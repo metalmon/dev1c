@@ -8,6 +8,11 @@ name: build image
 
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: "Open an SSH session to the runner after the job"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -20,9 +25,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Nothing here writes to the repository: the build reads sources and the
+    # result leaves as an artifact. Default permissions are wider than that.
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No pushing from here, so the token has no business staying in
+          # .git/config — where any build step could read it.
+          persist-credentials: false
 
       - name: Free up disk space
         # A stock runner keeps ~14 GB free on /, and the image plus its layers
@@ -39,6 +52,88 @@ jobs:
       - name: Build
         run: docker build -t oktaplus/dev1c:latest .
 
+      # --- Checks ------------------------------------------------------------
+      # The point of these is that nobody has to start the environment by hand to
+      # learn that a service does not come up or that a placeholder was never
+      # substituted. Both failures are silent: the environment looks fine and the
+      # agent simply has no model.
+
+      - name: Services start
+        run: |
+          # A dummy model file: llama-server will reject it, which is fine — what
+          # is being checked here is that the entrypoint finds a .gguf and
+          # substitutes its name into the editor settings.
+          docker volume create smoke-models
+          head -c 1048576 /dev/zero > model-smoke.gguf
+          docker run --rm -v smoke-models:/m -v "$PWD:/src:ro" alpine \
+            cp /src/model-smoke.gguf /m/
+
+          docker run -d --name smoke --init \
+            --cap-add SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            -v smoke-models:/opt/models \
+            oktaplus/dev1c:latest
+
+          for i in $(seq 1 30); do
+            docker exec smoke pgrep -x gitea >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker logs smoke
+
+          fail=0
+          for s in gitea xrdp sshd; do
+            if docker exec smoke pgrep -x "$s" >/dev/null 2>&1; then
+              echo "ok: $s is running"
+            else
+              echo "FAIL: $s is not running"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ]
+
+      - name: Model name reaches the editor settings
+        run: |
+          cfg=/home/dev1/.config/zed/settings.json
+          if docker exec smoke grep -q '"model": "model-smoke"' "$cfg"; then
+            echo "ok: local model substituted"
+          else
+            echo "FAIL: placeholder left in settings"
+            docker exec smoke grep -n -A3 '"default_model"' "$cfg"
+            exit 1
+          fi
+          if docker exec smoke grep -q 'PLACEHOLDER' "$cfg"; then
+            echo "note: unreplaced placeholders remain (expected for the remote provider)"
+            docker exec smoke grep -n 'PLACEHOLDER' "$cfg"
+          fi
+
+      - name: Remote provider configuration
+        run: |
+          # The other branch of the same logic: with CUSTOM_API_URL set, the
+          # remote provider must become the default one.
+          docker run -d --name smoke-remote --init \
+            -e CUSTOM_API_URL=https://model.example.com/v1 \
+            -e CUSTOM_API_KEY=not-a-real-key \
+            -e CUSTOM_MODEL=some-model \
+            oktaplus/dev1c:latest
+          sleep 10
+          cfg=/home/dev1/.config/zed/settings.json
+          docker exec smoke-remote grep -q '"provider": "custom"' "$cfg" \
+            && echo "ok: provider switched to custom" \
+            || { docker exec smoke-remote grep -n -A3 '"default_model"' "$cfg"; exit 1; }
+          docker exec smoke-remote grep -q 'model.example.com' "$cfg" \
+            && echo "ok: api_url substituted" || exit 1
+          docker exec smoke-remote grep -q 'CUSTOM_API_URL=' /etc/environment \
+            && echo "ok: variables carried into /etc/environment" || exit 1
+
+      - name: 1C tooling works
+        run: |
+          docker exec smoke oscript -version
+          docker exec smoke sh -c 'printf "Сообщить(\"ok: \" + (2+2));" > /tmp/t.os && oscript /tmp/t.os'
+          docker exec smoke /opt/bsl-analyzer/bsl-analyzer --version
+          docker exec smoke tea --version | head -1
+          docker exec smoke sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
+          docker exec smoke test -s /home/dev1/.config/zed/AGENTS.md \
+            && echo "ok: agent rules in place"
+
       - name: Pack
         # gzip -1: the layers are already compressed, so a higher level costs
         # minutes and saves almost nothing.
@@ -47,6 +142,14 @@ jobs:
           ls -lh dev1c-image.tar.gz
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'
+
+      - name: Layer sizes
+        # Printed on every build so growth is noticed when it happens, not when
+        # somebody has to transfer the file. Note that `docker image inspect`
+        # under Docker Desktop reports a compressed figure, while a plain dockerd
+        # reports the unpacked one — compare like with like.
+        run: |
+          docker history oktaplus/dev1c:latest --format '{{.Size}}	{{.CreatedBy}}'             | sort -rh | head -8 | cut -c1-110
 
       - name: Verify no secrets in the image
         # The key is passed at run time and no build argument accepts it any
@@ -67,3 +170,26 @@ jobs:
           retention-days: 14
           # Already a .gz — re-compressing wastes several minutes
           compression-level: 0
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          docker logs smoke 2>&1 | tail -50 || true
+          docker logs smoke-remote 2>&1 | tail -30 || true
+
+      - name: SSH session to the runner
+        # For hands-on debugging when the local machine has no memory to spare.
+        # The URL to connect appears in this step's log; the job then waits until
+        # you disconnect or the 60-minute timeout hits.
+        #
+        # Only on an explicit request, never automatically on failure: an
+        # unattended failed build would otherwise hold a runner for an hour
+        # waiting for somebody who is not coming.
+        #
+        # Pinned to a commit, not to a tag: a third-party action in a public
+        # repository is supply chain, and a tag can be moved to different code
+        # at any time. Re-pin deliberately when updating.
+        if: github.event_name == 'workflow_dispatch' && inputs.debug
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113 # v3.24
+        with:
+          limit-access-to-actor: true

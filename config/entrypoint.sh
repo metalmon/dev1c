@@ -36,20 +36,41 @@ done
 # stamp of the shipped version. A hand-edited file is replaced too, but kept as
 # .bak next to it: these are our settings, not the user's, and the people this
 # environment is for do not edit JSON — while we change it constantly.
+# This runs as root and writes into directories owned by the user. A symlink put
+# in place of any of these paths would have root write wherever it points. Today
+# the workstation accounts have passwordless sudo, so that grants nothing they
+# could not do directly — but sudo is exactly the kind of thing dropped when a
+# pilot turns into an installation, and then this would become a real hole. So
+# the paths are refused when symlinked, and the writes do not follow links.
 for home in /home/*; do
-    [ -d "$home/.config/zed" ] || continue
-    owner=$(stat -c '%U:%G' "$home")
+    zed="$home/.config/zed"
+    [ -d "$zed" ] || continue
+    if [ -L "$home" ] || [ -L "$home/.config" ] || [ -L "$zed" ]; then
+        log "skipping $home: a symlinked path on the way to the settings"
+        continue
+    fi
+    owner_u=$(stat -c '%U' "$home")
+    owner_g=$(stat -c '%G' "$home")
     for f in settings.json AGENTS.md; do
         src="/etc/skel/.config/zed/$f"
-        dst="$home/.config/zed/$f"
-        stamp="$home/.config/zed/.$f.from-image"
+        dst="$zed/$f"
+        stamp="$zed/.$f.from-image"
         [ -f "$src" ] || continue
+        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ]; then
+            log "skipping $dst: symlink"
+            continue
+        fi
         shipped=$(md5sum "$src" | cut -d' ' -f1)
         [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && continue
-        [ -f "$dst" ] && cp "$dst" "$dst.bak"
-        cp "$src" "$dst"
-        echo "$shipped" > "$stamp"
-        chown "$owner" "$dst" "$stamp" 2>/dev/null || true
+        [ -f "$dst" ] && cp --remove-destination "$dst" "$dst.bak"
+        # install after rm: writing over a path replaces the file itself rather
+        # than following whatever it might point at
+        rm -f "$dst"
+        install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
+        tmp=$(mktemp "$zed/.from-image.XXXXXX") || continue
+        echo "$shipped" > "$tmp"
+        chown "$owner_u:$owner_g" "$tmp"
+        mv -f "$tmp" "$stamp"
         log "$f updated from the image in $home"
     done
 done
@@ -75,6 +96,15 @@ MODEL_ALIAS=""
 
 for cfg in /home/*/.config/zed/settings.json /etc/skel/.config/zed/settings.json; do
     [ -f "$cfg" ] || continue
+    # Same reasoning as above, and not theoretical: `sed -i` on a symlinked path
+    # reads whatever it points at and leaves the result in its place. Pointed at
+    # /etc/shadow, it put the shadow file's contents into a user's directory —
+    # the file itself survived, but the mechanism works, and with different
+    # permissions that is a leak.
+    if [ -L "$cfg" ]; then
+        log "skipping $cfg: symlink"
+        continue
+    fi
 
     if [ -n "${CUSTOM_API_URL:-}" ]; then
         name="${CUSTOM_MODEL:-model}"

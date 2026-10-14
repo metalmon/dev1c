@@ -69,12 +69,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY"                      --workflow "build image" --status success --limit 1                      --json databaseId --jq '.[0].databaseId')
-          if [ -n "$run_id" ] && gh run download "$run_id"                --repo "$GITHUB_REPOSITORY" -n dev1c-image -D /tmp/img; then
-            echo "loading the image from build $run_id"
+          # The run is picked with the source pinned down: our repository, branch
+          # main. An artifact name is not an identity — in a public repository
+          # anyone's fork run could produce a "dev1c-image", and this session then
+          # starts it with access to the tailnet and to the model key. Today the
+          # build workflow only triggers on pushes to main, which forks cannot
+          # do, but that is a property of the current triggers rather than a
+          # guarantee: add a pull_request trigger and the hole opens.
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY"                      --workflow "build image" --status success                      --branch main --limit 10                      --json databaseId,headSha,headRepository                    | jq -r --arg repo "$GITHUB_REPOSITORY"                        'map(select(.headRepository.nameWithOwner == $repo))
+                        | .[0] | "\(.databaseId) \(.headSha)"')
+          id=${run_id%% *}
+          sha=${run_id##* }
+          if [ -n "$id" ] && [ "$id" != "null" ]              && gh run download "$id" --repo "$GITHUB_REPOSITORY"                   -n dev1c-image -D /tmp/img; then
+            echo "loading the image built from $sha (run $id)"
             docker load -i /tmp/img/dev1c-image.tar.gz
           else
-            echo "no artifact available, building"
+            echo "no trusted artifact available, building from the checkout"
             docker build -t oktaplus/dev1c:latest .
           fi
           docker image inspect oktaplus/dev1c:latest --format 'image: {{.Id}}'

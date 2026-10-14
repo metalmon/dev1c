@@ -235,10 +235,16 @@ RUN mkdir -p /opt/llama \
     && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
     && ldconfig \
     && ls /opt/llama/llama-server >/dev/null \
-    `# the CUDA runtime has to be resolvable, otherwise the fallback to the CPU` \
-    `# happens at run time and surfaces as "the model is slow"` \
+    `# The CUDA runtime has to be resolvable, otherwise the fallback to the CPU` \
+    `# happens at run time and surfaces as "the model is slow".` \
+    `#` \
+    `# Only what the archive brings is checked. libcuda.so.1 is the driver` \
+    `# library: it is absent here by definition and arrives from the host at run` \
+    `# time, so a plain "no unresolved libraries" check fails every build on a` \
+    `# machine without a GPU — as it did.` \
     && ldconfig -p | grep -q libcudart \
-    && ! ldd /opt/llama/libggml-cuda.so | grep -q "not found" \
+    && ldconfig -p | grep -q libcublas \
+    && [ -z "$(ldd /opt/llama/libggml-cuda.so | grep 'not found' | grep -v 'libcuda\.so\.1')" ] \
     && echo "llama.cpp ${LLAMA_VERSION} installed: $(du -sh /opt/llama | cut -f1)"
 
 # --- Gitea --------------------------------------------------------------------

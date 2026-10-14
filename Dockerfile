@@ -31,6 +31,85 @@ RUN set -eu; \
 
 
 # =============================================================================
+# llama.cpp with CUDA, built from source.
+#
+# The official release tarball carries kernels for every GPU generation plus the
+# full cuBLAS — 1.1 GB, of which this environment uses a fraction. Building
+# against the architectures that matter here trims the part we control: 86 for
+# Ampere, 120 for a 5090, and 75-virtual as PTX the driver can compile for
+# anything newer than Turing.
+#
+# Only the compiler and the dev libraries are installed, not cuda-toolkit, which
+# drags in Nsight and a JDK behind it. None of this reaches the runtime image —
+# only the built server and the libraries it needs.
+# =============================================================================
+FROM debian:13-slim AS llama-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG LLAMA_VERSION=b11606
+ARG LLAMA_CUDA_ARCHS="86-real;120-real;75-virtual"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# The CUDA repository for Debian 12 works here: these packages need a glibc
+# older than what trixie ships.
+RUN curl -fsSL -o /tmp/cuda-keyring.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         cuda-compiler-12-8 cuda-libraries-dev-12-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/local/cuda-12.8/bin:${PATH}"
+
+RUN git clone --depth=1 --branch "${LLAMA_VERSION}" \
+      https://github.com/ggml-org/llama.cpp.git /src/llama.cpp
+
+# GGML_BACKEND_DL: backends become separately loadable .so files, so a machine
+# without an NVIDIA driver falls back to the CPU instead of refusing to start.
+# GGML_NATIVE=OFF: the build machine is not the target machine.
+RUN cd /src/llama.cpp \
+    && cmake -B build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DGGML_CUDA=ON \
+         -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHS}" \
+         -DGGML_BACKEND_DL=ON \
+         -DGGML_CPU=ON \
+         -DGGML_CPU_ALL_VARIANTS=ON \
+         -DGGML_NATIVE=OFF \
+         -DLLAMA_BUILD_TESTS=OFF \
+         -DLLAMA_BUILD_EXAMPLES=OFF \
+         -DLLAMA_BUILD_TOOLS=ON \
+         -DLLAMA_BUILD_SERVER=ON \
+         -DLLAMA_CURL=OFF \
+         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+         -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+    && cmake --build build --config Release --target llama-server -j"$(nproc)" \
+    && cmake --build build --config Release --target ggml-cpu -j"$(nproc)" \
+    && cmake --build build --config Release --target ggml-cuda -j"$(nproc)"
+
+# Collect what the server actually needs: itself, the backends, and the CUDA
+# libraries it links against. Everything else the build produced — other tools,
+# test binaries, static archives — stays behind in this stage.
+RUN mkdir -p /opt/llama \
+    && cd /src/llama.cpp/build \
+    && cp bin/llama-server /opt/llama/ \
+    && cp bin/libggml*.so* /opt/llama/ \
+    && cp bin/libllama*.so* /opt/llama/ \
+    && for lib in libcudart libcublas libcublasLt; do \
+         find /usr/local/cuda-12.8 -name "$lib.so.*" -type f \
+           -exec cp -n {} /opt/llama/ ';' ; \
+       done \
+    && strip --strip-unneeded /opt/llama/llama-server /opt/llama/*.so* 2>/dev/null || true \
+    && echo "llama.cpp ${LLAMA_VERSION} built: $(du -sh /opt/llama | cut -f1)" \
+    && du -ah /opt/llama | sort -rh | head -8
+
+
+# =============================================================================
 # Runtime image
 #
 # Layer order is deliberate: packages first, then everything downloaded over the
@@ -212,40 +291,23 @@ RUN mkdir -p /opt/powershell \
 # The model server, one instance for every user of the image: a model takes about
 # 16 GB of GPU memory, and there is physically nowhere to keep a copy per person.
 #
-# Prebuilt releases are used: llama.cpp ships CUDA binaries and the CUDA runtime
-# as separate archives, so the whole CUDA Toolkit is unnecessary.
-# The model itself is NOT baked in — it is mounted as a volume: heavier than the
-# image and updated independently.
-#
-# This is the heaviest layer in the build, about 731 MB of downloads. Keep it
-# above anything that changes often.
-ARG LLAMA_VERSION=b11606
-ARG LLAMA_CUDA=12.8
-RUN mkdir -p /opt/llama \
-    && curl -fsSL "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-cuda-${LLAMA_CUDA}-x64.tar.gz" \
-       | tar -xz -C /opt/llama --strip-components=1 \
-    `# --strip-components=1 here too: this archive carries its own top-level` \
-    `# directory, and without it libcudart and libcublas land in a subdirectory` \
-    `# ld.so never looks into. The CUDA backend then fails to load, the server` \
-    `# reports "Available devices: (none)" and quietly computes on the CPU —` \
-    `# four tokens a second instead of fifty, with the GPU sitting idle.` \
-    && curl -fsSL "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/cudart-llama-${LLAMA_VERSION}-bin-ubuntu-cuda-${LLAMA_CUDA}-x64.tar.gz" \
-       | tar -xz -C /opt/llama --strip-components=1 \
-    && ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
+# Taken from the build stage rather than from a release tarball. The release
+# carries kernels for every GPU generation ever shipped; built here, it carries
+# the two that this environment runs on. The model itself is NOT baked in — it is
+# mounted as a volume, being heavier than the image and updated independently.
+COPY --from=llama-builder /opt/llama /opt/llama
+RUN ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
     && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
     && ldconfig \
-    && ls /opt/llama/llama-server >/dev/null \
     `# The CUDA runtime has to be resolvable, otherwise the fallback to the CPU` \
     `# happens at run time and surfaces as "the model is slow".` \
     `#` \
-    `# Only what the archive brings is checked. libcuda.so.1 is the driver` \
-    `# library: it is absent here by definition and arrives from the host at run` \
-    `# time, so a plain "no unresolved libraries" check fails every build on a` \
-    `# machine without a GPU — as it did.` \
+    `# Only what the build stage brings is checked. libcuda.so.1 is the driver` \
+    `# library: absent here by definition, mounted from the host at run time.` \
     && ldconfig -p | grep -q libcudart \
     && ldconfig -p | grep -q libcublas \
     && [ -z "$(ldd /opt/llama/libggml-cuda.so | grep 'not found' | grep -v 'libcuda\.so\.1')" ] \
-    && echo "llama.cpp ${LLAMA_VERSION} installed: $(du -sh /opt/llama | cut -f1)"
+    && echo "llama.cpp in place: $(du -sh /opt/llama | cut -f1)"
 
 # --- Gitea --------------------------------------------------------------------
 # A git server inside the image rather than a separate service. For a pilot this

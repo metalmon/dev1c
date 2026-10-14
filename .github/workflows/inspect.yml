@@ -134,17 +134,24 @@ jobs:
         # Userspace networking, for one, lets a runner reach out while refusing
         # incoming connections to its own ports — and that looks exactly like
         # "nothing opened".
+        #
+        # Deliberately NOT printing `tailscale status`: it lists every device in
+        # the tailnet with its name, owner and address, and these logs are
+        # readable by anyone in a public repository. Only the facts needed to
+        # locate the break are reported — state, peer count, and whether ports
+        # answer. Same reason for ss without -p: no process names.
         run: |
           echo "--- tun device ---"
           ls -l /dev/net/tun || echo "no /dev/net/tun"
-          echo "--- tailscale ---"
-          tailscale status || true
+          echo "--- tailscale state ---"
+          tailscale status --json \
+            | jq '{BackendState, TUN, peers: (.Peer | length)}' || true
+          echo "--- tailscale interface present ---"
+          ip -brief addr show tailscale0 2>/dev/null \
+            | awk '{print $1, $2}' || echo "no tailscale0 interface"
           ip=$(tailscale ip -4 | head -1)
-          echo "tailscale ip: $ip"
-          echo "--- interfaces ---"
-          ip -brief addr
           echo "--- listening ---"
-          sudo ss -ltnp | grep -E "3389|3000" || echo "3389/3000 not listening"
+          ss -ltn | grep -E "3389|3000" || echo "3389/3000 not listening"
           echo "--- gitea over loopback ---"
           curl -sS -m 5 -I http://localhost:3000/ | head -1 || echo "loopback failed"
           echo "--- gitea over the tailnet address ---"

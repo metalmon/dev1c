@@ -14,6 +14,19 @@ name: inspect environment
 # Access goes through Tailscale: the runner joins your tailnet and becomes
 # reachable by its private address. No public port is opened anywhere.
 #
+# What actually protects this session is the tailnet, not the passwords. The
+# accounts inside are dev1/dev1 and dev/dev — fine behind an attested network,
+# useless as protection on their own. So restrict the tag in your ACL to your
+# own devices, for example:
+#
+#   "acls": [
+#     { "action": "accept", "src": ["autogroup:member"], "dst": ["tag:ci:*"] }
+#   ]
+#
+# And mind that Actions logs of a public repository are readable by anyone.
+# Nothing secret is printed here on purpose — not even a generated password,
+# because printing one would publish it. Keep it that way.
+#
 # Required repository secrets:
 #   TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET — a Tailscale OAuth client with the
 #     auth_keys scope, and tag:ci listed in tagOwners in your ACL
@@ -72,9 +85,12 @@ jobs:
                 --device /dev/fuse
                 --shm-size 2g
                 -p 3389:3389 -p 3000:3000"
+          # -e NAME without a value: docker takes it from its own environment,
+          # so the key never appears in the command line — where anyone with a
+          # shell on the runner could read it out of the process list.
           for v in CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL; do
             eval "val=\$$v"
-            [ -n "$val" ] && args="$args -e $v=$val"
+            [ -n "$val" ] && args="$args -e $v"
           done
           # shellcheck disable=SC2086
           docker run -d --name dev1c $args oktaplus/dev1c:latest

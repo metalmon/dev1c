@@ -26,6 +26,34 @@ do
     echo "$var=$value" >> /etc/environment
 done
 
+# --- Editor settings from the image -------------------------------------------
+# Home directories live on a volume and survive image updates — which also means
+# a new image's settings never reach anyone who already has a home. The symptom
+# is nasty: the image carries a fix, the environment keeps the old behaviour, and
+# nothing anywhere says why.
+#
+# So our two files are refreshed when they change in the image, tracked by a
+# stamp of the shipped version. A hand-edited file is replaced too, but kept as
+# .bak next to it: these are our settings, not the user's, and the people this
+# environment is for do not edit JSON — while we change it constantly.
+for home in /home/*; do
+    [ -d "$home/.config/zed" ] || continue
+    owner=$(stat -c '%U:%G' "$home")
+    for f in settings.json AGENTS.md; do
+        src="/etc/skel/.config/zed/$f"
+        dst="$home/.config/zed/$f"
+        stamp="$home/.config/zed/.$f.from-image"
+        [ -f "$src" ] || continue
+        shipped=$(md5sum "$src" | cut -d' ' -f1)
+        [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && continue
+        [ -f "$dst" ] && cp "$dst" "$dst.bak"
+        cp "$src" "$dst"
+        echo "$shipped" > "$stamp"
+        chown "$owner" "$dst" "$stamp" 2>/dev/null || true
+        log "$f updated from the image in $home"
+    done
+done
+
 # --- Model server in Zed settings ---------------------------------------------
 # Nobody edits JSON to point the environment at a model. The settings ship with
 # placeholders; everything concrete is filled in here, from the environment and

@@ -1,0 +1,20 @@
+# Line endings are not cosmetic here: a shell script with CRLF in its shebang
+# makes the system look for an interpreter named "/bin/sh\r" and report "no such
+# file" about a file that is right there. The image normalises this at build
+# time, but the repository should not hand out broken files in the first place.
+#
+# Everything text is stored and checked out with LF, regardless of platform.
+* text=auto eol=lf
+
+# PowerShell stays CRLF: it is a Windows tool and that is what its tooling
+# expects.
+*.ps1 text eol=crlf
+
+# Binary — never touched
+*.jpg  binary
+*.png  binary
+*.bmp  binary
+*.ico  binary
+*.gguf binary
+*.gz   binary
+*.zip  binary

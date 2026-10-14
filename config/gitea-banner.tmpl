@@ -1,0 +1,58 @@
+{{/*
+  Плашка с учётными данными на каждой странице Gitea.
+
+  Зачем: среда пилотная, пользователи — 1С-разработчики, впервые видящие git.
+  Пароль, известный только из документации, гарантированно потеряется, и
+  знакомство закончится на форме входа. Здесь он перед глазами.
+
+  Закрывается крестиком, решение запоминается в localStorage браузера: тому,
+  кто уже освоился, плашка не мозолит глаза, а новому пользователю (или после
+  очистки данных браузера) показывается снова.
+
+  Для закрытого контура это приемлемо: сервер слушает только внутри среды,
+  вход в саму среду уже защищён паролем RDP. Перед передачей в боевую
+  эксплуатацию шаблон убрать.
+*/}}
+<div id="oktaplus-cred-banner" style="
+    background: #0E9E82;
+    color: #fff;
+    padding: 6px 14px;
+    font: 500 13px/1.5 Inter, system-ui, sans-serif;
+    display: none;
+    gap: 18px;
+    align-items: center;
+    flex-wrap: wrap;
+">
+  <strong>Учебный сервер репозиториев</strong>
+  <span>Вход: <code style="background:rgba(0,0,0,.25);padding:2px 6px;border-radius:4px;">dev1</code>, <code style="background:rgba(0,0,0,.25);padding:2px 6px;border-radius:4px;">dev2</code>, <code style="background:rgba(0,0,0,.25);padding:2px 6px;border-radius:4px;">dev3</code> — пароль совпадает с логином</span>
+  <span style="opacity:.85;">В терминале git и tea уже авторизованы — пароль нужен только здесь</span>
+  <button type="button" id="oktaplus-cred-hide" title="Скрыть подсказку" style="
+      margin-left:auto;
+      background:rgba(0,0,0,.25);
+      color:#fff;
+      border:0;
+      border-radius:4px;
+      padding:2px 10px;
+      cursor:pointer;
+      font:inherit;
+  ">Скрыть</button>
+</div>
+<script>
+(function () {
+  var KEY = 'oktaplus-cred-banner-hidden';
+  var el = document.getElementById('oktaplus-cred-banner');
+  if (!el) return;
+  // display задаётся скриптом, а не в разметке: иначе при скрытой плашке
+  // она успевает мигнуть до выполнения скрипта
+  try {
+    if (localStorage.getItem(KEY) !== '1') el.style.display = 'flex';
+  } catch (e) {
+    el.style.display = 'flex';  // приватный режим — показываем всегда
+  }
+  var btn = document.getElementById('oktaplus-cred-hide');
+  if (btn) btn.addEventListener('click', function () {
+    el.style.display = 'none';
+    try { localStorage.setItem(KEY, '1'); } catch (e) {}
+  });
+})();
+</script>

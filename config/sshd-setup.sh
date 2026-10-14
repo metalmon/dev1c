@@ -1,0 +1,71 @@
+#!/bin/sh
+# SSH server for the reverse tunnel from the machine that runs 1C.
+#
+# The scheme: that host connects to us as a client and forwards its own local
+# port into the container (ssh -R). The container then talks to localhost and
+# lands on the host. Execution stays on the host, where a process able to run
+# vrunner and the platform lives.
+#
+# Why this direction and not ssh from us to the host: workstations in an
+# air-gapped network are attested, and installing server services on them needs
+# sign-off. An SSH client, by contrast, ships with Windows 10/11 and changes
+# nothing in the system.
+set -eu
+
+SSH_PORT="${SSH_PORT:-2022}"
+CONF=/etc/ssh/sshd_config.d/dev1c.conf
+
+mkdir -p /etc/ssh/sshd_config.d /run/sshd
+
+cat > "$CONF" <<EOF
+# A separate port: 22 is left free so nothing conflicts with it
+Port $SSH_PORT
+
+# Password login is allowed on purpose. Keys would be stronger, but they mean
+# somebody has to generate a pair, copy the public half into
+# ~/.ssh/authorized_keys inside the container and keep it there across volume
+# recreation — three manual steps before the first tunnel works. For a pilot
+# whose point is to show git and an AI agent, that is friction that buys nothing:
+# the environment already sits inside a closed network, behind the RDP password.
+#
+# The cost is stated plainly: anyone who can reach this port can log in by
+# guessing dev/dev. Two things limit the damage — the account has no shell (see
+# ForceCommand below) and no sudo. Still: do not publish the port beyond the
+# network where the environment lives. Outside a pilot, switch
+# PasswordAuthentication to no and distribute keys.
+PasswordAuthentication yes
+PermitRootLogin no
+PubkeyAuthentication yes
+
+# The point of the whole scheme: allow reverse tunnels and let them listen on all
+# container interfaces. Otherwise the forwarded port is visible to sshd alone and
+# applications in the session cannot reach it.
+AllowTcpForwarding yes
+GatewayPorts clientspecified
+PermitTunnel yes
+
+# The tunnel has to survive idle periods: without keepalives it silently drops
+# after a few minutes of inactivity, and the agent gets "connection refused" out
+# of nowhere.
+ClientAliveInterval 30
+ClientAliveCountMax 6
+TCPKeepAlive yes
+
+# Only the tunnel account. The workstations themselves (dev1, dev2, dev3) come in
+# over RDP and have no business here.
+AllowUsers dev
+
+# And this account gets nothing but forwarding. ForceCommand applies when a
+# client asks for a shell or a command; `ssh -N`, which is what a tunnel is,
+# asks for neither and keeps working. So even someone who guesses the password
+# ends up with port forwarding and no shell.
+Match User dev
+    ForceCommand /bin/false
+EOF
+
+# Host keys are generated on first start rather than at build time: otherwise
+# every deployment would share one fingerprint, and connecting to one
+# installation would be indistinguishable from connecting to another.
+ssh-keygen -A >/dev/null 2>&1 || true
+
+exec /usr/sbin/sshd -D -e

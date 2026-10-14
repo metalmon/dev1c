@@ -1,0 +1,223 @@
+// Преднастроенный конфиг Zed для образа 1С-разработки.
+// Копируется каждому рабочему месту в ~/.config/zed/settings.json при сборке.
+//
+// Принцип: из коробки Zed не делает ни одного сетевого запроса, кроме обращения
+// к выбранной модели. Всё остальное — обновления, телеметрия, подсказки
+// расширений, edit predictions — выключено явно.
+{
+  // --- Приватность: ничего наружу ---------------------------------------
+  "telemetry": {
+    "diagnostics": false, // отчёты о падениях
+    "metrics": false // метрики использования
+  },
+  "auto_update": false, // по умолчанию true: тот самый "Failed to Update"
+  "auto_install_extensions": {}, // расширения вморожены при сборке
+  "edit_predictions": {
+    "provider": "none" // иначе ходит в Zeta на каждое нажатие
+  },
+
+  // disable_ai НЕ ставим: агент — смысл этого образа.
+
+  // --- Доверие воркспейсов ----------------------------------------------
+  // Без этого Restricted Mode не даёт стартовать language server'у: в логе
+  // "Worktree ... is not trusted", и Zed выглядит рабочим, но без диагностики,
+  // навигации и автодополнения.
+  //
+  // Это осознанное ослабление модели безопасности Zed: она защищает от
+  // враждебного .zed/settings.json в чужом репозитории. В нашем случае среда
+  // контролируемая, проекты — собственные выгрузки заказчика, а требовать от
+  // 1С-ника разбираться в модальном окне про доверие — верный способ получить
+  // "у меня подсказки не работают".
+  // Ключ живёт внутри секции session, на верхнем уровне игнорируется молча.
+  "session": {
+    "trust_all_worktrees": true
+  },
+
+  // --- Язык 1С ----------------------------------------------------------
+  // Имя языка из расширения bsl — именно "Bsl".
+  // path_suffixes расширения = ["bsl"], файлы OneScript (.os) не покрыты.
+  "languages": {
+    "Bsl": {
+      // Идентификатор сервера — ключ секции [language_servers.bsl] в
+      // extension.toml расширения, а не поле name внутри неё.
+      "language_servers": ["bsl"],
+      "tab_size": 4
+    }
+  },
+
+  // Расширение bsl заявляет path_suffixes = ["bsl"], поэтому файлы OneScript
+  // (.os) не привязаны ни к какому языку: ни подсветки, ни анализатора. Язык у
+  // них тот же, что в .bsl, так что достаточно сопоставить расширение вручную.
+  "file_types": {
+    "Bsl": ["*.os", "*.bsl"]
+  },
+
+  // Путь задан явно — при заданном пути расширение не идёт в GitHub за
+  // бинарём. Это и есть условие работы в закрытом контуре.
+  "lsp": {
+    "bsl": {
+      "binary": {
+        "path": "/opt/bsl-analyzer/bsl-analyzer",
+        "arguments": ["lsp"]
+      }
+    }
+  },
+
+  // --- MCP ---------------------------------------------------------------
+  // Тот же бинарь умеет отдавать свои возможности модели как MCP-инструменты.
+  // Глобальный context_server: Restricted Mode его не блокирует (в отличие от
+  // проектных, объявленных в .zed/settings.json).
+  // --profile обязателен, без него сервер не стартует и Zed отваливается по
+  // таймауту initialize. reference — справочник платформы, проекта не требует.
+  // Профиль workspace (--profile workspace -s <корень>) добавляет конфигуратор:
+  // он зависит от конкретного проекта.
+  "context_servers": {
+    "bsl-reference": {
+      "source": "custom",
+      "command": "/opt/bsl-analyzer/bsl-analyzer",
+      "args": ["mcp", "serve", "--profile", "reference"]
+      // BSL_CACHE_DIR не задаём. Порядок у анализатора такой:
+      // ключ CLI > BSL_CACHE_DIR > штатный кеш системы, а штатный — это
+      // ~/.cache/bsl-analyzer, то есть уже у каждого свой. Прописанный здесь
+      // абсолютный путь был бы общим на всех пользователей, и первый же
+      // сработал бы как чужой: каталог в /home создать некому (сам /home
+      // принадлежит root), анализатор молча откатывался бы на штатный кеш —
+      // настройка выглядела бы работающей, ничего при этом не делая.
+      // Каталог монтируется томом вместе с /home, так что переиндексации при
+      // перезапуске контейнера не происходит.
+    }
+  },
+
+  // --- Models -----------------------------------------------------------
+  // Two providers, and the usual case needs no configuration at all.
+  //
+  // llama.cpp — the model server inside this same container. The address is
+  // localhost, not host.docker.internal: the server runs here, next to the
+  // editor. (It used to point at the host, from the days when llama.cpp lived
+  // outside — a leftover that quietly broke the provider.)
+  //
+  // custom — any OpenAI-compatible server, for a remote model. Address, key and
+  // model name arrive as CUSTOM_API_URL, CUSTOM_API_KEY and CUSTOM_MODEL; the
+  // entrypoint substitutes them for the placeholders below. Nothing of ours is
+  // in the repository, and nobody edits JSON to point the environment at a
+  // different server.
+  //
+  // The provider name dictates the key variable: Zed looks for
+  // <PROVIDER>_API_KEY, so "custom" means CUSTOM_API_KEY. That is why it is
+  // named this way and not after us.
+  "language_models": {
+    "llama.cpp": {
+      "api_url": "http://localhost:8080"
+    },
+    "openai_compatible": {
+      "custom": {
+        // Full path up to, but excluding, /chat/completions — Zed appends that.
+        // A server with a non-standard path looks like
+        // https://model.example.com/api/v1/threads
+        "api_url": "CUSTOM_API_URL_PLACEHOLDER",
+        "available_models": [
+          {
+            "name": "CUSTOM_MODEL_PLACEHOLDER",
+            "display_name": "CUSTOM_MODEL_PLACEHOLDER",
+            // Context window and answer size are set separately, on purpose.
+            //
+            // A server may report max_model_len as max_total_tokens — the SUM of
+            // input and output, not the input window. Zed asks for a fifth of
+            // the declared window as output, so max_tokens equal to that sum
+            // produced a request of sum + 20%: the server refused, the stream
+            // broke in the middle of a tool call's arguments, and Zed reported
+            // "tool input was not fully received". It looked like a broken
+            // terminal on one specific command, while in fact everything broke
+            // once the thread history grew.
+            //
+            // Hence a margin: 55296 + 8192 = 63488 against a 65536 limit. The
+            // margin matters because Zed counts tokens approximately — the
+            // server's own error says "at least". 8192 output tokens is roughly
+            // 30 KB of text, plenty for an answer.
+            "max_tokens": 55296,
+            "max_output_tokens": 8192,
+            "supports_tools": true
+          }
+        ]
+      }
+    }
+  },
+
+  "agent": {
+    // В контейнере нет управления питанием, и запрос «не засыпать» уходит в
+    // портал, который отвечает отказом. Zed считает это ошибкой агентского
+    // потока: в логе «Failed to prevent idle sleep», и агент не отвечает.
+    "prevent_idle_sleep": false,
+    // Панель агента справа: слева проводник с файлами конфигурации, и
+    // перекидывать его ради чата каждый раз неудобно. По умолчанию Zed ставит
+    // агента слева, конфликтуя с проводником.
+    "dock": "right",
+    // Default model: the local llama.cpp, named after the file in /opt/models.
+    // The entrypoint fills the name in, and switches the whole block to the
+    // custom provider when CUSTOM_API_URL is set — so the environment uses
+    // whichever model is actually available, with no editing by hand.
+    "default_model": {
+      "provider": "llama.cpp",
+      "model": "DEFAULT_MODEL_PLACEHOLDER"
+    }
+  },
+
+  // --- Интерфейс --------------------------------------------------------
+  // Темы из расширения macos-classic — те же, что на рабочей машине.
+  // Режим light по умолчанию: Конфигуратор и EDT светлые, 1С-разработчик
+  // привык к ним. Тёмная доступна переключением, ставить её по умолчанию для
+  // этой аудитории — не «современно», а непривычно.
+  "theme": {
+    "mode": "dark",
+    "light": "macOS Classic Light",
+    "dark": "macOS Classic Dark"
+  },
+  // Zed не наследует Xft.dpi: масштаб системы на него не влияет, размер задаётся
+  // только здесь. По RDP мелкий шрифт читается хуже, чем локально (сжатие
+  // картинки), поэтому берём на ступень крупнее привычного.
+  "buffer_font_family": "JetBrains Mono",
+  "buffer_font_size": 17,
+  "ui_font_family": "Inter",
+  "ui_font_size": 17,
+  "agent_ui_font_size": 17,
+  "agent_buffer_font_size": 17,
+
+  // Онбординг и всё, что относится к аккаунту Zed: в этой среде аккаунта нет,
+  // модель подключается своя. Баннеры и кнопки входа только мешают.
+  "title_bar": {
+    "show_onboarding_banner": false,
+    "show_sign_in": false,
+    "show_user_picture": false,
+    "show_user_menu": false
+  },
+  // Classic layout. В Zed это не одна настройка, а набор дефолтов для доков:
+  // «Agentic» (по умолчанию) ставит проводник и структуру справа, агента слева;
+  // «Classic» — наоборот. Второй вариант привычен тем, кто пришёл из любой
+  // другой IDE, включая Конфигуратор и EDT: дерево объектов слева.
+  // Положение агента задано в секции "agent" выше.
+  "project_panel": {
+    "dock": "left"
+  },
+  "outline_panel": {
+    "dock": "left"
+  },
+
+  // Выгрузка ЕРП — сотни тысяч файлов. Без исключений Zed индексирует служебные
+  // каталоги и кеши, и поиск по проекту становится заметно медленнее.
+  "file_scan_exclusions": [
+    "**/.git", "**/.svn", "**/.hg", "**/CVS", "**/.DS_Store",
+    "**/node_modules", "**/.venv", "**/__pycache__",
+    "**/.cache", "**/build", "**/dist",
+    "**/ConfigDumpInfo.xml"
+  ],
+
+  "terminal": {
+    "shell": {
+      "program": "/bin/bash"
+    },
+    // Тот же моноширинный шрифт, что в редакторе
+    "font_family": "JetBrains Mono",
+    "font_size": 15,
+    "copy_on_select": true
+  }
+}

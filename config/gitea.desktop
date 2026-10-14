@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Репозитории (Gitea)
+GenericName=Git-сервер
+Comment=Хранилище исходников 1С: история изменений, ветки, код-ревью. Вход: dev / dev — как в системе
+# Открывает веб-интерфейс локального Gitea. Сам сервер стартует при входе
+# в сессию, здесь только окно браузера.
+Exec=firefox-esr http://localhost:3000/
+Icon=gitea
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;gitea;репозиторий;исходники;версии;

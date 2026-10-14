@@ -1,0 +1,19 @@
+# Model server key. Never committed: a secret that lands in history once stays
+# there even after the file is removed, and this history is public. The key never
+# reaches the image either — it is passed as an environment variable at run time.
+.env
+.env.*
+# ...but the sample must be in the repository: it is the documentation of what
+# to fill in. Without this exception the pattern above swallows it.
+!.env.example
+
+# Release archives and model files: both weigh more than the repository
+dist/
+models/
+*.tar
+*.tar.gz
+*.gguf
+
+# Local run state
+.ports
+*.log

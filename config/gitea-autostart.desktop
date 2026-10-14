@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Gitea (сервер)
+Comment=Поднимает локальный git-сервер при входе в сессию
+# Gitea живёт внутри образа: для пилота это проще, чем отдельный сервис —
+# разработчику ничего не надо поднимать руками, репозиторий доступен сразу.
+# Данные лежат на томе, поэтому переживают обновление образа.
+Exec=/usr/local/bin/gitea-start
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

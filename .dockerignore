@@ -1,0 +1,19 @@
+# The build context should hold only what gets copied into the image.
+#
+# The model key is never part of a build — it is passed as an environment
+# variable at run time. It has no business in the context either: otherwise it
+# travels to the build machine along with everything else.
+.env
+.env.*
+
+# Build output and model files: heavier than the image itself
+dist/
+models/
+*.tar
+*.tar.gz
+*.gguf
+
+# Housekeeping
+.git/
+.ports
+*.log

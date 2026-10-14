@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Классическая раскладка: одна панель внизу, как в Windows.
+  Целевой пользователь — 1С-разработчик с Windows; верхняя панель плюс док
+  снизу (дефолт XFCE) для него непривычны и съедают два ряда пикселей.
+
+  Слева направо: меню | быстрый запуск | список окон | трей | раскладка |
+  часы | выход.
+-->
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <!-- У панели свой тёмный режим, независимый от темы GTK. Держим его
+       выключенным: панель должна следовать общей теме, а не решать сама —
+       иначе при смене темы получается разнобой. -->
+  <property name="dark-mode" type="bool" value="false"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=8;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="42"/>
+      <!-- 0 = автоподбор под высоту панели. Фиксированное значение пришлось бы
+           менять вручную при каждой правке высоты, а на 4K с удвоением
+           масштаба оно и вовсе оказалось бы не тем. -->
+      <property name="icon-size" type="uint" value="0"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+        <value type="int" value="14"/>
+        <value type="int" value="7"/>
+        <value type="int" value="8"/>
+        <value type="int" value="9"/>
+        <value type="int" value="10"/>
+        <value type="int" value="11"/>
+        <value type="int" value="12"/>
+        <value type="int" value="13"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu">
+      <property name="show-button-title" type="bool" value="true"/>
+      <property name="button-title" type="string" value="Приложения"/>
+    </property>
+    <property name="plugin-2" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <!-- Быстрый запуск: то, чем пользуются каждый день -->
+    <property name="plugin-3" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="dev.zed.Zed.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-4" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-terminal-emulator.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-5" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="firefox-esr.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-6" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="xfce4-file-manager.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-14" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="gitea.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-7" type="string" value="separator">
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-8" type="string" value="tasklist">
+      <property name="grouping" type="uint" value="1"/>
+      <property name="show-labels" type="bool" value="true"/>
+      <property name="flat-buttons" type="bool" value="false"/>
+    </property>
+    <!-- Растяжка: прижимает трей, раскладку и часы к правому краю -->
+    <property name="plugin-9" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-10" type="string" value="systray">
+      <property name="square-icons" type="bool" value="true"/>
+    </property>
+    <!-- Индикатор раскладки: текстом (us/ru), флаг по RDP читается хуже -->
+    <property name="plugin-11" type="string" value="xkb">
+      <property name="display-type" type="uint" value="1"/>
+      <property name="group-policy" type="uint" value="0"/>
+    </property>
+    <property name="plugin-12" type="string" value="clock">
+      <property name="mode" type="uint" value="2"/>
+      <property name="digital-layout" type="uint" value="3"/>
+      <property name="digital-time-font" type="string" value="Inter 14"/>
+      <property name="digital-date-font" type="string" value="Inter 10"/>
+    </property>
+    <!-- Кнопки выхода. В контейнере нет systemd-logind, поэтому выключение,
+         перезагрузка, спящий и ждущий режимы не работают: они либо молча ничего
+         не делают, либо ругаются. Блокировка экрана опаснее — без screensaver
+         разблокировать будет нечем, сессия потеряна.
+         Оставлен только выход из сессии: он корректно завершает RDP-подключение.
+         Префикс "+" показывает пункт, "-" скрывает. -->
+    <property name="plugin-13" type="string" value="actions">
+      <property name="appearance" type="uint" value="0"/>
+      <property name="items" type="array">
+        <value type="string" value="-lock-screen"/>
+        <value type="string" value="-switch-user"/>
+        <value type="string" value="-suspend"/>
+        <value type="string" value="-hibernate"/>
+        <value type="string" value="-hybrid-sleep"/>
+        <value type="string" value="-shutdown"/>
+        <value type="string" value="-restart"/>
+        <value type="string" value="+logout"/>
+        <value type="string" value="-logout-dialog"/>
+      </property>
+    </property>
+  </property>
+</channel>

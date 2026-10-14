@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Оконный менеджер.
+
+  Композитор включён, но все его эффекты выключены. Сам по себе он дёшев:
+  перерисовка идёт только при изменениях. Дорого обходятся именно тени,
+  прозрачность и анимации — каждый кадр пересобирается и гонится по сети.
+  Поэтому берём от композитора только корректную отрисовку альфа-канала,
+  без которой тема Arc даёт чёрные рамки вокруг окон.
+-->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="theme" type="string" value="Materia-dark"/>
+    <property name="title_font" type="string" value="Inter Bold 10"/>
+    <property name="title_alignment" type="string" value="center"/>
+    <!-- Набор кнопок заголовка задаётся здесь, а НЕ темой. Если не указать
+         явно, часть тем (Materia) отрисовывает заголовок без свернуть/развернуть
+         и закрыть — окно становится невозможно закрыть мышью.
+         O=меню, H=свернуть, M=развернуть, C=закрыть, | — разделитель лево/право. -->
+    <property name="button_layout" type="string" value="O|HMC"/>
+    <!-- Композитор включён вынужденно: без него альфа-канал рисовать нечем, и
+         скруглённые углы с тенями темы Arc (а также декорации GTK-окон,
+         которые рисуют их сами) вырождаются в сплошную чёрную рамку.
+         Но все эффекты ниже погашены: композитор нужен только ради корректной
+         альфы, а не ради теней — лишних кадров по RDP он так не создаёт. -->
+    <property name="use_compositing" type="bool" value="true"/>
+    <property name="show_frame_shadow" type="bool" value="false"/>
+    <property name="show_popup_shadow" type="bool" value="false"/>
+    <property name="show_dock_shadow" type="bool" value="false"/>
+    <property name="frame_opacity" type="int" value="100"/>
+    <property name="inactive_opacity" type="int" value="100"/>
+    <property name="popup_opacity" type="int" value="100"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="placement_ratio" type="int" value="20"/>
+    <property name="workspace_count" type="int" value="2"/>
+    <property name="click_to_focus" type="bool" value="true"/>
+    <property name="focus_new" type="bool" value="true"/>
+    <!-- Без анимаций разворачивания: по RDP они только добавляют кадров -->
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="cycle_preview" type="bool" value="false"/>
+  </property>
+</channel>

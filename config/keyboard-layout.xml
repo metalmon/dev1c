@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Раскладка клавиатуры для XFCE.
+  Кладётся в ~/.config/xfce4/xfconf/xfce-perchannel-xml/keyboard-layout.xml
+
+  Почему здесь, а не setxkbmap в .xsession: xfce4-settings-daemon стартует
+  позже сессионного скрипта и применяет СВОИ настройки, затирая setxkbmap.
+  Этот файл — источник правды для демона.
+
+  Переключение: Alt+Shift. Альтернативы для XkbOptions/Group:
+    grp:ctrl_shift_toggle  — Ctrl+Shift
+    grp:caps_toggle        — Caps Lock
+    grp:win_space_toggle   — Win+Space
+-->
+<channel name="keyboard-layout" version="1.0">
+  <property name="Default" type="empty">
+    <property name="XkbDisable" type="bool" value="false"/>
+    <property name="XkbLayout" type="string" value="us,ru"/>
+    <property name="XkbVariant" type="string" value=","/>
+    <property name="XkbOptions" type="empty">
+      <property name="Group" type="string" value="grp:alt_shift_toggle"/>
+    </property>
+  </property>
+</channel>

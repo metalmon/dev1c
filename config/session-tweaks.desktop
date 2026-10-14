@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Настройки сессии
+Comment=Отключает гашение экрана и заставку
+# По RDP погасший экран выглядит как зависшая или разорванная сессия, а
+# блокировка в контейнере без screensaver может оставить пользователя ни с чем.
+# X-сервер в xrdp-сессии каждый раз новый, поэтому задаём при каждом входе.
+Exec=sh -c "xset s off; xset s noblank; xset -dpms"
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

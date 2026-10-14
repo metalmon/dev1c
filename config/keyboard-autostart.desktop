@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Раскладка клавиатуры
+Comment=Принудительно задаёт us,ru с переключением по Alt+Shift
+# Почему autostart, а не .xsession: раскладку последовательно перетирают
+# xorgxrdp (ставит присланную RDP-клиентом) и xfce4-settings-daemon. Скрипт в
+# .xsession отрабатывает раньше обоих, и его результат теряется.
+# Автозапуск срабатывает после них, пауза — на случай, если демон ещё стартует.
+Exec=sh -c "sleep 4; setxkbmap -layout us,ru -variant , -option grp:alt_shift_toggle; setxkbmap -query > /tmp/xkb-applied.log 2>&1"
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

@@ -1,3 +1,7 @@
+# The llama.cpp base image, built separately — see Dockerfile.llama. Declared
+# before any stage because that is the only place an ARG is visible to FROM.
+ARG LLAMA_IMAGE=ghcr.io/metalmon/dev1c-llama:b11606
+
 # =============================================================================
 # Theme build stage. Materia is built from source (meson + npm + sassc); there is
 # no reason to drag that toolchain into the runtime image — we take the result.
@@ -30,90 +34,11 @@ RUN set -eu; \
     done
 
 
-# =============================================================================
-# llama.cpp with CUDA, built from source.
-#
-# The official release tarball carries kernels for every GPU generation plus the
-# full cuBLAS — 1.1 GB, of which this environment uses a fraction. Building
-# against the architectures that matter here trims the part we control: 86 for
-# Ampere, 120 for a 5090, and 75-virtual as PTX the driver can compile for
-# anything newer than Turing.
-#
-# Only the compiler and the dev libraries are installed, not cuda-toolkit, which
-# drags in Nsight and a JDK behind it. None of this reaches the runtime image —
-# only the built server and the libraries it needs.
-# =============================================================================
-# Built on Debian 12, not 13: trixie's apt rejects SHA1 signatures since
-# February 2026, and NVIDIA's repository key is signed that way — the repository
-# is simply refused. Bookworm also links against an older glibc, so the result
-# runs on both and on anything newer.
-FROM debian:12-slim AS llama-builder
-
-ARG DEBIAN_FRONTEND=noninteractive
-ARG LLAMA_VERSION=b11606
-ARG LLAMA_CUDA_ARCHS="86-real;120-real;75-virtual"
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake git ca-certificates curl gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL -o /tmp/cuda-keyring.deb \
-      https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i /tmp/cuda-keyring.deb \
-    && rm /tmp/cuda-keyring.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-         cuda-compiler-12-8 cuda-libraries-dev-12-8 \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PATH="/usr/local/cuda-12.8/bin:${PATH}"
-
-RUN git clone --depth=1 --branch "${LLAMA_VERSION}" \
-      https://github.com/ggml-org/llama.cpp.git /src/llama.cpp
-
-# GGML_BACKEND_DL: backends become separately loadable .so files, so a machine
-# without an NVIDIA driver falls back to the CPU instead of refusing to start.
-# GGML_NATIVE=OFF: the build machine is not the target machine.
-RUN cd /src/llama.cpp \
-    && cmake -B build \
-         -DCMAKE_BUILD_TYPE=Release \
-         -DGGML_CUDA=ON \
-         -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHS}" \
-         -DGGML_BACKEND_DL=ON \
-         -DGGML_CPU=ON \
-         -DGGML_CPU_ALL_VARIANTS=ON \
-         -DGGML_NATIVE=OFF \
-         -DLLAMA_BUILD_TESTS=OFF \
-         -DLLAMA_BUILD_EXAMPLES=OFF \
-         -DLLAMA_BUILD_TOOLS=ON \
-         -DLLAMA_BUILD_SERVER=ON \
-         -DLLAMA_CURL=OFF \
-         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
-         -DCMAKE_INSTALL_RPATH='$ORIGIN' \
-    `# The backends come along as dependencies of the server. Building them by` \
-    `# name does not work with GGML_CPU_ALL_VARIANTS: there is no "ggml-cpu"` \
-    `# target then, only ggml-cpu-haswell, ggml-cpu-sandybridge and the rest.` \
-    && cmake --build build --config Release --target llama-server -j"$(nproc)" \
-    `# Verified by result, not by exit code: a missing backend means a server` \
-    `# that silently runs on the CPU, or does not start at all.` \
-    && test -f build/bin/libggml-cuda.so \
-    && ls build/bin/libggml-cpu*.so >/dev/null
-
-# Collect what the server actually needs: itself, the backends, and the CUDA
-# libraries it links against. Everything else the build produced — other tools,
-# test binaries, static archives — stays behind in this stage.
-RUN mkdir -p /opt/llama \
-    && cd /src/llama.cpp/build \
-    && cp bin/llama-server /opt/llama/ \
-    && cp bin/libggml*.so* /opt/llama/ \
-    && cp bin/libllama*.so* /opt/llama/ \
-    && for lib in libcudart libcublas libcublasLt; do \
-         find /usr/local/cuda-12.8 -name "$lib.so.*" -type f \
-           -exec cp -n {} /opt/llama/ ';' ; \
-       done \
-    && strip --strip-unneeded /opt/llama/llama-server /opt/llama/*.so* 2>/dev/null || true \
-    && echo "llama.cpp ${LLAMA_VERSION} built: $(du -sh /opt/llama | cut -f1)" \
-    && du -ah /opt/llama | sort -rh | head -8
+# llama.cpp comes from its own base image, built by .github/workflows/llama.yml
+# from Dockerfile.llama. Compiling it takes about forty minutes and it changes
+# only when llama.cpp or the target GPUs change — while this file changes several
+# times a day. Keeping the two apart is what keeps this build at six minutes.
+FROM ${LLAMA_IMAGE} AS llama-dist
 
 
 # =============================================================================
@@ -302,7 +227,7 @@ RUN mkdir -p /opt/powershell \
 # carries kernels for every GPU generation ever shipped; built here, it carries
 # the two that this environment runs on. The model itself is NOT baked in — it is
 # mounted as a volume, being heavier than the image and updated independently.
-COPY --from=llama-builder /opt/llama /opt/llama
+COPY --from=llama-dist /opt/llama /opt/llama
 RUN ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
     && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
     && ldconfig \

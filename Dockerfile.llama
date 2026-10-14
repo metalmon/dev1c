@@ -1,0 +1,119 @@
+# =============================================================================
+# llama.cpp with CUDA — a base image, built on its own.
+#
+# Separate from the main image on purpose: this takes about forty minutes to
+# compile and changes only when llama.cpp or the target GPUs change, while the
+# environment's own files change several times a day. Keeping it here means the
+# main build stays at its six minutes and simply copies the result.
+#
+#   docker build -f Dockerfile.llama -t ghcr.io/<owner>/dev1c-llama:b11606 .
+#
+# The size problem this solves: the official release tarball is 1.1 GB, of which
+# roughly 830 MB is cuBLAS carrying kernels for every GPU generation ever
+# shipped, and another 170 MB is ggml's own kernels, likewise for all of them.
+# This environment runs on two architectures.
+#
+#   - ggml kernels are cut by CMAKE_CUDA_ARCHITECTURES
+#   - cuBLAS is linked statically from archives pruned with nvprune, which only
+#     works on .a files — a finished .so cannot be trimmed, which is why simply
+#     rebuilding against fewer architectures changed almost nothing before
+# =============================================================================
+
+# Built on Debian 12, not 13: trixie's apt rejects SHA1 signatures since
+# February 2026, and NVIDIA's repository key is signed that way — the repository
+# is simply refused. Bookworm also links against an older glibc, so the result
+# runs on both and on anything newer.
+FROM debian:12-slim AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG LLAMA_VERSION=b11606
+# 86 for Ampere (3060 Ti and the like), 120 for a 5090, and 75-virtual as PTX
+# the driver can compile for anything newer than Turing.
+ARG LLAMA_CUDA_ARCHS="86-real;120-real;75-virtual"
+# The same set in nvprune's notation, for the static cuBLAS archives.
+ARG NVPRUNE_ARCHS="--generate-code code=sm_86,arch=compute_86 --generate-code code=sm_120,arch=compute_120 --generate-code code=compute_75,arch=compute_75"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates curl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Only the compiler, the dev libraries and nvprune — not cuda-toolkit, which
+# drags in Nsight and a JDK behind it.
+RUN curl -fsSL -o /tmp/cuda-keyring.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && rm /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         cuda-compiler-12-8 cuda-libraries-dev-12-8 cuda-nvprune-12-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/local/cuda-12.8/bin:${PATH}"
+
+# Prune the static cuBLAS archives before anything links against them. This is
+# where the weight actually is: the shipped libcublasLt is 717 MB because it
+# holds compiled kernels for every architecture CUDA 12.8 knows about.
+RUN cd /usr/local/cuda-12.8/lib64 \
+    && for a in libcublas_static.a libcublasLt_static.a; do \
+         [ -f "$a" ] || continue; \
+         before=$(du -m "$a" | cut -f1); \
+         nvprune ${NVPRUNE_ARCHS} "$a" -o "$a.pruned" \
+           && mv "$a.pruned" "$a"; \
+         echo "$a: ${before} MB -> $(du -m "$a" | cut -f1) MB"; \
+       done
+
+RUN git clone --depth=1 --branch "${LLAMA_VERSION}" \
+      https://github.com/ggml-org/llama.cpp.git /src/llama.cpp
+
+# GGML_STATIC links the CUDA libraries into the backend instead of loading them
+# at run time — which is what lets the pruned archives matter. GGML_BACKEND_DL
+# keeps the backends separately loadable, so a machine without a driver falls
+# back to the CPU instead of refusing to start. GGML_NATIVE=OFF: the build
+# machine is not the target machine.
+RUN cd /src/llama.cpp \
+    && cmake -B build \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DGGML_CUDA=ON \
+         -DGGML_STATIC=ON \
+         -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHS}" \
+         -DGGML_BACKEND_DL=ON \
+         -DGGML_CPU=ON \
+         -DGGML_CPU_ALL_VARIANTS=ON \
+         -DGGML_NATIVE=OFF \
+         -DLLAMA_BUILD_TESTS=OFF \
+         -DLLAMA_BUILD_EXAMPLES=OFF \
+         -DLLAMA_BUILD_SERVER=ON \
+         -DLLAMA_CURL=OFF \
+         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+         -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+    `# The backends come along as dependencies of the server: with` \
+    `# GGML_CPU_ALL_VARIANTS there is no "ggml-cpu" target to ask for, only` \
+    `# ggml-cpu-haswell, ggml-cpu-sandybridge and the rest.` \
+    && cmake --build build --config Release --target llama-server -j"$(nproc)" \
+    `# Verified by result, not by exit code: a missing backend means a server` \
+    `# that silently runs on the CPU, or does not start at all.` \
+    && test -f build/bin/libggml-cuda.so \
+    && ls build/bin/libggml-cpu*.so >/dev/null
+
+# Collect what the server needs. With a static cuBLAS the shared libcublas*
+# files are not copied at all — that is the point of the exercise.
+RUN mkdir -p /opt/llama \
+    && cd /src/llama.cpp/build \
+    && cp bin/llama-server /opt/llama/ \
+    && cp bin/libggml*.so* /opt/llama/ \
+    && cp bin/libllama*.so* /opt/llama/ \
+    && for lib in libcudart libcublas libcublasLt; do \
+         find /usr/local/cuda-12.8 -name "$lib.so.*" -type f \
+           -exec sh -c 'ldd /opt/llama/libggml-cuda.so | grep -q "$(basename "$1")" && cp -n "$1" /opt/llama/' _ {} ';' ; \
+       done \
+    && strip --strip-unneeded /opt/llama/llama-server /opt/llama/*.so* 2>/dev/null || true \
+    && echo "llama.cpp ${LLAMA_VERSION} built: $(du -sh /opt/llama | cut -f1)" \
+    && du -ah /opt/llama | sort -rh | head -8
+
+
+# =============================================================================
+# The image itself holds nothing but the result: the main Dockerfile copies
+# /opt/llama out of it.
+# =============================================================================
+FROM scratch
+COPY --from=builder /opt/llama /opt/llama

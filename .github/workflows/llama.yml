@@ -1,0 +1,68 @@
+name: build llama.cpp base
+
+# Compiling llama.cpp with CUDA takes about forty minutes, and it changes only
+# when llama.cpp or the target GPUs do. Doing it inside the main build meant
+# paying that price for every edit to a shell script, so it lives in its own
+# image and the main build just copies the result.
+#
+# Run this by hand after changing Dockerfile.llama — the version and the GPU
+# architectures are its build arguments.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.llama
+      - .github/workflows/llama.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Read the version from the Dockerfile
+        # One source of truth: the version lives in Dockerfile.llama as a build
+        # argument, and the tag follows it rather than being repeated here.
+        id: ver
+        run: |
+          v=$(grep -m1 '^ARG LLAMA_VERSION=' Dockerfile.llama | cut -d= -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "building $v"
+
+      - name: Log in to the registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          docker build -f Dockerfile.llama \
+            -t "ghcr.io/$owner/dev1c-llama:${{ steps.ver.outputs.version }}" \
+            -t "ghcr.io/$owner/dev1c-llama:latest" \
+            .
+
+      - name: Size
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          docker image inspect "ghcr.io/$owner/dev1c-llama:latest" \
+            --format 'image size: {{.Size}} bytes'
+
+      - name: Push
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          docker push "ghcr.io/$owner/dev1c-llama:${{ steps.ver.outputs.version }}"
+          docker push "ghcr.io/$owner/dev1c-llama:latest"

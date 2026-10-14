@@ -65,16 +65,29 @@ RUN cd /usr/local/cuda-12.8/lib64 \
 RUN git clone --depth=1 --branch "${LLAMA_VERSION}" \
       https://github.com/ggml-org/llama.cpp.git /src/llama.cpp
 
-# GGML_STATIC links the CUDA libraries into the backend instead of loading them
-# at run time — which is what lets the pruned archives matter. GGML_BACKEND_DL
-# keeps the backends separately loadable, so a machine without a driver falls
-# back to the CPU instead of refusing to start. GGML_NATIVE=OFF: the build
-# machine is not the target machine.
+# Link cuBLAS statically — into the CUDA backend only.
+#
+# ggml already knows how: the static variant sits in its CMakeLists, but only
+# under GGML_STATIC, which links everything statically and breaks the build
+# outright — ggml produces shared libraries, and the linker refuses with
+# "failed to set dynamic section sizes". So the one line that matters is
+# patched instead; culibos comes along because the static CUDA archives need
+# it.
+#
+# This is what makes the pruning above count: a static archive is linked by
+# object, so only the kernels actually used end up in the result.
+RUN cd /src/llama.cpp \
+    && sed -i 's|PRIVATE CUDA::cudart CUDA::cublas)|PRIVATE CUDA::cudart_static CUDA::cublas_static CUDA::cublasLt_static CUDA::culibos)|' \
+         ggml/src/ggml-cuda/CMakeLists.txt \
+    && grep -q "cublas_static" ggml/src/ggml-cuda/CMakeLists.txt
+
+# GGML_BACKEND_DL keeps the backends separately loadable, so a machine without
+# a driver falls back to the CPU instead of refusing to start. GGML_NATIVE=OFF:
+# the build machine is not the target machine.
 RUN cd /src/llama.cpp \
     && cmake -B build \
          -DCMAKE_BUILD_TYPE=Release \
          -DGGML_CUDA=ON \
-         -DGGML_STATIC=ON \
          -DCMAKE_CUDA_ARCHITECTURES="${LLAMA_CUDA_ARCHS}" \
          -DGGML_BACKEND_DL=ON \
          -DGGML_CPU=ON \

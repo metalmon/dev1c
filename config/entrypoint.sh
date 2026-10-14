@@ -135,18 +135,44 @@ fi
 # that is not an error, the environment stays usable, only the agent is absent.
 if [ "${LLAMA_ENABLED:-1}" = "1" ]; then
     if [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; then
-        log "llama.cpp: model $(basename "$MODEL_FILE")"
+        log "llama.cpp: model $(basename "$MODEL_FILE"), context ${LLAMA_CTX:-196608}"
         # --host 0.0.0.0 so the server is reachable from the host too, and
         # --alias so it reports a stable model name: that same name goes into the
-        # editor's settings above. Layer and context values live in variables —
-        # they differ radically between an 8 GB card and a 32 GB one.
+        # editor's settings above.
+        #
+        # One slot, not three. llama.cpp splits --ctx-size between slots, so
+        # --parallel 3 quietly gave each workstation a third of it: 32768 became
+        # about 11000 tokens per request, while this environment's prompt — the
+        # editor's own instructions plus the skill catalog — is around 17500. The
+        # agent answered nothing, and the reason was only visible in the server's
+        # log: "request (17475 tokens) exceeds the available context size (11008
+        # tokens)". Requests from several people queue instead, which is the
+        # right trade: waiting beats not working.
+        #
+        # The KV cache is quantised to q8_0, which roughly halves its memory at
+        # no noticeable quality cost and is what makes a context this long fit on
+        # a card at all. Flash attention is required for a quantised cache.
         /usr/local/bin/llama-server \
             --model "$MODEL_FILE" \
             --alias "$MODEL_ALIAS" \
             --host 0.0.0.0 --port 8080 \
             --n-gpu-layers "${LLAMA_GPU_LAYERS:-999}" \
-            --ctx-size "${LLAMA_CTX:-32768}" \
-            --parallel "${LLAMA_PARALLEL:-3}" \
+            --ctx-size "${LLAMA_CTX:-196608}" \
+            --parallel "${LLAMA_PARALLEL:-1}" \
+            --cache-type-k "${LLAMA_CACHE_TYPE:-q8_0}" \
+            --cache-type-v "${LLAMA_CACHE_TYPE:-q8_0}" \
+            --flash-attn "${LLAMA_FLASH_ATTN:-on}" \
+            --batch-size "${LLAMA_BATCH:-2048}" \
+            --ubatch-size "${LLAMA_UBATCH:-512}" \
+            `# Thought blocks are kept out of the answer itself. Note what this
+             # does NOT do: a model distilled on reasoning traces writes its
+             # thinking regardless — neither this flag nor enable_thinking in the
+             # template stops it, that behaviour lives in the weights. What it
+             # does mean is that such a model needs a generous answer budget: cut
+             # it short and the reply ends mid-thought with finish_reason
+             # "length" and an empty content, which reads as "the model said
+             # nothing".` \
+            --reasoning "${LLAMA_REASONING:-off}" \
             --cont-batching \
             >/var/log/llama-server.log 2>&1 &
     else

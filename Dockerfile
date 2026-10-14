@@ -224,12 +224,21 @@ ARG LLAMA_CUDA=12.8
 RUN mkdir -p /opt/llama \
     && curl -fsSL "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-cuda-${LLAMA_CUDA}-x64.tar.gz" \
        | tar -xz -C /opt/llama --strip-components=1 \
+    `# --strip-components=1 here too: this archive carries its own top-level` \
+    `# directory, and without it libcudart and libcublas land in a subdirectory` \
+    `# ld.so never looks into. The CUDA backend then fails to load, the server` \
+    `# reports "Available devices: (none)" and quietly computes on the CPU —` \
+    `# four tokens a second instead of fifty, with the GPU sitting idle.` \
     && curl -fsSL "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/cudart-llama-${LLAMA_VERSION}-bin-ubuntu-cuda-${LLAMA_CUDA}-x64.tar.gz" \
-       | tar -xz -C /opt/llama \
+       | tar -xz -C /opt/llama --strip-components=1 \
     && ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
     && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
     && ldconfig \
     && ls /opt/llama/llama-server >/dev/null \
+    `# the CUDA runtime has to be resolvable, otherwise the fallback to the CPU` \
+    `# happens at run time and surfaces as "the model is slow"` \
+    && ldconfig -p | grep -q libcudart \
+    && ! ldd /opt/llama/libggml-cuda.so | grep -q "not found" \
     && echo "llama.cpp ${LLAMA_VERSION} installed: $(du -sh /opt/llama | cut -f1)"
 
 # --- Gitea --------------------------------------------------------------------

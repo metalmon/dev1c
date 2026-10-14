@@ -128,6 +128,30 @@ jobs:
           done
           docker logs dev1c
 
+      - name: Reachability
+        # Where a connection fails is not guessable from the outside: it can be
+        # the container, the published port on the runner, or Tailscale itself.
+        # Userspace networking, for one, lets a runner reach out while refusing
+        # incoming connections to its own ports — and that looks exactly like
+        # "nothing opened".
+        run: |
+          echo "--- tun device ---"
+          ls -l /dev/net/tun || echo "no /dev/net/tun"
+          echo "--- tailscale ---"
+          tailscale status || true
+          ip=$(tailscale ip -4 | head -1)
+          echo "tailscale ip: $ip"
+          echo "--- interfaces ---"
+          ip -brief addr
+          echo "--- listening ---"
+          sudo ss -ltnp | grep -E "3389|3000" || echo "3389/3000 not listening"
+          echo "--- gitea over loopback ---"
+          curl -sS -m 5 -I http://localhost:3000/ | head -1 || echo "loopback failed"
+          echo "--- gitea over the tailnet address ---"
+          curl -sS -m 5 -I "http://$ip:3000/" | head -1 || echo "tailnet address failed"
+          echo "--- rdp port over the tailnet address ---"
+          nc -z -w 5 "$ip" 3389 && echo "3389 accepts" || echo "3389 refused"
+
       - name: How to connect
         run: |
           ip=$(tailscale ip -4 | head -1)

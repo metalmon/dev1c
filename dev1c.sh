@@ -81,9 +81,13 @@ $ENGINE rm -f "$NAME" >/dev/null 2>&1 || true
 # baked into the image: every build stays clean, and the repository does not
 # reveal what we run and where. See .env.example. In an air-gapped network .env
 # is not needed at all — llama.cpp there wants neither key nor address.
-CUSTOM_VARS="CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL"
+# Passed into the container as they are, no renaming: what is written in
+# .env is what arrives inside. LLAMA_ENABLED=0 turns off the local model
+# server — useful while the machine has no GPU worth the name, or when a
+# remote model is used instead.
+PASS_VARS="CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL LLAMA_ENABLED"
 if [ -f "$DIR/.env" ]; then
-    for v in $CUSTOM_VARS; do
+    for v in $PASS_VARS; do
         eval "cur=\${$v:-}"
         [ -n "$cur" ] && continue
         val=$(tr -d '\r' < "$DIR/.env" |
@@ -125,7 +129,7 @@ set -- run -d --name "$NAME" --restart unless-stopped --init \
 # Passed through under the same names they have in .env — no renaming anywhere,
 # so there is nothing to get wrong. The provider in the editor's settings is
 # called "custom", and Zed derives the key variable from the provider name.
-for v in $CUSTOM_VARS; do
+for v in $PASS_VARS; do
     eval "val=\${$v:-}"
     [ -n "$val" ] && set -- "$@" -e "$v=$val"
 done

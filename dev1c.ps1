@@ -88,7 +88,9 @@ if (-not (& $Engine image inspect $Image 2>$null)) {
 # reveal what we run and where. See .env.example. In an air-gapped network .env
 # is not needed at all — llama.cpp there wants neither key nor address.
 $customVars = @{}
-foreach ($name in @("CUSTOM_API_URL", "CUSTOM_API_KEY", "CUSTOM_MODEL")) {
+# LLAMA_ENABLED=0 turns off the local model server — useful while the machine
+# has no GPU worth the name, or when a remote model is used instead.
+foreach ($name in @("CUSTOM_API_URL", "CUSTOM_API_KEY", "CUSTOM_MODEL", "LLAMA_ENABLED")) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if (-not $value -and (Test-Path "$PSScriptRoot\.env")) {
         $line = Get-Content "$PSScriptRoot\.env" |

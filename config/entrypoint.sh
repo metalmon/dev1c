@@ -94,7 +94,12 @@ MODEL_FILE="${LLAMA_MODEL:-}"
 MODEL_ALIAS=""
 [ -n "$MODEL_FILE" ] && MODEL_ALIAS=$(basename "$MODEL_FILE" .gguf)
 
-for cfg in /home/*/.config/zed/settings.json /etc/skel/.config/zed/settings.json; do
+# /etc/skel is deliberately NOT in this list. It is the reference copy the block
+# above hands out, and substituting into it burns the placeholders on first run:
+# after that the environment can never be pointed at a different provider,
+# because there is nothing left to replace. Homes get the substitution; the
+# reference stays pristine.
+for cfg in /home/*/.config/zed/settings.json; do
     [ -f "$cfg" ] || continue
     # Same reasoning as above, and not theoretical: `sed -i` on a symlinked path
     # reads whatever it points at and leaves the result in its place. Pointed at

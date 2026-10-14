@@ -43,7 +43,11 @@ RUN set -eu; \
 # drags in Nsight and a JDK behind it. None of this reaches the runtime image —
 # only the built server and the libraries it needs.
 # =============================================================================
-FROM debian:13-slim AS llama-builder
+# Built on Debian 12, not 13: trixie's apt rejects SHA1 signatures since
+# February 2026, and NVIDIA's repository key is signed that way — the repository
+# is simply refused. Bookworm also links against an older glibc, so the result
+# runs on both and on anything newer.
+FROM debian:12-slim AS llama-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG LLAMA_VERSION=b11606
@@ -53,8 +57,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake git ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# The CUDA repository for Debian 12 works here: these packages need a glibc
-# older than what trixie ships.
 RUN curl -fsSL -o /tmp/cuda-keyring.deb \
       https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
     && dpkg -i /tmp/cuda-keyring.deb \

@@ -47,6 +47,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      # To pull the image artifact from the latest successful build
+      actions: read
 
     steps:
       - uses: actions/checkout@v4
@@ -59,8 +61,23 @@ jobs:
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           df -h /
 
-      - name: Build
-        run: docker build -t oktaplus/dev1c:latest .
+      - name: Take the image from the latest build
+        # Not rebuilt here on purpose: this session is meant to inspect exactly
+        # the image that would be handed over, and rebuilding costs six minutes
+        # plus a chance of a flaky failure on layer export. Falls back to a build
+        # if no artifact is around (they expire after two weeks).
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY"                      --workflow "build image" --status success --limit 1                      --json databaseId --jq '.[0].databaseId')
+          if [ -n "$run_id" ] && gh run download "$run_id"                --repo "$GITHUB_REPOSITORY" -n dev1c-image -D /tmp/img; then
+            echo "loading the image from build $run_id"
+            docker load -i /tmp/img/dev1c-image.tar.gz
+          else
+            echo "no artifact available, building"
+            docker build -t oktaplus/dev1c:latest .
+          fi
+          docker image inspect oktaplus/dev1c:latest --format 'image: {{.Id}}'
 
       - name: Join the tailnet
         # Pinned to a commit: a third-party action in a public repository is

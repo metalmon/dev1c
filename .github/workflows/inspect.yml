@@ -1,0 +1,109 @@
+name: inspect environment
+
+# Start the environment on a runner and connect to it over RDP, to look at what
+# cannot be checked by a script: the desktop itself, syntax highlighting, the
+# file manager, how the agent behaves.
+#
+# This is a test session for a built artifact, not a workplace, and the limits
+# say so plainly:
+#   * the job is killed after the timeout below (an hour at most here)
+#   * no GPU, so a local model would run on CPU — point the agent at a remote
+#     one instead, through the repository secrets
+#   * volumes disappear with the runner: nothing you do here survives
+#
+# Access goes through Tailscale: the runner joins your tailnet and becomes
+# reachable by its private address. No public port is opened anywhere.
+#
+# Required repository secrets:
+#   TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET — a Tailscale OAuth client with the
+#     auth_keys scope, and tag:ci listed in tagOwners in your ACL
+#   CUSTOM_API_URL, CUSTOM_API_KEY, CUSTOM_MODEL — optional, to give the agent a
+#     remote model
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to keep the session (max 55)"
+        type: number
+        default: 30
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - name: Build
+        run: docker build -t oktaplus/dev1c:latest .
+
+      - name: Join the tailnet
+        # Pinned to a commit: a third-party action in a public repository is
+        # supply chain, and a tag can be moved at any time.
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Start the environment
+        env:
+          CUSTOM_API_URL: ${{ secrets.CUSTOM_API_URL }}
+          CUSTOM_API_KEY: ${{ secrets.CUSTOM_API_KEY }}
+          CUSTOM_MODEL: ${{ secrets.CUSTOM_MODEL }}
+        run: |
+          # Same flags as dev1c.sh, minus the GPU: xrdp-sesman needs SYS_ADMIN
+          # for its PAM session, and drive forwarding needs /dev/fuse.
+          args="--init --cap-add SYS_ADMIN
+                --security-opt seccomp=unconfined
+                --security-opt apparmor=unconfined
+                --device /dev/fuse
+                --shm-size 2g
+                -p 3389:3389 -p 3000:3000"
+          for v in CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL; do
+            eval "val=\$$v"
+            [ -n "$val" ] && args="$args -e $v=$val"
+          done
+          # shellcheck disable=SC2086
+          docker run -d --name dev1c $args oktaplus/dev1c:latest
+
+          for i in $(seq 1 30); do
+            docker exec dev1c pgrep -x xrdp >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker logs dev1c
+
+      - name: How to connect
+        run: |
+          ip=$(tailscale ip -4 | head -1)
+          echo "============================================================"
+          echo "  RDP:         mstsc /v:$ip:3389"
+          echo "  logins:      dev1 / dev1,  dev2 / dev2,  dev3 / dev3"
+          echo "  Gitea:       http://$ip:3000"
+          echo
+          echo "  The session ends in ${{ inputs.minutes }} minutes."
+          echo "  Nothing here is persisted — the runner is wiped afterwards."
+          echo "============================================================"
+
+      - name: Hold the session
+        run: |
+          minutes=${{ inputs.minutes }}
+          [ "$minutes" -gt 55 ] && minutes=55
+          echo "holding for $minutes minutes"
+          sleep $((minutes * 60))
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs dev1c 2>&1 | tail -50 || true

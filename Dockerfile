@@ -90,9 +90,14 @@ RUN cd /src/llama.cpp \
          -DLLAMA_CURL=OFF \
          -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
          -DCMAKE_INSTALL_RPATH='$ORIGIN' \
+    `# The backends come along as dependencies of the server. Building them by` \
+    `# name does not work with GGML_CPU_ALL_VARIANTS: there is no "ggml-cpu"` \
+    `# target then, only ggml-cpu-haswell, ggml-cpu-sandybridge and the rest.` \
     && cmake --build build --config Release --target llama-server -j"$(nproc)" \
-    && cmake --build build --config Release --target ggml-cpu -j"$(nproc)" \
-    && cmake --build build --config Release --target ggml-cuda -j"$(nproc)"
+    `# Verified by result, not by exit code: a missing backend means a server` \
+    `# that silently runs on the CPU, or does not start at all.` \
+    && test -f build/bin/libggml-cuda.so \
+    && ls build/bin/libggml-cpu*.so >/dev/null
 
 # Collect what the server actually needs: itself, the backends, and the CUDA
 # libraries it links against. Everything else the build produced — other tools,

@@ -142,15 +142,18 @@ without the comments; the commented sample stays as `dev1c-setup example`.
 4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch
    `merge-upstream` (worktree `D:\1c\projects\mcp-1c-upstream-merge`), tests
    green in its CI; fast-forward `main` when the business tools are needed.
-5. **Local model the volt-llama way** (spec section «Локальная модель», from
-   `e:\zeroclaw\_local\spec-volt-llama.md`): entrypoint switches from
-   `--ctx-size 196608` to `--fit on --fit-ctx 65536`, three slots with a
-   unified cache; `dev1c-setup` gains a `gpu` operation (nvidia-smi, GPU
-   pass-through check, `--fit-target`/`--cache-ram` from measurements) and
-   `check` facts from `/props` and timings; the three numbers (server window,
-   Zed window, agent budget × slots) must agree. Own plan after `1c-connect`.
-   Today the model is served by the other project's `volt-llama` container
-   from the same `dev1c-models` volume, and `dev1c` points at it as remote.
+5. **Local model as a sibling container, the volt-llama way** (decided
+   2026-10-16, spec section «Локальная модель»): CUDA and llama.cpp leave the
+   `dev1c` image; `dev1c-setup` gets an operation `llama` that runs
+   `dev1c-llama` (own slim image, `--fit on --fit-ctx 65536`, three slots,
+   unified cache, GPU and RAM measured first) and then syncs the numbers into
+   Zed: `max_tokens = window/3 − 8192`, `max_output_tokens`, `auto_compact`
+   threshold, read back from `/props`; `check` states the three numbers. Zed
+   owns the sliding window (`agent.auto_compact`, present in the image's
+   build), llama owns capacity, the installer keeps them in step. Own plan
+   after `1c-connect`. Today the model is served by the other project's
+   `volt-llama` container from the same `dev1c-models` volume, and `dev1c`
+   points at it as remote.
 6. **`vrunner-mcp` in the developer's kit** (stage 6): portable OneScript plus
    vanessa-runner, port 778N; check first that `vrunner-mcp` runs from a
    portable OneScript on Windows. This is what makes PRISM category B possible.

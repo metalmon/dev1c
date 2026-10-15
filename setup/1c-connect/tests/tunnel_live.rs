@@ -46,7 +46,7 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
         // answers. Connect + auth + forward take a few seconds on a slow
         // runner, so poll rather than sleep a fixed time.
         let mut open = false;
-        for _ in 0..20 {
+        for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7771"]).status().unwrap();
             if st.success() {
@@ -54,7 +54,7 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
                 break;
             }
         }
-        assert!(open, "the container must reach the forwarded port within 20 s");
+        assert!(open, "the container must reach the forwarded port within 40 s");
     } else {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }

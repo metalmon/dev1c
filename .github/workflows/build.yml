@@ -130,7 +130,13 @@ jobs:
       - name: Build
         run: |
           docker build -t oktaplus/dev1c:latest .
-          echo "== memory after the build"; free -m
+          echo "== memory after the build"; free -m | grep -E 'Mem|Swap'
+          # dockerd keeps ~14 GB resident after exporting this image (84 % of
+          # the runner) and everything after it runs from swap or gets killed.
+          # The image is on disk; the daemon's memory is not needed again.
+          sudo systemctl restart docker
+          docker image inspect oktaplus/dev1c:latest --format 'image still here: {{.Id}}'
+          echo "== memory after restarting docker"; free -m | grep -E 'Mem|Swap'
 
       # --- Checks ------------------------------------------------------------
       # The point of these is that nobody has to start the environment by hand to

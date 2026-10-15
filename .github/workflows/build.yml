@@ -63,6 +63,20 @@ jobs:
           name: 1c-connect-${{ matrix.name }}
           path: setup/target/release/1c-connect${{ matrix.name == 'windows' && '.exe' || '' }}
           if-no-files-found: error
+      - name: Build the live tunnel test as a standalone binary
+        # The image job runs it against the container it installs; that job
+        # carries no Rust toolchain of its own.
+        if: matrix.name == 'linux'
+        run: |
+          bin=$(cargo test --manifest-path setup/Cargo.toml -p onec-connect --test tunnel_live --no-run 2>&1 \
+                | grep -oE 'setup/target/debug/deps/tunnel_live-[0-9a-f]+' | head -1)
+          test -n "$bin" && cp "$bin" tunnel_live && ls -la tunnel_live
+      - uses: actions/upload-artifact@v4
+        if: matrix.name == 'linux'
+        with:
+          name: tunnel-live-linux
+          path: tunnel_live
+          if-no-files-found: error
 
   build:
     needs: setup
@@ -135,20 +149,20 @@ jobs:
           ./dev1c-setup --kit kit status
           cat kit/last-check.txt
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
         with:
-          workspaces: setup
+          name: tunnel-live-linux
+          path: .
 
       - name: The tunnel from a developer's machine reaches the container
         # The real sshd, the real PermitListen, the real nc behind Zed's
-        # settings: 1c-connect's live test (same code as the Windows build)
-        # forwards 7771 and asserts that `nc -z localhost 7771` succeeds
-        # inside the container. The bridge behind it is not exercised here —
-        # there is no 1C on a runner.
+        # settings: 1c-connect's live test (same code as the Windows build,
+        # built by the setup job) forwards 7771 and asserts that
+        # `nc -z localhost 7771` succeeds inside the container. The bridge
+        # behind it is not exercised here — there is no 1C on a runner.
         run: |
-          DEV1C_SSH=127.0.0.1:3393 DEV1C_SSH_PASSWORD=dev DEV1C_DOCKER=1 \
-            cargo test --manifest-path setup/Cargo.toml -p onec-connect --test tunnel_live -- --nocapture
+          chmod +x tunnel_live
+          DEV1C_SSH=127.0.0.1:3393 DEV1C_SSH_PASSWORD=dev DEV1C_DOCKER=1 ./tunnel_live --nocapture
 
       - name: Variables reach the sessions, placeholders are gone
         run: |

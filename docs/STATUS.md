@@ -129,6 +129,14 @@ script days is obsolete; the scripts are gone.
   its tools and fails on every call — set the variable.
 - Git Bash rewrites `/tmp/...` arguments into Windows paths before `docker
   exec` sees them; prefix the command with `MSYS_NO_PATHCONV=1`.
+- A GitHub runner (16 GB) runs out of memory around `docker build`'s
+  "exporting layers" of this 3 GB image, and dockerd keeps most of it
+  afterwards: the runner then SIGTERMs whatever runs next (exit 143, job
+  shown as "cancelled", no notice anywhere). It hit the build itself, the
+  installer's `check` and `rustup` on different days' luck; the diagnostics
+  step showed 215 MB available and the runner's 3 GB swap full. `build.yml`
+  now adds an 8 GB swap file before the build and caps the container at 6g
+  on the runner.
 - The `dev1c-kit` artifact is a zip and drops the mode bits: the Linux
   `dev1c-setup` arrives as `-rw-r--r--` and needs `chmod +x`. Pack the kits as
   a tar inside the artifact, or say so in the README, before a Linux customer

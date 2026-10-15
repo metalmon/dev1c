@@ -116,9 +116,13 @@ jobs:
         # the build itself at "exporting layers" on a bad day. The runner's
         # own 3 GB of swap was full every time it happened. Disk is plentiful.
         run: |
-          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile \
-            && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
-          free -m
+          # /swapfile is the runner's own, in use; ours goes next to it. Each
+          # command on its own line so a failure stops the step (set -e).
+          sudo fallocate -l 8G /swap-dev1c
+          sudo chmod 600 /swap-dev1c
+          sudo mkswap /swap-dev1c >/dev/null
+          sudo swapon /swap-dev1c
+          free -m | grep -E 'Mem|Swap'
 
       - name: Lint Dockerfile
         run: docker build --check .

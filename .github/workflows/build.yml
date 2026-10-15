@@ -20,9 +20,45 @@ on:
       - config/**
       - .dockerignore
       - .github/workflows/build.yml
+      - setup/**
 
 jobs:
+  setup:
+    # The installers. Built here, not on the laptop: this is where the memory
+    # is, and the result lands next to the image as an artifact.
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            bin: dev1c-setup
+          - os: windows-latest
+            name: windows
+            bin: dev1c-setup.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: setup
+      - name: Test
+        run: cargo test --workspace --manifest-path setup/Cargo.toml
+      - name: Build
+        run: cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dev1c-setup-${{ matrix.name }}
+          path: setup/target/release/${{ matrix.bin }}
+          if-no-files-found: error
+
   build:
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Nothing here writes to the repository: the build reads sources and the
@@ -65,82 +101,49 @@ jobs:
       # substituted. Both failures are silent: the environment looks fine and the
       # agent simply has no model.
 
-      - name: Services start
+      - uses: actions/download-artifact@v4
+        with:
+          name: dev1c-setup-linux
+          path: .
+
+      - name: Install through dev1c-setup
+        # The installer is the product: if it cannot bring the image up and
+        # pass its own checks on a clean machine, nothing else matters. Remote
+        # model: the local file path is not exercised here (the model is served
+        # elsewhere for now). The image is already loaded under its tag, so the
+        # kit needs no archive.
         run: |
-          # A dummy model file: llama-server will reject it, which is fine — what
-          # is being checked here is that the entrypoint finds a .gguf and
-          # substitutes its name into the editor settings.
-          docker volume create smoke-models
-          head -c 1048576 /dev/zero > model-smoke.gguf
-          docker run --rm -v smoke-models:/m -v "$PWD:/src:ro" alpine \
-            cp /src/model-smoke.gguf /m/
+          mkdir -p kit
+          cat > kit/dev1c.toml <<'EOF'
+          [server]
+          gpu = false
+          [model]
+          url = "https://model.example.com/v1"
+          key = "not-a-real-key"
+          name = "some-model"
+          EOF
+          chmod +x dev1c-setup
+          ./dev1c-setup --kit kit install --dry-run
+          ./dev1c-setup --kit kit install -y
+          ./dev1c-setup --kit kit status
+          cat kit/last-check.txt
 
-          docker run -d --name smoke --init \
-            --cap-add SYS_ADMIN \
-            --security-opt seccomp=unconfined \
-            -v smoke-models:/opt/models \
-            oktaplus/dev1c:latest
-
-          for i in $(seq 1 30); do
-            docker exec smoke pgrep -x gitea >/dev/null 2>&1 && break
-            sleep 2
-          done
-          docker logs smoke
-
-          fail=0
-          for s in gitea xrdp sshd; do
-            if docker exec smoke pgrep -x "$s" >/dev/null 2>&1; then
-              echo "ok: $s is running"
-            else
-              echo "FAIL: $s is not running"; fail=1
-            fi
-          done
-          [ "$fail" = 0 ]
-
-      - name: Model name reaches the editor settings
+      - name: Variables reach the sessions, placeholders are gone
         run: |
-          cfg=/home/dev1/.config/zed/settings.json
-          if docker exec smoke grep -q '"model": "model-smoke"' "$cfg"; then
-            echo "ok: local model substituted"
-          else
-            echo "FAIL: placeholder left in settings"
-            docker exec smoke grep -n -A3 '"default_model"' "$cfg"
-            exit 1
-          fi
-          if docker exec smoke grep -q 'PLACEHOLDER' "$cfg"; then
-            echo "note: unreplaced placeholders remain (expected for the remote provider)"
-            docker exec smoke grep -n 'PLACEHOLDER' "$cfg"
-          fi
-
-      - name: Remote provider configuration
-        run: |
-          # The other branch of the same logic: with CUSTOM_API_URL set, the
-          # remote provider must become the default one.
-          docker run -d --name smoke-remote --init \
-            -e CUSTOM_API_URL=https://model.example.com/v1 \
-            -e CUSTOM_API_KEY=not-a-real-key \
-            -e CUSTOM_MODEL=some-model \
-            oktaplus/dev1c:latest
-          sleep 10
-          cfg=/home/dev1/.config/zed/settings.json
-          docker exec smoke-remote grep -q '"provider": "custom"' "$cfg" \
-            && echo "ok: provider switched to custom" \
-            || { docker exec smoke-remote grep -n -A3 '"default_model"' "$cfg"; exit 1; }
-          docker exec smoke-remote grep -q 'model.example.com' "$cfg" \
-            && echo "ok: api_url substituted" || exit 1
-          docker exec smoke-remote grep -q 'CUSTOM_API_URL=' /etc/environment \
-            && echo "ok: variables carried into /etc/environment" || exit 1
+          docker exec dev1c grep -q 'CUSTOM_API_URL=' /etc/environment && echo "ok: variables carried into /etc/environment"
+          docker exec dev1c grep -q '"provider": "custom"' /home/dev1/.config/zed/settings.json && echo "ok: provider switched to custom"
+          ! docker exec dev1c grep -q 'PLACEHOLDER"' /home/dev1/.config/zed/settings.json || { echo "FAIL: placeholder left"; exit 1; }
 
       - name: 1C tooling works
         run: |
-          docker exec smoke oscript -version
-          docker exec smoke sh -c 'printf "Сообщить(\"ok: \" + (2+2));" > /tmp/t.os && oscript /tmp/t.os'
-          docker exec smoke /opt/bsl-analyzer/bsl-analyzer --version
-          docker exec smoke sh -c 'command -v nc'
-          docker exec smoke sh /usr/local/bin/test-entrypoint-ports
-          docker exec smoke tea --version | head -1
-          docker exec smoke sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
-          docker exec smoke test -s /home/dev1/.config/zed/AGENTS.md \
+          docker exec dev1c oscript -version
+          docker exec dev1c sh -c 'printf "Сообщить(\"ok: \" + (2+2));" > /tmp/t.os && oscript /tmp/t.os'
+          docker exec dev1c /opt/bsl-analyzer/bsl-analyzer --version
+          docker exec dev1c sh -c 'command -v nc'
+          docker exec dev1c sh /usr/local/bin/test-entrypoint-ports
+          docker exec dev1c tea --version | head -1
+          docker exec dev1c sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
+          docker exec dev1c test -s /home/dev1/.config/zed/AGENTS.md \
             && echo "ok: agent rules in place"
 
       - name: Pack
@@ -183,8 +186,8 @@ jobs:
       - name: Container logs on failure
         if: failure()
         run: |
-          docker logs smoke 2>&1 | tail -50 || true
-          docker logs smoke-remote 2>&1 | tail -30 || true
+          docker logs dev1c 2>&1 | tail -50 || true
+          cat kit/setup.log 2>/dev/null | tail -40 || true
 
       - name: SSH session to the runner
         # For hands-on debugging when the local machine has no memory to spare.

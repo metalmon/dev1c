@@ -238,6 +238,18 @@ jobs:
           docker logs dev1c 2>&1 | tail -50 || true
           cat kit/setup.log 2>/dev/null | tail -40 || true
 
+      - name: Who killed the step (diagnostics on failure)
+        # Steps have been dying with SIGTERM (exit 143) about 20 s after the
+        # container starts, with no cancellation notice. The kernel log, the
+        # system journal and docker's own events are where a reason would be.
+        if: failure()
+        run: |
+          echo "== dmesg"; sudo dmesg 2>/dev/null | tail -40 || true
+          echo "== journal (last 3 min)"; sudo journalctl --no-pager --since "-3min" 2>/dev/null | grep -v -E 'audit|pam_unix' | tail -80 || true
+          echo "== docker events (last 3 min)"; docker events --since 3m --until 0s 2>/dev/null | tail -40 || true
+          echo "== memory"; free -m; echo "== disk"; df -h / | tail -1
+          echo "== container"; docker inspect dev1c --format '{{.State.Status}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' 2>/dev/null || true
+
       - name: SSH session to the runner
         # For hands-on debugging when the local machine has no memory to spare.
         # The URL to connect appears in this step's log; the job then waits until

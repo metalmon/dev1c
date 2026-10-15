@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["common", "dev1c-setup"]
+members = ["common", "dev1c-setup", "1c-connect"]
 
 [workspace.package]
 version = "0.1.0"

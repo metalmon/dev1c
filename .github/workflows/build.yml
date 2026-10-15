@@ -110,11 +110,23 @@ jobs:
         # Needed to pull the llama.cpp base image
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Room to breathe
+        # Exporting a 3 GB image leaves dockerd holding most of the runner's
+        # 16 GB, and the runner then kills whatever runs next (exit 143) —
+        # the build itself at "exporting layers" on a bad day. The runner's
+        # own 3 GB of swap was full every time it happened. Disk is plentiful.
+        run: |
+          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile \
+            && sudo mkswap /swapfile >/dev/null && sudo swapon /swapfile
+          free -m
+
       - name: Lint Dockerfile
         run: docker build --check .
 
       - name: Build
-        run: docker build -t oktaplus/dev1c:latest .
+        run: |
+          docker build -t oktaplus/dev1c:latest .
+          echo "== memory after the build"; free -m
 
       # --- Checks ------------------------------------------------------------
       # The point of these is that nobody has to start the environment by hand to

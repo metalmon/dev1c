@@ -41,11 +41,22 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     let (tx, rx) = tokio::sync::watch::channel(false);
     let kh = dir.join("known_hosts");
     let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx).await });
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     if std::env::var("DEV1C_DOCKER").is_ok() {
-        // The real proof: from inside the container the workstation port answers.
-        let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7771"]).status().unwrap();
-        assert!(st.success(), "the container must reach the forwarded port");
+        // The real proof: from inside the container the workstation port
+        // answers. Connect + auth + forward take a few seconds on a slow
+        // runner, so poll rather than sleep a fixed time.
+        let mut open = false;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7771"]).status().unwrap();
+            if st.success() {
+                open = true;
+                break;
+            }
+        }
+        assert!(open, "the container must reach the forwarded port within 20 s");
+    } else {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
     tx.send(true).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();

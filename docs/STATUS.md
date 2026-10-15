@@ -11,22 +11,20 @@ Last updated: 2026-10-15.
 | | |
 |---|---|
 | repository | https://github.com/metalmon/dev1c (public) |
-| image | built in CI, artifact `dev1c-image` (~1328 MB) |
+| kit | built in CI, artifact `dev1c-kit`: `dev1c-kit/` (installer, `dev1c.toml`, image ~1328 MB, checksums) and `1c-connect/` (mcp-1c for the 1C machine) |
 | llama.cpp base | `ghcr.io/metalmon/dev1c-llama:b11606`, built from `Dockerfile.llama` |
 | local container | `dev1c`, ports 3390 RDP / 3391 Gitea / 3392 model / 3393 SSH |
-| workstations | `dev1`, `dev2`, `dev3` — password equals login |
-| tunnel account | `dev` / `dev`, port forwarding only, no shell |
+| workstations | `dev1`, `dev2`, `dev3` — password equals login; tunnel ports 777N / 778N / 779N |
+| tunnel account | `dev` / `dev`, forwarding onto the nine workstation ports only, no shell |
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
-| mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the image; the fork `D:\1c\projects\mcp-1c` is 340 commits behind it |
+| mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
+| installers | `setup/` — Cargo workspace `common` + `dev1c-setup`; `1c-connect` is the next plan |
 
-Secrets live in `.env` (git-ignored). Currently pointed at a remote model, with
-the local llama.cpp switched off — no GPU worth the name on this machine yet:
-
-```
-CUSTOM_API_URL, CUSTOM_API_KEY, CUSTOM_MODEL, LLAMA_ENABLED=0
-MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
-```
+Parameters live in `dev1c.toml` of the kit (never in the repository). On this
+machine the kit is `dist/dev1c-kit`, pointed at a remote model with the local
+llama.cpp switched off — no GPU worth the name here yet. The old `.env` from the
+script days is obsolete; the scripts are gone.
 
 ## Verified by running it
 
@@ -115,55 +113,46 @@ MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
 
 ## Next
 
-0. **Two installers, spec `2026-10-16-setup-binaries-design.md`** (decided
-   2026-10-16): `dev1c-setup` for the Docker machine, `1c-connect` on each
-   developer's flash drive. `mcp-1c` moves out of the image onto the 1C
-   machine behind a TCP↔stdio bridge; the container reaches it as
-   `nc localhost 777N`. Everything below that mentions `MCP_1C_*` in the
-   image is superseded by stage 1 of that spec.
-1. **Build and start the image with the `1c` server:** CI build, `.env` with
-   `MCP_1C_*`, tunnel `-R 7777:localhost:80` (or 8081 here), then in an RDP
-   session ask the agent for the configuration info. This closes the chain.
-2. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` were written
-   for another MCP server (`helpsearch`, `ssl_search`…) and now name the real
-   tools; the rest of the kit never used MCP. Try them on real tasks.
-3. **Host kit for the pilot:** `pack.sh` / `pack.ps1` now download the Windows
-   `mcp-1c.exe` and the `.cfe` of the pinned release into `dist/host/` and
-   `SETUP.md` tells the customer what to do with them. Not run yet — the next
-   release build will show whether the download and the guide hold up.
-4. **The fork `metalmon/mcp-1c`:** 14 own commits (business tools for
-   Бухгалтерия, HTTP transport) on top of v1.6.0; upstream is at v1.22.3 and the
-   merge conflicts in 10 files, mostly `server.go`, `main.go` and the extension
-   module. The image does not need the fork; merge it when the business tools
-   are needed again. A dry run lives in a scratch worktree on branch
-   `scratch/merge-upstream`.
-5. **Host binary** (decided 2026-10-15, see the spec): one exe on the machine
-   with the platform, volt-setup style — opens the tunnel and bridges TCP to
-   `vrunner-mcp`, which travels in the kit as portable OneScript plus
-   vanessa-runner (incremental load is vrunner's job, not ours). Nothing
-   installed on the host, no service; in the container the agent reaches it
-   through `nc`. To check first: `vrunner-mcp` runs from a portable OneScript
-   on Windows. This is what makes PRISM category B possible.
+Spec `2026-10-16-setup-binaries-design.md`, plan
+`docs/superpowers/plans/2026-10-16-dev1c-setup.md`. Stages 1 and 2 done on
+2026-10-16: the image carries the `nc` endpoints and `PermitListen`, `mcp-1c`
+and `MCP_1C_*` are out of it; `dev1c-setup` (CLI) installs the image, checks
+it and writes `last-check.txt`; CI brings the image up through it and packs
+`dev1c-kit`. Known limitation: `dev1c-setup change` rewrites `dev1c.toml`
+without the comments; the commented sample stays as `dev1c-setup example`.
+
+1. **`1c-connect`** (stage 3): own plan. First step: prove `russh` talks to
+   the OpenSSH in the container (ed25519 host key, password auth). Then
+   `install`/`uninstall` of the extension, the tunnel with `tcpip-forward`
+   onto 777N/779N, the bridge to `mcp-1c.exe`, `check` with a report; verify on
+   the Бухгалтерия base here.
+2. **Windows of both programs** (stage 4), copied from volt-setup's `ui/`.
+3. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` now name
+   the real tools; try them on real tasks once `1c-connect` is up.
+4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch
+   `merge-upstream` (worktree `D:\1c\projects\mcp-1c-upstream-merge`), tests
+   green in its CI; fast-forward `main` when the business tools are needed.
+5. **`vrunner-mcp` in the developer's kit** (stage 5): portable OneScript plus
+   vanessa-runner, port 778N; check first that `vrunner-mcp` runs from a
+   portable OneScript on Windows. This is what makes PRISM category B possible.
 6. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
 
 ## Commands
 
 ```sh
-./dev1c.sh | .\dev1c.ps1          # start, stop, remove, status, logs
-./pack.sh  | .\pack.ps1           # build a release into dist/
+dev1c-setup status|install|change k=v|check|clean --stack|--data|verify   # in the kit
+cd setup && cargo test --workspace     # unit tests of the installers (light)
+./pack.sh <image.tar.gz> <bins>        # assemble the two kits from built parts
 
-gh run list --limit 5             # CI
-gh run download <id> -n dev1c-image -D <dir>
-docker load -i <dir>/dev1c-image.tar.gz
+gh run list --limit 5                  # CI: setup (binaries) + build (image, kit)
+gh run download <id> -n dev1c-kit -D <dir>
 
-# tunnel from the machine with the platform: its web server into the container
-ssh -p 3393 -N -R 7777:localhost:80 dev@<host>
+# tunnel from the machine with the platform, by hand until 1c-connect exists
+ssh -p 3393 -N -R 7771:localhost:7771 -R 7791:localhost:80 dev@<host>
 
-# the base's HTTP service, on the host and from inside the container
+# the base's HTTP service on this machine
 curl -u mcp:mcp http://localhost:8081/InfoBase/hs/mcp-1c/version
-docker exec -e MCP_1C_BASE_URL=http://host.docker.internal:8081/InfoBase/hs/mcp-1c \
-  -e MCP_1C_USER=mcp -e MCP_1C_PASSWORD=mcp -u dev1 dev1c mcp-1c --version
 
 # extension into a base (Windows, drives the configurator)
 mcp-1c.exe --install "C:\Users\bucher\Documents\InfoBase" --db-user mcp --db-password mcp

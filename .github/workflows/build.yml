@@ -146,14 +146,23 @@ jobs:
           docker exec dev1c test -s /home/dev1/.config/zed/AGENTS.md \
             && echo "ok: agent rules in place"
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: dev1c-setup-windows
+          path: bins
+
       - name: Pack
         # gzip -1: the layers are already compressed, so a higher level costs
-        # minutes and saves almost nothing.
+        # minutes and saves almost nothing. pack.sh then lays out the two kits
+        # from the archive and the two installer binaries.
         run: |
           docker save oktaplus/dev1c:latest | gzip -1 > dev1c-image.tar.gz
           ls -lh dev1c-image.tar.gz
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'
+          cp dev1c-setup bins/
+          ./pack.sh dev1c-image.tar.gz bins
+          ls -la dist/dev1c-kit dist/1c-connect
 
       - name: Layer sizes
         # Printed on every build so growth is noticed when it happens, not when
@@ -177,10 +186,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dev1c-image
-          path: dev1c-image.tar.gz
+          name: dev1c-kit
+          path: dist/
           retention-days: 14
-          # Already a .gz — re-compressing wastes several minutes
+          # The image inside is already a .gz — re-compressing wastes minutes
           compression-level: 0
 
       - name: Container logs on failure

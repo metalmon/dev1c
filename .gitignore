@@ -1,11 +1,10 @@
-# Model server key. Never committed: a secret that lands in history once stays
-# there even after the file is removed, and this history is public. The key never
-# reaches the image either — it is passed as an environment variable at run time.
+# Parameters now live in dev1c.toml of a kit, which is never in the repository;
+# a leftover .env from the script days stays ignored for the same reason it
+# always was: a key that lands in a public history stays there.
 .env
 .env.*
-# ...but the sample must be in the repository: it is the documentation of what
-# to fill in. Without this exception the pattern above swallows it.
-!.env.example
+# The working kit on this machine and anything .superpowers writes
+.superpowers/
 
 # Release archives and model files: both weigh more than the repository
 dist/

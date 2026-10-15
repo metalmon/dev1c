@@ -345,11 +345,9 @@ impl Op<Ctx> for Container {
         if !docker::container_state(ctx, &ctx.cfg.server.name).is_empty() {
             v.push(Action::new(format!("{} rm -f {} (тома не трогаются)", ctx.engine(), ctx.cfg.server.name)));
         }
-        let shown: Vec<String> = run_args(&ctx.cfg)
-            .iter()
-            .map(|a| if a.starts_with("CUSTOM_API_KEY=") { "CUSTOM_API_KEY=…".into() } else { a.clone() })
-            .collect();
-        v.push(Action::new(format!("{} {}", ctx.engine(), shown.join(" "))));
+        let args = run_args(&ctx.cfg);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        v.push(Action::new(format!("{} {}", ctx.engine(), docker::redact(&refs))));
         v
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {

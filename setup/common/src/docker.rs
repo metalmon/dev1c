@@ -45,8 +45,23 @@ pub fn probe<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
     exec_inner(ctx, program, args, true)
 }
 
+/// Командная строка для журнала и плана: значения ключей и паролей скрыты.
+/// Журнал лежит в комплекте, а комплект копируют и пересылают; ключ в нём —
+/// утечка, даже если тот же ключ лежит в соседнем toml.
+pub fn redact(args: &[&str]) -> String {
+    args.iter()
+        .map(|a| match a.split_once('=') {
+            Some((k, _)) if k.to_ascii_lowercase().contains("key") || k.to_ascii_lowercase().contains("password") => {
+                format!("{k}=…")
+            }
+            _ => a.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool) -> Result<Out> {
-    let shown = format!("{program} {}", args.join(" "));
+    let shown = format!("{program} {}", redact(args));
     ctx.emit(Event::Command(shown.clone()));
     if ctx.dry_run() && !read_only {
         return Ok(Out { code: 0, text: String::new() });
@@ -125,6 +140,13 @@ pub fn sh_in_volume_ro<X: Runner>(ctx: &X, image: &str, volume: &str, mount: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_are_masked_before_anything_is_logged() {
+        let args = ["run", "-e", "CUSTOM_API_KEY=sk-secret", "-e", "CUSTOM_MODEL=Q", "--db-password=hunter2"];
+        let shown = redact(&args);
+        assert_eq!(shown, "run -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=Q --db-password=…");
+    }
 
     #[test]
     fn tail_skips_blank_lines() {

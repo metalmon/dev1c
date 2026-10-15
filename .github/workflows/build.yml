@@ -138,6 +138,10 @@ jobs:
           cat > kit/dev1c.toml <<'EOF'
           [server]
           gpu = false
+          # The runner has 16 GB; a container allowed 24g took it all and the
+          # runner killed whatever ran next. Cap it here, so a hog inside dies
+          # inside (oom=true in the diagnostics) instead of taking the job.
+          memory = "6g"
           [model]
           url = "https://model.example.com/v1"
           key = "not-a-real-key"
@@ -248,7 +252,10 @@ jobs:
           echo "== journal (last 3 min)"; sudo journalctl --no-pager --since "-3min" 2>/dev/null | grep -v -E 'audit|pam_unix' | tail -80 || true
           echo "== docker events (last 3 min)"; docker events --since 3m --until 0s 2>/dev/null | tail -40 || true
           echo "== memory"; free -m; echo "== disk"; df -h / | tail -1
+          echo "== biggest processes on the runner"; ps aux --sort=-rss | head -12 | cut -c1-160
           echo "== container"; docker inspect dev1c --format '{{.State.Status}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}' 2>/dev/null || true
+          docker stats --no-stream 2>/dev/null || true
+          echo "== processes in the container"; docker top dev1c -o pid,rss,args 2>/dev/null | sort -k2 -rn | head -12 | cut -c1-160 || true
 
       - name: SSH session to the runner
         # For hands-on debugging when the local machine has no memory to spare.

@@ -113,37 +113,20 @@ impl Cfg {
     /// `dev1c.toml` с текущими значениями и всеми комментариями образца:
     /// `change` правит значения на месте, а не пересобирает файл с нуля.
     pub fn render(cfg: &Cfg) -> String {
-        let mut section = String::new();
-        let mut out = String::new();
-        for line in EXAMPLE.lines() {
-            let t = line.trim();
-            if t.starts_with('[') && t.ends_with(']') {
-                section = t.to_string();
-                out.push_str(line);
-            } else if let Some((key, _)) = t.split_once(" = ").filter(|_| !t.starts_with('#')) {
-                let v = match (section.as_str(), key) {
-                    ("[server]", "name") => format!("{:?}", cfg.server.name),
-                    ("[server]", "port") => cfg.server.port.to_string(),
-                    ("[server]", "memory") => format!("{:?}", cfg.server.memory),
-                    ("[server]", "gpu") => cfg.server.gpu.to_string(),
-                    ("[server]", "engine") => format!("{:?}", cfg.server.engine),
-                    ("[model]", "file") => format!("{:?}", cfg.model.file),
-                    ("[model]", "url") => format!("{:?}", cfg.model.url),
-                    ("[model]", "key") => format!("{:?}", cfg.model.key),
-                    ("[model]", "name") => format!("{:?}", cfg.model.name),
-                    _ => {
-                        out.push_str(line);
-                        out.push('\n');
-                        continue;
-                    }
-                };
-                out.push_str(&format!("{key} = {v}"));
-            } else {
-                out.push_str(line);
-            }
-            out.push('\n');
-        }
-        out
+        common::toml_render::render(EXAMPLE, |section, key| {
+            Some(match (section, key) {
+                ("[server]", "name") => format!("{:?}", cfg.server.name),
+                ("[server]", "port") => cfg.server.port.to_string(),
+                ("[server]", "memory") => format!("{:?}", cfg.server.memory),
+                ("[server]", "gpu") => cfg.server.gpu.to_string(),
+                ("[server]", "engine") => format!("{:?}", cfg.server.engine),
+                ("[model]", "file") => format!("{:?}", cfg.model.file),
+                ("[model]", "url") => format!("{:?}", cfg.model.url),
+                ("[model]", "key") => format!("{:?}", cfg.model.key),
+                ("[model]", "name") => format!("{:?}", cfg.model.name),
+                _ => return None,
+            })
+        })
     }
 
     pub fn volume(&self, suffix: &str) -> String {

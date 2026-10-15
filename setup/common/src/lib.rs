@@ -10,6 +10,7 @@ pub mod integrity;
 pub mod kit;
 pub mod op;
 pub mod run;
+pub mod toml_render;
 
 use std::sync::Arc;
 

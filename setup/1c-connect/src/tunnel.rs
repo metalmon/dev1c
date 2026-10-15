@@ -263,4 +263,11 @@ impl Tunnel {
         }
         Ok(Tunnel { handle, incoming: rx })
     }
+
+    /// Tell the server we are leaving, so it releases the forwards at once.
+    /// Dropping the handle closes the socket eventually, and a reconnect in
+    /// the meantime finds its port still taken.
+    pub async fn close(self) {
+        let _ = self.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
+    }
 }

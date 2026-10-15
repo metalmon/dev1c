@@ -19,10 +19,12 @@ async fn forwards_7771_and_remembers_the_host_key() {
     assert!(kh.exists(), "host key remembered on first connect");
     let line = std::fs::read_to_string(&kh).unwrap();
     assert!(line.starts_with(&server), "{line}");
-    // Second connect with the same file must succeed (key matches).
-    drop(t);
+    // Second connect with the same file must succeed (key matches). Leave
+    // properly first: a dropped session keeps its forward on the server for
+    // a moment, and the reconnect would find 7771 taken.
+    t.close().await;
     let t2 = one_c_connect::tunnel::Tunnel::connect(&server, &password, &kh, &[7771]).await.expect("reconnect with pinned key");
-    drop(t2);
+    t2.close().await;
     // A tampered key must be refused.
     std::fs::write(&kh, format!("{server} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n")).unwrap();
     let e = one_c_connect::tunnel::Tunnel::connect(&server, &password, &kh, &[7771]).await.err().expect("changed key refused");
@@ -38,6 +40,9 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     let mut cfg = one_c_connect::cfg::Cfg::default();
     cfg.host.server = server;
     cfg.host.password = password;
+    // Workstation dev2 → 7772/7792: the other test holds 7771 and the two run
+    // in parallel; sharing a port would make one of them a victim of timing.
+    cfg.host.workstation = "dev2".into();
     let (tx, rx) = tokio::sync::watch::channel(false);
     let kh = dir.join("known_hosts");
     let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx).await });
@@ -48,13 +53,19 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
         let mut open = false;
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7771"]).status().unwrap();
+            if task.is_finished() {
+                break; // run() gave up: its error is what to report
+            }
+            let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7772"]).status().unwrap();
             if st.success() {
                 open = true;
                 break;
             }
         }
-        assert!(open, "the container must reach the forwarded port within 40 s");
+        if !open {
+            let why = if task.is_finished() { format!("{:?}", task.await) } else { "run() still alive, port never opened".into() };
+            panic!("the container must reach the forwarded port within 40 s: {why}");
+        }
     } else {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }

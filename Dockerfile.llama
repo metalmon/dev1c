@@ -113,13 +113,19 @@ RUN cd /src/llama.cpp \
 RUN mkdir -p /opt/llama \
     && cd /src/llama.cpp/build \
     && cp bin/llama-server /opt/llama/ \
-    && cp bin/libggml*.so* /opt/llama/ \
-    && cp bin/libllama*.so* /opt/llama/ \
+    `# Every library the build produced, not a hand-picked list: picking by` \
+    `# name left libmtmd behind and the server would not start at all —` \
+    `# "error while loading shared libraries: libmtmd.so.0".` \
+    && cp bin/*.so* /opt/llama/ \
     && for lib in libcudart libcublas libcublasLt; do \
          find /usr/local/cuda-12.8 -name "$lib.so.*" -type f \
            -exec sh -c 'ldd /opt/llama/libggml-cuda.so | grep -q "$(basename "$1")" && cp -n "$1" /opt/llama/' _ {} ';' ; \
        done \
     && strip --strip-unneeded /opt/llama/llama-server /opt/llama/*.so* 2>/dev/null || true \
+    `# The server has to actually run. Checking libraries by eye is how libmtmd` \
+    `# went missing: everything looked present, and the binary was dead.` \
+    && ! ldd /opt/llama/llama-server | grep -q "not found" \
+    && LD_LIBRARY_PATH=/opt/llama /opt/llama/llama-server --version \
     && echo "llama.cpp ${LLAMA_VERSION} built: $(du -sh /opt/llama | cut -f1)" \
     && du -ah /opt/llama | sort -rh | head -8
 

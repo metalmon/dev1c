@@ -3,5 +3,6 @@
 //! the developer's base behind each forwarded connection. Nothing is
 //! installed on this machine; the program lives on a flash drive.
 
+pub mod bridge;
 pub mod cfg;
 pub mod tunnel;

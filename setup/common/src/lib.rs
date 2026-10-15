@@ -5,6 +5,7 @@
 //! Движок ничего не печатает сам: он отдаёт события (`Event`) наблюдателю.
 //! CLI печатает их в терминал, окно — рисует в списке шагов.
 
+pub mod check;
 pub mod docker;
 pub mod integrity;
 pub mod kit;

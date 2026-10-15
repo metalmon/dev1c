@@ -217,13 +217,7 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
 fn check(ctx: &Ctx) -> Result<()> {
     println!("Проверка среды:");
     let checks = verify::run(ctx);
-    for (i, c) in checks.iter().enumerate() {
-        let mark = if c.info { "info" } else if c.ok { " ok " } else { "FAIL" };
-        println!("{:>3}. [{mark}] {}: {}", i + 1, c.what, c.detail);
-        if !c.hint.is_empty() {
-            println!("           → {}", c.hint);
-        }
-    }
+    common::check::print(&checks);
     let (p, f) = verify::summary(&checks);
     let path = verify::report(ctx, &checks)?;
     println!();

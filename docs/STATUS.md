@@ -132,10 +132,19 @@ without the comments; the commented sample stays as `dev1c-setup example`.
 4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch
    `merge-upstream` (worktree `D:\1c\projects\mcp-1c-upstream-merge`), tests
    green in its CI; fast-forward `main` when the business tools are needed.
-5. **`vrunner-mcp` in the developer's kit** (stage 5): portable OneScript plus
+5. **Local model the volt-llama way** (spec section «Локальная модель», from
+   `e:\zeroclaw\_local\spec-volt-llama.md`): entrypoint switches from
+   `--ctx-size 196608` to `--fit on --fit-ctx 65536`, three slots with a
+   unified cache; `dev1c-setup` gains a `gpu` operation (nvidia-smi, GPU
+   pass-through check, `--fit-target`/`--cache-ram` from measurements) and
+   `check` facts from `/props` and timings; the three numbers (server window,
+   Zed window, agent budget × slots) must agree. Own plan after `1c-connect`.
+   Today the model is served by the other project's `volt-llama` container
+   from the same `dev1c-models` volume, and `dev1c` points at it as remote.
+6. **`vrunner-mcp` in the developer's kit** (stage 6): portable OneScript plus
    vanessa-runner, port 778N; check first that `vrunner-mcp` runs from a
    portable OneScript on Windows. This is what makes PRISM category B possible.
-6. **PRISM** on real tasks (category A already runnable inside), then shorten
+7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
 
 ## Commands

@@ -208,7 +208,7 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
     }
     ctx.cfg.validate()?;
     if !ctx.dry_run {
-        common::kit::write_text(&ctx.kit.path(cfg::FILE), &toml::to_string(&ctx.cfg)?)?;
+        common::kit::write_text(&ctx.kit.path(cfg::FILE), &cfg::Cfg::render(&ctx.cfg))?;
         ctx.ok(format!("{} обновлён", cfg::FILE));
     }
     Ok(())

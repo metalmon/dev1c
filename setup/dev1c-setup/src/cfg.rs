@@ -78,7 +78,7 @@ impl Cfg {
         );
         if !m.url.is_empty() {
             anyhow::ensure!(!m.name.is_empty(), "[model]: для удалённого сервера нужно name — имя модели, как сервер его называет");
-            anyhow::ensure!(!m.key.is_empty(), "[model]: для удалённого сервера нужно key — ключ доступа");
+            // key may be empty: a server inside the network often has none.
         }
         anyhow::ensure!(
             self.server.port >= 1024 && self.server.port <= 65532,
@@ -101,12 +101,49 @@ impl Cfg {
         if m.url.is_empty() {
             return Vec::new();
         }
-        vec![
-            ("CUSTOM_API_URL".into(), m.url.clone()),
-            ("CUSTOM_API_KEY".into(), m.key.clone()),
-            ("CUSTOM_MODEL".into(), m.name.clone()),
-            ("LLAMA_ENABLED".into(), "0".into()),
-        ]
+        let mut env = vec![("CUSTOM_API_URL".to_string(), m.url.clone())];
+        if !m.key.is_empty() {
+            env.push(("CUSTOM_API_KEY".into(), m.key.clone()));
+        }
+        env.push(("CUSTOM_MODEL".into(), m.name.clone()));
+        env.push(("LLAMA_ENABLED".into(), "0".into()));
+        env
+    }
+
+    /// `dev1c.toml` с текущими значениями и всеми комментариями образца:
+    /// `change` правит значения на месте, а не пересобирает файл с нуля.
+    pub fn render(cfg: &Cfg) -> String {
+        let mut section = String::new();
+        let mut out = String::new();
+        for line in EXAMPLE.lines() {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                section = t.to_string();
+                out.push_str(line);
+            } else if let Some((key, _)) = t.split_once(" = ").filter(|_| !t.starts_with('#')) {
+                let v = match (section.as_str(), key) {
+                    ("[server]", "name") => format!("{:?}", cfg.server.name),
+                    ("[server]", "port") => cfg.server.port.to_string(),
+                    ("[server]", "memory") => format!("{:?}", cfg.server.memory),
+                    ("[server]", "gpu") => cfg.server.gpu.to_string(),
+                    ("[server]", "engine") => format!("{:?}", cfg.server.engine),
+                    ("[model]", "file") => format!("{:?}", cfg.model.file),
+                    ("[model]", "url") => format!("{:?}", cfg.model.url),
+                    ("[model]", "key") => format!("{:?}", cfg.model.key),
+                    ("[model]", "name") => format!("{:?}", cfg.model.name),
+                    _ => {
+                        out.push_str(line);
+                        out.push('\n');
+                        continue;
+                    }
+                };
+                out.push_str(&format!("{key} = {v}"));
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        out
     }
 
     pub fn volume(&self, suffix: &str) -> String {
@@ -164,6 +201,35 @@ mod tests {
         c.model.url = "https://m".into();
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("[model]"), "{e}");
+    }
+
+    #[test]
+    fn url_without_key_is_allowed_and_sends_no_key() {
+        // A server inside the network (llama-server, vLLM) has no key at all.
+        let mut c = Cfg::default();
+        c.model.url = "https://m".into();
+        c.model.name = "Q".into();
+        c.validate().unwrap();
+        let env = c.container_env();
+        assert!(env.iter().all(|(k, _)| k != "CUSTOM_API_KEY"));
+        assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
+    }
+
+    #[test]
+    fn change_keeps_the_comments() {
+        let mut c = Cfg::default();
+        assert_eq!(Cfg::render(&c), EXAMPLE, "defaults render to the example itself");
+        c.server.port = 4000;
+        c.model.url = "https://m".into();
+        c.model.name = "Q".into();
+        let t = Cfg::render(&c);
+        assert!(t.contains("port = 4000"));
+        assert!(t.contains("url = \"https://m\""));
+        // `name` exists in both sections: only [model] name changes.
+        assert!(t.contains("name = \"dev1c\"") && t.contains("name = \"Q\""));
+        assert!(t.contains("# Первый из четырёх портов подряд"));
+        let back: Cfg = toml::from_str(&t).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]

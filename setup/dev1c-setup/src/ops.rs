@@ -112,6 +112,42 @@ pub fn drift_of(cfg: &Cfg, image: &str, first_port: &str, env: &[String]) -> Opt
     None
 }
 
+/// Состояние контейнера до сравнения с заданным. `created` — след неудачного
+/// `docker run` (например, `--gpus all` без видеокарты): это «не сделано», а
+/// не «разошлось», иначе план предлагал бы чинить то, что не запускалось.
+pub fn state_before_drift(status: &str) -> Option<OpState> {
+    match status {
+        "" | "created" => Some(OpState::Missing),
+        "running" => None,
+        other => Some(OpState::Drifted { from: other.to_string(), to: "running".into() }),
+    }
+}
+
+/// Контейнер собран из образа, который уже не тот, что загружен под тегом:
+/// так выглядит новый комплект поверх старой среды.
+pub fn image_drift(container_image_id: &str, loaded_image_id: &str) -> Option<(String, String)> {
+    if loaded_image_id.is_empty() || container_image_id == loaded_image_id {
+        return None;
+    }
+    Some((
+        format!("контейнер из старого образа {}", short_id(container_image_id)),
+        format!("загружен новый образ {}", short_id(loaded_image_id)),
+    ))
+}
+
+fn short_id(id: &str) -> String {
+    id.trim_start_matches("sha256:").chars().take(12).collect()
+}
+
+/// Отпечаток архива образа в комплекте: размер и время правки. Хватает, чтобы
+/// заметить новый комплект, и не требует читать полтора гигабайта на каждый
+/// `status`.
+fn archive_stamp(path: &std::path::Path) -> Option<String> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some(format!("{}:{t}", m.len()))
+}
+
 struct Env;
 impl Op<Ctx> for Env {
     fn id(&self) -> &'static str {
@@ -166,13 +202,18 @@ impl Op<Ctx> for Image {
         "Образ среды"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        if docker::image_loaded(ctx, &ctx.cfg.image()) {
-            return OpState::Done(ctx.cfg.image());
+        let archive = ctx.kit.path("dev1c-image.tar.gz");
+        let loaded = docker::image_loaded(ctx, &ctx.cfg.image());
+        match (loaded, archive_stamp(&archive)) {
+            // A new kit over an old environment: the archive is not the one
+            // that was loaded last time, so it is loaded again.
+            (true, Some(stamp)) if ctx.kit.state_get("IMAGE_ARCHIVE").is_some_and(|s| s != stamp) => {
+                OpState::Drifted { from: "образ из прежнего комплекта".into(), to: "образ из этого комплекта".into() }
+            }
+            (true, _) => OpState::Done(ctx.cfg.image()),
+            (false, None) => OpState::Blocked("в комплекте нет dev1c-image.tar.gz".into()),
+            (false, Some(_)) => OpState::Missing,
         }
-        if !ctx.kit.path("dev1c-image.tar.gz").exists() {
-            return OpState::Blocked("в комплекте нет dev1c-image.tar.gz".into());
-        }
-        OpState::Missing
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![Action::new(format!("{} load -i dev1c-image.tar.gz (несколько минут)", ctx.engine()))]
@@ -181,6 +222,9 @@ impl Op<Ctx> for Image {
         let archive = ctx.kit.path("dev1c-image.tar.gz");
         let o = docker::load_image(ctx, &archive.to_string_lossy())?;
         anyhow::ensure!(o.ok(), "образ не загрузился: {}", o.tail(3).join(" "));
+        if let (false, Some(stamp)) = (ctx.dry_run, archive_stamp(&archive)) {
+            ctx.kit.state_set("IMAGE_ARCHIVE", &stamp)?;
+        }
         ctx.ok("образ загружен");
         Ok(())
     }
@@ -323,21 +367,25 @@ impl Op<Ctx> for Container {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let name = &ctx.cfg.server.name;
-        match docker::container_state(ctx, name).as_str() {
-            "" => OpState::Missing,
-            "running" => {
-                let image = docker::inspect(ctx, name, "{{.Config.Image}}");
-                let port = docker::inspect(ctx, name, "{{(index (index .HostConfig.PortBindings \"3389/tcp\") 0).HostPort}}");
-                let env: Vec<String> = docker::inspect(ctx, name, "{{range .Config.Env}}{{println .}}{{end}}")
-                    .lines()
-                    .map(|s| s.to_string())
-                    .collect();
-                match drift_of(&ctx.cfg, &image, &port, &env) {
-                    None => OpState::Done(format!("работает, порты {}–{}", ctx.cfg.ports()[0], ctx.cfg.ports()[3])),
-                    Some((from, to)) => OpState::Drifted { from, to },
-                }
-            }
-            other => OpState::Drifted { from: other.to_string(), to: "running".into() },
+        if let Some(st) = state_before_drift(&docker::container_state(ctx, name)) {
+            return st;
+        }
+        let image = docker::inspect(ctx, name, "{{.Config.Image}}");
+        let port = docker::inspect(ctx, name, "{{(index (index .HostConfig.PortBindings \"3389/tcp\") 0).HostPort}}");
+        let env: Vec<String> = docker::inspect(ctx, name, "{{range .Config.Env}}{{println .}}{{end}}")
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+        if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env) {
+            return OpState::Drifted { from, to };
+        }
+        let have_id = docker::inspect(ctx, name, "{{.Image}}");
+        let want_id = docker::ask(ctx, &["images", "-q", "--no-trunc", &ctx.cfg.image()])
+            .map(|o| o.text.trim().to_string())
+            .unwrap_or_default();
+        match image_drift(&have_id, &want_id) {
+            Some((from, to)) => OpState::Drifted { from, to },
+            None => OpState::Done(format!("работает, порты {}–{}", ctx.cfg.ports()[0], ctx.cfg.ports()[3])),
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
@@ -461,6 +509,23 @@ mod tests {
         c.server.gpu = true;
         c.server.engine = "podman".into();
         assert!(run_args(&c).join(" ").contains("--device nvidia.com/gpu=all"));
+    }
+
+    #[test]
+    fn a_container_left_by_a_failed_run_is_missing_not_drifted() {
+        assert_eq!(state_before_drift(""), Some(OpState::Missing));
+        assert_eq!(state_before_drift("created"), Some(OpState::Missing));
+        assert_eq!(state_before_drift("running"), None);
+        assert_eq!(state_before_drift("exited"), Some(OpState::Drifted { from: "exited".into(), to: "running".into() }));
+    }
+
+    #[test]
+    fn a_newer_image_under_the_same_tag_is_drift() {
+        assert_eq!(image_drift("sha256:aaa", "sha256:aaa"), None);
+        let d = image_drift("sha256:aaa", "sha256:bbb").unwrap();
+        assert!(d.0.contains("старого образа") && d.1.contains("загружен"), "{d:?}");
+        // No loaded image at all: nothing to compare, the image op will say so.
+        assert_eq!(image_drift("sha256:aaa", ""), None);
     }
 
     #[test]

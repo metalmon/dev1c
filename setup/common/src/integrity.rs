@@ -42,9 +42,15 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-/// Что входит в список: всё, кроме самого списка и того, что программа пишет сама.
+/// Что входит в список: всё, кроме самого списка, того, что программа пишет
+/// сама, и файлов параметров — их человек правит по назначению.
 fn listed(rel: &str) -> bool {
-    !(rel == LIST || rel.ends_with(".log") || rel == "install.state" || rel == "last-check.txt")
+    !(rel == LIST
+        || rel.ends_with(".log")
+        || rel == "install.state"
+        || rel == "last-check.txt"
+        || rel == "dev1c.toml"
+        || rel == "1c-connect.toml")
 }
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -116,6 +122,9 @@ mod tests {
         std::fs::write(d.join("a.txt"), "a").unwrap();
         std::fs::write(d.join("sub/b.bin"), [1u8, 2, 3]).unwrap();
         std::fs::write(d.join("setup.log"), "noise").unwrap();
+        // The parameter files are the customer's to edit: never listed.
+        std::fs::write(d.join("dev1c.toml"), "[server]\nport = 3390\n").unwrap();
+        std::fs::write(d.join("1c-connect.toml"), "[host]\n").unwrap();
         Kit::at(d)
     }
 
@@ -123,7 +132,9 @@ mod tests {
     fn list_then_verify_then_detect_damage() {
         let k = tmp_kit();
         let n = write_list(&k, |_| {}).unwrap();
-        assert_eq!(n, 2, "the log is not listed");
+        assert_eq!(n, 2, "the log and the parameter files are not listed");
+        std::fs::write(k.path("dev1c.toml"), "[server]\nport = 4000\n").unwrap();
+        assert!(verify(&k, |_, _, _| {}).unwrap().ok(), "editing parameters is not damage");
         assert!(verify(&k, |_, _, _| {}).unwrap().ok());
         std::fs::write(k.path("a.txt"), "changed").unwrap();
         std::fs::remove_file(k.path("sub/b.bin")).unwrap();

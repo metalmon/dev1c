@@ -63,6 +63,21 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     toml::to_string(&c).unwrap_or_default()
 }
 
+/// Настройки Zed отражают выбранную модель. Смотрим только на заготовки,
+/// которые относятся к выбранному провайдеру: при локальной модели
+/// CUSTOM_* остаются в файле по замыслу (entrypoint их не трогает).
+pub fn settings_ok(settings: &str, provider: &str, model_name: &str) -> bool {
+    if !settings.contains(&format!("\"provider\": \"{provider}\"")) || settings.contains("DEFAULT_MODEL_PLACEHOLDER") {
+        return false;
+    }
+    if provider == "custom" {
+        return !settings.contains("CUSTOM_API_URL_PLACEHOLDER")
+            && !settings.contains("CUSTOM_MODEL_PLACEHOLDER")
+            && settings.contains(model_name);
+    }
+    true
+}
+
 fn tcp_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok()
@@ -172,10 +187,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         ("custom", ctx.cfg.model.name.clone())
     };
     v.push(
-        if settings.contains(&format!("\"provider\": \"{want_provider}\""))
-            && settings.contains(&want_model)
-            && !settings.contains("PLACEHOLDER\"")
-        {
+        if settings_ok(&settings, want_provider, &want_model) {
             Check::pass(
                 "модель в настройках Zed",
                 format!(
@@ -240,6 +252,19 @@ mod tests {
         assert!(text.contains(" 2. [info] туннель dev1: не поднят"), "{text}");
         assert!(text.contains("→ dev1c-setup status"));
         assert!(text.ends_with("Пройдено 2, провалено 1.\n"));
+    }
+
+    #[test]
+    fn local_model_settings_pass_with_the_remote_placeholders_still_in_place() {
+        // The entrypoint substitutes CUSTOM_* only for a remote model; with a
+        // local one those placeholders stay by design and must not fail the check.
+        let local = r#""provider": "llama.cpp", "model": "Qwen.gguf", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "CUSTOM_MODEL_PLACEHOLDER""#;
+        assert!(settings_ok(local, "llama.cpp", ""));
+        assert!(!settings_ok(r#""provider": "llama.cpp", "model": "DEFAULT_MODEL_PLACEHOLDER""#, "llama.cpp", ""));
+        let remote = r#""provider": "custom", "api_url": "https://m", "model": "Q""#;
+        assert!(settings_ok(remote, "custom", "Q"));
+        assert!(!settings_ok(r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "Q""#, "custom", "Q"));
+        assert!(!settings_ok(remote, "custom", "Other"));
     }
 
     #[test]

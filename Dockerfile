@@ -367,7 +367,12 @@ COPY config/test-skills.sh      /usr/local/bin/test-skills
 # literal carriage return cannot survive inside a Dockerfile: any tool with
 # universal newline handling turns it into a line break and tears the
 # instruction apart — which is exactly how this file once stopped building.
-RUN find /usr/local/bin -maxdepth 1 -type f -exec sed -i 's/\r$//' {} + \
+#
+# Text files only (grep -I fails on a binary): the same directory holds
+# downloaded binaries, and sed once rewrote the \r\n sequences inside mcp-1c —
+# the ELF still ran in the build layer, where it was checked before this step,
+# and died with SIGILL in the running container.
+RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 's/\r$//' {} + \
     && head -1 /usr/local/bin/gitea-start | grep -qx '#!/bin/sh' \
     && chmod +x /usr/local/bin/xfce-autoscale /usr/local/bin/keyring-start \
                 /usr/local/bin/xsession /usr/local/bin/sshd-setup \

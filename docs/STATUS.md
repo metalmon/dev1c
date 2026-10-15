@@ -96,6 +96,10 @@ MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
   where the tunnel uses a password.
 - The launch script recreates the container from the image, so anything placed
   inside with `docker cp` is gone on the next start.
+- The CRLF normalisation in the Dockerfile (`sed -i 's/\r$//'` over
+  `/usr/local/bin`) rewrote the bytes of the `mcp-1c` ELF; the binary passed
+  its own check in the build layer and died with SIGILL (exit 132) in the
+  running container. Now text files only.
 - `mcp-1c --install` drives the configurator and needs the base user even on a
   file base: without `--db-user` it dies with «Пользователь ИБ не
   идентифицирован».
@@ -127,8 +131,14 @@ MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
    module. The image does not need the fork; merge it when the business tools
    are needed again. A dry run lives in a scratch worktree on branch
    `scratch/merge-upstream`.
-5. **`vanessa-runner` over the tunnel**, then **PRISM** on real tasks, then
-   shorten skill descriptions (17 KB per request), then **ERP**.
+5. **Host binary** (decided 2026-10-15, see the spec): one exe on the machine
+   with the platform, volt-setup style — opens the tunnel, listens on a local
+   port and runs a fixed list of `1cv8` batch operations on request, installs
+   the mcp-1c extension. Nothing installed on the host, no service, no
+   OneScript; in the container the agent reaches it through `nc`. This is what
+   makes `vanessa-runner`-class work and PRISM category B possible.
+6. **PRISM** on real tasks (category A already runnable inside), then shorten
+   skill descriptions (17 KB per request), then **ERP**.
 
 ## Commands
 

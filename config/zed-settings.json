@@ -95,15 +95,22 @@
     // всё про базу живёт у разработчика в 1c-connect.toml.
     // Туннель не поднят — nc завершается сразу, Zed показывает «сервер
     // недоступен»; после подключения сервер перезапускается кнопкой в Zed.
+    // -N: по концу stdin nc закрывает сокет, и процесс на той стороне
+    // завершается, а не висит до обрыва туннеля.
+    // timeout — предел одного вызова инструмента в секундах; умолчание Zed
+    // 60 с. У mcp-1c собственный предел запроса к 1С 300 с, у vrunner
+    // выгрузка ЕРП идёт десятки минут.
     "1c": {
       "source": "custom",
       "command": "nc",
-      "args": ["localhost", "WORKSTATION_1C_PORT_PLACEHOLDER"]
+      "args": ["-N", "localhost", "WORKSTATION_1C_PORT_PLACEHOLDER"],
+      "timeout": 300
     },
     "vrunner": {
       "source": "custom",
       "command": "nc",
-      "args": ["localhost", "WORKSTATION_VRUNNER_PORT_PLACEHOLDER"]
+      "args": ["-N", "localhost", "WORKSTATION_VRUNNER_PORT_PLACEHOLDER"],
+      "timeout": 3600
     }
   },
 

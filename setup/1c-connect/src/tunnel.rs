@@ -229,9 +229,13 @@ impl Tunnel {
     /// Connect, authenticate, request every forward. Any failure is one of
     /// `TunnelError`, with the text the person needs.
     pub async fn connect(server: &str, password: &str, known_hosts: &Path, forwards: &[u16]) -> Result<Tunnel> {
+        // Keepalives every 30 s keep the session alive through hours of silence
+        // (a long dump on the other side); no inactivity timeout on purpose —
+        // a tunnel that quietly garbage-collects itself is the failure mode
+        // this program exists to remove.
         let config = Arc::new(client::Config {
             keepalive_interval: Some(std::time::Duration::from_secs(30)),
-            inactivity_timeout: Some(std::time::Duration::from_secs(600)),
+            inactivity_timeout: None,
             ..Default::default()
         });
         let (tx, rx) = mpsc::unbounded_channel();

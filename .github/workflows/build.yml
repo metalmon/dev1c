@@ -50,11 +50,18 @@ jobs:
       - name: Test
         run: cargo test --workspace --manifest-path setup/Cargo.toml
       - name: Build
-        run: cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup
+        run: |
+          cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup
+          cargo build --release --manifest-path setup/Cargo.toml -p onec-connect
       - uses: actions/upload-artifact@v4
         with:
           name: dev1c-setup-${{ matrix.name }}
           path: setup/target/release/${{ matrix.bin }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1c-connect-${{ matrix.name }}
+          path: setup/target/release/1c-connect${{ matrix.name == 'windows' && '.exe' || '' }}
           if-no-files-found: error
 
   build:
@@ -128,6 +135,21 @@ jobs:
           ./dev1c-setup --kit kit status
           cat kit/last-check.txt
 
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: setup
+
+      - name: The tunnel from a developer's machine reaches the container
+        # The real sshd, the real PermitListen, the real nc behind Zed's
+        # settings: 1c-connect's live test (same code as the Windows build)
+        # forwards 7771 and asserts that `nc -z localhost 7771` succeeds
+        # inside the container. The bridge behind it is not exercised here —
+        # there is no 1C on a runner.
+        run: |
+          DEV1C_SSH=127.0.0.1:3393 DEV1C_SSH_PASSWORD=dev DEV1C_DOCKER=1 \
+            cargo test --manifest-path setup/Cargo.toml -p onec-connect --test tunnel_live -- --nocapture
+
       - name: Variables reach the sessions, placeholders are gone
         run: |
           docker exec dev1c grep -q 'CUSTOM_API_URL=' /etc/environment && echo "ok: variables carried into /etc/environment"
@@ -149,6 +171,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dev1c-setup-windows
+          path: bins
+      - uses: actions/download-artifact@v4
+        with:
+          name: 1c-connect-windows
           path: bins
 
       - name: Pack

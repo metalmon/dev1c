@@ -36,6 +36,11 @@ for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
     curl -fsSL "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" -o "$CONNECT/$f"
 done
 
+# The developer's program itself, Windows only (the platform is there), and
+# its commented parameters.
+[ -f "$BIN_DIR/1c-connect.exe" ] && cp "$BIN_DIR/1c-connect.exe" "$CONNECT/" || true
+cp setup/1c-connect/1c-connect.example.toml "$CONNECT/1c-connect.toml"
+
 # Checksums by the installer itself, so the customer verifies with the same code.
 SETUP="$KIT/dev1c-setup"
 [ -x "$SETUP" ] || SETUP="$KIT/dev1c-setup.exe"

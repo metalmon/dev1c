@@ -108,29 +108,32 @@ security team. An SSH client, on the other hand, ships with Windows 10/11 since
 attested workstation.
 
 Everything about a developer's base lives on the developer's machine, in the
-`1c-connect/` kit (its program is the next stage; the kit already carries
-`mcp-1c` and its extension). `1c-connect` installs the `mcp-1c` extension into
-the base, raises the tunnel and, on each connection from the container, starts
-`mcp-1c` on the base through the tunnel. Inside the container the agent sees it
-as a plain TCP port: `777N` for workstation `dev N`, `778N` for `vrunner-mcp`,
-`779N` for the web client of the same base in Firefox. Zed is already pointed at
-them (`nc localhost 777N`); the server side holds no parameter about any base.
+`1c-connect/` kit: `1c-connect.exe`, its `1c-connect.toml`, `mcp-1c` and its
+extension. On the machine with 1C, once:
 
-Until `1c-connect` exists, the same thing by hand from the machine that has 1C
-(after `mcp-1c.exe --install` and a web publication of the base, see the
-developer's kit):
+1. Copy the kit anywhere (a flash drive is fine) and fill `1c-connect.toml`:
+   the environment's address and SSH port (printed by `dev1c-setup install`),
+   your workstation (`dev1`…`dev3`), the base, its user, the address of its
+   web publication.
+2. `1c-connect install` — puts the `mcp-1c` extension into the base through
+   the configurator; then publish the base on the web server (configurator →
+   Administration → Publish on web server, "publish extension HTTP services
+   by default" ticked). `1c-connect check` tells what is still missing.
+3. `1c-connect connect` — raises the tunnel with its own SSH client and keeps
+   it while the window is open. `Ctrl+C` closes it; nothing stays behind.
 
-```sh
-ssh -p 3393 -N -R 7771:localhost:7771 -R 7791:localhost:80 dev@<environment-host>
-```
+Inside the container the agent sees the base as a plain TCP port: `777N` for
+workstation `dev N` (a fresh `mcp-1c` on the base per connection), `778N` for
+`vrunner-mcp` (next stage), `779N` for the web client of the same base in
+Firefox: `http://localhost:779N/<publication>/`. Zed is already pointed at them
+(`nc -N localhost 777N`); the server side holds no parameter about any base.
 
-with something on that machine bridging `127.0.0.1:7771` to
-`mcp-1c.exe --base http://localhost/<name>/hs/mcp-1c --user … --password …`
-over stdio. Account `dev`, password `dev` — one shared pair, because the tunnel
-is a shared function rather than anybody's personal one. That account has no
-shell and no sudo: sshd grants it forwarding onto the nine workstation ports and
-nothing else. See the note in `config/sshd-setup.sh` on why keys are not
-required for a pilot.
+Account `dev`, password `dev` — one shared pair, because the tunnel is a shared
+function rather than anybody's personal one. That account has no shell and no
+sudo: sshd grants it forwarding onto the nine workstation ports and nothing
+else; the host key is remembered in the kit on first connect and must match
+afterwards. See the note in `config/sshd-setup.sh` on why keys are not required
+for a pilot.
 
 ## Building a release
 

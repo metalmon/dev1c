@@ -53,6 +53,14 @@ script days is obsolete; the scripts are gone.
   generation 140–160 tok/s; the gateway preset thinks before answering, so
   reasoning eats output tokens. Numbers and the 5090 estimate are in the spec
   («Хватит ли окна на кодинг»).
+- **`1c-connect`, the whole agent path** (2026-10-16, this machine): with
+  `1c-connect connect` running against the local container, from inside the
+  container `nc -z localhost 7771` and `7791` both open, the web client of the
+  base answered HTTP 200 through `localhost:7791/InfoBase/`, and an MCP
+  session through `nc -N localhost 7771` listed mcp-1c's nine tools and
+  returned the configuration info of the Бухгалтерия base. `1c-connect check`:
+  6 facts, 0 failed. `russh` 0.64 talks to the container's OpenSSH (ed25519,
+  password), remembers the host key, refuses a changed one.
 - **`dev1c-setup`.** In CI the Linux binary installed the image on a clean
   runner and passed its 14 checks; the kit from the artifact ran on this
   Windows machine: `dev1c-setup.exe status` saw the local container as done
@@ -136,11 +144,15 @@ it and writes `last-check.txt`; CI brings the image up through it and packs
 `dev1c-kit`. Known limitation: `dev1c-setup change` rewrites `dev1c.toml`
 without the comments; the commented sample stays as `dev1c-setup example`.
 
-1. **`1c-connect`** (stage 3): own plan. First step: prove `russh` talks to
-   the OpenSSH in the container (ed25519 host key, password auth). Then
-   `install`/`uninstall` of the extension, the tunnel with `tcpip-forward`
-   onto 777N/779N, the bridge to `mcp-1c.exe`, `check` with a report; verify on
-   the Бухгалтерия base here.
+1. **`1c-connect`** (stage 3) — done 2026-10-16, plan
+   `docs/superpowers/plans/2026-10-16-1c-connect.md`: `install`/`uninstall`
+   of the extension, the embedded tunnel onto 777N/779N with reconnect, the
+   bridge to `mcp-1c.exe`, `check` with `last-check.txt`; proved here end to
+   end and in CI (the live tunnel test against the installed image). Zed's
+   per-server `timeout` is set in the image: 300 s for `1c`, 3600 s for
+   `vrunner` (Zed's default is 60 s per MCP call — too short for a dump).
+   Long operations are better served as jobs (start → id → poll); decide when
+   `vrunner-mcp` arrives.
 2. **Windows of both programs** (stage 4), copied from volt-setup's `ui/`.
 3. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` now name
    the real tools; try them on real tasks once `1c-connect` is up.

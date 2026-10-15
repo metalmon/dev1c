@@ -8,9 +8,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 for n in 1 2 3; do
     cfg=/home/dev$n/.config/zed/settings.json
-    grep -q "\"args\": \[\"localhost\", \"777$n\"\]" "$cfg" \
+    grep -q "\"args\": \[\"-N\", \"localhost\", \"777$n\"\]" "$cfg" \
         || fail "dev$n: mcp-1c port 777$n not in $cfg"
-    grep -q "\"args\": \[\"localhost\", \"778$n\"\]" "$cfg" \
+    grep -q "\"args\": \[\"-N\", \"localhost\", \"778$n\"\]" "$cfg" \
         || fail "dev$n: vrunner port 778$n not in $cfg"
     ! grep -q WORKSTATION_ "$cfg" || fail "dev$n: placeholder left"
     # The file is JSONC (comments inside), so no parser here; sed replaces a

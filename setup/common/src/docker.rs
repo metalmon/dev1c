@@ -49,15 +49,32 @@ pub fn probe<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
 /// Журнал лежит в комплекте, а комплект копируют и пересылают; ключ в нём —
 /// утечка, даже если тот же ключ лежит в соседнем toml.
 pub fn redact(args: &[&str]) -> String {
-    args.iter()
-        .map(|a| match a.split_once('=') {
-            Some((k, _)) if k.to_ascii_lowercase().contains("key") || k.to_ascii_lowercase().contains("password") => {
-                format!("{k}=…")
+    let secret_name = |s: &str| {
+        let l = s.to_ascii_lowercase();
+        l.contains("key") || l.contains("password")
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for a in args {
+        if hide_next {
+            out.push("…".to_string());
+            hide_next = false;
+            continue;
+        }
+        match a.split_once('=') {
+            // NAME=value and --flag=value
+            Some((k, _)) if secret_name(k) => out.push(format!("{k}=…")),
+            // --flag value: the value is the next argument
+            None if a.starts_with('-') && secret_name(a) => {
+                hide_next = true;
+                out.push(a.to_string());
             }
-            _ => a.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            // The configurator's /P<password>
+            None if a.starts_with("/P") && a.len() > 2 => out.push("/P…".to_string()),
+            _ => out.push(a.to_string()),
+        }
+    }
+    out.join(" ")
 }
 
 fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool) -> Result<Out> {
@@ -146,6 +163,9 @@ mod tests {
         let args = ["run", "-e", "CUSTOM_API_KEY=sk-secret", "-e", "CUSTOM_MODEL=Q", "--db-password=hunter2"];
         let shown = redact(&args);
         assert_eq!(shown, "run -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=Q --db-password=…");
+        // Flag followed by its value, and the configurator's /P<password> switch.
+        let args = ["--install", "C:\\b", "--db-user", "mcp", "--db-password", "mcp", "DESIGNER", "/Nmcp", "/Phunter2"];
+        assert_eq!(redact(&args), "--install C:\\b --db-user mcp --db-password … DESIGNER /Nmcp /P…");
     }
 
     #[test]

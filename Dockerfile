@@ -231,13 +231,16 @@ COPY --from=llama-dist /opt/llama /opt/llama
 RUN ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
     && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
     && ldconfig \
-    `# The CUDA runtime has to be resolvable, otherwise the fallback to the CPU` \
-    `# happens at run time and surfaces as "the model is slow".` \
+    `# The CUDA backend must have everything it needs, or it silently falls` \
+    `# back to the CPU at run time and surfaces as "the model is slow".` \
     `#` \
-    `# Only what the build stage brings is checked. libcuda.so.1 is the driver` \
-    `# library: absent here by definition, mounted from the host at run time.` \
-    && ldconfig -p | grep -q libcudart \
-    && ldconfig -p | grep -q libcublas \
+    `# What is NOT checked here: libcublas and libcudart as shared libraries.` \
+    `# They are linked statically into the backend now — demanding them failed` \
+    `# the build for exactly the reason the change was made.` \
+    `#` \
+    `# libcuda.so.1 is excluded on purpose: that is the driver, absent in any` \
+    `# image by definition and mounted from the host at run time.` \
+    && test -f /opt/llama/libggml-cuda.so \
     && [ -z "$(ldd /opt/llama/libggml-cuda.so | grep 'not found' | grep -v 'libcuda\.so\.1')" ] \
     && echo "llama.cpp in place: $(du -sh /opt/llama | cut -f1)"
 

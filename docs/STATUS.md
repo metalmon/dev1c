@@ -48,6 +48,12 @@ script days is obsolete; the scripts are gone.
   runs on the host beyond the platform's own web publication.
 - **Skills:** 40, flat, valid frontmatter, `cf-init` produces valid XML with
   Cyrillic intact.
+- **`dev1c-setup`.** In CI the Linux binary installed the image on a clean
+  runner and passed its 14 checks; the kit from the artifact ran on this
+  Windows machine: `dev1c-setup.exe status` saw the local container as done
+  on all four operations. Its `verify` complained about the edited
+  `dev1c.toml` — the review finding, fixed the same day (parameter files are
+  no longer in the checksums).
 
 ## Not verified
 
@@ -110,6 +116,10 @@ script days is obsolete; the scripts are gone.
   its tools and fails on every call — set the variable.
 - Git Bash rewrites `/tmp/...` arguments into Windows paths before `docker
   exec` sees them; prefix the command with `MSYS_NO_PATHCONV=1`.
+- The `dev1c-kit` artifact is a zip and drops the mode bits: the Linux
+  `dev1c-setup` arrives as `-rw-r--r--` and needs `chmod +x`. Pack the kits as
+  a tar inside the artifact, or say so in the README, before a Linux customer
+  meets it.
 
 ## Next
 

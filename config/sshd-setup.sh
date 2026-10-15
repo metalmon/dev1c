@@ -61,6 +61,12 @@ AllowUsers dev
 # ends up with port forwarding and no shell.
 Match User dev
     ForceCommand /bin/false
+    # One workstation, three ports: dev1 -> 7771 (mcp-1c), 7781 (vrunner-mcp),
+    # 7791 (web client of the base); dev2 -> 7772/7782/7792; dev3 ->
+    # 7773/7783/7793. Anything else is refused by sshd at the request, so a
+    # mistyped workstation name fails on the client with a clear message
+    # instead of binding a neighbour's tunnel.
+    PermitListen localhost:7771 localhost:7772 localhost:7773 localhost:7781 localhost:7782 localhost:7783 localhost:7791 localhost:7792 localhost:7793
 EOF
 
 # Host keys are generated on first start rather than at build time: otherwise

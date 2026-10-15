@@ -69,7 +69,7 @@ if [ -f "$ZED_SETTINGS" ] && [ -f "$ZED_BIN" ]; then
     UNKNOWN=""
     for k in $(grep -oE '^[[:space:]]*"[a-z_.]+"[[:space:]]*:' "$ZED_SETTINGS" \
                | tr -d ' ":' | sort -u); do
-        case "$k" in custom|bsl|bsl-reference) continue ;; esac
+        case "$k" in custom|bsl|bsl-reference|1c|vrunner) continue ;; esac
         grep -aq "$k" "$ZED_BIN" || UNKNOWN="$UNKNOWN $k"
     done
     [ -z "$UNKNOWN" ] || fail "settings.json has keys absent from this Zed version:$UNKNOWN"

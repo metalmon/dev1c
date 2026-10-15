@@ -17,7 +17,6 @@ log() { echo "[entrypoint] $*"; }
 # the model key is visible in `docker exec` but not to Zed — exactly the case of
 # "everything is passed, nothing works".
 for var in CUSTOM_API_KEY CUSTOM_API_URL CUSTOM_MODEL \
-           MCP_1C_BASE_URL MCP_1C_USER MCP_1C_PASSWORD \
            ANTHROPIC_API_KEY OPENAI_API_KEY \
            HTTP_PROXY HTTPS_PROXY NO_PROXY
 do
@@ -130,6 +129,23 @@ for cfg in /home/*/.config/zed/settings.json; do
         log "skipping $cfg: symlink"
         continue
     fi
+
+    # Workstation ports for the tunnel from the machine with 1C: dev1 -> 7771
+    # (mcp-1c) and 7781 (vrunner-mcp), dev2 -> 7772/7782, dev3 -> 7773/7783.
+    # Fixed by convention so that neither side needs a parameter; 1c-connect
+    # derives the same numbers from the workstation name. Any other home (the
+    # tunnel account, a future user) keeps the placeholder: nc with a word for
+    # a port fails loudly instead of binding somebody else's tunnel.
+    u=${cfg#/home/}; u=${u%%/*}
+    case "$u" in
+        dev[1-9])
+            n=${u#dev}
+            sed -i \
+                -e "s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|" \
+                -e "s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|" \
+                "$cfg"
+            ;;
+    esac
 
     if [ -n "${CUSTOM_API_URL:-}" ]; then
         name="${CUSTOM_MODEL:-model}"

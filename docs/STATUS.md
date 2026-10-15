@@ -115,6 +115,12 @@ MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
 
 ## Next
 
+0. **Two installers, spec `2026-10-16-setup-binaries-design.md`** (decided
+   2026-10-16): `dev1c-setup` for the Docker machine, `1c-connect` on each
+   developer's flash drive. `mcp-1c` moves out of the image onto the 1C
+   machine behind a TCP↔stdio bridge; the container reaches it as
+   `nc localhost 777N`. Everything below that mentions `MCP_1C_*` in the
+   image is superseded by stage 1 of that spec.
 1. **Build and start the image with the `1c` server:** CI build, `.env` with
    `MCP_1C_*`, tunnel `-R 7777:localhost:80` (or 8081 here), then in an RDP
    session ask the agent for the configuration info. This closes the chain.

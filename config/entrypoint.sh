@@ -26,6 +26,25 @@ do
     echo "$var=$value" >> /etc/environment
 done
 
+# --- Home directories ---------------------------------------------------------
+# /home is a volume, so it hides whatever the image put there — and an account
+# added in a later image has no home at all on an existing volume. Nothing
+# complains: the user simply has no files, and sshd quietly refuses their key
+# because the directory it does find belongs to root.
+for u in dev1 dev2 dev3 dev; do
+    id "$u" >/dev/null 2>&1 || continue
+    home=$(getent passwd "$u" | cut -d: -f6)
+    [ -n "$home" ] || continue
+    if [ ! -d "$home" ]; then
+        mkdir -p "$home"
+        cp -a /etc/skel/. "$home/" 2>/dev/null || true
+        log "created missing home for $u"
+    fi
+    # Ownership is checked every time, not only on creation: root-owned files in
+    # a user's home are exactly what breaks key-based login.
+    [ "$(stat -c '%U' "$home")" = "$u" ] || chown -R "$u:$u" "$home"
+done
+
 # --- Editor settings from the image -------------------------------------------
 # Home directories live on a volume and survive image updates — which also means
 # a new image's settings never reach anyone who already has a home. The symptom

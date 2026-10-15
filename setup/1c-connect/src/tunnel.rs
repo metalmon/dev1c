@@ -38,7 +38,7 @@ impl std::fmt::Display for TunnelError {
                 f,
                 "сервер отказал в пробросе порта {p}: у кого-то ещё поднят туннель этого рабочего места, или workstation в 1c-connect.toml не ваш"
             ),
-            TunnelError::Net(e) => write!(f, "нет связи с сервером: {e} — проверьте адрес и порт в 1c-connect.toml и что среда запущена"),
+            TunnelError::Net(e) => write!(f, "нет связи с сервером: {e} — проверьте server в 1c-connect.toml и что среда запущена"),
         }
     }
 }
@@ -111,6 +111,97 @@ pub fn decide_key(known: std::io::Result<String>, server: &str, line: &str) -> K
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => KeyDecision::Remember,
         Err(e) => KeyDecision::Unreadable(e.to_string()),
+    }
+}
+
+pub fn retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((2u64 << attempt.min(5)).min(60))
+}
+
+/// Wrong password, changed key, refused port: retrying would only repeat the
+/// same answer — the person has to act. A dropped connection is retried.
+pub fn is_terminal(e: &TunnelError) -> bool {
+    !matches!(e, TunnelError::Net(_))
+}
+
+/// Держит туннель, пока его не остановят: переподключается после обрыва,
+/// останавливается на ошибке, которую надо чинить человеку. Каждое
+/// проброшенное соединение отдаёт `serve`.
+pub async fn run(
+    cfg: &crate::cfg::Cfg,
+    known_hosts: PathBuf,
+    on_event: impl Fn(common::Event),
+    serve: impl Fn(Incoming) + Send + Sync + 'static,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let serve = Arc::new(serve);
+    let ports = cfg.ports();
+    let mut attempt = 0u32;
+    loop {
+        if *stop.borrow() {
+            return Ok(());
+        }
+        match Tunnel::connect(&cfg.host.server, &cfg.host.password, &known_hosts, &[ports.mcp, ports.web]).await {
+            Ok(mut t) => {
+                attempt = 0;
+                on_event(common::Event::Ok(format!(
+                    "туннель поднят: {} → порты {} (mcp-1c) и {} (веб-клиент)",
+                    cfg.host.server, ports.mcp, ports.web
+                )));
+                loop {
+                    tokio::select! {
+                        inc = t.incoming.recv() => match inc {
+                            Some(inc) => serve(inc),
+                            None => break, // the session is gone
+                        },
+                        _ = stop.changed() => {
+                            let _ = t.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
+                            return Ok(());
+                        }
+                    }
+                }
+                on_event(common::Event::Warn("связь с сервером оборвалась — переподключаюсь".into()));
+            }
+            Err(e) => {
+                if e.downcast_ref::<TunnelError>().is_some_and(is_terminal) {
+                    return Err(e);
+                }
+                on_event(common::Event::Warn(format!("{e}; повтор через {} с", retry_delay(attempt).as_secs())));
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(retry_delay(attempt)) => {}
+            _ = stop.changed() => return Ok(()),
+        }
+        attempt += 1;
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        assert_eq!(retry_delay(0).as_secs(), 2);
+        assert_eq!(retry_delay(1).as_secs(), 4);
+        assert_eq!(retry_delay(4).as_secs(), 32);
+        assert_eq!(retry_delay(10).as_secs(), 60);
+    }
+
+    #[test]
+    fn only_network_drops_are_retried() {
+        assert!(is_terminal(&TunnelError::Auth));
+        assert!(is_terminal(&TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() }));
+        assert!(is_terminal(&TunnelError::Forward(7771)));
+        assert!(!is_terminal(&TunnelError::Net("reset".into())));
+    }
+
+    #[test]
+    fn errors_name_the_field_to_fix() {
+        assert!(TunnelError::Auth.to_string().contains("password"));
+        assert!(TunnelError::Forward(7771).to_string().contains("7771"));
+        assert!(TunnelError::Net("x".into()).to_string().contains("server"));
     }
 }
 

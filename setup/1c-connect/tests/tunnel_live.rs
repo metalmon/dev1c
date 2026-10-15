@@ -29,3 +29,25 @@ async fn forwards_7771_and_remembers_the_host_key() {
     assert!(e.to_string().contains("отпечаток"), "{e}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn run_keeps_the_forward_open_and_the_container_sees_it() {
+    let Some((server, password)) = env() else { return };
+    let dir = std::env::temp_dir().join(format!("1c-connect-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cfg = one_c_connect::cfg::Cfg::default();
+    cfg.host.server = server;
+    cfg.host.password = password;
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let kh = dir.join("known_hosts");
+    let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx).await });
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    if std::env::var("DEV1C_DOCKER").is_ok() {
+        // The real proof: from inside the container the workstation port answers.
+        let st = std::process::Command::new("docker").args(["exec", "dev1c", "nc", "-z", "localhost", "7771"]).status().unwrap();
+        assert!(st.success(), "the container must reach the forwarded port");
+    }
+    tx.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

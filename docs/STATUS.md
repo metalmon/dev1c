@@ -48,6 +48,11 @@ script days is obsolete; the scripts are gone.
   runs on the host beyond the platform's own web publication.
 - **Skills:** 40, flat, valid frontmatter, `cf-init` produces valid XML with
   Cyrillic intact.
+- **Cloud endpoint measured** (2026-10-16, gateway over vLLM, Qwen3.6-35B-A3B-AWQ):
+  window 65 536, prefill ≈ 22 000 tok/s at 53k tokens (first token in 2.4 s),
+  generation 140–160 tok/s; the gateway preset thinks before answering, so
+  reasoning eats output tokens. Numbers and the 5090 estimate are in the spec
+  («Хватит ли окна на кодинг»).
 - **`dev1c-setup`.** In CI the Linux binary installed the image on a clean
   runner and passed its 14 checks; the kit from the artifact ran on this
   Windows machine: `dev1c-setup.exe status` saw the local container as done
@@ -147,8 +152,11 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    `dev1c` image; `dev1c-setup` gets an operation `llama` that runs
    `dev1c-llama` (own slim image, `--fit on --fit-ctx 65536`, three slots,
    unified cache, GPU and RAM measured first) and then syncs the numbers into
-   Zed: `max_tokens = window/3 − 8192`, `max_output_tokens`, `auto_compact`
-   threshold, read back from `/props`; `check` states the three numbers. Zed
+   Zed: `max_tokens = window/agents − 8192 − margin` (`agents` defaults to 1:
+   the window is not split three ways, eviction under three busy agents is a
+   recompute, not a failure; target ≥ 128k per agent, YaRN beyond 262k as the
+   measured reserve), `max_output_tokens`, `auto_compact` threshold, read back
+   from `/props`; `check` states the three numbers. Zed
    owns the sliding window (`agent.auto_compact`, present in the image's
    build), llama owns capacity, the installer keeps them in step. Own plan
    after `1c-connect`. Today the model is served by the other project's

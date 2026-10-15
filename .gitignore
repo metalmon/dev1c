@@ -17,3 +17,6 @@ models/
 # Local run state
 .ports
 *.log
+
+# Rust build output of the installers
+setup/target/

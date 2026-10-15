@@ -1,0 +1,26 @@
+[package]
+name = "dev1c-setup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Установка среды разработки 1С: один файл вместо скриптов"
+
+[dependencies]
+common = { path = "../common" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# Проверки по HTTP (Gitea отвечает?). Системное доверие на Windows, rustls с
+# системными корнями на Linux — так бинарь собирается статически.
+[target.'cfg(windows)'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["blocking", "native-tls"]
+
+[target.'cfg(unix)'.dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["blocking", "rustls-tls-native-roots"]

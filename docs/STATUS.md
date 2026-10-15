@@ -132,11 +132,12 @@ MCP_1C_BASE_URL, MCP_1C_USER, MCP_1C_PASSWORD      # the live base, see below
    are needed again. A dry run lives in a scratch worktree on branch
    `scratch/merge-upstream`.
 5. **Host binary** (decided 2026-10-15, see the spec): one exe on the machine
-   with the platform, volt-setup style — opens the tunnel, listens on a local
-   port and runs a fixed list of `1cv8` batch operations on request, installs
-   the mcp-1c extension. Nothing installed on the host, no service, no
-   OneScript; in the container the agent reaches it through `nc`. This is what
-   makes `vanessa-runner`-class work and PRISM category B possible.
+   with the platform, volt-setup style — opens the tunnel and bridges TCP to
+   `vrunner-mcp`, which travels in the kit as portable OneScript plus
+   vanessa-runner (incremental load is vrunner's job, not ours). Nothing
+   installed on the host, no service; in the container the agent reaches it
+   through `nc`. To check first: `vrunner-mcp` runs from a portable OneScript
+   on Windows. This is what makes PRISM category B possible.
 6. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
 

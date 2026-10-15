@@ -65,6 +65,19 @@ if (Test-Path dev1c.sh) { Copy-Item dev1c.sh $OutDir -Force }
 if (Test-Path README.md) { Copy-Item README.md $OutDir -Force }
 if (Test-Path .env.example) { Copy-Item .env.example $OutDir -Force }
 
+# The host kit: what the machine with the 1C platform needs so the agent can
+# read a base — the Windows mcp-1c (installs its extension through the
+# configurator) and the extension itself for a manual install. Same release as
+# the binary inside the image, read from the Dockerfile so the two cannot
+# drift apart. In an air-gapped network nobody can download these later.
+$mcpVersion = (Select-String -Path Dockerfile -Pattern '^ARG MCP_1C_VERSION=(.+)$').Matches[0].Groups[1].Value
+$hostDir = Join-Path $OutDir "host"
+New-Item -ItemType Directory -Force -Path $hostDir | Out-Null
+foreach ($f in @("mcp-1c-windows-amd64.exe", "MCP_HTTPService.cfe")) {
+    Invoke-WebRequest -UseBasicParsing "https://github.com/feenlace/mcp-1c/releases/download/$mcpVersion/$f" `
+        -OutFile (Join-Path $hostDir $f)
+}
+
 $size = [math]::Round((Get-Item $gz).Length / 1GB, 2)
 
 @"
@@ -118,6 +131,35 @@ git-сервер и сервер модели — общие.
     .\dev1c.ps1 -Stop           остановить
     .\dev1c.ps1 -Remove         остановить и удалить данные (с подтверждением)
 
+## 5. Подключить базу 1С (по желанию)
+
+Агент умеет читать работающую базу: метаданные, структуру объектов и форм,
+выполнять запросы, смотреть журнал регистрации. Для этого на машине с
+платформой 1С, один раз:
+
+1. Установить расширение в базу — из каталога ``host``:
+
+       host\mcp-1c-windows-amd64.exe --install "C:\путь\к\базе" --db-user Пользователь --db-password Пароль
+
+   Программа сама вызывает конфигуратор. Если командная строка недоступна,
+   файл ``host\MCP_HTTPService.cfe`` добавляется через Конфигуратор:
+   Конфигурация -> Расширения конфигурации -> Добавить из файла, затем F7.
+
+2. Опубликовать базу на веб-сервере (Конфигуратор -> Администрирование ->
+   Публикация на веб-сервере), на вкладке «HTTP-сервисы» включить
+   «Публиковать HTTP-сервисы расширений по умолчанию». Проверка в браузере:
+   ``http://localhost/<имя публикации>/hs/mcp-1c/version``.
+
+3. В файле ``.env`` рядом со скриптом запуска указать адрес и пользователя базы
+   (образец — ``.env.example``, раздел «Case 3») и перезапустить среду.
+
+4. Поднять туннель с машины, где опубликована база (адрес среды напечатал
+   скрипт запуска, порт — четвёртый из блока):
+
+       ssh -p 3393 -N -R 7777:localhost:80 dev@<адрес среды>
+
+   Пароль ``dev``. Пока это окно открыто, агент видит базу.
+
 ## Что внутри
 
 Среда разработки 1С: редактор Zed с ИИ-агентом, анализатор BSL, локальный
@@ -129,4 +171,5 @@ Write-Host ""
 Write-Host "Release ready: $OutDir" -ForegroundColor Green
 Write-Host "  dev1c-image.tar.gz   $size GB"
 Write-Host "  dev1c.ps1, dev1c.sh, .env.example, SETUP.md"
+Write-Host "  host\                mcp-1c for the machine with the platform ($mcpVersion)"
 Write-Host ""

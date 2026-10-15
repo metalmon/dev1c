@@ -136,6 +136,7 @@ jobs:
           docker exec smoke oscript -version
           docker exec smoke sh -c 'printf "Сообщить(\"ok: \" + (2+2));" > /tmp/t.os && oscript /tmp/t.os'
           docker exec smoke /opt/bsl-analyzer/bsl-analyzer --version
+          docker exec smoke mcp-1c --version
           docker exec smoke tea --version | head -1
           docker exec smoke sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
           docker exec smoke test -s /home/dev1/.config/zed/AGENTS.md \

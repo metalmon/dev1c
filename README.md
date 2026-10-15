@@ -139,10 +139,26 @@ security team. An SSH client, on the other hand, ships with Windows 10/11 since
 1803, and running it is ordinary use of the system rather than a change to an
 attested workstation.
 
-Raising the tunnel by hand, from the machine that has 1C:
+What the tunnel carries today is the **HTTP service of a published base**: the
+agent's `mcp-1c` runs inside the container and reads the base through it —
+metadata, queries, the event log, form structure. On the machine with the
+platform, once:
+
+1. Install the `mcp-1c` extension into the base (the Windows binary from the
+   same release as the one in the image; it drives the configurator itself):
+   `mcp-1c.exe --install "<base path>" --db-user <user> --db-password <password>`
+2. Publish the base on the web server (configurator → Administration → Publish
+   on web server) with "publish extension HTTP services by default" ticked, and
+   check that `http://localhost/<name>/hs/mcp-1c/version` answers.
+3. Put the address and the user into `.env` as `MCP_1C_BASE_URL`, `MCP_1C_USER`,
+   `MCP_1C_PASSWORD` — with the tunnel port, not the host's:
+   `http://localhost:7777/<name>/hs/mcp-1c`.
+
+Then raise the tunnel, from the machine that has 1C, forwarding the web
+server's port:
 
 ```sh
-ssh -p 3393 -N -R 7777:localhost:7777 dev@<environment-host>
+ssh -p 3393 -N -R 7777:localhost:80 dev@<environment-host>
 ```
 
 Account `dev`, password `dev` — one shared pair, because the tunnel is a shared
@@ -151,18 +167,23 @@ sudo: sshd grants it port forwarding and nothing else. See the note in
 `config/sshd-setup.sh` on why keys are not required for a pilot and when to
 switch to them.
 
-`7777` is the port of whatever listens on the machine with the platform; the
-same port becomes reachable as `localhost:7777` inside the container.
+`7777` is an arbitrary port inside the container; `80` is whatever the web
+server on the platform machine listens on. The same scheme carries anything
+else that listens there — `vanessa-runner` and the configurator are the next
+candidates.
 
 A client-side utility is planned: bring the tunnel up, check connectivity, show
-status — one window instead of a command with four flags. The scheme has not yet
-been verified on a machine with the platform installed.
+status — one window instead of a command with four flags.
 
 ## Building a release
 
 ```sh
 ./pack.sh                   # or .\pack.ps1
 ```
+
+Besides the image and the scripts, `dist/host/` carries the Windows `mcp-1c`
+and its `.cfe` for the machine with the platform — the same release as the
+binary inside the image, so the two cannot drift apart.
 
 The model key never reaches the image: it is passed as an environment variable at
 run time, so every build is clean by construction rather than "remember to build
@@ -179,6 +200,7 @@ unpacked as files.
 - Zed with extensions (bsl, xml, html, csv, ini, sql, dockerfile, toml, powershell)
   and the macOS Classic theme; agent, LSP and MCP configured out of the box
 - `bsl-analyzer` — language server and MCP server in one binary, works offline
+- `mcp-1c` — MCP server for a live base: metadata, queries, event log, over the tunnel
 - Firefox ESR (the 1C web client supports it officially), SSH client, OktaPlus branding
 - Windows drives are forwarded over RDP and appear in `~/thinclient_drives`
 

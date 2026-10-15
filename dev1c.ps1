@@ -90,7 +90,8 @@ if (-not (& $Engine image inspect $Image 2>$null)) {
 $customVars = @{}
 # LLAMA_ENABLED=0 turns off the local model server — useful while the machine
 # has no GPU worth the name, or when a remote model is used instead.
-foreach ($name in @("CUSTOM_API_URL", "CUSTOM_API_KEY", "CUSTOM_MODEL", "LLAMA_ENABLED")) {
+foreach ($name in @("CUSTOM_API_URL", "CUSTOM_API_KEY", "CUSTOM_MODEL", "LLAMA_ENABLED",
+                    "MCP_1C_BASE_URL", "MCP_1C_USER", "MCP_1C_PASSWORD")) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if (-not $value -and (Test-Path "$PSScriptRoot\.env")) {
         $line = Get-Content "$PSScriptRoot\.env" |

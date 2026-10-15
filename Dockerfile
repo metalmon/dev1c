@@ -184,6 +184,20 @@ RUN mkdir -p /opt/bsl-analyzer \
     && chmod +x /opt/bsl-analyzer/bsl-analyzer \
     && /opt/bsl-analyzer/bsl-analyzer --version
 
+# mcp-1c is the model's window into a running base: metadata, queries, event
+# log, form structure — read through the HTTP service of a published base. The
+# binary runs here, next to the editor, and the base lives on the machine with
+# the platform; the two meet over the reverse tunnel (see sshd-setup). Nothing
+# runs on that machine beyond the platform's own web publication, which is the
+# point of the whole scheme.
+#
+# The address and credentials of the base are not baked in: the binary reads
+# MCP_1C_BASE_URL, MCP_1C_USER and MCP_1C_PASSWORD from the environment, so the
+# Zed entry below has no arguments and dev1c.sh passes the three variables
+# through from .env — the same path the model key takes.
+ARG MCP_1C_VERSION=v1.22.3
+RUN curl -fsSL "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/mcp-1c-linux-amd64"        -o /usr/local/bin/mcp-1c     && chmod +x /usr/local/bin/mcp-1c     && mcp-1c --version
+
 # Zed extensions frozen at build time. Otherwise Zed reaches for the registry on
 # first launch (visible as "installing extension html latest version").
 #   bsl        — 1C grammar plus the language server binding (the important one)

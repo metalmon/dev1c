@@ -55,6 +55,18 @@ cp dev1c.sh "$OUT_DIR/"
 [ -f .env.example ] && cp .env.example "$OUT_DIR/"
 chmod +x "$OUT_DIR/dev1c.sh"
 
+# The host kit: what the machine with the 1C platform needs so the agent can
+# read a base — the Windows mcp-1c (installs its extension through the
+# configurator) and the extension itself for a manual install. Same release as
+# the binary inside the image, read from the Dockerfile so the two cannot
+# drift apart. In an air-gapped network nobody can download these later.
+MCP_1C_VERSION=$(sed -n 's/^ARG MCP_1C_VERSION=//p' Dockerfile)
+mkdir -p "$OUT_DIR/host"
+for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
+    curl -fsSL "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" \
+         -o "$OUT_DIR/host/$f"
+done
+
 cat > "$OUT_DIR/SETUP.md" <<'EOF'
 # Развёртывание среды разработки 1С
 
@@ -116,6 +128,35 @@ Linux:
 
 Windows — то же через параметры: -Status, -Stop, -Remove
 
+## 5. Подключить базу 1С (по желанию)
+
+Агент умеет читать работающую базу: метаданные, структуру объектов и форм,
+выполнять запросы, смотреть журнал регистрации. Для этого на машине с
+платформой 1С, один раз:
+
+1. Установить расширение в базу — из каталога `host`:
+
+       host\mcp-1c-windows-amd64.exe --install "C:\путь\к\базе" --db-user Пользователь --db-password Пароль
+
+   Программа сама вызывает конфигуратор. Если командная строка недоступна,
+   файл `host\MCP_HTTPService.cfe` добавляется через Конфигуратор:
+   Конфигурация -> Расширения конфигурации -> Добавить из файла, затем F7.
+
+2. Опубликовать базу на веб-сервере (Конфигуратор -> Администрирование ->
+   Публикация на веб-сервере), на вкладке «HTTP-сервисы» включить
+   «Публиковать HTTP-сервисы расширений по умолчанию». Проверка в браузере:
+   `http://localhost/<имя публикации>/hs/mcp-1c/version`.
+
+3. В файле `.env` рядом со скриптом запуска указать адрес и пользователя базы
+   (образец — `.env.example`, раздел «Case 3») и перезапустить среду.
+
+4. Поднять туннель с машины, где опубликована база (адрес среды напечатал
+   скрипт запуска, порт — четвёртый из блока):
+
+       ssh -p 3393 -N -R 7777:localhost:80 dev@<адрес среды>
+
+   Пароль `dev`. Пока это окно открыто, агент видит базу.
+
 ## Что внутри
 
 Среда разработки 1С: редактор Zed с ИИ-агентом, анализатор BSL, локальный
@@ -129,4 +170,5 @@ echo
 echo "Release ready: $OUT_DIR"
 echo "  dev1c-image.tar.gz   $SIZE"
 echo "  dev1c.sh, dev1c.ps1, .env.example, SETUP.md"
+echo "  host/                mcp-1c for the machine with the platform ($MCP_1C_VERSION)"
 echo

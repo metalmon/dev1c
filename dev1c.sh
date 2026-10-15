@@ -85,7 +85,8 @@ $ENGINE rm -f "$NAME" >/dev/null 2>&1 || true
 # .env is what arrives inside. LLAMA_ENABLED=0 turns off the local model
 # server — useful while the machine has no GPU worth the name, or when a
 # remote model is used instead.
-PASS_VARS="CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL LLAMA_ENABLED"
+PASS_VARS="CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL LLAMA_ENABLED
+           MCP_1C_BASE_URL MCP_1C_USER MCP_1C_PASSWORD"
 if [ -f "$DIR/.env" ]; then
     for v in $PASS_VARS; do
         eval "cur=\${$v:-}"

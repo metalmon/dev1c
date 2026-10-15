@@ -17,6 +17,7 @@ log() { echo "[entrypoint] $*"; }
 # the model key is visible in `docker exec` but not to Zed — exactly the case of
 # "everything is passed, nothing works".
 for var in CUSTOM_API_KEY CUSTOM_API_URL CUSTOM_MODEL \
+           MCP_1C_BASE_URL MCP_1C_USER MCP_1C_PASSWORD \
            ANTHROPIC_API_KEY OPENAI_API_KEY \
            HTTP_PROXY HTTPS_PROXY NO_PROXY
 do

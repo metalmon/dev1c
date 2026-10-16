@@ -7,6 +7,7 @@ pub mod bridge;
 pub mod cfg;
 #[cfg(feature = "gui")]
 pub mod gui;
+pub mod job;
 pub mod jsonrpc;
 pub mod ops_host;
 pub mod project;

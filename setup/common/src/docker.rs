@@ -56,7 +56,7 @@ pub fn redact_text(text: &str) -> String {
         .map(|l| {
             let name = l.split('=').next().unwrap_or("");
             let upper = name.to_ascii_uppercase();
-            if l.contains('=') && !l.contains(' ') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
+            if l.contains('=') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
                 format!("{name}=…")
             } else {
                 blot_words(l)
@@ -209,6 +209,10 @@ mod tests {
         assert!(!r.contains("qwerty") && r.contains("/P…"), "{r}");
         assert!(!r.contains("secret") && r.contains("--db-pwd=…") && r.contains("--db-user=Admin"), "{r}");
         assert_eq!(redact_text("API_KEY=abc"), "API_KEY=…");
+        // docker inspect prints env as indented JSON strings: still blotted.
+        let r = redact_text("            \"CUSTOM_API_KEY=f5b8bc7e\",
+            \"PATH=/bin\",");
+        assert!(!r.contains("f5b8bc7e") && r.contains("PATH=/bin"), "{r}");
     }
 
     #[test]

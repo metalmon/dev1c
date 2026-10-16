@@ -50,14 +50,19 @@ where
     on_exit(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), tail);
 }
 
-/// A plain relay to a local TCP port (the web server behind 779N).
-pub async fn pipe_tcp<S>(stream: S, port: u16)
+/// A plain relay to a local TCP port (the web server behind 779N). A port
+/// that does not answer is reported, not swallowed: from the container it
+/// looks exactly like a tunnel fault, and only this side can tell.
+pub async fn pipe_tcp<S>(stream: S, port: u16) -> Result<(), String>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Ok(mut tcp) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else { return };
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .map_err(|e| format!("веб-сервер на порту {port} не отвечает ({e}) — публикация базы не поднята"))?;
     let mut stream = stream;
     let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+    Ok(())
 }
 
 /// `mcp-1c.exe` as the bridge starts it: the kit's binary, the developer's base.
@@ -130,6 +135,17 @@ mod tests {
         let (code, err) = rx.await.unwrap();
         assert_eq!(code, 3);
         assert!(err.contains("база недоступна"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dead_web_server_is_reported_not_swallowed() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l); // nothing listens there any more
+        let (_ours, theirs) = tokio::io::duplex(64);
+        let r = pipe_tcp(theirs, port).await;
+        assert!(r.is_err(), "connect to a closed port must be an error");
+        assert!(r.unwrap_err().contains(&port.to_string()));
     }
 
     #[tokio::test]

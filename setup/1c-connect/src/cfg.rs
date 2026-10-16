@@ -66,6 +66,12 @@ impl Cfg {
         Ok(cfg)
     }
 
+    /// The sample's address: the kit ships the sample as the working file,
+    /// and connecting with it dials a machine nobody has.
+    pub fn is_sample(&self) -> bool {
+        self.host.server == Host::default().server
+    }
+
     fn number(&self) -> Option<u16> {
         self.host.workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
     }
@@ -157,6 +163,16 @@ mod tests {
         assert_eq!(c.publication(), "/InfoBase/");
         c.host.base_url = "http://other-host/Buh/hs/mcp-1c".into();
         assert!(c.validate().unwrap_err().to_string().contains("localhost"));
+    }
+
+    #[test]
+    fn untouched_sample_is_recognised() {
+        // The kit ships the sample as 1c-connect.toml; connecting with it
+        // means dialling an address nobody has.
+        let mut c = sample();
+        assert!(c.is_sample());
+        c.host.server = "10.0.0.5:3393".into();
+        assert!(!c.is_sample());
     }
 
     #[test]

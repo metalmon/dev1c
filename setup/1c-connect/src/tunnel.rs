@@ -24,11 +24,24 @@ pub enum TunnelError {
     HostKeyChanged { old: String, new: String },
     Forward(u16),
     Net(String),
+    /// Something on this machine: the kit's known_hosts unreadable, a
+    /// certificate where a key was expected. Retrying changes nothing.
+    Local(String),
+}
+
+/// Whatever `russh` or our handler returned, as one of ours. A ready
+/// `TunnelError` passes through; anything else is the link.
+pub fn classify(e: anyhow::Error) -> TunnelError {
+    match e.downcast::<TunnelError>() {
+        Ok(t) => t,
+        Err(e) => TunnelError::Net(e.to_string()),
+    }
 }
 
 impl std::fmt::Display for TunnelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            TunnelError::Local(e) => write!(f, "на этой машине: {e}"),
             TunnelError::Auth => write!(f, "сервер не принял пароль учётки dev — проверьте server и password в 1c-connect.toml"),
             TunnelError::HostKeyChanged { old, new } => write!(
                 f,
@@ -55,7 +68,7 @@ impl Handler for ForwardHandler {
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool> {
         let PublicKeyOrCertificate::PublicKey { key: pk, .. } = key else {
-            anyhow::bail!("сервер предъявил сертификат, а не ключ")
+            return Err(TunnelError::Local("сервер предъявил сертификат, а не ключ — это не наша среда".into()).into());
         };
         let line = format!("{} {}", self.server, pk.to_openssh().context("ключ хоста")?);
         let fp = pk.fingerprint(HashAlg::Sha256).to_string();
@@ -68,7 +81,7 @@ impl Handler for ForwardHandler {
                 Ok(true)
             }
             KeyDecision::Changed { old } => Err(TunnelError::HostKeyChanged { old, new: fp }.into()),
-            KeyDecision::Unreadable(e) => Err(TunnelError::Net(format!("не прочитать known_hosts в комплекте: {e}")).into()),
+            KeyDecision::Unreadable(e) => Err(TunnelError::Local(format!("не прочитать known_hosts в комплекте: {e}")).into()),
         }
     }
 
@@ -118,10 +131,16 @@ pub fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs((2u64 << attempt.min(5)).min(60))
 }
 
-/// Wrong password, changed key, refused port: retrying would only repeat the
-/// same answer — the person has to act. A dropped connection is retried.
-pub fn is_terminal(e: &TunnelError) -> bool {
-    !matches!(e, TunnelError::Net(_))
+/// What a person has to fix is never retried: a refused password, a changed
+/// key, a fault on this machine. The rest depends on history. Before the
+/// first session, a refused port is somebody else's tunnel and no link is a
+/// wrong address — stop and say so. After a drop, sshd still holds our own
+/// forward for a while and the network may blink — retry with backoff.
+pub fn is_terminal(e: &TunnelError, had_session: bool) -> bool {
+    match e {
+        TunnelError::Auth | TunnelError::HostKeyChanged { .. } | TunnelError::Local(_) => true,
+        TunnelError::Forward(_) | TunnelError::Net(_) => !had_session,
+    }
 }
 
 /// Держит туннель, пока его не остановят: переподключается после обрыва,
@@ -137,6 +156,7 @@ pub async fn run(
     let serve = Arc::new(serve);
     let ports = cfg.ports();
     let mut attempt = 0u32;
+    let mut had_session = false;
     loop {
         if *stop.borrow() {
             return Ok(());
@@ -144,6 +164,7 @@ pub async fn run(
         match Tunnel::connect(&cfg.host.server, &cfg.host.password, &known_hosts, &[ports.mcp, ports.web]).await {
             Ok(mut t) => {
                 attempt = 0;
+                had_session = true;
                 on_event(common::Event::Ok(format!(
                     "туннель поднят: {} → порты {} (mcp-1c) и {} (веб-клиент)",
                     cfg.host.server, ports.mcp, ports.web
@@ -163,10 +184,17 @@ pub async fn run(
                 on_event(common::Event::Warn("связь с сервером оборвалась — переподключаюсь".into()));
             }
             Err(e) => {
-                if e.downcast_ref::<TunnelError>().is_some_and(is_terminal) {
-                    return Err(e);
+                let te = classify(e);
+                if is_terminal(&te, had_session) {
+                    return Err(te.into());
                 }
-                on_event(common::Event::Warn(format!("{e}; повтор через {} с", retry_delay(attempt).as_secs())));
+                // After a drop the server may still hold our own forward:
+                // that is not a neighbour's tunnel, just the old session dying.
+                let text = match &te {
+                    TunnelError::Forward(p) if had_session => format!("порт {p} ещё держит прошлая сессия"),
+                    _ => te.to_string(),
+                };
+                on_event(common::Event::Warn(format!("{text}; повтор через {} с", retry_delay(attempt).as_secs())));
             }
         }
         tokio::select! {
@@ -190,11 +218,21 @@ mod loop_tests {
     }
 
     #[test]
-    fn only_network_drops_are_retried() {
-        assert!(is_terminal(&TunnelError::Auth));
-        assert!(is_terminal(&TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() }));
-        assert!(is_terminal(&TunnelError::Forward(7771)));
-        assert!(!is_terminal(&TunnelError::Net("reset".into())));
+    fn what_is_retried_depends_on_whether_a_session_ever_existed() {
+        let fwd = TunnelError::Forward(7771);
+        let net = TunnelError::Net("reset".into());
+        // Before the first session: a refused port is somebody else's tunnel,
+        // no link is a wrong address — both are the person's to fix.
+        assert!(is_terminal(&fwd, false));
+        assert!(is_terminal(&net, false));
+        // After a drop: sshd still holds our own forward for a while and the
+        // network may blink — both are retried.
+        assert!(!is_terminal(&fwd, true));
+        assert!(!is_terminal(&net, true));
+        // Never retried: a refused password, a changed key, a local fault.
+        for e in [TunnelError::Auth, TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() }, TunnelError::Local("known_hosts".into())] {
+            assert!(is_terminal(&e, false) && is_terminal(&e, true), "{e}");
+        }
     }
 
     #[test]
@@ -202,6 +240,15 @@ mod loop_tests {
         assert!(TunnelError::Auth.to_string().contains("password"));
         assert!(TunnelError::Forward(7771).to_string().contains("7771"));
         assert!(TunnelError::Net("x".into()).to_string().contains("server"));
+        assert!(TunnelError::Local("known_hosts: нет прав".into()).to_string().contains("known_hosts"));
+    }
+
+    #[test]
+    fn a_ready_tunnel_error_passes_through_classification_unwrapped() {
+        let e = classify(anyhow::Error::new(TunnelError::Local("x".into())));
+        assert!(matches!(e, TunnelError::Local(_)), "{e}");
+        let e = classify(anyhow::anyhow!("connection refused"));
+        assert!(matches!(e, TunnelError::Net(ref m) if m == "connection refused"), "{e}");
     }
 }
 
@@ -243,10 +290,7 @@ impl Tunnel {
         let mut handle = tokio::time::timeout(std::time::Duration::from_secs(15), client::connect(config, server, handler))
             .await
             .map_err(|_| TunnelError::Net("тайм-аут подключения".into()))?
-            .map_err(|e| match e.downcast_ref::<TunnelError>() {
-                Some(TunnelError::HostKeyChanged { old, new }) => TunnelError::HostKeyChanged { old: old.clone(), new: new.clone() },
-                _ => TunnelError::Net(e.to_string()),
-            })?;
+            .map_err(classify)?;
         let auth = handle.authenticate_password("dev", password).await.map_err(|e| TunnelError::Net(e.to_string()))?;
         if !auth.success() {
             return Err(TunnelError::Auth.into());

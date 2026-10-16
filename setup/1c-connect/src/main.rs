@@ -173,6 +173,18 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
 /// Туннель плюс мост, пока не нажмут Ctrl+C. На порт mcp-1c — процесс на
 /// stdio, на порт веб-клиента — локальный веб-сервер.
 fn connect(ctx: &Ctx) -> Result<()> {
+    anyhow::ensure!(
+        ctx.kit.path(cfg::FILE).exists(),
+        "в комплекте нет {} — создайте его из образца: 1c-connect example > {}",
+        cfg::FILE,
+        cfg::FILE
+    );
+    anyhow::ensure!(
+        !ctx.cfg.is_sample(),
+        "{}: server всё ещё из образца ({}) — впишите адрес своей среды, его печатает dev1c-setup install",
+        cfg::FILE,
+        ctx.cfg.host.server
+    );
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -196,7 +208,12 @@ fn connect(ctx: &Ctx) -> Result<()> {
                     }
                 }));
             } else if inc.port == ports.web {
-                tokio::spawn(bridge::pipe_tcp(stream, web_port));
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = bridge::pipe_tcp(stream, web_port).await {
+                        sink(Event::Warn(e));
+                    }
+                });
             }
         };
         let sink2 = ctx.sink.clone();

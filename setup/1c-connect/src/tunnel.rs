@@ -1,5 +1,6 @@
-//! One SSH session into the environment with remote forwards. Password as
-//! `dev`, the host key pinned in the kit after the first connect. Forwarded
+//! One SSH session into the environment with remote forwards. Login and
+//! password of the workstation, the host key pinned in the kit after the first
+//! connect. Forwarded
 //! channels are handed to whoever registered for the port (bridge.rs); here
 //! they are only accepted.
 
@@ -42,7 +43,7 @@ impl std::fmt::Display for TunnelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TunnelError::Local(e) => write!(f, "на этой машине: {e}"),
-            TunnelError::Auth => write!(f, "сервер не принял пароль учётки dev — проверьте server и password в 1c-connect.toml"),
+            TunnelError::Auth => write!(f, "сервер не принял логин и пароль рабочего места — проверьте workstation и password в 1c-connect.toml"),
             TunnelError::HostKeyChanged { old, new } => write!(
                 f,
                 "отпечаток сервера изменился: был {old}, стал {new}. Если среду переустанавливали — удалите known_hosts из комплекта (или 1c-connect uninstall) и подключитесь заново"
@@ -161,7 +162,7 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(());
         }
-        match Tunnel::connect(&cfg.host.server, &cfg.host.password, &known_hosts, &[ports.mcp, ports.vrunner, ports.web]).await {
+        match Tunnel::connect(&cfg.host.server, &cfg.host.workstation, &cfg.host.password, &known_hosts, &[ports.mcp, ports.vrunner, ports.web]).await {
             Ok(mut t) => {
                 attempt = 0;
                 had_session = true;
@@ -236,6 +237,12 @@ mod loop_tests {
     }
 
     #[test]
+    fn auth_error_names_the_workstation_not_a_shared_account() {
+        let s = TunnelError::Auth.to_string();
+        assert!(s.contains("рабочего места") && !s.contains("учётки dev"), "{s}");
+    }
+
+    #[test]
     fn errors_name_the_field_to_fix() {
         assert!(TunnelError::Auth.to_string().contains("password"));
         assert!(TunnelError::Forward(7771).to_string().contains("7771"));
@@ -275,7 +282,7 @@ pub struct Tunnel {
 impl Tunnel {
     /// Connect, authenticate, request every forward. Any failure is one of
     /// `TunnelError`, with the text the person needs.
-    pub async fn connect(server: &str, password: &str, known_hosts: &Path, forwards: &[u16]) -> Result<Tunnel> {
+    pub async fn connect(server: &str, login: &str, password: &str, known_hosts: &Path, forwards: &[u16]) -> Result<Tunnel> {
         // Keepalives every 30 s keep the session alive through hours of silence
         // (a long dump on the other side); no inactivity timeout on purpose —
         // a tunnel that quietly garbage-collects itself is the failure mode
@@ -291,7 +298,7 @@ impl Tunnel {
             .await
             .map_err(|_| TunnelError::Net("тайм-аут подключения".into()))?
             .map_err(classify)?;
-        let auth = handle.authenticate_password("dev", password).await.map_err(|e| TunnelError::Net(e.to_string()))?;
+        let auth = handle.authenticate_password(login, password).await.map_err(|e| TunnelError::Net(e.to_string()))?;
         if !auth.success() {
             return Err(TunnelError::Auth.into());
         }

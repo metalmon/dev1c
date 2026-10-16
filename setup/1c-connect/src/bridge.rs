@@ -260,6 +260,10 @@ async fn handle_request(
     };
     match jsonrpc::route_request(&line, &rules.allowed) {
         Route::Drop => Ok(()),
+        Route::Reject { id, why } => {
+            let _ = out.send(jsonrpc::error_reply(&id, -32601, &format!("мост 1c-connect: {why}")));
+            Ok(())
+        }
         Route::ListRequest { id, line } => {
             pending.lock().unwrap().insert(key(&id), id);
             forward(stdin, &line).await

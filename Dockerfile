@@ -500,14 +500,9 @@ RUN useradd -r -m -d /var/lib/gitea -s /bin/sh gitea \
     && mkdir -p /var/lib/gitea \
     && chown -R gitea:gitea /var/lib/gitea
 
-# An account for the SSH tunnel: dev/dev, shared by everyone.
-#
-# The tunnel is a shared function — it reaches the one machine that has the 1C
-# platform — so tying it to a particular workstation would only raise the
-# question "under which login do I connect?". This account exists for nothing
-# else: no sudo, and sshd allows it port forwarding only (see sshd-setup).
-RUN useradd -m -s /bin/sh dev \
-    && echo 'dev:dev' | chpasswd
+# The SSH tunnel comes in under the workstation's own account (dev1..dev3):
+# sshd lets each one forward only its own three ports and never a shell (see
+# sshd-setup). No separate tunnel account.
 
 # --- Environment --------------------------------------------------------------
 # ENV alone is not enough here: an xrdp session is created by PAM and the image

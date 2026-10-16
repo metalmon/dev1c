@@ -87,8 +87,10 @@ pub const PLATFORM_TOOLS: [&str; 2] = ["cf_load", "infobase_update"];
 /// канонический текст — JSON, как его разобрал мост (без BOM, пробелов и
 /// повторов ключей): иначе ребёнок прочёл бы не то, что проверил фильтр.
 pub enum Route {
-    /// Не JSON-объект — от агента такое не пересылается.
+    /// Не JSON-объект или уведомление с неизвестным методом — от агента такое не пересылается.
     Drop,
+    /// Запрос, который мост не пропускает: ответ — ошибка JSON-RPC с этим текстом.
+    Reject { id: Value, why: String },
     Forward(Vec<u8>),
     ListRequest { id: Value, line: Vec<u8> },
     OurCall { id: Value, tool: String, args: Value },
@@ -112,32 +114,94 @@ fn canonical(v: &Value) -> Vec<u8> {
     out
 }
 
+/// Методы, которые мост пропускает ребёнку. Остальное — ошибка «нет такого
+/// метода»: OneScript сравнивает строки без учёта регистра, и `Tools/Call`
+/// для него — вызов инструмента, а для фильтра был бы «что-то другое».
+const METHODS: [&str; 14] = [
+    "initialize",
+    "notifications/initialized",
+    "ping",
+    "tools/list",
+    "tools/call",
+    "notifications/cancelled",
+    "notifications/progress",
+    "prompts/list",
+    "prompts/get",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "logging/setLevel",
+    "completion/complete",
+];
+
+/// Ключ объекта без учёта регистра — и только если он один такой: два ключа,
+/// различающихся регистром, читаются ребёнком и мостом по-разному.
+fn key_ci<'a>(o: &'a serde_json::Map<String, Value>, key: &str) -> Result<Option<&'a Value>, ()> {
+    let mut found = None;
+    for (k, v) in o {
+        if k.eq_ignore_ascii_case(key) {
+            if found.is_some() {
+                return Err(());
+            }
+            found = Some(v);
+        }
+    }
+    Ok(found)
+}
+
 /// Что делать со строкой от агента.
 pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
     let Some(v) = parse(line) else { return Route::Drop };
-    let id = v.get("id").cloned().unwrap_or(Value::Null);
-    match v.get("method").and_then(Value::as_str) {
-        Some("tools/list") => Route::ListRequest { id, line: canonical(&v) },
-        Some("tools/call") => {
-            let Some(tool) = v.pointer("/params/name").and_then(Value::as_str) else { return Route::Forward(canonical(&v)) };
+    let Some(obj) = v.as_object() else { return Route::Drop };
+    let Ok(id) = key_ci(obj, "id") else { return Route::Drop };
+    let id = id.cloned().unwrap_or(Value::Null);
+    let reject = |why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), why: why.to_string() } };
+    let method = match key_ci(obj, "method") {
+        Ok(Some(Value::String(m))) => m.to_ascii_lowercase(),
+        _ => return reject("нет метода"),
+    };
+    let Some(method) = METHODS.iter().find(|m| m.eq_ignore_ascii_case(&method)) else { return reject("нет такого метода") };
+    let params = match key_ci(obj, "params") {
+        Ok(p) => p.cloned().unwrap_or(json!({})),
+        Err(()) => return reject("params задан дважды"),
+    };
+    // Пересобранное сообщение: только проверенные поля, канонические имена.
+    let rebuilt = |params: Value| canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+    match *method {
+        "tools/list" => Route::ListRequest { id: id.clone(), line: rebuilt(params) },
+        "tools/call" => {
+            let Some(p) = params.as_object() else { return reject("params — не объект") };
+            let (Ok(name), Ok(args)) = (key_ci(p, "name"), key_ci(p, "arguments")) else { return reject("name или arguments заданы дважды") };
+            let Some(tool) = name.and_then(Value::as_str) else { return reject("tools/call без name") };
             let tool = tool.to_string();
+            let args = args.cloned().unwrap_or(json!({}));
             if OUR_TOOLS.contains(&tool.as_str()) {
-                let args = v.pointer("/params/arguments").cloned().unwrap_or(json!({}));
-                Route::OurCall { id, tool, args }
+                Route::OurCall { id: id.clone(), tool, args }
             } else if !allowed.iter().any(|a| a == &tool) {
-                Route::Disabled { id, tool }
-            } else if PLATFORM_TOOLS.contains(&tool.as_str()) {
-                Route::PlatformCall { id, tool, line: canonical(&v) }
+                Route::Disabled { id: id.clone(), tool }
             } else {
-                Route::Forward(canonical(&v))
+                let line = rebuilt(json!({"name": tool, "arguments": args}));
+                if PLATFORM_TOOLS.contains(&tool.as_str()) {
+                    Route::PlatformCall { id: id.clone(), tool, line }
+                } else {
+                    Route::Forward(line)
+                }
             }
         }
-        Some("notifications/cancelled") => match v.pointer("/params/requestId") {
-            Some(rid) => Route::Cancel { id: rid.clone(), line: canonical(&v) },
-            None => Route::Forward(canonical(&v)),
+        "notifications/cancelled" => match params.as_object().and_then(|p| key_ci(p, "requestId").ok().flatten()) {
+            Some(rid) => Route::Cancel { id: rid.clone(), line: rebuilt(params) },
+            None => Route::Forward(rebuilt(params)),
         },
-        _ => Route::Forward(canonical(&v)),
+        _ => Route::Forward(rebuilt(params)),
     }
+}
+
+/// Ошибка JSON-RPC на запрос, который мост не пропустил.
+pub fn error_reply(id: &Value, code: i64, message: &str) -> Vec<u8> {
+    let v = json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
+    let mut out = serde_json::to_vec(&v).unwrap();
+    out.push(b'\n');
+    out
 }
 
 /// Ответ ребёнка на `tools/list`: чужие инструменты вырезаются, на последней
@@ -300,7 +364,49 @@ mod tests {
         assert!(matches!(route_request(b"warning: something", &allowed()), Route::Drop));
         assert!(matches!(route_request(b"[1,2]", &allowed()), Route::Drop));
         assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#, &allowed()), Route::Forward(_)));
-        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &allowed()), Route::Forward(_)));
+        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &allowed()), Route::Reject { .. }));
+    }
+
+    #[test]
+    fn method_and_key_case_cannot_dodge_the_whitelist() {
+        // OneScript compares strings case-insensitively: "Tools/Call" with a
+        // "Name" key is a tools/call to the child. It must be one to us too.
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"Tools/Call","params":{"Name":"infobase_delete","arguments":{}}}"#;
+        assert!(matches!(route_request(line, &allowed()), Route::Disabled { tool, .. } if tool == "infobase_delete"));
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"TOOLS/CALL","params":{"NAME":"task_status","Arguments":{"a":1},"extra":"x"}}"#;
+        match route_request(line, &allowed()) {
+            Route::Forward(out) => {
+                let v: Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(v["method"], "tools/call");
+                assert_eq!(v["params"]["name"], "task_status");
+                assert_eq!(v["params"]["arguments"]["a"], 1);
+                assert_eq!(v["params"].as_object().unwrap().len(), 2, "{v}");
+                assert_eq!(v.as_object().unwrap().len(), 4, "{v}");
+            }
+            _ => panic!("task_status is allowed"),
+        }
+        // Two keys that differ only by case: ambiguous, refused.
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","NAME":"infobase_delete"}}"#;
+        assert!(matches!(route_request(line, &allowed()), Route::Reject { .. }));
+    }
+
+    #[test]
+    fn unknown_methods_and_nameless_calls_are_refused_not_forwarded() {
+        let line = br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#;
+        assert!(matches!(route_request(line, &allowed()), Route::Reject { id, .. } if id == json!(3)));
+        let line = br#"{"jsonrpc":"2.0","id":4,"method":"tools/execute","params":{"name":"infobase_delete"}}"#;
+        assert!(matches!(route_request(line, &allowed()), Route::Reject { id, .. } if id == json!(4)));
+        // A notification with an unknown method has no id to answer: dropped.
+        let line = br#"{"jsonrpc":"2.0","method":"notifications/whatever"}"#;
+        assert!(matches!(route_request(line, &allowed()), Route::Drop));
+        // Known methods pass, in canonical spelling.
+        for m in ["initialize", "Ping", "notifications/initialized", "prompts/list", "resources/list"] {
+            let line = format!(r#"{{"jsonrpc":"2.0","id":5,"method":"{m}","params":{{}}}}"#);
+            assert!(matches!(route_request(line.as_bytes(), &allowed()), Route::Forward(_)), "{m}");
+        }
+        let v: Value = serde_json::from_slice(&error_reply(&json!(4), -32601, "нет такого метода")).unwrap();
+        assert_eq!(v["error"]["code"], -32601);
+        assert_eq!(v["id"], 4);
     }
 
     #[test]

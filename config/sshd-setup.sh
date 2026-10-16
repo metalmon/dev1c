@@ -51,23 +51,30 @@ ClientAliveInterval 30
 ClientAliveCountMax 6
 TCPKeepAlive yes
 
-# Only the tunnel account. The workstations themselves (dev1, dev2, dev3) come in
-# over RDP and have no business here.
-AllowUsers dev
-
-# And this account gets nothing but forwarding. ForceCommand applies when a
-# client asks for a shell or a command; `ssh -N`, which is what a tunnel is,
-# asks for neither and keeps working. So even someone who guesses the password
-# ends up with port forwarding and no shell.
-Match User dev
-    ForceCommand /bin/false
-    # One workstation, three ports: dev1 -> 7771 (mcp-1c), 7781 (vrunner-mcp),
-    # 7791 (web client of the base); dev2 -> 7772/7782/7792; dev3 ->
-    # 7773/7783/7793. Anything else is refused by sshd at the request, so a
-    # mistyped workstation name fails on the client with a clear message
-    # instead of binding a neighbour's tunnel.
-    PermitListen localhost:7771 localhost:7772 localhost:7773 localhost:7781 localhost:7782 localhost:7783 localhost:7791 localhost:7792 localhost:7793
+# The tunnel comes in under the workstation's own account (dev1, dev2, dev3 —
+# the same system users, password equal to the login). One shared account
+# with PermitListen on all nine ports would let a typo in `workstation` bind a
+# neighbour's ports — and 778N runs the Configurator on that developer's
+# machine.
+AllowUsers dev1 dev2 dev3
 EOF
+
+# Over SSH these accounts get nothing but forwarding. ForceCommand applies when
+# a client asks for a shell or a command; `ssh -N`, which is what a tunnel is,
+# asks for neither and keeps working. So even someone who guesses the password
+# ends up with port forwarding and no shell. Each workstation may listen on
+# its own three ports only: dev1 -> 7771 (mcp-1c), 7781 (vrunner-mcp), 7791
+# (web client of the base); dev2 -> 7772/7782/7792; dev3 -> 7773/7783/7793.
+# Anything else is refused by sshd at the request, so a mistyped workstation
+# name fails on the client with a clear message instead of binding a
+# neighbour's tunnel.
+for n in 1 2 3; do
+    cat >> "$CONF" <<EOF
+Match User dev$n
+    ForceCommand /bin/false
+    PermitListen localhost:777$n localhost:778$n localhost:779$n
+EOF
+done
 
 # Host keys are generated on first start rather than at build time: otherwise
 # every deployment would share one fingerprint, and connecting to one

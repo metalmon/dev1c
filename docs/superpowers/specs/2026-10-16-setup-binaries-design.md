@@ -636,8 +636,9 @@ Windows-сборка в CI и запуск руками.
 **Комплект.** `pack.sh` докладывает `llama/bin/windows-x64-cuda13`
 (`llama-b11606-bin-win-cuda-13.4-x64.zip` + `cudart-llama-bin-win-cuda-13.4-x64.zip`)
 или `llama/bin/linux-x64-cuda13` под ОС комплекта и `llama/nssm.exe`
-(nssm 2.24, только для Windows); сборка `b11606` — та же, что у образа
-`dev1c-llama`. Модель в комплект не кладётся.
+(nssm 2.24-101 из репозитория, `setup/dev1c-setup/vendor`, с приколоченным
+SHA-256 — nssm.cc часто недоступен, только для Windows); сборка `b11606` — та
+же, что у образа `dev1c-llama`. Модель в комплект не кладётся.
 
 **Образ.** После того как хостовая форма проверена, из образа `dev1c`
 уходят CUDA и `llama.cpp` (база — `debian:13` вместо `dev1c-llama`),

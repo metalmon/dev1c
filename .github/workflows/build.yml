@@ -231,7 +231,8 @@ jobs:
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'
           cp dev1c-setup bins/
-          ./pack.sh dev1c-image.tar.gz bins
+          # --llama windows adds the model server row (about 550 MB) and nssm.
+          ./pack.sh --llama windows dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit dist/1c-connect
 
       - name: Layer sizes

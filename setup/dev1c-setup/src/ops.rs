@@ -81,7 +81,7 @@ pub fn run_args(cfg: &Cfg) -> Vec<String> {
             a.extend([s("--gpus"), s("all")]);
         }
     }
-    for (k, v) in cfg.container_env() {
+    for (k, v) in cfg.container_env(None) {
         a.extend([s("-e"), format!("{k}={v}")]);
     }
     a.push(cfg.image());
@@ -91,7 +91,7 @@ pub fn run_args(cfg: &Cfg) -> Vec<String> {
 /// Чем работающий контейнер отличается от заданного: образ, первый порт,
 /// переменные. `None` — ничем. Чистая функция ради теста; значения ей даёт
 /// `docker inspect`.
-pub fn drift_of(cfg: &Cfg, image: &str, first_port: &str, env: &[String]) -> Option<(String, String)> {
+pub fn drift_of(cfg: &Cfg, image: &str, first_port: &str, env: &[String], facts: Option<&crate::cfg::Facts>) -> Option<(String, String)> {
     if image != cfg.image() {
         return Some((format!("образ {image}"), format!("образ {}", cfg.image())));
     }
@@ -99,7 +99,7 @@ pub fn drift_of(cfg: &Cfg, image: &str, first_port: &str, env: &[String]) -> Opt
     if first_port != want_port {
         return Some((format!("порт {first_port}"), format!("порт {want_port}")));
     }
-    for (k, v) in cfg.container_env() {
+    for (k, v) in cfg.container_env(facts) {
         let want = format!("{k}={v}");
         let have = env.iter().find(|e| e.starts_with(&format!("{k}=")));
         if have != Some(&want) {
@@ -376,7 +376,7 @@ impl Op<Ctx> for Container {
             .lines()
             .map(|s| s.to_string())
             .collect();
-        if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env) {
+        if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env, None) {
             return OpState::Drifted { from, to };
         }
         let have_id = docker::inspect(ctx, name, "{{.Image}}");
@@ -487,6 +487,7 @@ mod tests {
     fn run_args_carry_ports_volumes_and_environment() {
         let mut c = Cfg::default();
         c.server.port = 4000;
+        c.model.serve = "remote".into();
         c.model.url = "https://m".into();
         c.model.key = "k".into();
         c.model.name = "Q".into();
@@ -531,25 +532,27 @@ mod tests {
     #[test]
     fn drift_names_what_differs() {
         let c = Cfg::default();
-        assert_eq!(drift_of(&c, "oktaplus/dev1c:latest", "3390", &[]), None);
-        let d = drift_of(&c, "oktaplus/dev1c:old", "3390", &[]).unwrap();
+        let base: Vec<String> = vec!["LLAMA_ENABLED=0".into()];
+        assert_eq!(drift_of(&c, "oktaplus/dev1c:latest", "3390", &base, None), None);
+        let d = drift_of(&c, "oktaplus/dev1c:old", "3390", &base, None).unwrap();
         assert!(d.0.contains("old") && d.1.contains("latest"));
-        let d = drift_of(&c, "oktaplus/dev1c:latest", "4000", &[]).unwrap();
+        let d = drift_of(&c, "oktaplus/dev1c:latest", "4000", &base, None).unwrap();
         assert!(d.0.contains("4000") && d.1.contains("3390"));
         let mut r = Cfg::default();
+        r.model.serve = "remote".into();
         r.model.url = "https://m".into();
         r.model.key = "k".into();
         r.model.name = "Q".into();
         // The first difference is reported, so the variables before CUSTOM_MODEL
         // must match for the model to be the one named.
-        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "CUSTOM_MODEL=Old"].iter().map(|s| s.to_string()).collect();
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env).unwrap();
+        let env: Vec<String> = ["LLAMA_ENABLED=0", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "CUSTOM_MODEL=Old"].iter().map(|s| s.to_string()).collect();
+        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
         assert!(d.0.contains("CUSTOM_MODEL=Old") && d.1.contains("CUSTOM_MODEL=Q"), "{d:?}");
         // A missing variable is named without its value, and the key never shows.
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &[]).unwrap();
+        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &base, None).unwrap();
         assert_eq!(d.0, "CUSTOM_API_URL не задан");
-        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env).unwrap();
+        let env: Vec<String> = ["LLAMA_ENABLED=0", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
+        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
     }
 }

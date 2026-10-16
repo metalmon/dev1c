@@ -205,12 +205,16 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
             "memory" => ctx.cfg.server.memory = val.into(),
             "gpu" => ctx.cfg.server.gpu = matches!(val, "true" | "да" | "1"),
             "engine" => ctx.cfg.server.engine = val.into(),
+            "model.serve" => ctx.cfg.model.serve = val.into(),
             "model.url" => ctx.cfg.model.url = val.into(),
             "model.key" => ctx.cfg.model.key = val.into(),
             "model.name" => ctx.cfg.model.name = val.into(),
             "model.file" => ctx.cfg.model.file = val.into(),
+            "model.port" => ctx.cfg.model.port = val.parse().context("model.port — число")?,
+            "model.agents" => ctx.cfg.model.agents = val.parse().context("model.agents — число")?,
+            "model.fit_ctx" => ctx.cfg.model.fit_ctx = val.parse().context("model.fit_ctx — число")?,
             other => anyhow::bail!(
-                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.url, model.key, model.name, model.file"
+                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.serve, model.file, model.url, model.key, model.name, model.port, model.agents, model.fit_ctx"
             ),
         }
     }

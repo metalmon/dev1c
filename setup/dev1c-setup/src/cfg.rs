@@ -29,10 +29,18 @@ pub struct Server {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Model {
+    /// "host" — служба этой машины, "docker" — контейнер рядом, "remote" — чужой сервер.
+    pub serve: String,
     pub file: String,
     pub url: String,
     pub key: String,
     pub name: String,
+    /// Порт службы хоста (на петле). Для docker наружу идёт третий порт среды.
+    pub port: u16,
+    /// На сколько агентов делить окно. 1 — не делить (см. спеку: окно на три не делим).
+    pub agents: u16,
+    /// Нижняя граница окна для --fit-ctx; меньше — установка проваливается.
+    pub fit_ctx: u32,
 }
 
 impl Default for Server {
@@ -43,9 +51,38 @@ impl Default for Server {
 
 impl Default for Model {
     fn default() -> Self {
-        Self { file: String::new(), url: String::new(), key: String::new(), name: String::new() }
+        Self {
+            serve: "host".into(),
+            file: String::new(),
+            url: String::new(),
+            key: String::new(),
+            name: String::new(),
+            port: 1235,
+            agents: 1,
+            fit_ctx: 65536,
+        }
     }
 }
+
+/// Форма сервера модели.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Form {
+    Remote,
+    Host,
+    Docker,
+}
+
+/// Что установщик измерил у поднятого сервера; без этого контейнеру среды
+/// нечего сказать про локальную модель.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Facts {
+    pub token: String,
+    pub window: u32,
+    pub max_tokens: u32,
+}
+
+/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ).
+pub const OUTPUT_TOKENS: u32 = 8192;
 
 impl Default for Cfg {
     fn default() -> Self {
@@ -69,16 +106,62 @@ impl Cfg {
         Ok(cfg)
     }
 
+    pub fn form(&self) -> Form {
+        match self.model.serve.as_str() {
+            "remote" => Form::Remote,
+            "docker" => Form::Docker,
+            _ => Form::Host,
+        }
+    }
+
+    /// Имя модели для Zed: name, а без него — имя файла без расширения.
+    pub fn model_alias(&self) -> String {
+        if !self.model.name.is_empty() {
+            return self.model.name.clone();
+        }
+        // Path::file_stem on Linux does not split a Windows path: do it by hand.
+        let tail = self.model.file.rsplit(['/', '\\']).next().unwrap_or_default();
+        tail.rsplit_once('.').map(|(s, _)| s).unwrap_or(tail).to_string()
+    }
+
+    /// Адрес сервера модели, как его видит контейнер среды.
+    pub fn model_url(&self) -> String {
+        match self.form() {
+            Form::Remote => self.model.url.clone(),
+            Form::Host => format!("http://host.docker.internal:{}/v1", self.model.port),
+            Form::Docker => format!("http://host.docker.internal:{}/v1", self.ports()[2]),
+        }
+    }
+
     /// Ошибка называет поле и что с ним делать.
     pub fn validate(&self) -> Result<()> {
         let m = &self.model;
+        anyhow::ensure!(matches!(m.serve.as_str(), "host" | "docker" | "remote"), "[model]: serve — host, docker или remote");
+        anyhow::ensure!((1..=3).contains(&m.agents), "[model]: agents — от 1 до 3");
+        anyhow::ensure!(m.fit_ctx >= 16384, "[model]: fit_ctx — не меньше 16384");
         anyhow::ensure!(
             m.file.is_empty() || m.url.is_empty(),
-            "[model]: задано и file, и url — оставьте одно: файл в комплекте или удалённый сервер"
+            "[model]: задано и file, и url — оставьте одно: файл (serve = \"host\" или \"docker\") или удалённый сервер (serve = \"remote\")"
         );
-        if !m.url.is_empty() {
-            anyhow::ensure!(!m.name.is_empty(), "[model]: для удалённого сервера нужно name — имя модели, как сервер его называет");
-            // key may be empty: a server inside the network often has none.
+        // Is the path absolute on either OS? The kit is written on Windows and read on Linux too.
+        let absolute = |p: &str| p.starts_with('/') || p.starts_with('\\') || p.get(1..3).is_some_and(|s| s == ":\\" || s == ":/");
+        match self.form() {
+            Form::Remote => {
+                anyhow::ensure!(!m.url.is_empty(), "[model]: для serve = \"remote\" нужен url");
+                anyhow::ensure!(!m.name.is_empty(), "[model]: для удалённого сервера нужно name — имя модели, как сервер его называет");
+                // key may be empty: a server inside the network often has none.
+            }
+            Form::Host => {
+                anyhow::ensure!(m.url.is_empty(), "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url");
+                anyhow::ensure!(
+                    m.file.is_empty() || absolute(&m.file),
+                    "[model]: при serve = \"host\" file — полный путь к .gguf на этой машине; для файла в комплекте выберите serve = \"docker\""
+                );
+            }
+            Form::Docker => {
+                anyhow::ensure!(m.url.is_empty(), "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url");
+                anyhow::ensure!(m.file.is_empty() || !absolute(&m.file), "[model]: при serve = \"docker\" file — путь относительно комплекта");
+            }
         }
         anyhow::ensure!(
             self.server.port >= 1024 && self.server.port <= 65532,
@@ -94,19 +177,28 @@ impl Cfg {
         [p, p + 1, p + 2, p + 3]
     }
 
-    /// Что уходит в контейнер через -e. Локальная модель не требует ничего:
-    /// entrypoint находит файл в томе сам.
-    pub fn container_env(&self) -> Vec<(String, String)> {
+    /// Что уходит в контейнер через -e. Локальные формы говорят про модель
+    /// только после замера (`facts`): адрес, токен, имя и числа окна для Zed.
+    pub fn container_env(&self, facts: Option<&Facts>) -> Vec<(String, String)> {
         let m = &self.model;
-        if m.url.is_empty() {
-            return Vec::new();
+        let mut env = vec![("LLAMA_ENABLED".to_string(), "0".to_string())];
+        match self.form() {
+            Form::Remote => {
+                env.push(("CUSTOM_API_URL".into(), m.url.clone()));
+                if !m.key.is_empty() {
+                    env.push(("CUSTOM_API_KEY".into(), m.key.clone()));
+                }
+                env.push(("CUSTOM_MODEL".into(), m.name.clone()));
+            }
+            Form::Host | Form::Docker => {
+                let Some(f) = facts else { return env };
+                env.push(("CUSTOM_API_URL".into(), self.model_url()));
+                env.push(("CUSTOM_API_KEY".into(), f.token.clone()));
+                env.push(("CUSTOM_MODEL".into(), self.model_alias()));
+                env.push(("CUSTOM_MAX_TOKENS".into(), f.max_tokens.to_string()));
+                env.push(("CUSTOM_MAX_OUTPUT_TOKENS".into(), OUTPUT_TOKENS.to_string()));
+            }
         }
-        let mut env = vec![("CUSTOM_API_URL".to_string(), m.url.clone())];
-        if !m.key.is_empty() {
-            env.push(("CUSTOM_API_KEY".into(), m.key.clone()));
-        }
-        env.push(("CUSTOM_MODEL".into(), m.name.clone()));
-        env.push(("LLAMA_ENABLED".into(), "0".into()));
         env
     }
 
@@ -120,10 +212,14 @@ impl Cfg {
                 ("[server]", "memory") => format!("{:?}", cfg.server.memory),
                 ("[server]", "gpu") => cfg.server.gpu.to_string(),
                 ("[server]", "engine") => format!("{:?}", cfg.server.engine),
+                ("[model]", "serve") => format!("{:?}", cfg.model.serve),
                 ("[model]", "file") => format!("{:?}", cfg.model.file),
                 ("[model]", "url") => format!("{:?}", cfg.model.url),
                 ("[model]", "key") => format!("{:?}", cfg.model.key),
                 ("[model]", "name") => format!("{:?}", cfg.model.name),
+                ("[model]", "port") => cfg.model.port.to_string(),
+                ("[model]", "agents") => cfg.model.agents.to_string(),
+                ("[model]", "fit_ctx") => cfg.model.fit_ctx.to_string(),
                 _ => return None,
             })
         })
@@ -158,11 +254,12 @@ mod tests {
     #[test]
     fn remote_model_gives_custom_variables_and_no_llama() {
         let mut c = Cfg::default();
+        c.model.serve = "remote".into();
         c.model.url = "https://m.example.com/v1".into();
         c.model.key = "k".into();
         c.model.name = "Q".into();
         c.validate().unwrap();
-        let env = c.container_env();
+        let env = c.container_env(None);
         assert!(env.contains(&("CUSTOM_API_URL".into(), "https://m.example.com/v1".into())));
         assert!(env.contains(&("CUSTOM_API_KEY".into(), "k".into())));
         assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
@@ -170,11 +267,65 @@ mod tests {
     }
 
     #[test]
-    fn local_model_gives_no_variables() {
+    fn default_form_is_host_and_needs_an_absolute_path() {
         let mut c = Cfg::default();
+        assert_eq!(c.form(), Form::Host);
+        c.model.file = "model/x.gguf".into();
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("serve = \"docker\""), "{e}");
+        c.model.file = if cfg!(windows) { r"C:\models\x.gguf".into() } else { "/models/x.gguf".into() };
+        c.validate().unwrap();
+        assert_eq!(c.model_alias(), "x");
+        assert_eq!(c.model_url(), "http://host.docker.internal:1235/v1");
+    }
+
+    #[test]
+    fn docker_form_takes_the_file_from_the_kit_and_the_third_port() {
+        let mut c = Cfg::default();
+        c.model.serve = "docker".into();
         c.model.file = "model/x.gguf".into();
         c.validate().unwrap();
-        assert!(c.container_env().is_empty());
+        assert_eq!(c.form(), Form::Docker);
+        assert_eq!(c.model_url(), "http://host.docker.internal:3392/v1");
+    }
+
+    #[test]
+    fn remote_form_is_chosen_by_serve_not_guessed() {
+        let mut c = Cfg::default();
+        c.model.url = "https://m".into();
+        c.model.name = "Q".into();
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("serve"), "{e}");
+        c.model.serve = "remote".into();
+        c.validate().unwrap();
+        assert_eq!(c.model_url(), "https://m");
+    }
+
+    #[test]
+    fn local_forms_send_the_measured_numbers_and_nothing_before_them() {
+        let mut c = Cfg::default();
+        c.model.file = if cfg!(windows) { r"C:\models\x.gguf".into() } else { "/models/x.gguf".into() };
+        // До замера фактов нет: контейнеру нечего сказать про модель.
+        let env = c.container_env(None);
+        assert!(env.iter().all(|(k, _)| k != "CUSTOM_API_URL"));
+        assert!(env.contains(&("LLAMA_ENABLED".into(), "0".into())));
+        let f = Facts { token: "t".into(), window: 131072, max_tokens: 120832 };
+        let env = c.container_env(Some(&f));
+        assert!(env.contains(&("CUSTOM_API_URL".into(), "http://host.docker.internal:1235/v1".into())));
+        assert!(env.contains(&("CUSTOM_API_KEY".into(), "t".into())));
+        assert!(env.contains(&("CUSTOM_MODEL".into(), "x".into())));
+        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), "120832".into())));
+        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "8192".into())));
+    }
+
+    #[test]
+    fn agents_and_fit_ctx_have_sane_bounds() {
+        let mut c = Cfg::default();
+        c.model.agents = 0;
+        assert!(c.validate().unwrap_err().to_string().contains("agents"));
+        c.model.agents = 1;
+        c.model.fit_ctx = 1000;
+        assert!(c.validate().unwrap_err().to_string().contains("fit_ctx"));
     }
 
     #[test]
@@ -190,10 +341,11 @@ mod tests {
     fn url_without_key_is_allowed_and_sends_no_key() {
         // A server inside the network (llama-server, vLLM) has no key at all.
         let mut c = Cfg::default();
+        c.model.serve = "remote".into();
         c.model.url = "https://m".into();
         c.model.name = "Q".into();
         c.validate().unwrap();
-        let env = c.container_env();
+        let env = c.container_env(None);
         assert!(env.iter().all(|(k, _)| k != "CUSTOM_API_KEY"));
         assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
     }
@@ -203,11 +355,15 @@ mod tests {
         let mut c = Cfg::default();
         assert_eq!(Cfg::render(&c), EXAMPLE, "defaults render to the example itself");
         c.server.port = 4000;
+        c.model.serve = "remote".into();
         c.model.url = "https://m".into();
         c.model.name = "Q".into();
+        c.model.agents = 3;
         let t = Cfg::render(&c);
         assert!(t.contains("port = 4000"));
+        assert!(t.contains("serve = \"remote\""));
         assert!(t.contains("url = \"https://m\""));
+        assert!(t.contains("agents = 3"));
         // `name` exists in both sections: only [model] name changes.
         assert!(t.contains("name = \"dev1c\"") && t.contains("name = \"Q\""));
         assert!(t.contains("# Первый из четырёх портов подряд"));
@@ -218,6 +374,7 @@ mod tests {
     #[test]
     fn url_without_name_is_refused() {
         let mut c = Cfg::default();
+        c.model.serve = "remote".into();
         c.model.url = "https://m".into();
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("name"), "{e}");

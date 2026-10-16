@@ -67,11 +67,18 @@ EOF
 # (web client of the base); dev2 -> 7772/7782/7792; dev3 -> 7773/7783/7793.
 # Anything else is refused by sshd at the request, so a mistyped workstation
 # name fails on the client with a clear message instead of binding a
-# neighbour's tunnel.
+# neighbour's tunnel. Remote forwarding only: no local forwards into the
+# network, no tty, no X11, no agent — over SSH these sudo-capable RDP accounts
+# can do exactly one thing.
 for n in 1 2 3; do
     cat >> "$CONF" <<EOF
 Match User dev$n
     ForceCommand /bin/false
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    AllowTcpForwarding remote
+    PermitOpen none
     PermitListen localhost:777$n localhost:778$n localhost:779$n
 EOF
 done

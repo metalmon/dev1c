@@ -2,7 +2,6 @@
 // и зовёт команды. Логики развёртывания здесь нет намеренно.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
-const dialog = window.__TAURI__.dialog;
 
 const $ = (id) => document.getElementById(id);
 const KEYS = ['server.name', 'server.port', 'server.memory', 'server.engine', 'server.gpu', 'model.serve', 'model.file', 'model.url', 'model.name', 'model.key', 'model.port', 'model.agents', 'model.fit_ctx'];
@@ -77,7 +76,6 @@ async function refresh() {
     if (f.type === 'checkbox') f.checked = v; else f.value = v;
   }
   syncForm();
-  $('kit').textContent = `Комплект: ${machine.kit}`;
   const ops = machine.ops;
   const name = machine.cfg.server.name;
   const container = ops.find((o) => o.id === 'container');
@@ -154,8 +152,7 @@ async function save() {
 }
 
 async function browse(kind, inputId) {
-  const filters = kind === 'gguf' ? [{ name: 'Модель GGUF', extensions: ['gguf'] }] : undefined;
-  const picked = await dialog.open({ directory: kind === 'dir', multiple: false, filters, defaultPath: $(inputId).value || undefined });
+  const picked = await invoke('pick', { kind, start: $(inputId).value });
   if (!picked) return;
   $(inputId).value = picked;
   await save();

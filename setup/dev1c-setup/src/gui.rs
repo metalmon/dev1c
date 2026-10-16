@@ -156,6 +156,22 @@ async fn check(app: AppHandle, ui: State<'_, Ui>) -> Result<Vec<Check>, String> 
     .map_err(|e| e.to_string())
 }
 
+/// Системный диалог выбора файла модели или папки.
+#[tauri::command]
+async fn pick(app: AppHandle, kind: String, start: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut d = app.dialog().file();
+    if !start.is_empty() {
+        let base = std::path::Path::new(&start);
+        let dir = if base.is_dir() { Some(base) } else { base.parent() };
+        if let Some(dir) = dir.filter(|d| d.is_dir()) {
+            d = d.set_directory(dir);
+        }
+    }
+    let picked = if kind == "dir" { d.blocking_pick_folder() } else { d.add_filter("Модель GGUF", &["gguf"]).blocking_pick_file() };
+    Ok(picked.map(|p| p.to_string()))
+}
+
 #[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
@@ -175,7 +191,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             Ok(())
         })
         .manage(Ui { kit, cfg: Mutex::new(cfg) })
-        .invoke_handler(tauri::generate_handler![machine, save_cfg, run, check, quit])
+        .invoke_handler(tauri::generate_handler![machine, save_cfg, run, check, pick, quit])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("окно не открылось: {e}"))
 }

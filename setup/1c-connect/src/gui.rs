@@ -29,6 +29,8 @@ pub struct Ui {
     hidden_at: Mutex<Option<std::time::Instant>>,
     /// Пункт меню трея «Подключить»/«Отключить»: один, надпись по состоянию.
     toggle_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    /// Открыт системный диалог выбора: фокус у него, прятаться нельзя.
+    dialog_open: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Serialize, Clone)]
@@ -361,6 +363,27 @@ fn open_web(ui: State<Ui>) -> Result<(), String> {
     r.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Системный диалог выбора папки или файла. Пока он открыт, флайаут не
+/// прячется (фокус уходит к диалогу), а после выбора снова выходит вперёд.
+#[tauri::command]
+async fn pick(app: AppHandle, ui: State<'_, Ui>, kind: String, start: String) -> Result<Option<String>, String> {
+    use std::sync::atomic::Ordering;
+    use tauri_plugin_dialog::DialogExt;
+    ui.dialog_open.store(true, Ordering::Relaxed);
+    let mut d = app.dialog().file();
+    if !start.is_empty() {
+        let base = std::path::Path::new(&start);
+        let dir = if base.is_dir() { Some(base) } else { base.parent() };
+        if let Some(dir) = dir.filter(|d| d.is_dir()) {
+            d = d.set_directory(dir);
+        }
+    }
+    let picked = if kind == "dir" { d.blocking_pick_folder() } else { d.add_filter("Модель GGUF", &["gguf"]).blocking_pick_file() };
+    ui.dialog_open.store(false, Ordering::Relaxed);
+    show_window(&app);
+    Ok(picked.map(|p| p.to_string()))
+}
+
 #[tauri::command]
 fn hide(window: tauri::WebviewWindow) {
     let _ = window.hide();
@@ -442,7 +465,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             show_window(app.handle());
             Ok(())
         })
-        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None), toggle_item: Mutex::new(None) })
+        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None), toggle_item: Mutex::new(None), dialog_open: std::sync::atomic::AtomicBool::new(false) })
         // Флайаут прячется, когда теряет фокус или его закрывают: туннель
         // живёт, пока не сказано «Выход».
         .on_window_event(|w, e| match e {
@@ -457,14 +480,15 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
                 let w = w.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(250));
-                    if w.is_visible().unwrap_or(false) && !foreground_is_ours(&w) {
+                    let dialog = w.app_handle().state::<Ui>().dialog_open.load(std::sync::atomic::Ordering::Relaxed);
+                    if !dialog && w.is_visible().unwrap_or(false) && !foreground_is_ours(&w) {
                         hide_window(&w);
                     }
                 });
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, hide, quit])
+        .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, pick, hide, quit])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("окно не открылось: {e}"))
 }

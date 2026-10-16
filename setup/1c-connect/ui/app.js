@@ -2,7 +2,6 @@
 // и зовёт команды. Логики подключения здесь нет намеренно.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
-const dialog = window.__TAURI__.dialog;
 
 const $ = (id) => document.getElementById(id);
 const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump'];
@@ -39,13 +38,13 @@ function row(kind, title, detail, extra) {
   return el('li', '', [icon(kind), text]);
 }
 
-// Итог последнего действия в нижней строке; через несколько секунд — снова путь к комплекту.
+// Итог последнего действия в нижней строке; через несколько секунд гаснет.
 function status(text, kind = '') {
   const s = $('foot-status');
   s.textContent = text;
   s.className = `path ${kind}`;
   clearTimeout(statusTimer);
-  if (kind !== 'bad') statusTimer = setTimeout(() => { s.textContent = machine ? `Комплект: ${machine.kit}` : ''; s.className = 'path'; }, 6000);
+  if (kind !== 'bad') statusTimer = setTimeout(() => { s.textContent = ''; s.className = 'path'; }, 6000);
 }
 
 function currentTab() {
@@ -122,7 +121,6 @@ function setBusy(on, which) {
 async function refresh() {
   machine = await invoke('machine');
   for (const k of KEYS) $(`f-${k}`).value = machine.host[k];
-  if (!$('foot-status').textContent) status(`Комплект: ${machine.kit}`);
   showLink(machine.link);
   await refreshOps();
 }
@@ -151,7 +149,8 @@ async function save() {
 }
 
 async function browse(kind, inputId) {
-  const picked = await dialog.open({ directory: kind === 'dir', multiple: false, defaultPath: $(inputId).value || undefined });
+  // Диалог открывает Rust: на это время окно не прячется при потере фокуса.
+  const picked = await invoke('pick', { kind, start: $(inputId).value });
   if (!picked) return;
   $(inputId).value = picked;
   await save();

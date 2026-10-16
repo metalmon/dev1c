@@ -159,6 +159,9 @@ script days is obsolete; the scripts are gone.
 - A flyout that hides on blur cannot be screenshotted by a script that then
   steals focus: the driver re-shows it with `ShowWindow` and an Alt tap before
   `SetForegroundWindow` (`drive.py` in the session scratchpad, not in the repo).
+- Dependabot flags `glib` 0.18 (advisory for 0.15–0.20) in `setup/Cargo.lock`:
+  it is Tauri's Linux GTK dependency, compiled only in a Linux build with the
+  window, which CI never does. Goes away when Tauri bumps gtk-rs.
 - The window ships only in the Windows build: Linux CI builds pass
   `--no-default-features` (no webkit2gtk on the runner). A release build with
   the window is `windows_subsystem = "windows"`: commands get their console
@@ -196,7 +199,8 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    `httpport` publication mode from the spec is not implemented yet.
 2. **Windows of both programs** (stage 4) — done 2026-10-16, plan
    `docs/superpowers/plans/2026-10-16-windows-and-tray.md`; tried by hand here
-   in debug builds, release exe from CI not yet run by a person. Not tried:
+   in debug builds (CI green for both stage commits, 99c3c77 and 4f08d07); the
+   release exe from the CI kit not yet run by a person. Not tried:
    the tray menu by click, «Подключить» against a live environment from the
    window (the CLI path is the same `session::start`). Left for later: the
    tray menu does not grey out «Подключить» while connected (a second click

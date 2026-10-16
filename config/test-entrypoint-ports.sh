@@ -34,8 +34,15 @@ for u in dev1 dev2 dev3; do
     grep -q '"max_tokens": [0-9]' "$f" || fail "$u: max_tokens is not a number"
 done
 
-grep -q '^    PermitListen localhost:7771 .*localhost:7793$' /etc/ssh/sshd_config.d/dev1c.conf \
-    || fail "sshd: PermitListen for the nine workstation ports is missing"
+# One Match block per workstation, each allowed to listen on its own three
+# ports only (777N, 778N, 779N) — a typo in `workstation` must not bind a
+# neighbour's tunnel.
+for n in 1 2 3; do
+    grep -A12 "^Match User dev$n\$" /etc/ssh/sshd_config.d/dev1c.conf \
+        | grep -q "^    PermitListen localhost:777$n localhost:778$n localhost:779$n\$" \
+        || fail "sshd: PermitListen for dev$n (777$n/778$n/779$n) is missing"
+done
+grep -q '^AllowUsers dev1 dev2 dev3$' /etc/ssh/sshd_config.d/dev1c.conf || fail "sshd: AllowUsers dev1 dev2 dev3 is missing"
 # sshd must accept its own config, otherwise it never started and the whole
 # tunnel scheme is dead without a word.
 pgrep -x sshd >/dev/null || fail "sshd is not running: check /etc/ssh/sshd_config.d/dev1c.conf"

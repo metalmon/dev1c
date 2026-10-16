@@ -7,6 +7,8 @@ use common::kit::Kit;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+pub mod theme;
+
 pub const TRAY_PNG: &[u8] = include_bytes!("../../icons/tray.png");
 
 /// Значок трея со статусом: кружок в правом нижнем углу, зелёный —
@@ -54,9 +56,10 @@ impl Render for Panel {
 
 /// Временный запуск: пустое окно 380×560. Трей, события и содержимое
 /// приходят следующими задачами плана.
-pub fn launch(_kit: Kit) -> anyhow::Result<()> {
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(|cx| {
+pub fn launch(kit: Kit) -> anyhow::Result<()> {
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        theme::install(&kit, cx);
         // Окно закрыто — процесс живёт, пока «Выход» в трее (следующая задача).
         cx.set_quit_mode(QuitMode::Explicit);
         let opts = WindowOptions {

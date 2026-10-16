@@ -2,6 +2,8 @@
 //! и при провале — что делать. Отчёт пишется в файл: разработчик присылает
 //! файл, а не пересказ.
 
+use crate::cfg::Form;
+use crate::llama;
 use crate::ops::Ctx;
 use anyhow::Result;
 use common::docker;
@@ -140,11 +142,27 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     let settings = docker::ask(ctx, &["exec", &name, "cat", "/home/dev1/.config/zed/settings.json"])
         .map(|o| o.text)
         .unwrap_or_default();
-    let (want_provider, want_model) = if ctx.cfg.model.url.is_empty() {
-        ("llama.cpp", String::new())
-    } else {
-        ("custom", ctx.cfg.model.name.clone())
-    };
+    // Локальный сервер модели: карта, ответ сервера, и сходятся ли его окно,
+    // бюджет агента в Zed и слоты.
+    if ctx.cfg.form() != Form::Remote {
+        v.push(match llama::gpu(ctx) {
+            Some(g) => Check::pass("видеокарта", format!("{}, {} МиБ, занято {} МиБ, драйвер {}", g.name, g.total_mb, g.used_mb, g.driver)),
+            None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
+        });
+        let token = llama::read_token().unwrap_or_default();
+        let url = crate::ops_llama::local_url(ctx);
+        let props = llama::props(&url, &token);
+        v.push(match &props {
+            Some(p) => Check::pass("сервер модели", format!("{}: окно {} токенов, слотов {}, модель {}", ctx.cfg.model_url(), p.window, p.slots, p.model)),
+            None => Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера"),
+        });
+        if let Some(p) = props {
+            v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents));
+        }
+    }
+    // Для Zed модель всегда провайдер custom: удалённая по имени из toml,
+    // локальная — по имени файла.
+    let (want_provider, want_model) = ("custom", ctx.cfg.model_alias());
     v.push(
         if settings_ok(&settings, want_provider, &want_model) {
             Check::pass(
@@ -186,6 +204,34 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     v
 }
 
+/// Окно сервера, бюджет агента в Zed и слоты обязаны сойтись:
+/// max_tokens × agents + ответ ≤ окно.
+pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Check {
+    let out = crate::cfg::OUTPUT_TOKENS;
+    let Some(mt) = zed_max_tokens else {
+        return Check::fail("три числа", "в настройках Zed нет max_tokens", "dev1c-setup install — замер запишет числа в настройки");
+    };
+    let need = mt as u64 * agents.max(1) as u64 + out as u64;
+    if need <= window as u64 {
+        Check::pass("три числа", format!("окно {window}, max_tokens {mt} × {agents} + ответ {out} ≤ окна"))
+    } else {
+        Check::fail(
+            "три числа",
+            format!("окно {window}, а max_tokens {mt} × {agents} + ответ {out} = {need}"),
+            "dev1c-setup install — пересчитает и пересоздаст контейнер",
+        )
+    }
+}
+
+/// `max_tokens` из settings.json рабочего места; плейсхолдер или его
+/// отсутствие — None.
+fn zed_max_tokens(settings: &str) -> Option<u32> {
+    settings
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("\"max_tokens\":"))
+        .and_then(|v| v.trim().trim_end_matches(',').parse().ok())
+}
+
 /// Записать отчёт в комплект и вернуть путь.
 pub fn report(ctx: &Ctx, checks: &[Check]) -> Result<PathBuf> {
     let p = ctx.kit.path("last-check.txt");
@@ -198,6 +244,20 @@ pub fn report(ctx: &Ctx, checks: &[Check]) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_three_numbers_must_agree() {
+        let c = numbers_fact(131072, Some(120832), 1);
+        assert!(c.ok, "{c:?}");
+        let c = numbers_fact(131072, Some(130000), 1);
+        assert!(!c.ok && c.detail.contains("130000") && c.detail.contains("131072"), "{c:?}");
+        let c = numbers_fact(131072, None, 1);
+        assert!(!c.ok && c.hint.contains("install"), "{c:?}");
+        // На три агента бюджет × 3 + ответ не должен превышать окно.
+        assert!(!numbers_fact(131072, Some(60000), 3).ok);
+        assert_eq!(zed_max_tokens("  \"max_tokens\": 120832,\n  \"max_output_tokens\": 8192,"), Some(120832));
+        assert_eq!(zed_max_tokens("\"max_tokens\": CUSTOM_MAX_TOKENS_PLACEHOLDER,"), None);
+    }
 
     #[test]
     fn local_model_settings_pass_with_the_remote_placeholders_still_in_place() {

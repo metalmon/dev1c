@@ -68,9 +68,11 @@ script days is obsolete; the scripts are gone.
   `dev1c.toml` — the review finding, fixed the same day (parameter files are
   no longer in the checksums).
 
-- **Both windows** (2026-10-16, this machine, debug builds): `1c-connect.exe`
-  without arguments opens the window and puts the Zed icon with the grey status
-  dot into the tray; «Проверить» lists the seven facts and writes
+- **Both windows** (2026-10-16, this machine, debug builds; restyled the same
+  day to Windows 11 / Fluent after the first look was rejected as unprofessional):
+  `1c-connect.exe` without arguments puts the Zed icon with the grey status dot
+  into the tray and opens the flyout at the bottom-right of the work area
+  (hides on blur, left click on the icon brings it back); «Проверить» lists the seven facts and writes
   `last-check.txt`; «Подключить» with the sample address refuses in the log;
   the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
@@ -151,6 +153,12 @@ script days is obsolete; the scripts are gone.
   a tar inside the artifact, or say so in the README, before a Linux customer
   meets it.
 
+- Author CSS beats the `hidden` attribute: a `.badge { display: inline-block }`
+  rule kept a hidden badge visible. The stylesheet carries
+  `[hidden] { display: none !important }` for that reason.
+- A flyout that hides on blur cannot be screenshotted by a script that then
+  steals focus: the driver re-shows it with `ShowWindow` and an Alt tap before
+  `SetForegroundWindow` (`drive.py` in the session scratchpad, not in the repo).
 - The window ships only in the Windows build: Linux CI builds pass
   `--no-default-features` (no webkit2gtk on the runner). A release build with
   the window is `windows_subsystem = "windows"`: commands get their console

@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 const KEYS = ['server.name', 'server.port', 'server.memory', 'server.engine', 'server.gpu', 'model.url', 'model.name', 'model.key', 'model.file'];
 let machine = null;
 let busy = false;
+let unread = 0;
 
 function el(tag, text, children = [], cls = '') {
   const e = document.createElement(tag);
@@ -16,15 +17,42 @@ function el(tag, text, children = [], cls = '') {
   return e;
 }
 
+function icon(kind) {
+  const glyph = { ok: '✓', warn: '!', bad: '✕', dim: '·' }[kind] || '·';
+  return el('span', glyph, [], `ic ${kind}`);
+}
+
+function row(kind, title, detail, extra) {
+  const text = el('div', '', [el('div', title, [], 't'), el('div', detail, [], 'd')]);
+  if (extra) text.append(el('div', extra, [], 'fix'));
+  return el('li', '', [icon(kind), text]);
+}
+
+function showTab(name) {
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
+  for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== `panel-${name}`;
+  if (name === 'log') { unread = 0; badge('b-log', 0); }
+}
+
+function badge(id, n, cls = '') {
+  const b = $(id);
+  b.hidden = !n;
+  b.textContent = n;
+  b.className = `badge ${cls}`;
+}
+
 function logLine(kind, text) {
   const log = $('log');
   log.append(el('div', text, [], kind));
   log.scrollTop = log.scrollHeight;
+  if ($('panel-log').hidden && kind !== 'say') badge('b-log', ++unread, kind === 'fail' ? 'bad' : '');
 }
 
-function setBusy(on) {
+function setBusy(on, which) {
   busy = on;
-  for (const b of document.querySelectorAll('.btn[data-do]:not([data-do="quit"])')) b.disabled = on;
+  for (const b of document.querySelectorAll('.btn[data-do]:not([data-do="quit"]):not([data-do="clear-log"])')) b.disabled = on;
+  $('p-ops').classList.toggle('on', on && which === 'ops');
+  $('p-check').classList.toggle('on', on && which === 'check');
 }
 
 function get(obj, path) {
@@ -39,26 +67,37 @@ async function refresh() {
     if (f.type === 'checkbox') f.checked = v; else f.value = v;
   }
   $('kit').textContent = `Комплект: ${machine.kit}`;
-  const done = machine.ops.filter((o) => o.kind === 'done').length;
-  $('lead').textContent = !machine.file_exists
-    ? 'Параметров ещё нет: проверьте значения, сохраните и установите.'
-    : done === machine.ops.length
-      ? 'Среда установлена. Повторная установка выполняет только недостающие шаги.'
-      : `Сделано ${done} из ${machine.ops.length}. «Установить» выполняет только недостающее.`;
+  const ops = machine.ops;
+  const done = ops.filter((o) => o.kind === 'done').length;
+  const drift = ops.filter((o) => o.kind === 'drift').length;
+  const container = ops.find((o) => o.id === 'container');
+  const running = container && container.kind === 'done';
+  $('state').textContent = running
+    ? (drift ? 'Среда работает, параметры разошлись' : 'Среда работает')
+    : done ? 'Среда установлена не полностью' : 'Среда не установлена';
+  $('ind').className = 'ind' + (running ? (drift ? ' busy' : ' up') : '');
+  $('sub').textContent = running
+    ? `${machine.cfg.server.name} · ${container.label}`
+    : `сделано ${done} из ${ops.length} — «Установить» выполняет только недостающее`;
+  $('notice').hidden = machine.file_exists;
+  $('notice-text').textContent = 'Параметров ещё нет: проверьте значения на вкладке «Параметры», сохраните и установите.';
+
   const ul = $('ops');
   ul.replaceChildren();
-  for (const o of machine.ops) {
-    const mark = { done: '✓', missing: '·', drift: '!', blocked: '–' }[o.kind] || '·';
-    ul.append(el('li', '', [el('span', mark, [], 'mark'), el('span', o.title, [el('small', o.label)], 'what')], o.kind));
+  for (const o of ops) {
+    const kind = { done: 'ok', missing: 'dim', drift: 'warn', blocked: 'dim' }[o.kind] || 'dim';
+    ul.append(row(kind, o.title, o.label));
   }
+  badge('b-ops', ops.length - done, drift ? 'bad' : '');
+
   const [rdp, gitea, model, ssh] = machine.ports;
   const rows = [
-    ['Рабочие места', `mstsc /v:<адрес этой машины>:${rdp} — dev1/dev1, dev2/dev2, dev3/dev3`],
-    ['Репозитории', `http://<адрес>:${gitea}`],
-    ['Сервер модели', `http://<адрес>:${model}`],
-    ['Для 1c-connect', `адрес этой машины и порт ${ssh}`],
+    ['Рабочие места', `mstsc /v:<адрес>:${rdp}`, 'dev1 / dev1, dev2 / dev2, dev3 / dev3'],
+    ['Репозитории Gitea', `http://<адрес>:${gitea}`, 'те же логины'],
+    ['Сервер модели', `http://<адрес>:${model}`, 'OpenAI-совместимый, для Zed внутри и снаружи'],
+    ['Для 1c-connect', `<адрес>:${ssh}`, 'адрес среды в 1c-connect.toml разработчика'],
   ];
-  $('access').replaceChildren(...rows.map(([k, v]) => el('div', '', [el('span', k), el('code', v)], 'kv')));
+  $('access').replaceChildren(...rows.map(([k, v, d]) => el('li', '', [el('span', k, [], 't'), el('div', '', [el('code', v), el('div', d, [], 'd')])])));
 }
 
 async function save() {
@@ -68,10 +107,9 @@ async function save() {
     const f = $(`f-${k}`);
     cfg[s][key] = f.type === 'checkbox' ? f.checked : f.type === 'number' ? Number(f.value) : f.value;
   }
-  $('save-hint').textContent = '';
   try {
     await invoke('save_cfg', { cfg });
-    $('save-hint').textContent = 'Сохранено.';
+    $('save-hint').textContent = 'Сохранено в dev1c.toml. Применить — «Операции» → «Применить изменения».';
     await refresh();
   } catch (e) {
     $('save-hint').textContent = String(e);
@@ -79,7 +117,9 @@ async function save() {
 }
 
 async function check() {
-  setBusy(true);
+  if (busy) return;
+  showTab('check');
+  setBusy(true, 'check');
   $('check-hint').textContent = 'Проверяю…';
   try {
     const checks = await invoke('check');
@@ -87,13 +127,11 @@ async function check() {
     ul.replaceChildren();
     let failed = 0;
     for (const c of checks) {
-      const cls = c.ok ? (c.info ? 'info' : 'pass') : 'fail';
       if (!c.ok) failed++;
-      const what = el('span', c.what, [el('small', c.detail)], 'what');
-      if (c.hint) what.append(el('span', c.hint, [], 'fix'));
-      ul.append(el('li', '', [el('span', c.ok ? (c.info ? '·' : '✓') : '✗', [], 'mark'), what], cls));
+      ul.append(row(c.ok ? (c.info ? 'dim' : 'ok') : 'bad', c.what, c.detail, c.ok ? '' : c.hint));
     }
-    $('check-hint').textContent = failed ? `Провалено: ${failed}. Отчёт — last-check.txt в комплекте.` : 'Всё в порядке.';
+    badge('b-check', failed, 'bad');
+    $('check-hint').textContent = failed ? `Провалено: ${failed}. Отчёт записан в last-check.txt.` : 'Все факты в порядке. Отчёт записан в last-check.txt.';
   } catch (e) {
     $('check-hint').textContent = String(e);
   }
@@ -101,11 +139,9 @@ async function check() {
 }
 
 function run(which) {
-  if (which === 'clean-data' && $('confirm').value !== machine.cfg.server.name) {
-    logLine('fail', 'Удаление данных: введите имя контейнера в поле рядом — это стирает репозитории, проекты и настройки.');
-    return;
-  }
-  setBusy(true);
+  if (busy) return;
+  showTab('log');
+  setBusy(true, 'ops');
   logLine('say', `— ${{ install: 'установка', change: 'применяю изменения', 'clean-stack': 'снимаю контейнер', 'clean-data': 'удаляю контейнер и данные' }[which]} —`);
   invoke('run', { which });
 }
@@ -117,14 +153,28 @@ async function act(what) {
       case 'save': await save(); break;
       case 'check': await check(); break;
       case 'quit': await invoke('quit'); break;
+      case 'clear-log': $('log').replaceChildren(); break;
+      case 'ask-clean-data': $('confirm-box').hidden = false; $('confirm').value = ''; $('confirm').focus(); break;
+      case 'cancel-clean': $('confirm-box').hidden = true; break;
+      case 'clean-data':
+        if ($('confirm').value !== machine.cfg.server.name) {
+          $('ops-hint').textContent = `Введите имя контейнера (${machine.cfg.server.name}): удаление стирает репозитории, проекты и настройки.`;
+          return;
+        }
+        $('confirm-box').hidden = true;
+        run('clean-data');
+        break;
       default: run(what);
     }
   } catch (e) {
     logLine('fail', String(e));
+    showTab('log');
   }
 }
 
 document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('.tab');
+  if (t) return showTab(t.dataset.tab);
   const b = ev.target.closest('[data-do]');
   if (b) act(b.dataset.do);
 });

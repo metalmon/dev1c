@@ -6,107 +6,129 @@
 <title>1c-connect</title>
 <link rel="stylesheet" href="app.css">
 </head>
-<body>
+<body class="flyout">
+<div class="app">
 
-<main class="screen">
-  <div class="screen-head">
-    <h1>Подключение к среде разработки</h1>
-    <p class="lead" id="lead">Читаю параметры…</p>
-  </div>
-
-  <div class="cols">
-    <div class="col wide">
-      <section class="card">
-        <div class="card-title">Связь</div>
-        <div class="status"><span class="dot" id="dot"></span><b id="state">—</b></div>
-        <div class="hint" id="route"></div>
-        <div class="row-btns">
-          <button class="btn primary" data-do="connect">Подключить</button>
-          <button class="btn" data-do="disconnect">Отключить</button>
-          <button class="btn" data-do="web">Открыть веб-клиент</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-title">Параметры <span class="dim">1c-connect.toml</span></div>
-        <div class="grid2">
-          <div>
-            <label for="f-server">Адрес среды и SSH-порт</label>
-            <input id="f-server" data-key="server" placeholder="192.168.1.10:3393">
-            <div class="hint">Печатает dev1c-setup install на сервере.</div>
-          </div>
-          <div>
-            <label for="f-workstation">Рабочее место</label>
-            <select id="f-workstation" data-key="workstation">
-              <option>dev1</option><option>dev2</option><option>dev3</option>
-            </select>
-            <div class="hint">Ваш логин в среде; от него зависят порты.</div>
-          </div>
-          <div>
-            <label for="f-password">Пароль учётки dev (туннель)</label>
-            <input id="f-password" data-key="password" type="password">
-          </div>
-          <div>
-            <label for="f-base_path">База: путь или сервер\база</label>
-            <input id="f-base_path" data-key="base_path" placeholder="C:\Bases\Buh">
-          </div>
-          <div>
-            <label for="f-db_user">Пользователь базы (администратор)</label>
-            <input id="f-db_user" data-key="db_user">
-          </div>
-          <div>
-            <label for="f-db_password">Пароль пользователя базы</label>
-            <input id="f-db_password" data-key="db_password" type="password">
-          </div>
-          <div class="span2">
-            <label for="f-base_url">Адрес публикации базы на этой машине</label>
-            <input id="f-base_url" data-key="base_url" placeholder="http://localhost/Buh/hs/mcp-1c">
-            <div class="hint">Конфигуратор → Администрирование → Публикация на веб-сервере; путь до hs/mcp-1c.</div>
-          </div>
-          <div class="span2">
-            <label for="f-dump">Каталог выгрузки конфигурации (поиск по коду; пусто — без него)</label>
-            <input id="f-dump" data-key="dump">
-          </div>
-        </div>
-        <div class="row-btns">
-          <button class="btn primary" data-do="save">Сохранить</button>
-          <span class="hint" id="save-hint"></span>
-        </div>
-      </section>
+  <header class="head" data-tauri-drag-region>
+    <div class="head-row" data-tauri-drag-region>
+      <img class="logo" src="logo.png" alt="" data-tauri-drag-region>
+      <div class="head-text" data-tauri-drag-region>
+        <div class="name" data-tauri-drag-region>1c-connect</div>
+        <div class="caption" id="route" data-tauri-drag-region>машина с 1С → среда разработки</div>
+      </div>
+      <button class="icon-btn" data-do="hide" title="Скрыть (остаётся в трее)">✕</button>
     </div>
-
-    <div class="col">
-      <section class="card">
-        <div class="card-title">Расширение mcp-1c в базе</div>
-        <ul class="ops" id="ops"></ul>
-        <div class="row-btns">
-          <button class="btn" data-do="install">Установить</button>
-          <button class="btn" data-do="uninstall">Снять</button>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-title">Проверка</div>
-        <ul class="checks" id="checks"></ul>
-        <div class="row-btns">
-          <button class="btn" data-do="check">Проверить</button>
-          <span class="hint" id="check-hint"></span>
-        </div>
-      </section>
-
-      <section class="card grow">
-        <div class="card-title">Журнал</div>
-        <div class="log" id="log"></div>
-      </section>
+    <div class="status-row">
+      <span class="ind" id="ind"></span>
+      <h2 id="state">—</h2>
     </div>
-  </div>
+    <div class="actions">
+      <button class="btn accent" data-do="connect">Подключить</button>
+      <button class="btn" data-do="disconnect">Отключить</button>
+      <button class="btn" data-do="web" title="Опубликованная база в браузере">Веб-клиент</button>
+    </div>
+  </header>
+
+  <div class="main">
+  <div class="infobar warn" id="notice" hidden><span class="ic warn">!</span><div id="notice-text"></div></div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="params">Параметры</button>
+    <button class="tab" data-tab="ext">Расширение<span class="badge" id="b-ext" hidden></span></button>
+    <button class="tab" data-tab="check">Проверка<span class="badge" id="b-check" hidden></span></button>
+    <button class="tab" data-tab="log">Журнал<span class="badge" id="b-log" hidden></span></button>
+  </nav>
+
+  <!-- Параметры -->
+  <section class="panel" id="panel-params">
+    <div class="body">
+      <p class="group-title">Среда</p>
+      <div class="field">
+        <label for="f-server">Адрес среды и порт SSH</label>
+        <input id="f-server" data-key="server" placeholder="192.168.1.10:3393" spellcheck="false">
+        <div class="hint">Печатает dev1c-setup install на сервере.</div>
+      </div>
+      <div class="cols2">
+        <div class="field">
+          <label for="f-workstation">Рабочее место</label>
+          <select id="f-workstation" data-key="workstation">
+            <option>dev1</option><option>dev2</option><option>dev3</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="f-password">Пароль учётки dev</label>
+          <input id="f-password" data-key="password" type="password">
+        </div>
+      </div>
+      <p class="group-title">База 1С на этой машине</p>
+      <div class="field">
+        <label for="f-base_path">База</label>
+        <input id="f-base_path" data-key="base_path" placeholder="C:\Bases\Buh" spellcheck="false">
+        <div class="hint">Путь к файловой базе или сервер\база.</div>
+      </div>
+      <div class="cols2">
+        <div class="field">
+          <label for="f-db_user">Пользователь базы</label>
+          <input id="f-db_user" data-key="db_user">
+        </div>
+        <div class="field">
+          <label for="f-db_password">Пароль</label>
+          <input id="f-db_password" data-key="db_password" type="password">
+        </div>
+      </div>
+      <div class="field">
+        <label for="f-base_url">Адрес публикации</label>
+        <input id="f-base_url" data-key="base_url" placeholder="http://localhost/Buh/hs/mcp-1c" spellcheck="false">
+        <div class="hint">Конфигуратор → Администрирование → Публикация на веб-сервере, с путём до hs/mcp-1c.</div>
+      </div>
+      <div class="field">
+        <label for="f-dump">Каталог выгрузки конфигурации</label>
+        <input id="f-dump" data-key="dump" spellcheck="false">
+        <div class="hint">Включает поиск по коду. Пусто — без него.</div>
+      </div>
+    </div>
+    <div class="bar">
+      <button class="btn accent" data-do="save">Сохранить</button>
+      <span class="status" id="save-hint"></span>
+    </div>
+  </section>
+
+  <!-- Расширение -->
+  <section class="panel" id="panel-ext" hidden>
+    <div class="progress" id="p-ext"></div>
+    <div class="body"><ul class="list" id="ops"></ul></div>
+    <div class="bar">
+      <button class="btn accent" data-do="install">Установить</button>
+      <button class="btn" data-do="uninstall">Снять</button>
+      <span class="status">Затем — публикация в Конфигураторе.</span>
+    </div>
+  </section>
+
+  <!-- Проверка -->
+  <section class="panel" id="panel-check" hidden>
+    <div class="progress" id="p-check"></div>
+    <div class="body"><ul class="list" id="checks"><li class="empty">Семь фактов снизу вверх; отчёт — last-check.txt в комплекте.</li></ul></div>
+    <div class="bar">
+      <button class="btn accent" data-do="check">Проверить</button>
+      <span class="status" id="check-hint"></span>
+    </div>
+  </section>
+
+  <!-- Журнал -->
+  <section class="panel" id="panel-log" hidden>
+    <div class="body"><pre class="log" id="log"></pre></div>
+    <div class="bar">
+      <button class="btn" data-do="clear-log">Очистить</button>
+      <span class="status">Подробности — в setup.log в комплекте.</span>
+    </div>
+  </section>
 
   <footer class="foot">
-    <div class="hint" id="kit"></div>
-    <button class="btn" data-do="hide">Свернуть в трей</button>
+    <span class="path" id="kit" title=""></span>
     <button class="btn" data-do="quit">Выход</button>
   </footer>
-</main>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

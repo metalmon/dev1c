@@ -6,6 +6,7 @@ const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump'];
 let busy = false;
+let unread = 0;
 
 function el(tag, text, children = [], cls = '') {
   const e = document.createElement(tag);
@@ -15,34 +16,65 @@ function el(tag, text, children = [], cls = '') {
   return e;
 }
 
+// Значок состояния: ✓ / ! / ✕ / · в кружке.
+function icon(kind) {
+  const glyph = { ok: '✓', warn: '!', bad: '✕', dim: '·' }[kind] || '·';
+  return el('span', glyph, [], `ic ${kind}`);
+}
+
+function row(kind, title, detail, extra) {
+  const text = el('div', '', [el('div', title, [], 't'), el('div', detail, [], 'd')]);
+  if (extra) text.append(el('div', extra, [], 'fix'));
+  return el('li', '', [icon(kind), text]);
+}
+
+function showTab(name) {
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
+  for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== `panel-${name}`;
+  if (name === 'log') { unread = 0; badge('b-log', 0); }
+}
+
+function badge(id, n, cls = '') {
+  const b = $(id);
+  b.hidden = !n;
+  b.textContent = n;
+  b.className = `badge ${cls}`;
+}
+
 function logLine(kind, text) {
   const log = $('log');
   log.append(el('div', text, [], kind));
   log.scrollTop = log.scrollHeight;
+  if ($('panel-log').hidden && kind !== 'say') badge('b-log', ++unread, kind === 'fail' ? 'bad' : '');
 }
 
 function showLink(link) {
-  $('state').textContent = link.label;
-  $('dot').className = 'dot' + (link.up ? ' up' : link.on ? ' busy' : '');
+  $('state').textContent = link.label[0].toUpperCase() + link.label.slice(1);
+  $('ind').className = 'ind' + (link.up ? ' up' : link.on ? ' busy' : link.label.startsWith('не подключён:') ? ' bad' : '');
   document.querySelector('[data-do="connect"]').disabled = link.on;
   document.querySelector('[data-do="disconnect"]').disabled = !link.on;
 }
 
-function setBusy(on) {
+function setBusy(on, which) {
   busy = on;
   for (const b of document.querySelectorAll('[data-do="install"],[data-do="uninstall"],[data-do="check"],[data-do="save"]')) b.disabled = on;
+  $('p-ext').classList.toggle('on', on && which === 'ext');
+  $('p-check').classList.toggle('on', on && which === 'check');
 }
 
 async function refresh() {
   const m = await invoke('machine');
   for (const k of KEYS) $(`f-${k}`).value = m.host[k];
   $('kit').textContent = `Комплект: ${m.kit}`;
-  $('route').textContent = `${m.host.workstation} → ${m.host.server}; порты ${m.ports[0]} (mcp-1c) и ${m.ports[2]} (веб-клиент) · ${m.web_url}`;
-  $('lead').textContent = !m.file_exists
-    ? 'Параметров ещё нет: заполните и сохраните, затем установите расширение и подключайтесь.'
+  $('kit').title = m.kit;
+  $('route').textContent = `${m.host.workstation} → ${m.host.server} · порты ${m.ports[0]} и ${m.ports[2]} · ${m.web_url}`;
+  const notice = !m.file_exists
+    ? 'Параметров ещё нет. Заполните их на вкладке «Параметры» и сохраните, затем установите расширение.'
     : m.is_sample
-      ? 'Адрес среды всё ещё из образца: впишите свой (его печатает dev1c-setup install).'
-      : 'Туннель в контейнер и мост к mcp-1c. Окно можно свернуть — связь живёт, пока не нажать «Выход».';
+      ? 'Адрес среды всё ещё из образца. Впишите свой: его печатает dev1c-setup install на сервере.'
+      : '';
+  $('notice').hidden = !notice;
+  $('notice-text').textContent = notice;
   showLink(m.link);
   await refreshOps();
 }
@@ -51,10 +83,13 @@ async function refreshOps() {
   const ops = await invoke('states');
   const ul = $('ops');
   ul.replaceChildren();
+  let missing = 0;
   for (const o of ops) {
-    const mark = { done: '✓', missing: '·', drift: '!', blocked: '–' }[o.kind] || '·';
-    ul.append(el('li', '', [el('span', mark, [], 'mark'), el('span', o.title, [el('small', o.label)], 'what')], o.kind));
+    const kind = { done: 'ok', missing: 'dim', drift: 'warn', blocked: 'dim' }[o.kind] || 'dim';
+    if (o.kind !== 'done') missing++;
+    ul.append(row(kind, o.title, o.label));
   }
+  badge('b-ext', missing, 'bad');
 }
 
 async function save() {
@@ -63,7 +98,7 @@ async function save() {
   $('save-hint').textContent = '';
   try {
     await invoke('save_cfg', { host });
-    $('save-hint').textContent = 'Сохранено.';
+    $('save-hint').textContent = 'Сохранено в 1c-connect.toml.';
     await refresh();
   } catch (e) {
     $('save-hint').textContent = String(e);
@@ -72,7 +107,8 @@ async function save() {
 
 async function check() {
   if (busy) return;
-  setBusy(true);
+  showTab('check');
+  setBusy(true, 'check');
   $('check-hint').textContent = 'Проверяю…';
   try {
     const checks = await invoke('check');
@@ -80,13 +116,11 @@ async function check() {
     ul.replaceChildren();
     let failed = 0;
     for (const c of checks) {
-      const cls = c.ok ? (c.info ? 'info' : 'pass') : 'fail';
       if (!c.ok) failed++;
-      const what = el('span', c.what, [el('small', c.detail)], 'what');
-      if (c.hint) what.append(el('span', c.hint, [], 'fix'));
-      ul.append(el('li', '', [el('span', c.ok ? (c.info ? '·' : '✓') : '✗', [], 'mark'), what], cls));
+      ul.append(row(c.ok ? (c.info ? 'dim' : 'ok') : 'bad', c.what, c.detail, c.ok ? '' : c.hint));
     }
-    $('check-hint').textContent = failed ? `Провалено: ${failed}. Отчёт — last-check.txt в комплекте.` : 'Всё в порядке.';
+    badge('b-check', failed, 'bad');
+    $('check-hint').textContent = failed ? `Провалено: ${failed}. Отчёт записан в last-check.txt.` : 'Все факты в порядке. Отчёт записан в last-check.txt.';
   } catch (e) {
     $('check-hint').textContent = String(e);
   }
@@ -95,7 +129,7 @@ async function check() {
 
 function run(which) {
   if (busy) return;
-  setBusy(true);
+  setBusy(true, 'ext');
   logLine('say', which === 'uninstall' ? '— снимаю расширение —' : '— устанавливаю расширение —');
   invoke('run', { which });
 }
@@ -103,22 +137,26 @@ function run(which) {
 async function act(what) {
   try {
     switch (what) {
-      case 'connect': await invoke('connect'); break;
+      case 'connect': await invoke('connect'); showTab('log'); break;
       case 'disconnect': await invoke('disconnect'); break;
       case 'web': await invoke('open_web'); break;
       case 'save': await save(); break;
       case 'install': run('install'); break;
       case 'uninstall': run('uninstall'); break;
       case 'check': await check(); break;
+      case 'clear-log': $('log').replaceChildren(); break;
       case 'hide': await invoke('hide'); break;
       case 'quit': await invoke('quit'); break;
     }
   } catch (e) {
     logLine('fail', String(e));
+    showTab('log');
   }
 }
 
 document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('.tab');
+  if (t) return showTab(t.dataset.tab);
   const b = ev.target.closest('[data-do]');
   if (b) act(b.dataset.do);
 });
@@ -133,5 +171,5 @@ listen('conn:done', async (e) => {
 listen('conn:run-check', () => check());
 
 refresh();
-// «подключён N мин» — обновляется само.
+// «подключён N мин» обновляется само.
 setInterval(async () => showLink(await invoke('link')), 30000);

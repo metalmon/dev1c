@@ -7,101 +7,145 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
+<div class="app">
 
-<main class="screen">
-  <div class="screen-head">
-    <h1>Среда разработки 1С на этой машине</h1>
-    <p class="lead" id="lead">Читаю состояние…</p>
-  </div>
+  <header class="head">
+    <div class="head-row">
+      <img class="logo" src="logo.png" alt="">
+      <div class="head-text">
+        <div class="name">Среда разработки 1С</div>
+        <div class="caption">dev1c-setup · контейнер с Zed, Gitea и рабочими местами на этой машине</div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-do="check">Проверить</button>
+        <button class="btn accent" data-do="install">Установить</button>
+      </div>
+    </div>
+    <div class="status-row">
+      <span class="ind" id="ind"></span>
+      <div class="text">
+        <h2 id="state">—</h2>
+        <div class="sub" id="sub"></div>
+      </div>
+    </div>
+  </header>
 
-  <div class="cols">
-    <div class="col wide">
-      <section class="card">
-        <div class="card-title">Параметры <span class="dim">dev1c.toml</span></div>
-        <div class="grid2">
-          <div>
-            <label for="f-server.name">Имя контейнера</label>
-            <input id="f-server.name" data-key="server.name">
-          </div>
-          <div>
-            <label for="f-server.port">Первый порт (RDP; дальше Gitea, модель, SSH)</label>
+  <div class="main">
+  <div class="infobar warn" id="notice" hidden><span class="ic warn">!</span><div id="notice-text"></div></div>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="ops">Операции<span class="badge" id="b-ops" hidden></span></button>
+    <button class="tab" data-tab="params">Параметры</button>
+    <button class="tab" data-tab="access">Доступ</button>
+    <button class="tab" data-tab="check">Проверка<span class="badge" id="b-check" hidden></span></button>
+    <button class="tab" data-tab="log">Журнал<span class="badge" id="b-log" hidden></span></button>
+  </nav>
+
+  <!-- Операции -->
+  <section class="panel" id="panel-ops">
+    <div class="progress" id="p-ops"></div>
+    <div class="body"><ul class="list" id="ops"></ul></div>
+    <div class="bar">
+      <button class="btn" data-do="change">Применить изменения</button>
+      <button class="btn" data-do="clean-stack">Снять контейнер</button>
+      <button class="btn danger" data-do="ask-clean-data">Удалить данные…</button>
+      <span class="confirm" id="confirm-box" hidden>
+        <input id="confirm" placeholder="имя контейнера для подтверждения" spellcheck="false">
+        <button class="btn danger" data-do="clean-data">Удалить</button>
+        <button class="btn" data-do="cancel-clean">Отмена</button>
+      </span>
+      <span class="spacer"></span>
+      <span class="status" id="ops-hint">Повторная установка выполняет только недостающее.</span>
+    </div>
+  </section>
+
+  <!-- Параметры -->
+  <section class="panel" id="panel-params" hidden>
+    <div class="body cols2">
+      <div class="group">
+        <p class="group-title">Контейнер</p>
+        <div class="field">
+          <label for="f-server.name">Имя контейнера</label>
+          <input id="f-server.name" data-key="server.name" spellcheck="false">
+          <div class="hint">Тома данных называются по нему: имя-home, имя-gitea, имя-models.</div>
+        </div>
+        <div class="cols2">
+          <div class="field">
+            <label for="f-server.port">Первый порт</label>
             <input id="f-server.port" data-key="server.port" type="number" min="1024" max="65000">
+            <div class="hint">RDP; дальше подряд Gitea, модель, SSH.</div>
           </div>
-          <div>
-            <label for="f-server.memory">Память контейнера</label>
+          <div class="field">
+            <label for="f-server.memory">Память</label>
             <input id="f-server.memory" data-key="server.memory" placeholder="24g">
           </div>
-          <div>
-            <label for="f-server.engine">Движок контейнеров</label>
-            <select id="f-server.engine" data-key="server.engine"><option>docker</option><option>podman</option></select>
-          </div>
-          <div class="span2">
-            <label class="row"><input id="f-server.gpu" data-key="server.gpu" type="checkbox"> Отдать контейнеру GPU</label>
-          </div>
-          <div class="span2">
-            <label for="f-model.url">Удалённая модель: адрес (пусто — локальная из комплекта)</label>
-            <input id="f-model.url" data-key="model.url" placeholder="https://host/v1">
-          </div>
-          <div>
+        </div>
+        <div class="field">
+          <label for="f-server.engine">Движок контейнеров</label>
+          <select id="f-server.engine" data-key="server.engine"><option>docker</option><option>podman</option></select>
+        </div>
+        <label class="switch"><input id="f-server.gpu" data-key="server.gpu" type="checkbox"><span>Отдать контейнеру GPU</span></label>
+      </div>
+      <div class="group">
+        <p class="group-title">Модель для агентов</p>
+        <div class="field">
+          <label for="f-model.url">Адрес удалённой модели</label>
+          <input id="f-model.url" data-key="model.url" placeholder="https://host/v1" spellcheck="false">
+          <div class="hint">Пусто — локальная модель из комплекта (файл ниже).</div>
+        </div>
+        <div class="cols2">
+          <div class="field">
             <label for="f-model.name">Имя модели</label>
-            <input id="f-model.name" data-key="model.name">
+            <input id="f-model.name" data-key="model.name" spellcheck="false">
           </div>
-          <div>
-            <label for="f-model.key">Ключ (если нужен)</label>
+          <div class="field">
+            <label for="f-model.key">Ключ</label>
             <input id="f-model.key" data-key="model.key" type="password">
           </div>
-          <div class="span2">
-            <label for="f-model.file">Локальная модель: файл в комплекте</label>
-            <input id="f-model.file" data-key="model.file">
-          </div>
         </div>
-        <div class="row-btns">
-          <button class="btn primary" data-do="save">Сохранить</button>
-          <span class="hint" id="save-hint"></span>
+        <div class="field">
+          <label for="f-model.file">Файл локальной модели в комплекте</label>
+          <input id="f-model.file" data-key="model.file" spellcheck="false">
         </div>
-      </section>
-
-      <section class="card">
-        <div class="card-title">Доступ</div>
-        <div id="access" class="kv-list"></div>
-      </section>
+      </div>
     </div>
-
-    <div class="col">
-      <section class="card">
-        <div class="card-title">Операции</div>
-        <ul class="ops" id="ops"></ul>
-        <div class="row-btns">
-          <button class="btn primary" data-do="install">Установить</button>
-          <button class="btn" data-do="change">Применить изменения</button>
-          <button class="btn" data-do="check">Проверить</button>
-        </div>
-        <div class="row-btns">
-          <button class="btn" data-do="clean-stack">Снять контейнер</button>
-          <input id="confirm" placeholder="имя контейнера — для удаления данных" style="width: 240px">
-          <button class="btn" data-do="clean-data">Удалить данные</button>
-        </div>
-        <div class="hint">Снять контейнер — тома с репозиториями и настройками остаются. Удалить данные — тома тоже.</div>
-      </section>
-
-      <section class="card">
-        <div class="card-title">Проверка</div>
-        <ul class="checks" id="checks"></ul>
-        <div class="hint" id="check-hint"></div>
-      </section>
+    <div class="bar">
+      <button class="btn accent" data-do="save">Сохранить</button>
+      <span class="status" id="save-hint">Сохраняется в dev1c.toml с комментариями образца. Применить — на вкладке «Операции».</span>
     </div>
-  </div>
+  </section>
 
-  <section class="card grow" style="margin-top: 14px">
-    <div class="card-title">Журнал</div>
-    <div class="log" id="log"></div>
+  <!-- Доступ -->
+  <section class="panel" id="panel-access" hidden>
+    <div class="body"><ul class="list kv" id="access"></ul></div>
+    <div class="bar"><span class="status">Адрес этой машины в сети подставьте сами: контейнер слушает на всех интерфейсах.</span></div>
+  </section>
+
+  <!-- Проверка -->
+  <section class="panel" id="panel-check" hidden>
+    <div class="progress" id="p-check"></div>
+    <div class="body"><ul class="list" id="checks"><li class="empty">Нажмите «Проверить»: факты о контейнере, отчёт — last-check.txt в комплекте.</li></ul></div>
+    <div class="bar">
+      <button class="btn accent" data-do="check">Проверить</button>
+      <span class="status" id="check-hint"></span>
+    </div>
+  </section>
+
+  <!-- Журнал -->
+  <section class="panel" id="panel-log" hidden>
+    <div class="body"><pre class="log" id="log"></pre></div>
+    <div class="bar">
+      <button class="btn" data-do="clear-log">Очистить</button>
+      <span class="status">Команды и их вывод — в setup.log рядом с программой.</span>
+    </div>
   </section>
 
   <footer class="foot">
-    <div class="hint" id="kit"></div>
+    <span class="path" id="kit"></span>
     <button class="btn" data-do="quit">Закрыть</button>
   </footer>
-</main>
+  </div>
+</div>
 
 <script src="app.js"></script>
 </body>

@@ -26,6 +26,7 @@ pub struct Ui {
     cfg: Mutex<Cfg>,
     session: Mutex<Option<Session>>,
     link: Mutex<Link>,
+    hidden_at: Mutex<Option<std::time::Instant>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -137,11 +138,29 @@ fn refresh_tray(app: &AppHandle, l: &Link) {
     }
 }
 
+/// Окно — флайаут у трея: правый нижний угол рабочей области, над панелью
+/// задач, как у быстрых настроек Windows. Прячется, когда теряет фокус.
 fn show_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        if let (Ok(Some(m)), Ok(sz)) = (w.primary_monitor(), w.outer_size()) {
+            let wa = m.work_area();
+            let gap = (12.0 * m.scale_factor()) as i32;
+            let x = wa.position.x + wa.size.width as i32 - sz.width as i32 - gap;
+            let y = wa.position.y + wa.size.height as i32 - sz.height as i32 - gap;
+            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        }
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+/// Щелчок по значку, когда флайаут открыт: потеря фокуса уже спрятала его
+/// мгновение назад — показывать заново не надо, человек хотел закрыть.
+fn toggle_window(app: &AppHandle) {
+    let just_hidden = app.state::<Ui>().hidden_at.lock().unwrap().map(|t| t.elapsed().as_millis() < 400).unwrap_or(false);
+    if !just_hidden {
+        show_window(app);
     }
 }
 
@@ -334,7 +353,7 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .on_tray_icon_event(|tray, ev| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                show_window(tray.app_handle());
+                toggle_window(tray.app_handle());
             }
         })
         .build(app)?;
@@ -351,14 +370,24 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
                 }
             }
             tray(app)?;
+            show_window(app.handle());
             Ok(())
         })
-        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off) })
-        // Крестик прячет окно: туннель живёт, пока не сказано «Выход».
+        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None) })
+        // Флайаут прячется, когда теряет фокус или его закрывают: туннель
+        // живёт, пока не сказано «Выход».
         .on_window_event(|w, e| {
-            if let WindowEvent::CloseRequested { api, .. } = e {
-                api.prevent_close();
+            let hide = match e {
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    true
+                }
+                WindowEvent::Focused(false) => true,
+                _ => false,
+            };
+            if hide {
                 let _ = w.hide();
+                *w.app_handle().state::<Ui>().hidden_at.lock().unwrap() = Some(std::time::Instant::now());
             }
         })
         .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, hide, quit])

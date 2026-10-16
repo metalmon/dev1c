@@ -9,13 +9,15 @@
   "app": {
     "windows": [
       {
-        "title": "1c-connect — подключение к среде разработки",
-        "width": 1000,
-        "height": 780,
-        "minWidth": 900,
-        "minHeight": 640,
+        "title": "1c-connect",
+        "width": 440,
+        "height": 680,
+        "minWidth": 400,
+        "minHeight": 560,
         "resizable": true,
-        "center": true,
+        "decorations": false,
+        "skipTaskbar": true,
+        "visible": false,
         "label": "main"
       }
     ],

@@ -60,15 +60,32 @@ cp setup/1c-connect/1c-connect.example.toml "$CONNECT/1c-connect.toml"
 # never used.
 LLAMA_BUILD=b11606
 NSSM_SHA256=8288b6174231954fe0d9653522f1ccd9883c135dbd99fbc53cc2ea36cd91e401
-fetch() { # $1 = url, $2 = destination
+# Every archive is pinned by hash: a release asset can be replaced under the
+# same name, and these are executables the customer's service will run.
+sha_of() { # $1 = file name → pinned SHA-256
+    case "$1" in
+        llama-b11606-bin-win-cuda-13.4-x64.zip) echo 93ba7c16d1ad8343248d540bb4c06e7e18f7d0601e762d6952bad13628295be8 ;;
+        cudart-llama-bin-win-cuda-13.4-x64.zip) echo 738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668 ;;
+        llama-b11606-bin-ubuntu-cuda-13.4-x64.tar.gz) echo e984c5d442bf6310015440243a6f85927b320ecafccd50deaf9cc4a38daad22f ;;
+        cudart-llama-b11606-bin-ubuntu-cuda-13.4-x64.tar.gz) echo 29bde5b11418e49192e790d8fdc488715253bdf9cddd6736125907fa0f14405a ;;
+        *) echo "no pinned hash for $1" >&2; exit 1 ;;
+    esac
+}
+check_sha() { # $1 = file, $2 = expected
+    got=$(sha256sum "$1" | cut -c1-64)
+    [ "$got" = "$2" ] || { echo "$(basename "$1"): hash $got, expected $2" >&2; exit 1; }
+}
+fetch() { # $1 = url, $2 = destination; verified against the pinned hash either way
+    name=$(basename "$1")
     if [ -n "${LLAMA_CACHE:-}" ]; then
         mkdir -p "$LLAMA_CACHE"
-        cached="$LLAMA_CACHE/$(basename "$1")"
+        cached="$LLAMA_CACHE/$name"
         [ -f "$cached" ] || curl -fsSL -o "$cached" "$1"
         cp "$cached" "$2"
     else
         curl -fsSL -o "$2" "$1"
     fi
+    check_sha "$2" "$(sha_of "$name")"
 }
 llama_row() { # $1 = windows|linux
     dst="$KIT/llama/bin/$1-x64-cuda13"
@@ -77,27 +94,24 @@ llama_row() { # $1 = windows|linux
     rel="https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD"
     case "$1" in
         windows)
+            # Both zips are flat.
             fetch "$rel/llama-$LLAMA_BUILD-bin-win-cuda-13.4-x64.zip" "$tmp/l.zip"
             fetch "$rel/cudart-llama-bin-win-cuda-13.4-x64.zip" "$tmp/c.zip"
             unzip -qo "$tmp/l.zip" -d "$dst"
             unzip -qo "$tmp/c.zip" -d "$dst"
             cp setup/dev1c-setup/vendor/nssm.exe "$KIT/llama/nssm.exe"
-            got=$(sha256sum "$KIT/llama/nssm.exe" | cut -c1-64)
-            [ "$got" = "$NSSM_SHA256" ] || { echo "nssm.exe: hash $got, expected $NSSM_SHA256" >&2; exit 1; }
+            check_sha "$KIT/llama/nssm.exe" "$NSSM_SHA256"
             ;;
         linux)
+            # Both tarballs nest their files under one top-level directory.
             fetch "$rel/llama-$LLAMA_BUILD-bin-ubuntu-cuda-13.4-x64.tar.gz" "$tmp/l.tgz"
             fetch "$rel/cudart-llama-$LLAMA_BUILD-bin-ubuntu-cuda-13.4-x64.tar.gz" "$tmp/c.tgz"
-            tar -xzf "$tmp/l.tgz" -C "$dst"
-            tar -xzf "$tmp/c.tgz" -C "$dst"
+            tar -xzf "$tmp/l.tgz" -C "$dst" --strip-components=1
+            tar -xzf "$tmp/c.tgz" -C "$dst" --strip-components=1
             ;;
     esac
     rm -rf "$tmp"
-    # Some archives nest the files (build/bin): the installer expects them flat.
-    if [ -d "$dst/build/bin" ]; then
-        mv "$dst"/build/bin/* "$dst"/
-        rm -rf "$dst/build"
-    fi
+    [ -f "$dst/llama-server" ] || [ -f "$dst/llama-server.exe" ] || { echo "llama $1: llama-server not at the top of $dst" >&2; exit 1; }
     echo "llama $1: $(ls "$dst" | wc -l) files, $(du -sh "$dst" | cut -f1)"
 }
 case "$LLAMA_ROW" in

@@ -56,14 +56,39 @@ pub fn redact_text(text: &str) -> String {
         .map(|l| {
             let name = l.split('=').next().unwrap_or("");
             let upper = name.to_ascii_uppercase();
-            if l.contains('=') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
+            if l.contains('=') && !l.contains(' ') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
                 format!("{name}=…")
             } else {
-                l.to_string()
+                blot_words(l)
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Секреты внутри строки: `Basic <base64>`, `/P<пароль>`, `--db-pwd=…`,
+/// `--password <…>` — значение заменяется многоточием, остальное остаётся.
+/// `/P…` задевает и `/Path` — это строки журнала, не команды; цена принята.
+fn blot_words(line: &str) -> String {
+    let mut out = Vec::new();
+    let mut blot_next = false;
+    for w in line.split(' ') {
+        let blotted = if blot_next {
+            blot_next = false;
+            "…".to_string()
+        } else if w == "Basic" || w == "--password" || w == "--db-pwd" {
+            blot_next = true;
+            w.to_string()
+        } else if w.starts_with("/P") && w.len() > 2 {
+            "/P…".to_string()
+        } else if let Some((k, _)) = w.split_once('=').filter(|(k, _)| k.ends_with("pwd") || k.ends_with("password")) {
+            format!("{k}=…")
+        } else {
+            w.to_string()
+        };
+        out.push(blotted);
+    }
+    out.join(" ")
 }
 
 pub fn redact(args: &[&str]) -> String {
@@ -175,6 +200,16 @@ pub fn sh_in_volume_ro<X: Runner>(ctx: &X, image: &str, volume: &str, mount: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_and_platform_secrets_are_blotted_out() {
+        let t = "fatal: Authorization: Basic ZGV2MTpkZXYx rejected\n1cv8 DESIGNER /F C:\\b /N Admin /Pqwerty /DumpCfg\nvrunner --db-pwd=secret --db-user=Admin";
+        let r = redact_text(t);
+        assert!(!r.contains("ZGV2MTpkZXYx") && r.contains("Basic …"), "{r}");
+        assert!(!r.contains("qwerty") && r.contains("/P…"), "{r}");
+        assert!(!r.contains("secret") && r.contains("--db-pwd=…") && r.contains("--db-user=Admin"), "{r}");
+        assert_eq!(redact_text("API_KEY=abc"), "API_KEY=…");
+    }
 
     #[test]
     fn command_output_hides_secret_values_before_the_journal() {

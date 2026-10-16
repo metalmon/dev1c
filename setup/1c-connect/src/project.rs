@@ -1,0 +1,319 @@
+//! Git-инструменты моста: состояние, pull, push — одним набором флагов, из
+//! MinGit комплекта. Пароль не в URL, а в заголовке; вывод проходит затирку.
+//! Мьютекс проекта: второй вызов получает «занято», не очередь.
+
+use crate::cfg::Cfg;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+
+pub struct Project {
+    pub dir: PathBuf,
+    pub git: PathBuf,
+    pub branch: String,
+    pub remote: String,
+    pub login: String,
+}
+
+impl Project {
+    /// `tools` — каталог инструментов на машине (`%LOCALAPPDATA%\dev1c`).
+    pub fn from_cfg(cfg: &Cfg, tools: &Path) -> Project {
+        let dir = PathBuf::from(&cfg.host.project);
+        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+        let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
+        Project { dir, git, branch: cfg.host.workstation.clone(), remote: format!("{}/dev1c/{name}.git", cfg.gitea_url()), login: cfg.host.workstation.clone() }
+    }
+}
+
+/// Один набор флагов на все вызовы: личность, длинные пути, кириллица в
+/// именах, никакого менеджера паролей, пароль заголовком (в пилоте равен логину).
+pub fn git_flags(login: &str) -> Vec<String> {
+    let auth = base64(format!("{login}:{login}").as_bytes());
+    [
+        format!("user.name={login}"),
+        format!("user.email={login}@dev1c.local"),
+        "safe.directory=*".into(),
+        "core.longpaths=true".into(),
+        "core.quotepath=false".into(),
+        "credential.helper=".into(),
+        format!("http.extraHeader=Authorization: Basic {auth}"),
+    ]
+    .into_iter()
+    .flat_map(|f| ["-c".to_string(), f])
+    .collect()
+}
+
+fn base64(b: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::new();
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        s.push(T[(n >> 18) as usize & 63] as char);
+        s.push(T[(n >> 12) as usize & 63] as char);
+        s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    s
+}
+
+struct Out {
+    ok: bool,
+    text: String,
+}
+
+fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
+    let mut c = Command::new(&p.git);
+    c.args(git_flags(&p.login)).args(args).current_dir(&p.dir).env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let o = c.output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&o.stderr));
+    Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
+}
+
+fn must(p: &Project, args: &[&str]) -> Result<String, String> {
+    let o = git(p, args)?;
+    if o.ok {
+        Ok(o.text)
+    } else {
+        Err(format!("git {}: {}", args.join(" "), o.text))
+    }
+}
+
+fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
+    Ok(must(p, &["ls-remote", "--heads", p.remote.as_str(), branch])?.contains(&format!("refs/heads/{branch}")))
+}
+
+pub fn status(p: &Project) -> Result<String, String> {
+    let branch = must(p, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
+    let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_else(|_| "нет".into());
+    let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
+    let changed = must(p, &["status", "--porcelain"])?.lines().count();
+    let index = if p.dir.join("src").join("ConfigDumpInfo.xml").exists() { "есть" } else { "нет — первая загрузка будет полной" };
+    Ok(format!("ветка {branch}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}"))
+}
+
+pub fn pull(p: &Project) -> Result<String, String> {
+    // A fresh project has no branch on the server yet — that comes first:
+    // its tree is "dirty" too, and the useful answer is "export first".
+    if !remote_has(p, &p.branch)? {
+        return Err(format!("ветки {} в Gitea ещё нет — сначала «Выгрузить в git» (cf_decompile, затем project_push)", p.branch));
+    }
+    if !must(p, &["status", "--porcelain"])?.is_empty() {
+        return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
+    }
+    let o = git(p, &["pull", "--rebase", "origin", &p.branch])?;
+    if o.ok {
+        return Ok(format!("{}\nтеперь cf_load", o.text));
+    }
+    let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+    if !conflicted.is_empty() {
+        // Half-applied rebase is worse than none: cf_load would read a tree
+        // with conflict markers. Back out and hand the merge to a human.
+        let _ = git(p, &["rebase", "--abort"]);
+        return Err(format!(
+            "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
+            conflicted.replace('\n', ", "),
+            p.dir.display(),
+            p.branch
+        ));
+    }
+    Err(o.text)
+}
+
+pub fn push(p: &Project, message: &str) -> Result<String, String> {
+    must(p, &["add", "--", "src", ".gitattributes", ".gitignore", "autumn-properties.json"])?;
+    let staged = !must(p, &["diff", "--cached", "--name-only"])?.is_empty();
+    let has_commits = git(p, &["rev-parse", "--verify", "HEAD"])?.ok;
+    if staged || !has_commits {
+        must(p, &["commit", "-q", "--allow-empty", "-m", if message.trim().is_empty() { "выгрузка" } else { message }])?;
+    }
+    let first = !remote_has(p, "main")?;
+    if first {
+        must(p, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
+    }
+    must(p, &["push", "-q", "-u", "origin", &p.branch])?;
+    let what = if staged { "отправлено" } else { "нечего коммитить, ветка отправлена" };
+    Ok(format!("{what}: ветка {} в {}{}", p.branch, p.remote, if first { " (репозиторий создан, main тоже отправлен)" } else { "" }))
+}
+
+/// Один проект — один процесс за раз.
+pub static LOCK: Mutex<()> = Mutex::new(());
+static DOING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const DOING_NAMES: [&str; 4] = ["", "project_status", "project_pull", "project_push"];
+
+/// Что сейчас идёт под мьютексом (пусто — ничего).
+pub fn doing() -> &'static str {
+    DOING_NAMES[DOING.load(std::sync::atomic::Ordering::Relaxed)]
+}
+
+/// Вызов инструмента моста: `(текст, isError)`. Занято — ответ, не очередь.
+pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Ok(_guard) = LOCK.try_lock() else {
+        let what = doing();
+        return (format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }), true);
+    };
+    DOING.store(DOING_NAMES.iter().position(|n| *n == tool).unwrap_or(1), Relaxed);
+    let r = match tool {
+        "project_status" => status(p),
+        "project_pull" => pull(p),
+        "project_push" => push(p, args.get("message").and_then(Value::as_str).unwrap_or("")),
+        other => Err(format!("нет инструмента {other}")),
+    };
+    DOING.store(0, Relaxed);
+    match r {
+        Ok(t) => (t, false),
+        Err(t) => (t, true),
+    }
+}
+
+#[cfg(test)]
+mod tempdir {
+    pub struct Dir(std::path::PathBuf);
+    impl Dir {
+        pub fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "dev1c-proj-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Dir(p)
+        }
+        pub fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Настоящий git с машины — для тестов; в комплекте будет MinGit.
+    fn system_git() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { "git.exe" } else { "git" })
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = Command::new(system_git())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "safe.directory=*"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// Голый origin и проект с веткой dev2, как положит host.project (6B).
+    fn fixture() -> (tempdir::Dir, Project) {
+        let tmp = tempdir::Dir::new();
+        let origin = tmp.path().join("origin.git");
+        git(tmp.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        let dir = tmp.path().join("Проект с пробелом");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        git(&dir, &["init", "-q", "-b", "dev2"]);
+        git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        std::fs::write(dir.join(".gitattributes"), "* -text\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "build/\n*.log\n").unwrap();
+        std::fs::write(dir.join("autumn-properties.json"), "{}").unwrap();
+        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev2".into(), remote: origin.to_string_lossy().into(), login: "dev2".into() };
+        (tmp, p)
+    }
+
+    #[test]
+    fn flags_carry_identity_and_auth_header_without_a_password_in_the_url() {
+        let f = git_flags("dev2");
+        assert!(f.iter().any(|a| a == "user.name=dev2"));
+        assert!(f.iter().any(|a| a == "http.extraHeader=Authorization: Basic ZGV2MjpkZXYy"));
+        assert!(f.iter().any(|a| a == "credential.helper="));
+        let cfg = Cfg::default();
+        let p = Project::from_cfg(&cfg, Path::new("/tools"));
+        assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
+        assert_eq!(p.branch, "dev1");
+        assert!(p.git.to_string_lossy().contains("git"));
+    }
+
+    #[test]
+    fn first_push_creates_main_and_the_workstation_branch() {
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("Module.bsl"), "Процедура А() КонецПроцедуры").unwrap();
+        std::fs::write(p.dir.join("secret.log"), "x").unwrap();
+        let text = push(&p, "первая выгрузка").unwrap();
+        assert!(text.contains("dev2"), "{text}");
+        let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
+        assert!(heads.contains("refs/heads/main") && heads.contains("refs/heads/dev2"), "{heads}");
+        // .log is ignored, and only the four roots are added.
+        assert!(!git(&p.dir, &["ls-files"]).contains("secret.log"));
+        // Nothing new → push still succeeds and says so.
+        let again = push(&p, "пусто").unwrap();
+        assert!(again.contains("нечего"), "{again}");
+    }
+
+    #[test]
+    fn pull_refuses_a_dirty_tree_and_reports_conflicts_by_file() {
+        let (t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "a").unwrap();
+        // A second clone pushes a conflicting change to dev2.
+        let other = t.path().join("other");
+        git(t.path(), &["clone", "-q", "-b", "dev2", &p.remote, other.to_str().unwrap()]);
+        std::fs::write(other.join("src").join("M.bsl"), "2").unwrap();
+        git(&other, &["commit", "-qam", "theirs"]);
+        git(&other, &["push", "-q", "origin", "dev2"]);
+        // Dirty tree here → refused before touching git.
+        std::fs::write(p.dir.join("src").join("M.bsl"), "3").unwrap();
+        let e = pull(&p).unwrap_err();
+        assert!(e.contains("project_push"), "{e}");
+        // Commit locally without pushing: the push would be rejected (non-fast-forward).
+        let err = push(&p, "mine").unwrap_err();
+        assert!(err.contains("push"), "{err}");
+        let e = pull(&p).unwrap_err();
+        assert!(e.contains("конфликт") && e.contains("M.bsl"), "{e}");
+        // The rebase is aborted: the tree is clean and nothing is half-applied,
+        // the local commit still exists for a human to merge by hand.
+        assert!(git(&p.dir, &["status", "--porcelain"]).is_empty());
+        assert!(!p.dir.join(".git").join("rebase-merge").exists());
+        assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "mine");
+    }
+
+    #[test]
+    fn pull_before_any_push_says_export_first() {
+        let (_t, p) = fixture();
+        let e = pull(&p).unwrap_err();
+        assert!(e.contains("Выгрузить в git"), "{e}");
+    }
+
+    #[test]
+    fn status_names_branch_unpushed_and_the_dump_index() {
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "a").unwrap();
+        std::fs::write(p.dir.join("src").join("ConfigDumpInfo.xml"), "<x/>").unwrap();
+        let s = status(&p).unwrap();
+        assert!(s.contains("ветка dev2") && s.contains("ConfigDumpInfo.xml: есть") && s.contains("изменено: 1"), "{s}");
+    }
+
+    #[test]
+    fn second_caller_is_told_busy_not_queued() {
+        let (_t, p) = fixture();
+        let guard = LOCK.try_lock().unwrap();
+        let (text, err) = call(&p, "project_status", &Value::Null);
+        assert!(err && text.contains("занято"), "{text}");
+        drop(guard);
+        let (text, err) = call(&p, "project_status", &Value::Null);
+        assert!(!err, "{text}");
+    }
+}

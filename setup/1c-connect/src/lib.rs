@@ -9,6 +9,7 @@ pub mod cfg;
 pub mod gui;
 pub mod jsonrpc;
 pub mod ops_host;
+pub mod project;
 pub mod session;
 pub mod tunnel;
 pub mod verify;

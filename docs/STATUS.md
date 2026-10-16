@@ -160,7 +160,15 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    per-server `timeout` is set in the image: 300 s for `1c`, 3600 s for
    `vrunner` (Zed's default is 60 s per MCP call — too short for a dump).
    Long operations are better served as jobs (start → id → poll); decide when
-   `vrunner-mcp` arrives.
+   `vrunner-mcp` arrives. Final review (fresh agent) found and the fix pass
+   closed: reconnect gave up on a port sshd still held after a drop; local
+   faults were retried forever; the sample `1c-connect.toml` was dialled
+   forever; a dead web server behind 779N was silent. Deferred minors:
+   `find_1cv8` sorts versions as strings; the «was/became» fingerprint shows
+   two formats; `check` waits 60 s on a filtered port; `pack.sh` packs a kit
+   without `1c-connect.exe` silently; `Cfg::publication`/`render` unused by
+   any command; `mcp-1c` exit 0 and Warn events are not journaled; the
+   `httpport` publication mode from the spec is not implemented yet.
 2. **Windows of both programs** (stage 4), copied from volt-setup's `ui/`.
 3. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` now name
    the real tools; try them on real tasks once `1c-connect` is up.

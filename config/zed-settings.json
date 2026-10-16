@@ -160,8 +160,13 @@
             // margin matters because Zed counts tokens approximately — the
             // server's own error says "at least". 8192 output tokens is roughly
             // 30 KB of text, plenty for an answer.
-            "max_tokens": 55296,
-            "max_output_tokens": 8192,
+            //
+            // The numbers are filled in by the entrypoint: from the measurement
+            // dev1c-setup made of the local model server (CUSTOM_MAX_TOKENS,
+            // CUSTOM_MAX_OUTPUT_TOKENS), or the defaults above (55296, 8192)
+            // for a remote server nobody measured.
+            "max_tokens": CUSTOM_MAX_TOKENS_PLACEHOLDER,
+            "max_output_tokens": CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER,
             "supports_tools": true
           }
         ]

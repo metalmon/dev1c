@@ -26,6 +26,14 @@ if [ -f /home/dev/.config/zed/settings.json ]; then
         || fail "dev: placeholder was substituted for a non-workstation account"
 fi
 
+# The window numbers are substituted for every workstation: a placeholder
+# left behind is invalid JSON, and Zed would drop the whole provider block.
+for u in dev1 dev2 dev3; do
+    f=/home/$u/.config/zed/settings.json
+    grep -q 'CUSTOM_MAX_TOKENS_PLACEHOLDER\|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER' "$f" && fail "$u: window placeholder not substituted"
+    grep -q '"max_tokens": [0-9]' "$f" || fail "$u: max_tokens is not a number"
+done
+
 grep -q '^    PermitListen localhost:7771 .*localhost:7793$' /etc/ssh/sshd_config.d/dev1c.conf \
     || fail "sshd: PermitListen for the nine workstation ports is missing"
 # sshd must accept its own config, otherwise it never started and the whole

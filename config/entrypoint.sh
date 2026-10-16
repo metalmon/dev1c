@@ -17,6 +17,7 @@ log() { echo "[entrypoint] $*"; }
 # the model key is visible in `docker exec` but not to Zed — exactly the case of
 # "everything is passed, nothing works".
 for var in CUSTOM_API_KEY CUSTOM_API_URL CUSTOM_MODEL \
+           CUSTOM_MAX_TOKENS CUSTOM_MAX_OUTPUT_TOKENS \
            ANTHROPIC_API_KEY OPENAI_API_KEY \
            HTTP_PROXY HTTPS_PROXY NO_PROXY
 do
@@ -146,6 +147,14 @@ for cfg in /home/*/.config/zed/settings.json; do
                 "$cfg"
             ;;
     esac
+
+    # The window numbers: measured by dev1c-setup for a local model server,
+    # or the defaults for a remote one. Always substituted, so the file is
+    # valid JSON whatever the provider.
+    sed -i \
+        -e "s|CUSTOM_MAX_TOKENS_PLACEHOLDER|${CUSTOM_MAX_TOKENS:-55296}|" \
+        -e "s|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER|${CUSTOM_MAX_OUTPUT_TOKENS:-8192}|" \
+        "$cfg"
 
     if [ -n "${CUSTOM_API_URL:-}" ]; then
         name="${CUSTOM_MODEL:-model}"

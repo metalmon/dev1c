@@ -24,19 +24,13 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     toml::to_string(&c).unwrap_or_default()
 }
 
-/// Настройки Zed отражают выбранную модель. Смотрим только на заготовки,
-/// которые относятся к выбранному провайдеру: при локальной модели
-/// CUSTOM_* остаются в файле по замыслу (entrypoint их не трогает).
+/// Настройки Zed отражают выбранную модель: провайдер на месте, заготовки
+/// адреса и имени подставлены, имя — то, что задано.
 pub fn settings_ok(settings: &str, provider: &str, model_name: &str) -> bool {
-    if !settings.contains(&format!("\"provider\": \"{provider}\"")) || settings.contains("DEFAULT_MODEL_PLACEHOLDER") {
-        return false;
-    }
-    if provider == "custom" {
-        return !settings.contains("CUSTOM_API_URL_PLACEHOLDER")
-            && !settings.contains("CUSTOM_MODEL_PLACEHOLDER")
-            && settings.contains(model_name);
-    }
-    true
+    settings.contains(&format!("\"provider\": \"{provider}\""))
+        && !settings.contains("CUSTOM_API_URL_PLACEHOLDER")
+        && !settings.contains("CUSTOM_MODEL_PLACEHOLDER")
+        && settings.contains(model_name)
 }
 
 fn tcp_open(port: u16) -> bool {
@@ -260,12 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn local_model_settings_pass_with_the_remote_placeholders_still_in_place() {
-        // The entrypoint substitutes CUSTOM_* only for a remote model; with a
-        // local one those placeholders stay by design and must not fail the check.
-        let local = r#""provider": "llama.cpp", "model": "Qwen.gguf", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "CUSTOM_MODEL_PLACEHOLDER""#;
-        assert!(settings_ok(local, "llama.cpp", ""));
-        assert!(!settings_ok(r#""provider": "llama.cpp", "model": "DEFAULT_MODEL_PLACEHOLDER""#, "llama.cpp", ""));
+    fn settings_pass_only_with_the_custom_provider_filled_in() {
+        // No model configured: the placeholders stay, and that is a failed fact.
+        let unset = r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "CUSTOM_MODEL_PLACEHOLDER""#;
+        assert!(!settings_ok(unset, "custom", "x"));
         let remote = r#""provider": "custom", "api_url": "https://m", "model": "Q""#;
         assert!(settings_ok(remote, "custom", "Q"));
         assert!(!settings_ok(r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "Q""#, "custom", "Q"));

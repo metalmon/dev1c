@@ -45,7 +45,7 @@ pub struct Model {
 
 impl Default for Server {
     fn default() -> Self {
-        Self { name: "dev1c".into(), port: 3390, memory: "24g".into(), gpu: true, engine: "docker".into() }
+        Self { name: "dev1c".into(), port: 3390, memory: "24g".into(), gpu: false, engine: "docker".into() }
     }
 }
 
@@ -181,7 +181,7 @@ impl Cfg {
     /// только после замера (`facts`): адрес, токен, имя и числа окна для Zed.
     pub fn container_env(&self, facts: Option<&Facts>) -> Vec<(String, String)> {
         let m = &self.model;
-        let mut env = vec![("LLAMA_ENABLED".to_string(), "0".to_string())];
+        let mut env = Vec::new();
         match self.form() {
             Form::Remote => {
                 env.push(("CUSTOM_API_URL".into(), m.url.clone()));
@@ -272,7 +272,7 @@ mod tests {
         assert!(env.contains(&("CUSTOM_API_URL".into(), "https://m.example.com/v1".into())));
         assert!(env.contains(&("CUSTOM_API_KEY".into(), "k".into())));
         assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
-        assert!(env.contains(&("LLAMA_ENABLED".into(), "0".into())));
+        assert!(env.iter().all(|(k, _)| k != "LLAMA_ENABLED"), "внутренней лламы больше нет");
     }
 
     #[test]
@@ -316,8 +316,7 @@ mod tests {
         c.model.file = if cfg!(windows) { r"C:\models\x.gguf".into() } else { "/models/x.gguf".into() };
         // До замера фактов нет: контейнеру нечего сказать про модель.
         let env = c.container_env(None);
-        assert!(env.iter().all(|(k, _)| k != "CUSTOM_API_URL"));
-        assert!(env.contains(&("LLAMA_ENABLED".into(), "0".into())));
+        assert!(env.is_empty(), "{env:?}");
         let f = Facts { token: "t".into(), window: 131072, max_tokens: 120832 };
         let env = c.container_env(Some(&f));
         assert!(env.contains(&("CUSTOM_API_URL".into(), "http://host.docker.internal:1235/v1".into())));

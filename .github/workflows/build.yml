@@ -89,8 +89,9 @@ jobs:
     # result leaves as an artifact. Default permissions are wider than that.
     permissions:
       contents: read
-      # llama.cpp comes from a base image in the registry, built separately by
-      # llama.yml. Private by default, so the build needs to read packages.
+      # The model-server image dev1c-llama (built separately by llama.yml) is
+      # pulled from the registry and packed next to the environment image.
+      # Private by default, so the job needs to read packages.
       packages: read
 
     steps:
@@ -110,7 +111,7 @@ jobs:
           df -h /
 
       - name: Log in to the registry
-        # Needed to pull the llama.cpp base image
+        # Needed to pull the model-server image dev1c-llama
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Room to breathe
@@ -226,7 +227,11 @@ jobs:
         # minutes and saves almost nothing. pack.sh then lays out the two kits
         # from the archive and the two installer binaries.
         run: |
-          docker save oktaplus/dev1c:latest | gzip -1 > dev1c-image.tar.gz
+          # Both images in one archive: the environment and the model server
+          # for serve = "docker" (same llama.cpp build as the host row in pack.sh).
+          docker pull ghcr.io/metalmon/dev1c-llama:b11606
+          docker tag ghcr.io/metalmon/dev1c-llama:b11606 oktaplus/dev1c-llama:latest
+          docker save oktaplus/dev1c:latest oktaplus/dev1c-llama:latest | gzip -1 > dev1c-image.tar.gz
           ls -lh dev1c-image.tar.gz
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'

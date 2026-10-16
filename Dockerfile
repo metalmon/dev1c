@@ -1,7 +1,3 @@
-# The llama.cpp base image, built separately — see Dockerfile.llama. Declared
-# before any stage because that is the only place an ARG is visible to FROM.
-ARG LLAMA_IMAGE=ghcr.io/metalmon/dev1c-llama:b11606
-
 # =============================================================================
 # Theme build stage. Materia is built from source (meson + npm + sassc); there is
 # no reason to drag that toolchain into the runtime image — we take the result.
@@ -34,21 +30,14 @@ RUN set -eu; \
     done
 
 
-# llama.cpp comes from its own base image, built by .github/workflows/llama.yml
-# from Dockerfile.llama. Compiling it takes about forty minutes and it changes
-# only when llama.cpp or the target GPUs change — while this file changes several
-# times a day. Keeping the two apart is what keeps this build at six minutes.
-FROM ${LLAMA_IMAGE} AS llama-dist
-
-
 # =============================================================================
 # Runtime image
 #
 # Layer order is deliberate: packages first, then everything downloaded over the
 # network, and only afterwards our own configs, scripts and skills. Those change
 # on every iteration, and with the old order a one-line edit in a shell script
-# invalidated the cache for llama.cpp — 731 MB of CUDA re-downloaded to deliver a
-# changed comment. Rarely-changing layers go up, frequently-changing ones down.
+# invalidated the heavy download layers to deliver a changed comment.
+# Rarely-changing layers go up, frequently-changing ones down.
 # =============================================================================
 FROM debian:13-slim
 
@@ -219,30 +208,10 @@ RUN mkdir -p /opt/powershell \
     && ln -s /opt/powershell/pwsh /usr/local/bin/pwsh \
     && pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
 
-# --- llama.cpp ----------------------------------------------------------------
-# The model server, one instance for every user of the image: a model takes about
-# 16 GB of GPU memory, and there is physically nowhere to keep a copy per person.
-#
-# Taken from the build stage rather than from a release tarball. The release
-# carries kernels for every GPU generation ever shipped; built here, it carries
-# the two that this environment runs on. The model itself is NOT baked in — it is
-# mounted as a volume, being heavier than the image and updated independently.
-COPY --from=llama-dist /opt/llama /opt/llama
-RUN ln -sf /opt/llama/llama-server /usr/local/bin/llama-server \
-    && echo /opt/llama > /etc/ld.so.conf.d/llama.conf \
-    && ldconfig \
-    `# The CUDA backend must have everything it needs, or it silently falls` \
-    `# back to the CPU at run time and surfaces as "the model is slow".` \
-    `#` \
-    `# What is NOT checked here: libcublas and libcudart as shared libraries.` \
-    `# They are linked statically into the backend now — demanding them failed` \
-    `# the build for exactly the reason the change was made.` \
-    `#` \
-    `# libcuda.so.1 is excluded on purpose: that is the driver, absent in any` \
-    `# image by definition and mounted from the host at run time.` \
-    && test -f /opt/llama/libggml-cuda.so \
-    && [ -z "$(ldd /opt/llama/libggml-cuda.so | grep 'not found' | grep -v 'libcuda\.so\.1')" ] \
-    && echo "llama.cpp in place: $(du -sh /opt/llama | cut -f1)"
+# The model server is NOT in this image any more: dev1c-setup runs it as a
+# service on the host or as the sibling container dev1c-llama (Dockerfile.llama),
+# and Zed reaches it as a remote OpenAI-compatible provider. That took CUDA
+# (about 630 MB) and the only reason to hand this container a GPU out of here.
 
 # --- Gitea --------------------------------------------------------------------
 # A git server inside the image rather than a separate service. For a pilot this
@@ -321,7 +290,7 @@ COPY --from=theme-builder /usr/share/themes/Materia-dark        /usr/share/theme
 # =============================================================================
 # Our own files from here on. Everything below is cheap to rebuild, which is the
 # point of the ordering: editing a script or a skill costs seconds, not a
-# re-download of CUDA.
+# re-download of the heavy layers.
 # =============================================================================
 
 # --- Branding -----------------------------------------------------------------
@@ -499,7 +468,7 @@ RUN git lfs install --system \
 # would run out of memory before being any use.
 #
 # Each gets its own /home: own Zed with history and settings, own analyzer cache,
-# own projects. Only the services are shared — Gitea and llama.cpp, which start
+# own projects. Only the services are shared — Gitea and sshd, which start
 # with the container rather than within a user session.
 #
 # Password equals login: the environment sits behind the RDP password already,
@@ -527,9 +496,8 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
 
 # A service account for Gitea: the service is shared and must not depend on
 # whether anyone has logged in, or under which login.
-# /opt/models is the mount point of the model volume for llama.cpp.
 RUN useradd -r -m -d /var/lib/gitea -s /bin/sh gitea \
-    && mkdir -p /var/lib/gitea /opt/models \
+    && mkdir -p /var/lib/gitea \
     && chown -R gitea:gitea /var/lib/gitea
 
 # An account for the SSH tunnel: dev/dev, shared by everyone.

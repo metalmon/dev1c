@@ -97,23 +97,16 @@ done
 
 # --- Model server in Zed settings ---------------------------------------------
 # Nobody edits JSON to point the environment at a model. The settings ship with
-# placeholders; everything concrete is filled in here, from the environment and
-# from what is actually present in /opt/models.
-#
-# Two cases:
-#   CUSTOM_API_URL set  — a remote OpenAI-compatible server, used as the default
-#   not set             — the local llama.cpp, named after the model file
+# placeholders; everything concrete is filled in here from the environment:
+# CUSTOM_API_URL, CUSTOM_API_KEY and CUSTOM_MODEL name the OpenAI-compatible
+# server — a remote one, or the one dev1c-setup runs next to this container —
+# and CUSTOM_MAX_TOKENS / CUSTOM_MAX_OUTPUT_TOKENS carry the window it measured.
+# No CUSTOM_API_URL means no model: the editor works, the agent stays silent,
+# and dev1c-setup check says so.
 #
 # Only placeholders are replaced. If someone edited the settings by hand, their
 # change stays: there is no placeholder left to overwrite.
-# Searched recursively: a .gguf may be uploaded as a bare file or as the whole
-# directory a model hub produced (LM Studio, for one, nests them as
-# publisher/model/file.gguf).
-MODEL_FILE="${LLAMA_MODEL:-}"
-[ -n "$MODEL_FILE" ] || MODEL_FILE=$(find /opt/models -name '*.gguf' -type f 2>/dev/null | sort | head -1)
-MODEL_ALIAS=""
-[ -n "$MODEL_FILE" ] && MODEL_ALIAS=$(basename "$MODEL_FILE" .gguf)
-
+#
 # /etc/skel is deliberately NOT in this list. It is the reference copy the block
 # above hands out, and substituting into it burns the placeholders on first run:
 # after that the environment can never be pointed at a different provider,
@@ -161,13 +154,10 @@ for cfg in /home/*/.config/zed/settings.json; do
         sed -i \
             -e "s|CUSTOM_API_URL_PLACEHOLDER|$CUSTOM_API_URL|" \
             -e "s|CUSTOM_MODEL_PLACEHOLDER|$name|g" \
-            -e "s|\"provider\": \"llama.cpp\"|\"provider\": \"custom\"|" \
-            -e "s|DEFAULT_MODEL_PLACEHOLDER|$name|" \
             "$cfg"
-        log "model: remote server, $name ($cfg)"
-    elif [ -n "$MODEL_ALIAS" ]; then
-        sed -i -e "s|DEFAULT_MODEL_PLACEHOLDER|$MODEL_ALIAS|" "$cfg"
-        log "model: local llama.cpp, $MODEL_ALIAS ($cfg)"
+        log "model: $name at $CUSTOM_API_URL ($cfg)"
+    else
+        log "model: not configured — CUSTOM_API_URL is empty ($cfg)"
     fi
 done
 
@@ -179,58 +169,6 @@ if [ "${GITEA_ENABLED:-1}" = "1" ]; then
     su gitea -s /bin/sh -c "GITEA_HOME=/var/lib/gitea /usr/local/bin/gitea-start" &
 fi
 
-# --- llama.cpp ----------------------------------------------------------------
-# The model is mounted as a volume at /opt/models: it weighs more than the image
-# and changes independently. With no model the service simply does not start —
-# that is not an error, the environment stays usable, only the agent is absent.
-if [ "${LLAMA_ENABLED:-1}" = "1" ]; then
-    if [ -n "$MODEL_FILE" ] && [ -f "$MODEL_FILE" ]; then
-        log "llama.cpp: model $(basename "$MODEL_FILE"), context ${LLAMA_CTX:-196608}"
-        # --host 0.0.0.0 so the server is reachable from the host too, and
-        # --alias so it reports a stable model name: that same name goes into the
-        # editor's settings above.
-        #
-        # One slot, not three. llama.cpp splits --ctx-size between slots, so
-        # --parallel 3 quietly gave each workstation a third of it: 32768 became
-        # about 11000 tokens per request, while this environment's prompt — the
-        # editor's own instructions plus the skill catalog — is around 17500. The
-        # agent answered nothing, and the reason was only visible in the server's
-        # log: "request (17475 tokens) exceeds the available context size (11008
-        # tokens)". Requests from several people queue instead, which is the
-        # right trade: waiting beats not working.
-        #
-        # The KV cache is quantised to q8_0, which roughly halves its memory at
-        # no noticeable quality cost and is what makes a context this long fit on
-        # a card at all. Flash attention is required for a quantised cache.
-        /usr/local/bin/llama-server \
-            --model "$MODEL_FILE" \
-            --alias "$MODEL_ALIAS" \
-            --host 0.0.0.0 --port 8080 \
-            --n-gpu-layers "${LLAMA_GPU_LAYERS:-999}" \
-            --ctx-size "${LLAMA_CTX:-196608}" \
-            --parallel "${LLAMA_PARALLEL:-1}" \
-            --cache-type-k "${LLAMA_CACHE_TYPE:-q8_0}" \
-            --cache-type-v "${LLAMA_CACHE_TYPE:-q8_0}" \
-            --flash-attn "${LLAMA_FLASH_ATTN:-on}" \
-            --batch-size "${LLAMA_BATCH:-2048}" \
-            --ubatch-size "${LLAMA_UBATCH:-512}" \
-            `# Thought blocks are kept out of the answer itself. Note what this
-             # does NOT do: a model distilled on reasoning traces writes its
-             # thinking regardless — neither this flag nor enable_thinking in the
-             # template stops it, that behaviour lives in the weights. What it
-             # does mean is that such a model needs a generous answer budget: cut
-             # it short and the reply ends mid-thought with finish_reason
-             # "length" and an empty content, which reads as "the model said
-             # nothing".` \
-            --reasoning "${LLAMA_REASONING:-off}" \
-            --cont-batching \
-            >/var/log/llama-server.log 2>&1 &
-    else
-        log "llama.cpp: no model in /opt/models — service not started"
-        log "           upload a .gguf there, or set LLAMA_MODEL"
-    fi
-fi
-
 # --- Remote access ------------------------------------------------------------
 rm -f /var/run/xrdp/*.pid 2>/dev/null || true
 
@@ -239,5 +177,5 @@ rm -f /var/run/xrdp/*.pid 2>/dev/null || true
 
 /usr/sbin/xrdp-sesman --nodaemon &
 
-log "ready: RDP 3389, Gitea 3000, llama.cpp 8080, SSH 2022"
+log "ready: RDP 3389, Gitea 3000, SSH 2022"
 exec /usr/sbin/xrdp --nodaemon

@@ -37,7 +37,7 @@ impl Runner for Ctx {
 /// проброс дисков Windows по RDP идёт через FUSE; shm 2g — браузер и Zed.
 pub fn run_args(cfg: &Cfg, facts: Option<&crate::cfg::Facts>) -> Vec<String> {
     let s = |x: &str| x.to_string();
-    let [rdp, gitea, model, ssh] = cfg.ports();
+    let [rdp, gitea, _model, ssh] = cfg.ports();
     let mut a = vec![
         s("run"),
         s("-d"),
@@ -50,8 +50,6 @@ pub fn run_args(cfg: &Cfg, facts: Option<&crate::cfg::Facts>) -> Vec<String> {
         format!("{rdp}:3389"),
         s("-p"),
         format!("{gitea}:3000"),
-        s("-p"),
-        format!("{model}:8080"),
         s("-p"),
         format!("{ssh}:2022"),
         s("--shm-size"),
@@ -74,8 +72,6 @@ pub fn run_args(cfg: &Cfg, facts: Option<&crate::cfg::Facts>) -> Vec<String> {
         format!("{}:/home", cfg.volume("home")),
         s("-v"),
         format!("{}:/var/lib/gitea", cfg.volume("gitea")),
-        s("-v"),
-        format!("{}:/opt/models", cfg.volume("models")),
     ];
     if cfg.server.gpu {
         // Флаги GPU у движков разные.
@@ -426,7 +422,7 @@ impl Op<Ctx> for Container {
         let o = docker::run(ctx, &refs)?;
         anyhow::ensure!(
             o.ok(),
-            "контейнер не запустился: {}\nДве обычные причины: порты {}–{} заняты (dev1c-setup change port=4000) или нет видеокарты (gpu = false в dev1c.toml)",
+            "контейнер не запустился: {}\nДве обычные причины: порты {}–{} заняты (dev1c-setup change port=4000) или gpu = true без видеокарты (dev1c.toml)",
             o.tail(3).join(" "),
             ctx.cfg.ports()[0],
             ctx.cfg.ports()[3]
@@ -508,17 +504,19 @@ mod tests {
     fn run_args_carry_ports_volumes_and_environment() {
         let mut c = Cfg::default();
         c.server.port = 4000;
+        c.server.gpu = true;
         c.model.serve = "remote".into();
         c.model.url = "https://m".into();
         c.model.key = "k".into();
         c.model.name = "Q".into();
         let a = run_args(&c, None).join(" ");
         assert!(a.starts_with("run -d --name dev1c --restart unless-stopped --init"));
-        assert!(a.contains("-p 4000:3389 -p 4001:3000 -p 4002:8080 -p 4003:2022"));
-        assert!(a.contains("-v dev1c-home:/home -v dev1c-gitea:/var/lib/gitea -v dev1c-models:/opt/models"));
+        // The third port and the models volume belong to the model server now.
+        assert!(a.contains("-p 4000:3389 -p 4001:3000 -p 4003:2022") && !a.contains("8080"), "{a}");
+        assert!(a.contains("-v dev1c-home:/home -v dev1c-gitea:/var/lib/gitea") && !a.contains("/opt/models"));
         assert!(a.contains("--gpus all"));
         assert!(a.contains("-e CUSTOM_API_URL=https://m"));
-        assert!(a.contains("-e LLAMA_ENABLED=0"));
+        assert!(!a.contains("LLAMA_ENABLED"));
         assert!(a.ends_with("oktaplus/dev1c:latest"));
     }
 
@@ -571,7 +569,7 @@ mod tests {
     #[test]
     fn drift_names_what_differs() {
         let c = Cfg::default();
-        let base: Vec<String> = vec!["LLAMA_ENABLED=0".into()];
+        let base: Vec<String> = vec![];
         assert_eq!(drift_of(&c, "oktaplus/dev1c:latest", "3390", &base, None), None);
         let d = drift_of(&c, "oktaplus/dev1c:old", "3390", &base, None).unwrap();
         assert!(d.0.contains("old") && d.1.contains("latest"));
@@ -584,13 +582,13 @@ mod tests {
         r.model.name = "Q".into();
         // The first difference is reported, so the variables before CUSTOM_MODEL
         // must match for the model to be the one named.
-        let env: Vec<String> = ["LLAMA_ENABLED=0", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "CUSTOM_MODEL=Old"].iter().map(|s| s.to_string()).collect();
+        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "CUSTOM_MODEL=Old"].iter().map(|s| s.to_string()).collect();
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
         assert!(d.0.contains("CUSTOM_MODEL=Old") && d.1.contains("CUSTOM_MODEL=Q"), "{d:?}");
         // A missing variable is named without its value, and the key never shows.
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &base, None).unwrap();
         assert_eq!(d.0, "CUSTOM_API_URL не задан");
-        let env: Vec<String> = ["LLAMA_ENABLED=0", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
+        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
     }

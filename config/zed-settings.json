@@ -115,26 +115,18 @@
   },
 
   // --- Models -----------------------------------------------------------
-  // Two providers, and the usual case needs no configuration at all.
-  //
-  // llama.cpp — the model server inside this same container. The address is
-  // localhost, not host.docker.internal: the server runs here, next to the
-  // editor. (It used to point at the host, from the days when llama.cpp lived
-  // outside — a leftover that quietly broke the provider.)
-  //
-  // custom — any OpenAI-compatible server, for a remote model. Address, key and
-  // model name arrive as CUSTOM_API_URL, CUSTOM_API_KEY and CUSTOM_MODEL; the
-  // entrypoint substitutes them for the placeholders below. Nothing of ours is
-  // in the repository, and nobody edits JSON to point the environment at a
-  // different server.
+  // One provider: custom — any OpenAI-compatible server. Either the model
+  // server dev1c-setup runs next to this container (as a service on the host
+  // or as the sibling container dev1c-llama, reached as host.docker.internal)
+  // or a remote one. Address, key and model name arrive as CUSTOM_API_URL,
+  // CUSTOM_API_KEY and CUSTOM_MODEL; the entrypoint substitutes them for the
+  // placeholders below. Nothing of ours is in the repository, and nobody
+  // edits JSON to point the environment at a different server.
   //
   // The provider name dictates the key variable: Zed looks for
   // <PROVIDER>_API_KEY, so "custom" means CUSTOM_API_KEY. That is why it is
   // named this way and not after us.
   "language_models": {
-    "llama.cpp": {
-      "api_url": "http://localhost:8080"
-    },
     "openai_compatible": {
       "custom": {
         // Full path up to, but excluding, /chat/completions — Zed appends that.
@@ -183,13 +175,12 @@
     // перекидывать его ради чата каждый раз неудобно. По умолчанию Zed ставит
     // агента слева, конфликтуя с проводником.
     "dock": "right",
-    // Default model: the local llama.cpp, named after the file in /opt/models.
-    // The entrypoint fills the name in, and switches the whole block to the
-    // custom provider when CUSTOM_API_URL is set — so the environment uses
-    // whichever model is actually available, with no editing by hand.
+    // Default model: the one the custom provider names; the entrypoint fills
+    // the name in from CUSTOM_MODEL, so the environment uses whichever model
+    // dev1c-setup configured, with no editing by hand.
     "default_model": {
-      "provider": "llama.cpp",
-      "model": "DEFAULT_MODEL_PLACEHOLDER"
+      "provider": "custom",
+      "model": "CUSTOM_MODEL_PLACEHOLDER"
     }
   },
 

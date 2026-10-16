@@ -145,12 +145,12 @@ fn run() -> Result<()> {
             }
             println!();
             check(&ctx)?;
-            let [rdp, gitea, model, ssh] = ctx.cfg.ports();
+            let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
             println!();
             println!("Среда запущена:");
             println!("  Рабочие места   mstsc /v:<адрес этой машины>:{rdp}  —  dev1/dev1, dev2/dev2, dev3/dev3");
             println!("  Репозитории     http://<адрес>:{gitea}");
-            println!("  Сервер модели   http://<адрес>:{model}");
+            println!("  Сервер модели   {} ({})", ctx.cfg.model_url(), ctx.cfg.model_alias());
             println!("  Для 1c-connect  адрес этой машины и порт {ssh}");
         }
         Cmd::Change { values } => {

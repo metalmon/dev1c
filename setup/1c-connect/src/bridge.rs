@@ -165,7 +165,9 @@ where
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
     let (mut sr, mut sw) = tokio::io::split(stream);
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // Bounded: a multi-megabyte report waits for the tunnel instead of piling
+    // up in memory while it stalls.
+    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
     // Ответы ребёнка на tools/list, которых ещё ждут; ключ — id как JSON.
     let pending: Pending = Arc::default();
     let running: Running = Arc::default();
@@ -216,11 +218,13 @@ where
                     Ok(n) => n,
                 };
                 for fr in f.push(&buf[..n]) {
-                    let _ = out.send(rewrite_reply(fr, &rules.allowed, &pending));
+                    if out.send(rewrite_reply(fr, &rules.allowed, &pending)).await.is_err() {
+                        return;
+                    }
                 }
             }
             if let Some(fr) = f.finish() {
-                let _ = out.send(rewrite_reply(fr, &rules.allowed, &pending));
+                let _ = out.send(rewrite_reply(fr, &rules.allowed, &pending)).await;
             }
         })
     };
@@ -249,8 +253,9 @@ where
     };
     let _ = from_child.await;
     // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает всё равно.
-    for (_, id) in pending.lock().unwrap().drain() {
-        let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools()));
+    let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, id)| id).collect();
+    for id in unanswered {
+        let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
     let ours: Vec<_> = running.lock().unwrap().drain().map(|(_, h)| h).collect();
@@ -268,21 +273,27 @@ where
 async fn handle_request(
     fr: Frame,
     rules: &Arc<Rules>,
-    out: &mpsc::UnboundedSender<Vec<u8>>,
+    out: &mpsc::Sender<Vec<u8>>,
     pending: &Pending,
     running: &Running,
     stdin: &mut tokio::process::ChildStdin,
 ) -> Result<(), ()> {
-    // Oversized or unparsable input from the agent is dropped, never passed
-    // on: a line the bridge cannot read is a line the whitelist cannot check.
+    // Oversized or unparsable input from the agent is never passed on: a line
+    // the bridge cannot read is a line the whitelist cannot check. The agent
+    // hears why (a parse error with id null) instead of silence.
     let line = match fr {
-        Frame::Raw(_) => return Ok(()),
+        Frame::Raw(b) => {
+            if b.ends_with(b"\n") {
+                let _ = out.send(jsonrpc::error_reply(&Value::Null, -32700, "мост 1c-connect: строка длиннее 8 МиБ отброшена")).await;
+            }
+            return Ok(());
+        }
         Frame::Line(l) => l,
     };
     match jsonrpc::route_request(&line, &rules.allowed) {
         Route::Drop => Ok(()),
-        Route::Reject { id, why } => {
-            let _ = out.send(jsonrpc::error_reply(&id, -32601, &format!("мост 1c-connect: {why}")));
+        Route::Reject { id, code, why } => {
+            let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
             Ok(())
         }
         Route::ListRequest { id, line } => {
@@ -290,17 +301,19 @@ async fn handle_request(
             forward(stdin, &line).await
         }
         Route::Disabled { id, tool } => {
-            let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true));
+            let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true)).await;
             Ok(())
         }
         Route::PlatformCall { id, tool, line } => {
             let n = (rules.configurator_running)();
             if n > 0 {
-                let _ = out.send(jsonrpc::text_reply(
-                    &id,
-                    &format!("{tool}: на машине запущен 1cv8.exe ({n}) — закройте Конфигуратор и клиентов 1С, затем повторите"),
-                    true,
-                ));
+                let _ = out
+                    .send(jsonrpc::text_reply(
+                        &id,
+                        &format!("{tool}: на машине запущен 1cv8.exe ({n}) — закройте Конфигуратор и клиентов 1С, затем повторите"),
+                        true,
+                    ))
+                    .await;
                 Ok(())
             } else {
                 forward(stdin, &line).await
@@ -313,7 +326,7 @@ async fn handle_request(
                 let (text, is_error) = tokio::task::spawn_blocking(move || crate::project::call(&project, &tool, &args))
                     .await
                     .unwrap_or_else(|e| (format!("сорвалось: {e}"), true));
-                let _ = out.send(jsonrpc::text_reply(&id, &text, is_error));
+                let _ = out.send(jsonrpc::text_reply(&id, &text, is_error)).await;
             });
             // Kept for the life of the connection, finished or not: a cancel
             // for an id the bridge answered must never reach the child.
@@ -555,6 +568,16 @@ mod tests {
         let csv = "\"1cv8c.exe\",\"1234\",\"Console\",\"1\",\"100 K\"\n\"1cv8.exe\",\"77\",\"Console\",\"1\",\"1 K\"\n\"notepad.exe\",\"1\",\"Console\",\"1\",\"1 K\"\n";
         assert_eq!(count_platform(csv), 2);
         assert_eq!(count_platform("INFO: No tasks are running which match the specified criteria.\n"), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_and_junk_agent_lines_get_an_error_reply() {
+        let big = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"pad\":\"{}\"}}", "x".repeat(crate::jsonrpc::LINE_LIMIT + 1));
+        let (replies, raw, _) = talk(("BRIDGE_SCRIPT", "1"), rules(&[], 0), &[&big, "junk"]).await;
+        assert!(!raw.contains("child ran"), "{}", &raw[..raw.len().min(200)]);
+        let errors: Vec<_> = replies.iter().filter(|r| r["error"]["code"] == -32700).collect();
+        assert_eq!(errors.len(), 2, "{replies:?}");
+        assert!(errors.iter().all(|r| r["id"].is_null()));
     }
 
     #[tokio::test]

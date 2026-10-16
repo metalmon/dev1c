@@ -254,6 +254,10 @@ script days is obsolete; the scripts are gone.
   take the decision out of the lock before awaiting.
 - `PathBuf::file_name` on Linux sees `C:\proj\Buh` as one segment: derive
   names from strings by both separators when the config may come from Windows.
+- A line-framer with a size limit has two overflow paths: the limit crossed
+  with no newline in sight, and the newline arriving in the same read as the
+  overflow. The first was tested, the second emitted an 8 MiB `Line` — found
+  by the bridge test that expected a parse error for an oversized request.
 
 ## Next
 
@@ -324,10 +328,19 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    git tools `project_status`/`project_pull`/`project_push` on a project
    mutex, Job Object, `host.tools` into `%LOCALAPPDATA%\dev1c`, the kit rows
    (OneScript, vanessa-runner + add by manifest, MinGit), tunnel under the
-   workstation's account. Deferred from its reviews: abort of a bridge task
-   does not interrupt the running git call (the mutex frees when it ends);
-   `/P…` redaction also blots `/Path…` in journal lines; JSON-RPC batch
-   arrays from an agent are dropped silently. **6B next:** `host.project`
+   workstation's account. The review's minors are closed too: junk and
+   oversized agent lines get a JSON-RPC parse error (id null), a panic inside
+   a git tool no longer jams the project mutex, `origin` is pointed at the
+   configured remote before every git call, the bridge's output channel is
+   bounded. Still accepted: abort of a bridge task does not interrupt the
+   running git call (the mutex frees when it ends); `/P…` redaction also
+   blots `/Path…` in journal lines. Dependabot's `glib` 0.18.5 alert
+   (RUSTSEC-2024-0429, `VariantStrIter`, Linux target only) stays: every
+   layer of Tauri 2.12.4 — tray-icon, muda, wry, webkit2gtk — pins `gtk
+   ^0.18`, and the fixed glib 0.22 is only reachable through gtk 0.19, which
+   none of them has adopted (not even `tauri 3.0.0-alpha.5`); the iterator
+   is not used here and the Linux build has no window. Revisit when
+   `webkit2gtk-rs` releases against gtk 0.19. **6B next:** `host.project`
    (git init, remote, `.gitattributes`, `autumn-properties.json`),
    `export`/`import`, the «Проект» tab and project fields in the window,
    the remaining `check` facts (vrunner-mcp answers, project, Gitea,

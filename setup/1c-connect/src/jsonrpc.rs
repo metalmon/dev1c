@@ -45,6 +45,13 @@ impl Framer {
                 continue;
             }
             match rest.iter().position(|&b| b == b'\n') {
+                Some(i) if self.buf.len() + i > LINE_LIMIT => {
+                    // The line overflowed and its end is already here: raw
+                    // through the newline, never a Line.
+                    self.buf.extend_from_slice(&rest[..=i]);
+                    out.push(Frame::Raw(std::mem::take(&mut self.buf)));
+                    rest = &rest[i + 1..];
+                }
                 Some(i) => {
                     self.buf.extend_from_slice(&rest[..i]);
                     if self.buf.last() == Some(&b'\r') {
@@ -89,8 +96,9 @@ pub const PLATFORM_TOOLS: [&str; 2] = ["cf_load", "infobase_update"];
 pub enum Route {
     /// Не JSON-объект или уведомление с неизвестным методом — от агента такое не пересылается.
     Drop,
-    /// Запрос, который мост не пропускает: ответ — ошибка JSON-RPC с этим текстом.
-    Reject { id: Value, why: String },
+    /// Запрос, который мост не пропускает: ответ — ошибка JSON-RPC с этим
+    /// кодом и текстом (`id` null — разобрать не удалось).
+    Reject { id: Value, code: i64, why: String },
     Forward(Vec<u8>),
     ListRequest { id: Value, line: Vec<u8> },
     OurCall { id: Value, tool: String, args: Value },
@@ -151,28 +159,32 @@ fn key_ci<'a>(o: &'a serde_json::Map<String, Value>, key: &str) -> Result<Option
 
 /// Что делать со строкой от агента.
 pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
-    let Some(v) = parse(line) else { return Route::Drop };
-    let Some(obj) = v.as_object() else { return Route::Drop };
-    let Ok(id) = key_ci(obj, "id") else { return Route::Drop };
+    const PARSE: i64 = -32700;
+    const METHOD: i64 = -32601;
+    const PARAMS: i64 = -32602;
+    let Some(v) = parse(line) else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
+    let Some(obj) = v.as_object() else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
+    let Ok(id) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
     let id = id.cloned().unwrap_or(Value::Null);
-    let reject = |why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), why: why.to_string() } };
+    // Уведомление (без id) ответа не ждёт: неизвестное — молча мимо.
+    let reject = |code: i64, why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), code, why: why.to_string() } };
     let method = match key_ci(obj, "method") {
         Ok(Some(Value::String(m))) => m.to_ascii_lowercase(),
-        _ => return reject("нет метода"),
+        _ => return reject(METHOD, "нет метода"),
     };
-    let Some(method) = METHODS.iter().find(|m| m.eq_ignore_ascii_case(&method)) else { return reject("нет такого метода") };
+    let Some(method) = METHODS.iter().find(|m| m.eq_ignore_ascii_case(&method)) else { return reject(METHOD, "нет такого метода") };
     let params = match key_ci(obj, "params") {
         Ok(p) => p.cloned().unwrap_or(json!({})),
-        Err(()) => return reject("params задан дважды"),
+        Err(()) => return reject(PARAMS, "params задан дважды"),
     };
     // Пересобранное сообщение: только проверенные поля, канонические имена.
     let rebuilt = |params: Value| canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
     match *method {
         "tools/list" => Route::ListRequest { id: id.clone(), line: rebuilt(params) },
         "tools/call" => {
-            let Some(p) = params.as_object() else { return reject("params — не объект") };
-            let (Ok(name), Ok(args)) = (key_ci(p, "name"), key_ci(p, "arguments")) else { return reject("name или arguments заданы дважды") };
-            let Some(tool) = name.and_then(Value::as_str) else { return reject("tools/call без name") };
+            let Some(p) = params.as_object() else { return reject(PARAMS, "params — не объект") };
+            let (Ok(name), Ok(args)) = (key_ci(p, "name"), key_ci(p, "arguments")) else { return reject(PARAMS, "name или arguments заданы дважды") };
+            let Some(tool) = name.and_then(Value::as_str) else { return reject(PARAMS, "tools/call без name") };
             let tool = tool.to_string();
             let args = args.cloned().unwrap_or(json!({}));
             if OUR_TOOLS.contains(&tool.as_str()) {
@@ -311,6 +323,18 @@ mod tests {
         assert_eq!(lines(f.push(b"{\"ok\":1}\n")), vec!["L:{\"ok\":1}"]);
     }
 
+    #[test]
+    fn overflow_whose_newline_arrives_in_the_same_read_is_still_raw() {
+        // 8 MiB of a line, then one read holding its tail, the newline and
+        // the next line: the long line must come out as Raw, never as Line.
+        let mut f = Framer::new();
+        assert!(f.push(&vec![b'x'; LINE_LIMIT - 10]).is_empty());
+        let out = lines(f.push(b"xxxxxxxxxxxxxxxxxxxx\n{\"ok\":1}\n"));
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[0].starts_with("R:") && out[0].ends_with('\n'), "{}", &out[0][..8]);
+        assert_eq!(out[1], "L:{\"ok\":1}");
+    }
+
     fn allowed() -> Vec<String> {
         ["cf_load", "task_status"].iter().map(|s| s.to_string()).collect()
     }
@@ -360,9 +384,11 @@ mod tests {
     }
 
     #[test]
-    fn other_methods_are_forwarded_and_junk_is_dropped() {
-        assert!(matches!(route_request(b"warning: something", &allowed()), Route::Drop));
-        assert!(matches!(route_request(b"[1,2]", &allowed()), Route::Drop));
+    fn other_methods_are_forwarded_and_junk_is_answered_with_a_parse_error() {
+        // Junk from the agent gets a JSON-RPC parse error (id null), not
+        // silence: a client that sent something sees why nothing happened.
+        assert!(matches!(route_request(b"warning: something", &allowed()), Route::Reject { id: Value::Null, .. }));
+        assert!(matches!(route_request(b"[1,2]", &allowed()), Route::Reject { id: Value::Null, .. }));
         assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#, &allowed()), Route::Forward(_)));
         assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &allowed()), Route::Reject { .. }));
     }
@@ -473,3 +499,4 @@ mod tests {
         assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 3);
     }
 }
+

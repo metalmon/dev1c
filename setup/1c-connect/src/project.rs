@@ -89,12 +89,23 @@ fn must(p: &Project, args: &[&str]) -> Result<String, String> {
 
 /// Есть ли ветка на сервере. Репозитория ещё нет (push-to-create: его
 /// создаст первый push) — тоже «нет ветки», а не ошибка.
+/// `origin` всегда равен настроенному адресу: каталог мог быть git-инициализирован
+/// руками или указывать на старую среду, а status/pull/push говорят про `origin`.
+fn ensure_origin(p: &Project) -> Result<(), String> {
+    match git(p, &["remote", "get-url", "origin"])? {
+        Out { ok: true, text } if text.trim() == p.remote => Ok(()),
+        Out { ok: true, .. } => must(p, &["remote", "set-url", "origin", p.remote.as_str()]).map(|_| ()),
+        Out { ok: false, .. } => must(p, &["remote", "add", "origin", p.remote.as_str()]).map(|_| ()),
+    }
+}
+
 fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
     let o = git(p, &["ls-remote", "--heads", p.remote.as_str(), branch])?;
     Ok(o.ok && o.text.contains(&format!("refs/heads/{branch}")))
 }
 
 pub fn status(p: &Project) -> Result<String, String> {
+    ensure_origin(p)?;
     let branch = must(p, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
     let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_else(|_| "нет".into());
     let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
@@ -104,6 +115,7 @@ pub fn status(p: &Project) -> Result<String, String> {
 }
 
 pub fn pull(p: &Project) -> Result<String, String> {
+    ensure_origin(p)?;
     // A fresh project has no branch on the server yet — that comes first:
     // its tree is "dirty" too, and the useful answer is "export first".
     if !remote_has(p, &p.branch)? {
@@ -132,6 +144,7 @@ pub fn pull(p: &Project) -> Result<String, String> {
 }
 
 pub fn push(p: &Project, message: &str) -> Result<String, String> {
+    ensure_origin(p)?;
     // Only the roots that exist: a pathspec that matches nothing fails the
     // whole add, and before host.project (6B) some of them are not there yet.
     let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json"].into_iter().filter(|r| p.dir.join(r).exists()).collect();
@@ -168,9 +181,15 @@ pub fn doing() -> &'static str {
 /// Вызов инструмента моста: `(текст, isError)`. Занято — ответ, не очередь.
 pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
     use std::sync::atomic::Ordering::Relaxed;
-    let Ok(_guard) = LOCK.try_lock() else {
-        let what = doing();
-        return (format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }), true);
+    // A panic inside a tool poisons the mutex; the project is not broken by
+    // that, so a poisoned lock is simply taken.
+    let _guard = match LOCK.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let what = doing();
+            return (format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }), true);
+        }
     };
     DOING.store(DOING_NAMES.iter().position(|n| *n == tool).unwrap_or(1), Relaxed);
     let r = match tool {
@@ -343,9 +362,41 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_inside_a_tool_does_not_jam_the_project_forever() {
+        let (_t, p) = fixture();
+        let _ = std::thread::spawn(|| {
+            let _g = LOCK.lock().unwrap();
+            panic!("tool blew up while holding the lock");
+        })
+        .join();
+        let (text, err) = call(&p, "project_status", &Value::Null);
+        assert!(!err, "{text}");
+    }
+
+    #[test]
+    fn origin_is_pointed_at_the_configured_remote_before_any_push_or_pull() {
+        let (t, mut p) = fixture();
+        git(&p.dir, &["remote", "set-url", "origin", "C:/nowhere/old.git"]);
+        let fresh = t.path().join("fresh.git");
+        git(t.path(), &["init", "-q", "--bare", "-b", "main", fresh.to_str().unwrap()]);
+        p.remote = fresh.to_string_lossy().into();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "a").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
+        assert!(git(&fresh, &["branch", "--list"]).contains("dev2"));
+        // No origin at all (a directory somebody git-inited by hand): added.
+        git(&p.dir, &["remote", "remove", "origin"]);
+        assert!(status(&p).unwrap().contains("ветка dev2"));
+        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
+    }
+
+    #[test]
     fn second_caller_is_told_busy_not_queued() {
         let (_t, p) = fixture();
-        let guard = LOCK.try_lock().unwrap();
+        let guard = LOCK.try_lock().unwrap_or_else(|e| match e {
+            std::sync::TryLockError::Poisoned(g) => g.into_inner(),
+            e => panic!("{e}"),
+        });
         let (text, err) = call(&p, "project_status", &Value::Null);
         assert!(err && text.contains("занято"), "{text}");
         drop(guard);

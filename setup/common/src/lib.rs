@@ -6,6 +6,7 @@
 //! CLI печатает их в терминал, окно — рисует в списке шагов.
 
 pub mod check;
+pub mod console;
 pub mod docker;
 pub mod integrity;
 pub mod kit;

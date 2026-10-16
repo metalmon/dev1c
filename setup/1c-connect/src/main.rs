@@ -8,7 +8,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{bridge, cfg, tunnel, verify};
+use one_c_connect::{cfg, session, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -71,21 +71,17 @@ fn main() {
 
 fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
     let cfg = cfg::Cfg::load(&kit)?;
-    let log_path = kit.cmd_log();
+    let k = kit.clone();
     let sink = Arc::new(move |e: Event| {
-        let log = |line: String| {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                use std::io::Write;
-                let _ = writeln!(f, "{line}");
-            }
-        };
+        if k.journal(&e) {
+            return;
+        }
         match e {
             Event::Ok(t) => println!("  [ ok ] {t}"),
             Event::Warn(t) => println!("  [ !! ] {t}"),
             Event::Fail(t) => println!("  [FAIL] {t}"),
             Event::Say(t) => println!("{t}"),
-            Event::Command(c) => log(format!("$ {c}")),
-            Event::Output { command, text } => log(format!("# {command}\n{text}")),
+            Event::Command(_) | Event::Output { .. } => {}
         }
     });
     let prompt: Box<dyn Prompt> = if yes { Box::new(AlwaysDefault) } else { Box::new(StdinPrompt) };
@@ -170,8 +166,7 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Туннель плюс мост, пока не нажмут Ctrl+C. На порт mcp-1c — процесс на
-/// stdio, на порт веб-клиента — локальный веб-сервер.
+/// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(
         ctx.kit.path(cfg::FILE).exists(),
@@ -185,46 +180,22 @@ fn connect(ctx: &Ctx) -> Result<()> {
         cfg::FILE,
         ctx.cfg.host.server
     );
+    let ports = ctx.cfg.ports();
+    println!(
+        "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
+        ctx.cfg.host.server, ctx.cfg.host.workstation, ports.mcp, ports.web
+    );
+    let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-        let ctrl = tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = stop_tx.send(true);
-        });
-        let cfg = ctx.cfg.clone();
-        let kit = ctx.kit.clone();
-        let ports = cfg.ports();
-        let web_port = cfg.web_port();
-        let sink = ctx.sink.clone();
-        let serve = move |inc: tunnel::Incoming| {
-            let stream = inc.channel.into_stream();
-            if inc.port == ports.mcp {
-                let cmd = bridge::mcp_command(&cfg, &kit);
-                let sink = sink.clone();
-                tokio::spawn(bridge::pipe_process(stream, cmd, move |code, err| {
-                    if code != 0 {
-                        sink(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
-                    }
-                }));
-            } else if inc.port == ports.web {
-                let sink = sink.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = bridge::pipe_tcp(stream, web_port).await {
-                        sink(Event::Warn(e));
-                    }
-                });
-            }
-        };
-        let sink2 = ctx.sink.clone();
-        println!(
-            "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
-            ctx.cfg.host.server, ctx.cfg.host.workstation, ports.mcp, ports.web
-        );
-        let r = tunnel::run(&ctx.cfg, ctx.kit.path("known_hosts"), move |e| sink2(e), serve, stop_rx).await;
-        ctrl.abort();
-        r
-    })?;
+    let r = rt.block_on(async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Ok(()),
+            r = s.wait() => r,
+        }
+    });
+    let stopped = s.stop();
+    r?;
+    stopped?;
     println!("Отключено.");
     Ok(())
 }

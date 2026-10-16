@@ -6,5 +6,6 @@
 pub mod bridge;
 pub mod cfg;
 pub mod ops_host;
+pub mod session;
 pub mod tunnel;
 pub mod verify;

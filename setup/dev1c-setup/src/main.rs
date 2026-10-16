@@ -83,22 +83,17 @@ fn main() {
 
 fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
     let cfg = cfg::Cfg::load(&kit)?;
-    // В терминал идут приговоры и строки плана; команды и их вывод — в журнал.
-    let log_path = kit.cmd_log();
+    let k = kit.clone();
     let sink = Arc::new(move |e: Event| {
-        let log = |line: String| {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                use std::io::Write;
-                let _ = writeln!(f, "{line}");
-            }
-        };
+        if k.journal(&e) {
+            return;
+        }
         match e {
             Event::Ok(t) => println!("  [ ok ] {t}"),
             Event::Warn(t) => println!("  [ !! ] {t}"),
             Event::Fail(t) => println!("  [FAIL] {t}"),
             Event::Say(t) => println!("{t}"),
-            Event::Command(c) => log(format!("$ {c}")),
-            Event::Output { command, text } => log(format!("# {command}\n{text}")),
+            Event::Command(_) | Event::Output { .. } => {}
         }
     });
     let prompt: Box<dyn Prompt> = if yes { Box::new(AlwaysDefault) } else { Box::new(StdinPrompt) };

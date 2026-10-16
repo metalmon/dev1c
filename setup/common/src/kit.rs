@@ -34,6 +34,22 @@ impl Kit {
         self.path("setup.log")
     }
 
+    /// Пишет в журнал то, что в терминал и в окно не идёт: команды и их
+    /// сырой вывод. Возвращает true, если событие было только для журнала.
+    pub fn journal(&self, e: &crate::Event) -> bool {
+        let line = match e {
+            crate::Event::Command(c) => format!("$ {c}"),
+            crate::Event::Output { command, text } => format!("# {command}
+{text}"),
+            _ => return false,
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.cmd_log()) {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+        true
+    }
+
     fn state_file(&self) -> PathBuf {
         self.path("install.state")
     }

@@ -4,7 +4,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const KEYS = ['server.name', 'server.port', 'server.memory', 'server.engine', 'server.gpu', 'model.url', 'model.name', 'model.key', 'model.file'];
+const KEYS = ['server.name', 'server.port', 'server.memory', 'server.engine', 'server.gpu', 'model.serve', 'model.file', 'model.url', 'model.name', 'model.key', 'model.port', 'model.agents', 'model.fit_ctx'];
 let machine = null;
 let busy = false;
 let unread = 0;
@@ -59,6 +59,15 @@ function get(obj, path) {
   return path.split('.').reduce((o, k) => o[k], obj);
 }
 
+// Поля формы модели — по выбранной форме сервера.
+function syncForm() {
+  const form = $('f-model.serve').value;
+  for (const el of document.querySelectorAll('[data-form]')) el.hidden = !el.dataset.form.split(' ').includes(form);
+  $('file-hint').textContent = form === 'host'
+    ? 'Полный путь на этой машине, например C:\\models\\Qwen3.5-4B.Q4_K_M.gguf. В комплект не кладётся.'
+    : 'Путь относительно комплекта; при установке копируется в том моделей.';
+}
+
 async function refresh() {
   machine = await invoke('machine');
   for (const k of KEYS) {
@@ -66,6 +75,7 @@ async function refresh() {
     const v = get(machine.cfg, k);
     if (f.type === 'checkbox') f.checked = v; else f.value = v;
   }
+  syncForm();
   $('kit').textContent = `Комплект: ${machine.kit}`;
   const ops = machine.ops;
   const name = machine.cfg.server.name;
@@ -112,11 +122,11 @@ async function refresh() {
       ? `Шаг «${blocked[0].title}» ждёт параметров — вкладка «Параметры».`
       : 'Всё сделано. Параметры меняются на вкладке «Параметры».';
 
-  const [rdp, gitea, model, ssh] = machine.ports;
+  const [rdp, gitea, , ssh] = machine.ports;
   const rows = [
     ['Рабочие места', `mstsc /v:<адрес>:${rdp}`, 'dev1 / dev1, dev2 / dev2, dev3 / dev3'],
     ['Репозитории Gitea', `http://<адрес>:${gitea}`, 'те же логины'],
-    ['Сервер модели', `http://<адрес>:${model}`, 'OpenAI-совместимый, для Zed внутри и снаружи'],
+    ['Сервер модели', machine.model_url || '—', machine.facts ? `окно ${machine.facts.window} токенов, max_tokens ${machine.facts.max_tokens}` : 'замера ещё не было'],
     ['Для 1c-connect', `<адрес>:${ssh}`, 'адрес среды в 1c-connect.toml разработчика'],
   ];
   $('access').replaceChildren(...rows.map(([k, v, d]) => el('li', '', [el('span', k, [], 't'), el('div', '', [el('code', v), el('div', d, [], 'd')])])));
@@ -127,7 +137,8 @@ async function save() {
   for (const k of KEYS) {
     const [s, key] = k.split('.');
     const f = $(`f-${k}`);
-    cfg[s][key] = f.type === 'checkbox' ? f.checked : f.type === 'number' ? Number(f.value) : f.value;
+    const numeric = f.type === 'number' || key === 'agents';
+    cfg[s][key] = f.type === 'checkbox' ? f.checked : numeric ? Number(f.value) : f.value;
   }
   try {
     await invoke('save_cfg', { cfg });
@@ -193,6 +204,8 @@ async function act(what) {
     showTab('log');
   }
 }
+
+$('f-model.serve').addEventListener('change', syncForm);
 
 document.addEventListener('click', (ev) => {
   const t = ev.target.closest('.tab');

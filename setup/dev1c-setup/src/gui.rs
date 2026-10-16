@@ -39,6 +39,10 @@ struct Machine {
     cfg: Cfg,
     /// RDP, Gitea, модель, SSH для 1c-connect — из параметров.
     ports: [u16; 4],
+    /// Адрес сервера модели, как его видит контейнер среды.
+    model_url: String,
+    /// Числа последнего замера локального сервера, если он был.
+    facts: Option<crate::cfg::Facts>,
     ops: Vec<OpView>,
 }
 
@@ -86,6 +90,8 @@ fn machine(app: AppHandle, ui: State<Ui>) -> Machine {
         file_exists: ui.kit.path(cfg::FILE).exists(),
         cfg: ctx.cfg.clone(),
         ports: ctx.cfg.ports(),
+        model_url: ctx.cfg.model_url(),
+        facts: crate::llama::facts_load(&ctx),
         ops: states(&ctx),
     }
 }

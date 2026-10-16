@@ -88,29 +88,54 @@
       <div class="group">
         <p class="group-title">Модель для агентов</p>
         <div class="field">
-          <label for="f-model.url">Адрес удалённой модели</label>
+          <label for="f-model.serve">Где работает сервер модели</label>
+          <select id="f-model.serve" data-key="model.serve">
+            <option value="host">Служба на этой машине (видеокарта, nssm)</option>
+            <option value="docker">Контейнер рядом со средой</option>
+            <option value="remote">Удалённый сервер</option>
+          </select>
+        </div>
+        <div data-form="host docker" class="field">
+          <label for="f-model.file">Файл модели (.gguf)</label>
+          <input id="f-model.file" data-key="model.file" spellcheck="false">
+          <div class="hint" id="file-hint"></div>
+        </div>
+        <div data-form="remote" class="field">
+          <label for="f-model.url">Адрес сервера</label>
           <input id="f-model.url" data-key="model.url" placeholder="https://host/v1" spellcheck="false">
-          <div class="hint">Пусто — локальная модель из комплекта (файл ниже).</div>
+          <div class="hint">С путём, но без завершающего /chat/completions.</div>
         </div>
         <div class="cols2">
           <div class="field">
             <label for="f-model.name">Имя модели</label>
             <input id="f-model.name" data-key="model.name" spellcheck="false">
+            <div class="hint" data-form="host docker">Пусто — имя файла.</div>
           </div>
-          <div class="field">
+          <div data-form="remote" class="field">
             <label for="f-model.key">Ключ</label>
             <input id="f-model.key" data-key="model.key" type="password">
           </div>
+          <div data-form="host" class="field">
+            <label for="f-model.port">Порт службы</label>
+            <input id="f-model.port" data-key="model.port" type="number" min="1024" max="65535">
+          </div>
         </div>
-        <div class="field">
-          <label for="f-model.file">Файл локальной модели в комплекте</label>
-          <input id="f-model.file" data-key="model.file" spellcheck="false">
+        <div class="cols2" data-form="host docker">
+          <div class="field">
+            <label for="f-model.agents">Делить окно на агентов</label>
+            <select id="f-model.agents" data-key="model.agents"><option>1</option><option>2</option><option>3</option></select>
+            <div class="hint">1 — не делить (рекомендуется).</div>
+          </div>
+          <div class="field">
+            <label for="f-model.fit_ctx">Окно не меньше, токенов</label>
+            <input id="f-model.fit_ctx" data-key="model.fit_ctx" type="number" min="16384" step="1024">
+          </div>
         </div>
       </div>
     </div>
     <div class="bar">
       <button class="btn accent" data-do="save">Сохранить</button>
-      <span class="status" id="save-hint">Сохраняется в dev1c.toml с комментариями образца. Применить — на вкладке «Операции».</span>
+      <span class="status" id="save-hint">Сохраняется в dev1c.toml с комментариями образца. Разошедшееся с контейнером применяет кнопка в шапке.</span>
     </div>
   </section>
 

@@ -9,6 +9,7 @@
 mod cfg;
 #[cfg(feature = "gui")]
 mod gui;
+mod llama;
 mod ops;
 mod verify;
 

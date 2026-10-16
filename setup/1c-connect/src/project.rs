@@ -20,7 +20,9 @@ impl Project {
     /// `tools` — каталог инструментов на машине (`%LOCALAPPDATA%\dev1c`).
     pub fn from_cfg(cfg: &Cfg, tools: &Path) -> Project {
         let dir = PathBuf::from(&cfg.host.project);
-        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "project".into());
+        // The last path segment by either separator: a Windows path read on
+        // Linux (CI) has no separators as far as PathBuf is concerned.
+        let name = cfg.host.project.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().filter(|n| !n.is_empty()).unwrap_or("project").to_string();
         let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
         Project { dir, git, branch: cfg.host.workstation.clone(), remote: format!("{}/dev1c/{name}.git", cfg.gitea_url()), login: cfg.host.workstation.clone() }
     }
@@ -239,9 +241,11 @@ mod tests {
         assert!(f.iter().any(|a| a == "user.name=dev2"));
         assert!(f.iter().any(|a| a == "http.extraHeader=Authorization: Basic ZGV2MjpkZXYy"));
         assert!(f.iter().any(|a| a == "credential.helper="));
-        let cfg = Cfg::default();
+        let mut cfg = Cfg::default();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
+        cfg.host.project = "/home/dev/proj/Бух/".into();
+        assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://192.168.1.10:3391/dev1c/Бух.git");
         assert_eq!(p.branch, "dev1");
         assert!(p.git.to_string_lossy().contains("git"));
     }

@@ -61,6 +61,62 @@ pub fn git_exe(tools: &Path) -> PathBuf {
     }
 }
 
+pub enum Gitea {
+    Down(String),
+    NoOrg,
+    Ok(String),
+}
+
+/// Gitea среды напрямую (без туннеля): версия и организация dev1c.
+pub fn gitea_probe(url: &str) -> Gitea {
+    let c = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(e) => return Gitea::Down(e.to_string()),
+    };
+    let version = match c.get(format!("{url}/api/v1/version")).send() {
+        Ok(r) if r.status().is_success() => r.text().unwrap_or_default(),
+        Ok(r) => return Gitea::Down(format!("HTTP {}", r.status())),
+        Err(e) => return Gitea::Down(e.to_string()),
+    };
+    // {"version":"1.22.3"} — without reqwest's json feature.
+    let version = version.split('"').nth(3).unwrap_or("?").to_string();
+    match c.get(format!("{url}/api/v1/orgs/dev1c")).send() {
+        Ok(r) if r.status().as_u16() == 404 => Gitea::NoOrg,
+        _ => Gitea::Ok(version),
+    }
+}
+
+/// Что не так с носителем комплекта: съёмный или FAT/exFAT (Defender на
+/// каждый запуск, SmartScreen). Ничего — `None`.
+#[cfg(windows)]
+pub fn media_kind(path: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumeInformationW};
+    // DRIVE_REMOVABLE lives in Win32_System_WindowsProgramming; one feature for one constant is not worth it.
+    const DRIVE_REMOVABLE: u32 = 2;
+    let s = path.to_string_lossy();
+    let drive = s.get(..3).filter(|d| d.as_bytes().get(1) == Some(&b':')).unwrap_or("C:\\");
+    let root: Vec<u16> = drive.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if GetDriveTypeW(root.as_ptr()) == DRIVE_REMOVABLE {
+            return Some("съёмный носитель".into());
+        }
+        let mut fs = [0u16; 64];
+        let ok = GetVolumeInformationW(root.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), fs.as_mut_ptr(), fs.len() as u32);
+        if ok != 0 {
+            let name = String::from_utf16_lossy(&fs).trim_end_matches('\0').to_string();
+            if name.starts_with("FAT") || name == "exFAT" {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+pub fn media_kind(_path: &Path) -> Option<String> {
+    None
+}
+
 pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
     std::fs::create_dir_all(to)?;
     let mut n = 0;
@@ -312,6 +368,17 @@ pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitea_probe_on_a_closed_port_is_down() {
+        assert!(matches!(gitea_probe("http://127.0.0.1:1"), Gitea::Down(_)));
+    }
+
+    #[test]
+    fn media_kind_of_the_system_drive_is_plain() {
+        let root = if cfg!(windows) { Path::new("C:\\") } else { Path::new("/") };
+        assert_eq!(media_kind(root), None);
+    }
 
     #[test]
     fn tools_live_under_the_local_app_data_not_the_kit() {

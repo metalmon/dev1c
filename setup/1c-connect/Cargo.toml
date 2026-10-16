@@ -38,7 +38,7 @@ russh = { version = "0.64", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"

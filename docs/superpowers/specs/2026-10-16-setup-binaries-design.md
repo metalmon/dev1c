@@ -52,9 +52,15 @@ dev1c-kit/                       администратору, один раз
   1c-connect.exe                 программа (Windows)
   1c-connect.toml                параметры
   mcp-1c-windows-amd64.exe       MCP-сервер живой базы, той же версии, что
-  MCP_HTTPService.cfe              расширение; версия пинована в Dockerfile
+  MCP_HTTPService.cfe              расширение; версия и хеши пинованы в pack.sh
+  vrunner/bin/                   OneScript 2.2.0 (самодостаточный .NET, как в архиве)
+  vrunner/lib/                   библиотеки OneScript + vanessa-runner 3.0.2
+                                 (зависимости внутри) + add 6.8.0 (xddTestRunner.epf);
+                                 дерево opm — по манифесту vendor/vrunner-lib.sha256
+  git/                           MinGit 2.56.0.2
+  tools.version                  отметка версий; host.tools копирует vrunner/ и git/
+                                 в %LOCALAPPDATA%\dev1c
   checksums.txt
-  (этап 6: vrunner/oscript, vrunner/lib, git)
 ```
 
 ## Общий каркас (crate `common`)
@@ -845,19 +851,22 @@ export` и `1c-connect import` тем же способом. В «Парамет
 (нет висящих `1cv8.exe`; есть — «закройте: N процессов»), «комплект на
 носителе» (предупреждение про съёмный/FAT32), «туннель» — последним.
 
-**Комплект** (`pack.sh`, `dist/1c-connect`): `vrunner/oscript/` —
-распакованный `OneScript-2.2.0-win-x64.zip` (48 МБ, самодостаточный .NET,
-без установки); `vrunner/lib/` — результат `opm install -d lib
-vanessa-runner@3.0.2 vanessa-add` в контейнере `evilbeaver/onescript:2.2.0`
-на сборке (`vanessa-add` даёт `xddTestRunner.epf` для `test_xunit`; размер
-проверить); `git/` — распакованный `MinGit-2.56.0.2-64-bit.zip` (40 МБ).
-Архивы приколочены по SHA-256 как в этапе 5; дерево `lib` — по манифесту
+**Комплект** (`pack.sh`, `dist/1c-connect`): `vrunner/` — распакованный
+`OneScript-2.2.0-win-x64.zip` (48 МБ, самодостаточный .NET, без установки)
+как есть: `bin/oscript.exe` и `lib/`, `oscript.cfg` говорит `lib.system =
+../lib`, переменных окружения не нужно; в тот же `vrunner/lib/` ложится
+результат `opm install -d … vanessa-runner@3.0.2 add@6.8.0` в контейнере
+`evilbeaver/onescript:2.2.0` на сборке (vanessa-runner несёт зависимости в
+своём `oscript_modules`; пакет `add` — это vanessa-add: `bddRunner.epf` и
+`xddTestRunner.epf`, vrunner ищет их в `<bin>/../lib/add`; вместе 16 МБ,
+996 файлов); `git/` — распакованный `MinGit-2.56.0.2-64-bit.zip` (40 МБ).
+Архивы приколочены по SHA-256 как в этапе 5; дерево opm — по манифесту
 `setup/1c-connect/vendor/vrunner-lib.sha256` (список файлов с суммами,
 сверяется на сборке: hub.oscript.io отдаёт зависимости «какие сегодня», и
 два комплекта «3.0.2» иначе различались бы молча); ассеты `mcp-1c` в
-`pack.sh` тоже получают хеши. В `checksums.txt` комплекта — файлы как есть
-(тысячи строк; `verify` остаётся честным). Раздел «Комплекты» приводится к
-этой раскладке: `vrunner/oscript`, `vrunner/lib`, `git`.
+`pack.sh` тоже получают хеши. `tools.version` — отметка версий, по ней
+`host.tools` видит устаревшую копию. В `checksums.txt` комплекта — файлы как
+есть (тысячи строк; `verify` остаётся честным).
 
 **Образ.** `sshd-setup.sh` — три пользователя туннеля вместо `dev`;
 `gitea-start.sh` — организация `dev1c` с тремя владельцами и

@@ -42,8 +42,11 @@ pub fn tools_dir() -> PathBuf {
     }
 }
 
+/// OneScript лежит как в своём архиве: `bin/` и `lib/` рядом, `oscript.cfg`
+/// говорит `lib.system = ../lib` — библиотеки (и `lib/add` для vrunner)
+/// находятся без переменных окружения.
 pub fn oscript_exe(tools: &Path) -> PathBuf {
-    tools.join("vrunner").join("oscript").join(if cfg!(windows) { "oscript.exe" } else { "oscript" })
+    tools.join("vrunner").join("bin").join(if cfg!(windows) { "oscript.exe" } else { "oscript" })
 }
 
 pub fn vrunner_lib(tools: &Path) -> PathBuf {
@@ -282,7 +285,7 @@ mod tests {
     fn tools_live_under_the_local_app_data_not_the_kit() {
         let t = tools_dir();
         assert!(t.ends_with("dev1c"), "{}", t.display());
-        assert!(oscript_exe(Path::new("T")).ends_with(if cfg!(windows) { "vrunner\\oscript\\oscript.exe" } else { "vrunner/oscript/oscript" }));
+        assert!(oscript_exe(Path::new("T")).ends_with(if cfg!(windows) { "vrunner\\bin\\oscript.exe" } else { "vrunner/bin/oscript" }));
         assert!(vrunner_lib(Path::new("T")).ends_with("lib"));
     }
 

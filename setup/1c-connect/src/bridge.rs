@@ -77,8 +77,9 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     c
 }
 
-/// Процесс `vrunner-mcp` из инструментов на машине: cwd — проект, библиотека
-/// и git — из `tools`, подключение к базе — переменными (не в командной строке).
+/// Процесс `vrunner-mcp` из инструментов на машине: cwd — проект, библиотеки
+/// oscript находит сам (`lib.system = ../lib`), git — из `tools` через PATH,
+/// подключение к базе — переменными (не в командной строке).
 pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio::process::Command {
     use crate::ops_host::{git_exe, ib_switch, oscript_exe, vrunner_lib};
     let lib = vrunner_lib(tools);
@@ -90,7 +91,6 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     path.push(if cfg!(windows) { ";" } else { ":" });
     path.push(std::env::var_os("PATH").unwrap_or_default());
     c.env("PATH", path);
-    c.env("OSCRIPT_LIB", &lib);
     c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.host.base_path));
     c.env("VRUNNER_DBUSER", &cfg.host.db_user);
     c.env("VRUNNER_DBPWD", &cfg.host.db_password);
@@ -445,7 +445,6 @@ mod tests {
         assert_eq!(env["VRUNNER_DBPWD"], "па\"роль");
         assert_eq!(env["NO_PROXY"], "10.0.0.5");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
-        assert!(env["OSCRIPT_LIB"].ends_with("lib"));
         let sep = std::path::MAIN_SEPARATOR;
         assert!(env["PATH"].starts_with(&format!("T{sep}git{sep}cmd")) || env["PATH"].starts_with(&format!("T{sep}git{sep}bin")), "{}", env["PATH"]);
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));

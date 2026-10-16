@@ -42,7 +42,7 @@ PubkeyAuthentication yes
 # applications in the session cannot reach it.
 AllowTcpForwarding yes
 GatewayPorts clientspecified
-PermitTunnel yes
+PermitTunnel no
 
 # The tunnel has to survive idle periods: without keepalives it silently drops
 # after a few minutes of inactivity, and the agent gets "connection refused" out
@@ -78,6 +78,7 @@ Match User dev$n
     X11Forwarding no
     AllowAgentForwarding no
     AllowTcpForwarding remote
+    AllowStreamLocalForwarding no
     PermitOpen none
     PermitListen localhost:777$n localhost:778$n localhost:779$n
 EOF

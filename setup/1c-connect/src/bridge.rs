@@ -86,9 +86,13 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     let mut c = tokio::process::Command::new(oscript_exe(tools));
     c.arg(lib.join("vanessa-runner").join("src").join("mcp.os"));
     c.current_dir(&cfg.host.project);
-    let git_dir = git_exe(tools).parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    let mut path = git_dir.into_os_string();
-    path.push(if cfg!(windows) { ";" } else { ":" });
+    // oscript first: vrunner-mcp runs long commands as background tasks by
+    // re-executing `oscript` from PATH; then the kit's git.
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut path = oscript_exe(tools).parent().map(|p| p.as_os_str().to_owned()).unwrap_or_default();
+    path.push(sep);
+    path.push(git_exe(tools).parent().map(|p| p.as_os_str().to_owned()).unwrap_or_default());
+    path.push(sep);
     path.push(std::env::var_os("PATH").unwrap_or_default());
     c.env("PATH", path);
     c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.host.base_path));
@@ -487,7 +491,10 @@ mod tests {
         assert_eq!(env["NO_PROXY"], "10.0.0.5");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
         let sep = std::path::MAIN_SEPARATOR;
-        assert!(env["PATH"].starts_with(&format!("T{sep}git{sep}cmd")) || env["PATH"].starts_with(&format!("T{sep}git{sep}bin")), "{}", env["PATH"]);
+        let bin = format!("T{sep}vrunner{sep}bin");
+        let git = if cfg!(windows) { format!("T{sep}git{sep}cmd") } else { format!("T{sep}git{sep}bin") };
+        // Background tasks of vrunner-mcp re-exec `oscript` from PATH; git is the bridge's own.
+        assert!(env["PATH"].starts_with(&format!("{bin}{}{git}", if cfg!(windows) { ';' } else { ':' })), "{}", env["PATH"]);
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert!(args[0].ends_with("mcp.os"), "{args:?}");

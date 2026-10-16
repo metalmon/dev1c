@@ -8,6 +8,91 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
+pub const GITATTRIBUTES: &str = "* -text\n";
+pub const GITIGNORE: &str = "build/\n*.log\nautumn-properties.local.json\n";
+/// Настройки vrunner без секретов: выгрузка в src, загрузка оттуда инкрементом.
+pub const PROPERTIES: &str = "{\n  \"vrunner\": {\n    \"src\": \"src\",\n    \"cf\": {\n      \"decompile\": { \"out\": \"src\" },\n      \"load\": { \"increment\": true }\n    }\n  }\n}\n";
+
+pub enum Layout {
+    Missing,
+    /// В каталоге лежит база, не проект.
+    BaseDir(String),
+    Drifted(String),
+    Ok,
+}
+
+fn looks_like_a_base(dir: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .find(|n| n.eq_ignore_ascii_case("1Cv8.1CD") || n.to_lowercase().ends_with(".dt"))
+}
+
+pub fn layout_state(p: &Project) -> Layout {
+    if let Some(f) = looks_like_a_base(&p.dir) {
+        return Layout::BaseDir(f);
+    }
+    if !p.dir.join(".git").exists() {
+        return Layout::Missing;
+    }
+    let branch = git(p, &["symbolic-ref", "--short", "HEAD"]).map(|o| o.text).unwrap_or_default();
+    if branch != p.branch {
+        return Layout::Drifted(format!("ветка {branch}, нужна {}", p.branch));
+    }
+    let origin = git(p, &["remote", "get-url", "origin"]).map(|o| o.text).unwrap_or_default();
+    if origin != p.remote {
+        return Layout::Drifted(format!("origin {origin}, нужен {}", p.remote));
+    }
+    for f in [".gitattributes", ".gitignore", "autumn-properties.json"] {
+        if !p.dir.join(f).exists() {
+            return Layout::Drifted(format!("нет {f}"));
+        }
+    }
+    Layout::Ok
+}
+
+/// Разложить проект: каталог, git с веткой рабочего места и origin на Gitea,
+/// три служебных файла (существующие не трогаются). Доказывает круг на
+/// месте: git и oscript отвечают из этого каталога.
+pub fn init(p: &Project, tools: &Path, log: &dyn Fn(String)) -> Result<(), String> {
+    if let Some(f) = looks_like_a_base(&p.dir) {
+        return Err(format!("{} — это каталог базы ({f}), не проекта; укажите другой каталог в project", p.dir.display()));
+    }
+    std::fs::create_dir_all(p.dir.join("src")).map_err(|e| format!("не создать {}: {e}", p.dir.display()))?;
+    if !p.dir.join(".git").exists() {
+        must(p, &["init", "-q", "-b", &p.branch])?;
+        log(format!("git init, ветка {}", p.branch));
+    } else {
+        let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
+        if branch != p.branch {
+            must(p, &["checkout", "-q", "-B", &p.branch])?;
+            log(format!("ветка {}", p.branch));
+        }
+    }
+    ensure_origin(p)?;
+    for (name, body) in [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE), ("autumn-properties.json", PROPERTIES)] {
+        let f = p.dir.join(name);
+        if !f.exists() {
+            std::fs::write(&f, body).map_err(|e| format!("{name}: {e}"))?;
+            log(format!("{name} создан"));
+        }
+    }
+    must(p, &["status", "--porcelain"])?;
+    let mut c = Command::new(crate::ops_host::oscript_exe(tools));
+    c.arg("-version").current_dir(&p.dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    match c.output() {
+        Ok(o) if o.status.success() => log(format!("oscript {} из {}", String::from_utf8_lossy(&o.stdout).trim(), p.dir.display())),
+        _ => log(format!("oscript в {} не запустился — выполните 1c-connect install (host.tools)", tools.display())),
+    }
+    Ok(())
+}
+
 pub struct Project {
     pub dir: PathBuf,
     pub git: PathBuf,
@@ -106,7 +191,7 @@ fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
 
 pub fn status(p: &Project) -> Result<String, String> {
     ensure_origin(p)?;
-    let branch = must(p, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
+    let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
     let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_else(|_| "нет".into());
     let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
@@ -388,6 +473,43 @@ mod tests {
         git(&p.dir, &["remote", "remove", "origin"]);
         assert!(status(&p).unwrap().contains("ветка dev2"));
         assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
+    }
+
+    #[test]
+    fn init_lays_out_a_project_with_a_cyrillic_path() {
+        let t = tempdir::Dir::new();
+        let origin = t.path().join("o.git");
+        git(t.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        let dir = t.path().join("Проект Бух");
+        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev3".into(), remote: origin.to_string_lossy().into(), login: "dev3".into() };
+        assert!(matches!(layout_state(&p), Layout::Missing));
+        let lines = std::cell::RefCell::new(Vec::new());
+        init(&p, Path::new("nowhere"), &|s| lines.borrow_mut().push(s)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(git(&dir, &["symbolic-ref", "--short", "HEAD"]), "dev3");
+        assert_eq!(git(&dir, &["remote", "get-url", "origin"]), p.remote);
+        assert_eq!(std::fs::read_to_string(dir.join(".gitattributes")).unwrap(), GITATTRIBUTES);
+        assert!(std::fs::read_to_string(dir.join("autumn-properties.json")).unwrap().contains("\"increment\": true"));
+        assert!(dir.join("src").is_dir());
+        assert!(matches!(layout_state(&p), Layout::Ok));
+        assert!(lines.borrow().iter().any(|l| l.contains("git init")), "{:?}", lines.borrow());
+        // A second init changes nothing and keeps a hand-edited file.
+        std::fs::write(dir.join(".gitignore"), "mine\n").unwrap();
+        init(&p, Path::new("nowhere"), &|_| {}).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn a_base_directory_is_refused_and_drift_is_named() {
+        let t = tempdir::Dir::new();
+        let dir = t.path().join("base");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1Cv8.1CD"), "").unwrap();
+        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev1".into(), remote: "x".into(), login: "dev1".into() };
+        assert!(matches!(layout_state(&p), Layout::BaseDir(_)));
+        assert!(init(&p, Path::new("nowhere"), &|_| {}).unwrap_err().contains("каталог базы"));
+        let (_t2, p2) = fixture(); // branch dev2, origin set, three files present
+        git(&p2.dir, &["checkout", "-q", "-b", "main"]);
+        assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains("ветка")));
     }
 
     #[test]

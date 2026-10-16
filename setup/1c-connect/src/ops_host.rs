@@ -215,6 +215,38 @@ impl Op<Ctx> for Env {
     }
 }
 
+struct ProjectOp;
+impl Op<Ctx> for ProjectOp {
+    fn id(&self) -> &'static str {
+        "host.project"
+    }
+    fn title(&self) -> &'static str {
+        "Каталог проекта"
+    }
+    fn state(&self, ctx: &Ctx) -> OpState {
+        use crate::project::Layout;
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
+        match crate::project::layout_state(&p) {
+            Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
+            Layout::Missing => OpState::Missing,
+            Layout::Drifted(d) => OpState::Drifted { from: d, to: format!("ветка {}, origin {}", p.branch, p.remote) },
+            Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), p.branch)),
+        }
+    }
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
+        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json", p.dir.display(), p.branch, p.remote))]
+    }
+    fn apply(&self, ctx: &Ctx) -> Result<()> {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
+        crate::project::init(&p, &tools_dir(), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+    // uninstall leaves the project alone: it is the person's work.
+}
+
 struct Extension;
 impl Op<Ctx> for Extension {
     fn id(&self) -> &'static str {
@@ -274,7 +306,7 @@ impl Op<Ctx> for Extension {
 }
 
 pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
-    vec![Box::new(Env), Box::new(Tools), Box::new(Extension)]
+    vec![Box::new(Env), Box::new(Tools), Box::new(ProjectOp), Box::new(Extension)]
 }
 
 #[cfg(test)]

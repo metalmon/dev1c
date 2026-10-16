@@ -64,6 +64,10 @@ pub struct Ui {
     pub kit: Kit,
     pub cfg: Cfg,
     pub session: Option<Session>,
+    /// Растёт на каждый новый сеанс и на каждую остановку: хвостовое
+    /// событие от уже не текущего сеанса (умирающий поток ещё договаривает)
+    /// несёт старое значение и отбрасывается в `handle`.
+    pub session_gen: u64,
     pub link: State,
     pub log: Vec<Line>,
     pub unread: usize,
@@ -129,7 +133,9 @@ pub struct OpView {
 pub enum Ev {
     Tray(tray_icon::TrayIconEvent),
     Menu(tray_icon::menu::MenuEvent),
-    Link(State),
+    /// Переход сеанса, помеченный поколением, что был текущим в момент
+    /// отправки — старое поколение значит сеанс уже не тот.
+    Link(u64, State),
     Line(Line),
     Done(Option<String>),
     Checks(Vec<Check>),
@@ -159,6 +165,13 @@ pub fn link_line(l: &State, host: &Host) -> Option<Line> {
         State::Off => Some(Line { kind: Kind::Say, text: "отключено".into() }),
         State::Up { .. } | State::Retrying(_) => None,
     }
+}
+
+/// `Ev::Link(gen, ..)` стоит применять только если `gen` — поколение сеанса,
+/// текущее прямо сейчас; иначе это хвост уже остановленного или уже
+/// замещённого сеанса.
+fn link_is_current(ui: &Ui, gen: u64) -> bool {
+    gen == ui.session_gen
 }
 
 /// Строка в журнал, с потолком в `LOG_CAP`. Непрочитанные растут, если
@@ -231,7 +244,7 @@ fn set_link(cx: &mut App, l: State) {
 
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
 pub fn start_session(cx: &mut App) -> Result<(), String> {
-    let ui = cx.global::<Ui>();
+    let ui = cx.global_mut::<Ui>();
     if !ui.kit.path(cfg::FILE).exists() {
         return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
     }
@@ -241,10 +254,14 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     if ui.session.is_some() && ui.link.is_on() {
         return Ok(());
     }
+    // Новый сеанс — новое поколение: хвост от прежнего (если он всё ещё
+    // договаривает) будет отбрасываться в `handle` по несовпадению.
+    ui.session_gen += 1;
+    let gen = ui.session_gen;
     let ctx = ctx_for(ui);
     let (cfg, kit, tx) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone());
     let session = session::start(cfg, kit, ctx.sink, move |l| {
-        let _ = tx.unbounded_send(Ev::Link(l));
+        let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     cx.global_mut::<Ui>().session = Some(session);
     Ok(())
@@ -252,7 +269,12 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
 
 /// Остановить сеанс (блокирующе — в своём потоке) и сразу показать «отключено».
 pub fn stop_session(cx: &mut App) {
-    if let Some(s) = cx.global_mut::<Ui>().session.take() {
+    let ui = cx.global_mut::<Ui>();
+    // Хвостовой `Ev::Link` от останавливаемого сеанса (тот всё ещё может
+    // договаривать в своём потоке) должен отбрасываться — он уже не про
+    // текущее поколение.
+    ui.session_gen += 1;
+    if let Some(s) = ui.session.take() {
         std::thread::spawn(move || {
             let _ = s.stop();
         });
@@ -280,6 +302,7 @@ pub fn run_op(cx: &mut App, uninstall: bool) {
     ui.busy = Some(Busy::Ext);
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
+    cx.refresh_windows();
     std::thread::spawn(move || {
         let ops = ops_host::host();
         let r = if uninstall {
@@ -299,6 +322,7 @@ pub fn run_check(cx: &mut App) {
     let ctx = ctx_for(ui);
     let link = ui.link.clone();
     let tx = ui.tx.clone();
+    cx.refresh_windows();
     std::thread::spawn(move || {
         let state = link.is_up().then(|| link.label());
         let checks = verify::run(&ctx, state.as_deref());
@@ -321,8 +345,16 @@ pub fn open_web(cx: &mut App) {
     cx.open_url(&url);
 }
 
+/// Выход: ждём, пока сеанс действительно опустится (поток собственного
+/// рантайма сеанса), и только потом закрываем приложение — иначе туннель
+/// обрывается не чисто.
 pub fn quit(cx: &mut App) {
-    stop_session(cx);
+    if let Some(s) = cx.global_mut::<Ui>().session.take() {
+        let stopped = std::thread::spawn(move || {
+            let _ = s.stop();
+        });
+        let _ = stopped.join();
+    }
     cx.quit();
 }
 
@@ -330,7 +362,11 @@ fn handle(ev: Ev, cx: &mut App) {
     match ev {
         Ev::Tray(e) => tray::on_tray(e, cx),
         Ev::Menu(e) => tray::on_menu(e, cx),
-        Ev::Link(l) => set_link(cx, l),
+        Ev::Link(gen, l) => {
+            if link_is_current(cx.global::<Ui>(), gen) {
+                set_link(cx, l);
+            }
+        }
         Ev::Line(line) => {
             note_line(cx.global_mut::<Ui>(), line);
             cx.refresh_windows();
@@ -375,6 +411,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             kit,
             cfg,
             session: None,
+            session_gen: 0,
             link: State::Off,
             log: Vec::new(),
             unread: 0,
@@ -417,6 +454,7 @@ impl Ui {
             kit: Kit::at(dir),
             cfg: Cfg::default(),
             session: None,
+            session_gen: 0,
             link: State::Off,
             log: Vec::new(),
             unread: 0,
@@ -437,7 +475,7 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge, line_of, link_line, note_line, save_host, Kind, Line, Tab, Ui, LOG_CAP, TRAY_PNG};
+    use super::{badge, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, LOG_CAP, TRAY_PNG};
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
     use common::Event;
@@ -505,5 +543,13 @@ mod tests {
         assert_eq!(link_line(&State::Connecting, &h).unwrap().text, "подключаюсь к s:1 как dev2");
         assert_eq!(link_line(&State::Off, &h).unwrap().text, "отключено");
         assert!(link_line(&State::Up { since: Instant::now() }, &h).is_none());
+    }
+
+    #[test]
+    fn a_stale_session_generation_is_not_current() {
+        let mut ui = Ui::for_test();
+        ui.session_gen = 2;
+        assert!(!link_is_current(&ui, 1), "поколение 1 устарело, текущее — 2");
+        assert!(link_is_current(&ui, 2));
     }
 }

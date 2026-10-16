@@ -87,8 +87,11 @@ fn must(p: &Project, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Есть ли ветка на сервере. Репозитория ещё нет (push-to-create: его
+/// создаст первый push) — тоже «нет ветки», а не ошибка.
 fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
-    Ok(must(p, &["ls-remote", "--heads", p.remote.as_str(), branch])?.contains(&format!("refs/heads/{branch}")))
+    let o = git(p, &["ls-remote", "--heads", p.remote.as_str(), branch])?;
+    Ok(o.ok && o.text.contains(&format!("refs/heads/{branch}")))
 }
 
 pub fn status(p: &Project) -> Result<String, String> {
@@ -129,7 +132,15 @@ pub fn pull(p: &Project) -> Result<String, String> {
 }
 
 pub fn push(p: &Project, message: &str) -> Result<String, String> {
-    must(p, &["add", "--", "src", ".gitattributes", ".gitignore", "autumn-properties.json"])?;
+    // Only the roots that exist: a pathspec that matches nothing fails the
+    // whole add, and before host.project (6B) some of them are not there yet.
+    let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json"].into_iter().filter(|r| p.dir.join(r).exists()).collect();
+    if roots.is_empty() {
+        return Err(format!("в {} нет src — сначала cf_decompile", p.dir.display()));
+    }
+    let mut add = vec!["add", "--"];
+    add.extend(roots);
+    must(p, &add)?;
     let staged = !must(p, &["diff", "--cached", "--name-only"])?.is_empty();
     let has_commits = git(p, &["rev-parse", "--verify", "HEAD"])?.ok;
     if staged || !has_commits {
@@ -291,6 +302,27 @@ mod tests {
         assert!(git(&p.dir, &["status", "--porcelain"]).is_empty());
         assert!(!p.dir.join(".git").join("rebase-merge").exists());
         assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "mine");
+    }
+
+    #[test]
+    fn a_repository_gitea_has_not_created_yet_counts_as_empty() {
+        // Push-to-create: before the first push there is no repository at all,
+        // and `ls-remote` fails with "repository not found". That is "no
+        // branch", not an error — otherwise the first push can never happen.
+        let (t, mut p) = fixture();
+        p.remote = t.path().join("absent.git").to_string_lossy().into();
+        assert_eq!(remote_has(&p, "main"), Ok(false));
+        let e = pull(&p).unwrap_err();
+        assert!(e.contains("Выгрузить в git"), "{e}");
+    }
+
+    #[test]
+    fn push_tolerates_roots_that_do_not_exist_yet() {
+        let (_t, p) = fixture();
+        std::fs::remove_file(p.dir.join("autumn-properties.json")).unwrap();
+        std::fs::remove_file(p.dir.join(".gitignore")).unwrap();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "без служебных файлов").unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]

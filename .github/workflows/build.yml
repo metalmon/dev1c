@@ -193,7 +193,8 @@ jobs:
         # behind it is not exercised here — there is no 1C on a runner.
         run: |
           chmod +x tunnel_live
-          DEV1C_SSH=127.0.0.1:3393 DEV1C_SSH_PASSWORD=dev DEV1C_DOCKER=1 ./tunnel_live --nocapture
+          # The tunnel comes in as workstation dev1 (password = login).
+          DEV1C_SSH=127.0.0.1:3393 DEV1C_SSH_PASSWORD=dev1 DEV1C_DOCKER=1 ./tunnel_live --nocapture
 
       - name: Variables reach the sessions, placeholders are gone
         run: |

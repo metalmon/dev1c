@@ -29,10 +29,11 @@ Port $SSH_PORT
 # the environment already sits inside a closed network, behind the RDP password.
 #
 # The cost is stated plainly: anyone who can reach this port can log in by
-# guessing dev/dev. Two things limit the damage — the account has no shell (see
-# ForceCommand below) and no sudo. Still: do not publish the port beyond the
-# network where the environment lives. Outside a pilot, switch
-# PasswordAuthentication to no and distribute keys.
+# guessing dev1/dev1 — the same accounts that hold passwordless sudo over
+# RDP. What limits the damage over SSH is the Match block below: no shell, no
+# tty, no command, remote forwarding onto three ports and nothing else. Still:
+# do not publish the port beyond the network where the environment lives.
+# Outside a pilot, switch PasswordAuthentication to no and distribute keys.
 PasswordAuthentication yes
 PermitRootLogin no
 PubkeyAuthentication yes

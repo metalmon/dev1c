@@ -112,19 +112,25 @@ pub struct Rules {
     pub configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
 }
 
-/// Сколько `1cv8.exe` запущено на машине (открытые Конфигураторы и клиенты).
+/// Сколько процессов платформы запущено на машине: Конфигураторы и толстые
+/// клиенты (`1cv8.exe`) и тонкие (`1cv8c.exe`) — файловую базу держит любой.
 pub fn configurator_count() -> usize {
     if !cfg!(windows) {
         return 0;
     }
     let mut c = std::process::Command::new("tasklist");
-    c.args(["/FI", "IMAGENAME eq 1cv8.exe", "/NH", "/FO", "CSV"]);
+    c.args(["/NH", "/FO", "CSV"]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000);
     }
-    c.output().map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with("\"1cv8.exe\"")).count()).unwrap_or(0)
+    c.output().map(|o| count_platform(&String::from_utf8_lossy(&o.stdout))).unwrap_or(0)
+}
+
+/// Строки `tasklist /FO CSV`, начинающиеся с процесса платформы.
+fn count_platform(csv: &str) -> usize {
+    csv.lines().filter(|l| l.starts_with("\"1cv8.exe\"") || l.starts_with("\"1cv8c.exe\"")).count()
 }
 
 type Pending = Arc<Mutex<HashMap<String, Value>>>;
@@ -224,7 +230,23 @@ where
         let lines: Vec<&str> = s.lines().collect();
         lines[lines.len().saturating_sub(5)..].join("\n")
     });
-    let status = child.wait().await;
+    // Канал закрылся, а ребёнок не вышел по EOF: несколько секунд на выход,
+    // затем принудительно — иначе `oscript.exe` с Конфигуратором под ним
+    // живут до перезапуска, а следующий вызов видит «закройте Конфигуратор».
+    let mut to_child = to_child;
+    let status = tokio::select! {
+        s = child.wait() => {
+            to_child.abort();
+            s
+        }
+        _ = &mut to_child => match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = child.start_kill();
+                child.wait().await
+            }
+        },
+    };
     let _ = from_child.await;
     // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает всё равно.
     for (_, id) in pending.lock().unwrap().drain() {
@@ -235,7 +257,6 @@ where
     for h in ours {
         let _ = h.await;
     }
-    to_child.abort();
     drop(out_tx);
     let _ = writer.await;
     drop(job);
@@ -391,6 +412,13 @@ mod tests {
             }
             std::process::exit(0);
         }
+        // Ignores EOF on stdin: a server that does not exit when the client goes.
+        if std::env::var("BRIDGE_LINGER").is_ok() {
+            let mut s = String::new();
+            while std::io::stdin().read_line(&mut s).map(|n| n > 0).unwrap_or(false) {}
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::process::exit(0);
+        }
         // Reads one line and leaves without answering.
         if std::env::var("BRIDGE_DIE_AFTER_READ").is_ok() {
             let mut s = String::new();
@@ -512,6 +540,21 @@ mod tests {
         assert!(!raw.contains("child saw cancel 6"), "{raw}");
         // Ours either finished first or was cancelled — never two answers for 6.
         assert!(replies.iter().filter(|r| r["id"] == 6).count() <= 1);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_ignores_eof_is_killed_when_the_channel_closes() {
+        let t0 = std::time::Instant::now();
+        let (_replies, _raw, code) = talk(("BRIDGE_LINGER", "1"), rules(&[], 0), &[r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#]).await;
+        assert_ne!(code, 0, "a killed child does not exit 0");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(20), "killed within the grace period, not after 60 s");
+    }
+
+    #[test]
+    fn thin_client_counts_as_a_running_platform() {
+        let csv = "\"1cv8c.exe\",\"1234\",\"Console\",\"1\",\"100 K\"\n\"1cv8.exe\",\"77\",\"Console\",\"1\",\"1 K\"\n\"notepad.exe\",\"1\",\"Console\",\"1\",\"1 K\"\n";
+        assert_eq!(count_platform(csv), 2);
+        assert_eq!(count_platform("INFO: No tasks are running which match the specified criteria.\n"), 0);
     }
 
     #[tokio::test]

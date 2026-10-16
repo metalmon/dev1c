@@ -111,14 +111,17 @@ tools_row() {
     [ -f "$CONNECT/git/cmd/git.exe" ] || { echo "MinGit: cmd/git.exe missing" >&2; exit 1; }
     # The library tree: opm inside the project's own OneScript image, into an
     # empty directory, checked against the manifest, then merged into lib/.
-    # The mount is /out, not /lib: /lib is the container's own libc.
+    # The mount is /out, not /lib: /lib is the container's own libc. Rootful
+    # docker (CI) writes the tree as root; a+rwX lets this user copy and
+    # remove it afterwards.
     mkdir -p "$tmp/opm"
     docker run --rm -v "$tmp/opm:/out" --entrypoint /bin/sh "evilbeaver/onescript:$ONESCRIPT_VERSION" \
-        -c "opm install -d /out vanessa-runner@$VRUNNER_VERSION add@$ADD_VERSION >/dev/null && chmod -R a+rX /out"
+        -c "opm install -d /out vanessa-runner@$VRUNNER_VERSION add@$ADD_VERSION >/dev/null && chmod -R a+rwX /out"
     (cd "$tmp/opm" && sha256sum -c --quiet "$MANIFEST") \
         || { echo "vrunner lib differs from $MANIFEST — hub.oscript.io moved; review and regenerate the manifest (setup/1c-connect/vendor/README.md)" >&2; exit 1; }
     [ "$(cd "$tmp/opm" && find . -type f | wc -l)" = "$(wc -l <"$MANIFEST")" ] \
         || { echo "vrunner lib has files the manifest does not list" >&2; exit 1; }
+    mkdir -p "$CONNECT/vrunner/lib"
     cp -r "$tmp/opm"/. "$CONNECT/vrunner/lib/"
     [ -f "$CONNECT/vrunner/lib/vanessa-runner/src/mcp.os" ] && [ -f "$CONNECT/vrunner/lib/add/xddTestRunner.epf" ] \
         || { echo "vrunner lib: mcp.os or xddTestRunner.epf missing" >&2; exit 1; }

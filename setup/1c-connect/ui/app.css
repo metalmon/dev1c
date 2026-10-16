@@ -61,6 +61,14 @@ input, textarea, .log, code, .selectable { user-select: text; }
 .ind.up { background: var(--ok); box-shadow: 0 0 0 4px rgba(15, 123, 15, .15); }
 .ind.busy { background: var(--warn); box-shadow: 0 0 0 4px rgba(157, 93, 0, .15); }
 .ind.bad { background: var(--bad); box-shadow: 0 0 0 4px rgba(196, 43, 28, .15); }
+.status-card {
+  display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+  background: var(--layer); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+}
+.status-card .text { flex: 1; min-width: 0; }
+.status-card .state { font-size: 15px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.status-card .sub { color: var(--text-2); font-size: 12px; line-height: 16px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.status-card .switch { margin: 0; flex: none; }
 .icon-btn {
   width: 32px; height: 32px; border: 0; border-radius: 4px; background: transparent; color: var(--text-2);
   font: inherit; font-size: 14px; flex: none; cursor: default;
@@ -190,9 +198,8 @@ input:disabled { color: var(--text-3); background: #f5f5f5; }
 body.flyout { background: var(--layer); }
 body.flyout .app { border: 1px solid var(--stroke-strong); border-radius: 8px; overflow: hidden; }
 body.flyout .head { padding: 12px 16px; background: var(--bg); }
-body.flyout .head .actions { display: flex; gap: 8px; }
-body.flyout .head .actions .accent { flex: 1; }
-body.flyout .status-row h2 { font-size: 16px; line-height: 22px; }
+body.flyout .head { gap: 10px; }
+body.flyout .head .name { flex: 1; }
 body.flyout .main { padding: 12px 16px 0; }
 body.flyout .infobar { padding: 8px 12px; font-size: 13px; line-height: 18px; }
 body.flyout .tab { padding: 6px 8px 8px; font-size: 13px; }

@@ -12,29 +12,23 @@
   <header class="head" data-tauri-drag-region>
     <div class="head-row" data-tauri-drag-region>
       <img class="logo" src="logo.png" alt="" data-tauri-drag-region>
-      <div class="head-text" data-tauri-drag-region>
-        <div class="name" data-tauri-drag-region>1c-connect</div>
-        <div class="caption" id="route" data-tauri-drag-region>машина с 1С → среда разработки</div>
-      </div>
-      <button class="icon-btn" data-do="hide" title="Скрыть (остаётся в трее)">✕</button>
+      <div class="name" data-tauri-drag-region>1c-connect</div>
+      <button class="icon-btn" data-do="hide" title="Скрыть. Программа остаётся в трее">✕</button>
     </div>
-    <div class="status-row">
+    <div class="status-card">
       <span class="ind" id="ind"></span>
-      <h2 id="state">—</h2>
-    </div>
-    <div class="actions">
-      <button class="btn accent" data-do="connect">Подключить</button>
-      <button class="btn" data-do="disconnect">Отключить</button>
-      <button class="btn" data-do="web" title="Опубликованная база в браузере">Веб-клиент</button>
+      <div class="text">
+        <div class="state" id="state">—</div>
+        <div class="sub" id="sub"></div>
+      </div>
+      <label class="switch" title="Туннель в среду разработки"><input type="checkbox" id="toggle"></label>
     </div>
   </header>
 
   <div class="main">
-  <div class="infobar warn" id="notice" hidden><span class="ic warn">!</span><div id="notice-text"></div></div>
-
   <nav class="tabs" id="tabs">
     <button class="tab active" data-tab="params">Параметры</button>
-    <button class="tab" data-tab="ext">Расширение<span class="badge" id="b-ext" hidden></span></button>
+    <button class="tab" data-tab="ext">Расширение</button>
     <button class="tab" data-tab="check">Проверка<span class="badge" id="b-check" hidden></span></button>
     <button class="tab" data-tab="log">Журнал<span class="badge" id="b-log" hidden></span></button>
   </nav>
@@ -100,7 +94,8 @@
     <div class="bar">
       <button class="btn accent" data-do="install">Установить</button>
       <button class="btn" data-do="uninstall">Снять</button>
-      <span class="status">Затем — публикация в Конфигураторе.</span>
+      <span class="spacer"></span>
+      <button class="btn" data-do="web" title="Опубликованная база в браузере">Веб-клиент</button>
     </div>
   </section>
 

@@ -48,11 +48,34 @@ function logLine(kind, text) {
   if ($('panel-log').hidden && kind !== 'say') badge('b-log', ++unread, kind === 'fail' ? 'bad' : '');
 }
 
+let machine = null;
+
+// Карточка состояния: одно состояние, одна причина, один переключатель.
+// Переключатель заперт, пока адрес среды не задан — подключаться некуда.
 function showLink(link) {
-  $('state').textContent = link.label[0].toUpperCase() + link.label.slice(1);
-  $('ind').className = 'ind' + (link.up ? ' up' : link.on ? ' busy' : link.label.startsWith('не подключён:') ? ' bad' : '');
-  document.querySelector('[data-do="connect"]').disabled = link.on;
-  document.querySelector('[data-do="disconnect"]').disabled = !link.on;
+  const m = machine || { configured: false, host: {}, ports: [0, 0, 0] };
+  const route = `${m.host.server} · рабочее место ${m.host.workstation}`;
+  const bridge = `mcp-1c → порт ${m.ports[0]}, веб-клиент → ${m.ports[2]}`;
+  let state, sub, ind;
+  if (!m.configured && !link.on) {
+    [state, sub, ind] = ['Не настроено', 'Укажите адрес среды на вкладке «Параметры»', ''];
+  } else if (link.kind === 'up') {
+    [state, sub, ind] = [`Подключён${link.minutes ? ` · ${link.minutes} мин` : ''}`, bridge, 'up'];
+  } else if (link.kind === 'connecting') {
+    [state, sub, ind] = ['Подключаюсь…', route, 'busy'];
+  } else if (link.kind === 'retrying') {
+    [state, sub, ind] = ['Переподключаюсь', link.why, 'busy'];
+  } else if (link.kind === 'failed') {
+    [state, sub, ind] = ['Не подключён', link.why, 'bad'];
+  } else {
+    [state, sub, ind] = ['Не подключён', route, ''];
+  }
+  $('state').textContent = state;
+  $('sub').textContent = sub;
+  $('sub').title = sub;
+  $('ind').className = `ind ${ind}`;
+  $('toggle').checked = link.on;
+  $('toggle').disabled = !m.configured && !link.on;
 }
 
 function setBusy(on, which) {
@@ -63,18 +86,11 @@ function setBusy(on, which) {
 }
 
 async function refresh() {
-  const m = await invoke('machine');
+  machine = await invoke('machine');
+  const m = machine;
   for (const k of KEYS) $(`f-${k}`).value = m.host[k];
   $('kit').textContent = `Комплект: ${m.kit}`;
   $('kit').title = m.kit;
-  $('route').textContent = `${m.host.workstation} → ${m.host.server} · порты ${m.ports[0]} и ${m.ports[2]} · ${m.web_url}`;
-  const notice = !m.file_exists
-    ? 'Параметров ещё нет. Заполните их на вкладке «Параметры» и сохраните, затем установите расширение.'
-    : m.is_sample
-      ? 'Адрес среды всё ещё из образца. Впишите свой: его печатает dev1c-setup install на сервере.'
-      : '';
-  $('notice').hidden = !notice;
-  $('notice-text').textContent = notice;
   showLink(m.link);
   await refreshOps();
 }
@@ -83,13 +99,10 @@ async function refreshOps() {
   const ops = await invoke('states');
   const ul = $('ops');
   ul.replaceChildren();
-  let missing = 0;
   for (const o of ops) {
     const kind = { done: 'ok', missing: 'dim', drift: 'warn', blocked: 'dim' }[o.kind] || 'dim';
-    if (o.kind !== 'done') missing++;
     ul.append(row(kind, o.title, o.label));
   }
-  badge('b-ext', missing, 'bad');
 }
 
 async function save() {
@@ -138,7 +151,7 @@ async function act(what) {
   try {
     switch (what) {
       case 'connect': await invoke('connect'); showTab('log'); break;
-      case 'disconnect': await invoke('disconnect'); break;
+      case 'disconnect': await invoke('disconnect'); showLink(await invoke('link')); break;
       case 'web': await invoke('open_web'); break;
       case 'save': await save(); break;
       case 'install': run('install'); break;
@@ -153,6 +166,8 @@ async function act(what) {
     showTab('log');
   }
 }
+
+$('toggle').addEventListener('change', (ev) => act(ev.target.checked ? 'connect' : 'disconnect'));
 
 document.addEventListener('click', (ev) => {
   const t = ev.target.closest('.tab');
@@ -170,6 +185,6 @@ listen('conn:done', async (e) => {
 });
 listen('conn:run-check', () => check());
 
-refresh();
+refresh().then(() => showTab(machine.configured ? 'log' : 'params'));
 // «подключён N мин» обновляется само.
 setInterval(async () => showLink(await invoke('link')), 30000);

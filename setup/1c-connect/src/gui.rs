@@ -37,7 +37,13 @@ struct Line {
 
 #[derive(Serialize, Clone)]
 struct LinkView {
+    /// off | connecting | up | retrying | failed
+    kind: &'static str,
     label: String,
+    /// Причина (переподключение, отказ) или пусто.
+    why: String,
+    /// Минут с подключения, когда `up`.
+    minutes: u64,
     on: bool,
     up: bool,
 }
@@ -47,6 +53,8 @@ struct Machine {
     kit: String,
     file_exists: bool,
     is_sample: bool,
+    /// Есть файл и адрес не из образца: подключаться можно.
+    configured: bool,
     host: Host,
     ports: [u16; 3],
     web_url: String,
@@ -62,7 +70,14 @@ struct OpView {
 }
 
 fn link_view(l: &Link) -> LinkView {
-    LinkView { label: l.label(), on: l.is_on(), up: l.is_up() }
+    let (kind, why, minutes) = match l {
+        Link::Off => ("off", String::new(), 0),
+        Link::Connecting => ("connecting", String::new(), 0),
+        Link::Up { since } => ("up", String::new(), since.elapsed().as_secs() / 60),
+        Link::Retrying(w) => ("retrying", w.clone(), 0),
+        Link::Failed(w) => ("failed", w.clone(), 0),
+    };
+    LinkView { kind, label: l.label(), why, minutes, on: l.is_on(), up: l.is_up() }
 }
 
 /// Значок трея со статусом: кружок в правом нижнем углу, зелёный —
@@ -123,6 +138,20 @@ fn ctx_for(app: &AppHandle, ui: &Ui) -> Ctx {
 fn set_link(app: &AppHandle, l: Link) {
     let ui = app.state::<Ui>();
     *ui.link.lock().unwrap() = l.clone();
+    // Начало и конец сеанса видны и в журнале: туннель сам пишет только
+    // про поднятую связь и обрывы, а отказ возвращает ошибкой.
+    let line = match &l {
+        Link::Connecting => {
+            let h = ui.cfg.lock().unwrap().host.clone();
+            Some(Line { kind: "say".into(), text: format!("подключаюсь к {} как {}", h.server, h.workstation) })
+        }
+        Link::Failed(why) => Some(Line { kind: "fail".into(), text: why.clone() }),
+        Link::Off => Some(Line { kind: "say".into(), text: "отключено".into() }),
+        _ => None,
+    };
+    if let Some(line) = line {
+        let _ = app.emit("conn:line", line);
+    }
     let _ = app.emit("conn:state", link_view(&l));
     refresh_tray(app, &l);
 }
@@ -198,6 +227,7 @@ fn machine(ui: State<Ui>) -> Machine {
         kit: ui.kit.root.display().to_string(),
         file_exists: ui.kit.path(cfg::FILE).exists(),
         is_sample: cfg.is_sample(),
+        configured: ui.kit.path(cfg::FILE).exists() && !cfg.is_sample(),
         host: cfg.host.clone(),
         ports: [p.mcp, p.vrunner, p.web],
         web_url: web_url(&cfg),

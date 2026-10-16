@@ -68,17 +68,34 @@ async function refresh() {
   }
   $('kit').textContent = `Комплект: ${machine.kit}`;
   const ops = machine.ops;
-  const done = ops.filter((o) => o.kind === 'done').length;
-  const drift = ops.filter((o) => o.kind === 'drift').length;
+  const name = machine.cfg.server.name;
   const container = ops.find((o) => o.id === 'container');
   const running = container && container.kind === 'done';
-  $('state').textContent = running
-    ? (drift ? 'Среда работает, параметры разошлись' : 'Среда работает')
-    : done ? 'Среда установлена не полностью' : 'Среда не установлена';
-  $('ind').className = 'ind' + (running ? (drift ? ' busy' : ' up') : '');
-  $('sub').textContent = running
-    ? `${machine.cfg.server.name} · ${container.label}`
-    : `сделано ${done} из ${ops.length} — «Установить» выполняет только недостающее`;
+  const todo = ops.filter((o) => o.kind === 'missing' || o.kind === 'drift');
+  const drift = ops.some((o) => o.kind === 'drift');
+  const blocked = ops.filter((o) => o.kind === 'blocked');
+  const doneCount = ops.filter((o) => o.kind === 'done').length;
+
+  // Карточка состояния: одно состояние, одна строка подробности, одна
+  // главная кнопка, чья надпись следует состоянию. Делать нечего — кнопки нет.
+  let state, sub, ind, primary;
+  if (!running && doneCount === 0) {
+    [state, sub, ind, primary] = ['Среда не установлена', `сделано 0 из ${ops.length}`, '', 'Установить'];
+  } else if (!running) {
+    [state, sub, ind, primary] = ['Среда установлена не полностью', `сделано ${doneCount} из ${ops.length}`, 'busy', 'Доустановить'];
+  } else if (drift) {
+    [state, sub, ind, primary] = ['Среда работает, параметры разошлись', `контейнер ${name} · ${container.detail}`, 'busy', 'Применить изменения'];
+  } else if (blocked.length) {
+    [state, sub, ind, primary] = ['Среда работает, не всё настроено', `${blocked[0].title}: ${blocked[0].detail}`, 'busy', todo.length ? 'Доустановить' : ''];
+  } else {
+    [state, sub, ind, primary] = ['Среда работает', `контейнер ${name} · ${container.detail}`, 'up', todo.length ? 'Доустановить' : ''];
+  }
+  $('state').textContent = state;
+  $('sub').textContent = sub;
+  $('sub').title = sub;
+  $('ind').className = `ind ${ind}`;
+  $('primary').textContent = primary;
+  $('primary').hidden = !primary;
   $('notice').hidden = machine.file_exists;
   $('notice-text').textContent = 'Параметров ещё нет: проверьте значения на вкладке «Параметры», сохраните и установите.';
 
@@ -86,9 +103,14 @@ async function refresh() {
   ul.replaceChildren();
   for (const o of ops) {
     const kind = { done: 'ok', missing: 'dim', drift: 'warn', blocked: 'dim' }[o.kind] || 'dim';
-    ul.append(row(kind, o.title, o.label));
+    ul.append(row(kind, o.title, o.detail));
   }
-  badge('b-ops', ops.length - done, drift ? 'bad' : '');
+  badge('b-ops', todo.length, drift ? 'bad' : '');
+  $('ops-hint').textContent = todo.length
+    ? `Не сделано: ${todo.length}. «${primary}» выполняет только это.`
+    : blocked.length
+      ? `Шаг «${blocked[0].title}» ждёт параметров — вкладка «Параметры».`
+      : 'Всё сделано. Параметры меняются на вкладке «Параметры».';
 
   const [rdp, gitea, model, ssh] = machine.ports;
   const rows = [
@@ -109,7 +131,7 @@ async function save() {
   }
   try {
     await invoke('save_cfg', { cfg });
-    $('save-hint').textContent = 'Сохранено в dev1c.toml. Применить — «Операции» → «Применить изменения».';
+    $('save-hint').textContent = 'Сохранено в dev1c.toml. Разошедшееся с контейнером применяет кнопка в шапке.';
     await refresh();
   } catch (e) {
     $('save-hint').textContent = String(e);
@@ -142,7 +164,7 @@ function run(which) {
   if (busy) return;
   showTab('log');
   setBusy(true, 'ops');
-  logLine('say', `— ${{ install: 'установка', change: 'применяю изменения', 'clean-stack': 'снимаю контейнер', 'clean-data': 'удаляю контейнер и данные' }[which]} —`);
+  logLine('say', `— ${{ install: 'установка', 'clean-stack': 'снимаю контейнер', 'clean-data': 'удаляю контейнер и данные' }[which]} —`);
   invoke('run', { which });
 }
 

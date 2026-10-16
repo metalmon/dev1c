@@ -65,8 +65,9 @@ struct Machine {
 struct OpView {
     id: String,
     title: String,
+    /// done | missing | drift | blocked
     kind: String,
-    label: String,
+    detail: String,
 }
 
 fn link_view(l: &Link) -> LinkView {
@@ -291,13 +292,14 @@ fn states(app: AppHandle, ui: State<Ui>) -> Vec<OpView> {
         .into_iter()
         .map(|(id, title, st)| {
             use common::op::OpState::*;
-            let kind = match st {
-                Done(_) => "done",
-                Missing => "missing",
-                Drifted { .. } => "drift",
-                Blocked(_) => "blocked",
+            // Значок говорит состояние; текст — только подробность.
+            let (kind, detail) = match st {
+                Done(d) => ("done", d),
+                Missing => ("missing", "не сделано".into()),
+                Drifted { from, to } => ("drift", format!("было: {from} → станет: {to}")),
+                Blocked(why) => ("blocked", why),
             };
-            OpView { id, title, kind: kind.into(), label: st.label() }
+            OpView { id, title, kind: kind.into(), detail }
         })
         .collect()
 }

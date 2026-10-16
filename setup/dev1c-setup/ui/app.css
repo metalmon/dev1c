@@ -69,6 +69,9 @@ input, textarea, .log, code, .selectable { user-select: text; }
 .status-card .state { font-size: 15px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .status-card .sub { color: var(--text-2); font-size: 12px; line-height: 16px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .status-card .switch { margin: 0; flex: none; }
+.status-card .actions { display: flex; gap: 8px; flex: none; }
+.status-card .state { font-size: 16px; line-height: 22px; }
+.head .status-card { background: var(--layer-alt); }
 .icon-btn {
   width: 32px; height: 32px; border: 0; border-radius: 4px; background: transparent; color: var(--text-2);
   font: inherit; font-size: 14px; flex: none; cursor: default;
@@ -199,6 +202,8 @@ body.flyout { background: var(--layer); }
 body.flyout .app { border: 1px solid var(--stroke-strong); border-radius: 8px; overflow: hidden; }
 body.flyout .head { padding: 12px 16px; background: var(--bg); }
 body.flyout .head { gap: 10px; }
+body.flyout .head .status-card { background: var(--layer); }
+body.flyout .status-card .state { font-size: 15px; line-height: 20px; }
 body.flyout .head .name { flex: 1; }
 body.flyout .main { padding: 12px 16px 0; }
 body.flyout .infobar { padding: 8px 12px; font-size: 13px; line-height: 18px; }

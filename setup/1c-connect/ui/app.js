@@ -101,7 +101,7 @@ async function refreshOps() {
   ul.replaceChildren();
   for (const o of ops) {
     const kind = { done: 'ok', missing: 'dim', drift: 'warn', blocked: 'dim' }[o.kind] || 'dim';
-    ul.append(row(kind, o.title, o.label));
+    ul.append(row(kind, o.title, o.detail));
   }
 }
 

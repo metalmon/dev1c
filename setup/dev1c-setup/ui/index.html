@@ -16,16 +16,16 @@
         <div class="name">Среда разработки 1С</div>
         <div class="caption">dev1c-setup · контейнер с Zed, Gitea и рабочими местами на этой машине</div>
       </div>
-      <div class="actions">
-        <button class="btn" data-do="check">Проверить</button>
-        <button class="btn accent" data-do="install">Установить</button>
-      </div>
     </div>
-    <div class="status-row">
+    <div class="status-card">
       <span class="ind" id="ind"></span>
       <div class="text">
-        <h2 id="state">—</h2>
+        <div class="state" id="state">—</div>
         <div class="sub" id="sub"></div>
+      </div>
+      <div class="actions">
+        <button class="btn" data-do="check">Проверить</button>
+        <button class="btn accent" data-do="install" id="primary">Установить</button>
       </div>
     </div>
   </header>
@@ -46,7 +46,6 @@
     <div class="progress" id="p-ops"></div>
     <div class="body"><ul class="list" id="ops"></ul></div>
     <div class="bar">
-      <button class="btn" data-do="change">Применить изменения</button>
       <button class="btn" data-do="clean-stack">Снять контейнер</button>
       <button class="btn danger" data-do="ask-clean-data">Удалить данные…</button>
       <span class="confirm" id="confirm-box" hidden>
@@ -55,7 +54,7 @@
         <button class="btn" data-do="cancel-clean">Отмена</button>
       </span>
       <span class="spacer"></span>
-      <span class="status" id="ops-hint">Повторная установка выполняет только недостающее.</span>
+      <span class="status" id="ops-hint"></span>
     </div>
   </section>
 
@@ -142,7 +141,6 @@
 
   <footer class="foot">
     <span class="path" id="kit"></span>
-    <button class="btn" data-do="quit">Закрыть</button>
   </footer>
   </div>
 </div>

@@ -36,6 +36,13 @@ impl Job {
         let Some(h) = child.raw_handle() else { return false };
         unsafe { AssignProcessToJobObject(self.0, h as _) != 0 }
     }
+
+    /// То же для процесса из `std` (локальный вызов без tokio).
+    pub fn assign_std(&self, child: &std::process::Child) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as _) != 0 }
+    }
 }
 
 #[cfg(windows)]
@@ -60,6 +67,9 @@ impl Job {
         Some(Job)
     }
     pub fn assign(&self, _child: &tokio::process::Child) -> bool {
+        true
+    }
+    pub fn assign_std(&self, _child: &std::process::Child) -> bool {
         true
     }
 }

@@ -415,6 +415,7 @@ mod tests {
                 };
                 let id = v["id"].clone();
                 let reply = match v["method"].as_str() {
+                    Some("initialize") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"script","version":"0"}}}),
                     Some("tools/list") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}}),
                     Some("tools/call") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("child ran {}", v["params"]["name"].as_str().unwrap_or(""))}]}}),
                     Some("notifications/cancelled") => {

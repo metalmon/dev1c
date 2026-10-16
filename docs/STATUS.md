@@ -12,8 +12,9 @@ Last updated: 2026-10-15.
 |---|---|
 | repository | https://github.com/metalmon/dev1c (public) |
 | kit | built in CI, artifact `dev1c-kit`: `dev1c-kit/` (installer, `dev1c.toml`, image ~1328 MB, checksums) and `1c-connect/` (mcp-1c for the 1C machine) |
-| llama.cpp base | `ghcr.io/metalmon/dev1c-llama:b11606`, built from `Dockerfile.llama` |
-| local container | `dev1c`, ports 3390 RDP / 3391 Gitea / 3392 model / 3393 SSH |
+| llama.cpp | `ghcr.io/metalmon/dev1c-llama:b11606` (built from `Dockerfile.llama`) is no longer the base of `dev1c` — the image has no CUDA; the same build b11606 ships in the kit as `llama/bin/<os>` for the host form |
+| local container | `dev1c`, ports 3390 RDP / 3391 Gitea / 3393 SSH; 3392 belongs to the model container when `serve = "docker"` |
+| model server | `dev1c-setup` runs it: `serve = "host"` (default) — `llama-server` as a Windows service `dev1c-llama` via nssm in `C:\dev1c\llama` (Linux: systemd, `/opt/dev1c/llama`), `serve = "docker"` — container `<name>-llama` from `oktaplus/dev1c-llama` in the same kit tar, `serve = "remote"` — any OpenAI-compatible server. Zed reaches local forms as `http://host.docker.internal:<port>/v1` |
 | workstations | `dev1`, `dev2`, `dev3` — password equals login; tunnel ports 777N / 778N / 779N |
 | tunnel account | `dev` / `dev`, forwarding onto the nine workstation ports only, no shell |
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
@@ -79,7 +80,31 @@ script days is obsolete; the scripts are gone.
   model: blocked) and the access addresses. `cargo check` with Tauri fits
   this laptop at 3 jobs (4.5 min, under 4 GB); release builds stay in CI.
 
+- **Inference server, host form** (2026-10-16, this machine, 3060 Ti 8 GB with
+  the Volt pilot's `volt-llama` already on the card): `install --only
+  llama.bin` lays 58 files into `C:\dev1c\llama` under an admin-only ACL,
+  `llama.service` registers `dev1c-llama` through nssm on port 1236 (1235 is
+  `volt-llama`), `llama.answers` reads `/props` — window 76544 tokens, 3 slots,
+  prefill 1726 tok/s — and writes `max_tokens = 66304` into `install.state`;
+  `install --only container` recreates the environment with `CUSTOM_API_URL=
+  http://host.docker.internal:1236/v1`, `CUSTOM_API_KEY`, `CUSTOM_MODEL`,
+  `CUSTOM_MAX_TOKENS`; from inside the container `curl host.docker.internal:
+  1236/health` with the token answers 200. `check`: видеокарта, сервер модели,
+  три числа — green. `clean --stack` removes the service and the container,
+  keeps the files and the model; `install --only container` brings the
+  environment back. CI (run 38892442454): image without CUDA builds, both
+  images in one tar, install and check with `serve = "remote"` pass,
+  `test-entrypoint-ports` confirms the window numbers are substituted.
+
 ## Not verified
+
+- The container form (`serve = "docker"`) ran only through its unit tests and
+  the CI image save: no live `docker run --gpus all` of `dev1c-llama` here
+  (the card is shared with `volt-llama`).
+- The new image is not deployed on this machine: the local `dev1c` still runs
+  the old one, so the local `check` fails «модель в настройках Zed» and «порты
+  рабочих мест» — image staleness, both pass in CI.
+- A Zed agent reply through the host-form server was not tried over RDP.
 
 - **The whole chain in one go:** `.env` → `/etc/environment` → Zed → `mcp-1c`
   → tunnel → Apache. Every link is verified on its own; the image with the
@@ -163,6 +188,16 @@ script days is obsolete; the scripts are gone.
 - A flyout that hides on blur cannot be screenshotted by a script that then
   steals focus: the driver re-shows it with `ShowWindow` and an Alt tap before
   `SetForegroundWindow` (`drive.py` in the session scratchpad, not in the repo).
+- `icacls <dir> /inheritance:r /grant:r …:(OI)(CI)F /T` writes the inheritable
+  ACEs onto the files too, where they do not apply — every file ends up with
+  an empty DACL, unreadable and unrunnable even for administrators (nssm.exe
+  «Отказано в доступе», the token «не читается»). Grant the directory without
+  `/T`, then `icacls <dir>\* /reset /T` so the children inherit.
+- nssm.cc did not resolve from this machine (and is flaky in CI): `nssm.exe`
+  (2.24-101) is vendored in `setup/dev1c-setup/vendor` with its SHA-256 pinned
+  in `pack.sh`; the llama/cudart archives are pinned the same way.
+- A Windows path in TOML needs single quotes (`file = 'C:\models\x.gguf'`) or
+  doubled backslashes; the sample says so now.
 - Dependabot flags `glib` 0.18 (advisory for 0.15–0.20) in `setup/Cargo.lock`:
   it is Tauri's Linux GTK dependency, compiled only in a Linux build with the
   window, which CI never does. Goes away when Tauri bumps gtk-rs.
@@ -215,7 +250,14 @@ without the comments; the commented sample stays as `dev1c-setup example`.
 4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch
    `merge-upstream` (worktree `D:\1c\projects\mcp-1c-upstream-merge`), tests
    green in its CI; fast-forward `main` when the business tools are needed.
-5. **Local model as a sibling container, the volt-llama way** (decided
+5. **Inference server** (stage 5) — done 2026-10-16, plan
+   `docs/superpowers/plans/2026-10-16-inference-server.md`: three forms in
+   `[model] serve`, host service by default, measurement and sync into Zed,
+   three new `check` facts, window support, kit with the llama row, image
+   without CUDA. Left: live run of the container form; deploying the new
+   image here; an agent reply over RDP against the host-form server; a
+   «Обзор…» file picker in the window (text field today).
+6. **(superseded) Local model as a sibling container, the volt-llama way** (decided
    2026-10-16, spec section «Локальная модель»): CUDA and llama.cpp leave the
    `dev1c` image; `dev1c-setup` gets an operation `llama` that runs
    `dev1c-llama` (own slim image, `--fit on --fit-ctx 65536`, three slots,

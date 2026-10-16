@@ -206,12 +206,15 @@ pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
         for path in &paths {
             let o = docker::exec(ctx, "takeown", &["/F", path, "/A", "/R", "/D", "Y"])?;
             anyhow::ensure!(o.ok(), "не забрать {path} во владение администраторов: {}", o.tail(2).join(" "));
-            let o = docker::exec(
-                ctx,
-                "icacls",
-                &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"],
-            )?;
+            // Права — каталогу, без /T: наследуемые записи (OI)(CI), прописанные
+            // файлам напрямую, на файл не действуют, и он остаётся без единой
+            // записи — недоступен даже администратору (проверено: nssm.exe не
+            // запускался, токен не читался). Детям — /reset: они наследуют.
+            let o = docker::exec(ctx, "icacls", &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"])?;
             anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
+            let children = format!("{path}\\*");
+            let o = docker::exec(ctx, "icacls", &[&children, "/reset", "/T", "/Q"])?;
+            anyhow::ensure!(o.ok(), "не передать права файлам в {path}: {}", o.tail(2).join(" "));
         }
     } else {
         let path = d.to_string_lossy().to_string();
@@ -267,6 +270,8 @@ pub fn ensure_token(ctx: &Ctx) -> Result<String> {
     if let Some(t) = read_token() {
         return Ok(t);
     }
+    let f = token_file();
+    anyhow::ensure!(!f.exists(), "{} есть, но не читается: проверьте права на каталог", f.display());
     let token = random_hex();
     write_secret(&token_file(), &token)?;
     Ok(token)

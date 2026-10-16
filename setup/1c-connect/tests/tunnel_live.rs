@@ -39,10 +39,12 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut cfg = one_c_connect::cfg::Cfg::default();
     cfg.host.server = server;
-    cfg.host.password = password;
     // Workstation dev2 → 7772/7792: the other test holds 7771 and the two run
     // in parallel; sharing a port would make one of them a victim of timing.
+    // The tunnel logs in as the workstation itself; in the image the password
+    // equals the login, so the dev1 password from the environment is not it.
     cfg.host.workstation = "dev2".into();
+    cfg.host.password = if std::env::var("DEV1C_DOCKER").is_ok() { "dev2".into() } else { password };
     let (tx, rx) = tokio::sync::watch::channel(false);
     let kh = dir.join("known_hosts");
     let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx).await });

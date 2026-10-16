@@ -112,7 +112,9 @@ script days is obsolete; the scripts are gone.
   version 2.56.0.windows.2`), `check` fact 4 «инструменты комплекта» green,
   and `oscript.exe lib/vanessa-runner/src/mcp.os` from that copy answers
   `initialize` (AutumnMCP) and `tools/list` with 61 tools — 10 s to the first
-  reply. CI run 38916234545: both OSes green, Linux kit packed with the
+  reply. After the final review's fix pass, CI run 38921692754 is green end
+  to end: both OSes, the image check for the per-workstation `Match` blocks,
+  the live tunnel as `dev1` and `dev2`, and the Linux kit packed with the
   vrunner row.
 
 ## Not verified

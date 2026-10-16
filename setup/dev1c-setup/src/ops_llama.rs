@@ -145,7 +145,7 @@ impl Op<Ctx> for Service {
         if llama::kit_bin(ctx).is_none() && !llama::server_exe().exists() {
             return OpState::Blocked("нет сервера модели: в комплекте нет llama/bin".into());
         }
-        if cfg!(windows) && llama::nssm(ctx).is_none() {
+        if cfg!(windows) && !llama::nssm_available(ctx) {
             return OpState::Blocked("нет nssm: его кладут в комплект как llama/nssm.exe".into());
         }
         let got = llama::installed(ctx);

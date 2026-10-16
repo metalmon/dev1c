@@ -158,30 +158,49 @@ pub fn kit_bin(ctx: &Ctx) -> Option<PathBuf> {
     let p = ctx.kit.path(if cfg!(windows) { "llama/bin/windows-x64-cuda13" } else { "llama/bin/linux-x64-cuda13" });
     p.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }).exists().then_some(p)
 }
-/// Только из комплекта, а когда комплекта рядом уже нет — наша копия в
-/// закрытом каталоге службы. Чужой файл на машине не берём.
-pub fn nssm(ctx: &Ctx) -> Option<PathBuf> {
-    let kit = ctx.kit.path("llama/nssm.exe");
-    if kit.exists() {
-        return Some(kit);
-    }
-    let mine = dir().join("nssm.exe");
-    mine.exists().then_some(mine)
+/// nssm есть, откуда взять: в комплекте (llama/nssm.exe) или уже наша копия
+/// в закрытом каталоге. Чужой файл на машине не берём.
+pub fn nssm_available(ctx: &Ctx) -> bool {
+    ctx.kit.path("llama/nssm.exe").exists() || dir().join("nssm.exe").exists()
 }
 
-/// Каталог службы создаётся закрытым: писать в него могут только SYSTEM и
-/// администраторы (Linux: root), иначе подмена llama-server.exe — это
-/// выполнение кода от службы.
+/// nssm, которым регистрируется и управляется служба: только копия в
+/// закрытом каталоге (её кладёт шаг llama.bin). Путь к нему запекается в
+/// запись службы, и с флешки он быть не должен.
+fn nssm_exe() -> Result<String> {
+    let n = dir().join("nssm.exe");
+    anyhow::ensure!(n.exists(), "нет {}: его туда кладёт шаг llama.bin", n.display());
+    Ok(n.to_string_lossy().to_string())
+}
+
+/// Каталог службы — во владении администраторов и закрыт: SYSTEM и
+/// администраторы, больше никто (Linux: root, 755). Сброс рекурсивный и при
+/// каждой установке: иначе подмена llama-server.exe — это выполнение кода от
+/// службы, а каталог, созданный кем-то заранее, остался бы его.
 pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
     let d = dir();
     std::fs::create_dir_all(&d)?;
-    let path = d.to_string_lossy().to_string();
     if cfg!(windows) {
-        let o = docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])?;
-        anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
+        let mut paths = vec![d.to_string_lossy().to_string()];
+        if let Some(parent) = d.parent() {
+            paths.insert(0, parent.to_string_lossy().to_string());
+        }
+        for path in &paths {
+            let o = docker::exec(ctx, "takeown", &["/F", path, "/A", "/R", "/D", "Y"])?;
+            anyhow::ensure!(o.ok(), "не забрать {path} во владение администраторов: {}", o.tail(2).join(" "));
+            let o = docker::exec(
+                ctx,
+                "icacls",
+                &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/T", "/Q"],
+            )?;
+            anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
+        }
     } else {
-        docker::exec(ctx, "chown", &["root:root", &path])?;
-        docker::exec(ctx, "chmod", &["755", &path])?;
+        let path = d.to_string_lossy().to_string();
+        let o = docker::exec(ctx, "chown", &["-R", "root:root", &path])?;
+        anyhow::ensure!(o.ok(), "не сменить владельца {path}: {}", o.tail(2).join(" "));
+        let o = docker::exec(ctx, "chmod", &["755", &path])?;
+        anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
     }
     Ok(())
 }
@@ -221,21 +240,17 @@ pub fn read_token() -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
-/// Токен службы: файл с закрытыми правами в закрытом каталоге, в команду
-/// попадает путь. Существующий файл не перевыписывается.
+/// Токен службы: файл в закрытом каталоге (права наследуются от него —
+/// SYSTEM и администраторы, Linux: 0600), в команду попадает путь.
+/// Каталог закрывается заново и до чтения существующего файла: так
+/// старый токен тоже оказывается под замком.
 pub fn ensure_token(ctx: &Ctx) -> Result<String> {
+    ensure_dir(ctx)?;
     if let Some(t) = read_token() {
         return Ok(t);
     }
-    ensure_dir(ctx)?;
     let token = random_hex();
-    let f = token_file();
-    write_secret(&f, &token)?;
-    if cfg!(windows) {
-        let path = f.to_string_lossy().to_string();
-        let o = docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", "*S-1-5-18:(R)", "*S-1-5-32-544:(R,W)"])?;
-        anyhow::ensure!(o.ok(), "не закрыть права на токен: {}", o.tail(2).join(" "));
-    }
+    write_secret(&token_file(), &token)?;
     Ok(token)
 }
 
@@ -302,7 +317,7 @@ pub fn installed(ctx: &Ctx) -> Installed {
 pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
     let exe = server_exe().to_string_lossy().to_string();
     if cfg!(windows) {
-        let nssm = nssm(ctx).context("нет nssm: его кладут в комплект как llama/nssm.exe")?.to_string_lossy().to_string();
+        let nssm = nssm_exe()?;
         let mut cmd: Vec<&str> = vec!["install", SERVICE, &exe];
         cmd.extend(args.iter().map(|a| a.as_str()));
         let o = docker::exec(ctx, &nssm, &cmd)?;
@@ -341,7 +356,7 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
 
 fn service_cmd(ctx: &Ctx, verb: &str) -> Result<docker::Out> {
     if cfg!(windows) {
-        let nssm = nssm(ctx).context("нет nssm")?.to_string_lossy().to_string();
+        let nssm = nssm_exe()?;
         docker::exec(ctx, &nssm, &[verb, SERVICE])
     } else {
         docker::exec(ctx, "systemctl", &[verb, SERVICE])
@@ -355,8 +370,8 @@ pub fn service_start(ctx: &Ctx) -> Result<()> {
 pub fn service_remove(ctx: &Ctx) -> Result<()> {
     let _ = service_cmd(ctx, "stop");
     if cfg!(windows) {
-        if let Some(n) = nssm(ctx) {
-            let _ = docker::exec(ctx, &n.to_string_lossy(), &["remove", SERVICE, "confirm"]);
+        if let Ok(n) = nssm_exe() {
+            let _ = docker::exec(ctx, &n, &["remove", SERVICE, "confirm"]);
         }
     } else {
         let _ = docker::exec(ctx, "systemctl", &["disable", SERVICE]);

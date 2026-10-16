@@ -13,7 +13,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, session, verify};
+use one_c_connect::{cfg, flow, session, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -56,6 +56,14 @@ enum Cmd {
     Uninstall,
     /// Поднять туннель и мост; работает, пока не нажать Ctrl+C.
     Connect,
+    /// Выгрузить конфигурацию в src (cf_decompile) и отправить ветку в Gitea.
+    Export {
+        /// Сообщение коммита.
+        #[arg(long, default_value = "выгрузка")]
+        message: String,
+    },
+    /// Забрать свою ветку из Gitea и загрузить в базу (cf_load, инкрементом).
+    Import,
     /// Проверки по фактам; отчёт — last-check.txt.
     Check,
     /// Сверить комплект с контрольными суммами.
@@ -122,7 +130,7 @@ fn run() -> Result<()> {
                 println!("  {:<16} {:<26} {}", id, title, st.label());
             }
             println!();
-            println!("Установить расширение: 1c-connect install. Подключиться: 1c-connect connect.");
+            println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить в git: 1c-connect export.");
         }
         Cmd::Install => {
             common::run::apply_all(&ctx, &ops, None, false)?;
@@ -147,6 +155,14 @@ fn run() -> Result<()> {
             ext.revert_apply(&ctx, CleanLevel::Stack)?;
         }
         Cmd::Connect => connect(&ctx)?,
+        Cmd::Export { message } => {
+            let t = flow::export(&ctx, &message).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{t}");
+        }
+        Cmd::Import => {
+            let t = flow::import(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{t}");
+        }
         Cmd::Check => check(&ctx, None)?,
         Cmd::Verify => {
             let r = common::integrity::verify(&ctx.kit, |i, n, p| println!("  {i}/{n} {p}"))?;

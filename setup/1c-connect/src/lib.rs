@@ -5,6 +5,7 @@
 
 pub mod bridge;
 pub mod cfg;
+pub mod flow;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod job;

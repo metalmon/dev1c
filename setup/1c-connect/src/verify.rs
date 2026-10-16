@@ -2,11 +2,12 @@
 //! база → веб-сервер → публикация и расширение → туннель. Человек читает
 //! сверху вниз и останавливается на первом провале.
 
-use crate::ops_host::{extension_version, find_1cv8, mcp_exe, Ctx};
+use crate::ops_host::{extension_version, find_1cv8, mcp_exe, tools_dir, tools_state, Ctx};
 use common::check::Check;
+use common::op::OpState;
 
 /// Порядок фактов — часть контракта (см. тест).
-pub const ORDER: [&str; 7] = ["параметры", "платформа 1С", "mcp-1c в комплекте", "база", "веб-сервер", "публикация и расширение", "туннель"];
+pub const ORDER: [&str; 8] = ["параметры", "платформа 1С", "mcp-1c в комплекте", "инструменты комплекта", "база", "веб-сервер", "публикация и расширение", "туннель"];
 
 /// Файл параметров есть и адрес среды в нём не из образца.
 pub fn params_fact(file_exists: bool, is_sample: bool, server: &str) -> Check {
@@ -40,22 +41,29 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     } else {
         Check::fail(ORDER[2], "файла нет", "комплект неполный — скопируйте заново")
     });
+    let tools = tools_dir();
+    v.push(match tools_state(&ctx.kit.root, &tools) {
+        OpState::Done(d) => Check::pass(ORDER[3], d),
+        OpState::Missing => Check::fail(ORDER[3], format!("в {} ничего нет", tools.display()), "1c-connect install"),
+        OpState::Drifted { from, to } => Check::fail(ORDER[3], format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
+        OpState::Blocked(d) => Check::fail(ORDER[3], d, "соберите комплект заново: pack.sh"),
+    });
     let server_base = h.base_path.contains('\\') && !h.base_path.contains(':');
     v.push(if server_base || std::path::Path::new(&h.base_path).exists() {
-        Check::pass(ORDER[3], h.base_path.clone())
+        Check::pass(ORDER[4], h.base_path.clone())
     } else {
-        Check::fail(ORDER[3], format!("каталога {} нет", h.base_path), "base_path в 1c-connect.toml")
+        Check::fail(ORDER[4], format!("каталога {} нет", h.base_path), "base_path в 1c-connect.toml")
     });
     let web = ctx.cfg.web_port();
     let web_ok = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
     v.push(if web_ok {
-        Check::pass(ORDER[4], format!("порт {web} отвечает"))
+        Check::pass(ORDER[5], format!("порт {web} отвечает"))
     } else {
-        Check::fail(ORDER[4], format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
+        Check::fail(ORDER[5], format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
     });
     v.push(match extension_version(&h.base_url, &h.db_user, &h.db_password) {
-        Some(ver) => Check::pass(ORDER[5], format!("{} → расширение {ver}", h.base_url)),
-        None => Check::fail(ORDER[5], format!("{}/version не отвечает", h.base_url), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
+        Some(ver) => Check::pass(ORDER[6], format!("{} → расширение {ver}", h.base_url)),
+        None => Check::fail(ORDER[6], format!("{}/version не отвечает", h.base_url), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
     });
     v.push(tunnel_fact(tunnel_state));
     v

@@ -77,9 +77,26 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     c
 }
 
-/// Процесс `vrunner-mcp` — заглушка до операции `host.tools` (задача 6).
-pub fn vrunner_command(_cfg: &crate::cfg::Cfg, _tools: &std::path::Path) -> tokio::process::Command {
-    tokio::process::Command::new("oscript")
+/// Процесс `vrunner-mcp` из инструментов на машине: cwd — проект, библиотека
+/// и git — из `tools`, подключение к базе — переменными (не в командной строке).
+pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio::process::Command {
+    use crate::ops_host::{git_exe, ib_switch, oscript_exe, vrunner_lib};
+    let lib = vrunner_lib(tools);
+    let mut c = tokio::process::Command::new(oscript_exe(tools));
+    c.arg(lib.join("vanessa-runner").join("src").join("mcp.os"));
+    c.current_dir(&cfg.host.project);
+    let git_dir = git_exe(tools).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let mut path = git_dir.into_os_string();
+    path.push(if cfg!(windows) { ";" } else { ":" });
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    c.env("PATH", path);
+    c.env("OSCRIPT_LIB", &lib);
+    c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.host.base_path));
+    c.env("VRUNNER_DBUSER", &cfg.host.db_user);
+    c.env("VRUNNER_DBPWD", &cfg.host.db_password);
+    c.env("NO_PROXY", cfg.host.server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.host.server));
+    c.env("GIT_TERMINAL_PROMPT", "0");
+    c
 }
 
 use crate::jsonrpc::{self, Frame, Framer, Route};
@@ -235,12 +252,15 @@ async fn handle_request(
     running: &Running,
     stdin: &mut tokio::process::ChildStdin,
 ) -> Result<(), ()> {
+    // Oversized or unparsable input from the agent is dropped, never passed
+    // on: a line the bridge cannot read is a line the whitelist cannot check.
     let line = match fr {
-        Frame::Raw(b) => return stdin.write_all(&b).await.map_err(|_| ()),
+        Frame::Raw(_) => return Ok(()),
         Frame::Line(l) => l,
     };
     match jsonrpc::route_request(&line, &rules.allowed) {
-        Route::ListRequest { id } => {
+        Route::Drop => Ok(()),
+        Route::ListRequest { id, line } => {
             pending.lock().unwrap().insert(key(&id), id);
             forward(stdin, &line).await
         }
@@ -248,7 +268,7 @@ async fn handle_request(
             let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true));
             Ok(())
         }
-        Route::PlatformCall { id, tool } => {
+        Route::PlatformCall { id, tool, line } => {
             let n = (rules.configurator_running)();
             if n > 0 {
                 let _ = out.send(jsonrpc::text_reply(
@@ -277,7 +297,7 @@ async fn handle_request(
         }
         // ponytail: abort drops the waiter; the blocking git call itself runs
         // to its end and frees the project mutex then. Enough for a pilot.
-        Route::Cancel { id } => {
+        Route::Cancel { id, line } => {
             let ours = {
                 let map = running.lock().unwrap();
                 map.get(&key(&id)).map(|h| h.abort()).is_some()
@@ -288,13 +308,13 @@ async fn handle_request(
                 forward(stdin, &line).await
             }
         }
-        Route::Forward => forward(stdin, &line).await,
+        Route::Forward(line) => forward(stdin, &line).await,
     }
 }
 
+/// Канонический текст уже с `\n` на конце.
 async fn forward(stdin: &mut tokio::process::ChildStdin, line: &[u8]) -> Result<(), ()> {
-    stdin.write_all(line).await.map_err(|_| ())?;
-    stdin.write_all(b"\n").await.map_err(|_| ())
+    stdin.write_all(line).await.map_err(|_| ())
 }
 
 /// Одна строка от ребёнка: ответ на tools/list переписывается, остальное как есть.
@@ -404,6 +424,29 @@ mod tests {
         tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
         let (code, _) = rx.await.unwrap();
         (got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(), got, code)
+    }
+
+    #[test]
+    fn connection_env_is_passed_verbatim() {
+        let mut cfg = crate::cfg::Cfg::default();
+        cfg.host.base_path = "C:\\Bases\\Бух".into();
+        cfg.host.db_password = "па\"роль".into();
+        cfg.host.project = "C:\\proj\\Бух".into();
+        cfg.host.server = "10.0.0.5:3393".into();
+        let c = vrunner_command(&cfg, std::path::Path::new("T")).into_std();
+        let env: std::collections::HashMap<_, _> =
+            c.get_envs().filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().to_string(), v.to_string_lossy().to_string()))).collect();
+        assert_eq!(env["VRUNNER_IBCONNECTION"], "/FC:\\Bases\\Бух");
+        assert_eq!(env["VRUNNER_DBUSER"], "Администратор");
+        assert_eq!(env["VRUNNER_DBPWD"], "па\"роль");
+        assert_eq!(env["NO_PROXY"], "10.0.0.5");
+        assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        assert!(env["OSCRIPT_LIB"].ends_with("lib"));
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(env["PATH"].starts_with(&format!("T{sep}git{sep}cmd")) || env["PATH"].starts_with(&format!("T{sep}git{sep}bin")), "{}", env["PATH"]);
+        assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
+        let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(args[0].ends_with("mcp.os"), "{args:?}");
     }
 
     #[tokio::test]

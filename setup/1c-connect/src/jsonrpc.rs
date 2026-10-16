@@ -83,30 +83,43 @@ pub const OUR_TOOLS: [&str; 3] = ["project_status", "project_pull", "project_pus
 /// Вызовы, которым мешает открытый Конфигуратор (потеря его работы или отказ платформы).
 pub const PLATFORM_TOOLS: [&str; 2] = ["cf_load", "infobase_update"];
 
+/// Строка от агента: что с ней делать. Всё, что уходит ребёнку, несёт
+/// канонический текст — JSON, как его разобрал мост (без BOM, пробелов и
+/// повторов ключей): иначе ребёнок прочёл бы не то, что проверил фильтр.
 pub enum Route {
-    Forward,
-    ListRequest { id: Value },
+    /// Не JSON-объект — от агента такое не пересылается.
+    Drop,
+    Forward(Vec<u8>),
+    ListRequest { id: Value, line: Vec<u8> },
     OurCall { id: Value, tool: String, args: Value },
     Disabled { id: Value, tool: String },
-    PlatformCall { id: Value, tool: String },
-    Cancel { id: Value },
+    PlatformCall { id: Value, tool: String, line: Vec<u8> },
+    Cancel { id: Value, line: Vec<u8> },
 }
 
 fn parse(line: &[u8]) -> Option<Value> {
-    if line.first() != Some(&b'{') {
+    let s = std::str::from_utf8(line).ok()?;
+    let s = s.trim_start_matches('\u{feff}').trim();
+    if !s.starts_with('{') {
         return None;
     }
-    serde_json::from_slice(line).ok()
+    serde_json::from_str(s).ok()
+}
+
+fn canonical(v: &Value) -> Vec<u8> {
+    let mut out = serde_json::to_vec(v).unwrap_or_default();
+    out.push(b'\n');
+    out
 }
 
 /// Что делать со строкой от агента.
 pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
-    let Some(v) = parse(line) else { return Route::Forward };
+    let Some(v) = parse(line) else { return Route::Drop };
     let id = v.get("id").cloned().unwrap_or(Value::Null);
     match v.get("method").and_then(Value::as_str) {
-        Some("tools/list") => Route::ListRequest { id },
+        Some("tools/list") => Route::ListRequest { id, line: canonical(&v) },
         Some("tools/call") => {
-            let Some(tool) = v.pointer("/params/name").and_then(Value::as_str) else { return Route::Forward };
+            let Some(tool) = v.pointer("/params/name").and_then(Value::as_str) else { return Route::Forward(canonical(&v)) };
             let tool = tool.to_string();
             if OUR_TOOLS.contains(&tool.as_str()) {
                 let args = v.pointer("/params/arguments").cloned().unwrap_or(json!({}));
@@ -114,16 +127,16 @@ pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
             } else if !allowed.iter().any(|a| a == &tool) {
                 Route::Disabled { id, tool }
             } else if PLATFORM_TOOLS.contains(&tool.as_str()) {
-                Route::PlatformCall { id, tool }
+                Route::PlatformCall { id, tool, line: canonical(&v) }
             } else {
-                Route::Forward
+                Route::Forward(canonical(&v))
             }
         }
         Some("notifications/cancelled") => match v.pointer("/params/requestId") {
-            Some(id) => Route::Cancel { id: id.clone() },
-            None => Route::Forward,
+            Some(rid) => Route::Cancel { id: rid.clone(), line: canonical(&v) },
+            None => Route::Forward(canonical(&v)),
         },
-        _ => Route::Forward,
+        _ => Route::Forward(canonical(&v)),
     }
 }
 
@@ -241,13 +254,13 @@ mod tests {
     #[test]
     fn list_request_is_remembered_and_forwarded() {
         let r = route_request(br#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#, &allowed());
-        assert!(matches!(r, Route::ListRequest { id } if id == json!(7)));
+        assert!(matches!(r, Route::ListRequest { id, .. } if id == json!(7)));
     }
 
     #[test]
     fn allowed_call_goes_to_the_child_as_is() {
         let r = route_request(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","arguments":{}}}"#, &allowed());
-        assert!(matches!(r, Route::Forward));
+        assert!(matches!(r, Route::Forward(_)));
     }
 
     #[test]
@@ -271,7 +284,7 @@ mod tests {
     #[test]
     fn cancel_carries_the_request_id() {
         let r = route_request(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}"#, &allowed());
-        assert!(matches!(r, Route::Cancel { id } if id == json!(2)));
+        assert!(matches!(r, Route::Cancel { id, .. } if id == json!(2)));
     }
 
     #[test]
@@ -279,14 +292,32 @@ mod tests {
         // Route only says "cancel of id 9"; whether 9 is ours is the bridge's
         // table — the bridge forwards what it does not own (tested in bridge.rs).
         let r = route_request(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#, &allowed());
-        assert!(matches!(r, Route::Cancel { id } if id == json!(9)));
+        assert!(matches!(r, Route::Cancel { id, .. } if id == json!(9)));
     }
 
     #[test]
-    fn non_json_and_other_methods_are_forwarded() {
-        assert!(matches!(route_request(b"warning: something", &allowed()), Route::Forward));
-        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#, &allowed()), Route::Forward));
-        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &allowed()), Route::Forward));
+    fn other_methods_are_forwarded_and_junk_is_dropped() {
+        assert!(matches!(route_request(b"warning: something", &allowed()), Route::Drop));
+        assert!(matches!(route_request(b"[1,2]", &allowed()), Route::Drop));
+        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}"#, &allowed()), Route::Forward(_)));
+        assert!(matches!(route_request(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call"}"#, &allowed()), Route::Forward(_)));
+    }
+
+    #[test]
+    fn agent_lines_are_canonicalised_before_forwarding() {
+        // Leading whitespace, a BOM and duplicate keys must not let a call slip
+        // past the whitelist: what goes to the child is what the bridge parsed.
+        let line = "\u{feff}  {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"infobase_delete\"},\"params\":{\"name\":\"task_status\"}}";
+        match route_request(line.as_bytes(), &allowed()) {
+            Route::Forward(out) => {
+                let s = String::from_utf8(out).unwrap();
+                assert!(s.starts_with('{') && s.ends_with('\n'), "{s}");
+                assert!(!s.contains("infobase_delete"), "{s}");
+            }
+            _ => panic!("task_status is allowed"),
+        }
+        let line = " {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"infobase_delete\"}}";
+        assert!(matches!(route_request(line.as_bytes(), &allowed()), Route::Disabled { .. }));
     }
 
     #[test]

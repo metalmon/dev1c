@@ -2,7 +2,8 @@
 //! не операции с состоянием, а процесс `connect`.
 
 use crate::cfg::Cfg;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
@@ -28,9 +29,113 @@ impl Runner for Ctx {
     }
 }
 
-/// Каталог инструментов на машине — заглушка до операции `host.tools` (задача 6).
-pub fn tools_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(".")
+/// Каталог инструментов на машине: с носителя комплекта (флешка, FAT32,
+/// Defender на каждый запуск) 48 МБ .NET не запускают.
+pub fn tools_dir() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| ".".into())).join("dev1c")
+    } else {
+        match std::env::var_os("XDG_DATA_HOME") {
+            Some(d) => PathBuf::from(d).join("dev1c"),
+            None => PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".local/share/dev1c"),
+        }
+    }
+}
+
+pub fn oscript_exe(tools: &Path) -> PathBuf {
+    tools.join("vrunner").join("oscript").join(if cfg!(windows) { "oscript.exe" } else { "oscript" })
+}
+
+pub fn vrunner_lib(tools: &Path) -> PathBuf {
+    tools.join("vrunner").join("lib")
+}
+
+pub fn git_exe(tools: &Path) -> PathBuf {
+    if cfg!(windows) {
+        tools.join("git").join("cmd").join("git.exe")
+    } else {
+        tools.join("git").join("bin").join("git")
+    }
+}
+
+pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
+    std::fs::create_dir_all(to)?;
+    let mut n = 0;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dst = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            n += copy_tree(&e.path(), &dst)?;
+        } else {
+            std::fs::copy(e.path(), &dst)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+const VERSION_FILE: &str = "tools.version";
+
+/// Состояние по отметке версии: комплект пишет `tools.version` (pack.sh),
+/// копия на машине несёт ту же строку.
+pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
+    if !kit_root.join("vrunner").is_dir() || !kit_root.join("git").is_dir() {
+        return OpState::Blocked("в комплекте нет vrunner/ или git/ — комплект собран без инструментов (pack.sh)".into());
+    }
+    let want = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
+    let have = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();
+    if have.trim().is_empty() {
+        OpState::Missing
+    } else if have.trim() == want.trim() {
+        OpState::Done(format!("{} в {}", want.trim(), tools.display()))
+    } else {
+        OpState::Drifted { from: have.trim().to_string(), to: want.trim().to_string() }
+    }
+}
+
+struct Tools;
+impl Op<Ctx> for Tools {
+    fn id(&self) -> &'static str {
+        "host.tools"
+    }
+    fn title(&self) -> &'static str {
+        "Инструменты комплекта на машине"
+    }
+    fn state(&self, ctx: &Ctx) -> OpState {
+        tools_state(&ctx.kit.root, &tools_dir())
+    }
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        vec![Action::new(format!("скопировать vrunner/ и git/ из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
+    }
+    fn apply(&self, ctx: &Ctx) -> Result<()> {
+        let to = tools_dir();
+        if ctx.dry_run {
+            return Ok(());
+        }
+        for d in ["vrunner", "git"] {
+            let _ = std::fs::remove_dir_all(to.join(d));
+            let n = copy_tree(&ctx.kit.root.join(d), &to.join(d)).with_context(|| format!("копирование {d} в {}", to.display()))?;
+            ctx.ok(format!("{d}: {n} файлов"));
+        }
+        let o = docker::probe(ctx, &oscript_exe(&to).to_string_lossy(), &["--version"])?;
+        anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", to.display(), o.tail(2).join(" "));
+        ctx.ok(format!("oscript {}", o.text.trim()));
+        let o = docker::probe(ctx, &git_exe(&to).to_string_lossy(), &["--version"])?;
+        anyhow::ensure!(o.ok(), "git не запускается из {}: {}", to.display(), o.tail(2).join(" "));
+        ctx.ok(o.text.trim().to_string());
+        std::fs::copy(ctx.kit.root.join(VERSION_FILE), to.join(VERSION_FILE)).context("отметка версии")?;
+        Ok(())
+    }
+    fn revert(&self, _ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
+        matches!(level, CleanLevel::Data).then(|| vec![Action::new(format!("удалить {}", tools_dir().display()))])
+    }
+    fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
+        if matches!(level, CleanLevel::Data) {
+            let _ = std::fs::remove_dir_all(tools_dir());
+            ctx.ok("инструменты удалены с машины");
+        }
+        Ok(())
+    }
 }
 
 pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
@@ -166,12 +271,53 @@ impl Op<Ctx> for Extension {
 }
 
 pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
-    vec![Box::new(Env), Box::new(Extension)]
+    vec![Box::new(Env), Box::new(Tools), Box::new(Extension)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tools_live_under_the_local_app_data_not_the_kit() {
+        let t = tools_dir();
+        assert!(t.ends_with("dev1c"), "{}", t.display());
+        assert!(oscript_exe(Path::new("T")).ends_with(if cfg!(windows) { "vrunner\\oscript\\oscript.exe" } else { "vrunner/oscript/oscript" }));
+        assert!(vrunner_lib(Path::new("T")).ends_with("lib"));
+    }
+
+    #[test]
+    fn copy_tree_copies_nested_files_and_counts_them() {
+        let tmp = std::env::temp_dir().join(format!("dev1c-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("src/a/b")).unwrap();
+        std::fs::write(tmp.join("src/a/b/f.txt"), "1").unwrap();
+        std::fs::write(tmp.join("src/g.txt"), "2").unwrap();
+        let n = copy_tree(&tmp.join("src"), &tmp.join("dst")).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(std::fs::read_to_string(tmp.join("dst/a/b/f.txt")).unwrap(), "1");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tools_op_state_follows_the_version_stamp() {
+        let tmp = std::env::temp_dir().join(format!("dev1c-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let kit = tmp.join("kit");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(kit.join("vrunner")).unwrap();
+        std::fs::create_dir_all(kit.join("git")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(kit.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2\n").unwrap();
+        assert!(matches!(tools_state(&kit, &home), OpState::Missing));
+        std::fs::write(home.join("tools.version"), "старая\n").unwrap();
+        assert!(matches!(tools_state(&kit, &home), OpState::Drifted { .. }));
+        std::fs::write(home.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2\n").unwrap();
+        assert!(matches!(tools_state(&kit, &home), OpState::Done(d) if d.contains("3.0.2")));
+        std::fs::remove_dir_all(kit.join("git")).unwrap();
+        assert!(matches!(tools_state(&kit, &home), OpState::Blocked(_)));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn server_base_uses_s_and_file_base_uses_f() {

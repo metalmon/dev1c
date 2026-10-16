@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dev1c-setup</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<main class="screen">
+  <div class="screen-head">
+    <h1>Среда разработки 1С на этой машине</h1>
+    <p class="lead" id="lead">Читаю состояние…</p>
+  </div>
+
+  <div class="cols">
+    <div class="col wide">
+      <section class="card">
+        <div class="card-title">Параметры <span class="dim">dev1c.toml</span></div>
+        <div class="grid2">
+          <div>
+            <label for="f-server.name">Имя контейнера</label>
+            <input id="f-server.name" data-key="server.name">
+          </div>
+          <div>
+            <label for="f-server.port">Первый порт (RDP; дальше Gitea, модель, SSH)</label>
+            <input id="f-server.port" data-key="server.port" type="number" min="1024" max="65000">
+          </div>
+          <div>
+            <label for="f-server.memory">Память контейнера</label>
+            <input id="f-server.memory" data-key="server.memory" placeholder="24g">
+          </div>
+          <div>
+            <label for="f-server.engine">Движок контейнеров</label>
+            <select id="f-server.engine" data-key="server.engine"><option>docker</option><option>podman</option></select>
+          </div>
+          <div class="span2">
+            <label class="row"><input id="f-server.gpu" data-key="server.gpu" type="checkbox"> Отдать контейнеру GPU</label>
+          </div>
+          <div class="span2">
+            <label for="f-model.url">Удалённая модель: адрес (пусто — локальная из комплекта)</label>
+            <input id="f-model.url" data-key="model.url" placeholder="https://host/v1">
+          </div>
+          <div>
+            <label for="f-model.name">Имя модели</label>
+            <input id="f-model.name" data-key="model.name">
+          </div>
+          <div>
+            <label for="f-model.key">Ключ (если нужен)</label>
+            <input id="f-model.key" data-key="model.key" type="password">
+          </div>
+          <div class="span2">
+            <label for="f-model.file">Локальная модель: файл в комплекте</label>
+            <input id="f-model.file" data-key="model.file">
+          </div>
+        </div>
+        <div class="row-btns">
+          <button class="btn primary" data-do="save">Сохранить</button>
+          <span class="hint" id="save-hint"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Доступ</div>
+        <div id="access" class="kv-list"></div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="card">
+        <div class="card-title">Операции</div>
+        <ul class="ops" id="ops"></ul>
+        <div class="row-btns">
+          <button class="btn primary" data-do="install">Установить</button>
+          <button class="btn" data-do="change">Применить изменения</button>
+          <button class="btn" data-do="check">Проверить</button>
+        </div>
+        <div class="row-btns">
+          <button class="btn" data-do="clean-stack">Снять контейнер</button>
+          <input id="confirm" placeholder="имя контейнера — для удаления данных" style="width: 240px">
+          <button class="btn" data-do="clean-data">Удалить данные</button>
+        </div>
+        <div class="hint">Снять контейнер — тома с репозиториями и настройками остаются. Удалить данные — тома тоже.</div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Проверка</div>
+        <ul class="checks" id="checks"></ul>
+        <div class="hint" id="check-hint"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card grow" style="margin-top: 14px">
+    <div class="card-title">Журнал</div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <footer class="foot">
+    <div class="hint" id="kit"></div>
+    <button class="btn" data-do="quit">Закрыть</button>
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

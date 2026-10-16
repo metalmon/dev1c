@@ -19,3 +19,4 @@ models/
 
 # Rust build output of the installers
 setup/target/
+setup/*/gen/

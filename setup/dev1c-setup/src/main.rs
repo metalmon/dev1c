@@ -1,8 +1,14 @@
-//! Установка среды разработки 1С. Без аргументов — состояние (окно появится
-//! следующим этапом), с аргументами — команды. У любой есть `--dry-run`:
-//! печатает план и ничего не делает.
+// Оконная сборка: двойной щелчок не должен открывать чёрное окно консоли.
+// Для команд консоль возвращает common::console::attach; в отладочной сборке
+// она остаётся всегда.
+#![cfg_attr(all(not(debug_assertions), feature = "gui"), windows_subsystem = "windows")]
+
+//! Установка среды разработки 1С. Без аргументов — окно, с аргументами —
+//! команды. У любой есть `--dry-run`: печатает план и ничего не делает.
 
 mod cfg;
+#[cfg(feature = "gui")]
+mod gui;
 mod ops;
 mod verify;
 
@@ -74,6 +80,7 @@ enum Cmd {
 }
 
 fn main() {
+    common::console::attach();
     if let Err(e) = run() {
         eprintln!();
         eprintln!("Остановлено: {e:#}");
@@ -101,6 +108,12 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
 }
 
 fn run() -> Result<()> {
+    // Без аргументов — окно: так программу запускают двойным щелчком.
+    // Сборка без окна показывает состояние — самое безобидное из возможного.
+    #[cfg(feature = "gui")]
+    if std::env::args().len() == 1 {
+        return gui::launch(Kit::discover("DEV1C_KIT")?);
+    }
     let cli = Cli::parse();
     let kit = match &cli.kit {
         Some(p) => Kit::at(p),

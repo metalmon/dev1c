@@ -5,6 +5,8 @@
 
 pub mod bridge;
 pub mod cfg;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod ops_host;
 pub mod session;
 pub mod tunnel;

@@ -47,12 +47,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: setup
+      # The window (Tauri) is built on Windows only: that is where the kits
+      # are double-clicked. Linux builds serve the server CLI and the live
+      # tunnel test, and skip the window rather than install webkit2gtk here.
       - name: Test
-        run: cargo test --workspace --manifest-path setup/Cargo.toml
+        run: cargo test --workspace --manifest-path setup/Cargo.toml ${{ matrix.name == 'linux' && '--no-default-features' || '' }}
       - name: Build
         run: |
-          cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup
-          cargo build --release --manifest-path setup/Cargo.toml -p onec-connect
+          cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup ${{ matrix.name == 'linux' && '--no-default-features' || '' }}
+          cargo build --release --manifest-path setup/Cargo.toml -p onec-connect ${{ matrix.name == 'linux' && '--no-default-features' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: dev1c-setup-${{ matrix.name }}
@@ -68,7 +71,7 @@ jobs:
         # carries no Rust toolchain of its own.
         if: matrix.name == 'linux'
         run: |
-          bin=$(cargo test --manifest-path setup/Cargo.toml -p onec-connect --test tunnel_live --no-run 2>&1 \
+          bin=$(cargo test --manifest-path setup/Cargo.toml -p onec-connect --no-default-features --test tunnel_live --no-run 2>&1 \
                 | grep -oE 'setup/target/debug/deps/tunnel_live-[0-9a-f]+' | head -1)
           test -n "$bin" && cp "$bin" tunnel_live && ls -la tunnel_live
       - uses: actions/upload-artifact@v4

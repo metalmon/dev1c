@@ -5,8 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "Установка среды разработки 1С: один файл вместо скриптов"
 
+# Окно входит в сборку по умолчанию: двойной щелчок по файлу из комплекта
+# обязан его открыть. Linux-сборка в CI идёт без него (--no-default-features).
+[features]
+default = ["gui"]
+gui = ["dep:tauri", "dep:tauri-build"]
+
 [dependencies]
 common = { path = "../common" }
+tauri = { version = "2", features = ["image-png"], optional = true }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
@@ -24,3 +31,6 @@ features = ["blocking", "native-tls"]
 version = "0.12"
 default-features = false
 features = ["blocking", "rustls-tls-native-roots"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }

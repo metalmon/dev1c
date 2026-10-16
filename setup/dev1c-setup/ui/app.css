@@ -1,0 +1,99 @@
+/* Один лист на оба окна (dev1c-setup и 1c-connect): копия, не общий файл —
+   Tauri отдаёт страницу из одного каталога. */
+:root {
+  --bg: #f5f2ee;
+  --fg: #262120;
+  --card: #faf8f5;
+  --muted: #7f7870;
+  --muted-2: #47413c;
+  --line: #e5dfd5;
+  --primary: #393530;
+  --primary-fg: #faf8f5;
+  --ok: #2f8f4e;
+  --warn: #9a6b12;
+  --bad: #8f2f2f;
+  --dim: #8d867e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.45 system-ui, "Segoe UI", sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.screen { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 20px 24px 0; overflow: auto; }
+.screen-head h1 { margin: 0 0 4px; font-size: 20px; font-weight: 600; }
+.lead { margin: 0 0 16px; color: var(--muted); }
+
+.cols { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.col { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.col.wide { flex: 2 1 460px; }
+
+.card { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 14px 16px; min-width: 0; }
+.card.grow { flex: 1; display: flex; flex-direction: column; min-height: 160px; }
+.card-title { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 10px; }
+.card-title .dim { text-transform: none; letter-spacing: 0; }
+
+label { display: block; margin: 8px 0 3px; color: var(--muted-2); font-size: 13px; }
+input, select {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+  background: #fff; color: var(--fg); font: inherit;
+}
+input:focus, select:focus { outline: 2px solid #cfc6b8; outline-offset: 0; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.span2 { grid-column: 1 / -1; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.dim { color: var(--muted); }
+
+.status { display: flex; align-items: center; gap: 10px; font-size: 16px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--dim); flex: none; }
+.dot.up { background: var(--ok); }
+.dot.busy { background: var(--warn); }
+
+.row-btns { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+.btn {
+  padding: 7px 14px; border: 1px solid var(--primary); border-radius: 8px; background: transparent;
+  color: var(--primary); font: inherit; cursor: pointer;
+}
+.btn.primary { background: var(--primary); color: var(--primary-fg); }
+.btn:disabled { opacity: .45; cursor: default; }
+
+.ops, .checks { list-style: none; margin: 0; padding: 0; }
+.ops li, .checks li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+.ops li:last-child, .checks li:last-child { border-bottom: 0; }
+.mark { width: 18px; flex: none; text-align: center; color: var(--dim); }
+li.done .mark, li.pass .mark { color: var(--ok); }
+li.drift .mark, li.info .mark { color: var(--warn); }
+li.fail .mark { color: var(--bad); }
+.what { flex: 1; min-width: 0; }
+.what small { display: block; color: var(--muted); }
+.what .fix { display: block; color: var(--bad); }
+
+.log {
+  flex: 1; min-height: 120px; max-height: 320px; overflow: auto; font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; white-space: pre-wrap;
+}
+.log .ok { color: var(--ok); }
+.log .warn { color: var(--warn); }
+.log .fail { color: var(--bad); }
+
+.foot {
+  position: sticky; bottom: 0; display: flex; gap: 10px; align-items: center; justify-content: flex-end;
+  padding: 12px 0 16px; margin-top: 16px; background: var(--bg); border-top: 1px solid var(--line);
+}
+.foot .hint { margin-right: auto; }
+
+/* Доступ: пары «что — значение». */
+.kv-list { display: flex; flex-direction: column; gap: 4px; }
+.kv { display: flex; gap: 10px; align-items: baseline; }
+.kv span { width: 130px; flex: none; color: var(--muted); }
+.kv code { font: 12.5px ui-monospace, Consolas, monospace; }
+label.row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+label.row input { width: auto; }

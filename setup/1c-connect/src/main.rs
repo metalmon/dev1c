@@ -1,6 +1,11 @@
+// Оконная сборка: двойной щелчок не должен открывать чёрное окно консоли.
+// Для команд консоль возвращает common::console::attach; в отладочной сборке
+// она остаётся всегда.
+#![cfg_attr(all(not(debug_assertions), feature = "gui"), windows_subsystem = "windows")]
+
 //! 1c-connect: подключение машины с 1С к среде разработки. Лежит на флешке,
-//! ничего не устанавливает. Без аргументов — состояние (окно появится
-//! следующим этапом), с аргументами — команды; у любой есть `--dry-run`.
+//! ничего не устанавливает. Без аргументов — окно и значок в трее, с
+//! аргументами — команды; у любой есть `--dry-run`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -62,6 +67,7 @@ enum Cmd {
 }
 
 fn main() {
+    common::console::attach();
     if let Err(e) = run() {
         eprintln!();
         eprintln!("Остановлено: {e:#}");
@@ -89,6 +95,12 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
 }
 
 fn run() -> Result<()> {
+    // Без аргументов — окно: так программу запускают двойным щелчком.
+    // Сборка без окна показывает состояние — самое безобидное из возможного.
+    #[cfg(feature = "gui")]
+    if std::env::args().len() == 1 {
+        return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?);
+    }
     let cli = Cli::parse();
     let kit = match &cli.kit {
         Some(p) => Kit::at(p),

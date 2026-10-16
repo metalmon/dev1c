@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1c-connect</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<main class="screen">
+  <div class="screen-head">
+    <h1>Подключение к среде разработки</h1>
+    <p class="lead" id="lead">Читаю параметры…</p>
+  </div>
+
+  <div class="cols">
+    <div class="col wide">
+      <section class="card">
+        <div class="card-title">Связь</div>
+        <div class="status"><span class="dot" id="dot"></span><b id="state">—</b></div>
+        <div class="hint" id="route"></div>
+        <div class="row-btns">
+          <button class="btn primary" data-do="connect">Подключить</button>
+          <button class="btn" data-do="disconnect">Отключить</button>
+          <button class="btn" data-do="web">Открыть веб-клиент</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Параметры <span class="dim">1c-connect.toml</span></div>
+        <div class="grid2">
+          <div>
+            <label for="f-server">Адрес среды и SSH-порт</label>
+            <input id="f-server" data-key="server" placeholder="192.168.1.10:3393">
+            <div class="hint">Печатает dev1c-setup install на сервере.</div>
+          </div>
+          <div>
+            <label for="f-workstation">Рабочее место</label>
+            <select id="f-workstation" data-key="workstation">
+              <option>dev1</option><option>dev2</option><option>dev3</option>
+            </select>
+            <div class="hint">Ваш логин в среде; от него зависят порты.</div>
+          </div>
+          <div>
+            <label for="f-password">Пароль учётки dev (туннель)</label>
+            <input id="f-password" data-key="password" type="password">
+          </div>
+          <div>
+            <label for="f-base_path">База: путь или сервер\база</label>
+            <input id="f-base_path" data-key="base_path" placeholder="C:\Bases\Buh">
+          </div>
+          <div>
+            <label for="f-db_user">Пользователь базы (администратор)</label>
+            <input id="f-db_user" data-key="db_user">
+          </div>
+          <div>
+            <label for="f-db_password">Пароль пользователя базы</label>
+            <input id="f-db_password" data-key="db_password" type="password">
+          </div>
+          <div class="span2">
+            <label for="f-base_url">Адрес публикации базы на этой машине</label>
+            <input id="f-base_url" data-key="base_url" placeholder="http://localhost/Buh/hs/mcp-1c">
+            <div class="hint">Конфигуратор → Администрирование → Публикация на веб-сервере; путь до hs/mcp-1c.</div>
+          </div>
+          <div class="span2">
+            <label for="f-dump">Каталог выгрузки конфигурации (поиск по коду; пусто — без него)</label>
+            <input id="f-dump" data-key="dump">
+          </div>
+        </div>
+        <div class="row-btns">
+          <button class="btn primary" data-do="save">Сохранить</button>
+          <span class="hint" id="save-hint"></span>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="card">
+        <div class="card-title">Расширение mcp-1c в базе</div>
+        <ul class="ops" id="ops"></ul>
+        <div class="row-btns">
+          <button class="btn" data-do="install">Установить</button>
+          <button class="btn" data-do="uninstall">Снять</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Проверка</div>
+        <ul class="checks" id="checks"></ul>
+        <div class="row-btns">
+          <button class="btn" data-do="check">Проверить</button>
+          <span class="hint" id="check-hint"></span>
+        </div>
+      </section>
+
+      <section class="card grow">
+        <div class="card-title">Журнал</div>
+        <div class="log" id="log"></div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <div class="hint" id="kit"></div>
+    <button class="btn" data-do="hide">Свернуть в трей</button>
+    <button class="btn" data-do="quit">Выход</button>
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

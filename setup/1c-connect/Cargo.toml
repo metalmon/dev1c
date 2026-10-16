@@ -15,6 +15,13 @@ path = "src/lib.rs"
 name = "1c-connect"
 path = "src/main.rs"
 
+# Окно входит в сборку по умолчанию: двойной щелчок по файлу из комплекта
+# обязан его открыть. Linux-сборка для живого теста в CI идёт без него
+# (--no-default-features), чтобы не ставить на раннер webkit2gtk.
+[features]
+default = ["gui"]
+gui = ["dep:tauri", "dep:tauri-build"]
+
 [dependencies]
 common = { path = "../common" }
 anyhow.workspace = true
@@ -22,6 +29,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+tauri = { version = "2", features = ["image-png", "tray-icon"], optional = true }
 # The SSH client is embedded: ssh.exe is an optional Windows component with
 # behaviour that differs by version, and it takes the password only from a
 # keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.
@@ -37,3 +45,6 @@ features = ["blocking", "native-tls"]
 version = "0.12"
 default-features = false
 features = ["blocking", "rustls-tls-native-roots"]
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }

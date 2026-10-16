@@ -127,6 +127,270 @@ pub fn parse_nvidia_smi(csv: &str) -> Option<Gpu> {
     Some(Gpu { name: f[0].to_string(), total_mb: mb(f[1])?, used_mb: mb(f[2])?, driver: f[3].to_string() })
 }
 
+// ------------------------------------------------------------ обёртки
+
+use crate::ops::Ctx;
+use anyhow::{Context, Result};
+use common::docker;
+use common::Runner;
+use std::path::PathBuf;
+
+pub const SERVICE: &str = "dev1c-llama";
+
+pub fn dir() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\dev1c\llama")
+    } else {
+        PathBuf::from("/opt/dev1c/llama")
+    }
+}
+pub fn server_exe() -> PathBuf {
+    dir().join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" })
+}
+pub fn token_file() -> PathBuf {
+    dir().join("dev1c-llama.token")
+}
+pub fn log_file() -> PathBuf {
+    dir().join("llama.log")
+}
+/// Ряд бинарников под эту ОС в комплекте.
+pub fn kit_bin(ctx: &Ctx) -> Option<PathBuf> {
+    let p = ctx.kit.path(if cfg!(windows) { "llama/bin/windows-x64-cuda13" } else { "llama/bin/linux-x64-cuda13" });
+    p.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }).exists().then_some(p)
+}
+/// Только из комплекта или уже скопированный нами; чужой на машине не берём.
+pub fn nssm(ctx: &Ctx) -> Option<PathBuf> {
+    let mine = dir().join("nssm.exe");
+    if mine.exists() {
+        return Some(mine);
+    }
+    let kit = ctx.kit.path("llama/nssm.exe");
+    kit.exists().then_some(kit)
+}
+
+/// 128 бит системной случайности без лишней зависимости: RandomState сеется
+/// из ОС при каждом создании.
+pub fn random_hex() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    (0..2)
+        .map(|_| {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u8(0);
+            format!("{:016x}", h.finish())
+        })
+        .collect()
+}
+
+/// Токен службы: файл с закрытыми правами, в команду попадает путь.
+pub fn ensure_token(ctx: &Ctx) -> Result<String> {
+    let f = token_file();
+    if let Ok(t) = std::fs::read_to_string(&f) {
+        if !t.trim().is_empty() {
+            return Ok(t.trim().to_string());
+        }
+    }
+    std::fs::create_dir_all(dir())?;
+    let token = random_hex();
+    common::kit::write_text(&f, &token)?;
+    let path = f.to_string_lossy().to_string();
+    if cfg!(windows) {
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        anyhow::ensure!(!user.is_empty(), "не узнать имя пользователя: права на токен не закрыть");
+        let grant = format!("{user}:(R,W)");
+        docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", &grant, "*S-1-5-18:(R)"])?;
+    } else {
+        docker::exec(ctx, "chmod", &["600", &path])?;
+    }
+    Ok(token)
+}
+
+pub fn gpu(ctx: &Ctx) -> Option<Gpu> {
+    let o = docker::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
+    if !o.ok() {
+        return None;
+    }
+    parse_nvidia_smi(&o.text)
+}
+
+pub fn free_ram_mb(ctx: &Ctx) -> u64 {
+    if cfg!(windows) {
+        docker::probe(ctx, "powershell", &["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"])
+            .ok()
+            .and_then(|o| o.text.trim().lines().next()?.trim().parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+            .unwrap_or(0)
+    } else {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+            .unwrap_or(0)
+    }
+}
+
+/// Где слушать: на Windows петля (Docker Desktop доставляет host.docker.internal
+/// до неё — замерено), на Linux адрес моста — виден контейнерам и машине, не сети.
+pub fn bind_host(ctx: &Ctx) -> String {
+    if cfg!(windows) {
+        return "127.0.0.1".into();
+    }
+    docker::probe(ctx, &ctx.engine(), &["network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"])
+        .ok()
+        .filter(|o| o.ok())
+        .map(|o| o.text.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "172.17.0.1".into())
+}
+
+pub fn port_busy(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+pub struct Installed {
+    pub present: bool,
+    pub running: bool,
+}
+
+pub fn installed(ctx: &Ctx) -> Installed {
+    if cfg!(windows) {
+        match docker::probe(ctx, "sc", &["query", SERVICE]) {
+            Ok(o) if o.ok() => Installed { present: true, running: o.text.contains("RUNNING") },
+            _ => Installed { present: false, running: false },
+        }
+    } else {
+        let present = docker::probe(ctx, "systemctl", &["cat", SERVICE]).map(|o| o.ok()).unwrap_or(false);
+        let running = present && docker::probe(ctx, "systemctl", &["is-active", SERVICE]).map(|o| o.text.trim() == "active").unwrap_or(false);
+        Installed { present, running }
+    }
+}
+
+pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
+    let exe = server_exe().to_string_lossy().to_string();
+    if cfg!(windows) {
+        let nssm = nssm(ctx).context("нет nssm: его кладут в комплект как llama/nssm.exe")?.to_string_lossy().to_string();
+        let mut cmd: Vec<&str> = vec!["install", SERVICE, &exe];
+        cmd.extend(args.iter().map(|a| a.as_str()));
+        let o = docker::exec(ctx, &nssm, &cmd)?;
+        anyhow::ensure!(o.ok(), "служба не зарегистрирована: {}", o.tail(3).join(" "));
+        let d = dir().to_string_lossy().to_string();
+        let log = log_file().to_string_lossy().to_string();
+        // Каждая настройка отдельной командой: nssm их так и принимает.
+        for pair in [
+            vec!["set", SERVICE, "AppDirectory", &d],
+            vec!["set", SERVICE, "AppStdout", &log],
+            vec!["set", SERVICE, "AppStderr", &log],
+            vec!["set", SERVICE, "AppRotateFiles", "1"],
+            vec!["set", SERVICE, "AppRotateBytes", "10485760"],
+            // Упавший сервер поднимается сам: иначе агенты молчат до прихода администратора.
+            vec!["set", SERVICE, "AppExit", "Default", "Restart"],
+            vec!["set", SERVICE, "Start", "SERVICE_AUTO_START"],
+            vec!["set", SERVICE, "DisplayName", "dev1c — сервер модели"],
+        ] {
+            let o = docker::exec(ctx, &nssm, &pair)?;
+            anyhow::ensure!(o.ok(), "не настроить службу: {}", o.tail(2).join(" "));
+        }
+    } else {
+        let line = args.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ");
+        let unit = format!(
+            "[Unit]\nDescription=dev1c — сервер модели\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart={exe} {line}\nRestart=on-failure\nRestartSec=5\nWorkingDirectory={}\n\n[Install]\nWantedBy=multi-user.target\n",
+            dir().display()
+        );
+        common::kit::write_text(std::path::Path::new(&format!("/etc/systemd/system/{SERVICE}.service")), &unit)?;
+        let o = docker::exec(ctx, "systemctl", &["daemon-reload"])?;
+        anyhow::ensure!(o.ok(), "systemd не перечитал юниты: {}", o.tail(2).join(" "));
+        let o = docker::exec(ctx, "systemctl", &["enable", SERVICE])?;
+        anyhow::ensure!(o.ok(), "служба не включена: {}", o.tail(2).join(" "));
+    }
+    Ok(())
+}
+
+fn service_cmd(ctx: &Ctx, verb: &str) -> Result<docker::Out> {
+    if cfg!(windows) {
+        let nssm = nssm(ctx).context("нет nssm")?.to_string_lossy().to_string();
+        docker::exec(ctx, &nssm, &[verb, SERVICE])
+    } else {
+        docker::exec(ctx, "systemctl", &[verb, SERVICE])
+    }
+}
+pub fn service_start(ctx: &Ctx) -> Result<()> {
+    let o = service_cmd(ctx, "start")?;
+    anyhow::ensure!(o.ok(), "служба не запустилась: {}", o.tail(3).join(" "));
+    Ok(())
+}
+pub fn service_stop(ctx: &Ctx) -> Result<()> {
+    let o = service_cmd(ctx, "stop")?;
+    anyhow::ensure!(o.ok(), "служба не остановилась: {}", o.tail(3).join(" "));
+    Ok(())
+}
+pub fn service_remove(ctx: &Ctx) -> Result<()> {
+    let _ = service_cmd(ctx, "stop");
+    if cfg!(windows) {
+        if let Some(n) = nssm(ctx) {
+            let _ = docker::exec(ctx, &n.to_string_lossy(), &["remove", SERVICE, "confirm"]);
+        }
+    } else {
+        let _ = docker::exec(ctx, "systemctl", &["disable", SERVICE]);
+        let _ = std::fs::remove_file(format!("/etc/systemd/system/{SERVICE}.service"));
+        let _ = docker::exec(ctx, "systemctl", &["daemon-reload"]);
+    }
+    Ok(())
+}
+
+fn client(secs: u64) -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(secs)).build().expect("reqwest client")
+}
+
+/// Модель читается с диска: на гигабайтах это минуты.
+pub fn wait_health(url: &str, token: &str, secs: u64) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let c = client(10);
+    let mut last = String::from("нет ответа");
+    loop {
+        match c.get(format!("{url}/health")).bearer_auth(token).send() {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            Ok(r) => last = format!("ответ {}", r.status().as_u16()),
+            Err(e) => last = e.to_string(),
+        }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "сервер модели не готов за {secs} с: {last}");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+pub fn props(url: &str, token: &str) -> Option<Props> {
+    let r = client(10).get(format!("{url}/props")).bearer_auth(token).send().ok()?;
+    parse_props(&r.text().ok()?)
+}
+
+/// Один длинный запрос с меткой в начале (иначе сервер отдаст скорость кэша,
+/// а не модели) и запретом кэша подсказок.
+pub fn measure_prefill(url: &str, token: &str) -> Option<f64> {
+    let filler = format!("{} {}", random_hex(), "Регламент перевозки опасных грузов определяет порядок погрузки, крепления и сопровождения. ".repeat(110));
+    let body = serde_json::json!({ "messages": [{"role": "user", "content": filler}], "max_tokens": 1, "stream": false, "cache_prompt": false });
+    let r = client(600)
+        .post(format!("{url}/v1/chat/completions"))
+        .bearer_auth(token)
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .ok()?;
+    prefill_from(&r.text().ok()?)
+}
+
+pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Result<()> {
+    ctx.kit.state_set("llama.token", &f.token)?;
+    ctx.kit.state_set("llama.window", &f.window.to_string())?;
+    ctx.kit.state_set("llama.max_tokens", &f.max_tokens.to_string())?;
+    ctx.kit.state_set("llama.prefill", &prefill.map(|p| format!("{p:.0}")).unwrap_or_default())
+}
+
+pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
+    Some(crate::cfg::Facts {
+        token: ctx.kit.state_get("llama.token")?,
+        window: ctx.kit.state_get("llama.window")?.parse().ok()?,
+        max_tokens: ctx.kit.state_get("llama.max_tokens")?.parse().ok()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +451,23 @@ mod tests {
         assert!(parse_props("{}").is_none());
         assert_eq!(prefill_from(r#"{"timings":{"prompt_n":1800,"prompt_per_second":2600.5}}"#), Some(2600.5));
         assert_eq!(prefill_from(r#"{"timings":{"prompt_n":4,"prompt_per_second":9000.0}}"#), None, "горстка токенов — это кэш, не замер");
+    }
+
+    #[test]
+    fn facts_round_trip_through_the_kit_state_and_the_token_is_random_hex() {
+        let dir = std::env::temp_dir().join(format!("dev1c-llama-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let kit = common::kit::Kit::at(&dir);
+        let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
+        assert!(facts_load(&ctx).is_none());
+        let f = crate::cfg::Facts { token: "abc".into(), window: 131072, max_tokens: 120832 };
+        facts_save(&ctx, &f, Some(2600.0)).unwrap();
+        assert_eq!(facts_load(&ctx), Some(f));
+        let t1 = random_hex();
+        let t2 = random_hex();
+        assert_eq!(t1.len(), 32);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()) && t1 != t2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

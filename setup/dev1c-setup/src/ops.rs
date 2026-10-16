@@ -35,7 +35,7 @@ impl Runner for Ctx {
 /// --init — настоящий init как PID 1, иначе xrdp не жнёт сирот; SYS_ADMIN и
 /// seccomp/apparmor unconfined — xrdp-sesman открывает PAM-сессию; /dev/fuse —
 /// проброс дисков Windows по RDP идёт через FUSE; shm 2g — браузер и Zed.
-pub fn run_args(cfg: &Cfg) -> Vec<String> {
+pub fn run_args(cfg: &Cfg, facts: Option<&crate::cfg::Facts>) -> Vec<String> {
     let s = |x: &str| x.to_string();
     let [rdp, gitea, model, ssh] = cfg.ports();
     let mut a = vec![
@@ -66,6 +66,10 @@ pub fn run_args(cfg: &Cfg) -> Vec<String> {
         s("apparmor=unconfined"),
         s("--device"),
         s("/dev/fuse"),
+        // Сервер модели на хосте виден контейнеру как host.docker.internal:
+        // Docker Desktop знает это имя сам, движку на Linux его надо дать.
+        s("--add-host"),
+        s("host.docker.internal:host-gateway"),
         s("-v"),
         format!("{}:/home", cfg.volume("home")),
         s("-v"),
@@ -81,7 +85,7 @@ pub fn run_args(cfg: &Cfg) -> Vec<String> {
             a.extend([s("--gpus"), s("all")]);
         }
     }
-    for (k, v) in cfg.container_env(None) {
+    for (k, v) in cfg.container_env(facts) {
         a.extend([s("-e"), format!("{k}={v}")]);
     }
     a.push(cfg.image());
@@ -305,12 +309,21 @@ impl Op<Ctx> for Model {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let f = &ctx.cfg.model.file;
+        match ctx.cfg.form() {
+            crate::cfg::Form::Remote => return OpState::Done(format!("удалённая: {}", ctx.cfg.model.name)),
+            crate::cfg::Form::Host => {
+                if f.is_empty() {
+                    return OpState::Blocked("модель не выбрана: [model] file — путь к .gguf на этой машине".into());
+                }
+                return match std::fs::metadata(f) {
+                    Ok(m) => OpState::Done(format!("{f} ({:.1} ГБ)", m.len() as f64 / 1_073_741_824.0)),
+                    Err(_) => OpState::Blocked(format!("нет файла модели {f}")),
+                };
+            }
+            crate::cfg::Form::Docker => {}
+        }
         if f.is_empty() {
-            return if ctx.cfg.model.url.is_empty() {
-                OpState::Blocked("модель не задана: ни file, ни url в [model] — агент будет молчать".into())
-            } else {
-                OpState::Done(format!("удалённая: {}", ctx.cfg.model.name))
-            };
+            return OpState::Blocked("модель не выбрана: [model] file — файл в комплекте".into());
         }
         let src = ctx.kit.path(f);
         let Ok(meta) = std::fs::metadata(&src) else {
@@ -333,6 +346,9 @@ impl Op<Ctx> for Model {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        if ctx.cfg.form() != crate::cfg::Form::Docker {
+            return vec![];
+        }
         vec![Action::new(format!(
             "скопировать {} в том {} (файл большой, это долго)",
             ctx.cfg.model.file,
@@ -340,6 +356,9 @@ impl Op<Ctx> for Model {
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
+        if ctx.cfg.form() != crate::cfg::Form::Docker {
+            return Ok(());
+        }
         // Через работающий контейнер нельзя (его ещё нет), поэтому одноразовый
         // контейнер с томом и docker cp в него. Bind-mount каталога хоста не
         // используется намеренно: на Windows антивирус рвёт чтение больших файлов.
@@ -376,7 +395,8 @@ impl Op<Ctx> for Container {
             .lines()
             .map(|s| s.to_string())
             .collect();
-        if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env, None) {
+        let facts = crate::llama::facts_load(ctx);
+        if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env, facts.as_ref()) {
             return OpState::Drifted { from, to };
         }
         let have_id = docker::inspect(ctx, name, "{{.Image}}");
@@ -391,9 +411,9 @@ impl Op<Ctx> for Container {
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let mut v = Vec::new();
         if !docker::container_state(ctx, &ctx.cfg.server.name).is_empty() {
-            v.push(Action::new(format!("{} rm -f {} (тома не трогаются)", ctx.engine(), ctx.cfg.server.name)));
+            v.push(Action::new(format!("{} rm -f {} (тома не трогаются; сессии RDP разорвутся)", ctx.engine(), ctx.cfg.server.name)));
         }
-        let args = run_args(&ctx.cfg);
+        let args = run_args(&ctx.cfg, crate::llama::facts_load(ctx).as_ref());
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         v.push(Action::new(format!("{} {}", ctx.engine(), docker::redact(&refs))));
         v
@@ -401,7 +421,7 @@ impl Op<Ctx> for Container {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let name = ctx.cfg.server.name.clone();
         let _ = docker::run(ctx, &["rm", "-f", &name]);
-        let args = run_args(&ctx.cfg);
+        let args = run_args(&ctx.cfg, crate::llama::facts_load(ctx).as_ref());
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let o = docker::run(ctx, &refs)?;
         anyhow::ensure!(
@@ -439,19 +459,14 @@ impl Op<Ctx> for Services {
         OpState::Missing
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!(
-            "дождаться gitea, xrdp, sshd{} (до двух минут)",
-            if ctx.cfg.model.file.is_empty() { "" } else { ", llama-server" }
-        ))]
+        let _ = ctx;
+        vec![Action::new("дождаться gitea, xrdp, sshd (до двух минут)")]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
         }
-        let mut want = vec!["gitea", "xrdp", "sshd"];
-        if !ctx.cfg.model.file.is_empty() {
-            want.push("llama-server");
-        }
+        let want = ["gitea", "xrdp", "sshd"];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let mut missing = Vec::new();
@@ -475,13 +490,19 @@ impl Op<Ctx> for Services {
 }
 
 /// Операции сервера в порядке применения.
-pub fn server() -> Vec<Box<dyn Op<Ctx>>> {
-    vec![Box::new(Env), Box::new(Image), Box::new(Volumes), Box::new(Model), Box::new(Container), Box::new(Services)]
+pub fn server(cfg: &Cfg) -> Vec<Box<dyn Op<Ctx>>> {
+    let mut v: Vec<Box<dyn Op<Ctx>>> = vec![Box::new(Env), Box::new(Image), Box::new(Volumes), Box::new(Model)];
+    // Сервер модели — до контейнера среды: его числа уходят туда переменными.
+    v.extend(crate::ops_llama::ops(cfg.form()));
+    v.push(Box::new(Container));
+    v.push(Box::new(Services));
+    v
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cfg::Facts;
 
     #[test]
     fn run_args_carry_ports_volumes_and_environment() {
@@ -491,7 +512,7 @@ mod tests {
         c.model.url = "https://m".into();
         c.model.key = "k".into();
         c.model.name = "Q".into();
-        let a = run_args(&c).join(" ");
+        let a = run_args(&c, None).join(" ");
         assert!(a.starts_with("run -d --name dev1c --restart unless-stopped --init"));
         assert!(a.contains("-p 4000:3389 -p 4001:3000 -p 4002:8080 -p 4003:2022"));
         assert!(a.contains("-v dev1c-home:/home -v dev1c-gitea:/var/lib/gitea -v dev1c-models:/opt/models"));
@@ -502,14 +523,32 @@ mod tests {
     }
 
     #[test]
+    fn a_change_of_the_measured_numbers_is_a_drift_of_the_container() {
+        let mut c = Cfg::default();
+        c.model.file = "/m/x.gguf".into();
+        let f = Facts { token: "t".into(), window: 131072, max_tokens: 120832 };
+        let env: Vec<String> = c.container_env(Some(&f)).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+        assert!(drift_of(&c, &c.image(), "3390", &env, Some(&f)).is_none());
+        let f2 = Facts { max_tokens: 100000, ..f.clone() };
+        let (from, to) = drift_of(&c, &c.image(), "3390", &env, Some(&f2)).unwrap();
+        assert!(from.contains("CUSTOM_MAX_TOKENS=120832") && to.contains("CUSTOM_MAX_TOKENS=100000"));
+    }
+
+    #[test]
+    fn docker_engine_gets_the_host_alias_for_the_model_server() {
+        let c = Cfg::default();
+        assert!(run_args(&c, None).join(" ").contains("--add-host host.docker.internal:host-gateway"));
+    }
+
+    #[test]
     fn no_gpu_and_podman_change_the_flags() {
         let mut c = Cfg::default();
         c.server.gpu = false;
-        let a = run_args(&c).join(" ");
+        let a = run_args(&c, None).join(" ");
         assert!(!a.contains("--gpus"));
         c.server.gpu = true;
         c.server.engine = "podman".into();
-        assert!(run_args(&c).join(" ").contains("--device nvidia.com/gpu=all"));
+        assert!(run_args(&c, None).join(" ").contains("--device nvidia.com/gpu=all"));
     }
 
     #[test]

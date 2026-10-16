@@ -62,7 +62,7 @@ fn ctx_for(app: &AppHandle, ui: &Ui, dry_run: bool) -> Ctx {
 }
 
 fn states(ctx: &Ctx) -> Vec<OpView> {
-    common::run::status(ctx, &ops::server())
+    common::run::status(ctx, &ops::server(&ctx.cfg))
         .into_iter()
         .map(|(id, title, st)| {
             use common::op::OpState::*;
@@ -107,7 +107,7 @@ fn save_cfg(ui: State<Ui>, cfg: Cfg) -> Result<(), String> {
 fn run(app: AppHandle, ui: State<Ui>, which: String) {
     let ctx = ctx_for(&app, &ui, false);
     std::thread::spawn(move || {
-        let ops = ops::server();
+        let ops = ops::server(&ctx.cfg);
         let r = match which.as_str() {
             "change" => common::run::apply_all(&ctx, &ops, None, true).map(|_| ()),
             "clean-stack" => common::run::clean_apply(&ctx, &ops, CleanLevel::Stack),

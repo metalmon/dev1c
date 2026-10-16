@@ -11,6 +11,7 @@ mod cfg;
 mod gui;
 mod llama;
 mod ops;
+mod ops_llama;
 mod verify;
 
 use anyhow::{Context, Result};
@@ -125,7 +126,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let mut ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
-    let ops = ops::server();
+    let ops = ops::server(&ctx.cfg);
     match cli.cmd.unwrap_or(Cmd::Status) {
         Cmd::Example => unreachable!(),
         Cmd::Status => {

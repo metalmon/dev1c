@@ -158,14 +158,47 @@ pub fn kit_bin(ctx: &Ctx) -> Option<PathBuf> {
     let p = ctx.kit.path(if cfg!(windows) { "llama/bin/windows-x64-cuda13" } else { "llama/bin/linux-x64-cuda13" });
     p.join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }).exists().then_some(p)
 }
-/// Только из комплекта или уже скопированный нами; чужой на машине не берём.
+/// Только из комплекта, а когда комплекта рядом уже нет — наша копия в
+/// закрытом каталоге службы. Чужой файл на машине не берём.
 pub fn nssm(ctx: &Ctx) -> Option<PathBuf> {
-    let mine = dir().join("nssm.exe");
-    if mine.exists() {
-        return Some(mine);
-    }
     let kit = ctx.kit.path("llama/nssm.exe");
-    kit.exists().then_some(kit)
+    if kit.exists() {
+        return Some(kit);
+    }
+    let mine = dir().join("nssm.exe");
+    mine.exists().then_some(mine)
+}
+
+/// Каталог службы создаётся закрытым: писать в него могут только SYSTEM и
+/// администраторы (Linux: root), иначе подмена llama-server.exe — это
+/// выполнение кода от службы.
+pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
+    let d = dir();
+    std::fs::create_dir_all(&d)?;
+    let path = d.to_string_lossy().to_string();
+    if cfg!(windows) {
+        let o = docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"])?;
+        anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
+    } else {
+        docker::exec(ctx, "chown", &["root:root", &path])?;
+        docker::exec(ctx, "chmod", &["755", &path])?;
+    }
+    Ok(())
+}
+
+/// Файл с секретом: создаётся сразу с закрытыми правами, не после записи.
+fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path).with_context(|| format!("не создать {}", path.display()))?;
+    f.write_all(text.as_bytes())?;
+    Ok(())
 }
 
 /// 128 бит системной случайности без лишней зависимости: RandomState сеется
@@ -181,25 +214,27 @@ pub fn random_hex() -> String {
         .collect()
 }
 
-/// Токен службы: файл с закрытыми правами, в команду попадает путь.
+/// Токен, если он уже выписан. Живёт только в своём файле.
+pub fn read_token() -> Option<String> {
+    let t = std::fs::read_to_string(token_file()).ok()?;
+    let t = t.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// Токен службы: файл с закрытыми правами в закрытом каталоге, в команду
+/// попадает путь. Существующий файл не перевыписывается.
 pub fn ensure_token(ctx: &Ctx) -> Result<String> {
-    let f = token_file();
-    if let Ok(t) = std::fs::read_to_string(&f) {
-        if !t.trim().is_empty() {
-            return Ok(t.trim().to_string());
-        }
+    if let Some(t) = read_token() {
+        return Ok(t);
     }
-    std::fs::create_dir_all(dir())?;
+    ensure_dir(ctx)?;
     let token = random_hex();
-    common::kit::write_text(&f, &token)?;
-    let path = f.to_string_lossy().to_string();
+    let f = token_file();
+    write_secret(&f, &token)?;
     if cfg!(windows) {
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        anyhow::ensure!(!user.is_empty(), "не узнать имя пользователя: права на токен не закрыть");
-        let grant = format!("{user}:(R,W)");
-        docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", &grant, "*S-1-5-18:(R)"])?;
-    } else {
-        docker::exec(ctx, "chmod", &["600", &path])?;
+        let path = f.to_string_lossy().to_string();
+        let o = docker::exec(ctx, "icacls", &[&path, "/inheritance:r", "/grant:r", "*S-1-5-18:(R)", "*S-1-5-32-544:(R,W)"])?;
+        anyhow::ensure!(o.ok(), "не закрыть права на токен: {}", o.tail(2).join(" "));
     }
     Ok(token)
 }
@@ -317,11 +352,6 @@ pub fn service_start(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(o.ok(), "служба не запустилась: {}", o.tail(3).join(" "));
     Ok(())
 }
-pub fn service_stop(ctx: &Ctx) -> Result<()> {
-    let o = service_cmd(ctx, "stop")?;
-    anyhow::ensure!(o.ok(), "служба не остановилась: {}", o.tail(3).join(" "));
-    Ok(())
-}
 pub fn service_remove(ctx: &Ctx) -> Result<()> {
     let _ = service_cmd(ctx, "stop");
     if cfg!(windows) {
@@ -344,13 +374,12 @@ fn client(secs: u64) -> reqwest::blocking::Client {
 pub fn wait_health(url: &str, token: &str, secs: u64) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let c = client(10);
-    let mut last = String::from("нет ответа");
     loop {
-        match c.get(format!("{url}/health")).bearer_auth(token).send() {
+        let last = match c.get(format!("{url}/health")).bearer_auth(token).send() {
             Ok(r) if r.status().is_success() => return Ok(()),
-            Ok(r) => last = format!("ответ {}", r.status().as_u16()),
-            Err(e) => last = e.to_string(),
-        }
+            Ok(r) => format!("ответ {}", r.status().as_u16()),
+            Err(e) => e.to_string(),
+        };
         anyhow::ensure!(std::time::Instant::now() < deadline, "сервер модели не готов за {secs} с: {last}");
         std::thread::sleep(std::time::Duration::from_secs(3));
     }
@@ -376,8 +405,9 @@ pub fn measure_prefill(url: &str, token: &str) -> Option<f64> {
     prefill_from(&r.text().ok()?)
 }
 
+/// Числа замера — в состоянии комплекта; токен туда не пишется, он
+/// читается из своего файла (комплект лежит на флешке с обычными правами).
 pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Result<()> {
-    ctx.kit.state_set("llama.token", &f.token)?;
     ctx.kit.state_set("llama.window", &f.window.to_string())?;
     ctx.kit.state_set("llama.max_tokens", &f.max_tokens.to_string())?;
     ctx.kit.state_set("llama.prefill", &prefill.map(|p| format!("{p:.0}")).unwrap_or_default())
@@ -385,7 +415,7 @@ pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Res
 
 pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
     Some(crate::cfg::Facts {
-        token: ctx.kit.state_get("llama.token")?,
+        token: read_token()?,
         window: ctx.kit.state_get("llama.window")?.parse().ok()?,
         max_tokens: ctx.kit.state_get("llama.max_tokens")?.parse().ok()?,
     })
@@ -457,12 +487,22 @@ mod tests {
     fn facts_round_trip_through_the_kit_state_and_the_token_is_random_hex() {
         let dir = std::env::temp_dir().join(format!("dev1c-llama-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let dir_for_test = dir.clone();
         let kit = common::kit::Kit::at(&dir);
         let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
-        assert!(facts_load(&ctx).is_none());
+        assert!(ctx.kit.state_get("llama.window").is_none());
         let f = crate::cfg::Facts { token: "abc".into(), window: 131072, max_tokens: 120832 };
         facts_save(&ctx, &f, Some(2600.0)).unwrap();
-        assert_eq!(facts_load(&ctx), Some(f));
+        // Токен в состоянии комплекта не хранится: он только в своём файле.
+        assert!(ctx.kit.state_get("llama.token").is_none());
+        assert_eq!(ctx.kit.state_get("llama.window").as_deref(), Some("131072"));
+        assert_eq!(ctx.kit.state_get("llama.max_tokens").as_deref(), Some("120832"));
+        if let Some(got) = facts_load(&ctx) {
+            assert_eq!((got.window, got.max_tokens), (131072, 120832));
+        }
+        let secret = dir_for_test.join("s.token");
+        write_secret(&secret, "x").unwrap();
+        assert!(write_secret(&secret, "y").is_err(), "существующий файл секрета не перевыписывается");
         let t1 = random_hex();
         let t2 = random_hex();
         assert_eq!(t1.len(), 32);

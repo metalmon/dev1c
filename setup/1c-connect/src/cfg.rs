@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 pub const EXAMPLE: &str = include_str!("../1c-connect.example.toml");
 pub const FILE: &str = "1c-connect.toml";
 
+/// Инструменты vrunner, видимые агенту по умолчанию: выгрузка/загрузка,
+/// синтакс-контроль, тесты, фоновые задачи, кэш. Остальные 49 — по списку
+/// в toml.
+pub const DEFAULT_TOOLS: [&str; 12] = [
+    "cf_decompile", "cf_load", "infobase_update", "validate_syntax_check", "test_xunit", "test_vanessa",
+    "test_yaxunit", "task_status", "task_result", "task_cancel", "cache_show", "cache_clear",
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
@@ -25,19 +33,23 @@ pub struct Host {
     pub db_password: String,
     pub base_url: String,
     pub dump: String,
+    pub project: String,
+    pub tools: Vec<String>,
 }
 
 impl Default for Host {
     fn default() -> Self {
         Self {
             server: "192.168.1.10:3393".into(),
-            password: "dev".into(),
+            password: "dev1".into(),
             workstation: "dev1".into(),
             base_path: "C:\\Bases\\Buh".into(),
             db_user: "Администратор".into(),
             db_password: String::new(),
             base_url: "http://localhost/Buh/hs/mcp-1c".into(),
             dump: String::new(),
+            project: "C:\\proj\\Buh".into(),
+            tools: DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect(),
         }
     }
 }
@@ -72,7 +84,7 @@ impl Cfg {
         self.host.server == Host::default().server
     }
 
-    fn number(&self) -> Option<u16> {
+    pub fn number(&self) -> Option<u16> {
         self.host.workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
     }
 
@@ -90,7 +102,26 @@ impl Cfg {
             "[host]: base_url — только латиница, цифры и -._~:/ (путь публикации без пробелов и спецсимволов)"
         );
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
+        let p = &self.host.project;
+        let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
+        anyhow::ensure!(full && !p.contains('"') && !p.contains('%'), "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh");
         Ok(())
+    }
+
+    /// Gitea среды: на два порта ниже SSH (блок из четырёх подряд у dev1c-setup).
+    pub fn gitea_url(&self) -> String {
+        let (host, port) = self.host.server.rsplit_once(':').unwrap_or((&self.host.server, "3393"));
+        let port: u32 = port.parse().unwrap_or(3393);
+        format!("http://{host}:{}", port.saturating_sub(2))
+    }
+
+    /// Каталог выгрузки для поиска mcp-1c: `dump`, а пусто — `<project>/src`.
+    pub fn dump_dir(&self) -> String {
+        if self.host.dump.is_empty() {
+            format!("{}{}src", self.host.project.trim_end_matches(['\\', '/']), std::path::MAIN_SEPARATOR)
+        } else {
+            self.host.dump.clone()
+        }
     }
 
     pub fn ports(&self) -> Ports {
@@ -128,6 +159,8 @@ impl Cfg {
                 "db_password" => format!("{:?}", h.db_password),
                 "base_url" => format!("{:?}", h.base_url),
                 "dump" => format!("{:?}", h.dump),
+                "project" => format!("{:?}", h.project),
+                "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
                 _ => return None,
             })
         })
@@ -177,6 +210,48 @@ mod tests {
         assert!(c.is_sample());
         c.host.server = "10.0.0.5:3393".into();
         assert!(!c.is_sample());
+    }
+
+    #[test]
+    fn gitea_sits_two_ports_below_ssh() {
+        let mut c = sample();
+        assert_eq!(c.gitea_url(), "http://192.168.1.10:3391");
+        c.host.server = "10.0.0.5:4403".into();
+        assert_eq!(c.gitea_url(), "http://10.0.0.5:4401");
+    }
+
+    #[test]
+    fn dump_defaults_to_src_under_the_project() {
+        let mut c = sample();
+        c.host.project = "C:\\proj\\Buh".into();
+        assert_eq!(c.dump_dir(), format!("C:\\proj\\Buh{}src", std::path::MAIN_SEPARATOR));
+        c.host.dump = "D:\\dump".into();
+        assert_eq!(c.dump_dir(), "D:\\dump");
+    }
+
+    #[test]
+    fn project_must_be_a_full_path_without_quotes_or_percent() {
+        let mut c = sample();
+        c.host.project = "proj".into();
+        assert!(c.validate().unwrap_err().to_string().contains("project"));
+        c.host.project = "C:\\proj\\\"x\"".into();
+        assert!(c.validate().unwrap_err().to_string().contains("project"));
+        c.host.project = "C:\\proj\\Buh".into();
+        assert!(c.validate().is_ok());
+        c.host.project = "/home/dev/proj".into();
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn tools_default_to_the_working_set() {
+        let c = sample();
+        assert_eq!(c.host.tools, DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert!(c.host.tools.contains(&"cf_load".to_string()) && !c.host.tools.contains(&"xunit".to_string()));
+    }
+
+    #[test]
+    fn password_is_the_workstation_login_by_default() {
+        assert_eq!(Host::default().password, "dev1");
     }
 
     #[test]

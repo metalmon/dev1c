@@ -278,7 +278,14 @@ fn link(app: AppHandle, ui: State<Ui>) -> LinkView {
 }
 
 #[tauri::command]
-fn save_cfg(ui: State<Ui>, host: Host) -> Result<(), String> {
+fn save_cfg(ui: State<Ui>, mut host: Host) -> Result<(), String> {
+    // Полей проекта в окне пока нет (этап 6B): берём их из текущих параметров,
+    // иначе пустые значения из формы затёрли бы toml.
+    {
+        let cur = ui.cfg.lock().unwrap();
+        host.project = cur.host.project.clone();
+        host.tools = cur.host.tools.clone();
+    }
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     common::kit::write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;

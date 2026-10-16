@@ -22,7 +22,7 @@ pub fn ops(form: Form) -> Vec<Box<dyn Op<Ctx>>> {
 pub fn local_url(ctx: &Ctx) -> String {
     match ctx.cfg.form() {
         Form::Host => format!("http://{}:{}", llama::bind_host(ctx), ctx.cfg.model.port),
-        _ => format!("http://127.0.0.1:{}", ctx.cfg.ports()[2]),
+        _ => format!("http://{}:{}", llama::bind_host(ctx), ctx.cfg.ports()[2]),
     }
 }
 
@@ -44,9 +44,24 @@ pub fn desired_args(ctx: &Ctx) -> Vec<String> {
     })
 }
 
+/// Параметры запуска без `--cache-ram`: он считается от свободной памяти и
+/// гуляет между запусками, а расхождение должно означать настоящее изменение.
+fn significant(line: &str) -> String {
+    let mut out = Vec::new();
+    let mut it = line.split_whitespace();
+    while let Some(w) = it.next() {
+        if w == "--cache-ram" {
+            it.next();
+            continue;
+        }
+        out.push(w);
+    }
+    out.join(" ")
+}
+
 pub fn args_drift(want: &[String], baked: &str) -> Option<(String, String)> {
     let w = want.join(" ");
-    (w != baked).then(|| (format!("служба: {baked}"), format!("служба: {w}")))
+    (significant(&w) != significant(baked)).then(|| (format!("служба: {baked}"), format!("служба: {w}")))
 }
 
 /// Что из окна сервера следует для Zed; меньше нижней границы — провал с числами.
@@ -148,6 +163,11 @@ impl Op<Ctx> for Bin {
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let src = llama::kit_bin(ctx).ok_or_else(|| anyhow::anyhow!("в комплекте нет llama/bin"))?;
+        // Поверх работающей службы файлы не перепишутся: сначала остановить.
+        if llama::installed(ctx).running {
+            llama::service_stop(ctx)?;
+            ctx.warn("служба модели остановлена на время обновления файлов; шаг llama.service запустит её снова");
+        }
         llama::ensure_dir(ctx)?;
         let mut kit_files = Vec::new();
         for e in std::fs::read_dir(&src)? {
@@ -203,6 +223,9 @@ impl Op<Ctx> for Service {
         if m.file.is_empty() {
             return OpState::Blocked("модель не выбрана: [model] file — путь к .gguf на этой машине".into());
         }
+        if !llama::is_admin(ctx) {
+            return OpState::Blocked("нужны права администратора: служба и её каталог регистрируются от имени системы — запустите программу от администратора".into());
+        }
         if !std::path::Path::new(&m.file).exists() {
             return OpState::Blocked(format!("нет файла модели {}", m.file));
         }
@@ -218,7 +241,7 @@ impl Op<Ctx> for Service {
         let got = llama::installed(ctx);
         if !got.present {
             // Порт занимать будем мы: узнать о чужом лучше до регистрации.
-            if llama::port_busy(m.port) {
+            if llama::port_busy(&llama::bind_host(ctx), m.port) {
                 return OpState::Blocked(format!("порт {} занят другой программой — [model] port", m.port));
             }
             return OpState::Missing;
@@ -339,8 +362,16 @@ impl Op<Ctx> for Answers {
     fn always_run(&self) -> bool {
         true
     }
-    fn state(&self, _ctx: &Ctx) -> OpState {
-        OpState::Missing
+    fn state(&self, ctx: &Ctx) -> OpState {
+        // Сервер не может подняться — замеру нечего ждать пять минут.
+        let server: Box<dyn Op<Ctx>> = match ctx.cfg.form() {
+            Form::Docker => Box::new(Container),
+            _ => Box::new(Service),
+        };
+        match server.state(ctx) {
+            OpState::Blocked(why) => OpState::Blocked(format!("сервер модели не поднимается: {why}")),
+            _ => OpState::Missing,
+        }
     }
     fn plan(&self, _ctx: &Ctx) -> Vec<Action> {
         vec![
@@ -412,6 +443,30 @@ mod tests {
         assert!(args_drift(&["a".into(), "b".into()], "a b").is_none());
         let (from, to) = args_drift(&["a".into(), "c".into()], "a b").unwrap();
         assert!(from.contains("a b") && to.contains("a c"));
+        // Кэш подсказок считается от свободной памяти и гуляет между запусками:
+        // это настройка, а не тождество службы, и расхождением не считается.
+        let want: Vec<String> = ["-m", "x", "--cache-ram", "3072", "--port", "1"].iter().map(|s| s.to_string()).collect();
+        assert!(args_drift(&want, "-m x --cache-ram 8192 --port 1").is_none());
+        assert!(args_drift(&want, "-m x --cache-ram 8192 --port 2").is_some());
+    }
+
+    #[test]
+    fn the_measurement_is_blocked_when_the_server_step_is() {
+        // Пустой file: служба заблокирована, и замер не должен пять минут
+        // стучаться в сервер, которого нет, обрывая установку.
+        let c = Cfg::default();
+        let dir = std::env::temp_dir().join(format!("dev1c-answers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx { kit: common::kit::Kit::at(&dir), cfg: c, dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
+        let st = Answers.state(&ctx);
+        assert!(matches!(st, OpState::Blocked(ref w) if w.contains("модель")), "{st:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_arguments_with_spaces_are_quoted_for_nssm() {
+        let line = llama::quote_args(&["-m".into(), r"C:\Program Files\m\x.gguf".into(), "--port".into(), "1236".into()]);
+        assert_eq!(line, r#"-m "C:\Program Files\m\x.gguf" --port 1236"#);
     }
 
     #[test]

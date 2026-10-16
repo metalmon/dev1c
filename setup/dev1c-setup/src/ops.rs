@@ -183,12 +183,14 @@ impl Op<Ctx> for Env {
         // Порт занят не нашим контейнером — установка упрётся в docker run с
         // невнятной ошибкой; лучше сказать здесь и назвать выход.
         let ours = docker::container_state(ctx, &ctx.cfg.server.name) == "running";
-        for p in ctx.cfg.ports() {
+        // Третий порт — сервера модели (контейнерная форма), среда его не слушает.
+        let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
+        for p in [rdp, gitea, ssh] {
             if !ours && std::net::TcpListener::bind(("0.0.0.0", p)).is_err() {
                 anyhow::bail!("порт {p} занят другой программой — задайте другой блок: dev1c-setup change port=4000");
             }
         }
-        ctx.ok(format!("порты {}–{} свободны или наши", ctx.cfg.ports()[0], ctx.cfg.ports()[3]));
+        ctx.ok(format!("порты {rdp}, {gitea}, {ssh} свободны или наши"));
         Ok(())
     }
 }
@@ -382,6 +384,11 @@ impl Op<Ctx> for Container {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let name = &ctx.cfg.server.name;
+        // Локальная модель без замера: контейнер, собранный сейчас, вышел бы
+        // без адреса модели и молча потерял бы агента.
+        if ctx.cfg.form() != crate::cfg::Form::Remote && crate::llama::facts_load(ctx).is_none() {
+            return OpState::Blocked("сервер модели ещё не замерен (шаг llama.answers); без его чисел контейнер собирать нельзя".into());
+        }
         if let Some(st) = state_before_drift(&docker::container_state(ctx, name)) {
             return st;
         }

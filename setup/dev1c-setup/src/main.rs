@@ -155,7 +155,14 @@ fn run() -> Result<()> {
         }
         Cmd::Change { values } => {
             apply_changes(&mut ctx, &values)?;
-            common::run::apply_all(&ctx, &ops, None, true)?;
+            let ops = ops::server(&ctx.cfg);
+            let touched = common::run::apply_all(&ctx, &ops, None, true)?;
+            // Служба пересоздана — числа окна могли измениться: замер заново,
+            // иначе контейнер и Zed остаются с прежними.
+            if touched > 0 && ctx.cfg.form() != cfg::Form::Remote && !ctx.dry_run {
+                common::run::apply_all(&ctx, &ops, Some("llama.answers"), false)?;
+                common::run::apply_all(&ctx, &ops, None, true)?;
+            }
         }
         Cmd::Check => check(&ctx)?,
         Cmd::Clean { stack, data } => {

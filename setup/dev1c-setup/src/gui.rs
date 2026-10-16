@@ -33,6 +33,12 @@ struct OpView {
 }
 
 #[derive(Serialize)]
+struct FactsView {
+    window: u32,
+    max_tokens: u32,
+}
+
+#[derive(Serialize)]
 struct Machine {
     kit: String,
     file_exists: bool,
@@ -41,8 +47,8 @@ struct Machine {
     ports: [u16; 4],
     /// Адрес сервера модели, как его видит контейнер среды.
     model_url: String,
-    /// Числа последнего замера локального сервера, если он был.
-    facts: Option<crate::cfg::Facts>,
+    /// Числа последнего замера локального сервера, если он был (без токена).
+    facts: Option<FactsView>,
     ops: Vec<OpView>,
 }
 
@@ -91,7 +97,7 @@ fn machine(app: AppHandle, ui: State<Ui>) -> Machine {
         cfg: ctx.cfg.clone(),
         ports: ctx.cfg.ports(),
         model_url: ctx.cfg.model_url(),
-        facts: crate::llama::facts_load(&ctx),
+        facts: crate::llama::facts_load(&ctx).map(|f| FactsView { window: f.window, max_tokens: f.max_tokens }),
         ops: states(&ctx),
     }
 }

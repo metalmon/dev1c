@@ -74,7 +74,7 @@ pub enum Form {
 
 /// Что установщик измерил у поднятого сервера; без этого контейнеру среды
 /// нечего сказать про локальную модель.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Facts {
     pub token: String,
     pub window: u32,

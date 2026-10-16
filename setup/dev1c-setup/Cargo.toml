@@ -22,6 +22,9 @@ toml.workspace = true
 
 # Проверки по HTTP (Gitea отвечает?). Системное доверие на Windows, rustls с
 # системными корнями на Linux — так бинарь собирается статически.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"
 default-features = false

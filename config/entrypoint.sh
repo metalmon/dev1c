@@ -81,6 +81,16 @@ for home in /home/*; do
             continue
         fi
         shipped=$(md5sum "$src" | cut -d' ' -f1)
+        # The settings carry the model address and window substituted below;
+        # a substituted placeholder is gone for good, so when the model
+        # variables change the file has to come from the image again. The
+        # stamp therefore covers the image copy AND the model variables: the
+        # same image with a new model re-seeds settings.json (a hand edit in it
+        # is lost then — the .bak keeps it), AGENTS.md is untouched by this.
+        if [ "$f" = settings.json ]; then
+            shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${CUSTOM_API_URL:-}" "${CUSTOM_MODEL:-}" \
+                "${CUSTOM_MAX_TOKENS:-}" "${CUSTOM_MAX_OUTPUT_TOKENS:-}" | md5sum | cut -d' ' -f1)
+        fi
         [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && continue
         [ -f "$dst" ] && cp --remove-destination "$dst" "$dst.bak"
         # install after rm: writing over a path replaces the file itself rather

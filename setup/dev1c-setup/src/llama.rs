@@ -241,17 +241,27 @@ fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// 128 бит системной случайности без лишней зависимости: RandomState сеется
-/// из ОС при каждом создании.
+/// 128 бит из генератора ОС: BCryptGenRandom на Windows, /dev/urandom на
+/// Linux. Хэш-функция std для токена не годится — она не криптографическая.
 pub fn random_hex() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    (0..2)
-        .map(|_| {
-            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-            h.write_u8(0);
-            format!("{:016x}", h.finish())
-        })
-        .collect()
+    let mut buf = [0u8; 16];
+    os_random(&mut buf).expect("системный генератор случайных чисел недоступен");
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(windows)]
+fn os_random(buf: &mut [u8]) -> Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    anyhow::ensure!(status == 0, "BCryptGenRandom: статус {status:#x}");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn os_random(buf: &mut [u8]) -> Result<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")?.read_exact(buf)?;
+    Ok(())
 }
 
 /// Токен, если он уже выписан. Живёт только в своём файле.
@@ -315,8 +325,25 @@ pub fn bind_host(ctx: &Ctx) -> String {
         .unwrap_or_else(|| "172.17.0.1".into())
 }
 
-pub fn port_busy(port: u16) -> bool {
-    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+/// Занят ли порт на том адресе, где будет слушать служба.
+pub fn port_busy(host: &str, port: u16) -> bool {
+    std::net::TcpListener::bind((host, port)).is_err()
+}
+
+/// Запущена ли программа с правами администратора (root на Linux):
+/// без них не зарегистрировать службу и не закрыть каталог.
+pub fn is_admin(ctx: &Ctx) -> bool {
+    if cfg!(windows) {
+        docker::probe(ctx, "net", &["session"]).map(|o| o.ok()).unwrap_or(false)
+    } else {
+        docker::probe(ctx, "id", &["-u"]).map(|o| o.ok() && o.text.trim() == "0").unwrap_or(false)
+    }
+}
+
+/// Строка параметров службы: аргументы с пробелами в кавычках — nssm и
+/// systemd читают её как одну строку.
+pub fn quote_args(args: &[String]) -> String {
+    args.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")
 }
 
 pub struct Installed {
@@ -341,14 +368,16 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
     let exe = server_exe().to_string_lossy().to_string();
     if cfg!(windows) {
         let nssm = nssm_exe()?;
-        let mut cmd: Vec<&str> = vec!["install", SERVICE, &exe];
-        cmd.extend(args.iter().map(|a| a.as_str()));
-        let o = docker::exec(ctx, &nssm, &cmd)?;
+        let o = docker::exec(ctx, &nssm, &["install", SERVICE, &exe])?;
         anyhow::ensure!(o.ok(), "служба не зарегистрирована: {}", o.tail(3).join(" "));
         let d = dir().to_string_lossy().to_string();
         let log = log_file().to_string_lossy().to_string();
+        // Параметры — одной строкой с кавычками: переданные по одному, nssm
+        // склеивает их пробелами, и путь с пробелом распадается надвое.
+        let params = quote_args(args);
         // Каждая настройка отдельной командой: nssm их так и принимает.
         for pair in [
+            vec!["set", SERVICE, "AppParameters", &params],
             vec!["set", SERVICE, "AppDirectory", &d],
             vec!["set", SERVICE, "AppStdout", &log],
             vec!["set", SERVICE, "AppStderr", &log],
@@ -363,7 +392,7 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
             anyhow::ensure!(o.ok(), "не настроить службу: {}", o.tail(2).join(" "));
         }
     } else {
-        let line = args.iter().map(|a| if a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ");
+        let line = quote_args(args);
         let unit = format!(
             "[Unit]\nDescription=dev1c — сервер модели\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart={exe} {line}\nRestart=on-failure\nRestartSec=5\nWorkingDirectory={}\n\n[Install]\nWantedBy=multi-user.target\n",
             dir().display()
@@ -384,6 +413,11 @@ fn service_cmd(ctx: &Ctx, verb: &str) -> Result<docker::Out> {
     } else {
         docker::exec(ctx, "systemctl", &[verb, SERVICE])
     }
+}
+pub fn service_stop(ctx: &Ctx) -> Result<()> {
+    let o = service_cmd(ctx, "stop")?;
+    anyhow::ensure!(o.ok(), "служба не остановилась: {}", o.tail(3).join(" "));
+    Ok(())
 }
 pub fn service_start(ctx: &Ctx) -> Result<()> {
     let o = service_cmd(ctx, "start")?;

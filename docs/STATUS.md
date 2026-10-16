@@ -188,6 +188,11 @@ script days is obsolete; the scripts are gone.
 - A flyout that hides on blur cannot be screenshotted by a script that then
   steals focus: the driver re-shows it with `ShowWindow` and an Alt tap before
   `SetForegroundWindow` (`drive.py` in the session scratchpad, not in the repo).
+- The settings seeding in the entrypoint re-copies `settings.json` from the
+  image only when its stamp changes; substituted placeholders are gone for
+  good, so a new model address or window never reached a home that already
+  had the file. The stamp now covers the `CUSTOM_*` variables too (a hand
+  edit in settings.json is lost on a model change; `.bak` keeps it).
 - `icacls <dir> /inheritance:r /grant:r …:(OI)(CI)F /T` writes the inheritable
   ACEs onto the files too, where they do not apply — every file ends up with
   an empty DACL, unreadable and unrunnable even for administrators (nssm.exe

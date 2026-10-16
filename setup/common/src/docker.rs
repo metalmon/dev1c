@@ -48,6 +48,24 @@ pub fn probe<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
 /// Командная строка для журнала и плана: значения ключей и паролей скрыты.
 /// Журнал лежит в комплекте, а комплект копируют и пересылают; ключ в нём —
 /// утечка, даже если тот же ключ лежит в соседнем toml.
+/// Вывод команд тоже идёт в журнал: `docker inspect` отдаёт переменные
+/// контейнера, среди них ключ модели. Значения ключей, токенов и паролей
+/// заменяются многоточием построчно.
+pub fn redact_text(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let name = l.split('=').next().unwrap_or("");
+            let upper = name.to_ascii_uppercase();
+            if l.contains('=') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
+                format!("{name}=…")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn redact(args: &[&str]) -> String {
     let secret_name = |s: &str| {
         let l = s.to_ascii_lowercase();
@@ -89,7 +107,7 @@ fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool)
         .with_context(|| format!("не удалось запустить {program}"))?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
-    ctx.emit(Event::Output { command: shown, text: text.clone() });
+    ctx.emit(Event::Output { command: shown, text: redact_text(&text) });
     Ok(Out { code: output.status.code().unwrap_or(-1), text })
 }
 
@@ -157,6 +175,16 @@ pub fn sh_in_volume_ro<X: Runner>(ctx: &X, image: &str, volume: &str, mount: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_output_hides_secret_values_before_the_journal() {
+        let text = "CUSTOM_API_URL=http://h/v1\nCUSTOM_API_KEY=f5b8bc7e\nLLAMA_API_KEY=abc\nPATH=/bin\n";
+        let r = redact_text(text);
+        assert!(r.contains("CUSTOM_API_URL=http://h/v1") && r.contains("PATH=/bin"));
+        assert!(r.contains("CUSTOM_API_KEY=…") && r.contains("LLAMA_API_KEY=…"), "{r}");
+        assert!(!r.contains("f5b8bc7e") && !r.contains("abc"));
+    }
+
 
     #[test]
     fn secrets_are_masked_before_anything_is_logged() {

@@ -140,6 +140,9 @@ async function save() {
     const numeric = f.type === 'number' || key === 'agents';
     cfg[s][key] = f.type === 'checkbox' ? f.checked : numeric ? Number(f.value) : f.value;
   }
+  // Поля другой формы не уезжают: иначе validate видит и file, и url, а
+  // скрытое поле человек очистить не может.
+  if (cfg.model.serve === 'remote') cfg.model.file = ''; else { cfg.model.url = ''; cfg.model.key = ''; }
   try {
     await invoke('save_cfg', { cfg });
     $('save-hint').textContent = 'Сохранено в dev1c.toml. Разошедшееся с контейнером применяет кнопка в шапке.';

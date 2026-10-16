@@ -19,7 +19,7 @@ Last updated: 2026-10-15.
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
 | mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
-| installers | `setup/` — Cargo workspace `common` + `dev1c-setup`; `1c-connect` is the next plan |
+| installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary: window without arguments (Tauri 2, `gui` feature on by default), CLI with arguments; `1c-connect` lives in the tray |
 
 Parameters live in `dev1c.toml` of the kit (never in the repository). On this
 machine the kit is `dist/dev1c-kit`, pointed at a remote model with the local
@@ -67,6 +67,15 @@ script days is obsolete; the scripts are gone.
   on all four operations. Its `verify` complained about the edited
   `dev1c.toml` — the review finding, fixed the same day (parameter files are
   no longer in the checksums).
+
+- **Both windows** (2026-10-16, this machine, debug builds): `1c-connect.exe`
+  without arguments opens the window and puts the Zed icon with the grey status
+  dot into the tray; «Проверить» lists the seven facts and writes
+  `last-check.txt`; «Подключить» with the sample address refuses in the log;
+  the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
+  the real state of the container here (image, volumes, container: done;
+  model: blocked) and the access addresses. `cargo check` with Tauri fits
+  this laptop at 3 jobs (4.5 min, under 4 GB); release builds stay in CI.
 
 ## Not verified
 
@@ -142,6 +151,14 @@ script days is obsolete; the scripts are gone.
   a tar inside the artifact, or say so in the README, before a Linux customer
   meets it.
 
+- The window ships only in the Windows build: Linux CI builds pass
+  `--no-default-features` (no webkit2gtk on the runner). A release build with
+  the window is `windows_subsystem = "windows"`: commands get their console
+  back through `common::console::attach`; without it `status` prints nowhere.
+- Tauri's `tauri icon` is not used: `icons/icon.ico` and the 64 px `tray.png`
+  are made once with Pillow (the SVG mark via headless Edge); the status dot
+  is drawn at run time over `tray.png`.
+
 ## Next
 
 Spec `2026-10-16-setup-binaries-design.md`, plan
@@ -169,7 +186,14 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    without `1c-connect.exe` silently; `Cfg::publication`/`render` unused by
    any command; `mcp-1c` exit 0 and Warn events are not journaled; the
    `httpport` publication mode from the spec is not implemented yet.
-2. **Windows of both programs** (stage 4), copied from volt-setup's `ui/`.
+2. **Windows of both programs** (stage 4) — done 2026-10-16, plan
+   `docs/superpowers/plans/2026-10-16-windows-and-tray.md`; tried by hand here
+   in debug builds, release exe from CI not yet run by a person. Not tried:
+   the tray menu by click, «Подключить» against a live environment from the
+   window (the CLI path is the same `session::start`). Left for later: the
+   tray menu does not grey out «Подключить» while connected (a second click
+   is a no-op); the window asks no questions (`AlwaysDefault`), so the
+   data-wiping clean is guarded only by the typed container name.
 3. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` now name
    the real tools; try them on real tasks once `1c-connect` is up.
 4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch

@@ -85,6 +85,10 @@ impl Cfg {
             "[host]: base_url — адрес публикации на ЭТОЙ машине, начинается с http://localhost"
         );
         anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: base_url должен заканчиваться на /hs/mcp-1c");
+        anyhow::ensure!(
+            u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
+            "[host]: base_url — только латиница, цифры и -._~:/ (путь публикации без пробелов и спецсимволов)"
+        );
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
         Ok(())
     }

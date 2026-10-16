@@ -268,8 +268,10 @@ async fn check(app: AppHandle, ui: State<'_, Ui>) -> Result<Vec<Check>, String> 
 #[tauri::command]
 fn open_web(ui: State<Ui>) -> Result<(), String> {
     let url = web_url(&ui.cfg.lock().unwrap());
+    // Not through cmd.exe: there the address would be parsed as a command line.
+    // rundll32 takes it as data.
     #[cfg(windows)]
-    let r = std::process::Command::new("cmd").args(["/c", "start", "", &url]).spawn();
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
     #[cfg(not(windows))]
     let r = std::process::Command::new("xdg-open").arg(&url).spawn();
     r.map(|_| ()).map_err(|e| e.to_string())

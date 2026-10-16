@@ -20,7 +20,7 @@ Last updated: 2026-10-15.
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
 | mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
-| installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary: window without arguments (Tauri 2, `gui` feature on by default), CLI with arguments; `1c-connect` lives in the tray |
+| installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary: window without arguments (Tauri 2, `gui` feature on by default), CLI with arguments; `1c-connect` lives in the tray (release `1c-connect.exe` ≈ 23.9 MB) |
 
 Parameters live in `dev1c.toml` of the kit (never in the repository). On this
 machine the kit is `dist/dev1c-kit`, pointed at a remote model with the local

@@ -184,6 +184,28 @@ fn show_window(app: &AppHandle) {
     }
 }
 
+fn hide_window(w: &tauri::Window) {
+    let _ = w.hide();
+    *w.app_handle().state::<Ui>().hidden_at.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// Окно переднего плана — наше (или его дочернее, WebView2)?
+#[cfg(windows)]
+fn foreground_is_ours(w: &tauri::Window) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsChild};
+    let Ok(h) = w.hwnd() else { return false };
+    let h = h.0 as *mut core::ffi::c_void;
+    unsafe {
+        let fg = GetForegroundWindow();
+        fg == h || IsChild(h, fg) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_is_ours(w: &tauri::Window) -> bool {
+    w.is_focused().unwrap_or(false)
+}
+
 /// Щелчок по значку, когда флайаут открыт: потеря фокуса уже спрятала его
 /// мгновение назад — показывать заново не надо, человек хотел закрыть.
 fn toggle_window(app: &AppHandle) {
@@ -406,19 +428,24 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None) })
         // Флайаут прячется, когда теряет фокус или его закрывают: туннель
         // живёт, пока не сказано «Выход».
-        .on_window_event(|w, e| {
-            let hide = match e {
-                WindowEvent::CloseRequested { api, .. } => {
-                    api.prevent_close();
-                    true
-                }
-                WindowEvent::Focused(false) => true,
-                _ => false,
-            };
-            if hide {
-                let _ = w.hide();
-                *w.app_handle().state::<Ui>().hidden_at.lock().unwrap() = Some(std::time::Instant::now());
+        .on_window_event(|w, e| match e {
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                hide_window(w);
             }
+            // «Потерял фокус» приходит и когда фокус уходит внутрь — к WebView2
+            // при первом показе. Прячем, только если спустя мгновение окно
+            // переднего плана и правда чужое.
+            WindowEvent::Focused(false) => {
+                let w = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if w.is_visible().unwrap_or(false) && !foreground_is_ours(&w) {
+                        hide_window(&w);
+                    }
+                });
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, hide, quit])
         .run(tauri::generate_context!())

@@ -153,6 +153,10 @@ script days is obsolete; the scripts are gone.
   a tar inside the artifact, or say so in the README, before a Linux customer
   meets it.
 
+- Tauri fires `Focused(false)` on the window when focus moves *into* its own
+  WebView2 child right after the first show: a flyout that hides on blur
+  flashed and vanished at launch. The handler now waits 250 ms and hides only
+  if `GetForegroundWindow` is neither our window nor its child.
 - Author CSS beats the `hidden` attribute: a `.badge { display: inline-block }`
   rule kept a hidden badge visible. The stylesheet carries
   `[hidden] { display: none !important }` for that reason.

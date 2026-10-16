@@ -57,7 +57,7 @@ pub fn redact_text(text: &str) -> String {
             let name = l.split('=').next().unwrap_or("");
             let upper = name.to_ascii_uppercase();
             if l.contains('=') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
-                format!("{name}=…")
+                format!("{}=…", blot_words(name))
             } else {
                 blot_words(l)
             }
@@ -213,6 +213,9 @@ mod tests {
         let r = redact_text("            \"CUSTOM_API_KEY=f5b8bc7e\",
             \"PATH=/bin\",");
         assert!(!r.contains("f5b8bc7e") && r.contains("PATH=/bin"), "{r}");
+        // A secret before the first '=' on a KEY line is not printed either.
+        let r = redact_text("Authorization: Basic ZGV2 API_KEY=abc");
+        assert!(!r.contains("ZGV2") && !r.contains("abc"), "{r}");
     }
 
     #[test]

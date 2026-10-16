@@ -133,16 +133,31 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 }
 
 /// Что отвечает на проброшенное соединение: на порту mcp-1c — процесс на
-/// stdio, на порту веб-клиента — локальный веб-сервер. Остальные порты
-/// (vrunner, этап 5) пока молчат.
+/// stdio, на порту vrunner — мост `pipe_jsonrpc` с процессом `vrunner-mcp`,
+/// на порту веб-клиента — локальный веб-сервер.
 pub fn serve(cfg: &Cfg, kit: &Kit, log: Sink) -> impl Fn(tunnel::Incoming) + Send + Sync + 'static {
     let cfg = cfg.clone();
     let kit = kit.clone();
     let ports = cfg.ports();
     let web_port = cfg.web_port();
+    let tools_dir = crate::ops_host::tools_dir();
+    let project = std::sync::Arc::new(crate::project::Project::from_cfg(&cfg, &tools_dir));
     move |inc: tunnel::Incoming| {
         let stream = inc.channel.into_stream();
-        if inc.port == ports.mcp {
+        if inc.port == ports.vrunner {
+            let cmd = bridge::vrunner_command(&cfg, &tools_dir);
+            let rules = bridge::Rules {
+                allowed: cfg.host.tools.clone(),
+                project: project.clone(),
+                configurator_running: std::sync::Arc::new(bridge::configurator_count),
+            };
+            let log = log.clone();
+            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, move |code, err| {
+                if code != 0 {
+                    log(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
+                }
+            }));
+        } else if inc.port == ports.mcp {
             let cmd = bridge::mcp_command(&cfg, &kit);
             let log = log.clone();
             tokio::spawn(bridge::pipe_process(stream, cmd, move |code, err| {

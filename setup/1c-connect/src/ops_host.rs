@@ -28,6 +28,11 @@ impl Runner for Ctx {
     }
 }
 
+/// Каталог инструментов на машине — заглушка до операции `host.tools` (задача 6).
+pub fn tools_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(".")
+}
+
 pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
     kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" })
 }

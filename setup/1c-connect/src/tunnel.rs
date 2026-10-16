@@ -161,13 +161,13 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(());
         }
-        match Tunnel::connect(&cfg.host.server, &cfg.host.password, &known_hosts, &[ports.mcp, ports.web]).await {
+        match Tunnel::connect(&cfg.host.server, &cfg.host.password, &known_hosts, &[ports.mcp, ports.vrunner, ports.web]).await {
             Ok(mut t) => {
                 attempt = 0;
                 had_session = true;
                 on_event(common::Event::Ok(format!(
-                    "туннель поднят: {} → порты {} (mcp-1c) и {} (веб-клиент)",
-                    cfg.host.server, ports.mcp, ports.web
+                    "туннель поднят: {} → порты {} (mcp-1c), {} (vrunner) и {} (веб-клиент)",
+                    cfg.host.server, ports.mcp, ports.vrunner, ports.web
                 )));
                 loop {
                     tokio::select! {

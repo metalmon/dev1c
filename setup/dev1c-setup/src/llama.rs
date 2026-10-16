@@ -18,10 +18,9 @@ pub struct ServeInput<'a> {
     pub fit_ctx: u32,
     pub fit_target: u32,
     pub cache_ram: u32,
-    /// Токен путём к файлу (служба хоста) …
+    /// Токен путём к файлу (служба хоста); контейнер получает его
+    /// переменной LLAMA_API_KEY через --env-file, и в строке его нет.
     pub token_file: Option<&'a str>,
-    /// … или переменной LLAMA_API_KEY (контейнер): тогда в строке его нет.
-    pub token_env: bool,
 }
 
 /// Командная строка по спеке volt-llama. Окно НЕ задаём: подбор уменьшит его
@@ -152,6 +151,18 @@ pub fn token_file() -> PathBuf {
 }
 pub fn log_file() -> PathBuf {
     dir().join("llama.log")
+}
+/// Файл переменных для контейнера модели (LLAMA_API_KEY=…): лежит в
+/// закрытом каталоге, в аргументы docker попадает путь.
+pub fn env_file() -> PathBuf {
+    dir().join("llama.env")
+}
+
+/// Записать файл переменных контейнера заново (токен мог смениться).
+pub fn write_env_file(token: &str) -> Result<()> {
+    let f = env_file();
+    let _ = std::fs::remove_file(&f);
+    write_secret(&f, &format!("LLAMA_API_KEY={token}\n"))
 }
 /// Ряд бинарников под эту ОС в комплекте.
 pub fn kit_bin(ctx: &Ctx) -> Option<PathBuf> {
@@ -448,7 +459,7 @@ mod tests {
     use super::*;
 
     fn input<'a>(token_file: Option<&'a str>) -> ServeInput<'a> {
-        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, fit_ctx: 65536, fit_target: 1024, cache_ram: 4096, token_file, token_env: false }
+        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, fit_ctx: 65536, fit_target: 1024, cache_ram: 4096, token_file }
     }
 
     #[test]
@@ -468,10 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn the_container_form_takes_the_token_from_the_environment() {
-        let mut i = input(None);
-        i.token_env = true;
-        let a = serve_args(&i);
+    fn without_a_token_file_nothing_about_the_token_is_in_the_line() {
+        let a = serve_args(&input(None));
         assert!(!a.iter().any(|x| x == "--api-key-file"));
     }
 

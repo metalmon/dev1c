@@ -41,7 +41,6 @@ pub fn desired_args(ctx: &Ctx) -> Vec<String> {
         fit_target: llama::fit_target_mb(used),
         cache_ram: llama::cache_ram_mb(llama::free_ram_mb(ctx)),
         token_file: Some(&token),
-        token_env: false,
     })
 }
 
@@ -69,12 +68,15 @@ pub fn keep_in_service_dir(name: &str, kit_files: &[String]) -> bool {
     kit_files.iter().any(|k| k == name)
         || name == "nssm.exe"
         || name == "dev1c-llama.token"
+        || name == "llama.env"
         || (name.starts_with("llama") && name.ends_with(".log"))
 }
 
 /// `docker run` контейнера модели: образ из комплекта, том моделей, карта,
-/// токен переменной (в строке процесса его нет), сервер слушает внутри на 8080.
-pub fn llama_run_args(cfg: &crate::cfg::Cfg, token: &str, cache_ram: u32, fit_target: u32) -> Vec<String> {
+/// токен переменной из файла в закрытом каталоге (в аргументах его нет),
+/// порт наружу — только на адрес, который видят контейнеры и эта машина
+/// (петля на Windows, мост на Linux); внутри сервер слушает 8080.
+pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str, cache_ram: u32, fit_target: u32) -> Vec<String> {
     let base = cfg.model.file.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
     let model = format!("/opt/models/{base}");
     let alias = cfg.model_alias();
@@ -88,11 +90,11 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, token: &str, cache_ram: u32, fit_ta
         "--gpus",
         "all",
         "-p",
-        &format!("{}:8080", cfg.ports()[2]),
+        &format!("{publish_host}:{}:8080", cfg.ports()[2]),
         "-v",
         &format!("{}:/opt/models", cfg.volume("models")),
-        "-e",
-        &format!("LLAMA_API_KEY={token}"),
+        "--env-file",
+        env_file,
         &cfg.llama_image(),
         "llama-server",
     ]
@@ -108,7 +110,6 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, token: &str, cache_ram: u32, fit_ta
         fit_target,
         cache_ram,
         token_file: None,
-        token_env: true,
     }));
     a
 }
@@ -282,10 +283,10 @@ impl Op<Ctx> for Container {
             return st;
         }
         let baked = ctx.kit.state_get("llama.args").unwrap_or_default();
-        if let Some(d) = args_drift(&self.wanted(ctx, "…"), &baked) {
+        if let Some(d) = args_drift(&self.wanted(ctx), &baked) {
             return OpState::Drifted { from: d.0, to: d.1 };
         }
-        OpState::Done(format!("работает, порт {}", ctx.cfg.ports()[2]))
+        OpState::Done(format!("работает, порт {} на {}", ctx.cfg.ports()[2], llama::bind_host(ctx)))
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![Action::new(format!(
@@ -297,13 +298,13 @@ impl Op<Ctx> for Container {
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let token = llama::ensure_token(ctx)?;
+        llama::write_env_file(&token)?;
         let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
-        let args = self.wanted(ctx, &token);
+        let args = self.wanted(ctx);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let o = docker::run(ctx, &refs)?;
         anyhow::ensure!(o.ok(), "контейнер модели не запустился: {}", o.tail(3).join(" "));
-        // В состоянии токен заменён на «…»: сравнение не должно зависеть от него.
-        ctx.kit.state_set("llama.args", &self.wanted(ctx, "…").join(" "))?;
+        ctx.kit.state_set("llama.args", &args.join(" "))?;
         ctx.ok("контейнер модели запущен");
         Ok(())
     }
@@ -318,9 +319,10 @@ impl Op<Ctx> for Container {
 }
 
 impl Container {
-    fn wanted(&self, ctx: &Ctx, token: &str) -> Vec<String> {
+    fn wanted(&self, ctx: &Ctx) -> Vec<String> {
         let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
-        llama_run_args(&ctx.cfg, token, llama::cache_ram_mb(llama::free_ram_mb(ctx)), llama::fit_target_mb(used))
+        let env = llama::env_file().to_string_lossy().to_string();
+        llama_run_args(&ctx.cfg, &env, &llama::bind_host(ctx), llama::cache_ram_mb(llama::free_ram_mb(ctx)), llama::fit_target_mb(used))
     }
 }
 
@@ -388,10 +390,10 @@ mod tests {
         let mut c = Cfg::default();
         c.model.serve = "docker".into();
         c.model.file = "models/x.gguf".into();
-        let a = llama_run_args(&c, "tok", 4096, 1024).join(" ");
-        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all -p 3392:8080 -v dev1c-models:/opt/models -e LLAMA_API_KEY=tok oktaplus/dev1c-llama:latest llama-server"), "{a}");
+        let a = llama_run_args(&c, "/k/llama.env", "127.0.0.1", 4096, 1024).join(" ");
+        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models --env-file /k/llama.env oktaplus/dev1c-llama:latest llama-server"), "{a}");
         assert!(a.contains("-m /opt/models/x.gguf --alias x --host 0.0.0.0 --port 8080"));
-        assert!(!a.contains("--api-key-file"));
+        assert!(!a.contains("--api-key-file") && !a.contains("LLAMA_API_KEY="), "токен не в аргументах");
         let ids = ops(Form::Docker).iter().map(|o| o.id().to_string()).collect::<Vec<_>>();
         assert_eq!(ids, ["llama.container", "llama.answers"]);
     }
@@ -400,7 +402,7 @@ mod tests {
     fn foreign_files_in_the_service_dir_are_pruned_but_ours_stay() {
         let keep = |n: &str| keep_in_service_dir(n, &["llama-server.exe".to_string(), "cudart64_13.dll".to_string()]);
         assert!(keep("llama-server.exe") && keep("cudart64_13.dll"));
-        assert!(keep("nssm.exe") && keep("dev1c-llama.token") && keep("llama.log") && keep("llama-20261016.log"));
+        assert!(keep("nssm.exe") && keep("dev1c-llama.token") && keep("llama.env") && keep("llama.log") && keep("llama-20261016.log"));
         assert!(!keep("evil.dll") && !keep("version.dll"));
     }
 

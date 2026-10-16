@@ -10,7 +10,7 @@ use crate::verify;
 use common::check::Check;
 use common::kit::Kit;
 use common::op::CleanLevel;
-use common::{AlwaysDefault, Event};
+use common::{AlwaysDefault, Event, Runner};
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::image::Image;
@@ -279,13 +279,8 @@ fn link(app: AppHandle, ui: State<Ui>) -> LinkView {
 
 #[tauri::command]
 fn save_cfg(ui: State<Ui>, mut host: Host) -> Result<(), String> {
-    // Полей проекта в окне пока нет (этап 6B): берём их из текущих параметров,
-    // иначе пустые значения из формы затёрли бы toml.
-    {
-        let cur = ui.cfg.lock().unwrap();
-        host.project = cur.host.project.clone();
-        host.tools = cur.host.tools.clone();
-    }
+    // Списка инструментов в окне нет: он правится в toml руками.
+    host.tools = ui.cfg.lock().unwrap().host.tools.clone();
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     common::kit::write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
@@ -331,16 +326,56 @@ fn run(app: AppHandle, ui: State<Ui>, which: String) {
     let ctx = ctx_for(&app, &ui);
     std::thread::spawn(move || {
         let ops = ops_host::host();
-        let r = if which == "uninstall" {
-            ops.iter()
+        let r = match which.as_str() {
+            "uninstall" => ops
+                .iter()
                 .find(|o| o.id() == "host.extension")
                 .map(|ext| ext.revert_apply(&ctx, CleanLevel::Stack))
-                .unwrap_or(Ok(()))
-        } else {
-            common::run::apply_all(&ctx, &ops, None, false).map(|_| ())
+                .unwrap_or(Ok(())),
+            // The same tools the agent calls, under the same project mutex.
+            "export" => crate::flow::export(&ctx, "выгрузка из 1c-connect").map(|t| ctx.ok(t)).map_err(|e| anyhow::anyhow!("{e}")),
+            "import" => crate::flow::import(&ctx).map(|t| ctx.ok(t)).map_err(|e| anyhow::anyhow!("{e}")),
+            _ => common::run::apply_all(&ctx, &ops, None, false).map(|_| ()),
         };
         let _ = app.emit("conn:done", r.err().map(|e| format!("{e:#}")));
     });
+}
+
+#[derive(Serialize)]
+struct ProjectView {
+    dir: String,
+    branch: String,
+    lines: Vec<String>,
+    ok: bool,
+    why: String,
+}
+
+/// Вкладка «Проект»: раскладка каталога и, если она в порядке, состояние ветки.
+#[tauri::command]
+async fn project(ui: State<'_, Ui>) -> Result<ProjectView, String> {
+    let cfg = ui.cfg.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use crate::project::Layout;
+        let p = crate::project::Project::from_cfg(&cfg, &ops_host::tools_dir());
+        let (ok, why) = match crate::project::layout_state(&p) {
+            Layout::Ok => (true, String::new()),
+            Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
+            Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
+            Layout::Drifted(d) => (false, d),
+        };
+        let lines = if ok { crate::project::status(&p).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default() } else { vec![] };
+        ProjectView { dir: p.dir.display().to_string(), branch: p.branch, lines, ok, why }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_dir(ui: State<Ui>) -> Result<(), String> {
+    let dir = ui.cfg.lock().unwrap().host.project.clone();
+    let mut c = std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" });
+    c.arg(&dir);
+    c.spawn().map(|_| ()).map_err(|e| format!("не открыть {dir}: {e}"))
 }
 
 #[tauri::command]
@@ -495,7 +530,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, pick, hide, quit])
+        .invoke_handler(tauri::generate_handler![machine, link, save_cfg, connect, disconnect, states, run, check, open_web, pick, hide, quit, project, open_dir])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("окно не открылось: {e}"))
 }

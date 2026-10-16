@@ -4,7 +4,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump'];
+const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump', 'project'];
 let machine = null;
 let busy = false;
 let unread = 0;
@@ -15,6 +15,7 @@ const ACTIONS = {
   params: [],
   ext: [{ do: 'web', label: 'Веб-клиент' }, { do: 'uninstall', label: 'Снять' }, { do: 'install', label: 'Установить', accent: true }],
   check: [{ do: 'check', label: 'Проверить', accent: true }],
+  project: [{ do: 'open-dir', label: 'Открыть каталог' }, { do: 'import', label: 'Загрузить из git' }, { do: 'export', label: 'Выгрузить в git', accent: true }],
   log: [{ do: 'clear-log', label: 'Очистить' }],
 };
 
@@ -66,6 +67,7 @@ function showTab(name) {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
   for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== `panel-${name}`;
   if (name === 'log') { unread = 0; badge('b-log', 0); }
+  if (name === 'project') refreshProject();
   renderActions();
 }
 
@@ -115,6 +117,7 @@ function setBusy(on, which) {
   busy = on;
   $('p-ext').classList.toggle('on', on && which === 'ext');
   $('p-check').classList.toggle('on', on && which === 'check');
+  $('p-project').classList.toggle('on', on && which === 'project');
   renderActions();
 }
 
@@ -123,6 +126,20 @@ async function refresh() {
   for (const k of KEYS) $(`f-${k}`).value = machine.host[k];
   showLink(machine.link);
   await refreshOps();
+}
+
+// Вкладка «Проект»: раскладка и состояние ветки, строки от project_status.
+async function refreshProject() {
+  const ul = $('project');
+  try {
+    const v = await invoke('project');
+    ul.replaceChildren();
+    if (!v.ok) { ul.append(row('warn', v.dir, v.why, 'Параметры → Проект, затем Расширение → Установить')); return; }
+    ul.append(row('ok', v.dir, `ветка ${v.branch}`));
+    for (const l of v.lines) { const i = l.indexOf(': '); ul.append(row('dim', i > 0 ? l.slice(0, i) : l, i > 0 ? l.slice(i + 2) : '')); }
+  } catch (e) {
+    ul.replaceChildren(row('bad', 'проект', String(e)));
+  }
 }
 
 async function refreshOps() {
@@ -178,10 +195,13 @@ async function check() {
   setBusy(false);
 }
 
+const RUN_TITLES = { install: '— устанавливаю —', uninstall: '— снимаю расширение —', export: '— выгружаю в git —', import: '— загружаю из git —' };
+
 function run(which) {
   if (busy) return;
-  setBusy(true, 'ext');
-  logLine('say', which === 'uninstall' ? '— снимаю расширение —' : '— устанавливаю расширение —');
+  setBusy(true, which === 'export' || which === 'import' ? 'project' : 'ext');
+  logLine('say', RUN_TITLES[which] || `— ${which} —`);
+  showTab('log');
   invoke('run', { which });
 }
 
@@ -193,6 +213,9 @@ async function act(what) {
       case 'web': await invoke('open_web'); break;
       case 'install': run('install'); break;
       case 'uninstall': run('uninstall'); break;
+      case 'export': run('export'); break;
+      case 'import': run('import'); break;
+      case 'open-dir': await invoke('open_dir'); break;
       case 'check': await check(); break;
       case 'clear-log': $('log').replaceChildren(); break;
       case 'hide': await invoke('hide'); break;
@@ -223,6 +246,7 @@ listen('conn:done', async (e) => {
   status(e.payload ? `Остановлено: ${e.payload}` : 'Готово', e.payload ? 'bad' : 'ok');
   setBusy(false);
   await refreshOps();
+  if (currentTab() === 'project') await refreshProject();
 });
 listen('conn:run-check', () => check());
 

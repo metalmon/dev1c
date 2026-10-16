@@ -20,7 +20,7 @@ path = "src/main.rs"
 # (--no-default-features), чтобы не ставить на раннер webkit2gtk.
 [features]
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
 
 [dependencies]
 common = { path = "../common" }
@@ -30,6 +30,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tauri = { version = "2", features = ["image-png", "tray-icon"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 # The SSH client is embedded: ssh.exe is an optional Windows component with
 # behaviour that differs by version, and it takes the password only from a
 # keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.

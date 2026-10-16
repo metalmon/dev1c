@@ -2,11 +2,22 @@
 // и зовёт команды. Логики подключения здесь нет намеренно.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const dialog = window.__TAURI__.dialog;
 
 const $ = (id) => document.getElementById(id);
 const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump'];
+let machine = null;
 let busy = false;
 let unread = 0;
+let statusTimer = null;
+
+// Действия каждой вкладки живут в нижней плашке.
+const ACTIONS = {
+  params: [],
+  ext: [{ do: 'web', label: 'Веб-клиент' }, { do: 'uninstall', label: 'Снять' }, { do: 'install', label: 'Установить', accent: true }],
+  check: [{ do: 'check', label: 'Проверить', accent: true }],
+  log: [{ do: 'clear-log', label: 'Очистить' }],
+};
 
 function el(tag, text, children = [], cls = '') {
   const e = document.createElement(tag);
@@ -28,10 +39,35 @@ function row(kind, title, detail, extra) {
   return el('li', '', [icon(kind), text]);
 }
 
+// Итог последнего действия в нижней строке; через несколько секунд — снова путь к комплекту.
+function status(text, kind = '') {
+  const s = $('foot-status');
+  s.textContent = text;
+  s.className = `path ${kind}`;
+  clearTimeout(statusTimer);
+  if (kind !== 'bad') statusTimer = setTimeout(() => { s.textContent = machine ? `Комплект: ${machine.kit}` : ''; s.className = 'path'; }, 6000);
+}
+
+function currentTab() {
+  return document.querySelector('.tab.active').dataset.tab;
+}
+
+function renderActions() {
+  const box = $('foot-actions');
+  box.replaceChildren();
+  for (const a of ACTIONS[currentTab()]) {
+    const b = el('button', a.label, [], `btn${a.accent ? ' accent' : ''}`);
+    b.dataset.do = a.do;
+    b.disabled = busy && a.do !== 'clear-log';
+    box.append(b);
+  }
+}
+
 function showTab(name) {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.dataset.tab === name);
   for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== `panel-${name}`;
   if (name === 'log') { unread = 0; badge('b-log', 0); }
+  renderActions();
 }
 
 function badge(id, n, cls = '') {
@@ -47,8 +83,6 @@ function logLine(kind, text) {
   log.scrollTop = log.scrollHeight;
   if ($('panel-log').hidden && kind !== 'say') badge('b-log', ++unread, kind === 'fail' ? 'bad' : '');
 }
-
-let machine = null;
 
 // Карточка состояния: одно состояние, одна причина, один переключатель.
 // Переключатель заперт, пока адрес среды не задан — подключаться некуда.
@@ -80,18 +114,16 @@ function showLink(link) {
 
 function setBusy(on, which) {
   busy = on;
-  for (const b of document.querySelectorAll('[data-do="install"],[data-do="uninstall"],[data-do="check"],[data-do="save"]')) b.disabled = on;
   $('p-ext').classList.toggle('on', on && which === 'ext');
   $('p-check').classList.toggle('on', on && which === 'check');
+  renderActions();
 }
 
 async function refresh() {
   machine = await invoke('machine');
-  const m = machine;
-  for (const k of KEYS) $(`f-${k}`).value = m.host[k];
-  $('kit').textContent = `Комплект: ${m.kit}`;
-  $('kit').title = m.kit;
-  showLink(m.link);
+  for (const k of KEYS) $(`f-${k}`).value = machine.host[k];
+  if (!$('foot-status').textContent) status(`Комплект: ${machine.kit}`);
+  showLink(machine.link);
   await refreshOps();
 }
 
@@ -105,24 +137,31 @@ async function refreshOps() {
   }
 }
 
+// Сохранение — при каждом изменении поля; кнопки нет, итог — в нижней строке.
 async function save() {
   const host = {};
   for (const k of KEYS) host[k] = $(`f-${k}`).value;
-  $('save-hint').textContent = '';
   try {
     await invoke('save_cfg', { host });
-    $('save-hint').textContent = 'Сохранено в 1c-connect.toml.';
+    status('Сохранено в 1c-connect.toml', 'ok');
     await refresh();
   } catch (e) {
-    $('save-hint').textContent = String(e);
+    status(String(e), 'bad');
   }
+}
+
+async function browse(kind, inputId) {
+  const picked = await dialog.open({ directory: kind === 'dir', multiple: false, defaultPath: $(inputId).value || undefined });
+  if (!picked) return;
+  $(inputId).value = picked;
+  await save();
 }
 
 async function check() {
   if (busy) return;
   showTab('check');
   setBusy(true, 'check');
-  $('check-hint').textContent = 'Проверяю…';
+  status('Проверяю…');
   try {
     const checks = await invoke('check');
     const ul = $('checks');
@@ -133,9 +172,9 @@ async function check() {
       ul.append(row(c.ok ? (c.info ? 'dim' : 'ok') : 'bad', c.what, c.detail, c.ok ? '' : c.hint));
     }
     badge('b-check', failed, 'bad');
-    $('check-hint').textContent = failed ? `Провалено: ${failed}. Отчёт записан в last-check.txt.` : 'Все факты в порядке. Отчёт записан в last-check.txt.';
+    status(failed ? `Провалено: ${failed}. Отчёт — last-check.txt в комплекте` : 'Все факты в порядке. Отчёт — last-check.txt', failed ? 'bad' : 'ok');
   } catch (e) {
-    $('check-hint').textContent = String(e);
+    status(String(e), 'bad');
   }
   setBusy(false);
 }
@@ -153,25 +192,27 @@ async function act(what) {
       case 'connect': await invoke('connect'); showTab('log'); break;
       case 'disconnect': await invoke('disconnect'); showLink(await invoke('link')); break;
       case 'web': await invoke('open_web'); break;
-      case 'save': await save(); break;
       case 'install': run('install'); break;
       case 'uninstall': run('uninstall'); break;
       case 'check': await check(); break;
       case 'clear-log': $('log').replaceChildren(); break;
       case 'hide': await invoke('hide'); break;
-      case 'quit': await invoke('quit'); break;
     }
   } catch (e) {
     logLine('fail', String(e));
+    status(String(e), 'bad');
     showTab('log');
   }
 }
 
 $('toggle').addEventListener('change', (ev) => act(ev.target.checked ? 'connect' : 'disconnect'));
+for (const k of KEYS) $(`f-${k}`).addEventListener('change', save);
 
 document.addEventListener('click', (ev) => {
   const t = ev.target.closest('.tab');
   if (t) return showTab(t.dataset.tab);
+  const br = ev.target.closest('[data-browse]');
+  if (br) return browse(br.dataset.browse, br.dataset.for);
   const b = ev.target.closest('[data-do]');
   if (b) act(b.dataset.do);
 });
@@ -180,6 +221,7 @@ listen('conn:line', (e) => logLine(e.payload.kind, e.payload.text));
 listen('conn:state', (e) => showLink(e.payload));
 listen('conn:done', async (e) => {
   logLine(e.payload ? 'fail' : 'ok', e.payload ? `Остановлено: ${e.payload}` : 'Готово.');
+  status(e.payload ? `Остановлено: ${e.payload}` : 'Готово', e.payload ? 'bad' : 'ok');
   setBusy(false);
   await refreshOps();
 });

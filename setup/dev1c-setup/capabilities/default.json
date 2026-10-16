@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Окну нужны вызовы команд и события движка.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:event:default"]
+  "permissions": ["core:default", "core:event:default", "dialog:default"]
 }

@@ -33,7 +33,7 @@
     <button class="tab" data-tab="log">Журнал<span class="badge" id="b-log" hidden></span></button>
   </nav>
 
-  <!-- Параметры -->
+  <!-- Параметры: сохраняются сами при изменении поля, итог — в нижней строке -->
   <section class="panel" id="panel-params">
     <div class="body">
       <p class="group-title">Среда</p>
@@ -57,8 +57,13 @@
       <p class="group-title">База 1С на этой машине</p>
       <div class="field">
         <label for="f-base_path">База</label>
-        <input id="f-base_path" data-key="base_path" placeholder="C:\Bases\Buh" spellcheck="false">
-        <div class="hint">Путь к файловой базе или сервер\база.</div>
+        <div class="row">
+          <input id="f-base_path" data-key="base_path" placeholder="C:\Bases\Buh" spellcheck="false">
+          <button class="icon-btn browse" data-browse="dir" data-for="f-base_path" title="Выбрать папку базы">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1.5 3A1.5 1.5 0 0 1 3 1.5h3.2a1.5 1.5 0 0 1 1.06.44L8.3 3H13a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5V3Zm1 0v9.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V6h-11V3Zm0 2h11v-.5a.5.5 0 0 0-.5-.5H7.9L6.55 2.65A.5.5 0 0 0 6.2 2.5H3a.5.5 0 0 0-.5.5V5Z"/></svg>
+          </button>
+        </div>
+        <div class="hint">Папка файловой базы или сервер\база.</div>
       </div>
       <div class="cols2">
         <div class="field">
@@ -77,13 +82,14 @@
       </div>
       <div class="field">
         <label for="f-dump">Каталог выгрузки конфигурации</label>
-        <input id="f-dump" data-key="dump" spellcheck="false">
+        <div class="row">
+          <input id="f-dump" data-key="dump" spellcheck="false">
+          <button class="icon-btn browse" data-browse="dir" data-for="f-dump" title="Выбрать каталог выгрузки">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M1.5 3A1.5 1.5 0 0 1 3 1.5h3.2a1.5 1.5 0 0 1 1.06.44L8.3 3H13a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5V3Zm1 0v9.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V6h-11V3Zm0 2h11v-.5a.5.5 0 0 0-.5-.5H7.9L6.55 2.65A.5.5 0 0 0 6.2 2.5H3a.5.5 0 0 0-.5.5V5Z"/></svg>
+          </button>
+        </div>
         <div class="hint">Включает поиск по коду. Пусто — без него.</div>
       </div>
-    </div>
-    <div class="bar">
-      <button class="btn accent" data-do="save">Сохранить</button>
-      <span class="status" id="save-hint"></span>
     </div>
   </section>
 
@@ -91,36 +97,24 @@
   <section class="panel" id="panel-ext" hidden>
     <div class="progress" id="p-ext"></div>
     <div class="body"><ul class="list" id="ops"></ul></div>
-    <div class="bar">
-      <button class="btn accent" data-do="install">Установить</button>
-      <button class="btn" data-do="uninstall">Снять</button>
-      <span class="spacer"></span>
-      <button class="btn" data-do="web" title="Опубликованная база в браузере">Веб-клиент</button>
-    </div>
   </section>
 
   <!-- Проверка -->
   <section class="panel" id="panel-check" hidden>
     <div class="progress" id="p-check"></div>
     <div class="body"><ul class="list" id="checks"><li class="empty">Семь фактов снизу вверх; отчёт — last-check.txt в комплекте.</li></ul></div>
-    <div class="bar">
-      <button class="btn accent" data-do="check">Проверить</button>
-      <span class="status" id="check-hint"></span>
-    </div>
   </section>
 
   <!-- Журнал -->
   <section class="panel" id="panel-log" hidden>
     <div class="body"><pre class="log" id="log"></pre></div>
-    <div class="bar">
-      <button class="btn" data-do="clear-log">Очистить</button>
-      <span class="status">Подробности — в setup.log в комплекте.</span>
-    </div>
   </section>
 
+  <!-- Нижняя плашка: слева итог последнего действия (или путь к комплекту),
+       справа — действия открытой вкладки. Выход — в меню трея. -->
   <footer class="foot">
-    <span class="path" id="kit" title=""></span>
-    <button class="btn" data-do="quit">Выход</button>
+    <span class="path" id="foot-status"></span>
+    <div class="actions" id="foot-actions"></div>
   </footer>
   </div>
 </div>

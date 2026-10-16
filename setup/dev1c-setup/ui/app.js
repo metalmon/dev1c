@@ -2,6 +2,7 @@
 // и зовёт команды. Логики развёртывания здесь нет намеренно.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const dialog = window.__TAURI__.dialog;
 
 const $ = (id) => document.getElementById(id);
 const KEYS = ['server.name', 'server.port', 'server.memory', 'server.engine', 'server.gpu', 'model.serve', 'model.file', 'model.url', 'model.name', 'model.key', 'model.port', 'model.agents', 'model.fit_ctx'];
@@ -152,6 +153,14 @@ async function save() {
   }
 }
 
+async function browse(kind, inputId) {
+  const filters = kind === 'gguf' ? [{ name: 'Модель GGUF', extensions: ['gguf'] }] : undefined;
+  const picked = await dialog.open({ directory: kind === 'dir', multiple: false, filters, defaultPath: $(inputId).value || undefined });
+  if (!picked) return;
+  $(inputId).value = picked;
+  await save();
+}
+
 async function check() {
   if (busy) return;
   showTab('check');
@@ -186,7 +195,6 @@ async function act(what) {
   if (busy) return;
   try {
     switch (what) {
-      case 'save': await save(); break;
       case 'check': await check(); break;
       case 'quit': await invoke('quit'); break;
       case 'clear-log': $('log').replaceChildren(); break;
@@ -209,10 +217,14 @@ async function act(what) {
 }
 
 $('f-model.serve').addEventListener('change', syncForm);
+// Сохранение — при каждом изменении поля, кнопки нет.
+for (const k of KEYS) $(`f-${k}`).addEventListener('change', () => { if (!busy) save(); });
 
 document.addEventListener('click', (ev) => {
   const t = ev.target.closest('.tab');
   if (t) return showTab(t.dataset.tab);
+  const br = ev.target.closest('[data-browse]');
+  if (br) return browse(br.dataset.browse, br.dataset.for);
   const b = ev.target.closest('[data-do]');
   if (b) act(b.dataset.do);
 });

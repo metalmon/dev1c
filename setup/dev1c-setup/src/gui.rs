@@ -164,6 +164,7 @@ fn quit(app: AppHandle) {
 pub fn launch(kit: Kit) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Значок окна ставим сами: иначе в панели задач окно идёт без него.
             if let Some(w) = app.get_webview_window("main") {

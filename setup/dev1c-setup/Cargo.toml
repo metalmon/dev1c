@@ -9,11 +9,12 @@ description = "Установка среды разработки 1С: один 
 # обязан его открыть. Linux-сборка в CI идёт без него (--no-default-features).
 [features]
 default = ["gui"]
-gui = ["dep:tauri", "dep:tauri-build"]
+gui = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog"]
 
 [dependencies]
 common = { path = "../common" }
 tauri = { version = "2", features = ["image-png"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

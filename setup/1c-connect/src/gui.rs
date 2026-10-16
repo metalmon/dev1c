@@ -27,6 +27,8 @@ pub struct Ui {
     session: Mutex<Option<Session>>,
     link: Mutex<Link>,
     hidden_at: Mutex<Option<std::time::Instant>>,
+    /// Пункт меню трея «Подключить»/«Отключить»: один, надпись по состоянию.
+    toggle_item: Mutex<Option<MenuItem<tauri::Wry>>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -157,7 +159,14 @@ fn set_link(app: &AppHandle, l: Link) {
     refresh_tray(app, &l);
 }
 
+fn refresh_toggle(app: &AppHandle, on: bool) {
+    if let Some(item) = app.state::<Ui>().toggle_item.lock().unwrap().as_ref() {
+        let _ = item.set_text(if on { "Отключить" } else { "Подключить" });
+    }
+}
+
 fn refresh_tray(app: &AppHandle, l: &Link) {
+    refresh_toggle(app, l.is_on());
     if let Some(tray) = app.tray_by_id(TRAY) {
         if let Ok(base) = Image::from_bytes(TRAY_PNG) {
             let _ = tray.set_icon(Some(badge(&base, l.is_up())));
@@ -281,8 +290,10 @@ fn connect(app: AppHandle, ui: State<Ui>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn disconnect(ui: State<Ui>) -> Result<(), String> {
-    stop_session(&ui)
+fn disconnect(app: AppHandle, ui: State<Ui>) -> Result<(), String> {
+    stop_session(&ui)?;
+    set_link(&app, Link::Off);
+    Ok(())
 }
 
 #[tauri::command]
@@ -295,7 +306,7 @@ fn states(app: AppHandle, ui: State<Ui>) -> Vec<OpView> {
             // Значок говорит состояние; текст — только подробность.
             let (kind, detail) = match st {
                 Done(d) => ("done", d),
-                Missing => ("missing", "не сделано".into()),
+                Missing => ("missing", "не установлено".into()),
                 Drifted { from, to } => ("drift", format!("было: {from} → станет: {to}")),
                 Blocked(why) => ("blocked", why),
             };
@@ -362,15 +373,17 @@ fn quit(app: AppHandle, ui: State<Ui>) {
 }
 
 fn tray(app: &tauri::App) -> tauri::Result<()> {
+    // Один пункт на подключение: надпись меняется по состоянию, два рядом —
+    // противоречие.
+    let toggle = MenuItem::with_id(app, "toggle", "Подключить", true, None::<&str>)?;
+    *app.state::<Ui>().toggle_item.lock().unwrap() = Some(toggle.clone());
     let items = [
-        MenuItem::with_id(app, "connect", "Подключить", true, None::<&str>)?,
-        MenuItem::with_id(app, "disconnect", "Отключить", true, None::<&str>)?,
         MenuItem::with_id(app, "check", "Проверить", true, None::<&str>)?,
         MenuItem::with_id(app, "web", "Открыть веб-клиент", true, None::<&str>)?,
     ];
     let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&items[0], &items[1], &items[2], &items[3], &sep, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &items[0], &items[1], &sep, &quit])?;
     let base = Image::from_bytes(TRAY_PNG)?;
     TrayIconBuilder::with_id(TRAY)
         .icon(badge(&base, false))
@@ -380,15 +393,16 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, ev| {
             let ui = app.state::<Ui>();
             match ev.id().0.as_str() {
-                "connect" => {
-                    if let Err(e) = start_session(app, &ui) {
+                "toggle" => {
+                    let on = ui.link.lock().unwrap().is_on();
+                    let r = if on { stop_session(&ui) } else { start_session(app, &ui) };
+                    if let Err(e) = r {
                         show_window(app);
                         let _ = app.emit("conn:line", Line { kind: "fail".into(), text: e });
                     }
-                }
-                "disconnect" => {
-                    if let Err(e) = stop_session(&ui) {
-                        let _ = app.emit("conn:line", Line { kind: "fail".into(), text: e });
+                    if on {
+                        // Остановка не шлёт перехода сама: сеанс закрыт синхронно.
+                        set_link(app, Link::Off);
                     }
                 }
                 "check" => {
@@ -417,6 +431,7 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
 pub fn launch(kit: Kit) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Some(w) = app.get_webview_window("main") {
                 if let Ok(img) = Image::from_bytes(include_bytes!("../icons/icon.png")) {
@@ -427,7 +442,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             show_window(app.handle());
             Ok(())
         })
-        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None) })
+        .manage(Ui { kit, cfg: Mutex::new(cfg), session: Mutex::new(None), link: Mutex::new(Link::Off), hidden_at: Mutex::new(None), toggle_item: Mutex::new(None) })
         // Флайаут прячется, когда теряет фокус или его закрывают: туннель
         // живёт, пока не сказано «Выход».
         .on_window_event(|w, e| match e {

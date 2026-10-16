@@ -48,7 +48,7 @@ input, textarea, .log, code, .selectable { user-select: text; }
 
 .head { padding: 16px 24px 14px; background: var(--layer); border-bottom: 1px solid var(--stroke-strong); display: flex; flex-direction: column; gap: 12px; }
 .head-row { display: flex; align-items: center; gap: 12px; }
-.head .logo { width: 36px; height: 36px; border-radius: 8px; flex: none; }
+.head .logo { width: 36px; height: 36px; border-radius: 4px; flex: none; }
 .head-text { min-width: 0; flex: 1; }
 .head .name { font-size: 16px; line-height: 22px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .head .caption { color: var(--text-2); font-size: 12px; line-height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -63,7 +63,7 @@ input, textarea, .log, code, .selectable { user-select: text; }
 .ind.bad { background: var(--bad); box-shadow: 0 0 0 4px rgba(196, 43, 28, .15); }
 .status-card {
   display: flex; align-items: center; gap: 12px; padding: 12px 14px;
-  background: var(--layer); border: 1px solid var(--stroke); border-radius: 8px; box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
+  background: var(--layer); border: 1px solid var(--stroke); border-radius: 4px; box-shadow: 0 1px 2px rgba(0, 0, 0, .04);
 }
 .status-card .text { flex: 1; min-width: 0; }
 .status-card .state { font-size: 15px; line-height: 20px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -106,7 +106,7 @@ input, textarea, .log, code, .selectable { user-select: text; }
 .tab .badge.bad { background: var(--bad-bg); color: var(--bad); }
 .tab .badge.ok { background: var(--ok-bg); color: var(--ok); }
 
-.panel { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--layer); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+.panel { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--layer); border-radius: 4px; box-shadow: var(--shadow); overflow: hidden; }
 .panel .body { flex: 1; min-height: 0; overflow: auto; padding: 20px; }
 .panel .bar {
   display: flex; align-items: center; gap: 8px; padding: 12px 20px;
@@ -124,6 +124,18 @@ input, textarea, .log, code, .selectable { user-select: text; }
 
 .foot { display: flex; align-items: center; gap: 8px; padding: 12px 0 16px; color: var(--text-3); font-size: 12px; }
 .foot .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot .path.ok { color: var(--ok); }
+.foot .path.bad { color: var(--bad); white-space: normal; }
+.foot .actions { display: flex; gap: 8px; flex: none; }
+/* Поле пути с кнопкой выбора в одной строке. */
+.row { display: flex; gap: 6px; align-items: center; }
+.row input { flex: 1; min-width: 0; }
+.icon-btn.browse { border: 1px solid var(--stroke); border-bottom-color: var(--stroke-strong); background: #fbfbfb; color: var(--text-2); }
+.icon-btn.browse:hover { background: #f6f6f6; color: var(--text); }
+.icon-btn.browse svg { display: block; margin: auto; }
+/* Действия в плашке панели — справа, итог слева. */
+.panel .bar { justify-content: flex-end; }
+.panel .bar .status { flex: 1; margin-left: 0; order: -1; }
 
 /* ---- элементы управления ---- */
 .btn {
@@ -199,7 +211,7 @@ input:disabled { color: var(--text-3); background: #f5f5f5; }
 
 /* ---- флайаут у трея (1c-connect): узкое окно без рамки, у правого нижнего угла ---- */
 body.flyout { background: var(--layer); }
-body.flyout .app { border: 1px solid var(--stroke-strong); border-radius: 8px; overflow: hidden; }
+body.flyout .app { border: 1px solid var(--stroke-strong); overflow: hidden; }
 body.flyout .head { padding: 12px 16px; background: var(--bg); }
 body.flyout .head { gap: 10px; }
 body.flyout .head .status-card { background: var(--layer); }
@@ -211,10 +223,59 @@ body.flyout .tab { padding: 6px 8px 8px; font-size: 13px; }
 body.flyout .tab .badge { margin-left: 4px; }
 body.flyout .tab.active::after { left: 8px; right: 8px; }
 body.flyout .panel { box-shadow: none; border: 1px solid var(--stroke); background: var(--layer-alt); }
-body.flyout .panel .body { padding: 12px 16px; }
+body.flyout .panel .body { padding: 10px 14px; }
 body.flyout .panel .bar { padding: 10px 16px; background: var(--layer); }
 body.flyout .panel .bar .status { font-size: 12px; }
-body.flyout .field { margin-bottom: 12px; }
+body.flyout .field { margin-bottom: 10px; }
+body.flyout .field .hint { font-size: 11.5px; line-height: 15px; margin-top: 2px; }
+body.flyout label { margin-bottom: 2px; font-size: 13px; }
+body.flyout .group-title { margin-bottom: 8px; }
+body.flyout .field + .group-title, body.flyout .cols2 + .group-title { margin-top: 4px; }
 body.flyout .cols2 { gap: 0 12px; }
 body.flyout .list li { padding: 8px 4px; }
 body.flyout .foot { padding: 4px 0 12px; }
+body.flyout .foot .path.bad { font-size: 12px; line-height: 15px; }
+
+/* Тёмная тема — системная: те же токены, другие значения. Нативные элементы
+   (select, скроллбар) берут схему из color-scheme. */
+:root { color-scheme: light dark; }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020;
+    --layer: #2b2b2b;
+    --layer-alt: #262626;
+    --stroke: rgba(255, 255, 255, .0837);
+    --stroke-strong: rgba(255, 255, 255, .16);
+    --stroke-input: rgba(255, 255, 255, .54);
+    --text: rgba(255, 255, 255, 1);
+    --text-2: rgba(255, 255, 255, .786);
+    --text-3: rgba(255, 255, 255, .545);
+    --accent: #60cdff;
+    --accent-hover: #4cc2ff;
+    --accent-press: #3aa0d4;
+    --ok: #6ccb5f;
+    --warn: #fce100;
+    --bad: #ff99a4;
+    --neutral: #9a9a9a;
+    --ok-bg: #393d1b;
+    --warn-bg: #433519;
+    --bad-bg: #442726;
+    --info-bg: #2e2e2e;
+    --hover: rgba(255, 255, 255, .0605);
+    --shadow: 0 2px 4px rgba(0, 0, 0, .26), 0 0 0 1px var(--stroke);
+  }
+  input, select { background: rgba(255, 255, 255, .06); }
+  input:hover, select:hover { background: rgba(255, 255, 255, .08); }
+  input:disabled { background: rgba(255, 255, 255, .04); }
+  .btn { background: rgba(255, 255, 255, .06); }
+  .btn:hover { background: rgba(255, 255, 255, .08); }
+  .btn:active { background: rgba(255, 255, 255, .03); }
+  .btn.accent { color: #000; border-bottom-color: rgba(0, 0, 0, .3); }
+  .btn:disabled, .btn.accent:disabled { background: rgba(255, 255, 255, .04); color: var(--text-3); }
+  .icon-btn.browse { background: rgba(255, 255, 255, .06); }
+  .icon-btn.browse:hover { background: rgba(255, 255, 255, .08); }
+  .switch input:checked::before { background: #000; }
+  .log { background: rgba(255, 255, 255, .04); }
+  .ic.dim { border-color: var(--stroke-input); }
+  body.flyout .head { background: #1c1c1c; }
+}

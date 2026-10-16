@@ -660,6 +660,132 @@ SHA-256 — nssm.cc часто недоступен, только для Windows
 в CI — сборка и `check` без карты (факты про модель — `Blocked`, не провал
 установки с `serve = "remote"`).
 
+## vanessa-runner в комплекте разработчика (этап 6)
+
+Решения заказчика 2026-10-16: мост внутри `1c-connect`, без отдельного
+бинаря; один репозиторий на базу с веткой на рабочее место; агент сразу
+получает синтакс-контроль и тесты; git несём с собой (MinGit в комплекте —
+на машинах разработчиков его нет или он древний).
+
+**Что уже есть у vanessa-runner и что это меняет.** vanessa-runner 3.0.2
+содержит MCP-сервер `vrunner-mcp` (stdio, `src/mcp.os`, серверное имя
+AutumnMCP): 61 инструмент — все команды `vrunner` (`cf_decompile`,
+`cf_load`, `validate_syntax_check`, `test_xunit`, `test_vanessa`,
+`test_yaxunit`, `infobase_update` …), длинные команды — фоновыми задачами
+(`task_status`, `task_result`, `task_cancel`), подключение к базе
+(`ibconnection`, `db-user`, `db-pwd`) запоминается на сессию. Проверено
+2026-10-16 в контейнере `evilbeaver/onescript:2.2.0`: `initialize` →
+`tools/list` отдаёт 61 инструмент. Поэтому порт 778N — тот же мост, что
+777N: `1c-connect` запускает процесс на stdio и соединяет его с каналом
+туннеля; свой MCP-сервер не пишется. Единственное, чего у vrunner нет, —
+git: эти три инструмента мост добавляет сам (ниже).
+
+**Поток работы** (раздел «Путь файлов: git, не туннель» остаётся в силе):
+
+1. машина с 1С — `cf_decompile` (инструментом из Zed или кнопкой в окне)
+   кладёт исходники в `<проект>/src`, `project_push` коммитит и шлёт в Gitea;
+2. контейнер — агент `git clone`/`pull` из Gitea (`http://localhost:3000/
+   dev1c/<репозиторий>.git`, логин — его рабочее место), правит, коммитит,
+   `git push` в свою ветку;
+3. машина с 1С — `project_pull`, затем `cf_load` (с `--increment`: индекс
+   изменённых файлов ведёт сам vrunner, `git diff` для `--list` не нужен),
+   `validate_syntax_check`, `test_xunit`.
+
+Файлы конфигурации через туннель не ездят; через 778N идут только JSON-RPC.
+
+**Репозиторий.** Организация `dev1c` в Gitea образа (создаёт
+`gitea-start.sh`, владельцы — dev1, dev2, dev3), репозиторий `dev1c/<repo>`
+— один на базу; ветка рабочего места — `dev1`, `dev2`, `dev3`; `main` —
+слияние руками или агентом. `1c-connect` при установке создаёт репозиторий
+через API Gitea (`POST /api/v1/orgs/dev1c/repos`, учётка рабочего места),
+если его ещё нет.
+
+**Параметры `[host]`** (к нынешним): `project` — каталог проекта на этой
+машине (полный путь; создаётся, если нет), `repo` — имя репозитория в
+`dev1c` (пусто — имя каталога базы без пути). `dump` пустой означает
+`<project>/src`: поиск по коду у mcp-1c смотрит в те же исходники.
+
+**Что в каталоге проекта.** `.git` с `origin =
+http://dev<N>:dev<N>@<адрес среды>:3391/dev1c/<repo>.git` и веткой
+`dev<N>`; `src/` — исходники; `autumn-properties.json` без секретов:
+
+```json
+{ "vrunner": { "src": "src", "cf": { "decompile": { "out": "src" }, "load": { "increment": true } } } }
+```
+
+Подключение и пароль базы процесс `vrunner-mcp` получает переменными
+окружения `VRUNNER_IBCONNECTION` (`/F<base_path>` или `/S<сервер>\<база>`),
+`VRUNNER_DBUSER`, `VRUNNER_DBPWD` — в репозиторий они не попадают.
+`.gitignore`: `build/`, `*.log`, `autumn-properties.local.json`.
+
+**Мост 778N** (`bridge::vrunner`). На соединение — процесс
+`<kit>/vrunner/oscript/oscript.exe <kit>/vrunner/lib/vanessa-runner/src/mcp.os`
+с `cwd = project`, `OSCRIPT_LIB = <kit>/vrunner/lib`, `PATH` с
+`<kit>/git/cmd` впереди, переменными подключения выше и
+`CREATE_NO_WINDOW`. Поток JSON-RPC (строка на сообщение) идёт сквозь мост с
+тремя перехватами:
+
+- ответ на `tools/list` дополняется тремя инструментами моста;
+- `tools/call` с именем `project_status` (ветка, последний коммит,
+  неотправленные коммиты, изменённые файлы), `project_pull` (`git pull
+  --rebase origin dev<N>`), `project_push` (`git add -A`, `git commit -m
+  <message>`, `git push -u origin dev<N>`; аргумент `message`) — исполняется
+  мостом через MinGit комплекта, ответ в формате MCP (`content: text`,
+  `isError` при ненулевом коде);
+- всё остальное — как есть, байт в байт.
+
+Чистая часть (`route(line) -> Route::{Forward, ListReply(id),
+Ours(id, tool, args)}` и сборка ответа) — функции с тестами на JSON;
+процесс и git — обёртки. Zed уже ждёт этот сервер: `context_servers.vrunner`
+= `nc -N localhost 778N` с таймаутом 3600 с.
+
+**Окно и команды `1c-connect`.** Вкладка «Проект»: ветка и состояние git,
+действия в нижней плашке — «Выгрузить в git» (`cf_decompile` → `project_push`),
+«Загрузить из git» (`project_pull` → `cf_load --increment`), «Открыть
+каталог». Это те же команды, что зовёт агент, только из окна они идут через
+CLI `vrunner` (тот же oscript, тот же проект), ход — в «Журнал». В CLI:
+`1c-connect export` и `1c-connect import`. В «Параметрах» — группа «Проект»
+(каталог с кнопкой выбора, имя репозитория). Операция `host.project`
+(`install`): каталог, `git init`, remote и ветка, `autumn-properties.json`,
+`.gitignore`, репозиторий в Gitea; `uninstall` проект не трогает.
+
+**Проверки `check`** (к семи нынешним, после «mcp-1c в комплекте»):
+«OneScript в комплекте» (`oscript.exe --version`), «vanessa-runner»
+(`lib/vanessa-runner`, версия из `packagedef`/`--version` = 3.0.2), «git в
+комплекте», «проект» (каталог, `.git`, remote указывает в среду, ветка
+`dev<N>`), «Gitea» (`http://<адрес среды>:3391/api/v1/version` отвечает —
+напрямую, без туннеля), «туннель» остаётся последним. Факт «туннель» при
+поднятом туннеле дополняется «778N: vrunner-mcp отвечает» — мост
+спрашивает процесс `initialize` сам.
+
+**Комплект** (`pack.sh`, `dist/1c-connect`): `vrunner/oscript/` —
+`OneScript-2.2.0-win-x64.zip` (48 МБ, самодостаточный .NET, без установки),
+`vrunner/lib/` — результат `opm install -d lib vanessa-runner@3.0.2` в
+контейнере `evilbeaver/onescript:2.2.0` на сборке (9 МБ; `lib/vanessa-runner`
+плюс зависимости), `git/` — `MinGit-2.56.0.2-64-bit.zip` (40 МБ). Архивы
+приколочены по SHA-256 как в этапе 5; содержимое `lib` — по версии пакета.
+Комплект разработчика вырастает с 31 МБ до ≈ 250 МБ.
+
+**Образ.** `gitea-start.sh` создаёт организацию `dev1c` с тремя
+владельцами. `config/agents-global.md` получает раздел «Как работать с
+конфигурацией через git»: поток выше, имена инструментов, правило «после
+`project_pull` — `cf_load`, после правок — `validate_syntax_check`, потом
+`test_xunit`». Таймаут `vrunner` в Zed уже 3600 с; длинные операции агент
+ведёт через `task_status`.
+
+**Проверка этапа.** На этой машине: Бухгалтерия (`C:\Users\bucher\
+Documents\InfoBase`), проект `C:\proj\InfoBase`, `1c-connect install` →
+репозиторий `dev1c/InfoBase` в локальном контейнере, `export` → исходники в
+Gitea (ветка dev1), правка модуля в контейнере → `import` → загрузка в базу,
+`validate_syntax_check` через Zed. В CI — сборка, тесты моста на JSON,
+`pack.sh` с рядом vrunner.
+
+**Этапы внутри:** 6.1 `cfg` (`project`, `repo`, `dump` по умолчанию) и
+чистая маршрутизация JSON-RPC с тестами; 6.2 мост 778N и git-инструменты;
+6.3 операция `host.project`, репозиторий в Gitea, `export`/`import` в CLI;
+6.4 проверки; 6.5 окно (вкладка «Проект», параметры); 6.6 `pack.sh` и
+образ (организация, AGENTS.md); 6.7 проверка на этой машине, ledger.
+
 ## Этапы
 
 1. Образ: `nc`-серверы, `PermitListen`, уборка `mcp-1c` и `MCP_1C_*`.
@@ -668,6 +794,6 @@ SHA-256 — nssm.cc часто недоступен, только для Windows
 4. Окна обеих программ и трей у `1c-connect` (раздел «Окна и трей»).
 5. Сервер инференса: три формы, хостовая по умолчанию (раздел «Сервер
    инференса»), затем образ без CUDA.
-6. Этап 2 по срокам: `vrunner-mcp` в комплекте `1c-connect` (переносимый
-   OneScript, проверить, что работает без установки), порт 778N, PRISM
-   категории B.
+6. vanessa-runner в комплекте `1c-connect`: мост 778N к `vrunner-mcp`,
+   git-инструменты моста, проект и репозиторий в Gitea (раздел
+   «vanessa-runner в комплекте разработчика»); PRISM категории B.

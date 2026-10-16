@@ -232,6 +232,15 @@ impl Cfg {
     pub fn image(&self) -> String {
         "oktaplus/dev1c:latest".into()
     }
+
+    /// Образ сервера модели (serve = "docker"); едет в том же архиве комплекта.
+    pub fn llama_image(&self) -> String {
+        "oktaplus/dev1c-llama:latest".into()
+    }
+
+    pub fn llama_container(&self) -> String {
+        format!("{}-llama", self.server.name)
+    }
 }
 
 #[cfg(test)]

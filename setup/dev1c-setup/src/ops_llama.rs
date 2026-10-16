@@ -13,7 +13,7 @@ use common::Runner;
 pub fn ops(form: Form) -> Vec<Box<dyn Op<Ctx>>> {
     match form {
         Form::Host => vec![Box::new(Bin), Box::new(Service), Box::new(Answers)],
-        Form::Docker => vec![Box::new(Answers)], // контейнер — следующей задачей
+        Form::Docker => vec![Box::new(Container), Box::new(Answers)],
         Form::Remote => vec![],
     }
 }
@@ -62,6 +62,57 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32) -> Result<u32> {
     })
 }
 
+/// Что остаётся в каталоге службы при раскладке из комплекта: файлы
+/// комплекта, nssm, токен и журналы. Всё остальное удаляется — подложенная
+/// заранее библиотека загрузилась бы в процесс службы.
+pub fn keep_in_service_dir(name: &str, kit_files: &[String]) -> bool {
+    kit_files.iter().any(|k| k == name)
+        || name == "nssm.exe"
+        || name == "dev1c-llama.token"
+        || (name.starts_with("llama") && name.ends_with(".log"))
+}
+
+/// `docker run` контейнера модели: образ из комплекта, том моделей, карта,
+/// токен переменной (в строке процесса его нет), сервер слушает внутри на 8080.
+pub fn llama_run_args(cfg: &crate::cfg::Cfg, token: &str, cache_ram: u32, fit_target: u32) -> Vec<String> {
+    let base = cfg.model.file.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+    let model = format!("/opt/models/{base}");
+    let alias = cfg.model_alias();
+    let mut a: Vec<String> = [
+        "run",
+        "-d",
+        "--name",
+        &cfg.llama_container(),
+        "--restart",
+        "unless-stopped",
+        "--gpus",
+        "all",
+        "-p",
+        &format!("{}:8080", cfg.ports()[2]),
+        "-v",
+        &format!("{}:/opt/models", cfg.volume("models")),
+        "-e",
+        &format!("LLAMA_API_KEY={token}"),
+        &cfg.llama_image(),
+        "llama-server",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    a.extend(llama::serve_args(&llama::ServeInput {
+        model: &model,
+        alias: &alias,
+        host: "0.0.0.0",
+        port: 8080,
+        fit_ctx: cfg.model.fit_ctx,
+        fit_target,
+        cache_ram,
+        token_file: None,
+        token_env: true,
+    }));
+    a
+}
+
 struct Bin;
 impl Op<Ctx> for Bin {
     fn id(&self) -> &'static str {
@@ -97,10 +148,25 @@ impl Op<Ctx> for Bin {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let src = llama::kit_bin(ctx).ok_or_else(|| anyhow::anyhow!("в комплекте нет llama/bin"))?;
         llama::ensure_dir(ctx)?;
+        let mut kit_files = Vec::new();
         for e in std::fs::read_dir(&src)? {
             let e = e?;
             if e.file_type()?.is_file() {
                 std::fs::copy(e.path(), llama::dir().join(e.file_name()))?;
+                kit_files.push(e.file_name().to_string_lossy().to_string());
+            }
+        }
+        // Каталог зеркалит комплект: чужих файлов в нём не остаётся.
+        for e in std::fs::read_dir(llama::dir())? {
+            let e = e?;
+            let name = e.file_name().to_string_lossy().to_string();
+            if !keep_in_service_dir(&name, &kit_files) {
+                if e.file_type()?.is_dir() {
+                    std::fs::remove_dir_all(e.path())?;
+                } else {
+                    std::fs::remove_file(e.path())?;
+                }
+                ctx.warn(format!("удалён посторонний файл {name} из каталога службы"));
             }
         }
         if cfg!(windows) {
@@ -193,6 +259,71 @@ impl Op<Ctx> for Service {
     }
 }
 
+struct Container;
+impl Op<Ctx> for Container {
+    fn id(&self) -> &'static str {
+        "llama.container"
+    }
+    fn title(&self) -> &'static str {
+        "Контейнер модели"
+    }
+    fn state(&self, ctx: &Ctx) -> OpState {
+        if ctx.cfg.model.file.is_empty() {
+            return OpState::Blocked("модель не выбрана: [model] file — файл в комплекте".into());
+        }
+        if !docker::image_loaded(ctx, &ctx.cfg.llama_image()) {
+            return OpState::Blocked(format!("образ {} не загружен: он едет в том же архиве, что и образ среды", ctx.cfg.llama_image()));
+        }
+        if llama::gpu(ctx).is_none() {
+            return OpState::Blocked("нет видеокарты (nvidia-smi не отвечает): модель для агентов на процессоре неработоспособна".into());
+        }
+        let name = ctx.cfg.llama_container();
+        if let Some(st) = crate::ops::state_before_drift(&docker::container_state(ctx, &name)) {
+            return st;
+        }
+        let baked = ctx.kit.state_get("llama.args").unwrap_or_default();
+        if let Some(d) = args_drift(&self.wanted(ctx, "…"), &baked) {
+            return OpState::Drifted { from: d.0, to: d.1 };
+        }
+        OpState::Done(format!("работает, порт {}", ctx.cfg.ports()[2]))
+    }
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        vec![Action::new(format!(
+            "{} run … {} llama-server (три слота, общий кэш, окно не ниже {})",
+            ctx.engine(),
+            ctx.cfg.llama_image(),
+            ctx.cfg.model.fit_ctx
+        ))]
+    }
+    fn apply(&self, ctx: &Ctx) -> Result<()> {
+        let token = llama::ensure_token(ctx)?;
+        let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
+        let args = self.wanted(ctx, &token);
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let o = docker::run(ctx, &refs)?;
+        anyhow::ensure!(o.ok(), "контейнер модели не запустился: {}", o.tail(3).join(" "));
+        // В состоянии токен заменён на «…»: сравнение не должно зависеть от него.
+        ctx.kit.state_set("llama.args", &self.wanted(ctx, "…").join(" "))?;
+        ctx.ok("контейнер модели запущен");
+        Ok(())
+    }
+    fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
+        Some(vec![Action::new(format!("{} rm -f {}", ctx.engine(), ctx.cfg.llama_container()))])
+    }
+    fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
+        let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
+        ctx.ok("контейнер модели снят");
+        Ok(())
+    }
+}
+
+impl Container {
+    fn wanted(&self, ctx: &Ctx, token: &str) -> Vec<String> {
+        let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
+        llama_run_args(&ctx.cfg, token, llama::cache_ram_mb(llama::free_ram_mb(ctx)), llama::fit_target_mb(used))
+    }
+}
+
 /// Сервер отвечает, и мы знаем его настоящие числа. Всегда выполняется:
 /// это и есть синхронизация с Zed.
 struct Answers;
@@ -250,6 +381,27 @@ mod tests {
         let ids = |f: Form| ops(f).iter().map(|o| o.id().to_string()).collect::<Vec<_>>();
         assert_eq!(ids(Form::Host), ["llama.bin", "llama.service", "llama.answers"]);
         assert_eq!(ids(Form::Remote), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_container_form_runs_the_server_from_the_models_volume() {
+        let mut c = Cfg::default();
+        c.model.serve = "docker".into();
+        c.model.file = "models/x.gguf".into();
+        let a = llama_run_args(&c, "tok", 4096, 1024).join(" ");
+        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all -p 3392:8080 -v dev1c-models:/opt/models -e LLAMA_API_KEY=tok oktaplus/dev1c-llama:latest llama-server"), "{a}");
+        assert!(a.contains("-m /opt/models/x.gguf --alias x --host 0.0.0.0 --port 8080"));
+        assert!(!a.contains("--api-key-file"));
+        let ids = ops(Form::Docker).iter().map(|o| o.id().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids, ["llama.container", "llama.answers"]);
+    }
+
+    #[test]
+    fn foreign_files_in_the_service_dir_are_pruned_but_ours_stay() {
+        let keep = |n: &str| keep_in_service_dir(n, &["llama-server.exe".to_string(), "cudart64_13.dll".to_string()]);
+        assert!(keep("llama-server.exe") && keep("cudart64_13.dll"));
+        assert!(keep("nssm.exe") && keep("dev1c-llama.token") && keep("llama.log") && keep("llama-20261016.log"));
+        assert!(!keep("evil.dll") && !keep("version.dll"));
     }
 
     #[test]

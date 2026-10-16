@@ -180,6 +180,13 @@ fn nssm_exe() -> Result<String> {
 pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
     let d = dir();
     std::fs::create_dir_all(&d)?;
+    // Перенаправление (junction, символическая ссылка) на месте каталога
+    // службы — подмена: закрывать права мы стали бы у чужого каталога.
+    for p in [d.parent().map(|p| p.to_path_buf()), Some(d.clone())].into_iter().flatten() {
+        if std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            anyhow::bail!("{} — ссылка, а не каталог: удалите её и повторите", p.display());
+        }
+    }
     if cfg!(windows) {
         let mut paths = vec![d.to_string_lossy().to_string()];
         if let Some(parent) = d.parent() {

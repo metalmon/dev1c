@@ -11,12 +11,12 @@ Last updated: 2026-10-15.
 | | |
 |---|---|
 | repository | https://github.com/metalmon/dev1c (public) |
-| kit | built in CI, artifact `dev1c-kit`: `dev1c-kit/` (installer, `dev1c.toml`, image ~1328 MB, checksums) and `1c-connect/` (mcp-1c for the 1C machine) |
+| kit | built in CI, artifact `dev1c-kit`: `dev1c-kit/` (installer, `dev1c.toml`, image ~1328 MB, checksums) and `1c-connect/` (≈ 230 MB: mcp-1c, `vrunner/` = OneScript 2.2.0 + vanessa-runner 3.0.2 + add 6.8.0, `git/` = MinGit 2.56.0.2, `tools.version`) |
 | llama.cpp | `ghcr.io/metalmon/dev1c-llama:b11606` (built from `Dockerfile.llama`) is no longer the base of `dev1c` — the image has no CUDA; the same build b11606 ships in the kit as `llama/bin/<os>` for the host form |
 | local container | `dev1c`, ports 3390 RDP / 3391 Gitea / 3393 SSH; 3392 belongs to the model container when `serve = "docker"` |
 | model server | `dev1c-setup` runs it: `serve = "host"` (default) — `llama-server` as a Windows service `dev1c-llama` via nssm in `C:\dev1c\llama` (Linux: systemd, `/opt/dev1c/llama`), `serve = "docker"` — container `<name>-llama` from `oktaplus/dev1c-llama` in the same kit tar, `serve = "remote"` — any OpenAI-compatible server. Zed reaches local forms as `http://host.docker.internal:<port>/v1` |
 | workstations | `dev1`, `dev2`, `dev3` — password equals login; tunnel ports 777N / 778N / 779N |
-| tunnel account | `dev` / `dev`, forwarding onto the nine workstation ports only, no shell |
+| tunnel account | none: each workstation tunnels as itself (`dev1`/`dev1` …), sshd `Match User` gives it remote forwarding onto its own three ports only — no shell, no tty, no local forwards |
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
 | mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
@@ -96,8 +96,30 @@ script days is obsolete; the scripts are gone.
   images in one tar, install and check with `serve = "remote"` pass,
   `test-entrypoint-ports` confirms the window numbers are substituted.
 
+- **vrunner bridge (stage 6A, 2026-10-16):** `jsonrpc.rs` framing and routing
+  on bytes (line split across reads, 8 MiB overflow passthrough, filtered
+  `tools/list` with the three bridge tools on the last page, disabled tools
+  answered with `isError`, cancel), `bridge::pipe_jsonrpc` against a scripted
+  child (filter, platform call refused while `1cv8.exe` runs, own tool in its
+  own task, cancel swallowed for ours and forwarded for foreign ids, child
+  death still answers a pending `tools/list` with our tools), git tools on a
+  real git with a bare origin (first push creates `main` + `dev2`, dirty tree
+  refused, rebase conflict aborted and named by file, `project_status`), the
+  project mutex (second caller told «занято»), Job Object (dropping it kills
+  `cmd.exe` + `ping`). `pack.sh --llama none` end to end here: kit 232 MB,
+  opm tree matches the manifest (996 files), `tools.version` written.
+  `1c-connect install` copied the tools to `%LOCALAPPDATA%\dev1c` (`git
+  version 2.56.0.windows.2`), `check` fact 4 «инструменты комплекта» green,
+  and `oscript.exe lib/vanessa-runner/src/mcp.os` from that copy answers
+  `initialize` (AutumnMCP) and `tools/list` with 61 tools — 10 s to the first
+  reply. CI run 38916234545: both OSes green, Linux kit packed with the
+  vrunner row.
+
 ## Not verified
 
+- The vrunner bridge over a live tunnel (778N from Zed) and with a real
+  project: `host.project`, export/import and the «Проект» tab are plan 6B.
+  `cf_load`/`cf_decompile` through the bridge not yet run against a base.
 - The container form (`serve = "docker"`) ran only through its unit tests and
   the CI image save: no live `docker run --gpus all` of `dev1c-llama` here
   (the card is shared with `volt-llama`).
@@ -111,10 +133,8 @@ script days is obsolete; the scripts are gone.
   wiring (`MCP_1C_*` pass-through, the `1c` context server) has not been built
   and started yet. Needs a CI build, then an RDP session with the tunnel up.
 - **`vanessa-runner` and the configurator over the tunnel.** Reading the base is
-  solved; building, loading and running tests on the host is not. `vrunner-mcp`
-  (vanessa-runner 3.0, stdio) is the candidate, but it needs something on the
-  host that answers a TCP port with a process — the SSH client alone cannot do
-  that.
+  solved; the bridge for building, loading and tests is in (6A), the project
+  flow around it (6B) is not: nothing has loaded a configuration from git yet.
 - **ERP-scale configuration.** Debugging happens on the Бухгалтерия test base
   (`C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 at
   `C:\Program Files (x86)\1cv8`). Anything may be done to it.
@@ -213,6 +233,25 @@ script days is obsolete; the scripts are gone.
 - Tauri's `tauri icon` is not used: `icons/icon.ico` and the 64 px `tray.png`
   are made once with Pillow (the SVG mark via headless Edge); the status dot
   is drawn at run time over `tray.png`.
+- `opm install -d <dir> vanessa-runner` vendors every dependency under
+  `vanessa-runner/oscript_modules` — but resolves them as the hub has them
+  today, hence the committed manifest `setup/1c-connect/vendor/vrunner-lib.sha256`.
+  `vanessa-add` is the hub package `add` (6.8.0); vrunner looks for its
+  `xddTestRunner.epf` at `<bin>/../lib/add`, so OneScript is unpacked with its
+  own `bin/` + `lib/` layout and the opm tree merged into that `lib/`.
+- In the OneScript image mount the output at `/out`, never `/lib`: `/lib` is
+  the container's libc and `sh` stops loading. `find … | xargs sha256sum`
+  without `-print0` loses the eight `add/features` names with spaces.
+- OneScript's version flag is `-version` (one dash); `--version` prints the
+  usage and exits 0.
+- OneScript strings compare case-insensitively, so a child written in it reads
+  `Tools/Call` and a `Name` key as a tool call. The bridge therefore forwards
+  only parsed objects it re-serialises itself, with a fixed list of methods and
+  `tools/call` rebuilt from the checked `name`/`arguments`.
+- `std::sync::MutexGuard` held across an `.await` makes the future `!Send`;
+  take the decision out of the lock before awaiting.
+- `PathBuf::file_name` on Linux sees `C:\proj\Buh` as one segment: derive
+  names from strings by both separators when the config may come from Windows.
 
 ## Next
 
@@ -277,9 +316,22 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    after `1c-connect`. Today the model is served by the other project's
    `volt-llama` container from the same `dev1c-models` volume, and `dev1c`
    points at it as remote.
-6. **`vrunner-mcp` in the developer's kit** (stage 6): portable OneScript plus
-   vanessa-runner, port 778N; check first that `vrunner-mcp` runs from a
-   portable OneScript on Windows. This is what makes PRISM category B possible.
+6. **`vrunner-mcp` in the developer's kit** (stage 6). 6A done 2026-10-16,
+   plan `docs/superpowers/plans/2026-10-16-vrunner-bridge.md`: `[host]
+   project`/`tools`, the 778N bridge (`jsonrpc.rs` + `bridge::pipe_jsonrpc`),
+   git tools `project_status`/`project_pull`/`project_push` on a project
+   mutex, Job Object, `host.tools` into `%LOCALAPPDATA%\dev1c`, the kit rows
+   (OneScript, vanessa-runner + add by manifest, MinGit), tunnel under the
+   workstation's account. Deferred from its reviews: abort of a bridge task
+   does not interrupt the running git call (the mutex frees when it ends);
+   `/P…` redaction also blots `/Path…` in journal lines; JSON-RPC batch
+   arrays from an agent are dropped silently. **6B next:** `host.project`
+   (git init, remote, `.gitattributes`, `autumn-properties.json`),
+   `export`/`import`, the «Проект» tab and project fields in the window,
+   the remaining `check` facts (vrunner-mcp answers, project, Gitea,
+   Configurator, removable media), the image (org `dev1c`, git credentials,
+   AGENTS.md), live run here with Бухгалтерия. This is what makes PRISM
+   category B possible.
 7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
 

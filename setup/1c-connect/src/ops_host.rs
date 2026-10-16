@@ -120,7 +120,7 @@ impl Op<Ctx> for Tools {
             let n = copy_tree(&ctx.kit.root.join(d), &to.join(d)).with_context(|| format!("копирование {d} в {}", to.display()))?;
             ctx.ok(format!("{d}: {n} файлов"));
         }
-        let o = docker::probe(ctx, &oscript_exe(&to).to_string_lossy(), &["--version"])?;
+        let o = docker::probe(ctx, &oscript_exe(&to).to_string_lossy(), &["-version"])?;
         anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", to.display(), o.tail(2).join(" "));
         ctx.ok(format!("oscript {}", o.text.trim()));
         let o = docker::probe(ctx, &git_exe(&to).to_string_lossy(), &["--version"])?;

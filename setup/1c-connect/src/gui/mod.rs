@@ -396,6 +396,27 @@ fn handle(ev: Ev, cx: &mut App) {
     }
 }
 
+/// Нативное сообщение об ошибке (на Windows — `MessageBoxW`, иначе `stderr`)
+/// перед принудительным выходом: без трея программа беззвучно зависла бы —
+/// окно без трея не закрыть (ни кнопки на всплывающем окне снаружи, ни
+/// пункта «Выход» вне его меню), а `QuitMode::Explicit` не уходит по закрытию
+/// окна. `eprintln!` здесь не увидят: обычный запуск без консоли, а релиз —
+/// `windows_subsystem = "windows"`.
+#[cfg(windows)]
+fn fatal(text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let (text, title) = (wide(text), wide("1c-connect"));
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+    }
+}
+
+#[cfg(not(windows))]
+fn fatal(text: &str) {
+    eprintln!("{text}");
+}
+
 pub fn launch(kit: Kit) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
@@ -406,13 +427,15 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         // Без опроса: обработчики трея (их зовёт WndProc на этом же потоке)
         // кладут событие в канал, задача GPUI просыпается по нему.
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Ev>();
-        // Закрытие `run` — `FnOnce(&mut App)`, без `Result`: ошибка трея не
-        // смертельна (значок просто не появится), поэтому не `?`, а лог.
+        // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
+        // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
+        // напрямую, а не через `quit()` этого модуля.
         let tray = match tray::build(tx.clone(), theme::Choice::load(&kit)) {
-            Ok(t) => Some(t),
+            Ok(t) => t,
             Err(e) => {
-                eprintln!("трей не создался: {e:#}");
-                None
+                fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
+                cx.quit();
+                return;
             }
         };
         cx.set_global(Ui {
@@ -429,7 +452,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             ops: Vec::new(),
             busy: None,
             status: None,
-            tray,
+            tray: Some(tray),
             window: None,
             hidden_at: None,
             dialog_open: false,

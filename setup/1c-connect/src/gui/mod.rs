@@ -406,7 +406,15 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         // Без опроса: обработчики трея (их зовёт WndProc на этом же потоке)
         // кладут событие в канал, задача GPUI просыпается по нему.
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Ev>();
-        let tray = tray::build(tx.clone(), theme::Choice::load(&kit)).ok();
+        // Закрытие `run` — `FnOnce(&mut App)`, без `Result`: ошибка трея не
+        // смертельна (значок просто не появится), поэтому не `?`, а лог.
+        let tray = match tray::build(tx.clone(), theme::Choice::load(&kit)) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("трей не создался: {e:#}");
+                None
+            }
+        };
         cx.set_global(Ui {
             kit,
             cfg,

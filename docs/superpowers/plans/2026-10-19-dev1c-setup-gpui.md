@@ -19,7 +19,7 @@
 - One theme: light. `Theme::change(ThemeMode::Light, None, cx)` and nothing else — no system appearance, no choice, no dark.
 - The window never hardcodes the operation list: it renders whatever `ops::server(&cfg)` returned. The single exception, as today, is the status card looking up the operation whose `id` is `container`.
 - Fluent device, copied from `1c-connect/src/gui/panel.rs`: layers instead of shadows, radii 4/8 px, the 4/8/12/16/24 spacing grid, IBM Plex Sans, `muted_foreground` only for placeholders.
-- `mod gui` stays behind the `gui` feature in both crates, so its tests run in CI's Windows job, not locally.
+- **No local GPUI build at all** (house rule: build in CI whatever can be built in CI). Therefore the window splits in two: `dev1c-setup/src/ui.rs` holds every pure decision (what the status card says, which tab opens, what the notice carries, which rows «Доступ» shows, whether edits are unsaved, whether closing may proceed) with no `gpui` import and no feature gate, so `cargo test --workspace --no-default-features` runs its tests locally in seconds; `dev1c-setup/src/gui/*` holds the GPUI views behind the `gui` feature and is proven by CI's Windows job. Three things stay CI-only: the palette test (it needs `gpui_kit::component::ThemeSet`), the rendering, and the live look.
 
 ## Review Focus
 
@@ -52,11 +52,11 @@
 
 The test `theme_file_has_one_light_and_one_dark_theme_with_the_fluent_radii` moves verbatim into `common/src/gui.rs` (it asserts the two theme names in order, `(radius, radius_lg, shadow) == (Some(4), Some(8), Some(false))`, `font_family == "IBM Plex Sans"`, `primary == "#FACC1F"`). The two remaining tests (`theme_choice_round_trips…`, `menu_mode_follows_the_choice…`) stay in `1c-connect`.
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p common --features gui gui::` — Expected: PASS.
+Run locally: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS (the palette test is not in this run: it needs gpui). The palette test itself is proven by CI's Windows job in Task 2 step 5.
 
-- [ ] **Step 3: Verify `1c-connect` still compiles and its theme tests pass**
+- [ ] **Step 3: Verify `1c-connect` still compiles without the window**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p onec-connect theme::` — Expected: PASS (2 tests).
+Run: `cargo test --manifest-path setup/Cargo.toml -p onec-connect --no-default-features` — Expected: PASS. Its two theme tests (`theme_choice_round_trips…`, `menu_mode_follows_the_choice…`) live under the `gui` feature and are proven by CI in Task 2 step 5.
 
 - [ ] **Step 4: Commit**
 
@@ -115,11 +115,13 @@ Expected: the Windows job builds `dev1c-setup.exe` with the `gui` feature; the L
 ### Task 3: State, events, worker threads
 
 **Files:**
-- Modify: `setup/dev1c-setup/src/gui/mod.rs`
+- Create: `setup/dev1c-setup/src/ui.rs` (pure logic and its tests, no gpui, no feature gate)
+- Modify: `setup/dev1c-setup/src/gui/mod.rs`, `setup/dev1c-setup/src/main.rs` (`mod ui;`)
 
 **Interfaces:**
 - Consumes: `ops::server`, `ops::Ctx`, `verify::{run, summary, report}`, `common::run::{status, apply_all, clean_apply}`, `common::op::{OpState, CleanLevel}`, `cfg::{Cfg, FILE}`.
-- Produces: `Ui` (GPUI global), `Ev`, `Line`, `Kind`, `OpView`, `Which`, `Busy`, `Dot`, `LOG_CAP: usize = 2000`, `LOG_FILE: &str = "dev1c-setup.log"`, `PANIC_TEXT`, `load_or_default(kit: &Kit) -> (Cfg, Option<String>)`, `op_view(id: String, title: String, st: OpState) -> OpView`, `notice(ops: &[OpView]) -> Option<String>`, `refresh_ops(cx: &mut App)`, `run_op(cx: &mut App, which: Which)`, `run_check(cx: &mut App)`, `note_line(ui: &mut Ui, line: Line)`, `guarded(...)`, `start_tab(file_exists: bool) -> Tab`.
+- Produces in `ui.rs` (no gpui, tested locally): `Line`, `Kind`, `OpView`, `Which`, `Busy`, `Dot`, `Tab`, `LOG_CAP: usize = 2000`, `LOG_FILE: &str = "dev1c-setup.log"`, `PANIC_TEXT`, `load_or_default(kit: &Kit) -> (Cfg, Option<String>)`, `op_view(id: String, title: String, st: OpState) -> OpView`, `notice(ops: &[OpView]) -> Option<String>`, `start_tab(file_exists: bool) -> Tab`, `guarded<E>(send: impl Fn(E), as_line: impl FnOnce(Line) -> E, body: impl FnOnce() -> E, on_panic: impl FnOnce() -> E)` — the sender is a closure precisely so the panic path is testable without a GPUI channel.
+- Produces in `gui/mod.rs` (GPUI, proven by CI): `Ui` global with `working(&self) -> bool`, `Ev`, `handle(ev, cx)`, `refresh_ops(cx)`, `run_op(cx, which)`, `run_check(cx)`, `note_line(ui, line)`.
 
 Shapes follow `1c-connect/src/gui/mod.rs` field for field where the meaning is the same (`kit`, `cfg`, `log`, `unread`, `tab`, `busy`, `started`, `pending`, `status`, `window`, `panel`, `dialog_open`, `tx`); `ops: Vec<OpView>` and `failed_checks: usize` are ours; `session`, `link`, `project`, `tray`, `height`, `hidden_at` do not exist here. `Which` is `Install | Change | CleanStack | CleanData | Check` with `title()` giving the Russian button label.
 
@@ -158,7 +160,7 @@ fn a_panicking_worker_still_reports_the_end_of_work_and_a_line() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup gui::` — Expected: FAIL, functions not found.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features ui::` — Expected: FAIL, functions not found.
 
 - [ ] **Step 3: Implement the state, the event loop and the workers**
 
@@ -168,7 +170,7 @@ Workers are `std::thread::spawn` + `guarded`, one per command, with the `Ctx` si
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup gui::` — Expected: PASS.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features ui::` — Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -186,7 +188,7 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1
 
 **Interfaces:**
 - Consumes: Task 3's `Ui`, `OpView`, `Which`, `notice`.
-- Produces: `status_line(ops: &[OpView], name: &str) -> (Dot, String, String, Option<Which>)` — indicator, title, subline, primary button; `Panel` with `Render`; `Panel::layer(bg, border)` helper copied from `1c-connect`.
+- Produces in `ui.rs`: `status_line(ops: &[OpView], name: &str) -> (Dot, String, String, Option<Which>)` — indicator, title, subline, primary button; `Panel` with `Render`; `Panel::layer(bg, border)` helper copied from `1c-connect`.
 
 - [ ] **Step 1: Write the failing test for the status card**
 
@@ -207,7 +209,7 @@ fn the_status_card_names_the_state_and_the_next_step() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup panel::` — Expected: FAIL.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features ui::` — Expected: FAIL.
 
 - [ ] **Step 3: Implement `status_line` and the four-element shell**
 
@@ -219,7 +221,7 @@ Header: icon, «dev1c-setup», status card (dot, title, subline, «Провер�
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup` — Expected: PASS.
+Run: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -237,7 +239,7 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1
 
 **Interfaces:**
 - Consumes: `Cfg::ports()`, `Cfg::model_url()`, `llama::facts_load`, `verify::run` via Task 3's `run_check`.
-- Produces: `access_rows(cfg: &Cfg) -> Vec<(&'static str, String, &'static str)>` — label, value, explanation.
+- Produces in `ui.rs`: `access_rows(cfg: &Cfg) -> Vec<(&'static str, String, &'static str)>` — label, value, explanation.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -256,7 +258,7 @@ fn the_access_rows_follow_the_port_block_and_the_model_url() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup access_rows` — Expected: FAIL.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features access_rows` — Expected: FAIL.
 
 - [ ] **Step 3: Implement both tabs**
 
@@ -264,7 +266,7 @@ Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup access_rows` �
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup` — Expected: PASS.
+Run: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -282,7 +284,7 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1
 
 **Interfaces:**
 - Consumes: `Cfg::{validate, render}`, `common::kit::write_text`, `cfg::FILE`.
-- Produces: `Fields` (one `Entity<InputState>` per editable value plus the two switches/selects), `fields_to_cfg(f: &Fields, cx: &App) -> Cfg`, `fields_differ(a: &Cfg, b: &Cfg) -> bool`, `save_cfg(ui: &mut Ui, cfg: Cfg) -> Result<(), String>`, `pick_model_file(...)`.
+- Produces: `Fields` (one `Entity<InputState>` per editable value plus the two switches/selects), `fields_to_cfg(f: &Fields, cx: &App) -> Cfg`, `ui::fields_differ(a: &Cfg, b: &Cfg) -> bool`, `ui::primary_blocked(dirty: bool) -> Option<&'static str>`, `save_cfg(ui: &mut Ui, cfg: Cfg) -> Result<(), String>`, `pick_model_file(...)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -319,7 +321,7 @@ fn an_unwritable_file_is_reported_not_swallowed() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup cfg_fields` — Expected: FAIL.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features ui::` — Expected: FAIL.
 
 - [ ] **Step 3: Implement the tab**
 
@@ -331,7 +333,7 @@ When `fields_differ` is true, the header's primary button does not run: the foot
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup` — Expected: PASS.
+Run: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -349,21 +351,21 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1
 
 **Interfaces:**
 - Consumes: `Ui::working()`.
-- Produces: `window::should_close(working: bool) -> bool`, the confirmation through `AlertDialog::new(cx).confirm()`.
+- Produces: `ui::should_close(working: bool) -> bool`, the confirmation through `AlertDialog::new(cx).confirm()`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```rust
 #[test]
 fn closing_is_free_when_idle_and_asks_while_working() {
-    assert!(window::should_close(false));
-    assert!(!window::should_close(true));
+    assert!(ui::should_close(false));
+    assert!(!ui::should_close(true));
 }
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup should_close` — Expected: FAIL.
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features should_close` — Expected: FAIL.
 
 - [ ] **Step 3: Implement the guard**
 
@@ -371,7 +373,7 @@ In `window::open`, register `window.on_window_should_close(...)`: when `Ui::work
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup` — Expected: PASS.
+Run: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS.
 
 - [ ] **Step 5: Commit**
 

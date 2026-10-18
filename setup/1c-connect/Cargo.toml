@@ -20,7 +20,7 @@ path = "src/main.rs"
 # нам не нужен (--no-default-features, тот же раннер CI).
 [features]
 default = ["gui"]
-gui = ["dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle"]
+gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle"]
 
 [dependencies]
 common = { path = "../common" }

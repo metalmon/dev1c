@@ -5,8 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "Каркас установщиков: операции, комплект, движок контейнеров, контрольные суммы"
 
+# Окно: шрифты и палитра комплекта. Флаг, потому что Linux-сборка идёт без
+# окна вовсе (--no-default-features у обоих установщиков).
+[features]
+gui = ["dep:gpui-kit", "dep:serde_json"]
+
 [dependencies]
 anyhow.workspace = true
+gpui-kit = { version = "=0.7.3", optional = true }
+serde_json = { workspace = true, optional = true }
 serde.workspace = true
 sha2.workspace = true
 

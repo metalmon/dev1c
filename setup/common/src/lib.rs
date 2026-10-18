@@ -8,6 +8,8 @@
 pub mod check;
 pub mod console;
 pub mod docker;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod integrity;
 pub mod kit;
 pub mod op;

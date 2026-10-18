@@ -1,15 +1,11 @@
-//! Шрифт Zed (IBM Plex Sans) и палитра 1С:Такси для окна.
-//! Выбор темы (система/светлая/тёмная) хранится в комплекте и переживает
-//! перезапуск программы.
+//! Выбор темы окна: система/светлая/тёмная, хранится в комплекте и
+//! переживает перезапуск программы. Сами шрифт и палитра — общие данные
+//! комплекта, они живут в `common::gui`.
 
 use common::kit::Kit;
-use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::App;
-use std::borrow::Cow;
 
-pub const LIGHT: &str = "1C Light";
-pub const DARK: &str = "1C Dark";
-pub const THEME_JSON: &str = include_str!("../../theme/1c.json");
 pub const STATE_KEY: &str = "theme";
 
 /// Выбор темы: система или явно светлая/тёмная.
@@ -115,42 +111,18 @@ pub fn apply(choice: Choice, cx: &mut App) {
     apply_menu_theme(menu_mode(choice, Theme::global(cx).is_dark()));
 }
 
-/// Шрифты и палитра окна. Звать из `launch` сразу после `gpui_kit::init`.
+/// Шрифты, палитра и выбранная тема. Звать из `launch` сразу после
+/// `gpui_kit::init`.
 pub fn install(kit: &Kit, cx: &mut App) {
-    let _ = cx.text_system().add_fonts(vec![
-        Cow::Borrowed(include_bytes!("../../fonts/IBMPlexSans-Regular.ttf").as_slice()),
-        Cow::Borrowed(include_bytes!("../../fonts/IBMPlexSans-SemiBold.ttf").as_slice()),
-    ]);
-    let reg = ThemeRegistry::global_mut(cx);
-    // Паника здесь намеренна: JSON вшит в двоичный файл на сборке, и его
-    // разбор с обоими именами тем проверяет тест ниже — сломаться это может
-    // только при правке самого файла, и тогда лучше сразу и громко.
-    reg.load_themes_from_str(THEME_JSON).expect("theme json");
-    let (light, dark) = (reg.themes()[LIGHT].clone(), reg.themes()[DARK].clone());
-    let theme = Theme::global_mut(cx);
-    theme.light_theme = light;
-    theme.dark_theme = dark;
+    common::gui::fonts(cx);
+    common::gui::palette(cx);
     apply(Choice::load(kit), cx);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_mode, Choice, MenuMode, DARK, LIGHT, THEME_JSON};
+    use super::{menu_mode, Choice, MenuMode};
     use common::kit::Kit;
-    use gpui_kit::component::ThemeSet;
-
-    #[test]
-    fn theme_file_has_one_light_and_one_dark_theme_with_the_fluent_radii() {
-        let set: ThemeSet = serde_json::from_str(THEME_JSON).unwrap();
-        let names: Vec<_> = set.themes.iter().map(|t| (t.name.to_string(), t.mode.is_dark())).collect();
-        assert_eq!(names, vec![(DARK.into(), true), (LIGHT.into(), false)]);
-        for t in &set.themes {
-            assert_eq!((t.radius, t.radius_lg, t.shadow), (Some(4), Some(8), Some(false)));
-            assert_eq!(t.font_family.as_deref(), Some("IBM Plex Sans"));
-            assert!(t.colors.primary.is_some() && t.colors.ring.is_some());
-            assert_eq!(t.colors.primary.as_deref(), Some("#FACC1F"));
-        }
-    }
 
     #[test]
     fn theme_choice_round_trips_through_kit_state_and_defaults_to_system() {

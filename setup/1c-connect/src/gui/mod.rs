@@ -567,7 +567,15 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
                     Layout::Drifted(d) => (false, d),
                 };
-                let lines = if ok { project::status(&p).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default() } else { Vec::new() };
+                // Тот же инструмент, что зовёт агент, под тем же замком
+                // проекта: во время выгрузки вкладка говорит «занято», а не
+                // читает полузаписанный индекс (правка 6B на main).
+                let lines = if ok {
+                    let (text, _) = project::call(&p, "project_status", &serde_json::Value::Null);
+                    text.lines().map(str::to_string).collect()
+                } else {
+                    Vec::new()
+                };
                 Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, lines, ok, why })
             },
             || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), lines: Vec::new(), ok: false, why: PANIC_TEXT.into() }),

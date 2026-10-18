@@ -517,3 +517,75 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Dot, String, String)>; // p
 - [ ] **Step 3: Реализовать** по Interfaces; ничего из Tauri-образца не копировать дословно, только логику и тексты.
 - [ ] **Step 4: Проверки:** `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` зелёный; один `cargo check --manifest-path setup/Cargo.toml -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000, перезапуск при лимите) без ошибок и предупреждений. Полные тесты с окном — в CI.
 - [ ] **Step 5: Commit** — `feat(1c-connect): Проект tab and project directory in the GPUI window (stage 6B port)`
+
+---
+
+### Task 9: Высота окна по содержимому вкладки «Параметры»
+
+Заказчик (2026-10-18): на вкладке «Параметры» остаётся небольшая ненужная прокрутка. Окно должно само подбирать высоту так, чтобы «Параметры» помещались целиком; прокрутка остаётся только как страховка на маленьких рабочих областях.
+
+**Files:** Modify `setup/1c-connect/src/gui/window.rs`, `setup/1c-connect/src/gui/panel.rs`, `setup/1c-connect/src/gui/mod.rs` (поле в `Ui`); spec «Окно» (380×640 → «380 × высота по содержимому, не меньше 640 и не больше рабочей области»).
+
+**Interfaces (produces):**
+
+```rust
+// window.rs
+pub const MIN_SIZE: Size<Pixels>;                                  // 380×640 (бывший SIZE)
+pub fn wanted_size(cx: &App) -> Size<Pixels>;                      // Ui.height.unwrap_or(MIN_SIZE.height), ширина MIN_SIZE.width
+pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels); // если content > viewport: new_h = min(window.bounds().size.height + (content - viewport), work_area height - 2*GAP); Ui.height = Some(new_h); window.resize(size(w, new_h)); затем вернуть окно в угол: на Windows SetWindowPos(hwnd, 0, x, y, 0, 0, SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE) с origin = flyout_origin(work_area, new size, GAP) в физических px (умножить на window.scale_factor()); hwnd — из raw_window_handle::HasWindowHandle for Window (RawWindowHandle::Win32(h) → h.hwnd). Делается один раз на окно (флаг в Panel).
+pub fn grown_height(current: Pixels, content: Pixels, viewport: Pixels, work_area_h: Pixels, gap: Pixels) -> Option<Pixels>; // чистая: None, если content <= viewport; иначе Some(min(current + content - viewport, work_area_h - 2*gap))
+// mod.rs
+pub struct Ui { .., pub height: Option<Pixels> }                   // запомненная высота; show_window открывает окно сразу с ней, второй показ без скачка
+```
+
+**panel.rs:** тело «Параметры» — обёртка `div().flex_1().min_h_0()` получает `on_children_prepainted` → запоминает высоту viewport (bounds[0].size.height); прокручиваемый контейнер `div().id("params").overflow_y_scroll()` получает `on_children_prepainted` → высота содержимого (bounds[0].size.height); когда известны оба и `Panel.fitted == false` — `window::fit_height(window, cx, content, viewport)`, `fitted = true`. Слушатели через `cx.listener`. Прокрутка у «Параметры» остаётся (страховка), но после подбора высоты её не должно быть видно.
+
+- [ ] **Step 1: Падающий тест** `grown_height_grows_by_the_overflow_and_stops_at_the_work_area`: `(640, 700, 560, 1300, 12) → Some(780)`; `(640, 500, 560, 1300, 12) → None`; `(640, 2000, 560, 1000, 12) → Some(976)`.
+- [ ] **Step 2: Убедиться, что падает.** **Step 3: Реализовать.**
+- [ ] **Step 4: Проверки:** `--no-default-features` тесты; один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000). Полные тесты и живой прогон — CI и заказчик.
+- [ ] **Step 5: Commit** — `feat(1c-connect): window height fits the Параметры tab`
+
+---
+
+### Task 10: Меню трея в теме приложения
+
+Заказчик (2026-10-18): контекстное меню значка в трее должно быть светлым или тёмным вместе с темой окна. Это Win32-меню `muda`; у Windows нет документированного API, общепринятый приём (Проводник, Notepad++, wxWidgets): `uxtheme.dll` ординалы 135 `SetPreferredAppMode(mode)` и 136 `FlushMenuThemes()`; режимы `Default = 0, AllowDark = 1, ForceDark = 2, ForceLight = 3`. Доступно с Windows 10 1903; на старых системах ординалов нет — тогда ничего не делать.
+
+**Files:** Modify `setup/1c-connect/src/gui/theme.rs` (новая функция), `setup/1c-connect/src/gui/mod.rs` (вызов при старте до `tray::build`), `setup/1c-connect/Cargo.toml` (фича `Win32_System_LibraryLoader` у `windows-sys`), spec «Выбор темы — в меню трея» (одна фраза про меню).
+
+**Interfaces (produces):**
+
+```rust
+// theme.rs
+#[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum MenuMode { Light, Dark }
+pub fn menu_mode(choice: Choice, system_dark: bool) -> MenuMode;   // чистая: Light → Light, Dark → Dark, System → по system_dark
+pub fn apply_menu_theme(mode: MenuMode);                           // Windows: LoadLibraryW("uxtheme.dll"), GetProcAddress по ординалам 135/136 (MAKEINTRESOURCE: указатель с номером в младшем слове), SetPreferredAppMode(ForceDark|ForceLight), затем FlushMenuThemes(); если библиотека или функции не нашлись — тихо ничего; не-Windows — no-op. unsafe минимально, с комментарием про недокументированность.
+```
+
+`apply(choice, cx)` после смены темы GPUI зовёт `apply_menu_theme(menu_mode(choice, Theme::global(cx).is_dark()))`; `install` — то же при старте, до `tray::build` в `launch`. Проверить, что `Theme::global(cx).is_dark()` отражает уже применённый режим (иначе взять `cx.window_appearance()` для System).
+
+- [ ] **Step 1: Падающий тест** `menu_mode_follows_the_choice_and_the_system_only_when_asked`: `(Light, true) → Light`, `(Dark, false) → Dark`, `(System, true) → Dark`, `(System, false) → Light`.
+- [ ] **Step 2–3:** убедиться, что падает; реализовать.
+- [ ] **Step 4: Проверки:** `--no-default-features` тесты; один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000).
+- [ ] **Step 5: Commit** — `feat(1c-connect): tray menu follows the app theme (uxtheme preferred app mode)`
+
+---
+
+### Task 11: Токены темы по палитре 1С
+
+Заказчик (2026-10-18): светлая тема должна быть максимально похожа на 1С:Предприятие (Такси), тёмная — на тех же токенах, акцент не синий. Палитра снята с живого тонкого клиента 8.3.27 (Бухгалтерия 3.0, схема по умолчанию): фон окна `#F2F2F2`, содержимое `#FFFFFF`, карточки `#FFFBE3`, панель разделов и заголовок `#FBED9E`, жёлтый акцент `#FACC1F`, тёмный жёлтый `#C8BA6B`, светлый крем `#FDF7D7`, текст `#333333`, вторичный текст `#4D4D4D`, плейсхолдер `#C7C7C7`, рамки `#A0A0A0`/`#B1B1B1`, ссылка `#1C55AE`, зелёный `#009646`, красный `#B22222`, оранжевый `#DF9C4B`/`#C27E33`.
+
+**Files:** Rename `setup/1c-connect/theme/macos-classic.json` → `setup/1c-connect/theme/1c.json` (git mv) и переписать; Modify `setup/1c-connect/src/gui/theme.rs` (`THEME_JSON`, `LIGHT = "1C Light"`, `DARK = "1C Dark"`, тест), spec «Тема и шрифты» (палитра 1С вместо macOS Classic, акцент жёлтый, ссылки синие остаются ссылками), `docs/STATUS.md` (одна фраза), plan Global Constraints (`theme/1c.json`).
+
+**Содержимое `theme/1c.json`** — те же ключи, что сейчас (структура `ThemeSet`, `font.*`, `radius 4`, `radius.lg 8`, `shadow false`); значения:
+
+Светлая `"1C Light"` (`mode: light`):
+`background #FFFFFF`, `foreground #333333`, `border #D9D9D9`, `input.border #B1B1B1`, `ring #B1B1B1`, `caret #333333`, `selection.background #FBED9E`, `muted.background #F2F2F2`, `muted.foreground #4D4D4D`, `accent.background #FDF7D7`, `accent.foreground #333333`, `secondary.background #FFFBE3`, `secondary.hover.background #FDF7D7`, `secondary.active.background #FBED9E`, `secondary.foreground #333333`, `primary.background #FACC1F`, `primary.hover.background #FBD64A`, `primary.active.background #E6B800`, `primary.foreground #333333`, `success.background #009646`, `success.foreground #009646`, `danger.background #B22222`, `danger.foreground #B22222`, `warning.background #DF9C4B`, `warning.foreground #C27E33`, `info.background #1C55AE`, `info.foreground #1C55AE`, `link #1C55AE`, `link.hover #1C7BCC`, `link.active #163F80`, `popover.background #FFFFFF`, `popover.foreground #333333`, `list.background #FFFFFF`, `list.active.background #FBED9E`, `list.active.border #C8BA6B`, `list.hover.background #FDF7D7`, `list.even.background #FFFFFF`, `list.head.background #F2F2F2`, `tab_bar.background #FFFFFF`, `tab_bar.segmented.background #F2F2F2`, `tab.background #FFFFFF`, `tab.foreground #4D4D4D`, `tab.active.background #FFFFFF`, `tab.active.foreground #333333`, `title_bar.background #FBED9E`, `title_bar.border #C8BA6B`, `status_bar.background #F2F2F2`, `status_bar.border #D9D9D9`, `sidebar.background #FBED9E`, `sidebar.border #C8BA6B`, `sidebar.foreground #333333`, `sidebar.accent.background #FDF7D7`, `sidebar.accent.foreground #333333`, `sidebar.primary.background #FACC1F`, `sidebar.primary.foreground #333333`, `scrollbar.background #00000000`, `scrollbar.thumb.background #C8C8C8AA`, `scrollbar.thumb.hover.background #A0A0A0`, `switch.background #C8C8C8`, `switch.thumb.background #FFFFFF`, `group_box.background #FFFBE3`, `group_box.foreground #333333`, `skeleton.background #F2F2F2`, `slider.background #FACC1F`, `slider.thumb.background #FFFFFF`, `progress.bar.background #FACC1F`, `table.background #FFFFFF`, `table.head.foreground #4D4D4D`, `table.row.border #E6E6E6`, `drag.border #FACC1F`, `drop_target.background #FBED9E80`, `overlay #00000022`, `window.border #B1B1B1`, `base.red #B22222`, `base.red.light #D9564E`, `base.green #009646`, `base.green.light #35BD33`, `base.blue #1C55AE`, `base.blue.light #1C7BCC`, `base.yellow #FACC1F`, `base.yellow.light #FBED9E`, `base.magenta #8E44AD`, `base.magenta.light #B07CC6`, `base.cyan #1C7BCC`, `base.cyan.light #50B3DC`.
+
+Тёмная `"1C Dark"` (`mode: dark`), те же роли на тёплых тёмных серых, акцент тот же жёлтый:
+`background #262626`, `foreground #DCDCDC`, `border #4A4A4A`, `input.border #5A5A5A`, `ring #5A5A5A`, `caret #DCDCDC`, `selection.background #FACC1F40`, `muted.background #333333`, `muted.foreground #A6A6A6`, `accent.background #3A3A3A`, `accent.foreground #DCDCDC`, `secondary.background #2F2D26`, `secondary.hover.background #3A3830`, `secondary.active.background #45423A`, `secondary.foreground #DCDCDC`, `primary.background #FACC1F`, `primary.hover.background #FBD64A`, `primary.active.background #E6B800`, `primary.foreground #262626`, `success.background #3DBB6E`, `success.foreground #3DBB6E`, `danger.background #E06060`, `danger.foreground #E06060`, `warning.background #DF9C4B`, `warning.foreground #DF9C4B`, `info.background #6FA3F0`, `info.foreground #6FA3F0`, `link #6FA3F0`, `link.hover #8FB8F5`, `link.active #5A8CD8`, `popover.background #2C2C2C`, `popover.foreground #DCDCDC`, `list.background #262626`, `list.active.background #45423A`, `list.active.border #C8BA6B`, `list.hover.background #333333`, `list.even.background #262626`, `list.head.background #2C2C2C`, `tab_bar.background #262626`, `tab_bar.segmented.background #2F2D26`, `tab.background #262626`, `tab.foreground #A6A6A6`, `tab.active.background #262626`, `tab.active.foreground #DCDCDC`, `title_bar.background #3A3A3A`, `title_bar.border #4A4A4A`, `status_bar.background #2C2C2C`, `status_bar.border #4A4A4A`, `sidebar.background #2C2C2C`, `sidebar.border #4A4A4A`, `sidebar.foreground #DCDCDC`, `sidebar.accent.background #3A3A3A`, `sidebar.accent.foreground #DCDCDC`, `sidebar.primary.background #FACC1F`, `sidebar.primary.foreground #262626`, `scrollbar.background #00000000`, `scrollbar.thumb.background #6A6A6AAA`, `scrollbar.thumb.hover.background #8A8A8A`, `switch.background #4A4A4A`, `switch.thumb.background #E5E5E5`, `group_box.background #2F2D26`, `group_box.foreground #DCDCDC`, `skeleton.background #333333`, `slider.background #FACC1F`, `slider.thumb.background #E5E5E5`, `progress.bar.background #FACC1F`, `table.background #262626`, `table.head.foreground #A6A6A6`, `table.row.border #3A3A3A`, `drag.border #FACC1F`, `drop_target.background #45423A80`, `overlay #00000055`, `window.border #4A4A4A`, `base.red #E06060`, `base.red.light #F08A8A`, `base.green #3DBB6E`, `base.green.light #6FD79A`, `base.blue #6FA3F0`, `base.blue.light #8FB8F5`, `base.yellow #FACC1F`, `base.yellow.light #FBED9E`, `base.magenta #B07CC6`, `base.magenta.light #C9A0DC`, `base.cyan #50B3DC`, `base.cyan.light #7FCBE8`.
+
+- [ ] **Step 1: Обновить тест** `theme_file_has_one_light_and_one_dark_theme_with_the_fluent_radii` под новые имена; добавить проверку, что `primary.background` обеих тем — `#FACC1F`.
+- [ ] **Step 2–3:** тест падает → переписать файл и константы.
+- [ ] **Step 4: Проверки:** `--no-default-features` тесты; один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000).
+- [ ] **Step 5: Commit** — `feat(1c-connect): 1C palette — light like Такси, dark on the same tokens, yellow accent`

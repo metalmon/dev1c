@@ -34,9 +34,10 @@ pub struct Ui {
     /// Числа последнего замера локального сервера модели (окно, max_tokens),
     /// если он был — вкладка «Доступ». Без токена: он не для показа.
     pub facts: Option<(u32, u32)>,
-    /// Адрес этой машины в сети для вкладки «Доступ»: разработчику его
-    /// диктует администратор, и лучше показать настоящий, чем «<адрес>».
-    pub address: String,
+    /// Адреса этой машины для вкладки «Доступ»: первый — тот, что в
+    /// локальной сети. Разработчику адрес диктует администратор, и лучше
+    /// показать настоящие, чем «<адрес>».
+    pub addresses: Vec<String>,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -305,7 +306,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             failed_checks: 0,
             checks: Vec::new(),
             facts: None,
-            address: ui::local_address().unwrap_or_else(|| ui::ADDRESS_UNKNOWN.into()),
+            addresses: ui::local_addresses(),
             log: Vec::new(),
             unread: 0,
             tab: ui::start_tab(file_exists, cfg_error.is_some()),

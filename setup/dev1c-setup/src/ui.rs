@@ -304,18 +304,51 @@ pub struct AccessRow {
 /// заглушка — лучше честной заглушки только настоящий адрес.
 pub const ADDRESS_UNKNOWN: &str = "<адрес>";
 
-/// Адрес этой машины в сети, как его увидят с рабочих мест: берём тот, с
-/// которого система пошла бы наружу. Пакетов не отправляем — UDP-сокету
-/// хватает `connect`, чтобы выбрать исходящий адрес по таблице маршрутов.
-/// Не вышло (нет сети) — пусто, и «Доступ» покажет заглушку.
-pub fn local_address() -> Option<String> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("8.8.8.8:80").ok()?;
-    let ip = s.local_addr().ok()?.ip();
-    if ip.is_loopback() || ip.is_unspecified() {
-        return None;
+/// Порядок адресов для «Доступа»: сперва адреса локальной сети (по ним
+/// ходят рабочие места), потом всё остальное — например, адрес Tailscale.
+/// Машина с туннелем иначе показала бы администратору адрес, по которому в
+/// его сети к среде никто не подключится.
+pub fn order_addresses(found: &[String]) -> Vec<String> {
+    let lan = |a: &String| {
+        a.starts_with("192.168.") || a.starts_with("10.") || {
+            // 172.16.0.0/12 — вторая частная сеть; её же берёт Docker для
+            // своих мостов, но отличить их без таблицы маршрутов нечем.
+            a.strip_prefix("172.").and_then(|r| r.split('.').next()).and_then(|o| o.parse::<u8>().ok()).is_some_and(|o| (16..=31).contains(&o))
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    for a in found.iter().filter(|a| lan(a)).chain(found.iter().filter(|a| !lan(a))) {
+        if !out.contains(a) {
+            out.push(a.clone());
+        }
     }
-    Some(ip.to_string())
+    out
+}
+
+/// Адреса этой машины: тот, с которого система пошла бы наружу (UDP-сокету
+/// хватает `connect`, пакетов не отправляем), плюс всё, что система знает о
+/// собственном имени. Пусто — «Доступ» покажет заглушку.
+pub fn local_addresses() -> Vec<String> {
+    use std::net::ToSocketAddrs;
+    let mut found = Vec::new();
+    if let Some(ip) = std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| s.connect("8.8.8.8:80").ok().map(|_| s))
+        .and_then(|s| s.local_addr().ok())
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    {
+        found.push(ip.to_string());
+    }
+    let host = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_default();
+    if !host.is_empty() {
+        if let Ok(addrs) = (host.as_str(), 0u16).to_socket_addrs() {
+            for a in addrs.filter(|a| a.is_ipv4() && !a.ip().is_loopback()) {
+                found.push(a.ip().to_string());
+            }
+        }
+    }
+    order_addresses(&found)
 }
 
 /// Адреса среды, выведенные из параметров: четыре порта подряд от
@@ -705,6 +738,18 @@ mod tests {
     fn a_picked_model_file_must_be_a_gguf() {
         assert!(gguf_warning("C:\\models\\q.gguf").is_none());
         assert!(gguf_warning("C:\\models\\q.bin").unwrap().contains(".gguf"));
+    }
+
+    #[test]
+    fn the_lan_address_comes_before_the_tunnel_one() {
+        // На машине с Tailscale наружу система ходит через 100.64/10, но
+        // рабочие места в сети клиента подключаются по локальному адресу.
+        let found = vec!["100.77.83.96".to_string(), "192.168.1.10".to_string(), "100.77.83.96".to_string()];
+        assert_eq!(order_addresses(&found), vec!["192.168.1.10", "100.77.83.96"]);
+        assert_eq!(order_addresses(&["10.0.5.7".into(), "172.17.0.1".into()]), vec!["10.0.5.7", "172.17.0.1"]);
+        // 172.32 — уже не частная сеть, в начало не лезет.
+        assert_eq!(order_addresses(&["172.32.0.1".into(), "172.20.0.5".into()]), vec!["172.20.0.5", "172.32.0.1"]);
+        assert!(order_addresses(&[]).is_empty());
     }
 
     #[test]

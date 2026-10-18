@@ -467,11 +467,23 @@ impl Render for Panel {
             }
             Tab::Access => {
                 let ui = cx.global::<Ui>();
-                let rows = crate::ui::access_rows(&ui.cfg, ui.facts, &ui.address);
+                let host = ui.addresses.first().cloned().unwrap_or_else(|| crate::ui::ADDRESS_UNKNOWN.to_string());
+                let others = ui.addresses.iter().skip(1).cloned().collect::<Vec<_>>();
+                let rows = crate::ui::access_rows(&ui.cfg, ui.facts, &host);
                 Self::body_card(layer, border, Self::scrolled(
                     "access",
                     &self.body_scroll,
-                    v_flex().children(rows.into_iter().enumerate().map(|(ix, r)| {
+                    v_flex()
+                        .when(!others.is_empty(), |v| {
+                            v.child(
+                                div()
+                                    .pb_2()
+                                    .text_size(px(12.))
+                                    .text_color(caption)
+                                    .child(format!("другие адреса этой машины: {}", others.join(", "))),
+                            )
+                        })
+                        .children(rows.into_iter().enumerate().map(|(ix, r)| {
                         Self::list_row("access", ix, row_border, ground)
                             .child(div().w(px(150.)).flex_shrink_0().text_color(caption).child(r.what))
                             .child(

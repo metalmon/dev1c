@@ -193,9 +193,11 @@ fn must(p: &Project, args: &[&str]) -> Result<String, String> {
 }
 
 /// Как `git`, но прерываемо: `cancel` взведённый до старта — вообще не
-/// запускает процесс, взведённый во время ожидания — убивает его. Вывод
-/// читается только после выхода: у `push -q`/`pull --rebase` его мало.
-/// ponytail: вывод читается после выхода; у push -q / pull --rebase его мало, при переполнении канала перейти на чтение в потоке
+/// запускает процесс, взведённый во время ожидания — убивает его. Оба пайпа
+/// разбираются в своих потоках, пока `try_wait` опрашивает раз в 250 мс —
+/// иначе `git`, заполнив ~8 КиБ буфер (тысячи строк конфликтов
+/// `pull --rebase` или длинный `remote:` от хука push), блокируется на
+/// записи и никогда не завершается, а `try_wait` крутится вечно.
 fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, String> {
     if cancel.load(Ordering::Relaxed) {
         return Err("прервано".into());
@@ -205,10 +207,27 @@ fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, Stri
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    let (mut out_h, mut err_h) = (child.stdout.take(), child.stderr.take());
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(h) = out_h.as_mut() {
+            let _ = std::io::Read::read_to_end(h, &mut buf);
+        }
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(h) = err_h.as_mut() {
+            let _ = std::io::Read::read_to_end(h, &mut buf);
+        }
+        buf
+    });
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            // Читающие потоки сами закончатся по закрытию пайпов убитого
+            // процесса — ждать их здесь незачем, важно только «прервано».
             return Err("прервано".into());
         }
         match child.try_wait().map_err(|e| e.to_string())? {
@@ -216,10 +235,10 @@ fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, Stri
             None => std::thread::sleep(std::time::Duration::from_millis(250)),
         }
     }
-    let o = child.wait_with_output().map_err(|e| e.to_string())?;
-    let mut text = String::from_utf8_lossy(&o.stdout).to_string();
-    text.push_str(&String::from_utf8_lossy(&o.stderr));
-    Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).to_string();
+    text.push_str(&String::from_utf8_lossy(&err_thread.join().unwrap_or_default()));
+    Ok(Out { ok: status.success(), text: common::docker::redact_text(text.trim()) })
 }
 
 fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, String> {
@@ -317,6 +336,14 @@ pub static NEVER: AtomicBool = AtomicBool::new(false);
 
 /// Один проект — один процесс за раз.
 pub static LOCK: Mutex<()> = Mutex::new(());
+
+/// Тестовый серилизатор: cargo гоняет тесты в одном бинарнике параллельно,
+/// а `LOCK` — один глобал на процесс. Берётся первым во всех тестах этого
+/// файла и `flow.rs`, что держат или оспаривают `LOCK` — иначе сосед,
+/// попавший в то же окно, получает «занято» и падает на `.unwrap()`.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
 static DOING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const DOING_NAMES: [&str; 4] = ["", "project_status", "project_pull", "project_push"];
 
@@ -544,6 +571,7 @@ mod tests {
 
     #[test]
     fn a_panic_inside_a_tool_does_not_jam_the_project_forever() {
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_t, p) = fixture();
         let _ = std::thread::spawn(|| {
             let _g = LOCK.lock().unwrap();
@@ -624,6 +652,7 @@ mod tests {
 
     #[test]
     fn second_caller_is_told_busy_not_queued() {
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_t, p) = fixture();
         let guard = LOCK.try_lock().unwrap_or_else(|e| match e {
             std::sync::TryLockError::Poisoned(g) => g.into_inner(),

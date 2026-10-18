@@ -174,8 +174,18 @@ mod tests {
         }
     }
 
+    /// `export_with`/`import_with` take `project::LOCK` as their first line
+    /// (`lock()` above, even on the `dry_run` branch) — cargo runs this
+    /// module's tests in parallel in one binary, so any overlap makes the
+    /// loser see «занято» and panic on `.unwrap()`. One mutex serialises
+    /// them; production code is untouched.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn export_decompiles_then_pushes() {
+        let _s = serial();
         let f = Fake::new(&[("разобрано", false)]);
         let r = f.run(|d| export_with(d, "выгрузка", &|_| {})).unwrap();
         assert!(r.contains("отправлено"), "{r}");
@@ -185,6 +195,7 @@ mod tests {
 
     #[test]
     fn a_failed_decompile_does_not_push() {
+        let _s = serial();
         let f = Fake::new(&[("платформа: ошибка", true)]);
         let e = f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert!(e.contains("платформа") && !*f.pushed.borrow(), "{e}");
@@ -192,6 +203,7 @@ mod tests {
 
     #[test]
     fn import_refuses_before_pulling_while_the_platform_runs() {
+        let _s = serial();
         let mut f = Fake::new(&[]);
         f.running = 1;
         let e = f.run(|d| import_with(d, &|_| {})).unwrap_err();
@@ -200,6 +212,7 @@ mod tests {
 
     #[test]
     fn import_pulls_then_loads_incrementally_and_warns_without_the_index() {
+        let _s = serial();
         let mut f = Fake::new(&[("загружено", false)]);
         f.index = false;
         let log = RefCell::new(Vec::new());
@@ -211,6 +224,7 @@ mod tests {
 
     #[test]
     fn failed_load_names_the_way_back() {
+        let _s = serial();
         let f = Fake::new(&[("Конфигуратор: ошибка загрузки", true)]);
         let e = f.run(|d| import_with(d, &|_| {})).unwrap_err();
         assert!(e.contains("Вернуться к конфигурации БД") && *f.pulled.borrow(), "{e}");
@@ -220,6 +234,7 @@ mod tests {
     fn dry_run_prints_the_plan_and_touches_nothing() {
         // --dry-run is global and promises «ничего не делать»: no decompile,
         // no push, no pull, no load — only the plan in the log.
+        let _s = serial();
         let mut f = Fake::new(&[]);
         f.dry = true;
         let log = RefCell::new(Vec::new());
@@ -232,6 +247,7 @@ mod tests {
 
     #[test]
     fn the_git_phase_of_export_is_announced_before_it_starts() {
+        let _s = serial();
         let f = Fake::new(&[("разобрано", false)]);
         let log = RefCell::new(Vec::new());
         f.run(|d| export_with(d, "m", &|s| log.borrow_mut().push(s))).unwrap();
@@ -240,6 +256,7 @@ mod tests {
 
     #[test]
     fn export_is_told_busy_like_any_tool() {
+        let _s = serial();
         let _g = crate::project::LOCK.try_lock().unwrap_or_else(|e| match e {
             std::sync::TryLockError::Poisoned(g) => g.into_inner(),
             e => panic!("{e}"),
@@ -251,6 +268,7 @@ mod tests {
 
     #[test]
     fn export_announces_decompile_then_push() {
+        let _s = serial();
         let f = Fake::new(&[("разобрано", false)]);
         f.run(|d| export_with(d, "m", &|_| {})).unwrap();
         assert_eq!(*f.phases.borrow(), vec![Phase::Decompile, Phase::Push]);
@@ -258,6 +276,7 @@ mod tests {
 
     #[test]
     fn import_announces_pull_then_load() {
+        let _s = serial();
         let f = Fake::new(&[("загружено", false)]);
         f.run(|d| import_with(d, &|_| {})).unwrap();
         assert_eq!(*f.phases.borrow(), vec![Phase::Pull, Phase::Load]);
@@ -265,6 +284,7 @@ mod tests {
 
     #[test]
     fn dry_run_announces_nothing() {
+        let _s = serial();
         let mut f = Fake::new(&[]);
         f.dry = true;
         f.run(|d| export_with(d, "x", &|_| {})).unwrap();
@@ -274,6 +294,7 @@ mod tests {
 
     #[test]
     fn a_failed_decompile_announces_no_push() {
+        let _s = serial();
         let f = Fake::new(&[("платформа: ошибка", true)]);
         f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert_eq!(*f.phases.borrow(), vec![Phase::Decompile]);

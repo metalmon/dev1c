@@ -572,6 +572,21 @@ fn ctx_for(ui: &Ui) -> Ctx {
     Ctx { kit: ui.kit.clone(), cfg: ui.cfg.clone(), dry_run: false, sink, prompt: Box::new(AlwaysDefault) }
 }
 
+/// Синхронизировать трей с `Ui`: состояние (занято — жёлтый, иначе по
+/// связи) и подсказка на текущий момент. Общий конец всех мест, что меняют
+/// `busy`/`progress`/`link` — `set_link`, `run_op`, `Ev::Done`, `Ev::Checks`;
+/// один из них забыл это раньше (S1) — значок трея застревал жёлтым после
+/// проверки.
+fn sync_tray(ui: &Ui, now: Instant) {
+    let busy = ui.progress.is_some() || ui.busy.is_some();
+    let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
+    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
+    if let Some(tray) = &ui.tray {
+        tray.set_state(state, on);
+        tray.set_tooltip(&tooltip);
+    }
+}
+
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
 fn set_link(cx: &mut App, l: State) {
     let host = cx.global::<Ui>().cfg.host.clone();
@@ -581,14 +596,7 @@ fn set_link(cx: &mut App, l: State) {
     if let Some(line) = line {
         note_line(ui, line);
     }
-    let now = Instant::now();
-    let busy = ui.progress.is_some() || ui.busy.is_some();
-    let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
-    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
-    if let Some(tray) = &ui.tray {
-        tray.set_state(state, on);
-        tray.set_tooltip(&tooltip);
-    }
+    sync_tray(ui, Instant::now());
     cx.refresh_windows();
 }
 
@@ -668,13 +676,8 @@ pub fn run_op(cx: &mut App, which: Which) {
     ui.unread = 0;
     // Подсказка фазы сразу, а не через TOOLTIP_EVERY: иначе первые 60 с
     // новой операции висела бы подсказка от прежней (или «подключён»).
-    let (state, on) = (tray_state(&ui.link, true), ui.link.is_on());
-    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
     ui.tooltip_at = Some(now);
-    if let Some(tray) = &ui.tray {
-        tray.set_state(state, on);
-        tray.set_tooltip(&tooltip);
-    }
+    sync_tray(ui, now);
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
     cx.refresh_windows();
@@ -806,6 +809,20 @@ pub fn quit(cx: &mut App) {
 /// получил свою строку с заголовком фазы через `line_of` уже отдельно.
 /// `now` — параметр, а не свой `Instant::now()`, иначе тест не отличил бы
 /// «`seen` подвинулся» от «часы сами не стоят на месте».
+/// `Ev::Line`: журнал получает каждую строку всегда (в т.ч. на диск,
+/// `1c-connect.log`); во время операции карточка хода, вдобавок, берёт её
+/// как последнюю заметку — но без `refresh_windows()` на каждую строку, по
+/// спеке «Троттлинг»: `dirty` подхватит `tick` раз в `TICK_BUSY`. Вызывающий
+/// сам решает про `refresh_windows()` вне операции — здесь нет `cx`.
+fn on_line(ui: &mut Ui, line: Line, now: Instant) {
+    note_line(ui, line.clone());
+    if let Some(r) = ui.progress.as_mut() {
+        r.note = line.text;
+        r.seen = now;
+        ui.dirty = true;
+    }
+}
+
 fn on_progress(ui: &mut Ui, p: Progress, now: Instant) {
     if let Some(r) = ui.progress.as_mut() {
         r.phase = p.phase;
@@ -880,12 +897,9 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Line(line) => {
             let now = Instant::now();
             let ui = cx.global_mut::<Ui>();
-            if let Some(r) = ui.progress.as_mut() {
-                r.note = line.text;
-                r.seen = now;
-                ui.dirty = true;
-            } else {
-                note_line(ui, line);
+            let running = ui.progress.is_some();
+            on_line(ui, line, now);
+            if !running {
                 cx.refresh_windows();
             }
         }
@@ -899,13 +913,8 @@ fn handle(ev: Ev, cx: &mut App) {
             // `tooltip_at` тоже назад в `None` — следующая операция не должна
             // наследовать свежий штамп и ждать до TOOLTIP_EVERY своей подсказки.
             let now = Instant::now();
-            let (state, on) = (tray_state(&ui.link, false), ui.link.is_on());
-            let tooltip = tray_tooltip(None, &ui.link, now);
             ui.tooltip_at = None;
-            if let Some(tray) = &ui.tray {
-                tray.set_state(state, on);
-                tray.set_tooltip(&tooltip);
-            }
+            sync_tray(ui, now);
             let hidden = ui.window.is_none();
             cx.refresh_windows();
             if hidden {
@@ -935,6 +944,10 @@ fn handle(ev: Ev, cx: &mut App) {
             };
             note_line(ui, status.clone());
             ui.status = Some(status);
+            // Трей (S1): проверка — другое место, где `busy` возвращается в
+            // `None`, и значок/подсказку надо подвинуть, как у `Ev::Done` —
+            // иначе жёлтый («занят») может застрять до следующего перехода.
+            sync_tray(ui, Instant::now());
             cx.refresh_windows();
         }
         Ev::Ops(ops) => {
@@ -1036,13 +1049,24 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // Единый тик приложения: сам решает свой срок (занято — секунда,
         // иначе полминуты) и заменяет прежний тик панели `Panel::new`, тот
         // жил только пока было открыто окно.
-        cx.spawn(async move |cx| loop {
-            let busy = cx.update(|cx| {
-                let ui = cx.global::<Ui>();
-                ui.progress.is_some() || ui.busy.is_some()
-            });
-            cx.background_executor().timer(if busy { TICK_BUSY } else { TICK_IDLE }).await;
-            cx.update(|cx| tick(cx));
+        // Один сон на `TICK_BUSY`, занятость — не до него, а после: иначе
+        // операция, начавшаяся в окне простоя, молчала бы до следующего
+        // тика (до 30 с) — именно первые полминуты, на которые смотрит
+        // человек. Счётчик держит прежний ритм покоя (раз в `TICK_IDLE`).
+        cx.spawn(async move |cx| {
+            let mut idle = Duration::ZERO;
+            loop {
+                cx.background_executor().timer(TICK_BUSY).await;
+                let busy = cx.update(|cx| {
+                    let ui = cx.global::<Ui>();
+                    ui.progress.is_some() || ui.busy.is_some()
+                });
+                idle = if busy { Duration::ZERO } else { idle + TICK_BUSY };
+                if busy || idle >= TICK_IDLE {
+                    idle = Duration::ZERO;
+                    cx.update(|cx| tick(cx));
+                }
+            }
         })
         .detach();
         cx.spawn(async move |cx| {
@@ -1109,7 +1133,7 @@ impl Ui {
 mod tests {
     use super::{
         autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
-        link_line, note_line, on_done, on_progress, progress_text, project_primary, save_host, stale_text, took,
+        link_line, note_line, on_done, on_line, on_progress, progress_text, project_primary, save_host, stale_text, took,
         tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE,
         TRAY_PNG,
     };
@@ -1449,6 +1473,24 @@ mod tests {
         let r = ui.progress.as_ref().unwrap();
         assert_eq!(r.phase, Phase::Push);
         assert_eq!(r.note, "x");
+        assert_eq!(r.seen, now);
+        assert!(ui.dirty);
+    }
+
+    #[test]
+    fn a_line_during_an_operation_reaches_both_the_journal_and_the_card() {
+        // B1: `Ev::Line` while `progress.is_some()` used to move the line
+        // into `r.note` only — `note_line` (the sole caller of
+        // `write_log_file`) was never reached, so the journal (window and
+        // `1c-connect.log`) stayed empty for the whole operation.
+        let mut ui = Ui::for_test();
+        let now = Instant::now() + Duration::from_secs(3600);
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, note: String::new(), seen: now - Duration::from_secs(10) });
+        let line = Line { kind: Kind::Say, text: "cf_decompile → src (минуты…)".into() };
+        on_line(&mut ui, line.clone(), now);
+        assert_eq!(ui.log.last(), Some(&line));
+        let r = ui.progress.as_ref().unwrap();
+        assert_eq!(r.note, line.text);
         assert_eq!(r.seen, now);
         assert!(ui.dirty);
     }

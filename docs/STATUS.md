@@ -225,10 +225,10 @@ script days is obsolete; the scripts are gone.
   a tar inside the artifact, or say so in the README, before a Linux customer
   meets it.
 
-- Tauri fires `Focused(false)` on the window when focus moves *into* its own
-  WebView2 child right after the first show: a flyout that hides on blur
-  flashed and vanished at launch. The handler now waits 250 ms and hides only
-  if `GetForegroundWindow` is neither our window nor its child.
+- *(history)* Tauri used to fire `Focused(false)` on the window when focus
+  moved *into* its own WebView2 child right after the first show, flashing
+  and vanishing the flyout at launch; moot since `1c-connect` moved to GPUI
+  (task 7, `docs/superpowers/specs/2026-10-16-gpui-connect-design.md`).
 - Author CSS beats the `hidden` attribute: a `.badge { display: inline-block }`
   rule kept a hidden badge visible. The stylesheet carries
   `[hidden] { display: none !important }` for that reason.
@@ -251,12 +251,16 @@ script days is obsolete; the scripts are gone.
 - A Windows path in TOML needs single quotes (`file = 'C:\models\x.gguf'`) or
   doubled backslashes; the sample says so now.
 - Dependabot flags `glib` 0.18 (advisory for 0.15–0.20) in `setup/Cargo.lock`:
-  it is Tauri's Linux GTK dependency, compiled only in a Linux build with the
-  window, which CI never does. Goes away when Tauri bumps gtk-rs.
+  it is `dev1c-setup`'s Tauri Linux GTK dependency (`1c-connect`'s window
+  moved to GPUI in task 7 and no longer pulls it), compiled only in a Linux
+  build with the window, which CI never does. Goes away when Tauri bumps
+  gtk-rs.
 - The window ships only in the Windows build: Linux CI builds pass
-  `--no-default-features` (no webkit2gtk on the runner). A release build with
-  the window is `windows_subsystem = "windows"`: commands get their console
-  back through `common::console::attach`; without it `status` prints nowhere.
+  `--no-default-features` for both binaries — `dev1c-setup` to avoid
+  installing webkit2gtk on the runner (Tauri), `1c-connect` because
+  GPUI-on-Linux is not needed. A release build with the window is
+  `windows_subsystem = "windows"`: commands get their console back through
+  `common::console::attach`; without it `status` prints nowhere.
 - Tauri's `tauri icon` is not used: `icons/icon.ico` and the 64 px `tray.png`
   are made once with Pillow (the SVG mark via headless Edge); the status dot
   is drawn at run time over `tray.png`.
@@ -300,6 +304,19 @@ script days is obsolete; the scripts are gone.
   with no newline in sight, and the newline arriving in the same read as the
   overflow. The first was tested, the second emitted an 8 MiB `Line` — found
   by the bridge test that expected a parse error for an oversized request.
+- A debug build of `1c-connect` is a console app (`windows_subsystem` only
+  goes to `"windows"` in release): its conhost window steals focus on launch
+  and hides the flyout right behind it, before anyone clicks anything.
+- Under a test harness or other automation, the flyout's `PopUp` window opens
+  behind the foreground window (Windows' foreground-lock heuristic distrusts
+  a background process asking for focus); a real launch from Explorer is
+  unaffected.
+- GPUI builds are heavy: a cold build takes around 10 minutes on this 16 GB
+  box, and `cargo` run in the background gets OOM-killed under memory
+  pressure. Build GPUI crates in the foreground, `-j 1`.
+- `windows-sys` 0.60 needs the `Win32_Security` feature for `job.rs`
+  (`setup/1c-connect`'s Job Object code) — not pulled in by the other
+  Win32 features already enabled there.
 
 ## Next
 
@@ -378,11 +395,12 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    running git call (the mutex frees when it ends); `/P…` redaction also
    blots `/Path…` in journal lines. Dependabot's `glib` 0.18.5 alert
    (RUSTSEC-2024-0429, `VariantStrIter`, Linux target only) stays: every
-   layer of Tauri 2.12.4 — tray-icon, muda, wry, webkit2gtk — pins `gtk
-   ^0.18`, and the fixed glib 0.22 is only reachable through gtk 0.19, which
-   none of them has adopted (not even `tauri 3.0.0-alpha.5`); the iterator
-   is not used here and the Linux build has no window. Revisit when
-   `webkit2gtk-rs` releases against gtk 0.19. **6B next:** `host.project`
+   layer of `dev1c-setup`'s Tauri 2.12.4 — tray-icon, muda, wry, webkit2gtk —
+   pins `gtk ^0.18`, and the fixed glib 0.22 is only reachable through gtk
+   0.19, which none of them has adopted (not even `tauri 3.0.0-alpha.5`); the
+   iterator is not used here and the Linux build has no window. `1c-connect`
+   moved off Tauri onto GPUI (task 7) and no longer carries this chain.
+   Revisit when `webkit2gtk-rs` releases against gtk 0.19. **6B next:** `host.project`
    (git init, remote, `.gitattributes`, `autumn-properties.json`),
    `export`/`import`, the «Проект» tab and project fields in the window,
    the remaining `check` facts (vrunner-mcp answers, project, Gitea,

@@ -47,9 +47,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: setup
-      # The window (Tauri) is built on Windows only: that is where the kits
-      # are double-clicked. Linux builds serve the server CLI and the live
-      # tunnel test, and skip the window rather than install webkit2gtk here.
+      # The window is built on Windows only: that is where the kits are
+      # double-clicked (1c-connect: GPUI; dev1c-setup: still Tauri). Linux
+      # builds serve the server CLI and the live tunnel test, and skip the
+      # window because GPUI-on-Linux is not needed, not for a toolchain gap.
       - name: Test
         run: cargo test --workspace --manifest-path setup/Cargo.toml ${{ matrix.name == 'linux' && '--no-default-features' || '' }}
       - name: Build

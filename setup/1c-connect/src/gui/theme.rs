@@ -1,4 +1,4 @@
-//! Шрифты Zed (IBM Plex Sans / Lilex) и палитра 1С:Такси для окна.
+//! Шрифт Zed (IBM Plex Sans) и палитра 1С:Такси для окна.
 //! Выбор темы (система/светлая/тёмная) хранится в комплекте и переживает
 //! перезапуск программы.
 
@@ -120,7 +120,6 @@ pub fn install(kit: &Kit, cx: &mut App) {
     let _ = cx.text_system().add_fonts(vec![
         Cow::Borrowed(include_bytes!("../../fonts/IBMPlexSans-Regular.ttf").as_slice()),
         Cow::Borrowed(include_bytes!("../../fonts/IBMPlexSans-SemiBold.ttf").as_slice()),
-        Cow::Borrowed(include_bytes!("../../fonts/Lilex-Regular.ttf").as_slice()),
     ]);
     let reg = ThemeRegistry::global_mut(cx);
     // Паника здесь намеренна: JSON вшит в двоичный файл на сборке, и его

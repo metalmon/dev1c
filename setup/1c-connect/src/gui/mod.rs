@@ -81,6 +81,8 @@ pub struct Ui {
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
     /// `None` — ещё не спрашивали.
     pub project: Option<ProjectView>,
+    /// Начало текущей операции или проверки — для «Готово за …» в `Ev::Done`.
+    pub started: Option<Instant>,
     pub busy: Option<Busy>,
     pub status: Option<Line>,
     pub tray: Option<tray::Tray>,
@@ -104,6 +106,20 @@ pub enum Kind {
     Warn,
     Fail,
     Say,
+    /// Заголовок раздела журнала — название операции с часами в заголовке.
+    Head,
+}
+
+impl Kind {
+    /// Значок перед строкой журнала; у `Say` и `Head` строка идёт без значка.
+    pub fn mark(self) -> &'static str {
+        match self {
+            Kind::Ok => "✓",
+            Kind::Warn => "!",
+            Kind::Fail => "✗",
+            Kind::Say | Kind::Head => "",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -220,6 +236,55 @@ fn guarded(tx: &UnboundedSender<Ev>, body: impl FnOnce() -> Ev, on_panic: impl F
 
 pub const LOG_CAP: usize = 2000;
 
+/// Файл журнала рядом с комплектом: та же дозапись, что командная строка
+/// ведёт в `setup.log` (`Kit::journal`), но для окна и своим текстом.
+pub const LOG_FILE: &str = "1c-connect.log";
+
+/// Местное время `HH:MM` для заголовка раздела. `gui` собирается под
+/// Windows (feature `gui` на Linux в CI отключена, см. `Cargo.toml`), но
+/// модуль всё равно огорожен по примеру `fatal` ниже, а не завязан на это.
+#[cfg(windows)]
+pub fn clock() -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut t = SYSTEMTIME { wYear: 0, wMonth: 0, wDayOfWeek: 0, wDay: 0, wHour: 0, wMinute: 0, wSecond: 0, wMilliseconds: 0 };
+    unsafe { GetLocalTime(&mut t) };
+    format!("{:02}:{:02}", t.wHour, t.wMinute)
+}
+
+#[cfg(not(windows))]
+pub fn clock() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
+}
+
+/// Заголовок раздела журнала: название операции и час её начала.
+pub fn head_line(title: &str) -> Line {
+    Line { kind: Kind::Head, text: format!("{title} · {}", clock()) }
+}
+
+/// Сколько шла операция, для «Готово за …»: меньше минуты — секунды,
+/// иначе минуты и секунды. Секунды целые, без округления вверх.
+pub fn took(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs} с")
+    } else {
+        format!("{} мин {} с", secs / 60, secs % 60)
+    }
+}
+
+/// Строка журнала на диск, тем же текстом, что рисует окно, но без цвета:
+/// значок и пробел перед строкой (у `Say` — два пробела вместо значка),
+/// у заголовка раздела — пустая строка перед ним. Ошибки записи (диск занят,
+/// прав нет) молча игнорируются — журнал на диске не обязателен для работы.
+fn write_log_file(kit: &Kit, line: &Line) {
+    use std::io::Write;
+    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(kit.path(LOG_FILE)) else { return };
+    let text = if line.kind == Kind::Head { format!("\n{}\n", line.text) } else { format!("{:<2}{}\n", line.kind.mark(), line.text) };
+    let _ = f.write_all(text.as_bytes());
+}
+
 /// `Command`/`Output` — в журнал команд на диске (см. `ctx_for`), не в окно.
 pub fn line_of(e: &Event) -> Option<Line> {
     let (kind, text) = match e {
@@ -254,6 +319,7 @@ fn link_is_current(ui: &Ui, gen: u64) -> bool {
 /// Строка в журнал, с потолком в `LOG_CAP`. Непрочитанные растут, если
 /// журнал сейчас не на экране — вкладка другая или окно спрятано.
 pub fn note_line(ui: &mut Ui, line: Line) {
+    write_log_file(&ui.kit, &line);
     ui.log.push(line);
     if ui.log.len() > LOG_CAP {
         let extra = ui.log.len() - LOG_CAP;
@@ -286,20 +352,22 @@ pub fn project_primary(ops: &[OpView]) -> Which {
 }
 
 /// Факты проверки строками в журнал: отдельного списка на экране больше нет.
-/// Подсказка провалившегося факта идёт второй строкой с отступом.
+/// Значок перед строкой даёт `Kind::mark` при отрисовке — в тексте его больше
+/// нет. Подсказка провалившегося факта идёт второй строкой без ведущих
+/// пробелов: отступ ей даёт колонка значка, а не сам текст.
 pub fn check_lines(checks: &[Check]) -> Vec<Line> {
     let mut out = Vec::with_capacity(checks.len());
     for c in checks {
         // Информационный факт — не приговор: как серый кружок прежней
         // вкладки «Проверка», обычная строка, а не провал.
-        let (kind, mark) = match (c.ok, c.info) {
-            (true, false) => (Kind::Ok, "✓"),
-            (true, true) => (Kind::Say, "·"),
-            _ => (Kind::Fail, "✗"),
+        let kind = match (c.ok, c.info) {
+            (true, false) => Kind::Ok,
+            (true, true) => Kind::Say,
+            _ => Kind::Fail,
         };
-        out.push(Line { kind, text: format!("{mark} {}: {}", c.what, c.detail) });
+        out.push(Line { kind, text: format!("{}: {}", c.what, c.detail) });
         if kind == Kind::Fail && !c.hint.is_empty() {
-            out.push(Line { kind: Kind::Warn, text: format!("  {}", c.hint) });
+            out.push(Line { kind: Kind::Warn, text: c.hint.clone() });
         }
     }
     out
@@ -430,7 +498,8 @@ pub fn run_op(cx: &mut App, which: Which) {
         Which::Export | Which::Import => Busy::Project,
         _ => Busy::Ext,
     });
-    note_line(ui, Line { kind: Kind::Say, text: which.title().into() });
+    note_line(ui, head_line(which.title()));
+    ui.started = Some(Instant::now());
     ui.tab = Tab::Log;
     ui.unread = 0;
     let ctx = ctx_for(ui);
@@ -488,6 +557,10 @@ pub fn refresh_project(cx: &mut App) {
 pub fn run_check(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     ui.busy = Some(Busy::Check);
+    note_line(ui, head_line("Проверка"));
+    ui.started = Some(Instant::now());
+    ui.tab = Tab::Log;
+    ui.unread = 0;
     let ctx = ctx_for(ui);
     let link = ui.link.clone();
     let tx = ui.tx.clone();
@@ -560,10 +633,17 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Done(err) => {
             let ui = cx.global_mut::<Ui>();
             ui.busy = None;
-            ui.status = Some(match err {
+            let elapsed = ui.started.take();
+            let line = match err {
                 Some(e) => Line { kind: Kind::Fail, text: e },
-                None => Line { kind: Kind::Ok, text: "Готово.".into() },
-            });
+                None => match elapsed {
+                    Some(since) => Line { kind: Kind::Ok, text: format!("Готово за {}", took(since.elapsed())) },
+                    None => Line { kind: Kind::Ok, text: "Готово.".into() },
+                },
+            };
+            note_line(ui, line.clone());
+            ui.status = Some(line);
+            cx.refresh_windows();
             refresh_ops(cx);
             refresh_project(cx);
         }
@@ -576,11 +656,14 @@ fn handle(ev: Ev, cx: &mut App) {
                 note_line(ui, line);
             }
             ui.busy = None;
-            ui.status = Some(if failed > 0 {
+            ui.started = None;
+            let status = if failed > 0 {
                 Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Отчёт — last-check.txt в комплекте") }
             } else {
                 Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — last-check.txt".into() }
-            });
+            };
+            note_line(ui, status.clone());
+            ui.status = Some(status);
             cx.refresh_windows();
         }
         Ev::Ops(ops) => {
@@ -617,6 +700,11 @@ fn fatal(text: &str) {
 
 pub fn launch(kit: Kit) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
+    // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
+    let log_path = kit.path(LOG_FILE);
+    if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::remove_file(&log_path);
+    }
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -650,6 +738,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
+            started: None,
             busy: None,
             status: None,
             tray: Some(tray),
@@ -695,6 +784,7 @@ impl Ui {
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
+            started: None,
             busy: None,
             status: None,
             tray: None,
@@ -712,13 +802,13 @@ impl Ui {
 mod tests {
     use super::{
         badge, carried_base_url, check_lines, line_of, link_is_current, link_line, note_line, project_primary,
-        save_host, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, TRAY_PNG,
+        save_host, took, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
     use common::check::Check;
     use common::Event;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn op(id: &str, dot: Dot) -> OpView {
         OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
@@ -753,12 +843,38 @@ mod tests {
             Check::fail("расширение", "не установлено", "нажмите «Установить»"),
         ]);
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0], Line { kind: Kind::Ok, text: "✓ база: C:\\Bases\\Buh".into() });
-        assert_eq!(lines[1], Line { kind: Kind::Say, text: "· туннель: не поднят".into() });
-        assert_eq!(lines[2], Line { kind: Kind::Fail, text: "✗ расширение: не установлено".into() });
-        assert_eq!(lines[3], Line { kind: Kind::Warn, text: "  нажмите «Установить»".into() });
+        // Значки из текста ушли — их теперь даёт `Kind::mark` при отрисовке.
+        assert_eq!(lines[0], Line { kind: Kind::Ok, text: "база: C:\\Bases\\Buh".into() });
+        assert_eq!(lines[1], Line { kind: Kind::Say, text: "туннель: не поднят".into() });
+        assert_eq!(lines[2], Line { kind: Kind::Fail, text: "расширение: не установлено".into() });
+        assert_eq!(lines[3], Line { kind: Kind::Warn, text: "нажмите «Установить»".into() });
         // Пустая подсказка второй строки не добавляет.
         assert_eq!(check_lines(&[Check::fail("а", "б", "")]).len(), 1);
+    }
+
+    #[test]
+    fn kind_marks_are_icons_say_and_head_have_none() {
+        assert_eq!(Kind::Ok.mark(), "✓");
+        assert_eq!(Kind::Warn.mark(), "!");
+        assert_eq!(Kind::Fail.mark(), "✗");
+        assert_eq!(Kind::Say.mark(), "");
+        assert_eq!(Kind::Head.mark(), "");
+    }
+
+    #[test]
+    fn took_prints_seconds_under_a_minute_then_minutes_and_seconds() {
+        assert_eq!(took(Duration::from_secs(12)), "12 с");
+        assert_eq!(took(Duration::from_secs(72)), "1 мин 12 с");
+        assert_eq!(took(Duration::from_secs(0)), "0 с");
+    }
+
+    #[test]
+    fn note_line_appends_marks_and_head_lines_to_the_log_file() {
+        let mut ui = Ui::for_test();
+        note_line(&mut ui, Line { kind: Kind::Head, text: "— устанавливаю — · 12:34".into() });
+        note_line(&mut ui, Line { kind: Kind::Ok, text: "готово".into() });
+        let text = std::fs::read_to_string(ui.kit.path(LOG_FILE)).unwrap();
+        assert_eq!(text, "\n— устанавливаю — · 12:34\n✓ готово\n");
     }
 
     #[test]

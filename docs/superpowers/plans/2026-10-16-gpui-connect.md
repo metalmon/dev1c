@@ -640,3 +640,37 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 - [ ] **Step 5: Commit** — `feat(1c-connect): three tabs, checks print into the log, one primary button plus a … menu per tab`
 
 **Дополнение (заказчик 2026-10-18):** подбор высоты работает в обе стороны — `fit_height_for(current, content, viewport, work_area_h, gap)` даёт точную высоту (и меньше, и больше), ограниченную [MIN_SIZE.height = 420, work_area_h − 2·gap]; `Ui.height` перезаписывается при каждом подборе. «Параметры» — опорная вкладка, остальные прокручиваются внутри.
+
+### Task 14: Читаемый журнал и плотный подвал
+
+Заказчик (2026-10-18): журнал — сплошной список моноширинных строк, тип виден только по цвету, границ между операциями нет, времени нет, унести журнал некуда. Решено: разделы по операциям с временем только в заголовке, значок перед строкой, обычный шрифт, воздух между строками, журнал в файл с пунктами «Открыть журнал»/«Очистить». И у текста в подвале меньше межстрочный интервал, чтобы две строки читались одним блоком.
+
+**Files:** `setup/1c-connect/src/gui/{mod,panel,theme}.rs`, `setup/1c-connect/Cargo.toml` (одна feature у windows-sys), `setup/1c-connect/fonts/` (минус Lilex), spec `docs/superpowers/specs/2026-10-16-gpui-connect-design.md` (типографика и пункт «Журнал»), `docs/STATUS.md` одна фраза.
+
+**Строки и разделы (`gui/mod.rs`):**
+- `Kind` получает пятый вариант `Head` — заголовок раздела. `impl Kind { pub fn mark(self) -> &'static str }`: `Ok` → `"✓"`, `Warn` → `"!"`, `Fail` → `"✗"`, `Say` и `Head` → `""`.
+- `pub fn clock() -> String` — местное время `HH:MM` (`GetLocalTime` из `windows-sys`, feature `Win32_System_SystemInformation`; модуль gui и так только под Windows — проверь, как он огорожен, и повтори ту же ограду).
+- `pub fn head_line(title: &str) -> Line` → `Line { kind: Kind::Head, text: format!("{title} · {}", clock()) }`.
+- `pub fn took(d: Duration) -> String`: меньше минуты — `"12 с"`, иначе `"1 мин 12 с"` (секунды целые, без округления вверх). Тест: `took(12 с) == "12 с"`, `took(72 с) == "1 мин 12 с"`, `took(0) == "0 с"`.
+- `Ui.started: Option<Instant>`. `run_op`: вместо `Say` с `which.title()` пишет `head_line(which.title())` и ставит `started = Some(Instant::now())`. `run_check`: пишет `head_line("Проверка")`, ставит `started`, переводит на `Tab::Log` и обнуляет `unread` (как `run_op`).
+- `Ev::Done`: итоговая строка — `Fail` с ошибкой или `Ok` с `format!("Готово за {}", took(elapsed))` (`elapsed` от `started`, если его нет — просто «Готово.»); строка идёт и в `status`, и в журнал через `note_line`. `Ev::Checks`: итоговая строка статуса («Проблем: N…»/«Проверка пройдена…») тоже дублируется в журнал последней строкой раздела.
+- `check_lines`: значки из текста убрать — их теперь даёт `Kind`: pass → `Ok` «{what}: {detail}», info → `Say` «{what}: {detail}», fail → `Fail` «{what}: {detail}» и второй строкой `Warn` «{hint}» без ведущих пробелов. Поправь тесты `check_lines` под это.
+- Файл журнала: `pub const LOG_FILE: &str = "1c-connect.log"`. `note_line` дописывает строку в `ui.kit.path(LOG_FILE)` (`OpenOptions::append().create(true)`, ошибки записи молча игнорируются): для `Head` — пустая строка, затем текст; для остальных — `"{mark:<2}{text}\n"` (значок и пробел, у `Say` два пробела). В `launch`, до окна: если файл больше 1 MiB — удалить (`// ponytail: усечение сбросом, ротация — когда кому-то понадобится история`). Тест: после двух `note_line` файл содержит обе строки в этом формате.
+
+**Отрисовка (`gui/panel.rs`, вкладка Журнал):**
+- Убрать `.font_family("Lilex")`; размер оставить `px(14.)`; `v_flex().gap_1()`.
+- `Head`: `div().mt_2().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(text)`.
+- Остальные: `h_flex().items_start().child(div().w(px(18.)).flex_shrink_0().child(mark)).child(div().flex_1().child(text))`, цвет на всей строке: `Ok` → `success`, `Warn` → `warning`, `Fail` → `danger`, `Say` → `caption`. Колонка значка даёт и отступ раздела, и висячий отступ при переносе.
+- Меню «Ещё» на Журнале: «Открыть журнал» (`gui::open_path` на `kit.path(gui::LOG_FILE)`), «Открыть отчёт last-check.txt» (как сейчас), «Очистить» (как сейчас — только окно, файл не трогать).
+- Подвал: тексту итога (`div().flex_1().text_size(px(13.))…`) добавить `.line_height(relative(1.2))`.
+
+**Шрифт Lilex больше не нужен:** убрать `include_bytes!` из `theme.rs`, файл `fonts/Lilex-Regular.ttf` и абзац о Lilex из `fonts/LICENSE-OFL.txt`; в спеке «Моно (Lilex 14) только в журнале» заменить на «моно не нужен: журнал — проза, обычный шрифт 14 px», упоминания Lilex в заголовке `theme.rs` и в спеке (строки про «IBM Plex Sans для интерфейса, Lilex для журнала») поправить.
+
+**Спека, пункт «Журнал»:** описать разделы (заголовок операции с временем `HH:MM`, полужирный, отступ сверху; итог «Готово за …»), значки `✓ ! ✗` в колонке 18 px, `Say` приглушённым `caption`, зазор 4 px, файл `1c-connect.log` рядом с комплектом (дозапись, сброс при > 1 MiB), меню «Открыть журнал»/«Открыть отчёт last-check.txt»/«Очистить». В «Что остаётся строителю» строку «Потолок журнала, формат строк, автопрокрутка» оставить про потолок и автопрокрутку.
+
+**Сборка — только в CI** (уговор заказчика; ноутбуку не хватает памяти и диска). Локально `cargo` не запускать. Тесты пиши так, чтобы они прошли с первого раза: сверяйся с сигнатурами по соседним тестам в `mod.rs` (`ui_fixture`/как там зовётся фикстура `Ui` с временным `Kit`). API gpui для `line_height`, `FontWeight`, `relative` смотри в реестре `C:\Users\bucher\.cargo\registry\src\*\gpui-0.3.9*` (или `gpui-pre`) — `Styled::line_height(impl Into<DefiniteLength>)`, `gpui::relative`, `gpui::FontWeight::SEMIBOLD`.
+
+- [ ] **Step 1: Падающие тесты** (`took`, `check_lines` без значков, `note_line` пишет файл, `Kind::mark`).
+- [ ] **Step 2: Реализация** по списку выше.
+- [ ] **Step 3: Спека и STATUS.**
+- [ ] **Step 4: Commit** — `feat(1c-connect): log sections with time and duration, marks instead of colour alone, sans font, 1c-connect.log with an Open item; tighter footer line height` (с трейлером `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).

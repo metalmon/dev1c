@@ -80,7 +80,10 @@ script days is obsolete; the scripts are gone.
   a «…» menu per tab, and its height follows the Параметры content both ways
   (task 13, same call); «Проверить» prints the seven facts as lines in the
   journal and writes `last-check.txt`; «Подключить» connects with whatever
-  address is saved — a wrong one fails in the journal;
+  address is saved — a wrong one fails in the journal; the journal reads as
+  sections per operation with a clock in the head line, a mark instead of
+  colour alone, and «Готово за …», mirrored to `1c-connect.log` next to the
+  kit (task 14, same call);
   the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
   model: blocked) and the access addresses. Builds belong in CI: on this

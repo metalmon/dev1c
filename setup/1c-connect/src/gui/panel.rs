@@ -503,16 +503,23 @@ impl Render for Panel {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.log_scroll)
-                    .font_family("Lilex").text_size(px(14.))
-                    .child(v_flex().children(lines.into_iter().map(|l| {
-                        div()
-                            .text_color(match l.kind {
-                                Kind::Ok => success,
-                                Kind::Warn => warning,
-                                Kind::Fail => danger,
-                                Kind::Say => fg,
-                            })
-                            .child(l.text)
+                    .text_size(px(14.))
+                    .child(v_flex().gap_1().children(lines.into_iter().map(|l| {
+                        if l.kind == Kind::Head {
+                            div().mt_2().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(l.text).into_any_element()
+                        } else {
+                            h_flex()
+                                .items_start()
+                                .text_color(match l.kind {
+                                    Kind::Ok => success,
+                                    Kind::Warn => warning,
+                                    Kind::Fail => danger,
+                                    Kind::Say | Kind::Head => caption,
+                                })
+                                .child(div().w(px(18.)).flex_shrink_0().child(l.kind.mark()))
+                                .child(div().flex_1().child(l.text))
+                                .into_any_element()
+                        }
                     })))
                     .into_any_element()
             }
@@ -590,15 +597,19 @@ impl Render for Panel {
             gui::Tab::Log => h_flex()
                 .gap_2()
                 .child(more("more-log").dropdown_menu(move |menu, _, _| {
-                    menu.item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
-                        let ui = cx.global_mut::<Ui>();
-                        ui.log.clear();
-                        ui.unread = 0;
-                        cx.refresh_windows();
+                    menu.item(PopupMenuItem::new("Открыть журнал").disabled(busy_now).on_click(|_, _, cx| {
+                        let path = cx.global::<Ui>().kit.path(gui::LOG_FILE);
+                        gui::open_path(cx, &path);
                     }))
                     .item(PopupMenuItem::new("Открыть отчёт last-check.txt").disabled(busy_now).on_click(|_, _, cx| {
                         let path = cx.global::<Ui>().kit.path("last-check.txt");
                         gui::open_path(cx, &path);
+                    }))
+                    .item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
+                        let ui = cx.global_mut::<Ui>();
+                        ui.log.clear();
+                        ui.unread = 0;
+                        cx.refresh_windows();
                     }))
                 }))
                 .child(
@@ -658,6 +669,7 @@ impl Render for Panel {
                         div()
                             .flex_1()
                             .text_size(px(13.))
+                            .line_height(relative(1.2))
                             .text_color(if foot_left.1 { danger } else { caption })
                             .whitespace_normal()
                             .line_clamp(2)

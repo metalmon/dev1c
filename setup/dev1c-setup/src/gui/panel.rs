@@ -105,7 +105,7 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-// Основа сравнения нормализована так же, как поля: иначе честный
+        // Основа сравнения нормализована так же, как поля: иначе честный
         // файл с полем другой формы открывал бы окно «изменённым».
         let saved = crate::ui::for_form(cx.global::<Ui>().cfg.clone());
         let m = &saved.model;
@@ -287,7 +287,9 @@ impl Render for Panel {
         let todo = ops.iter().filter(|o| o.dot == Dot::Off || o.dot == Dot::Busy).count();
 
         // Заголовок окна: значок, название, кнопки Windows рисует TitleBar.
-        let title_bar = TitleBar::new().child(
+        // Фон — фон окна: своя полоса акцентом спорила бы с единственной
+        // акцентной кнопкой в шапке.
+        let title_bar = TitleBar::new().bg(bg).border_b_1().border_color(border.opacity(0.6)).child(
             h_flex()
                 .items_center()
                 .gap_2()
@@ -513,11 +515,16 @@ impl Render for Panel {
                 Self::scrolled(
                     "params",
                     &self.body_scroll,
-                    v_flex()
-                        .gap_5()
+                    // Две группы рядом: в 1040 px одна колонка полей во всю
+                    // ширину читается хуже, и так было в прежнем окне.
+                    h_flex()
+                        .items_start()
+                        .gap_6()
                         .py_1()
                         .child(
                             group("Контейнер")
+                                .flex_1()
+                                .min_w_0()
                                 .child(input("Имя контейнера", "Тома данных называются по нему: имя-home, имя-gitea, имя-models.", &f.name))
                                 .child(input("Первый порт", "RDP; дальше подряд Gitea, модель, SSH.", &f.port))
                                 .child(input("Память", "", &f.memory))
@@ -534,6 +541,8 @@ impl Render for Panel {
                         )
                         .child(
                             group("Модель для агентов")
+                                .flex_1()
+                                .min_w_0()
                                 .child(labelled("Где работает сервер модели", "", Select::new(&f.serve).into_any_element()))
                                 .when(local, |g| {
                                     g.child(labelled(

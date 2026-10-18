@@ -674,7 +674,9 @@ impl Render for Panel {
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .p_4()
+                    // Сетка отступов прежнего окна: 24 по бокам, 16 сверху.
+                    .px_6()
+                    .py_4()
                     .gap_3()
                     .child(status)
                     .children(notice.map(|text| {

@@ -1,5 +1,7 @@
-//! Содержимое флайаута: шапка, карточка состояния, вкладки-пивот,
-//! параметры с кнопкой «Сохранить», список операций, проверка, журнал и подвал.
+//! Содержимое флайаута: шапка, карточка состояния, три вкладки-пивота
+//! (Параметры, Проект, Журнал), тело вкладки и подвал — слева итог
+//! последнего действия, справа одна акцентная кнопка главного действия и
+//! кнопка «…» с меню остального.
 //!
 //! Окно пересобирается на каждый показ, поэтому `Panel` держит только
 //! сущности полей, фокус и прокрутку журнала; всё остальное читается из
@@ -10,9 +12,9 @@ use crate::gui::theme;
 use crate::gui::window::hide_window;
 use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Ui, Which};
 use crate::session::State;
-use common::check::Check;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Sizable, Theme};
@@ -77,17 +79,8 @@ pub fn status_line(l: &State, ports: &cfg::Ports) -> (Dot, &'static str, String)
     }
 }
 
-/// Информационный факт — не приговор: серый кружок, а не красный.
-pub fn check_dot(c: &Check) -> Dot {
-    match (c.ok, c.info) {
-        (true, false) => Dot::Up,
-        (true, true) => Dot::Off,
-        _ => Dot::Down,
-    }
-}
-
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
-pub const HINT_PROJECT: &str = "Параметры → Проект, затем Расширение → Установить";
+pub const HINT_PROJECT: &str = "Параметры → Проект, затем «Установить»";
 
 /// Вкладка «Проект» без ответа от `refresh_project`.
 const PROJECT_EMPTY: &str = "Каталог проекта задаётся в «Параметрах»; install раскладывает git.";
@@ -273,10 +266,10 @@ impl Panel {
             })
     }
 
-    fn row(label: &str, muted: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
+    fn row(label: &str, caption: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
         v_flex()
             .gap_1()
-            .child(div().text_size(px(13.)).text_color(muted).child(label.to_string()))
+            .child(div().text_size(px(13.)).text_color(caption).child(label.to_string()))
             .child(Self::input(input, accent, window, cx))
     }
 
@@ -299,12 +292,13 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        let (bg, border, fg, muted, accent) = (t.background, t.border, t.foreground, t.muted_foreground, t.primary);
+        let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
         let (success, warning, danger, card, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
         let theme = t.clone();
-        // Приглушённый цвет остался за подсказками в полях (`muted_foreground`
-        // красит placeholder); подписи и подробности — основной текст
-        // вполсилы, чтобы набранное читалось темнее незаполненного.
+        // `muted_foreground` отдан подсказкам в полях (его берёт placeholder
+        // из темы) и в окне больше нигде не встречается: осветлённый, он не
+        // добирал контраста для настоящего текста. Подписи, подробности
+        // строк и подстрока карточки — основной текст вполсилы.
         let caption = fg.opacity(0.75);
 
         let ui = cx.global::<Ui>();
@@ -356,43 +350,32 @@ impl Render for Panel {
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
-        // Бейдж — не акцент: проблемы красным, непрочитанное приглушённым
-        // слоем (акцент берёт только переключатель и главная кнопка).
-        // Ширины сверх самой цифры бейдж не добавляет: пять вкладок и так
-        // едва помещаются в 380 px.
-        let badge = |n: usize, colour: Hsla, on: Hsla| {
-            div().rounded_sm().bg(colour).text_color(on).child(n.to_string())
+        // Бейдж на «Журнале» один: проблемы последней проверки красным, а
+        // когда их нет — непрочитанные строки приглушённым слоем (акцент
+        // берёт только переключатель и главная кнопка). Ширины сверх самой
+        // цифры бейдж не добавляет.
+        let log_badge = if failed > 0 {
+            Some((failed, danger, bg))
+        } else if unread > 0 && tab != gui::Tab::Log {
+            Some((unread, border, fg))
+        } else {
+            None
         };
-        let with_badge = |label: &'static str, n: usize, colour: Hsla, on: Hsla| {
-            let t = KitTab::new().label(label);
-            if n > 0 {
-                t.suffix(badge(n, colour, on))
-            } else {
-                t
+        let log_tab = match log_badge {
+            Some((n, colour, on)) => {
+                KitTab::new().label("Журнал").suffix(div().rounded_sm().bg(colour).text_color(on).child(n.to_string()))
             }
+            None => KitTab::new().label("Журнал"),
         };
-        // `xsmall`: пять подписей с двумя бейджами в 348 px (380 минус поля)
-        // влезают только при шрифте 12 px и зазоре 10 px — на `small`
-        // «Журнал» обрезается.
+        // Трём подписям хватает обычного размера (`small`, 14 px): на пяти
+        // приходилось жать до `xsmall`.
         let tabs = TabBar::new("tabs")
             .underline()
-            .xsmall()
-            .selected_index(match tab {
-                gui::Tab::Params => 0,
-                gui::Tab::Ext => 1,
-                gui::Tab::Project => 2,
-                gui::Tab::Check => 3,
-                gui::Tab::Log => 4,
-            })
-            .children([
-                KitTab::new().label("Параметры"),
-                KitTab::new().label("Расширение"),
-                KitTab::new().label("Проект"),
-                with_badge("Проверка", failed, danger, bg),
-                with_badge("Журнал", if tab == gui::Tab::Log { 0 } else { unread }, border, fg),
-            ])
+            .small()
+            .selected_index(gui::Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0))
+            .children([KitTab::new().label("Параметры"), KitTab::new().label("Проект"), log_tab])
             .on_click(cx.listener(|_, i: &usize, _, cx| {
-                let t = [gui::Tab::Params, gui::Tab::Ext, gui::Tab::Project, gui::Tab::Check, gui::Tab::Log][*i];
+                let Some(t) = gui::Tab::ALL.get(*i).copied() else { return };
                 let ui = cx.global_mut::<Ui>();
                 ui.tab = t;
                 if t == gui::Tab::Log {
@@ -471,83 +454,39 @@ impl Render for Panel {
                         ),
                 )
                 .into_any_element(),
-            gui::Tab::Ext => div()
-                .id("ext")
-                .size_full()
-                .overflow_y_scroll()
-                .child(v_flex().gap_2().children(cx.global::<Ui>().ops.iter().map(|o| {
-                    Self::layer(card, border)
-                        .flex()
-                        .flex_row()
-                        .gap_3()
-                        .items_center()
-                        .px_3()
-                        .py_2()
-                        .child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(o.dot, &theme)))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(div().text_size(px(14.)).child(o.title.clone()))
-                                .child(div().text_size(px(13.)).text_color(muted).child(o.detail.clone())),
-                        )
-                })))
-                .into_any_element(),
-            gui::Tab::Project => div()
-                .id("project")
-                .size_full()
-                .overflow_y_scroll()
-                .child(v_flex().gap_2().children(project_rows(cx.global::<Ui>().project.as_ref()).into_iter().map(|(d, title, detail)| {
-                    let row = Self::layer(card, border).flex().flex_row().gap_3().items_center().px_3().py_2();
-                    // Подсказка — не факт о проекте: мелкий текст без кружка.
-                    let Some(d) = d else {
-                        return row.child(div().text_size(px(13.)).text_color(caption).child(title));
-                    };
-                    row.child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
+            // «Проект» = прежние «Расширение» и «Проект» одной лентой:
+            // сверху операции на машине, ниже — каталог и состояние ветки.
+            gui::Tab::Project => {
+                let ui = cx.global::<Ui>();
+                let ops = ui.ops.clone();
+                let rows = project_rows(ui.project.as_ref());
+                let row = || Self::layer(card, border).flex().flex_row().gap_3().items_center().px_3().py_2();
+                let fact = |d: Dot, title: String, detail: String| {
+                    row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .child(div().text_size(px(14.)).child(title))
-                            .child(div().text_size(px(13.)).text_color(muted).child(detail)),
+                            .child(div().text_size(px(13.)).text_color(caption).child(detail)),
                     )
-                })))
-                .into_any_element(),
-            gui::Tab::Check => {
-                let checks = cx.global::<Ui>().checks.clone();
+                };
                 div()
-                    .id("check")
+                    .id("project")
                     .size_full()
                     .overflow_y_scroll()
+                    // 12 px между операциями и строками проекта: это два
+                    // списка, а не один.
                     .child(
                         v_flex()
-                            .gap_2()
-                            .when(checks.is_empty(), |d| {
-                                d.child(
-                                    Self::layer(card, border).px_3().py_2().text_size(px(13.)).text_color(caption).child(
-                                        "Семь фактов снизу вверх; отчёт — last-check.txt в комплекте.",
-                                    ),
-                                )
-                            })
-                            .children(checks.iter().map(|c| {
-                                let d = check_dot(c);
-                                Self::layer(card, border)
-                                    .flex()
-                                    .flex_row()
-                                    .gap_3()
-                                    .px_3()
-                                    .py_2()
-                                    .child(div().size_2().flex_shrink_0().rounded_full().mt_1p5().bg(Self::dot(d, &theme)))
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(div().text_size(px(14.)).child(c.what.clone()))
-                                            .child(div().text_size(px(13.)).text_color(muted).child(c.detail.clone()))
-                                            .when(d == Dot::Down && !c.hint.is_empty(), |v| {
-                                                v.child(div().text_size(px(13.)).text_color(warning).child(c.hint.clone()))
-                                            }),
-                                    )
-                            })),
+                            .gap_3()
+                            .child(v_flex().gap_2().children(ops.iter().map(|o| fact(o.dot, o.title.clone(), o.detail.clone()))))
+                            .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
+                                // Подсказка — не факт о проекте: мелкий текст без кружка.
+                                match d {
+                                    Some(d) => fact(d, title, detail),
+                                    None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
+                                }
+                            }))),
                     )
                     .into_any_element()
             }
@@ -577,7 +516,15 @@ impl Render for Panel {
             }
         };
 
-        // Одна акцентная кнопка на вкладку; остальные — «standard».
+        // Подвал: ровно одна акцентная кнопка главного действия, остальное —
+        // в меню «…» (как «Ещё» в 1С и в Fluent). Трём кнопкам в 348 px
+        // места не было. Значка «многоточие» в наборе нет — подпись.
+        // Меню закрывается само; пункты зовут те же `gui::*`, что и кнопки.
+        // Своё имя на вкладку: меню помнит построенные пункты по имени
+        // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
+        let more = |id: &'static str| Button::new(id).outline().label("…").tooltip("Ещё");
+        let busy_now = busy.is_some();
+
         let foot_actions: AnyElement = match tab {
             gui::Tab::Params => {
                 let dirty = self.is_dirty(cx);
@@ -599,67 +546,68 @@ impl Render for Panel {
                     }))
                     .into_any_element()
             }
-            // `Busy::Ext` не различает установку и снятие, поэтому спиннер
-            // на обеих — обе всё равно заблокированы на время работы.
-            gui::Tab::Ext => h_flex()
+            // Главная кнопка ведёт человека по порядку: сначала поставить
+            // расширение, потом — выгружать в git. `Busy::Ext` и
+            // `Busy::Project` не различают, что именно идёт: на время
+            // работы заблокировано всё равно всё.
+            gui::Tab::Project => {
+                let which = gui::project_primary(&cx.global::<Ui>().ops);
+                let (label, hint) = match which {
+                    Which::Export => ("Выгрузить", "Выгрузить в git"),
+                    _ => ("Установить", "Установить расширение"),
+                };
+                h_flex()
+                    .gap_2()
+                    .child(more("more-project").dropdown_menu(move |menu, _, _| {
+                        menu.item(
+                            PopupMenuItem::new("Загрузить из git")
+                                .disabled(busy_now)
+                                .on_click(|_, _, cx| gui::run_op(cx, Which::Import)),
+                        )
+                        .item(
+                            PopupMenuItem::new("Установить расширение")
+                                .disabled(busy_now)
+                                .on_click(|_, _, cx| gui::run_op(cx, Which::Install)),
+                        )
+                        .item(
+                            PopupMenuItem::new("Снять расширение")
+                                .disabled(busy_now)
+                                .on_click(|_, _, cx| gui::run_op(cx, Which::Uninstall)),
+                        )
+                    }))
+                    .child(
+                        Button::new("primary")
+                            .primary()
+                            .label(label)
+                            .tooltip(hint)
+                            .disabled(busy_now)
+                            .loading(matches!(busy, Some(Busy::Ext) | Some(Busy::Project)))
+                            .on_click(move |_, _, cx| gui::run_op(cx, which)),
+                    )
+                    .into_any_element()
+            }
+            gui::Tab::Log => h_flex()
                 .gap_2()
+                .child(more("more-log").dropdown_menu(|menu, _, _| {
+                    menu.item(PopupMenuItem::new("Очистить журнал").on_click(|_, _, cx| {
+                        let ui = cx.global_mut::<Ui>();
+                        ui.log.clear();
+                        ui.unread = 0;
+                        cx.refresh_windows();
+                    }))
+                    .item(PopupMenuItem::new("Открыть отчёт last-check.txt").on_click(|_, _, cx| {
+                        let path = cx.global::<Ui>().kit.path("last-check.txt");
+                        gui::open_path(cx, &path);
+                    }))
+                }))
                 .child(
-                    Button::new("uninstall")
-                        .outline()
-                        .label("Снять")
-                        .disabled(busy.is_some())
-                        .loading(busy == Some(Busy::Ext))
-                        .on_click(|_, _, cx| gui::run_op(cx, Which::Uninstall)),
-                )
-                .child(
-                    Button::new("install")
+                    Button::new("check")
                         .primary()
-                        .label("Установить")
-                        .disabled(busy.is_some())
-                        .loading(busy == Some(Busy::Ext))
-                        .on_click(|_, _, cx| gui::run_op(cx, Which::Install)),
+                        .label("Проверить")
+                        .disabled(busy_now)
+                        .loading(busy == Some(Busy::Check))
+                        .on_click(|_, _, cx| gui::run_check(cx)),
                 )
-                .into_any_element(),
-            // Подписи короткие: в 348 px длинные «Загрузить из git» и
-            // «Выгрузить в git» не помещались. Полная формулировка — в
-            // подсказке и в журнале (`Which::title`).
-            gui::Tab::Project => h_flex()
-                .gap_2()
-                .child(
-                    Button::new("import")
-                        .outline()
-                        .label("Загрузить")
-                        .tooltip("Загрузить из git")
-                        .disabled(busy.is_some())
-                        .loading(busy == Some(Busy::Project))
-                        .on_click(|_, _, cx| gui::run_op(cx, Which::Import)),
-                )
-                .child(
-                    Button::new("export")
-                        .primary()
-                        .label("Выгрузить")
-                        .tooltip("Выгрузить в git")
-                        .disabled(busy.is_some())
-                        .loading(busy == Some(Busy::Project))
-                        .on_click(|_, _, cx| gui::run_op(cx, Which::Export)),
-                )
-                .into_any_element(),
-            gui::Tab::Check => Button::new("check")
-                .primary()
-                .label("Проверить")
-                .disabled(busy.is_some())
-                .loading(busy == Some(Busy::Check))
-                .on_click(|_, _, cx| gui::run_check(cx))
-                .into_any_element(),
-            gui::Tab::Log => Button::new("clear")
-                .outline()
-                .label("Очистить")
-                .on_click(|_, _, cx| {
-                    let ui = cx.global_mut::<Ui>();
-                    ui.log.clear();
-                    ui.unread = 0;
-                    cx.refresh_windows();
-                })
                 .into_any_element(),
         };
 
@@ -721,11 +669,10 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_dot, fields_differ, project_rows, status_line, HINT_PROJECT};
+    use super::{fields_differ, project_rows, status_line, HINT_PROJECT};
     use crate::cfg::{self, Host};
     use crate::gui::{Dot, ProjectView};
     use crate::session::State;
-    use common::check::Check;
     use std::time::Instant;
 
     #[test]
@@ -783,9 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn check_dots_tell_fail_from_note() {
-        assert_eq!(check_dot(&Check::pass("a", "")), Dot::Up);
-        assert_eq!(check_dot(&Check::note("a", "")), Dot::Off);
-        assert_eq!(check_dot(&Check::fail("a", "", "")), Dot::Down);
+    fn the_hint_no_longer_points_at_a_tab_that_is_gone() {
+        assert!(!HINT_PROJECT.contains("Расширение"), "{HINT_PROJECT}");
     }
 }

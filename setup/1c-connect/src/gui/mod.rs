@@ -74,7 +74,8 @@ pub struct Ui {
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
-    pub checks: Vec<Check>,
+    /// Сколько фактов провалила последняя проверка — бейдж на «Журнале».
+    /// Сами факты живут строками в журнале (`check_lines`), списка их нет.
     pub failed_checks: usize,
     pub ops: Vec<OpView>,
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
@@ -111,14 +112,20 @@ pub struct Line {
     pub text: String,
 }
 
+/// Три вкладки (решение заказчика 2026-10-18): «Расширение» ушло в «Проект»,
+/// «Проверка» — в «Журнал». Пять подписей и по три кнопки в подвале в 380 px
+/// не помещались.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Tab {
     #[default]
     Params,
-    Ext,
     Project,
-    Check,
     Log,
+}
+
+impl Tab {
+    /// Порядок вкладок в полосе; он же — порядок индексов `TabBar`.
+    pub const ALL: [Tab; 3] = [Tab::Params, Tab::Project, Tab::Log];
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -266,6 +273,46 @@ pub fn op_view(id: String, title: String, st: OpState) -> OpView {
         OpState::Blocked(why) => (Dot::Down, why),
     };
     OpView { id, title, dot, detail }
+}
+
+/// Главное действие вкладки «Проект»: пока расширение не стоит — «Установить»,
+/// дальше человеку нужен обмен с git, и главной становится «Выгрузить».
+/// Остальное — в меню «…».
+pub fn project_primary(ops: &[OpView]) -> Which {
+    match ops.iter().find(|o| o.id == "host.extension") {
+        Some(o) if o.dot == Dot::Up => Which::Export,
+        _ => Which::Install,
+    }
+}
+
+/// Факты проверки строками в журнал: отдельного списка на экране больше нет.
+/// Подсказка провалившегося факта идёт второй строкой с отступом.
+pub fn check_lines(checks: &[Check]) -> Vec<Line> {
+    let mut out = Vec::with_capacity(checks.len());
+    for c in checks {
+        // Информационный факт — не приговор: как серый кружок прежней
+        // вкладки «Проверка», обычная строка, а не провал.
+        let (kind, mark) = match (c.ok, c.info) {
+            (true, false) => (Kind::Ok, "✓"),
+            (true, true) => (Kind::Say, "·"),
+            _ => (Kind::Fail, "✗"),
+        };
+        out.push(Line { kind, text: format!("{mark} {}: {}", c.what, c.detail) });
+        if kind == Kind::Fail && !c.hint.is_empty() {
+            out.push(Line { kind: Kind::Warn, text: format!("  {}", c.hint) });
+        }
+    }
+    out
+}
+
+/// Файл или каталог средствами системы: на Windows — `explorer`, иначе
+/// `xdg-open`. Не открылось — строкой в журнал, молча не теряем.
+pub fn open_path(cx: &mut App, path: &std::path::Path) {
+    let mut c = std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" });
+    if let Err(e) = c.arg(path).spawn() {
+        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("не открыть {}: {e}", path.display()) });
+        cx.refresh_windows();
+    }
 }
 
 /// Адрес публикации для записи: умолчание идёт за каталогом базы, правка в
@@ -522,9 +569,12 @@ fn handle(ev: Ev, cx: &mut App) {
         }
         Ev::Checks(checks) => {
             let failed = checks.iter().filter(|c| !c.ok).count();
+            let lines = check_lines(&checks);
             let ui = cx.global_mut::<Ui>();
-            ui.checks = checks;
             ui.failed_checks = failed;
+            for line in lines {
+                note_line(ui, line);
+            }
             ui.busy = None;
             ui.status = Some(if failed > 0 {
                 Line { kind: Kind::Fail, text: format!("Провалено: {failed}. Отчёт — last-check.txt в комплекте") }
@@ -597,7 +647,6 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
-            checks: Vec::new(),
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
@@ -643,7 +692,6 @@ impl Ui {
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
-            checks: Vec::new(),
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
@@ -663,13 +711,55 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        badge, carried_base_url, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, Which,
-        LOG_CAP, TRAY_PNG,
+        badge, carried_base_url, check_lines, line_of, link_is_current, link_line, note_line, project_primary,
+        save_host, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
+    use common::check::Check;
     use common::Event;
     use std::time::Instant;
+
+    fn op(id: &str, dot: Dot) -> OpView {
+        OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
+    }
+
+    #[test]
+    fn three_tabs_in_the_order_the_window_draws_them() {
+        assert_eq!(Tab::ALL, [Tab::Params, Tab::Project, Tab::Log]);
+        assert_eq!(Tab::ALL.len(), 3);
+        assert_eq!(Tab::default(), Tab::Params);
+        for (i, t) in Tab::ALL.iter().enumerate() {
+            assert_eq!(Tab::ALL.iter().position(|x| x == t), Some(i));
+        }
+    }
+
+    #[test]
+    fn the_project_button_installs_until_the_extension_is_up_then_exports() {
+        // Ответа от `refresh_ops` ещё нет — ставить.
+        assert_eq!(project_primary(&[]), Which::Install);
+        assert_eq!(project_primary(&[op("host.tools", Dot::Up)]), Which::Install);
+        assert_eq!(project_primary(&[op("host.extension", Dot::Off)]), Which::Install);
+        assert_eq!(project_primary(&[op("host.extension", Dot::Down)]), Which::Install);
+        // Расширение стоит — главная кнопка про обмен с git.
+        assert_eq!(project_primary(&[op("host.tools", Dot::Off), op("host.extension", Dot::Up)]), Which::Export);
+    }
+
+    #[test]
+    fn checks_print_into_the_log_as_facts_with_a_hint_on_its_own_line() {
+        let lines = check_lines(&[
+            Check::pass("база", "C:\\Bases\\Buh"),
+            Check::note("туннель", "не поднят"),
+            Check::fail("расширение", "не установлено", "нажмите «Установить»"),
+        ]);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], Line { kind: Kind::Ok, text: "✓ база: C:\\Bases\\Buh".into() });
+        assert_eq!(lines[1], Line { kind: Kind::Say, text: "· туннель: не поднят".into() });
+        assert_eq!(lines[2], Line { kind: Kind::Fail, text: "✗ расширение: не установлено".into() });
+        assert_eq!(lines[3], Line { kind: Kind::Warn, text: "  нажмите «Установить»".into() });
+        // Пустая подсказка второй строки не добавляет.
+        assert_eq!(check_lines(&[Check::fail("а", "б", "")]).len(), 1);
+    }
 
     #[test]
     fn the_badge_sits_in_the_corner_and_says_up_or_down() {

@@ -122,7 +122,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
         MenuAction::Toggle => toggle_link(cx),
         MenuAction::Check => {
             window::show_window(cx);
-            cx.global_mut::<Ui>().tab = Tab::Check;
+            cx.global_mut::<Ui>().tab = Tab::Log;
             // Пока проверка (или установка) идёт, пункт меню только
             // показывает вкладку: второй прогон поверх первого путал бы
             // `busy` и писал бы отчёт дважды.

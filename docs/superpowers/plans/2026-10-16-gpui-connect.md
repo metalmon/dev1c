@@ -613,3 +613,30 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 7. **Проверка «server из образца» убирается везде** (заказчик: в проде адрес может совпасть): guard в gui::start_session, проверка в CLI (main.rs), параметр is_sample у verify::params_fact, сама Cfg::is_sample с тестами; упоминания в spec/STATUS.
 8. **Крупноват текст в списках, подвал «Проекта» не влезает** (заказчик, снимок вкладки «Проект»): заголовки строк списков 14 px, подробности 13 px; строка-подсказка — просто текст 13 px foreground.opacity(0.75) без кружка; кнопки «Проекта»: «Каталог», «Загрузить», «Выгрузить» (полные названия — в tooltip и в заголовках журнала).
    Решение заказчика: кнопка «Каталог» убирается (вместе с gui::open_dir); остаются «Загрузить» и «Выгрузить».
+
+---
+
+### Task 13: Три вкладки и подвал «главная кнопка + …»
+
+Заказчик (2026-10-18): пять вкладок и по три кнопки в подвале не влезают в 380 px. Решение: три вкладки и в подвале ровно одна акцентная кнопка главного действия плюс кнопка «…» со всплывающим меню остального (как «Ещё» в 1С и в Fluent).
+
+**Вкладки:** `Tab { Params, Project, Log }` в этом порядке; размер вкладок снова обычный (`small`, 14 px), бейдж на «Журнал» = `failed_checks` (красный, если > 0) иначе `unread` (если > 0 и вкладка не открыта).
+
+**«Проект»** = бывшие «Расширение» + «Проект»: сверху список операций (`ui.ops`, слоями как сейчас), ниже строки проекта (`project_rows`); между ними 12 px. Подвал: главная кнопка — «Установить» (`run_op(Install)`), пока у операции `host.extension` состояние не `Done` (в `OpView` есть `dot`: считать «установлено» = `Dot::Up` у строки с `id == "host.extension"`); иначе «Выгрузить» (`run_op(Export)`). Меню «…»: «Загрузить из git» (`Import`), «Установить расширение» (`Install`), «Снять расширение» (`Uninstall`); пункты `disabled` при `busy.is_some()`.
+
+**«Журнал»** = бывшие «Проверка» + «Журнал»: проверка печатает факты строками в журнал: на `Ev::Checks(checks)` каждая проверка становится `Line` с `Kind::Ok` («✓ {what}: {detail}»), `Kind::Say` для `info` («· {what}: {detail}») или `Kind::Fail` («✗ {what}: {detail}» и второй строкой «  {hint}», если подсказка не пуста), плюс итоговая строка статуса как сейчас; `ui.checks` и вкладка Check исчезают; `failed_checks` остаётся для бейджа. Подвал: главная кнопка «Проверить» (`run_check`, `loading` при `Busy::Check`); меню «…»: «Очистить журнал», «Открыть отчёт last-check.txt» (`cx.open_url` на путь файла или `explorer`/`xdg-open` через `std::process::Command` как раньше делал `open_dir` — вернуть минимальный `open_path(path)` в `mod.rs`).
+
+**«Параметры»**: подвал как сейчас («Сохранить»), меню «…» не нужно.
+
+**Кнопка «…»:** `gpui-component`: `Button::new("more").outline().label("…")` (или иконка `IconName::Ellipsis`, если есть в `gpui_kit::assets::IconName`) с `.dropdown_menu(|menu, window, cx| menu.menu_with_...` — см. трейт в `C:\Users\bucher\.cargo\registry\src\*\gpui-component-0.7.3\src\menu\dropdown_menu.rs` и `PopupMenu`/`PopupMenuItem` в `menu/popup_menu.rs` (`PopupMenuItem::new(label).on_click(..)`, `.disabled(..)`, `PopupMenu::item(..)`, `separator()`); закрывается сам. Пункты зовут те же функции `gui::*` через `cx`. Если `dropdown_menu` требует `Action`-типы, завести `actions!(onec, [Import, Install, Uninstall, ClearLog, OpenReport])` и обработчики `on_action` на корне панели — что проще, решает строитель, но без своих виджетов.
+
+**Чистые функции и тесты:** `pub fn project_primary(ops: &[OpView]) -> Which` (`Install`, пока `host.extension` не `Dot::Up`, иначе `Export`) с тестом; `pub fn check_lines(checks: &[Check]) -> Vec<Line>` с тестом на три вида (pass / note / fail с подсказкой → две строки); тесты вкладок (`Tab` трёхзначный, индексы 0..3).
+
+**Files:** `setup/1c-connect/src/gui/{mod,panel}.rs`, spec «Состояние и вид» (три вкладки, подвалы, проверка в журнале), `docs/STATUS.md` одна фраза.
+
+- [ ] **Step 1: Падающие тесты** (`project_primary`, `check_lines`, обновлённые тесты `Tab`/`project_rows`).
+- [ ] **Step 2–3:** падают → реализовать.
+- [ ] **Step 4: Проверки:** `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1`; один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000).
+- [ ] **Step 5: Commit** — `feat(1c-connect): three tabs, checks print into the log, one primary button plus a … menu per tab`
+
+**Дополнение (заказчик 2026-10-18):** подбор высоты работает в обе стороны — `fit_height_for(current, content, viewport, work_area_h, gap)` даёт точную высоту (и меньше, и больше), ограниченную [MIN_SIZE.height = 420, work_area_h − 2·gap]; `Ui.height` перезаписывается при каждом подборе. «Параметры» — опорная вкладка, остальные прокручиваются внутри.

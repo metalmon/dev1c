@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 
 /// Наименьший логический размер флайаута: ширина у окна постоянная, высота —
 /// начальная и нижняя граница подбора по содержимому (см. `fit_height`).
-pub const MIN_SIZE: Size<Pixels> = size(px(380.0), px(640.0));
+/// Высота нарочно мала: окно растёт и ужимается под «Параметры», а пол
+/// страхует только от вырожденного обмера.
+pub const MIN_SIZE: Size<Pixels> = size(px(380.0), px(420.0));
 /// Зазор до края рабочей области.
 pub const GAP: Pixels = px(12.0);
 /// Окно только что спряталось по потере фокуса — клик по трею в этом окне
@@ -56,14 +58,13 @@ pub fn wanted_size(cx: &App) -> Size<Pixels> {
     size(MIN_SIZE.width, cx.global::<Ui>().height.unwrap_or(MIN_SIZE.height))
 }
 
-/// Насколько вырастить окно, чтобы содержимое влезло целиком: ровно на
-/// переполнение, но не выше рабочей области с зазорами по краям. `None` —
-/// содержимое уже помещается, трогать окно незачем.
-pub fn grown_height(current: Pixels, content: Pixels, viewport: Pixels, work_area_h: Pixels, gap: Pixels) -> Option<Pixels> {
-    if content <= viewport {
-        return None;
-    }
-    Some((current + (content - viewport)).min(work_area_h - gap - gap))
+/// Высота окна под содержимое — в обе стороны: ровно на разницу между
+/// содержимым и видимой областью (переполнение растит, пустота ужимает),
+/// не выше рабочей области с зазорами и не ниже `MIN_SIZE.height`. `None` —
+/// разница меньше пикселя, трогать окно незачем.
+pub fn fit_height_for(current: Pixels, content: Pixels, viewport: Pixels, work_area_h: Pixels, gap: Pixels) -> Option<Pixels> {
+    let want = (current + (content - viewport)).min(work_area_h - gap - gap).max(MIN_SIZE.height);
+    ((want - current).abs() > px(1.0)).then_some(want)
 }
 
 /// Переставить окно левым верхним углом в точку (логические px). GPUI умеет
@@ -85,12 +86,13 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
 #[cfg(not(windows))]
 fn move_to(_window: &Window, _origin: Point<Pixels>) {}
 
-/// Подогнать высоту окна под содержимое: вырасти ровно на переполнение (не
-/// выше рабочей области), запомнить высоту в `Ui` — следующий показ откроется
-/// сразу такой — и вернуть окно в угол у трея, потому что растёт оно вниз.
+/// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
+/// на пустоту (не выше рабочей области), запомнить высоту в `Ui` — следующий
+/// показ откроется сразу такой — и вернуть окно в угол у трея, потому что
+/// меняется оно вниз от прежнего угла.
 pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels) {
     let wa = work_area(cx);
-    let Some(h) = grown_height(window.bounds().size.height, content, viewport, wa.size.height, GAP) else { return };
+    let Some(h) = fit_height_for(window.bounds().size.height, content, viewport, wa.size.height, GAP) else { return };
     let s = size(MIN_SIZE.width, h);
     cx.global_mut::<Ui>().height = Some(h);
     window.resize(s);
@@ -161,16 +163,25 @@ pub fn toggle_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{flyout_origin, forget_window, grown_height, should_show, GAP, MIN_SIZE};
+    use super::{fit_height_for, flyout_origin, forget_window, should_show, GAP, MIN_SIZE};
     use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
 
     #[test]
-    fn grown_height_grows_by_the_overflow_and_stops_at_the_work_area() {
-        assert_eq!(grown_height(px(640.), px(700.), px(560.), px(1300.), px(12.)), Some(px(780.)));
-        assert_eq!(grown_height(px(640.), px(500.), px(560.), px(1300.), px(12.)), None);
-        assert_eq!(grown_height(px(640.), px(2000.), px(560.), px(1000.), px(12.)), Some(px(976.)));
+    fn the_height_follows_the_content_both_ways_and_stays_on_the_work_area() {
+        // Содержимое не влезло — вырасти ровно на переполнение.
+        assert_eq!(fit_height_for(px(640.), px(700.), px(560.), px(1300.), px(12.)), Some(px(780.)));
+        // Содержимого стало меньше видимой области — ужаться на разницу
+        // (вкладка «Параметры» — мерная: пустота под ней и была жалобой).
+        assert_eq!(fit_height_for(px(640.), px(460.), px(560.), px(1300.), px(12.)), Some(px(540.)));
+        // Разница меньше пикселя — окно не трогаем.
+        assert_eq!(fit_height_for(px(640.), px(560.5), px(560.), px(1300.), px(12.)), None);
+        assert_eq!(fit_height_for(px(640.), px(560.), px(560.), px(1300.), px(12.)), None);
+        // Сверху — рабочая область с зазорами, снизу — наименьшая высота.
+        assert_eq!(fit_height_for(px(640.), px(2000.), px(560.), px(1000.), px(12.)), Some(px(976.)));
+        assert_eq!(fit_height_for(px(640.), px(100.), px(560.), px(1300.), px(12.)), Some(MIN_SIZE.height));
+        assert_eq!(MIN_SIZE.height, px(420.));
     }
 
     #[test]

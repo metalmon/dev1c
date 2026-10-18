@@ -75,8 +75,12 @@ script days is obsolete; the scripts are gone.
   into the tray and opens the flyout at the bottom-right of the work area
   (hides on blur, left click on the icon brings it back); the window's colour
   theme is now 1С:Такси's own palette (yellow accent `#FACC1F`, links stay
-  blue), not Zed's macOS Classic (task 11, 2026-10-18 customer call); «Проверить» lists the seven facts and writes
-  `last-check.txt`; «Подключить» with the sample address refuses in the log;
+  blue), not Zed's macOS Classic (task 11, 2026-10-18 customer call); the
+  window is three tabs (Параметры, Проект, Журнал) with one primary button and
+  a «…» menu per tab, and its height follows the Параметры content both ways
+  (task 13, same call); «Проверить» prints the seven facts as lines in the
+  journal and writes `last-check.txt`; «Подключить» connects with whatever
+  address is saved — a wrong one fails in the journal;
   the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
   model: blocked) and the access addresses. Builds belong in CI: on this

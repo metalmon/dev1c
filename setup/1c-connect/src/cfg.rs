@@ -45,6 +45,10 @@ pub struct Host {
     pub dump: String,
     pub project: String,
     pub tools: Vec<String>,
+    /// Режим работы: `tunnel` — база на этой машине и туннель в среду,
+    /// `local` — база внутри образа. Пока только читается и сохраняется;
+    /// переключатель и поведение — спека окна, раздел «Режим работы».
+    pub mode: String,
 }
 
 impl Default for Host {
@@ -60,6 +64,7 @@ impl Default for Host {
             dump: String::new(),
             project: "C:\\proj\\Buh".into(),
             tools: DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect(),
+            mode: "tunnel".into(),
         }
     }
 }
@@ -95,6 +100,7 @@ impl Cfg {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
         anyhow::ensure!(self.host.server.contains(':'), "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393");
+        anyhow::ensure!(matches!(self.host.mode.as_str(), "tunnel" | "local"), "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)");
         let u = &self.host.base_url;
         anyhow::ensure!(
             u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
@@ -165,6 +171,7 @@ impl Cfg {
                 "dump" => format!("{:?}", h.dump),
                 "project" => format!("{:?}", h.project),
                 "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
+                "mode" => format!("{:?}", h.mode),
                 _ => return None,
             })
         })
@@ -182,6 +189,19 @@ mod tests {
     #[test]
     fn example_parses_and_equals_defaults() {
         assert_eq!(sample(), Cfg::default());
+    }
+
+    #[test]
+    fn mode_defaults_to_tunnel_accepts_local_and_rejects_the_rest() {
+        let without: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "")).unwrap();
+        assert_eq!(without.host.mode, "tunnel");
+        let local: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "mode = \"local\"")).unwrap();
+        assert_eq!(local.host.mode, "local");
+        local.validate().unwrap();
+        assert!(local.render().contains("mode = \"local\""));
+        let mut odd = Cfg::default();
+        odd.host.mode = "remote".into();
+        assert!(odd.validate().unwrap_err().to_string().contains("mode"));
     }
 
     #[test]

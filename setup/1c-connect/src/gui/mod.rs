@@ -488,6 +488,7 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
+    host.mode = ui.cfg.host.mode.clone();
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;

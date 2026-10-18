@@ -130,6 +130,7 @@ pub fn host_of(f: &Fields, cx: &App) -> Host {
         dump: String::new(),
         project: v(&f.project),
         tools: Vec::new(),
+        mode: String::new(),
     }
 }
 

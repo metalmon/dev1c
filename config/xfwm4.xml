@@ -11,7 +11,7 @@
 <channel name="xfwm4" version="1.0">
   <property name="general" type="empty">
     <property name="theme" type="string" value="1C-light"/>
-    <property name="title_font" type="string" value="IBM Plex Sans Semi-Bold 11"/>
+    <property name="title_font" type="string" value="Inter Bold 10"/>
     <property name="title_alignment" type="string" value="center"/>
     <!-- Набор кнопок заголовка задаётся здесь, а НЕ темой. Если не указать
          явно, часть тем (Materia) отрисовывает заголовок без свернуть/развернуть

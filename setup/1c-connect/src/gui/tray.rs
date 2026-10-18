@@ -118,18 +118,19 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
-    /// Значок badge(state), подсказка «подключён/не подключён» (без фазы —
-    /// ту двигает `set_tooltip` из тика), надпись переключателя
-    /// «Отключить»/«Подключить».
+    /// Значок badge(state) и надпись переключателя «Отключить»/«Подключить».
+    /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
+    /// подключён, нет связи) и само по себе не знает фазу операции — её
+    /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
+    /// `Ev::Done`, тик) сам зовёт `set_tooltip` следом тем же текстом, иначе
+    /// занятость при поднятой связи осталась бы с «не подключён».
     pub fn set_state(&self, state: TrayState, on: bool) {
         let _ = self.icon.set_icon(Some(icon(state)));
-        let up = state == TrayState::Up;
-        let _ = self.icon.set_tooltip(Some(if up { "1c-connect: подключён" } else { "1c-connect: не подключён" }));
         self.toggle.set_text(if on { "Отключить" } else { "Подключить" });
     }
 
-    /// Подсказка трея произвольным текстом — её двигает тик приложения на
-    /// фазу операции (`tray_tooltip`), не чаще `TOOLTIP_EVERY`.
+    /// Подсказка трея произвольным текстом (`tray_tooltip`) — единственный
+    /// источник, который её меняет.
     pub fn set_tooltip(&self, text: &str) {
         let _ = self.icon.set_tooltip(Some(text));
     }

@@ -581,10 +581,13 @@ fn set_link(cx: &mut App, l: State) {
     if let Some(line) = line {
         note_line(ui, line);
     }
+    let now = Instant::now();
     let busy = ui.progress.is_some() || ui.busy.is_some();
     let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
+    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
     if let Some(tray) = &ui.tray {
         tray.set_state(state, on);
+        tray.set_tooltip(&tooltip);
     }
     cx.refresh_windows();
 }
@@ -663,9 +666,14 @@ pub fn run_op(cx: &mut App, which: Which) {
     ui.cancel = cancel.clone();
     ui.tab = Tab::Log;
     ui.unread = 0;
-    let on = ui.link.is_on();
+    // Подсказка фазы сразу, а не через TOOLTIP_EVERY: иначе первые 60 с
+    // новой операции висела бы подсказка от прежней (или «подключён»).
+    let (state, on) = (tray_state(&ui.link, true), ui.link.is_on());
+    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
+    ui.tooltip_at = Some(now);
     if let Some(tray) = &ui.tray {
-        tray.set_state(TrayState::Busy, on);
+        tray.set_state(state, on);
+        tray.set_tooltip(&tooltip);
     }
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
@@ -828,12 +836,20 @@ fn on_done(ui: &mut Ui, err: Option<String>, cancelled: bool) -> Line {
     line
 }
 
+/// Перерисовать на тике: окно открыто — карточка связи считает минуты от
+/// `since.elapsed()` сама на каждой отрисовке и обязана не стоять на месте,
+/// даже в покое; окно спрятано — только когда есть, что показать (новые
+/// данные или операция на ходу).
+fn tick_redraw(window_open: bool, dirty: bool, running: bool) -> bool {
+    window_open || dirty || running
+}
+
 /// Единый тик приложения (`launch` зовёт его раз в `TICK_BUSY`/`TICK_IDLE`):
-/// перерисовывает окно на свежих данных и, не чаще `TOOLTIP_EVERY`, двигает
-/// подсказку трея на фазу текущей операции.
+/// перерисовывает окно (см. `tick_redraw`) и, не чаще `TOOLTIP_EVERY`,
+/// двигает подсказку трея на фазу текущей операции.
 fn tick(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
-    let redraw = ui.dirty || ui.progress.is_some();
+    let redraw = tick_redraw(ui.window.is_some(), ui.dirty, ui.progress.is_some());
     ui.dirty = false;
     if redraw {
         cx.refresh_windows();
@@ -880,9 +896,15 @@ fn handle(ev: Ev, cx: &mut App) {
             note_line(ui, line.clone());
             ui.status = Some(line.clone());
             // Подсказка без операции: `on_done` уже опустил `progress`/`busy`.
+            // `tooltip_at` тоже назад в `None` — следующая операция не должна
+            // наследовать свежий штамп и ждать до TOOLTIP_EVERY своей подсказки.
+            let now = Instant::now();
             let (state, on) = (tray_state(&ui.link, false), ui.link.is_on());
+            let tooltip = tray_tooltip(None, &ui.link, now);
+            ui.tooltip_at = None;
             if let Some(tray) = &ui.tray {
                 tray.set_state(state, on);
+                tray.set_tooltip(&tooltip);
             }
             let hidden = ui.window.is_none();
             cx.refresh_windows();
@@ -1088,7 +1110,8 @@ mod tests {
     use super::{
         autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
         link_line, note_line, on_done, on_progress, progress_text, project_primary, save_host, stale_text, took,
-        tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE,
+        TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
@@ -1217,6 +1240,18 @@ mod tests {
         assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию, меньше минуты");
         assert_eq!(tray_tooltip(None, &State::Up { since: now }, now), "1c-connect: подключён");
         assert_eq!(tray_tooltip(None, &State::Off, now), "1c-connect: не подключён");
+    }
+
+    #[test]
+    fn tick_redraws_when_the_window_is_open_or_something_changed() {
+        // Окно открыто и в покое — минуты в карточке связи всё равно не
+        // должны стоять, та считает их сама от `since.elapsed()`.
+        assert!(tick_redraw(true, false, false));
+        // Окно спрятано и тихо — перерисовывать нечего.
+        assert!(!tick_redraw(false, false, false));
+        // Спрятано, но пришли новые данные или идёт операция — всё равно да.
+        assert!(tick_redraw(false, true, false));
+        assert!(tick_redraw(false, false, true));
     }
 
     #[test]

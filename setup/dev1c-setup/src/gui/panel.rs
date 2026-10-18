@@ -369,12 +369,12 @@ impl Render for Panel {
         let badge = |n: usize, colour: Hsla, on: Hsla| div().rounded_sm().px_1().bg(colour).text_color(on).child(n.to_string());
         let ops_tab = match (todo, ops.iter().any(|o| o.dot == Dot::Busy)) {
             (0, _) => KitTab::new().label(Tab::Ops.title()),
-            (n, true) => KitTab::new().label(Tab::Ops.title()).suffix(badge(n, danger, bg)),
+            (n, true) => KitTab::new().label(Tab::Ops.title()).suffix(badge(n, danger, layer)),
             (n, false) => KitTab::new().label(Tab::Ops.title()).suffix(badge(n, border, fg)),
         };
         let check_tab = match failed {
             0 => KitTab::new().label(Tab::Check.title()),
-            n => KitTab::new().label(Tab::Check.title()).suffix(badge(n, danger, bg)),
+            n => KitTab::new().label(Tab::Check.title()).suffix(badge(n, danger, layer)),
         };
         let log_tab = match unread {
             n if n > 0 && tab != Tab::Log => KitTab::new().label(Tab::Log.title()).suffix(badge(n, border, fg)),

@@ -14,7 +14,7 @@ use common::{run, AlwaysDefault, Event, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub mod panel;
 pub mod theme;
@@ -78,7 +78,11 @@ pub struct Ui {
     pub busy: Option<Busy>,
     pub status: Option<Line>,
     pub tray: Option<tray::Tray>,
-    pub window: Option<WindowHandle<panel::Panel>>,
+    /// `gpui_kit::open_window` оборачивает панель в свой корневой вид,
+    /// поэтому ручка окна — безтиповая (`downcast::<Panel>()` дал бы `None`),
+    /// а до самой панели ведёт отдельная сущность рядом.
+    pub window: Option<AnyWindowHandle>,
+    pub panel: Option<Entity<panel::Panel>>,
     pub hidden_at: Option<Instant>,
     pub dialog_open: bool,
     pub tx: UnboundedSender<Ev>,
@@ -139,6 +143,28 @@ pub enum Ev {
     Line(Line),
     Done(Option<String>),
     Checks(Vec<Check>),
+    /// Состояние операций, перечитанное в своём потоке (`refresh_ops`).
+    Ops(Vec<OpView>),
+}
+
+/// Сколько ждать опускания туннеля на «Выходе».
+pub const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Текст в журнал, когда рабочий поток упал с паникой.
+pub const PANIC_TEXT: &str = "внутренняя ошибка: операция прервана";
+
+/// Рабочий поток обязан договорить: паника в теле всё равно шлёт конец
+/// работы (иначе кнопки навсегда остались бы в «идёт работа») и строку об
+/// этом в журнал.
+fn guarded(tx: &UnboundedSender<Ev>, body: impl FnOnce() -> Ev, on_panic: impl FnOnce() -> Ev) {
+    let ev = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(ev) => ev,
+        Err(_) => {
+            let _ = tx.unbounded_send(Ev::Line(Line { kind: Kind::Fail, text: PANIC_TEXT.into() }));
+            on_panic()
+        }
+    };
+    let _ = tx.unbounded_send(ev);
 }
 
 pub const LOG_CAP: usize = 2000;
@@ -304,13 +330,19 @@ pub fn run_op(cx: &mut App, uninstall: bool) {
     let tx = ui.tx.clone();
     cx.refresh_windows();
     std::thread::spawn(move || {
-        let ops = ops_host::host();
-        let r = if uninstall {
-            ops.iter().find(|o| o.id() == "host.extension").map(|ext| ext.revert_apply(&ctx, CleanLevel::Stack)).unwrap_or(Ok(()))
-        } else {
-            run::apply_all(&ctx, &ops, None, false).map(|_| ())
-        };
-        let _ = tx.unbounded_send(Ev::Done(r.err().map(|e| format!("{e:#}"))));
+        guarded(
+            &tx,
+            || {
+                let ops = ops_host::host();
+                let r = if uninstall {
+                    ops.iter().find(|o| o.id() == "host.extension").map(|ext| ext.revert_apply(&ctx, CleanLevel::Stack)).unwrap_or(Ok(()))
+                } else {
+                    run::apply_all(&ctx, &ops, None, false).map(|_| ())
+                };
+                Ev::Done(r.err().map(|e| format!("{e:#}")))
+            },
+            || Ev::Done(Some(PANIC_TEXT.into())),
+        );
     });
 }
 
@@ -324,20 +356,34 @@ pub fn run_check(cx: &mut App) {
     let tx = ui.tx.clone();
     cx.refresh_windows();
     std::thread::spawn(move || {
-        let state = link.is_up().then(|| link.label());
-        let checks = verify::run(&ctx, state.as_deref());
-        let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
-        let _ = write_text(&ctx.kit.path("last-check.txt"), &text);
-        let _ = tx.unbounded_send(Ev::Checks(checks));
+        guarded(
+            &tx,
+            || {
+                let state = link.is_up().then(|| link.label());
+                let checks = verify::run(&ctx, state.as_deref());
+                let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
+                let _ = write_text(&ctx.kit.path("last-check.txt"), &text);
+                Ev::Checks(checks)
+            },
+            || Ev::Checks(Vec::new()),
+        );
     });
 }
 
 /// Перечитать состояние операций на машине (без изменений) в `ui.ops`.
+/// В своём потоке: `run::status` ходит по сети (у `ops_host` запрос с
+/// минутным сроком) и на главном потоке подвесил бы окно.
 pub fn refresh_ops(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     let ctx = ctx_for(ui);
-    ui.ops = run::status(&ctx, &ops_host::host()).into_iter().map(|(id, title, st)| op_view(id, title, st)).collect();
-    cx.refresh_windows();
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        guarded(
+            &tx,
+            || Ev::Ops(run::status(&ctx, &ops_host::host()).into_iter().map(|(id, title, st)| op_view(id, title, st)).collect()),
+            || Ev::Ops(Vec::new()),
+        );
+    });
 }
 
 pub fn open_web(cx: &mut App) {
@@ -347,13 +393,16 @@ pub fn open_web(cx: &mut App) {
 
 /// Выход: ждём, пока сеанс действительно опустится (поток собственного
 /// рантайма сеанса), и только потом закрываем приложение — иначе туннель
-/// обрывается не чисто.
+/// обрывается не чисто. Ждём не дольше `STOP_WAIT`: застрявший `stop` не
+/// должен держать «Выход» навсегда.
 pub fn quit(cx: &mut App) {
     if let Some(s) = cx.global_mut::<Ui>().session.take() {
-        let stopped = std::thread::spawn(move || {
+        let (done, stopped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let _ = s.stop();
+            let _ = done.send(());
         });
-        let _ = stopped.join();
+        let _ = stopped.recv_timeout(STOP_WAIT);
     }
     cx.quit();
 }
@@ -391,6 +440,10 @@ fn handle(ev: Ev, cx: &mut App) {
             } else {
                 Line { kind: Kind::Ok, text: "Все факты в порядке. Отчёт — last-check.txt".into() }
             });
+            cx.refresh_windows();
+        }
+        Ev::Ops(ops) => {
+            cx.global_mut::<Ui>().ops = ops;
             cx.refresh_windows();
         }
     }
@@ -454,6 +507,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             status: None,
             tray: Some(tray),
             window: None,
+            panel: None,
             hidden_at: None,
             dialog_open: false,
             tx,
@@ -497,6 +551,7 @@ impl Ui {
             status: None,
             tray: None,
             window: None,
+            panel: None,
             hidden_at: None,
             dialog_open: false,
             tx,
@@ -574,6 +629,25 @@ mod tests {
         assert_eq!(link_line(&State::Connecting, &h).unwrap().text, "подключаюсь к s:1 как dev2");
         assert_eq!(link_line(&State::Off, &h).unwrap().text, "отключено");
         assert!(link_line(&State::Up { since: Instant::now() }, &h).is_none());
+    }
+
+    #[test]
+    fn a_panicking_worker_still_reports_the_end_of_the_work() {
+        use super::{guarded, Ev, PANIC_TEXT};
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        guarded(&tx, || -> Ev { Ev::Done(None) }, || -> Ev { unreachable!("тело не паниковало") });
+        assert!(matches!(rx.try_recv().unwrap(), Ev::Done(None)));
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        guarded(&tx, || -> Ev { panic!("ой") }, || Ev::Done(Some("сломалось".into())));
+        std::panic::set_hook(prev);
+        match rx.try_recv().unwrap() {
+            Ev::Line(l) => assert_eq!((l.kind, l.text.as_str()), (Kind::Fail, PANIC_TEXT)),
+            _ => panic!("первой должна идти строка в журнал"),
+        }
+        // Без этого `busy` остался бы навсегда и кнопки — заблокированными.
+        assert!(matches!(rx.try_recv().unwrap(), Ev::Done(Some(_))));
     }
 
     #[test]

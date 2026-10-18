@@ -4,7 +4,7 @@
 //! фокуса раньше, чем клик по трею успевает его поднять заново).
 
 use super::panel::Panel;
-use super::Ui;
+use super::{note_line, Kind, Line, Ui};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -78,15 +78,26 @@ pub fn show_window(cx: &mut App) {
         icon,
         ..Default::default()
     };
-    if let Ok((handle, _)) = gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Panel::new(window, cx))) {
-        cx.global_mut::<Ui>().window = handle.downcast::<Panel>();
+    match gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Panel::new(window, cx))) {
+        Ok((handle, panel)) => {
+            let ui = cx.global_mut::<Ui>();
+            ui.window = Some(handle);
+            ui.panel = Some(panel);
+        }
+        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("окно не открылось: {e:#}") }),
     }
 }
 
-pub fn hide_window(window: &mut Window, cx: &mut App) {
-    let ui = cx.global_mut::<Ui>();
+/// Окна больше нет: обе ручки забываются вместе — иначе `show_window`
+/// поднимал бы закрытое окно, а журнал считал бы строки прочитанными.
+pub fn forget_window(ui: &mut Ui) {
     ui.window = None;
+    ui.panel = None;
     ui.hidden_at = Some(Instant::now());
+}
+
+pub fn hide_window(window: &mut Window, cx: &mut App) {
+    forget_window(cx.global_mut::<Ui>());
     window.remove_window();
 }
 
@@ -100,7 +111,8 @@ pub fn toggle_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{flyout_origin, should_show, GAP, SIZE};
+    use super::{flyout_origin, forget_window, should_show, GAP, SIZE};
+    use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
 
@@ -118,5 +130,15 @@ mod tests {
         assert!(should_show(None, now));
         assert!(!should_show(Some(now - Duration::from_millis(100)), now));
         assert!(should_show(Some(now - Duration::from_millis(900)), now));
+    }
+
+    #[test]
+    fn hiding_forgets_both_handles_and_starts_the_grace_window() {
+        let mut ui = Ui::for_test();
+        ui.hidden_at = None;
+        forget_window(&mut ui);
+        assert!(ui.window.is_none(), "ручка окна");
+        assert!(ui.panel.is_none(), "сущность панели");
+        assert!(ui.hidden_at.is_some(), "щелчок по трею сразу после — закрыть, а не открыть");
     }
 }

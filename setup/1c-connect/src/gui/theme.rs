@@ -64,6 +64,9 @@ pub fn install(kit: &Kit, cx: &mut App) {
         Cow::Borrowed(include_bytes!("../../fonts/Lilex-Regular.ttf").as_slice()),
     ]);
     let reg = ThemeRegistry::global_mut(cx);
+    // Паника здесь намеренна: JSON вшит в двоичный файл на сборке, и его
+    // разбор с обоими именами тем проверяет тест ниже — сломаться это может
+    // только при правке самого файла, и тогда лучше сразу и громко.
     reg.load_themes_from_str(THEME_JSON).expect("theme json");
     let (light, dark) = (reg.themes()[LIGHT].clone(), reg.themes()[DARK].clone());
     let theme = Theme::global_mut(cx);

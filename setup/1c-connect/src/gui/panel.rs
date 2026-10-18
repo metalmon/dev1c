@@ -167,7 +167,11 @@ impl Panel {
         .detach();
 
         let original = host.clone();
-        Self { focus: cx.focus_handle(), fields, log_scroll: ScrollHandle::new(), log_len: 0, original }
+        // Клавиатура сразу у панели: Esc прячет окно и до того, как щёлкнули
+        // хоть по одному полю.
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        Self { focus, fields, log_scroll: ScrollHandle::new(), log_len: 0, original }
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
@@ -176,7 +180,8 @@ impl Panel {
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
     /// проверки — строкой, toml не тронут, набранное остаётся в поле.
-    fn save(&mut self, cx: &mut Context<Self>) {
+    /// Возвращает, удалось ли: по неудаче сеанс не перезапускают.
+    fn save(&mut self, cx: &mut Context<Self>) -> bool {
         let host = host_of(&self.fields, cx);
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
@@ -188,10 +193,13 @@ impl Panel {
             self.original = host;
         }
         gui::refresh_ops(cx);
+        ok
     }
 
     /// Выбор папки: на время диалога окно не прячется (`dialog_open`), после
-    /// — возвращается на передний план, путь ложится в поле и в toml.
+    /// — возвращается на передний план, путь ложится в поле. В toml его
+    /// отнесёт «Сохранить»: кнопка загорится сама, поле разошлось с
+    /// сохранённым.
     fn pick_dir(&mut self, target: Entity<InputState>, cx: &mut Context<Self>) {
         cx.global_mut::<Ui>().dialog_open = true;
         let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
@@ -199,14 +207,16 @@ impl Panel {
             let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next());
             let _ = cx.update(|cx| {
                 cx.global_mut::<Ui>().dialog_open = false;
-                let Some(w) = cx.global::<Ui>().window else { return };
-                let _ = w.update(cx, |panel, window, cx| {
+                let ui = cx.global::<Ui>();
+                let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
+                let _ = w.update(cx, |_, window, cx| {
                     window.activate_window();
                     if let Some(p) = &picked {
                         let text = p.display().to_string();
                         target.update(cx, |s, cx| s.set_value(text, window, cx));
-                        panel.save(cx);
                     }
+                    // Клавиатура обратно панели — Esc работает и после диалога.
+                    panel.update(cx, |this, cx| this.focus.focus(window, cx));
                 });
             });
         })
@@ -503,10 +513,13 @@ impl Render for Panel {
                     .disabled(!dirty)
                     .on_click(cx.listener(|panel, _, _, cx| {
                         let was_on_cur = cx.global::<Ui>().link.is_on();
-                        panel.save(cx);
-                        if was_on_cur {
+                        // Сеанс перезапускаем только по удачной записи: иначе
+                        // живой туннель оборвался бы ради непринятых параметров.
+                        if panel.save(cx) && was_on_cur {
                             gui::stop_session(cx);
-                            let _ = gui::start_session(cx);
+                            if let Err(e) = gui::start_session(cx) {
+                                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                            }
                         }
                         cx.refresh_windows();
                     }))

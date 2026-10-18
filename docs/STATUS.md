@@ -77,8 +77,9 @@ script days is obsolete; the scripts are gone.
   `last-check.txt`; «Подключить» with the sample address refuses in the log;
   the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
-  model: blocked) and the access addresses. `cargo check` with Tauri fits
-  this laptop at 3 jobs (4.5 min, under 4 GB); release builds stay in CI.
+  model: blocked) and the access addresses. Builds belong in CI: on this
+  laptop a cold `cargo check` of the GPUI window takes about 10 minutes and
+  only fits at `-j 1`, in the foreground; release builds stay in CI too.
 
 - **Inference server, host form** (2026-10-16, this machine, 3060 Ti 8 GB with
   the Volt pilot's `volt-llama` already on the card): `install --only

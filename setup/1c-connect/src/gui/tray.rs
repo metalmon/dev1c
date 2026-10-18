@@ -123,7 +123,14 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
         MenuAction::Check => {
             window::show_window(cx);
             cx.global_mut::<Ui>().tab = Tab::Check;
-            run_check(cx);
+            // Пока проверка (или установка) идёт, пункт меню только
+            // показывает вкладку: второй прогон поверх первого путал бы
+            // `busy` и писал бы отчёт дважды.
+            if cx.global::<Ui>().busy.is_none() {
+                run_check(cx);
+            } else {
+                cx.refresh_windows();
+            }
         }
         MenuAction::Web => open_web(cx),
         MenuAction::Theme(c) => {

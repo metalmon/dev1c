@@ -117,11 +117,36 @@ script days is obsolete; the scripts are gone.
   the live tunnel as `dev1` and `dev2`, and the Linux kit packed with the
   vrunner row.
 
+- **vrunner project flow (stage 6B, 2026-10-18):** `host.project` on a real
+  git (Cyrillic path with a space, base-directory refusal, drift by branch /
+  origin / files, idempotent second init), `local::call` against a scripted
+  MCP child (initialize → call → reap; a child that dies is an error, not a
+  hang), `flow` export/import order through fakes (no push after a failed
+  decompile, import refused while the platform runs, full-load warning
+  without `ConfigDumpInfo.xml`, the way back after a failed `cf_load`, busy
+  like any tool), the thirteen `check` facts, connection arguments replacing
+  the agent's (case-insensitive) — 93 tests. CI run 39117216055 and later:
+  the image creates the `dev1c` organisation with the three workstations as
+  owners, `~/.git-credentials` 0600 per home, and a push-to-create by `dev2`
+  lands in the organisation. On this machine, against the running container
+  patched additively (org, credentials, `Match User dev1..3` appended, sshd
+  reloaded): `1c-connect install` laid out `C:\proj\InfoBase` (`oscript
+  2.2.0` answers from it), `check` 13/13 with the base user `mcp`, the window
+  shows the «Проект» tab and the parameters fit without scrolling, and
+  `1c-connect export` decompiled Бухгалтерия into `src` (92 k files,
+  `ConfigDumpInfo.xml` present) and committed it on `dev1` with the CI-built
+  `1c-connect.exe`.
+
 ## Not verified
 
-- The vrunner bridge over a live tunnel (778N from Zed) and with a real
-  project: `host.project`, export/import and the «Проект» tab are plan 6B.
-  `cf_load`/`cf_decompile` through the bridge not yet run against a base.
+- The push of that first export did not reach Gitea from this laptop: with
+  Docker at 4.7 GB and under 1 GB free, `git pack-objects` over 92 k objects
+  crawled at 4 % CPU for two hours (`pack.window=0` did not help), and every
+  background attempt was killed for memory. Still to run when the machine is
+  free: the push (branches `main` and `dev1` in `dev1c/InfoBase`), the edit
+  in the container → `import` → incremental `cf_load`, the bridge over a live
+  tunnel from Zed, and the Job Object against a real Configurator. The
+  project-side git code is covered by tests on a real git with a bare origin.
 - The container form (`serve = "docker"`) ran only through its unit tests and
   the CI image save: no live `docker run --gpus all` of `dev1c-llama` here
   (the card is shared with `volt-llama`).
@@ -254,6 +279,23 @@ script days is obsolete; the scripts are gone.
   take the decision out of the lock before awaiting.
 - `PathBuf::file_name` on Linux sees `C:\proj\Buh` as one segment: derive
   names from strings by both separators when the config may come from Windows.
+- `vrunner-mcp` takes the base user only from tool arguments: `VRUNNER_DBUSER`
+  / `VRUNNER_DBPWD` are ignored (while `VRUNNER_IBCONNECTION` works), so the
+  bridge and the local caller put `ibconnection`, `db-user`, `db-pwd` into every
+  vrunner call — and replace whatever the agent sent, or the host's password
+  would travel to an address of the agent's choosing. `cf_decompile`/`cf_load`
+  also need `oscript` on PATH for their background tasks; `background: false`
+  makes them synchronous.
+- On Windows `git commit` cannot detach its auto-gc: committing a 92 k-file
+  dump repacked for an hour at 2 GB RAM. The bridge's git runs with
+  `gc.auto=0`, `core.fscache`, `core.preloadindex`. The first push of such a
+  dump is still minutes of `pack-objects` on a healthy machine and hopeless on
+  a starved one — do it once, before the pilot, not on the user's laptop.
+- The test base's user is `mcp`/`mcp` (publication answers 200 to anything,
+  so the publication proves nothing about Configurator credentials);
+  «Пользователь ИБ не идентифицирован» is the platform saying "wrong user".
+- PowerShell `Start-Process -ArgumentList` splits an argument with a space
+  (`--message "первая выгрузка"` became two arguments and clap refused).
 - A line-framer with a size limit has two overflow paths: the limit crossed
   with no newline in sight, and the newline arriving in the same read as the
   overflow. The first was tested, the second emitted an 8 MiB `Line` — found
@@ -345,7 +387,12 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    `export`/`import`, the «Проект» tab and project fields in the window,
    the remaining `check` facts (vrunner-mcp answers, project, Gitea,
    Configurator, removable media), the image (org `dev1c`, git credentials,
-   AGENTS.md), live run here with Бухгалтерия. This is what makes PRISM
+   AGENTS.md), live run here with Бухгалтерия. **6B done 2026-10-18** except
+   the tail of the live run (see «Not verified»): plan
+   `docs/superpowers/plans/2026-10-17-vrunner-project.md`. Left for the
+   merge with the other tracks (GPUI window in worktree `pgui`, the image
+   with the platform inside): the «Проект» tab logic is in `flow.rs` /
+   `project.rs` / `verify.rs`, not in the window. This is what makes PRISM
    category B possible.
 7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.

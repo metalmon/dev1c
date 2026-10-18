@@ -117,26 +117,31 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
 # --- the demo base -----------------------------------------------------------
 # One template base in the image; every workstation gets its own copy on first
 # use (see config/1c/stand.sh). Built from a configuration template in the
-# platform context when one is named — DEMO_TEMPLATE=<file>, e.g. the .cf of
-# the training УНФ — otherwise from an empty configuration: the stand still
-# shows the tools. The mcp-1c extension goes in here; whether it applies is
-# checked right away through a throwaway Apache, and a 404 is a warning, not a
-# failure: on an empty 8.5 base the spike saw it refused (DefaultLanguage
-# check), the demo configuration is where it matters.
+# platform context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt —
+# otherwise from an empty configuration: the stand still shows the tools.
+# The template in use is the training УНФ 3.0.13.251 WITHOUT data
+# (1cv8new.dt of its kit, here unf-empty.dt): the kit's demo base with data
+# cannot be opened under the training licence — its users have passwords,
+# and the licence allows only empty ones (the platform says so in a dialog
+# and exits). A base of this configuration is about 1.9 GB.
+# The mcp-1c extension goes in here; whether it applies is checked right away
+# through a throwaway Apache, and a 404 is a warning, not a failure.
 ARG DEMO_TEMPLATE=
 COPY config/1c/stand.sh /usr/local/bin/1c-stand
 RUN --mount=type=bind,from=platform,target=/platform \
     sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand \
     && P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
+    # every Designer run prints its own log, pass or fail: a silent chain is
+    # what cost the first build with a template an hour
+    && D() { xvfb-run -a "$P/1cv8" "$@" /Out /tmp/d.log 2>/dev/null; rc=$?; cat /tmp/d.log; echo " [rc=$rc] $1 $2"; return $rc; } \
     && if [ -n "${DEMO_TEMPLATE}" ]; then test -f "/platform/${DEMO_TEMPLATE}" && tpl="/UseTemplate /platform/${DEMO_TEMPLATE}"; else tpl=""; fi \
-    && xvfb-run -a "$P/1cv8" CREATEINFOBASE "File=$B" $tpl /DisableStartupDialogs /DisableStartupMessages /Out /tmp/create.log \
-    && test -s "$B/1Cv8.1CD" \
+    && D CREATEINFOBASE "File=$B" $tpl /DisableStartupDialogs /DisableStartupMessages \
+    && test -s "$B/1Cv8.1CD" && du -sh "$B" \
     # two Designer runs: two -Extension keys in one command line are refused
-    && xvfb-run -a "$P/1cv8" DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
-         /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService /Out /tmp/ext.log \
-    && xvfb-run -a "$P/1cv8" DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
-         /UpdateDBCfg -Extension MCP_HTTPService /Out /tmp/upd.log \
-    && cat /tmp/create.log /tmp/ext.log /tmp/upd.log && rm -f /tmp/create.log /tmp/ext.log /tmp/upd.log \
+    && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+         /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService \
+    && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+         /UpdateDBCfg -Extension MCP_HTTPService \
     && chmod -R a+rX /opt/1c-demo \
     # the check: a copy of the base, published for www-data on a spare port
     && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \

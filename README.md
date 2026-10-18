@@ -154,12 +154,15 @@ this layer is built where the file is, not in CI:
 ```
 mkdir platform                         # git- and docker-ignored
 # put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz)
-# optionally the demo configuration template, e.g. the training УНФ's 1Cv8.cf
-docker build -f Dockerfile.1c --build-context platform=platform              [--build-arg DEMO_TEMPLATE=1Cv8.cf] -t oktaplus/dev1c-1c:latest .
+# the demo configuration: the training УНФ without data (1cv8new.dt of its kit)
+docker build -f Dockerfile.1c --build-context platform=platform \
+             --build-arg DEMO_TEMPLATE=unf-empty.dt -t oktaplus/dev1c-1c:latest .
 docker exec <container> test-stand    # the check of a running stand
 ```
 
-The build itself checks the platform (ldd, a base created under Xvfb), the
+The demo base is the training УНФ 3.0.13.251 without data: the kit's demo base
+with data has users with passwords, and the training licence admits only empty
+ones. The build itself checks the platform (ldd, a base created under Xvfb), the
 mcp-1c HTTP service on the demo base through a throwaway Apache, and
 vrunner-mcp's tool list. While a stand holds `777N`/`778N`, `1c-connect` from a
 real machine cannot bind them: a workstation is either demo or real.

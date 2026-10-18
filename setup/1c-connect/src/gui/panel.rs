@@ -299,7 +299,7 @@ impl Render for Panel {
                     .child(div().text_size(px(13.)).text_color(muted).child(sub)),
             )
             .child(
-                Switch::new("link")
+                Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
                     .tooltip("Туннель в среду разработки")
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
@@ -478,7 +478,7 @@ impl Render for Panel {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.log_scroll)
-                    .font_family("Lilex")
+                    .font_family("Lilex").text_size(px(14.))
                     .child(v_flex().children(lines.into_iter().map(|l| {
                         div()
                             .text_color(match l.kind {

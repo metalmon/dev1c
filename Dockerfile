@@ -31,6 +31,10 @@ RUN git clone --depth=1 https://github.com/nana-4/materia-theme.git /tmp/materia
          'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=e6b800' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' 'MATERIA_PANEL_OPACITY=1' > /tmp/1c-dark \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-light /tmp/1c-light \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-dark /tmp/1c-dark \
+    `# Materia labels desktop icons white with a shadow, for dark wallpapers;` \
+    `# on the light theme's wallpaper that is white on white. Appended last,` \
+    `# so it wins over the theme's own rule.` \
+    && printf '\nXfdesktopIconView.view { color: #333333; text-shadow: none; }\n' >> /usr/share/themes/1C-light/gtk-3.0/gtk.css \
     && test -f /usr/share/themes/1C-light/gtk-3.0/gtk.css && test -f /usr/share/themes/1C-dark/gtk-3.0/gtk.css \
     && test -d /usr/share/themes/1C-light/xfwm4
 

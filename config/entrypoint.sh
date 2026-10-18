@@ -32,7 +32,7 @@ done
 # added in a later image has no home at all on an existing volume. Nothing
 # complains: the user simply has no files, and sshd quietly refuses their key
 # because the directory it does find belongs to root.
-for u in dev1 dev2 dev3 dev; do
+for u in dev1 dev2 dev3; do
     id "$u" >/dev/null 2>&1 || continue
     home=$(getent passwd "$u" | cut -d: -f6)
     [ -n "$home" ] || continue
@@ -44,6 +44,19 @@ for u in dev1 dev2 dev3 dev; do
     # Ownership is checked every time, not only on creation: root-owned files in
     # a user's home are exactly what breaks key-based login.
     [ "$(stat -c '%U' "$home")" = "$u" ] || chown -R "$u:$u" "$home"
+    # git without a password prompt and with a real identity: the credential
+    # helper is `store` in /etc/gitconfig, this is the file it reads. Written
+    # only when absent — a person may have changed the password or the name.
+    # Symlinks are refused: this runs as root inside the user's home.
+    cred="$home/.git-credentials"
+    if [ ! -e "$cred" ] && [ ! -L "$cred" ]; then
+        printf 'http://%s:%s@localhost:3000\n' "$u" "$u" >"$cred"
+        chown "$u:$u" "$cred" && chmod 600 "$cred"
+    fi
+    if [ ! -e "$home/.gitconfig" ] && [ ! -L "$home/.gitconfig" ]; then
+        printf '[user]\n\tname = %s\n\temail = %s@dev1c.local\n' "$u" "$u" >"$home/.gitconfig"
+        chown "$u:$u" "$home/.gitconfig"
+    fi
 done
 
 # --- Editor settings from the image -------------------------------------------

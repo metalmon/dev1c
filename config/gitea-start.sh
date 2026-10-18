@@ -125,18 +125,46 @@ fi
 "$GITEA_BIN" web --config "$GITEA_CONF" >>"$GITEA_LOG" 2>&1 &
 GITEA_PID=$!
 
+# Wait for HTTP: the organisation and the seeding below talk to the API.
+i=0
+while [ $i -lt 60 ]; do
+    if curl -sf -o /dev/null "http://localhost:3000/api/v1/version" 2>/dev/null; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+# --- The developers' organisation ----------------------------------------------
+# One repository per base lives under dev1c/<base>, every workstation an owner:
+# push-to-create then works for any of them, and 1c-connect's first
+# project_push creates the repository. Idempotent and run every start: the org
+# is created once, owners are re-added (a PUT for a member is a no-op).
+api() { # $1 = method, $2 = path, $3 = json body (optional) → HTTP status
+    if [ -n "${3:-}" ]; then
+        curl -s -o /dev/null -w '%{http_code}' -X "$1" -u "${GITEA_ADMIN}:${GITEA_PASSWORD}" \
+            -H 'Content-Type: application/json' -d "$3" "http://localhost:3000/api/v1$2" 2>/dev/null || true
+    else
+        curl -s -o /dev/null -w '%{http_code}' -X "$1" -u "${GITEA_ADMIN}:${GITEA_PASSWORD}" \
+            "http://localhost:3000/api/v1$2" 2>/dev/null || true
+    fi
+}
+if [ "$(api GET /orgs/dev1c)" != "200" ]; then
+    api POST /orgs '{"username":"dev1c","full_name":"Разработка 1С","visibility":"public","repo_admin_change_team_access":true}' >/dev/null
+    echo "organisation dev1c created" >>"$GITEA_LOG"
+fi
+owners=$(curl -sf -u "${GITEA_ADMIN}:${GITEA_PASSWORD}" "http://localhost:3000/api/v1/orgs/dev1c/teams" 2>/dev/null \
+    | jq -r '.[] | select(.name=="Owners") | .id' 2>/dev/null | head -1)
+if [ -n "$owners" ]; then
+    for u in $GITEA_USERS; do
+        api PUT "/teams/$owners/members/$u" >/dev/null
+    done
+else
+    echo "organisation dev1c: Owners team not found, members not added" >>"$GITEA_LOG"
+fi
+
 # --- Seeding repositories (first run only) ------------------------------------
 if [ "$FIRST_RUN" = "1" ] && [ -d "$SEED_DIR" ]; then
-    # Wait for HTTP: pushing before that is pointless
-    i=0
-    while [ $i -lt 60 ]; do
-        if curl -sf -o /dev/null "http://localhost:3000/api/v1/version" 2>/dev/null; then
-            break
-        fi
-        i=$((i + 1))
-        sleep 1
-    done
-
     for repo in "$SEED_DIR"/*; do
         [ -d "$repo" ] || continue
         name=$(basename "$repo")

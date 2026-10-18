@@ -64,9 +64,12 @@ impl Line {
 /// 2026-10-19).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Tab {
+    /// Первой открывается она: полоса читается как порядок работы, и на
+    /// первом запуске администратор идёт сюда. Состояние среды он видит и
+    /// отсюда — карточка в шапке висит на всех вкладках.
     #[default]
-    Ops,
     Params,
+    Ops,
     Access,
     Check,
     Log,
@@ -155,19 +158,6 @@ pub fn load_or_default(kit: &Kit) -> (Cfg, Option<String>) {
     match Cfg::load(kit) {
         Ok(cfg) => (cfg, None),
         Err(e) => (Cfg::default(), Some(format!("{e:#}"))),
-    }
-}
-
-/// Какая вкладка открывается первой. Обычно «Операции»: незаполненное видно
-/// там словами (операция отвечает `Blocked` с именем параметра). «Параметры» —
-/// когда смотреть надо на них: файла нет (его удалили — комплект всегда едет
-/// с `dev1c.toml`, см. `pack.sh`) или файл не прочитан, и список операций
-/// посчитан по умолчаниям, а не по тому, что в файле.
-pub fn start_tab(file_exists: bool, cfg_unread: bool) -> Tab {
-    if file_exists && !cfg_unread {
-        Tab::Ops
-    } else {
-        Tab::Params
     }
 }
 
@@ -530,15 +520,6 @@ mod tests {
         // Полоса вкладок и индексы, по которым приходит щелчок, — один
         // список: разъедутся они молча, поэтому порядок закреплён тестом.
         assert_eq!(Tab::ALL.map(|t| t.title()), ["Параметры", "Операции", "Доступ", "Проверка", "Журнал"]);
-    }
-
-    #[test]
-    fn the_first_tab_is_operations_unless_the_parameters_need_a_look() {
-        assert_eq!(start_tab(true, false), Tab::Ops);
-        // Файла нет или он не прочитан — человеку нужны «Параметры», а не
-        // список операций, посчитанный по умолчаниям.
-        assert_eq!(start_tab(false, false), Tab::Params);
-        assert_eq!(start_tab(true, true), Tab::Params);
     }
 
     #[test]

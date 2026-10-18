@@ -309,7 +309,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             addresses: ui::local_addresses(),
             log: Vec::new(),
             unread: 0,
-            tab: ui::start_tab(file_exists, cfg_error.is_some()),
+            tab: Tab::default(),
             started: None,
             busy: None,
             pending: 0,

@@ -13,9 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # oomox preset path): the same tokens 1c-connect's window uses — sampled from
 # 1C:Enterprise 8.3.27 Такси, see setup/1c-connect/theme/1c.json. Light is the
 # default on the desktop (Такси is light); dark is the same roles on warm dark
-# greys. Selections are 1C's blue (#1C55AE light / #6FA3F0 dark), not the
-# yellow accent: Materia paints white text over the selection colour, and
-# white on yellow cannot be read. Radius 4, compact density, like the window.
+# greys. The accent is the yellow #FACC1F in both: Materia derives the text
+# colour on it by contrast (on-primary), so it comes out dark, as in the
+# window. Radius 4, compact density, like the window.
 # --inkscape False: rsvg-convert renders the assets, inkscape is not here.
 RUN git clone --depth=1 https://github.com/nana-4/materia-theme.git /tmp/materia \
     && cd /tmp/materia \
@@ -24,9 +24,9 @@ RUN git clone --depth=1 https://github.com/nana-4/materia-theme.git /tmp/materia
     `# wrote an empty PNG - a tolerant wrapper keeps the build going` \
     && printf '#!/bin/sh\nresvg "$@" || exit 0\n' > /usr/local/bin/rendersvg && chmod +x /usr/local/bin/rendersvg \
     && printf '%s\n' 'BG=f5f5f5' 'FG=333333' 'MATERIA_VIEW=ffffff' 'MATERIA_SURFACE=ffffff' \
-         'HDR_BG=f0f0f0' 'HDR_FG=333333' 'SEL_BG=1c55ae' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-light \
+         'HDR_BG=f0f0f0' 'HDR_FG=333333' 'SEL_BG=facc1f' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-light \
     && printf '%s\n' 'BG=262626' 'FG=dcdcdc' 'MATERIA_VIEW=262626' 'MATERIA_SURFACE=2c2c2c' \
-         'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=6fa3f0' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-dark \
+         'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=facc1f' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-dark \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-light /tmp/1c-light \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-dark /tmp/1c-dark \
     && test -f /usr/share/themes/1C-light/gtk-3.0/gtk.css && test -f /usr/share/themes/1C-dark/gtk-3.0/gtk.css \

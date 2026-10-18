@@ -76,7 +76,7 @@ fn blot_words(line: &str) -> String {
         let blotted = if blot_next {
             blot_next = false;
             "…".to_string()
-        } else if w == "Basic" || w == "--password" || w == "--db-pwd" {
+        } else if w == "Basic" || w == "--password" || w == "--db-pwd" || w == "--db-password" {
             blot_next = true;
             w.to_string()
         } else if w.starts_with("/P") && w.len() > 2 {
@@ -209,6 +209,9 @@ mod tests {
         assert!(!r.contains("qwerty") && r.contains("/P…"), "{r}");
         assert!(!r.contains("secret") && r.contains("--db-pwd=…") && r.contains("--db-user=Admin"), "{r}");
         assert_eq!(redact_text("API_KEY=abc"), "API_KEY=…");
+        // mcp-1c --install echoes its argv in an error: the password after
+        // --db-password is blotted the same way as after --db-pwd.
+        assert_eq!(redact_text("mcp-1c --install C:\\b --db-user mcp --db-password hunter2 failed"), "mcp-1c --install C:\\b --db-user mcp --db-password … failed");
         // docker inspect prints env as indented JSON strings: still blotted.
         let r = redact_text("            \"CUSTOM_API_KEY=f5b8bc7e\",
             \"PATH=/bin\",");

@@ -838,7 +838,7 @@ mod tests {
         let c = card(Some(&r), &State::Off, &p, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю в git");
-        assert_eq!(c.sub, "01 мин 05 с");
+        assert_eq!(c.sub, "1 мин 05 с");
         assert_eq!(c.note, Some("git: add…".into()));
         assert_eq!(c.stale, None);
         assert!(c.cancel);

@@ -39,6 +39,15 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 russh = { version = "0.64", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Значку в трее на Linux нужен бэкенд, иначе `tray-icon` отказывается
+# собираться: «either the `libappindicator` or `ksni` feature must be enabled».
+# Берём libappindicator: панель XFCE показывает его элементы (проверено в
+# образе живым значком), а меню у `muda` на Linux всё равно через GTK, так что
+# `ksni` без GTK не обошёлся бы. На сборке нужны libgtk-3-dev и
+# libayatana-appindicator3-dev, в образе — libayatana-appindicator3-1.
+tray-icon = { version = "=0.26.1", default-features = false, features = ["libappindicator"], optional = true }
+
 [target.'cfg(windows)'.dependencies]
 # Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не
 # отдаёт. Новой сборки крейт не добавляет — он уже в зависимостях gpui.

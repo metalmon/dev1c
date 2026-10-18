@@ -541,8 +541,8 @@ pub fn run_op(cx: &mut App, which: Which) {
                         .unwrap_or(Ok(()))
                         .map_err(|e| format!("{e:#}")),
                     // Те же инструменты, что зовёт агент, под тем же замком проекта.
-                    Which::Export => flow::export(&ctx, "выгрузка из 1c-connect").map(|t| ctx.ok(t)),
-                    Which::Import => flow::import(&ctx).map(|t| ctx.ok(t)),
+                    Which::Export => flow::export(&ctx, "выгрузка из 1c-connect", &project::NEVER).map(|t| ctx.ok(t)),
+                    Which::Import => flow::import(&ctx, &project::NEVER).map(|t| ctx.ok(t)),
                 };
                 Ev::Done(r.err())
             },

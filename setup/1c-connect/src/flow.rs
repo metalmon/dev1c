@@ -6,6 +6,7 @@ use crate::local::Reply;
 use crate::ops_host::Ctx;
 use common::{Phase, Runner};
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 
 pub struct Deps<'a> {
     pub call: &'a dyn Fn(&str, Value) -> Result<Reply, String>,
@@ -79,7 +80,7 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
 }
 
 /// Настоящие части: процесс `vrunner-mcp` из инструментов на машине, git проекта.
-fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
+fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
     let tools = crate::ops_host::tools_dir();
     let p = crate::project::Project::from_cfg(&ctx.cfg, &tools);
     let log = |s: String| ctx.say(s);
@@ -94,8 +95,8 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
         let cmd = crate::bridge::vrunner_command(&cfg, &tools).into_std();
         crate::local::call(cmd, tool, args, std::time::Duration::from_secs(3600), &log)
     };
-    let push = |m: &str| crate::project::push(&p, m);
-    let pull = || crate::project::pull(&p);
+    let push = |m: &str| crate::project::push(&p, m, cancel);
+    let pull = || crate::project::pull(&p, cancel);
     let phase = |ph: Phase| ctx.progress(ph);
     let d = Deps {
         call: &call,
@@ -109,12 +110,12 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
     f(&d, &log)
 }
 
-pub fn export(ctx: &Ctx, message: &str) -> Result<String, String> {
-    with_real(ctx, |d, log| export_with(d, message, log))
+pub fn export(ctx: &Ctx, message: &str, cancel: &AtomicBool) -> Result<String, String> {
+    with_real(ctx, cancel, |d, log| export_with(d, message, log))
 }
 
-pub fn import(ctx: &Ctx) -> Result<String, String> {
-    with_real(ctx, |d, log| import_with(d, log))
+pub fn import(ctx: &Ctx, cancel: &AtomicBool) -> Result<String, String> {
+    with_real(ctx, cancel, |d, log| import_with(d, log))
 }
 
 #[cfg(test)]

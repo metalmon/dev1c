@@ -5,7 +5,8 @@
 use crate::cfg::Cfg;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 pub const GITATTRIBUTES: &str = "* -text\n";
@@ -163,7 +164,8 @@ struct Out {
     text: String,
 }
 
-fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
+/// Один набор флагов и окружения на все пути запуска — обычный и прерываемый.
+fn git_cmd(p: &Project, args: &[&str]) -> Command {
     let mut c = Command::new(&p.git);
     c.args(git_flags(&p.login)).args(args).current_dir(&p.dir).env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
@@ -171,7 +173,11 @@ fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x0800_0000);
     }
-    let o = c.output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    c
+}
+
+fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
+    let o = git_cmd(p, args).output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
     let mut text = String::from_utf8_lossy(&o.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&o.stderr));
     Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
@@ -179,6 +185,45 @@ fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
 
 fn must(p: &Project, args: &[&str]) -> Result<String, String> {
     let o = git(p, args)?;
+    if o.ok {
+        Ok(o.text)
+    } else {
+        Err(format!("git {}: {}", args.join(" "), o.text))
+    }
+}
+
+/// Как `git`, но прерываемо: `cancel` взведённый до старта — вообще не
+/// запускает процесс, взведённый во время ожидания — убивает его. Вывод
+/// читается только после выхода: у `push -q`/`pull --rebase` его мало.
+/// ponytail: вывод читается после выхода; у push -q / pull --rebase его мало, при переполнении канала перейти на чтение в потоке
+fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("прервано".into());
+    }
+    let mut child = git_cmd(p, args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("прервано".into());
+        }
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(_) => break,
+            None => std::thread::sleep(std::time::Duration::from_millis(250)),
+        }
+    }
+    let o = child.wait_with_output().map_err(|e| e.to_string())?;
+    let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&o.stderr));
+    Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
+}
+
+fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, String> {
+    let o = git_wait(p, args, cancel)?;
     if o.ok {
         Ok(o.text)
     } else {
@@ -213,7 +258,7 @@ pub fn status(p: &Project) -> Result<String, String> {
     Ok(format!("ветка {branch}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}"))
 }
 
-pub fn pull(p: &Project) -> Result<String, String> {
+pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     ensure_origin(p)?;
     // A fresh project has no branch on the server yet — that comes first:
     // its tree is "dirty" too, and the useful answer is "export first".
@@ -223,7 +268,7 @@ pub fn pull(p: &Project) -> Result<String, String> {
     if !must(p, &["status", "--porcelain"])?.is_empty() {
         return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
     }
-    let o = git(p, &["pull", "--rebase", "origin", &p.branch])?;
+    let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
     if o.ok {
         return Ok(format!("{}\nтеперь cf_load", o.text));
     }
@@ -242,7 +287,7 @@ pub fn pull(p: &Project) -> Result<String, String> {
     Err(o.text)
 }
 
-pub fn push(p: &Project, message: &str) -> Result<String, String> {
+pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, String> {
     ensure_origin(p)?;
     // Only the roots that exist: a pathspec that matches nothing fails the
     // whole add, and before host.project (6B) some of them are not there yet.
@@ -260,12 +305,15 @@ pub fn push(p: &Project, message: &str) -> Result<String, String> {
     }
     let first = !remote_has(p, "main")?;
     if first {
-        must(p, &["push", "-q", "origin", "HEAD:refs/heads/main"])?;
+        must_wait(p, &["push", "-q", "origin", "HEAD:refs/heads/main"], cancel)?;
     }
-    must(p, &["push", "-q", "-u", "origin", &p.branch])?;
+    must_wait(p, &["push", "-q", "-u", "origin", &p.branch], cancel)?;
     let what = if staged { "отправлено" } else { "нечего коммитить, ветка отправлена" };
     Ok(format!("{what}: ветка {} в {}{}", p.branch, p.remote, if first { " (репозиторий создан, main тоже отправлен)" } else { "" }))
 }
+
+/// Флаг отмены для CLI и моста: его никто не взводит — окно (Task 4) заведёт свой.
+pub static NEVER: AtomicBool = AtomicBool::new(false);
 
 /// Один проект — один процесс за раз.
 pub static LOCK: Mutex<()> = Mutex::new(());
@@ -293,8 +341,8 @@ pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
     DOING.store(DOING_NAMES.iter().position(|n| *n == tool).unwrap_or(1), Relaxed);
     let r = match tool {
         "project_status" => status(p),
-        "project_pull" => pull(p),
-        "project_push" => push(p, args.get("message").and_then(Value::as_str).unwrap_or("")),
+        "project_pull" => pull(p, &NEVER),
+        "project_push" => push(p, args.get("message").and_then(Value::as_str).unwrap_or(""), &NEVER),
         other => Err(format!("нет инструмента {other}")),
     };
     DOING.store(0, Relaxed);
@@ -381,18 +429,50 @@ mod tests {
     }
 
     #[test]
+    fn git_cmd_carries_the_same_flags_as_git() {
+        let (_t, p) = fixture();
+        let c = git_cmd(&p, &["status"]);
+        let flags = git_flags(&p.login);
+        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[..flags.len()], flags[..]);
+        assert_eq!(c.get_current_dir(), Some(p.dir.as_path()));
+        assert!(
+            c.get_envs().any(|(k, v)| k.to_string_lossy().into_owned() == "GIT_TERMINAL_PROMPT" && v.map(|v| v.to_string_lossy().into_owned()) == Some("0".into())),
+            "{:?}",
+            c.get_envs().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_raised_cancel_stops_push_before_the_push_and_a_clear_one_pushes() {
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(push(&p, "m", &cancel), Err("прервано".into()));
+        // The commit happens through `must`, before the cancellable push — it stays.
+        assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "m");
+        let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
+        assert!(heads.is_empty(), "{heads}");
+        cancel.store(false, Ordering::Relaxed);
+        push(&p, "m", &cancel).unwrap_or_else(|e| panic!("{e}"));
+        let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
+        assert!(heads.contains("refs/heads/dev2"), "{heads}");
+        assert!(LOCK.try_lock().is_ok());
+    }
+
+    #[test]
     fn first_push_creates_main_and_the_workstation_branch() {
         let (_t, p) = fixture();
         std::fs::write(p.dir.join("src").join("Module.bsl"), "Процедура А() КонецПроцедуры").unwrap();
         std::fs::write(p.dir.join("secret.log"), "x").unwrap();
-        let text = push(&p, "первая выгрузка").unwrap();
+        let text = push(&p, "первая выгрузка", &NEVER).unwrap();
         assert!(text.contains("dev2"), "{text}");
         let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
         assert!(heads.contains("refs/heads/main") && heads.contains("refs/heads/dev2"), "{heads}");
         // .log is ignored, and only the four roots are added.
         assert!(!git(&p.dir, &["ls-files"]).contains("secret.log"));
         // Nothing new → push still succeeds and says so.
-        let again = push(&p, "пусто").unwrap();
+        let again = push(&p, "пусто", &NEVER).unwrap();
         assert!(again.contains("нечего"), "{again}");
     }
 
@@ -400,7 +480,7 @@ mod tests {
     fn pull_refuses_a_dirty_tree_and_reports_conflicts_by_file() {
         let (t, p) = fixture();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "a").unwrap();
+        push(&p, "a", &NEVER).unwrap();
         // A second clone pushes a conflicting change to dev2.
         let other = t.path().join("other");
         git(t.path(), &["clone", "-q", "-b", "dev2", &p.remote, other.to_str().unwrap()]);
@@ -409,12 +489,12 @@ mod tests {
         git(&other, &["push", "-q", "origin", "dev2"]);
         // Dirty tree here → refused before touching git.
         std::fs::write(p.dir.join("src").join("M.bsl"), "3").unwrap();
-        let e = pull(&p).unwrap_err();
+        let e = pull(&p, &NEVER).unwrap_err();
         assert!(e.contains("project_push"), "{e}");
         // Commit locally without pushing: the push would be rejected (non-fast-forward).
-        let err = push(&p, "mine").unwrap_err();
+        let err = push(&p, "mine", &NEVER).unwrap_err();
         assert!(err.contains("push"), "{err}");
-        let e = pull(&p).unwrap_err();
+        let e = pull(&p, &NEVER).unwrap_err();
         assert!(e.contains("конфликт") && e.contains("M.bsl"), "{e}");
         // The rebase is aborted: the tree is clean and nothing is half-applied,
         // the local commit still exists for a human to merge by hand.
@@ -431,7 +511,7 @@ mod tests {
         let (t, mut p) = fixture();
         p.remote = t.path().join("absent.git").to_string_lossy().into();
         assert_eq!(remote_has(&p, "main"), Ok(false));
-        let e = pull(&p).unwrap_err();
+        let e = pull(&p, &NEVER).unwrap_err();
         assert!(e.contains("Выгрузить в git"), "{e}");
     }
 
@@ -441,13 +521,13 @@ mod tests {
         std::fs::remove_file(p.dir.join("autumn-properties.json")).unwrap();
         std::fs::remove_file(p.dir.join(".gitignore")).unwrap();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "без служебных файлов").unwrap_or_else(|e| panic!("{e}"));
+        push(&p, "без служебных файлов", &NEVER).unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[test]
     fn pull_before_any_push_says_export_first() {
         let (_t, p) = fixture();
-        let e = pull(&p).unwrap_err();
+        let e = pull(&p, &NEVER).unwrap_err();
         assert!(e.contains("Выгрузить в git"), "{e}");
     }
 
@@ -455,7 +535,7 @@ mod tests {
     fn status_names_branch_unpushed_and_the_dump_index() {
         let (_t, p) = fixture();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "a").unwrap();
+        push(&p, "a", &NEVER).unwrap();
         std::fs::write(p.dir.join("src").join("ConfigDumpInfo.xml"), "<x/>").unwrap();
         let s = status(&p).unwrap();
         assert!(s.contains("ветка dev2") && s.contains("ConfigDumpInfo.xml: есть") && s.contains("изменено: 1"), "{s}");
@@ -481,7 +561,7 @@ mod tests {
         git(t.path(), &["init", "-q", "--bare", "-b", "main", fresh.to_str().unwrap()]);
         p.remote = fresh.to_string_lossy().into();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "a").unwrap_or_else(|e| panic!("{e}"));
+        push(&p, "a", &NEVER).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
         assert!(git(&fresh, &["branch", "--list"]).contains("dev2"));
         // No origin at all (a directory somebody git-inited by hand): added.
@@ -519,7 +599,7 @@ mod tests {
         // its own commit. install must switch back to dev2, not reset it.
         let (_t, p) = fixture();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "work on dev2").unwrap();
+        push(&p, "work on dev2", &NEVER).unwrap();
         git(&p.dir, &["checkout", "-q", "-b", "main"]);
         git(&p.dir, &["commit", "-q", "--allow-empty", "-m", "main moved on"]);
         init(&p, Path::new("nowhere"), &|_| {}).unwrap();

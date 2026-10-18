@@ -588,14 +588,14 @@ impl Render for Panel {
             }
             gui::Tab::Log => h_flex()
                 .gap_2()
-                .child(more("more-log").dropdown_menu(|menu, _, _| {
-                    menu.item(PopupMenuItem::new("Очистить журнал").on_click(|_, _, cx| {
+                .child(more("more-log").dropdown_menu(move |menu, _, _| {
+                    menu.item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
                         let ui = cx.global_mut::<Ui>();
                         ui.log.clear();
                         ui.unread = 0;
                         cx.refresh_windows();
                     }))
-                    .item(PopupMenuItem::new("Открыть отчёт last-check.txt").on_click(|_, _, cx| {
+                    .item(PopupMenuItem::new("Открыть отчёт last-check.txt").disabled(busy_now).on_click(|_, _, cx| {
                         let path = cx.global::<Ui>().kit.path("last-check.txt");
                         gui::open_path(cx, &path);
                     }))

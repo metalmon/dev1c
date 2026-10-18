@@ -570,6 +570,8 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
+        // а Win32 берёт режим в момент создания меню.
         theme::install(&kit, cx);
         // Окно закрыто — процесс живёт, пока «Выход» в трее.
         cx.set_quit_mode(QuitMode::Explicit);

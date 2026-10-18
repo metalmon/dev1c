@@ -60,6 +60,41 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     }
 }
 
+/// Как часто прокручивается главный цикл GTK на Linux (см. `pump`). Тик
+/// приложения (секунда в работе, полминуты в покое) для меню слишком редок:
+/// человек ждал бы отклика на щелчок.
+#[cfg(target_os = "linux")]
+pub const PUMP: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// На Linux значок рисует libappindicator, а это GTK-библиотека: без
+/// `gtk::init()` первый же пункт меню роняет процесс («GTK has not been
+/// initialized»). Зовётся до `build` и на том же потоке, где потом живёт
+/// значок, — поэтому `pump` и окно остаются на одном потоке, и пересылать
+/// между потоками нечего.
+#[cfg(target_os = "linux")]
+pub fn init() -> anyhow::Result<()> {
+    gtk::init().map_err(|e| anyhow::anyhow!("GTK не инициализирован: {e}"))
+}
+
+/// На остальных системах трею GTK не нужен.
+#[cfg(not(target_os = "linux"))]
+pub fn init() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Разобрать накопившиеся события GTK, не блокируя поток: через них
+/// приходят щелчки по меню значка и ответы панели по DBus. Своего цикла у
+/// нас нет — его роль играет эта функция из задачи в `launch`.
+#[cfg(target_os = "linux")]
+pub fn pump() {
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pump() {}
+
 /// Значок трея с бейджем состояния, байты RGBA — тестируемое ядро `icon`,
 /// не трогает Win32.
 fn icon_rgba(state: TrayState) -> Vec<u8> {

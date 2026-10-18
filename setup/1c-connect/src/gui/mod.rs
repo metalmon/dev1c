@@ -225,12 +225,14 @@ impl Which {
 
 /// Операция на ходу: с чего начали, какая фаза сейчас и когда от неё
 /// последний раз были вести (строка в журнал или `Event::Progress`).
+/// `stale_noted` — застой уже отмечен строкой в журнал для этой операции
+/// (не чаще раза: см. `stale_line`).
 pub struct Running {
     pub which: Which,
     pub started: Instant,
     pub phase: Phase,
-    pub note: String,
     pub seen: Instant,
+    pub stale_noted: bool,
 }
 
 /// Фаза, с которой начинается операция — журнал и карточка хода встречают
@@ -357,21 +359,24 @@ pub fn took(d: Duration) -> String {
     }
 }
 
-/// Прошло с начала операции, для карточки хода: секунды с ведущим нулём,
-/// как на часах («05 с»); от минуты — минуты и секунды («12 мин 05 с»).
-/// Не `took`: та не дополняет секунды нулём, а эта всегда с ним.
-fn running_elapsed(d: Duration) -> String {
+/// Прошло с начала операции, для карточки хода, в виде часов: `m:ss`
+/// («12:05»), а от часа и больше — `h:mm:ss» («1:02:05»). Минуты и секунды
+/// всегда с ведущим нулём, кроме самих часов. Не `took`: та словами
+/// («12 мин 05 с»), эта — цифрами, чтобы заголовок карточки не растягивался.
+fn running_clock(d: Duration) -> String {
     let secs = d.as_secs();
-    if secs < 60 {
-        format!("{secs:02} с")
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
     } else {
-        format!("{} мин {:02} с", secs / 60, secs % 60)
+        format!("{m}:{s:02}")
     }
 }
 
-/// Заголовок карточки хода (название фазы) и сколько она уже идёт.
+/// Заголовок карточки хода (название фазы) и часы — сколько она уже идёт
+/// (`m:ss`/`h:mm:ss`, см. `running_clock`).
 pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
-    (r.phase.title().to_string(), running_elapsed(now.saturating_duration_since(r.started)))
+    (r.phase.title().to_string(), running_clock(now.saturating_duration_since(r.started)))
 }
 
 /// Подсказка трея: во время операции — фаза строчными и сколько она идёт
@@ -402,6 +407,19 @@ pub fn is_stale(r: &Running, now: Instant) -> bool {
 
 pub fn stale_text(r: &Running, now: Instant) -> String {
     format!("нет новостей {} мин", now.saturating_duration_since(r.seen).as_secs() / 60)
+}
+
+/// Застой уходит из карточки (заказчик 2026-10-19) в журнал — одной строкой
+/// `Kind::Warn`, в момент, когда операция впервые застряла, не чаще раза на
+/// операцию: взводит `stale_noted`, второй вызов при том же застое отдаёт
+/// `None`.
+fn stale_line(r: &mut Running, now: Instant) -> Option<Line> {
+    if is_stale(r, now) && !r.stale_noted {
+        r.stale_noted = true;
+        Some(Line { kind: Kind::Warn, text: stale_text(r, now) })
+    } else {
+        None
+    }
 }
 
 /// Отменить можно только git-обмен (`Push`/`Pull`) — он единственный умеет
@@ -670,7 +688,7 @@ pub fn run_op(cx: &mut App, which: Which) {
     note_line(ui, head_line(which.title()));
     let now = Instant::now();
     let cancel = Arc::new(AtomicBool::new(false));
-    ui.progress = Some(Running { which, started: now, phase: first_phase(which), note: String::new(), seen: now });
+    ui.progress = Some(Running { which, started: now, phase: first_phase(which), seen: now, stale_noted: false });
     ui.cancel = cancel.clone();
     ui.tab = Tab::Log;
     ui.unread = 0;
@@ -805,19 +823,18 @@ pub fn quit(cx: &mut App) {
     cx.quit();
 }
 
-/// `Ev::Progress`: фаза/заметка идут в карточку хода, не в журнал — тот
+/// `Ev::Progress`: фаза и `seen` идут в карточку хода, не в журнал — тот
 /// получил свою строку с заголовком фазы через `line_of` уже отдельно.
 /// `now` — параметр, а не свой `Instant::now()`, иначе тест не отличил бы
 /// «`seen` подвинулся» от «часы сами не стоят на месте».
 /// `Ev::Line`: журнал получает каждую строку всегда (в т.ч. на диск,
-/// `1c-connect.log`); во время операции карточка хода, вдобавок, берёт её
-/// как последнюю заметку — но без `refresh_windows()` на каждую строку, по
+/// `1c-connect.log`); во время операции `seen` карточки хода, вдобавок,
+/// подвигается этой строкой — но без `refresh_windows()` на каждую строку, по
 /// спеке «Троттлинг»: `dirty` подхватит `tick` раз в `TICK_BUSY`. Вызывающий
 /// сам решает про `refresh_windows()` вне операции — здесь нет `cx`.
 fn on_line(ui: &mut Ui, line: Line, now: Instant) {
     note_line(ui, line.clone());
     if let Some(r) = ui.progress.as_mut() {
-        r.note = line.text;
         r.seen = now;
         ui.dirty = true;
     }
@@ -826,7 +843,6 @@ fn on_line(ui: &mut Ui, line: Line, now: Instant) {
 fn on_progress(ui: &mut Ui, p: Progress, now: Instant) {
     if let Some(r) = ui.progress.as_mut() {
         r.phase = p.phase;
-        r.note = p.note;
         r.seen = now;
     }
     ui.dirty = true;
@@ -862,8 +878,9 @@ fn tick_redraw(window_open: bool, dirty: bool, running: bool) -> bool {
 }
 
 /// Единый тик приложения (`launch` зовёт его раз в `TICK_BUSY`/`TICK_IDLE`):
-/// перерисовывает окно (см. `tick_redraw`) и, не чаще `TOOLTIP_EVERY`,
-/// двигает подсказку трея на фазу текущей операции.
+/// перерисовывает окно (см. `tick_redraw`), один раз на операцию отмечает
+/// застой строкой в журнал (`stale_line`) и, не чаще `TOOLTIP_EVERY`, двигает
+/// подсказку трея на фазу текущей операции.
 fn tick(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     let redraw = tick_redraw(ui.window.is_some(), ui.dirty, ui.progress.is_some());
@@ -874,6 +891,9 @@ fn tick(cx: &mut App) {
     let now = Instant::now();
     let ui = cx.global_mut::<Ui>();
     if ui.progress.is_some() {
+        if let Some(line) = ui.progress.as_mut().and_then(|r| stale_line(r, now)) {
+            note_line(ui, line);
+        }
         let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
         if due {
             let text = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
@@ -1011,7 +1031,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
         // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
         // напрямую, а не через `quit()` этого модуля.
-        let tray = match tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on) {
+        let tray = match tray::init().and_then(|()| tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on)) {
             Ok(t) => t,
             Err(e) => {
                 fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
@@ -1076,6 +1096,16 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             }
         })
         .detach();
+        // Linux: значок трея живёт в GTK, и его главный цикл крутим мы сами,
+        // на этом же потоке (`tray::pump`). Отдельная задача с коротким сном,
+        // а не общий тик: тот просыпается раз в секунду и реже, и меню
+        // отвечало бы с задержкой.
+        #[cfg(target_os = "linux")]
+        cx.spawn(async move |cx| loop {
+            cx.background_executor().timer(tray::PUMP).await;
+            cx.update(|_| tray::pump());
+        })
+        .detach();
         refresh_ops(cx);
         if autoconnect_on {
             if let Err(e) = start_session(cx) {
@@ -1133,9 +1163,9 @@ impl Ui {
 mod tests {
     use super::{
         autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
-        link_line, note_line, on_done, on_line, on_progress, progress_text, project_primary, save_host, stale_text, took,
-        tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE,
-        TRAY_PNG,
+        link_line, note_line, on_done, on_line, on_progress, progress_text, project_primary, save_host, stale_line, stale_text,
+        took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP,
+        LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
@@ -1256,8 +1286,8 @@ mod tests {
             which: Which::Export,
             started: now - Duration::from_secs(12 * 60),
             phase: Phase::Decompile,
-            note: String::new(),
             seen: now,
+            stale_noted: false,
         };
         assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
@@ -1413,15 +1443,16 @@ mod tests {
     #[test]
     fn progress_text_shows_title_and_elapsed() {
         // Anchored an hour into the future: a fresh CI runner can have under
-        // 12 minutes of uptime, and `Instant::now() - Duration::from_secs(725)`
+        // an hour of uptime, and `Instant::now() - Duration::from_secs(3725)`
         // panics (underflow) once the subtracted duration outruns it.
         let now = Instant::now() + Duration::from_secs(3600);
-        let r = Running { which: Which::Export, started: now - Duration::from_secs(725), phase: Phase::Decompile, note: String::new(), seen: now };
-        let (title, elapsed) = progress_text(&r, now);
+        let at = |secs| Running { which: Which::Export, started: now - Duration::from_secs(secs), phase: Phase::Decompile, seen: now, stale_noted: false };
+        let (title, clock) = progress_text(&at(725), now);
         assert_eq!(title, "Выгружаю конфигурацию");
-        assert_eq!(elapsed, "12 мин 05 с");
-        let r5 = Running { which: Which::Export, started: now - Duration::from_secs(5), phase: Phase::Decompile, note: String::new(), seen: now };
-        assert_eq!(progress_text(&r5, now).1, "05 с");
+        assert_eq!(clock, "12:05");
+        assert_eq!(progress_text(&at(5), now).1, "0:05");
+        assert_eq!(progress_text(&at(65), now).1, "1:05");
+        assert_eq!(progress_text(&at(3725), now).1, "1:02:05");
     }
 
     #[test]
@@ -1429,11 +1460,25 @@ mod tests {
         // Same underflow risk as above: anchor `now` well past any real
         // clock value before subtracting minutes from it.
         let now = Instant::now() + Duration::from_secs(3600);
-        let fresh = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(299) };
+        let fresh = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(299), stale_noted: false };
         assert!(!is_stale(&fresh, now));
-        let quiet = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(301) };
+        let quiet = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
         assert!(is_stale(&quiet, now));
         assert_eq!(stale_text(&quiet, now), "нет новостей 5 мин");
+    }
+
+    #[test]
+    fn stale_line_fires_once_per_operation() {
+        // Карточка не показывает застой (заказчик 2026-10-19) — он уходит в
+        // журнал одной строкой `Kind::Warn`, не чаще раза на операцию.
+        let now = Instant::now() + Duration::from_secs(3600);
+        let mut fresh = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
+        assert_eq!(stale_line(&mut fresh, now), None);
+        let mut quiet = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
+        assert_eq!(stale_line(&mut quiet, now), Some(Line { kind: Kind::Warn, text: "нет новостей 5 мин".into() }));
+        assert!(quiet.stale_noted);
+        // Второй вызов на том же застое — ничего не шлёт.
+        assert_eq!(stale_line(&mut quiet, now), None);
     }
 
     #[test]
@@ -1449,7 +1494,7 @@ mod tests {
     fn done_clears_progress_and_renews_cancel() {
         let mut ui = Ui::for_test();
         let now = Instant::now();
-        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now });
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
         let old_cancel = ui.cancel.clone();
         old_cancel.store(true, Ordering::Relaxed);
         on_done(&mut ui, None, false);
@@ -1459,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn a_progress_event_moves_phase_note_and_seen() {
+    fn a_progress_event_moves_phase_and_seen() {
         let mut ui = Ui::for_test();
         // `on_progress` now takes `now` as a parameter instead of reading
         // the real clock itself: a plain `assert!(r.seen >= old_seen)`
@@ -1468,29 +1513,27 @@ mod tests {
         // Anchored, so the `- 10s` below can't underflow a short-lived
         // runner's clock either.
         let now = Instant::now() + Duration::from_secs(3600);
-        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, note: String::new(), seen: now - Duration::from_secs(10) });
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now - Duration::from_secs(10), stale_noted: false });
         on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() }, now);
         let r = ui.progress.as_ref().unwrap();
         assert_eq!(r.phase, Phase::Push);
-        assert_eq!(r.note, "x");
         assert_eq!(r.seen, now);
         assert!(ui.dirty);
     }
 
     #[test]
-    fn a_line_during_an_operation_reaches_both_the_journal_and_the_card() {
+    fn a_line_during_an_operation_reaches_the_journal_and_moves_seen() {
         // B1: `Ev::Line` while `progress.is_some()` used to move the line
         // into `r.note` only — `note_line` (the sole caller of
         // `write_log_file`) was never reached, so the journal (window and
         // `1c-connect.log`) stayed empty for the whole operation.
         let mut ui = Ui::for_test();
         let now = Instant::now() + Duration::from_secs(3600);
-        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, note: String::new(), seen: now - Duration::from_secs(10) });
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now - Duration::from_secs(10), stale_noted: false });
         let line = Line { kind: Kind::Say, text: "cf_decompile → src (минуты…)".into() };
         on_line(&mut ui, line.clone(), now);
         assert_eq!(ui.log.last(), Some(&line));
         let r = ui.progress.as_ref().unwrap();
-        assert_eq!(r.note, line.text);
         assert_eq!(r.seen, now);
         assert!(ui.dirty);
     }
@@ -1499,7 +1542,7 @@ mod tests {
     fn a_cancelled_done_is_a_warning_not_a_failure() {
         let mut ui = Ui::for_test();
         let now = Instant::now();
-        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now });
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
         let line = on_done(&mut ui, Some("прервано".into()), true);
         note_line(&mut ui, line.clone());
         ui.status = Some(line);

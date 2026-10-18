@@ -16,11 +16,12 @@ name = "1c-connect"
 path = "src/main.rs"
 
 # Окно входит в сборку по умолчанию: двойной щелчок по файлу из комплекта
-# обязан его открыть. Linux собирается без окна, потому что GPUI-на-Linux
-# нам не нужен (--no-default-features, тот же раннер CI).
+# обязан его открыть. На Linux оно тоже собирается — образ со стендом
+# запускает программу в локальном режиме со значком в трее XFCE; без окна
+# (`--no-default-features`) там остаётся только CLI для живого теста туннеля.
 [features]
 default = ["gui"]
-gui = ["dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle"]
+gui = ["dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk"]
 
 [dependencies]
 common = { path = "../common" }
@@ -40,6 +41,10 @@ russh = { version = "0.64", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Трею нужен инициализированный GTK и прокрутка его цикла (`tray::init`,
+# `tray::pump`). Крейт всё равно приходит с libappindicator, здесь он нужен
+# по имени; на других системах его нет вовсе.
+gtk = { version = "0.18", optional = true }
 # Значку в трее на Linux нужен бэкенд, иначе `tray-icon` отказывается
 # собираться: «either the `libappindicator` or `ksni` feature must be enabled».
 # Берём libappindicator: панель XFCE показывает его элементы (проверено в

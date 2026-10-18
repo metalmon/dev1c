@@ -162,10 +162,12 @@ pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
     route_request_with(line, allowed, &Value::Null)
 }
 
-/// То же с умолчаниями аргументов для вызовов, уходящих ребёнку: подключение
-/// к базе и её пользователь. vrunner-mcp берёт их из аргументов инструмента,
-/// не из окружения (проверено 2026-10-18); агент их не знает и знать не должен.
-/// Переданное агентом значение остаётся.
+/// То же с аргументами подключения для вызовов, уходящих ребёнку: база и её
+/// пользователь. vrunner-mcp берёт их из аргументов инструмента, не из
+/// окружения (проверено 2026-10-18); агент их не знает и знать не должен.
+/// Переданное агентом значение **заменяется** (ключи — без учёта регистра):
+/// иначе строка подключения по выбору агента увела бы пароль базы на чужой
+/// адрес.
 pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> Route {
     const PARSE: i64 = -32700;
     const METHOD: i64 = -32601;
@@ -202,8 +204,9 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
             } else {
                 let mut args = if args.is_object() { args } else { json!({}) };
                 if let (Some(a), Some(d)) = (args.as_object_mut(), defaults.as_object()) {
+                    a.retain(|k, _| !d.keys().any(|dk| dk.eq_ignore_ascii_case(k)) && !k.eq_ignore_ascii_case("db-pwd"));
                     for (k, v) in d {
-                        a.entry(k.clone()).or_insert_with(|| v.clone());
+                        a.insert(k.clone(), v.clone());
                     }
                 }
                 let line = rebuilt(json!({"name": tool, "arguments": args}));
@@ -464,13 +467,18 @@ mod tests {
             }
             _ => panic!("forwarded"),
         }
-        // The agent's own value wins.
-        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{"db-user":"other"}}}"#;
+        // The agent's own values are replaced, whatever their key case: a
+        // connection string of the agent's choosing with the host's password
+        // would send that password to an address the agent picked.
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{"db-user":"other","IBConnection":"/Sevil\\base","Db-Pwd":"x"}}}"#;
         match route_request_with(line, &allowed(), &defaults) {
             Route::PlatformCall { line, .. } => {
                 let v: Value = serde_json::from_slice(&line).unwrap();
-                assert_eq!(v["params"]["arguments"]["db-user"], "other");
-                assert_eq!(v["params"]["arguments"]["db-pwd"], "secret");
+                let a = v["params"]["arguments"].as_object().unwrap();
+                assert_eq!(a["db-user"], "mcp");
+                assert_eq!(a["db-pwd"], "secret");
+                assert_eq!(a["ibconnection"], "/FC:\\b");
+                assert_eq!(a.len(), 3, "{a:?}");
             }
             _ => panic!("platform call"),
         }

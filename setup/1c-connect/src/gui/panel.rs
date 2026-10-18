@@ -73,6 +73,9 @@ pub struct Panel {
     /// видимую область и без повторной подгонки окно прокручивалось бы на
     /// высоту этой строки.
     last_fit: Option<(Pixels, Pixels)>,
+    /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
+    /// не дублирует.
+    fit_queued: bool,
 }
 
 /// Кружок, состояние и подстрока карточки. Порты — аргументом, чтобы
@@ -205,6 +208,7 @@ impl Panel {
             viewport_h: None,
             params_h: None,
             last_fit: None,
+            fit_queued: false,
         }
     }
 
@@ -220,11 +224,21 @@ impl Panel {
         self.viewport_h = viewport.or(self.viewport_h);
         self.params_h = params.or(self.params_h);
         let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
-        if !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
+        // Два обмера за кадр (видимая область и содержимое) — один подбор:
+        // отложенный замыкание читает пару, какой она стала к концу кадра.
+        if self.fit_queued || !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
             return;
         }
-        self.last_fit = Some((v, c));
-        cx.defer_in(window, move |_, window, cx| crate::gui::window::fit_height(window, cx, c, v));
+        self.fit_queued = true;
+        cx.defer_in(window, |this, window, cx| {
+            this.fit_queued = false;
+            let (Some(v), Some(c)) = (this.viewport_h, this.params_h) else { return };
+            if !crate::gui::window::needs_fit(this.last_fit, (v, c)) {
+                return;
+            }
+            this.last_fit = Some((v, c));
+            crate::gui::window::fit_height(window, cx, c, v);
+        });
     }
 
     /// Область прокрутки с тонкой полосой (Проект, Журнал): корень

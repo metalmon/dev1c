@@ -88,6 +88,9 @@ pub struct Ui {
     /// а до самой панели ведёт отдельная сущность рядом.
     pub window: Option<AnyWindowHandle>,
     pub panel: Option<Entity<panel::Panel>>,
+    /// Высота окна, подобранная под содержимое «Параметров» (`window::fit_height`);
+    /// `None` — ещё не мерили, окно открывается наименьшим.
+    pub height: Option<Pixels>,
     pub hidden_at: Option<Instant>,
     pub dialog_open: bool,
     pub tx: UnboundedSender<Ev>,
@@ -602,6 +605,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             tray: Some(tray),
             window: None,
             panel: None,
+            height: None,
             hidden_at: None,
             dialog_open: false,
             tx,
@@ -647,6 +651,7 @@ impl Ui {
             tray: None,
             window: None,
             panel: None,
+            height: None,
             hidden_at: None,
             dialog_open: false,
             tx,

@@ -20,7 +20,7 @@ path = "src/main.rs"
 # нам не нужен (--no-default-features, тот же раннер CI).
 [features]
 default = ["gui"]
-gui = ["dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource"]
+gui = ["dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle"]
 
 [dependencies]
 common = { path = "../common" }
@@ -40,7 +40,10 @@ russh = { version = "0.64", default-features = false, features = ["ring"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security"] }
+# Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не
+# отдаёт. Новой сборки крейт не добавляет — он уже в зависимостях gpui.
+raw-window-handle = { version = "0.6", optional = true }
+windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"

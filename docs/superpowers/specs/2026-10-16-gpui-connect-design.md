@@ -202,7 +202,12 @@ macOS в тёмной, синий Zed в светлой) носят ровно �
 
 `WindowOptions`: `kind: PopUp`, `titlebar: None`,
 `window_decorations: Client`, `is_resizable: false`, `is_minimizable: false`,
-`focus: true`, `show: true`, размер 380×640 логических пикселей. Положение —
+`focus: true`, `show: true`, размер 380 × высота по содержимому логических
+пикселей: не меньше 640 и не больше рабочей области за вычетом зазоров.
+Высоту подбирает `window::fit_height` на первой отрисовке «Параметров» —
+окно растёт ровно на переполнение и возвращается в угол (`SetWindowPos`),
+а подобранная высота живёт в `Ui.height`, поэтому следующий показ
+открывается сразу такой. Положение —
 правый нижний угол рабочей области с отступом 12 px:
 `SystemParametersInfoW(SPI_GETWORKAREA)` и `GetDpiForSystem` из
 `windows-sys` (физические → логические пиксели). На не-Windows —

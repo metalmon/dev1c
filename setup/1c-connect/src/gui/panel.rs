@@ -60,6 +60,12 @@ pub struct Panel {
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
     original: Host,
+    /// Высота видимой области тела вкладки и высота содержимого «Параметров»
+    /// с последней отрисовки; `fitted` — высоту окна уже подбирали, второй
+    /// раз не нужно (иначе подбор гонялся бы по кругу).
+    viewport_h: Option<Pixels>,
+    params_h: Option<Pixels>,
+    fitted: bool,
 }
 
 /// Кружок, состояние и подстрока карточки. Порты — аргументом, чтобы
@@ -192,7 +198,22 @@ impl Panel {
         // хоть по одному полю.
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { focus, fields, log_scroll: ScrollHandle::new(), log_len: 0, original }
+        Self { focus, fields, log_scroll: ScrollHandle::new(), log_len: 0, original, viewport_h: None, params_h: None, fitted: false }
+    }
+
+    /// Обмер на отрисовке: как только известны и видимая область, и
+    /// содержимое «Параметров», окно один раз растёт на их разницу. Сам
+    /// подбор — отложенно (`defer_in`): менять размер окна прямо посреди
+    /// раскладки нельзя.
+    fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.viewport_h = viewport.or(self.viewport_h);
+        self.params_h = params.or(self.params_h);
+        let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
+        if self.fitted {
+            return;
+        }
+        self.fitted = true;
+        cx.defer_in(window, move |_, window, cx| crate::gui::window::fit_height(window, cx, c, v));
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
@@ -390,7 +411,16 @@ impl Render for Panel {
         let f = &self.fields;
 
         let body: AnyElement = match tab {
+            // Обмер до `.id`: `on_children_prepainted` есть у `Div`, а `.id`
+            // отдаёт уже `Stateful<Div>`.
             gui::Tab::Params => div()
+                // Высота содержимого вкладки: по ней окно подбирает свою.
+                .on_children_prepainted({
+                    let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
+                        this.measured(None, b.first().map(|b| b.size.height), window, cx)
+                    });
+                    move |b, window, cx| m(&b, window, cx)
+                })
                 .id("params")
                 .size_full()
                 .overflow_y_scroll()
@@ -668,7 +698,19 @@ impl Render for Panel {
             .child(header)
             .child(status)
             .child(div().border_b_1().border_color(border.opacity(0.6)).child(tabs))
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    // Видимая область тела вкладки — вторая половина обмера.
+                    .on_children_prepainted({
+                        let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
+                            this.measured(b.first().map(|b| b.size.height), None, window, cx)
+                        });
+                        move |b, window, cx| m(&b, window, cx)
+                    })
+                    .child(body),
+            )
             .child(
                 h_flex()
                     .items_center()

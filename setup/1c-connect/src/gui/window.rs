@@ -10,8 +10,9 @@ use gpui_kit::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Логический размер флайаута.
-pub const SIZE: Size<Pixels> = size(px(380.0), px(640.0));
+/// Наименьший логический размер флайаута: ширина у окна постоянная, высота —
+/// начальная и нижняя граница подбора по содержимому (см. `fit_height`).
+pub const MIN_SIZE: Size<Pixels> = size(px(380.0), px(640.0));
 /// Зазор до края рабочей области.
 pub const GAP: Pixels = px(12.0);
 /// Окно только что спряталось по потере фокуса — клик по трею в этом окне
@@ -48,6 +49,54 @@ pub fn work_area(cx: &App) -> Bounds<Pixels> {
     cx.primary_display().map(|d| d.bounds()).unwrap_or_default()
 }
 
+/// Размер окна для нового показа: ширина постоянная, высота — подобранная в
+/// прошлый раз (`Ui.height`), иначе наименьшая. Второй показ открывается
+/// сразу нужной высоты, без скачка.
+pub fn wanted_size(cx: &App) -> Size<Pixels> {
+    size(MIN_SIZE.width, cx.global::<Ui>().height.unwrap_or(MIN_SIZE.height))
+}
+
+/// Насколько вырастить окно, чтобы содержимое влезло целиком: ровно на
+/// переполнение, но не выше рабочей области с зазорами по краям. `None` —
+/// содержимое уже помещается, трогать окно незачем.
+pub fn grown_height(current: Pixels, content: Pixels, viewport: Pixels, work_area_h: Pixels, gap: Pixels) -> Option<Pixels> {
+    if content <= viewport {
+        return None;
+    }
+    Some((current + (content - viewport)).min(work_area_h - gap - gap))
+}
+
+/// Переставить окно левым верхним углом в точку (логические px). GPUI умеет
+/// менять только размер окна, причём растит его вниз от прежнего угла, —
+/// положение правим сами, на Windows через `SetWindowPos` по HWND окна.
+#[cfg(windows)]
+fn move_to(window: &Window, origin: Point<Pixels>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let s = window.scale_factor();
+    let (x, y) = ((origin.x.as_f32() * s) as i32, (origin.y.as_f32() * s) as i32);
+    unsafe {
+        SetWindowPos(h.hwnd.get() as *mut _, std::ptr::null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+#[cfg(not(windows))]
+fn move_to(_window: &Window, _origin: Point<Pixels>) {}
+
+/// Подогнать высоту окна под содержимое: вырасти ровно на переполнение (не
+/// выше рабочей области), запомнить высоту в `Ui` — следующий показ откроется
+/// сразу такой — и вернуть окно в угол у трея, потому что растёт оно вниз.
+pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels) {
+    let wa = work_area(cx);
+    let Some(h) = grown_height(window.bounds().size.height, content, viewport, wa.size.height, GAP) else { return };
+    let s = size(MIN_SIZE.width, h);
+    cx.global_mut::<Ui>().height = Some(h);
+    window.resize(s);
+    move_to(window, flyout_origin(wa, s, GAP));
+}
+
 /// `false` сразу после того, как окно спряталось по потере фокуса — в этот
 /// момент клик по значку трея, который и вызвал потерю фокуса, не должен
 /// поднимать окно обратно.
@@ -66,8 +115,9 @@ pub fn show_window(cx: &mut App) {
         return;
     }
     let icon = image::load_from_memory(include_bytes!("../../icons/icon.png")).ok().map(|i| Arc::new(i.to_rgba8()));
+    let s = wanted_size(cx);
     let opts = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(flyout_origin(work_area(cx), SIZE, GAP), SIZE))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(flyout_origin(work_area(cx), s, GAP), s))),
         titlebar: None,
         kind: WindowKind::PopUp,
         is_resizable: false,
@@ -111,17 +161,24 @@ pub fn toggle_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{flyout_origin, forget_window, should_show, GAP, SIZE};
+    use super::{flyout_origin, forget_window, grown_height, should_show, GAP, MIN_SIZE};
     use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
 
     #[test]
+    fn grown_height_grows_by_the_overflow_and_stops_at_the_work_area() {
+        assert_eq!(grown_height(px(640.), px(700.), px(560.), px(1300.), px(12.)), Some(px(780.)));
+        assert_eq!(grown_height(px(640.), px(500.), px(560.), px(1300.), px(12.)), None);
+        assert_eq!(grown_height(px(640.), px(2000.), px(560.), px(1000.), px(12.)), Some(px(976.)));
+    }
+
+    #[test]
     fn the_flyout_sits_in_the_corner_and_never_leaves_the_work_area() {
         let wa = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(700.)));
-        assert_eq!(flyout_origin(wa, SIZE, GAP), point(px(608.), px(48.)));
+        assert_eq!(flyout_origin(wa, MIN_SIZE, GAP), point(px(608.), px(48.)));
         let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
-        assert_eq!(flyout_origin(tiny, SIZE, GAP), point(px(100.), px(50.)));
+        assert_eq!(flyout_origin(tiny, MIN_SIZE, GAP), point(px(100.), px(50.)));
     }
 
     #[test]

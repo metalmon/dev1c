@@ -12,9 +12,10 @@ use crate::verify;
 use common::check::{self, Check};
 use common::kit::{write_text, Kit};
 use common::op::{CleanLevel, OpState};
-use common::{run, AlwaysDefault, Event, Runner, Sink};
+use common::{run, AlwaysDefault, Event, Phase, Progress, Runner, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -82,8 +83,15 @@ pub struct Ui {
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
     /// `None` — ещё не спрашивали.
     pub project: Option<ProjectView>,
-    /// Начало текущей операции или проверки — для «Готово за …» в `Ev::Done`.
-    pub started: Option<Instant>,
+    /// Операция (`run_op`) на ходу: фаза, начало, последняя активность.
+    /// Проверка (`run_check`) идёт без неё — у неё нет `Which`.
+    pub progress: Option<Running>,
+    /// Флаг отмены текущей операции; `run_op` заводит новый `Arc` на каждый
+    /// запуск, чтобы устаревший клон в потоке прежней операции не мог
+    /// отменить следующую.
+    pub cancel: Arc<AtomicBool>,
+    /// Пришли новые фаза/заметка после последней перерисовки карточки хода.
+    pub dirty: bool,
     pub busy: Option<Busy>,
     /// Число живых потоков `refresh_ops`/`refresh_project` — растёт в момент
     /// `thread::spawn`, падает (насыщенно) в `Ev::Ops`/`Ev::Project`. Входит
@@ -186,6 +194,27 @@ impl Which {
     }
 }
 
+/// Операция на ходу: с чего начали, какая фаза сейчас и когда от неё
+/// последний раз были вести (строка в журнал или `Event::Progress`).
+pub struct Running {
+    pub which: Which,
+    pub started: Instant,
+    pub phase: Phase,
+    pub note: String,
+    pub seen: Instant,
+}
+
+/// Фаза, с которой начинается операция — журнал и карточка хода встречают
+/// её раньше первого `Event::Progress` движка.
+pub fn first_phase(which: Which) -> Phase {
+    match which {
+        Which::Export => Phase::Decompile,
+        Which::Import => Phase::Pull,
+        Which::Install => Phase::Install,
+        Which::Uninstall => Phase::Uninstall,
+    }
+}
+
 /// Вкладка «Проект»: раскладка каталога и, если она в порядке, состояние
 /// ветки строками `project::status`.
 #[derive(Clone, Debug, PartialEq)]
@@ -220,7 +249,10 @@ pub enum Ev {
     /// отправки — старое поколение значит сеанс уже не тот.
     Link(u64, State),
     Line(Line),
-    Done(Option<String>),
+    /// Фаза/заметка долгой операции — для карточки хода (журналу своей
+    /// строки хватает, её шлёт `line_of`).
+    Progress(Progress),
+    Done { err: Option<String>, cancelled: bool },
     Checks(Vec<Check>),
     /// Состояние операций, перечитанное в своём потоке (`refresh_ops`).
     Ops(Vec<OpView>),
@@ -286,6 +318,47 @@ pub fn took(d: Duration) -> String {
     } else {
         format!("{} мин {} с", secs / 60, secs % 60)
     }
+}
+
+/// Прошло с начала операции, для карточки хода: секунды с ведущим нулём,
+/// как на часах («05 с»); от минуты — минуты и секунды («12 мин 05 с»).
+/// Не `took`: та не дополняет секунды нулём, а эта всегда с ним.
+fn running_elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs:02} с")
+    } else {
+        format!("{} мин {:02} с", secs / 60, secs % 60)
+    }
+}
+
+/// Заголовок карточки хода (название фазы) и сколько она уже идёт.
+pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
+    (r.phase.title().to_string(), running_elapsed(now.saturating_duration_since(r.started)))
+}
+
+/// Пять минут без вестей от потока — поток молчит, но операция ещё жива.
+const QUIET: Duration = Duration::from_secs(5 * 60);
+
+pub fn is_stale(r: &Running, now: Instant) -> bool {
+    now.saturating_duration_since(r.seen) > QUIET
+}
+
+pub fn stale_text(r: &Running, now: Instant) -> String {
+    format!("нет новостей {} мин", now.saturating_duration_since(r.seen).as_secs() / 60)
+}
+
+/// Отменить можно только git-обмен (`Push`/`Pull`) — он единственный умеет
+/// слушать флаг (`flow::export`/`import`); `cf_decompile`/`cf_load` на
+/// стороне платформы не прерываются.
+pub fn can_cancel(phase: Phase) -> bool {
+    matches!(phase, Phase::Push | Phase::Pull)
+}
+
+/// Кнопка «Отменить» карточки хода — поток сам решает, когда заметить флаг
+/// и договорить `Ev::Done { cancelled: true, .. }`.
+pub fn cancel_op(cx: &mut App) {
+    cx.global::<Ui>().cancel.store(true, Ordering::Relaxed);
 }
 
 /// Строка журнала на диск, тем же текстом, что рисует окно, но без цвета:
@@ -432,6 +505,9 @@ fn ctx_for(ui: &Ui) -> Ctx {
         if kit.journal(&e) {
             return;
         }
+        if let Event::Progress(p) = &e {
+            let _ = tx.unbounded_send(Ev::Progress(p.clone()));
+        }
         if let Some(line) = line_of(&e) {
             let _ = tx.unbounded_send(Ev::Line(line));
         }
@@ -522,7 +598,10 @@ pub fn run_op(cx: &mut App, which: Which) {
         _ => Busy::Ext,
     });
     note_line(ui, head_line(which.title()));
-    ui.started = Some(Instant::now());
+    let now = Instant::now();
+    let cancel = Arc::new(AtomicBool::new(false));
+    ui.progress = Some(Running { which, started: now, phase: first_phase(which), note: String::new(), seen: now });
+    ui.cancel = cancel.clone();
     ui.tab = Tab::Log;
     ui.unread = 0;
     let ctx = ctx_for(ui);
@@ -541,12 +620,15 @@ pub fn run_op(cx: &mut App, which: Which) {
                         .unwrap_or(Ok(()))
                         .map_err(|e| format!("{e:#}")),
                     // Те же инструменты, что зовёт агент, под тем же замком проекта.
-                    Which::Export => flow::export(&ctx, "выгрузка из 1c-connect", &project::NEVER).map(|t| ctx.ok(t)),
-                    Which::Import => flow::import(&ctx, &project::NEVER).map(|t| ctx.ok(t)),
+                    Which::Export => flow::export(&ctx, "выгрузка из 1c-connect", &cancel).map(|t| ctx.ok(t)),
+                    Which::Import => flow::import(&ctx, &cancel).map(|t| ctx.ok(t)),
                 };
-                Ev::Done(r.err())
+                match r {
+                    Ok(()) => Ev::Done { err: None, cancelled: false },
+                    Err(e) => Ev::Done { err: Some(e), cancelled: cancel.load(Ordering::Relaxed) },
+                }
             },
-            || Ev::Done(Some(PANIC_TEXT.into())),
+            || Ev::Done { err: Some(PANIC_TEXT.into()), cancelled: false },
         );
     });
 }
@@ -590,7 +672,6 @@ pub fn run_check(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     ui.busy = Some(Busy::Check);
     note_line(ui, head_line("Проверка"));
-    ui.started = Some(Instant::now());
     ui.tab = Tab::Log;
     ui.unread = 0;
     let ctx = ctx_for(ui);
@@ -650,6 +731,38 @@ pub fn quit(cx: &mut App) {
     cx.quit();
 }
 
+/// `Ev::Progress`: фаза/заметка идут в карточку хода, не в журнал — тот
+/// получил свою строку с заголовком фазы через `line_of` уже отдельно.
+fn on_progress(ui: &mut Ui, p: Progress) {
+    if let Some(r) = ui.progress.as_mut() {
+        r.phase = p.phase;
+        r.note = p.note;
+        r.seen = Instant::now();
+    }
+    ui.dirty = true;
+}
+
+/// Конец операции: строка в журнал (провал/успех/отмена — отмена не
+/// провал, `Kind::Warn`), и сброс карточки хода с новым флагом отмены —
+/// старый, даже уже взведённый, никакую следующую операцию не отменит.
+fn on_done(ui: &mut Ui, err: Option<String>, cancelled: bool) -> Line {
+    ui.busy = None;
+    let running = ui.progress.take();
+    let line = if cancelled {
+        Line { kind: Kind::Warn, text: err.unwrap_or_else(|| "прервано".into()) }
+    } else {
+        match err {
+            Some(e) => Line { kind: Kind::Fail, text: e },
+            None => match running {
+                Some(r) => Line { kind: Kind::Ok, text: format!("Готово за {}", took(r.started.elapsed())) },
+                None => Line { kind: Kind::Ok, text: "Готово.".into() },
+            },
+        }
+    };
+    ui.cancel = Arc::new(AtomicBool::new(false));
+    line
+}
+
 fn handle(ev: Ev, cx: &mut App) {
     match ev {
         Ev::Tray(e) => tray::on_tray(e, cx),
@@ -660,20 +773,20 @@ fn handle(ev: Ev, cx: &mut App) {
             }
         }
         Ev::Line(line) => {
-            note_line(cx.global_mut::<Ui>(), line);
-            cx.refresh_windows();
-        }
-        Ev::Done(err) => {
             let ui = cx.global_mut::<Ui>();
-            ui.busy = None;
-            let elapsed = ui.started.take();
-            let line = match err {
-                Some(e) => Line { kind: Kind::Fail, text: e },
-                None => match elapsed {
-                    Some(since) => Line { kind: Kind::Ok, text: format!("Готово за {}", took(since.elapsed())) },
-                    None => Line { kind: Kind::Ok, text: "Готово.".into() },
-                },
-            };
+            if let Some(r) = ui.progress.as_mut() {
+                r.note = line.text;
+                r.seen = Instant::now();
+                ui.dirty = true;
+            } else {
+                note_line(ui, line);
+                cx.refresh_windows();
+            }
+        }
+        Ev::Progress(p) => on_progress(cx.global_mut::<Ui>(), p),
+        Ev::Done { err, cancelled } => {
+            let ui = cx.global_mut::<Ui>();
+            let line = on_done(ui, err, cancelled);
             note_line(ui, line.clone());
             ui.status = Some(line);
             cx.refresh_windows();
@@ -689,7 +802,6 @@ fn handle(ev: Ev, cx: &mut App) {
                 note_line(ui, line);
             }
             ui.busy = None;
-            ui.started = None;
             let status = if failed > 0 {
                 Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Отчёт — last-check.txt в комплекте") }
             } else {
@@ -777,7 +889,9 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
-            started: None,
+            progress: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            dirty: false,
             busy: None,
             pending: 0,
             status: None,
@@ -831,7 +945,9 @@ impl Ui {
             failed_checks: 0,
             ops: Vec::new(),
             project: None,
-            started: None,
+            progress: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            dirty: false,
             busy: None,
             pending: 0,
             status: None,
@@ -849,13 +965,16 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, carried_base_url, check_lines, line_of, link_is_current, link_line, note_line,
-        project_primary, save_host, took, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
+        link_line, note_line, on_done, on_progress, progress_text, project_primary, save_host, stale_text, took, Dot,
+        Kind, Line, OpView, Running, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
     use common::check::Check;
-    use common::Event;
+    use common::{Event, Phase, Progress};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn op(id: &str, dot: Dot) -> OpView {
@@ -1005,19 +1124,19 @@ mod tests {
     fn a_panicking_worker_still_reports_the_end_of_the_work() {
         use super::{guarded, Ev, PANIC_TEXT};
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        guarded(&tx, || -> Ev { Ev::Done(None) }, || -> Ev { unreachable!("тело не паниковало") });
-        assert!(matches!(rx.try_recv().unwrap(), Ev::Done(None)));
+        guarded(&tx, || -> Ev { Ev::Done { err: None, cancelled: false } }, || -> Ev { unreachable!("тело не паниковало") });
+        assert!(matches!(rx.try_recv().unwrap(), Ev::Done { err: None, cancelled: false }));
 
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        guarded(&tx, || -> Ev { panic!("ой") }, || Ev::Done(Some("сломалось".into())));
+        guarded(&tx, || -> Ev { panic!("ой") }, || Ev::Done { err: Some("сломалось".into()), cancelled: false });
         std::panic::set_hook(prev);
         match rx.try_recv().unwrap() {
             Ev::Line(l) => assert_eq!((l.kind, l.text.as_str()), (Kind::Fail, PANIC_TEXT)),
             _ => panic!("первой должна идти строка в журнал"),
         }
         // Без этого `busy` остался бы навсегда и кнопки — заблокированными.
-        assert!(matches!(rx.try_recv().unwrap(), Ev::Done(Some(_))));
+        assert!(matches!(rx.try_recv().unwrap(), Ev::Done { err: Some(_), cancelled: false }));
     }
 
     #[test]
@@ -1062,5 +1181,81 @@ mod tests {
         ui.session_gen = 2;
         assert!(!link_is_current(&ui, 1), "поколение 1 устарело, текущее — 2");
         assert!(link_is_current(&ui, 2));
+    }
+
+    #[test]
+    fn first_phase_of_each_operation() {
+        assert_eq!(first_phase(Which::Export), Phase::Decompile);
+        assert_eq!(first_phase(Which::Import), Phase::Pull);
+        assert_eq!(first_phase(Which::Install), Phase::Install);
+        assert_eq!(first_phase(Which::Uninstall), Phase::Uninstall);
+    }
+
+    #[test]
+    fn progress_text_shows_title_and_elapsed() {
+        let now = Instant::now();
+        let r = Running { which: Which::Export, started: now - Duration::from_secs(725), phase: Phase::Decompile, note: String::new(), seen: now };
+        let (title, elapsed) = progress_text(&r, now);
+        assert_eq!(title, "Выгружаю конфигурацию");
+        assert_eq!(elapsed, "12 мин 05 с");
+        let r5 = Running { which: Which::Export, started: now - Duration::from_secs(5), phase: Phase::Decompile, note: String::new(), seen: now };
+        assert_eq!(progress_text(&r5, now).1, "05 с");
+    }
+
+    #[test]
+    fn stale_after_five_quiet_minutes() {
+        let now = Instant::now();
+        let fresh = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(299) };
+        assert!(!is_stale(&fresh, now));
+        let quiet = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(301) };
+        assert!(is_stale(&quiet, now));
+        assert_eq!(stale_text(&quiet, now), "нет новостей 5 мин");
+    }
+
+    #[test]
+    fn only_git_phases_can_be_cancelled() {
+        assert!(can_cancel(Phase::Push));
+        assert!(can_cancel(Phase::Pull));
+        for p in [Phase::Decompile, Phase::Load, Phase::Install, Phase::Uninstall, Phase::Check] {
+            assert!(!can_cancel(p), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn done_clears_progress_and_renews_cancel() {
+        let mut ui = Ui::for_test();
+        let now = Instant::now();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now });
+        let old_cancel = ui.cancel.clone();
+        old_cancel.store(true, Ordering::Relaxed);
+        on_done(&mut ui, None, false);
+        assert!(ui.progress.is_none());
+        assert!(!ui.cancel.load(Ordering::Relaxed));
+        assert!(!Arc::ptr_eq(&old_cancel, &ui.cancel));
+    }
+
+    #[test]
+    fn a_progress_event_moves_phase_note_and_seen() {
+        let mut ui = Ui::for_test();
+        let old_seen = Instant::now() - Duration::from_secs(10);
+        ui.progress = Some(Running { which: Which::Export, started: old_seen, phase: Phase::Decompile, note: String::new(), seen: old_seen });
+        on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() });
+        let r = ui.progress.as_ref().unwrap();
+        assert_eq!(r.phase, Phase::Push);
+        assert_eq!(r.note, "x");
+        assert!(r.seen > old_seen);
+        assert!(ui.dirty);
+    }
+
+    #[test]
+    fn a_cancelled_done_is_a_warning_not_a_failure() {
+        let mut ui = Ui::for_test();
+        let now = Instant::now();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now });
+        let line = on_done(&mut ui, Some("прервано".into()), true);
+        note_line(&mut ui, line.clone());
+        ui.status = Some(line);
+        assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "прервано".into() }));
+        assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
     }
 }

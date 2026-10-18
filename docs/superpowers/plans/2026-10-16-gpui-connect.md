@@ -704,3 +704,36 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 - [ ] **Step 2: Реализация** по списку выше.
 - [ ] **Step 3: Спека.**
 - [ ] **Step 4: Commit** — `fix(1c-connect): the window refits whenever the measure changes and keeps a 4 px slack; thin scrollbars on Проект and Журнал` (трейлер `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).
+
+### Task 16: Автозапуск при входе в систему и автоподключение — пункты меню трея
+
+Заказчик (2026-10-18): отдельного окна параметров не будет; «Запускать при входе в Windows» и «Подключаться при запуске» — два пункта-галочки в меню правой кнопки трея. Получается: программа поднимается вместе с системой и сразу подключается, окно при этом не показывается.
+
+**Files:** `setup/1c-connect/src/gui/autostart.rs` (новый), `setup/1c-connect/src/gui/{mod,tray}.rs`, `setup/1c-connect/src/main.rs`, `setup/1c-connect/Cargo.toml` (одна feature у windows-sys), spec `docs/superpowers/specs/2026-10-16-gpui-connect-design.md` (раздел «Трей» и абзац «Автозапуск и автоподключение»), `docs/STATUS.md` одна фраза.
+
+**Скрытый старт (`main.rs`, `gui/mod.rs`):**
+- `gui::launch(kit: Kit, hidden: bool)`. В `main.rs` ветка без аргументов становится: без аргументов → `launch(kit, false)`; ровно один аргумент `--tray` → `launch(kit, true)`; всё остальное — `clap`, как сейчас. (`--tray` не попадает в `Cli`: проверка по `std::env::args()` до `Cli::parse()`, как сейчас для `len() == 1`.)
+- В `launch` в конце: `if !hidden { window::show_window(cx) }`. Значок в трее есть в любом случае.
+- Автоподключение: ключ состояния комплекта `autoconnect` (`Kit::state_get/state_set`, значения `"1"`/`"0"`, нет записи — выключено). В `launch` после `refresh_ops(cx)`: если включено — `if let Err(e) = start_session(cx) { note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }) }`. Ошибка видна бейджем на «Журнале» и в журнале, как у кнопки «Подключить». Вынеси чтение в `pub fn autoconnect(kit: &Kit) -> bool` (в `gui/mod.rs`) с тестом: нет записи → `false`, `"1"` → `true`, `"0"` → `false`.
+
+**Автозапуск (`gui/autostart.rs`):**
+- `pub fn is_on() -> bool`, `pub fn set(on: bool) -> anyhow::Result<()>`.
+- Windows: раздел `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`, значение `1c-connect` типа `REG_SZ` с данными `run_value(&std::env::current_exe()?)`. `windows-sys` feature `Win32_System_Registry`: `RegCreateKeyExW` (или `RegOpenKeyExW` с `KEY_SET_VALUE | KEY_QUERY_VALUE`), `RegSetValueExW`, `RegDeleteValueW`, `RegGetValueW` с `RRF_RT_REG_SZ` для `is_on` (значение есть → `true`; удаление отсутствующего значения — не ошибка). `RegCloseKey` в конце. Строки — UTF-16 с нулём (`encode_utf16().chain(Some(0))`).
+- Не Windows: файл `~/.config/autostart/1c-connect.desktop` (`$XDG_CONFIG_HOME` при наличии, иначе `$HOME/.config`) с содержимым `desktop_entry(&exe)`; `is_on` — файл существует; `set(false)` — удалить (отсутствие — не ошибка).
+- Чистые функции с тестами (без cfg, работают везде): `pub fn run_value(exe: &Path) -> String` → `"\"<exe>\" --tray"`, тест с `C:\dev1c\1c-connect.exe` → `"C:\dev1c\1c-connect.exe" --tray` (в кавычках, затем пробел и `--tray`); `pub fn desktop_entry(exe: &Path) -> String` → ровно `[Desktop Entry]\nType=Application\nName=1c-connect\nExec="<exe>" --tray\n`, тест на `/opt/dev1c/1c-connect`.
+
+**Меню трея (`gui/tray.rs`):**
+- Два `CheckMenuItem::with_id`: `"autostart"` «Запускать при входе в Windows» (на не-Windows текст «Запускать при входе») и `"autoconnect"` «Подключаться при запуске». Начальные галочки — аргументы `build(tx, choice, autostart_on: bool, autoconnect_on: bool)`; `launch` передаёт `autostart::is_on()` и `autoconnect(&kit)`.
+- Порядок меню: Подключить / Проверить / Открыть веб-клиент / — / Тема ▸ / ✓ Запускать при входе в Windows / ✓ Подключаться при запуске / — / Выход.
+- `Tray` хранит оба `CheckMenuItem`. `MenuAction::{Autostart, Autoconnect}` (без полей), `menu_action("autostart")`/`("autoconnect")` + тест. `CheckMenuItem` при щелчке переключает галочку сам; в `on_menu` читаем `is_checked()`:
+  - `Autostart`: `autostart::set(on)`; при ошибке — `set_checked(!on)` обратно и строка `Kind::Fail` «автозапуск: {e:#}» в журнал.
+  - `Autoconnect`: `kit.state_set("autoconnect", "1"|"0")`; при ошибке — так же обратно и строка в журнал.
+
+**Спека:** в разделе «Трей» — пункты меню в новом порядке и `--tray`; в абзаце «Автозапуск и автоподключение» (раздел «Режим работы…») уточнить: значение в реестре — `"<exe>" --tray`, скрытый старт только при запуске системой, запуск руками показывает окно как раньше; автоподключение действует при любом запуске. STATUS: одна фраза про задачу 16.
+
+**Сборка — только в CI** (уговор заказчика). Локально `cargo` не запускать; API `windows-sys 0.60` сверяй по реестру `C:\Users\bucher\.cargo\registry\src\*\windows-sys-0.60*` (`Win32::System::Registry::{RegCreateKeyExW, RegSetValueExW, RegDeleteValueW, RegGetValueW, RegCloseKey, HKEY_CURRENT_USER, KEY_SET_VALUE, KEY_QUERY_VALUE, REG_SZ, RRF_RT_REG_SZ, REG_OPTION_NON_VOLATILE}`), `tray-icon 0.26`/`muda` — `CheckMenuItem::{is_checked, set_checked}`. Linux CI собирает без `gui`, так что `autostart.rs` под `#[cfg(not(windows))]` всё равно должен компилироваться только внутри `gui` — модуль объявляется в `gui/mod.rs`, как остальные.
+
+- [ ] **Step 1: Падающие тесты** (`run_value`, `desktop_entry`, `autoconnect`, `menu_action`).
+- [ ] **Step 2: Реализация** по списку выше.
+- [ ] **Step 3: Спека и STATUS.**
+- [ ] **Step 4: Commit** — `feat(1c-connect): tray menu toggles for autostart at login (HKCU Run, --tray) and autoconnect at launch` (трейлер `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).

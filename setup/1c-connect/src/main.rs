@@ -105,9 +105,18 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
 fn run() -> Result<()> {
     // Без аргументов — окно: так программу запускают двойным щелчком.
     // Сборка без окна показывает состояние — самое безобидное из возможного.
+    // `--tray` не попадает в `Cli`: это скрытый старт автозапуском при входе
+    // в систему (см. `gui::autostart`), проверяется до `Cli::parse()`, как
+    // и `len() == 1`.
     #[cfg(feature = "gui")]
-    if std::env::args().len() == 1 {
-        return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?);
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() == 1 {
+            return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, false);
+        }
+        if args.len() == 2 && args[1] == "--tray" {
+            return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, true);
+        }
     }
     let cli = Cli::parse();
     let kit = match &cli.kit {

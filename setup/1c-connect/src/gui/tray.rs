@@ -3,18 +3,27 @@
 //! GPUI, они только кладут событие в канал — его разбирает `on_tray`/`on_menu`
 //! из задачи-читателя в `mod.rs::handle`.
 
-use super::{badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, Ui, TRAY_PNG};
+use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, Ui, TRAY_PNG};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-/// Трей: значок, пункт-переключатель (меняет надпись) и три пункта темы
-/// (отмечен ровно один).
+/// Текст пункта «Запускать при входе»: на Windows речь про вход в саму
+/// Windows, иначе — просто про вход (нет чего-то другого, с чем спутать).
+#[cfg(windows)]
+const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
+#[cfg(not(windows))]
+const AUTOSTART_TEXT: &str = "Запускать при входе";
+
+/// Трей: значок, пункт-переключатель (меняет надпись), три пункта темы
+/// (отмечен ровно один) и два пункта-галочки — автозапуск и автоподключение.
 pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
     themes: [CheckMenuItem; 3],
+    autostart: CheckMenuItem,
+    autoconnect: CheckMenuItem,
 }
 
 /// Выбор темы → id пункта меню и наоборот.
@@ -27,6 +36,8 @@ pub enum MenuAction {
     Check,
     Web,
     Theme(theme::Choice),
+    Autostart,
+    Autoconnect,
     Quit,
 }
 
@@ -42,6 +53,8 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         "toggle" => Some(MenuAction::Toggle),
         "check" => Some(MenuAction::Check),
         "web" => Some(MenuAction::Web),
+        "autostart" => Some(MenuAction::Autostart),
+        "autoconnect" => Some(MenuAction::Autoconnect),
         "quit" => Some(MenuAction::Quit),
         _ => None,
     }
@@ -63,15 +76,28 @@ pub fn icon(up: bool) -> Icon {
 
 /// Построить значок трея с меню и подписаться на события ОС — обработчики
 /// шлют их в `tx`. Левый щелчок не открывает меню (оно только по правому).
-pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice) -> anyhow::Result<Tray> {
+/// `autostart_on`/`autoconnect_on` — начальные галочки, читает `launch`.
+pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     let web = MenuItem::with_id("web", "Открыть веб-клиент", true, None);
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
+    let autostart = CheckMenuItem::with_id("autostart", AUTOSTART_TEXT, true, autostart_on, None);
+    let autoconnect = CheckMenuItem::with_id("autoconnect", "Подключаться при запуске", true, autoconnect_on, None);
     let quit = MenuItem::with_id("quit", "Выход", true, None);
-    let menu = Menu::with_items(&[&toggle, &check, &web, &PredefinedMenuItem::separator(), &themes_submenu, &PredefinedMenuItem::separator(), &quit])?;
+    let menu = Menu::with_items(&[
+        &toggle,
+        &check,
+        &web,
+        &PredefinedMenuItem::separator(),
+        &themes_submenu,
+        &autostart,
+        &autoconnect,
+        &PredefinedMenuItem::separator(),
+        &quit,
+    ])?;
     let tray = TrayIconBuilder::new()
         .with_icon(icon(false))
         .with_tooltip("1c-connect: не подключён")
@@ -88,7 +114,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice) -> anyhow::Result<T
     }));
 
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
-    Ok(Tray { icon: tray, toggle, themes })
+    Ok(Tray { icon: tray, toggle, themes, autostart, autoconnect })
 }
 
 impl Tray {
@@ -143,6 +169,27 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 tray.set_theme(c);
             }
         }
+        MenuAction::Autostart => {
+            let ui = cx.global::<Ui>();
+            let Some(on) = ui.tray.as_ref().map(|t| t.autostart.is_checked()) else { return };
+            if let Err(e) = autostart::set(on) {
+                if let Some(t) = &cx.global::<Ui>().tray {
+                    t.autostart.set_checked(!on);
+                }
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("автозапуск: {e:#}") });
+            }
+        }
+        MenuAction::Autoconnect => {
+            let ui = cx.global::<Ui>();
+            let Some(on) = ui.tray.as_ref().map(|t| t.autoconnect.is_checked()) else { return };
+            let kit = ui.kit.clone();
+            if let Err(e) = kit.state_set("autoconnect", if on { "1" } else { "0" }) {
+                if let Some(t) = &cx.global::<Ui>().tray {
+                    t.autoconnect.set_checked(!on);
+                }
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("автоподключение: {e:#}") });
+            }
+        }
         MenuAction::Quit => quit(cx),
     }
 }
@@ -159,6 +206,8 @@ mod tests {
         assert_eq!(menu_action("quit"), Some(MenuAction::Quit));
         assert_eq!(menu_action("theme:dark"), Some(MenuAction::Theme(theme::Choice::Dark)));
         assert_eq!(menu_action("theme:system"), Some(MenuAction::Theme(theme::Choice::System)));
+        assert_eq!(menu_action("autostart"), Some(MenuAction::Autostart));
+        assert_eq!(menu_action("autoconnect"), Some(MenuAction::Autoconnect));
         assert_eq!(menu_action("nope"), None);
     }
 

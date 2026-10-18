@@ -18,6 +18,7 @@ use gpui_kit::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub mod autostart;
 pub mod panel;
 pub mod theme;
 pub mod tray;
@@ -439,6 +440,12 @@ fn set_link(cx: &mut App, l: State) {
     cx.refresh_windows();
 }
 
+/// Автоподключение при запуске: ключ состояния комплекта `autoconnect`,
+/// нет записи — выключено.
+pub fn autoconnect(kit: &Kit) -> bool {
+    kit.state_get("autoconnect").as_deref() == Some("1")
+}
+
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
 pub fn start_session(cx: &mut App) -> Result<(), String> {
     let ui = cx.global_mut::<Ui>();
@@ -698,13 +705,15 @@ fn fatal(text: &str) {
     eprintln!("{text}");
 }
 
-pub fn launch(kit: Kit) -> anyhow::Result<()> {
+pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
     let log_path = kit.path(LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
         let _ = std::fs::remove_file(&log_path);
     }
+    let autostart_on = autostart::is_on();
+    let autoconnect_on = autoconnect(&kit);
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -718,7 +727,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
         // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
         // напрямую, а не через `quit()` этого модуля.
-        let tray = match tray::build(tx.clone(), theme::Choice::load(&kit)) {
+        let tray = match tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on) {
             Ok(t) => t,
             Err(e) => {
                 fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
@@ -757,7 +766,14 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         })
         .detach();
         refresh_ops(cx);
-        window::show_window(cx);
+        if autoconnect_on {
+            if let Err(e) = start_session(cx) {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            }
+        }
+        if !hidden {
+            window::show_window(cx);
+        }
     });
     Ok(())
 }
@@ -801,8 +817,8 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        badge, carried_base_url, check_lines, line_of, link_is_current, link_line, note_line, project_primary,
-        save_host, took, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        autoconnect, badge, carried_base_url, check_lines, line_of, link_is_current, link_line, note_line,
+        project_primary, save_host, took, Dot, Kind, Line, OpView, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
@@ -978,6 +994,16 @@ mod tests {
         assert_eq!(Which::Uninstall.title(), "— снимаю расширение —");
         assert_eq!(Which::Export.title(), "— выгружаю в git —");
         assert_eq!(Which::Import.title(), "— загружаю из git —");
+    }
+
+    #[test]
+    fn autoconnect_reads_the_kit_state_with_no_record_meaning_off() {
+        let ui = Ui::for_test();
+        assert!(!autoconnect(&ui.kit));
+        ui.kit.state_set("autoconnect", "1").unwrap();
+        assert!(autoconnect(&ui.kit));
+        ui.kit.state_set("autoconnect", "0").unwrap();
+        assert!(!autoconnect(&ui.kit));
     }
 
     #[test]

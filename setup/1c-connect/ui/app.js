@@ -4,7 +4,8 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'dump', 'project'];
+// dump (каталог выгрузки для поиска) и tools правятся в toml: в окне их нет.
+const KEYS = ['server', 'workstation', 'password', 'base_path', 'db_user', 'db_password', 'base_url', 'project'];
 let machine = null;
 let busy = false;
 let unread = 0;

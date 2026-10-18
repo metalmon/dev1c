@@ -453,11 +453,12 @@ mod tests {
         assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "m");
         let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
         assert!(heads.is_empty(), "{heads}");
-        cancel.store(false, Ordering::Relaxed);
-        push(&p, "m", &cancel).unwrap_or_else(|e| panic!("{e}"));
+        // The mutex isn't left held by the cancelled run: a push through the
+        // bridge's own call() — which takes LOCK itself — goes through, not «занято».
+        let (text, is_err) = call(&p, "project_push", &serde_json::json!({"message": "m"}));
+        assert!(!is_err, "{text}");
         let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
         assert!(heads.contains("refs/heads/dev2"), "{heads}");
-        assert!(LOCK.try_lock().is_ok());
     }
 
     #[test]

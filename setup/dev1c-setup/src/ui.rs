@@ -168,6 +168,49 @@ pub fn start_tab(file_exists: bool) -> Tab {
     }
 }
 
+/// Карточка состояния в шапке: кружок, заголовок, подстрочник и главная
+/// кнопка со своей надписью. Пусто в `primary` — делать нечего, кнопки нет.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Card {
+    pub dot: Dot,
+    pub state: String,
+    pub sub: String,
+    pub primary: Option<(Which, &'static str)>,
+}
+
+/// Состояние среды по состояниям операций — те же пять случаев, что считало
+/// старое окно. Среда «работает», когда сделана операция `container`:
+/// единственное имя операции, которое окно знает (состав списка задаёт
+/// `dev1c.toml`, не окно).
+pub fn status_line(ops: &[OpView], name: &str) -> Card {
+    let container = ops.iter().find(|o| o.id == "container");
+    let running = container.is_some_and(|o| o.dot == Dot::Up);
+    let todo = ops.iter().filter(|o| o.dot == Dot::Off || o.dot == Dot::Busy).count();
+    let drift = ops.iter().any(|o| o.dot == Dot::Busy);
+    let done = ops.iter().filter(|o| o.dot == Dot::Up).count();
+    let blocked = ops.iter().find(|o| o.dot == Dot::Down);
+    // Доустановить или установить — одна и та же работа, разные надписи:
+    // человек должен видеть, начинает он или продолжает.
+    let finish = |label| Some((Which::Install, label));
+
+    let (dot, state, sub, primary) = if !running && done == 0 {
+        (Dot::Off, "Среда не установлена", format!("сделано 0 из {}", ops.len()), finish("Установить"))
+    } else if !running {
+        (Dot::Busy, "Среда установлена не полностью", format!("сделано {done} из {}", ops.len()), finish("Доустановить"))
+    } else if drift {
+        let detail = container.map(|o| o.detail.clone()).unwrap_or_default();
+        (Dot::Busy, "Среда работает, параметры разошлись", format!("контейнер {name} · {detail}"), Some((Which::Change, "Применить изменения")))
+    } else if let Some(b) = blocked {
+        let primary = if todo > 0 { finish("Доустановить") } else { None };
+        (Dot::Busy, "Среда работает, не всё настроено", format!("{}: {}", b.title, b.detail), primary)
+    } else {
+        let detail = container.map(|o| o.detail.clone()).unwrap_or_default();
+        let primary = if todo > 0 { finish("Доустановить") } else { None };
+        (Dot::Up, "Среда работает", format!("контейнер {name} · {detail}"), primary)
+    };
+    Card { dot, state: state.into(), sub, primary }
+}
+
 /// Плашка над вкладками: первая заблокированная операция своим текстом.
 /// Недоделанное плашкой не считается — это обычная работа кнопки.
 pub fn notice(ops: &[OpView]) -> Option<String> {
@@ -341,6 +384,50 @@ mod tests {
         let sent = std::sync::Mutex::new(Vec::<String>::new());
         guarded(|e: String| sent.lock().unwrap().push(e), |l: Line| l.text, || "ok".to_string(), || "done".to_string());
         assert_eq!(*sent.lock().unwrap(), vec!["ok".to_string()]);
+    }
+
+    /// Карточка состояния коротко: заголовок и надпись главной кнопки.
+    fn card(ops: &[OpView]) -> (String, Option<&'static str>) {
+        let c = status_line(ops, "dev1c");
+        (c.state, c.primary.map(|(_, label)| label))
+    }
+
+    #[test]
+    fn the_status_card_names_the_state_and_the_next_step() {
+        let missing = |id: &str| op(id, OpState::Missing);
+        let done = |id: &str| op(id, OpState::Done("готово".into()));
+        let drift = |id: &str| op(id, OpState::Drifted { from: "3390".into(), to: "4000".into() });
+        let blocked = |id: &str| op(id, OpState::Blocked("модель не выбрана".into()));
+
+        assert_eq!(card(&[missing("container"), missing("image")]), ("Среда не установлена".into(), Some("Установить")));
+        assert_eq!(card(&[done("image"), missing("container")]), ("Среда установлена не полностью".into(), Some("Доустановить")));
+        assert_eq!(card(&[done("container"), drift("image")]), ("Среда работает, параметры разошлись".into(), Some("Применить изменения")));
+        assert_eq!(card(&[done("container"), blocked("model")]), ("Среда работает, не всё настроено".into(), None));
+        assert_eq!(card(&[done("container"), done("image")]), ("Среда работает".into(), None));
+    }
+
+    #[test]
+    fn a_blocked_environment_with_work_left_still_offers_to_finish_it() {
+        let ops = vec![
+            op("container", OpState::Done("запущен".into())),
+            op("model", OpState::Blocked("модель не выбрана".into())),
+            op("image", OpState::Missing),
+        ];
+        let c = status_line(&ops, "dev1c");
+        assert_eq!(c.primary.map(|(w, l)| (w, l)), Some((Which::Install, "Доустановить")));
+        assert_eq!(c.sub, "model: модель не выбрана");
+    }
+
+    #[test]
+    fn the_subline_counts_what_is_done_until_the_container_runs() {
+        let ops = vec![op("image", OpState::Done("загружен".into())), op("container", OpState::Missing)];
+        assert_eq!(status_line(&ops, "dev1c").sub, "сделано 1 из 2");
+    }
+
+    #[test]
+    fn a_running_environment_shows_the_container_name_and_its_detail() {
+        let ops = vec![op("container", OpState::Done("запущен".into()))];
+        assert_eq!(status_line(&ops, "dev1c").sub, "контейнер dev1c · запущен");
     }
 
     #[test]

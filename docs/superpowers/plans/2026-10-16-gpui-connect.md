@@ -737,3 +737,31 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 - [ ] **Step 2: Реализация** по списку выше.
 - [ ] **Step 3: Спека и STATUS.**
 - [ ] **Step 4: Commit** — `feat(1c-connect): tray menu toggles for autostart at login (HKCU Run, --tray) and autoconnect at launch` (трейлер `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).
+
+### Task 17: Полоса хода в разделителе над подвалом
+
+Заказчик (2026-10-18): разделитель между телом вкладки и подвалом становится тоненьким прогресс-баром, и полоса отражает **всё, что требует времени**: операции, подключение туннеля, фоновое обновление состояния. Спека: `docs/superpowers/specs/2026-10-18-progress-design.md`, абзац «Полоса хода = разделитель над подвалом». Фазы, часы, уведомления и «Прервать» из той спеки в эту задачу **не входят** — только полоса на уже имеющихся признаках.
+
+**Files:** `setup/1c-connect/src/gui/{mod,panel}.rs`, spec `docs/superpowers/specs/2026-10-18-progress-design.md` (пометить абзац про полосу как сделанное в задаче 17 на `Ui::working()`) и `docs/superpowers/specs/2026-10-16-gpui-connect-design.md` (пункт 5 про нижнюю плашку: разделитель = полоса хода), `docs/STATUS.md` одна фраза.
+
+**Признак «что-то идёт» (`gui/mod.rs`):**
+- `Ui.pending: usize` — число живых потоков `refresh_ops`/`refresh_project`: `+1` при `thread::spawn` в каждой из двух функций, `−1` (насыщенно, `saturating_sub`) в обработчиках `Ev::Ops` и `Ev::Project`. Оба потока идут через `guarded`, чья запасная ветка шлёт то же событие при панике, так что счётчик всегда сходится.
+- `impl Ui { pub fn working(&self) -> bool { self.busy.is_some() || matches!(self.link, State::Connecting) || self.pending > 0 } }`.
+- Тест (на фикстуре `Ui::for_test()`): покой → `false`; `busy = Some(Busy::Check)` → `true`; `link = State::Connecting` → `true`; `pending = 1` → `true`; `pending` обратно `0` и `link = State::Off` → `false`.
+- Перерисовка: `Ev::Ops`/`Ev::Project` уже зовут `cx.refresh_windows()`; убедись, что смена `link` на `Connecting` и обратно тоже перерисовывает (так и есть через `set_link`) — иначе полоса застрянет.
+
+**Полоса (`gui/panel.rs`):**
+- Подвал сейчас — `h_flex().items_center().gap_2().pt_3().border_t_1().border_color(border.opacity(0.6))…`. Убрать у него `border_t_1`/`border_color`; перед подвалом в корневой `v_flex` вставить полосу высотой ровно **2 px** в обоих состояниях (высота окна не меняется):
+  - покой (`!working`): `div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))` — та же линия 1 px, прижата к низу полосы;
+  - работа (`working`): корень `div().w_full().h(px(2.)).relative().bg(border.opacity(0.6))` (дорожка) с ребёнком-бегунком `div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(primary)` (акцент темы — `theme.primary`), анимированным `with_animation("progress-thumb", Animation::new(Duration::from_millis(1200)).repeat(), |d, t| d.left(relative(-0.25 + 1.25 * t)))` — бегунок въезжает слева и уезжает справа, по кругу. `AnimationExt`/`Animation` — из `gpui` (через `gpui_kit`), `relative` — `gpui::relative` (даёт `DefiniteLength`; `left` принимает `impl Into<Length>`, `DefiniteLength: Into<Length>`).
+  - Возврат в линию — мгновенный (решение контролёра: затухание 300 мс из спеки не делаем, нечему мешать; при ревью вида заказчик скажет, если нужно).
+- `working` читается один раз в `render`: `let working = cx.global::<Ui>().working();`.
+
+**Спека:** в `2026-10-18-progress-design.md` в абзаце про полосу добавить строку «Сделано в задаче 17 на `Ui::working()` без фаз; затухания нет — возврат мгновенный»; в `2026-10-16-gpui-connect-design.md` в пункте 5 («Нижняя плашка») одной фразой: разделитель над подвалом — полоса хода 2 px (линия 1 px в покое, бегунок акцентом при любой работе: операция, подключение, обновление состояния). STATUS: одна фраза.
+
+**Сборка — только в CI.** Локально `cargo` не запускать; API сверяй по `C:\Users\bucher\.cargo\registry\src\*\gpui-pre-0.3.9\src\elements\animation.rs` (`AnimationExt::with_animation(id, Animation, animator)`, `Animation::new(Duration).repeat()`), `styled.rs` (`left`, `w`, `h`, `relative`).
+
+- [ ] **Step 1: Падающий тест** `working`.
+- [ ] **Step 2: Реализация** по списку выше.
+- [ ] **Step 3: Спеки и STATUS.**
+- [ ] **Step 4: Commit** — `feat(1c-connect): the separator above the footer becomes a 2 px progress bar while anything is in flight` (трейлер `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).

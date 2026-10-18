@@ -87,7 +87,10 @@ script days is obsolete; the scripts are gone.
   the form saves `1c-connect.toml` through `render`; the tray menu now also
   carries two checkboxes, autostart at login (`HKCU\...\Run`, value
   `"<exe>" --tray`) and autoconnect at launch (task 16, 2026-10-18 customer
-  call) — built in CI only, not yet tried by hand. `dev1c-setup.exe` shows
+  call); the separator above the footer is now a 2 px progress bar —
+  a 1 px line at rest, an accent thumb while anything is in flight: operation,
+  tunnel connect, or background refresh (task 17, same call) — built in CI
+  only, not yet tried by hand. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
   model: blocked) and the access addresses. Builds belong in CI: on this
   laptop a cold `cargo check` of the GPUI window takes about 10 minutes and

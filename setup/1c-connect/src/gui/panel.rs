@@ -380,6 +380,9 @@ impl Render for Panel {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
             None => (ui.kit.root.display().to_string(), false),
         };
+        // Полоса хода в разделителе над подвалом: что-то идёт — операция,
+        // подключение туннеля или фоновое обновление состояния.
+        let working = cx.global::<Ui>().working();
 
         // Шапка — на поверхности, без отдельной полосы: Body Strong + ✕.
         let header = h_flex()
@@ -722,13 +725,34 @@ impl Render for Panel {
                     })
                     .child(body),
             )
+            .child(if working {
+                // Работа: дорожка акцентом темы, бегунок въезжает слева и
+                // уезжает справа по кругу. Возврат в линию — мгновенный,
+                // затухания нет (решение контролёра 2026-10-18).
+                div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .h(px(2.))
+                        .w(relative(0.25))
+                        .rounded_full()
+                        .bg(accent)
+                        .with_animation(
+                            "progress-thumb",
+                            Animation::new(Duration::from_millis(1200)).repeat(),
+                            |d, t| d.left(relative(-0.25 + 1.25 * t)),
+                        ),
+                )
+            } else {
+                // Покой: та же линия 1 px, прижата к низу 2 px полосы —
+                // высота разделителя не меняется между состояниями.
+                div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
+            })
             .child(
                 h_flex()
                     .items_center()
                     .gap_2()
                     .pt_3()
-                    .border_t_1()
-                    .border_color(border.opacity(0.6))
                     // Итог последнего действия переносится (до двух строк),
                     // а не обрезается многоточием: плашка растёт по тексту.
                     .child(

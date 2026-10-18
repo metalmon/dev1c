@@ -85,6 +85,10 @@ pub struct Ui {
     /// Начало текущей операции или проверки — для «Готово за …» в `Ev::Done`.
     pub started: Option<Instant>,
     pub busy: Option<Busy>,
+    /// Число живых потоков `refresh_ops`/`refresh_project` — растёт в момент
+    /// `thread::spawn`, падает (насыщенно) в `Ev::Ops`/`Ev::Project`. Входит
+    /// в `working()`: полоса хода в разделителе над подвалом.
+    pub pending: usize,
     pub status: Option<Line>,
     pub tray: Option<tray::Tray>,
     /// `gpui_kit::open_window` оборачивает панель в свой корневой вид,
@@ -100,6 +104,15 @@ pub struct Ui {
     pub tx: UnboundedSender<Ev>,
 }
 impl Global for Ui {}
+
+impl Ui {
+    /// Что-то идёт: операция/проверка (`busy`), подключение туннеля, или
+    /// фоновое обновление состояния (`pending` — `refresh_ops`/`refresh_project`
+    /// ещё не ответили). Полоса хода в разделителе над подвалом читает это.
+    pub fn working(&self) -> bool {
+        self.busy.is_some() || matches!(self.link, State::Connecting) || self.pending > 0
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -538,8 +551,9 @@ pub fn run_op(cx: &mut App, which: Which) {
 /// Перечитать каталог проекта в своём потоке: `layout_state` и `status` ходят
 /// по диску и к git, на главном потоке подвесили бы окно.
 pub fn refresh_project(cx: &mut App) {
-    let ui = cx.global::<Ui>();
+    let ui = cx.global_mut::<Ui>();
     let (cfg, tx) = (ui.cfg.clone(), ui.tx.clone());
+    ui.pending += 1;
     std::thread::spawn(move || {
         guarded(
             &tx,
@@ -594,6 +608,7 @@ pub fn refresh_ops(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
+    ui.pending += 1;
     std::thread::spawn(move || {
         guarded(
             &tx,
@@ -674,11 +689,15 @@ fn handle(ev: Ev, cx: &mut App) {
             cx.refresh_windows();
         }
         Ev::Ops(ops) => {
-            cx.global_mut::<Ui>().ops = ops;
+            let ui = cx.global_mut::<Ui>();
+            ui.ops = ops;
+            ui.pending = ui.pending.saturating_sub(1);
             cx.refresh_windows();
         }
         Ev::Project(v) => {
-            cx.global_mut::<Ui>().project = Some(v);
+            let ui = cx.global_mut::<Ui>();
+            ui.project = Some(v);
+            ui.pending = ui.pending.saturating_sub(1);
             cx.refresh_windows();
         }
     }
@@ -749,6 +768,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             project: None,
             started: None,
             busy: None,
+            pending: 0,
             status: None,
             tray: Some(tray),
             window: None,
@@ -802,6 +822,7 @@ impl Ui {
             project: None,
             started: None,
             busy: None,
+            pending: 0,
             status: None,
             tray: None,
             window: None,
@@ -1004,6 +1025,24 @@ mod tests {
         assert!(autoconnect(&ui.kit));
         ui.kit.state_set("autoconnect", "0").unwrap();
         assert!(!autoconnect(&ui.kit));
+    }
+
+    #[test]
+    fn working_is_true_while_busy_connecting_or_a_background_refresh_is_in_flight() {
+        use super::Busy;
+        let mut ui = Ui::for_test();
+        assert!(!ui.working(), "покой");
+        ui.busy = Some(Busy::Check);
+        assert!(ui.working(), "операция/проверка идёт");
+        ui.busy = None;
+        ui.link = State::Connecting;
+        assert!(ui.working(), "подключение туннеля идёт");
+        ui.link = State::Off;
+        assert!(!ui.working());
+        ui.pending = 1;
+        assert!(ui.working(), "фоновое обновление состояния идёт");
+        ui.pending = 0;
+        assert!(!ui.working());
     }
 
     #[test]

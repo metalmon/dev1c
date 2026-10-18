@@ -92,7 +92,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       firefox-esr firefox-esr-l10n-ru \
 \
       arc-theme papirus-icon-theme \
-      fonts-inter fonts-jetbrains-mono fonts-ibm-plex \
+      fonts-inter fonts-jetbrains-mono \
       `# librsvg2-common is the SVG LOADER for gdk-pixbuf. Without it GTK cannot` \
       `#   draw vector icons and falls back to low-resolution PNGs from hicolor:` \
       `#   large icons look blurry and SVG-only sets (Papirus) do not render at` \
@@ -360,6 +360,10 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
 # Global settings: telemetry and auto-updates off, language server and models
 # configured. Global rather than per-project — Restricted Mode does not block
 # those.
+# IBM Plex Sans, the desktop font: the same two faces 1c-connect's window
+# embeds (OFL, the licence file alongside). Debian 13 has no package for it.
+COPY config/fonts/ /usr/local/share/fonts/ibm-plex/
+RUN fc-cache -f >/dev/null && fc-list | grep -q "IBM Plex Sans"
 COPY config/zed-settings.json /etc/skel/.config/zed/settings.json
 # The 1C themes for Zed: the same tokens as the desktop and 1c-connect.
 COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json

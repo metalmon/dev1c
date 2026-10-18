@@ -65,34 +65,53 @@ done
 # is nasty: the image carries a fix, the environment keeps the old behaviour, and
 # nothing anywhere says why.
 #
-# So our two files are refreshed when they change in the image, tracked by a
-# stamp of the shipped version. A hand-edited file is replaced too, but kept as
-# .bak next to it: these are our settings, not the user's, and the people this
-# environment is for do not edit JSON — while we change it constantly.
+# So our files are refreshed when they change in the image, tracked by a stamp
+# of the shipped version in .config/.from-image/. A hand-edited file is
+# replaced too, but kept as .bak next to it: these are our settings, not the
+# user's, and the people this environment is for do not edit JSON — while we
+# change it constantly. The same goes for the desktop: theme, fonts, wallpaper
+# and window manager live in xfconf files in the home, and a theme change in
+# the image would otherwise reach nobody with an existing home.
 # This runs as root and writes into directories owned by the user. A symlink put
 # in place of any of these paths would have root write wherever it points. Today
 # the workstation accounts have passwordless sudo, so that grants nothing they
 # could not do directly — but sudo is exactly the kind of thing dropped when a
 # pilot turns into an installation, and then this would become a real hole. So
-# the paths are refused when symlinked, and the writes do not follow links.
+# the paths are refused when symlinked, a parent that resolves outside .config
+# is refused, and the writes do not follow links.
+SHIPPED_FILES="zed/settings.json zed/AGENTS.md zed/themes/1c.json
+    xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+    xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
+    xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+    gtk-3.0/settings.ini gtk-4.0/settings.ini"
 for home in /home/*; do
-    zed="$home/.config/zed"
-    [ -d "$zed" ] || continue
-    if [ -L "$home" ] || [ -L "$home/.config" ] || [ -L "$zed" ]; then
+    cfg="$home/.config"
+    [ -d "$cfg/zed" ] || continue
+    if [ -L "$home" ] || [ -L "$cfg" ]; then
         log "skipping $home: a symlinked path on the way to the settings"
         continue
     fi
     owner_u=$(stat -c '%U' "$home")
     owner_g=$(stat -c '%G' "$home")
-    for f in settings.json AGENTS.md themes/1c.json; do
-        src="/etc/skel/.config/zed/$f"
-        dst="$zed/$f"
-        stamp="$zed/.$(basename "$f").from-image"
+    cfg_real=$(realpath "$cfg")
+    stamps="$cfg/.from-image"
+    [ -L "$stamps" ] && { log "skipping $home: $stamps is a symlink"; continue; }
+    [ -d "$stamps" ] || install -d -o "$owner_u" -g "$owner_g" "$stamps"
+    for f in $SHIPPED_FILES; do
+        src="/etc/skel/.config/$f"
+        dst="$cfg/$f"
+        stamp="$stamps/$(echo "$f" | tr / _)"
         [ -f "$src" ] || continue
-        # the parent too: themes/ is a directory a user could replace with a link
-        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ] || [ -L "$(dirname "$dst")" ]; then
+        parent=$(dirname "$dst")
+        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ] || [ -L "$parent" ]; then
             log "skipping $dst: symlink"
             continue
+        fi
+        # the parent is created below if missing; an existing one must resolve
+        # inside .config (a link deeper in the path would lead root elsewhere)
+        if [ -e "$parent" ]; then
+            case "$(realpath "$parent")" in "$cfg_real"|"$cfg_real"/*) ;; *)
+                log "skipping $dst: parent resolves outside $cfg"; continue ;; esac
         fi
         shipped=$(md5sum "$src" | cut -d' ' -f1)
         # The settings carry the model address and window substituted below;
@@ -100,8 +119,8 @@ for home in /home/*; do
         # variables change the file has to come from the image again. The
         # stamp therefore covers the image copy AND the model variables: the
         # same image with a new model re-seeds settings.json (a hand edit in it
-        # is lost then — the .bak keeps it), AGENTS.md is untouched by this.
-        if [ "$f" = settings.json ]; then
+        # is lost then — the .bak keeps it), the other files are untouched by this.
+        if [ "$f" = zed/settings.json ]; then
             shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${CUSTOM_API_URL:-}" "${CUSTOM_MODEL:-}" \
                 "${CUSTOM_MAX_TOKENS:-}" "${CUSTOM_MAX_OUTPUT_TOKENS:-}" | md5sum | cut -d' ' -f1)
         fi
@@ -110,10 +129,10 @@ for home in /home/*; do
         # install after rm: writing over a path replaces the file itself rather
         # than following whatever it might point at
         rm -f "$dst"
-        # themes/ is the user's directory (their own themes go there too)
-        [ -d "$(dirname "$dst")" ] || install -d -o "$owner_u" -g "$owner_g" "$(dirname "$dst")"
+        # the directories are the user's (their own themes go to zed/themes too)
+        [ -d "$parent" ] || install -d -o "$owner_u" -g "$owner_g" "$parent"
         install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
-        tmp=$(mktemp "$zed/.from-image.XXXXXX") || continue
+        tmp=$(mktemp "$stamps/.tmp.XXXXXX") || continue
         echo "$shipped" > "$tmp"
         chown "$owner_u:$owner_g" "$tmp"
         mv -f "$tmp" "$stamp"

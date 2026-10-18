@@ -82,7 +82,8 @@ DEFAULT_KEEP_EMAIL_PRIVATE = true
 ENABLED = true
 
 [ui]
-DEFAULT_THEME = gitea-dark
+# auto: the page follows the browser, the browser follows the desktop theme
+DEFAULT_THEME = gitea-auto
 
 [security]
 INSTALL_LOCK = true
@@ -120,6 +121,21 @@ if [ "$FIRST_RUN" = "1" ]; then
             --email "$u@oktaplus.local" $admin_flag --must-change-password=false \
             >>"$GITEA_LOG" 2>&1 || true
     done
+fi
+
+# The theme used to be gitea-dark, and Gitea copies the default into every
+# account at creation. Volumes from that time get the new default once: the
+# config line, and the accounts still carrying the old default (a theme a
+# person picked later is a different value and stays). Before the server
+# starts, while the database is free.
+if grep -q '^DEFAULT_THEME = gitea-dark' "$GITEA_CONF"; then
+    sed -i 's/^DEFAULT_THEME = gitea-dark/DEFAULT_THEME = gitea-auto/' "$GITEA_CONF"
+    python3 - "$GITEA_HOME/data/gitea.db" <<'PY' >>"$GITEA_LOG" 2>&1 || true
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+n = c.execute("UPDATE user SET theme = 'gitea-auto' WHERE theme = 'gitea-dark'").rowcount
+c.commit(); print("theme gitea-dark -> gitea-auto for", n, "accounts")
+PY
 fi
 
 "$GITEA_BIN" web --config "$GITEA_CONF" >>"$GITEA_LOG" 2>&1 &

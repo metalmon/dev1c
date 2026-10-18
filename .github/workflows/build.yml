@@ -13,6 +13,10 @@ on:
         description: "Open an SSH session to the runner after the job"
         type: boolean
         default: false
+      binaries_only:
+        description: "Build and test the setup binaries only, skip the image"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -84,6 +88,9 @@ jobs:
 
   build:
     needs: setup
+    # A manual run for the installers alone (a window change, say) does not
+    # need the 3 GB image rebuilt.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.binaries_only) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Nothing here writes to the repository: the build reads sources and the

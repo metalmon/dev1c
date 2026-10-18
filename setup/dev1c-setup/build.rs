@@ -1,6 +1,6 @@
-//! Окно: манифест и значок кладёт tauri-build. Сборка без окна
-//! (`--no-default-features`) ничего не делает.
+//! Окно: значок exe кладёт embed-resource. Сборка без окна
+//! (`--no-default-features`) и сборка не под Windows ничего не делают.
 fn main() {
-    #[cfg(feature = "gui")]
-    tauri_build::build();
+    #[cfg(all(windows, feature = "gui"))]
+    embed_resource::compile("icons/app.rc", embed_resource::NONE).manifest_optional().unwrap();
 }

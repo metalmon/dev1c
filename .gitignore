@@ -19,7 +19,6 @@ models/
 
 # Rust build output of the installers
 setup/target/
-setup/*/gen/
 
 # The 1C training installer for Dockerfile.1c (download it from the 1C site)
 platform/

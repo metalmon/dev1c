@@ -266,20 +266,18 @@ script days is obsolete; the scripts are gone.
   in `pack.sh`; the llama/cudart archives are pinned the same way.
 - A Windows path in TOML needs single quotes (`file = 'C:\models\x.gguf'`) or
   doubled backslashes; the sample says so now.
-- Dependabot flags `glib` 0.18 (advisory for 0.15–0.20) in `setup/Cargo.lock`:
-  it is `dev1c-setup`'s Tauri Linux GTK dependency (`1c-connect`'s window
-  moved to GPUI in task 7 and no longer pulls it), compiled only in a Linux
-  build with the window, which CI never does. Goes away when Tauri bumps
-  gtk-rs.
+- *(closed)* Dependabot's `glib` 0.18 advisory came in through
+  `dev1c-setup`'s Tauri GTK chain. Both windows are GPUI now and Tauri is out
+  of the workspace, so the chain is gone with it.
 - The window ships only in the Windows build: Linux CI builds pass
-  `--no-default-features` for both binaries — `dev1c-setup` to avoid
-  installing webkit2gtk on the runner (Tauri), `1c-connect` because
-  GPUI-on-Linux is not needed. A release build with the window is
+  `--no-default-features` for both binaries: GPUI-on-Linux is not needed by
+  either of them. A release build with the window is
   `windows_subsystem = "windows"`: commands get their console back through
   `common::console::attach`; without it `status` prints nowhere.
-- Tauri's `tauri icon` is not used: `icons/icon.ico` and the 64 px `tray.png`
-  are made once with Pillow (the SVG mark via headless Edge); the status dot
-  is drawn at run time over `tray.png`.
+- Icons are made once with Pillow (`icons/icon.ico`, the 64 px `tray.png`,
+  the SVG mark via headless Edge) and embedded by `embed-resource` through
+  each crate's `icons/app.rc`; the status dot is drawn at run time over
+  `tray.png`.
 - `opm install -d <dir> vanessa-runner` vendors every dependency under
   `vanessa-runner/oscript_modules` — but resolves them as the hub has them
   today, hence the committed manifest `setup/1c-connect/vendor/vrunner-lib.sha256`.
@@ -410,13 +408,10 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    bounded. Still accepted: abort of a bridge task does not interrupt the
    running git call (the mutex frees when it ends); `/P…` redaction also
    blots `/Path…` in journal lines. Dependabot's `glib` 0.18.5 alert
-   (RUSTSEC-2024-0429, `VariantStrIter`, Linux target only) stays: every
-   layer of `dev1c-setup`'s Tauri 2.12.4 — tray-icon, muda, wry, webkit2gtk —
-   pins `gtk ^0.18`, and the fixed glib 0.22 is only reachable through gtk
-   0.19, which none of them has adopted (not even `tauri 3.0.0-alpha.5`); the
-   iterator is not used here and the Linux build has no window. `1c-connect`
-   moved off Tauri onto GPUI (task 7) and no longer carries this chain.
-   Revisit when `webkit2gtk-rs` releases against gtk 0.19. **6B next:** `host.project`
+   (RUSTSEC-2024-0429, `VariantStrIter`, Linux target only) came in through
+   `dev1c-setup`'s Tauri 2.12.4 chain — tray-icon, muda, wry, webkit2gtk, all
+   pinning `gtk ^0.18`. Closed 2026-10-19: that window is GPUI too, and with
+   Tauri out of the workspace nothing pulls gtk any more. **6B next:** `host.project`
    (git init, remote, `.gitattributes`, `autumn-properties.json`),
    `export`/`import`, the «Проект» tab and project fields in the window,
    the remaining `check` facts (vrunner-mcp answers, project, Gitea,

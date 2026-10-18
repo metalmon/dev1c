@@ -52,7 +52,7 @@ jobs:
         with:
           workspaces: setup
       # The window is built on Windows only: that is where the kits are
-      # double-clicked (1c-connect: GPUI; dev1c-setup: still Tauri). Linux
+      # double-clicked (both windows are GPUI since 2026-10-19). Linux
       # builds serve the server CLI and the live tunnel test, and skip the
       # window because GPUI-on-Linux is not needed, not for a toolchain gap.
       - name: Test

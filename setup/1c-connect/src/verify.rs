@@ -6,6 +6,7 @@
 use crate::ops_host::{extension_version, find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
+use common::{Phase, Runner};
 
 /// Порядок фактов — часть контракта (см. тест).
 pub const ORDER: [&str; 13] = [
@@ -102,6 +103,7 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
 }
 
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
+    ctx.progress(Phase::Check);
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
     v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), &h.server));

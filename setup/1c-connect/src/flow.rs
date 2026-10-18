@@ -4,7 +4,7 @@
 
 use crate::local::Reply;
 use crate::ops_host::Ctx;
-use common::Runner;
+use common::{Phase, Runner};
 use serde_json::{json, Value};
 
 pub struct Deps<'a> {
@@ -15,6 +15,7 @@ pub struct Deps<'a> {
     pub dump_index_exists: bool,
     /// `--dry-run`: только план, ни одного вызова.
     pub dry_run: bool,
+    pub phase: &'a dyn Fn(Phase),
 }
 
 fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -35,6 +36,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log("план: cf_decompile → src, затем git add/commit/push ветки рабочего места (project_push)".into());
         return Ok("план напечатан, на машине ничего не менялось".into());
     }
+    (d.phase)(Phase::Decompile);
     log("cf_decompile → src (минуты; Конфигуратор работает в фоне)".into());
     let r = (d.call)("cf_decompile", json!({"OUT": "src", "background": false}))?;
     if r.is_error {
@@ -43,6 +45,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
     if !r.text.trim().is_empty() {
         log(r.text);
     }
+    (d.phase)(Phase::Push);
     log("git: add, commit, push в Gitea — первая выгрузка это десятки тысяч файлов, минуты".into());
     (d.push)(message)
 }
@@ -58,10 +61,12 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
     if n > 0 {
         return Err(format!("на машине запущен 1cv8.exe ({n}) — закройте Конфигуратор и клиентов 1С, затем повторите"));
     }
+    (d.phase)(Phase::Pull);
     log((d.pull)()?);
     if !d.dump_index_exists {
         log("src/ConfigDumpInfo.xml нет — загрузка будет полной, не инкрементом (первая после клонирования)".into());
     }
+    (d.phase)(Phase::Load);
     log("cf_load ← src (минуты)".into());
     let r = (d.call)("cf_load", json!({"SRC": "src", "background": false, "increment": true}))?;
     if r.is_error {
@@ -91,6 +96,7 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
     };
     let push = |m: &str| crate::project::push(&p, m);
     let pull = || crate::project::pull(&p);
+    let phase = |ph: Phase| ctx.progress(ph);
     let d = Deps {
         call: &call,
         platform_running: &crate::bridge::configurator_count,
@@ -98,6 +104,7 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
         pull: &pull,
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
+        phase: &phase,
     };
     f(&d, &log)
 }
@@ -123,6 +130,7 @@ mod tests {
         pulled: RefCell<bool>,
         index: bool,
         dry: bool,
+        phases: RefCell<Vec<Phase>>,
     }
     impl Fake {
         fn new(replies: &[(&str, bool)]) -> Fake {
@@ -134,6 +142,7 @@ mod tests {
                 pulled: RefCell::new(false),
                 index: true,
                 dry: false,
+                phases: RefCell::new(vec![]),
             }
         }
         fn run<R>(&self, f: impl FnOnce(&Deps) -> R) -> R {
@@ -151,7 +160,16 @@ mod tests {
                 *self.pulled.borrow_mut() = true;
                 Ok("pulled".to_string())
             };
-            f(&Deps { call: &call, platform_running: &platform_running, push: &push, pull: &pull, dump_index_exists: self.index, dry_run: self.dry })
+            let phase = |ph: Phase| self.phases.borrow_mut().push(ph);
+            f(&Deps {
+                call: &call,
+                platform_running: &platform_running,
+                push: &push,
+                pull: &pull,
+                dump_index_exists: self.index,
+                dry_run: self.dry,
+                phase: &phase,
+            })
         }
     }
 
@@ -228,5 +246,35 @@ mod tests {
         let f = Fake::new(&[]);
         let e = f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert!(e.contains("занято"), "{e}");
+    }
+
+    #[test]
+    fn export_announces_decompile_then_push() {
+        let f = Fake::new(&[("разобрано", false)]);
+        f.run(|d| export_with(d, "m", &|_| {})).unwrap();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Decompile, Phase::Push]);
+    }
+
+    #[test]
+    fn import_announces_pull_then_load() {
+        let f = Fake::new(&[("загружено", false)]);
+        f.run(|d| import_with(d, &|_| {})).unwrap();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Pull, Phase::Load]);
+    }
+
+    #[test]
+    fn dry_run_announces_nothing() {
+        let mut f = Fake::new(&[]);
+        f.dry = true;
+        f.run(|d| export_with(d, "x", &|_| {})).unwrap();
+        f.run(|d| import_with(d, &|_| {})).unwrap();
+        assert!(f.phases.borrow().is_empty(), "{:?}", f.phases.borrow());
+    }
+
+    #[test]
+    fn a_failed_decompile_announces_no_push() {
+        let f = Fake::new(&[("платформа: ошибка", true)]);
+        f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Decompile]);
     }
 }

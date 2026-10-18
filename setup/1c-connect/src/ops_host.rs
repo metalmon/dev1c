@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
-use common::{Prompt, Runner, Sink};
+use common::{Phase, Prompt, Runner, Sink};
 
 pub struct Ctx {
     pub kit: Kit,
@@ -324,6 +324,7 @@ impl Op<Ctx> for Extension {
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
+        ctx.progress(Phase::Install);
         let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
         let o = docker::exec(ctx, &exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password])?;
@@ -349,6 +350,7 @@ impl Op<Ctx> for Extension {
         ])
     }
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
+        ctx.progress(Phase::Uninstall);
         let Some(v8) = find_1cv8() else { anyhow::bail!("1cv8.exe не найден") };
         let h = &ctx.cfg.host;
         let ib = ib_switch(&h.base_path);

@@ -266,6 +266,12 @@ impl Panel {
             .hover(|s| s.bg(hover))
     }
 
+    /// Содержимое вкладки белой карточкой: на сером поле панели карточка
+    /// читается как карточка, а не как лист без краёв.
+    fn body_card(layer: Hsla, border: Hsla, content: impl IntoElement) -> Div {
+        Self::layer(layer, border).flex().flex_col().size_full().p_4().child(content)
+    }
+
     /// Прокручиваемая область с полосой поверх текста.
     fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement {
         div()
@@ -398,7 +404,7 @@ impl Render for Panel {
         let body: AnyElement = match tab {
             Tab::Ops => {
                 let rows = ops.clone();
-                Self::scrolled(
+                Self::body_card(layer, border, Self::scrolled(
                     "ops",
                     &self.body_scroll,
                     v_flex().children(rows.into_iter().enumerate().map(|(ix, o)| {
@@ -422,7 +428,7 @@ impl Render for Panel {
                     self.log_len = lines.len();
                     self.log_scroll.scroll_to_bottom();
                 }
-                Self::scrolled(
+                Self::body_card(layer, border, Self::scrolled(
                     "log",
                     &self.log_scroll,
                     v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
@@ -461,7 +467,7 @@ impl Render for Panel {
             Tab::Access => {
                 let ui = cx.global::<Ui>();
                 let rows = crate::ui::access_rows(&ui.cfg, ui.facts, &ui.address);
-                Self::scrolled(
+                Self::body_card(layer, border, Self::scrolled(
                     "access",
                     &self.body_scroll,
                     v_flex().children(rows.into_iter().enumerate().map(|(ix, r)| {
@@ -484,10 +490,11 @@ impl Render for Panel {
             Tab::Check => {
                 let checks = cx.global::<Ui>().checks.clone();
                 if checks.is_empty() {
-                    div().text_color(caption).child("Проверки ещё не было — кнопка «Проверить» в шапке.").into_any_element()
+                    Self::body_card(layer, border, div().text_color(caption).child("Проверки ещё не было — кнопка «Проверить» в шапке."))
+                        .into_any_element()
                 } else {
                     let (passed, failed) = common::check::summary(&checks);
-                    Self::scrolled(
+                    Self::body_card(layer, border, Self::scrolled(
                         "check",
                         &self.body_scroll,
                         v_flex()
@@ -534,16 +541,23 @@ impl Render for Panel {
                     labelled(label, Self::input(state, accent, stroke, window, cx).into_any_element())
                 };
                 let group = |title: &'static str| {
-                    v_flex().w_full().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    Self::layer(layer, border)
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .p_4()
+                        .gap_4()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 };
                 Self::scrolled(
                     "params",
                     &self.body_scroll,
-                    // Две группы рядом, между ними линия: без неё поля
-                    // читаются как одна сплошная сетка. В прежнем окне
-                    // колонки тоже шли парой.
+                    // Две группы рядом, каждая своей карточкой: границы
+                    // карточек делят колонки и показывают, где группа
+                    // кончается (решение заказчика 2026-10-19).
                     h_flex()
-                        .gap_6()
+                        .items_start()
+                        .gap_4()
                         .py_1()
                         .child(
                             group("Контейнер")
@@ -563,7 +577,6 @@ impl Render for Panel {
                                     .child(div().child("Отдать контейнеру GPU")),
                                 ),
                         )
-                        .child(div().w(px(1.)).flex_shrink_0().bg(border.opacity(0.6)))
                         .child(
                             group("Модель для агентов")
                                 .flex_1()
@@ -692,12 +705,12 @@ impl Render for Panel {
         let panel = v_flex()
             .flex_1()
             .min_h_0()
-            .bg(layer)
+            .bg(ground)
             .rounded(px(4.))
             .border_1()
             .border_color(border.opacity(0.6))
             .overflow_hidden()
-            .child(div().flex_1().min_h_0().p_5().child(body))
+            .child(div().flex_1().min_h_0().p_4().child(body))
             .child(if working {
                 // Работа: дорожка акцентом темы, бегунок по кругу.
                 div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
@@ -715,7 +728,10 @@ impl Render for Panel {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .px_5()
+                    .bg(layer)
+                    .border_t_1()
+                    .border_color(border.opacity(0.6))
+                    .px_4()
                     .py_3()
                     .child(
                         div()

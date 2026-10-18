@@ -31,6 +31,43 @@ pub enum Event {
     Command(String),
     /// Сырой вывод внешней программы: в терминал не идёт, живёт в журнале.
     Output { command: String, text: String },
+    /// Фаза долгой операции (экспорт, импорт, установка расширения, проверка).
+    Progress(Progress),
+}
+
+/// Фаза долгой операции — для заголовка в окне и в CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    Decompile,
+    Push,
+    Pull,
+    Load,
+    Install,
+    Uninstall,
+    Check,
+}
+
+impl Phase {
+    pub fn title(self) -> &'static str {
+        match self {
+            Phase::Decompile => "Выгружаю конфигурацию",
+            Phase::Push => "Отправляю в git",
+            Phase::Pull => "Получаю из git",
+            Phase::Load => "Загружаю в базу",
+            Phase::Install => "Устанавливаю расширение",
+            Phase::Uninstall => "Снимаю расширение",
+            Phase::Check => "Проверяю",
+        }
+    }
+}
+
+/// Состояние долгой операции прямо сейчас.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Progress {
+    pub phase: Phase,
+    pub done: Option<u64>,
+    pub total: Option<u64>,
+    pub note: String,
 }
 
 /// Куда движок отдаёт события.
@@ -108,5 +145,31 @@ pub trait Runner: Sync {
     }
     fn say(&self, t: impl Into<String>) {
         self.emit(Event::Say(t.into()));
+    }
+    fn progress(&self, phase: Phase) {
+        self.emit(Event::Progress(Progress { phase, done: None, total: None, note: String::new() }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_phase_has_a_russian_title() {
+        let all = [Phase::Decompile, Phase::Push, Phase::Pull, Phase::Load, Phase::Install, Phase::Uninstall, Phase::Check];
+        let titles: Vec<&str> = all.iter().map(|p| p.title()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Выгружаю конфигурацию",
+                "Отправляю в git",
+                "Получаю из git",
+                "Загружаю в базу",
+                "Устанавливаю расширение",
+                "Снимаю расширение",
+                "Проверяю",
+            ]
+        );
     }
 }

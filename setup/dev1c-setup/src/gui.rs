@@ -64,6 +64,7 @@ fn ctx_for(app: &AppHandle, ui: &Ui, dry_run: bool) -> Ctx {
             Event::Warn(t) => Line { kind: "warn".into(), text: t },
             Event::Fail(t) => Line { kind: "fail".into(), text: t },
             Event::Say(t) => Line { kind: "say".into(), text: t },
+            Event::Progress(p) => Line { kind: "say".into(), text: p.phase.title().into() },
             Event::Command(_) | Event::Output { .. } => return,
         };
         let _ = handle.emit("dev1c:line", line);

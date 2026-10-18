@@ -115,6 +115,7 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
             Event::Warn(t) => println!("  [ !! ] {t}"),
             Event::Fail(t) => println!("  [FAIL] {t}"),
             Event::Say(t) => println!("{t}"),
+            Event::Progress(p) => println!("== {}", p.phase.title()),
             Event::Command(_) | Event::Output { .. } => {}
         }
     });

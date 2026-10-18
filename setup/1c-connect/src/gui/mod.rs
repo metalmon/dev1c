@@ -306,6 +306,7 @@ pub fn line_of(e: &Event) -> Option<Line> {
         Event::Warn(t) => (Kind::Warn, t.clone()),
         Event::Fail(t) => (Kind::Fail, t.clone()),
         Event::Say(t) => (Kind::Say, t.clone()),
+        Event::Progress(p) => (Kind::Say, p.phase.title().into()),
         Event::Command(_) | Event::Output { .. } => return None,
     };
     Some(Line { kind, text })

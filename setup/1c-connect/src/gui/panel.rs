@@ -1,5 +1,5 @@
 //! Содержимое флайаута: шапка, карточка состояния, вкладки-пивот,
-//! самосохраняющиеся параметры, список операций, проверка, журнал и подвал.
+//! параметры с кнопкой «Сохранить», список операций, проверка, журнал и подвал.
 //!
 //! Окно пересобирается на каждый показ, поэтому `Panel` держит только
 //! сущности полей, фокус и прокрутку журнала; всё остальное читается из
@@ -16,7 +16,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Theme};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, IndexPath, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -104,6 +104,15 @@ pub fn host_of(f: &Fields, cx: &App) -> Host {
     }
 }
 
+/// Поля окна отличаются от сохранённых? `project` и `tools` в окне не
+/// редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
+pub fn fields_differ(a: &Host, b: &Host) -> bool {
+    fn key(h: &Host) -> [&str; 8] {
+        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.base_url, &h.dump]
+    }
+    key(a) != key(b)
+}
+
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
     let (ph, val) = (ph.to_string(), val.to_string());
     cx.new(|cx| {
@@ -145,10 +154,6 @@ impl Panel {
             dump: field("C:\\proj\\Buh\\src", &host.dump, false, window, cx),
             workstation: cx.new(|cx| SelectState::new(WORKSTATIONS.to_vec(), Some(IndexPath::new(ws_ix)), window, cx)),
         };
-        // Автосохранение убрано: сохранение только по кнопке "Сохранить"
-        // Оставляем подписку только при необходимости; больше не сохраняем при blur/enter
-        // cx.subscribe(...) for blur removed
-
         // Минуты в карточке: пока окно живо, раз в полминуты перерисовка.
         // Окно закрыли — сущность не поднимается, задача уходит.
         cx.spawn(async move |this, cx| {
@@ -166,7 +171,7 @@ impl Panel {
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        host_of(&self.fields, cx) != self.original
+        fields_differ(&host_of(&self.fields, cx), &self.original)
     }
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
@@ -224,7 +229,7 @@ impl Panel {
     fn row(label: &str, muted: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
         v_flex()
             .gap_1()
-            .child(div().text_xs().text_color(muted).child(label.to_string()))
+            .child(div().text_size(px(13.)).text_color(muted).child(label.to_string()))
             .child(Self::input(input, accent, window, cx))
     }
 
@@ -291,7 +296,7 @@ impl Render for Panel {
                     .min_w_0()
                     .gap_0p5()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(state))
-                    .child(div().text_xs().text_color(muted).child(sub)),
+                    .child(div().text_size(px(13.)).text_color(muted).child(sub)),
             )
             .child(
                 Switch::new("link")
@@ -303,7 +308,7 @@ impl Render for Panel {
         // Бейдж — не акцент: проблемы красным, непрочитанное приглушённым
         // слоем (акцент берёт только переключатель и главная кнопка).
         let badge = |n: usize, colour: Hsla, on: Hsla| {
-            div().px_1().rounded_sm().bg(colour).text_xs().text_color(on).child(n.to_string())
+            div().px_1().rounded_sm().bg(colour).text_size(px(13.)).text_color(on).child(n.to_string())
         };
         let with_badge = |label: &'static str, n: usize, colour: Hsla, on: Hsla| {
             let t = KitTab::new().label(label);
@@ -362,8 +367,8 @@ impl Render for Panel {
                                     div().flex_1().child(
                                         v_flex()
                                             .gap_1()
-                                            .child(div().text_xs().text_color(muted).child("Рабочее место"))
-                                            .child(Select::new(&f.workstation)),
+                                            .child(div().text_size(px(13.)).text_color(muted).child("Рабочее место"))
+                                            .child(Select::new(&f.workstation).focus_ring(false)),
                                     ),
                                 )
                                 .child(div().flex_1().child(Self::row("Пароль рабочего места", muted, accent, &f.password, window, cx))),
@@ -371,7 +376,7 @@ impl Render for Panel {
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("База"))
+                                .child(div().text_size(px(13.)).text_color(muted).child("База"))
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -390,7 +395,7 @@ impl Render for Panel {
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("Каталог выгрузки конфигурации"))
+                                .child(div().text_size(px(13.)).text_color(muted).child("Каталог выгрузки конфигурации"))
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -419,7 +424,7 @@ impl Render for Panel {
                                 .flex_1()
                                 .min_w_0()
                                 .child(o.title.clone())
-                                .child(div().text_xs().text_color(muted).child(o.detail.clone())),
+                                .child(div().text_size(px(13.)).text_color(muted).child(o.detail.clone())),
                         )
                 })))
                 .into_any_element(),
@@ -453,9 +458,9 @@ impl Render for Panel {
                                             .flex_1()
                                             .min_w_0()
                                             .child(c.what.clone())
-                                            .child(div().text_xs().text_color(muted).child(c.detail.clone()))
+                                            .child(div().text_size(px(13.)).text_color(muted).child(c.detail.clone()))
                                             .when(d == Dot::Down && !c.hint.is_empty(), |v| {
-                                                v.child(div().text_xs().text_color(warning).child(c.hint.clone()))
+                                                v.child(div().text_size(px(13.)).text_color(warning).child(c.hint.clone()))
                                             }),
                                     )
                             })),
@@ -557,7 +562,7 @@ impl Render for Panel {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .text_sm()
+            .text_size(px(15.))
             .border_1()
             .border_color(window_border)
             .rounded_lg()
@@ -579,7 +584,7 @@ impl Render for Panel {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
+                            .text_size(px(13.))
                             .text_color(if foot_left.1 { danger } else { muted })
                             .truncate()
                             .child(foot_left.0),
@@ -591,8 +596,8 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_dot, status_line};
-    use crate::cfg;
+    use super::{check_dot, fields_differ, status_line};
+    use crate::cfg::{self, Host};
     use crate::gui::Dot;
     use crate::session::State;
     use common::check::Check;
@@ -606,6 +611,15 @@ mod tests {
         let (d, t, s) = status_line(&State::Up { since: Instant::now() }, &p);
         assert_eq!((d, t), (Dot::Up, "Подключён"));
         assert_eq!(s, "0 мин · mcp-1c 7771 · web 7791");
+    }
+
+    #[test]
+    fn dirty_ignores_project_and_tools_but_sees_a_changed_field() {
+        let saved = Host { project: "C:\\proj".into(), tools: vec!["x".into()], ..Host::default() };
+        let shown = Host { project: String::new(), tools: Vec::new(), ..saved.clone() };
+        assert!(!fields_differ(&shown, &saved));
+        let edited = Host { server: "h:1".into(), ..shown };
+        assert!(fields_differ(&edited, &saved));
     }
 
     #[test]

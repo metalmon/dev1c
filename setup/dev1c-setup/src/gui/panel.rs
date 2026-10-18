@@ -243,6 +243,7 @@ impl Panel {
         let (h, colour) = if focused { (px(2.), accent) } else { (px(1.), stroke) };
         div()
             .relative()
+            .w_full()
             .child(Input::new(state).focus_bordered(false))
             // Нижняя линия поля — подпись Fluent: в покое сильнее рамки,
             // у активного поля акцентная и вдвое толще.
@@ -527,6 +528,7 @@ impl Render for Panel {
                 // прежнем окне и как в `1c-connect`.
                 let labelled = |label: &'static str, hint: &'static str, body: AnyElement| {
                     v_flex()
+                        .w_full()
                         .gap_1()
                         .child(div().child(label))
                         .child(body)
@@ -536,7 +538,7 @@ impl Render for Panel {
                     labelled(label, hint, Self::input(state, accent, stroke, window, cx).into_any_element())
                 };
                 let group = |title: &'static str| {
-                    v_flex().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                    v_flex().w_full().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 };
                 Self::scrolled(
                     "params",
@@ -554,7 +556,7 @@ impl Render for Panel {
                                 .child(input("Имя контейнера", "Тома данных называются по нему: имя-home, имя-gitea, имя-models.", &f.name))
                                 .child(input("Первый порт", "RDP; дальше подряд Gitea, модель, SSH.", &f.port))
                                 .child(input("Память", "", &f.memory))
-                                .child(labelled("Движок контейнеров", "", Select::new(&f.engine).into_any_element()))
+                                .child(labelled("Движок контейнеров", "", div().w_full().child(Select::new(&f.engine)).into_any_element()))
                                 .child(
                                     h_flex().items_center().gap_2().child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(
                                         |panel, checked: &bool, _, cx| {
@@ -569,7 +571,7 @@ impl Render for Panel {
                             group("Модель для агентов")
                                 .flex_1()
                                 .min_w_0()
-                                .child(labelled("Где работает сервер модели", "", Select::new(&f.serve).into_any_element()))
+                                .child(labelled("Где работает сервер модели", "", div().w_full().child(Select::new(&f.serve)).into_any_element()))
                                 .when(local, |g| {
                                     g.child(labelled(
                                         "Файл модели (.gguf)",

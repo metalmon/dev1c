@@ -445,15 +445,14 @@ impl Render for Panel {
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_size(px(13.)).text_color(caption).child("Каталог проекта"))
+                                .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
                                         .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
                                         .child(pick("pick-project", f.project.clone(), cx)),
-                                )
-                                .child(div().text_size(px(13.)).text_color(caption).child("Папка с src и git, не каталог базы.")),
+                                ),
                         ),
                 )
                 .into_any_element(),
@@ -559,24 +558,23 @@ impl Render for Panel {
                     Which::Export => ("Выгрузить", "Выгрузить в git"),
                     _ => ("Установить", "Установить расширение"),
                 };
+                // В меню — всё, кроме того, что на главной кнопке.
+                let rest: Vec<(&'static str, Which)> = [
+                    ("Выгрузить в git", Which::Export),
+                    ("Загрузить из git", Which::Import),
+                    ("Установить расширение", Which::Install),
+                    ("Снять расширение", Which::Uninstall),
+                ]
+                .into_iter()
+                .filter(|(_, w)| *w != which)
+                .collect();
                 h_flex()
                     .gap_2()
-                    .child(more("more-project").dropdown_menu(move |menu, _, _| {
-                        menu.item(
-                            PopupMenuItem::new("Загрузить из git")
-                                .disabled(busy_now)
-                                .on_click(|_, _, cx| gui::run_op(cx, Which::Import)),
-                        )
-                        .item(
-                            PopupMenuItem::new("Установить расширение")
-                                .disabled(busy_now)
-                                .on_click(|_, _, cx| gui::run_op(cx, Which::Install)),
-                        )
-                        .item(
-                            PopupMenuItem::new("Снять расширение")
-                                .disabled(busy_now)
-                                .on_click(|_, _, cx| gui::run_op(cx, Which::Uninstall)),
-                        )
+                    .child(more("more-project").dropdown_menu(move |mut menu, _, _| {
+                        for (label, w) in rest.iter().copied() {
+                            menu = menu.item(PopupMenuItem::new(label).disabled(busy_now).on_click(move |_, _, cx| gui::run_op(cx, w)));
+                        }
+                        menu
                     }))
                     .child(
                         Button::new("primary")

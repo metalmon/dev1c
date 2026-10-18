@@ -577,9 +577,9 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             ui.busy = None;
             ui.status = Some(if failed > 0 {
-                Line { kind: Kind::Fail, text: format!("Провалено: {failed}. Отчёт — last-check.txt в комплекте") }
+                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Отчёт — last-check.txt в комплекте") }
             } else {
-                Line { kind: Kind::Ok, text: "Все факты в порядке. Отчёт — last-check.txt".into() }
+                Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — last-check.txt".into() }
             });
             cx.refresh_windows();
         }

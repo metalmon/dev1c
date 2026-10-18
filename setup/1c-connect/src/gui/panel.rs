@@ -209,11 +209,23 @@ impl Panel {
     }
 
     /// Поле по Fluent: подпись Caption 12 px приглушённым, 4 px, поле.
-    fn row(label: &str, muted: Hsla, input: &Entity<InputState>) -> impl IntoElement {
+    /// Поле по Fluent: без кольца фокуса, у активного поля — акцентная линия
+    /// 2 px снизу (как `input:focus` в прежнем `app.css`).
+    fn input(state: &Entity<InputState>, accent: Hsla, window: &Window, cx: &App) -> impl IntoElement {
+        let focused = state.read(cx).focus_handle(cx).is_focused(window);
+        div()
+            .relative()
+            .child(Input::new(state).focus_bordered(false))
+            .when(focused, |d| {
+                d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent))
+            })
+    }
+
+    fn row(label: &str, muted: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
         v_flex()
             .gap_1()
             .child(div().text_xs().text_color(muted).child(label.to_string()))
-            .child(Input::new(input))
+            .child(Self::input(input, accent, window, cx))
     }
 
     /// Слой Fluent: заливка слоя, скругление 8, обводка 1 px низкой
@@ -233,9 +245,9 @@ impl Panel {
 }
 
 impl Render for Panel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        let (bg, border, fg, muted) = (t.background, t.border, t.foreground, t.muted_foreground);
+        let (bg, border, fg, muted, accent) = (t.background, t.border, t.foreground, t.muted_foreground, t.primary);
         let (success, warning, danger, card, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
         let theme = t.clone();
 
@@ -341,7 +353,7 @@ impl Render for Panel {
                 .child(
                     v_flex()
                         .gap_3()
-                        .child(Self::row("Адрес среды и порт SSH", muted, &f.server))
+                        .child(Self::row("Адрес среды и порт SSH", muted, accent, &f.server, window, cx))
                         .child(
                             h_flex()
                                 .gap_3()
@@ -354,7 +366,7 @@ impl Render for Panel {
                                             .child(Select::new(&f.workstation)),
                                     ),
                                 )
-                                .child(div().flex_1().child(Self::row("Пароль рабочего места", muted, &f.password))),
+                                .child(div().flex_1().child(Self::row("Пароль рабочего места", muted, accent, &f.password, window, cx))),
                         )
                         .child(
                             v_flex()
@@ -364,17 +376,17 @@ impl Render for Panel {
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child(div().flex_1().child(Input::new(&f.base_path)))
+                                        .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
                                         .child(pick("pick-base", f.base_path.clone(), cx)),
                                 ),
                         )
                         .child(
                             h_flex()
                                 .gap_3()
-                                .child(div().flex_1().child(Self::row("Пользователь базы", muted, &f.db_user)))
-                                .child(div().flex_1().child(Self::row("Пароль", muted, &f.db_password))),
+                                .child(div().flex_1().child(Self::row("Пользователь базы", muted, accent, &f.db_user, window, cx)))
+                                .child(div().flex_1().child(Self::row("Пароль", muted, accent, &f.db_password, window, cx))),
                         )
-                        .child(Self::row("Адрес публикации", muted, &f.base_url))
+                        .child(Self::row("Адрес публикации", muted, accent, &f.base_url, window, cx))
                         .child(
                             v_flex()
                                 .gap_1()
@@ -383,7 +395,7 @@ impl Render for Panel {
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child(div().flex_1().child(Input::new(&f.dump)))
+                                        .child(div().flex_1().child(Self::input(&f.dump, accent, window, cx)))
                                         .child(pick("pick-dump", f.dump.clone(), cx)),
                                 ),
                         ),

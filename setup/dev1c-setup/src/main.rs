@@ -12,6 +12,7 @@ mod gui;
 mod llama;
 mod ops;
 mod ops_llama;
+mod ui;
 mod verify;
 
 use anyhow::{Context, Result};

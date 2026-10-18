@@ -390,7 +390,8 @@ impl Render for Panel {
             .underline()
             .small()
             .selected_index(Tab::ALL.iter().position(|x| *x == tab).unwrap_or(0))
-            .children([ops_tab, KitTab::new().label(Tab::Params.title()), KitTab::new().label(Tab::Access.title()), check_tab, log_tab])
+            // Порядок — `Tab::ALL`, он же порядок индексов щелчка.
+            .children([KitTab::new().label(Tab::Params.title()), ops_tab, KitTab::new().label(Tab::Access.title()), check_tab, log_tab])
             .on_click(cx.listener(|_, i: &usize, _, cx| {
                 let Some(t) = Tab::ALL.get(*i).copied() else { return };
                 let ui = cx.global_mut::<Ui>();

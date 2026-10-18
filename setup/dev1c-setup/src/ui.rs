@@ -59,7 +59,9 @@ impl Line {
     }
 }
 
-/// Пять вкладок старого окна в том же порядке.
+/// Пять вкладок прежнего окна. Порядок — порядок работы: сначала параметры,
+/// потом установка, потом адреса, проверка и журнал (решение заказчика
+/// 2026-10-19).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Tab {
     #[default]
@@ -72,7 +74,7 @@ pub enum Tab {
 
 impl Tab {
     /// Порядок вкладок в полосе; он же — порядок индексов `TabBar`.
-    pub const ALL: [Tab; 5] = [Tab::Ops, Tab::Params, Tab::Access, Tab::Check, Tab::Log];
+    pub const ALL: [Tab; 5] = [Tab::Params, Tab::Ops, Tab::Access, Tab::Check, Tab::Log];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -488,6 +490,13 @@ mod tests {
         ];
         assert!(notice(&ops).unwrap().starts_with("модель не выбрана: [model] file"));
         assert!(notice(&[op("env", OpState::Missing)]).is_none());
+    }
+
+    #[test]
+    fn the_tab_strip_reads_in_the_order_of_work() {
+        // Полоса вкладок и индексы, по которым приходит щелчок, — один
+        // список: разъедутся они молча, поэтому порядок закреплён тестом.
+        assert_eq!(Tab::ALL.map(|t| t.title()), ["Параметры", "Операции", "Доступ", "Проверка", "Журнал"]);
     }
 
     #[test]

@@ -175,6 +175,18 @@ RUN --mount=type=bind,from=platform,target=/platform \
 # from it by checksum), and the entrypoint wrapper as CMD.
 COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
 COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.desktop
+# The tray at session start. The entry is here even when the binary is not:
+# `1c-stand connect` says so in the log and exits, which is better than an
+# autostart entry that appears and disappears between image versions.
+COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.desktop
+# 1c-connect for Linux, built with its window by CI (artifact 1c-connect-linux).
+# Optional: put the file into the platform context to have it in the image.
+RUN --mount=type=bind,from=platform,target=/platform \
+    if [ -f /platform/1c-connect-linux ]; then \
+        install -D -m 0755 /platform/1c-connect-linux /opt/1c-connect/1c-connect \
+        && /opt/1c-connect/1c-connect --help >/dev/null \
+        && echo "1c-connect: in the image"; \
+    else echo "1c-connect: not supplied, the stand works without the window"; fi
 COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
 RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-configurator.desktop /usr/share/applications/1c-enterprise.desktop \

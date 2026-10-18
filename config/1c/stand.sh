@@ -48,6 +48,8 @@ V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
 DEMO=/opt/1c-demo/base
 RUN=/run/1c
 LOG=/var/log/1c
+CONNECT=/opt/1c-connect/1c-connect
+CONNECT_TOML=1c-connect.toml
 
 log() { printf '[1c-stand] %s\n' "$*"; }
 
@@ -71,6 +73,31 @@ seed() { # runs as the workstation user; $HOME is theirs
             cp "/usr/share/applications/$l.desktop" "$d" && chmod +x "$d"
         fi
     done
+    # 1c-connect, if the image carries it. Its kit is the directory of the
+    # binary (common::kit), and every workstation needs its own parameters —
+    # so each gets its own copy next to its own toml, refreshed when the image
+    # brings a new build.
+    if [ -x "$CONNECT" ]; then
+        mkdir -p "$HOME/dev1c"
+        cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
+        if [ ! -e "$HOME/dev1c/$CONNECT_TOML" ]; then
+            u=$(id -un); n=${u#dev}
+            # The server fields stay at their defaults: in local mode there is
+            # no tunnel to raise. The base, its publication and the project
+            # are the stand's own, the same ones the agent's tools see.
+            cat >"$HOME/dev1c/$CONNECT_TOML" <<EOF
+[host]
+mode = "local"
+workstation = "$u"
+base_path = "$HOME/base"
+base_url = "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+project = "$HOME/project"
+db_user = ""
+db_password = ""
+EOF
+            log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
+        fi
+    fi
 }
 
 case "${1:-}" in
@@ -105,6 +132,13 @@ enterprise)
 seed)
     # runuser without -l keeps root's HOME: take the caller's own
     export HOME; HOME=$(home_of "$(id -un)"); seed
+    ;;
+connect)
+    # the autostart entry of the session: seed first (the toml and the copy
+    # live in the home, which may be a fresh volume), then the tray.
+    export HOME; HOME=$(home_of "$(id -un)"); seed
+    [ -x "$HOME/dev1c/1c-connect" ] || { log "1c-connect is not in this image"; exit 0; }
+    exec "$HOME/dev1c/1c-connect" --tray
     ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"

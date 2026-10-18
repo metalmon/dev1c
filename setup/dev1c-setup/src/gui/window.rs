@@ -46,9 +46,14 @@ pub fn open(cx: &mut App) {
                 });
             });
         }
-        // Окна нет — говорить больше некуда: журнал живёт в окне (задача 3
-        // кладёт эту строку туда).
-        Err(e) => eprintln!("окно не открылось: {e:#}"),
+        // Окна нет — журнал тоже негде показать, а консоли у релизной сборки
+        // не бывает. Молчать нельзя: процесс остался бы висеть без единого
+        // окна. Системное сообщение и выход.
+        Err(e) => {
+            let text = format!("Окно не открылось: {e:#}\nПрограмма работает и из командной строки: dev1c-setup status.");
+            eprintln!("{text}");
+            say_and_quit(&text, cx);
+        }
     }
 }
 
@@ -68,4 +73,19 @@ fn ask_interrupt() -> bool {
 fn ask_interrupt() -> bool {
     // Не под Windows окна у этой программы нет вовсе (сборка без `gui`).
     true
+}
+
+/// Сказать и выйти: окна нет, значит ни журнала, ни кнопки «закрыть» —
+/// процесс обязан закончиться, а не висеть невидимым.
+fn say_and_quit(text: &str, cx: &mut App) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let (text, title) = (wide(text), wide("dev1c-setup"));
+        unsafe {
+            MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
+        }
+    }
+    cx.quit();
 }

@@ -105,7 +105,9 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let saved = cx.global::<Ui>().cfg.clone();
+// Основа сравнения нормализована так же, как поля: иначе честный
+        // файл с полем другой формы открывал бы окно «изменённым».
+        let saved = crate::ui::for_form(cx.global::<Ui>().cfg.clone());
         let m = &saved.model;
         let fields = Fields {
             name: field("dev1c", &saved.server.name, false, window, cx),
@@ -266,14 +268,19 @@ impl Render for Panel {
         let name = ui.cfg.server.name.clone();
         let card_now = crate::ui::status_line(&ops, &name);
         // Плашка: сначала непрочитанные параметры, потом заблокированная операция.
-        let notice = ui
-            .cfg_error
-            .as_ref()
-            .map(|e| format!("Параметры не прочитаны: {e}. Показаны значения по умолчанию, «Сохранить» перезапишет файл."))
+        let notice = crate::ui::cfg_notice(ui.kit.path(crate::cfg::FILE).exists(), ui.cfg_error.as_deref())
             .or_else(|| crate::ui::notice(&ops));
-        let foot_left = match &ui.status {
-            Some(l) => (l.text.clone(), l.kind == Kind::Fail),
-            None => (ui.kit.root.display().to_string(), false),
+        // Несохранённые правки и непрочитанный файл главную кнопку не
+        // пускают: установка идёт по файлу, и молча применить не то — обман.
+        let dirty = self.is_dirty(cx);
+        let cfg_unread = ui.cfg_error.is_some();
+        let blocked_why = crate::ui::primary_blocked(dirty, cfg_unread);
+        let foot_left = match (blocked_why, &ui.status) {
+            // Почему главная кнопка не работает — текстом в подвале: всплывающая
+            // подсказка на погасшей кнопке молчит, пока на неё не наведут.
+            (Some(why), _) => (why.to_string(), true),
+            (None, Some(l)) => (l.text.clone(), l.kind == Kind::Fail),
+            (None, None) => (ui.kit.root.display().to_string(), false),
         };
         let working = ui.working();
         let busy_now = busy.is_some();
@@ -289,10 +296,6 @@ impl Render for Panel {
         );
 
         // Карточка состояния: кружок, состояние, подробность, две кнопки.
-        // Несохранённые правки главную кнопку не пускают: установка идёт по
-        // файлу, и молча применить старые значения — обман.
-        let dirty = self.is_dirty(cx);
-        let blocked_why = crate::ui::primary_blocked(dirty);
         let primary_btn = card_now.primary.map(|(which, label)| {
             Button::new("primary")
                 .primary()
@@ -564,7 +567,21 @@ impl Render for Panel {
             }
         };
 
+        // Несохранённое и непрочитанное правится на «Параметрах»: пока это
+        // так, в подвале одна кнопка — туда. Чистку и установку в это время
+        // всё равно нельзя пускать по файлу, который разошёлся с полями.
+        let to_params: Option<AnyElement> = ((dirty || cfg_unread) && tab != Tab::Params).then(|| {
+            Button::new("to-params")
+                .primary()
+                .label("К параметрам")
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.global_mut::<Ui>().tab = Tab::Params;
+                    cx.refresh_windows();
+                }))
+                .into_any_element()
+        });
         let foot_actions: AnyElement = match tab {
+            _ if to_params.is_some() => to_params.unwrap(),
             Tab::Ops => {
                 let confirming = self.confirming;
                 let confirm = self.confirm.clone();

@@ -216,7 +216,9 @@ pub fn run_check(cx: &mut App) {
                 }
                 Ev::Checks(checks)
             },
-            || Ev::Checks(Vec::new()),
+            // Паника — не «проверка прошла»: пустой список фактов читался бы
+            // как «0 провалов». Конец работы с ошибкой, факты не трогаем.
+            || Ev::Done(Some(ui::PANIC_TEXT.into())),
         );
     });
 }
@@ -266,7 +268,9 @@ fn handle(ev: Ev, cx: &mut App) {
             if !ops.is_empty() {
                 ui.ops = ops;
             }
-            ui.facts = facts;
+            if facts.is_some() {
+                ui.facts = facts;
+            }
             cx.refresh_windows();
         }
     }
@@ -297,7 +301,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             facts: None,
             log: Vec::new(),
             unread: 0,
-            tab: ui::start_tab(file_exists),
+            tab: ui::start_tab(file_exists, cfg_error.is_some()),
             started: None,
             busy: None,
             pending: 0,
@@ -315,10 +319,11 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             }
         })
         .detach();
-        if let Some(e) = &cfg_error {
-            let ui = cx.global_mut::<Ui>();
-            note_line(ui, Line::fail(format!("параметры не прочитаны: {e}")));
-            note_line(ui, Line::say("показаны значения по умолчанию; «Сохранить» перезапишет файл"));
+        // Про сам файл параметров окно говорит сразу: и когда он не
+        // прочитался, и когда его нет вовсе.
+        if let Some(text) = ui::cfg_notice(file_exists, cfg_error.as_deref()) {
+            let kind = if cfg_error.is_some() { Kind::Fail } else { Kind::Warn };
+            note_line(cx.global_mut::<Ui>(), Line { kind, text });
         }
         window::open(cx);
         refresh_ops(cx);

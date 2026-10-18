@@ -156,15 +156,31 @@ pub fn load_or_default(kit: &Kit) -> (Cfg, Option<String>) {
     }
 }
 
-/// Какая вкладка открывается первой. Всегда «Операции»: незаполненное видно
+/// Какая вкладка открывается первой. Обычно «Операции»: незаполненное видно
 /// там словами (операция отвечает `Blocked` с именем параметра). «Параметры» —
-/// только если файла параметров нет вовсе, то есть его удалили: комплект
-/// всегда едет с `dev1c.toml` (`pack.sh`).
-pub fn start_tab(file_exists: bool) -> Tab {
-    if file_exists {
+/// когда смотреть надо на них: файла нет (его удалили — комплект всегда едет
+/// с `dev1c.toml`, см. `pack.sh`) или файл не прочитан, и список операций
+/// посчитан по умолчаниям, а не по тому, что в файле.
+pub fn start_tab(file_exists: bool, cfg_unread: bool) -> Tab {
+    if file_exists && !cfg_unread {
         Tab::Ops
     } else {
         Tab::Params
+    }
+}
+
+/// Плашка про сам файл параметров: его нет или он не прочитан. Первая
+/// плашка окна — она важнее заблокированной операции, потому что операции в
+/// этом случае посчитаны не по файлу.
+pub fn cfg_notice(file_exists: bool, cfg_error: Option<&str>) -> Option<String> {
+    match (file_exists, cfg_error) {
+        (_, Some(e)) => Some(format!(
+            "Параметры не прочитаны: {e}. Показаны значения по умолчанию — проверьте их на вкладке «Параметры»; «Сохранить» перезапишет файл."
+        )),
+        (false, None) => Some(
+            "Параметров ещё нет: проверьте значения на вкладке «Параметры», сохраните и установите.".into(),
+        ),
+        (true, None) => None,
     }
 }
 
@@ -237,11 +253,13 @@ pub fn fields_differ(saved: &Cfg, edited: &Cfg) -> bool {
     saved != edited
 }
 
-/// Почему главная кнопка не работает. Несохранённые правки — единственная
-/// причина: иначе человек правит поле, жмёт «Установить» и получает установку
-/// по старому файлу.
-pub fn primary_blocked(dirty: bool) -> Option<&'static str> {
-    if dirty {
+/// Почему главная кнопка не работает. Две причины, и обе про параметры:
+/// несохранённые правки (установка пошла бы по старому файлу) и непрочитанный
+/// файл (установка пошла бы по умолчаниям — не с тем именем и портами).
+pub fn primary_blocked(dirty: bool, cfg_unread: bool) -> Option<&'static str> {
+    if cfg_unread {
+        Some("Параметры не прочитаны: проверьте их и сохраните")
+    } else if dirty {
         Some("Сначала сохраните параметры")
     } else {
         None
@@ -293,10 +311,11 @@ pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>) -> Vec<AccessRow> {
     ]
 }
 
-/// Плашка над вкладками: первая заблокированная операция своим текстом.
-/// Недоделанное плашкой не считается — это обычная работа кнопки.
+/// Плашка над вкладками: первая заблокированная операция своим текстом и
+/// указание, где это правят. Недоделанное плашкой не считается — это
+/// обычная работа кнопки.
 pub fn notice(ops: &[OpView]) -> Option<String> {
-    ops.iter().find(|o| o.dot == Dot::Down).map(|o| o.detail.clone())
+    ops.iter().find(|o| o.dot == Dot::Down).map(|o| format!("{} — вкладка «Параметры».", o.detail))
 }
 
 /// Рабочий поток обязан договорить: паника в теле всё равно шлёт конец
@@ -439,14 +458,57 @@ mod tests {
             op("env", OpState::Done("docker 27".into())),
             op("model", OpState::Blocked("модель не выбрана: [model] file".into())),
         ];
-        assert_eq!(notice(&ops).unwrap(), "модель не выбрана: [model] file");
+        assert!(notice(&ops).unwrap().starts_with("модель не выбрана: [model] file"));
         assert!(notice(&[op("env", OpState::Missing)]).is_none());
     }
 
     #[test]
-    fn the_first_tab_is_operations_unless_the_file_is_gone() {
-        assert_eq!(start_tab(true), Tab::Ops);
-        assert_eq!(start_tab(false), Tab::Params);
+    fn the_first_tab_is_operations_unless_the_parameters_need_a_look() {
+        assert_eq!(start_tab(true, false), Tab::Ops);
+        // Файла нет или он не прочитан — человеку нужны «Параметры», а не
+        // список операций, посчитанный по умолчаниям.
+        assert_eq!(start_tab(false, false), Tab::Params);
+        assert_eq!(start_tab(true, true), Tab::Params);
+    }
+
+    #[test]
+    fn the_primary_button_waits_for_unsaved_edits_and_for_unread_parameters() {
+        assert_eq!(primary_blocked(false, false), None);
+        assert_eq!(primary_blocked(true, false), Some("Сначала сохраните параметры"));
+        // Непрочитанный файл опаснее несохранённого поля: установка по
+        // умолчаниям создала бы контейнер не с тем именем и портами.
+        assert_eq!(primary_blocked(false, true), Some("Параметры не прочитаны: проверьте их и сохраните"));
+        assert_eq!(primary_blocked(true, true), Some("Параметры не прочитаны: проверьте их и сохраните"));
+    }
+
+    #[test]
+    fn the_plaque_speaks_both_when_the_file_is_missing_and_when_it_is_broken() {
+        assert!(cfg_notice(true, None).is_none());
+        let missing = cfg_notice(false, None).unwrap();
+        assert!(missing.contains("Параметров ещё нет"), "{missing}");
+        assert!(missing.contains("Параметры"), "{missing}");
+        let broken = cfg_notice(true, Some("dev1c.toml: ошибка в файле параметров")).unwrap();
+        assert!(broken.contains("ошибка в файле параметров"), "{broken}");
+        assert!(broken.contains("Сохранить"), "о перезаписи файла надо предупредить: {broken}");
+    }
+
+    #[test]
+    fn the_notice_points_at_the_tab_that_fixes_it() {
+        let ops = vec![op("model", OpState::Blocked("модель не выбрана: [model] file".into()))];
+        let text = notice(&ops).unwrap();
+        assert!(text.starts_with("модель не выбрана: [model] file"), "{text}");
+        assert!(text.contains("Параметры"), "{text}");
+    }
+
+    #[test]
+    fn normalising_the_form_twice_changes_nothing_the_second_time() {
+        // Иначе окно открывалось бы «изменённым» на честном файле: поля
+        // сравниваются с сохранённым, и то, и другое нормализовано.
+        let mut c = Cfg::default();
+        c.model.serve = "host".into();
+        c.model.key = "остался от remote".into();
+        let once = for_form(c);
+        assert_eq!(for_form(once.clone()), once);
     }
 
     #[test]
@@ -542,8 +604,6 @@ mod tests {
         edited.server.port = 4000;
         assert!(fields_differ(&saved, &edited));
         assert!(!fields_differ(&saved, &saved.clone()));
-        assert_eq!(primary_blocked(true), Some("Сначала сохраните параметры"));
-        assert_eq!(primary_blocked(false), None);
     }
 
     #[test]

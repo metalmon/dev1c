@@ -759,7 +759,7 @@ mod tests {
         let edited = Host { server: "h:1".into(), ..shown.clone() };
         assert!(fields_differ(&edited, &saved));
         // Каталог проекта теперь в форме — его правка видна.
-        let moved = Host { project: "C:\\proj\\Buh".into(), ..shown };
+        let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
         assert!(fields_differ(&moved, &saved));
     }
 

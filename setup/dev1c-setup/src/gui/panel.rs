@@ -107,6 +107,9 @@ pub struct Panel {
     params_h: Option<Pixels>,
     last_fit: Option<(Pixels, Pixels)>,
     fit_queued: bool,
+    /// Высота, которую подгонка поставила сама. Окно стало другим — значит
+    /// размер выбрал человек, и больше мы в высоту не лезем.
+    fitted_h: Option<Pixels>,
 }
 
 impl Panel {
@@ -146,12 +149,23 @@ impl Panel {
             params_h: None,
             last_fit: None,
             fit_queued: false,
+            fitted_h: None,
         }
     }
 
     /// Два обмера за кадр (видимая область и содержимое) — один подбор:
     /// отложенное замыкание читает пару, какой она стала к концу кадра.
     fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Меряем только «Параметры»: это самая высокая вкладка, и по ней
+        // одной окно выбирает высоту. Иначе плашка, появившаяся во время
+        // установки, двигала бы окно, пока человек смотрит журнал.
+        if cx.global::<Ui>().tab != Tab::Params {
+            return;
+        }
+        // Человек сам изменил высоту — больше не спорим.
+        if !crate::ui::should_fit(self.fitted_h.map(f32::from), f32::from(window.bounds().size.height)) {
+            return;
+        }
         self.viewport_h = viewport.or(self.viewport_h);
         self.params_h = params.or(self.params_h);
         let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
@@ -159,6 +173,8 @@ impl Panel {
             return;
         }
         self.fit_queued = true;
+        // Два обмера за кадр (видимая область и содержимое) — один подбор:
+        // отложенное замыкание читает пару, какой она стала к концу кадра.
         cx.defer_in(window, |this, window, cx| {
             this.fit_queued = false;
             let (Some(v), Some(c)) = (this.viewport_h, this.params_h) else { return };
@@ -166,7 +182,9 @@ impl Panel {
                 return;
             }
             this.last_fit = Some((v, c));
-            crate::gui::window::fit_height(window, cx, c, v);
+            if let Some(h) = crate::gui::window::fit_height(window, cx, c, v) {
+                this.fitted_h = Some(h);
+            }
         });
     }
 
@@ -641,7 +659,7 @@ impl Render for Panel {
                                         "Файл модели (.gguf)",
                                         h_flex()
                                             .gap_2()
-                                            .child(div().flex_1().min_w_0().child(Input::new(&f.file)))
+                                            .child(div().flex_1().min_w_0().child(Self::input(&f.file, accent, stroke, window, cx)))
                                             .child(Button::new("pick-file").label("Выбрать…").on_click(cx.listener(
                                                 |panel: &mut Self, _, _, cx| panel.pick_file(cx),
                                             )))
@@ -732,8 +750,6 @@ impl Render for Panel {
                 .disabled(!dirty || busy_now)
                 .on_click(cx.listener(|panel: &mut Self, _, _, cx| panel.save(cx)))
                 .into_any_element(),
-            // «Проверка»: факты о среде и отдельно — целость комплекта,
-            // то есть всё ли довезли и не побилось ли по дороге.
             Tab::Log => Button::new("clear-log")
                 .label("Очистить")
                 .disabled(busy_now)

@@ -299,21 +299,75 @@ pub const ADDRESS_UNKNOWN: &str = "<адрес>";
 /// Машина с туннелем иначе показала бы администратору адрес, по которому в
 /// его сети к среде никто не подключится.
 pub fn order_addresses(found: &[String]) -> Vec<String> {
-    let lan = |a: &String| {
-        a.starts_with("192.168.") || a.starts_with("10.") || {
-            // 172.16.0.0/12 — вторая частная сеть; её же берёт Docker для
-            // своих мостов, но отличить их без таблицы маршрутов нечем.
-            a.strip_prefix("172.").and_then(|r| r.split('.').next()).and_then(|o| o.parse::<u8>().ok()).is_some_and(|o| (16..=31).contains(&o))
+    // Ярус 0 — сети, в которых стоят рабочие места. Ярус 1 — 172.16/12:
+    // частная сеть, но в неё же Docker и Hyper-V кладут свои мосты, поэтому
+    // ниже настоящей. Ярус 2 — всё остальное, включая Tailscale (100.64/10).
+    let tier = |a: &String| {
+        if a.starts_with("192.168.") || a.starts_with("10.") {
+            0
+        } else if a.strip_prefix("172.").and_then(|r| r.split('.').next()).and_then(|o| o.parse::<u8>().ok()).is_some_and(|o| (16..=31).contains(&o)) {
+            1
+        } else {
+            2
         }
     };
     let mut out: Vec<String> = Vec::new();
-    for a in found.iter().filter(|a| lan(a)).chain(found.iter().filter(|a| !lan(a))) {
-        if !out.contains(a) {
-            out.push(a.clone());
+    for want in 0..=2 {
+        for a in found.iter().filter(|a| tier(a) == want) {
+            // 169.254/16 — адрес, который машина дала себе сама, когда DHCP
+            // не ответил: по нему не подключится никто.
+            if !a.starts_with("169.254.") && !out.contains(a) {
+                out.push(a.clone());
+            }
         }
     }
     out
 }
+
+/// Итог сверки комплекта: сколько файлов совпало или чего не хватает.
+/// Перечень обрывается: половина несовпавшего комплекта — это сотни имён, и
+/// строка в журнал должна остаться читаемой.
+pub fn integrity_report(ok: usize, bad: &[String]) -> Result<String, String> {
+    const SHOWN: usize = 20;
+    if bad.is_empty() {
+        return Ok(format!("файлы комплекта: {ok} из {ok}, суммы совпали"));
+    }
+    let mut names = bad.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; ");
+    if bad.len() > SHOWN {
+        names.push_str(&format!("; и ещё {}", bad.len() - SHOWN));
+    }
+    Err(format!(
+        "комплект скопирован не полностью или испорчен — возьмите его заново. Совпало {ok}, не совпало {}: {names}",
+        bad.len()
+    ))
+}
+
+/// Можно ли ещё подбирать высоту окна. Человек потянул окно за край —
+/// значит высоту он выбрал сам, и спорить с ним нельзя: иначе окно
+/// возвращается к прежней высоте на следующем же кадре.
+pub fn should_fit(fitted: Option<f32>, current: f32) -> bool {
+    match fitted {
+        None => true,
+        Some(h) => (current - h).abs() <= 1.0,
+    }
+}
+
+/// Высота окна под содержимое вкладки: переполнение растит окно, пустота
+/// ужимает. `None` — разница меньше пикселя, трогать окно незачем.
+pub fn fit_height(current: f32, content: f32, viewport: f32, work_h: f32, margin: f32, slack: f32) -> Option<f32> {
+    fit_height_at(current, content, viewport, work_h, 0.0, margin, slack)
+}
+
+/// То же, но с оглядкой на то, где у окна верх: вниз оно расти может только
+/// до нижней границы рабочей области, иначе подвал уедет под панель задач.
+pub fn fit_height_at(current: f32, content: f32, viewport: f32, work_h: f32, top: f32, margin: f32, slack: f32) -> Option<f32> {
+    let room = (work_h - top - margin).max(MIN_WINDOW_H);
+    let want = (current + (content - viewport) + slack).min(room).max(MIN_WINDOW_H);
+    ((want - current).abs() > 1.0).then_some(want)
+}
+
+/// Ниже этого окно не ужимаем: ниже уже не окно, а щель.
+pub const MIN_WINDOW_H: f32 = 560.0;
 
 /// Адреса этой машины: тот, с которого система пошла бы наружу (UDP-сокету
 /// хватает `connect`, пакетов не отправляем), плюс всё, что система знает о
@@ -722,14 +776,54 @@ mod tests {
     }
 
     #[test]
+    fn the_window_stops_fitting_once_the_person_resized_it() {
+        // Подгонка не спорит с человеком: он потянул за край — больше не лезем.
+        assert!(should_fit(None, 800.));
+        assert!(should_fit(Some(800.), 800.5));
+        assert!(!should_fit(Some(800.), 900.));
+    }
+
+    #[test]
+    fn fitting_follows_the_content_and_respects_the_screen() {
+        // Содержимое выше видимой области — окно растёт на разницу с запасом.
+        assert_eq!(fit_height(800., 700., 600., 1000., 24., 8.), Some(908.));
+        // Пустота под содержимым — ужимается.
+        assert_eq!(fit_height(900., 500., 700., 1000., 24., 8.), Some(708.));
+        // Подогнали — и на следующем кадре видимая область уже выросла на ту
+        // же разницу: второй подгонки не происходит, окно стоит.
+        assert_eq!(fit_height(800., 600., 600., 1000., 24., 8.), Some(808.));
+        assert_eq!(fit_height(808., 600., 608., 1000., 24., 8.), None);
+        // Расти некуда: окно уже упирается в низ рабочей области.
+        assert_eq!(fit_height(800., 2000., 600., 1000., 24., 8.), Some(976.));
+        // И с учётом того, где у окна верх: ниже рабочей области не вылезаем.
+        assert_eq!(fit_height_at(800., 2000., 600., 1000., 300., 24., 8.), Some(676.));
+    }
+
+    #[test]
+    fn a_damaged_kit_names_at_most_twenty_files() {
+        let ok = integrity_report(42, &[]).unwrap();
+        assert!(ok.contains("42"), "{ok}");
+        let many: Vec<String> = (0..50).map(|i| format!("нет: f{i}")).collect();
+        let bad = integrity_report(0, &many).unwrap_err();
+        assert!(bad.contains("f0") && bad.contains("f19"), "{bad}");
+        assert!(!bad.contains("f20"), "перечень должен обрываться: {bad}");
+        assert!(bad.contains("и ещё 30"), "{bad}");
+    }
+
+    #[test]
     fn the_lan_address_comes_before_the_tunnel_one() {
         // На машине с Tailscale наружу система ходит через 100.64/10, но
         // рабочие места в сети клиента подключаются по локальному адресу.
         let found = vec!["100.77.83.96".to_string(), "192.168.1.10".to_string(), "100.77.83.96".to_string()];
         assert_eq!(order_addresses(&found), vec!["192.168.1.10", "100.77.83.96"]);
-        assert_eq!(order_addresses(&["10.0.5.7".into(), "172.17.0.1".into()]), vec!["10.0.5.7", "172.17.0.1"]);
+        // Мосты Docker и Hyper-V живут в 172.16/12 и не должны обгонять
+        // настоящую сеть: у них свой, второй ярус.
+        assert_eq!(order_addresses(&["172.17.0.1".into(), "10.0.5.7".into()]), vec!["10.0.5.7", "172.17.0.1"]);
+        assert_eq!(order_addresses(&["172.17.0.1".into(), "100.77.83.96".into()]), vec!["172.17.0.1", "100.77.83.96"]);
         // 172.32 — уже не частная сеть, в начало не лезет.
         assert_eq!(order_addresses(&["172.32.0.1".into(), "172.20.0.5".into()]), vec!["172.20.0.5", "172.32.0.1"]);
+        // Адрес без DHCP (169.254/16) не адрес вовсе.
+        assert_eq!(order_addresses(&["169.254.3.4".into(), "192.168.1.10".into()]), vec!["192.168.1.10"]);
         assert!(order_addresses(&[]).is_empty());
     }
 

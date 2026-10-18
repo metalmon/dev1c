@@ -73,6 +73,8 @@ pub enum Ev {
     /// Конец работы: текст ошибки или ничего.
     Done(Option<String>),
     Checks(Vec<Check>),
+    /// Адреса этой машины, собранные в своём потоке.
+    Addresses(Vec<String>),
     /// Состояние операций и числа замера, перечитанные в своём потоке.
     Ops(Vec<OpView>, Option<(u32, u32)>),
 }
@@ -162,7 +164,7 @@ pub fn run_op(cx: &mut App, which: Which) {
                     Which::CleanData => common::run::clean_apply(&ctx, &list, CleanLevel::Data),
                     // Установка начинается сверкой комплекта и кончается
                     // проверкой: обещаниям тут не место.
-                    _ => ops::kit_is_intact(&ctx)
+                    Which::Install | Which::Check => ops::kit_is_intact(&ctx)
                         .and_then(|_| common::run::apply_all(&ctx, &list, None, false))
                         .and_then(|_| checked(&ctx)),
                 };
@@ -232,6 +234,10 @@ pub fn run_check(cx: &mut App) {
 
 fn handle(ev: Ev, cx: &mut App) {
     match ev {
+        Ev::Addresses(list) => {
+            cx.global_mut::<Ui>().addresses = list;
+            cx.refresh_windows();
+        }
         Ev::Line(line) => {
             note_line(cx.global_mut::<Ui>(), line);
             cx.refresh_windows();
@@ -306,7 +312,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             failed_checks: 0,
             checks: Vec::new(),
             facts: None,
-            addresses: ui::local_addresses(),
+            addresses: Vec::new(),
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -335,6 +341,12 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         }
         window::open(cx);
         refresh_ops(cx);
+        // Адреса собираем в стороне: разрешение имени машины ходит в DNS, а
+        // окно должно открыться сразу.
+        let tx = cx.global::<Ui>().tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.unbounded_send(Ev::Addresses(ui::local_addresses()));
+        });
     });
     Ok(())
 }

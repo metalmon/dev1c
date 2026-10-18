@@ -40,18 +40,10 @@ fn work_area(cx: &App) -> Bounds<Pixels> {
 }
 
 /// Запас под содержимым, чтобы последняя строка не липла к подвалу.
-const SLACK: Pixels = px(8.0);
+const SLACK: f32 = 8.0;
 
-/// Высота окна под содержимое вкладки — в обе стороны: переполнение растит
-/// окно, пустота ужимает. Не выше рабочей области и не ниже наименьшего
-/// размера. `None` — разница меньше пикселя, трогать окно незачем.
-pub fn fit_height_for(current: Pixels, content: Pixels, viewport: Pixels, work_h: Pixels) -> Option<Pixels> {
-    let want = (current + (content - viewport) + SLACK).min(work_h - px(MARGIN)).max(MIN_SIZE.height);
-    ((want - current).abs() > px(1.0)).then_some(want)
-}
-
-/// Нужно ли подбирать высоту заново: впервые или пара (видимая область,
-/// содержимое) сдвинулась больше чем на пиксель.
+/// Нужно ли мерить заново: впервые или пара (видимая область, содержимое)
+/// сдвинулась больше чем на пиксель.
 pub fn needs_fit(last: Option<(Pixels, Pixels)>, now: (Pixels, Pixels)) -> bool {
     match last {
         None => true,
@@ -59,13 +51,23 @@ pub fn needs_fit(last: Option<(Pixels, Pixels)>, now: (Pixels, Pixels)) -> bool 
     }
 }
 
-/// Подогнать высоту окна под содержимое вкладки «Параметры»: это самая
-/// высокая вкладка, и по ней окно открывается без пустоты под карточками.
-/// Угол окна остаётся на месте — GPUI растит окно вниз, и прыжка нет.
-pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels) {
+/// Подогнать высоту окна под содержимое вкладки «Параметры». Возвращает
+/// высоту, которую поставили, — панель её помнит и по ней понимает, что
+/// высоту потом изменил человек, а не она сама. Счёт — в `crate::ui`.
+pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels) -> Option<Pixels> {
     let wa = work_area(cx);
-    let Some(h) = fit_height_for(window.bounds().size.height, content, viewport, wa.size.height) else { return };
-    window.resize(size(window.bounds().size.width, h));
+    let bounds = window.bounds();
+    let h = crate::ui::fit_height_at(
+        f32::from(bounds.size.height),
+        f32::from(content),
+        f32::from(viewport),
+        f32::from(wa.size.height),
+        f32::from(bounds.origin.y - wa.origin.y),
+        MARGIN,
+        SLACK,
+    )?;
+    window.resize(size(bounds.size.width, px(h)));
+    Some(px(h))
 }
 
 /// Где и какого размера открыть окно: по центру рабочей области и не больше

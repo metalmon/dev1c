@@ -500,9 +500,11 @@ impl Op<Ctx> for Services {
 /// сразу. Списка сумм нет (комплект собран руками) — предупреждаем и идём
 /// дальше: это не повод не работать.
 pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
+    // Первый файл — сразу: образ весит гигабайты, и десять молчащих файлов
+    // подряд выглядят как зависшая установка.
     let mut last = 0usize;
     let report = match common::integrity::verify(&ctx.kit, |i, n, path| {
-        if i == n || i - last >= 10 {
+        if i == 1 || i == n || i - last >= 10 {
             last = i;
             ctx.say(format!("файлы комплекта: {i}/{n} {path}"));
         }
@@ -513,6 +515,12 @@ pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
             return Ok(());
         }
     };
+    // Пустой список — не «всё совпало», а нечитаемый список сумм: сказать
+    // «0 из 0» значило бы выдать за проверку то, чего не было.
+    if report.entries.is_empty() {
+        ctx.warn("целость комплекта не проверена: в checksums.txt нет ни одной строки");
+        return Ok(());
+    }
     let bad: Vec<String> = report
         .entries
         .iter()
@@ -523,14 +531,13 @@ pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
         })
         .collect();
     let ok = report.entries.len() - bad.len();
-    anyhow::ensure!(
-        bad.is_empty(),
-        "комплект скопирован не полностью или испорчен — возьмите его заново. Совпало {ok}, не совпало {}: {}",
-        bad.len(),
-        bad.join("; ")
-    );
-    ctx.ok(format!("файлы комплекта: {ok} из {ok}, суммы совпали"));
-    Ok(())
+    match crate::ui::integrity_report(ok, &bad) {
+        Ok(text) => {
+            ctx.ok(text);
+            Ok(())
+        }
+        Err(text) => anyhow::bail!(text),
+    }
 }
 
 pub fn server(cfg: &Cfg) -> Vec<Box<dyn Op<Ctx>>> {

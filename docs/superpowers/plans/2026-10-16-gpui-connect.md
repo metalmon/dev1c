@@ -15,10 +15,10 @@
 - Фича `gui` остаётся в `default`; Linux-сборка `--no-default-features` обязана собираться и проходить тесты без GPUI.
 - Версии пинуются точно: `gpui-kit = "=0.7.3"`, `tray-icon = "=0.26.1"`, `futures = "0.3"`, `windows-sys = "0.60"` c фичами `Win32_Foundation`, `Win32_UI_WindowsAndMessaging`, `Win32_UI_HiDpi`.
 - Никаких новых зависимостей сверх перечисленных; `image` и `embed-resource` берём потому, что они уже в дереве.
-- Окно 380×560 логических px, отступ от угла рабочей области 12 px, окно `PopUp` + `Client`, не растягивается, не сворачивается.
+- Окно 380×640 логических px, отступ от угла рабочей области 12 px, окно `PopUp` + `Client`, не растягивается, не сворачивается.
 - Радиусы 8 px (окно, карточки) и 4 px (элементы); отступы 12/8/4; шрифт 14, подписи 12, моно 13; тени выключены.
 - Акцент только у включённого переключателя, одной главной кнопки вкладки и кольца фокуса; цвета — из `theme/macos-classic.json`, других констант цвета в коде нет.
-- Параметры сохраняются при уходе из поля или Enter; кнопки «Сохранить» нет.
+- Параметры сохраняются кнопкой «Сохранить» (решение заказчика 2026-10-18, заменяет автосохранение); подключение — переключателем в карточке состояния.
 - Журнал не длиннее 2000 строк; события `Command` и `Output` в окно не попадают.
 - Строки интерфейса на русском, как в `gui.rs`/`index.html` сегодня; тексты ошибок из `start_session` переносятся дословно.
 - Коммиты: идентичность через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` (+ `GIT_COMMITTER_*`) в том же вызове, сообщение из файла.
@@ -109,7 +109,7 @@ fn main() {
 
 - [ ] **Step 5: Удалить файлы Tauri и написать каркас `gui/mod.rs`**
 
-Удалить перечисленное в **Files**. В `gui/mod.rs`: `pub const TRAY_PNG: &[u8] = include_bytes!("../../icons/tray.png");`, `badge` (тело из старого `gui.rs`, вход/выход `image::RgbaImage`), `web_url` (без изменений), и временный `launch`, который открывает пустое окно GPUI 380×560 c `gpui_kit::application().run(..)`, `gpui_kit::init(cx)`, `cx.set_quit_mode(QuitMode::Explicit)`. `lib.rs` не меняется (`#[cfg(feature = "gui")] pub mod gui;`).
+Удалить перечисленное в **Files**. В `gui/mod.rs`: `pub const TRAY_PNG: &[u8] = include_bytes!("../../icons/tray.png");`, `badge` (тело из старого `gui.rs`, вход/выход `image::RgbaImage`), `web_url` (без изменений), и временный `launch`, который открывает пустое окно GPUI 380×640 c `gpui_kit::application().run(..)`, `gpui_kit::init(cx)`, `cx.set_quit_mode(QuitMode::Explicit)`. `lib.rs` не меняется (`#[cfg(feature = "gui")] pub mod gui;`).
 
 - [ ] **Step 6: Тесты и обе сборки зелёные**
 
@@ -351,7 +351,7 @@ fn tray_icon_is_the_badged_png() {
 - Produces:
 
 ```rust
-pub const SIZE: Size<Pixels>;                       // 380×560
+pub const SIZE: Size<Pixels>;                       // 380×640
 pub const GAP: Pixels;                              // 12
 pub const JUST_HIDDEN: Duration;                    // 400 мс
 pub fn flyout_origin(work_area: Bounds<Pixels>, size: Size<Pixels>, gap: Pixels) -> Point<Pixels>; // правый нижний угол, не меньше origin рабочей области
@@ -368,7 +368,7 @@ pub fn toggle_window(cx: &mut App);                 // should_show → show_wind
 #[test]
 fn the_flyout_sits_in_the_corner_and_never_leaves_the_work_area() {
     let wa = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(700.)));
-    assert_eq!(flyout_origin(wa, SIZE, GAP), point(px(608.), px(128.)));
+    assert_eq!(flyout_origin(wa, SIZE, GAP), point(px(608.), px(48.)));
     let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
     assert_eq!(flyout_origin(tiny, SIZE, GAP), point(px(100.), px(50.)));
 }
@@ -439,12 +439,12 @@ fn check_dots_tell_fail_from_note() {
 
 Дерево — как в спайке после Fluent-правок (`spike-gpui/src/main.rs`, `impl Render for Panel`), с данными из `Ui` вместо заглушек:
 
-- шапка: значок 16 px (`img` из `icons/icon.png`), «1c-connect» SemiBold, ✕ ghost compact → `hide_window`;
+- шапка: значок 24 px (`img` из `icons/icon.png`, `size_6`), «1c-connect» SemiBold, ✕ ghost compact → `hide_window`;
 - карточка-слой: кружок по `Dot` (`Off`→`muted_foreground`, `Busy`→`primary`, `Up`→`success`, `Down`→`danger`), заголовок SemiBold, подстрока 12 px, `Switch` (`checked = link.is_on()`, `on_change` → `toggle_link`);
 - `TabBar::underline()` с `Tab::suffix` бейджами: Проверка — `failed_checks` (если > 0), Журнал — `unread` (если > 0 и вкладка не открыта); щелчок → `ui.tab`, при `Log` → `unread = 0`;
 - тело по `ui.tab`: Params — поля по спеке (сервер; рабочее место + пароль в ряд; база с кнопкой «Выбрать…» `.outline()`; пользователь базы + пароль в ряд; адрес публикации; каталог выгрузки с «Выбрать…»); Ext — `ui.ops` слоями; Check — подсказка или `ui.checks` (`what`, `detail`, при `Down` ещё `hint` 12 px); Log — `div().id("log").overflow_y_scroll()`, `font_family("Lilex")`, цвет по `Kind` (`Ok`→`success`, `Warn`→`warning`, `Fail`→`danger`, `Say`→`foreground`), прокрутка вниз при новых строках (`ScrollHandle::scroll_to_bottom` после `notify`);
 - подвал: слева `ui.status` или путь комплекта 12 px; справа по вкладке: Params — «Подключить»/«Отключить» (`.primary()`); Ext — «Снять» (`.outline()`) + «Установить» (`.primary()`), обе `disabled(busy.is_some())`, `loading` у той, что в работе; Check — «Проверить» (`.primary()`, `loading` при `Busy::Check`); Log — «Очистить» (`.outline()`);
-- корень: `track_focus`, `on_key_down` Esc → `hide_window`, `rounded_lg`, рамка `window_border`, `p_3`, `gap_3`.
+- корень: `track_focus`, `on_key_down` Esc → `hide_window`, `rounded_lg`, рамка `window_border`, `p_4` (внешние поля 16 px), `gap_3`.
 
 Диалог «Выбрать…»: `dialog_open = true`; `cx.prompt_for_paths(PathPromptOptions { directories: true, files: false, multiple: false, prompt: None })`; в `cx.spawn` дождаться, `dialog_open = false`, `activate_window`, выбранный путь → `set_value` поля и `save_host`.
 
@@ -476,3 +476,6 @@ Run: `cargo test --manifest-path setup/Cargo.toml --workspace` и `--no-default-
 Run: `cargo build --release --manifest-path setup/Cargo.toml -p onec-connect` → собирается.
 
 - [ ] **Step 3: Commit** — `docs(1c-connect): GPUI window in STATUS and the setup spec; CI comments; drop the spike`
+
+
+

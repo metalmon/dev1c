@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Логический размер флайаута.
-pub const SIZE: Size<Pixels> = size(px(380.0), px(560.0));
+pub const SIZE: Size<Pixels> = size(px(380.0), px(640.0));
 /// Зазор до края рабочей области.
 pub const GAP: Pixels = px(12.0);
 /// Окно только что спряталось по потере фокуса — клик по трею в этом окне
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn the_flyout_sits_in_the_corner_and_never_leaves_the_work_area() {
         let wa = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(700.)));
-        assert_eq!(flyout_origin(wa, SIZE, GAP), point(px(608.), px(128.)));
+        assert_eq!(flyout_origin(wa, SIZE, GAP), point(px(608.), px(48.)));
         let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
         assert_eq!(flyout_origin(tiny, SIZE, GAP), point(px(100.), px(50.)));
     }

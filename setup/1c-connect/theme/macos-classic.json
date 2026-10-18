@@ -17,7 +17,7 @@
         "foreground": "#CACCCA",
         "border": "#404040",
         "input.border": "#404040",
-        "ring": "#5A5A5A",
+        "ring": "#3F7CC6",
         "caret": "#CACCCA",
         "selection.background": "#3F7CC655",
         "muted.background": "#353436",
@@ -97,7 +97,9 @@
         "base.magenta": "#BF5AF2",
         "base.magenta.light": "#D283F5",
         "base.cyan": "#64D2FF",
-        "base.cyan.light": "#8FDFFF"
+        "base.cyan.light": "#8FDFFF",
+        "focus.border": "#3F7CC6",
+        "input.focus.border": "#3F7CC6"
       }
     },
     {
@@ -115,7 +117,7 @@
         "foreground": "#000000",
         "border": "#D2D2D2",
         "input.border": "#D2D2D2",
-        "ring": "#B0B0B0",
+        "ring": "#2F6BD1",
         "caret": "#000000",
         "selection.background": "#C7DEFF",
         "muted.background": "#E0E0E0",
@@ -195,7 +197,9 @@
         "base.magenta": "#6F42C1",
         "base.magenta.light": "#D75CE7",
         "base.cyan": "#0000A2",
-        "base.cyan.light": "#0065a2"
+        "base.cyan.light": "#0065a2",
+        "focus.border": "#2F6BD1",
+        "input.focus.border": "#2F6BD1"
       }
     }
   ]

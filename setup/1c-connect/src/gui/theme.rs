@@ -1,4 +1,4 @@
-//! Шрифты Zed (IBM Plex Sans / Lilex) и палитра macOS Classic для окна.
+//! Шрифты Zed (IBM Plex Sans / Lilex) и палитра 1С:Такси для окна.
 //! Выбор темы (система/светлая/тёмная) хранится в комплекте и переживает
 //! перезапуск программы.
 
@@ -7,9 +7,9 @@ use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::App;
 use std::borrow::Cow;
 
-pub const LIGHT: &str = "macOS Classic Light";
-pub const DARK: &str = "macOS Classic Dark";
-pub const THEME_JSON: &str = include_str!("../../theme/macos-classic.json");
+pub const LIGHT: &str = "1C Light";
+pub const DARK: &str = "1C Dark";
+pub const THEME_JSON: &str = include_str!("../../theme/1c.json");
 pub const STATE_KEY: &str = "theme";
 
 /// Выбор темы: система или явно светлая/тёмная.
@@ -149,6 +149,7 @@ mod tests {
             assert_eq!((t.radius, t.radius_lg, t.shadow), (Some(4), Some(8), Some(false)));
             assert_eq!(t.font_family.as_deref(), Some("IBM Plex Sans"));
             assert!(t.colors.primary.is_some() && t.colors.ring.is_some());
+            assert_eq!(t.colors.primary.as_deref(), Some("#FACC1F"));
         }
     }
 

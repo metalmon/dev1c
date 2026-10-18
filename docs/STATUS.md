@@ -73,7 +73,9 @@ script days is obsolete; the scripts are gone.
   day to Windows 11 / Fluent after the first look was rejected as unprofessional):
   `1c-connect.exe` without arguments puts the Zed icon with the grey status dot
   into the tray and opens the flyout at the bottom-right of the work area
-  (hides on blur, left click on the icon brings it back); «Проверить» lists the seven facts and writes
+  (hides on blur, left click on the icon brings it back); the window's colour
+  theme is now 1С:Такси's own palette (yellow accent `#FACC1F`, links stay
+  blue), not Zed's macOS Classic (task 11, 2026-10-18 customer call); «Проверить» lists the seven facts and writes
   `last-check.txt`; «Подключить» with the sample address refuses in the log;
   the form saves `1c-connect.toml` through `render`. `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;

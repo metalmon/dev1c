@@ -574,7 +574,18 @@ impl Render for Panel {
                     &self.log_scroll,
                     v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
                         if l.kind == Kind::Head {
-                            div().mt_2().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(l.text).into_any_element()
+                            // Заголовок раздела: «{операция} · {HH:MM}» из `head_line`;
+                            // на экране операция слева полужирным, время справа
+                            // мелким приглушённым (заказчик 2026-10-18).
+                            let (title, time) = l.text.rsplit_once(" · ").map(|(t, c)| (t.to_string(), c.to_string())).unwrap_or((l.text.clone(), String::new()));
+                            h_flex()
+                                .mt_2()
+                                .items_baseline()
+                                .justify_between()
+                                .gap_2()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
+                                .child(div().text_size(px(13.)).text_color(caption).child(time))
+                                .into_any_element()
                         } else {
                             h_flex()
                                 .items_start()

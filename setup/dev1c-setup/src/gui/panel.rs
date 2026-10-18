@@ -10,6 +10,9 @@ use crate::gui::{self, Ui};
 use crate::ui::{Busy, Dot, Kind, Line, Tab, Which};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::searchable_list::SearchableVec;
+use gpui_kit::component::select::{Select, SelectState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, Sizable, Theme, TitleBar};
@@ -26,8 +29,68 @@ fn icon() -> Arc<Image> {
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
 }
 
+/// Варианты списков: значение в `dev1c.toml` и подпись в окне.
+const ENGINES: [(&str, &str); 2] = [("docker", "docker"), ("podman", "podman")];
+const SERVES: [(&str, &str); 3] = [
+    ("host", "Служба на этой машине (видеокарта, nssm)"),
+    ("docker", "Контейнер рядом со средой"),
+    ("remote", "Удалённый сервер"),
+];
+
+/// Поля вкладки «Параметры». Числа — тот же ввод, что текст: `validate`
+/// скажет словами, если вписали не то.
+pub struct Fields {
+    pub name: Entity<InputState>,
+    pub port: Entity<InputState>,
+    pub memory: Entity<InputState>,
+    pub engine: Entity<SelectState<SearchableVec<SharedString>>>,
+    pub gpu: bool,
+    pub serve: Entity<SelectState<SearchableVec<SharedString>>>,
+    pub file: Entity<InputState>,
+    pub url: Entity<InputState>,
+    pub key: Entity<InputState>,
+    pub model_name: Entity<InputState>,
+    pub model_port: Entity<InputState>,
+    pub agents: Entity<InputState>,
+    pub fit_ctx: Entity<InputState>,
+}
+
+/// Поле ввода с подсказкой и начальным значением.
+fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
+    let (ph, val) = (ph.to_string(), val.to_string());
+    cx.new(|cx| {
+        let s = InputState::new(window, cx).placeholder(ph).default_value(val);
+        if masked {
+            s.masked(true)
+        } else {
+            s
+        }
+    })
+}
+
+/// Список выбора: подписи людям, значения — в файл.
+fn select(
+    options: &[(&str, &str)],
+    current: &str,
+    window: &mut Window,
+    cx: &mut Context<Panel>,
+) -> Entity<SelectState<SearchableVec<SharedString>>> {
+    let labels: Vec<SharedString> = options.iter().map(|(_, label)| SharedString::from(label.to_string())).collect();
+    let at = options.iter().position(|(value, _)| *value == current).unwrap_or(0);
+    cx.new(|cx| SelectState::new(SearchableVec::new(labels), Some(IndexPath::new(at)), window, cx))
+}
+
+/// Что выбрано в списке — значением для файла, не подписью.
+fn selected<'a>(state: &Entity<SelectState<SearchableVec<SharedString>>>, options: &'a [(&str, &str)], cx: &App) -> &'a str {
+    let at = state.read(cx).selected_index(cx).map(|i| i.row).unwrap_or(0);
+    options.get(at).map(|(value, _)| *value).unwrap_or(options[0].0)
+}
+
 pub struct Panel {
     pub focus: FocusHandle,
+    pub fields: Fields,
+    /// Параметры, какими они лежат в файле: с ними сравниваем поля.
+    saved: crate::cfg::Cfg,
     /// Полоса прокрутки тела вкладки: своя у журнала, своя у остального.
     log_scroll: ScrollHandle,
     body_scroll: ScrollHandle,
@@ -42,10 +105,119 @@ pub struct Panel {
 
 impl Panel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let saved = cx.global::<Ui>().cfg.clone();
+        let m = &saved.model;
+        let fields = Fields {
+            name: field("dev1c", &saved.server.name, false, window, cx),
+            port: field("3390", &saved.server.port.to_string(), false, window, cx),
+            memory: field("24g", &saved.server.memory, false, window, cx),
+            engine: select(&ENGINES, &saved.server.engine, window, cx),
+            gpu: saved.server.gpu,
+            serve: select(&SERVES, &m.serve, window, cx),
+            file: field("C:\\models\\model.gguf", &m.file, false, window, cx),
+            url: field("https://host/v1", &m.url, false, window, cx),
+            key: field("ключ доступа", &m.key, true, window, cx),
+            model_name: field("как сервер называет модель", &m.name, false, window, cx),
+            model_port: field("1235", &m.port.to_string(), false, window, cx),
+            agents: field("1", &m.agents.to_string(), false, window, cx),
+            fit_ctx: field("65536", &m.fit_ctx.to_string(), false, window, cx),
+        };
         let confirm = cx.new(|cx| InputState::new(window, cx).placeholder("имя контейнера для подтверждения"));
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Panel { focus, log_scroll: ScrollHandle::new(), body_scroll: ScrollHandle::new(), log_len: 0, confirm, confirming: false }
+        Panel {
+            focus,
+            fields,
+            saved,
+            log_scroll: ScrollHandle::new(),
+            body_scroll: ScrollHandle::new(),
+            log_len: 0,
+            confirm,
+            confirming: false,
+        }
+    }
+
+    /// Параметры, как они набраны в полях. Числа, которые не разобрались,
+    /// остаются прежними: пустое поле не должно обнулять порт молча — об
+    /// ошибке скажет `validate` после «Сохранить».
+    fn edited(&self, cx: &App) -> crate::cfg::Cfg {
+        let v = |e: &Entity<InputState>| e.read(cx).value().to_string();
+        let mut cfg = self.saved.clone();
+        cfg.server.name = v(&self.fields.name);
+        cfg.server.port = v(&self.fields.port).trim().parse().unwrap_or(cfg.server.port);
+        cfg.server.memory = v(&self.fields.memory);
+        cfg.server.engine = selected(&self.fields.engine, &ENGINES, cx).to_string();
+        cfg.server.gpu = self.fields.gpu;
+        cfg.model.serve = selected(&self.fields.serve, &SERVES, cx).to_string();
+        cfg.model.file = v(&self.fields.file);
+        cfg.model.url = v(&self.fields.url);
+        cfg.model.key = v(&self.fields.key);
+        cfg.model.name = v(&self.fields.model_name);
+        cfg.model.port = v(&self.fields.model_port).trim().parse().unwrap_or(cfg.model.port);
+        cfg.model.agents = v(&self.fields.agents).trim().parse().unwrap_or(cfg.model.agents);
+        cfg.model.fit_ctx = v(&self.fields.fit_ctx).trim().parse().unwrap_or(cfg.model.fit_ctx);
+        crate::ui::for_form(cfg)
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        crate::ui::fields_differ(&self.saved, &self.edited(cx))
+    }
+
+    /// Записать параметры и сказать об этом в подвале. Ошибка — строкой,
+    /// файл не тронут, набранное остаётся в полях.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let cfg = self.edited(cx);
+        let kit = cx.global::<Ui>().kit.clone();
+        let r = crate::ui::save_to(&kit, &cfg);
+        let line = match &r {
+            Ok(()) => Line::ok(format!("Сохранено в {}", crate::cfg::FILE)),
+            Err(e) => Line::fail(e.clone()),
+        };
+        {
+            let ui = cx.global_mut::<Ui>();
+            ui.status = Some(line.clone());
+            gui::note_line(ui, line);
+        }
+        if r.is_ok() {
+            self.saved = cfg.clone();
+            let ui = cx.global_mut::<Ui>();
+            ui.cfg = cfg;
+            // Параметры приняты — файл больше не «не прочитан».
+            ui.cfg_error = None;
+            // Состояние операций считается от параметров: оно уже другое.
+            gui::refresh_ops(cx);
+        }
+        cx.refresh_windows();
+    }
+
+    /// Выбор файла модели: на время диалога окно не прячется (`dialog_open`),
+    /// после — путь ложится в поле, а в файл его отнесёт «Сохранить».
+    fn pick_file(&mut self, cx: &mut Context<Self>) {
+        let target = self.fields.file.clone();
+        cx.global_mut::<Ui>().dialog_open = true;
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+        cx.spawn(async move |_, cx| {
+            let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next());
+            let _ = cx.update(|cx| {
+                cx.global_mut::<Ui>().dialog_open = false;
+                let ui = cx.global::<Ui>();
+                let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
+                let _ = w.update(cx, |_, window, cx| {
+                    window.activate_window();
+                    if let Some(p) = &picked {
+                        let path = p.display().to_string();
+                        // Фильтра по расширению у системного запроса нет —
+                        // говорим словами, а не берём молча.
+                        if let Some(warn) = crate::ui::gguf_warning(&path) {
+                            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: warn });
+                        }
+                        target.update(cx, |s, cx| s.set_value(path, window, cx));
+                    }
+                    panel.update(cx, |this, cx| this.focus.focus(window, cx));
+                });
+            });
+        })
+        .detach();
     }
 
     /// Слой Fluent: та же плашка, что в `1c-connect` — фон, рамка, скругление.
@@ -117,11 +289,16 @@ impl Render for Panel {
         );
 
         // Карточка состояния: кружок, состояние, подробность, две кнопки.
+        // Несохранённые правки главную кнопку не пускают: установка идёт по
+        // файлу, и молча применить старые значения — обман.
+        let dirty = self.is_dirty(cx);
+        let blocked_why = crate::ui::primary_blocked(dirty);
         let primary_btn = card_now.primary.map(|(which, label)| {
             Button::new("primary")
                 .primary()
                 .label(label)
-                .disabled(busy_now)
+                .disabled(busy_now || blocked_why.is_some())
+                .when_some(blocked_why, |b, why| b.tooltip(why))
                 .loading(busy == Some(Busy::Run))
                 .on_click(move |_, _, cx| gui::run_op(cx, which))
         });
@@ -311,7 +488,75 @@ impl Render for Panel {
                     .into_any_element()
                 }
             }
-            // «Параметры» кладёт задача 6 плана.
+            Tab::Params => {
+                let f = &self.fields;
+                let serve = selected(&f.serve, &SERVES, cx);
+                let local = serve != "remote";
+                // Подпись Caption приглушённым, поле, подсказка — как в
+                // прежнем окне и как в `1c-connect`.
+                let labelled = |label: &'static str, hint: &'static str, body: AnyElement| {
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_size(px(12.)).text_color(caption).child(label))
+                        .child(body)
+                        .when(!hint.is_empty(), |v| v.child(div().text_size(px(12.)).text_color(caption).child(hint)))
+                };
+                let input = |label: &'static str, hint: &'static str, state: &Entity<InputState>| {
+                    labelled(label, hint, Input::new(state).into_any_element())
+                };
+                let group = |title: &'static str| {
+                    v_flex().gap_3().child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).child(title))
+                };
+                Self::scrolled(
+                    "params",
+                    &self.body_scroll,
+                    v_flex()
+                        .gap_5()
+                        .py_1()
+                        .child(
+                            group("Контейнер")
+                                .child(input("Имя контейнера", "Тома данных называются по нему: имя-home, имя-gitea, имя-models.", &f.name))
+                                .child(input("Первый порт", "RDP; дальше подряд Gitea, модель, SSH.", &f.port))
+                                .child(input("Память", "", &f.memory))
+                                .child(labelled("Движок контейнеров", "", Select::new(&f.engine).into_any_element()))
+                                .child(
+                                    h_flex().items_center().gap_2().child(Switch::new("gpu").checked(f.gpu).on_change(cx.listener(
+                                        |panel, checked: &bool, _, cx| {
+                                            panel.fields.gpu = *checked;
+                                            cx.refresh_windows();
+                                        },
+                                    )))
+                                    .child(div().child("Отдать контейнеру GPU")),
+                                ),
+                        )
+                        .child(
+                            group("Модель для агентов")
+                                .child(labelled("Где работает сервер модели", "", Select::new(&f.serve).into_any_element()))
+                                .when(local, |g| {
+                                    g.child(labelled(
+                                        "Файл модели (.gguf)",
+                                        "",
+                                        h_flex()
+                                            .gap_2()
+                                            .child(div().flex_1().min_w_0().child(Input::new(&f.file)))
+                                            .child(Button::new("pick-file").label("Выбрать…").on_click(cx.listener(
+                                                |panel: &mut Self, _, _, cx| panel.pick_file(cx),
+                                            )))
+                                            .into_any_element(),
+                                    ))
+                                })
+                                .when(!local, |g| {
+                                    g.child(input("Адрес сервера", "С путём, но без завершающего /chat/completions.", &f.url))
+                                        .child(input("Ключ", "", &f.key))
+                                })
+                                .child(input("Имя модели", if local { "Пусто — имя файла." } else { "" }, &f.model_name))
+                                .when(serve == "host", |g| g.child(input("Порт службы", "", &f.model_port)))
+                                .child(input("Делить окно на агентов", "1 — не делить (рекомендуется).", &f.agents))
+                                .child(input("Окно не меньше, токенов", "", &f.fit_ctx)),
+                        ),
+                )
+                .into_any_element()
+            }
             _ => div().text_color(caption).child("—").into_any_element(),
         };
 
@@ -359,6 +604,12 @@ impl Render for Panel {
                     })
                     .into_any_element()
             }
+            Tab::Params => Button::new("save")
+                .primary()
+                .label("Сохранить")
+                .disabled(!dirty || busy_now)
+                .on_click(cx.listener(|panel: &mut Self, _, _, cx| panel.save(cx)))
+                .into_any_element(),
             Tab::Log => Button::new("clear-log")
                 .label("Очистить")
                 .disabled(busy_now)

@@ -29,12 +29,43 @@ pub fn open(cx: &mut App) {
     };
     match gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Panel::new(window, cx))) {
         Ok((handle, panel)) => {
-            let ui = cx.global_mut::<super::Ui>();
-            ui.window = Some(handle);
-            ui.panel = Some(panel);
+            {
+                let ui = cx.global_mut::<super::Ui>();
+                ui.window = Some(handle);
+                ui.panel = Some(panel);
+            }
+            // Закрытие во время работы спрашивает: повторный запуск
+            // доустановит недостающее, но полуготовый контейнер случайным
+            // щелчком плодить не надо (решение заказчика 2026-10-19).
+            let _ = handle.update(cx, |_, window, cx| {
+                window.on_window_should_close(cx, |_, cx| {
+                    if crate::ui::should_close(cx.global::<super::Ui>().working()) {
+                        return true;
+                    }
+                    ask_interrupt()
+                });
+            });
         }
         // Окна нет — говорить больше некуда: журнал живёт в окне (задача 3
         // кладёт эту строку туда).
         Err(e) => eprintln!("окно не открылось: {e:#}"),
     }
+}
+
+/// Спросить, прерывать ли работу. Системное окно, а не своё: вопрос задаётся
+/// из обработчика закрытия, где своей разметке взяться негде, и ответ нужен
+/// сразу. «Да» — закрываем, «Нет» — остаёмся.
+#[cfg(windows)]
+fn ask_interrupt() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONWARNING, MB_YESNO};
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let text = wide("Работа не закончена. Прервать?\nПовторный запуск доустановит недостающее.");
+    let title = wide("dev1c-setup");
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING) == IDYES }
+}
+
+#[cfg(not(windows))]
+fn ask_interrupt() -> bool {
+    // Не под Windows окна у этой программы нет вовсе (сборка без `gui`).
+    true
 }

@@ -477,5 +477,43 @@ Run: `cargo build --release --manifest-path setup/Cargo.toml -p onec-connect` �
 
 - [ ] **Step 3: Commit** — `docs(1c-connect): GPUI window in STATUS and the setup spec; CI comments; drop the spike`
 
+---
 
+### Task 8: Вкладка «Проект» и каталог проекта в параметрах (перенос этапа 6B из Tauri-окна `main`)
 
+Пока окно переезжало на GPUI, в `main` Tauri-окно получило этап 6B (коммиты 560770b, bd638de, 8f62260, 5bf71f6): вкладку «Проект», поле «Каталог проекта» в параметрах, выгрузку/загрузку через git, и из формы ушёл «Каталог выгрузки конфигурации» (`dump` остаётся в toml). Ветка перебазирована на этот `main`; `src/gui.rs` (Tauri) удалён, его логика ниже переносится в `gui/` один в один. Образец: `git show main:setup/1c-connect/src/gui.rs` (команды `run`, `project`, `open_dir`, `save_cfg`), `git show main:setup/1c-connect/ui/app.js` (`refreshProject`, `RUN_TITLES`, действия вкладки), `git show main:setup/1c-connect/ui/index.html` (поле проекта с подсказкой).
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/mod.rs`, `setup/1c-connect/src/gui/panel.rs`
+- Modify: `docs/superpowers/specs/2026-10-16-gpui-connect-design.md` («Состояние и вид»: список полей и вкладок), `docs/superpowers/plans/2026-10-16-gpui-connect.md` (эта задача уже вписана)
+- Test: оба файла (`mod tests`)
+
+**Interfaces (consumes):** `crate::project::{Project, Layout, layout_state, status}` (`Project::from_cfg(&Cfg, &Path) -> Project` с полями `dir: PathBuf`, `branch: String`; `layout_state(&Project) -> Layout {Missing, BaseDir(String), Drifted(String), Ok}`; `status(&Project) -> Result<String, String>`), `crate::ops_host::tools_dir() -> PathBuf`, `crate::flow::{export(&Ctx, &str) -> Result<String, String>, import(&Ctx) -> Result<String, String>}`, `common::Runner` (для `ctx.ok(text)`).
+
+**Interfaces (produces):**
+
+```rust
+pub enum Tab { Params, Ext, Project, Check, Log }          // Project между Ext и Check, в этом порядке и во вкладках
+pub enum Busy { Ext, Project, Check }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum Which { Install, Uninstall, Export, Import }
+impl Which { pub fn title(self) -> &'static str }          // «— устанавливаю —», «— снимаю расширение —», «— выгружаю в git —», «— загружаю из git —»
+#[derive(Clone, Debug, PartialEq)] pub struct ProjectView { pub dir: String, pub branch: String, pub lines: Vec<String>, pub ok: bool, pub why: String }
+pub enum Ev { .., Project(ProjectView) }                   // handle: ui.project = Some(v); refresh_windows
+pub fn run_op(cx: &mut App, which: Which);                 // busy = Project для Export/Import, иначе Ext; строка Kind::Say с which.title(); ui.tab = Tab::Log; поток: Install → apply_all, Uninstall → revert_apply (как сейчас), Export → flow::export(&ctx, "выгрузка из 1c-connect").map(|t| ctx.ok(t)), Import → flow::import(&ctx).map(|t| ctx.ok(t)); ошибки → Ev::Done(Some(text)); guarded() как сейчас
+pub fn refresh_project(cx: &mut App);                      // поток: Project::from_cfg(&cfg, &tools_dir()); layout_state → (ok, why): Missing «каталог проекта ещё не разложен», BaseDir(f) «это каталог базы ({f})», Drifted(d) d, Ok ("", true); lines = status(&p).lines() при ok, иначе пусто; → Ev::Project. Зовётся при открытии вкладки Project, после Ev::Done и после удачного сохранения.
+pub fn open_dir(cx: &mut App);                             // explorer / xdg-open на cfg.host.project; ошибка → note_line Fail «не открыть {dir}: {e}»
+pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String>; // теперь переносит из текущих cfg `dump` и `tools` (как save_cfg в main), `project` берётся из формы
+pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Dot, String, String)>; // panel.rs, чистая: None → [(Off, «Каталог проекта задаётся в «Параметрах»; install раскладывает git.», "")]; !ok → [(Busy, dir, why)] + подсказка «Параметры → Проект, затем Расширение → Установить» третьим полем или второй строкой; ok → [(Up, dir, «ветка {branch}»)] + по строке на каждую line: разбить по первому ": " на (title, detail), Dot::Off
+```
+
+`Ui` получает поле `pub project: Option<ProjectView>`.
+
+**Вкладка «Параметры»:** ряд «Каталог выгрузки конфигурации» убрать; после «Адрес публикации» ряд «Каталог проекта» с кнопкой «Выбрать…» (placeholder `C:\proj\Buh`) и подсказкой под полем 13 px приглушённым: «Исходники в src, git с веткой рабочего места. Не каталог базы.». `Fields.dump` → `Fields.project`; `host_of` берёт `project` из поля, `dump` пустой; `fields_differ` сравнивает `project` вместо `dump`; тест `dirty_ignores_project_and_tools_but_sees_a_changed_field` переименовать в `dirty_ignores_dump_and_tools_but_sees_a_changed_field` и поправить (`dump`/`tools` игнорируются, `project` — нет).
+
+**Вкладка «Проект»:** строки из `project_rows` слоями, как «Расширение». Плашка действий: «Открыть каталог» (outline → `open_dir`), «Загрузить из git» (outline → `run_op(Import)`), «Выгрузить в git» (primary → `run_op(Export)`); все `disabled(busy.is_some())`, `loading` у «Загрузить»/«Выгрузить» при `Busy::Project`. Бейджи и прочее без изменений; индекс вкладок сдвигается (Check = 3, Log = 4).
+
+- [ ] **Step 1: Падающие тесты** — `which_titles_are_the_old_log_lines` (четыре заголовка), `project_rows_explain_a_missing_layout_and_list_status_lines` (None → одна строка-подсказка; `ok=false` → dir + why; `ok=true` c `lines = ["ветка: dev1", "изменено: 2 файла"]` → первая строка dir/«ветка dev1», затем («ветка», «dev1»), («изменено», «2 файла»)), обновлённый тест `fields_differ`.
+- [ ] **Step 2: Убедиться, что не компилируется.**
+- [ ] **Step 3: Реализовать** по Interfaces; ничего из Tauri-образца не копировать дословно, только логику и тексты.
+- [ ] **Step 4: Проверки:** `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` зелёный; один `cargo check --manifest-path setup/Cargo.toml -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000, перезапуск при лимите) без ошибок и предупреждений. Полные тесты с окном — в CI.
+- [ ] **Step 5: Commit** — `feat(1c-connect): Проект tab and project directory in the GPUI window (stage 6B port)`

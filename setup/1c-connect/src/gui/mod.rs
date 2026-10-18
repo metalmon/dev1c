@@ -4,13 +4,15 @@
 //! канал; задача-читатель канала — единственное, что меняет `Ui`.
 
 use crate::cfg::{self, Cfg, Host};
+use crate::flow;
 use crate::ops_host::{self, Ctx};
+use crate::project::{self, Layout, Project};
 use crate::session::{self, Session, State};
 use crate::verify;
 use common::check::{self, Check};
 use common::kit::{write_text, Kit};
 use common::op::{CleanLevel, OpState};
-use common::{run, AlwaysDefault, Event, Sink};
+use common::{run, AlwaysDefault, Event, Runner, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -75,6 +77,9 @@ pub struct Ui {
     pub checks: Vec<Check>,
     pub failed_checks: usize,
     pub ops: Vec<OpView>,
+    /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
+    /// `None` — ещё не спрашивали.
+    pub project: Option<ProjectView>,
     pub busy: Option<Busy>,
     pub status: Option<Line>,
     pub tray: Option<tray::Tray>,
@@ -108,6 +113,7 @@ pub enum Tab {
     #[default]
     Params,
     Ext,
+    Project,
     Check,
     Log,
 }
@@ -115,7 +121,40 @@ pub enum Tab {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Busy {
     Ext,
+    Project,
     Check,
+}
+
+/// Что делает кнопка вкладки: расширение или git-обмен с проектом.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Which {
+    Install,
+    Uninstall,
+    Export,
+    Import,
+}
+
+impl Which {
+    /// Заголовок в журнал перед работой — тексты из `RUN_TITLES` в `app.js`.
+    pub fn title(self) -> &'static str {
+        match self {
+            Which::Install => "— устанавливаю —",
+            Which::Uninstall => "— снимаю расширение —",
+            Which::Export => "— выгружаю в git —",
+            Which::Import => "— загружаю из git —",
+        }
+    }
+}
+
+/// Вкладка «Проект»: раскладка каталога и, если она в порядке, состояние
+/// ветки строками `project::status`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectView {
+    pub dir: String,
+    pub branch: String,
+    pub lines: Vec<String>,
+    pub ok: bool,
+    pub why: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -145,6 +184,8 @@ pub enum Ev {
     Checks(Vec<Check>),
     /// Состояние операций, перечитанное в своём потоке (`refresh_ops`).
     Ops(Vec<OpView>),
+    /// Каталог проекта, перечитанный в своём потоке (`refresh_project`).
+    Project(ProjectView),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -224,11 +265,11 @@ pub fn op_view(id: String, title: String, st: OpState) -> OpView {
     OpView { id, title, dot, detail }
 }
 
-/// Сохранить параметры сервера. Полей проекта в окне пока нет (задача 6):
-/// берём их из текущих параметров, иначе пустые значения из формы затёрли
-/// бы toml.
+/// Сохранить параметры сервера. Списка инструментов и каталога выгрузки в
+/// окне нет (правятся в toml): берём их из текущих параметров, иначе пустые
+/// значения из формы затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
-    host.project = ui.cfg.host.project.clone();
+    host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
@@ -321,11 +362,18 @@ pub fn toggle_link(cx: &mut App) {
     }
 }
 
-/// Установить (`uninstall = false`) или снять расширение; ход — событиями
-/// из `ctx_for`, конец — `Ev::Done`.
-pub fn run_op(cx: &mut App, uninstall: bool) {
+/// Расширение (установить/снять) или обмен с git (выгрузить/загрузить);
+/// ход — событиями из `ctx_for`, конец — `Ev::Done`. Заголовок работы ложится
+/// в журнал, и журнал же показывается: за ходом смотрят там.
+pub fn run_op(cx: &mut App, which: Which) {
     let ui = cx.global_mut::<Ui>();
-    ui.busy = Some(Busy::Ext);
+    ui.busy = Some(match which {
+        Which::Export | Which::Import => Busy::Project,
+        _ => Busy::Ext,
+    });
+    note_line(ui, Line { kind: Kind::Say, text: which.title().into() });
+    ui.tab = Tab::Log;
+    ui.unread = 0;
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
     cx.refresh_windows();
@@ -333,17 +381,57 @@ pub fn run_op(cx: &mut App, uninstall: bool) {
         guarded(
             &tx,
             || {
-                let ops = ops_host::host();
-                let r = if uninstall {
-                    ops.iter().find(|o| o.id() == "host.extension").map(|ext| ext.revert_apply(&ctx, CleanLevel::Stack)).unwrap_or(Ok(()))
-                } else {
-                    run::apply_all(&ctx, &ops, None, false).map(|_| ())
+                let r: Result<(), String> = match which {
+                    Which::Install => run::apply_all(&ctx, &ops_host::host(), None, false).map(|_| ()).map_err(|e| format!("{e:#}")),
+                    Which::Uninstall => ops_host::host()
+                        .iter()
+                        .find(|o| o.id() == "host.extension")
+                        .map(|ext| ext.revert_apply(&ctx, CleanLevel::Stack))
+                        .unwrap_or(Ok(()))
+                        .map_err(|e| format!("{e:#}")),
+                    // Те же инструменты, что зовёт агент, под тем же замком проекта.
+                    Which::Export => flow::export(&ctx, "выгрузка из 1c-connect").map(|t| ctx.ok(t)),
+                    Which::Import => flow::import(&ctx).map(|t| ctx.ok(t)),
                 };
-                Ev::Done(r.err().map(|e| format!("{e:#}")))
+                Ev::Done(r.err())
             },
             || Ev::Done(Some(PANIC_TEXT.into())),
         );
     });
+}
+
+/// Перечитать каталог проекта в своём потоке: `layout_state` и `status` ходят
+/// по диску и к git, на главном потоке подвесили бы окно.
+pub fn refresh_project(cx: &mut App) {
+    let ui = cx.global::<Ui>();
+    let (cfg, tx) = (ui.cfg.clone(), ui.tx.clone());
+    std::thread::spawn(move || {
+        guarded(
+            &tx,
+            || {
+                let p = Project::from_cfg(&cfg, &ops_host::tools_dir());
+                let (ok, why) = match project::layout_state(&p) {
+                    Layout::Ok => (true, String::new()),
+                    Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
+                    Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
+                    Layout::Drifted(d) => (false, d),
+                };
+                let lines = if ok { project::status(&p).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default() } else { Vec::new() };
+                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, lines, ok, why })
+            },
+            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), lines: Vec::new(), ok: false, why: PANIC_TEXT.into() }),
+        );
+    });
+}
+
+/// Каталог проекта в проводнике.
+pub fn open_dir(cx: &mut App) {
+    let dir = cx.global::<Ui>().cfg.host.project.clone();
+    let mut c = std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" });
+    if let Err(e) = c.arg(&dir).spawn() {
+        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("не открыть {dir}: {e}") });
+        cx.refresh_windows();
+    }
 }
 
 /// Семь фактов от основания к вершине; отчёт пишется в `last-check.txt` тем
@@ -428,6 +516,7 @@ fn handle(ev: Ev, cx: &mut App) {
                 None => Line { kind: Kind::Ok, text: "Готово.".into() },
             });
             refresh_ops(cx);
+            refresh_project(cx);
         }
         Ev::Checks(checks) => {
             let failed = checks.iter().filter(|c| !c.ok).count();
@@ -444,6 +533,10 @@ fn handle(ev: Ev, cx: &mut App) {
         }
         Ev::Ops(ops) => {
             cx.global_mut::<Ui>().ops = ops;
+            cx.refresh_windows();
+        }
+        Ev::Project(v) => {
+            cx.global_mut::<Ui>().project = Some(v);
             cx.refresh_windows();
         }
     }
@@ -503,6 +596,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             checks: Vec::new(),
             failed_checks: 0,
             ops: Vec::new(),
+            project: None,
             busy: None,
             status: None,
             tray: Some(tray),
@@ -547,6 +641,7 @@ impl Ui {
             checks: Vec::new(),
             failed_checks: 0,
             ops: Vec::new(),
+            project: None,
             busy: None,
             status: None,
             tray: None,
@@ -561,7 +656,7 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, LOG_CAP, TRAY_PNG};
+    use super::{badge, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, Which, LOG_CAP, TRAY_PNG};
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
     use common::Event;
@@ -648,6 +743,14 @@ mod tests {
         }
         // Без этого `busy` остался бы навсегда и кнопки — заблокированными.
         assert!(matches!(rx.try_recv().unwrap(), Ev::Done(Some(_))));
+    }
+
+    #[test]
+    fn which_titles_are_the_old_log_lines() {
+        assert_eq!(Which::Install.title(), "— устанавливаю —");
+        assert_eq!(Which::Uninstall.title(), "— снимаю расширение —");
+        assert_eq!(Which::Export.title(), "— выгружаю в git —");
+        assert_eq!(Which::Import.title(), "— загружаю из git —");
     }
 
     #[test]

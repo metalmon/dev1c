@@ -8,7 +8,7 @@
 use crate::cfg::{self, Host};
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, Ui};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Ui, Which};
 use crate::session::State;
 use common::check::Check;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -48,7 +48,7 @@ pub struct Fields {
     pub db_user: Entity<InputState>,
     pub db_password: Entity<InputState>,
     pub base_url: Entity<InputState>,
-    pub dump: Entity<InputState>,
+    pub project: Entity<InputState>,
     pub workstation: WsState,
 }
 
@@ -86,7 +86,28 @@ pub fn check_dot(c: &Check) -> Dot {
     }
 }
 
-/// Параметры из полей. `project` и `tools` пустые — их подставит `save_host`
+/// Подсказка под каталогом проекта, когда раскладки ещё нет.
+pub const HINT_PROJECT: &str = "Параметры → Проект, затем Расширение → Установить";
+
+/// Вкладка «Проект» без ответа от `refresh_project`.
+const PROJECT_EMPTY: &str = "Каталог проекта задаётся в «Параметрах»; install раскладывает git.";
+
+/// Строки вкладки «Проект»: кружок, заголовок, подробность. Чистая — вид
+/// только раскладывает её по слоям.
+pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Dot, String, String)> {
+    let Some(v) = v else { return vec![(Dot::Off, PROJECT_EMPTY.into(), String::new())] };
+    if !v.ok {
+        return vec![(Dot::Busy, v.dir.clone(), v.why.clone()), (Dot::Off, HINT_PROJECT.into(), String::new())];
+    }
+    let mut rows = vec![(Dot::Up, v.dir.clone(), format!("ветка {}", v.branch))];
+    rows.extend(v.lines.iter().map(|l| match l.split_once(": ") {
+        Some((title, detail)) => (Dot::Off, title.to_string(), detail.to_string()),
+        None => (Dot::Off, l.clone(), String::new()),
+    }));
+    rows
+}
+
+/// Параметры из полей. `dump` и `tools` пустые — их подставит `save_host`
 /// из текущих, в окне этих полей нет.
 pub fn host_of(f: &Fields, cx: &App) -> Host {
     let v = |e: &Entity<InputState>| e.read(cx).value().to_string();
@@ -98,17 +119,17 @@ pub fn host_of(f: &Fields, cx: &App) -> Host {
         db_user: v(&f.db_user),
         db_password: v(&f.db_password),
         base_url: v(&f.base_url),
-        dump: v(&f.dump),
-        project: String::new(),
+        dump: String::new(),
+        project: v(&f.project),
         tools: Vec::new(),
     }
 }
 
-/// Поля окна отличаются от сохранённых? `project` и `tools` в окне не
+/// Поля окна отличаются от сохранённых? `dump` и `tools` в окне не
 /// редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
 pub fn fields_differ(a: &Host, b: &Host) -> bool {
     fn key(h: &Host) -> [&str; 8] {
-        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.base_url, &h.dump]
+        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.base_url, &h.project]
     }
     key(a) != key(b)
 }
@@ -151,7 +172,7 @@ impl Panel {
             db_user: field("Администратор", &host.db_user, false, window, cx),
             db_password: field("пароль", &host.db_password, true, window, cx),
             base_url: field("http://localhost/Buh/hs/mcp-1c", &host.base_url, false, window, cx),
-            dump: field("C:\\proj\\Buh\\src", &host.dump, false, window, cx),
+            project: field("C:\\proj\\Buh", &host.project, false, window, cx),
             workstation: cx.new(|cx| SelectState::new(WORKSTATIONS.to_vec(), Some(IndexPath::new(ws_ix)), window, cx)),
         };
         // Минуты в карточке: пока окно живо, раз в полминуты перерисовка.
@@ -191,6 +212,8 @@ impl Panel {
         });
         if ok {
             self.original = host;
+            // Каталог проекта мог смениться — вкладка «Проект» уже про другой.
+            gui::refresh_project(cx);
         }
         gui::refresh_ops(cx);
         ok
@@ -333,21 +356,27 @@ impl Render for Panel {
             .selected_index(match tab {
                 gui::Tab::Params => 0,
                 gui::Tab::Ext => 1,
-                gui::Tab::Check => 2,
-                gui::Tab::Log => 3,
+                gui::Tab::Project => 2,
+                gui::Tab::Check => 3,
+                gui::Tab::Log => 4,
             })
             .children([
                 KitTab::new().label("Параметры"),
                 KitTab::new().label("Расширение"),
+                KitTab::new().label("Проект"),
                 with_badge("Проверка", failed, danger, bg),
                 with_badge("Журнал", if tab == gui::Tab::Log { 0 } else { unread }, border, fg),
             ])
             .on_click(cx.listener(|_, i: &usize, _, cx| {
-                let t = [gui::Tab::Params, gui::Tab::Ext, gui::Tab::Check, gui::Tab::Log][*i];
+                let t = [gui::Tab::Params, gui::Tab::Ext, gui::Tab::Project, gui::Tab::Check, gui::Tab::Log][*i];
                 let ui = cx.global_mut::<Ui>();
                 ui.tab = t;
                 if t == gui::Tab::Log {
                     ui.unread = 0;
+                }
+                // Состояние git читают при открытии вкладки, как в `app.js`.
+                if t == gui::Tab::Project {
+                    gui::refresh_project(cx);
                 }
                 cx.refresh_windows();
             }));
@@ -405,13 +434,19 @@ impl Render for Panel {
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_size(px(13.)).text_color(muted).child("Каталог выгрузки конфигурации"))
+                                .child(div().text_size(px(13.)).text_color(muted).child("Каталог проекта"))
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.dump, accent, window, cx)))
-                                        .child(pick("pick-dump", f.dump.clone(), cx)),
+                                        .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                        .child(pick("pick-project", f.project.clone(), cx)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(muted)
+                                        .child("Исходники в src, git с веткой рабочего места. Не каталог базы."),
                                 ),
                         ),
                 )
@@ -435,6 +470,28 @@ impl Render for Panel {
                                 .min_w_0()
                                 .child(o.title.clone())
                                 .child(div().text_size(px(13.)).text_color(muted).child(o.detail.clone())),
+                        )
+                })))
+                .into_any_element(),
+            gui::Tab::Project => div()
+                .id("project")
+                .size_full()
+                .overflow_y_scroll()
+                .child(v_flex().gap_2().children(project_rows(cx.global::<Ui>().project.as_ref()).into_iter().map(|(d, title, detail)| {
+                    Self::layer(card, border)
+                        .flex()
+                        .flex_row()
+                        .gap_3()
+                        .items_center()
+                        .px_3()
+                        .py_2()
+                        .child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(title)
+                                .child(div().text_size(px(13.)).text_color(muted).child(detail)),
                         )
                 })))
                 .into_any_element(),
@@ -535,7 +592,7 @@ impl Render for Panel {
                         .label("Снять")
                         .disabled(busy.is_some())
                         .loading(busy == Some(Busy::Ext))
-                        .on_click(|_, _, cx| gui::run_op(cx, true)),
+                        .on_click(|_, _, cx| gui::run_op(cx, Which::Uninstall)),
                 )
                 .child(
                     Button::new("install")
@@ -543,7 +600,33 @@ impl Render for Panel {
                         .label("Установить")
                         .disabled(busy.is_some())
                         .loading(busy == Some(Busy::Ext))
-                        .on_click(|_, _, cx| gui::run_op(cx, false)),
+                        .on_click(|_, _, cx| gui::run_op(cx, Which::Install)),
+                )
+                .into_any_element(),
+            gui::Tab::Project => h_flex()
+                .gap_2()
+                .child(
+                    Button::new("open-dir")
+                        .outline()
+                        .label("Открыть каталог")
+                        .disabled(busy.is_some())
+                        .on_click(|_, _, cx| gui::open_dir(cx)),
+                )
+                .child(
+                    Button::new("import")
+                        .outline()
+                        .label("Загрузить из git")
+                        .disabled(busy.is_some())
+                        .loading(busy == Some(Busy::Project))
+                        .on_click(|_, _, cx| gui::run_op(cx, Which::Import)),
+                )
+                .child(
+                    Button::new("export")
+                        .primary()
+                        .label("Выгрузить в git")
+                        .disabled(busy.is_some())
+                        .loading(busy == Some(Busy::Project))
+                        .on_click(|_, _, cx| gui::run_op(cx, Which::Export)),
                 )
                 .into_any_element(),
             gui::Tab::Check => Button::new("check")
@@ -609,9 +692,9 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_dot, fields_differ, status_line};
+    use super::{check_dot, fields_differ, project_rows, status_line, HINT_PROJECT};
     use crate::cfg::{self, Host};
-    use crate::gui::Dot;
+    use crate::gui::{Dot, ProjectView};
     use crate::session::State;
     use common::check::Check;
     use std::time::Instant;
@@ -627,12 +710,45 @@ mod tests {
     }
 
     #[test]
-    fn dirty_ignores_project_and_tools_but_sees_a_changed_field() {
-        let saved = Host { project: "C:\\proj".into(), tools: vec!["x".into()], ..Host::default() };
-        let shown = Host { project: String::new(), tools: Vec::new(), ..saved.clone() };
+    fn dirty_ignores_dump_and_tools_but_sees_a_changed_field() {
+        let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
+        let shown = Host { dump: String::new(), tools: Vec::new(), ..saved.clone() };
         assert!(!fields_differ(&shown, &saved));
-        let edited = Host { server: "h:1".into(), ..shown };
+        let edited = Host { server: "h:1".into(), ..shown.clone() };
         assert!(fields_differ(&edited, &saved));
+        // Каталог проекта теперь в форме — его правка видна.
+        let moved = Host { project: "C:\\proj\\Buh".into(), ..shown };
+        assert!(fields_differ(&moved, &saved));
+    }
+
+    #[test]
+    fn project_rows_explain_a_missing_layout_and_list_status_lines() {
+        let none = project_rows(None);
+        assert_eq!(none.len(), 1);
+        assert_eq!(none[0], (Dot::Off, "Каталог проекта задаётся в «Параметрах»; install раскладывает git.".into(), String::new()));
+
+        let bad = ProjectView {
+            dir: "C:\\proj\\Buh".into(),
+            branch: "dev1".into(),
+            lines: Vec::new(),
+            ok: false,
+            why: "каталог проекта ещё не разложен".into(),
+        };
+        let rows = project_rows(Some(&bad));
+        assert_eq!(rows[0], (Dot::Busy, "C:\\proj\\Buh".into(), "каталог проекта ещё не разложен".into()));
+        assert!(rows.iter().any(|r| r.1 == HINT_PROJECT || r.2 == HINT_PROJECT), "{rows:?}");
+
+        let good = ProjectView {
+            lines: vec!["ветка: dev1".into(), "изменено: 2 файла".into()],
+            ok: true,
+            why: String::new(),
+            ..bad
+        };
+        let rows = project_rows(Some(&good));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], (Dot::Up, "C:\\proj\\Buh".into(), "ветка dev1".into()));
+        assert_eq!(rows[1], (Dot::Off, "ветка".into(), "dev1".into()));
+        assert_eq!(rows[2], (Dot::Off, "изменено".into(), "2 файла".into()));
     }
 
     #[test]

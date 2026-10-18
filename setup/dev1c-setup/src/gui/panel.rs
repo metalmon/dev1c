@@ -678,6 +678,26 @@ impl Render for Panel {
                 .disabled(!dirty || busy_now)
                 .on_click(cx.listener(|panel: &mut Self, _, _, cx| panel.save(cx)))
                 .into_any_element(),
+            // «Проверка»: факты о среде и отдельно — целость комплекта,
+            // то есть всё ли довезли и не побилось ли по дороге.
+            Tab::Check => h_flex()
+                .gap_2()
+                .child(
+                    Button::new("integrity")
+                        .label("Проверить комплект")
+                        .disabled(busy_now)
+                        .tooltip("Сверить файлы комплекта с checksums.txt")
+                        .on_click(|_, _, cx| gui::run_integrity(cx)),
+                )
+                .child(
+                    Button::new("check-again")
+                        .primary()
+                        .label("Проверить")
+                        .disabled(busy_now)
+                        .loading(busy == Some(Busy::Check))
+                        .on_click(|_, _, cx| gui::run_check(cx)),
+                )
+                .into_any_element(),
             Tab::Log => Button::new("clear-log")
                 .label("Очистить")
                 .disabled(busy_now)

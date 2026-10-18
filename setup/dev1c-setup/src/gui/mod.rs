@@ -72,6 +72,9 @@ pub enum Ev {
     /// Конец работы: текст ошибки или ничего.
     Done(Option<String>),
     Checks(Vec<Check>),
+    /// Итог сверки комплекта с `checksums.txt` — отдельным фактом, чтобы не
+    /// затирать остальные проверки.
+    Integrity(Check),
     /// Состояние операций и числа замера, перечитанные в своём потоке.
     Ops(Vec<OpView>, Option<(u32, u32)>),
 }
@@ -187,6 +190,58 @@ fn checked(ctx: &Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Кнопка «Проверить комплект»: сверка файлов с `checksums.txt`. Считает
+/// суммы — для образа это гигабайты, поэтому ход идёт строками в журнал.
+pub fn run_integrity(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    if ui.busy.is_some() {
+        return;
+    }
+    ui.busy = Some(Busy::Check);
+    ui.started = Some(Instant::now());
+    ui.tab = Tab::Check;
+    note_line(ui, ui::head_line("— сверяю комплект —"));
+    let kit = ui.kit.clone();
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let send = |ev| {
+            let _ = tx.unbounded_send(ev);
+        };
+        ui::guarded(
+            &send,
+            Ev::Line,
+            || {
+                // Каждый десятый файл — строкой: на сотне файлов журнал
+                // иначе превращается в простыню, а молчать на гигабайтах нельзя.
+                let mut last = 0usize;
+                let report = common::integrity::verify(&kit, |i, n, path| {
+                    if i == n || i - last >= 10 {
+                        last = i;
+                        send(Ev::Line(ui::Line::say(format!("{i}/{n} {path}"))));
+                    }
+                });
+                match report {
+                    Ok(r) => {
+                        let bad: Vec<String> = r
+                            .entries
+                            .iter()
+                            .filter(|e| e.state != common::integrity::FileState::Ok)
+                            .map(|e| match e.state {
+                                common::integrity::FileState::Missing => format!("нет: {}", e.path),
+                                _ => format!("изменился: {}", e.path),
+                            })
+                            .collect();
+                        let ok = r.entries.len() - bad.len();
+                        Ev::Integrity(ui::integrity_check(ok, &bad))
+                    }
+                    Err(e) => Ev::Integrity(ui::integrity_unknown(format!("{e:#}"))),
+                }
+            },
+            || Ev::Done(Some(ui::PANIC_TEXT.into())),
+        );
+    });
+}
+
 /// Кнопка «Проверить»: только факты, ничего не меняет.
 pub fn run_check(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
@@ -228,6 +283,24 @@ pub fn run_check(cx: &mut App) {
 
 fn handle(ev: Ev, cx: &mut App) {
     match ev {
+        Ev::Integrity(check) => {
+            let ui = cx.global_mut::<Ui>();
+            ui.busy = None;
+            let elapsed = ui.started.take();
+            // Факт с тем же именем заменяется, а не копится.
+            ui.checks.retain(|c| c.what != check.what);
+            ui.checks.insert(0, check.clone());
+            ui.failed_checks = ui.checks.iter().filter(|c| !c.ok).count();
+            for line in ui::check_lines(std::slice::from_ref(&check)) {
+                note_line(ui, line);
+            }
+            let text = match elapsed {
+                Some(since) => format!("{} — за {}", check.detail, ui::took(since.elapsed())),
+                None => check.detail.clone(),
+            };
+            ui.status = Some(if check.ok { Line::ok(text) } else { Line::fail(text) });
+            cx.refresh_windows();
+        }
         Ev::Line(line) => {
             note_line(cx.global_mut::<Ui>(), line);
             cx.refresh_windows();

@@ -4,7 +4,7 @@
 //! фокуса раньше, чем клик по трею успевает его поднять заново).
 
 use super::panel::Panel;
-use super::{note_line, Kind, Line, Ui};
+use super::{note_line, Kind, Line, Tab, Ui};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -154,6 +154,11 @@ pub fn show_window(cx: &mut App) {
             let ui = cx.global_mut::<Ui>();
             ui.window = Some(handle);
             ui.panel = Some(panel);
+            // Окно открылось сразу на «Журнале» — строки, набежавшие пока оно
+            // было спрятано, теперь на виду, бейджу их считать нечего.
+            if ui.tab == Tab::Log {
+                ui.unread = 0;
+            }
         }
         Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("окно не открылось: {e:#}") }),
     }

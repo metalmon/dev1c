@@ -327,7 +327,9 @@ impl Op<Ctx> for Extension {
         let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
         let o = docker::exec(ctx, &exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password])?;
-        anyhow::ensure!(o.ok(), "расширение не установилось: {}", o.tail(4).join(" "));
+        // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
+        // аргументов, если команда его эхом вернула, затирается.
+        anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
         ctx.ok("расширение установлено");
         if ctx.dry_run {
             return Ok(());
@@ -354,7 +356,7 @@ impl Op<Ctx> for Extension {
         let p = format!("/P{}", h.db_password);
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
         let o = docker::exec(ctx, &v8.to_string_lossy(), &args)?;
-        anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", o.tail(3).join(" "));
+        anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
         Ok(())

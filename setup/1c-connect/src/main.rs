@@ -74,8 +74,28 @@ enum Cmd {
     Example,
 }
 
+/// Запуск окна: без аргументов (двойной щелчок) или `--tray` (автозапуск
+/// при входе в систему, см. `gui::autostart`). Ни тому, ни другому консоль
+/// не нужна — `console::attach` с одним аргументом выделил бы её, и при
+/// каждом входе в Windows всплывало бы чёрное окно.
+#[cfg(feature = "gui")]
+fn gui_launch() -> Option<bool> {
+    let args: Vec<String> = std::env::args().collect();
+    match args.as_slice() {
+        [_] => Some(false),
+        [_, a] if a == "--tray" => Some(true),
+        _ => None,
+    }
+}
+
 fn main() {
-    common::console::attach();
+    #[cfg(feature = "gui")]
+    let console = gui_launch().is_none();
+    #[cfg(not(feature = "gui"))]
+    let console = true;
+    if console {
+        common::console::attach();
+    }
     if let Err(e) = run() {
         eprintln!();
         eprintln!("Остановлено: {e:#}");
@@ -109,14 +129,8 @@ fn run() -> Result<()> {
     // в систему (см. `gui::autostart`), проверяется до `Cli::parse()`, как
     // и `len() == 1`.
     #[cfg(feature = "gui")]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.len() == 1 {
-            return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, false);
-        }
-        if args.len() == 2 && args[1] == "--tray" {
-            return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, true);
-        }
+    if let Some(hidden) = gui_launch() {
+        return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, hidden);
     }
     let cli = Cli::parse();
     let kit = match &cli.kit {

@@ -465,7 +465,9 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     if !ui.kit.path(cfg::FILE).exists() {
         return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
     }
-    if ui.session.is_some() && ui.link.is_on() {
+    // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
+    // в том числе в окно между `session::start` и первым `Connecting`.
+    if ui.session.is_some() && !matches!(ui.link, State::Failed(_)) {
         return Ok(());
     }
     // Новый сеанс — новое поколение: хвост от прежнего (если он всё ещё

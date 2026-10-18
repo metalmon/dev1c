@@ -123,7 +123,7 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         OpState::Done(d) => Check::pass(ORDER[3], d),
         OpState::Missing => Check::fail(ORDER[3], format!("в {} ничего нет", tools.display()), "1c-connect install"),
         OpState::Drifted { from, to } => Check::fail(ORDER[3], format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
-        OpState::Blocked(d) => Check::fail(ORDER[3], d, "соберите комплект заново: pack.sh"),
+        OpState::Blocked(d) => Check::fail(ORDER[3], d, "скопируйте полный комплект заново"),
     });
     v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(ORDER[4], "инструментов на машине нет", "1c-connect install") });
     v.push(project_fact(ctx, &tools));

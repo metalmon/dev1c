@@ -139,7 +139,7 @@ const VERSION_FILE: &str = "tools.version";
 /// копия на машине несёт ту же строку.
 pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
     if !kit_root.join("vrunner").is_dir() || !kit_root.join("git").is_dir() {
-        return OpState::Blocked("в комплекте нет vrunner/ или git/ — комплект собран без инструментов (pack.sh)".into());
+        return OpState::Blocked("в комплекте нет vrunner/ или git/ — скопируйте полный комплект заново".into());
     }
     let want = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
     let have = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();

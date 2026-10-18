@@ -92,7 +92,15 @@ designer)
     ;;
 enterprise)
     seed
-    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
+    # Scheduled jobs off: in a file base they run inside this very session, and
+    # the configuration's internet-support subsystem starts by asking
+    # update-api.1c.ru whether there is an update. Here that host is
+    # unreachable, the subsystem falls back to diagnostics — `ping ya.ru`
+    # through ЗапуститьПриложение, which the platform cannot launch on Linux
+    # ("не удалось распознать схему URI") — and the person gets a dialog about
+    # a URI scheme instead of the demo. A stand has nothing to update anyway.
+    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /AllowExecuteScheduledJobs -Off \
+        /DisableStartupDialogs /DisableStartupMessages
     ;;
 seed)
     # runuser without -l keeps root's HOME: take the caller's own

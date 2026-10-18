@@ -66,7 +66,14 @@ pub fn init(p: &Project, tools: &Path, log: &dyn Fn(String)) -> Result<(), Strin
     } else {
         let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_default();
         if branch != p.branch {
-            must(p, &["checkout", "-q", "-B", &p.branch])?;
+            // Switch to the workstation's branch; create it only if it does
+            // not exist — `-B` would reset a branch that already has work.
+            let exists = git(p, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", p.branch)])?.ok;
+            if exists {
+                must(p, &["checkout", "-q", &p.branch])?;
+            } else {
+                must(p, &["checkout", "-q", "-b", &p.branch])?;
+            }
             log(format!("ветка {}", p.branch));
         }
     }
@@ -504,6 +511,20 @@ mod tests {
         std::fs::write(dir.join(".gitignore"), "mine\n").unwrap();
         init(&p, Path::new("nowhere"), &|_| {}).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn init_switches_to_an_existing_workstation_branch_without_resetting_it() {
+        // The person merged into main by hand and is still on it; dev2 has
+        // its own commit. install must switch back to dev2, not reset it.
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "work on dev2").unwrap();
+        git(&p.dir, &["checkout", "-q", "-b", "main"]);
+        git(&p.dir, &["commit", "-q", "--allow-empty", "-m", "main moved on"]);
+        init(&p, Path::new("nowhere"), &|_| {}).unwrap();
+        assert_eq!(git(&p.dir, &["symbolic-ref", "--short", "HEAD"]), "dev2");
+        assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "work on dev2");
     }
 
     #[test]

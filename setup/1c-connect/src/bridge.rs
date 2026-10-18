@@ -416,8 +416,15 @@ mod tests {
             std::process::exit(3);
         }
         // A scripted MCP server: lists three tools, echoes the called tool's
-        // name, prints a plain line on a cancel notification.
-        if std::env::var("BRIDGE_SCRIPT").is_ok() {
+        // name, prints a plain line on a cancel notification. NOISY: first
+        // 200 KB of stderr, the way OneScript logs a long command.
+        if std::env::var("BRIDGE_SCRIPT_NOISY").is_ok() {
+            use std::io::Write;
+            let line = "предупреждение OneScript, строка журнала номер N, ничего страшного\n".repeat(3000);
+            std::io::stderr().write_all(line.as_bytes()).unwrap();
+            std::io::stderr().flush().unwrap();
+        }
+        if std::env::var("BRIDGE_SCRIPT").is_ok() || std::env::var("BRIDGE_SCRIPT_NOISY").is_ok() {
             use std::io::{BufRead, Write};
             let stdin = std::io::stdin();
             let mut out = std::io::stdout();

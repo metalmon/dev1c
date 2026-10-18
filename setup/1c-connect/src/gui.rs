@@ -367,7 +367,14 @@ async fn project(ui: State<'_, Ui>) -> Result<ProjectView, String> {
             Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
             Layout::Drifted(d) => (false, d),
         };
-        let lines = if ok { crate::project::status(&p).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default() } else { vec![] };
+        // The same tool the agent calls, under the same mutex: during an
+        // export the tab says «занято» instead of reading a half-written index.
+        let lines = if ok {
+            let (text, _) = crate::project::call(&p, "project_status", &serde_json::Value::Null);
+            text.lines().map(str::to_string).collect()
+        } else {
+            vec![]
+        };
         ProjectView { dir: p.dir.display().to_string(), branch: p.branch, lines, ok, why }
     })
     .await

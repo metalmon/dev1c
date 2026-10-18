@@ -52,6 +52,18 @@ pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Du
     }
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    // stderr is drained for the whole call (a full pipe would block the
+    // child) and its tail is what the person sees if the child dies.
+    let err_tail = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = std::io::BufReader::new(stderr);
+        let mut all = Vec::new();
+        let _ = r.read_to_end(&mut all);
+        let s = String::from_utf8_lossy(&all);
+        let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+        lines[lines.len().saturating_sub(5)..].join("\n")
+    });
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     // Reader thread: whole lines to the channel; this thread owns the timeout.
     std::thread::spawn(move || {
@@ -110,7 +122,12 @@ pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Du
     let _ = child.kill();
     let _ = child.wait();
     drop(job);
-    result.map(|r| Reply { text: common::docker::redact_text(&r.text), is_error: r.is_error })
+    let tail = err_tail.join().unwrap_or_default();
+    match result {
+        Ok(r) => Ok(Reply { text: common::docker::redact_text(&r.text), is_error: r.is_error }),
+        Err(e) if tail.is_empty() => Err(e),
+        Err(e) => Err(format!("{e}: {}", common::docker::redact_text(&tail))),
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +161,17 @@ mod tests {
         let r = call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({"background": false}), Duration::from_secs(30), &|s| logged.borrow_mut().push(s)).unwrap();
         assert_eq!(r.text, "child ran cf_decompile");
         assert!(!r.is_error);
+    }
+
+    #[test]
+    fn a_child_flooding_stderr_neither_blocks_nor_loses_its_last_words() {
+        // 200 KB on stderr before answering: more than any pipe buffer. The
+        // call must still get its answer, and when the child dies the tail of
+        // stderr is what the person sees.
+        let r = call(scripted(("BRIDGE_SCRIPT_NOISY", "1")), "task_status", json!({}), Duration::from_secs(60), &|_| {}).unwrap();
+        assert_eq!(r.text, "child ran task_status");
+        let e = call(scripted(("BRIDGE_DIE", "платформа не найдена")), "cf_load", json!({}), Duration::from_secs(30), &|_| {}).unwrap_err();
+        assert!(e.contains("платформа не найдена"), "{e}");
     }
 
     #[test]

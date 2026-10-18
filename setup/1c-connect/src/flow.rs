@@ -13,6 +13,8 @@ pub struct Deps<'a> {
     pub push: &'a dyn Fn(&str) -> Result<String, String>,
     pub pull: &'a dyn Fn() -> Result<String, String>,
     pub dump_index_exists: bool,
+    /// `--dry-run`: только план, ни одного вызова.
+    pub dry_run: bool,
 }
 
 fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -29,6 +31,10 @@ fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 /// cf_decompile в src, затем project_push.
 pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<String, String> {
     let _g = lock()?;
+    if d.dry_run {
+        log("план: cf_decompile → src, затем git add/commit/push ветки рабочего места (project_push)".into());
+        return Ok("план напечатан, на машине ничего не менялось".into());
+    }
     log("cf_decompile → src (минуты; Конфигуратор работает в фоне)".into());
     let r = (d.call)("cf_decompile", json!({"OUT": "src", "background": false}))?;
     if r.is_error {
@@ -37,12 +43,17 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
     if !r.text.trim().is_empty() {
         log(r.text);
     }
+    log("git: add, commit, push в Gitea — первая выгрузка это десятки тысяч файлов, минуты".into());
     (d.push)(message)
 }
 
 /// project_pull, затем cf_load инкрементом.
 pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
     let _g = lock()?;
+    if d.dry_run {
+        log("план: project_pull (git pull --rebase), затем cf_load --increment из src".into());
+        return Ok("план напечатан, на машине ничего не менялось".into());
+    }
     let n = (d.platform_running)();
     if n > 0 {
         return Err(format!("на машине запущен 1cv8.exe ({n}) — закройте Конфигуратор и клиентов 1С, затем повторите"));
@@ -86,6 +97,7 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
         push: &push,
         pull: &pull,
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
+        dry_run: ctx.dry_run,
     };
     f(&d, &log)
 }
@@ -110,6 +122,7 @@ mod tests {
         pushed: RefCell<bool>,
         pulled: RefCell<bool>,
         index: bool,
+        dry: bool,
     }
     impl Fake {
         fn new(replies: &[(&str, bool)]) -> Fake {
@@ -120,6 +133,7 @@ mod tests {
                 pushed: RefCell::new(false),
                 pulled: RefCell::new(false),
                 index: true,
+                dry: false,
             }
         }
         fn run<R>(&self, f: impl FnOnce(&Deps) -> R) -> R {
@@ -137,7 +151,7 @@ mod tests {
                 *self.pulled.borrow_mut() = true;
                 Ok("pulled".to_string())
             };
-            f(&Deps { call: &call, platform_running: &platform_running, push: &push, pull: &pull, dump_index_exists: self.index })
+            f(&Deps { call: &call, platform_running: &platform_running, push: &push, pull: &pull, dump_index_exists: self.index, dry_run: self.dry })
         }
     }
 
@@ -181,6 +195,28 @@ mod tests {
         let f = Fake::new(&[("Конфигуратор: ошибка загрузки", true)]);
         let e = f.run(|d| import_with(d, &|_| {})).unwrap_err();
         assert!(e.contains("Вернуться к конфигурации БД") && *f.pulled.borrow(), "{e}");
+    }
+
+    #[test]
+    fn dry_run_prints_the_plan_and_touches_nothing() {
+        // --dry-run is global and promises «ничего не делать»: no decompile,
+        // no push, no pull, no load — only the plan in the log.
+        let mut f = Fake::new(&[]);
+        f.dry = true;
+        let log = RefCell::new(Vec::new());
+        let r = f.run(|d| export_with(d, "x", &|s| log.borrow_mut().push(s))).unwrap();
+        assert!(f.calls.borrow().is_empty() && !*f.pushed.borrow(), "{r}");
+        assert!(log.borrow().iter().any(|l| l.contains("cf_decompile")), "{:?}", log.borrow());
+        let r = f.run(|d| import_with(d, &|_| {})).unwrap();
+        assert!(f.calls.borrow().is_empty() && !*f.pulled.borrow(), "{r}");
+    }
+
+    #[test]
+    fn the_git_phase_of_export_is_announced_before_it_starts() {
+        let f = Fake::new(&[("разобрано", false)]);
+        let log = RefCell::new(Vec::new());
+        f.run(|d| export_with(d, "m", &|s| log.borrow_mut().push(s))).unwrap();
+        assert!(log.borrow().iter().any(|l| l.contains("git") && l.contains("минут")), "{:?}", log.borrow());
     }
 
     #[test]

@@ -58,6 +58,12 @@ ARG MCP_1C_VERSION=v1.22.3
 # of the base for mcp-1c, published with webinstt at run time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libwebkit2gtk-4.1-0 libglu1-mesa xvfb xauth apache2 socat \
+      `# libayatana-appindicator3: the tray icon of 1c-connect in local mode.` \
+      `#   The panel's systray plugin shows StatusNotifier items, and tray-icon` \
+      `#   (the crate 1c-connect uses) talks to them through this library.` \
+      `#   Verified in the image with a test indicator: the icon appears in the` \
+      `#   panel next to the clock.` \
+      libayatana-appindicator3-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # The installer is bind-mounted, not copied: it would otherwise sit in a layer

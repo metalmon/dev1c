@@ -27,12 +27,34 @@ pub mod window;
 
 pub const TRAY_PNG: &[u8] = include_bytes!("../../icons/tray.png");
 
-/// Значок трея со статусом: кружок в правом нижнем углу, зелёный —
-/// подключён; без связи значок обесцвечен и кружок серый.
-pub fn badge(base: &image::RgbaImage, up: bool) -> image::RgbaImage {
+/// Три состояния трея: занят (операция/проверка идёт) берёт верх над связью —
+/// `tray_state` ниже решает, какое из них сейчас.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrayState {
+    Off,
+    Up,
+    Busy,
+}
+
+/// Занято — всегда жёлтый (идёт операция, связь тут не важна); иначе зелёный
+/// при поднятой связи, серый без неё.
+pub fn tray_state(link: &State, busy: bool) -> TrayState {
+    if busy {
+        TrayState::Busy
+    } else if link.is_up() {
+        TrayState::Up
+    } else {
+        TrayState::Off
+    }
+}
+
+/// Значок трея со статусом: кружок в правом нижнем углу — зелёный (подключён),
+/// жёлтый (занят) или серый (без связи); обесцвечен значок только без связи —
+/// занятость тоже заметна цветным значком.
+pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
     let (w, h) = base.dimensions();
     let mut out = base.clone();
-    if !up {
+    if state == TrayState::Off {
         for p in out.pixels_mut() {
             let [r, g, b, _] = p.0;
             let gr = ((r as u32 * 30 + g as u32 * 59 + b as u32 * 11) / 100) as u8;
@@ -43,7 +65,11 @@ pub fn badge(base: &image::RgbaImage, up: bool) -> image::RgbaImage {
     }
     let r = (w as f32 * 0.22).max(3.0);
     let (cx, cy) = (w as f32 - r - 1.0, h as f32 - r - 1.0);
-    let colour: [u8; 4] = if up { [0x2f, 0x8f, 0x4e, 255] } else { [0x8d, 0x86, 0x7e, 255] };
+    let colour: [u8; 4] = match state {
+        TrayState::Busy => [0xfa, 0xcc, 0x1f, 255],
+        TrayState::Up => [0x2f, 0x8f, 0x4e, 255],
+        TrayState::Off => [0x8d, 0x86, 0x7e, 255],
+    };
     for y in 0..h {
         for x in 0..w {
             let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
@@ -109,6 +135,9 @@ pub struct Ui {
     pub height: Option<Pixels>,
     pub hidden_at: Option<Instant>,
     pub dialog_open: bool,
+    /// Когда тик в последний раз подвинул подсказку трея на фазу операции —
+    /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
+    pub tooltip_at: Option<Instant>,
     pub tx: UnboundedSender<Ev>,
 }
 impl Global for Ui {}
@@ -263,6 +292,14 @@ pub enum Ev {
 /// Сколько ждать опускания туннеля на «Выходе».
 pub const STOP_WAIT: Duration = Duration::from_secs(5);
 
+/// Единый тик приложения (замена прежнего тика панели): раз в секунду, пока
+/// идёт операция, иначе раз в полминуты — только на перерисовку «N мин» в
+/// карточке хода, когда окно открыто. Подсказка трея обновляется не чаще
+/// `TOOLTIP_EVERY`.
+pub const TICK_BUSY: Duration = Duration::from_secs(1);
+pub const TICK_IDLE: Duration = Duration::from_secs(30);
+pub const TOOLTIP_EVERY: Duration = Duration::from_secs(60);
+
 /// Текст в журнал, когда рабочий поток упал с паникой.
 pub const PANIC_TEXT: &str = "внутренняя ошибка: операция прервана";
 
@@ -335,6 +372,25 @@ fn running_elapsed(d: Duration) -> String {
 /// Заголовок карточки хода (название фазы) и сколько она уже идёт.
 pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
     (r.phase.title().to_string(), running_elapsed(now.saturating_duration_since(r.started)))
+}
+
+/// Подсказка трея: во время операции — фаза строчными и сколько она идёт
+/// («выгружаю конфигурацию, 12 мин»; меньше минуты — «меньше минуты»); без
+/// операции — просто про связь.
+pub fn tray_tooltip(progress: Option<&Running>, link: &State, now: Instant) -> String {
+    match progress {
+        Some(r) => {
+            let mut chars = r.phase.title().chars();
+            let lower: String = match chars.next() {
+                Some(c) => c.to_lowercase().chain(chars).collect(),
+                None => String::new(),
+            };
+            let mins = now.saturating_duration_since(r.started).as_secs() / 60;
+            let when = if mins == 0 { "меньше минуты".to_string() } else { format!("{mins} мин") };
+            format!("1c-connect: {lower}, {when}")
+        }
+        None => format!("1c-connect: {}", if link.is_up() { "подключён" } else { "не подключён" }),
+    }
 }
 
 /// Пять минут без вестей от потока — поток молчит, но операция ещё жива.
@@ -525,8 +581,10 @@ fn set_link(cx: &mut App, l: State) {
     if let Some(line) = line {
         note_line(ui, line);
     }
+    let busy = ui.progress.is_some() || ui.busy.is_some();
+    let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
     if let Some(tray) = &ui.tray {
-        tray.set_state(l.is_up(), l.is_on());
+        tray.set_state(state, on);
     }
     cx.refresh_windows();
 }
@@ -605,6 +663,10 @@ pub fn run_op(cx: &mut App, which: Which) {
     ui.cancel = cancel.clone();
     ui.tab = Tab::Log;
     ui.unread = 0;
+    let on = ui.link.is_on();
+    if let Some(tray) = &ui.tray {
+        tray.set_state(TrayState::Busy, on);
+    }
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
     cx.refresh_windows();
@@ -766,6 +828,30 @@ fn on_done(ui: &mut Ui, err: Option<String>, cancelled: bool) -> Line {
     line
 }
 
+/// Единый тик приложения (`launch` зовёт его раз в `TICK_BUSY`/`TICK_IDLE`):
+/// перерисовывает окно на свежих данных и, не чаще `TOOLTIP_EVERY`, двигает
+/// подсказку трея на фазу текущей операции.
+fn tick(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    let redraw = ui.dirty || ui.progress.is_some();
+    ui.dirty = false;
+    if redraw {
+        cx.refresh_windows();
+    }
+    let now = Instant::now();
+    let ui = cx.global_mut::<Ui>();
+    if ui.progress.is_some() {
+        let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
+        if due {
+            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
+            ui.tooltip_at = Some(now);
+            if let Some(tray) = &ui.tray {
+                tray.set_tooltip(&text);
+            }
+        }
+    }
+}
+
 fn handle(ev: Ev, cx: &mut App) {
     match ev {
         Ev::Tray(e) => tray::on_tray(e, cx),
@@ -792,8 +878,22 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global_mut::<Ui>();
             let line = on_done(ui, err, cancelled);
             note_line(ui, line.clone());
-            ui.status = Some(line);
+            ui.status = Some(line.clone());
+            // Подсказка без операции: `on_done` уже опустил `progress`/`busy`.
+            let (state, on) = (tray_state(&ui.link, false), ui.link.is_on());
+            if let Some(tray) = &ui.tray {
+                tray.set_state(state, on);
+            }
+            let hidden = ui.window.is_none();
             cx.refresh_windows();
+            if hidden {
+                cx.show_system_notification(SystemNotification {
+                    tag: "op".into(),
+                    title: "1c-connect".into(),
+                    body: line.text.clone().into(),
+                    actions: vec![],
+                });
+            }
             refresh_ops(cx);
             refresh_project(cx);
         }
@@ -870,6 +970,9 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // Без опроса: обработчики трея (их зовёт WndProc на этом же потоке)
         // кладут событие в канал, задача GPUI просыпается по нему.
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<Ev>();
+        // AppUserModelID до первого окна/уведомления — Windows привязывает
+        // уведомления к процессу по нему.
+        cx.set_app_identity("OktaPlus.1c-connect", "1c-connect");
         // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
         // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
         // напрямую, а не через `quit()` этого модуля.
@@ -905,8 +1008,21 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             height: None,
             hidden_at: None,
             dialog_open: false,
+            tooltip_at: None,
             tx,
         });
+        // Единый тик приложения: сам решает свой срок (занято — секунда,
+        // иначе полминуты) и заменяет прежний тик панели `Panel::new`, тот
+        // жил только пока было открыто окно.
+        cx.spawn(async move |cx| loop {
+            let busy = cx.update(|cx| {
+                let ui = cx.global::<Ui>();
+                ui.progress.is_some() || ui.busy.is_some()
+            });
+            cx.background_executor().timer(if busy { TICK_BUSY } else { TICK_IDLE }).await;
+            cx.update(|cx| tick(cx));
+        })
+        .detach();
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(ev) = rx.next().await {
@@ -961,6 +1077,7 @@ impl Ui {
             height: None,
             hidden_at: None,
             dialog_open: false,
+            tooltip_at: None,
             tx,
         }
     }
@@ -970,8 +1087,8 @@ impl Ui {
 mod tests {
     use super::{
         autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
-        link_line, note_line, on_done, on_progress, progress_text, project_primary, save_host, stale_text, took, Dot,
-        Kind, Line, OpView, Running, Tab, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        link_line, note_line, on_done, on_progress, progress_text, project_primary, save_host, stale_text, took,
+        tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
@@ -1051,16 +1168,55 @@ mod tests {
     #[test]
     fn the_badge_sits_in_the_corner_and_says_up_or_down() {
         let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
-        let up = badge(&base, true);
+        let up = badge(&base, TrayState::Up);
         assert_eq!(up.dimensions(), base.dimensions());
         let w = up.width() as usize;
         let at = |img: &image::RgbaImage, x: usize, y: usize| img.get_pixel(x as u32, y as u32).0[..3].to_vec();
         let c = w - 1 - (w as f32 * 0.22) as usize;
         assert_eq!(at(&up, c, c), vec![0x2f, 0x8f, 0x4e]);
-        let down = badge(&base, false);
+        let down = badge(&base, TrayState::Off);
         assert_eq!(at(&down, c, c), vec![0x8d, 0x86, 0x7e]);
         let p = at(&down, 2, 2);
         assert!(p[0] == p[1] && p[1] == p[2], "{p:?}");
+    }
+
+    #[test]
+    fn the_busy_badge_is_yellow_and_not_greyed() {
+        let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
+        let busy = badge(&base, TrayState::Busy);
+        let w = busy.width() as usize;
+        let at = |img: &image::RgbaImage, x: usize, y: usize| img.get_pixel(x as u32, y as u32).0[..3].to_vec();
+        let c = w - 1 - (w as f32 * 0.22) as usize;
+        assert_eq!(at(&busy, c, c), vec![0xfa, 0xcc, 0x1f]);
+        // Занято — не обесцвечивается, в отличие от «без связи» (та же точка
+        // вдали от кружка остаётся такой же, как в исходном PNG).
+        assert_eq!(at(&busy, 2, 2), at(&base, 2, 2));
+    }
+
+    #[test]
+    fn busy_wins_over_the_link_state() {
+        let up = State::Up { since: Instant::now() };
+        assert_eq!(tray_state(&up, true), TrayState::Busy);
+        assert_eq!(tray_state(&up, false), TrayState::Up);
+        assert_eq!(tray_state(&State::Off, false), TrayState::Off);
+        assert_eq!(tray_state(&State::Connecting, false), TrayState::Off);
+    }
+
+    #[test]
+    fn tooltip_names_the_phase_and_minutes() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let r = Running {
+            which: Which::Export,
+            started: now - Duration::from_secs(12 * 60),
+            phase: Phase::Decompile,
+            note: String::new(),
+            seen: now,
+        };
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию, 12 мин");
+        let fresh = Running { started: now, seen: now, ..r };
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию, меньше минуты");
+        assert_eq!(tray_tooltip(None, &State::Up { since: now }, now), "1c-connect: подключён");
+        assert_eq!(tray_tooltip(None, &State::Off, now), "1c-connect: не подключён");
     }
 
     #[test]

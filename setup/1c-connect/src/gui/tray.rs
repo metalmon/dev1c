@@ -3,7 +3,7 @@
 //! GPUI, они только кладут событие в канал — его разбирает `on_tray`/`on_menu`
 //! из задачи-читателя в `mod.rs::handle`.
 
-use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, Ui, TRAY_PNG};
+use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -62,16 +62,16 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
 
 /// Значок трея с бейджем состояния, байты RGBA — тестируемое ядро `icon`,
 /// не трогает Win32.
-fn icon_rgba(up: bool) -> Vec<u8> {
+fn icon_rgba(state: TrayState) -> Vec<u8> {
     let base = image::load_from_memory(TRAY_PNG).expect("tray png").to_rgba8();
-    badge(&base, up).into_raw()
+    badge(&base, state).into_raw()
 }
 
 /// Значок трея с бейджем состояния.
-pub fn icon(up: bool) -> Icon {
+pub fn icon(state: TrayState) -> Icon {
     let base = image::load_from_memory(TRAY_PNG).expect("tray png").to_rgba8();
     let (w, h) = base.dimensions();
-    Icon::from_rgba(icon_rgba(up), w, h).expect("icon rgba")
+    Icon::from_rgba(icon_rgba(state), w, h).expect("icon rgba")
 }
 
 /// Построить значок трея с меню и подписаться на события ОС — обработчики
@@ -99,7 +99,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &quit,
     ])?;
     let tray = TrayIconBuilder::new()
-        .with_icon(icon(false))
+        .with_icon(icon(TrayState::Off))
         .with_tooltip("1c-connect: не подключён")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -118,12 +118,20 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
-    /// Значок badge(up), подсказка «подключён/не подключён», надпись
-    /// переключателя «Отключить»/«Подключить».
-    pub fn set_state(&self, up: bool, on: bool) {
-        let _ = self.icon.set_icon(Some(icon(up)));
+    /// Значок badge(state), подсказка «подключён/не подключён» (без фазы —
+    /// ту двигает `set_tooltip` из тика), надпись переключателя
+    /// «Отключить»/«Подключить».
+    pub fn set_state(&self, state: TrayState, on: bool) {
+        let _ = self.icon.set_icon(Some(icon(state)));
+        let up = state == TrayState::Up;
         let _ = self.icon.set_tooltip(Some(if up { "1c-connect: подключён" } else { "1c-connect: не подключён" }));
         self.toggle.set_text(if on { "Отключить" } else { "Подключить" });
+    }
+
+    /// Подсказка трея произвольным текстом — её двигает тик приложения на
+    /// фазу операции (`tray_tooltip`), не чаще `TOOLTIP_EVERY`.
+    pub fn set_tooltip(&self, text: &str) {
+        let _ = self.icon.set_tooltip(Some(text));
     }
 
     /// Отмечает ровно один пункт подменю «Тема».
@@ -196,7 +204,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, MenuAction};
+    use super::{icon_rgba, menu_action, MenuAction, TrayState};
     use crate::gui::theme;
     use crate::gui::TRAY_PNG;
 
@@ -214,6 +222,14 @@ mod tests {
     #[test]
     fn tray_icon_is_the_badged_png() {
         let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
-        assert_eq!(icon_rgba(true).len(), (base.width() * base.height() * 4) as usize);
+        assert_eq!(icon_rgba(TrayState::Up).len(), (base.width() * base.height() * 4) as usize);
+    }
+
+    #[test]
+    fn the_busy_badge_is_yellow() {
+        let busy = icon_rgba(TrayState::Busy);
+        assert!(busy.chunks(4).any(|p| p == [0xfa, 0xcc, 0x1f, 255]), "no yellow pixel in the busy badge");
+        let up = icon_rgba(TrayState::Up);
+        assert!(up.chunks(4).any(|p| p == [0x2f, 0x8f, 0x4e, 255]), "no green pixel in the up badge");
     }
 }

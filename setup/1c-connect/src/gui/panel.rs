@@ -30,9 +30,6 @@ const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 /// Значок меню «Ещё»: три линии (Lucide `menu`).
 const MENU_SVG: &[u8] = include_bytes!("../../icons/menu.svg");
 
-/// Как часто перерисовывать окно, чтобы «N мин» в карточке не отставало.
-const TICK: Duration = Duration::from_secs(30);
-
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
@@ -182,18 +179,6 @@ impl Panel {
             project: field("C:\\proj\\Buh", &host.project, false, window, cx),
             workstation: field("dev1", &host.workstation, false, window, cx),
         };
-        // Минуты в карточке: пока окно живо, раз в полминуты перерисовка.
-        // Окно закрыли — сущность не поднимается, задача уходит.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(TICK).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         let original = host.clone();
         // Клавиатура сразу у панели: Esc прячет окно и до того, как щёлкнули
         // хоть по одному полю.

@@ -719,21 +719,26 @@ impl Render for Panel {
             div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
         };
 
+        // Подвал одной высоты на всех вкладках: кнопки есть не везде, а
+        // итог последнего действия бывает длинным — высота от этого прыгать
+        // не должна, поэтому высота задана, а текст укладывается в строку.
         let footer = h_flex()
-                    .items_center()
-                    .gap_2()
-                    .bg(layer)
-                    .px_6()
-                    .py_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.))
-                            .text_color(if foot_left.1 { danger } else { caption })
-                            .child(foot_left.0),
-                    )
-                    .child(foot_actions);
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .h(px(56.))
+            .bg(layer)
+            .px_6()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_ellipsis()
+                    .text_color(if foot_left.1 { danger } else { caption })
+                    .child(foot_left.0),
+            )
+            .child(foot_actions);
 
         v_flex()
             .track_focus(&self.focus)

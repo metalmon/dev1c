@@ -150,6 +150,7 @@ pub fn serve(cfg: &Cfg, kit: &Kit, log: Sink) -> impl Fn(tunnel::Incoming) + Sen
                 allowed: cfg.host.tools.clone(),
                 project: project.clone(),
                 configurator_running: std::sync::Arc::new(bridge::configurator_count),
+                defaults: bridge::connection_args(&cfg),
             };
             let log = log.clone();
             tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, move |code, err| {

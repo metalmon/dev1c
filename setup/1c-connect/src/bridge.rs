@@ -114,6 +114,20 @@ pub struct Rules {
     pub allowed: Vec<String>,
     pub project: Arc<crate::project::Project>,
     pub configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
+    /// Аргументы подключения, подставляемые в каждый вызов инструмента vrunner
+    /// (см. `connection_args`).
+    pub defaults: Value,
+}
+
+/// Подключение к базе и её пользователь как аргументы инструмента vrunner:
+/// `vrunner-mcp` читает их отсюда, а не из переменных окружения. Пустой
+/// пароль не передаётся — иначе платформа получит `/P` с пустым значением.
+pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
+    let mut a = serde_json::json!({"ibconnection": crate::ops_host::ib_switch(&cfg.host.base_path), "db-user": cfg.host.db_user});
+    if !cfg.host.db_password.is_empty() {
+        a["db-pwd"] = Value::String(cfg.host.db_password.clone());
+    }
+    a
 }
 
 /// Сколько процессов платформы запущено на машине: Конфигураторы и толстые
@@ -294,7 +308,7 @@ async fn handle_request(
         }
         Frame::Line(l) => l,
     };
-    match jsonrpc::route_request(&line, &rules.allowed) {
+    match jsonrpc::route_request_with(&line, &rules.allowed, &rules.defaults) {
         Route::Drop => Ok(()),
         Route::Reject { id, code, why } => {
             let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
@@ -452,6 +466,7 @@ mod tests {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
             project: std::sync::Arc::new(project),
             configurator_running: std::sync::Arc::new(move || running),
+            defaults: Value::Null,
         }
     }
 
@@ -499,6 +514,20 @@ mod tests {
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert!(args[0].ends_with("mcp.os"), "{args:?}");
+    }
+
+    #[test]
+    fn connection_args_carry_the_base_and_its_user() {
+        let mut cfg = crate::cfg::Cfg::default();
+        cfg.host.base_path = "C:\\Bases\\Бух".into();
+        cfg.host.db_user = "mcp".into();
+        cfg.host.db_password = "p w".into();
+        let a = connection_args(&cfg);
+        assert_eq!(a["ibconnection"], "/FC:\\Bases\\Бух");
+        assert_eq!(a["db-user"], "mcp");
+        assert_eq!(a["db-pwd"], "p w");
+        cfg.host.db_password = String::new();
+        assert!(connection_args(&cfg).get("db-pwd").is_none(), "an empty password is not sent as a value");
     }
 
     #[tokio::test]

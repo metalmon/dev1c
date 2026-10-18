@@ -68,7 +68,13 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
     let p = crate::project::Project::from_cfg(&ctx.cfg, &tools);
     let log = |s: String| ctx.say(s);
     let cfg = ctx.cfg.clone();
-    let call = |tool: &str, args: Value| {
+    let call = |tool: &str, mut args: Value| {
+        // The same connection arguments the bridge injects for the agent.
+        if let (Some(a), Some(d)) = (args.as_object_mut(), crate::bridge::connection_args(&cfg).as_object()) {
+            for (k, v) in d {
+                a.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
         let cmd = crate::bridge::vrunner_command(&cfg, &tools).into_std();
         crate::local::call(cmd, tool, args, std::time::Duration::from_secs(3600), &log)
     };

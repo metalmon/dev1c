@@ -159,6 +159,14 @@ fn key_ci<'a>(o: &'a serde_json::Map<String, Value>, key: &str) -> Result<Option
 
 /// Что делать со строкой от агента.
 pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
+    route_request_with(line, allowed, &Value::Null)
+}
+
+/// То же с умолчаниями аргументов для вызовов, уходящих ребёнку: подключение
+/// к базе и её пользователь. vrunner-mcp берёт их из аргументов инструмента,
+/// не из окружения (проверено 2026-10-18); агент их не знает и знать не должен.
+/// Переданное агентом значение остаётся.
+pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> Route {
     const PARSE: i64 = -32700;
     const METHOD: i64 = -32601;
     const PARAMS: i64 = -32602;
@@ -192,6 +200,12 @@ pub fn route_request(line: &[u8], allowed: &[String]) -> Route {
             } else if !allowed.iter().any(|a| a == &tool) {
                 Route::Disabled { id: id.clone(), tool }
             } else {
+                let mut args = if args.is_object() { args } else { json!({}) };
+                if let (Some(a), Some(d)) = (args.as_object_mut(), defaults.as_object()) {
+                    for (k, v) in d {
+                        a.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
                 let line = rebuilt(json!({"name": tool, "arguments": args}));
                 if PLATFORM_TOOLS.contains(&tool.as_str()) {
                     Route::PlatformCall { id: id.clone(), tool, line }
@@ -433,6 +447,35 @@ mod tests {
         let v: Value = serde_json::from_slice(&error_reply(&json!(4), -32601, "нет такого метода")).unwrap();
         assert_eq!(v["error"]["code"], -32601);
         assert_eq!(v["id"], 4);
+    }
+
+    #[test]
+    fn connection_defaults_are_injected_into_forwarded_calls_only_when_absent() {
+        // vrunner-mcp reads the base user from tool arguments, not from the
+        // environment: the bridge fills them in so the agent never has to.
+        let defaults = json!({"ibconnection": "/FC:\\b", "db-user": "mcp", "db-pwd": "secret"});
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","arguments":{"taskId":"x"}}}"#;
+        match route_request_with(line, &allowed(), &defaults) {
+            Route::Forward(out) => {
+                let v: Value = serde_json::from_slice(&out).unwrap();
+                assert_eq!(v["params"]["arguments"]["taskId"], "x");
+                assert_eq!(v["params"]["arguments"]["db-user"], "mcp");
+                assert_eq!(v["params"]["arguments"]["ibconnection"], "/FC:\\b");
+            }
+            _ => panic!("forwarded"),
+        }
+        // The agent's own value wins.
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{"db-user":"other"}}}"#;
+        match route_request_with(line, &allowed(), &defaults) {
+            Route::PlatformCall { line, .. } => {
+                let v: Value = serde_json::from_slice(&line).unwrap();
+                assert_eq!(v["params"]["arguments"]["db-user"], "other");
+                assert_eq!(v["params"]["arguments"]["db-pwd"], "secret");
+            }
+            _ => panic!("platform call"),
+        }
+        // Our own tools and other methods are untouched.
+        assert!(matches!(route_request_with(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_status"}}"#, &allowed(), &defaults), Route::OurCall { args, .. } if args.get("db-pwd").is_none()));
     }
 
     #[test]

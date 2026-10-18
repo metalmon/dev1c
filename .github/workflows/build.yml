@@ -220,7 +220,7 @@ jobs:
             && echo "ok: git credentials for dev1"
           # Push-to-create as a non-admin owner: the first project_push does exactly this.
           docker exec -u dev2 dev1c sh -c 'cd "$(mktemp -d)" && git init -q -b dev2 && echo x > f && git add f && git commit -qm x && git push -q http://localhost:3000/dev1c/ci-probe.git dev2' \
-            && docker exec dev1c sh -c 'curl -sf http://localhost:3000/api/v1/repos/dev1c/ci-probe >/dev/null' \
+            && docker exec dev1c sh -c 'curl -sf -u dev2:dev2 http://localhost:3000/api/v1/repos/dev1c/ci-probe >/dev/null' \
             && echo "ok: push-to-create in the organisation as dev2"
 
       - uses: actions/download-artifact@v4

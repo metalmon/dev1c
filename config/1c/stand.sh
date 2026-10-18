@@ -60,6 +60,12 @@ seed() { # runs as the workstation user; $HOME is theirs
         log "demo base seeded into $HOME/base" >&2
     fi
     mkdir -p "$HOME/project"
+    # the Configurator on the desktop, next to Zed and Gitea (same way as the
+    # base image puts those there: a copy with the executable bit)
+    d="$HOME/Desktop/1c-configurator.desktop"
+    if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
+        cp /usr/share/applications/1c-configurator.desktop "$d" && chmod +x "$d"
+    fi
 }
 
 case "${1:-}" in

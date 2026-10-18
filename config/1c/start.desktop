@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=1С:Предприятие (учебная)
+Comment=Запуск 1С: в окне список баз этого рабочего места, кнопки «1С:Предприятие» и «Конфигуратор»
+Exec=/usr/local/bin/1c-stand start1c
+Icon=1cestartt-8.5.1-1150
+Terminal=false
+Categories=Office;Development;
+StartupNotify=true

@@ -9,7 +9,10 @@
 #                             base image's entrypoint
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
 #   1c-stand vrunner <N>      one vrunner-mcp on stdio for workstation dev<N>
-#   1c-stand designer         the Configurator on the user's base (menu entry)
+#   1c-stand start1c          the 1C starter on the user's base list (the
+#                             desktop icon; Предприятие and Конфигуратор
+#                             are its own buttons)
+#   1c-stand designer         the Configurator on the user's base, directly
 #   1c-stand enterprise       the thick client on it (menu entry); holds the
 #                             base's one Enterprise session while open
 #   1c-stand publish <user> <port> <base dir> <out dir>
@@ -48,6 +51,7 @@ V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
 DEMO=/opt/1c-demo/base
 RUN=/run/1c
 LOG=/var/log/1c
+STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
 
@@ -64,15 +68,34 @@ seed() { # runs as the workstation user; $HOME is theirs
         log "demo base seeded into $HOME/base" >&2
     fi
     mkdir -p "$HOME/project"
-    # the Configurator and the thick client on the desktop, next to Zed and
-    # Gitea (same way as the base image puts those there: a copy with the
-    # executable bit)
-    for l in 1c-configurator 1c-enterprise; do
+    # The list of infobases for the starter: the person opens 1C the way they
+    # are used to — one window with the base, and the buttons «1С:Предприятие»
+    # and «Конфигуратор» in it — instead of two desktop icons wired to command
+    # lines. Written once; a base added by hand stays.
+    # The training starter is 1cestartt, and its list lives in the directory
+    # of the same name: .1C/1cestartt, not .1C/1cestart. Written for whatever
+    # starter the image carries, by the name of its binary.
+    v8i="$HOME/.1C/$(basename "$STARTER")/ibases.v8i"
+    if [ ! -e "$v8i" ]; then
+        mkdir -p "$(dirname "$v8i")"
+        # UTF-8 with a BOM and CRLF: without them the starter opens with an
+        # empty list and asks to add a base, as if the file were not there.
+        { printf '\357\273\277'
+          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\n' \
+            "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base"
+        } >"$v8i"
+        log "1C: $v8i written" >&2
+    fi
+    # the starter on the desktop, next to Zed and Gitea (same way as the base
+    # image puts those there: a copy with the executable bit)
+    for l in 1c-start; do
         d="$HOME/Desktop/$l.desktop"
         if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
             cp "/usr/share/applications/$l.desktop" "$d" && chmod +x "$d"
         fi
     done
+    # the launchers of the first days, superseded by the starter
+    rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
     # 1c-connect, if the image carries it. Its kit is the directory of the
     # binary (common::kit), and every workstation needs its own parameters —
     # so each gets its own copy next to its own toml, refreshed when the image
@@ -112,6 +135,15 @@ vrunner)
     # Configurator vrunner launches in batch mode needs one, nobody looks at it.
     cd "$HOME/project"
     exec xvfb-run -a vrunner-mcp
+    ;;
+start1c)
+    # The starter: it shows the base list and the two buttons, and it is what
+    # a 1C developer knows. Scheduled jobs cannot be switched off through it
+    # (its own command line goes to the session), so the configuration may ask
+    # about updates; the base of a stand has nothing to update, and the answer
+    # is one dialog.
+    seed
+    exec "$STARTER"
     ;;
 designer)
     seed
@@ -223,7 +255,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | designer | enterprise | seed | publish ..." >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ..." >&2
     exit 2
     ;;
 esac

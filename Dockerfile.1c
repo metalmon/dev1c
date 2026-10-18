@@ -73,11 +73,13 @@ RUN --mount=type=bind,from=platform,target=/platform \
       --enable-components client_full,ws,ru \
       --disable-components v8_install_deps,desktop_icons \
     && P=/opt/1cv8t/x86_64/${PLATFORM_VERSION} && cd "$P" \
-    && ln -sf libwx_gtk3u-3.0.so.0.1.0.wk41 libwx_gtk3u-3.0.so.0 \
-    && ln -sf webkit2_extu-3.0.so.wk41 webkit2_extu-3.0.so \
+    `# the ".wk41" twins everywhere they ship: the version directory holds the` \
+    `# client and the Configurator, /opt/1cv8t/common holds the starter, and` \
+    `# each looks for its libraries next to itself (RUNPATH is $ORIGIN)` \
+    && for w in $(find /opt/1cv8t -name '*.wk41'); do ln -sf "$(basename "$w")" "${w%.wk41}"; done \
     && ln -s 1cv8t 1cv8 && ln -s 1cv8ct 1cv8c && ln -s webinstt webinst \
     && mkdir -p /opt/1cv8/x86_64 && ln -s "$P" /opt/1cv8/x86_64/${PLATFORM_VERSION} \
-    && ! ldd 1cv8t 1cv8ct webinstt wsap24t.so | grep 'not found' \
+    && ! ldd 1cv8t 1cv8ct webinstt wsap24t.so /opt/1cv8t/common/1cestartt | grep 'not found' \
     # Smoke test: the Configurator creates a base under Xvfb. If this fails the
     # build fails, not the demo.
     && xvfb-run -a "$P/1cv8t" CREATEINFOBASE "File=/tmp/smoke" /DisableStartupDialogs /DisableStartupMessages /Out /tmp/smoke.log \
@@ -148,20 +150,19 @@ RUN --mount=type=bind,from=platform,target=/platform \
          /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService \
     && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
          /UpdateDBCfg -Extension MCP_HTTPService \
-    # the check runs on the template base itself, not a copy: the first
-    # Enterprise session of a BSP configuration does its initial filling, and
-    # that work belongs in the image, not in every workstation's first call
-    # (which the training edition's one-session limit then makes collide with
-    # the next one). Published for www-data on a spare port, ownership restored.
-    && chown -R www-data:www-data "$B" \
-    && 1c-stand publish www-data 8089 "$B" /tmp/chk-pub \
+    && chmod -R a+rX /opt/1c-demo \
+    # the check runs on a COPY, never on the template itself. The first
+    # Enterprise session of a BSP configuration creates an infobase user named
+    # after the account that opened it; done on the template, that user would
+    # be www-data (the Apache worker here), and afterwards every interactive
+    # start of the shipped base is refused with «Пользователь ИБ не
+    # идентифицирован» — the stand looked broken. On a copy the template stays
+    # userless, and each workstation fills its own base under its own account.
+    && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \
+    && 1c-stand publish www-data 8089 /tmp/chk /tmp/chk-pub \
     && apache2 -f /tmp/chk-pub/apache.conf -k start && sleep 3 \
     && code=$(curl -s -o /tmp/hs -w '%{http_code}' http://127.0.0.1:8089/base/hs/mcp-1c/version) \
-    && curl -s -o /dev/null http://127.0.0.1:8089/base/hs/mcp-1c/configuration \
-    && sleep 25 \
     && apache2 -f /tmp/chk-pub/apache.conf -k stop && sleep 2 \
-    && chown -R root:root "$B" && chmod -R a+rX /opt/1c-demo \
-    && rm -f "$B"/*.cfl \
     && case "$code" in \
          200) echo "demo base: mcp-1c HTTP service answers $(tr -d ' \n' </tmp/hs)" ;; \
          404) echo "WARNING demo base: HTTP 404 — the mcp-1c extension did not apply; the stand works without the 1c tools" ;; \
@@ -170,9 +171,11 @@ RUN --mount=type=bind,from=platform,target=/platform \
     && rm -rf /tmp/chk /tmp/chk-pub /tmp/hs
 
 # --- the stand's runtime -----------------------------------------------------
-# The menu entry for the Configurator, the check, the agent rules for this
-# image (appended to the shipped AGENTS.md: the base entrypoint re-seeds homes
-# from it by checksum), and the entrypoint wrapper as CMD.
+# The menu entries, the check, the agent rules for this image (appended to the
+# shipped AGENTS.md: the base entrypoint re-seeds homes from it by checksum),
+# and the entrypoint wrapper as CMD. The starter is what the desktop gets;
+# the two direct launchers stay in the menu for when one is wanted by itself.
+COPY config/1c/start.desktop        /usr/share/applications/1c-start.desktop
 COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
 COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.desktop
 # The tray at session start. The entry is here even when the binary is not:
@@ -189,7 +192,7 @@ RUN --mount=type=bind,from=platform,target=/platform \
     else echo "1c-connect: not supplied, the stand works without the window"; fi
 COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
-RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-configurator.desktop /usr/share/applications/1c-enterprise.desktop \
+RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-*.desktop \
     && chmod +x /usr/local/bin/test-stand \
     && cat /tmp/agents-1c.md >> /etc/skel/.config/zed/AGENTS.md && rm /tmp/agents-1c.md \
     && grep -q 'демо-стенд' /etc/skel/.config/zed/AGENTS.md

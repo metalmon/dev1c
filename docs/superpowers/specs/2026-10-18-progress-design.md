@@ -111,7 +111,10 @@ impl Runner { fn progress(&self, phase: Phase) { self.emit(Event::Progress(Progr
 `export_with`/`import_with` не `log`, а две замыкания `log` и `phase: &dyn Fn(Phase)`;
 `Fake` даёт пустое `phase`. Это одна строка в каждой функции потока
 (`phase(Phase::Decompile)` перед `call`, `phase(Phase::Push)` перед `push`;
-`Pull`, `Load`) и одна в `Fake::run`.
+`Pull`, `Load`) и одна в `Fake::run`. *План 2026-10-19 (`2026-10-19-progress-v1.md`):
+замыкание едет полем `Deps.phase: &dyn Fn(Phase)`, а не третьим аргументом —
+`Deps` и так собирается в двух местах (`with_real`, `Fake`), сигнатуры
+`export_with`/`import_with` не меняются.*
 
 Четыре `match` по `Event` получают ветку `Progress`: `1c-connect` CLI печатает
 `== {title}`, `dev1c-setup` (`main.rs`, `gui.rs`) печатает как `Say`, окно —

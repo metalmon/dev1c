@@ -26,7 +26,7 @@ toml.workspace = true
 # системными корнями на Linux — так бинарь собирается статически.
 [target.'cfg(windows)'.dependencies]
 # Win32_System_SystemInformation — местное время для заголовков журнала окна.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_SystemInformation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_SystemInformation", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"

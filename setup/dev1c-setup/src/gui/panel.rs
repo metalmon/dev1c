@@ -459,7 +459,8 @@ impl Render for Panel {
                 .into_any_element()
             }
             Tab::Access => {
-                let rows = crate::ui::access_rows(&cx.global::<Ui>().cfg, cx.global::<Ui>().facts);
+                let ui = cx.global::<Ui>();
+                let rows = crate::ui::access_rows(&ui.cfg, ui.facts, &ui.address);
                 Self::scrolled(
                     "access",
                     &self.body_scroll,

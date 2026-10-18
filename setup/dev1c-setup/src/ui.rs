@@ -298,16 +298,35 @@ pub struct AccessRow {
     pub detail: String,
 }
 
+/// Если адрес этой машины не удалось узнать, в строках «Доступа» остаётся
+/// заглушка — лучше честной заглушки только настоящий адрес.
+pub const ADDRESS_UNKNOWN: &str = "<адрес>";
+
+/// Адрес этой машины в сети, как его увидят с рабочих мест: берём тот, с
+/// которого система пошла бы наружу. Пакетов не отправляем — UDP-сокету
+/// хватает `connect`, чтобы выбрать исходящий адрес по таблице маршрутов.
+/// Не вышло (нет сети) — пусто, и «Доступ» покажет заглушку.
+pub fn local_address() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+    Some(ip.to_string())
+}
+
 /// Адреса среды, выведенные из параметров: четыре порта подряд от
-/// `server.port` и адрес сервера модели. `facts` — числа последнего замера
+/// `server.port` и адрес сервера модели. `host` — адрес этой машины
+/// (`local_address`) или заглушка; `facts` — числа последнего замера
 /// локального сервера (окно, max_tokens), если он был.
-pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>) -> Vec<AccessRow> {
+pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>, host: &str) -> Vec<AccessRow> {
     let [rdp, gitea, _, ssh] = cfg.ports();
     let model_url = cfg.model_url();
     let row = |what: &'static str, value: String, detail: String| AccessRow { what, value, detail };
     vec![
-        row("Рабочие места", format!("mstsc /v:<адрес>:{rdp}"), "dev1 / dev1, dev2 / dev2, dev3 / dev3".into()),
-        row("Репозитории Gitea", format!("http://<адрес>:{gitea}"), "те же логины".into()),
+        row("Рабочие места", format!("mstsc /v:{host}:{rdp}"), "dev1 / dev1, dev2 / dev2, dev3 / dev3".into()),
+        row("Репозитории Gitea", format!("http://{host}:{gitea}"), "те же логины".into()),
         row(
             "Сервер модели",
             if model_url.is_empty() { "—".into() } else { model_url },
@@ -316,7 +335,7 @@ pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>) -> Vec<AccessRow> {
                 None => "замера ещё не было".into(),
             },
         ),
-        row("Для 1c-connect", format!("<адрес>:{ssh}"), "адрес среды в 1c-connect.toml разработчика".into()),
+        row("Для 1c-connect", format!("{host}:{ssh}"), "адрес среды в 1c-connect.toml разработчика".into()),
     ]
 }
 
@@ -683,8 +702,9 @@ mod tests {
     fn the_access_rows_follow_the_port_block_and_the_model_url() {
         let mut c = Cfg::default();
         c.server.port = 4000;
-        let rows = access_rows(&c, None);
+        let rows = access_rows(&c, None, "192.168.1.10");
         let values: Vec<_> = rows.iter().map(|r| r.value.clone()).collect();
+        assert!(values.iter().any(|v| v.contains("192.168.1.10")), "настоящий адрес машины: {values:?}");
         assert!(values.iter().any(|v| v.contains("4000")), "RDP: {values:?}");
         assert!(values.iter().any(|v| v.contains("4001")), "Gitea: {values:?}");
         assert!(values.iter().any(|v| *v == c.model_url()), "модель: {values:?}");
@@ -694,10 +714,10 @@ mod tests {
     #[test]
     fn the_model_row_says_whether_the_server_was_measured() {
         let c = Cfg::default();
-        let rows = access_rows(&c, None);
+        let rows = access_rows(&c, None, ADDRESS_UNKNOWN);
         let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
         assert_eq!(model.detail, "замера ещё не было");
-        let rows = access_rows(&c, Some((65536, 8192)));
+        let rows = access_rows(&c, Some((65536, 8192)), ADDRESS_UNKNOWN);
         let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
         assert_eq!(model.detail, "окно 65536 токенов, max_tokens 8192");
     }

@@ -84,12 +84,13 @@ for home in /home/*; do
     fi
     owner_u=$(stat -c '%U' "$home")
     owner_g=$(stat -c '%G' "$home")
-    for f in settings.json AGENTS.md; do
+    for f in settings.json AGENTS.md themes/1c.json; do
         src="/etc/skel/.config/zed/$f"
         dst="$zed/$f"
-        stamp="$zed/.$f.from-image"
+        stamp="$zed/.$(basename "$f").from-image"
         [ -f "$src" ] || continue
-        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ]; then
+        # the parent too: themes/ is a directory a user could replace with a link
+        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ] || [ -L "$(dirname "$dst")" ]; then
             log "skipping $dst: symlink"
             continue
         fi
@@ -109,6 +110,8 @@ for home in /home/*; do
         # install after rm: writing over a path replaces the file itself rather
         # than following whatever it might point at
         rm -f "$dst"
+        # themes/ is the user's directory (their own themes go there too)
+        [ -d "$(dirname "$dst")" ] || install -d -o "$owner_u" -g "$owner_g" "$(dirname "$dst")"
         install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
         tmp=$(mktemp "$zed/.from-image.XXXXXX") || continue
         echo "$shipped" > "$tmp"

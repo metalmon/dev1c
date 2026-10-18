@@ -6,21 +6,38 @@ FROM debian:13-slim AS theme-builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ca-certificates meson ninja-build sassc npm librsvg2-bin \
+      git ca-certificates meson ninja-build sassc npm librsvg2-bin bc resvg \
     && rm -rf /var/lib/apt/lists/*
 
-# Materia: flat and calm, visually consistent with Zed's macOS Classic theme
+# Materia, recoloured into the 1C palette with its own change_color.sh (the
+# oomox preset path): the same tokens 1c-connect's window uses — sampled from
+# 1C:Enterprise 8.3.27 Такси, see setup/1c-connect/theme/1c.json. Light is the
+# default on the desktop (Такси is light); dark is the same roles on warm dark
+# greys. Selections are 1C's blue (#1C55AE light / #6FA3F0 dark), not the
+# yellow accent: Materia paints white text over the selection colour, and
+# white on yellow cannot be read. Radius 4, compact density, like the window.
+# --inkscape False: rsvg-convert renders the assets, inkscape is not here.
 RUN git clone --depth=1 https://github.com/nana-4/materia-theme.git /tmp/materia \
     && cd /tmp/materia \
-    && meson setup _build --prefix=/usr \
-    && ninja -C _build install
+    `# the render script knows resvg by its old name; four hover/active handle` \
+    `# ids are absent from assets.svg, and resvg fails on them where inkscape` \
+    `# wrote an empty PNG - a tolerant wrapper keeps the build going` \
+    && printf '#!/bin/sh\nresvg "$@" || exit 0\n' > /usr/local/bin/rendersvg && chmod +x /usr/local/bin/rendersvg \
+    && printf '%s\n' 'BG=f5f5f5' 'FG=333333' 'MATERIA_VIEW=ffffff' 'MATERIA_SURFACE=ffffff' \
+         'HDR_BG=f0f0f0' 'HDR_FG=333333' 'SEL_BG=1c55ae' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-light \
+    && printf '%s\n' 'BG=262626' 'FG=dcdcdc' 'MATERIA_VIEW=262626' 'MATERIA_SURFACE=2c2c2c' \
+         'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=6fa3f0' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-dark \
+    && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-light /tmp/1c-light \
+    && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-dark /tmp/1c-dark \
+    && test -f /usr/share/themes/1C-light/gtk-3.0/gtk.css && test -f /usr/share/themes/1C-dark/gtk-3.0/gtk.css \
+    && test -d /usr/share/themes/1C-light/xfwm4
 
 # xfwm4 in Debian is built WITHOUT SVG support (ldd shows no librsvg), while
 # Materia ships title-bar buttons as SVG only. Result: a title bar with no
 # minimize/maximize/close buttons — no way to close a window with the mouse.
 # Convert them to PNG, which xfwm4 does read. The look is preserved.
 RUN set -eu; \
-    for d in /usr/share/themes/Materia*/xfwm4; do \
+    for d in /usr/share/themes/1C-*/xfwm4; do \
       [ -d "$d" ] || continue; \
       for f in "$d"/*.svg; do \
         [ -e "$f" ] || continue; \
@@ -73,7 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       firefox-esr firefox-esr-l10n-ru \
 \
       arc-theme papirus-icon-theme \
-      fonts-inter fonts-jetbrains-mono \
+      fonts-inter fonts-jetbrains-mono fonts-ibm-plex \
       `# librsvg2-common is the SVG LOADER for gdk-pixbuf. Without it GTK cannot` \
       `#   draw vector icons and falls back to low-resolution PNGs from hicolor:` \
       `#   large icons look blurry and SVG-only sets (Papirus) do not render at` \
@@ -184,7 +201,7 @@ RUN mkdir -p /opt/bsl-analyzer \
 # markdown and yaml are not needed — both are built into Zed.
 # ponytail: versions are not pinned, latest comes from the registry. If build
 #   reproducibility is ever required, the API accepts ?version=.
-ARG ZED_EXTENSIONS="bsl xml html csv ini sql dockerfile toml powershell macos-classic"
+ARG ZED_EXTENSIONS="bsl xml html csv ini sql dockerfile toml powershell"
 RUN set -eu; \
     for id in ${ZED_EXTENSIONS}; do \
       dir=/etc/skel/.local/share/zed/extensions/installed/$id; \
@@ -282,9 +299,8 @@ RUN git clone --depth=1 https://github.com/brake71/1c-ssl-skills.git /opt/ssl-sk
     && echo "ssl-skills: $(ls /opt/ssl-skills/skills/bsp/references | wc -l) references"
 
 # Theme from the build stage: finished files only, no meson/npm/sassc
-COPY --from=theme-builder /usr/share/themes/Materia-light       /usr/share/themes/Materia-light
-COPY --from=theme-builder /usr/share/themes/Materia-light-compact /usr/share/themes/Materia-light-compact
-COPY --from=theme-builder /usr/share/themes/Materia-dark        /usr/share/themes/Materia-dark
+COPY --from=theme-builder /usr/share/themes/1C-light /usr/share/themes/1C-light
+COPY --from=theme-builder /usr/share/themes/1C-dark  /usr/share/themes/1C-dark
 
 
 # =============================================================================
@@ -343,6 +359,8 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
 # configured. Global rather than per-project — Restricted Mode does not block
 # those.
 COPY config/zed-settings.json /etc/skel/.config/zed/settings.json
+# The 1C themes for Zed: the same tokens as the desktop and 1c-connect.
+COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json
 # Agent rules shared by every project: what this environment has, what it lacks
 # and how to run 1C code. Without them the model answers with guesses — it
 # declared OneScript impossible on Linux, confusing it with Windows Script Host.

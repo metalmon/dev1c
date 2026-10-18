@@ -183,9 +183,11 @@ unpacked as files.
 ## What is inside
 
 **Workstation**
-- Debian 13, XFCE: dark Materia theme, Russian interface, us/ru layout on Alt+Shift
+- Debian 13, XFCE: Materia recoloured into the 1C (Такси) palette, light by default
+  with a dark twin, Russian interface, us/ru layout on Alt+Shift
 - Zed with extensions (bsl, xml, html, csv, ini, sql, dockerfile, toml, powershell)
-  and the macOS Classic theme; agent, LSP and MCP configured out of the box
+  and the 1C Light / 1C Dark themes on the same palette; agent, LSP and MCP
+  configured out of the box
 - `bsl-analyzer` — language server and MCP server in one binary, works offline
 - `nc` endpoints in Zed for `mcp-1c` and `vrunner-mcp` on the developer's machine, over the tunnel
 - Firefox ESR (the 1C web client supports it officially), SSH client, OktaPlus branding

@@ -15,7 +15,7 @@
     <property name="EnableInputFeedbackSounds" type="bool" value="false"/>
   </property>
   <property name="Gtk" type="empty">
-    <property name="FontName" type="string" value="IBM Plex Sans 10"/>
+    <property name="FontName" type="string" value="IBM Plex Sans 11"/>
     <property name="MonospaceFontName" type="string" value="JetBrains Mono 10"/>
     <!-- Значки на кнопках и в пунктах меню выключены: на тёмной теме они
          дают пестроту и визуальный шум, а смысла не несут — текст рядом. -->

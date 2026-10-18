@@ -412,7 +412,9 @@ impl Render for Panel {
                     .min_w_0()
                     .gap_0p5()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(state))
-                    .child(div().text_size(px(13.)).text_color(caption).child(sub)),
+                    // Без подстроки («Подключаюсь…») пустая строка всё равно
+                    // занимала высоту, и кружок уезжал ниже заголовка.
+                    .when(!sub.is_empty(), |v| v.child(div().text_size(px(13.)).text_color(caption).child(sub))),
             )
             .child(
                 Switch::new("link").focus_ring(false)

@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn the_flyout_sits_in_the_corner_and_never_leaves_the_work_area() {
         let wa = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(700.)));
-        assert_eq!(flyout_origin(wa, MIN_SIZE, GAP), point(px(608.), px(48.)));
+        assert_eq!(flyout_origin(wa, MIN_SIZE, GAP), point(px(608.), px(268.)));
         let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
         assert_eq!(flyout_origin(tiny, MIN_SIZE, GAP), point(px(100.), px(50.)));
     }

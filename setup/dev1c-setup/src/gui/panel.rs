@@ -15,7 +15,7 @@ use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Sizable, Theme, TitleBar};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, IndexPath, Sizable, Theme, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -236,6 +236,16 @@ impl Panel {
         }
     }
 
+    /// Поле по Fluent: без кольца фокуса, у активного — акцентная линия 2 px
+    /// снизу (так же в `1c-connect` и так было в прежнем `app.css`).
+    fn input(state: &Entity<InputState>, accent: Hsla, window: &Window, cx: &App) -> impl IntoElement {
+        let focused = state.read(cx).focus_handle(cx).is_focused(window);
+        div()
+            .relative()
+            .child(Input::new(state).focus_bordered(false))
+            .when(focused, |d| d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent)))
+    }
+
     /// Прокручиваемая область с полосой поверх текста.
     fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement {
         div()
@@ -252,7 +262,7 @@ impl Panel {
 }
 
 impl Render for Panel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
         let (success, warning, danger, card) = (t.success, t.warning, t.danger, t.secondary);
@@ -319,8 +329,8 @@ impl Render for Panel {
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(card_now.state.clone()))
-                    .when(!card_now.sub.is_empty(), |v| v.child(div().text_size(px(13.)).text_color(caption).child(card_now.sub.clone()))),
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(card_now.state.clone()))
+                    .when(!card_now.sub.is_empty(), |v| v.child(div().text_size(px(12.)).text_color(caption).child(card_now.sub.clone()))),
             )
             .child(
                 Button::new("check")
@@ -379,7 +389,7 @@ impl Render for Panel {
                                     .min_w_0()
                                     .gap_0p5()
                                     .child(div().child(o.title))
-                                    .child(div().text_size(px(13.)).text_color(caption).child(o.detail)),
+                                    .child(div().text_size(px(12.)).text_color(caption).child(o.detail)),
                             )
                     })),
                 )
@@ -405,7 +415,7 @@ impl Render for Panel {
                                 .justify_between()
                                 .gap_2()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
-                                .child(div().text_size(px(13.)).text_color(caption).child(time))
+                                .child(div().text_size(px(12.)).text_color(caption).child(time))
                                 .into_any_element()
                         } else {
                             // Цвет — только у значка: строки, окрашенные целиком,
@@ -445,7 +455,7 @@ impl Render for Panel {
                                     // Значение — моноширинным: это то, что
                                     // человек перепечатывает или копирует.
                                     .child(div().font_family("ui-monospace").child(r.value))
-                                    .child(div().text_size(px(13.)).text_color(caption).child(r.detail)),
+                                    .child(div().text_size(px(12.)).text_color(caption).child(r.detail)),
                             )
                     })),
                 )
@@ -485,7 +495,7 @@ impl Render for Panel {
                                             .gap_0p5()
                                             .child(div().child(format!("{}: {}", c.what, c.detail)))
                                             .when(!c.ok && !c.hint.is_empty(), |v| {
-                                                v.child(div().text_size(px(13.)).text_color(warning).child(c.hint.clone()))
+                                                v.child(div().text_size(px(12.)).text_color(warning).child(c.hint.clone()))
                                             }),
                                     )
                             })),
@@ -502,15 +512,15 @@ impl Render for Panel {
                 let labelled = |label: &'static str, hint: &'static str, body: AnyElement| {
                     v_flex()
                         .gap_1()
-                        .child(div().text_size(px(12.)).text_color(caption).child(label))
+                        .child(div().child(label))
                         .child(body)
                         .when(!hint.is_empty(), |v| v.child(div().text_size(px(12.)).text_color(caption).child(hint)))
                 };
                 let input = |label: &'static str, hint: &'static str, state: &Entity<InputState>| {
-                    labelled(label, hint, Input::new(state).into_any_element())
+                    labelled(label, hint, Self::input(state, accent, window, cx).into_any_element())
                 };
                 let group = |title: &'static str| {
-                    v_flex().gap_3().child(div().font_weight(FontWeight::SEMIBOLD).text_size(px(13.)).child(title))
+                    v_flex().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                 };
                 Self::scrolled(
                     "params",
@@ -530,7 +540,7 @@ impl Render for Panel {
                                 .child(input("Память", "", &f.memory))
                                 .child(labelled("Движок контейнеров", "", Select::new(&f.engine).into_any_element()))
                                 .child(
-                                    h_flex().items_center().gap_2().child(Switch::new("gpu").checked(f.gpu).on_change(cx.listener(
+                                    h_flex().items_center().gap_2().child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(
                                         |panel, checked: &bool, _, cx| {
                                             panel.fields.gpu = *checked;
                                             cx.refresh_windows();
@@ -613,7 +623,7 @@ impl Render for Panel {
                     .when(confirming, |row| {
                         // Удаление данных подтверждается именем контейнера:
                         // то же правило, что было в окне на Tauri.
-                        row.child(div().w(px(260.)).child(Input::new(&confirm).small().focus_bordered(false)))
+                        row.child(div().w(px(260.)).child(Self::input(&confirm, accent, window, cx)))
                             .child(Button::new("clean-data").danger().label("Удалить").disabled(busy_now).on_click(cx.listener(
                                 |panel, _, _, cx| {
                                     let typed = panel.confirm.read(cx).value().to_string();
@@ -658,7 +668,7 @@ impl Render for Panel {
             .size_full()
             .bg(bg)
             .text_color(fg)
-            .text_size(px(15.))
+            .text_size(px(14.))
             .child(title_bar)
             .child(
                 v_flex()

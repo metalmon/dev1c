@@ -420,7 +420,7 @@ impl Render for Panel {
                                     .child(div().text_size(px(12.)).text_color(caption).child(o.detail)),
                             )
                     })),
-                )
+                ))
                 .into_any_element()
             }
             Tab::Log => {
@@ -462,7 +462,7 @@ impl Render for Panel {
                                 .into_any_element()
                         }
                     })),
-                )
+                ))
                 .into_any_element()
             }
             Tab::Access => {
@@ -485,7 +485,7 @@ impl Render for Panel {
                                     .child(div().text_size(px(12.)).text_color(caption).child(r.detail)),
                             )
                     })),
-                )
+                ))
                 .into_any_element()
             }
             Tab::Check => {
@@ -525,7 +525,7 @@ impl Render for Panel {
                                             }),
                                     )
                             })),
-                    )
+                    ))
                     .into_any_element()
                 }
             }

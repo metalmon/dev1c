@@ -259,6 +259,9 @@ impl Panel {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(handle)
+                    // Полоса лежит поверх области: отступ справа, чтобы
+                    // она не ложилась на текст.
+                    .pr_2()
                     .child(content),
             )
             .child(div().absolute().inset_0().child(
@@ -587,16 +590,22 @@ impl Render for Panel {
                                 .child(div().text_size(px(13.)).text_color(caption).child(time))
                                 .into_any_element()
                         } else {
+                            // Цвет — только у значка: строки, окрашенные целиком,
+                            // на тёмном сливаются в пёстрый лист (заказчик
+                            // 2026-10-18). Служебные строки — приглушённые.
+                            // `min_w_0` — иначе flex-ребёнок не уже своего
+                            // текста и строка не переносится, а обрезается.
+                            let mark_color = match l.kind {
+                                Kind::Ok => success,
+                                Kind::Warn => warning,
+                                Kind::Fail => danger,
+                                Kind::Say | Kind::Head => caption,
+                            };
+                            let text_color = if l.kind == Kind::Say { caption } else { fg };
                             h_flex()
                                 .items_start()
-                                .text_color(match l.kind {
-                                    Kind::Ok => success,
-                                    Kind::Warn => warning,
-                                    Kind::Fail => danger,
-                                    Kind::Say | Kind::Head => caption,
-                                })
-                                .child(div().w(px(18.)).flex_shrink_0().child(l.kind.mark()))
-                                .child(div().flex_1().child(l.text))
+                                .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
+                                .child(div().flex_1().min_w_0().text_color(text_color).child(l.text))
                                 .into_any_element()
                         }
                     })),

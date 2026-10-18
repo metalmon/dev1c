@@ -12,11 +12,49 @@ use std::sync::Arc;
 pub const SIZE: Size<Pixels> = size(px(1040.0), px(800.0));
 pub const MIN_SIZE: Size<Pixels> = size(px(920.0), px(660.0));
 
+/// Поля вокруг окна при открытии: столько остаётся до краёв рабочей области.
+const MARGIN: f32 = 48.0;
+
+/// `SPI_GETWORKAREA` с поправкой на DPI; иначе — границы основного дисплея
+/// целиком. Копия помощника из `1c-connect`: панель задач и масштаб экрана
+/// иначе съедают низ окна.
+fn work_area(cx: &App) -> Bounds<Pixels> {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+        let mut r: RECT = std::mem::zeroed();
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut _ as *mut _, 0) != 0 {
+            let s = GetDpiForSystem() as f32 / 96.0;
+            return Bounds::new(
+                point(px(r.left as f32 / s), px(r.top as f32 / s)),
+                size(px((r.right - r.left) as f32 / s), px((r.bottom - r.top) as f32 / s)),
+            );
+        }
+    }
+    cx.primary_display().map(|d| d.bounds()).unwrap_or_default()
+}
+
+/// Где и какого размера открыть окно: по центру рабочей области и не больше
+/// неё — счёт размера с тестом живёт в `crate::ui::window_size`.
+fn placement(cx: &App) -> Bounds<Pixels> {
+    let wa = work_area(cx);
+    let (w, h) = crate::ui::window_size(
+        (f32::from(SIZE.width), f32::from(SIZE.height)),
+        (f32::from(wa.size.width), f32::from(wa.size.height)),
+        MARGIN,
+    );
+    let s = size(px(w), px(h));
+    let origin = point(wa.origin.x + (wa.size.width - s.width) / 2., wa.origin.y + (wa.size.height - s.height) / 2.);
+    Bounds::new(origin, s)
+}
+
 /// Открыть окно. Ручки окна и панели кладём в глобал: по ним ходят события.
 pub fn open(cx: &mut App) {
     let icon = image::load_from_memory(include_bytes!("../../icons/icon.png")).ok().map(|i| Arc::new(i.to_rgba8()));
     let opts = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, SIZE, cx))),
+        window_bounds: Some(WindowBounds::Windowed(placement(cx))),
         window_min_size: Some(MIN_SIZE),
         kind: WindowKind::Normal,
         is_resizable: true,

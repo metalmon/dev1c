@@ -526,16 +526,11 @@ impl Render for Panel {
                 let local = serve != "remote";
                 // Подпись Caption приглушённым, поле, подсказка — как в
                 // прежнем окне и как в `1c-connect`.
-                let labelled = |label: &'static str, hint: &'static str, body: AnyElement| {
-                    v_flex()
-                        .w_full()
-                        .gap_1()
-                        .child(div().child(label))
-                        .child(body)
-                        .when(!hint.is_empty(), |v| v.child(div().text_size(px(12.)).text_color(caption).child(hint)))
+                let labelled = |label: &'static str, body: AnyElement| {
+                    v_flex().w_full().gap_1().child(div().child(label)).child(body)
                 };
-                let input = |label: &'static str, hint: &'static str, state: &Entity<InputState>| {
-                    labelled(label, hint, Self::input(state, accent, stroke, window, cx).into_any_element())
+                let input = |label: &'static str, state: &Entity<InputState>| {
+                    labelled(label, Self::input(state, accent, stroke, window, cx).into_any_element())
                 };
                 let group = |title: &'static str| {
                     v_flex().w_full().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
@@ -543,20 +538,20 @@ impl Render for Panel {
                 Self::scrolled(
                     "params",
                     &self.body_scroll,
-                    // Две группы рядом: в 1040 px одна колонка полей во всю
-                    // ширину читается хуже, и так было в прежнем окне.
+                    // Две группы рядом, между ними линия: без неё поля
+                    // читаются как одна сплошная сетка. В прежнем окне
+                    // колонки тоже шли парой.
                     h_flex()
-                        .items_start()
                         .gap_6()
                         .py_1()
                         .child(
                             group("Контейнер")
                                 .flex_1()
                                 .min_w_0()
-                                .child(input("Имя контейнера", "Тома данных называются по нему: имя-home, имя-gitea, имя-models.", &f.name))
-                                .child(input("Первый порт", "RDP; дальше подряд Gitea, модель, SSH.", &f.port))
-                                .child(input("Память", "", &f.memory))
-                                .child(labelled("Движок контейнеров", "", div().w_full().child(Select::new(&f.engine)).into_any_element()))
+                                .child(input("Имя контейнера и приставка его томов", &f.name))
+                                .child(input("Первый порт: RDP, дальше Gitea, модель, SSH", &f.port))
+                                .child(input("Предел памяти контейнера", &f.memory))
+                                .child(labelled("Движок контейнеров", div().w_full().child(Select::new(&f.engine)).into_any_element()))
                                 .child(
                                     h_flex().items_center().gap_2().child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(
                                         |panel, checked: &bool, _, cx| {
@@ -567,15 +562,15 @@ impl Render for Panel {
                                     .child(div().child("Отдать контейнеру GPU")),
                                 ),
                         )
+                        .child(div().w(px(1.)).flex_shrink_0().bg(border.opacity(0.6)))
                         .child(
                             group("Модель для агентов")
                                 .flex_1()
                                 .min_w_0()
-                                .child(labelled("Где работает сервер модели", "", div().w_full().child(Select::new(&f.serve)).into_any_element()))
+                                .child(labelled("Где работает сервер модели", div().w_full().child(Select::new(&f.serve)).into_any_element()))
                                 .when(local, |g| {
                                     g.child(labelled(
                                         "Файл модели (.gguf)",
-                                        "",
                                         h_flex()
                                             .gap_2()
                                             .child(div().flex_1().min_w_0().child(Input::new(&f.file)))
@@ -586,17 +581,17 @@ impl Render for Panel {
                                     ))
                                 })
                                 .when(!local, |g| {
-                                    g.child(input("Адрес сервера", "С путём, но без завершающего /chat/completions.", &f.url))
-                                        .child(input("Ключ", "", &f.key))
+                                    g.child(input("Адрес сервера, без завершающего /chat/completions", &f.url))
+                                        .child(input("Ключ доступа", &f.key))
                                 })
-                                .child(input("Имя модели", if local { "Пусто — имя файла." } else { "" }, &f.model_name))
-                                .when(serve == "host", |g| g.child(input("Порт службы", "", &f.model_port)))
+                                .child(input(if local { "Имя модели; пусто — имя файла" } else { "Имя модели, как его называет сервер" }, &f.model_name))
+                                .when(serve == "host", |g| g.child(input("Порт службы модели на этой машине", &f.model_port)))
                                 // Делёж окна и его нижняя граница — про свой
                                 // сервер: у чужого ни того, ни другого не
                                 // спрашивают (так было и в прежнем окне).
                                 .when(local, |g| {
-                                    g.child(input("Делить окно на агентов", "1 — не делить (рекомендуется).", &f.agents))
-                                        .child(input("Окно не меньше, токенов", "", &f.fit_ctx))
+                                    g.child(input("Делить окно на агентов; 1 — не делить", &f.agents))
+                                        .child(input("Нижняя граница окна, токенов", &f.fit_ctx))
                                 }),
                         ),
                 )

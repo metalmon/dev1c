@@ -26,9 +26,9 @@ RUN git clone --depth=1 https://github.com/nana-4/materia-theme.git /tmp/materia
     `# wrote an empty PNG - a tolerant wrapper keeps the build going` \
     && printf '#!/bin/sh\nresvg "$@" || exit 0\n' > /usr/local/bin/rendersvg && chmod +x /usr/local/bin/rendersvg \
     && printf '%s\n' 'BG=f5f5f5' 'FG=333333' 'MATERIA_VIEW=ffffff' 'MATERIA_SURFACE=ffffff' \
-         'HDR_BG=f0f0f0' 'HDR_FG=333333' 'SEL_BG=e6b800' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-light \
+         'HDR_BG=f0f0f0' 'HDR_FG=333333' 'SEL_BG=e6b800' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' 'MATERIA_PANEL_OPACITY=1' > /tmp/1c-light \
     && printf '%s\n' 'BG=262626' 'FG=dcdcdc' 'MATERIA_VIEW=262626' 'MATERIA_SURFACE=2c2c2c' \
-         'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=e6b800' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' > /tmp/1c-dark \
+         'HDR_BG=3a3a3a' 'HDR_FG=dcdcdc' 'SEL_BG=e6b800' 'ROUNDNESS=4' 'MATERIA_STYLE_COMPACT=True' 'MATERIA_PANEL_OPACITY=1' > /tmp/1c-dark \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-light /tmp/1c-light \
     && ./change_color.sh --inkscape False -t /usr/share/themes -o 1C-dark /tmp/1c-dark \
     && test -f /usr/share/themes/1C-light/gtk-3.0/gtk.css && test -f /usr/share/themes/1C-dark/gtk-3.0/gtk.css \

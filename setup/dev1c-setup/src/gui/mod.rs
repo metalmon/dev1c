@@ -192,18 +192,28 @@ pub fn run_check(cx: &mut App) {
     }
     ui.busy = Some(Busy::Check);
     ui.started = Some(Instant::now());
+    // Проверка идёт при открытой вкладке «Проверка»: факты появляются там,
+    // где человек их ждёт, как и в прежнем окне.
+    ui.tab = Tab::Check;
     note_line(ui, ui::head_line(Which::Check.title()));
     let ctx = ctx_for(ui, true);
     let tx = ui.tx.clone();
     std::thread::spawn(move || {
+        let send = |ev| {
+            let _ = tx.unbounded_send(ev);
+        };
+        // `&send`: один и тот же отправитель нужен и обёртке, и телу —
+        // ссылка на замыкание тоже `Fn`.
         ui::guarded(
-            |ev| {
-                let _ = tx.unbounded_send(ev);
-            },
+            &send,
             Ev::Line,
             || {
                 let checks = verify::run(&ctx);
-                let _ = verify::report(&ctx, &checks);
+                // Путь отчёта — строкой в журнал: в прежнем окне об нём
+                // говорила подсказка под списком.
+                if let Ok(path) = verify::report(&ctx, &checks) {
+                    send(Ev::Line(ui::Line::say(format!("Отчёт: {}", path.display()))));
+                }
                 Ev::Checks(checks)
             },
             || Ev::Checks(Vec::new()),

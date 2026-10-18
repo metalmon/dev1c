@@ -15,7 +15,7 @@ use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, Sizable, Theme, TitleBar};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, IndexPath, Sizable, Theme, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -557,7 +557,6 @@ impl Render for Panel {
                 )
                 .into_any_element()
             }
-            _ => div().text_color(caption).child("—").into_any_element(),
         };
 
         let foot_actions: AnyElement = match tab {

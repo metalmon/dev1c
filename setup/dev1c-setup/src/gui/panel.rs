@@ -680,24 +680,6 @@ impl Render for Panel {
                 .into_any_element(),
             // «Проверка»: факты о среде и отдельно — целость комплекта,
             // то есть всё ли довезли и не побилось ли по дороге.
-            Tab::Check => h_flex()
-                .gap_2()
-                .child(
-                    Button::new("integrity")
-                        .label("Проверить комплект")
-                        .disabled(busy_now)
-                        .tooltip("Сверить файлы комплекта с checksums.txt")
-                        .on_click(|_, _, cx| gui::run_integrity(cx)),
-                )
-                .child(
-                    Button::new("check-again")
-                        .primary()
-                        .label("Проверить")
-                        .disabled(busy_now)
-                        .loading(busy == Some(Busy::Check))
-                        .on_click(|_, _, cx| gui::run_check(cx)),
-                )
-                .into_any_element(),
             Tab::Log => Button::new("clear-log")
                 .label("Очистить")
                 .disabled(busy_now)
@@ -723,16 +705,7 @@ impl Render for Panel {
             .gap_3()
             .child(status);
 
-        let panel = v_flex()
-            .flex_1()
-            .min_h_0()
-            .bg(ground)
-            .rounded(px(4.))
-            .border_1()
-            .border_color(border.opacity(0.6))
-            .overflow_hidden()
-            .child(div().flex_1().min_h_0().p_4().child(body))
-            .child(if working {
+        let progress = if working {
                 // Работа: дорожка акцентом темы, бегунок по кругу.
                 div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
                     div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(accent).with_animation(
@@ -743,16 +716,14 @@ impl Render for Panel {
                 )
             } else {
                 // Покой: линия 1 px в полосе той же высоты — подвал не прыгает.
-                div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
-            })
-            .child(
-                h_flex()
+            div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
+        };
+
+        let footer = h_flex()
                     .items_center()
                     .gap_2()
                     .bg(layer)
-                    .border_t_1()
-                    .border_color(border.opacity(0.6))
-                    .px_4()
+                    .px_6()
                     .py_3()
                     .child(
                         div()
@@ -762,8 +733,7 @@ impl Render for Panel {
                             .text_color(if foot_left.1 { danger } else { caption })
                             .child(foot_left.0),
                     )
-                    .child(foot_actions),
-            );
+                    .child(foot_actions);
 
         v_flex()
             .track_focus(&self.focus)
@@ -794,7 +764,9 @@ impl Render for Panel {
                             .child(div().flex_1().min_w_0().child(text))
                     }))
                     .child(div().border_b_1().border_color(border).child(tabs))
-                    .child(panel),
+                    .child(div().flex_1().min_h_0().child(body)),
             )
+            .child(progress)
+            .child(footer)
     }
 }

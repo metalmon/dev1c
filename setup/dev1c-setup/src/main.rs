@@ -141,6 +141,11 @@ fn run() -> Result<()> {
             println!("Применить то, чего не хватает: dev1c-setup install");
         }
         Cmd::Install { only } => {
+            // Сверка комплекта до первого шага: ставить из битого архива —
+            // значит разбирать потом ошибку движка контейнеров.
+            if only.is_none() && !ctx.dry_run {
+                ops::kit_is_intact(&ctx)?;
+            }
             common::run::apply_all(&ctx, &ops, only.as_deref(), false)?;
             if ctx.dry_run || only.is_some() {
                 return Ok(());

@@ -300,31 +300,6 @@ pub struct AccessRow {
     pub detail: String,
 }
 
-/// Имя факта о целости комплекта — по нему строку находят и заменяют в
-/// списке проверок.
-pub const INTEGRITY: &str = "Целость комплекта";
-
-/// Итог сверки комплекта с `checksums.txt`: сколько файлов совпало и какие
-/// нет. Испорченный или недокачанный комплект лечится только новой копией,
-/// поэтому подсказка одна.
-pub fn integrity_check(ok: usize, bad: &[String]) -> Check {
-    if bad.is_empty() {
-        Check::pass(INTEGRITY, format!("{ok} файлов, все суммы совпали"))
-    } else {
-        Check::fail(
-            INTEGRITY,
-            format!("совпало {ok}, не совпало {}: {}", bad.len(), bad.join("; ")),
-            "комплект скопирован не полностью или испорчен — возьмите его заново",
-        )
-    }
-}
-
-/// Сверить не удалось (нет списка сумм — например, комплект собран руками).
-/// Это не провал и не успех: честная неизвестность.
-pub fn integrity_unknown(why: impl Into<String>) -> Check {
-    Check::note(INTEGRITY, why)
-}
-
 /// Если адрес этой машины не удалось узнать, в строках «Доступа» остаётся
 /// заглушка — лучше честной заглушки только настоящий адрес.
 pub const ADDRESS_UNKNOWN: &str = "<адрес>";
@@ -730,29 +705,6 @@ mod tests {
     fn a_picked_model_file_must_be_a_gguf() {
         assert!(gguf_warning("C:\\models\\q.gguf").is_none());
         assert!(gguf_warning("C:\\models\\q.bin").unwrap().contains(".gguf"));
-    }
-
-    #[test]
-    fn the_integrity_check_says_how_many_files_and_names_the_bad_ones() {
-        let all_good = integrity_check(42, &[]);
-        assert_eq!(all_good.what, INTEGRITY);
-        assert!(all_good.ok);
-        assert!(all_good.detail.contains("42"), "{}", all_good.detail);
-
-        let bad = integrity_check(40, &["нет: model/q.gguf".into(), "изменился: dev1c-image.tar.gz".into()]);
-        assert!(!bad.ok);
-        assert!(bad.detail.contains("model/q.gguf"), "{}", bad.detail);
-        assert!(bad.detail.contains("dev1c-image.tar.gz"), "{}", bad.detail);
-        // Испорченный комплект лечится только новой копией — так и скажем.
-        assert!(bad.hint.contains("заново"), "{}", bad.hint);
-    }
-
-    #[test]
-    fn a_kit_without_the_checksum_list_is_an_honest_unknown_not_a_pass() {
-        let missing = integrity_unknown("в комплекте нет checksums.txt");
-        assert_eq!(missing.what, INTEGRITY);
-        assert!(missing.ok && missing.info, "неизвестность — не провал и не успех");
-        assert!(missing.detail.contains("checksums.txt"));
     }
 
     #[test]

@@ -493,6 +493,46 @@ impl Op<Ctx> for Services {
 }
 
 /// Операции сервера в порядке применения.
+/// Сверка комплекта перед установкой: всё ли довезли и не побилось ли по
+/// дороге. Отдельной кнопки для этого нет и не нужно — установка сама не
+/// начинается с испорченного комплекта, а образ весит гигабайты, и разбирать
+/// потом ошибку движка контейнеров куда хуже, чем услышать про битый файл
+/// сразу. Списка сумм нет (комплект собран руками) — предупреждаем и идём
+/// дальше: это не повод не работать.
+pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
+    let mut last = 0usize;
+    let report = match common::integrity::verify(&ctx.kit, |i, n, path| {
+        if i == n || i - last >= 10 {
+            last = i;
+            ctx.say(format!("файлы комплекта: {i}/{n} {path}"));
+        }
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            ctx.warn(format!("целость комплекта не проверена: {e:#}"));
+            return Ok(());
+        }
+    };
+    let bad: Vec<String> = report
+        .entries
+        .iter()
+        .filter(|e| e.state != common::integrity::FileState::Ok)
+        .map(|e| match e.state {
+            common::integrity::FileState::Missing => format!("нет: {}", e.path),
+            _ => format!("изменился: {}", e.path),
+        })
+        .collect();
+    let ok = report.entries.len() - bad.len();
+    anyhow::ensure!(
+        bad.is_empty(),
+        "комплект скопирован не полностью или испорчен — возьмите его заново. Совпало {ok}, не совпало {}: {}",
+        bad.len(),
+        bad.join("; ")
+    );
+    ctx.ok(format!("файлы комплекта: {ok} из {ok}, суммы совпали"));
+    Ok(())
+}
+
 pub fn server(cfg: &Cfg) -> Vec<Box<dyn Op<Ctx>>> {
     let mut v: Vec<Box<dyn Op<Ctx>>> = vec![Box::new(Env), Box::new(Image), Box::new(Volumes), Box::new(Model)];
     // Сервер модели — до контейнера среды: его числа уходят туда переменными.

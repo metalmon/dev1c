@@ -142,13 +142,20 @@ RUN --mount=type=bind,from=platform,target=/platform \
          /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService \
     && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
          /UpdateDBCfg -Extension MCP_HTTPService \
-    && chmod -R a+rX /opt/1c-demo \
-    # the check: a copy of the base, published for www-data on a spare port
-    && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \
-    && 1c-stand publish www-data 8089 /tmp/chk /tmp/chk-pub \
+    # the check runs on the template base itself, not a copy: the first
+    # Enterprise session of a BSP configuration does its initial filling, and
+    # that work belongs in the image, not in every workstation's first call
+    # (which the training edition's one-session limit then makes collide with
+    # the next one). Published for www-data on a spare port, ownership restored.
+    && chown -R www-data:www-data "$B" \
+    && 1c-stand publish www-data 8089 "$B" /tmp/chk-pub \
     && apache2 -f /tmp/chk-pub/apache.conf -k start && sleep 3 \
     && code=$(curl -s -o /tmp/hs -w '%{http_code}' http://127.0.0.1:8089/base/hs/mcp-1c/version) \
-    && apache2 -f /tmp/chk-pub/apache.conf -k stop \
+    && curl -s -o /dev/null http://127.0.0.1:8089/base/hs/mcp-1c/configuration \
+    && sleep 25 \
+    && apache2 -f /tmp/chk-pub/apache.conf -k stop && sleep 2 \
+    && chown -R root:root "$B" && chmod -R a+rX /opt/1c-demo \
+    && rm -f "$B"/*.cfl \
     && case "$code" in \
          200) echo "demo base: mcp-1c HTTP service answers $(tr -d ' \n' </tmp/hs)" ;; \
          404) echo "WARNING demo base: HTTP 404 — the mcp-1c extension did not apply; the stand works without the 1c tools" ;; \

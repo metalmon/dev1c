@@ -20,14 +20,23 @@ LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 INFO='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_configuration_info","arguments":{}}}'
 for n in 1 2 3; do
     u="dev$n"; id "$u" >/dev/null 2>&1 || continue
-    # first: the first MCP connection seeds the base into the home. A real
-    # tool call, not tools/list: the list answers even when the HTTP service
-    # path is wrong.
+    # seed first (idempotent; the start does it in the background, but a
+    # 1.9 GB copy may still be running): the MCP checks below hold their
+    # connection for 25 s only. A real tool call, not tools/list: the list
+    # answers even when the HTTP service path is wrong.
+    runuser -u "$u" -- /usr/local/bin/1c-stand seed >/dev/null 2>&1
     mcp $((7770 + n)) "$INFO" '"result"' && say "ok   $u: mcp-1c on $((7770 + n)) reads the base" \
         || { say "FAIL $u: mcp-1c on $((7770 + n)): $(grep -ao '"text":"[^"]\{0,120\}' $T/mcp.out | head -n 1) (see /var/log/1c/$u-mcp.log)"; fail=1; }
     mcp $((7780 + n)) "$LIST" '"cf_decompile"' && say "ok   $u: vrunner-mcp on $((7780 + n))" \
         || { say "FAIL $u: vrunner-mcp on $((7780 + n)) (see /var/log/1c/$u-vrunner.log)"; fail=1; }
-    code=$(curl -s -o $T/hs.$n -w '%{http_code}' "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c/version")
+    # the base's one Enterprise session may still be busy with the agent's
+    # call above (the pool keeps it 20 s): on the connection-limit answer,
+    # wait and ask again rather than fail
+    for try in 1 2 3 4 5 6; do
+        code=$(curl -s -o $T/hs.$n -w '%{http_code}' "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c/version")
+        grep -q 'количество подключений\|connections limitation' $T/hs.$n || break
+        sleep 15
+    done
     case "$code" in
         200) say "ok   $u: HTTP service $(tr -d ' \n' <$T/hs.$n)" ;;
         404) say "WARN $u: HTTP service answers 404 — the mcp-1c extension is not applied to the base" ;;

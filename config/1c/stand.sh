@@ -79,6 +79,10 @@ designer)
     seed
     exec "$V8/1cv8" DESIGNER /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
     ;;
+seed)
+    # runuser without -l keeps root's HOME: take the caller's own
+    export HOME; HOME=$(home_of "$(id -un)"); seed
+    ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"
     # The publication: what webinstt writes, with the HTTP services on and
@@ -110,6 +114,15 @@ ErrorLog $d/apache.log
 LogLevel warn
 IncludeOptional mods-enabled/*.load
 IncludeOptional mods-enabled/*.conf
+# One worker process: the 1C module keeps a session pool per process, and a
+# second process means a second Enterprise session on the base — the one the
+# training edition refuses ("предельное количество подключений к ИБ").
+ServerLimit 1
+StartServers 1
+ThreadsPerChild 16
+MinSpareThreads 16
+MaxSpareThreads 16
+MaxRequestWorkers 16
 LoadModule _1cws_module "$V8/wsap24t.so"
 Alias "/base" "$d/pub/"
 <Directory "$d/pub/">
@@ -137,6 +150,16 @@ start)
               "EXEC:/usr/local/bin/1c-stand vrunner $n,su=$u" >"$LOG/$u-vrunner.log" 2>&1 &
         log "$u: HTTP service 127.0.0.1:$((8080 + n))/base, mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
     done
+    # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the
+    # first agent call would otherwise wait for the copy. In the background,
+    # after the base entrypoint has created the homes (it does so only for a
+    # missing directory, hence not before it). The lazy seed above stays as
+    # the fallback.
+    ( for n in 1 2 3; do
+          u="dev$n"; id "$u" >/dev/null 2>&1 || continue
+          until [ -d "$(home_of "$u")" ]; do sleep 2; done
+          runuser -u "$u" -- /usr/local/bin/1c-stand seed
+      done ) >"$LOG/seed.log" 2>&1 &
     exec /usr/local/bin/entrypoint
     ;;
 *)

@@ -101,6 +101,12 @@ pub struct Panel {
     confirm: Entity<InputState>,
     /// Показано ли поле подтверждения.
     confirming: bool,
+    /// Обмер для подбора высоты окна по вкладке «Параметры»: видимая область
+    /// тела вкладки и высота её содержимого.
+    viewport_h: Option<Pixels>,
+    params_h: Option<Pixels>,
+    last_fit: Option<(Pixels, Pixels)>,
+    fit_queued: bool,
 }
 
 impl Panel {
@@ -136,7 +142,32 @@ impl Panel {
             log_len: 0,
             confirm,
             confirming: false,
+            viewport_h: None,
+            params_h: None,
+            last_fit: None,
+            fit_queued: false,
         }
+    }
+
+    /// Два обмера за кадр (видимая область и содержимое) — один подбор:
+    /// отложенное замыкание читает пару, какой она стала к концу кадра.
+    fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.viewport_h = viewport.or(self.viewport_h);
+        self.params_h = params.or(self.params_h);
+        let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
+        if self.fit_queued || !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
+            return;
+        }
+        self.fit_queued = true;
+        cx.defer_in(window, |this, window, cx| {
+            this.fit_queued = false;
+            let (Some(v), Some(c)) = (this.viewport_h, this.params_h) else { return };
+            if !crate::gui::window::needs_fit(this.last_fit, (v, c)) {
+                return;
+            }
+            this.last_fit = Some((v, c));
+            crate::gui::window::fit_height(window, cx, c, v);
+        });
     }
 
     /// Параметры, как они набраны в полях. Числа, которые не разобрались,
@@ -541,6 +572,7 @@ impl Render for Panel {
                     .into_any_element()
                 }
             }
+            // Обмер содержимого «Параметров»: по нему окно подбирает высоту.
             Tab::Params => {
                 let f = &self.fields;
                 let serve = selected(&f.serve, &SERVES, cx);
@@ -565,6 +597,15 @@ impl Render for Panel {
                 Self::scrolled(
                     "params",
                     &self.body_scroll,
+                    div()
+                        // Высота содержимого вкладки: по ней окно подбирает свою.
+                        .on_children_prepainted({
+                            let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
+                                this.measured(None, b.first().map(|b| b.size.height), window, cx)
+                            });
+                            move |b, window, cx| m(&b, window, cx)
+                        })
+                        .child(
                     // Две группы рядом, каждая своей карточкой: границы
                     // карточек делят колонки и показывают, где группа
                     // кончается (решение заказчика 2026-10-19).
@@ -620,6 +661,7 @@ impl Render for Panel {
                                     g.child(input("Делить окно на агентов; 1 — не делить", &f.agents))
                                         .child(input("Нижняя граница окна, токенов", &f.fit_ctx))
                                 }),
+                        ),
                         ),
                 )
                 .into_any_element()
@@ -781,7 +823,18 @@ impl Render for Panel {
                             .child(div().flex_1().min_w_0().child(text))
                     }))
                     .child(div().border_b_1().border_color(border).child(tabs))
-                    .child(div().flex_1().min_h_0().child(body)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .on_children_prepainted({
+                                let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
+                                    this.measured(b.first().map(|b| b.size.height), None, window, cx)
+                                });
+                                move |b, window, cx| m(&b, window, cx)
+                            })
+                            .child(body),
+                    ),
             )
             .child(progress)
             .child(footer)

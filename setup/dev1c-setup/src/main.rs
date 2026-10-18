@@ -154,11 +154,18 @@ fn run() -> Result<()> {
             check(&ctx)?;
             let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
             println!();
+            // Адрес этой машины известен — печатаем его, а не «<адрес>»:
+            // администратор диктует его разработчикам как есть.
+            let addresses = ui::local_addresses();
+            let host = addresses.first().cloned().unwrap_or_else(|| ui::ADDRESS_UNKNOWN.to_string());
             println!("Среда запущена:");
-            println!("  Рабочие места   mstsc /v:<адрес этой машины>:{rdp}  —  dev1/dev1, dev2/dev2, dev3/dev3");
-            println!("  Репозитории     http://<адрес>:{gitea}");
+            println!("  Рабочие места   mstsc /v:{host}:{rdp}  —  dev1/dev1, dev2/dev2, dev3/dev3");
+            println!("  Репозитории     http://{host}:{gitea}");
             println!("  Сервер модели   {} ({})", ctx.cfg.model_url(), ctx.cfg.model_alias());
-            println!("  Для 1c-connect  адрес этой машины и порт {ssh}");
+            println!("  Для 1c-connect  {host}:{ssh}");
+            if addresses.len() > 1 {
+                println!("  Другие адреса   {}", addresses[1..].join(", "));
+            }
         }
         Cmd::Change { values } => {
             apply_changes(&mut ctx, &values)?;

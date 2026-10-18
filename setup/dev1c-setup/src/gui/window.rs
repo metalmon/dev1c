@@ -39,6 +39,35 @@ fn work_area(cx: &App) -> Bounds<Pixels> {
     cx.primary_display().map(|d| d.bounds()).unwrap_or_default()
 }
 
+/// Запас под содержимым, чтобы последняя строка не липла к подвалу.
+const SLACK: Pixels = px(8.0);
+
+/// Высота окна под содержимое вкладки — в обе стороны: переполнение растит
+/// окно, пустота ужимает. Не выше рабочей области и не ниже наименьшего
+/// размера. `None` — разница меньше пикселя, трогать окно незачем.
+pub fn fit_height_for(current: Pixels, content: Pixels, viewport: Pixels, work_h: Pixels) -> Option<Pixels> {
+    let want = (current + (content - viewport) + SLACK).min(work_h - px(MARGIN)).max(MIN_SIZE.height);
+    ((want - current).abs() > px(1.0)).then_some(want)
+}
+
+/// Нужно ли подбирать высоту заново: впервые или пара (видимая область,
+/// содержимое) сдвинулась больше чем на пиксель.
+pub fn needs_fit(last: Option<(Pixels, Pixels)>, now: (Pixels, Pixels)) -> bool {
+    match last {
+        None => true,
+        Some((v, c)) => (now.0 - v).abs() > px(1.0) || (now.1 - c).abs() > px(1.0),
+    }
+}
+
+/// Подогнать высоту окна под содержимое вкладки «Параметры»: это самая
+/// высокая вкладка, и по ней окно открывается без пустоты под карточками.
+/// Угол окна остаётся на месте — GPUI растит окно вниз, и прыжка нет.
+pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: Pixels) {
+    let wa = work_area(cx);
+    let Some(h) = fit_height_for(window.bounds().size.height, content, viewport, wa.size.height) else { return };
+    window.resize(size(window.bounds().size.width, h));
+}
+
 /// Где и какого размера открыть окно: по центру рабочей области и не больше
 /// неё — счёт размера с тестом живёт в `crate::ui::window_size`.
 fn placement(cx: &App) -> Bounds<Pixels> {

@@ -211,6 +211,88 @@ pub fn status_line(ops: &[OpView], name: &str) -> Card {
     Card { dot, state: state.into(), sub, primary }
 }
 
+/// Поля другой формы не уезжают в файл: скрытое поле человек очистить не
+/// может, а `validate` не терпит и `file`, и `url` разом. Правило взято из
+/// старого окна (`app.js`).
+pub fn for_form(mut cfg: Cfg) -> Cfg {
+    if cfg.model.serve == "remote" {
+        cfg.model.file.clear();
+    } else {
+        cfg.model.url.clear();
+        cfg.model.key.clear();
+    }
+    cfg
+}
+
+/// Записать параметры в `dev1c.toml` с комментариями образца. Проверка не
+/// прошла или файл не пишется — текст ошибки, файл не тронут: набранное
+/// остаётся в полях, человек правит и жмёт ещё раз.
+pub fn save_to(kit: &Kit, cfg: &Cfg) -> Result<(), String> {
+    cfg.validate().map_err(|e| format!("{e:#}"))?;
+    common::kit::write_text(&kit.path(cfg::FILE), &Cfg::render(cfg)).map_err(|e| format!("{}: {e:#}", cfg::FILE))
+}
+
+/// Есть ли несохранённые правки: установка идёт по файлу, не по полям.
+pub fn fields_differ(saved: &Cfg, edited: &Cfg) -> bool {
+    saved != edited
+}
+
+/// Почему главная кнопка не работает. Несохранённые правки — единственная
+/// причина: иначе человек правит поле, жмёт «Установить» и получает установку
+/// по старому файлу.
+pub fn primary_blocked(dirty: bool) -> Option<&'static str> {
+    if dirty {
+        Some("Сначала сохраните параметры")
+    } else {
+        None
+    }
+}
+
+/// Можно ли закрывать окно сразу. Пока идёт работа — нет, спрашиваем.
+pub fn should_close(working: bool) -> bool {
+    !working
+}
+
+/// Выбранный файл модели не `.gguf` — сказать словами, а не молча взять.
+pub fn gguf_warning(path: &str) -> Option<String> {
+    let ok = std::path::Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf"));
+    if ok {
+        None
+    } else {
+        Some(format!("выбран не .gguf: {path}"))
+    }
+}
+
+/// Строка вкладки «Доступ»: что это, чем пользоваться, пояснение.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessRow {
+    pub what: &'static str,
+    pub value: String,
+    pub detail: String,
+}
+
+/// Адреса среды, выведенные из параметров: четыре порта подряд от
+/// `server.port` и адрес сервера модели. `facts` — числа последнего замера
+/// локального сервера (окно, max_tokens), если он был.
+pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>) -> Vec<AccessRow> {
+    let [rdp, gitea, _, ssh] = cfg.ports();
+    let model_url = cfg.model_url();
+    let row = |what: &'static str, value: String, detail: String| AccessRow { what, value, detail };
+    vec![
+        row("Рабочие места", format!("mstsc /v:<адрес>:{rdp}"), "dev1 / dev1, dev2 / dev2, dev3 / dev3".into()),
+        row("Репозитории Gitea", format!("http://<адрес>:{gitea}"), "те же логины".into()),
+        row(
+            "Сервер модели",
+            if model_url.is_empty() { "—".into() } else { model_url },
+            match facts {
+                Some((window, max_tokens)) => format!("окно {window} токенов, max_tokens {max_tokens}"),
+                None => "замера ещё не было".into(),
+            },
+        ),
+        row("Для 1c-connect", format!("<адрес>:{ssh}"), "адрес среды в 1c-connect.toml разработчика".into()),
+    ]
+}
+
 /// Плашка над вкладками: первая заблокированная операция своим текстом.
 /// Недоделанное плашкой не считается — это обычная работа кнопки.
 pub fn notice(ops: &[OpView]) -> Option<String> {
@@ -428,6 +510,114 @@ mod tests {
     fn a_running_environment_shows_the_container_name_and_its_detail() {
         let ops = vec![op("container", OpState::Done("запущен".into()))];
         assert_eq!(status_line(&ops, "dev1c").sub, "контейнер dev1c · запущен");
+    }
+
+    #[test]
+    fn the_form_of_the_model_decides_which_fields_travel() {
+        // Скрытое поле человек очистить не может, поэтому его чистит форма:
+        // иначе validate увидит и file, и url. Правило из старого app.js.
+        let mut remote = Cfg::default();
+        remote.model.serve = "remote".into();
+        remote.model.file = "C:\\m.gguf".into();
+        remote.model.url = "https://m/v1".into();
+        remote.model.name = "Q".into();
+        let remote = for_form(remote);
+        assert_eq!(remote.model.file, "");
+        assert!(remote.validate().is_ok(), "{:?}", remote.validate().err());
+
+        let mut host = Cfg::default();
+        host.model.serve = "host".into();
+        host.model.file = "C:\\m.gguf".into();
+        host.model.url = "https://m/v1".into();
+        host.model.key = "k".into();
+        let host = for_form(host);
+        assert_eq!((host.model.url.as_str(), host.model.key.as_str()), ("", ""));
+        assert!(host.validate().is_ok(), "{:?}", host.validate().err());
+    }
+
+    #[test]
+    fn unsaved_edits_are_seen_and_block_the_primary_button() {
+        let saved = Cfg::default();
+        let mut edited = saved.clone();
+        edited.server.port = 4000;
+        assert!(fields_differ(&saved, &edited));
+        assert!(!fields_differ(&saved, &saved.clone()));
+        assert_eq!(primary_blocked(true), Some("Сначала сохраните параметры"));
+        assert_eq!(primary_blocked(false), None);
+    }
+
+    #[test]
+    fn a_rejected_config_keeps_the_file_and_returns_the_russian_reason() {
+        let kit = kit_with(Some("[server]\nname = \"keep\"\n"));
+        let mut bad = Cfg::default();
+        bad.model.agents = 9;
+        let e = save_to(&kit, &bad).unwrap_err();
+        assert!(e.contains("agents"), "{e}");
+        assert_eq!(std::fs::read_to_string(kit.path(cfg::FILE)).unwrap(), "[server]\nname = \"keep\"\n");
+        let _ = std::fs::remove_dir_all(&kit.root);
+    }
+
+    #[test]
+    fn an_unwritable_file_is_reported_not_swallowed() {
+        let kit = kit_with(Some("[server]\nname = \"keep\"\n"));
+        let path = kit.path(cfg::FILE);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let e = save_to(&kit, &Cfg::default()).unwrap_err();
+        assert!(e.contains(cfg::FILE), "в тексте ошибки должно быть имя файла: {e}");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let _ = std::fs::remove_dir_all(&kit.root);
+    }
+
+    #[test]
+    fn a_saved_config_lands_in_the_file_with_the_sample_comments() {
+        let kit = kit_with(None);
+        let mut c = Cfg::default();
+        c.server.port = 4000;
+        save_to(&kit, &c).unwrap();
+        let text = std::fs::read_to_string(kit.path(cfg::FILE)).unwrap();
+        assert!(text.contains("4000"));
+        assert!(text.contains('#'), "комментарии образца должны остаться");
+        let _ = std::fs::remove_dir_all(&kit.root);
+    }
+
+    #[test]
+    fn closing_is_free_when_idle_and_asks_while_working() {
+        assert!(should_close(false));
+        assert!(!should_close(true));
+    }
+
+    #[test]
+    fn a_picked_model_file_must_be_a_gguf() {
+        assert!(gguf_warning("C:\\models\\q.gguf").is_none());
+        assert!(gguf_warning("C:\\models\\q.bin").unwrap().contains(".gguf"));
+    }
+
+    #[test]
+    fn the_access_rows_follow_the_port_block_and_the_model_url() {
+        let mut c = Cfg::default();
+        c.server.port = 4000;
+        let rows = access_rows(&c, None);
+        let values: Vec<_> = rows.iter().map(|r| r.value.clone()).collect();
+        assert!(values.iter().any(|v| v.contains("4000")), "RDP: {values:?}");
+        assert!(values.iter().any(|v| v.contains("4001")), "Gitea: {values:?}");
+        assert!(values.iter().any(|v| *v == c.model_url()), "модель: {values:?}");
+        assert!(values.iter().any(|v| v.contains("4003")), "SSH для 1c-connect: {values:?}");
+    }
+
+    #[test]
+    fn the_model_row_says_whether_the_server_was_measured() {
+        let c = Cfg::default();
+        let rows = access_rows(&c, None);
+        let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
+        assert_eq!(model.detail, "замера ещё не было");
+        let rows = access_rows(&c, Some((65536, 8192)));
+        let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
+        assert_eq!(model.detail, "окно 65536 токенов, max_tokens 8192");
     }
 
     #[test]

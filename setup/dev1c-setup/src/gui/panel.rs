@@ -245,7 +245,73 @@ impl Render for Panel {
                 )
                 .into_any_element()
             }
-            // Параметры, Доступ и Проверка кладут задачи 5 и 6 плана.
+            Tab::Access => {
+                let rows = crate::ui::access_rows(&cx.global::<Ui>().cfg, cx.global::<Ui>().facts);
+                Self::scrolled(
+                    "access",
+                    &self.body_scroll,
+                    v_flex().gap_3().py_1().children(rows.into_iter().map(|r| {
+                        h_flex()
+                            .items_start()
+                            .gap_3()
+                            .child(div().w(px(150.)).flex_shrink_0().text_color(caption).child(r.what))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_0p5()
+                                    // Значение — моноширинным: это то, что
+                                    // человек перепечатывает или копирует.
+                                    .child(div().font_family("ui-monospace").child(r.value))
+                                    .child(div().text_size(px(13.)).text_color(caption).child(r.detail)),
+                            )
+                    })),
+                )
+                .into_any_element()
+            }
+            Tab::Check => {
+                let checks = cx.global::<Ui>().checks.clone();
+                if checks.is_empty() {
+                    div().text_color(caption).child("Проверки ещё не было — кнопка «Проверить» в шапке.").into_any_element()
+                } else {
+                    let (passed, failed) = common::check::summary(&checks);
+                    Self::scrolled(
+                        "check",
+                        &self.body_scroll,
+                        v_flex()
+                            .gap_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .text_color(if failed == 0 { success } else { danger })
+                                    .child(format!("прошло {passed}, провалено {failed}")),
+                            )
+                            .children(checks.into_iter().map(|c| {
+                                let dot = match (c.ok, c.info) {
+                                    (true, false) => Dot::Up,
+                                    (true, true) => Dot::Off,
+                                    _ => Dot::Down,
+                                };
+                                h_flex()
+                                    .items_start()
+                                    .gap_3()
+                                    .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(dot, &theme)))
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_0p5()
+                                            .child(div().child(format!("{}: {}", c.what, c.detail)))
+                                            .when(!c.ok && !c.hint.is_empty(), |v| {
+                                                v.child(div().text_size(px(13.)).text_color(warning).child(c.hint.clone()))
+                                            }),
+                                    )
+                            })),
+                    )
+                    .into_any_element()
+                }
+            }
+            // «Параметры» кладёт задача 6 плана.
             _ => div().text_color(caption).child("—").into_any_element(),
         };
 

@@ -31,6 +31,9 @@ pub struct Ui {
     /// Сколько фактов провалила последняя проверка — бейдж на «Проверке».
     pub failed_checks: usize,
     pub checks: Vec<Check>,
+    /// Числа последнего замера локального сервера модели (окно, max_tokens),
+    /// если он был — вкладка «Доступ». Без токена: он не для показа.
+    pub facts: Option<(u32, u32)>,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -66,8 +69,8 @@ pub enum Ev {
     /// Конец работы: текст ошибки или ничего.
     Done(Option<String>),
     Checks(Vec<Check>),
-    /// Состояние операций, перечитанное в своём потоке.
-    Ops(Vec<OpView>),
+    /// Состояние операций и числа замера, перечитанные в своём потоке.
+    Ops(Vec<OpView>, Option<(u32, u32)>),
 }
 
 /// Строка в журнал окна и в файл журнала рядом с комплектом.
@@ -118,11 +121,12 @@ pub fn refresh_ops(cx: &mut App) {
                     .into_iter()
                     .map(|(id, title, st)| ui::op_view(id, title, st))
                     .collect();
-                Ev::Ops(ops)
+                let facts = crate::llama::facts_load(&ctx).map(|f| (f.window, f.max_tokens));
+                Ev::Ops(ops, facts)
             },
             // Паника не должна оставить полосу хода навсегда: пустой ответ
             // снимает `pending`, а строку о поломке уже отправил `guarded`.
-            || Ev::Ops(Vec::new()),
+            || Ev::Ops(Vec::new(), None),
         );
     });
 }
@@ -246,12 +250,13 @@ fn handle(ev: Ev, cx: &mut App) {
             ui.status = Some(line);
             cx.refresh_windows();
         }
-        Ev::Ops(ops) => {
+        Ev::Ops(ops, facts) => {
             let ui = cx.global_mut::<Ui>();
             ui.pending = ui.pending.saturating_sub(1);
             if !ops.is_empty() {
                 ui.ops = ops;
             }
+            ui.facts = facts;
             cx.refresh_windows();
         }
     }
@@ -279,6 +284,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
             ops: Vec::new(),
             failed_checks: 0,
             checks: Vec::new(),
+            facts: None,
             log: Vec::new(),
             unread: 0,
             tab: ui::start_tab(file_exists),

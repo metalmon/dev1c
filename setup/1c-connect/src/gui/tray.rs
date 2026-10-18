@@ -32,6 +32,11 @@ const THEMES: [(theme::Choice, &str, &str); 3] =
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
+    /// Показать окно. Пункт есть только на Linux: там значок не сообщает о
+    /// щелчках (бэкенд appindicator), и левая кнопка открывает то же меню,
+    /// так что иначе окно было бы не достать.
+    #[cfg(target_os = "linux")]
+    Open,
     Toggle,
     Check,
     Web,
@@ -50,6 +55,8 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         }
     }
     match id {
+        #[cfg(target_os = "linux")]
+        "open" => Some(MenuAction::Open),
         "toggle" => Some(MenuAction::Toggle),
         "check" => Some(MenuAction::Check),
         "web" => Some(MenuAction::Web),
@@ -113,6 +120,8 @@ pub fn icon(state: TrayState) -> Icon {
 /// шлют их в `tx`. Левый щелчок не открывает меню (оно только по правому).
 /// `autostart_on`/`autoconnect_on` — начальные галочки, читает `launch`.
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
+    #[cfg(target_os = "linux")]
+    let open = MenuItem::with_id("open", "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     let web = MenuItem::with_id("web", "Открыть веб-клиент", true, None);
@@ -123,6 +132,10 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let autoconnect = CheckMenuItem::with_id("autoconnect", "Подключаться при запуске", true, autoconnect_on, None);
     let quit = MenuItem::with_id("quit", "Выход", true, None);
     let menu = Menu::with_items(&[
+        #[cfg(target_os = "linux")]
+        &open,
+        #[cfg(target_os = "linux")]
+        &PredefinedMenuItem::separator(),
         &toggle,
         &check,
         &web,
@@ -189,6 +202,8 @@ pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
 pub fn on_menu(ev: MenuEvent, cx: &mut App) {
     let Some(action) = menu_action(ev.id.0.as_str()) else { return };
     match action {
+        #[cfg(target_os = "linux")]
+        MenuAction::Open => window::show_window(cx),
         MenuAction::Toggle => toggle_link(cx),
         MenuAction::Check => {
             window::show_window(cx);

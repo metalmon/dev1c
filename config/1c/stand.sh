@@ -138,7 +138,10 @@ connect)
     # live in the home, which may be a fresh volume), then the tray.
     export HOME; HOME=$(home_of "$(id -un)"); seed
     [ -x "$HOME/dev1c/1c-connect" ] || { log "1c-connect is not in this image"; exit 0; }
-    exec "$HOME/dev1c/1c-connect" --tray
+    # its own log: an autostart entry has nowhere to print, and today the
+    # Linux tray still falls over (GTK is not initialised in the process —
+    # see the spec of the window), so the reason must survive the session
+    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
     ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"

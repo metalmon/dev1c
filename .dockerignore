@@ -17,3 +17,6 @@ models/
 .git/
 .ports
 *.log
+
+# The 1C training installer for Dockerfile.1c: 1.7 GB, a separate build context
+platform/

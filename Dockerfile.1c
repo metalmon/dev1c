@@ -1,0 +1,165 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# The demo stand: the training 1C platform on top of the dev1c image.
+#
+# A second layer rather than a change to the main Dockerfile: the installer is
+# 1.7 GB and lives on nobody's CI runner (the 1C site hands it out through a
+# browser form), so this layer is built where the file is and the main image
+# keeps building in GitHub Actions untouched.
+#
+#   docker build -f Dockerfile.1c --build-context platform=platform \
+#                -t oktaplus/dev1c-1c:latest .
+#
+# `platform/` holds setup-training-<version>-x86_64.run, unpacked from the
+# tar.gz of the 1C download page; it is a separate build context so the main
+# context never carries it (see .dockerignore too). The base image tag is an
+# argument: --build-arg BASE=oktaplus/dev1c:<tag>.
+#
+# What the spike of 2026-10-18 established, and this file encodes:
+#   - the training edition ships client_full + ws only: file bases, no server,
+#     no ibcmd; it installs into /opt/1cv8t and every binary carries a "t"
+#     suffix (1cv8t, 1cv8ct, webinstt, wsap24t.so);
+#   - Debian 13 has no webkit2gtk-4.0, which the binaries link; 1C ships
+#     ".wk41" variants of the two affected libraries, and pointing the
+#     symlinks at them makes ldd clean;
+#   - vanessa-runner only knows /opt/1cv8/x86_64/<version>/1cv8 — a symlink
+#     farm gives it that name;
+#   - the training edition allows ONE Enterprise session per base (a second
+#     one answers "Infobase connections limitation reached"); the Configurator
+#     coexists with it. The runtime (bases, publication, the 777N/778N
+#     listeners) is config/1c/stand.sh, the CMD of this image.
+# =============================================================================
+
+ARG BASE=oktaplus/dev1c:latest
+
+# --- vanessa-runner library tree ---------------------------------------------
+# Resolved by opm inside the project's OneScript image, exactly as pack.sh does
+# for the developer's kit, and checked against the same manifest: hub.oscript.io
+# serves "what it has today", and two images of the same version must not
+# differ silently.
+FROM evilbeaver/onescript:2.2.0 AS vrunner
+ARG VRUNNER_VERSION=3.0.2
+ARG ADD_VERSION=6.8.0
+COPY setup/1c-connect/vendor/vrunner-lib.sha256 /manifest
+RUN opm install -d /out vanessa-runner@${VRUNNER_VERSION} add@${ADD_VERSION} >/dev/null \
+    && cd /out && sha256sum -c --quiet /manifest \
+    && [ "$(find . -type f | wc -l)" = "$(wc -l </manifest)" ] \
+    && test -f vanessa-runner/src/mcp.os
+
+# --- the platform ------------------------------------------------------------
+FROM ${BASE}
+ARG DEBIAN_FRONTEND=noninteractive
+ARG PLATFORM_VERSION=8.5.1.1150
+ARG MCP_1C_VERSION=v1.22.3
+
+# webkit 4.1 + GLU: the client's own dependencies (v8_install_deps is disabled
+# below — it would apt on its own, outside our control). xvfb + xauth: the
+# Configurator in batch mode still wants a display. apache2: the HTTP service
+# of the base for mcp-1c, published with webinstt at run time.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libwebkit2gtk-4.1-0 libglu1-mesa xvfb xauth apache2 socat \
+    && rm -rf /var/lib/apt/lists/*
+
+# The installer is bind-mounted, not copied: it would otherwise sit in a layer
+# next to the 2.5 GB it unpacks.
+RUN --mount=type=bind,from=platform,target=/platform \
+    /platform/setup-training-${PLATFORM_VERSION}-x86_64.run --mode unattended --installer-language ru \
+      --enable-components client_full,ws,ru \
+      --disable-components v8_install_deps,desktop_icons \
+    && P=/opt/1cv8t/x86_64/${PLATFORM_VERSION} && cd "$P" \
+    && ln -sf libwx_gtk3u-3.0.so.0.1.0.wk41 libwx_gtk3u-3.0.so.0 \
+    && ln -sf webkit2_extu-3.0.so.wk41 webkit2_extu-3.0.so \
+    && ln -s 1cv8t 1cv8 && ln -s 1cv8ct 1cv8c && ln -s webinstt webinst \
+    && mkdir -p /opt/1cv8/x86_64 && ln -s "$P" /opt/1cv8/x86_64/${PLATFORM_VERSION} \
+    && ! ldd 1cv8t 1cv8ct webinstt wsap24t.so | grep 'not found' \
+    # Smoke test: the Configurator creates a base under Xvfb. If this fails the
+    # build fails, not the demo.
+    && xvfb-run -a "$P/1cv8t" CREATEINFOBASE "File=/tmp/smoke" /DisableStartupDialogs /DisableStartupMessages /Out /tmp/smoke.log \
+    && test -s /tmp/smoke/1Cv8.1CD && rm -rf /tmp/smoke /tmp/smoke.log \
+    && ln -s "$P/1cv8" /usr/local/bin/1cv8 \
+    && echo "platform ${PLATFORM_VERSION}: ok"
+
+# --- mcp-1c: the Linux binary and the extension ------------------------------
+# The same release as the developer's kit (pack.sh), pinned by the hashes of
+# its checksums.txt. The extension did not apply on an empty 8.5 base in the
+# spike (DefaultLanguage check); whether it applies on the demo configuration
+# is decided at run time, and the .cfe is here for that.
+RUN curl -fsSL -o /usr/local/bin/mcp-1c \
+      "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/mcp-1c-linux-amd64" \
+    && echo "8118fa6005e6a6c4add82d920142254f97e82a5d7bd7856b3d2276dd216abd92  /usr/local/bin/mcp-1c" | sha256sum -c --quiet \
+    && chmod +x /usr/local/bin/mcp-1c \
+    && mkdir -p /opt/mcp-1c \
+    && curl -fsSL -o /opt/mcp-1c/MCP_HTTPService.cfe \
+      "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/MCP_HTTPService.cfe" \
+    && echo "76df5ccf993c10caef73fe8399d2fa7df1cc3b7e9b24fc6662ab402aeea1bf61  /opt/mcp-1c/MCP_HTTPService.cfe" | sha256sum -c --quiet \
+    && mcp-1c --version
+
+# --- vanessa-runner ----------------------------------------------------------
+# Its own tree under /opt/vrunner: the dependencies are vendored in its
+# oscript_modules, so nothing is added to the image's OneScript library.
+# vrunner-mcp is the MCP server Zed talks to on 778N; the CLI is not wrapped
+# (its argument parser fails under oscript 2.2.0 on Linux — the MCP path is the
+# one that matters).
+COPY --from=vrunner /out /opt/vrunner
+RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\n' > /usr/local/bin/vrunner-mcp \
+    && chmod +x /usr/local/bin/vrunner-mcp \
+    # Smoke test: the server answers tools/list with the tools the bridge
+    # relies on. stdin is held open for a while: the server exits on EOF.
+    && ( printf '%s\n%s\n%s\n' \
+         '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"build","version":"0"}}}' \
+         '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+         '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 30 ) \
+       | timeout 300 vrunner-mcp > /tmp/tools.json \
+    && grep -q '"cf_decompile"' /tmp/tools.json && grep -q '"cf_load"' /tmp/tools.json \
+    && echo "vrunner-mcp: $(grep -oE '"name":"[a-z_0-9]+"' /tmp/tools.json | sort -u | wc -l) tools" \
+    && rm /tmp/tools.json
+
+# --- the demo base -----------------------------------------------------------
+# One template base in the image; every workstation gets its own copy on first
+# use (see config/1c/stand.sh). Built from a configuration template in the
+# platform context when one is named — DEMO_TEMPLATE=<file>, e.g. the .cf of
+# the training УНФ — otherwise from an empty configuration: the stand still
+# shows the tools. The mcp-1c extension goes in here; whether it applies is
+# checked right away through a throwaway Apache, and a 404 is a warning, not a
+# failure: on an empty 8.5 base the spike saw it refused (DefaultLanguage
+# check), the demo configuration is where it matters.
+ARG DEMO_TEMPLATE=
+COPY config/1c/stand.sh /usr/local/bin/1c-stand
+RUN --mount=type=bind,from=platform,target=/platform \
+    sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand \
+    && P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
+    && if [ -n "${DEMO_TEMPLATE}" ]; then test -f "/platform/${DEMO_TEMPLATE}" && tpl="/UseTemplate /platform/${DEMO_TEMPLATE}"; else tpl=""; fi \
+    && xvfb-run -a "$P/1cv8" CREATEINFOBASE "File=$B" $tpl /DisableStartupDialogs /DisableStartupMessages /Out /tmp/create.log \
+    && test -s "$B/1Cv8.1CD" \
+    # two Designer runs: two -Extension keys in one command line are refused
+    && xvfb-run -a "$P/1cv8" DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+         /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService /Out /tmp/ext.log \
+    && xvfb-run -a "$P/1cv8" DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+         /UpdateDBCfg -Extension MCP_HTTPService /Out /tmp/upd.log \
+    && cat /tmp/create.log /tmp/ext.log /tmp/upd.log && rm -f /tmp/create.log /tmp/ext.log /tmp/upd.log \
+    && chmod -R a+rX /opt/1c-demo \
+    # the check: a copy of the base, published for www-data on a spare port
+    && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \
+    && 1c-stand publish www-data 8089 /tmp/chk /tmp/chk-pub \
+    && apache2 -f /tmp/chk-pub/apache.conf -k start && sleep 3 \
+    && code=$(curl -s -o /tmp/hs -w '%{http_code}' http://127.0.0.1:8089/base/hs/mcp-1c/version) \
+    && apache2 -f /tmp/chk-pub/apache.conf -k stop \
+    && case "$code" in \
+         200) echo "demo base: mcp-1c HTTP service answers $(tr -d ' \n' </tmp/hs)" ;; \
+         404) echo "WARNING demo base: HTTP 404 — the mcp-1c extension did not apply; the stand works without the 1c tools" ;; \
+         *)   echo "demo base: HTTP service http=$code"; cat /tmp/hs; exit 1 ;; \
+       esac \
+    && rm -rf /tmp/chk /tmp/chk-pub /tmp/hs
+
+# --- the stand's runtime -----------------------------------------------------
+# The menu entry for the Configurator, the check, the agent rules for this
+# image (appended to the shipped AGENTS.md: the base entrypoint re-seeds homes
+# from it by checksum), and the entrypoint wrapper as CMD.
+COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
+COPY config/1c/test-stand.sh /usr/local/bin/test-stand
+COPY config/1c/agents-1c.md /tmp/agents-1c.md
+RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-configurator.desktop \
+    && chmod +x /usr/local/bin/test-stand \
+    && cat /tmp/agents-1c.md >> /etc/skel/.config/zed/AGENTS.md && rm /tmp/agents-1c.md \
+    && grep -q 'демо-стенд' /etc/skel/.config/zed/AGENTS.md
+CMD ["/usr/local/bin/1c-stand", "start"]

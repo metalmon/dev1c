@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Конфигуратор 1С
+Comment=Конфигуратор учебной платформы на базе этого рабочего места (~/base)
+Exec=/usr/local/bin/1c-stand designer
+Terminal=false
+Categories=Development;
+StartupNotify=false

@@ -135,6 +135,35 @@ else; the host key is remembered in the kit on first connect and must match
 afterwards. See the note in `config/sshd-setup.sh` on why keys are not required
 for a pilot.
 
+## The demo stand: the platform inside the container
+
+For a customer who will install nothing on their own machines there is a second
+image, `oktaplus/dev1c-1c`, built by `Dockerfile.1c` on top of `oktaplus/dev1c`:
+the **training** 1C:Enterprise 8.5 (file bases only, one Enterprise session per
+base, no server), a demo base per workstation, `mcp-1c` and `vanessa-runner`
+inside. The agent sees the same ports as with the tunnel — `777N` (mcp-1c),
+`778N` (vrunner-mcp) — served locally by `config/1c/stand.sh`, so Zed, the
+skills and the rules do not change; the Configurator is in the application
+menu, and `1cv8` is on the `PATH`. The base of workstation `devN` is
+`~/base`, seeded from the image on first use; the project directory for
+vrunner is `~/project`.
+
+The installer is 1.7 GB and comes from the 1C site through a browser form, so
+this layer is built where the file is, not in CI:
+
+```
+mkdir platform                         # git- and docker-ignored
+# put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz)
+# optionally the demo configuration template, e.g. the training УНФ's 1Cv8.cf
+docker build -f Dockerfile.1c --build-context platform=platform              [--build-arg DEMO_TEMPLATE=1Cv8.cf] -t oktaplus/dev1c-1c:latest .
+docker exec <container> test-stand    # the check of a running stand
+```
+
+The build itself checks the platform (ldd, a base created under Xvfb), the
+mcp-1c HTTP service on the demo base through a throwaway Apache, and
+vrunner-mcp's tool list. While a stand holds `777N`/`778N`, `1c-connect` from a
+real machine cannot bind them: a workstation is either demo or real.
+
 ## Building a release
 
 CI builds the image and the installers and uploads `dev1c-kit` with both kits:

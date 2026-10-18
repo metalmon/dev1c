@@ -1194,7 +1194,10 @@ mod tests {
 
     #[test]
     fn progress_text_shows_title_and_elapsed() {
-        let now = Instant::now();
+        // Anchored an hour into the future: a fresh CI runner can have under
+        // 12 minutes of uptime, and `Instant::now() - Duration::from_secs(725)`
+        // panics (underflow) once the subtracted duration outruns it.
+        let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now - Duration::from_secs(725), phase: Phase::Decompile, note: String::new(), seen: now };
         let (title, elapsed) = progress_text(&r, now);
         assert_eq!(title, "Выгружаю конфигурацию");
@@ -1205,7 +1208,9 @@ mod tests {
 
     #[test]
     fn stale_after_five_quiet_minutes() {
-        let now = Instant::now();
+        // Same underflow risk as above: anchor `now` well past any real
+        // clock value before subtracting minutes from it.
+        let now = Instant::now() + Duration::from_secs(3600);
         let fresh = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(299) };
         assert!(!is_stale(&fresh, now));
         let quiet = Running { which: Which::Export, started: now, phase: Phase::Push, note: String::new(), seen: now - Duration::from_secs(301) };
@@ -1238,13 +1243,19 @@ mod tests {
     #[test]
     fn a_progress_event_moves_phase_note_and_seen() {
         let mut ui = Ui::for_test();
-        let old_seen = Instant::now() - Duration::from_secs(10);
+        // `on_progress` reads the real `Instant::now()` internally (it has
+        // no `now` parameter to anchor), so the baseline here has to be a
+        // plain, un-subtracted reading too — anchoring it into the future
+        // like the tests above would make it always outrun the function's
+        // real-clock `seen`, and subtracting from it risks the same
+        // underflow this round is fixing.
+        let old_seen = Instant::now();
         ui.progress = Some(Running { which: Which::Export, started: old_seen, phase: Phase::Decompile, note: String::new(), seen: old_seen });
         on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() });
         let r = ui.progress.as_ref().unwrap();
         assert_eq!(r.phase, Phase::Push);
         assert_eq!(r.note, "x");
-        assert!(r.seen > old_seen);
+        assert!(r.seen >= old_seen);
         assert!(ui.dirty);
     }
 

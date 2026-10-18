@@ -125,6 +125,13 @@ pub fn git_flags(login: &str) -> Vec<String> {
         "core.quotepath=false".into(),
         "credential.helper=".into(),
         format!("http.extraHeader=Authorization: Basic {auth}"),
+        // A configuration dump is ~90k small files. On Windows `git commit`
+        // waits for its own auto-gc (it cannot detach), and repacking that
+        // many objects took an hour on a laptop. Never gc from the bridge;
+        // the two caches make status/add on 90k files bearable.
+        "gc.auto=0".into(),
+        "core.fscache=true".into(),
+        "core.preloadindex=true".into(),
     ]
     .into_iter()
     .flat_map(|f| ["-c".to_string(), f])
@@ -356,6 +363,7 @@ mod tests {
         assert!(f.iter().any(|a| a == "user.name=dev2"));
         assert!(f.iter().any(|a| a == "http.extraHeader=Authorization: Basic ZGV2MjpkZXYy"));
         assert!(f.iter().any(|a| a == "credential.helper="));
+        assert!(f.iter().any(|a| a == "gc.auto=0"), "no auto-gc from the bridge: a 90k-file commit must not repack");
         let mut cfg = Cfg::default();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");

@@ -734,11 +734,13 @@ pub fn quit(cx: &mut App) {
 
 /// `Ev::Progress`: фаза/заметка идут в карточку хода, не в журнал — тот
 /// получил свою строку с заголовком фазы через `line_of` уже отдельно.
-fn on_progress(ui: &mut Ui, p: Progress) {
+/// `now` — параметр, а не свой `Instant::now()`, иначе тест не отличил бы
+/// «`seen` подвинулся» от «часы сами не стоят на месте».
+fn on_progress(ui: &mut Ui, p: Progress, now: Instant) {
     if let Some(r) = ui.progress.as_mut() {
         r.phase = p.phase;
         r.note = p.note;
-        r.seen = Instant::now();
+        r.seen = now;
     }
     ui.dirty = true;
 }
@@ -774,17 +776,18 @@ fn handle(ev: Ev, cx: &mut App) {
             }
         }
         Ev::Line(line) => {
+            let now = Instant::now();
             let ui = cx.global_mut::<Ui>();
             if let Some(r) = ui.progress.as_mut() {
                 r.note = line.text;
-                r.seen = Instant::now();
+                r.seen = now;
                 ui.dirty = true;
             } else {
                 note_line(ui, line);
                 cx.refresh_windows();
             }
         }
-        Ev::Progress(p) => on_progress(cx.global_mut::<Ui>(), p),
+        Ev::Progress(p) => on_progress(cx.global_mut::<Ui>(), p, Instant::now()),
         Ev::Done { err, cancelled } => {
             let ui = cx.global_mut::<Ui>();
             let line = on_done(ui, err, cancelled);
@@ -1243,19 +1246,19 @@ mod tests {
     #[test]
     fn a_progress_event_moves_phase_note_and_seen() {
         let mut ui = Ui::for_test();
-        // `on_progress` reads the real `Instant::now()` internally (it has
-        // no `now` parameter to anchor), so the baseline here has to be a
-        // plain, un-subtracted reading too — anchoring it into the future
-        // like the tests above would make it always outrun the function's
-        // real-clock `seen`, and subtracting from it risks the same
-        // underflow this round is fixing.
-        let old_seen = Instant::now();
-        ui.progress = Some(Running { which: Which::Export, started: old_seen, phase: Phase::Decompile, note: String::new(), seen: old_seen });
-        on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() });
+        // `on_progress` now takes `now` as a parameter instead of reading
+        // the real clock itself: a plain `assert!(r.seen >= old_seen)`
+        // against the real clock would hold even if the function never
+        // touched `seen` at all, since real time never runs backwards.
+        // Anchored, so the `- 10s` below can't underflow a short-lived
+        // runner's clock either.
+        let now = Instant::now() + Duration::from_secs(3600);
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, note: String::new(), seen: now - Duration::from_secs(10) });
+        on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() }, now);
         let r = ui.progress.as_ref().unwrap();
         assert_eq!(r.phase, Phase::Push);
         assert_eq!(r.note, "x");
-        assert!(r.seen >= old_seen);
+        assert_eq!(r.seen, now);
         assert!(ui.dirty);
     }
 

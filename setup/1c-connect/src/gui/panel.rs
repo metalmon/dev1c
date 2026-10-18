@@ -524,7 +524,7 @@ impl Render for Panel {
         // Меню закрывается само; пункты зовут те же `gui::*`, что и кнопки.
         // Своё имя на вкладку: меню помнит построенные пункты по имени
         // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
-        let more = |id: &'static str| Button::new(id).outline().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
+        let more = |id: &'static str| Button::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
         let busy_now = busy.is_some();
 
         let foot_actions: AnyElement = match tab {

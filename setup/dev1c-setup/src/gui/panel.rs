@@ -238,12 +238,31 @@ impl Panel {
 
     /// Поле по Fluent: без кольца фокуса, у активного — акцентная линия 2 px
     /// снизу (так же в `1c-connect` и так было в прежнем `app.css`).
-    fn input(state: &Entity<InputState>, accent: Hsla, window: &Window, cx: &App) -> impl IntoElement {
+    fn input(state: &Entity<InputState>, accent: Hsla, stroke: Hsla, window: &Window, cx: &App) -> impl IntoElement {
         let focused = state.read(cx).focus_handle(cx).is_focused(window);
+        let (h, colour) = if focused { (px(2.), accent) } else { (px(1.), stroke) };
         div()
             .relative()
             .child(Input::new(state).focus_bordered(false))
-            .when(focused, |d| d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent)))
+            // Нижняя линия поля — подпись Fluent: в покое сильнее рамки,
+            // у активного поля акцентная и вдвое толще.
+            .child(div().absolute().bottom_0().left_1().right_1().h(h).rounded_b_sm().bg(colour))
+    }
+
+    /// Строка списка по прежнему окну: отступы 10/8, разделитель между
+    /// строками и подсветка под курсором.
+    fn list_row(id: &'static str, ix: usize, row_border: Hsla, hover: Hsla) -> Stateful<Div> {
+        div()
+            .id((id, ix))
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .px_2()
+            .py(px(10.))
+            .rounded(px(4.))
+            .when(ix > 0, |d| d.border_t_1().border_color(row_border))
+            .hover(|s| s.bg(hover))
     }
 
     /// Прокручиваемая область с полосой поверх текста.
@@ -264,8 +283,11 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
-        let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
+        // Слои Fluent, как в прежнем окне: серое основание, белые слои
+        // поверх, карточка состояния — слой 1С-палитры.
+        let (ground, layer, border, fg, accent) = (t.muted, t.background, t.border, t.foreground, t.primary);
         let (success, warning, danger, card) = (t.success, t.warning, t.danger, t.secondary);
+        let (stroke, row_border) = (t.input, t.table_row_border);
         let theme = t.clone();
         // Подписи и подробности — основной текст вполсилы: `muted_foreground`
         // отдан подсказкам полей, для настоящего текста он недобирает контраста.
@@ -299,7 +321,7 @@ impl Render for Panel {
         // Заголовок окна: значок, название, кнопки Windows рисует TitleBar.
         // Фон — фон окна: своя полоса акцентом спорила бы с единственной
         // акцентной кнопкой в шапке.
-        let title_bar = TitleBar::new().bg(bg).border_b_1().border_color(border.opacity(0.6)).child(
+        let title_bar = TitleBar::new().bg(layer).border_b_1().border_color(border.opacity(0.6)).child(
             h_flex()
                 .items_center()
                 .gap_2()
@@ -378,10 +400,8 @@ impl Render for Panel {
                 Self::scrolled(
                     "ops",
                     &self.body_scroll,
-                    v_flex().gap_2().py_1().children(rows.into_iter().map(|o| {
-                        h_flex()
-                            .items_start()
-                            .gap_3()
+                    v_flex().children(rows.into_iter().enumerate().map(|(ix, o)| {
+                        Self::list_row("ops", ix, row_border, ground)
                             .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(o.dot, &theme)))
                             .child(
                                 v_flex()
@@ -442,10 +462,8 @@ impl Render for Panel {
                 Self::scrolled(
                     "access",
                     &self.body_scroll,
-                    v_flex().gap_3().py_1().children(rows.into_iter().map(|r| {
-                        h_flex()
-                            .items_start()
-                            .gap_3()
+                    v_flex().children(rows.into_iter().enumerate().map(|(ix, r)| {
+                        Self::list_row("access", ix, row_border, ground)
                             .child(div().w(px(150.)).flex_shrink_0().text_color(caption).child(r.what))
                             .child(
                                 v_flex()
@@ -478,15 +496,13 @@ impl Render for Panel {
                                     .text_color(if failed == 0 { success } else { danger })
                                     .child(format!("прошло {passed}, провалено {failed}")),
                             )
-                            .children(checks.into_iter().map(|c| {
+                            .children(checks.into_iter().enumerate().map(|(ix, c)| {
                                 let dot = match (c.ok, c.info) {
                                     (true, false) => Dot::Up,
                                     (true, true) => Dot::Off,
                                     _ => Dot::Down,
                                 };
-                                h_flex()
-                                    .items_start()
-                                    .gap_3()
+                                Self::list_row("check", ix, row_border, ground)
                                     .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(dot, &theme)))
                                     .child(
                                         v_flex()
@@ -517,7 +533,7 @@ impl Render for Panel {
                         .when(!hint.is_empty(), |v| v.child(div().text_size(px(12.)).text_color(caption).child(hint)))
                 };
                 let input = |label: &'static str, hint: &'static str, state: &Entity<InputState>| {
-                    labelled(label, hint, Self::input(state, accent, window, cx).into_any_element())
+                    labelled(label, hint, Self::input(state, accent, stroke, window, cx).into_any_element())
                 };
                 let group = |title: &'static str| {
                     v_flex().gap_4().child(div().font_weight(FontWeight::SEMIBOLD).child(title))
@@ -623,7 +639,7 @@ impl Render for Panel {
                     .when(confirming, |row| {
                         // Удаление данных подтверждается именем контейнера:
                         // то же правило, что было в окне на Tauri.
-                        row.child(div().w(px(260.)).child(Self::input(&confirm, accent, window, cx)))
+                        row.child(div().w(px(260.)).child(Self::input(&confirm, accent, stroke, window, cx)))
                             .child(Button::new("clean-data").danger().label("Удалить").disabled(busy_now).on_click(cx.listener(
                                 |panel, _, _, cx| {
                                     let typed = panel.confirm.read(cx).value().to_string();
@@ -663,62 +679,87 @@ impl Render for Panel {
             _ => div().into_any_element(),
         };
 
+        // Раскладка слоями, как в прежнем окне: белая шапка с карточкой
+        // состояния, серое основание, белая панель вкладки со своим подвалом.
+        let head = v_flex()
+            .bg(layer)
+            .border_b_1()
+            .border_color(border)
+            .px_6()
+            .pt_4()
+            .pb(px(14.))
+            .gap_3()
+            .child(status);
+
+        let panel = v_flex()
+            .flex_1()
+            .min_h_0()
+            .bg(layer)
+            .rounded(px(4.))
+            .border_1()
+            .border_color(border.opacity(0.6))
+            .overflow_hidden()
+            .child(div().flex_1().min_h_0().p_5().child(body))
+            .child(if working {
+                // Работа: дорожка акцентом темы, бегунок по кругу.
+                div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
+                    div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(accent).with_animation(
+                        "progress-thumb",
+                        Animation::new(Duration::from_millis(1200)).repeat(),
+                        |d, t| d.left(relative(-0.25 + 1.25 * t)),
+                    ),
+                )
+            } else {
+                // Покой: линия 1 px в полосе той же высоты — подвал не прыгает.
+                div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
+            })
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_5()
+                    .py_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(if foot_left.1 { danger } else { caption })
+                            .child(foot_left.0),
+                    )
+                    .child(foot_actions),
+            );
+
         v_flex()
             .track_focus(&self.focus)
             .size_full()
-            .bg(bg)
+            .bg(ground)
             .text_color(fg)
             .text_size(px(14.))
             .child(title_bar)
+            .child(head)
             .child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    // Сетка отступов прежнего окна: 24 по бокам, 16 сверху.
+                    // Сетка отступов прежнего окна: 24 по бокам, 12 сверху.
                     .px_6()
-                    .py_4()
+                    .pt_3()
+                    .pb_3()
                     .gap_3()
-                    .child(status)
                     .children(notice.map(|text| {
                         Self::layer(warning.opacity(0.15), warning)
                             .flex()
                             .flex_row()
                             .items_start()
                             .gap_2()
-                            .p_2()
+                            .px_3()
+                            .py_2p5()
                             .child(div().w(px(16.)).flex_shrink_0().text_color(warning).child("!"))
-                            .child(div().flex_1().min_w_0().text_size(px(13.)).child(text))
+                            .child(div().flex_1().min_w_0().child(text))
                     }))
-                    .child(div().border_b_1().border_color(border.opacity(0.6)).child(tabs))
-                    .child(div().flex_1().min_h_0().child(body))
-                    .child(if working {
-                        // Работа: дорожка акцентом темы, бегунок по кругу.
-                        div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
-                            div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(accent).with_animation(
-                                "progress-thumb",
-                                Animation::new(Duration::from_millis(1200)).repeat(),
-                                |d, t| d.left(relative(-0.25 + 1.25 * t)),
-                            ),
-                        )
-                    } else {
-                        // Покой: линия 1 px в полосе той же высоты.
-                        div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
-                    })
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .pt_3()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(13.))
-                                    .text_color(if foot_left.1 { danger } else { caption })
-                                    .child(foot_left.0),
-                            )
-                            .child(foot_actions),
-                    ),
+                    .child(div().border_b_1().border_color(border).child(tabs))
+                    .child(panel),
             )
     }
 }

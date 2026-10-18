@@ -4,7 +4,7 @@
 # 1C platform"), so Zed, the skills and the agent rules do not know which of
 # the two they talk to.
 #
-#   1c-stand start            root, from the image's CMD: Xvfb, one Apache per
+#   1c-stand start            root, from the image's CMD: one Apache per
 #                             workstation, the 777N/778N listeners, then the
 #                             base image's entrypoint
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
@@ -46,7 +46,6 @@ V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
 DEMO=/opt/1c-demo/base
 RUN=/run/1c
 LOG=/var/log/1c
-DISPLAY_VFB=:99
 
 log() { printf '[1c-stand] %s\n' "$*"; }
 
@@ -71,9 +70,10 @@ mcp)
     ;;
 vrunner)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed
-    export DISPLAY=$DISPLAY_VFB
+    # Its own virtual display with its own cookie, as this user: the
+    # Configurator vrunner launches in batch mode needs one, nobody looks at it.
     cd "$HOME/project"
-    exec vrunner-mcp
+    exec xvfb-run -a vrunner-mcp
     ;;
 designer)
     seed
@@ -124,7 +124,6 @@ EOF
     ;;
 start)
     mkdir -p "$RUN" "$LOG"
-    Xvfb "$DISPLAY_VFB" -screen 0 1280x1024x24 -ac -nolisten tcp >"$LOG/xvfb.log" 2>&1 &
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
         d="$RUN/$u"

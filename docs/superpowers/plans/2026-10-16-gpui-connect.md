@@ -589,3 +589,27 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 - [ ] **Step 2–3:** тест падает → переписать файл и константы.
 - [ ] **Step 4: Проверки:** `--no-default-features` тесты; один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000).
 - [ ] **Step 5: Commit** — `feat(1c-connect): 1C palette — light like Такси, dark on the same tokens, yellow accent`
+
+---
+
+### Task 12: Правки по живому просмотру (2026-10-18, светлая тема 1С)
+
+Заказчик посмотрел сборку e669659 и попросил:
+
+1. **Подвал переносится на две строки.** Текст слева в нижней плашке («Провалено: 9. Отчёт — last-check.txt в комплекте») сейчас обрезается с многоточием; он должен переноситься (до двух строк, 13 px), плашка растёт по содержимому. Убрать `truncate`/`min_w_0` ограничение, дать `whitespace_normal` и ширину `flex_1`; кнопки справа выровнены по центру по вертикали.
+2. **Вкладки должны влезать в 380 px.** На снимке пять вкладок с бейджем «9» не помещаются, «Журнал» обрезан. Сделать вкладки компактнее: `TabBar`/`Tab` меньшего размера (`Sizable::small()` или `xsmall()`, что есть у `TabBar`), горизонтальные отступы вкладки 8 px, бейдж не добавляет ширины сверх цифры; при необходимости шрифт вкладок 14 px. Проверить, что все пять с бейджем на двух вкладках помещаются при 380 − 2·16 px.
+3. **Рабочее место — свободный ввод, не список.** `Select` dev1/dev2/dev3 заменить обычным `Input` (placeholder `dev1`); `Fields.workstation: Entity<InputState>`; `host_of` берёт текст; `WORKSTATIONS`, `SelectState`, `IndexPath` и `WsState` убрать. Проверка допустимых значений остаётся в `cfg::validate` (пользователей будут создавать позже — не трогать).
+4. **«Адрес публикации» уходит из формы.** Поле убрать. В `cfg.rs` добавить `pub fn derived_base_url(base_path: &str) -> String` → `http://localhost/{имя последней папки base_path}/hs/mcp-1c` (пустой/без папки base_path → `http://localhost/Buh/hs/mcp-1c`). В `gui::save_host`: `base_url` переносится из текущего cfg, но если он пуст или равен `derived_base_url(старый base_path)`, он пересчитывается от нового `base_path` — то есть умолчание следует за базой, а переопределение в toml сохраняется. `host_of` отдаёт `base_url` пустым; `fields_differ` его не сравнивает. Тест `derived_base_url_follows_the_base_folder` (`C:\Bases\Buh` → `http://localhost/Buh/hs/mcp-1c`; `C:\Bases\Buh\` → то же; `""` → `http://localhost/Buh/hs/mcp-1c`) и тест на `save_host`-логику через чистую функцию `pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String` (saved.base_url == derived(saved.base_path) → derived(new); иначе saved.base_url как есть; пустой → derived(new)).
+5. **Подсказка под «Каталог проекта» — одна строка:** «Папка с src и git, не каталог базы.»
+
+**Files:** `setup/1c-connect/src/gui/panel.rs`, `setup/1c-connect/src/gui/mod.rs`, `setup/1c-connect/src/cfg.rs` (одна чистая функция + тест), spec «Состояние и вид» (список полей: сервер; рабочее место + пароль; база; пользователь базы + пароль; каталог проекта; `base_url`, `dump`, `tools` — в toml), `1c-connect.example.toml` — комментарий у `base_url`, что умолчание считается от каталога базы.
+
+- [ ] **Step 1: Падающие тесты** (п. 4) — `cfg::tests::derived_base_url_follows_the_base_folder`, `gui::tests::carried_base_url_keeps_an_override_and_follows_the_default`.
+- [ ] **Step 2–3:** падают → реализовать всё 1–5.
+- [ ] **Step 4: Проверки:** `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` (тест в `cfg.rs` выполняется здесь); один `cargo check -p onec-connect -j 1 --all-targets` (`CARGO_TARGET_DIR=C:\cargo-target\gpui-connect`, передний план, timeout 600000).
+- [ ] **Step 5: Commit** — `feat(1c-connect): footer wraps, compact tabs, free workstation input, base_url derived from the base folder, shorter project hint`
+
+6. **Плейсхолдеры визуально отличаются от введённого текста** (заказчик 2026-10-18): найти токен цвета плейсхолдера у gpui-base; если это muted.foreground — в theme/1c.json muted.foreground = #9A9A9A (светлая) / #8A8A8A (тёмная), а подписи полей, подстрока состояния и путь в подвале переходят на foreground с opacity(0.75).
+7. **Проверка «server из образца» убирается везде** (заказчик: в проде адрес может совпасть): guard в gui::start_session, проверка в CLI (main.rs), параметр is_sample у verify::params_fact, сама Cfg::is_sample с тестами; упоминания в spec/STATUS.
+8. **Крупноват текст в списках, подвал «Проекта» не влезает** (заказчик, снимок вкладки «Проект»): заголовки строк списков 14 px, подробности 13 px; строка-подсказка — просто текст 13 px foreground.opacity(0.75) без кружка; кнопки «Проекта»: «Каталог», «Загрузить», «Выгрузить» (полные названия — в tooltip и в заголовках журнала).
+   Решение заказчика: кнопка «Каталог» убирается (вместе с gui::open_dir); остаются «Загрузить» и «Выгрузить».

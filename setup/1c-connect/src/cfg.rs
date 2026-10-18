@@ -16,6 +16,16 @@ pub const DEFAULT_TOOLS: [&str; 12] = [
     "test_yaxunit", "task_status", "task_result", "task_cancel", "cache_show", "cache_clear",
 ];
 
+/// Адрес публикации по умолчанию: имя последней папки `base_path`. Поля в
+/// окне нет — адрес следует за каталогом базы, а правку в toml переносит
+/// `gui::carried_base_url`. Имя, которое `validate` не пропустит (пусто,
+/// «C:», кириллица), заменяется на `Buh` из образца.
+pub fn derived_base_url(base_path: &str) -> String {
+    let name = base_path.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("");
+    let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c));
+    format!("http://localhost/{}/hs/mcp-1c", if ok { name } else { "Buh" })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
@@ -76,12 +86,6 @@ impl Cfg {
         let cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
         cfg.validate()?;
         Ok(cfg)
-    }
-
-    /// The sample's address: the kit ships the sample as the working file,
-    /// and connecting with it dials a machine nobody has.
-    pub fn is_sample(&self) -> bool {
-        self.host.server == Host::default().server
     }
 
     pub fn number(&self) -> Option<u16> {
@@ -203,13 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn untouched_sample_is_recognised() {
-        // The kit ships the sample as 1c-connect.toml; connecting with it
-        // means dialling an address nobody has.
-        let mut c = sample();
-        assert!(c.is_sample());
-        c.host.server = "10.0.0.5:3393".into();
-        assert!(!c.is_sample());
+    fn derived_base_url_follows_the_base_folder() {
+        assert_eq!(derived_base_url("C:\\Bases\\Buh"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(derived_base_url("C:\\Bases\\Buh\\"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(derived_base_url(""), "http://localhost/Buh/hs/mcp-1c");
+        // Имя папки, которое `validate` не пропустит, — то же умолчание.
+        assert_eq!(derived_base_url("C:\\"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(derived_base_url("C:\\Базы\\Бух"), "http://localhost/Buh/hs/mcp-1c");
     }
 
     #[test]

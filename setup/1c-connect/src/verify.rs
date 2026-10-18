@@ -84,14 +84,13 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     }
 }
 
-/// Файл параметров есть и адрес среды в нём не из образца.
-pub fn params_fact(file_exists: bool, is_sample: bool, server: &str) -> Check {
-    if !file_exists {
-        Check::fail(ORDER[0], "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
-    } else if is_sample {
-        Check::fail(ORDER[0], format!("server = {server} — адрес из образца"), "впишите адрес своей среды: его печатает dev1c-setup install")
-    } else {
+/// Файл параметров есть. Адрес среды не проверяется: в проде он может
+/// совпасть с образцом.
+pub fn params_fact(file_exists: bool, server: &str) -> Check {
+    if file_exists {
         Check::pass(ORDER[0], format!("среда {server}"))
+    } else {
+        Check::fail(ORDER[0], "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
     }
 }
 
@@ -105,7 +104,7 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
-    v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), ctx.cfg.is_sample(), &h.server));
+    v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), &h.server));
     v.push(match find_1cv8() {
         Some(p) => Check::pass(ORDER[1], p.display().to_string()),
         None => Check::fail(ORDER[1], "1cv8.exe не найден", "установите платформу 1С на эту машину"),
@@ -206,14 +205,13 @@ mod tests {
     }
 
     #[test]
-    fn untouched_parameters_fail_first_and_say_what_to_do() {
+    fn a_missing_parameters_file_fails_first_and_says_what_to_do() {
         assert_eq!(ORDER[0], "параметры");
-        let c = params_fact(false, true, "192.168.1.10:3393");
+        let c = params_fact(false, "192.168.1.10:3393");
         assert!(!c.ok && c.hint.contains("example"), "{c:?}");
-        let c = params_fact(true, true, "192.168.1.10:3393");
-        assert!(!c.ok && c.detail.contains("образца"), "{c:?}");
-        let c = params_fact(true, false, "10.0.0.5:3393");
-        assert!(c.ok);
+        // Адрес образца больше не повод для красного: в проде он может совпасть.
+        assert!(params_fact(true, "192.168.1.10:3393").ok);
+        assert!(params_fact(true, "10.0.0.5:3393").ok);
     }
 
     #[test]

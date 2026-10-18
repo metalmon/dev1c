@@ -13,10 +13,9 @@ use crate::session::State;
 use common::check::Check;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, IndexPath, Theme};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -25,31 +24,26 @@ use std::time::Duration;
 /// Значок программы в шапке — тот же PNG, что у окна и у трея.
 const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 
-/// Рабочие места среды: ровно три логина, больше `cfg::validate` не пустит.
-const WORKSTATIONS: [&str; 3] = ["dev1", "dev2", "dev3"];
-
 /// Как часто перерисовывать окно, чтобы «N мин» в карточке не отставало.
 const TICK: Duration = Duration::from_secs(30);
-
-type WsState = Entity<SelectState<Vec<&'static str>>>;
 
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
 }
 
-/// Поля вкладки «Параметры». Рабочее место — `Select` из `gpui-component`:
-/// три значения обходятся одной сущностью состояния, сегментные вкладки не
-/// понадобились.
+/// Поля вкладки «Параметры». Рабочее место — обычный ввод, а не список:
+/// логины среды заводят позже, допустимые значения стережёт `cfg::validate`.
+/// Адреса публикации в окне нет — он считается от каталога базы
+/// (`cfg::derived_base_url`).
 pub struct Fields {
     pub server: Entity<InputState>,
     pub password: Entity<InputState>,
     pub base_path: Entity<InputState>,
     pub db_user: Entity<InputState>,
     pub db_password: Entity<InputState>,
-    pub base_url: Entity<InputState>,
     pub project: Entity<InputState>,
-    pub workstation: WsState,
+    pub workstation: Entity<InputState>,
 }
 
 pub struct Panel {
@@ -99,43 +93,44 @@ pub const HINT_PROJECT: &str = "Параметры → Проект, затем 
 const PROJECT_EMPTY: &str = "Каталог проекта задаётся в «Параметрах»; install раскладывает git.";
 
 /// Строки вкладки «Проект»: кружок, заголовок, подробность. Чистая — вид
-/// только раскладывает её по слоям.
-pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Dot, String, String)> {
-    let Some(v) = v else { return vec![(Dot::Off, PROJECT_EMPTY.into(), String::new())] };
+/// только раскладывает её по слоям. Кружка нет (`None`) у подсказки: она
+/// не факт о проекте, а объяснение, и рисуется мелким текстом.
+pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String)> {
+    let Some(v) = v else { return vec![(None, PROJECT_EMPTY.into(), String::new())] };
     if !v.ok {
-        return vec![(Dot::Busy, v.dir.clone(), v.why.clone()), (Dot::Off, HINT_PROJECT.into(), String::new())];
+        return vec![(Some(Dot::Busy), v.dir.clone(), v.why.clone()), (None, HINT_PROJECT.into(), String::new())];
     }
-    let mut rows = vec![(Dot::Up, v.dir.clone(), format!("ветка {}", v.branch))];
+    let mut rows = vec![(Some(Dot::Up), v.dir.clone(), format!("ветка {}", v.branch))];
     rows.extend(v.lines.iter().map(|l| match l.split_once(": ") {
-        Some((title, detail)) => (Dot::Off, title.to_string(), detail.to_string()),
-        None => (Dot::Off, l.clone(), String::new()),
+        Some((title, detail)) => (Some(Dot::Off), title.to_string(), detail.to_string()),
+        None => (Some(Dot::Off), l.clone(), String::new()),
     }));
     rows
 }
 
-/// Параметры из полей. `dump` и `tools` пустые — их подставит `save_host`
-/// из текущих, в окне этих полей нет.
+/// Параметры из полей. `dump`, `tools` и `base_url` пустые — их подставит
+/// `save_host` из текущих, в окне этих полей нет.
 pub fn host_of(f: &Fields, cx: &App) -> Host {
     let v = |e: &Entity<InputState>| e.read(cx).value().to_string();
     Host {
         server: v(&f.server),
         password: v(&f.password),
-        workstation: f.workstation.read(cx).selected_value().copied().unwrap_or(WORKSTATIONS[0]).to_string(),
+        workstation: v(&f.workstation),
         base_path: v(&f.base_path),
         db_user: v(&f.db_user),
         db_password: v(&f.db_password),
-        base_url: v(&f.base_url),
+        base_url: String::new(),
         dump: String::new(),
         project: v(&f.project),
         tools: Vec::new(),
     }
 }
 
-/// Поля окна отличаются от сохранённых? `dump` и `tools` в окне не
-/// редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
+/// Поля окна отличаются от сохранённых? `dump`, `tools` и `base_url` в окне
+/// не редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
 pub fn fields_differ(a: &Host, b: &Host) -> bool {
-    fn key(h: &Host) -> [&str; 8] {
-        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.base_url, &h.project]
+    fn key(h: &Host) -> [&str; 7] {
+        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.project]
     }
     key(a) != key(b)
 }
@@ -170,16 +165,14 @@ impl Panel {
         })
         .detach();
 
-        let ws_ix = WORKSTATIONS.iter().position(|w| *w == host.workstation).unwrap_or(0);
         let fields = Fields {
             server: field("192.168.1.10:3393", &host.server, false, window, cx),
             password: field("пароль рабочего места", &host.password, true, window, cx),
             base_path: field("C:\\Bases\\Buh", &host.base_path, false, window, cx),
             db_user: field("Администратор", &host.db_user, false, window, cx),
             db_password: field("пароль", &host.db_password, true, window, cx),
-            base_url: field("http://localhost/Buh/hs/mcp-1c", &host.base_url, false, window, cx),
             project: field("C:\\proj\\Buh", &host.project, false, window, cx),
-            workstation: cx.new(|cx| SelectState::new(WORKSTATIONS.to_vec(), Some(IndexPath::new(ws_ix)), window, cx)),
+            workstation: field("dev1", &host.workstation, false, window, cx),
         };
         // Минуты в карточке: пока окно живо, раз в полминуты перерисовка.
         // Окно закрыли — сущность не поднимается, задача уходит.
@@ -309,6 +302,10 @@ impl Render for Panel {
         let (bg, border, fg, muted, accent) = (t.background, t.border, t.foreground, t.muted_foreground, t.primary);
         let (success, warning, danger, card, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
         let theme = t.clone();
+        // Приглушённый цвет остался за подсказками в полях (`muted_foreground`
+        // красит placeholder); подписи и подробности — основной текст
+        // вполсилы, чтобы набранное читалось темнее незаполненного.
+        let caption = fg.opacity(0.75);
 
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
@@ -350,7 +347,7 @@ impl Render for Panel {
                     .min_w_0()
                     .gap_0p5()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(state))
-                    .child(div().text_size(px(13.)).text_color(muted).child(sub)),
+                    .child(div().text_size(px(13.)).text_color(caption).child(sub)),
             )
             .child(
                 Switch::new("link").focus_ring(false)
@@ -361,8 +358,10 @@ impl Render for Panel {
 
         // Бейдж — не акцент: проблемы красным, непрочитанное приглушённым
         // слоем (акцент берёт только переключатель и главная кнопка).
+        // Ширины сверх самой цифры бейдж не добавляет: пять вкладок и так
+        // едва помещаются в 380 px.
         let badge = |n: usize, colour: Hsla, on: Hsla| {
-            div().px_1().rounded_sm().bg(colour).text_size(px(13.)).text_color(on).child(n.to_string())
+            div().rounded_sm().bg(colour).text_color(on).child(n.to_string())
         };
         let with_badge = |label: &'static str, n: usize, colour: Hsla, on: Hsla| {
             let t = KitTab::new().label(label);
@@ -372,8 +371,12 @@ impl Render for Panel {
                 t
             }
         };
+        // `xsmall`: пять подписей с двумя бейджами в 348 px (380 минус поля)
+        // влезают только при шрифте 12 px и зазоре 10 px — на `small`
+        // «Журнал» обрезается.
         let tabs = TabBar::new("tabs")
             .underline()
+            .xsmall()
             .selected_index(match tab {
                 gui::Tab::Params => 0,
                 gui::Tab::Ext => 1,
@@ -427,25 +430,18 @@ impl Render for Panel {
                 .child(
                     v_flex()
                         .gap_3()
-                        .child(Self::row("Адрес среды и порт SSH", muted, accent, &f.server, window, cx))
+                        .child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx))
                         .child(
                             h_flex()
                                 .gap_3()
                                 .items_end()
-                                .child(
-                                    div().flex_1().child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(div().text_size(px(13.)).text_color(muted).child("Рабочее место"))
-                                            .child(Select::new(&f.workstation).focus_ring(false)),
-                                    ),
-                                )
-                                .child(div().flex_1().child(Self::row("Пароль рабочего места", muted, accent, &f.password, window, cx))),
+                                .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
+                                .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
                         )
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_size(px(13.)).text_color(muted).child("База"))
+                                .child(div().text_size(px(13.)).text_color(caption).child("База"))
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -457,14 +453,13 @@ impl Render for Panel {
                         .child(
                             h_flex()
                                 .gap_3()
-                                .child(div().flex_1().child(Self::row("Пользователь базы", muted, accent, &f.db_user, window, cx)))
-                                .child(div().flex_1().child(Self::row("Пароль", muted, accent, &f.db_password, window, cx))),
+                                .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                                .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
                         )
-                        .child(Self::row("Адрес публикации", muted, accent, &f.base_url, window, cx))
                         .child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_size(px(13.)).text_color(muted).child("Каталог проекта"))
+                                .child(div().text_size(px(13.)).text_color(caption).child("Каталог проекта"))
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -472,12 +467,7 @@ impl Render for Panel {
                                         .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
                                         .child(pick("pick-project", f.project.clone(), cx)),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .text_color(muted)
-                                        .child("Исходники в src, git с веткой рабочего места. Не каталог базы."),
-                                ),
+                                .child(div().text_size(px(13.)).text_color(caption).child("Папка с src и git, не каталог базы.")),
                         ),
                 )
                 .into_any_element(),
@@ -498,7 +488,7 @@ impl Render for Panel {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(o.title.clone())
+                                .child(div().text_size(px(14.)).child(o.title.clone()))
                                 .child(div().text_size(px(13.)).text_color(muted).child(o.detail.clone())),
                         )
                 })))
@@ -508,21 +498,18 @@ impl Render for Panel {
                 .size_full()
                 .overflow_y_scroll()
                 .child(v_flex().gap_2().children(project_rows(cx.global::<Ui>().project.as_ref()).into_iter().map(|(d, title, detail)| {
-                    Self::layer(card, border)
-                        .flex()
-                        .flex_row()
-                        .gap_3()
-                        .items_center()
-                        .px_3()
-                        .py_2()
-                        .child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme)))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .child(title)
-                                .child(div().text_size(px(13.)).text_color(muted).child(detail)),
-                        )
+                    let row = Self::layer(card, border).flex().flex_row().gap_3().items_center().px_3().py_2();
+                    // Подсказка — не факт о проекте: мелкий текст без кружка.
+                    let Some(d) = d else {
+                        return row.child(div().text_size(px(13.)).text_color(caption).child(title));
+                    };
+                    row.child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(div().text_size(px(14.)).child(title))
+                            .child(div().text_size(px(13.)).text_color(muted).child(detail)),
+                    )
                 })))
                 .into_any_element(),
             gui::Tab::Check => {
@@ -536,9 +523,9 @@ impl Render for Panel {
                             .gap_2()
                             .when(checks.is_empty(), |d| {
                                 d.child(
-                                    div()
-                                        .text_color(muted)
-                                        .child("Семь фактов снизу вверх; отчёт — last-check.txt в комплекте."),
+                                    Self::layer(card, border).px_3().py_2().text_size(px(13.)).text_color(caption).child(
+                                        "Семь фактов снизу вверх; отчёт — last-check.txt в комплекте.",
+                                    ),
                                 )
                             })
                             .children(checks.iter().map(|c| {
@@ -554,7 +541,7 @@ impl Render for Panel {
                                         v_flex()
                                             .flex_1()
                                             .min_w_0()
-                                            .child(c.what.clone())
+                                            .child(div().text_size(px(14.)).child(c.what.clone()))
                                             .child(div().text_size(px(13.)).text_color(muted).child(c.detail.clone()))
                                             .when(d == Dot::Down && !c.hint.is_empty(), |v| {
                                                 v.child(div().text_size(px(13.)).text_color(warning).child(c.hint.clone()))
@@ -633,19 +620,16 @@ impl Render for Panel {
                         .on_click(|_, _, cx| gui::run_op(cx, Which::Install)),
                 )
                 .into_any_element(),
+            // Подписи короткие: в 348 px длинные «Загрузить из git» и
+            // «Выгрузить в git» не помещались. Полная формулировка — в
+            // подсказке и в журнале (`Which::title`).
             gui::Tab::Project => h_flex()
                 .gap_2()
                 .child(
-                    Button::new("open-dir")
-                        .outline()
-                        .label("Открыть каталог")
-                        .disabled(busy.is_some())
-                        .on_click(|_, _, cx| gui::open_dir(cx)),
-                )
-                .child(
                     Button::new("import")
                         .outline()
-                        .label("Загрузить из git")
+                        .label("Загрузить")
+                        .tooltip("Загрузить из git")
                         .disabled(busy.is_some())
                         .loading(busy == Some(Busy::Project))
                         .on_click(|_, _, cx| gui::run_op(cx, Which::Import)),
@@ -653,7 +637,8 @@ impl Render for Panel {
                 .child(
                     Button::new("export")
                         .primary()
-                        .label("Выгрузить в git")
+                        .label("Выгрузить")
+                        .tooltip("Выгрузить в git")
                         .disabled(busy.is_some())
                         .loading(busy == Some(Busy::Project))
                         .on_click(|_, _, cx| gui::run_op(cx, Which::Export)),
@@ -718,13 +703,15 @@ impl Render for Panel {
                     .pt_3()
                     .border_t_1()
                     .border_color(border.opacity(0.6))
+                    // Итог последнего действия переносится (до двух строк),
+                    // а не обрезается многоточием: плашка растёт по тексту.
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
                             .text_size(px(13.))
-                            .text_color(if foot_left.1 { danger } else { muted })
-                            .truncate()
+                            .text_color(if foot_left.1 { danger } else { caption })
+                            .whitespace_normal()
+                            .line_clamp(2)
                             .child(foot_left.0),
                     )
                     .child(foot_actions),
@@ -752,9 +739,10 @@ mod tests {
     }
 
     #[test]
-    fn dirty_ignores_dump_and_tools_but_sees_a_changed_field() {
+    fn dirty_ignores_dump_tools_and_base_url_but_sees_a_changed_field() {
         let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
-        let shown = Host { dump: String::new(), tools: Vec::new(), ..saved.clone() };
+        // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
+        let shown = Host { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
         assert!(!fields_differ(&shown, &saved));
         let edited = Host { server: "h:1".into(), ..shown.clone() };
         assert!(fields_differ(&edited, &saved));
@@ -767,7 +755,7 @@ mod tests {
     fn project_rows_explain_a_missing_layout_and_list_status_lines() {
         let none = project_rows(None);
         assert_eq!(none.len(), 1);
-        assert_eq!(none[0], (Dot::Off, "Каталог проекта задаётся в «Параметрах»; install раскладывает git.".into(), String::new()));
+        assert_eq!(none[0], (None, "Каталог проекта задаётся в «Параметрах»; install раскладывает git.".into(), String::new()));
 
         let bad = ProjectView {
             dir: "C:\\proj\\Buh".into(),
@@ -777,8 +765,9 @@ mod tests {
             why: "каталог проекта ещё не разложен".into(),
         };
         let rows = project_rows(Some(&bad));
-        assert_eq!(rows[0], (Dot::Busy, "C:\\proj\\Buh".into(), "каталог проекта ещё не разложен".into()));
-        assert!(rows.iter().any(|r| r.1 == HINT_PROJECT || r.2 == HINT_PROJECT), "{rows:?}");
+        assert_eq!(rows[0], (Some(Dot::Busy), "C:\\proj\\Buh".into(), "каталог проекта ещё не разложен".into()));
+        // Подсказка — без кружка: вид рисует её мелким текстом.
+        assert_eq!(rows[1], (None, HINT_PROJECT.into(), String::new()));
 
         let good = ProjectView {
             lines: vec!["ветка: dev1".into(), "изменено: 2 файла".into()],
@@ -788,9 +777,9 @@ mod tests {
         };
         let rows = project_rows(Some(&good));
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], (Dot::Up, "C:\\proj\\Buh".into(), "ветка dev1".into()));
-        assert_eq!(rows[1], (Dot::Off, "ветка".into(), "dev1".into()));
-        assert_eq!(rows[2], (Dot::Off, "изменено".into(), "2 файла".into()));
+        assert_eq!(rows[0], (Some(Dot::Up), "C:\\proj\\Buh".into(), "ветка dev1".into()));
+        assert_eq!(rows[1], (Some(Dot::Off), "ветка".into(), "dev1".into()));
+        assert_eq!(rows[2], (Some(Dot::Off), "изменено".into(), "2 файла".into()));
     }
 
     #[test]

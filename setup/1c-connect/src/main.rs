@@ -202,12 +202,6 @@ fn connect(ctx: &Ctx) -> Result<()> {
         cfg::FILE,
         cfg::FILE
     );
-    anyhow::ensure!(
-        !ctx.cfg.is_sample(),
-        "{}: server всё ещё из образца ({}) — впишите адрес своей среды, его печатает dev1c-setup install",
-        cfg::FILE,
-        ctx.cfg.host.server
-    );
     let ports = ctx.cfg.ports();
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",

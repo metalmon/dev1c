@@ -268,12 +268,24 @@ pub fn op_view(id: String, title: String, st: OpState) -> OpView {
     OpView { id, title, dot, detail }
 }
 
-/// Сохранить параметры сервера. Списка инструментов и каталога выгрузки в
-/// окне нет (правятся в toml): берём их из текущих параметров, иначе пустые
-/// значения из формы затёрли бы toml. Каталог проекта — из формы.
+/// Адрес публикации для записи: умолчание идёт за каталогом базы, правка в
+/// toml переживает его смену.
+pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
+    if saved.base_url.is_empty() || saved.base_url == cfg::derived_base_url(&saved.base_path) {
+        cfg::derived_base_url(new_base_path)
+    } else {
+        saved.base_url.clone()
+    }
+}
+
+/// Сохранить параметры сервера. Списка инструментов, каталога выгрузки и
+/// адреса публикации в окне нет (правятся в toml): берём их из текущих
+/// параметров, иначе пустые значения из формы затёрли бы toml. Каталог
+/// проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
+    host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
@@ -317,9 +329,6 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     let ui = cx.global_mut::<Ui>();
     if !ui.kit.path(cfg::FILE).exists() {
         return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
-    }
-    if ui.cfg.is_sample() {
-        return Err("server всё ещё из образца — впишите адрес своей среды, его печатает dev1c-setup install".into());
     }
     if ui.session.is_some() && ui.link.is_on() {
         return Ok(());
@@ -425,16 +434,6 @@ pub fn refresh_project(cx: &mut App) {
             || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), lines: Vec::new(), ok: false, why: PANIC_TEXT.into() }),
         );
     });
-}
-
-/// Каталог проекта в проводнике.
-pub fn open_dir(cx: &mut App) {
-    let dir = cx.global::<Ui>().cfg.host.project.clone();
-    let mut c = std::process::Command::new(if cfg!(windows) { "explorer" } else { "xdg-open" });
-    if let Err(e) = c.arg(&dir).spawn() {
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("не открыть {dir}: {e}") });
-        cx.refresh_windows();
-    }
 }
 
 /// Семь фактов от основания к вершине; отчёт пишется в `last-check.txt` тем
@@ -663,7 +662,10 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, Which, LOG_CAP, TRAY_PNG};
+    use super::{
+        badge, carried_base_url, line_of, link_is_current, link_line, note_line, save_host, Kind, Line, Tab, Ui, Which,
+        LOG_CAP, TRAY_PNG,
+    };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::State;
     use common::Event;
@@ -723,6 +725,18 @@ mod tests {
         let err = save_host(&mut ui, host).unwrap_err();
         assert!(!err.is_empty());
         assert_eq!(std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok(), before);
+    }
+
+    #[test]
+    fn carried_base_url_keeps_an_override_and_follows_the_default() {
+        // Поля «Адрес публикации» в окне нет: умолчание идёт за каталогом
+        // базы, а правка в toml переживает смену базы.
+        let mut saved = Host { base_path: "C:\\Bases\\Buh".into(), base_url: cfg::derived_base_url("C:\\Bases\\Buh"), ..Host::default() };
+        assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost/Torg/hs/mcp-1c");
+        saved.base_url = "http://localhost:8081/InfoBase/hs/mcp-1c".into();
+        assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost:8081/InfoBase/hs/mcp-1c");
+        saved.base_url = String::new();
+        assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost/Torg/hs/mcp-1c");
     }
 
     #[test]

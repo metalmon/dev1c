@@ -150,8 +150,14 @@ api() { # $1 = method, $2 = path, $3 = json body (optional) → HTTP status
     fi
 }
 if [ "$(api GET /orgs/dev1c)" != "200" ]; then
-    api POST /orgs '{"username":"dev1c","full_name":"Разработка 1С","visibility":"public","repo_admin_change_team_access":true}' >/dev/null
-    echo "organisation dev1c created" >>"$GITEA_LOG"
+    code=$(api POST /orgs '{"username":"dev1c","full_name":"Разработка 1С","visibility":"public","repo_admin_change_team_access":true}')
+    if [ "$code" = "201" ]; then
+        echo "organisation dev1c created" >>"$GITEA_LOG"
+    else
+        # Registration is open in the pilot: a person who signed up as "dev1c"
+        # would hold the name and every first push would fail. Say so loudly.
+        echo "FAIL: organisation dev1c not created (HTTP $code); if a user named dev1c exists, rename it" >>"$GITEA_LOG"
+    fi
 fi
 owners=$(curl -sf -u "${GITEA_ADMIN}:${GITEA_PASSWORD}" "http://localhost:3000/api/v1/orgs/dev1c/teams" 2>/dev/null \
     | jq -r '.[] | select(.name=="Owners") | .id' 2>/dev/null | head -1)

@@ -17,7 +17,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Sizable, Theme};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -25,6 +25,9 @@ use std::time::Duration;
 
 /// Значок программы в шапке — тот же PNG, что у окна и у трея.
 const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
+
+/// Значок меню «Ещё»: три линии (Lucide `menu`).
+const MENU_SVG: &[u8] = include_bytes!("../../icons/menu.svg");
 
 /// Как часто перерисовывать окно, чтобы «N мин» в карточке не отставало.
 const TICK: Duration = Duration::from_secs(30);
@@ -517,12 +520,12 @@ impl Render for Panel {
         };
 
         // Подвал: ровно одна акцентная кнопка главного действия, остальное —
-        // в меню «…» (как «Ещё» в 1С и в Fluent). Трём кнопкам в 348 px
-        // места не было. Значка «многоточие» в наборе нет — подпись.
+        // в меню «Ещё» (как в 1С и в Fluent): значок — три линии (Lucide
+        // `menu`, лежит в icons/, ISC). Трём кнопкам в 348 px места не было.
         // Меню закрывается само; пункты зовут те же `gui::*`, что и кнопки.
         // Своё имя на вкладку: меню помнит построенные пункты по имени
         // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
-        let more = |id: &'static str| Button::new(id).outline().label("…").tooltip("Ещё");
+        let more = |id: &'static str| Button::new(id).outline().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
         let busy_now = busy.is_some();
 
         let foot_actions: AnyElement = match tab {

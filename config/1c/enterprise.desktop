@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=1С:Предприятие
+Comment=Толстый клиент учебной платформы на базе этого рабочего места (~/base). Пока он открыт, инструменты агента 1c заняты: учебная версия даёт один сеанс на базу
+Exec=/usr/local/bin/1c-stand enterprise
+Icon=1cv8c
+Terminal=false
+Categories=Office;
+StartupNotify=true

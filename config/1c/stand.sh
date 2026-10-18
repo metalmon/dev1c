@@ -10,6 +10,8 @@
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
 #   1c-stand vrunner <N>      one vrunner-mcp on stdio for workstation dev<N>
 #   1c-stand designer         the Configurator on the user's base (menu entry)
+#   1c-stand enterprise       the thick client on it (menu entry); holds the
+#                             base's one Enterprise session while open
 #   1c-stand publish <user> <port> <base dir> <out dir>
 #                             writes the publication (default.vrd) and the
 #                             Apache config for one base; `start` uses it per
@@ -60,12 +62,15 @@ seed() { # runs as the workstation user; $HOME is theirs
         log "demo base seeded into $HOME/base" >&2
     fi
     mkdir -p "$HOME/project"
-    # the Configurator on the desktop, next to Zed and Gitea (same way as the
-    # base image puts those there: a copy with the executable bit)
-    d="$HOME/Desktop/1c-configurator.desktop"
-    if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
-        cp /usr/share/applications/1c-configurator.desktop "$d" && chmod +x "$d"
-    fi
+    # the Configurator and the thick client on the desktop, next to Zed and
+    # Gitea (same way as the base image puts those there: a copy with the
+    # executable bit)
+    for l in 1c-configurator 1c-enterprise; do
+        d="$HOME/Desktop/$l.desktop"
+        if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
+            cp "/usr/share/applications/$l.desktop" "$d" && chmod +x "$d"
+        fi
+    done
 }
 
 case "${1:-}" in
@@ -84,6 +89,10 @@ vrunner)
 designer)
     seed
     exec "$V8/1cv8" DESIGNER /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
+    ;;
+enterprise)
+    seed
+    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
     ;;
 seed)
     # runuser without -l keeps root's HOME: take the caller's own
@@ -169,7 +178,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | designer" >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | designer | enterprise | seed | publish ..." >&2
     exit 2
     ;;
 esac

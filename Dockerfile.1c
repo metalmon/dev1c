@@ -168,9 +168,10 @@ RUN --mount=type=bind,from=platform,target=/platform \
 # image (appended to the shipped AGENTS.md: the base entrypoint re-seeds homes
 # from it by checksum), and the entrypoint wrapper as CMD.
 COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
+COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.desktop
 COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
-RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-configurator.desktop \
+RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-configurator.desktop /usr/share/applications/1c-enterprise.desktop \
     && chmod +x /usr/local/bin/test-stand \
     && cat /tmp/agents-1c.md >> /etc/skel/.config/zed/AGENTS.md && rm /tmp/agents-1c.md \
     && grep -q 'демо-стенд' /etc/skel/.config/zed/AGENTS.md

@@ -3,6 +3,7 @@ Type=Application
 Name=Конфигуратор 1С
 Comment=Конфигуратор учебной платформы на базе этого рабочего места (~/base); конфигурация УНФ грузится около минуты
 Exec=/usr/local/bin/1c-stand designer
+Icon=1cv8
 Terminal=false
 Categories=Development;
 StartupNotify=true

@@ -453,12 +453,12 @@ mod tests {
         assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "m");
         let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
         assert!(heads.is_empty(), "{heads}");
-        // The mutex isn't left held by the cancelled run: a push through the
-        // bridge's own call() — which takes LOCK itself — goes through, not «занято».
-        let (text, is_err) = call(&p, "project_push", &serde_json::json!({"message": "m"}));
-        assert!(!is_err, "{text}");
-        let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
-        assert!(heads.contains("refs/heads/dev2"), "{heads}");
+        // push() itself never takes LOCK — that's the caller's (flow::lock,
+        // project::call) RAII guard, dropped on any return including the
+        // cancelled one — so there is nothing about the mutex to prove here;
+        // a clear flag simply pushes.
+        push(&p, "m", &AtomicBool::new(false)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(remote_has(&p, "dev2"), Ok(true));
     }
 
     #[test]

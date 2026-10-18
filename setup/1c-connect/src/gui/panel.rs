@@ -15,6 +15,7 @@ use crate::session::State;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
@@ -55,16 +56,23 @@ pub struct Panel {
     pub focus: FocusHandle,
     pub fields: Fields,
     log_scroll: ScrollHandle,
+    /// Полоса прокрутки «Проекта» — своя ручка, отдельная от журнала.
+    project_scroll: ScrollHandle,
     /// Сколько строк журнала было на прошлой отрисовке: чтобы
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
     original: Host,
     /// Высота видимой области тела вкладки и высота содержимого «Параметров»
-    /// с последней отрисовки; `fitted` — высоту окна уже подбирали, второй
-    /// раз не нужно (иначе подбор гонялся бы по кругу).
+    /// с последней отрисовки.
     viewport_h: Option<Pixels>,
     params_h: Option<Pixels>,
-    fitted: bool,
+    /// Пара (видимая область, содержимое), по которой подбирали высоту в
+    /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
+    /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
+    /// подвал, переносящийся на вторую строку после первого подбора, меняет
+    /// видимую область и без повторной подгонки окно прокручивалось бы на
+    /// высоту этой строки.
+    last_fit: Option<(Pixels, Pixels)>,
 }
 
 /// Кружок, состояние и подстрока карточки. Порты — аргументом, чтобы
@@ -187,22 +195,68 @@ impl Panel {
         // хоть по одному полю.
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { focus, fields, log_scroll: ScrollHandle::new(), log_len: 0, original, viewport_h: None, params_h: None, fitted: false }
+        Self {
+            focus,
+            fields,
+            log_scroll: ScrollHandle::new(),
+            project_scroll: ScrollHandle::new(),
+            log_len: 0,
+            original,
+            viewport_h: None,
+            params_h: None,
+            last_fit: None,
+        }
     }
 
     /// Обмер на отрисовке: как только известны и видимая область, и
-    /// содержимое «Параметров», окно один раз растёт на их разницу. Сам
+    /// содержимое «Параметров», окно подбирает высоту на их разницу — не
+    /// только в первый раз, а при каждом обмере, заметно отличающемся от
+    /// прошлого подбора (`window::needs_fit`). Цикла нет: после
+    /// `window.resize` новый обмер даёт пару, для которой `fit_height_for`
+    /// возвращает `None` (неподвижная точка или зажатый предел). Сам
     /// подбор — отложенно (`defer_in`): менять размер окна прямо посреди
     /// раскладки нельзя.
     fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.viewport_h = viewport.or(self.viewport_h);
         self.params_h = params.or(self.params_h);
         let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
-        if self.fitted {
+        if !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
             return;
         }
-        self.fitted = true;
+        self.last_fit = Some((v, c));
         cx.defer_in(window, move |_, window, cx| crate::gui::window::fit_height(window, cx, c, v));
+    }
+
+    /// Область прокрутки с тонкой полосой (Проект, Журнал): корень
+    /// `relative`, дорожка-дитя `overflow_y_scroll` + `track_scroll`, полоса
+    /// — поверх, абсолютным слоем (как `Scrollable::render` в
+    /// `gpui-component`). Дорожка прозрачная, бегунок 3 px (5 px при
+    /// наведении), цвета бегунка — из темы (`scrollbar.thumb.background`),
+    /// режим показа — из темы. «Параметры» этим не зовёт: вкладка мерная,
+    /// окно подстраивается под неё, полосы там нет.
+    fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement {
+        div()
+            .id(id)
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .id(format!("{id}-area"))
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(handle)
+                    .child(content),
+            )
+            .child(div().absolute().inset_0().child(
+                Scrollbar::vertical(handle).id(format!("{id}-scrollbar")).viewport_from_layout().styles(|s| {
+                    s.track(|t| t.bg(gpui::transparent_black()))
+                        .track_hover(|t| t.bg(gpui::transparent_black()))
+                        .track_active(|t| t.bg(gpui::transparent_black()))
+                        .thumb(|t| t.width(px(3.)).inset(px(2.)).radius(px(2.)))
+                        .thumb_hover(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.)))
+                        .thumb_active(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.)))
+                }),
+            ))
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
@@ -472,25 +526,23 @@ impl Render for Panel {
                             .child(div().text_size(px(13.)).text_color(caption).child(detail)),
                     )
                 };
-                div()
-                    .id("project")
-                    .size_full()
-                    .overflow_y_scroll()
-                    // 12 px между операциями и строками проекта: это два
-                    // списка, а не один.
-                    .child(
-                        v_flex()
-                            .gap_3()
-                            .child(v_flex().gap_2().children(ops.iter().map(|o| fact(o.dot, o.title.clone(), o.detail.clone()))))
-                            .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
-                                // Подсказка — не факт о проекте: мелкий текст без кружка.
-                                match d {
-                                    Some(d) => fact(d, title, detail),
-                                    None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
-                                }
-                            }))),
-                    )
-                    .into_any_element()
+                Self::scrolled(
+                    "project",
+                    &self.project_scroll,
+                    v_flex()
+                        // 12 px между операциями и строками проекта: это два
+                        // списка, а не один.
+                        .gap_3()
+                        .child(v_flex().gap_2().children(ops.iter().map(|o| fact(o.dot, o.title.clone(), o.detail.clone()))))
+                        .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
+                            // Подсказка — не факт о проекте: мелкий текст без кружка.
+                            match d {
+                                Some(d) => fact(d, title, detail),
+                                None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
+                            }
+                        }))),
+                )
+                .into_any_element()
             }
             gui::Tab::Log => {
                 let lines = cx.global::<Ui>().log.clone();
@@ -498,13 +550,10 @@ impl Render for Panel {
                     self.log_len = lines.len();
                     self.log_scroll.scroll_to_bottom();
                 }
-                div()
-                    .id("log")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.log_scroll)
-                    .text_size(px(14.))
-                    .child(v_flex().gap_1().children(lines.into_iter().map(|l| {
+                Self::scrolled(
+                    "log",
+                    &self.log_scroll,
+                    v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
                         if l.kind == Kind::Head {
                             div().mt_2().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(l.text).into_any_element()
                         } else {
@@ -520,8 +569,9 @@ impl Render for Panel {
                                 .child(div().flex_1().child(l.text))
                                 .into_any_element()
                         }
-                    })))
-                    .into_any_element()
+                    })),
+                )
+                .into_any_element()
             }
         };
 

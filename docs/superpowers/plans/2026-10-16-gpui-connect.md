@@ -674,3 +674,33 @@ pub fn apply_menu_theme(mode: MenuMode);                           // Windows: L
 - [ ] **Step 2: Реализация** по списку выше.
 - [ ] **Step 3: Спека и STATUS.**
 - [ ] **Step 4: Commit** — `feat(1c-connect): log sections with time and duration, marks instead of colour alone, sans font, 1c-connect.log with an Open item; tighter footer line height` (с трейлером `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).
+
+### Task 15: Высота без скролла на «Параметрах», тонкая полоса прокрутки на остальных вкладках
+
+Заказчик (2026-10-18): на «Параметрах» снова появилась прокрутка; на «Проекте» и «Журнале» без прокрутки не обойтись, но полоса должна быть тонкой аккуратной линией (сейчас голый gpui `overflow_y_scroll` полосу не рисует вовсе).
+
+**Причина скролла на «Параметрах» (найдена контролёром):** `Panel::measured` подбирает высоту один раз (`fitted: bool`). После первого подбора видимая область тела меняется — текст в подвале переносится на две строки («Сохранено…», путь к комплекту, ошибка), и вкладка начинает прокручиваться на высоту одной строки. Плюс округления: содержимое ровно в видимую область по дробным пикселям всё равно даёт прокрутку.
+
+**Files:** `setup/1c-connect/src/gui/{panel,window}.rs`, spec `docs/superpowers/specs/2026-10-16-gpui-connect-design.md` (абзац «Высота окна идёт за содержимым…» и пункт про вкладки).
+
+**Подбор высоты (`window.rs`, `panel.rs`):**
+- `pub const SLACK: Pixels = px(4.)` в `window.rs` — запас под округления. `fit_height_for(current, content, viewport, work_area_h, gap)`: `want = (current + (content - viewport) + SLACK).min(work_area_h - 2·gap).max(MIN_SIZE.height)`; как и раньше, `None`, если `|want - current| <= 1 px`. Неподвижная точка — `content == viewport - SLACK`: окно на 4 px выше содержимого и больше не дёргается.
+- Тесты `the_height_follows_the_content_both_ways_and_stays_on_the_work_area` переписать под запас: `(640, 700, 560, 1300, 12) → Some(784)`; `(640, 460, 560, 1300, 12) → Some(544)`; `(640, 556, 560, 1300, 12) → None` (неподвижная точка); `(640, 556.5, 560, 1300, 12) → None` (меньше пикселя); `(640, 2000, 560, 1000, 12) → Some(976)`; `(640, 100, 560, 1300, 12) → Some(MIN_SIZE.height)`; `MIN_SIZE.height == 420`; `SLACK == px(4.)`.
+- `Panel`: поле `fitted: bool` заменить на `last_fit: Option<(Pixels, Pixels)>` — пара (viewport, content), по которой подбирали в прошлый раз. `measured` подбирает заново, когда пара отличается от `last_fit` больше чем на 1 px по любой из координат (первый раз — всегда); после подбора `last_fit = Some((v, c))`. Цикла нет: после `window.resize` новый обмер даёт пару, для которой `fit_height_for` возвращает `None` (неподвижная точка или зажатый предел). Комментарий к полю поправить.
+- Чистая функция `pub fn needs_fit(last: Option<(Pixels, Pixels)>, now: (Pixels, Pixels)) -> bool` в `window.rs` с тестом: `None → true`; та же пара → `false`; сдвиг 0.5 px → `false`; сдвиг 2 px по viewport → `true`; по content → `true`.
+
+**Полоса прокрутки (`panel.rs`, вкладки «Проект» и «Журнал»):**
+- Рисует `gpui_base::Scrollbar` (реэкспорт: `gpui_component::scroll::Scrollbar` — найди, под каким путём он доступен через `gpui_kit`, `grep -rn "pub use" …/gpui-kit-0.7.3/src`). Схема — как в `Scrollable::render` из `…/gpui-component-0.7.3/src/scroll/scrollable.rs`: корень `div().id(..).size_full().relative()` с двумя детьми — областью прокрутки (`div().id(..).size_full().overflow_y_scroll().track_scroll(&handle).child(содержимое)`) и `Scrollbar::vertical(&handle)`; посмотри там же `render_scrollbar`, как именно кладётся полоса (absolute/inset), и повтори. Своих виджетов не рисовать.
+- `Panel` получает `project_scroll: ScrollHandle` для «Проекта»; «Журнал» использует уже имеющийся `log_scroll` (автопрокрутка вниз должна остаться).
+- Стиль — тонкая линия: `Scrollbar::vertical(&h).styles(|s| s.track(|t| t.bg(gpui::transparent_black())).track_hover(|t| t.bg(gpui::transparent_black())).track_active(|t| t.bg(gpui::transparent_black())).thumb(|t| t.width(px(3.)).inset(px(2.)).radius(px(2.))).thumb_hover(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.))).thumb_active(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.))))`. Цвета бегунка — из темы (`scrollbar.thumb.background` в `theme/1c.json` уже есть), не задавать. Режим показа — из темы (авто-скрытие), не задавать.
+- «Параметры» — без полосы: вкладка мерная, окно подстраивается под неё; на крошечном экране (пол 420 px) она прокрутится без полосы — принято.
+- Вынести сборку «область + полоса» в один помощник `fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement` (или метод `Panel`), чтобы обе вкладки звали одно и то же.
+
+**Спека:** в абзаце про высоту окна — запас `SLACK` 4 px и подбор при каждом изменении обмера (а не один раз), с причиной (подвал на две строки); в пункте про вкладки — у «Проекта» и «Журнала» тонкая полоса прокрутки (бегунок 3 px, при наведении 5 px, дорожка прозрачная, цвета из темы), у «Параметров» полосы нет.
+
+**Сборка — только в CI** (уговор заказчика). Локально `cargo` не запускать; API сверяй по реестру `C:\Users\bucher\.cargo\registry\src\*\{gpui-pre-0.3.9,gpui-base-0.7.3,gpui-component-0.7.3,gpui-kit-0.7.3}`.
+
+- [ ] **Step 1: Падающие тесты** (`fit_height_for` с запасом, `needs_fit`).
+- [ ] **Step 2: Реализация** по списку выше.
+- [ ] **Step 3: Спека.**
+- [ ] **Step 4: Commit** — `fix(1c-connect): the window refits whenever the measure changes and keeps a 4 px slack; thin scrollbars on Проект and Журнал` (трейлер `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; identity через `GIT_AUTHOR_NAME=OktaPlus GIT_AUTHOR_EMAIL=oktacoder@gmail.com` и те же `GIT_COMMITTER_*`, сообщение файлом `-F`).

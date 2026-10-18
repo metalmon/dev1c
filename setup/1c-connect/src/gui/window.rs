@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 pub const MIN_SIZE: Size<Pixels> = size(px(380.0), px(420.0));
 /// Зазор до края рабочей области.
 pub const GAP: Pixels = px(12.0);
+/// Запас под округления дробных пикселей и перенос подвала на вторую
+/// строку: без него окно и содержимое сходятся ровно в упор и подбор
+/// гоняется по кругу на высоту одной строки. Неподвижная точка подбора —
+/// содержимое на `SLACK` меньше видимой области.
+pub const SLACK: Pixels = px(4.0);
 /// Окно только что спряталось по потере фокуса — клик по трею в этом окне
 /// закрывает, а не открывает заново.
 pub const JUST_HIDDEN: Duration = Duration::from_millis(400);
@@ -59,12 +64,26 @@ pub fn wanted_size(cx: &App) -> Size<Pixels> {
 }
 
 /// Высота окна под содержимое — в обе стороны: ровно на разницу между
-/// содержимым и видимой областью (переполнение растит, пустота ужимает),
-/// не выше рабочей области с зазорами и не ниже `MIN_SIZE.height`. `None` —
-/// разница меньше пикселя, трогать окно незачем.
+/// содержимым и видимой областью (переполнение растит, пустота ужимает)
+/// плюс запас `SLACK`, не выше рабочей области с зазорами и не ниже
+/// `MIN_SIZE.height`. `None` — разница меньше пикселя, трогать окно
+/// незачем.
 pub fn fit_height_for(current: Pixels, content: Pixels, viewport: Pixels, work_area_h: Pixels, gap: Pixels) -> Option<Pixels> {
-    let want = (current + (content - viewport)).min(work_area_h - gap - gap).max(MIN_SIZE.height);
+    let want = (current + (content - viewport) + SLACK).min(work_area_h - gap - gap).max(MIN_SIZE.height);
     ((want - current).abs() > px(1.0)).then_some(want)
+}
+
+/// Нужно ли подбирать высоту заново: впервые (`last` — `None`) или пара
+/// (видимая область, содержимое) сдвинулась больше чем на 1 px по любой из
+/// координат с прошлого подбора. Чистая — `Panel::measured` зовёт её перед
+/// каждым обмером вместо одноразового флага: подвал, переносящийся на вторую
+/// строку, меняет видимую область и без повторного подбора окно прокручивалось
+/// бы на высоту этой строки.
+pub fn needs_fit(last: Option<(Pixels, Pixels)>, now: (Pixels, Pixels)) -> bool {
+    match last {
+        None => true,
+        Some((v, c)) => (now.0 - v).abs() > px(1.0) || (now.1 - c).abs() > px(1.0),
+    }
 }
 
 /// Переставить окно левым верхним углом в точку (логические px). GPUI умеет
@@ -163,25 +182,43 @@ pub fn toggle_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_height_for, flyout_origin, forget_window, should_show, GAP, MIN_SIZE};
+    use super::{fit_height_for, flyout_origin, forget_window, needs_fit, should_show, GAP, MIN_SIZE, SLACK};
     use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
 
     #[test]
     fn the_height_follows_the_content_both_ways_and_stays_on_the_work_area() {
-        // Содержимое не влезло — вырасти ровно на переполнение.
-        assert_eq!(fit_height_for(px(640.), px(700.), px(560.), px(1300.), px(12.)), Some(px(780.)));
+        // Содержимое не влезло — вырасти на переполнение плюс запас `SLACK`.
+        assert_eq!(fit_height_for(px(640.), px(700.), px(560.), px(1300.), px(12.)), Some(px(784.)));
         // Содержимого стало меньше видимой области — ужаться на разницу
         // (вкладка «Параметры» — мерная: пустота под ней и была жалобой).
-        assert_eq!(fit_height_for(px(640.), px(460.), px(560.), px(1300.), px(12.)), Some(px(540.)));
+        assert_eq!(fit_height_for(px(640.), px(460.), px(560.), px(1300.), px(12.)), Some(px(544.)));
+        // Неподвижная точка — содержимое на `SLACK` меньше видимой области:
+        // окно уже на 4 px выше содержимого, подбор больше не дёргается.
+        assert_eq!(fit_height_for(px(640.), px(556.), px(560.), px(1300.), px(12.)), None);
         // Разница меньше пикселя — окно не трогаем.
-        assert_eq!(fit_height_for(px(640.), px(560.5), px(560.), px(1300.), px(12.)), None);
-        assert_eq!(fit_height_for(px(640.), px(560.), px(560.), px(1300.), px(12.)), None);
+        assert_eq!(fit_height_for(px(640.), px(556.5), px(560.), px(1300.), px(12.)), None);
         // Сверху — рабочая область с зазорами, снизу — наименьшая высота.
         assert_eq!(fit_height_for(px(640.), px(2000.), px(560.), px(1000.), px(12.)), Some(px(976.)));
         assert_eq!(fit_height_for(px(640.), px(100.), px(560.), px(1300.), px(12.)), Some(MIN_SIZE.height));
         assert_eq!(MIN_SIZE.height, px(420.));
+        assert_eq!(SLACK, px(4.));
+    }
+
+    #[test]
+    fn a_new_measure_needs_a_fit_only_when_it_moved_more_than_a_pixel() {
+        // Первый обмер — всегда подбираем.
+        assert!(needs_fit(None, (px(560.), px(556.))));
+        // Та же пара — подбирать незачем.
+        let last = Some((px(560.), px(556.)));
+        assert!(!needs_fit(last, (px(560.), px(556.))));
+        // Сдвиг меньше пикселя — тоже нет.
+        assert!(!needs_fit(last, (px(560.5), px(556.))));
+        // Сдвиг на 2 px по видимой области — подбираем заново.
+        assert!(needs_fit(last, (px(562.), px(556.))));
+        // Сдвиг на 2 px по содержимому — тоже.
+        assert!(needs_fit(last, (px(560.), px(558.))));
     }
 
     #[test]

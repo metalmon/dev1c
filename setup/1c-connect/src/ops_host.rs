@@ -183,6 +183,19 @@ impl Op<Ctx> for Tools {
         anyhow::ensure!(o.ok(), "git не запускается из {}: {}", to.display(), o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
         std::fs::copy(ctx.kit.root.join(VERSION_FILE), to.join(VERSION_FILE)).context("отметка версии")?;
+        if cfg!(windows) {
+            let exe = find_1cv8();
+            if let Some(platform) = exe.as_deref().and_then(|exe| exe.parent()).and_then(|bin| bin.parent()) {
+                match shadow_platform(platform, &to) {
+                    Ok(shadow_dir) if shadow_dir.starts_with(&to) => match add_installed_location(&one_c_estart_cfg(), &shadow_dir) {
+                        Ok(()) => ctx.ok("учебная платформа зарегистрирована в 1С под обычным именем".to_string()),
+                        Err(e) => ctx.warn(format!("путь к платформе не записан в список версий 1С: {e}")),
+                    },
+                    Ok(_) => {} // платформа уже обычная — тень не нужна
+                    Err(e) => ctx.warn(format!("не удалось подготовить платформу к запуску: {e}")),
+                }
+            }
+        }
         Ok(())
     }
     fn revert(&self, _ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
@@ -275,6 +288,79 @@ pub fn find_1cv8() -> Option<PathBuf> {
         return platform_from(&PathBuf::from(dir));
     }
     pick_version(dedup_canonical(scan_1cv8()))
+}
+
+/// Жёсткая ссылка на файл под новым именем; если том не позволяет ссылки
+/// (съёмный диск, другой раздел), копирует файл — не проваливает всю раскладку
+/// теневого каталога из-за одного файла.
+fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(dst);
+    if std::fs::hard_link(src, dst).is_err() {
+        std::fs::copy(src, dst).map_err(|e| format!("копирование {} в {}: {e}", src.display(), dst.display()))?;
+    }
+    Ok(())
+}
+
+/// Теневой каталог `bin` учебной платформы под именами коммерческой версии:
+/// на вход — каталог версии (`…\1cv8t\8.5.1.1150`), на выходе — каталог версии
+/// тени (`<to>\platform\8.5.1.1150`) с `bin\1cv8.exe` и `bin\1cv8c.exe`,
+/// указывающими (жёсткой ссылкой, либо копией) на `1cv8t.exe`/`1cv8ct.exe`.
+/// Если платформа уже коммерческая (рядом есть `1cv8.exe`), тень не нужна —
+/// ничего не создаём и возвращаем исходный каталог платформы без изменений.
+pub fn shadow_platform(platform: &Path, to: &Path) -> Result<PathBuf, String> {
+    let bin = platform.join("bin");
+    if bin.join("1cv8.exe").exists() {
+        return Ok(platform.to_path_buf());
+    }
+    let version = platform.file_name().ok_or_else(|| format!("не удалось определить версию платформы из {}", platform.display()))?;
+    let shadow_dir = to.join("platform").join(version);
+    let shadow_bin = shadow_dir.join("bin");
+    std::fs::create_dir_all(&shadow_bin).map_err(|e| format!("каталог {}: {e}", shadow_bin.display()))?;
+    let entries = std::fs::read_dir(&bin).map_err(|e| format!("чтение {}: {e}", bin.display()))?;
+    for e in entries.filter_map(|e| e.ok()) {
+        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = e.file_name();
+        let src = e.path();
+        link_or_copy(&src, &shadow_bin.join(&name))?;
+        let renamed = match name.to_string_lossy().as_ref() {
+            "1cv8t.exe" => Some("1cv8.exe"),
+            "1cv8ct.exe" => Some("1cv8c.exe"),
+            _ => None,
+        };
+        if let Some(r) = renamed {
+            link_or_copy(&src, &shadow_bin.join(r))?;
+        }
+    }
+    Ok(shadow_dir)
+}
+
+/// Список установленных версий платформы у лаунчера 1С (1CEStart.exe): без
+/// строки на наш теневой каталог он не предложит его в списке версий.
+fn one_c_estart_cfg() -> PathBuf {
+    PathBuf::from(std::env::var_os("APPDATA").unwrap_or_else(|| ".".into())).join("1C").join("1CEStart").join("1CEStart.cfg")
+}
+
+/// Добавляет `InstalledLocation=<location>` в файл лаунчера, если такой строки
+/// там ещё нет; остальные строки не трогает. Файла может не быть — тогда
+/// создаёт его с единственной строкой.
+fn add_installed_location(cfg_path: &Path, location: &Path) -> std::io::Result<()> {
+    let line = format!("InstalledLocation={}", location.display());
+    let existing = std::fs::read_to_string(cfg_path).unwrap_or_default();
+    if existing.lines().any(|l| l == line) {
+        return Ok(());
+    }
+    if let Some(parent) = cfg_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&line);
+    out.push('\n');
+    std::fs::write(cfg_path, out)
 }
 
 /// Ключ подключения конфигуратора: /F для файловой базы, /S для сервер\база.
@@ -542,6 +628,67 @@ mod tests {
         let exe = tmp.join(platform_exe_names()[1]); // учебная платформа — суффикс t
         std::fs::write(&exe, "x").unwrap();
         assert_eq!(platform_from(&tmp), Some(exe));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn shadow_renames_the_training_binaries() {
+        // Теневой bin содержит 1cv8.exe/1cv8c.exe — те же файлы, что 1cv8t.exe/1cv8ct.exe,
+        // плюс остальные файлы bin под своими именами (платформе нужны соседние библиотеки).
+        let tmp = std::env::temp_dir().join(format!("dev1c-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let platform = tmp.join("src").join("1cv8t").join("8.5.1.1150");
+        let bin = platform.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("1cv8t.exe"), "платформа").unwrap();
+        std::fs::write(bin.join("1cv8ct.exe"), "тонкий клиент").unwrap();
+        std::fs::write(bin.join("some.dll"), "библиотека").unwrap();
+        let to = tmp.join("shadow-root");
+
+        let shadow_dir = shadow_platform(&platform, &to).unwrap();
+
+        let shadow_bin = shadow_dir.join("bin");
+        assert_eq!(std::fs::read(shadow_bin.join("1cv8.exe")).unwrap(), std::fs::read(bin.join("1cv8t.exe")).unwrap());
+        assert_eq!(std::fs::read(shadow_bin.join("1cv8c.exe")).unwrap(), std::fs::read(bin.join("1cv8ct.exe")).unwrap());
+        assert!(shadow_bin.join("some.dll").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_commercial_platform_needs_no_shadow() {
+        // 1cv8.exe уже называется как нужно — тень не создаём вообще.
+        let tmp = std::env::temp_dir().join(format!("dev1c-shadow-commercial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let platform = tmp.join("src").join("1cv8").join("8.5.1.1150");
+        let bin = platform.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("1cv8.exe"), "платформа").unwrap();
+        let to = tmp.join("shadow-root");
+
+        let result = shadow_platform(&platform, &to).unwrap();
+
+        assert_eq!(result, platform);
+        assert!(!to.join("platform").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_1cestart_line_is_added_once() {
+        // Повторный вызов (повторный запуск host.tools) не плодит строк.
+        let tmp = std::env::temp_dir().join(format!("dev1c-1cestart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("1CEStart.cfg");
+        std::fs::write(&cfg_path, "ОбщегоНазначения=значение\n").unwrap();
+        let location = tmp.join("platform").join("8.5.1.1150");
+
+        add_installed_location(&cfg_path, &location).unwrap();
+        add_installed_location(&cfg_path, &location).unwrap();
+
+        let text = std::fs::read_to_string(&cfg_path).unwrap();
+        let line = format!("InstalledLocation={}", location.display());
+        assert_eq!(text.lines().filter(|l| *l == line).count(), 1);
+        assert!(text.contains("ОбщегоНазначения=значение"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

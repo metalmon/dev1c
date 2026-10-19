@@ -1,0 +1,76 @@
+# Тесты модуля placement. Чистая геометрия — без gi/GTK.
+import unittest
+
+from scenario import Step, Target
+from targets import Rect
+from placement import bubble_size, place
+
+SCREEN = Rect(0, 0, 2560, 1440)
+
+_TARGET = Target('none', None, None, 'whole')
+
+
+def overlaps(a, b):
+    """Пересекаются ли два прямоугольника (для assertFalse в тестах)."""
+    return not (a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y)
+
+
+class PlaceTests(unittest.TestCase):
+    def test_bubble_never_leaves_the_screen(self):
+        for target in (Rect(36, 122, 48, 48), Rect(2500, 1400, 24, 24), Rect(1280, 0, 48, 48)):
+            b = place(SCREEN, target, (640, 150)).bubble
+            self.assertGreaterEqual(b.x, 0)
+            self.assertGreaterEqual(b.y, 0)
+            self.assertLessEqual(b.x + b.w, SCREEN.w)
+            self.assertLessEqual(b.y + b.h, SCREEN.h)
+
+    def test_bubble_never_covers_its_target(self):
+        target = Rect(36, 122, 48, 48)
+        b = place(SCREEN, target, (640, 150)).bubble
+        self.assertFalse(overlaps(b, target))
+
+    def test_small_screen_still_fits(self):
+        b = place(Rect(0, 0, 1280, 800), Rect(36, 330, 48, 48), (640, 150)).bubble
+        self.assertLessEqual(b.x + b.w, 1280)
+
+    def test_no_target_centres_the_bubble(self):
+        layout = place(SCREEN, None, (640, 150))
+        self.assertEqual(layout.arrow_start, layout.arrow_end)
+
+    def test_screen_with_non_zero_origin(self):
+        # Экран может не начинаться в (0, 0) — проверяем, что это не зашито.
+        screen = Rect(1920, 0, 2560, 1440)
+        target = Rect(1956, 122, 48, 48)
+        b = place(screen, target, (640, 150)).bubble
+        self.assertGreaterEqual(b.x, screen.x)
+        self.assertGreaterEqual(b.y, screen.y)
+        self.assertLessEqual(b.x + b.w, screen.x + screen.w)
+        self.assertLessEqual(b.y + b.h, screen.y + screen.h)
+
+
+class BubbleSizeTests(unittest.TestCase):
+    def _step(self, body):
+        return Step(1, 'Заголовок', body, _TARGET, ('Дальше',), 'button', ())
+
+    def test_width_is_fixed_height_grows_with_lines(self):
+        one_line = bubble_size(self._step('Одна строка.'))
+        three_lines = bubble_size(self._step('Первая.\nВторая.\nТретья.'))
+        self.assertEqual(one_line[0], 640)
+        self.assertEqual(three_lines[0], 640)
+        self.assertEqual(three_lines[1] - one_line[1], 2 * 21)
+
+    def test_head_and_foot_included(self):
+        w, h = bubble_size(self._step('Одна строка.'), head=64, foot=24, line_height=21)
+        self.assertEqual(h, 64 + 24 + 1 * 21)
+
+    def test_empty_body_is_still_valid(self):
+        w, h = bubble_size(self._step(''))
+        self.assertEqual(h, 64 + 24)
+
+    def test_custom_width(self):
+        w, h = bubble_size(self._step('Строка.'), width=480)
+        self.assertEqual(w, 480)
+
+
+if __name__ == '__main__':
+    unittest.main()

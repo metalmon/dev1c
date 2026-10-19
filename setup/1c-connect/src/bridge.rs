@@ -104,10 +104,15 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
 }
 
 use crate::jsonrpc::{self, Frame, Framer, Route};
+use common::{Event, Sink};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
+pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
 /// Правила моста на одно соединение.
 pub struct Rules {
@@ -115,8 +120,51 @@ pub struct Rules {
     pub project: Arc<crate::project::Project>,
     pub configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
     /// Аргументы подключения, подставляемые в каждый вызов инструмента vrunner
-    /// (см. `connection_args`).
+    /// (см. `connection_args`). У порта mcp-1c пустые: туда подставлять
+    /// нечего, база и так передана процессу в командной строке.
     pub defaults: Value,
+    /// Переключатель «MCP включены» окна — общий на оба порта одного сеанса.
+    /// Выключен — каждый вызов инструмента получает отказ, не доходя до
+    /// ребёнка; `initialize`, `tools/list`, уведомления и отмены идут как
+    /// обычно, иначе Zed остался бы без ответа и счёл сервер упавшим.
+    pub enabled: Arc<AtomicBool>,
+    /// Подмешивать ли свои инструменты (`project_status`/`pull`/`push`) в
+    /// список и исполнять их здесь же: `true` у vrunner-mcp (778N), `false`
+    /// у mcp-1c (777N) — там нет ни белого списка инструментов, ни наших.
+    pub inject: bool,
+}
+
+impl Rules {
+    /// Мост 778N: `vrunner-mcp`. Белый список из `[host] tools`, свои
+    /// инструменты подмешиваются в `tools/list` и исполняются мостом.
+    pub fn for_vrunner(
+        allowed: Vec<String>,
+        project: Arc<crate::project::Project>,
+        configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
+        defaults: Value,
+        enabled: Arc<AtomicBool>,
+    ) -> Rules {
+        Rules { allowed, project, configurator_running, defaults, enabled, inject: true }
+    }
+
+    /// Мост 777N: `mcp-1c`. Голый проброс — ни белого списка инструментов,
+    /// ни наших, ни аргументов подключения.
+    pub fn for_mcp(enabled: Arc<AtomicBool>) -> Rules {
+        Rules {
+            allowed: Vec::new(),
+            project: Arc::new(crate::project::Project {
+                dir: std::path::PathBuf::new(),
+                git: std::path::PathBuf::new(),
+                branch: String::new(),
+                remote: String::new(),
+                login: String::new(),
+            }),
+            configurator_running: Arc::new(|| 0),
+            defaults: Value::Null,
+            enabled,
+            inject: false,
+        }
+    }
 }
 
 /// Подключение к базе и её пользователь как аргументы инструмента vrunner:
@@ -158,10 +206,12 @@ fn key(id: &Value) -> String {
     id.to_string()
 }
 
-/// Мост 778N: `stream` ↔ процесс `vrunner-mcp`, построчно. `tools/list`
-/// переписывается, чужие и наши инструменты перехватываются, остальное идёт
-/// как есть. В канал пишет один писатель — за `out_tx`.
-pub async fn pipe_jsonrpc<S>(stream: S, mut cmd: tokio::process::Command, rules: Rules, on_exit: impl FnOnce(i32, String))
+/// Общий мост на оба порта: `stream` ↔ процесс (`vrunner-mcp` на 778N,
+/// `mcp-1c` на 777N), построчно. У 778N `tools/list` переписывается, чужие
+/// и наши инструменты перехватываются; у 777N (`Rules::for_mcp`) — голый
+/// проброс. Переключатель «MCP» выключен — любой `tools/call` получает
+/// отказ, не доходя до ребёнка. В канал пишет один писатель — за `out_tx`.
+pub async fn pipe_jsonrpc<S>(stream: S, mut cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, String))
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -227,7 +277,7 @@ where
 
     // Ребёнок → агент.
     let from_child = {
-        let (out, pending, rules) = (out_tx.clone(), pending.clone(), rules.clone());
+        let (out, pending, rules, log) = (out_tx.clone(), pending.clone(), rules.clone(), log.clone());
         tokio::spawn(async move {
             let mut f = Framer::new();
             let mut buf = vec![0u8; 64 * 1024];
@@ -237,13 +287,15 @@ where
                     Ok(n) => n,
                 };
                 for fr in f.push(&buf[..n]) {
-                    if out.send(rewrite_reply(fr, &rules.allowed, &pending)).await.is_err() {
+                    warn_on_session_limit(&fr, &log);
+                    if out.send(rewrite_reply(fr, &rules.allowed, rules.inject, &pending)).await.is_err() {
                         return;
                     }
                 }
             }
             if let Some(fr) = f.finish() {
-                let _ = out.send(rewrite_reply(fr, &rules.allowed, &pending)).await;
+                warn_on_session_limit(&fr, &log);
+                let _ = out.send(rewrite_reply(fr, &rules.allowed, rules.inject, &pending)).await;
             }
         })
     };
@@ -271,10 +323,13 @@ where
         },
     };
     let _ = from_child.await;
-    // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает всё равно.
+    // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает
+    // всё равно — но только у моста, который их вообще подмешивает.
     let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, id)| id).collect();
-    for id in unanswered {
-        let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
+    if rules.inject {
+        for id in unanswered {
+            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
+        }
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
     let ours: Vec<_> = running.lock().unwrap().drain().map(|(_, h)| h).collect();
@@ -309,7 +364,14 @@ async fn handle_request(
         }
         Frame::Line(l) => l,
     };
-    match jsonrpc::route_request_with(&line, &rules.allowed, &rules.defaults) {
+    // Переключатель выключен: белый список подменяется пустым — любой
+    // tools/call (кроме наших зарезервированных имён, см. ниже) превращается
+    // в Route::Disabled и тут же получает отказ по переключателю; остальные
+    // методы от allowed не зависят и идут как обычно.
+    let off = !rules.enabled.load(Ordering::Relaxed);
+    let empty: Vec<String> = Vec::new();
+    let allowed: &[String] = if off { &empty } else { &rules.allowed };
+    match jsonrpc::route_request_with(&line, allowed, &rules.defaults) {
         Route::Drop => Ok(()),
         Route::Reject { id, code, why } => {
             let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
@@ -320,8 +382,20 @@ async fn handle_request(
             forward(stdin, &line).await
         }
         Route::Disabled { id, tool } => {
-            let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true)).await;
-            Ok(())
+            if off {
+                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                Ok(())
+            } else if rules.inject {
+                let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true)).await;
+                Ok(())
+            } else {
+                // 777N (mcp-1c) не ведёт свой белый список инструментов: сюда
+                // попадает обычный вызов настоящего mcp-1c — пробрасываем как
+                // есть, байт в байт, как раньше делал pipe_process.
+                let mut raw = line;
+                raw.push(b'\n');
+                forward(stdin, &raw).await
+            }
         }
         Route::PlatformCall { id, tool, line } => {
             let n = (rules.configurator_running)();
@@ -339,6 +413,17 @@ async fn handle_request(
             }
         }
         Route::OurCall { id, tool, args } => {
+            if off {
+                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                return Ok(());
+            }
+            if !rules.inject {
+                // На 777N наших инструментов в tools/list нет, но имя всё
+                // равно зарезервировано в route_request_with — на всякий
+                // случай тот же отказ, что у выключенного инструмента.
+                let _ = out.send(jsonrpc::text_reply(&id, &format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)"), true)).await;
+                return Ok(());
+            }
             let (out, project) = (out.clone(), rules.project.clone());
             let k = key(&id);
             let h = tokio::spawn(async move {
@@ -374,13 +459,14 @@ async fn forward(stdin: &mut tokio::process::ChildStdin, line: &[u8]) -> Result<
     stdin.write_all(line).await.map_err(|_| ())
 }
 
-/// Одна строка от ребёнка: ответ на tools/list переписывается, остальное как есть.
-fn rewrite_reply(fr: Frame, allowed: &[String], pending: &Pending) -> Vec<u8> {
+/// Одна строка от ребёнка: ответ на tools/list переписывается, но только у
+/// моста, который подмешивает свои инструменты; остальное как есть.
+fn rewrite_reply(fr: Frame, allowed: &[String], inject: bool, pending: &Pending) -> Vec<u8> {
     match fr {
         Frame::Raw(b) => b,
         Frame::Line(mut l) => {
             let is_pending = jsonrpc::is_response_with_id(&l).map_or(false, |id| pending.lock().unwrap().remove(&key(&id)).is_some());
-            if is_pending {
+            if inject && is_pending {
                 if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed) {
                     return out;
                 }
@@ -388,6 +474,23 @@ fn rewrite_reply(fr: Frame, allowed: &[String], pending: &Pending) -> Vec<u8> {
             l.push(b'\n');
             l
         }
+    }
+}
+
+/// Текст лимита сеансов учебной (и не только) платформы — он же идёт агенту
+/// как есть, но человек должен узнать об этом из журнала: забытый сеанс
+/// «Предприятия» держит единственную лицензию файловой базы.
+const SESSION_LIMIT_TEXT: &str = "превышено предельное количество подключений";
+
+/// Если строка от ребёнка — ответ инструмента с текстом лимита сеансов,
+/// пишет строку в журнал; иначе ничего не делает. Ответ агенту эта функция
+/// не трогает и не меняет.
+fn warn_on_session_limit(fr: &Frame, log: &Sink) {
+    let Frame::Line(l) = fr else { return };
+    let Ok(v) = serde_json::from_slice::<Value>(l) else { return };
+    let Some(text) = v.pointer("/result/content/0/text").and_then(Value::as_str) else { return };
+    if text.contains(SESSION_LIMIT_TEXT) {
+        log(Event::Warn(format!("агент не вошёл в базу: {text}; если 1С открыта у вас — закройте её")));
     }
 }
 
@@ -439,7 +542,16 @@ mod tests {
                 let reply = match v["method"].as_str() {
                     Some("initialize") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"script","version":"0"}}}),
                     Some("tools/list") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}}),
-                    Some("tools/call") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":format!("child ran {}", v["params"]["name"].as_str().unwrap_or(""))}]}}),
+                    Some("tools/call") => {
+                        let mut text = format!("child ran {}", v["params"]["name"].as_str().unwrap_or(""));
+                        if std::env::var("BRIDGE_SCRIPT_ARGS").is_ok() {
+                            text = format!("{text} args={}", v["params"]["arguments"]);
+                        }
+                        if std::env::var("BRIDGE_SCRIPT_LIMIT").is_ok() {
+                            text = "ошибка сервера: превышено предельное количество подключений".into();
+                        }
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}]}})
+                    }
                     Some("notifications/cancelled") => {
                         writeln!(out, "child saw cancel {}", v["params"]["requestId"]).unwrap();
                         out.flush().unwrap();
@@ -468,14 +580,26 @@ mod tests {
     }
 
     fn rules(allowed: &[&str], running: usize) -> Rules {
+        rules_with(allowed, running, Arc::new(AtomicBool::new(true)))
+    }
+
+    /// Как `rules`, но с заданным переключателем — чтобы тест мог выключать
+    /// и включать MCP прямо посреди разговора.
+    fn rules_with(allowed: &[&str], running: usize, enabled: Arc<AtomicBool>) -> Rules {
         let dir = std::env::temp_dir();
         let project = crate::project::Project { dir, git: "git".into(), branch: "dev1".into(), remote: "x".into(), login: "dev1".into() };
-        Rules {
-            allowed: allowed.iter().map(|s| s.to_string()).collect(),
-            project: std::sync::Arc::new(project),
-            configurator_running: std::sync::Arc::new(move || running),
-            defaults: Value::Null,
-        }
+        Rules::for_vrunner(
+            allowed.iter().map(|s| s.to_string()).collect(),
+            std::sync::Arc::new(project),
+            std::sync::Arc::new(move || running),
+            Value::Null,
+            enabled,
+        )
+    }
+
+    /// Журнал, который ничего не делает — тестам, которым нужны только ответы агенту.
+    fn no_log() -> Sink {
+        Arc::new(|_: Event| {})
     }
 
     /// Drive the bridge: send the lines, wait, close; return the JSON replies,
@@ -483,7 +607,7 @@ mod tests {
     async fn talk(child_env: (&str, &str), rules: Rules, send: &[&str]) -> (Vec<serde_json::Value>, String, i32) {
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(child_env), rules, move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, child(child_env), rules, no_log(), move |code, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -562,6 +686,120 @@ mod tests {
         assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap().contains("закройте Конфигуратор"), "{raw}");
         let (replies, raw, _) = talk(("BRIDGE_SCRIPT", "1"), rules(&["cf_load"], 0), &[req]).await;
         assert_eq!(replies[0]["result"]["content"][0]["text"], "child ran cf_load", "{raw}");
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_is_refused_while_mcp_are_off() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let (replies, raw, _) = talk(
+            ("BRIDGE_SCRIPT", "1"),
+            rules_with(&["cf_load"], 0, enabled),
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#,
+            ],
+        )
+        .await;
+        assert!(!raw.contains("child ran"), "дочерний процесс не должен был запуститься для вызова: {raw}");
+        let call = replies.iter().find(|r| r["id"] == 3).unwrap();
+        assert_eq!(call["result"]["isError"], true);
+        assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{raw}");
+        assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был ответить: {raw}");
+        assert!(replies.iter().any(|r| r["id"] == 2), "tools/list должен был ответить: {raw}");
+    }
+
+    #[tokio::test]
+    async fn flipping_the_switch_mid_connection_starts_serving() {
+        let enabled = Arc::new(AtomicBool::new(false));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT", "1")), rules_with(&["cf_load"], 0, enabled.clone()), no_log(), move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (r, mut w) = tokio::io::split(ours);
+        let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        enabled.store(true, Ordering::Relaxed);
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        w.shutdown().await.unwrap();
+        let mut got = String::new();
+        tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
+        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        assert_eq!(replies.len(), 2, "{got}");
+        assert_eq!(replies[0]["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+        assert_eq!(replies[1]["result"]["content"][0]["text"], "child ran cf_load", "{got}");
+    }
+
+    #[tokio::test]
+    async fn the_mcp_port_does_not_get_our_tools_injected() {
+        let mut cmd = child(("BRIDGE_SCRIPT", "1"));
+        cmd.env("BRIDGE_SCRIPT_ARGS", "1");
+        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd, rules, no_log(), move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (r, mut w) = tokio::io::split(ours);
+        for l in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{"x":1}}}"#,
+        ] {
+            w.write_all(l.as_bytes()).await.unwrap();
+            w.write_all(b"\n").await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        w.shutdown().await.unwrap();
+        let mut got = String::new();
+        tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
+        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let list = replies.iter().find(|r| r["id"] == 1).unwrap();
+        let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(!names.iter().any(|n| n.starts_with("project_")), "{names:?}");
+        let call = replies.iter().find(|r| r["id"] == 2).unwrap();
+        let text = call["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"x\":1"), "{text}");
+        assert!(!text.contains("ibconnection") && !text.contains("db-user"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_session_limit_answer_adds_one_journal_line() {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let log: Sink = Arc::new(move |e: Event| {
+            if let Event::Warn(w) = e {
+                seen2.lock().unwrap().push(w);
+            }
+        });
+        let mut cmd = child(("BRIDGE_SCRIPT", "1"));
+        cmd.env("BRIDGE_SCRIPT_LIMIT", "1");
+        let (replies, raw, _) = {
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(pipe_jsonrpc(theirs, cmd, rules(&["task_status"], 0), log, move |code, err| {
+                let _ = tx.send((code, err));
+            }));
+            let (r, mut w) = tokio::io::split(ours);
+            w.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","arguments":{}}}"#).await.unwrap();
+            w.write_all(b"\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            w.shutdown().await.unwrap();
+            let mut got = String::new();
+            tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
+            let _ = rx.await;
+            (got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect::<Vec<Value>>(), got, 0)
+        };
+        assert_eq!(replies.len(), 1, "{raw}");
+        let text = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(SESSION_LIMIT_TEXT), "{text}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].starts_with("агент не вошёл в базу") && seen[0].contains(SESSION_LIMIT_TEXT), "{}", seen[0]);
     }
 
     #[tokio::test]

@@ -132,9 +132,9 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
     Session { stop: stop_tx, done: Some(done_rx) }
 }
 
-/// Что отвечает на проброшенное соединение: на порту mcp-1c — процесс на
-/// stdio, на порту vrunner — мост `pipe_jsonrpc` с процессом `vrunner-mcp`,
-/// на порту веб-клиента — локальный веб-сервер.
+/// Что отвечает на проброшенное соединение: на порту mcp-1c — мост
+/// `pipe_jsonrpc` с процессом mcp-1c на stdio, на порту vrunner — тот же мост
+/// с процессом `vrunner-mcp`, на порту веб-клиента — локальный веб-сервер.
 pub fn serve(cfg: &Cfg, kit: &Kit, log: Sink) -> impl Fn(tunnel::Incoming) + Send + Sync + 'static {
     let cfg = cfg.clone();
     let kit = kit.clone();
@@ -142,28 +142,36 @@ pub fn serve(cfg: &Cfg, kit: &Kit, log: Sink) -> impl Fn(tunnel::Incoming) + Sen
     let web_port = cfg.web_port();
     let tools_dir = crate::ops_host::tools_dir();
     let project = std::sync::Arc::new(crate::project::Project::from_cfg(&cfg, &tools_dir));
+    // ponytail: переключатель «MCP включены» пока не связан с окном — в этой
+    // задаче важна только проводка через Rules на оба порта одного сеанса;
+    // чтение/запись из окна подключается отдельной задачей (подменю «Режим работы»).
+    let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     move |inc: tunnel::Incoming| {
         let stream = inc.channel.into_stream();
         if inc.port == ports.vrunner {
             let cmd = bridge::vrunner_command(&cfg, &tools_dir);
-            let rules = bridge::Rules {
-                allowed: cfg.host.tools.clone(),
-                project: project.clone(),
-                configurator_running: std::sync::Arc::new(bridge::configurator_count),
-                defaults: bridge::connection_args(&cfg),
-            };
-            let log = log.clone();
-            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, move |code, err| {
+            let rules = bridge::Rules::for_vrunner(
+                cfg.host.tools.clone(),
+                project.clone(),
+                std::sync::Arc::new(bridge::configurator_count),
+                bridge::connection_args(&cfg),
+                enabled.clone(),
+            );
+            let log_journal = log.clone();
+            let log_exit = log.clone();
+            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
                 if code != 0 {
-                    log(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
+                    log_exit(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
                 }
             }));
         } else if inc.port == ports.mcp {
             let cmd = bridge::mcp_command(&cfg, &kit);
-            let log = log.clone();
-            tokio::spawn(bridge::pipe_process(stream, cmd, move |code, err| {
+            let rules = bridge::Rules::for_mcp(enabled.clone());
+            let log_journal = log.clone();
+            let log_exit = log.clone();
+            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
                 if code != 0 {
-                    log(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
+                    log_exit(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
                 }
             }));
         } else if inc.port == ports.web {

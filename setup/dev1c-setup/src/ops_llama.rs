@@ -298,15 +298,24 @@ impl Op<Ctx> for Container {
         if !docker::image_loaded(ctx, &ctx.cfg.llama_image()) {
             return OpState::Blocked(format!("образ {} не загружен: он едет в том же архиве, что и образ среды", ctx.cfg.llama_image()));
         }
-        // Образ уже загружен (проверено строкой выше) — самая честная проверка,
-        // что карта достаётся до контейнера: запустить образ и посмотреть, не
-        // упал ли он на --gpus all. Дешевле, чем поднимать настоящий сервер.
-        let probe_ok = docker::ask(ctx, &["run", "--rm", "--gpus", "all", &ctx.cfg.llama_image(), "--version"]).map(|o| o.ok()).unwrap_or(false);
-        if let Some(msg) = barrier::gpu_in_container(probe_ok, ctx.kit.path("nvidia-container-toolkit").is_dir()) {
+        let name = ctx.cfg.llama_container();
+        let container_state = docker::container_state(ctx, &name);
+        let running = container_state == "running";
+        // Драйвер на хосте — дешёвая проверка (nvidia-smi), и без неё дальше
+        // смотреть нечего: без драйвера карту не увидит и контейнер.
+        let driver_ok = llama::gpu(ctx).is_some();
+        // Настоящий запуск образа с --gpus all — дорогая проверка (NVIDIA
+        // runtime поднимает и роняет контейнер на каждый вызов): не нужна без
+        // драйвера (ответ и так ясен) и не нужна, когда наш контейнер уже
+        // работает — значит, карта до него уже дотянулась. Пробуем только
+        // перед тем, как контейнер собираются создавать, а не как пульс на
+        // каждый status.
+        let container_ok = driver_ok
+            && (running || docker::ask(ctx, &["run", "--rm", "--gpus", "all", &ctx.cfg.llama_image(), "--version"]).map(|o| o.ok()).unwrap_or(false));
+        if let Some(msg) = barrier::gpu_in_container(driver_ok, container_ok, ctx.kit.path("nvidia-container-toolkit").is_dir()) {
             return OpState::Blocked(msg);
         }
-        let name = ctx.cfg.llama_container();
-        if let Some(st) = crate::ops::state_before_drift(&docker::container_state(ctx, &name)) {
+        if let Some(st) = crate::ops::state_before_drift(&container_state) {
             return st;
         }
         let baked = ctx.kit.state_get("llama.args").unwrap_or_default();

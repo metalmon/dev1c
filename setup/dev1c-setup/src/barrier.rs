@@ -31,19 +31,29 @@ pub fn docker_verdict(out: &str, code: i32) -> Option<String> {
     None
 }
 
-/// Видеокарта не достаётся до контейнера. Сервер без интернета — ремонт не
-/// может быть «поставьте пакет», он либо уже лежит в комплекте, либо его
-/// должен принести администратор. `kit_has_debs` — есть ли в комплекте
-/// каталог `nvidia-container-toolkit` с `.deb`-пакетами (его кладёт отдельная
-/// задача; на старом комплекте каталога может и не быть).
-pub fn gpu_in_container(ok: bool, kit_has_debs: bool) -> Option<String> {
-    if ok {
+/// Видеокарта не достаётся до контейнера — а причина бывает двух разных
+/// родов с разным ремонтом. `driver_ok` — ответил ли `nvidia-smi` на самом
+/// хосте: если нет, карту не видит даже операционная система, и это не
+/// лечится из комплекта — нужен администратор сервера с драйвером под эту
+/// карту. `container_ok` — прошёл ли пробный запуск образа с `--gpus all`
+/// (спрашивается только когда `driver_ok`: без драйвера пробовать нечего).
+/// Драйвер на месте, а изоляция контейнера карту не видит — это NVIDIA
+/// Container Toolkit, и вот тут комплект может помочь: `kit_has_debs` — есть
+/// ли в комплекте каталог `nvidia-container-toolkit` с `.deb`-пакетами (его
+/// кладёт отдельная задача; на старом комплекте каталога может и не быть).
+pub fn gpu_in_container(driver_ok: bool, container_ok: bool, kit_has_debs: bool) -> Option<String> {
+    if !driver_ok {
+        return Some(
+            "Драйвер NVIDIA на сервере не отвечает (nvidia-smi молчит): видеокарту не видит сама операционная система. Это не лечится из комплекта — нужен администратор сервера с драйвером под эту карту.".into(),
+        );
+    }
+    if container_ok {
         return None;
     }
     Some(if kit_has_debs {
-        "Видеокарта не видна внутри контейнера. В комплекте есть NVIDIA Container Toolkit — установите его и перезапустите движок:\n  sudo dpkg -i nvidia-container-toolkit/*.deb && sudo systemctl restart docker".into()
+        "Драйвер на сервере работает, но видеокарта не видна внутри контейнера. В комплекте есть NVIDIA Container Toolkit — установите его и перезапустите движок:\n  sudo dpkg -i nvidia-container-toolkit/*.deb && sudo systemctl restart docker".into()
     } else {
-        "Видеокарта не видна внутри контейнера. Нужен NVIDIA Container Toolkit (пакеты .deb в каталоге nvidia-container-toolkit) — на этом сервере нет интернета, их приносит администратор вместе с комплектом.".into()
+        "Драйвер на сервере работает, но видеокарта не видна внутри контейнера. Нужен NVIDIA Container Toolkit (пакеты .deb в каталоге nvidia-container-toolkit) — на этом сервере нет интернета, их приносит администратор вместе с комплектом.".into()
     })
 }
 
@@ -83,13 +93,33 @@ mod tests {
     }
 
     #[test]
+    fn unrecognized_wording_is_left_to_the_caller() {
+        // Код не нулевой, но слова не похожи ни на права, ни на мёртвый демон —
+        // это не наш случай, обобщённое сообщение даёт вызывающая сторона.
+        assert!(docker_verdict("image not found: oktaplus/dev1c:latest", 1).is_none());
+    }
+
+    #[test]
+    fn no_driver_on_the_host_is_not_a_kit_problem() {
+        // Без драйвера на хосте dpkg не поможет — печатать его тут нечестно,
+        // ремонт не в комплекте, а у администратора сервера.
+        let t = gpu_in_container(false, false, true).unwrap();
+        assert!(!t.contains("dpkg"), "{t}");
+        // Тот же вердикт не зависит от того, что лежит в комплекте, и не
+        // зависит от результата контейнерной пробы — без драйвера её не было.
+        assert_eq!(t, gpu_in_container(false, true, true).unwrap());
+        assert_eq!(t, gpu_in_container(false, false, false).unwrap());
+    }
+
+    #[test]
     fn a_card_invisible_to_containers_points_at_the_kit_not_at_the_internet() {
-        let t = gpu_in_container(false, true).unwrap();
+        let t = gpu_in_container(true, false, true).unwrap();
         assert!(t.contains("dpkg -i"));
         assert!(!t.contains("apt"), "сервер без интернета: {t}");
         // Нет пакетов в комплекте — честно говорим, что нужен администратор.
-        assert!(gpu_in_container(false, false).unwrap().contains("nvidia-container-toolkit"));
-        assert!(gpu_in_container(true, true).is_none());
+        assert!(gpu_in_container(true, false, false).unwrap().contains("nvidia-container-toolkit"));
+        assert!(gpu_in_container(true, true, true).is_none());
+        assert!(gpu_in_container(true, true, false).is_none());
     }
 
     #[test]

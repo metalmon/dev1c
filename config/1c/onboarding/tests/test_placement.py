@@ -15,6 +15,20 @@ def overlaps(a, b):
     return not (a.x + a.w <= b.x or b.x + b.w <= a.x or a.y + a.h <= b.y or b.y + b.h <= a.y)
 
 
+def on_boundary(rect, point):
+    """Лежит ли точка на границе прямоугольника (а не где-то внутри/снаружи)."""
+    x, y = point
+    on_vertical_edge = x in (rect.x, rect.x + rect.w) and rect.y <= y <= rect.y + rect.h
+    on_horizontal_edge = y in (rect.y, rect.y + rect.h) and rect.x <= x <= rect.x + rect.w
+    return on_vertical_edge or on_horizontal_edge
+
+
+def inside(rect, point):
+    """Лежит ли точка внутри (включая границу) прямоугольника."""
+    x, y = point
+    return rect.x <= x <= rect.x + rect.w and rect.y <= y <= rect.y + rect.h
+
+
 class PlaceTests(unittest.TestCase):
     def test_bubble_never_leaves_the_screen(self):
         for target in (Rect(36, 122, 48, 48), Rect(2500, 1400, 24, 24), Rect(1280, 0, 48, 48)):
@@ -46,6 +60,25 @@ class PlaceTests(unittest.TestCase):
         self.assertGreaterEqual(b.y, screen.y)
         self.assertLessEqual(b.x + b.w, screen.x + screen.w)
         self.assertLessEqual(b.y + b.h, screen.y + screen.h)
+
+
+class ArrowTests(unittest.TestCase):
+    # Проверяем контракт стрелки (где начало и где конец), а не то, по
+    # какой оси выбрана грань — это внутренняя эвристика, которую вольна
+    # поменять задача 4.
+    def test_far_left_target_arrow_reaches_the_target(self):
+        target = Rect(36, 122, 48, 48)
+        layout = place(SCREEN, target, (640, 150))
+        self.assertTrue(on_boundary(layout.bubble, layout.arrow_start))
+        self.assertTrue(inside(target, layout.arrow_end))
+
+    def test_bottom_right_tray_target_is_a_fallback_case(self):
+        # Эта цель не влезает ни в одно из четырёх предпочтительных мест —
+        # место 2 в комментарии «куда поставили» подтвердило: это fallback.
+        target = Rect(2500, 1400, 24, 24)
+        layout = place(SCREEN, target, (640, 150))
+        self.assertTrue(on_boundary(layout.bubble, layout.arrow_start))
+        self.assertEqual(layout.arrow_end, (target.x + target.w // 2, target.y + target.h // 2))
 
 
 class BubbleSizeTests(unittest.TestCase):

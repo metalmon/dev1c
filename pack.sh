@@ -21,7 +21,8 @@
 # --llama picks the row of llama.cpp binaries for the model server on the host
 # (serve = "host" in dev1c.toml): the kit is used on one OS, so it carries one
 # row (about 550 MB) plus nssm for Windows. Default: windows — the pilot host.
-# Only --os windows builds a host row; the Linux kit always serves docker.
+# Only --os windows builds a host row; the Linux kit always serves docker and
+# refuses --llama rather than ignoring it.
 # LLAMA_CACHE=<dir> keeps every downloaded archive between runs (llama rows,
 # OneScript, MinGit, mcp-1c). Needs docker: the vanessa-runner library tree is
 # resolved by opm inside the project's OneScript image.
@@ -30,10 +31,11 @@ set -eu
 DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$DIR"
 LLAMA_ROW=windows
+LLAMA_GIVEN=
 OS=windows
 while [ "${1:-}" = "--llama" ] || [ "${1:-}" = "--os" ]; do
     case "$1" in
-        --llama) LLAMA_ROW=${2:?windows|linux|none}; shift 2 ;;
+        --llama) LLAMA_ROW=${2:?windows|linux|none}; LLAMA_GIVEN=1; shift 2 ;;
         --os) OS=${2:?linux|windows}; shift 2 ;;
     esac
 done
@@ -41,6 +43,13 @@ case "$OS" in
     linux|windows) ;;
     *) echo "--os: linux or windows" >&2; exit 2 ;;
 esac
+# The Linux kit serves docker and has no llama row at all, so --llama with it
+# asks for something that will not happen. Refused, not discarded: a flag that
+# vanishes silently is how a kit ends up without the row its caller wanted.
+if [ "$OS" = "linux" ] && [ -n "$LLAMA_GIVEN" ]; then
+    echo "--llama is for --os windows only: the Linux kit serves docker and carries no llama row" >&2
+    exit 2
+fi
 IMAGE_TAR=${1:?path to dev1c-image.tar.gz}
 BIN_DIR=${2:?directory with the dev1c-setup binaries}
 OUT=${OUT_DIR:-dist}
@@ -78,6 +87,14 @@ else
     cp setup/dev1c-setup/dev1c.example.toml "$KIT/dev1c.toml"
 fi
 
+# The one place the NVIDIA Container Toolkit version is written. The workflow
+# reads it from here (`sed -n 's/^NVIDIA_TOOLKIT_VERSION=//p' pack.sh`) instead
+# of repeating it: three copies of one version is how a kit ships packages
+# whose hashes belong to another version. The pins below name it through this
+# variable too, so bumping it without renewing the hashes fails the build on a
+# hash mismatch instead of shipping unchecked .deb files.
+NVIDIA_TOOLKIT_VERSION=1.20.1-1
+
 # Every archive is pinned by hash: a release asset can be replaced under the
 # same name, and these are executables the customer's machines will run.
 sha_of() { # $1 = file name → pinned SHA-256
@@ -90,10 +107,10 @@ sha_of() { # $1 = file name → pinned SHA-256
         MCP_HTTPService.cfe) echo 76df5ccf993c10caef73fe8399d2fa7df1cc3b7e9b24fc6662ab402aeea1bf61 ;;
         OneScript-2.2.0-win-x64.zip) echo b12f2c44445e19d5c627f63af5cefd3eb7ad4e36b939bbd49c073e0956928267 ;;
         MinGit-2.56.0.2-64-bit.zip) echo da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be ;;
-        nvidia-container-toolkit_1.20.1-1_amd64.deb) echo a95c9d206a7ecd6a90adff9290635271fa167a86b5767b17eaa0478a552eb02c ;;
-        nvidia-container-toolkit-base_1.20.1-1_amd64.deb) echo e01964a064fbdb62425ab22ec5832349f92c5b0b50c8f23fdf14dad004db4fb2 ;;
-        libnvidia-container1_1.20.1-1_amd64.deb) echo 9d803cd9c898cb2fa927529d5ac4fc09f3d65c8cfbde8985de1b9398e53a4656 ;;
-        libnvidia-container-tools_1.20.1-1_amd64.deb) echo 8bd131b8977a3db667982024850ae7b50cfa02d6b2be06a718064ec814778f05 ;;
+        "nvidia-container-toolkit_${NVIDIA_TOOLKIT_VERSION}_amd64.deb") echo a95c9d206a7ecd6a90adff9290635271fa167a86b5767b17eaa0478a552eb02c ;;
+        "nvidia-container-toolkit-base_${NVIDIA_TOOLKIT_VERSION}_amd64.deb") echo e01964a064fbdb62425ab22ec5832349f92c5b0b50c8f23fdf14dad004db4fb2 ;;
+        "libnvidia-container1_${NVIDIA_TOOLKIT_VERSION}_amd64.deb") echo 9d803cd9c898cb2fa927529d5ac4fc09f3d65c8cfbde8985de1b9398e53a4656 ;;
+        "libnvidia-container-tools_${NVIDIA_TOOLKIT_VERSION}_amd64.deb") echo 8bd131b8977a3db667982024850ae7b50cfa02d6b2be06a718064ec814778f05 ;;
         *) echo "no pinned hash for $1" >&2; exit 1 ;;
     esac
 }
@@ -223,9 +240,9 @@ if [ "$OS" = "linux" ]; then
     # The server cannot reach the internet, so these four .deb files travel
     # in the kit. The workflow fetches them from NVIDIA's repository into a
     # directory of the same name as the one they end up at inside the kit;
-    # pack.sh only verifies and copies — the pins below are what make a
-    # swapped file visible.
-    NVIDIA_TOOLKIT_VERSION=1.20.1-1
+    # pack.sh only verifies and copies — the pins in sha_of are what make a
+    # swapped file visible, and NVIDIA_TOOLKIT_VERSION above is the one place
+    # the version is written.
     src="${NVIDIA_TOOLKIT_DIR:-nvidia-container-toolkit}"
     dst="$KIT/nvidia-container-toolkit"
     mkdir -p "$dst"

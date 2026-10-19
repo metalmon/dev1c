@@ -715,6 +715,28 @@ pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
     })
 }
 
+/// Токен есть, но прочитать его не дали: `facts_load` без токена возвращает
+/// None, а причина у этого None своя. Установка под `sudo` пишет
+/// `dev1c-llama.token` как `root:root 0600`, и тот же администратор без
+/// `sudo` чисел уже не увидит.
+pub fn unreadable_token(ctx: &Ctx) -> Option<String> {
+    let f = token_path(&ctx.kit, ctx.cfg.form());
+    (read_token(&ctx.kit, ctx.cfg.form()).is_none() && f.exists()).then(|| f.display().to_string())
+}
+
+/// Чем объяснить отсутствие чисел замера. Нечитаемый токен обязан быть
+/// назван именно так, а не выдан за незамеренный сервер: слова те же, что у
+/// факта `check` (`verify::no_props_fact`) — две команды об одной причине не
+/// вправе говорить разное.
+pub fn facts_missing(unreadable_token: Option<String>) -> String {
+    match unreadable_token {
+        Some(f) => format!(
+            "токен {f} есть, но не читается: без него нет и чисел замера, и о самом сервере это не говорит ничего. install и status выполняет один пользователь: ставили под sudo — смотрите `sudo dev1c-setup status`, либо отдайте файл токена тому, кто смотрит"
+        ),
+        None => "сервер модели ещё не замерен (шаг llama.answers); без его чисел контейнер собирать нельзя".into(),
+    }
+}
+
 /// Байт KV на токен, посчитанный замером: число модели, а не таблицы.
 pub fn kv_per_token(ctx: &Ctx) -> Option<u32> {
     ctx.kit.state_get("llama.kv_bytes_per_token")?.parse().ok()
@@ -776,6 +798,37 @@ mod tests {
         assert_eq!(z.max_tokens, 300_000);
         // Три агента у одного человека делят его слот.
         assert_eq!(zed_numbers(250_000, 3).window, 83_333);
+    }
+
+    #[test]
+    fn an_unreadable_token_is_not_an_unmeasured_server() {
+        // status брал «сервер модели ещё не замерен» на оба случая, и установка
+        // под sudo с проверкой без него обвиняла совершенно здоровый сервер.
+        let c = facts_missing(Some("/srv/dev1c-kit/dev1c-llama.token".into()));
+        assert!(c.contains("dev1c-llama.token") && c.contains("не читается"), "{c}");
+        assert!(c.contains("sudo"), "{c}");
+        assert!(!c.contains("не замерен"), "замер тут не виноват: {c}");
+        // Токена нет вовсе — это по-прежнему незамеренный сервер.
+        let c = facts_missing(None);
+        assert!(c.contains("не замерен") && c.contains("llama.answers"), "{c}");
+    }
+
+    #[test]
+    fn the_administrators_page_divides_the_slot_by_agents_before_the_fifth() {
+        // Страница заказчика выписывает те же три числа руками, и на одном
+        // агенте арифметика сходилась и без деления: при agents > 1 слот
+        // делится ПЕРВЫМ, иначе администратор объявит рабочему месту окно,
+        // которого в пуле нет. Проверка смотрит на формулы страницы, потому
+        // что ломается именно она, а не zed_numbers.
+        let page = include_str!("../../../config/kit/УСТАНОВКА.md");
+        assert!(page.contains("окно агента = окно слота ÷ agents"), "в странице нет деления на agents");
+        assert!(page.contains("max_tokens  = окно агента + окно агента ÷ 5"), "max_tokens страницы считается не от окна агента");
+        assert!(
+            page.contains("CUSTOM_MAX_OUTPUT_TOKENS=<ответ: окно агента ÷ 5, но не меньше 8192>"),
+            "ответ в странице считается не от окна агента"
+        );
+        // И те же слова у программы: окно агента — это слот ÷ agents.
+        assert_eq!(zed_numbers(250_000, 3).window, 250_000 / 3);
     }
 
     #[test]

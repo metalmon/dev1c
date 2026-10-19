@@ -38,6 +38,29 @@ trap 'rm -rf "$tmp"' EXIT
 sed "s|^file = \"\"|file = \"$MODEL\"|" "$KIT/dev1c.toml" >"$tmp/dev1c.toml"
 (cd "$tmp" && "$SETUP" --kit . install --dry-run --commands) >"$tmp/raw.txt"
 
+# Предел контейнера модели из [model] memory комплекта: он задан человеком —
+# и тогда это его решение, верное на любой машине, которое страница обязана
+# напечатать как есть. Пусто (так комплект и уезжает) — предел считается от
+# памяти ЭТОЙ машины, и в странице ему место только заглушкой. Читаем именно
+# [model]: раздел [server] тоже зовёт свой предел memory.
+MODEL_MEMORY=$(awk '
+    /^\[/        { section = $0; next }
+    section == "[model]" && /^memory[ \t]*=/ {
+        sub(/^memory[ \t]*=[ \t]*"?/, ""); sub(/".*$/, ""); print; exit
+    }
+' "$KIT/dev1c.toml")
+
+# Заглушка вместо посчитанного предела — и только вместо посчитанного.
+mask_memory() {
+    if [ -n "$MODEL_MEMORY" ]; then
+        cat
+    else
+        sed -e 's|--memory [0-9][0-9]*m|--memory <ПРЕДЕЛ>m|g' \
+            -e 's|--memory-swap [0-9][0-9]*m|--memory-swap <ПРЕДЕЛ×2>m|g' \
+            -e 's|--memory-reservation [0-9][0-9]*m|--memory-reservation <ПРЕДЕЛ÷2>m|g'
+    fi
+}
+
 # Operation headings (== id — title) and the plan in words (· line) frame the
 # commands; every other line is a command. A plan line that is itself a
 # command (the plan names `docker load`, `docker volume create`, `docker run`
@@ -57,9 +80,7 @@ awk '
     END { fence() }
 ' "$tmp/raw.txt" \
     | sed 's|\./||g; s|\.\\||g' \
-    | sed -e 's|--memory [0-9][0-9]*m|--memory <ПРЕДЕЛ>m|g' \
-          -e 's|--memory-swap [0-9][0-9]*m|--memory-swap <ПРЕДЕЛ×2>m|g' \
-          -e 's|--memory-reservation [0-9][0-9]*m|--memory-reservation <ПРЕДЕЛ÷2>m|g' \
+    | mask_memory \
     >"$tmp/section.md"
 
 # Предел контейнера МОДЕЛИ считается от памяти этой машины, а комплект
@@ -74,7 +95,13 @@ awk '
 # из [server] memory комплекта как есть («8g») — он задан человеком, верен на
 # любой машине, и печатать его на странице нужно. Якорить проверку на любую
 # цифру нельзя: «--memory 8g» ломал бы сборку комплекта целиком.
-if grep -q -- '--memory[a-z-]* [0-9][0-9]*m' "$tmp/section.md"; then
+#
+# Заданный оператором [model] memory печатается в мегабайтах той же формой
+# («22g» программа тоже приводит к «22528m»), так что проверять там нечего:
+# считанного предела в странице нет по построению. Там, где он возможен —
+# комплект с пустым [model] memory, то есть ровно тот, который уезжает к
+# заказчику, — проверка работает и обязана уметь провалиться.
+if [ -z "$MODEL_MEMORY" ] && grep -q -- '--memory[a-z-]* [0-9][0-9]*m' "$tmp/section.md"; then
     echo "manual-path.sh: a computed memory limit from the build machine survived in the page" >&2
     exit 1
 fi

@@ -33,17 +33,19 @@ tar -xzf "$archive" -O "$manifest_entry" >"$tmpdir/manifest.json"
 # where an attestation manifest's vnd.docker.reference.type annotation
 # usually lives; check it too when present, though it is not required to
 # exist.
-index_entry=$(grep -E '(^|/)index\.json$' "$tmpdir/list" | head -1 || true)
-files="$tmpdir/manifest.json"
+index_entry=$(grep -E '(^|/)index\.json$' "$tmpdir/list" | head -1)
 if [ -n "$index_entry" ]; then
     tar -xzf "$archive" -O "$index_entry" >"$tmpdir/index.json"
-    files="$files $tmpdir/index.json"
 fi
 
-hit=$(grep -l -E 'vnd\.docker\.reference\.type|application/vnd\.in-toto' $files 2>/dev/null | head -1 || true)
-if [ -n "$hit" ]; then
-    echo "check-image-archive: attestation manifest found in $archive (in $(basename "$hit")) — Docker 20.10.24 refuses to load an archive that carries one" >&2
-    exit 1
-fi
+# One file per iteration, quoted: a list in a variable would be split by the
+# shell on whitespace, and a temporary directory is allowed to contain it.
+for f in "$tmpdir/manifest.json" "$tmpdir/index.json"; do
+    [ -f "$f" ] || continue
+    if grep -q -E 'vnd\.docker\.reference\.type|application/vnd\.in-toto' "$f"; then
+        echo "check-image-archive: attestation manifest found in $archive (in $(basename "$f")) — Docker 20.10.24 refuses to load an archive that carries one" >&2
+        exit 1
+    fi
+done
 
 echo "check-image-archive: $archive is clean (manifest.json present, no attestation manifests)"

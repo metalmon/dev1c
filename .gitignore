@@ -13,6 +13,10 @@ models/
 *.tar.gz
 *.gguf
 
+# The NVIDIA Container Toolkit .deb files the build fetches into the
+# repository root (mkdir -p nvidia-container-toolkit) for the Linux kit
+nvidia-container-toolkit/
+
 # Local run state
 .ports
 *.log

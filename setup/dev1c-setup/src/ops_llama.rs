@@ -145,7 +145,6 @@ pub fn keep_in_service_dir(name: &str, kit_files: &[String]) -> bool {
     kit_files.iter().any(|k| k == name)
         || name == "nssm.exe"
         || name == "dev1c-llama.token"
-        || name == "llama.env"
         || (name.starts_with("llama") && name.ends_with(".log"))
 }
 
@@ -592,8 +591,11 @@ mod tests {
     fn foreign_files_in_the_service_dir_are_pruned_but_ours_stay() {
         let keep = |n: &str| keep_in_service_dir(n, &["llama-server.exe".to_string(), "cudart64_13.dll".to_string()]);
         assert!(keep("llama-server.exe") && keep("cudart64_13.dll"));
-        assert!(keep("nssm.exe") && keep("dev1c-llama.token") && keep("llama.env") && keep("llama.log") && keep("llama-20261016.log"));
+        assert!(keep("nssm.exe") && keep("dev1c-llama.token") && keep("llama.log") && keep("llama-20261016.log"));
         assert!(!keep("evil.dll") && !keep("version.dll"));
+        // llama.env живёт в комплекте (llama::env_path), а не в каталоге
+        // службы: беречь его здесь было нечего.
+        assert!(!keep("llama.env"));
     }
 
     #[test]

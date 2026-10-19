@@ -396,7 +396,9 @@ impl Op<Ctx> for Container {
         // Локальная модель без замера: контейнер, собранный сейчас, вышел бы
         // без адреса модели и молча потерял бы агента.
         if ctx.cfg.form() != crate::cfg::Form::Remote && crate::llama::facts_load(ctx).is_none() {
-            return OpState::Blocked("сервер модели ещё не замерен (шаг llama.answers); без его чисел контейнер собирать нельзя".into());
+            // Чисел нет по двум разным причинам, и нечитаемый токен —
+            // не «ещё не замерен»: его называет facts_missing.
+            return OpState::Blocked(crate::llama::facts_missing(crate::llama::unreadable_token(ctx)));
         }
         if let Some(st) = state_before_drift(&docker::container_state(ctx, name)) {
             return st;

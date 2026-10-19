@@ -444,6 +444,12 @@ mod tests {
         // модели. Остальные формы отдают память среде, как и раньше.
         assert!(Cfg::example_for("docker").contains("memory = \"8g\""));
         assert!(Cfg::example_for("host").contains("memory = \"24g\""));
+        // Форма host не подменяет ничего — значит это сам dev1c.example.toml,
+        // байт в байт. Держалось это только косвенно (через «memory = 24g» и
+        // равенство EXAMPLE == Cfg::default() в тестах выше), а правка
+        // example_for могла незаметно развести образец комплекта с файлом.
+        assert_eq!(Cfg::example_for("host"), EXAMPLE, "образец для host — это и есть dev1c.example.toml");
+        assert_ne!(Cfg::example_for("docker"), EXAMPLE, "форма docker обязана подменить память контейнера среды");
         assert_eq!(Cfg::default().server.memory, "24g", "умолчание не тронуто");
         for form in ["host", "docker", "remote"] {
             let text = Cfg::example_for(form);

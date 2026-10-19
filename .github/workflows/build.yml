@@ -277,10 +277,16 @@ jobs:
         # travel in the Linux kit instead of being apt-installed there.
         # Fetched once, here; pack.sh (sha_of) only verifies and copies, so a
         # moved or swapped file fails the build instead of reaching a kit.
+        #
+        # The version is not written here: it is read out of pack.sh, which
+        # pins the hashes of exactly these four files. Two copies of it would
+        # mean fetching one version and checking another.
         run: |
           mkdir -p nvidia-container-toolkit
           base=https://nvidia.github.io/libnvidia-container/stable/deb/amd64
-          ver=1.20.1-1
+          ver=$(sed -n 's/^NVIDIA_TOOLKIT_VERSION=//p' pack.sh)
+          [ -n "$ver" ] || { echo "pack.sh no longer declares NVIDIA_TOOLKIT_VERSION" >&2; exit 1; }
+          echo "NVIDIA Container Toolkit $ver (from pack.sh)"
           for pkg in nvidia-container-toolkit nvidia-container-toolkit-base libnvidia-container1 libnvidia-container-tools; do
             curl -fsSL -o "nvidia-container-toolkit/${pkg}_${ver}_amd64.deb" "$base/${pkg}_${ver}_amd64.deb"
           done

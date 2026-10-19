@@ -636,13 +636,13 @@ git commit -m "Скилл: круг работы с базой — откуда 
   - `flow::dump_mark(project: &Path) -> Option<(String, String)>` — чтение отметки `.dev1c-dump` (версия платформы, версия формата);
   - `flow::write_dump_mark(project: &Path, platform: &str, format: &str) -> Result<(), String>`;
   - `flow::dump_format(project: &Path) -> Option<String>` — атрибут `version` из `ConfigDumpInfo.xml`;
-  - `flow::check_mark(mark: Option<(String, String)>, platform: &str) -> Mark` где `enum Mark { Same, Older(String), Newer(String) }` — чистая функция сравнения, её и проверяют тесты.
+  - `flow::check_mark(tree_format: Option<&str>, ours: Option<&str>) -> Mark` где `enum Mark { Same, Older(String), Newer(String) }` — чистая функция сравнения, её и проверяют тесты.
 
 - [ ] **Шаг 1: падающие тесты.**
   `same_version_loads_silently`: отметка и платформа совпадают — `Mark::Same`.
-  `older_files_load_with_a_warning`: отметка `8.3.27.1786`, платформа `8.5.1.1150` — `Mark::Older`, и текст предупреждения содержит обе версии и слова про то, что после выгрузки из этой базы старая платформа дерево не примет.
-  `newer_files_are_refused`: отметка `8.5.1.1150`, платформа `8.3.27.1786` — `Mark::Newer`, загрузка не начинается.
-  `versions_compare_as_numbers`: `8.3.9.1` старее `8.3.27.1786`.
+  `older_files_load_with_a_warning`: формат в дереве `2.20`, формат нашей платформы `2.21` — `Mark::Older`, и текст предупреждения содержит обе версии формата и слова про то, что после выгрузки из этой базы старая платформа дерево не примет.
+  `newer_files_are_refused`: формат в дереве `2.21`, формат нашей платформы `2.20` — `Mark::Newer`, загрузка не начинается (это тот отказ, который платформа даёт текстом «Неизвестная версия формата 2.21», но до запуска конфигуратора).
+  `format_versions_compare_as_numbers`: `2.9` старее `2.20`, то есть сравнение покомпонентное, а не текстовое.
   `a_missing_mark_is_not_a_failure`: отметки нет (дерево пришло из Gitea от другой машины) — загрузка идёт, в журнале строка «отметки о платформе нет, проверить формат не могу».
 - [ ] **Шаг 2: тесты падают** в CI.
 - [ ] **Шаг 3: запись отметки.** В конце «Выгрузить из 1С» (после `cf_decompile`, до отправки) пишется `.dev1c-dump` — две строки `platform=<версия>` и `format=<version из ConfigDumpInfo.xml>`. Файл попадает в репозиторий (он мал и нужен второй стороне), поэтому в `.gitignore` проекта его не добавлять.

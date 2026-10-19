@@ -394,11 +394,11 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit)
 ### Task 8: Memory for a stand that holds many sessions
 
 **Files:**
-- Modify: `setup/dev1c-setup/src/cfg.rs` (`[model] memory`), `setup/dev1c-setup/src/llama.rs` (`cache_ram_mb`), `setup/dev1c-setup/src/ops_llama.rs` (`llama_run_args`), `setup/dev1c-setup/src/verify.rs` (the swap fact)
+- Modify: `setup/dev1c-setup/src/cfg.rs` (`[model] memory`, `container_env` carries the slot numbers), `setup/dev1c-setup/src/llama.rs` (`cache_ram_mb`), `setup/dev1c-setup/src/ops_llama.rs` (`llama_run_args`), `setup/dev1c-setup/src/verify.rs` (the swap fact)
 - Test: the same files
 
 **Interfaces:**
-- Produces: `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`, `llama::kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32`, `llama::window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32`, `llama::warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32`.
+- Produces: `llama::zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers { window, max_output, max_tokens }`, `verify::declared_window_fact(declared: u32, available: u32) -> Check`, `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`, `llama::kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32`, `llama::window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32`, `llama::warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32`.
 - Consumes: `/proc/meminfo` on Linux for total and swap; the model server's own report of its KV cache size and window (the measurement step already runs it).
 
 - [ ] **Step 1: Write the failing tests**
@@ -415,6 +415,26 @@ fn the_window_that_fits_comes_from_the_model_not_from_a_table() {
     assert!(window_that_fits(13312, 32 * 1024, 3) < 250_000);
     // Девять тёплых сеансов по 250k при 10 КиБ — это 22 ГиБ.
     assert_eq!(warm_sessions_mb(10 * 1024, 250_000, 9), 21_972);
+}
+
+#[test]
+fn what_zed_is_told_matches_one_slot_and_carries_the_answer_too() {
+    // Слот 250k, один агент: окно слота целиком, ответ — пятая часть,
+    // max_tokens — их сумма, иначе Zed упрётся в предел на длинном диалоге.
+    let z = zed_numbers(250_000, 1);
+    assert_eq!(z.window, 250_000);
+    assert_eq!(z.max_output, 50_000);
+    assert_eq!(z.max_tokens, 300_000);
+    // Три агента у одного человека делят его слот.
+    assert_eq!(zed_numbers(250_000, 3).window, 83_333);
+}
+
+#[test]
+fn a_window_zed_believes_but_the_server_cannot_give_is_a_failed_fact() {
+    let c = declared_window_fact(250_000, 180_000);
+    assert!(!c.ok);
+    assert!(c.detail.contains("250") && c.detail.contains("180"));
+    assert!(declared_window_fact(180_000, 180_000).ok);
 }
 
 #[test]

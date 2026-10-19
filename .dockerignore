@@ -20,3 +20,6 @@ models/
 
 # The 1C training installer for Dockerfile.1c: 1.7 GB, a separate build context
 platform/
+
+# CI artifacts for Dockerfile.1c: a separate build context (see platform/)
+artifacts/

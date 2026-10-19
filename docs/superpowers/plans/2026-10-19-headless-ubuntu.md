@@ -268,7 +268,13 @@ Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-fe
 
 `example` gains `--serve <form>`; the default stays what it is today, so `EXAMPLE == Cfg::default()` and the round-trip tests in `cfg.rs` keep passing.
 
-- [ ] **Step 4: Assemble the Linux kit**
+- [ ] **Step 4: One llama.cpp version in the whole product**
+
+`pack.sh` pins `LLAMA_BUILD` for the prebuilt llama.cpp binaries of the host service form (Windows under nssm, Linux under systemd) — not a second image, but its own comment says it must be the same build the model-server image is made from. Task 1 raised the image and left this behind. Raise it to the same tag, with the SHA-256 of the real upstream assets for it (fetch and hash them: the pins exist so a moved release cannot slip in unnoticed), and check that the comment still tells the truth.
+
+Run: `grep -n LLAMA_BUILD pack.sh` — Expected: one version, the same one `ARG LLAMA_VERSION` carries in `Dockerfile.llama`.
+
+- [ ] **Step 5: Assemble the Linux kit**
 
 `pack.sh` learns `--os linux|windows` (default windows, as today): the Linux kit takes no `.exe`, no llama row, no `nssm`, writes `dev1c.toml` with `./dev1c-setup example --serve docker`, copies `nvidia-container-toolkit/*.deb` from a directory the workflow prepared, and runs `checksums` over the result.
 
@@ -276,7 +282,7 @@ In `build.yml` the `.deb` files are fetched once from NVIDIA's repository with t
 
 Run: `./pack.sh --os linux dev1c-image.tar.gz bins && ls dist/dev1c-kit-linux` — Expected: the layout above; `checksums.txt` lists the `.deb` files.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add pack.sh setup/dev1c-setup/src .github/workflows/build.yml

@@ -5350,6 +5350,7 @@ dependencies = [
  "gpui-kit",
  "gtk",
  "image",
+ "libc",
  "raw-window-handle",
  "reqwest",
  "russh",

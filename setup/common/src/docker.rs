@@ -122,7 +122,13 @@ pub fn redact(args: &[&str]) -> String {
 
 fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool) -> Result<Out> {
     let shown = format!("{program} {}", redact(args));
-    ctx.emit(Event::Command(shown.clone()));
+    // Вопрос машине — не изменение: в журнале он остаётся строкой вывода
+    // (`# <команда>` и ответ), а событие Command несёт только изменяющие
+    // команды. Из них собирается ручной путь в инструкции администратора, и
+    // `docker inspect` рядом с `docker run` там был бы указанием зря.
+    if !read_only {
+        ctx.emit(Event::Command(shown.clone()));
+    }
     if ctx.dry_run() && !read_only {
         return Ok(Out { code: 0, text: String::new() });
     }

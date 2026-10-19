@@ -236,6 +236,14 @@ if [ "$OS" = "linux" ]; then
         check_sha "$dst/$f" "$(sha_of "$f")"
     done
     echo "nvidia-container-toolkit: $(ls "$dst" | wc -l) packages, $(du -sh "$dst" | cut -f1)"
+
+    # The administrator's page. Only this kit carries one: its content is
+    # Linux-shaped (sha256sum -c, dpkg -i, ./dev1c-setup) and the headless
+    # server is what it is for; the Windows kit instructs through the
+    # installer's own window. The «Ручной путь» section is generated from the
+    # installer in the kit, so the commands cannot drift from what the program
+    # does — see scripts/manual-path.sh.
+    sh scripts/manual-path.sh "$KIT"
 fi
 
 # Checksums by the installer itself, so the customer verifies with the same code.

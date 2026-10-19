@@ -333,13 +333,21 @@ impl Op<Ctx> for Container {
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        let token = llama::ensure_token(ctx)?;
-        llama::write_env_file(&ctx.kit, &token)?;
+        // В режиме показа команда только печатается: токен, файл переменных и
+        // запомненные параметры тогда не нужны — и не должны появляться в
+        // комплекте от одной печати плана (`install --dry-run --commands`).
+        if !ctx.dry_run {
+            let token = llama::ensure_token(ctx)?;
+            llama::write_env_file(&ctx.kit, &token)?;
+        }
         let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
         let args = self.wanted(ctx);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let o = docker::run(ctx, &refs)?;
         anyhow::ensure!(o.ok(), "контейнер модели не запустился: {}", o.tail(3).join(" "));
+        if ctx.dry_run {
+            return Ok(());
+        }
         ctx.kit.state_set("llama.args", &args.join(" "))?;
         ctx.ok("контейнер модели запущен");
         Ok(())

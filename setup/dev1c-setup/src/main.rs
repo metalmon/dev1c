@@ -50,6 +50,10 @@ struct Cli {
     /// Не задавать вопросов: значения по умолчанию.
     #[arg(short = 'y', long, global = true)]
     yes: bool,
+    /// Только командные строки плана, по одной (с --dry-run): из них собрана
+    /// страница «Ручной путь» в инструкции администратора.
+    #[arg(long, global = true)]
+    commands: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -138,10 +142,28 @@ fn needs_typed_name_confirmation(data: bool, yes: bool) -> bool {
     data && !yes
 }
 
-fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
+/// Строка для `--commands`: команда печатается как есть, чтобы её можно было
+/// скопировать в терминал. Всё остальное — наши пояснения, в этом режиме их
+/// печатает не приёмник событий, а обход операций.
+fn command_line(e: &Event) -> Option<String> {
+    match e {
+        Event::Command(c) => Some(c.clone()),
+        _ => None,
+    }
+}
+
+fn make_ctx(kit: Kit, dry_run: bool, yes: bool, commands: bool) -> Result<Ctx> {
     let cfg = cfg::Cfg::load(&kit)?;
     let k = kit.clone();
     let sink = Arc::new(move |e: Event| {
+        // Печать плана командами: ни значков, ни журнала — вывод уходит в
+        // страницу, а комплект при сборке не должен обрастать нашим следом.
+        if commands {
+            if let Some(l) = command_line(&e) {
+                println!("{l}");
+            }
+            return;
+        }
         if k.journal(&e) {
             return;
         }
@@ -190,7 +212,7 @@ fn run() -> Result<()> {
         );
     }
     let yes = if answer == Answer::Default { true } else { cli.yes };
-    let mut ctx = make_ctx(kit, cli.dry_run, yes)?;
+    let mut ctx = make_ctx(kit, cli.dry_run, yes, cli.commands)?;
     let ops = ops::server(&ctx.cfg);
     match cmd {
         Cmd::Example { .. } => unreachable!(),
@@ -202,6 +224,10 @@ fn run() -> Result<()> {
             }
             println!();
             println!("Применить то, чего не хватает: dev1c-setup install");
+        }
+        Cmd::Install { only } if cli.commands => {
+            anyhow::ensure!(only.is_none(), "--commands печатает весь путь целиком, без --only");
+            print_commands(&ctx, &ops)?;
         }
         Cmd::Install { only } => {
             // Сверка комплекта до первого шага: ставить из битого архива —
@@ -347,6 +373,46 @@ mod tty_tests {
         // --data --yes: --yes — это и есть осознанное разрешение,
         // переспрашивать имя контейнера уже не нужно.
         assert!(!needs_typed_name_confirmation(true, true));
+    }
+}
+
+/// Тот же путь установки, но командами: заголовок операции, её план словами
+/// и строки, которые она выполнила бы. Движок контейнеров в режиме показа не
+/// вызывается (`common::docker` печатает команду и возвращается), поэтому
+/// обход идёт и там, где ни Docker, ни карты нет — на машине сборки комплекта.
+///
+/// Операции обходятся подряд, без опроса состояния: страница описывает
+/// установку с нуля, а на машине сборки состояние взять негде.
+/// Ошибка операции не прерывает обход — здесь ничего не ставится, а
+/// `env` упирается в неотвечающий Docker на любой машине сборки.
+fn print_commands(ctx: &Ctx, ops: &[Box<dyn common::op::Op<Ctx>>]) -> Result<()> {
+    anyhow::ensure!(ctx.dry_run, "--commands только с --dry-run: иначе это была бы установка, а не её описание");
+    anyhow::ensure!(
+        ctx.cfg.form() == cfg::Form::Docker,
+        "--commands собирает ручной путь для serve = \"docker\": у формы host установка регистрирует службу на самой машине, и такой путь командами не переписывается"
+    );
+    for op in ops {
+        println!("== {} — {}", op.id(), op.title());
+        for a in op.plan(ctx) {
+            println!("· {}", a.0);
+        }
+        let _ = op.apply(ctx);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod commands_tests {
+    use super::*;
+
+    #[test]
+    fn dry_run_with_commands_prints_the_command_lines_and_nothing_else() {
+        // Событие Command печатается как есть, без значка и без «$».
+        assert_eq!(
+            command_line(&Event::Command("docker volume create dev1c-home".into())),
+            Some("docker volume create dev1c-home".to_string())
+        );
+        assert_eq!(command_line(&Event::Ok("готово".into())), None);
     }
 }
 

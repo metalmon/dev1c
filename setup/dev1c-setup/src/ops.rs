@@ -275,7 +275,11 @@ impl Op<Ctx> for Volumes {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         for s in ["home", "gitea", "models"] {
             let v = ctx.cfg.volume(s);
-            if !docker::volume_exists(ctx, &v) {
+            // В режиме показа машину не спрашиваем: план описывает установку
+            // на чистый сервер, а не на ту машину, где его печатают. Иначе
+            // `install --dry-run --commands` на машине с уже созданными
+            // томами выдал бы путь без них.
+            if ctx.dry_run || !docker::volume_exists(ctx, &v) {
                 let o = docker::run(ctx, &["volume", "create", &v])?;
                 anyhow::ensure!(o.ok(), "том {v} не создался: {}", o.tail(2).join(" "));
             }

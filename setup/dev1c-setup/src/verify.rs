@@ -152,6 +152,10 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         });
         if let Some(p) = props {
             v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents));
+            // model_window_fact сверяет окно с тем, что карта может дать сейчас —
+            // в токенах. Задача 8 (kv_bytes_per_token, window_that_fits) переводит
+            // свободные МиБ карты (llama::gpu даёт их в МиБ) в токены; пока этого
+            // числа нет в коде, факт не подключён.
         }
     }
     // Для Zed модель всегда провайдер custom: удалённая по имени из toml,
@@ -217,6 +221,23 @@ pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Ch
     }
 }
 
+/// Карта общая с vGPU: окно, замеренное при настройке, на следующий день
+/// может больше не помещаться. «Было столько, сейчас карта даёт столько» —
+/// всё, что нужно сказать администратору. `available` — токены, не МиБ
+/// (перевод свободных МиБ в токены — задача 8: kv_bytes_per_token,
+/// window_that_fits).
+pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
+    if available >= fit_ctx {
+        Check::pass("карта и окно модели", format!("было {measured}, сейчас карта даёт {available} токенов"))
+    } else {
+        Check::fail(
+            "карта и окно модели",
+            format!("было {measured}, а сейчас карта даёт только {available} токенов (нужно не меньше {fit_ctx})"),
+            "видеокарта занята другой нагрузкой (vGPU) — проверьте её загрузку и повторите позже",
+        )
+    }
+}
+
 /// `max_tokens` из settings.json рабочего места; плейсхолдер или его
 /// отсутствие — None.
 fn zed_max_tokens(settings: &str) -> Option<u32> {
@@ -262,6 +283,14 @@ mod tests {
         assert!(settings_ok(remote, "custom", "Q"));
         assert!(!settings_ok(r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "Q""#, "custom", "Q"));
         assert!(!settings_ok(remote, "custom", "Other"));
+    }
+
+    #[test]
+    fn a_card_that_shrank_is_a_failed_fact_with_both_numbers() {
+        let c = model_window_fact(65536, 20000, 65536);
+        assert!(!c.ok);
+        assert!(c.detail.contains("65536") && c.detail.contains("20000"));
+        assert!(model_window_fact(65536, 70000, 65536).ok);
     }
 
     #[test]

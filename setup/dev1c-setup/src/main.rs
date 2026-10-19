@@ -96,6 +96,33 @@ fn main() {
     }
 }
 
+/// Как отвечать на вопросы без терминала: безобидная работа идёт по
+/// умолчанию, удаление данных без возможности спросить — отказ, а с
+/// терминалом — спрашиваем как обычно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Default,
+    Refuse,
+    Ask,
+}
+
+/// SSH-сессия без терминала (`ssh host dev1c-setup install`, служба systemd,
+/// шаг CI) не должна зависать на вопросе — вопрос с stdin, который никто не
+/// ответит, виснет навсегда. Безобидная работа (install, снять контейнер)
+/// идёт по умолчанию; удаление данных клиента без терминала — не делается
+/// молча, только явным ключом --yes.
+fn answers_without_tty(has_tty: bool, cmd: &Cmd) -> Answer {
+    if has_tty {
+        return Answer::Ask;
+    }
+    let destructive = matches!(cmd, Cmd::Clean { data: true, .. });
+    if destructive {
+        Answer::Refuse
+    } else {
+        Answer::Default
+    }
+}
+
 fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
     let cfg = cfg::Cfg::load(&kit)?;
     let k = kit.clone();
@@ -138,9 +165,19 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let mut ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
+    // Нет терминала на stdin — вопрос о подтверждении завис бы навсегда.
+    let has_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let cmd = cli.cmd.unwrap_or(Cmd::Status);
+    let yes = match answers_without_tty(has_tty, &cmd) {
+        Answer::Refuse if !cli.yes => anyhow::bail!(
+            "нет терминала для подтверждения, удаление данных без него не делается — повторите команду с --yes, если это точно нужно"
+        ),
+        Answer::Default => true,
+        _ => cli.yes,
+    };
+    let mut ctx = make_ctx(kit, cli.dry_run, yes)?;
     let ops = ops::server(&ctx.cfg);
-    match cli.cmd.unwrap_or(Cmd::Status) {
+    match cmd {
         Cmd::Example { .. } => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
@@ -258,6 +295,21 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
         ctx.ok(format!("{} обновлён", cfg::FILE));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tty_tests {
+    use super::*;
+
+    #[test]
+    fn an_ssh_session_without_a_terminal_does_not_hang_on_questions() {
+        assert_eq!(answers_without_tty(false, &Cmd::Install { only: None }), Answer::Default);
+        // Удаление данных без терминала не делается молча: только явным ключом.
+        assert_eq!(answers_without_tty(false, &Cmd::Clean { stack: false, data: true }), Answer::Refuse);
+        assert_eq!(answers_without_tty(true, &Cmd::Clean { stack: false, data: true }), Answer::Ask);
+        // Снять контейнер без терминала можно: данные остаются на месте.
+        assert_eq!(answers_without_tty(false, &Cmd::Clean { stack: true, data: false }), Answer::Default);
+    }
 }
 
 fn check(ctx: &Ctx) -> Result<()> {

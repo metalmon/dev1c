@@ -147,6 +147,18 @@ impl Cfg {
         anyhow::ensure!(matches!(m.serve.as_str(), "host" | "docker" | "remote"), "[model]: serve — host, docker или remote");
         anyhow::ensure!((1..=3).contains(&m.agents), "[model]: agents — от 1 до 3");
         anyhow::ensure!(m.fit_ctx >= 16384, "[model]: fit_ctx — не меньше 16384");
+        // Предел памяти, который администратор написал, а мы молча отбросили,
+        // хуже отказа: "22" — это 22 байта, "22gb" не читается вовсе.
+        if !m.memory.is_empty() {
+            let unit = matches!(m.memory.chars().last(), Some('g' | 'G' | 'm' | 'M'));
+            let digits = unit && m.memory[..m.memory.len() - 1].trim().parse::<f64>().is_ok();
+            let big_enough = digits && crate::llama::parse_size_mb(&m.memory).is_some_and(|mb| mb >= crate::llama::MIN_MODEL_MB as u64);
+            anyhow::ensure!(
+                big_enough,
+                "[model]: memory — предел памяти контейнера модели с единицей: \"22g\" или \"22528m\", не меньше {} МиБ; пусто — посчитать от машины",
+                crate::llama::MIN_MODEL_MB
+            );
+        }
         anyhow::ensure!(
             m.file.is_empty() || m.url.is_empty(),
             "[model]: задано и file, и url — оставьте одно: файл (serve = \"host\" или \"docker\") или удалённый сервер (serve = \"remote\")"
@@ -238,10 +250,18 @@ impl Cfg {
     }
 
     /// Образец с одной подставленной формой обслуживания: умалчивание
-    /// (`Cfg::default()`) не трогаем — только `model.serve` для показа.
+    /// (`Cfg::default()`) не трогаем — только то, что нужно показать.
     pub fn example_for(serve: &str) -> String {
         let mut cfg = Cfg::default();
         cfg.model.serve = serve.into();
+        // При serve = "docker" сервер модели живёт на этой же машине и просит
+        // памяти больше, чем среда: раздел стенда из спеки — 8 ГБ среде,
+        // остальное (на 32 ГБ это 22 ГБ) контейнеру модели. Умолчание 24g
+        // верно для рабочей станции, где модель отдана службе хоста, но
+        // оставлять его здесь значит отдать модели 6 ГБ и не сказать об этом.
+        if cfg.form() == Form::Docker {
+            cfg.server.memory = "8g".into();
+        }
         Cfg::render(&cfg)
     }
 
@@ -360,6 +380,22 @@ mod tests {
     }
 
     #[test]
+    fn a_memory_limit_we_would_not_understand_is_refused_not_ignored() {
+        let mut c = Cfg::default();
+        for bad in ["22", "22gb", "g", "2g"] {
+            c.model.memory = bad.into();
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("memory") && e.contains("22g"), "{bad}: {e}");
+        }
+        for good in ["22g", "22528m", "8G"] {
+            c.model.memory = good.into();
+            c.validate().unwrap();
+        }
+        c.model.memory = String::new();
+        c.validate().unwrap();
+    }
+
+    #[test]
     fn both_file_and_url_is_refused_with_the_field_named() {
         let mut c = Cfg::default();
         c.model.file = "model/x.gguf".into();
@@ -404,6 +440,11 @@ mod tests {
 
     #[test]
     fn the_sample_can_be_printed_for_any_form() {
+        // Форма docker делит память по спеке стенда: среде 8 ГБ, остальное
+        // модели. Остальные формы отдают память среде, как и раньше.
+        assert!(Cfg::example_for("docker").contains("memory = \"8g\""));
+        assert!(Cfg::example_for("host").contains("memory = \"24g\""));
+        assert_eq!(Cfg::default().server.memory, "24g", "умолчание не тронуто");
         for form in ["host", "docker", "remote"] {
             let text = Cfg::example_for(form);
             assert!(text.contains(&format!("serve = \"{form}\"")));

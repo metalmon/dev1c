@@ -48,10 +48,32 @@ awk '
     function fence() { if (open) { print "```"; open = 0; blank = 0 } }
     /^== / { fence(); sub(/^== /, ""); printf "\n**%s**\n\n", $0; blank = 1; next }
     /^· (docker|podman) / { next }
+    # Раздел памяти называется числами ЭТОЙ машины — на машине сборки они
+    # чужие. Он нужен тому, кто ставит программой; страница объясняет предел
+    # сама, в списке оговорок, и заглушками в команде.
+    /^· память: / { next }
     /^· /  { fence(); sub(/^· /, ""); printf "- %s\n", $0; blank = 0; next }
     { if (!open) { if (!blank) print ""; print "```sh"; open = 1 } print }
     END { fence() }
-' "$tmp/raw.txt" | sed 's|\./||g; s|\.\\||g' >"$tmp/section.md"
+#
+# --memory и его два спутника считаются от памяти ЭТОЙ машины, а комплект
+# собирается не на сервере: число машины сборки здесь — это 4 ГБ пределу на
+# 32-гигабайтном сервере, то есть сломанный сервер, а не потеря настройки
+# (как с --cache-ram). Поэтому вместо числа стоит заглушка, которую страница
+# объясняет: вставленная как есть, она остановит docker с внятной ошибкой,
+# а не покалечит сервер молча.
+' "$tmp/raw.txt" \
+    | sed 's|\./||g; s|\.\\||g' \
+    | sed -e 's|--memory [0-9][0-9]*m|--memory <ПРЕДЕЛ>m|g' \
+          -e 's|--memory-swap [0-9][0-9]*m|--memory-swap <ПРЕДЕЛ×2>m|g' \
+          -e 's|--memory-reservation [0-9][0-9]*m|--memory-reservation <ПРЕДЕЛ÷2>m|g' \
+    >"$tmp/section.md"
+
+# Заглушка обязана быть на месте: число оттуда уехать не должно.
+if grep -q -- '--memory[a-z-]* [0-9]' "$tmp/section.md"; then
+    echo "manual-path.sh: a memory limit from the build machine survived in the page" >&2
+    exit 1
+fi
 
 # A silently lost step would be the worst outcome: the page looks finished and
 # stands up half a server. So every operation is accounted for by name — the

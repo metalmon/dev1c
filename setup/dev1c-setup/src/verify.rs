@@ -151,13 +151,15 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             None => Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера"),
         });
         if let Some(p) = props {
-            v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents));
+            v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents, p.slots));
             // Сервер сообщает окно слота (при --kv-unified это весь общий пул
-            // сразу): доля, на которую можно рассчитывать при всех занятых
-            // слотах, — пул, делённый на слоты, и объявляется рабочим местам
-            // именно она.
-            let slot = p.window / p.slots.max(1) as u32;
-            if let Some(declared) = ctx.kit.state_get("llama.window").and_then(|s| s.parse::<u32>().ok()) {
+            // сразу): окно, которое слот честно держит вместе с ответом,
+            // считает llama::slot_window_in — им и объявляется рабочее место.
+            let slot = llama::slot_window_in(p.window, p.slots);
+            // Объявленное — из самих настроек рабочего места; их нет (или они
+            // с заготовками) — из состояния комплекта, как записал замер.
+            let declared = zed_declared_window(&settings).or_else(|| ctx.kit.state_get("llama.window").and_then(|s| s.parse().ok()));
+            if let Some(declared) = declared {
                 v.push(declared_window_fact(declared, slot));
             }
             // Карта общая с vGPU: столько токенов на слот она держит сейчас.
@@ -168,8 +170,10 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         }
         // Подкачка — требование к хосту; на Windows её размером не управляем,
         // и факта нет вовсе (ложного «пройдено» тоже).
-        if let Some(swap) = llama::swap_total_mb() {
-            v.push(swap_fact(swap, llama::limit_mb(ctx)));
+        // Предел не узнан — сравнивать подкачку не с чем, и выдуманное число
+        // здесь означало бы «здоров» против неверного предела.
+        if let (Some(swap), Some(limit)) = (llama::swap_total_mb(), llama::limit_mb(ctx)) {
+            v.push(swap_fact(swap, limit));
         }
     }
     // Для Zed модель всегда провайдер custom: удалённая по имени из toml,
@@ -216,20 +220,23 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     v
 }
 
-/// Окно сервера, бюджет агента в Zed и слоты обязаны сойтись:
-/// max_tokens × agents + ответ ≤ окно.
-pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Check {
-    let out = crate::cfg::OUTPUT_TOKENS;
+/// Пул сервера, `max_tokens` в Zed, слоты и агенты обязаны сойтись:
+/// `max_tokens × agents × slots ≤ пул`. Умножать на одних агентов мало — на
+/// стенде слотов три, и `max_tokens`, который не может быть обслужен на всех
+/// слотах разом, это та самая поломка «агент поглупел». Ответ отдельным
+/// слагаемым не входит: он уже внутри `max_tokens` (`llama::zed_numbers`).
+pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16, slots: u16) -> Check {
     let Some(mt) = zed_max_tokens else {
         return Check::fail("три числа", "в настройках Zed нет max_tokens", "dev1c-setup install — замер запишет числа в настройки");
     };
-    let need = mt as u64 * agents.max(1) as u64 + out as u64;
+    let (a, s) = (agents.max(1), slots.max(1));
+    let need = mt as u64 * a as u64 * s as u64;
     if need <= window as u64 {
-        Check::pass("три числа", format!("окно {window}, max_tokens {mt} × {agents} + ответ {out} ≤ окна"))
+        Check::pass("три числа", format!("пул {window}, max_tokens {mt} × {a} агентов × {s} слотов = {need} ≤ пула"))
     } else {
         Check::fail(
             "три числа",
-            format!("окно {window}, а max_tokens {mt} × {agents} + ответ {out} = {need}"),
+            format!("пул {window}, а max_tokens {mt} × {a} агентов × {s} слотов = {need}"),
             "dev1c-setup install — пересчитает и пересоздаст контейнер",
         )
     }
@@ -286,13 +293,26 @@ pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
     }
 }
 
-/// `max_tokens` из settings.json рабочего места; плейсхолдер или его
-/// отсутствие — None.
-fn zed_max_tokens(settings: &str) -> Option<u32> {
+/// Число из settings.json рабочего места; плейсхолдер или его отсутствие — None.
+fn zed_number(settings: &str, key: &str) -> Option<u32> {
+    let prefix = format!("\"{key}\":");
     settings
         .lines()
-        .find_map(|l| l.trim().strip_prefix("\"max_tokens\":"))
+        .find_map(|l| l.trim().strip_prefix(prefix.as_str()).map(|v| v.to_string()))
         .and_then(|v| v.trim().trim_end_matches(',').parse().ok())
+}
+
+fn zed_max_tokens(settings: &str) -> Option<u32> {
+    zed_number(settings, "max_tokens")
+}
+
+/// Какое окно рабочее место считает своим: `max_tokens` без доли под ответ.
+/// Берётся из самих настроек — проверять надо то, во что верит Zed, а не то,
+/// что мы когда-то записали в состояние комплекта.
+fn zed_declared_window(settings: &str) -> Option<u32> {
+    let mt = zed_max_tokens(settings)?;
+    let out = zed_number(settings, "max_output_tokens")?;
+    mt.checked_sub(out)
 }
 
 /// Записать отчёт в комплект и вернуть путь.
@@ -310,16 +330,27 @@ mod tests {
 
     #[test]
     fn the_three_numbers_must_agree() {
-        let c = numbers_fact(131072, Some(120832), 1);
+        // Стенд: пул на три слота по 250k вместе с ответом; max_tokens одного
+        // рабочего места — 300 000, и три слота по нему пул держит ровно.
+        let pool = llama::pool_for(250_000, 3);
+        let c = numbers_fact(pool, Some(300_000), 1, 3);
         assert!(c.ok, "{c:?}");
-        let c = numbers_fact(131072, Some(130000), 1);
-        assert!(!c.ok && c.detail.contains("130000") && c.detail.contains("131072"), "{c:?}");
-        let c = numbers_fact(131072, None, 1);
+        // Правленный руками max_tokens, который на всех слотах не обслужить,
+        // обязан провалиться — и назвать оба числа.
+        let c = numbers_fact(pool, Some(500_000), 1, 3);
+        assert!(!c.ok && c.detail.contains("500000") && c.detail.contains(&pool.to_string()), "{c:?}");
+        // Умножения на одних агентов не хватало: 300 000 × 1 проходило и в
+        // пуле 750 000, которого на три слота по 300 000 не хватает.
+        assert!(!numbers_fact(750_000, Some(300_000), 1, 3).ok);
+        let c = numbers_fact(pool, None, 1, 3);
         assert!(!c.ok && c.hint.contains("install"), "{c:?}");
-        // На три агента бюджет × 3 + ответ не должен превышать окно.
-        assert!(!numbers_fact(131072, Some(60000), 3).ok);
+        // Три агента делят слот: их max_tokens втрое меньше, и сумма та же.
+        assert!(numbers_fact(pool, Some(99_999), 3, 3).ok);
         assert_eq!(zed_max_tokens("  \"max_tokens\": 120832,\n  \"max_output_tokens\": 8192,"), Some(120832));
         assert_eq!(zed_max_tokens("\"max_tokens\": CUSTOM_MAX_TOKENS_PLACEHOLDER,"), None);
+        // Объявленное окно читается из самих настроек: max_tokens без ответа.
+        assert_eq!(zed_declared_window("  \"max_tokens\": 300000,\n  \"max_output_tokens\": 50000,"), Some(250_000));
+        assert_eq!(zed_declared_window("  \"max_tokens\": 300000,"), None);
     }
 
     #[test]
@@ -344,12 +375,14 @@ mod tests {
         // Стенд: по 250k на слот, три слота — значит пул 750k, и именно его
         // сообщает /props (llama.cpp: slot_n_ctx, а при --kv-unified
         // n_ctx_seq == n_ctx — весь пул). Zed получает долю одного слота.
-        let pool = 250_000 * llama::SLOTS as u32;
+        let pool = llama::pool_for(250_000, llama::SLOTS);
+        let slot = llama::slot_window_in(pool, llama::SLOTS);
+        assert_eq!(slot, 250_000, "пул и окно слота обязаны сходиться туда и назад");
         for agents in 1..=3u16 {
-            let z = llama::zed_numbers(pool / llama::SLOTS as u32, agents);
-            let c = numbers_fact(pool, Some(z.max_tokens), agents);
+            let z = llama::zed_numbers(slot, agents);
+            let c = numbers_fact(pool, Some(z.max_tokens), agents, llama::SLOTS);
             assert!(c.ok, "agents={agents}: {c:?}");
-            assert!(declared_window_fact(z.window, pool / llama::SLOTS as u32).ok);
+            assert!(declared_window_fact(z.window, slot / agents as u32).ok);
         }
         assert_eq!(llama::zed_numbers(250_000, 1).max_tokens, 300_000);
     }

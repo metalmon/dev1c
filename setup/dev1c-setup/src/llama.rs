@@ -36,11 +36,11 @@ pub struct ServeInput<'a> {
 /// под карту, а заданное окно он уменьшить не может и выносит слои на
 /// процессор — генерация падает с 32 до 4 токенов в секунду.
 ///
-/// `--fit-ctx` получает ОБЩИЙ пул: при `--kv-unified` кэш у слотов один, и
-/// три занятых слота по `fit_ctx` токенов живут только в пуле втрое большем.
+/// `--fit-ctx` получает ОБЩИЙ пул (`pool_for`): при `--kv-unified` кэш у
+/// слотов один, и занятый слот держит не окно, а окно вместе с ответом.
 pub fn serve_args(i: &ServeInput) -> Vec<String> {
     let port = i.port.to_string();
-    let fit_ctx = (i.fit_ctx as u64 * SLOTS as u64).to_string();
+    let fit_ctx = pool_for(i.fit_ctx, SLOTS).to_string();
     let slots = SLOTS.to_string();
     let fit_target = i.fit_target.to_string();
     let cache_ram = i.cache_ram.to_string();
@@ -143,12 +143,40 @@ pub fn zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers {
     ZedNumbers { window, max_output, max_tokens: window + max_output }
 }
 
+/// Какой пул нужен серверу, чтобы окно слота было настоящим: рабочее место
+/// вправе занять весь свой `max_tokens` — вход И ответ, — и так на каждом
+/// слоте. Число берётся у `zed_numbers`, а не считается здесь заново: иначе
+/// пул и объявленное Zed окно разошлись бы на пятую часть молча.
+pub fn pool_for(slot_window: u32, slots: u16) -> u32 {
+    let per_slot = zed_numbers(slot_window, 1).max_tokens as u64;
+    (per_slot * slots.max(1) as u64).min(u32::MAX as u64) as u32
+}
+
+/// Обратное к `pool_for`: какое окно слота честно помещается в пул, который
+/// сервер действительно выделил. `pool_for(slot_window_in(p, s), s) <= p`.
+pub fn slot_window_in(pool: u32, slots: u16) -> u32 {
+    let share = pool / slots.max(1) as u32;
+    // Окно плюс его пятая часть должны уложиться в долю слота.
+    (share as u64 * 5 / 6) as u32
+}
+
 /// Размер KV-кэша в журнале сервера, сложенный по устройствам: ни `/props`,
 /// ни `/metrics` его не сообщают, а строку «KV buffer size» llama.cpp печатает
 /// при загрузке всегда.
+/// Берётся ПОСЛЕДНЯЯ загрузка, а не весь хвост: после перезапуска в журнале
+/// лежит два таких блока, и сложенные вместе они дали бы вдвое больший кэш —
+/// то есть вдвое больший размер KV на токен, провал проверки на здоровой
+/// карте и неверное число, записанное в состояние комплекта.
 pub fn kv_cache_mb_from_log(text: &str) -> Option<u32> {
     let mut sum = 0.0;
-    for l in text.lines().filter(|l| l.contains("KV buffer size")) {
+    for l in text.lines().rev() {
+        if !l.contains("KV buffer size") {
+            // Строка не из блока: если блок уже собран, он и есть последний.
+            if sum > 0.0 {
+                break;
+            }
+            continue;
+        }
         if let Some(n) = l.rsplit('=').next().and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse::<f64>().ok()) {
             sum += n;
         }
@@ -455,12 +483,20 @@ pub fn engine_env_limit_mb(ctx: &Ctx) -> Option<u64> {
 
 /// Предел памяти контейнера модели: заданный в параметрах, иначе остаток
 /// машины после контейнера среды и запаса хосту.
-pub fn limit_mb(ctx: &Ctx) -> u32 {
+///
+/// None — машина не ответила, сколько у неё памяти. Тогда предела не ставим
+/// вовсе: пол (`MIN_MODEL_MB`) выглядел бы как решение, а на деле это 4 ГБ
+/// работающему серверу и пересоздание контейнера на пустом месте.
+pub fn limit_mb(ctx: &Ctx) -> Option<u32> {
     if let Some(n) = parse_size_mb(&ctx.cfg.model.memory) {
-        return (n.min(u32::MAX as u64) as u32).max(MIN_MODEL_MB);
+        return Some((n.min(u32::MAX as u64) as u32).max(MIN_MODEL_MB));
+    }
+    let total = total_ram_mb(ctx);
+    if total == 0 {
+        return None;
     }
     let env = env_limit_mb(engine_env_limit_mb(ctx), &ctx.cfg.server.memory);
-    container_memory_mb(total_ram_mb(ctx), env, HOST_RESERVE_MB)
+    Some(container_memory_mb(total, env, HOST_RESERVE_MB))
 }
 
 /// Сколько видеопамяти может пойти под KV-кэш: свободное сейчас плюс то, что
@@ -688,8 +724,9 @@ mod tests {
         let a = serve_args(&input(Some("/k/dev1c-llama.token")));
         assert!(!a.iter().any(|x| x == "-c" || x == "--ctx-size"), "окно не задаём: {a:?}");
         let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
-        // Окно задаётся на слот, а серверу уходит общий пул: три слота по 65536.
-        assert_eq!(at("--fit-ctx").as_deref(), Some("196608"));
+        // Окно задаётся на слот, а серверу уходит общий пул: три слота по
+        // 65536 вместе с ответом (65536 + 13107) × 3.
+        assert_eq!(at("--fit-ctx").as_deref(), Some("235929"));
         assert_eq!(at("--fit-target").as_deref(), Some("1024"));
         assert_eq!(at("--parallel").as_deref(), Some("3"));
         assert!(a.iter().any(|x| x == "--kv-unified"));
@@ -732,6 +769,21 @@ mod tests {
     }
 
     #[test]
+    fn the_pool_holds_what_zed_is_allowed_to_ask_on_every_slot() {
+        // Zed вправе занять весь max_tokens на каждом слоте: пул обязан быть
+        // не окном × слоты, а max_tokens × слоты — иначе объявленное окно на
+        // пятую часть больше, чем сервер может держать.
+        assert_eq!(pool_for(250_000, 3), 300_000 * 3);
+        assert_eq!(pool_for(250_000, 3), zed_numbers(250_000, 1).max_tokens * 3);
+        // И обратно: в выделенный пул помещается ровно то окно, из которого он
+        // посчитан — туда и назад без потерь.
+        assert_eq!(slot_window_in(900_000, 3), 250_000);
+        for w in [16_384u32, 65_536, 131_072, 250_000] {
+            assert!(pool_for(slot_window_in(pool_for(w, 3), 3), 3) <= pool_for(w, 3), "окно {w}");
+        }
+    }
+
+    #[test]
     fn the_model_container_gets_what_is_left_of_the_machine() {
         // Стенд: 32 ГБ всего, 8 ГБ среде, 2 ГБ хосту.
         assert_eq!(container_memory_mb(32768, 8192, 2048), 22528);
@@ -759,9 +811,14 @@ mod tests {
     fn the_size_of_the_kv_cache_is_read_from_the_server_log() {
         // Размера кэша нет ни в /props, ни в /metrics: llama.cpp называет его
         // только в журнале, и по устройствам — значит складываем.
-        let log = "llama_kv_cache: CUDA0 KV buffer size =   320.00 MiB\nllama_kv_cache: CUDA1 KV buffer size =   320.00 MiB\nllama_context: n_ctx = 65536\n";
-        assert_eq!(kv_cache_mb_from_log(log), Some(640));
+        let block = "llama_kv_cache: CUDA0 KV buffer size =   320.00 MiB\nllama_kv_cache: CUDA1 KV buffer size =   320.00 MiB\n";
+        let log = format!("{block}llama_context: n_ctx = 65536\n");
+        assert_eq!(kv_cache_mb_from_log(&log), Some(640));
         assert_eq!(kv_cache_mb_from_log("llama_context: n_ctx = 65536"), None);
+        // Перезапуск: в хвосте журнала два блока, и считается последний, а не
+        // сумма — иначе кэш удваивается и здоровая карта «перестаёт вмещать».
+        let twice = format!("{log}srv    operator(): operator called, restarting\n{log}");
+        assert_eq!(kv_cache_mb_from_log(&twice), Some(640));
         // Предел памяти движка приходит в байтах; ноль — предела нет.
         assert_eq!(parse_size_mb("22528m"), Some(22528));
         assert_eq!(parse_size_mb("22g"), Some(22528));

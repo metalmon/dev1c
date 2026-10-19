@@ -124,6 +124,20 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<llama::
     Ok(z)
 }
 
+/// Строка замера. `window` — пул, который сообщил сервер; «на слот» должно
+/// быть ТО ЖЕ число, которое объявляется рабочему месту и которое потом
+/// печатает `check`, то есть `llama::slot_window_in`, а не доля пула: доля
+/// включает ответ, и администратор получал бы два разных числа для одного
+/// окна от одной программы.
+fn answers_line(window: u32, slots: u16, model: &str, z: &llama::ZedNumbers) -> String {
+    format!(
+        "пул {window} токенов, слотов {slots}, модель {model}; на слот {} — Zed получает max_tokens = {} и ответ {}",
+        llama::slot_window_in(window, slots),
+        z.max_tokens,
+        z.max_output
+    )
+}
+
 /// Что остаётся в каталоге службы при раскладке из комплекта: файлы
 /// комплекта, nssm, токен и журналы. Всё остальное удаляется — подложенная
 /// заранее библиотека загрузилась бы в процесс службы.
@@ -199,6 +213,22 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
         token_file: None,
     }));
     a
+}
+
+/// Два файла с токеном, которые установка пишет сама (`llama::ensure_token` +
+/// `llama::write_env_file`), — командами оболочки: токен в своём файле (его
+/// читает `check`) и тот же токен переменной LLAMA_API_KEY для контейнера.
+/// Ручной путь без них не доходит до конца: сервер отвечает 401, и `check`
+/// проваливает четыре факта на здоровой машине. Печатаются они здесь, вместе
+/// с остальными командами, а не рядом со страницей руками — иначе разошлись
+/// бы с кодом при первой же правке имён файлов.
+pub fn token_commands(ctx: &Ctx) -> Vec<String> {
+    let token = llama::token_path(&ctx.kit, ctx.cfg.form()).to_string_lossy().to_string();
+    let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
+    vec![
+        format!("sh -c 'tr -dc a-f0-9 </dev/urandom | head -c 32 > {token} && chmod 600 {token}'"),
+        format!("sh -c 'printf \"LLAMA_API_KEY=%s\\n\" \"$(cat {token})\" > {env} && chmod 600 {env}'"),
+    ]
 }
 
 struct Bin;
@@ -412,7 +442,14 @@ impl Op<Ctx> for Container {
         // В режиме показа команда только печатается: токен, файл переменных и
         // запомненные параметры тогда не нужны — и не должны появляться в
         // комплекте от одной печати плана (`install --dry-run --commands`).
-        if !ctx.dry_run {
+        // Но ручному пути они нужны, и там это шаг, а не файл: печатаем его
+        // командами (`token_commands`) на том же месте, где установка пишет
+        // файлы сама — перед запуском контейнера.
+        if ctx.dry_run {
+            for c in token_commands(ctx) {
+                ctx.emit(common::Event::Command(c));
+            }
+        } else {
             let token = llama::ensure_token(ctx)?;
             llama::write_env_file(&ctx.kit, &token)?;
         }
@@ -485,10 +522,7 @@ impl Op<Ctx> for Answers {
         llama::wait_health(&url, &token, 300).map_err(|e| anyhow::anyhow!("{e:#} — смотрите {}", llama::log_file().display()))?;
         let p = llama::props(&url, &token).ok_or_else(|| anyhow::anyhow!("сервер не отдал /props"))?;
         let z = verdict(&ctx.cfg, p.window, p.slots)?;
-        ctx.ok(format!(
-            "пул {} токенов, слотов {}, модель {}; на слот {} — Zed получает max_tokens = {} и ответ {}",
-            p.window, p.slots, p.model, p.window / p.slots.max(1) as u32, z.max_tokens, z.max_output
-        ));
+        ctx.ok(answers_line(p.window, p.slots, &p.model, &z));
         // Размер KV на токен — число этой модели, а не таблицы: дальше он
         // считает и то, что помещается в карту, и то, сколько нужно подкачки.
         if let Some(mb) = llama::kv_cache_mb_from_log(&llama::server_log(ctx)) {
@@ -631,5 +665,51 @@ mod tests {
         c.model.agents = 3;
         let e = verdict(&c, 49152, 3).unwrap_err().to_string();
         assert!(e.contains("16384"), "{e}");
+    }
+
+    #[test]
+    fn the_pool_the_server_was_asked_for_always_passes_the_verdict() {
+        // Отказ опирается на обратный счёт пула, и терять на делении нельзя:
+        // пул, который llama::serve_args и запросил, обязан проходить при
+        // ЛЮБОМ fit_ctx — включая 65536, умолчание комплекта. Раньше здесь
+        // выходило «просят 65536 … помещается 65535», и установку спасало
+        // только то, что llama.cpp сам округляет окно до кратного 256.
+        let mut c = Cfg::default();
+        c.model.agents = 1;
+        for fit in [16_384u32, 65_536, 65_537, 131_072, 250_000] {
+            c.model.fit_ctx = fit;
+            let pool = llama::pool_for(fit, llama::SLOTS);
+            let z = verdict(&c, pool, llama::SLOTS).unwrap_or_else(|e| panic!("fit_ctx {fit}: {e}"));
+            assert_eq!(z.window, fit, "fit_ctx {fit}");
+        }
+    }
+
+    #[test]
+    fn the_manual_path_gets_the_token_step_with_the_same_key_in_both_files() {
+        // Ручной путь собирается из печатаемых команд, и токен в нём — шаг, а
+        // не файл из комплекта: один и тот же ключ в dev1c-llama.token (его
+        // читает check) и в llama.env (его получает контейнер).
+        let mut c = Cfg::default();
+        c.model.serve = "docker".into();
+        let dir = std::env::temp_dir().join(format!("dev1c-token-cmds-{}", std::process::id()));
+        let ctx = Ctx { kit: common::kit::Kit::at(&dir), cfg: c, dry_run: true, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
+        let cmds = token_commands(&ctx);
+        assert_eq!(cmds.len(), 2, "{cmds:?}");
+        let token = llama::token_path(&ctx.kit, Form::Docker).to_string_lossy().to_string();
+        assert!(cmds[0].contains(&token) && cmds[0].contains("chmod 600"), "{:?}", cmds[0]);
+        // Второй файл берёт ключ из первого, а не придумывает свой.
+        assert!(cmds[1].contains(&format!("cat {token}")), "{:?}", cmds[1]);
+        assert!(cmds[1].contains("LLAMA_API_KEY=%s") && cmds[1].contains("llama.env"), "{:?}", cmds[1]);
+    }
+
+    #[test]
+    fn the_measurement_line_names_the_slot_window_not_the_share_of_the_pool() {
+        // Доля пула включает ответ: 300 000 там, где Zed объявляется 250 000 и
+        // где check потом печатает «объявлено 250000 токенов на слот».
+        let slot = 250_000;
+        let z = llama::zed_numbers(slot, 1);
+        let line = answers_line(llama::pool_for(slot, llama::SLOTS), llama::SLOTS, "x.gguf", &z);
+        assert!(line.contains("на слот 250000 —"), "{line}");
+        assert!(line.contains("max_tokens = 300000 и ответ 50000"), "{line}");
     }
 }

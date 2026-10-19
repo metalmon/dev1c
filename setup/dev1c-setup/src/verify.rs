@@ -143,12 +143,15 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             Some(g) => Check::pass("видеокарта", format!("{}, {} МиБ, занято {} МиБ, драйвер {}", g.name, g.total_mb, g.used_mb, g.driver)),
             None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
         });
-        let token = llama::read_token(&ctx.kit, ctx.cfg.form()).unwrap_or_default();
+        let token_file = llama::token_path(&ctx.kit, ctx.cfg.form());
+        let token = llama::read_token(&ctx.kit, ctx.cfg.form());
+        // Токен не прочитан, а файл на месте — это права, а не сервер.
+        let unreadable = token.is_none() && token_file.exists();
         let url = crate::ops_llama::local_url(ctx);
-        let props = llama::props(&url, &token);
+        let props = llama::props(&url, &token.unwrap_or_default());
         v.push(match &props {
             Some(p) => Check::pass("сервер модели", format!("{}: окно {} токенов, слотов {}, модель {}", ctx.cfg.model_url(), p.window, p.slots, p.model)),
-            None => Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера"),
+            None => no_props_fact(&url, unreadable.then(|| token_file.display().to_string())),
         });
         if let Some(p) = props {
             v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents, p.slots));
@@ -218,6 +221,22 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         });
     }
     v
+}
+
+/// Сервер модели не ответил — и надо назвать настоящую причину. Пустой токен
+/// при существующем файле токена значит, что его не дали прочитать: установка
+/// под `sudo` пишет `dev1c-llama.token` как `root:root 0600`, а `check` тем же
+/// администратором, но без `sudo`, видит пустой ключ, получает от сервера 401
+/// — и обвинял бы в этом совершенно здоровый сервер.
+pub fn no_props_fact(url: &str, unreadable_token: Option<String>) -> Check {
+    match unreadable_token {
+        Some(f) => Check::fail(
+            "сервер модели",
+            format!("токен {f} есть, но не читается: без него серверу нечем ответить (401), и о самом сервере это не говорит ничего"),
+            "install и check выполняет один пользователь: ставили под sudo — и проверяйте `sudo dev1c-setup check`, либо отдайте файл токена тому, кто проверяет",
+        ),
+        None => Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера"),
+    }
 }
 
 /// Пул сервера, `max_tokens` в Zed, слоты и агенты обязаны сойтись:
@@ -351,6 +370,20 @@ mod tests {
         // Объявленное окно читается из самих настроек: max_tokens без ответа.
         assert_eq!(zed_declared_window("  \"max_tokens\": 300000,\n  \"max_output_tokens\": 50000,"), Some(250_000));
         assert_eq!(zed_declared_window("  \"max_tokens\": 300000,"), None);
+    }
+
+    #[test]
+    fn an_unreadable_token_is_named_instead_of_blaming_the_server() {
+        // Установка под sudo, check без него: токен есть, но не читается.
+        // Виноваты права, а не сервер, и «install» тут ничего не исправит.
+        let c = no_props_fact("http://172.17.0.1:3392", Some("/srv/dev1c-kit/dev1c-llama.token".into()));
+        assert!(!c.ok);
+        assert!(c.detail.contains("dev1c-llama.token") && c.detail.contains("не читается"), "{c:?}");
+        assert!(c.hint.contains("sudo"), "{c:?}");
+        assert!(!c.detail.contains("не отвечает"), "здоровый сервер не виноват: {c:?}");
+        // Токена нет вовсе — это по-прежнему «сервер не отвечает».
+        let c = no_props_fact("http://172.17.0.1:3392", None);
+        assert!(!c.ok && c.detail.contains("не отвечает") && c.hint.contains("install"), "{c:?}");
     }
 
     #[test]

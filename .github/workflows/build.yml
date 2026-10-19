@@ -149,7 +149,10 @@ jobs:
 
       - name: Build
         run: |
-          docker build -t oktaplus/dev1c:latest .
+          # --provenance/--sbom off: a modern BuildKit attaches attestation
+          # manifests by default, and Docker 20.10.24 on the customer's
+          # server refuses to load an archive that carries one.
+          docker build --provenance=false --sbom=false -t oktaplus/dev1c:latest .
           echo "== memory after the build"; free -m | grep -E 'Mem|Swap'
           # dockerd keeps ~14 GB resident after exporting this image (84 % of
           # the runner) and everything after it runs from swap or gets killed.
@@ -255,10 +258,13 @@ jobs:
         run: |
           # Both images in one archive: the environment and the model server
           # for serve = "docker" (same llama.cpp build as the host row in pack.sh).
-          docker pull ghcr.io/metalmon/dev1c-llama:b11606
-          docker tag ghcr.io/metalmon/dev1c-llama:b11606 oktaplus/dev1c-llama:latest
+          docker pull ghcr.io/metalmon/dev1c-llama:b11734
+          docker tag ghcr.io/metalmon/dev1c-llama:b11734 oktaplus/dev1c-llama:latest
           docker save oktaplus/dev1c:latest oktaplus/dev1c-llama:latest | gzip -1 > dev1c-image.tar.gz
           ls -lh dev1c-image.tar.gz
+          # The customer's server runs Docker 20.10.24, which refuses an
+          # archive carrying an attestation manifest. Fail here, not there.
+          sh scripts/check-image-archive.sh dev1c-image.tar.gz
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'
           cp dev1c-setup bins/

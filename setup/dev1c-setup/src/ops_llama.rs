@@ -2,6 +2,7 @@
 //! комплекта, служба, замер. Каждая умеет объясниться: без карты, без
 //! модели, без nssm человек узнаёт причину, а не «шагов: 0».
 
+use crate::barrier;
 use crate::cfg::{Facts, Form};
 use crate::llama;
 use crate::ops::Ctx;
@@ -297,8 +298,12 @@ impl Op<Ctx> for Container {
         if !docker::image_loaded(ctx, &ctx.cfg.llama_image()) {
             return OpState::Blocked(format!("образ {} не загружен: он едет в том же архиве, что и образ среды", ctx.cfg.llama_image()));
         }
-        if llama::gpu(ctx).is_none() {
-            return OpState::Blocked("нет видеокарты (nvidia-smi не отвечает): модель для агентов на процессоре неработоспособна".into());
+        // Образ уже загружен (проверено строкой выше) — самая честная проверка,
+        // что карта достаётся до контейнера: запустить образ и посмотреть, не
+        // упал ли он на --gpus all. Дешевле, чем поднимать настоящий сервер.
+        let probe_ok = docker::ask(ctx, &["run", "--rm", "--gpus", "all", &ctx.cfg.llama_image(), "--version"]).map(|o| o.ok()).unwrap_or(false);
+        if let Some(msg) = barrier::gpu_in_container(probe_ok, ctx.kit.path("nvidia-container-toolkit").is_dir()) {
+            return OpState::Blocked(msg);
         }
         let name = ctx.cfg.llama_container();
         if let Some(st) = crate::ops::state_before_drift(&docker::container_state(ctx, &name)) {

@@ -1,6 +1,7 @@
 //! Операции сервера: образ, тома, модель, контейнер, службы. Аргументы
 //! `docker run` переехали сюда из dev1c.ps1 вместе с причинами.
 
+use crate::barrier;
 use crate::cfg::Cfg;
 use anyhow::Result;
 use common::docker;
@@ -160,10 +161,14 @@ impl Op<Ctx> for Env {
         true
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        if !docker::available(ctx) {
-            return OpState::Blocked(format!("{} не отвечает: запустите Docker Desktop или установите движок", ctx.engine()));
+        match docker::ask(ctx, &["version", "--format", "{{.Server.Version}}"]) {
+            Ok(o) if o.ok() => OpState::Missing,
+            Ok(o) => OpState::Blocked(
+                barrier::docker_verdict(&o.text, o.code)
+                    .unwrap_or_else(|| format!("{} не отвечает: запустите Docker Desktop или установите движок", ctx.engine())),
+            ),
+            Err(e) => OpState::Blocked(format!("{} не отвечает: {e:#}", ctx.engine())),
         }
-        OpState::Missing
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![Action::new(format!(
@@ -213,7 +218,7 @@ impl Op<Ctx> for Image {
                 OpState::Drifted { from: "образ из прежнего комплекта".into(), to: "образ из этого комплекта".into() }
             }
             (true, _) => OpState::Done(ctx.cfg.image()),
-            (false, None) => OpState::Blocked("в комплекте нет dev1c-image.tar.gz".into()),
+            (false, None) => OpState::Blocked(barrier::missing_file("архив образа", &archive, &crate::ui::host_hint())),
             (false, Some(_)) => OpState::Missing,
         }
     }
@@ -325,7 +330,7 @@ impl Op<Ctx> for Model {
         }
         let src = ctx.kit.path(f);
         let Ok(meta) = std::fs::metadata(&src) else {
-            return OpState::Blocked(format!("файла {f} нет в комплекте"));
+            return OpState::Blocked(barrier::missing_file("файл модели", &src, &crate::ui::host_hint()));
         };
         let base = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if !docker::volume_exists(ctx, &ctx.cfg.volume("models")) {

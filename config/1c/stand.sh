@@ -329,10 +329,20 @@ start)
         # lines that used to bind these two ports straight to "1c-stand
         # mcp"/"vrunner": its bridge calls those same subcommands now, so the
         # connector's switch, journal and project mutex actually govern the
-        # agent's calls. runuser does not reset HOME (unlike "su -"), hence
-        # the explicit env.
-        runuser -u "$u" -- env HOME="$h" "$h/dev1c/1c-connect" serve \
-            >"$LOG/$u-connect.log" 2>&1 &
+        # agent's calls. A supervised loop, not one shot: on a fresh volume
+        # the binary and its toml are not there yet (seed() writes both, in
+        # the background below, deliberately — a УНФ base is 1.9 GB), and
+        # the socat lines this replaces tolerated that by binding the socket
+        # immediately and only running anything on the first connection.
+        # Wait for seed to land, then run; restart if the session ever
+        # exits, so a crash does not leave the ports silently dead. runuser
+        # does not reset HOME (unlike "su -"), hence the explicit env.
+        ( while :; do
+              until [ -x "$h/dev1c/1c-connect" ] && [ -e "$h/dev1c/$CONNECT_TOML" ]; do sleep 2; done
+              runuser -u "$u" -- env HOME="$h" "$h/dev1c/1c-connect" serve
+              log "$u: 1c-connect serve exited, restarting in 5s"
+              sleep 5
+          done ) >>"$LOG/$u-connect.log" 2>&1 &
         log "$u: HTTP service 127.0.0.1:$((8080 + n))/base, mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
     done
     # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the

@@ -35,6 +35,21 @@ for n in 1 2 3; do
     # connection for 25 s only. A real tool call, not tools/list: the list
     # answers even when the HTTP service path is wrong.
     runuser -u "$u" -- /usr/local/bin/1c-stand seed >/dev/null 2>&1
+    # Both MCP ports are the connector's own now, not socat's: start a
+    # session for this workstation if nothing answers yet (a fresh
+    # container, or a stand that has not been told to run start), and stop
+    # only what we started here — a connector the stand itself is running
+    # stays untouched.
+    serve_pid=
+    if ! nc -z -w1 localhost $((7770 + n)) 2>/dev/null; then
+        runuser -u "$u" -- env HOME="/home/$u" "/home/$u/dev1c/1c-connect" serve \
+            >/var/log/1c/$u-connect.log 2>&1 &
+        serve_pid=$!
+        for try in 1 2 3 4 5 6 7 8 9 10; do
+            nc -z -w1 localhost $((7770 + n)) 2>/dev/null && break
+            sleep 1
+        done
+    fi
     mcp $((7770 + n)) "$INFO" '"result"' && say "ok   $u: mcp-1c on $((7770 + n)) reads the base" \
         || { say "FAIL $u: mcp-1c on $((7770 + n)): $(grep -ao '"text":"[^"]\{0,120\}' $T/mcp.out | head -n 1) (see /var/log/1c/$u-mcp.log)"; fail=1; }
     mcp $((7780 + n)) "$LIST" '"cf_decompile"' && say "ok   $u: vrunner-mcp on $((7780 + n))" \
@@ -61,5 +76,6 @@ for n in 1 2 3; do
     [ -z "${DEMO_DB_USER-}" ] || grep -aq "/N${DEMO_DB_USER}" "$v8i" 2>/dev/null \
         && say "ok   $u: base list carries the infobase user" \
         || { say "FAIL $u: $v8i has no /N${DEMO_DB_USER} — the starter will ask who you are"; fail=1; }
+    [ -z "$serve_pid" ] || { kill "$serve_pid" 2>/dev/null; wait "$serve_pid" 2>/dev/null; }
 done
 exit $fail

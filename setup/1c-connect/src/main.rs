@@ -56,6 +56,9 @@ enum Cmd {
     Uninstall,
     /// Поднять туннель и мост; работает, пока не нажать Ctrl+C.
     Connect,
+    /// Без окна: поднять сеанс и держать его до Ctrl+C/SIGTERM. Для стенда и
+    /// другого автозапуска без рабочего стола.
+    Serve,
     /// Выгрузить конфигурацию в src (cf_decompile) и отправить ветку в Gitea.
     Export {
         /// Сообщение коммита.
@@ -179,6 +182,7 @@ fn run() -> Result<()> {
             ext.revert_apply(&ctx, CleanLevel::Stack)?;
         }
         Cmd::Connect => connect(&ctx)?,
+        Cmd::Serve => serve(&ctx)?,
         Cmd::Export { message } => {
             let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");
@@ -244,4 +248,49 @@ fn connect(ctx: &Ctx) -> Result<()> {
     stopped?;
     println!("Отключено.");
     Ok(())
+}
+
+/// То же самое, что `connect`, но без вопросов и без печати плана: для
+/// запуска без рабочего стола (стенд, автозапуск). Останавливается по
+/// Ctrl+C, а на Linux — ещё и по SIGTERM, чтобы `docker stop` и остановка
+/// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
+fn serve(ctx: &Ctx) -> Result<()> {
+    anyhow::ensure!(
+        ctx.kit.path(cfg::FILE).exists(),
+        "в комплекте нет {} — создайте его из образца: 1c-connect example > {}",
+        cfg::FILE,
+        cfg::FILE
+    );
+    let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
+    let rt = tokio::runtime::Runtime::new()?;
+    let r = rt.block_on(async {
+        #[cfg(unix)]
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Ok(()),
+            #[cfg(unix)]
+            _ = term.recv() => Ok(()),
+            r = s.wait() => r,
+        }
+    });
+    let stopped = s.stop();
+    r?;
+    stopped?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_is_a_subcommand() {
+        let cli = Cli::try_parse_from(["1c-connect", "serve"]).expect("serve разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Serve)));
+    }
+
+    #[test]
+    fn serve_takes_no_flags_of_its_own() {
+        assert!(Cli::try_parse_from(["1c-connect", "serve", "--port", "1"]).is_err());
+    }
 }

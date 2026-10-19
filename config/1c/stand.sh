@@ -321,15 +321,18 @@ start)
     fi
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
+        h="$(home_of "$u")"
         d="$RUN/$u"
-        "$0" publish "$u" $((8080 + n)) "$(home_of "$u")/base" "$d"
+        "$0" publish "$u" $((8080 + n)) "$h/base" "$d"
         apache2 -f "$d/apache.conf" -k start
-        # One MCP server per connection, as the workstation user; nc -N on the
-        # Zed side closes the socket at EOF and the server exits with it.
-        socat "TCP4-LISTEN:$((7770 + n)),bind=127.0.0.1,reuseaddr,fork" \
-              "EXEC:/usr/local/bin/1c-stand mcp $n,su=$u" >"$LOG/$u-mcp.log" 2>&1 &
-        socat "TCP4-LISTEN:$((7780 + n)),bind=127.0.0.1,reuseaddr,fork" \
-              "EXEC:/usr/local/bin/1c-stand vrunner $n,su=$u" >"$LOG/$u-vrunner.log" 2>&1 &
+        # The workstation's own connector session, in place of the socat
+        # lines that used to bind these two ports straight to "1c-stand
+        # mcp"/"vrunner": its bridge calls those same subcommands now, so the
+        # connector's switch, journal and project mutex actually govern the
+        # agent's calls. runuser does not reset HOME (unlike "su -"), hence
+        # the explicit env.
+        runuser -u "$u" -- env HOME="$h" "$h/dev1c/1c-connect" serve \
+            >"$LOG/$u-connect.log" 2>&1 &
         log "$u: HTTP service 127.0.0.1:$((8080 + n))/base, mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
     done
     # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the

@@ -189,10 +189,10 @@ impl Op<Ctx> for Tools {
                 match shadow_platform(platform, &to) {
                     Ok(shadow_dir) if shadow_dir.starts_with(&to) => match add_installed_location(&one_c_estart_cfg(), &shadow_dir) {
                         Ok(()) => ctx.ok("учебная платформа зарегистрирована в 1С под обычным именем".to_string()),
-                        Err(e) => ctx.warn(format!("путь к платформе не записан в список версий 1С: {e}")),
+                        Err(e) => ctx.warn(format!("1С не увидит учебную платформу в списке версий, путь придётся добавить вручную: {e}")),
                     },
                     Ok(_) => {} // платформа уже обычная — тень не нужна
-                    Err(e) => ctx.warn(format!("не удалось подготовить платформу к запуску: {e}")),
+                    Err(e) => ctx.warn(format!("не удалось подготовить учебную платформу к запуску под обычным именем: {e}")),
                 }
             }
         }
@@ -292,7 +292,9 @@ pub fn find_1cv8() -> Option<PathBuf> {
 
 /// Жёсткая ссылка на файл под новым именем; если том не позволяет ссылки
 /// (съёмный диск, другой раздел), копирует файл — не проваливает всю раскладку
-/// теневого каталога из-за одного файла.
+/// теневого каталога из-за одного файла. Старую ссылку/копию сперва убираем,
+/// чтобы повторный запуск (например, после прерванного прошлого) не падал и
+/// не плодил файлов.
 fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(dst);
     if std::fs::hard_link(src, dst).is_err() {
@@ -301,10 +303,43 @@ fn link_or_copy(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Рекурсивно сворачивает каталог `src` в `dst`: подкаталоги зеркалируются,
+/// файлы — жёсткая ссылка либо копия, причём `1cv8t.exe`/`1cv8ct.exe` получают
+/// дополнительные ссылки под именами `1cv8.exe`/`1cv8c.exe`. У платформы в bin
+/// есть подкаталоги с ресурсами (CEF, конфигурация) — без них она не стартует.
+fn shadow_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("каталог {} не создан: {e}", dst.display()))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("каталог {} не читается: {e}", src.display()))?;
+    for e in entries.filter_map(|e| e.ok()) {
+        let Ok(file_type) = e.file_type() else { continue };
+        let name = e.file_name();
+        let from = e.path();
+        let into = dst.join(&name);
+        if file_type.is_dir() {
+            shadow_tree(&from, &into)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue; // символические ссылки и прочее — пропускаем, не падаем
+        }
+        link_or_copy(&from, &into)?;
+        let renamed = match name.to_string_lossy().as_ref() {
+            "1cv8t.exe" => Some("1cv8.exe"),
+            "1cv8ct.exe" => Some("1cv8c.exe"),
+            _ => None,
+        };
+        if let Some(r) = renamed {
+            link_or_copy(&from, &dst.join(r))?;
+        }
+    }
+    Ok(())
+}
+
 /// Теневой каталог `bin` учебной платформы под именами коммерческой версии:
 /// на вход — каталог версии (`…\1cv8t\8.5.1.1150`), на выходе — каталог версии
 /// тени (`<to>\platform\8.5.1.1150`) с `bin\1cv8.exe` и `bin\1cv8c.exe`,
-/// указывающими (жёсткой ссылкой, либо копией) на `1cv8t.exe`/`1cv8ct.exe`.
+/// указывающими (жёсткой ссылкой, либо копией) на `1cv8t.exe`/`1cv8ct.exe`, и
+/// остальным деревом `bin` (вложенные каталоги включительно) рядом.
 /// Если платформа уже коммерческая (рядом есть `1cv8.exe`), тень не нужна —
 /// ничего не создаём и возвращаем исходный каталог платформы без изменений.
 pub fn shadow_platform(platform: &Path, to: &Path) -> Result<PathBuf, String> {
@@ -312,27 +347,9 @@ pub fn shadow_platform(platform: &Path, to: &Path) -> Result<PathBuf, String> {
     if bin.join("1cv8.exe").exists() {
         return Ok(platform.to_path_buf());
     }
-    let version = platform.file_name().ok_or_else(|| format!("не удалось определить версию платформы из {}", platform.display()))?;
+    let version = platform.file_name().ok_or_else(|| format!("путь {} не похож на каталог версии платформы", platform.display()))?;
     let shadow_dir = to.join("platform").join(version);
-    let shadow_bin = shadow_dir.join("bin");
-    std::fs::create_dir_all(&shadow_bin).map_err(|e| format!("каталог {}: {e}", shadow_bin.display()))?;
-    let entries = std::fs::read_dir(&bin).map_err(|e| format!("чтение {}: {e}", bin.display()))?;
-    for e in entries.filter_map(|e| e.ok()) {
-        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
-        }
-        let name = e.file_name();
-        let src = e.path();
-        link_or_copy(&src, &shadow_bin.join(&name))?;
-        let renamed = match name.to_string_lossy().as_ref() {
-            "1cv8t.exe" => Some("1cv8.exe"),
-            "1cv8ct.exe" => Some("1cv8c.exe"),
-            _ => None,
-        };
-        if let Some(r) = renamed {
-            link_or_copy(&src, &shadow_bin.join(r))?;
-        }
-    }
+    shadow_tree(&bin, &shadow_dir.join("bin"))?;
     Ok(shadow_dir)
 }
 
@@ -342,25 +359,61 @@ fn one_c_estart_cfg() -> PathBuf {
     PathBuf::from(std::env::var_os("APPDATA").unwrap_or_else(|| ".".into())).join("1C").join("1CEStart").join("1CEStart.cfg")
 }
 
+const UTF16_BOM: [u8; 2] = [0xFF, 0xFE];
+
+/// Читает файл лаунчера как UTF-16LE с BOM (так пишут инструменты 1С) и
+/// возвращает его текст без BOM. Пустой/отсутствующий файл — пустая строка.
+/// Файл неожиданной формы (нет BOM, нечётное число байт после него) не трогаем
+/// и считаем ошибкой — испорченный список версий стоит человеку всех ярлыков баз.
+fn read_1cestart_cfg(cfg_path: &Path) -> Result<String, String> {
+    let bytes = match std::fs::read(cfg_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(e) => return Err(format!("{} не читается: {e}", cfg_path.display())),
+    };
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    if bytes.len() < 2 || &bytes[0..2] != &UTF16_BOM {
+        return Err(format!("{} не похож на список версий 1С (ожидался BOM UTF-16LE)", cfg_path.display()));
+    }
+    if (bytes.len() - 2) % 2 != 0 {
+        return Err(format!("{} повреждён (нечётное число байт)", cfg_path.display()));
+    }
+    let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Ok(String::from_utf16_lossy(&units))
+}
+
+/// Записывает текст обратно как UTF-16LE с BOM — ровно в том виде, в котором
+/// лаунчер 1С сам пишет этот файл.
+fn write_1cestart_cfg(cfg_path: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = cfg_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("каталог {} не создан: {e}", parent.display()))?;
+    }
+    let mut bytes = UTF16_BOM.to_vec();
+    for u in text.encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    std::fs::write(cfg_path, bytes).map_err(|e| format!("{} не записан: {e}", cfg_path.display()))
+}
+
 /// Добавляет `InstalledLocation=<location>` в файл лаунчера, если такой строки
-/// там ещё нет; остальные строки не трогает. Файла может не быть — тогда
-/// создаёт его с единственной строкой.
-fn add_installed_location(cfg_path: &Path, location: &Path) -> std::io::Result<()> {
+/// там ещё нет; остальные строки не трогает. Строки разделены `\r\n` — как
+/// пишут инструменты 1С на Windows. Файла может не быть — тогда создаём его с
+/// BOM и единственной строкой.
+fn add_installed_location(cfg_path: &Path, location: &Path) -> Result<(), String> {
     let line = format!("InstalledLocation={}", location.display());
-    let existing = std::fs::read_to_string(cfg_path).unwrap_or_default();
+    let existing = read_1cestart_cfg(cfg_path)?;
     if existing.lines().any(|l| l == line) {
         return Ok(());
     }
-    if let Some(parent) = cfg_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let mut out = existing;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+    if !out.is_empty() && !out.ends_with("\r\n") && !out.ends_with('\n') {
+        out.push_str("\r\n");
     }
     out.push_str(&line);
-    out.push('\n');
-    std::fs::write(cfg_path, out)
+    out.push_str("\r\n");
+    write_1cestart_cfg(cfg_path, &out)
 }
 
 /// Ключ подключения конфигуратора: /F для файловой базы, /S для сервер\база.
@@ -643,6 +696,8 @@ mod tests {
         std::fs::write(bin.join("1cv8t.exe"), "платформа").unwrap();
         std::fs::write(bin.join("1cv8ct.exe"), "тонкий клиент").unwrap();
         std::fs::write(bin.join("some.dll"), "библиотека").unwrap();
+        std::fs::create_dir_all(bin.join("CFlite.resources")).unwrap();
+        std::fs::write(bin.join("CFlite.resources").join("icudtl.dat"), "ресурс").unwrap();
         let to = tmp.join("shadow-root");
 
         let shadow_dir = shadow_platform(&platform, &to).unwrap();
@@ -651,6 +706,32 @@ mod tests {
         assert_eq!(std::fs::read(shadow_bin.join("1cv8.exe")).unwrap(), std::fs::read(bin.join("1cv8t.exe")).unwrap());
         assert_eq!(std::fs::read(shadow_bin.join("1cv8c.exe")).unwrap(), std::fs::read(bin.join("1cv8ct.exe")).unwrap());
         assert!(shadow_bin.join("some.dll").exists());
+        // Подкаталоги bin (ресурсы CEF и т.п.) зеркалируются, а не пропускаются.
+        assert_eq!(std::fs::read(shadow_bin.join("CFlite.resources").join("icudtl.dat")).unwrap(), "ресурс".as_bytes());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn shadow_platform_twice_does_not_duplicate_files() {
+        // Половина раскладки могла прерваться (сбой, Ctrl+C) — повторный вызов
+        // над тем же источником не должен падать и не должен плодить файлы.
+        let tmp = std::env::temp_dir().join(format!("dev1c-shadow-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let platform = tmp.join("src").join("1cv8t").join("8.5.1.1150");
+        let bin = platform.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("1cv8t.exe"), "платформа").unwrap();
+        std::fs::write(bin.join("1cv8ct.exe"), "тонкий клиент").unwrap();
+        let to = tmp.join("shadow-root");
+
+        shadow_platform(&platform, &to).unwrap();
+        let shadow_dir = shadow_platform(&platform, &to).unwrap();
+
+        let names: std::collections::BTreeSet<String> =
+            std::fs::read_dir(shadow_dir.join("bin")).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let expect: std::collections::BTreeSet<String> =
+            ["1cv8.exe", "1cv8c.exe", "1cv8t.exe", "1cv8ct.exe"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, expect);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -672,23 +753,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Кодирует текст как настоящий файл 1CEStart.cfg: BOM UTF-16LE + содержимое.
+    fn utf16le_with_bom(text: &str) -> Vec<u8> {
+        let mut bytes = UTF16_BOM.to_vec();
+        for u in text.encode_utf16() {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        bytes
+    }
+
     #[test]
     fn the_1cestart_line_is_added_once() {
-        // Повторный вызов (повторный запуск host.tools) не плодит строк.
+        // Повторный вызов (повторный запуск host.tools) не плодит строк, а файл
+        // остаётся тем же UTF-16LE с BOM, что пишут инструменты 1С.
         let tmp = std::env::temp_dir().join(format!("dev1c-1cestart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let cfg_path = tmp.join("1CEStart.cfg");
-        std::fs::write(&cfg_path, "ОбщегоНазначения=значение\n").unwrap();
+        std::fs::write(&cfg_path, utf16le_with_bom("ОбщегоНазначения=значение\r\n")).unwrap();
         let location = tmp.join("platform").join("8.5.1.1150");
 
         add_installed_location(&cfg_path, &location).unwrap();
         add_installed_location(&cfg_path, &location).unwrap();
 
-        let text = std::fs::read_to_string(&cfg_path).unwrap();
+        let bytes = std::fs::read(&cfg_path).unwrap();
+        assert_eq!(&bytes[0..2], &UTF16_BOM, "BOM потерян при перезаписи");
+        let text = read_1cestart_cfg(&cfg_path).unwrap();
         let line = format!("InstalledLocation={}", location.display());
         assert_eq!(text.lines().filter(|l| *l == line).count(), 1);
         assert!(text.contains("ОбщегоНазначения=значение"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_non_utf16_1cestart_cfg_is_left_alone() {
+        // Файл неожиданной формы (нет BOM) не переписываем — испорченный список
+        // версий стоит человеку всех ярлыков баз.
+        let tmp = std::env::temp_dir().join(format!("dev1c-1cestart-ansi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("1CEStart.cfg");
+        std::fs::write(&cfg_path, "это не UTF-16").unwrap();
+        let before = std::fs::read(&cfg_path).unwrap();
+
+        let location = tmp.join("platform").join("8.5.1.1150");
+        assert!(add_installed_location(&cfg_path, &location).is_err());
+        assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

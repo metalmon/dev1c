@@ -38,7 +38,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         return Ok("план напечатан, на машине ничего не менялось".into());
     }
     (d.phase)(Phase::Decompile);
-    log("cf_decompile → src (минуты; Конфигуратор работает в фоне)".into());
+    log("выгружаю конфигурацию из 1С в файлы проекта — минуты, Конфигуратор работает в фоне (cf_decompile → src)".into());
     let r = (d.call)("cf_decompile", json!({"OUT": "src", "background": false}))?;
     if r.is_error {
         return Err(format!("выгрузка не удалась: {}", r.text));
@@ -47,7 +47,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log(r.text);
     }
     (d.phase)(Phase::Push);
-    log("git: add, commit, push в Gitea — первая выгрузка это десятки тысяч файлов, минуты".into());
+    log("отправляю файлы агенту — первая выгрузка это десятки тысяч файлов, минуты (git add, commit, push в Gitea)".into());
     (d.push)(message)
 }
 
@@ -68,7 +68,7 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
         log("src/ConfigDumpInfo.xml нет — загрузка будет полной, не инкрементом (первая после клонирования)".into());
     }
     (d.phase)(Phase::Load);
-    log("cf_load ← src (минуты)".into());
+    log("загружаю конфигурацию в 1С из файлов проекта — минуты (cf_load ← src)".into());
     let r = (d.call)("cf_load", json!({"SRC": "src", "background": false, "increment": true}))?;
     if r.is_error {
         return Err(format!(

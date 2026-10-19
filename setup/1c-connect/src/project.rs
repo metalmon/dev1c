@@ -282,7 +282,7 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     // A fresh project has no branch on the server yet — that comes first:
     // its tree is "dirty" too, and the useful answer is "export first".
     if !remote_has(p, &p.branch)? {
-        return Err(format!("ветки {} в Gitea ещё нет — сначала «Выгрузить в git» (cf_decompile, затем project_push)", p.branch));
+        return Err(format!("ветки {} в Gitea ещё нет — сначала «Выгрузить из 1С» (cf_decompile, затем project_push)", p.branch));
     }
     if !must(p, &["status", "--porcelain"])?.is_empty() {
         return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
@@ -540,7 +540,7 @@ mod tests {
         p.remote = t.path().join("absent.git").to_string_lossy().into();
         assert_eq!(remote_has(&p, "main"), Ok(false));
         let e = pull(&p, &NEVER).unwrap_err();
-        assert!(e.contains("Выгрузить в git"), "{e}");
+        assert!(e.contains("Выгрузить из 1С"), "{e}");
     }
 
     #[test]
@@ -556,7 +556,7 @@ mod tests {
     fn pull_before_any_push_says_export_first() {
         let (_t, p) = fixture();
         let e = pull(&p, &NEVER).unwrap_err();
-        assert!(e.contains("Выгрузить в git"), "{e}");
+        assert!(e.contains("Выгрузить из 1С"), "{e}");
     }
 
     #[test]

@@ -211,8 +211,8 @@ impl Which {
         match self {
             Which::Install => "— устанавливаю —",
             Which::Uninstall => "— снимаю расширение —",
-            Which::Export => "— выгружаю в git —",
-            Which::Import => "— загружаю из git —",
+            Which::Export => "— выгружаю из 1С —",
+            Which::Import => "— загружаю в 1С —",
         }
     }
 }
@@ -1373,8 +1373,8 @@ mod tests {
     fn which_titles_are_the_old_log_lines() {
         assert_eq!(Which::Install.title(), "— устанавливаю —");
         assert_eq!(Which::Uninstall.title(), "— снимаю расширение —");
-        assert_eq!(Which::Export.title(), "— выгружаю в git —");
-        assert_eq!(Which::Import.title(), "— загружаю из git —");
+        assert_eq!(Which::Export.title(), "— выгружаю из 1С —");
+        assert_eq!(Which::Import.title(), "— загружаю в 1С —");
     }
 
     #[test]

@@ -664,13 +664,13 @@ impl Render for Panel {
             gui::Tab::Project => {
                 let which = gui::project_primary(&cx.global::<Ui>().ops);
                 let (label, hint) = match which {
-                    Which::Export => ("Выгрузить", "Выгрузить в git"),
+                    Which::Export => ("Выгрузить", "Выгрузить из 1С"),
                     _ => ("Установить", "Установить расширение"),
                 };
                 // В меню — всё, кроме того, что на главной кнопке.
                 let rest: Vec<(&'static str, Which)> = [
-                    ("Выгрузить в git", Which::Export),
-                    ("Загрузить из git", Which::Import),
+                    ("Выгрузить из 1С", Which::Export),
+                    ("Загрузить в 1С", Which::Import),
                     ("Установить расширение", Which::Install),
                     ("Снять расширение", Which::Uninstall),
                 ]
@@ -832,7 +832,7 @@ mod tests {
         };
         let c = card(Some(&r), &State::Off, now);
         assert_eq!(c.dot, Dot::Busy);
-        assert_eq!(c.title, "Отправляю в git · 1:05");
+        assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
     }
 

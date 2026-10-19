@@ -187,7 +187,17 @@ publish)
 		base="/base"
 		ib="File=$base;">
 	<ws pointEnableCommon="false"/>
-	<httpServices publishByDefault="true" publishExtensionsByDefault="true"/>
+	<!-- reuseSessions="dontuse", and on the service itself: the container
+	     element does not take these attributes, the platform refuses the
+	     whole file («Ошибка при разборе»). The training edition allows one
+	     Enterprise session per base, and a pooled session of the HTTP
+	     service holds it between the agent's calls, so the person opening
+	     1C is told the connection limit is reached. Without the pool the
+	     service takes the base only for the length of a request. -->
+	<httpServices publishByDefault="true" publishExtensionsByDefault="true">
+		<service name="MCPService" rootUrl="mcp-1c" enable="true"
+				reuseSessions="dontuse" sessionMaxAge="1" poolSize="1" poolTimeout="1"/>
+	</httpServices>
 	<standardOdata enable="false"/>
 </point>
 EOF

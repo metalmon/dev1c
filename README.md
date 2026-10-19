@@ -184,7 +184,11 @@ that line first.
 
 `DEV1C_NAME` renames the container and all four volumes together and
 `DEV1C_PORT_BASE` moves the three ports, so a second stand can be raised
-beside a live one without touching it.
+beside a live one without touching it. `DEV1C_MEMORY` is the ceiling for the
+container as a whole, 8 GB by default: all three workstations sit in it
+together with Gitea, three copies of Zed, the analyzer and the 1C clients, and
+on the limit the kernel kills processes inside. The model server is a separate
+container and its memory is not counted here.
 
 The demo base is the training УНФ 3.0.13.251 without data: the kit's demo base
 with data has users with passwords, and the training licence admits only empty

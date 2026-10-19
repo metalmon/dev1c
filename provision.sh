@@ -20,6 +20,7 @@
 #
 # DEV1C_NAME renames the container and all four volumes together: a second
 # stand beside a live one, and the way `run` is tested without touching it.
+# DEV1C_MEMORY is the ceiling for the container as a whole (default 8g).
 #
 # `run` passes its extra arguments to `docker run`, which is where the model
 # settings go — this script never reads or writes a key:
@@ -46,6 +47,14 @@ PAYLOAD_IMAGE=oktaplus/dev1c-1c-payload:latest
 # this script gets tested.
 NAME=${DEV1C_NAME:-dev1c}
 PORT_BASE=${DEV1C_PORT_BASE:-3390}
+# A ceiling for the whole container, not a share per workstation: all three
+# sit in it together with Gitea, three copies of Zed, the bsl analyzer, the
+# Apache workers and the 1C clients. On the limit the kernel kills processes
+# inside, which on a stand means a 1C session dying during the demonstration.
+# 8g is sized for the stand's machine: 32 GB total, about 20 of them taken by
+# the model (its own container, outside this limit), the rest left to the host.
+# A smaller machine wants a smaller ceiling — this laptop runs 6g.
+MEMORY=${DEV1C_MEMORY:-8g}
 CONTAINER=$NAME
 VOL_PLATFORM=$NAME-platform
 VOL_DEMO=$NAME-demo
@@ -97,7 +106,7 @@ run)
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
     docker run -d --name "$CONTAINER" --restart unless-stopped --init \
-        --shm-size 2g --cap-add SYS_ADMIN \
+        --shm-size 2g --memory "$MEMORY" --cap-add SYS_ADMIN \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
         --device /dev/fuse --add-host host.docker.internal:host-gateway \
         -p "$PORT_BASE:3389" -p "$((PORT_BASE + 1)):3000" -p "$((PORT_BASE + 3)):2022" \

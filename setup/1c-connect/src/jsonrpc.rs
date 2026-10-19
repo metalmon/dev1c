@@ -174,8 +174,12 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
     const PARAMS: i64 = -32602;
     let Some(v) = parse(line) else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
     let Some(obj) = v.as_object() else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
-    let Ok(id) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
-    let id = id.cloned().unwrap_or(Value::Null);
+    let Ok(id_field) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
+    // Присутствие ключа `id`, а не только его значение: уведомление вообще
+    // не несёт этого ключа, и ответ `"id":null` превратил бы его для
+    // ребёнка в запрос, которого тот не посылал.
+    let has_id = id_field.is_some();
+    let id = id_field.cloned().unwrap_or(Value::Null);
     // Уведомление (без id) ответа не ждёт: неизвестное — молча мимо.
     let reject = |code: i64, why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), code, why: why.to_string() } };
     let method = match key_ci(obj, "method") {
@@ -187,8 +191,19 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
         Ok(p) => p.cloned().unwrap_or(json!({})),
         Err(()) => return reject(PARAMS, "params задан дважды"),
     };
-    // Пересобранное сообщение: только проверенные поля, канонические имена.
-    let rebuilt = |params: Value| canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+    // Пересобранное сообщение: только проверенные поля, канонические имена —
+    // но уведомление (нет ключа `id`, например `notifications/initialized`
+    // или `notifications/cancelled`) уходит ребёнку байт в байт, как
+    // пришло: добавленный ключ `"id":null` сделал бы из него запрос.
+    let rebuilt = |params: Value| {
+        if has_id {
+            canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+        } else {
+            let mut verbatim = line.to_vec();
+            verbatim.push(b'\n');
+            verbatim
+        }
+    };
     match *method {
         "tools/list" => Route::ListRequest { id: id.clone(), line: rebuilt(params) },
         "tools/call" => {
@@ -223,6 +238,21 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
         },
         _ => Route::Forward(rebuilt(params)),
     }
+}
+
+/// Единственная проверка на порту-трубе (mcp-1c): это запрос `tools/call`?
+/// Если да — id для ответа агенту (или `Null`, если его почему-то нет); если
+/// нет (другой метод, неизвестный метод, уведомление, батч, строка, которая
+/// вообще не разбирается) — `None`, и строка идёт ребёнку как есть, без
+/// изменений: этот порт не ведёт разбор JSON-RPC, кроме этой одной проверки.
+pub fn tools_call_id(line: &[u8]) -> Option<Value> {
+    let v = parse(line)?;
+    let obj = v.as_object()?;
+    let method = key_ci(obj, "method").ok().flatten()?.as_str()?;
+    if !method.eq_ignore_ascii_case("tools/call") {
+        return None;
+    }
+    Some(key_ci(obj, "id").ok().flatten().cloned().unwrap_or(Value::Null))
 }
 
 /// Ошибка JSON-RPC на запрос, который мост не пропустил.
@@ -398,6 +428,48 @@ mod tests {
         // table — the bridge forwards what it does not own (tested in bridge.rs).
         let r = route_request(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#, &allowed());
         assert!(matches!(r, Route::Cancel { id, .. } if id == json!(9)));
+    }
+
+    #[test]
+    fn a_notification_is_forwarded_byte_exact_without_an_id() {
+        // No "id" key at all (a notification, not "id":null) must reach the
+        // child exactly as it arrived — an added "id":null would turn it
+        // into a request the child never sent, and mcp-1c may refuse that.
+        let line: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        match route_request(line, &allowed()) {
+            Route::Forward(out) => {
+                let mut want = line.to_vec();
+                want.push(b'\n');
+                assert_eq!(out, want);
+            }
+            _ => panic!("notifications/initialized must forward"),
+        }
+        // Same for notifications/cancelled without a matching running id: the
+        // bridge does not own it, so it is forwarded, and still byte-exact.
+        let line: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#;
+        match route_request(line, &allowed()) {
+            Route::Cancel { line: out, .. } => {
+                let mut want = line.to_vec();
+                want.push(b'\n');
+                assert_eq!(out, want);
+            }
+            _ => panic!("notifications/cancelled must carry the raw line"),
+        }
+    }
+
+    #[test]
+    fn tools_call_id_recognises_only_tools_call() {
+        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"x"}}"#), Some(json!(5)));
+        // Case does not matter — OneScript compares method names the same way.
+        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), Some(json!("a")));
+        // No id: still recognised (for a reply the bridge sends anyway), as Null.
+        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","method":"tools/call"}"#), Some(Value::Null));
+        // Anything else — unknown method, a plain notification, junk, a
+        // batch — is not ours to gate: None, and the line passes through.
+        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), None);
+        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
+        assert_eq!(tools_call_id(b"not json"), None);
+        assert_eq!(tools_call_id(b"[1,2]"), None);
     }
 
     #[test]

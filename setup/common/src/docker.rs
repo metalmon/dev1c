@@ -81,14 +81,34 @@ fn blot_words(line: &str) -> String {
             w.to_string()
         } else if w.starts_with("/P") && w.len() > 2 {
             "/P…".to_string()
-        } else if let Some((k, _)) = w.split_once('=').filter(|(k, _)| k.ends_with("pwd") || k.ends_with("password")) {
-            format!("{k}=…")
         } else {
-            w.to_string()
+            blot_secrets_in_word(w)
         };
         out.push(blotted);
     }
     out.join(" ")
+}
+
+/// Внутри одного «слова» секрет может быть не единственной парой
+/// `ключ=значение`: строка подключения 1С пишет несколько через `;`
+/// (`File="…";Usr="…";Pwd="…";`), без пробелов. Каждый сегмент между `;`
+/// проверяется отдельно, ключ — без учёта регистра (`Pwd`, `PWD`, `pwd`).
+fn blot_secrets_in_word(word: &str) -> String {
+    if !word.contains('=') {
+        return word.to_string();
+    }
+    word.split(';')
+        .map(|seg| match seg.split_once('=') {
+            Some((k, _)) if is_secret_key(k) => format!("{k}=…"),
+            _ => seg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn is_secret_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    k.ends_with("pwd") || k.ends_with("password")
 }
 
 pub fn redact(args: &[&str]) -> String {
@@ -225,6 +245,17 @@ mod tests {
         // A secret before the first '=' on a KEY line is not printed either.
         let r = redact_text("Authorization: Basic ZGV2 API_KEY=abc");
         assert!(!r.contains("ZGV2") && !r.contains("abc"), "{r}");
+    }
+
+    #[test]
+    fn a_1c_connection_string_hides_only_the_password() {
+        // 1С пишет несколько key=value через ';' в одном слове, без
+        // пробелов, и сам ключ может быть в любом регистре (`Pwd`, не
+        // только `pwd`) — оба случая должны находить и прятать пароль.
+        let r = redact_text(r#"File="C:\Bases\UNF";Usr="mcp";Pwd="secret";"#);
+        assert!(!r.contains("secret"), "{r}");
+        assert!(r.contains("Pwd=…"), "{r}");
+        assert!(r.contains(r#"File="C:\Bases\UNF""#), "{r}");
     }
 
     #[test]

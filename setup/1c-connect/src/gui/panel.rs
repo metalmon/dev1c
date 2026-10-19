@@ -762,18 +762,23 @@ impl Render for Panel {
                 // Работа: дорожка акцентом темы, бегунок въезжает слева и
                 // уезжает справа по кругу. Возврат в линию — мгновенный,
                 // затухания нет (решение контролёра 2026-10-18).
-                div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
+                // `overflow_hidden`: бегунок едет от −25 % до 100 % ширины и
+                // без обрезки высовывался бы за концы линии в поля окна.
+                div().w_full().h(px(2.)).relative().overflow_hidden().bg(border.opacity(0.6)).child(
                     div()
                         .absolute()
                         .top_0()
                         .h(px(2.))
-                        .w(relative(0.25))
+                        // Как у установщика (app.css `.progress`): бегунок 40 %,
+                        // 1.4 с, плавный разгон и торможение — обе программы
+                        // дышат одинаково (заказчик 2026-10-19).
+                        .w(relative(0.4))
                         .rounded_full()
                         .bg(accent)
                         .with_animation(
                             "progress-thumb",
-                            Animation::new(Duration::from_millis(1200)).repeat(),
-                            |d, t| d.left(relative(-0.25 + 1.25 * t)),
+                            Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out),
+                            |d, t| d.left(relative(-0.4 + 1.4 * t)),
                         ),
                 )
             } else {

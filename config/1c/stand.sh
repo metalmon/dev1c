@@ -41,10 +41,11 @@
 # The training edition allows one Enterprise session per base. Each workstation
 # has its own base and its own Apache (its own session pool), so the three
 # never queue on each other; the Configurator coexists with the session. A
-# second Enterprise session on the same base — the thick client opened from the
-# menu while the agent asks mcp-1c — gets "Infobase connections limitation
-# reached" from the platform; the HTTP-service session lingers sessionMaxAge
-# (20 s) after the agent's last call.
+# second Enterprise session on the same base — the client opened from the
+# starter while the agent asks mcp-1c — gets "Infobase connections limitation
+# reached" from the platform. The service itself keeps no session between
+# calls (`reuseSessions="dontuse"` in the publication), so it blocks a person
+# only for the length of a request.
 set -eu
 
 V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
@@ -80,8 +81,15 @@ seed() { # runs as the workstation user; $HOME is theirs
         mkdir -p "$(dirname "$v8i")"
         # UTF-8 with a BOM and CRLF: without them the starter opens with an
         # empty list and asks to add a base, as if the file were not there.
+        # AdditionalParameters: the starter appends them to whatever it
+        # launches, Предприятие and Конфигуратор alike (checked by reading the
+        # command line of the session it started). Scheduled jobs are off that
+        # way without touching the base itself — in a file base they run inside
+        # the session, and the configuration's internet support opens by asking
+        # an update server that is unreachable here, then falls back to a ping
+        # the platform cannot run on Linux.
         { printf '\357\273\277'
-          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\n' \
+          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\nAdditionalParameters=/AllowExecuteScheduledJobs -Off\r\n' \
             "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base"
         } >"$v8i"
         log "1C: $v8i written" >&2
@@ -138,10 +146,8 @@ vrunner)
     ;;
 start1c)
     # The starter: it shows the base list and the two buttons, and it is what
-    # a 1C developer knows. Scheduled jobs cannot be switched off through it
-    # (its own command line goes to the session), so the configuration may ask
-    # about updates; the base of a stand has nothing to update, and the answer
-    # is one dialog.
+    # a 1C developer knows. Its sessions carry the keys from the list's
+    # AdditionalParameters (see `seed`), so scheduled jobs are off there too.
     seed
     exec "$STARTER"
     ;;

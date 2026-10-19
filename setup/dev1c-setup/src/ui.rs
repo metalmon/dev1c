@@ -324,6 +324,31 @@ pub fn order_addresses(found: &[String]) -> Vec<String> {
     out
 }
 
+/// Предел памяти для поля ввода: число гигабайт, единица стоит в подписи
+/// поля. Значение, которое в целых гигабайтах не выражается (`512m`),
+/// показываем как есть — выдумывать за человека нечего.
+pub fn memory_field(value: &str) -> String {
+    let v = value.trim();
+    let num = |s: &str| s.parse::<u64>().ok();
+    if let Some(g) = v.strip_suffix(['g', 'G']).and_then(num) {
+        return g.to_string();
+    }
+    if let Some(m) = v.strip_suffix(['m', 'M']).and_then(num).filter(|m| m % 1024 == 0) {
+        return (m / 1024).to_string();
+    }
+    v.to_string()
+}
+
+/// Обратно в `dev1c.toml`: голое число — это гигабайты, к нему и дописываем
+/// суффикс, который понимает движок контейнеров. Всё остальное идёт как есть.
+pub fn memory_value(field: &str) -> String {
+    let v = field.trim();
+    match v.parse::<u64>() {
+        Ok(g) => format!("{g}g"),
+        Err(_) => v.to_string(),
+    }
+}
+
 /// Итог сверки комплекта: сколько файлов совпало или чего не хватает.
 /// Перечень обрывается: половина несовпавшего комплекта — это сотни имён, и
 /// строка в журнал должна остаться читаемой.
@@ -808,6 +833,23 @@ mod tests {
         assert!(bad.contains("f0") && bad.contains("f19"), "{bad}");
         assert!(!bad.contains("f20"), "перечень должен обрываться: {bad}");
         assert!(bad.contains("и ещё 30"), "{bad}");
+    }
+
+    #[test]
+    fn memory_shows_as_a_number_and_goes_back_with_its_unit() {
+        // В поле — число, единица стоит в подписи; в файл уходит то, что
+        // понимает движок контейнеров.
+        assert_eq!(memory_field("24g"), "24");
+        assert_eq!(memory_field("16G"), "16");
+        assert_eq!(memory_field("24576m"), "24");
+        assert_eq!(memory_value("24"), "24g");
+        assert_eq!(memory_value(" 32 "), "32g");
+        // Значение не в целых гигабайтах не выдумываем: показываем как есть
+        // и так же возвращаем.
+        assert_eq!(memory_field("512m"), "512m");
+        assert_eq!(memory_value("512m"), "512m");
+        assert_eq!(memory_field(""), "");
+        assert_eq!(memory_value(""), "");
     }
 
     #[test]

@@ -121,7 +121,7 @@ impl Panel {
         let fields = Fields {
             name: field("dev1c", &saved.server.name, false, window, cx),
             port: field("3390", &saved.server.port.to_string(), false, window, cx),
-            memory: field("24g", &saved.server.memory, false, window, cx),
+            memory: field("24", &crate::ui::memory_field(&saved.server.memory), false, window, cx),
             engine: select(&ENGINES, &saved.server.engine, window, cx),
             gpu: saved.server.gpu,
             serve: select(&SERVES, &m.serve, window, cx),
@@ -196,7 +196,7 @@ impl Panel {
         let mut cfg = self.saved.clone();
         cfg.server.name = v(&self.fields.name);
         cfg.server.port = v(&self.fields.port).trim().parse().unwrap_or(cfg.server.port);
-        cfg.server.memory = v(&self.fields.memory);
+        cfg.server.memory = crate::ui::memory_value(&v(&self.fields.memory));
         cfg.server.engine = selected(&self.fields.engine, &ENGINES, cx).to_string();
         cfg.server.gpu = self.fields.gpu;
         cfg.model.serve = selected(&self.fields.serve, &SERVES, cx).to_string();
@@ -637,7 +637,7 @@ impl Render for Panel {
                                 .min_w_0()
                                 .child(input("Имя контейнера и приставка его томов", &f.name))
                                 .child(input("Первый порт: RDP, дальше Gitea, модель, SSH", &f.port))
-                                .child(input("Предел памяти контейнера", &f.memory))
+                                .child(input("Предел памяти контейнера, ГБ", &f.memory))
                                 .child(labelled("Движок контейнеров", div().w_full().child(Select::new(&f.engine)).into_any_element()))
                                 .child(
                                     h_flex().items_center().gap_2().child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(

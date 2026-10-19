@@ -50,6 +50,19 @@ set -eu
 
 V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
 DEMO=/opt/1c-demo/base
+# The demo base ships with the configuration's welcome wizard already done —
+# otherwise the first person to open 1C is met by it, and finishing it creates
+# an infobase user, which breaks every headless way in mid-demo. The wizard
+# cannot be skipped and cannot be undone (deleting the user brings it back),
+# so the base keeps the one user it made. Its password is empty, the only kind
+# the training licence allows, and every way into the base carries the name:
+# the list for the starter, the two launch commands, the publication, vrunner.
+# A name with a space would need quoting in the starter's list — keep it one word.
+# Empty on purpose means a base with no users at all (the image can be built
+# that way), so `-` and not `:-`: an empty DEMO_DB_USER must stay empty.
+DB_USER=${DEMO_DB_USER-Администратор}
+IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
+IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
 RUN=/run/1c
 LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
@@ -88,9 +101,13 @@ seed() { # runs as the workstation user; $HOME is theirs
         # the session, and the configuration's internet support opens by asking
         # an update server that is unreachable here, then falls back to a ping
         # the platform cannot run on Linux.
+        # /N<имя> rides along the same way: the base has one infobase user
+        # with an empty password, so without it the person gets a login
+        # dialog before the demo. Unquoted, the form the platform itself
+        # writes when the welcome wizard restarts the client.
         { printf '\357\273\277'
-          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\nAdditionalParameters=/AllowExecuteScheduledJobs -Off\r\n' \
-            "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base"
+          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\nAdditionalParameters=/AllowExecuteScheduledJobs -Off %s\r\n' \
+            "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base" "$IB_N"
         } >"$v8i"
         log "1C: $v8i written" >&2
     fi
@@ -123,7 +140,7 @@ workstation = "$u"
 base_path = "$HOME/base"
 base_url = "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
 project = "$HOME/project"
-db_user = ""
+db_user = "$DB_USER"
 db_password = ""
 EOF
             log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
@@ -142,6 +159,11 @@ vrunner)
     # Its own virtual display with its own cookie, as this user: the
     # Configurator vrunner launches in batch mode needs one, nobody looks at it.
     cd "$HOME/project"
+    # vanessa-runner reads the infobase credentials from the environment when
+    # a command does not carry them (`&ВОкружении("VRUNNER_DBUSER")`), so the
+    # agent's tool calls need not know the name.
+    VRUNNER_DBUSER=$DB_USER VRUNNER_DBPWD=
+    export VRUNNER_DBUSER VRUNNER_DBPWD
     exec xvfb-run -a vrunner-mcp
     ;;
 start1c)
@@ -153,7 +175,7 @@ start1c)
     ;;
 designer)
     seed
-    exec "$V8/1cv8" DESIGNER /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
+    exec "$V8/1cv8" DESIGNER /F "$HOME/base" $IB_N /DisableStartupDialogs /DisableStartupMessages
     ;;
 enterprise)
     seed
@@ -164,7 +186,7 @@ enterprise)
     # through ЗапуститьПриложение, which the platform cannot launch on Linux
     # ("не удалось распознать схему URI") — and the person gets a dialog about
     # a URI scheme instead of the demo. A stand has nothing to update anyway.
-    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /AllowExecuteScheduledJobs -Off \
+    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" $IB_N /AllowExecuteScheduledJobs -Off \
         /DisableStartupDialogs /DisableStartupMessages
     ;;
 seed)
@@ -191,7 +213,7 @@ publish)
 		xmlns:xs="http://www.w3.org/2001/XMLSchema"
 		xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 		base="/base"
-		ib="File=$base;">
+		ib="File=$base;$IB_USR">
 	<ws pointEnableCommon="false"/>
 	<!-- reuseSessions="dontuse", and on the service itself: the container
 	     element does not take these attributes, the platform refuses the

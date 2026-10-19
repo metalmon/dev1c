@@ -154,15 +154,38 @@ this layer is built where the file is, not in CI:
 ```
 mkdir platform                         # git- and docker-ignored
 # put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz)
-# the demo configuration: the training УНФ without data (1cv8new.dt of its kit)
+# and unf-ready.dt, the demo base of the stand (see below)
 docker build -f Dockerfile.1c --build-context platform=platform \
-             --build-arg DEMO_TEMPLATE=unf-empty.dt -t oktaplus/dev1c-1c:latest .
+             -t oktaplus/dev1c-1c:latest .
 docker exec <container> test-stand    # the check of a running stand
 ```
 
 The demo base is the training УНФ 3.0.13.251 without data: the kit's demo base
 with data has users with passwords, and the training licence admits only empty
-ones. The build itself checks the platform (ldd, a base created under Xvfb), the
+ones. `unf-ready.dt` is that empty base with the configuration's welcome wizard
+already done. The wizard («Добро пожаловать!», three steps, a required name)
+cannot be skipped, and finishing it creates an infobase user — so if the
+customer meets it, the agent's connection breaks in the middle of the demo.
+Done once at build time instead, and the name of the user it makes
+(`DEMO_DB_USER`, «Администратор», empty password — the only kind the licence
+allows) is carried by the publication, by the base list of the starter and by
+vrunner. To make the file: build a base from `unf-empty.dt` (1cv8new.dt of the
+kit), open a copy of it, walk the three steps giving that name and no password,
+then `1cv8 DESIGNER /F <base> /NАдминистратор /DumpIB unf-ready.dt`. Building
+without a wizard-done template needs both arguments:
+`--build-arg DEMO_TEMPLATE=unf-empty.dt --build-arg DEMO_DB_USER=`.
+
+`platform/DoNotCopy.txt` goes with that template. A BSP configuration keeps
+the identifier of its file base in that file, and a base restored from a `.dt`
+has no such file, so the first person in is asked whether the base was moved or
+is a copy, with external resources locked and `[КОПИЯ]` in the title until they
+answer. Make it once: restore `unf-ready.dt` into a base, open it, answer
+«Информационная база перемещена», and take the `DoNotCopy.txt` the
+configuration writes. The build drops it next to the template base and every
+workstation copy inherits it. Regenerate it with the template; a stale
+identifier only brings the question back.
+
+The build itself checks the platform (ldd, a base created under Xvfb), the
 mcp-1c HTTP service on the demo base through a throwaway Apache, and
 vrunner-mcp's tool list. While a stand holds `777N`/`778N`, `1c-connect` from a
 real machine cannot bind them: a workstation is either demo or real.

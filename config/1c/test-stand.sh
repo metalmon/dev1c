@@ -40,9 +40,16 @@ for n in 1 2 3; do
     case "$code" in
         200) say "ok   $u: HTTP service $(tr -d ' \n' <$T/hs.$n)" ;;
         404) say "WARN $u: HTTP service answers 404 — the mcp-1c extension is not applied to the base" ;;
+        401) say "FAIL $u: HTTP service answers 401 — the publication does not carry the infobase user (DEMO_DB_USER)"; fail=1 ;;
         *)   say "FAIL $u: HTTP service http=$code $(head -c 200 $T/hs.$n)"; fail=1 ;;
     esac
     [ -f "/home/$u/base/1Cv8.1CD" ] && [ "$(stat -c %U "/home/$u/base/1Cv8.1CD")" = "$u" ] \
         && say "ok   $u: base seeded, owned by $u" || { say "FAIL $u: base missing or not owned by $u"; fail=1; }
+    # the person's own way in: the base of the stand has one infobase user, and
+    # without /N in the list the starter opens a login dialog instead of 1C
+    v8i="/home/$u/.1C/1cestartt/ibases.v8i"
+    [ -z "${DEMO_DB_USER-}" ] || grep -aq "/N${DEMO_DB_USER}" "$v8i" 2>/dev/null \
+        && say "ok   $u: base list carries the infobase user" \
+        || { say "FAIL $u: $v8i has no /N${DEMO_DB_USER} — the starter will ask who you are"; fail=1; }
 done
 exit $fail

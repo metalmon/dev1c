@@ -138,13 +138,31 @@ RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.lis
 # platform context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt —
 # otherwise from an empty configuration: the stand still shows the tools.
 # The template in use is the training УНФ 3.0.13.251 WITHOUT data
-# (1cv8new.dt of its kit, here unf-empty.dt): the kit's demo base with data
-# cannot be opened under the training licence — its users have passwords,
-# and the licence allows only empty ones (the platform says so in a dialog
-# and exits). A base of this configuration is about 1.9 GB.
+# (1cv8new.dt of its kit): the kit's demo base with data cannot be opened
+# under the training licence — its users have passwords, and the licence
+# allows only empty ones (the platform says so in a dialog and exits).
+# A base of this configuration is about 1.9 GB.
+#
+# unf-ready.dt is that empty base with the configuration's welcome wizard
+# already done, dumped with /DumpIB. The wizard («Добро пожаловать!», three
+# steps, a required name) cannot be skipped and cannot be undone — deleting
+# the infobase user it creates brings it straight back — and finishing it
+# creates that user, after which everything headless needs the name. Doing it
+# once here means the customer opens 1C and is simply in the program, and the
+# name is known to the publication, to the starter's list and to vrunner
+# (DEMO_DB_USER below). How the file is made: open a copy of the base built
+# from unf-empty.dt, walk the three steps giving the name below and NO
+# password (the licence allows none), then /DumpIB.
+#
 # The mcp-1c extension goes in here; whether it applies is checked right away
 # through a throwaway Apache, and a 404 is a warning, not a failure.
-ARG DEMO_TEMPLATE=
+ARG DEMO_TEMPLATE=unf-ready.dt
+# The infobase user the welcome wizard made, carried into the runtime: the
+# publication, the base list and vrunner all read it from here. Empty means a
+# base with no users at all — pass `--build-arg DEMO_DB_USER=` together with a
+# template whose wizard was never done (unf-empty.dt) or with no template.
+ARG DEMO_DB_USER=Администратор
+ENV DEMO_DB_USER=${DEMO_DB_USER}
 COPY config/1c/stand.sh /usr/local/bin/1c-stand
 RUN --mount=type=bind,from=platform,target=/platform \
     sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand \
@@ -152,22 +170,37 @@ RUN --mount=type=bind,from=platform,target=/platform \
     # every Designer run prints its own log, pass or fail: a silent chain is
     # what cost the first build with a template an hour
     && D() { xvfb-run -a "$P/1cv8" "$@" /Out /tmp/d.log 2>/dev/null; rc=$?; cat /tmp/d.log; echo " [rc=$rc] $1 $2"; return $rc; } \
-    && if [ -n "${DEMO_TEMPLATE}" ]; then test -f "/platform/${DEMO_TEMPLATE}" && tpl="/UseTemplate /platform/${DEMO_TEMPLATE}"; else tpl=""; fi \
+    # a named template that is not in the context is an error, not a quiet
+    # fallback to an empty configuration: the user below belongs to it
+    && if [ -n "${DEMO_TEMPLATE}" ]; then test -f "/platform/${DEMO_TEMPLATE}" || { echo "DEMO_TEMPLATE=${DEMO_TEMPLATE} is not in the platform context"; exit 1; }; tpl="/UseTemplate /platform/${DEMO_TEMPLATE}"; else tpl=""; fi \
+    && N=${DEMO_DB_USER:+/N${DEMO_DB_USER}} \
     && D CREATEINFOBASE "File=$B" $tpl /DisableStartupDialogs /DisableStartupMessages \
     && test -s "$B/1Cv8.1CD" && du -sh "$B" \
+    # DoNotCopy.txt is how a BSP configuration recognises a file base it has
+    # been copied away from: the file holds the identifier of the base, and if
+    # it is missing or holds another one, the first person in is met by
+    # «Информационная база была перемещена или восстановлена из резервной
+    # копии», work with external resources is locked and the window is titled
+    # [КОПИЯ]. A .dt carries the identifier but not the file, so a restored
+    # base has none; the one in the platform context was written by answering
+    # that question once on a base restored from this very template (see the
+    # README), and every workstation copy of the directory inherits it.
+    # Regenerate it whenever the template is regenerated — a stale identifier
+    # only brings the question back, it breaks nothing.
+    && if [ -f /platform/DoNotCopy.txt ]; then cp /platform/DoNotCopy.txt "$B/"; fi \
     # two Designer runs: two -Extension keys in one command line are refused
-    && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+    && D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
          /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService \
-    && D DESIGNER /F "$B" /DisableStartupDialogs /DisableStartupMessages \
+    && D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
          /UpdateDBCfg -Extension MCP_HTTPService \
     && chmod -R a+rX /opt/1c-demo \
-    # the check runs on a COPY, never on the template itself. The first
-    # Enterprise session of a BSP configuration creates an infobase user named
-    # after the account that opened it; done on the template, that user would
-    # be www-data (the Apache worker here), and afterwards every interactive
-    # start of the shipped base is refused with «Пользователь ИБ не
-    # идентифицирован» — the stand looked broken. On a copy the template stays
-    # userless, and each workstation fills its own base under its own account.
+    # the check runs on a COPY, never on the template itself: whatever a
+    # session writes — the configuration's own first-run bookkeeping included —
+    # stays out of what every workstation is cloned from. With a template built
+    # without DEMO_DB_USER this also keeps the base userless: the first session
+    # of a BSP configuration creates an infobase user named after the account
+    # that opened it, here www-data, and every interactive start afterwards is
+    # refused with «Пользователь ИБ не идентифицирован».
     && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \
     && 1c-stand publish www-data 8089 /tmp/chk /tmp/chk-pub \
     && apache2 -f /tmp/chk-pub/apache.conf -k start && sleep 3 \

@@ -5,7 +5,7 @@
 # сетки значков и области трея, вынесенные в константы ниже.
 import re
 from collections import namedtuple
-from typing import Callable, Optional
+from typing import Callable
 
 Rect = namedtuple('Rect', 'x y w h')
 WindowInfo = namedtuple('WindowInfo', 'name wclass rect stacking')
@@ -18,31 +18,33 @@ ICON_GRID_ORIGIN_Y = 40
 ICON_GRID_STEP = 106
 
 # Область трея на нижней панели: прямоугольник ~160x40 у правого края
-# рабочей области (трей сидит рядом с часами).
+# рабочей области (трей сидит рядом с часами). У значка трея нет своей
+# геометрии в X11, которую можно было бы запросить — только калибровка,
+# как и у сетки значков выше.
 TRAY_WIDTH = 160
 TRAY_HEIGHT = 40
 
-# Запись раскладки xfdesktop: "- uri: ...\n    row: N\n    col: N".
+# Запись раскладки xfdesktop (~/.config/xfce4/desktop/icons.screen0.yaml):
+# ключ — абсолютный путь в кавычках, значение — отображение row/col:
+#   "/home/dev1/Desktop/foo.desktop":
+#     row: N
+#     col: N
 # Файл называется .yaml, но парсим его регуляркой, а не YAML-библиотекой —
 # в стандартной библиотеке её нет, а своих записей всего три поля.
-_ICON_ENTRY_RE = re.compile(r'-\s+uri:\s*(?P<uri>\S+)\s+row:\s*(?P<row>\d+)\s+col:\s*(?P<col>\d+)')
+_ICON_ENTRY_RE = re.compile(r'"(?P<path>[^"]+)":\s*row:\s*(?P<row>\d+)\s*col:\s*(?P<col>\d+)')
 
 
-def _uri_to_path(uri: str) -> str:
-    return uri[len('file://'):] if uri.startswith('file://') else uri
-
-
-def desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bool], icon_size: int = 48) -> Optional[Rect]:
+def desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bool], icon_size: int = 48) -> Rect | None:
     """Прямоугольник значка desktop_file по раскладке xfdesktop.
 
     Раскладка помнит и значки, которых уже нет на диске (устаревшие
     записи) — такая запись игнорируется, даже если формально нашлась.
     """
     for m in _ICON_ENTRY_RE.finditer(layout_text):
-        uri = m.group('uri')
-        if not uri.endswith(desktop_file):
+        path = m.group('path')
+        if not path.endswith(desktop_file):
             continue
-        if not exists(_uri_to_path(uri)):
+        if not exists(path):
             return None
         row = int(m.group('row'))
         col = int(m.group('col'))
@@ -53,7 +55,7 @@ def desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bo
     return None
 
 
-def window(lister: Callable[[], list], name_pattern: str) -> Optional[Rect]:
+def window(lister: Callable[[], list[WindowInfo]], name_pattern: str) -> Rect | None:
     """Прямоугольник окна, чьё имя содержит name_pattern (без учёта регистра).
 
     Если подходит несколько окон — берётся верхнее по stacking (самое

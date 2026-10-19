@@ -123,6 +123,21 @@ fn answers_without_tty(has_tty: bool, cmd: &Cmd) -> Answer {
     }
 }
 
+/// Отказ без терминала — только для настоящего изменения на машине:
+/// `--dry-run` печатает план и ничего не делает, отказывать ему незачем;
+/// `--yes` — явное разрешение, второй отказ после него не нужен.
+fn refuses_without_tty(answer: Answer, yes: bool, dry_run: bool) -> bool {
+    !dry_run && answer == Answer::Refuse && !yes
+}
+
+/// Вопрос «наберите имя контейнера» защищает от случайного удаления в
+/// интерактивной сессии; `--yes` — это и есть осознанное разрешение, так что
+/// вопрос не переспрашивается, а просто не задаётся (не отвечается именем
+/// автоматически — это пустило бы и случайный Enter).
+fn needs_typed_name_confirmation(data: bool, yes: bool) -> bool {
+    data && !yes
+}
+
 fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
     let cfg = cfg::Cfg::load(&kit)?;
     let k = kit.clone();
@@ -168,13 +183,13 @@ fn run() -> Result<()> {
     // Нет терминала на stdin — вопрос о подтверждении завис бы навсегда.
     let has_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let cmd = cli.cmd.unwrap_or(Cmd::Status);
-    let yes = match answers_without_tty(has_tty, &cmd) {
-        Answer::Refuse if !cli.yes => anyhow::bail!(
+    let answer = answers_without_tty(has_tty, &cmd);
+    if refuses_without_tty(answer, cli.yes, cli.dry_run) {
+        anyhow::bail!(
             "нет терминала для подтверждения, удаление данных без него не делается — повторите команду с --yes, если это точно нужно"
-        ),
-        Answer::Default => true,
-        _ => cli.yes,
-    };
+        );
+    }
+    let yes = if answer == Answer::Default { true } else { cli.yes };
     let mut ctx = make_ctx(kit, cli.dry_run, yes)?;
     let ops = ops::server(&ctx.cfg);
     match cmd {
@@ -240,7 +255,7 @@ fn run() -> Result<()> {
                 println!("План напечатан, на машине ничего не менялось.");
                 return Ok(());
             }
-            if data {
+            if needs_typed_name_confirmation(data, cli.yes) {
                 let name = ctx.prompt.ask(
                     "Удалить данные: репозитории, проекты, настройки. Введите имя контейнера для подтверждения",
                     "",
@@ -309,6 +324,29 @@ mod tty_tests {
         assert_eq!(answers_without_tty(true, &Cmd::Clean { stack: false, data: true }), Answer::Ask);
         // Снять контейнер без терминала можно: данные остаются на месте.
         assert_eq!(answers_without_tty(false, &Cmd::Clean { stack: true, data: false }), Answer::Default);
+    }
+
+    #[test]
+    fn a_dry_run_is_never_refused_for_lack_of_a_terminal() {
+        // Без --dry-run и без --yes — отказ, как раньше.
+        assert!(refuses_without_tty(Answer::Refuse, false, false));
+        // --dry-run ничего не меняет на машине: отказывать ему незачем.
+        assert!(!refuses_without_tty(Answer::Refuse, false, true));
+        // --yes — явное разрешение, второй отказ не нужен.
+        assert!(!refuses_without_tty(Answer::Refuse, true, false));
+        // Безобидная команда — отказа никогда не было.
+        assert!(!refuses_without_tty(Answer::Default, false, false));
+    }
+
+    #[test]
+    fn typed_name_confirmation_is_skipped_only_with_explicit_yes() {
+        // --stack: не про данные, вопрос не про это.
+        assert!(!needs_typed_name_confirmation(false, false));
+        // --data без --yes: обычное интерактивное подтверждение именем.
+        assert!(needs_typed_name_confirmation(true, false));
+        // --data --yes: --yes — это и есть осознанное разрешение,
+        // переспрашивать имя контейнера уже не нужно.
+        assert!(!needs_typed_name_confirmation(true, true));
     }
 }
 

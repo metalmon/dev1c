@@ -227,12 +227,15 @@ pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Ch
 /// (перевод свободных МиБ в токены — задача 8: kv_bytes_per_token,
 /// window_that_fits).
 pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
-    if available >= fit_ctx {
+    // Сравниваем с measured — окном, которое сервер реально загрузил, а не
+    // с fit_ctx (настроенной целью): карта могла ещё удовлетворять fit_ctx и
+    // при этом уже не помещать то окно, которое сервер фактически держит.
+    if available >= measured {
         Check::pass("карта и окно модели", format!("было {measured}, сейчас карта даёт {available} токенов"))
     } else {
         Check::fail(
             "карта и окно модели",
-            format!("было {measured}, а сейчас карта даёт только {available} токенов (нужно не меньше {fit_ctx})"),
+            format!("было {measured}, а сейчас карта даёт только {available} токенов (настроенная цель — {fit_ctx})"),
             "видеокарта занята другой нагрузкой (vGPU) — проверьте её загрузку и повторите позже",
         )
     }
@@ -291,6 +294,9 @@ mod tests {
         assert!(!c.ok);
         assert!(c.detail.contains("65536") && c.detail.contains("20000"));
         assert!(model_window_fact(65536, 70000, 65536).ok);
+        // fit_ctx — цель из настроек, не повод закрыть глаза на то, что окно,
+        // которое сервер реально загрузил (measured), уже не помещается.
+        assert!(!model_window_fact(65536, 50000, 40000).ok);
     }
 
     #[test]

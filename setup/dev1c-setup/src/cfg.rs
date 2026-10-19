@@ -225,6 +225,14 @@ impl Cfg {
         })
     }
 
+    /// Образец с одной подставленной формой обслуживания: умалчивание
+    /// (`Cfg::default()`) не трогаем — только `model.serve` для показа.
+    pub fn example_for(serve: &str) -> String {
+        let mut cfg = Cfg::default();
+        cfg.model.serve = serve.into();
+        Cfg::render(&cfg)
+    }
+
     pub fn volume(&self, suffix: &str) -> String {
         format!("{}-{}", self.server.name, suffix)
     }
@@ -377,6 +385,19 @@ mod tests {
         assert!(t.contains("# Первый из четырёх портов подряд"));
         let back: Cfg = toml::from_str(&t).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn the_sample_can_be_printed_for_any_form() {
+        for form in ["host", "docker", "remote"] {
+            let text = Cfg::example_for(form);
+            assert!(text.contains(&format!("serve = \"{form}\"")));
+            // Комментарии образца на месте: файл остаётся человеческим.
+            assert!(text.contains('#'));
+            // И он читается обратно без потерь.
+            let back: Cfg = toml::from_str(&text).unwrap();
+            assert_eq!(back.model.serve, form);
+        }
     }
 
     #[test]

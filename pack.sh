@@ -1,17 +1,27 @@
 #!/bin/sh
-# Assemble the two kits from already built parts: the image archive and the
+# Assemble the kits from already built parts: the image archive and the
 # installer binaries come from CI (or from a local build), nothing is compiled
 # here. Keeps the laptop out of the loop: it has neither the memory for the
 # image nor a reason to carry a Rust toolchain.
 #
-#   ./pack.sh [--llama windows|linux|none] <dev1c-image.tar.gz> <dir with dev1c-setup and dev1c-setup.exe>
+#   ./pack.sh [--llama windows|linux|none] [--os linux|windows] <dev1c-image.tar.gz> <dir with dev1c-setup and dev1c-setup.exe>
 #
-# Output: dist/dev1c-kit (the administrator's kit) and dist/1c-connect (the
+# --os windows (default, the pilot host for the first two kits): produces
+# dist/dev1c-kit (the administrator's kit) and dist/1c-connect (the
 # developer's, minus 1c-connect.exe until it exists).
+#
+# --os linux: a second administrator's kit, dist/dev1c-kit-linux, for a
+# headless Ubuntu server with no internet — serve = "docker" only, so it
+# carries the environment+model-server image, no llama row, no nssm, no
+# developer's kit, and the NVIDIA Container Toolkit as .deb files (the server
+# cannot download them) at nvidia-container-toolkit/ inside the kit — read
+# from a directory of the same name the workflow fetched them into (override
+# with NVIDIA_TOOLKIT_DIR), checked against the pins below.
 #
 # --llama picks the row of llama.cpp binaries for the model server on the host
 # (serve = "host" in dev1c.toml): the kit is used on one OS, so it carries one
 # row (about 550 MB) plus nssm for Windows. Default: windows — the pilot host.
+# Only --os windows builds a host row; the Linux kit always serves docker.
 # LLAMA_CACHE=<dir> keeps every downloaded archive between runs (llama rows,
 # OneScript, MinGit, mcp-1c). Needs docker: the vanessa-runner library tree is
 # resolved by opm inside the project's OneScript image.
@@ -20,38 +30,66 @@ set -eu
 DIR=$(cd "$(dirname "$0")" && pwd)
 cd "$DIR"
 LLAMA_ROW=windows
-if [ "${1:-}" = "--llama" ]; then
-    LLAMA_ROW=${2:?windows|linux|none}
-    shift 2
-fi
+OS=windows
+while [ "${1:-}" = "--llama" ] || [ "${1:-}" = "--os" ]; do
+    case "$1" in
+        --llama) LLAMA_ROW=${2:?windows|linux|none}; shift 2 ;;
+        --os) OS=${2:?linux|windows}; shift 2 ;;
+    esac
+done
 IMAGE_TAR=${1:?path to dev1c-image.tar.gz}
 BIN_DIR=${2:?directory with the dev1c-setup binaries}
 OUT=${OUT_DIR:-dist}
 
-KIT="$OUT/dev1c-kit"
+if [ "$OS" = "linux" ]; then
+    KIT="$OUT/dev1c-kit-linux"
+else
+    KIT="$OUT/dev1c-kit"
+fi
 CONNECT="$OUT/1c-connect"
-rm -rf "$KIT" "$CONNECT"
-mkdir -p "$KIT" "$CONNECT"
+rm -rf "$KIT"
+mkdir -p "$KIT"
+if [ "$OS" = "windows" ]; then
+    rm -rf "$CONNECT"
+    mkdir -p "$CONNECT"
+fi
 
 cp "$IMAGE_TAR" "$KIT/dev1c-image.tar.gz"
-for b in dev1c-setup dev1c-setup.exe; do
-    [ -f "$BIN_DIR/$b" ] && cp "$BIN_DIR/$b" "$KIT/"
-done
+if [ "$OS" = "linux" ]; then
+    # No .exe, ever — this kit runs on the server, not on a developer's
+    # Windows machine, even when BIN_DIR carries both binaries.
+    [ -f "$BIN_DIR/dev1c-setup" ] || { echo "pack.sh --os linux: dev1c-setup (Linux binary) not in $BIN_DIR" >&2; exit 1; }
+    cp "$BIN_DIR/dev1c-setup" "$KIT/"
+else
+    for b in dev1c-setup dev1c-setup.exe; do
+        [ -f "$BIN_DIR/$b" ] && cp "$BIN_DIR/$b" "$KIT/"
+    done
+fi
 chmod +x "$KIT/dev1c-setup" 2>/dev/null || true
-cp setup/dev1c-setup/dev1c.example.toml "$KIT/dev1c.toml"
+if [ "$OS" = "linux" ]; then
+    # The program prints its own sample: one source for the comments and the
+    # structure, so dev1c.toml and Cfg::default never drift apart.
+    "$KIT/dev1c-setup" example --serve docker >"$KIT/dev1c.toml"
+else
+    cp setup/dev1c-setup/dev1c.example.toml "$KIT/dev1c.toml"
+fi
 
 # Every archive is pinned by hash: a release asset can be replaced under the
 # same name, and these are executables the customer's machines will run.
 sha_of() { # $1 = file name → pinned SHA-256
     case "$1" in
-        llama-b11606-bin-win-cuda-13.4-x64.zip) echo 93ba7c16d1ad8343248d540bb4c06e7e18f7d0601e762d6952bad13628295be8 ;;
+        llama-b11734-bin-win-cuda-13.4-x64.zip) echo 16ebb234a4723d5900cff196b5e6ce8c0559202cfe16379c08511f41611e0ad2 ;;
         cudart-llama-bin-win-cuda-13.4-x64.zip) echo 738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668 ;;
-        llama-b11606-bin-ubuntu-cuda-13.4-x64.tar.gz) echo e984c5d442bf6310015440243a6f85927b320ecafccd50deaf9cc4a38daad22f ;;
-        cudart-llama-b11606-bin-ubuntu-cuda-13.4-x64.tar.gz) echo 29bde5b11418e49192e790d8fdc488715253bdf9cddd6736125907fa0f14405a ;;
+        llama-b11734-bin-ubuntu-cuda-13.4-x64.tar.gz) echo f165c871d0473ace56b05b5ed32fef7ecb47d6a01ca06cbda0ad9d55132b0892 ;;
+        cudart-llama-b11734-bin-ubuntu-cuda-13.4-x64.tar.gz) echo e0aa65934ed0171a8784a32d072ac473cd001d3ff041bc08ff370a908a853daa ;;
         mcp-1c-windows-amd64.exe) echo 0922a0e15c2ffc7201650ad0f17e96a405439a30d8b0adcb97744946a32081b2 ;;
         MCP_HTTPService.cfe) echo 76df5ccf993c10caef73fe8399d2fa7df1cc3b7e9b24fc6662ab402aeea1bf61 ;;
         OneScript-2.2.0-win-x64.zip) echo b12f2c44445e19d5c627f63af5cefd3eb7ad4e36b939bbd49c073e0956928267 ;;
         MinGit-2.56.0.2-64-bit.zip) echo da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be ;;
+        nvidia-container-toolkit_1.20.1-1_amd64.deb) echo a95c9d206a7ecd6a90adff9290635271fa167a86b5767b17eaa0478a552eb02c ;;
+        nvidia-container-toolkit-base_1.20.1-1_amd64.deb) echo e01964a064fbdb62425ab22ec5832349f92c5b0b50c8f23fdf14dad004db4fb2 ;;
+        libnvidia-container1_1.20.1-1_amd64.deb) echo 9d803cd9c898cb2fa927529d5ac4fc09f3d65c8cfbde8985de1b9398e53a4656 ;;
+        libnvidia-container-tools_1.20.1-1_amd64.deb) echo 8bd131b8977a3db667982024850ae7b50cfa02d6b2be06a718064ec814778f05 ;;
         *) echo "no pinned hash for $1" >&2; exit 1 ;;
     esac
 }
@@ -71,6 +109,8 @@ fetch() { # $1 = url, $2 = destination; verified against the pinned hash either 
     fi
     check_sha "$2" "$(sha_of "$name")"
 }
+
+if [ "$OS" = "windows" ]; then
 
 # The developer's kit: mcp-1c for the machine with the platform, the same
 # release the image was designed against. Pinned here, not in the Dockerfile:
@@ -138,7 +178,7 @@ tools_row
 # unreachable) and is checked against its pinned hash here. The installer
 # copies everything into C:\dev1c\llama; a foreign nssm on the machine is
 # never used.
-LLAMA_BUILD=b11606
+LLAMA_BUILD=b11734
 NSSM_SHA256=8288b6174231954fe0d9653522f1ccd9883c135dbd99fbc53cc2ea36cd91e401
 llama_row() { # $1 = windows|linux
     dst="$KIT/llama/bin/$1-x64-cuda13"
@@ -173,11 +213,38 @@ case "$LLAMA_ROW" in
     *) echo "--llama: windows, linux or none" >&2; exit 2 ;;
 esac
 
+fi # OS = windows (developer's kit + the host-form llama row)
+
+if [ "$OS" = "linux" ]; then
+    # The server cannot reach the internet, so these four .deb files travel
+    # in the kit. The workflow fetches them from NVIDIA's repository into a
+    # directory of the same name as the one they end up at inside the kit;
+    # pack.sh only verifies and copies — the pins below are what make a
+    # swapped file visible.
+    NVIDIA_TOOLKIT_VERSION=1.20.1-1
+    src="${NVIDIA_TOOLKIT_DIR:-nvidia-container-toolkit}"
+    dst="$KIT/nvidia-container-toolkit"
+    mkdir -p "$dst"
+    for pkg in nvidia-container-toolkit nvidia-container-toolkit-base libnvidia-container1 libnvidia-container-tools; do
+        f="${pkg}_${NVIDIA_TOOLKIT_VERSION}_amd64.deb"
+        [ -f "$src/$f" ] || { echo "nvidia-container-toolkit: $f missing in $src (the workflow must fetch it before calling pack.sh)" >&2; exit 1; }
+        cp "$src/$f" "$dst/"
+        check_sha "$dst/$f" "$(sha_of "$f")"
+    done
+    echo "nvidia-container-toolkit: $(ls "$dst" | wc -l) packages, $(du -sh "$dst" | cut -f1)"
+fi
+
 # Checksums by the installer itself, so the customer verifies with the same code.
 SETUP="$KIT/dev1c-setup"
 [ -x "$SETUP" ] || SETUP="$KIT/dev1c-setup.exe"
 "$SETUP" --kit "$KIT" checksums >/dev/null
-"$SETUP" --kit "$CONNECT" checksums >/dev/null
+if [ "$OS" = "windows" ]; then
+    "$SETUP" --kit "$CONNECT" checksums >/dev/null
+fi
 
 echo "Kits ready in $OUT:"
-du -sh "$KIT" "$CONNECT"
+if [ "$OS" = "windows" ]; then
+    du -sh "$KIT" "$CONNECT"
+else
+    du -sh "$KIT"
+fi

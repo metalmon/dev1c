@@ -272,6 +272,27 @@ jobs:
           ./pack.sh --llama windows dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit dist/1c-connect
 
+      - name: Fetch the NVIDIA Container Toolkit .deb files
+        # The pilot server (Task 5) has no internet, so these four packages
+        # travel in the Linux kit instead of being apt-installed there.
+        # Fetched once, here; pack.sh (sha_of) only verifies and copies, so a
+        # moved or swapped file fails the build instead of reaching a kit.
+        run: |
+          mkdir -p nvidia-container-toolkit
+          base=https://nvidia.github.io/libnvidia-container/stable/deb/amd64
+          ver=1.20.1-1
+          for pkg in nvidia-container-toolkit nvidia-container-toolkit-base libnvidia-container1 libnvidia-container-tools; do
+            curl -fsSL -o "nvidia-container-toolkit/${pkg}_${ver}_amd64.deb" "$base/${pkg}_${ver}_amd64.deb"
+          done
+          ls -la nvidia-container-toolkit
+
+      - name: Pack the Linux kit
+        # The headless Ubuntu pilot: serve = "docker" only, so no llama row
+        # and no nssm (--os linux in pack.sh); same image archive as above.
+        run: |
+          ./pack.sh --os linux dev1c-image.tar.gz bins
+          ls -la dist/dev1c-kit-linux
+
       - name: Layer sizes
         # Printed on every build so growth is noticed when it happens, not when
         # somebody has to transfer the file. Note that `docker image inspect`

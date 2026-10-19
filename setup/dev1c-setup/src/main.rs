@@ -80,7 +80,11 @@ enum Cmd {
     /// Собрать список контрольных сумм (при сборке поставки).
     Checksums,
     /// Напечатать образец dev1c.toml.
-    Example,
+    Example {
+        /// Форма обслуживания модели для образца: host, docker или remote.
+        #[arg(long)]
+        serve: Option<String>,
+    },
 }
 
 fn main() {
@@ -124,14 +128,20 @@ fn run() -> Result<()> {
         Some(p) => Kit::at(p),
         None => Kit::discover("DEV1C_KIT")?,
     };
-    if let Some(Cmd::Example) = cli.cmd {
-        print!("{}", cfg::EXAMPLE);
+    if let Some(Cmd::Example { serve }) = &cli.cmd {
+        match serve {
+            Some(s) => {
+                anyhow::ensure!(matches!(s.as_str(), "host" | "docker" | "remote"), "--serve: host, docker или remote");
+                print!("{}", cfg::Cfg::example_for(s));
+            }
+            None => print!("{}", cfg::EXAMPLE),
+        }
         return Ok(());
     }
     let mut ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
     let ops = ops::server(&ctx.cfg);
     match cli.cmd.unwrap_or(Cmd::Status) {
-        Cmd::Example => unreachable!(),
+        Cmd::Example { .. } => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
             println!();

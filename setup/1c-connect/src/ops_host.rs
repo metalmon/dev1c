@@ -262,12 +262,17 @@ fn scan_1cv8() -> Vec<(String, PathBuf)> {
     found
 }
 
+/// Исполняемый файл платформы в заданном каталоге (обычная или учебная версия).
+/// Чистая функция — каталог ей называет вызывающий, а не переменная окружения.
+fn platform_from(dir: &Path) -> Option<PathBuf> {
+    platform_exe_names().into_iter().map(|n| dir.join(n)).find(|p| p.exists())
+}
+
 /// Путь к исполняемому файлу платформы: самая новая версия (обычная или учебная) из
 /// стандартных каталогов, либо принудительно — из `ONEC_PLATFORM`.
 pub fn find_1cv8() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(ONEC_PLATFORM) {
-        let dir = PathBuf::from(dir);
-        return platform_exe_names().into_iter().map(|n| dir.join(n)).find(|p| p.exists());
+        return platform_from(&PathBuf::from(dir));
     }
     pick_version(dedup_canonical(scan_1cv8()))
 }
@@ -528,16 +533,15 @@ mod tests {
 
     #[test]
     fn onec_platform_override_picks_whichever_exe_name_is_present() {
+        // Без переменной окружения: platform_from — чистая функция над каталогом,
+        // который ей называет тест, а не процесс целиком (тесты в этом бинарнике
+        // идут в разных потоках одного процесса — process-wide env var была бы гонкой).
         let tmp = std::env::temp_dir().join(format!("dev1c-1cv8-override-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let exe = tmp.join(platform_exe_names()[1]); // учебная платформа — суффикс t
         std::fs::write(&exe, "x").unwrap();
-        // SAFETY: тест однопоточный для этой переменной; значение снимается сразу после чтения.
-        unsafe { std::env::set_var(ONEC_PLATFORM, &tmp) };
-        let found = find_1cv8();
-        unsafe { std::env::remove_var(ONEC_PLATFORM) };
-        assert_eq!(found, Some(exe));
+        assert_eq!(platform_from(&tmp), Some(exe));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

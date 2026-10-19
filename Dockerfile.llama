@@ -131,13 +131,22 @@ RUN mkdir -p /opt/llama \
 
 
 # =============================================================================
-# Runtime: a slim Debian 12 base, the same libc the builder used, so the
-# dynamic links `ldd` still finds (libc, libgcc, libstdc++, libgomp) are
-# already present without pulling in the CUDA toolkit — the GPU driver
-# libraries arrive at run time from nvidia-container-toolkit, not here.
+# Runtime: a slim Debian 12 base, the same libc the builder used, so the CUDA
+# toolkit is not needed here and the GPU driver libraries arrive at run time
+# from nvidia-container-toolkit, not from the image.
+#
+# libgomp1 and libstdc++6 are installed because the slim base does not carry
+# them: the first build of this stage produced an image whose server died at
+# startup with "libgomp.so.1: cannot open shared object file". The builder
+# stage had them from build-essential, which is exactly why the check has to
+# run against the runtime image — see the smoke step in llama.yml.
+#
 # This also doubles as what the main Dockerfile copies /opt/llama out of.
 # =============================================================================
 FROM debian:12-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/llama /opt/llama
 ENV PATH=/opt/llama:$PATH \
     LD_LIBRARY_PATH=/opt/llama \

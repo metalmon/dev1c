@@ -50,7 +50,10 @@
 | `Dockerfile.1c` | пакеты, копирование, автозапуск, пункт меню |
 | `config/1c/stand.sh` | команда `1c-stand onboarding` |
 
-Тесты запускаются так: `python3 -m unittest discover -s config/1c/onboarding/tests -t config/1c/onboarding` из корня репозитория. Задачи 1–3 и 5 проходят на любой машине с Python 3, задачи 4 и 6 — в контейнере.
+Тесты всегда запускаются из каталога `config/1c/onboarding`:
+`cd config/1c/onboarding && python3 -m unittest tests.test_targets -v`, и так же
+для остальных. Задачи 1–3 и 5 проходят на любой машине с Python 3, задачи 4 и 6
+— в контейнере.
 
 ---
 
@@ -62,7 +65,12 @@
 - Create: `config/1c/onboarding/tests/fixtures/icons.screen0.yaml`
 
 **Interfaces:**
-- Produces: `Rect = namedtuple('Rect', 'x y w h')`; `desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bool], icon_size: int = 48) -> Rect | None`; `window(lister: Callable[[], list[WindowInfo]], name_pattern: str) -> Rect | None`; `tray_area(workarea: Rect) -> Rect`; `WindowInfo = namedtuple('WindowInfo', 'name wclass rect stacking')`.
+- Produces: `Rect = namedtuple('Rect', 'x y w h')`; `desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bool], icon_size: int = 48) -> Rect | None`; `window(lister: Callable[[], list[WindowInfo]], name_pattern: str) -> Rect | None`; `tray_area(workarea: Rect) -> Rect`; `anchor_in(rect: Rect, anchor: str) -> Rect`; `WindowInfo = namedtuple('WindowInfo', 'name wclass rect stacking')`.
+
+`anchor_in` сужает прямоугольник окна до его части: `'whole'`, `'right-bottom'`,
+`'right'`. Нужен пятому шагу сценария, который показывает не на окно Zed целиком,
+а на панель агента справа внизу — своих окон Zed не отдаёт, и взять эту область
+можно только долей от окна.
 
 - [ ] **Step 1: Напиши падающий тест**
 
@@ -169,7 +177,11 @@ git commit -m "Онбординг: шесть шагов данными, а не
 
 **Interfaces:**
 - Consumes: `Rect` из `targets`.
-- Produces: `Layout = namedtuple('Layout', 'bubble arrow_start arrow_end')`; `place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24) -> Layout`.
+- Produces: `Layout = namedtuple('Layout', 'bubble arrow_start arrow_end')`; `place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24) -> Layout`; `bubble_size(step: Step, width: int = 640, line_height: int = 21, head: int = 64, foot: int = 24) -> tuple[int, int]`.
+
+`bubble_size` считается здесь, а не в окне: иначе размер выноски зависел бы от
+обмера текста в GTK, а размещение — от размера, и круг бы не разорвался. Ширина
+задана числом, высота — от числа строк тела. Задача 4 рисует по тем же числам.
 
 При `target is None` выноска ставится по центру экрана, `arrow_start == arrow_end`.
 
@@ -334,6 +346,7 @@ git commit -m "Онбординг: шаг уходит вперёд по фак�
 ### Task 6: Программа целиком и место в образе
 
 **Files:**
+- Create: `config/1c/onboarding/world.py`
 - Create: `config/1c/onboarding/main.py`
 - Create: `config/1c/onboarding.desktop`
 - Create: `config/1c/onboarding-autostart.desktop`
@@ -344,7 +357,7 @@ git commit -m "Онбординг: шаг уходит вперёд по фак�
 
 **Interfaces:**
 - Consumes: всё предыдущее.
-- Produces: `main.run(scenario_path: str) -> int`; `copy_question(text: str) -> bool`.
+- Produces: `World` в `world.py` с методами `icon(desktop_file) -> Rect | None`, `window(pattern, anchor='whole') -> Rect | None`, `covered(rect) -> bool`, `screen() -> Rect` — настоящая реализация того мира, который задача 5 подделывала; строится поверх чистых функций `targets` и запросов к `Gdk.Screen`. `main.run(scenario_path: str) -> int`; `copy_question(text: str) -> bool`.
 
 - [ ] **Step 1: Напиши падающий тест**
 

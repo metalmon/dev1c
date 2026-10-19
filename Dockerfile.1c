@@ -7,8 +7,30 @@
 # browser form), so this layer is built where the file is and the main image
 # keeps building in GitHub Actions untouched.
 #
+# The file builds two things, and the heavy one is NOT the image:
+#
 #   docker build -f Dockerfile.1c --build-context platform=platform \
 #                -t oktaplus/dev1c-1c:latest .
+#       the stand image — the tools, the launchers, the runtime. No platform,
+#       no demo base: about 4 GB, and a change to stand.sh costs one layer.
+#
+#   docker build -f Dockerfile.1c --build-context platform=platform \
+#                --target payload -t oktaplus/dev1c-1c-payload:latest .
+#       the payload — /opt/1cv8t (the platform) and /opt/1c-demo (the template
+#       base), about 4 GB more. It is built once per platform/configuration
+#       version and shipped as a tar that fills two named volumes:
+#           dev1c-platform -> /opt/1cv8t
+#           dev1c-demo     -> /opt/1c-demo
+#       `1c-stand export-payload` writes that tar, `1c-stand import-payload`
+#       unpacks it into the mounted volumes, and `setup/1c/provision.sh` is the
+#       host side of both. Until the volumes are filled, `1c-stand start` says
+#       so and exits instead of failing somewhere deep.
+#
+# Why volumes: the platform and the demo base change with their own releases,
+# not with ours. Baked in, every change to the stand meant moving 11 GB — of a
+# build context, of an image, of a kit. In volumes the image stays light, the
+# payload is delivered once, and a customer who already has it keeps it across
+# image updates.
 #
 # `platform/` holds setup-training-<version>-x86_64.run, unpacked from the
 # tar.gz of the 1C download page; it is a separate build context so the main
@@ -31,6 +53,7 @@
 # =============================================================================
 
 ARG BASE=oktaplus/dev1c:latest
+ARG PLATFORM_VERSION=8.5.1.1150
 
 # --- vanessa-runner library tree ---------------------------------------------
 # Resolved by opm inside the project's OneScript image, exactly as pack.sh does
@@ -46,16 +69,18 @@ RUN opm install -d /out vanessa-runner@${VRUNNER_VERSION} add@${ADD_VERSION} >/d
     && [ "$(find . -type f | wc -l)" = "$(wc -l </manifest)" ] \
     && test -f vanessa-runner/src/mcp.os
 
-# --- the platform ------------------------------------------------------------
-FROM ${BASE}
+# =============================================================================
+# tools — everything both the stand image and the payload build need
+# =============================================================================
+FROM ${BASE} AS tools
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PLATFORM_VERSION=8.5.1.1150
+ARG PLATFORM_VERSION
 ARG MCP_1C_VERSION=v1.22.3
 
 # webkit 4.1 + GLU: the client's own dependencies (v8_install_deps is disabled
-# below — it would apt on its own, outside our control). xvfb + xauth: the
-# Configurator in batch mode still wants a display. apache2: the HTTP service
-# of the base for mcp-1c, published with webinstt at run time.
+# in the payload stage — it would apt on its own, outside our control).
+# xvfb + xauth: the Configurator in batch mode still wants a display. apache2:
+# the HTTP service of the base for mcp-1c, published with webinstt at run time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libwebkit2gtk-4.1-0 libglu1-mesa xvfb xauth apache2 socat \
       `# libayatana-appindicator3: the tray icon of 1c-connect in local mode.` \
@@ -66,32 +91,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libayatana-appindicator3-1 \
     && rm -rf /var/lib/apt/lists/*
 
-# The installer is bind-mounted, not copied: it would otherwise sit in a layer
-# next to the 2.5 GB it unpacks.
-RUN --mount=type=bind,from=platform,target=/platform \
-    /platform/setup-training-${PLATFORM_VERSION}-x86_64.run --mode unattended --installer-language ru \
-      --enable-components client_full,ws,ru \
-      --disable-components v8_install_deps,desktop_icons \
-    && P=/opt/1cv8t/x86_64/${PLATFORM_VERSION} && cd "$P" \
-    `# the ".wk41" twins everywhere they ship: the version directory holds the` \
-    `# client and the Configurator, /opt/1cv8t/common holds the starter, and` \
-    `# each looks for its libraries next to itself (RUNPATH is $ORIGIN)` \
-    && for w in $(find /opt/1cv8t -name '*.wk41'); do ln -sf "$(basename "$w")" "${w%.wk41}"; done \
-    && ln -s 1cv8t 1cv8 && ln -s 1cv8ct 1cv8c && ln -s webinstt webinst \
-    && mkdir -p /opt/1cv8/x86_64 && ln -s "$P" /opt/1cv8/x86_64/${PLATFORM_VERSION} \
-    && ! ldd 1cv8t 1cv8ct webinstt wsap24t.so /opt/1cv8t/common/1cestartt | grep 'not found' \
-    # Smoke test: the Configurator creates a base under Xvfb. If this fails the
-    # build fails, not the demo.
-    && xvfb-run -a "$P/1cv8t" CREATEINFOBASE "File=/tmp/smoke" /DisableStartupDialogs /DisableStartupMessages /Out /tmp/smoke.log \
-    && test -s /tmp/smoke/1Cv8.1CD && rm -rf /tmp/smoke /tmp/smoke.log \
-    && ln -s "$P/1cv8" /usr/local/bin/1cv8 \
-    && echo "platform ${PLATFORM_VERSION}: ok"
-
 # --- mcp-1c: the Linux binary and the extension ------------------------------
 # The same release as the developer's kit (pack.sh), pinned by the hashes of
-# its checksums.txt. The extension did not apply on an empty 8.5 base in the
-# spike (DefaultLanguage check); whether it applies on the demo configuration
-# is decided at run time, and the .cfe is here for that.
+# its checksums.txt. The .cfe is applied to the demo base in the payload stage.
 RUN curl -fsSL -o /usr/local/bin/mcp-1c \
       "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/mcp-1c-linux-amd64" \
     && echo "8118fa6005e6a6c4add82d920142254f97e82a5d7bd7856b3d2276dd216abd92  /usr/local/bin/mcp-1c" | sha256sum -c --quiet \
@@ -128,20 +130,77 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
 # measured in Arial, Times New Roman and Courier New. The Debian installer
 # fetches the original self-extracting archives from SourceForge — the way
 # Microsoft allowed them to be redistributed — so this step needs the network
-# at build time and lives in contrib. Late in the file on purpose: it must not
-# invalidate the platform layer above it.
-RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources     && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections     && apt-get update     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer     && rm -rf /var/lib/apt/lists/*     && fc-list | grep -q "Arial"     && echo "ms core fonts: $(fc-list | grep -ciE 'arial|times new roman|courier new') faces"
+# at build time and lives in contrib.
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+    && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-list | grep -q "Arial" \
+    && echo "ms core fonts: $(fc-list | grep -ciE 'arial|times new roman|courier new') faces"
+
+# --- the names the platform volume fills in ----------------------------------
+# vanessa-runner knows exactly one path to the Configurator,
+# /opt/1cv8/x86_64/<version>/1cv8, and the training edition installs into
+# /opt/1cv8t with "t"-suffixed binaries. Two symlinks give it that name, and
+# they are made here rather than in the payload so that an image without the
+# volume still has the shape — a dangling link is a readable failure, a missing
+# one sends vanessa-runner looking for a platform it will never find.
+ENV PLATFORM_VERSION=${PLATFORM_VERSION}
+RUN ln -s /opt/1cv8t /opt/1cv8 \
+    && ln -s /opt/1cv8/x86_64/${PLATFORM_VERSION}/1cv8 /usr/local/bin/1cv8
+
+# --- the runtime script ------------------------------------------------------
+# In `tools` because the payload build uses it too: the demo base is published
+# with `1c-stand publish` so that the build checks the same publication the
+# stand serves, not a second copy of it that could drift.
+# DEMO_DB_USER: the infobase user the configuration's welcome wizard made in
+# the template base (see the payload stage). The publication, the base list and
+# vrunner all read it from here. Empty means a base with no users at all.
+ARG DEMO_DB_USER=Администратор
+ENV DEMO_DB_USER=${DEMO_DB_USER}
+COPY config/1c/stand.sh /usr/local/bin/1c-stand
+RUN sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand
+
+# =============================================================================
+# payload — the platform and the template base, for the two volumes
+# =============================================================================
+# Built with `--target payload`, exported with `1c-stand export-payload`, and
+# never shipped as an image. Everything it produces lives under /opt/1cv8t and
+# /opt/1c-demo, the two paths the volumes are mounted at.
+# PLATFORM_VERSION and DEMO_DB_USER are not re-declared here: `tools` turned
+# both into ENV, and an ENV always wins over an ARG of the same name, so the
+# two targets cannot drift apart on the values that matter.
+FROM tools AS payload
+
+# The installer is bind-mounted, not copied: it would otherwise sit in a layer
+# next to the 2.5 GB it unpacks.
+RUN --mount=type=bind,from=platform,target=/platform \
+    /platform/setup-training-${PLATFORM_VERSION}-x86_64.run --mode unattended --installer-language ru \
+      --enable-components client_full,ws,ru \
+      --disable-components v8_install_deps,desktop_icons \
+    && P=/opt/1cv8t/x86_64/${PLATFORM_VERSION} && cd "$P" \
+    `# the ".wk41" twins everywhere they ship: the version directory holds the` \
+    `# client and the Configurator, /opt/1cv8t/common holds the starter, and` \
+    `# each looks for its libraries next to itself (RUNPATH is $ORIGIN)` \
+    && for w in $(find /opt/1cv8t -name '*.wk41'); do ln -sf "$(basename "$w")" "${w%.wk41}"; done \
+    && ln -s 1cv8t 1cv8 && ln -s 1cv8ct 1cv8c && ln -s webinstt webinst \
+    && ! ldd 1cv8t 1cv8ct webinstt wsap24t.so /opt/1cv8t/common/1cestartt | grep 'not found' \
+    # Smoke test: the Configurator creates a base under Xvfb. If this fails the
+    # build fails, not the demo.
+    && xvfb-run -a "$P/1cv8t" CREATEINFOBASE "File=/tmp/smoke" /DisableStartupDialogs /DisableStartupMessages /Out /tmp/smoke.log \
+    && test -s /tmp/smoke/1Cv8.1CD && rm -rf /tmp/smoke /tmp/smoke.log \
+    && echo "platform ${PLATFORM_VERSION}: ok"
 
 # --- the demo base -----------------------------------------------------------
-# One template base in the image; every workstation gets its own copy on first
-# use (see config/1c/stand.sh). Built from a configuration template in the
-# platform context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt —
-# otherwise from an empty configuration: the stand still shows the tools.
+# One template base; every workstation gets its own copy on first use (see
+# config/1c/stand.sh). Built from a configuration template in the platform
+# context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt — otherwise
+# from an empty configuration: the stand still shows the tools.
 # The template in use is the training УНФ 3.0.13.251 WITHOUT data
 # (1cv8new.dt of its kit): the kit's demo base with data cannot be opened
 # under the training licence — its users have passwords, and the licence
 # allows only empty ones (the platform says so in a dialog and exits).
-# A base of this configuration is about 1.9 GB.
 #
 # unf-ready.dt is that empty base with the configuration's welcome wizard
 # already done, dumped with /DumpIB. The wizard («Добро пожаловать!», three
@@ -150,23 +209,15 @@ RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.lis
 # creates that user, after which everything headless needs the name. Doing it
 # once here means the customer opens 1C and is simply in the program, and the
 # name is known to the publication, to the starter's list and to vrunner
-# (DEMO_DB_USER below). How the file is made: open a copy of the base built
-# from unf-empty.dt, walk the three steps giving the name below and NO
+# (DEMO_DB_USER in `tools`). How the file is made: open a copy of the base
+# built from unf-empty.dt, walk the three steps giving that name and NO
 # password (the licence allows none), then /DumpIB.
 #
 # The mcp-1c extension goes in here; whether it applies is checked right away
 # through a throwaway Apache, and a 404 is a warning, not a failure.
 ARG DEMO_TEMPLATE=unf-ready.dt
-# The infobase user the welcome wizard made, carried into the runtime: the
-# publication, the base list and vrunner all read it from here. Empty means a
-# base with no users at all — pass `--build-arg DEMO_DB_USER=` together with a
-# template whose wizard was never done (unf-empty.dt) or with no template.
-ARG DEMO_DB_USER=Администратор
-ENV DEMO_DB_USER=${DEMO_DB_USER}
-COPY config/1c/stand.sh /usr/local/bin/1c-stand
 RUN --mount=type=bind,from=platform,target=/platform \
-    sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand \
-    && P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
+    P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
     # every Designer run prints its own log, pass or fail: a silent chain is
     # what cost the first build with a template an hour
     && D() { xvfb-run -a "$P/1cv8" "$@" /Out /tmp/d.log 2>/dev/null; rc=$?; cat /tmp/d.log; echo " [rc=$rc] $1 $2"; return $rc; } \
@@ -211,13 +262,22 @@ RUN --mount=type=bind,from=platform,target=/platform \
          404) echo "WARNING demo base: HTTP 404 — the mcp-1c extension did not apply; the stand works without the 1c tools" ;; \
          *)   echo "demo base: HTTP service http=$code"; cat /tmp/hs; exit 1 ;; \
        esac \
-    && rm -rf /tmp/chk /tmp/chk-pub /tmp/hs
+    && rm -rf /tmp/chk /tmp/chk-pub /tmp/hs \
+    # what import-payload checks for, and what `check` reports: the two trees
+    # and the versions they were built from
+    && printf 'platform=%s\ndemo_template=%s\ndemo_db_user=%s\nbuilt=%s\n' \
+         "${PLATFORM_VERSION}" "${DEMO_TEMPLATE:-(empty configuration)}" "${DEMO_DB_USER:-(no users)}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+         > /opt/1c-demo/payload.conf \
+    && cat /opt/1c-demo/payload.conf
 
-# --- the stand's runtime -----------------------------------------------------
+# =============================================================================
+# stand — the image (the default target: no platform, no demo base)
+# =============================================================================
 # The menu entries, the check, the agent rules for this image (appended to the
 # shipped AGENTS.md: the base entrypoint re-seeds homes from it by checksum),
-# and the entrypoint wrapper as CMD. The starter is what the desktop gets;
-# the two direct launchers stay in the menu for when one is wanted by itself.
+# and the runtime as CMD. The starter is what the desktop gets; the two direct
+# launchers stay in the menu for when one is wanted by itself.
+FROM tools AS stand
 COPY config/1c/start.desktop        /usr/share/applications/1c-start.desktop
 COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
 COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.desktop

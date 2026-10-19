@@ -148,17 +148,36 @@ menu, and `1cv8` is on the `PATH`. The base of workstation `devN` is
 `~/base`, seeded from the image on first use; the project directory for
 vrunner is `~/project`.
 
+The platform and the template base are **not in the image**. They come in two
+named volumes, `dev1c-platform` (`/opt/1cv8t`) and `dev1c-demo`
+(`/opt/1c-demo`), filled once from a payload tar. They follow 1C's releases,
+not ours: baked in, every change to `stand.sh` meant moving 11 GB of build
+context, image and kit, and a customer who already had the platform downloaded
+it again. The image is about 4 GB, the payload about 4 GB more, and the
+payload survives image updates. Without the volumes the container still gives
+the desktop, Zed and Gitea, and `1c-stand start` says in one line what is
+missing.
+
 The installer is 1.7 GB and comes from the 1C site through a browser form, so
-this layer is built where the file is, not in CI:
+both are built where the file is, not in CI. `provision.sh` is the whole host
+side, with fixed names and no discovery:
 
 ```
 mkdir platform                         # git- and docker-ignored
-# put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz)
-# and unf-ready.dt, the demo base of the stand (see below)
-docker build -f Dockerfile.1c --build-context platform=platform \
-             -t oktaplus/dev1c-1c:latest .
-docker exec <container> test-stand    # the check of a running stand
+# put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz),
+# unf-ready.dt and DoNotCopy.txt, the demo base of the stand (see below)
+./provision.sh build                   # the stand image and the payload image
+./provision.sh export                  # -> platform/dev1c-1c-payload.tar.gz
+./provision.sh import                  # that tar -> the two volumes
+./provision.sh run -e CUSTOM_API_URL=… -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=…
+./provision.sh status                  # what the volumes hold
+docker exec dev1c test-stand           # the check of a running stand
 ```
+
+On a customer's machine only the last three lines happen, with the image tar
+and the payload tar from the kit. The payload is rebuilt only for a new
+platform or a new demo configuration; `payload.conf` inside it records which
+versions it was built from, and `test-stand` prints that line first.
 
 The demo base is the training УНФ 3.0.13.251 without data: the kit's demo base
 with data has users with passwords, and the training licence admits only empty

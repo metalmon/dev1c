@@ -16,6 +16,16 @@ mcp() { # $1 = port, $2 = third request (JSON-RPC), $3 = pattern expected in the
       | timeout 120 nc -N localhost "$1" 2>/dev/null | tr -d '\000' > $T/mcp.out
     grep -aq "$3" $T/mcp.out && ! grep -aq '❌' $T/mcp.out
 }
+# The platform and the template base come in two volumes, not in the image.
+# Without them nothing below can pass, and the reason is one line, so say it
+# and stop rather than printing fifteen failures.
+V=${PLATFORM_VERSION:-8.5.1.1150}
+if [ -x "/opt/1cv8t/x86_64/$V/1cv8t" ] && [ -f /opt/1c-demo/base/1Cv8.1CD ]; then
+    say "ok   payload: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"
+else
+    say "FAIL payload: dev1c-platform / dev1c-demo are empty — ./provision.sh import"
+    exit 1
+fi
 LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 INFO='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_configuration_info","arguments":{}}}'
 for n in 1 2 3; do

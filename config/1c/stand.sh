@@ -20,6 +20,16 @@
 #                             Apache config for one base; `start` uses it per
 #                             workstation, the image build uses it to check
 #                             the demo base
+#   1c-stand export-payload   stdout: a gzip tar of the platform and the
+#                             template base, run in the payload image
+#   1c-stand import-payload [--force]
+#                             stdin: that tar, unpacked into the two volumes
+#                             mounted at /opt/1cv8t and /opt/1c-demo
+#
+# The platform and the template base are NOT in the image: they come in two
+# named volumes (dev1c-platform, dev1c-demo), filled once by import-payload —
+# see Dockerfile.1c and provision.sh. Without them the container still gives a
+# desktop, Zed and Gitea; `start` says what is missing and goes on.
 #
 # Everything about a workstation's base happens as that user: the base lives
 # in the home (a volume, survives image updates), the Configurator in the RDP
@@ -48,8 +58,14 @@
 # only for the length of a request.
 set -eu
 
-V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
+PLATFORM_VERSION=${PLATFORM_VERSION:-8.5.1.1150}
+V8=/opt/1cv8/x86_64/$PLATFORM_VERSION
 DEMO=/opt/1c-demo/base
+# The two trees the volumes carry, and the one test for "is the stand usable".
+# Both are checked, not just one: a half-filled pair is the state an interrupted
+# import leaves behind, and it is worth naming rather than crashing later.
+PAYLOAD_DIRS="opt/1cv8t opt/1c-demo"
+payload_present() { [ -x "/opt/1cv8t/x86_64/$PLATFORM_VERSION/1cv8t" ] && [ -f "$DEMO/1Cv8.1CD" ]; }
 # The demo base ships with the configuration's welcome wizard already done —
 # otherwise the first person to open 1C is met by it, and finishing it creates
 # an infobase user, which breaks every headless way in mid-demo. The wizard
@@ -75,6 +91,10 @@ log() { printf '[1c-stand] %s\n' "$*"; }
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
 seed() { # runs as the workstation user; $HOME is theirs
+    payload_present || {
+        log "no platform in this container: the volumes dev1c-platform and dev1c-demo are empty (see provision.sh)" >&2
+        return 1
+    }
     # The file, not the directory: the Apache module creates the directory with
     # a lock file on its first (failed) look at a base that is not there yet.
     if [ ! -f "$HOME/base/1Cv8.1CD" ]; then
@@ -265,8 +285,37 @@ Alias "/base" "$d/pub/"
 EOF
     chown -R "$u:$u" "$d"
     ;;
+export-payload)
+    # Run in the payload image (`docker build --target payload`). Paths are
+    # relative to / so that the import lands straight in the mounted volumes,
+    # and ownership is numeric: the archive crosses images.
+    payload_present || { log "this image has no payload: build with --target payload"; exit 1; }
+    exec tar -C / --numeric-owner -czf - $PAYLOAD_DIRS
+    ;;
+import-payload)
+    # Run in the stand image with both volumes mounted; stdin is what
+    # export-payload wrote. An already filled pair is left alone unless
+    # --force: re-importing over a running stand would swap the template base
+    # under the workstations that were cloned from it.
+    [ "$(id -u)" = 0 ] || { log "import-payload runs as root"; exit 1; }
+    if payload_present && [ "${2:-}" != "--force" ]; then
+        log "the platform and the demo base are already here; --force to replace them"
+        exit 0
+    fi
+    tar -C / --numeric-owner -xzf -
+    payload_present || { log "import-payload: the archive did not hold $PAYLOAD_DIRS"; exit 1; }
+    log "payload in place: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"
+    ;;
 start)
     mkdir -p "$RUN" "$LOG"
+    if ! payload_present; then
+        # Not a failure of the container: the desktop, Zed and Gitea are the
+        # base image's and work without 1C. Exiting here would put the
+        # container in a restart loop and hide the one line that matters.
+        log "1C is not in this container: the volumes dev1c-platform and dev1c-demo are empty"
+        log "fill them once:  ./provision.sh import <payload.tar.gz>"
+        exec /usr/local/bin/entrypoint
+    fi
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
         d="$RUN/$u"
@@ -293,7 +342,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ..." >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ... | export-payload | import-payload [--force]" >&2
     exit 2
     ;;
 esac

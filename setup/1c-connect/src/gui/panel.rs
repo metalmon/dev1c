@@ -762,7 +762,9 @@ impl Render for Panel {
                 // Работа: дорожка акцентом темы, бегунок въезжает слева и
                 // уезжает справа по кругу. Возврат в линию — мгновенный,
                 // затухания нет (решение контролёра 2026-10-18).
-                div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
+                // `overflow_hidden`: бегунок едет от −25 % до 100 % ширины и
+                // без обрезки высовывался бы за концы линии в поля окна.
+                div().w_full().h(px(2.)).relative().overflow_hidden().bg(border.opacity(0.6)).child(
                     div()
                         .absolute()
                         .top_0()

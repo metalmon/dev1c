@@ -166,6 +166,7 @@ side, with fixed names and no discovery:
 mkdir platform                         # git- and docker-ignored
 # put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz),
 # unf-ready.dt and DoNotCopy.txt, the demo base of the stand (see below)
+mkdir artifacts                        # optional: 1c-connect-linux from CI
 ./provision.sh build                   # the stand image and the payload image
 ./provision.sh export                  # -> dist/dev1c-1c-payload.tar.gz, outside the build context
 ./provision.sh import                  # that tar -> the two volumes
@@ -173,6 +174,11 @@ mkdir platform                         # git- and docker-ignored
 ./provision.sh status                  # what the volumes hold
 docker exec dev1c test-stand           # the check of a running stand
 ```
+
+Each target takes only the context it uses: the stand image reads `artifacts/`
+(68 MB), the payload reads `platform/` (3.8 GB). Mounting the big one in both
+cost eleven minutes per rebuild of the image that is meant to be quick to
+rebuild; now it is under a minute.
 
 On another machine only the last three lines happen, carrying two files: the
 image (`docker save oktaplus/dev1c-1c:latest | gzip`) and

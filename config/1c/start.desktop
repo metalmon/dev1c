@@ -1,9 +1,14 @@
+# The icon comes from the desktop's own theme (Papirus ships 1cestart,
+# 1cv8 and 1cv8c), not from the 1C installer. The installer's icons land in
+# /usr/share/icons of whatever image it ran in, and since the platform moved
+# into a volume that is the payload stage, not the stand image — the name it
+# registers, 1cestartt-<version>, resolves to nothing here.
 [Desktop Entry]
 Type=Application
 Name=1С:Предприятие (учебная)
 Comment=Запуск 1С: в окне список баз этого рабочего места, кнопки «1С:Предприятие» и «Конфигуратор»
 Exec=/usr/local/bin/1c-stand start1c
-Icon=1cestartt-8.5.1-1150
+Icon=1cestart
 Terminal=false
 Categories=Office;Development;
 StartupNotify=true

@@ -77,8 +77,12 @@ volumes() {
 case "${1:-}" in
 build)
     [ -d platform ] || die "platform/ is missing: the 1C installer and the demo template live there"
+    mkdir -p artifacts
+    # Each target gets only the context it uses, and BuildKit transfers a named
+    # context only when a stage mounts it: the stand image pulls 68 MB of
+    # artifacts/ instead of 3.8 GB of platform/, which is minutes per rebuild.
     say "the stand image (no platform, no demo base)"
-    docker build -f Dockerfile.1c --build-context platform=platform -t "$IMAGE" .
+    docker build -f Dockerfile.1c --build-context artifacts=artifacts -t "$IMAGE" .
     say "the payload image (platform + template base)"
     docker build -f Dockerfile.1c --build-context platform=platform --target payload -t "$PAYLOAD_IMAGE" .
     ;;

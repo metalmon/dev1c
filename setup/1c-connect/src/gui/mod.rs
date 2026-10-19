@@ -82,12 +82,6 @@ pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
     out
 }
 
-pub fn web_url(cfg: &Cfg) -> String {
-    let port = cfg.web_port();
-    let host = if port == 80 { "localhost".to_string() } else { format!("localhost:{port}") };
-    format!("http://{host}{}", cfg.publication())
-}
-
 /// Состояние окна целиком. Глобал GPUI: один на приложение, живёт дольше
 /// любого окна.
 pub struct Ui {
@@ -217,8 +211,8 @@ impl Which {
         match self {
             Which::Install => "— устанавливаю —",
             Which::Uninstall => "— снимаю расширение —",
-            Which::Export => "— выгружаю в git —",
-            Which::Import => "— загружаю из git —",
+            Which::Export => "— выгружаю из 1С —",
+            Which::Import => "— загружаю в 1С —",
         }
     }
 }
@@ -802,11 +796,6 @@ pub fn refresh_ops(cx: &mut App) {
     });
 }
 
-pub fn open_web(cx: &mut App) {
-    let url = web_url(&cx.global::<Ui>().cfg);
-    cx.open_url(&url);
-}
-
 /// Выход: ждём, пока сеанс действительно опустится (поток собственного
 /// рантайма сеанса), и только потом закрываем приложение — иначе туннель
 /// обрывается не чисто. Ждём не дольше `STOP_WAIT`: застрявший `stop` не
@@ -1289,9 +1278,9 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию, 12 мин");
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
-        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию, меньше минуты");
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
         assert_eq!(tray_tooltip(None, &State::Up { since: now }, now), "1c-connect: подключён");
         assert_eq!(tray_tooltip(None, &State::Off, now), "1c-connect: не подключён");
     }
@@ -1306,14 +1295,6 @@ mod tests {
         // Спрятано, но пришли новые данные или идёт операция — всё равно да.
         assert!(tick_redraw(false, true, false));
         assert!(tick_redraw(false, false, true));
-    }
-
-    #[test]
-    fn web_client_url_follows_the_publication() {
-        let mut c = Cfg::default();
-        assert_eq!(super::web_url(&c), "http://localhost/Buh/");
-        c.host.base_url = "http://localhost:8081/InfoBase/hs/mcp-1c".into();
-        assert_eq!(super::web_url(&c), "http://localhost:8081/InfoBase/");
     }
 
     #[test]
@@ -1392,8 +1373,8 @@ mod tests {
     fn which_titles_are_the_old_log_lines() {
         assert_eq!(Which::Install.title(), "— устанавливаю —");
         assert_eq!(Which::Uninstall.title(), "— снимаю расширение —");
-        assert_eq!(Which::Export.title(), "— выгружаю в git —");
-        assert_eq!(Which::Import.title(), "— загружаю из git —");
+        assert_eq!(Which::Export.title(), "— выгружаю из 1С —");
+        assert_eq!(Which::Import.title(), "— загружаю в 1С —");
     }
 
     #[test]
@@ -1448,7 +1429,7 @@ mod tests {
         let now = Instant::now() + Duration::from_secs(3600);
         let at = |secs| Running { which: Which::Export, started: now - Duration::from_secs(secs), phase: Phase::Decompile, seen: now, stale_noted: false };
         let (title, clock) = progress_text(&at(725), now);
-        assert_eq!(title, "Выгружаю конфигурацию");
+        assert_eq!(title, "Выгружаю конфигурацию из 1С");
         assert_eq!(clock, "12:05");
         assert_eq!(progress_text(&at(5), now).1, "0:05");
         assert_eq!(progress_text(&at(65), now).1, "1:05");

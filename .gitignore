@@ -26,3 +26,7 @@ setup/target/
 
 # The 1C training installer for Dockerfile.1c (download it from the 1C site)
 platform/
+
+# CI artifacts for Dockerfile.1c (1c-connect-linux): their own small build
+# context, so a rebuild of the stand image does not drag the 1C installer
+artifacts/

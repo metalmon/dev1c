@@ -154,7 +154,7 @@ fn run() -> Result<()> {
                 println!("  {:<16} {:<26} {}", id, title, st.label());
             }
             println!();
-            println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить в git: 1c-connect export.");
+            println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить из 1С: 1c-connect export.");
         }
         Cmd::Install => {
             common::run::apply_all(&ctx, &ops, None, false)?;

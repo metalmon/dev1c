@@ -9,10 +9,13 @@
 #
 # The file builds two things, and the heavy one is NOT the image:
 #
-#   docker build -f Dockerfile.1c --build-context platform=platform \
+#   docker build -f Dockerfile.1c --build-context artifacts=artifacts \
 #                -t oktaplus/dev1c-1c:latest .
 #       the stand image — the tools, the launchers, the runtime. No platform,
 #       no demo base: about 4 GB, and a change to stand.sh costs one layer.
+#       It does NOT take the platform context: the only thing it needs from
+#       outside the repository is the 1c-connect binary, and that lives in
+#       `artifacts/` so a rebuild moves 68 MB instead of 3.8 GB.
 #
 #   docker build -f Dockerfile.1c --build-context platform=platform \
 #                --target payload -t oktaplus/dev1c-1c-payload:latest .
@@ -33,8 +36,10 @@
 # image updates.
 #
 # `platform/` holds setup-training-<version>-x86_64.run, unpacked from the
-# tar.gz of the 1C download page; it is a separate build context so the main
-# context never carries it (see .dockerignore too). The base image tag is an
+# tar.gz of the 1C download page, and the demo template; `artifacts/` holds
+# what CI built. Both are separate build contexts so the main context never
+# carries them (see .dockerignore too), and they are separate from each other
+# so each target transfers only what it uses. The base image tag is an
 # argument: --build-arg BASE=oktaplus/dev1c:<tag>.
 #
 # What the spike of 2026-10-18 established, and this file encodes:
@@ -286,10 +291,15 @@ COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.deskto
 # autostart entry that appears and disappears between image versions.
 COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.desktop
 # 1c-connect for Linux, built with its window by CI (artifact 1c-connect-linux).
-# Optional: put the file into the platform context to have it in the image.
-RUN --mount=type=bind,from=platform,target=/platform \
-    if [ -f /platform/1c-connect-linux ]; then \
-        install -D -m 0755 /platform/1c-connect-linux /opt/1c-connect/1c-connect \
+# Optional: put the file into `artifacts/` to have it in the image.
+#
+# Its own build context, not `platform/`: this is the only thing the stand
+# image needs from outside the repository, and mounting `platform/` here would
+# push the 1C installer and the demo template — about 3.8 GB — to the daemon on
+# every rebuild of a 4 GB image whose whole point is being quick to rebuild.
+RUN --mount=type=bind,from=artifacts,target=/artifacts \
+    if [ -f /artifacts/1c-connect-linux ]; then \
+        install -D -m 0755 /artifacts/1c-connect-linux /opt/1c-connect/1c-connect \
         && /opt/1c-connect/1c-connect --help >/dev/null \
         && echo "1c-connect: in the image"; \
     else echo "1c-connect: not supplied, the stand works without the window"; fi

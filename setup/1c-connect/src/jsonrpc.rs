@@ -1,6 +1,8 @@
 //! Чистая часть моста 778N: рамка «строка на сообщение» и правила, что
 //! уходит ребёнку, что отвечает мост сам и как переписывается `tools/list`.
 //! Байты и JSON, никаких процессов — всё проверяется тестами на строках.
+//! Сюда же вынесены две проверки общие для 778N и 777N (гейт `tools/call`
+//! без `id`) и своя, для 777N, пока переключатель выключен (`mcp_gate_while_off`).
 
 use serde_json::{json, Value};
 
@@ -240,19 +242,64 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
     }
 }
 
-/// Единственная проверка на порту-трубе (mcp-1c): это запрос `tools/call`?
-/// Если да — id для ответа агенту (или `Null`, если его почему-то нет); если
-/// нет (другой метод, неизвестный метод, уведомление, батч, строка, которая
-/// вообще не разбирается) — `None`, и строка идёт ребёнку как есть, без
-/// изменений: этот порт не ведёт разбор JSON-RPC, кроме этой одной проверки.
-pub fn tools_call_id(line: &[u8]) -> Option<Value> {
-    let v = parse(line)?;
-    let obj = v.as_object()?;
-    let method = key_ci(obj, "method").ok().flatten()?.as_str()?;
-    if !method.eq_ignore_ascii_case("tools/call") {
-        return None;
+/// `tools/call` без ключа `id` — ответить ему нечем (нет адреса для
+/// ответа), а пропустить его к ребёнку — значит исполнить побочный эффект
+/// (например, `cf_load`) без единого следа в ответах агенту. Поэтому такой
+/// вызов не доходит до ребёнка никогда и ни на каком порту, независимо от
+/// переключателя: безопаснее тихо отбросить, чем один раз обойти проверку
+/// вызовом без идентификатора.
+pub fn is_tools_call_without_id(line: &[u8]) -> bool {
+    let Some(v) = parse(line) else { return false };
+    let Some(obj) = v.as_object() else { return false };
+    let Some(method) = obj.get("method").and_then(Value::as_str) else { return false };
+    method.eq_ignore_ascii_case("tools/call") && obj.get("id").is_none()
+}
+
+/// Куда идёт строка от агента на трубе mcp-1c (777N), пока переключатель
+/// выключен. Этот порт не ведёт разбор JSON-RPC вовсе (голый проброс — см.
+/// `Rules::for_mcp`), поэтому правило — не «пропускать всё, кроме
+/// запрещённого», а наоборот: вперёд уходит только то, что уверенно опознано
+/// безопасным (один JSON-объект со своим методом, и это не `tools/call`).
+/// Всё прочее — не JSON-объект, батч, объект без понятного метода — закрыто
+/// по умолчанию, иначе такая строка стала бы тихой лазейкой в обход
+/// переключателя. `tools/call` без `id` сюда не долетает: он отбрасывается
+/// раньше и везде, см. `is_tools_call_without_id`.
+///
+/// Дубликаты ключей и прочие тонкости разбора здесь не разбираются отдельно
+/// (решение заказчика): с этой трубой говорит собственный агент пользователя
+/// в его же контейнере, а не чужой недоверенный клиент, и обычное для
+/// `serde_json` «последний ключ побеждает» — достаточная защита для этого
+/// случая; цена более строгой проверки (как у `route_request_with` для
+/// 778N) здесь не оправдана.
+pub enum McpOffGate {
+    /// Метод известен и это не `tools/call` — пропустить как есть.
+    Forward,
+    /// `tools/call` с `id` — отказ по переключателю этим `id`.
+    Refuse(Value),
+    /// Распознать не удалось, но `id` в объекте есть — ответить им ошибкой.
+    ParseError(Value),
+    /// Распознать не удалось и ответить нечем — тихо отбросить (журнал — на
+    /// совести вызывающего кода, здесь просто сигнал «не пропускать»).
+    Drop,
+}
+
+pub fn mcp_gate_while_off(line: &[u8]) -> McpOffGate {
+    let Some(v) = parse(line) else { return McpOffGate::Drop };
+    let Some(obj) = v.as_object() else { return McpOffGate::Drop };
+    let id = obj.get("id").cloned();
+    match obj.get("method").and_then(Value::as_str) {
+        Some(m) if m.eq_ignore_ascii_case("tools/call") => match id {
+            Some(id) => McpOffGate::Refuse(id),
+            // Перестраховка: is_tools_call_without_id должен был отбросить
+            // это раньше, но на две проверки надёжнее положиться, чем на одну.
+            None => McpOffGate::Drop,
+        },
+        Some(_) => McpOffGate::Forward,
+        None => match id {
+            Some(id) => McpOffGate::ParseError(id),
+            None => McpOffGate::Drop,
+        },
     }
-    Some(key_ci(obj, "id").ok().flatten().cloned().unwrap_or(Value::Null))
 }
 
 /// Ошибка JSON-RPC на запрос, который мост не пропустил.
@@ -458,18 +505,41 @@ mod tests {
     }
 
     #[test]
-    fn tools_call_id_recognises_only_tools_call() {
-        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"x"}}"#), Some(json!(5)));
+    fn tools_call_without_id_is_recognised_regardless_of_case_or_port() {
+        assert!(is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"cf_load"}}"#));
         // Case does not matter — OneScript compares method names the same way.
-        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), Some(json!("a")));
-        // No id: still recognised (for a reply the bridge sends anyway), as Null.
-        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","method":"tools/call"}"#), Some(Value::Null));
-        // Anything else — unknown method, a plain notification, junk, a
-        // batch — is not ours to gate: None, and the line passes through.
-        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), None);
-        assert_eq!(tools_call_id(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
-        assert_eq!(tools_call_id(b"not json"), None);
-        assert_eq!(tools_call_id(b"[1,2]"), None);
+        assert!(is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"Tools/Call"}"#));
+        // An id, any method other than tools/call, or junk — not this rule's business.
+        assert!(!is_tools_call_without_id(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#));
+        assert!(!is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"initialize"}"#));
+        assert!(!is_tools_call_without_id(b"not json"));
+        assert!(!is_tools_call_without_id(b"[1,2]"));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_forwards_only_a_recognised_non_tools_call_method() {
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), McpOffGate::Forward));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), McpOffGate::Forward));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_refuses_a_tools_call_that_has_an_id() {
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#), McpOffGate::Refuse(id) if id == json!(7)));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), McpOffGate::Refuse(id) if id == json!("a")));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_fails_closed_on_anything_unclassifiable() {
+        // A batch, junk, and an object without a usable method are not
+        // positively known safe — none of them reach the child.
+        assert!(matches!(mcp_gate_while_off(b"[1,2]"), McpOffGate::Drop));
+        assert!(matches!(mcp_gate_while_off(b"not json"), McpOffGate::Drop));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":3}"#), McpOffGate::ParseError(id) if id == json!(3)));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0"}"#), McpOffGate::Drop));
+        // A tools/call without an id never reaches this far in the bridge
+        // (handle_request drops it earlier for both ports), but the gate
+        // itself still fails closed on it rather than forwarding.
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","method":"tools/call"}"#), McpOffGate::Drop));
     }
 
     #[test]

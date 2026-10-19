@@ -208,7 +208,7 @@ where
 
     // Агент → ребёнок.
     let to_child = {
-        let (out, pending, running, rules) = (out_tx.clone(), pending.clone(), running.clone(), rules.clone());
+        let (out, pending, running, rules, log) = (out_tx.clone(), pending.clone(), running.clone(), rules.clone(), log.clone());
         tokio::spawn(async move {
             let mut f = Framer::new();
             let mut buf = vec![0u8; 64 * 1024];
@@ -218,13 +218,13 @@ where
                     Ok(n) => n,
                 };
                 for fr in f.push(&buf[..n]) {
-                    if handle_request(fr, &rules, &out, &pending, &running, &mut stdin).await.is_err() {
+                    if handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log).await.is_err() {
                         return;
                     }
                 }
             }
             if let Some(fr) = f.finish() {
-                let _ = handle_request(fr, &rules, &out, &pending, &running, &mut stdin).await;
+                let _ = handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log).await;
             }
             let _ = stdin.shutdown().await;
         })
@@ -306,6 +306,7 @@ async fn handle_request(
     pending: &Pending,
     running: &Running,
     stdin: &mut tokio::process::ChildStdin,
+    log: &Sink,
 ) -> Result<(), ()> {
     // A line over the Framer's cap is never passed on, on either port: a
     // line the bridge did not buffer whole is not one it can gate or route.
@@ -319,22 +320,45 @@ async fn handle_request(
         }
         Frame::Line(l) => l,
     };
+    // Ни на одном порту, ни при каком переключателе: ответить такому вызову
+    // нечем (нет id), а пропустить его — значит исполнить побочный эффект
+    // (например, cf_load) без единого следа в ответах агенту. Решение
+    // заказчика: отбой всегда, вместо того чтобы один раз обойти проверку.
+    if jsonrpc::is_tools_call_without_id(&line) {
+        log(Event::Warn("вызов инструмента без идентификатора отброшен".into()));
+        return Ok(());
+    }
     let off = !rules.enabled.load(Ordering::Relaxed);
     if !rules.inject {
-        // 777N (mcp-1c): голая труба. Единственная проверка на всём порту —
-        // переключатель на tools/call; всё остальное уходит ребёнку как
-        // есть, какой бы ни была строка (не JSON, неизвестный метод, чужое
-        // уведомление, батч) — так было устроено у бывшего `pipe_process`,
-        // и здесь остаётся так же: этот порт не ведёт свой разбор JSON-RPC.
-        if off {
-            if let Some(id) = jsonrpc::tools_call_id(&line) {
-                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
-                return Ok(());
-            }
+        // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
+        // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
+        // — закрыто по умолчанию: вперёд уходит только то, что уверенно
+        // опознано безопасным (см. `jsonrpc::mcp_gate_while_off`), иначе
+        // непонятая строка стала бы лазейкой в обход переключателя.
+        if !off {
+            let mut raw = line;
+            raw.push(b'\n');
+            return forward(stdin, &raw).await;
         }
-        let mut raw = line;
-        raw.push(b'\n');
-        return forward(stdin, &raw).await;
+        return match jsonrpc::mcp_gate_while_off(&line) {
+            jsonrpc::McpOffGate::Forward => {
+                let mut raw = line;
+                raw.push(b'\n');
+                forward(stdin, &raw).await
+            }
+            jsonrpc::McpOffGate::Refuse(id) => {
+                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                Ok(())
+            }
+            jsonrpc::McpOffGate::ParseError(id) => {
+                let _ = out.send(jsonrpc::error_reply(&id, -32700, "мост 1c-connect: строка не распознана, пока MCP выключены")).await;
+                Ok(())
+            }
+            jsonrpc::McpOffGate::Drop => {
+                log(Event::Warn("mcp-1c: нераспознанная строка от агента отброшена, пока MCP выключены".into()));
+                Ok(())
+            }
+        };
     }
     // 778N (vrunner-mcp): полный разбор — белый список, наши инструменты.
     // Переключатель — тем же механизмом, что обычный белый список: пустой
@@ -496,14 +520,20 @@ mod tests {
             let mut out = std::io::stdout();
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
+                // A test wants proof of exactly what the child did or did not
+                // read: a marker line reaches the agent as plain (non-JSON-RPC)
+                // text, exactly like a banner from a real child would. Printed
+                // for every line read, parseable or not — batches and junk
+                // included — so a test can prove the bridge never forwarded them.
+                if std::env::var("BRIDGE_SCRIPT_RECORD").is_ok() {
+                    writeln!(out, "GOT {line}").unwrap();
+                    out.flush().unwrap();
+                }
                 let v: serde_json::Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
                 let id = v["id"].clone();
-                // A test wants proof the child never saw a particular call: a
-                // marker line reaches the agent as plain (non-JSON-RPC) text,
-                // exactly like a banner from a real child would.
                 if v["method"].as_str() == Some("tools/call") && std::env::var("BRIDGE_SCRIPT_RECORD").is_ok() {
                     writeln!(out, "CALL {}", v["params"]["name"].as_str().unwrap_or("")).unwrap();
                     out.flush().unwrap();
@@ -717,6 +747,52 @@ mod tests {
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был пройти насквозь: {got}");
         let call = replies.iter().find(|r| r["id"] == 2).unwrap();
         assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+    }
+
+    #[tokio::test]
+    async fn a_tools_call_without_an_id_never_reaches_the_child() {
+        // Нет id — отвечать нечем, а пропустить вызов — значит исполнить его
+        // побочный эффект (cf_load) без единого следа в ответах агенту.
+        // Отбой всегда, независимо от переключателя (решение заказчика).
+        let call = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        for on in [false, true] {
+            let (replies, raw, _) = talk(("BRIDGE_SCRIPT_RECORD", "1"), rules_with(&["cf_load"], 0, Arc::new(AtomicBool::new(on))), &[call]).await;
+            assert!(replies.is_empty(), "вызову без id отвечать нечем (переключатель {on}): {raw}");
+            assert!(!raw.contains("cf_load"), "ребёнок не должен был увидеть вызов (переключатель {on}): {raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_mcp_port_forwards_junk_only_when_the_switch_is_on() {
+        // Второе ревью: гейт по tools_call_id пропускал насквозь всё, что
+        // сам не опознал (батч, мусор) — пока выключено, это лазейка. Теперь
+        // наоборот: вперёд уходит только уверенно безопасное, остальное —
+        // закрыто по умолчанию. Включено — труба прозрачна, как и была.
+        async fn drive(on: bool) -> String {
+            let rules = Rules::for_mcp(Arc::new(AtomicBool::new(on)));
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, err| {
+                let _ = tx.send((code, err));
+            }));
+            let (r, mut w) = tokio::io::split(ours);
+            for l in [r#"[{"jsonrpc":"2.0","id":1,"method":"ping"}]"#, "junk"] {
+                w.write_all(l.as_bytes()).await.unwrap();
+                w.write_all(b"\n").await.unwrap();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            w.shutdown().await.unwrap();
+            let mut got = String::new();
+            tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
+            got
+        }
+
+        let off = drive(false).await;
+        assert!(!off.contains("GOT"), "батч и мусор не должны были дойти до ребёнка, пока MCP выключены: {off}");
+
+        let on = drive(true).await;
+        assert!(on.contains(r#"GOT [{"jsonrpc":"2.0","id":1,"method":"ping"}]"#), "{on}");
+        assert!(on.contains("GOT junk"), "{on}");
     }
 
     #[tokio::test]

@@ -9,7 +9,10 @@
 #                             base image's entrypoint
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
 #   1c-stand vrunner <N>      one vrunner-mcp on stdio for workstation dev<N>
-#   1c-stand designer         the Configurator on the user's base (menu entry)
+#   1c-stand start1c          the 1C starter on the user's base list (the
+#                             desktop icon; Предприятие and Конфигуратор
+#                             are its own buttons)
+#   1c-stand designer         the Configurator on the user's base, directly
 #   1c-stand enterprise       the thick client on it (menu entry); holds the
 #                             base's one Enterprise session while open
 #   1c-stand publish <user> <port> <base dir> <out dir>
@@ -48,6 +51,9 @@ V8=/opt/1cv8/x86_64/${PLATFORM_VERSION:-8.5.1.1150}
 DEMO=/opt/1c-demo/base
 RUN=/run/1c
 LOG=/var/log/1c
+STARTER=/opt/1cv8t/common/1cestartt
+CONNECT=/opt/1c-connect/1c-connect
+CONNECT_TOML=1c-connect.toml
 
 log() { printf '[1c-stand] %s\n' "$*"; }
 
@@ -62,15 +68,59 @@ seed() { # runs as the workstation user; $HOME is theirs
         log "demo base seeded into $HOME/base" >&2
     fi
     mkdir -p "$HOME/project"
-    # the Configurator and the thick client on the desktop, next to Zed and
-    # Gitea (same way as the base image puts those there: a copy with the
-    # executable bit)
-    for l in 1c-configurator 1c-enterprise; do
+    # The list of infobases for the starter: the person opens 1C the way they
+    # are used to — one window with the base, and the buttons «1С:Предприятие»
+    # and «Конфигуратор» in it — instead of two desktop icons wired to command
+    # lines. Written once; a base added by hand stays.
+    # The training starter is 1cestartt, and its list lives in the directory
+    # of the same name: .1C/1cestartt, not .1C/1cestart. Written for whatever
+    # starter the image carries, by the name of its binary.
+    v8i="$HOME/.1C/$(basename "$STARTER")/ibases.v8i"
+    if [ ! -e "$v8i" ]; then
+        mkdir -p "$(dirname "$v8i")"
+        # UTF-8 with a BOM and CRLF: without them the starter opens with an
+        # empty list and asks to add a base, as if the file were not there.
+        { printf '\357\273\277'
+          printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\n' \
+            "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base"
+        } >"$v8i"
+        log "1C: $v8i written" >&2
+    fi
+    # the starter on the desktop, next to Zed and Gitea (same way as the base
+    # image puts those there: a copy with the executable bit)
+    for l in 1c-start; do
         d="$HOME/Desktop/$l.desktop"
         if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
             cp "/usr/share/applications/$l.desktop" "$d" && chmod +x "$d"
         fi
     done
+    # the launchers of the first days, superseded by the starter
+    rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
+    # 1c-connect, if the image carries it. Its kit is the directory of the
+    # binary (common::kit), and every workstation needs its own parameters —
+    # so each gets its own copy next to its own toml, refreshed when the image
+    # brings a new build.
+    if [ -x "$CONNECT" ]; then
+        mkdir -p "$HOME/dev1c"
+        cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
+        if [ ! -e "$HOME/dev1c/$CONNECT_TOML" ]; then
+            u=$(id -un); n=${u#dev}
+            # The server fields stay at their defaults: in local mode there is
+            # no tunnel to raise. The base, its publication and the project
+            # are the stand's own, the same ones the agent's tools see.
+            cat >"$HOME/dev1c/$CONNECT_TOML" <<EOF
+[host]
+mode = "local"
+workstation = "$u"
+base_path = "$HOME/base"
+base_url = "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+project = "$HOME/project"
+db_user = ""
+db_password = ""
+EOF
+            log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
+        fi
+    fi
 }
 
 case "${1:-}" in
@@ -86,17 +136,44 @@ vrunner)
     cd "$HOME/project"
     exec xvfb-run -a vrunner-mcp
     ;;
+start1c)
+    # The starter: it shows the base list and the two buttons, and it is what
+    # a 1C developer knows. Scheduled jobs cannot be switched off through it
+    # (its own command line goes to the session), so the configuration may ask
+    # about updates; the base of a stand has nothing to update, and the answer
+    # is one dialog.
+    seed
+    exec "$STARTER"
+    ;;
 designer)
     seed
     exec "$V8/1cv8" DESIGNER /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
     ;;
 enterprise)
     seed
-    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /DisableStartupDialogs /DisableStartupMessages
+    # Scheduled jobs off: in a file base they run inside this very session, and
+    # the configuration's internet-support subsystem starts by asking
+    # update-api.1c.ru whether there is an update. Here that host is
+    # unreachable, the subsystem falls back to diagnostics — `ping ya.ru`
+    # through ЗапуститьПриложение, which the platform cannot launch on Linux
+    # ("не удалось распознать схему URI") — and the person gets a dialog about
+    # a URI scheme instead of the demo. A stand has nothing to update anyway.
+    exec "$V8/1cv8" ENTERPRISE /F "$HOME/base" /AllowExecuteScheduledJobs -Off \
+        /DisableStartupDialogs /DisableStartupMessages
     ;;
 seed)
     # runuser without -l keeps root's HOME: take the caller's own
     export HOME; HOME=$(home_of "$(id -un)"); seed
+    ;;
+connect)
+    # the autostart entry of the session: seed first (the toml and the copy
+    # live in the home, which may be a fresh volume), then the tray.
+    export HOME; HOME=$(home_of "$(id -un)"); seed
+    [ -x "$HOME/dev1c/1c-connect" ] || { log "1c-connect is not in this image"; exit 0; }
+    # its own log: an autostart entry has nowhere to print, and today the
+    # Linux tray still falls over (GTK is not initialised in the process —
+    # see the spec of the window), so the reason must survive the session
+    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
     ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"
@@ -178,7 +255,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | designer | enterprise | seed | publish ..." >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ..." >&2
     exit 2
     ;;
 esac

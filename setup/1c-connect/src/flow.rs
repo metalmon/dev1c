@@ -4,8 +4,9 @@
 
 use crate::local::Reply;
 use crate::ops_host::Ctx;
-use common::Runner;
+use common::{Phase, Runner};
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 
 pub struct Deps<'a> {
     pub call: &'a dyn Fn(&str, Value) -> Result<Reply, String>,
@@ -15,6 +16,7 @@ pub struct Deps<'a> {
     pub dump_index_exists: bool,
     /// `--dry-run`: только план, ни одного вызова.
     pub dry_run: bool,
+    pub phase: &'a dyn Fn(Phase),
 }
 
 fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -35,6 +37,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log("план: cf_decompile → src, затем git add/commit/push ветки рабочего места (project_push)".into());
         return Ok("план напечатан, на машине ничего не менялось".into());
     }
+    (d.phase)(Phase::Decompile);
     log("cf_decompile → src (минуты; Конфигуратор работает в фоне)".into());
     let r = (d.call)("cf_decompile", json!({"OUT": "src", "background": false}))?;
     if r.is_error {
@@ -43,6 +46,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
     if !r.text.trim().is_empty() {
         log(r.text);
     }
+    (d.phase)(Phase::Push);
     log("git: add, commit, push в Gitea — первая выгрузка это десятки тысяч файлов, минуты".into());
     (d.push)(message)
 }
@@ -58,10 +62,12 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
     if n > 0 {
         return Err(format!("на машине запущен 1cv8.exe ({n}) — закройте Конфигуратор и клиентов 1С, затем повторите"));
     }
+    (d.phase)(Phase::Pull);
     log((d.pull)()?);
     if !d.dump_index_exists {
         log("src/ConfigDumpInfo.xml нет — загрузка будет полной, не инкрементом (первая после клонирования)".into());
     }
+    (d.phase)(Phase::Load);
     log("cf_load ← src (минуты)".into());
     let r = (d.call)("cf_load", json!({"SRC": "src", "background": false, "increment": true}))?;
     if r.is_error {
@@ -74,7 +80,7 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
 }
 
 /// Настоящие части: процесс `vrunner-mcp` из инструментов на машине, git проекта.
-fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
+fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
     let tools = crate::ops_host::tools_dir();
     let p = crate::project::Project::from_cfg(&ctx.cfg, &tools);
     let log = |s: String| ctx.say(s);
@@ -89,8 +95,9 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
         let cmd = crate::bridge::vrunner_command(&cfg, &tools).into_std();
         crate::local::call(cmd, tool, args, std::time::Duration::from_secs(3600), &log)
     };
-    let push = |m: &str| crate::project::push(&p, m);
-    let pull = || crate::project::pull(&p);
+    let push = |m: &str| crate::project::push(&p, m, cancel);
+    let pull = || crate::project::pull(&p, cancel);
+    let phase = |ph: Phase| ctx.progress(ph);
     let d = Deps {
         call: &call,
         platform_running: &crate::bridge::configurator_count,
@@ -98,16 +105,17 @@ fn with_real<R>(ctx: &Ctx, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
         pull: &pull,
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
+        phase: &phase,
     };
     f(&d, &log)
 }
 
-pub fn export(ctx: &Ctx, message: &str) -> Result<String, String> {
-    with_real(ctx, |d, log| export_with(d, message, log))
+pub fn export(ctx: &Ctx, message: &str, cancel: &AtomicBool) -> Result<String, String> {
+    with_real(ctx, cancel, |d, log| export_with(d, message, log))
 }
 
-pub fn import(ctx: &Ctx) -> Result<String, String> {
-    with_real(ctx, |d, log| import_with(d, log))
+pub fn import(ctx: &Ctx, cancel: &AtomicBool) -> Result<String, String> {
+    with_real(ctx, cancel, |d, log| import_with(d, log))
 }
 
 #[cfg(test)]
@@ -123,6 +131,7 @@ mod tests {
         pulled: RefCell<bool>,
         index: bool,
         dry: bool,
+        phases: RefCell<Vec<Phase>>,
     }
     impl Fake {
         fn new(replies: &[(&str, bool)]) -> Fake {
@@ -134,6 +143,7 @@ mod tests {
                 pulled: RefCell::new(false),
                 index: true,
                 dry: false,
+                phases: RefCell::new(vec![]),
             }
         }
         fn run<R>(&self, f: impl FnOnce(&Deps) -> R) -> R {
@@ -151,12 +161,31 @@ mod tests {
                 *self.pulled.borrow_mut() = true;
                 Ok("pulled".to_string())
             };
-            f(&Deps { call: &call, platform_running: &platform_running, push: &push, pull: &pull, dump_index_exists: self.index, dry_run: self.dry })
+            let phase = |ph: Phase| self.phases.borrow_mut().push(ph);
+            f(&Deps {
+                call: &call,
+                platform_running: &platform_running,
+                push: &push,
+                pull: &pull,
+                dump_index_exists: self.index,
+                dry_run: self.dry,
+                phase: &phase,
+            })
         }
+    }
+
+    /// `export_with`/`import_with` take `project::LOCK` as their first line
+    /// (`lock()` above, even on the `dry_run` branch) — cargo runs this
+    /// module's tests in parallel in one binary, so any overlap makes the
+    /// loser see «занято» and panic on `.unwrap()`. One mutex serialises
+    /// them; production code is untouched.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
     fn export_decompiles_then_pushes() {
+        let _s = serial();
         let f = Fake::new(&[("разобрано", false)]);
         let r = f.run(|d| export_with(d, "выгрузка", &|_| {})).unwrap();
         assert!(r.contains("отправлено"), "{r}");
@@ -166,6 +195,7 @@ mod tests {
 
     #[test]
     fn a_failed_decompile_does_not_push() {
+        let _s = serial();
         let f = Fake::new(&[("платформа: ошибка", true)]);
         let e = f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert!(e.contains("платформа") && !*f.pushed.borrow(), "{e}");
@@ -173,6 +203,7 @@ mod tests {
 
     #[test]
     fn import_refuses_before_pulling_while_the_platform_runs() {
+        let _s = serial();
         let mut f = Fake::new(&[]);
         f.running = 1;
         let e = f.run(|d| import_with(d, &|_| {})).unwrap_err();
@@ -181,6 +212,7 @@ mod tests {
 
     #[test]
     fn import_pulls_then_loads_incrementally_and_warns_without_the_index() {
+        let _s = serial();
         let mut f = Fake::new(&[("загружено", false)]);
         f.index = false;
         let log = RefCell::new(Vec::new());
@@ -192,6 +224,7 @@ mod tests {
 
     #[test]
     fn failed_load_names_the_way_back() {
+        let _s = serial();
         let f = Fake::new(&[("Конфигуратор: ошибка загрузки", true)]);
         let e = f.run(|d| import_with(d, &|_| {})).unwrap_err();
         assert!(e.contains("Вернуться к конфигурации БД") && *f.pulled.borrow(), "{e}");
@@ -201,6 +234,7 @@ mod tests {
     fn dry_run_prints_the_plan_and_touches_nothing() {
         // --dry-run is global and promises «ничего не делать»: no decompile,
         // no push, no pull, no load — only the plan in the log.
+        let _s = serial();
         let mut f = Fake::new(&[]);
         f.dry = true;
         let log = RefCell::new(Vec::new());
@@ -213,6 +247,7 @@ mod tests {
 
     #[test]
     fn the_git_phase_of_export_is_announced_before_it_starts() {
+        let _s = serial();
         let f = Fake::new(&[("разобрано", false)]);
         let log = RefCell::new(Vec::new());
         f.run(|d| export_with(d, "m", &|s| log.borrow_mut().push(s))).unwrap();
@@ -221,6 +256,7 @@ mod tests {
 
     #[test]
     fn export_is_told_busy_like_any_tool() {
+        let _s = serial();
         let _g = crate::project::LOCK.try_lock().unwrap_or_else(|e| match e {
             std::sync::TryLockError::Poisoned(g) => g.into_inner(),
             e => panic!("{e}"),
@@ -228,5 +264,39 @@ mod tests {
         let f = Fake::new(&[]);
         let e = f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert!(e.contains("занято"), "{e}");
+    }
+
+    #[test]
+    fn export_announces_decompile_then_push() {
+        let _s = serial();
+        let f = Fake::new(&[("разобрано", false)]);
+        f.run(|d| export_with(d, "m", &|_| {})).unwrap();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Decompile, Phase::Push]);
+    }
+
+    #[test]
+    fn import_announces_pull_then_load() {
+        let _s = serial();
+        let f = Fake::new(&[("загружено", false)]);
+        f.run(|d| import_with(d, &|_| {})).unwrap();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Pull, Phase::Load]);
+    }
+
+    #[test]
+    fn dry_run_announces_nothing() {
+        let _s = serial();
+        let mut f = Fake::new(&[]);
+        f.dry = true;
+        f.run(|d| export_with(d, "x", &|_| {})).unwrap();
+        f.run(|d| import_with(d, &|_| {})).unwrap();
+        assert!(f.phases.borrow().is_empty(), "{:?}", f.phases.borrow());
+    }
+
+    #[test]
+    fn a_failed_decompile_announces_no_push() {
+        let _s = serial();
+        let f = Fake::new(&[("платформа: ошибка", true)]);
+        f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
+        assert_eq!(*f.phases.borrow(), vec![Phase::Decompile]);
     }
 }

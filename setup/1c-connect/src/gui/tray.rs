@@ -3,7 +3,7 @@
 //! GPUI, они только кладут событие в канал — его разбирает `on_tray`/`on_menu`
 //! из задачи-читателя в `mod.rs::handle`.
 
-use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, Ui, TRAY_PNG};
+use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -32,6 +32,11 @@ const THEMES: [(theme::Choice, &str, &str); 3] =
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
+    /// Показать окно. Пункт есть только на Linux: там значок не сообщает о
+    /// щелчках (бэкенд appindicator), и левая кнопка открывает то же меню,
+    /// так что иначе окно было бы не достать.
+    #[cfg(target_os = "linux")]
+    Open,
     Toggle,
     Check,
     Web,
@@ -50,6 +55,8 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         }
     }
     match id {
+        #[cfg(target_os = "linux")]
+        "open" => Some(MenuAction::Open),
         "toggle" => Some(MenuAction::Toggle),
         "check" => Some(MenuAction::Check),
         "web" => Some(MenuAction::Web),
@@ -60,24 +67,61 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     }
 }
 
+/// Как часто прокручивается главный цикл GTK на Linux (см. `pump`). Тик
+/// приложения (секунда в работе, полминуты в покое) для меню слишком редок:
+/// человек ждал бы отклика на щелчок.
+#[cfg(target_os = "linux")]
+pub const PUMP: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// На Linux значок рисует libappindicator, а это GTK-библиотека: без
+/// `gtk::init()` первый же пункт меню роняет процесс («GTK has not been
+/// initialized»). Зовётся до `build` и на том же потоке, где потом живёт
+/// значок, — поэтому `pump` и окно остаются на одном потоке, и пересылать
+/// между потоками нечего.
+#[cfg(target_os = "linux")]
+pub fn init() -> anyhow::Result<()> {
+    gtk::init().map_err(|e| anyhow::anyhow!("GTK не инициализирован: {e}"))
+}
+
+/// На остальных системах трею GTK не нужен.
+#[cfg(not(target_os = "linux"))]
+pub fn init() -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Разобрать накопившиеся события GTK, не блокируя поток: через них
+/// приходят щелчки по меню значка и ответы панели по DBus. Своего цикла у
+/// нас нет — его роль играет эта функция из задачи в `launch`.
+#[cfg(target_os = "linux")]
+pub fn pump() {
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pump() {}
+
 /// Значок трея с бейджем состояния, байты RGBA — тестируемое ядро `icon`,
 /// не трогает Win32.
-fn icon_rgba(up: bool) -> Vec<u8> {
+fn icon_rgba(state: TrayState) -> Vec<u8> {
     let base = image::load_from_memory(TRAY_PNG).expect("tray png").to_rgba8();
-    badge(&base, up).into_raw()
+    badge(&base, state).into_raw()
 }
 
 /// Значок трея с бейджем состояния.
-pub fn icon(up: bool) -> Icon {
+pub fn icon(state: TrayState) -> Icon {
     let base = image::load_from_memory(TRAY_PNG).expect("tray png").to_rgba8();
     let (w, h) = base.dimensions();
-    Icon::from_rgba(icon_rgba(up), w, h).expect("icon rgba")
+    Icon::from_rgba(icon_rgba(state), w, h).expect("icon rgba")
 }
 
 /// Построить значок трея с меню и подписаться на события ОС — обработчики
 /// шлют их в `tx`. Левый щелчок не открывает меню (оно только по правому).
 /// `autostart_on`/`autoconnect_on` — начальные галочки, читает `launch`.
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
+    #[cfg(target_os = "linux")]
+    let open = MenuItem::with_id("open", "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     let web = MenuItem::with_id("web", "Открыть веб-клиент", true, None);
@@ -88,6 +132,10 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let autoconnect = CheckMenuItem::with_id("autoconnect", "Подключаться при запуске", true, autoconnect_on, None);
     let quit = MenuItem::with_id("quit", "Выход", true, None);
     let menu = Menu::with_items(&[
+        #[cfg(target_os = "linux")]
+        &open,
+        #[cfg(target_os = "linux")]
+        &PredefinedMenuItem::separator(),
         &toggle,
         &check,
         &web,
@@ -99,7 +147,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &quit,
     ])?;
     let tray = TrayIconBuilder::new()
-        .with_icon(icon(false))
+        .with_icon(icon(TrayState::Off))
         .with_tooltip("1c-connect: не подключён")
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -118,12 +166,21 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
-    /// Значок badge(up), подсказка «подключён/не подключён», надпись
-    /// переключателя «Отключить»/«Подключить».
-    pub fn set_state(&self, up: bool, on: bool) {
-        let _ = self.icon.set_icon(Some(icon(up)));
-        let _ = self.icon.set_tooltip(Some(if up { "1c-connect: подключён" } else { "1c-connect: не подключён" }));
+    /// Значок badge(state) и надпись переключателя «Отключить»/«Подключить».
+    /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
+    /// подключён, нет связи) и само по себе не знает фазу операции — её
+    /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
+    /// `Ev::Done`, тик) сам зовёт `set_tooltip` следом тем же текстом, иначе
+    /// занятость при поднятой связи осталась бы с «не подключён».
+    pub fn set_state(&self, state: TrayState, on: bool) {
+        let _ = self.icon.set_icon(Some(icon(state)));
         self.toggle.set_text(if on { "Отключить" } else { "Подключить" });
+    }
+
+    /// Подсказка трея произвольным текстом (`tray_tooltip`) — единственный
+    /// источник, который её меняет.
+    pub fn set_tooltip(&self, text: &str) {
+        let _ = self.icon.set_tooltip(Some(text));
     }
 
     /// Отмечает ровно один пункт подменю «Тема».
@@ -145,6 +202,8 @@ pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
 pub fn on_menu(ev: MenuEvent, cx: &mut App) {
     let Some(action) = menu_action(ev.id.0.as_str()) else { return };
     match action {
+        #[cfg(target_os = "linux")]
+        MenuAction::Open => window::show_window(cx),
         MenuAction::Toggle => toggle_link(cx),
         MenuAction::Check => {
             window::show_window(cx);
@@ -196,7 +255,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, MenuAction};
+    use super::{icon_rgba, menu_action, MenuAction, TrayState};
     use crate::gui::theme;
     use crate::gui::TRAY_PNG;
 
@@ -214,6 +273,14 @@ mod tests {
     #[test]
     fn tray_icon_is_the_badged_png() {
         let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
-        assert_eq!(icon_rgba(true).len(), (base.width() * base.height() * 4) as usize);
+        assert_eq!(icon_rgba(TrayState::Up).len(), (base.width() * base.height() * 4) as usize);
+    }
+
+    #[test]
+    fn the_busy_badge_is_yellow() {
+        let busy = icon_rgba(TrayState::Busy);
+        assert!(busy.chunks(4).any(|p| p == [0xfa, 0xcc, 0x1f, 255]), "no yellow pixel in the busy badge");
+        let up = icon_rgba(TrayState::Up);
+        assert!(up.chunks(4).any(|p| p == [0x2f, 0x8f, 0x4e, 255]), "no green pixel in the up badge");
     }
 }

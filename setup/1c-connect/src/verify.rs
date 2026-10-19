@@ -6,6 +6,7 @@
 use crate::ops_host::{extension_version, find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
+use common::{Phase, Runner};
 
 /// Порядок фактов — часть контракта (см. тест).
 pub const ORDER: [&str; 13] = [
@@ -102,6 +103,7 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
 }
 
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
+    ctx.progress(Phase::Check);
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
     v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), &h.server));
@@ -121,7 +123,7 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         OpState::Done(d) => Check::pass(ORDER[3], d),
         OpState::Missing => Check::fail(ORDER[3], format!("в {} ничего нет", tools.display()), "1c-connect install"),
         OpState::Drifted { from, to } => Check::fail(ORDER[3], format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
-        OpState::Blocked(d) => Check::fail(ORDER[3], d, "возьмите полный комплект у администратора среды"),
+        OpState::Blocked(d) => Check::fail(ORDER[3], d, "скопируйте полный комплект заново"),
     });
     v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(ORDER[4], "инструментов на машине нет", "1c-connect install") });
     v.push(project_fact(ctx, &tools));

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=1c-connect
+Comment=Значок в трее: проект в git, проверки, журнал. База внутри образа, туннель не нужен
+Exec=/usr/local/bin/1c-stand connect
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

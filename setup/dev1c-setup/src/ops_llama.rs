@@ -139,7 +139,7 @@ impl Op<Ctx> for Bin {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let Some(src) = llama::kit_bin(ctx) else {
-            return OpState::Blocked("в комплекте нет папки llama/bin — комплект собран без сервера модели, возьмите полный".into());
+            return OpState::Blocked("в комплекте нет llama/bin — скопируйте полный комплект заново".into());
         };
         if !llama::server_exe().exists() || (cfg!(windows) && !llama::dir().join("nssm.exe").exists()) {
             return OpState::Missing;

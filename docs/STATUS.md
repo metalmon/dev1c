@@ -90,7 +90,11 @@ script days is obsolete; the scripts are gone.
   call); the separator above the footer is now a 2 px progress bar —
   a 1 px line at rest, an accent thumb while anything is in flight: operation,
   tunnel connect, or background refresh (task 17, same call) — built in CI
-  only, not yet tried by hand. `dev1c-setup.exe` shows
+  only, not yet tried by hand; the status card now follows a running
+  export/import with its phase, a running clock, the thread's last line, a
+  «нет новостей N мин» warning past five quiet minutes, and «Прервать» for
+  the two cancellable git phases (tasks 4–6, plan 2026-10-19-progress-v1).
+  `dev1c-setup.exe` shows
   the real state of the container here (image, volumes, container: done;
   model: blocked) and the access addresses. Builds belong in CI: on this
   laptop a cold `cargo check` of the GPUI window takes about 10 minutes and

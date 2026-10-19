@@ -7,10 +7,10 @@
 //! сущности полей, фокус и прокрутку журнала; всё остальное читается из
 //! глобала `Ui` в `render`. Изменили `Ui` — `cx.refresh_windows()`.
 
-use crate::cfg::{self, Host};
+use crate::cfg::Host;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Ui, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Which};
 use crate::session::State;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -22,16 +22,13 @@ use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Значок программы в шапке — тот же PNG, что у окна и у трея.
 const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 
 /// Значок меню «Ещё»: три линии (Lucide `menu`).
 const MENU_SVG: &[u8] = include_bytes!("../../icons/menu.svg");
-
-/// Как часто перерисовывать окно, чтобы «N мин» в карточке не отставало.
-const TICK: Duration = Duration::from_secs(30);
 
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
@@ -78,19 +75,30 @@ pub struct Panel {
     fit_queued: bool,
 }
 
-/// Кружок, состояние и подстрока карточки. Порты — аргументом, чтобы
-/// функция оставалась чистой.
-pub fn status_line(l: &State, ports: &cfg::Ports) -> (Dot, &'static str, String) {
-    match l {
-        State::Off => (Dot::Off, "Не подключён", "туннель в среду разработки выключен".into()),
-        State::Connecting => (Dot::Busy, "Подключаюсь…", String::new()),
-        State::Up { since } => {
-            let m = since.elapsed().as_secs() / 60;
-            (Dot::Up, "Подключён", format!("{m} мин · mcp-1c {} · web {}", ports.mcp, ports.web))
-        }
-        State::Retrying(why) => (Dot::Busy, "Переподключаюсь", why.clone()),
-        State::Failed(why) => (Dot::Down, "Не подключён", why.clone()),
+/// Карточка состояния: кружок, заголовок, можно ли «Прервать» — всегда одна
+/// строка высотой. Подстрок, заметок и застоя в карточке нет (заказчик
+/// 2026-10-19: прыгающая высота окна) — застой уходит отдельной строкой в
+/// журнал (`gui::stale_line`), остальное и так дублируется там же.
+pub struct Card {
+    pub dot: Dot,
+    pub title: String,
+    pub cancel: bool,
+}
+
+pub fn card(progress: Option<&Running>, link: &State, now: Instant) -> Card {
+    if let Some(r) = progress {
+        let (_, clock) = gui::progress_text(r, now);
+        let title = format!("{} · {}", r.phase.title(), clock);
+        return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
+    let (dot, title): (Dot, &'static str) = match link {
+        State::Off => (Dot::Off, "Не подключён"),
+        State::Connecting => (Dot::Busy, "Подключаюсь…"),
+        State::Up { .. } => (Dot::Up, "Подключён"),
+        State::Retrying(_) => (Dot::Busy, "Переподключаюсь"),
+        State::Failed(_) => (Dot::Down, "Не подключён"),
+    };
+    Card { dot, title: title.to_string(), cancel: false }
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -130,6 +138,7 @@ pub fn host_of(f: &Fields, cx: &App) -> Host {
         dump: String::new(),
         project: v(&f.project),
         tools: Vec::new(),
+        mode: String::new(),
     }
 }
 
@@ -181,18 +190,6 @@ impl Panel {
             project: field("C:\\proj\\Buh", &host.project, false, window, cx),
             workstation: field("dev1", &host.workstation, false, window, cx),
         };
-        // Минуты в карточке: пока окно живо, раз в полминуты перерисовка.
-        // Окно закрыли — сущность не поднимается, задача уходит.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(TICK).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-
         let original = host.clone();
         // Клавиатура сразу у панели: Esc прячет окно и до того, как щёлкнули
         // хоть по одному полю.
@@ -367,7 +364,7 @@ impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
-        let (success, warning, danger, card, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
+        let (success, warning, danger, card_bg, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
         let theme = t.clone();
         // `muted_foreground` отдан подсказкам в полях (его берёт placeholder
         // из темы) и в окне больше нигде не встречается: осветлённый, он не
@@ -378,7 +375,8 @@ impl Render for Panel {
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
         let (unread, failed) = (ui.unread, ui.failed_checks);
-        let (dot, state, sub) = status_line(&link, &ui.cfg.ports());
+        let has_progress = ui.progress.is_some();
+        let c = card(ui.progress.as_ref(), &link, Instant::now());
         let foot_left = match &ui.status {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
             None => (ui.kit.root.display().to_string(), false),
@@ -404,27 +402,42 @@ impl Render for Panel {
                     .on_click(|_, window, cx| hide_window(window, cx)),
             );
 
-        // Карточка состояния — слой. Акцент здесь только у переключателя.
-        let status = Self::layer(card, border)
+        // Карточка состояния — слой, всегда одна строка (заказчик 2026-10-19:
+        // прыгающая высота окна из-за переменного числа строк). Акцент здесь
+        // только у переключателя. На ходу операции переключатель заблокирован
+        // (`Switch::disabled`): дёргать туннель посреди git-обмена незачем.
+        let status = Self::layer(card_bg, border)
             .flex()
             .flex_row()
             .items_center()
             .gap_3()
             .p_3()
-            .child(div().size_3().flex_shrink_0().rounded_full().bg(Self::dot(dot, &theme)))
+            .child(div().size_3().flex_shrink_0().rounded_full().bg(Self::dot(c.dot, &theme)))
             .child(
-                v_flex()
+                div()
                     .flex_1()
                     .min_w_0()
-                    .gap_0p5()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(state))
-                    // Без подстроки («Подключаюсь…») пустая строка всё равно
-                    // занимала высоту, и кружок уезжал ниже заголовка.
-                    .when(!sub.is_empty(), |v| v.child(div().text_size(px(13.)).text_color(caption).child(sub))),
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(c.title.clone()),
             )
+            // «Прервать» — перед переключателем, только пока можно отменить
+            // (git-обмен; cf_decompile/cf_load не прерываются).
+            .when(c.cancel, |d| {
+                d.child(
+                    Button::new("cancel")
+                        .ghost()
+                        .small()
+                        .label("Прервать")
+                        .on_click(|_, _, cx| gui::cancel_op(cx)),
+                )
+            })
             .child(
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
+                    .disabled(has_progress)
                     .tooltip("Туннель в среду разработки")
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
@@ -538,7 +551,7 @@ impl Render for Panel {
                 let ui = cx.global::<Ui>();
                 let ops = ui.ops.clone();
                 let rows = project_rows(ui.project.as_ref());
-                let row = || Self::layer(card, border).flex().flex_row().gap_3().items_center().px_3().py_2();
+                let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
                     row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
                         v_flex()
@@ -792,20 +805,58 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{fields_differ, project_rows, status_line, HINT_PROJECT};
-    use crate::cfg::{self, Host};
-    use crate::gui::{Dot, ProjectView};
+    use super::{card, fields_differ, project_rows, HINT_PROJECT};
+    use crate::cfg::Host;
+    use crate::gui::{Dot, ProjectView, Running, Which};
     use crate::session::State;
-    use std::time::Instant;
+    use common::Phase;
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn status_line_reads_like_the_old_window() {
-        let p = cfg::Ports { mcp: 7771, vrunner: 7781, web: 7791 };
-        assert_eq!(status_line(&State::Off, &p), (Dot::Off, "Не подключён", "туннель в среду разработки выключен".into()));
-        assert_eq!(status_line(&State::Failed("нет сети".into()), &p), (Dot::Down, "Не подключён", "нет сети".into()));
-        let (d, t, s) = status_line(&State::Up { since: Instant::now() }, &p);
-        assert_eq!((d, t), (Dot::Up, "Подключён"));
-        assert_eq!(s, "0 мин · mcp-1c 7771 · web 7791");
+    fn the_card_follows_the_running_operation() {
+        // Anchored an hour into the future, same as the helpers in
+        // `gui::mod` tests: a fresh CI runner can have under 65s of
+        // uptime, and `Instant::now() - Duration::from_secs(65)` panics.
+        let now = Instant::now() + Duration::from_secs(3600);
+        let r = Running {
+            which: Which::Export,
+            started: now - Duration::from_secs(65),
+            phase: Phase::Push,
+            seen: now,
+            stale_noted: false,
+        };
+        let c = card(Some(&r), &State::Off, now);
+        assert_eq!(c.dot, Dot::Busy);
+        assert_eq!(c.title, "Отправляю в git · 1:05");
+        assert!(c.cancel);
+    }
+
+    #[test]
+    fn the_card_hides_cancel_for_the_platform() {
+        // `cf_decompile`/`cf_load` на стороне платформы не прерываются —
+        // «Прервать» не показывается, в отличие от git-обмена выше.
+        let now = Instant::now() + Duration::from_secs(3600);
+        let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
+        let c = card(Some(&r), &State::Off, now);
+        assert_eq!(c.dot, Dot::Busy);
+        assert!(!c.cancel);
+    }
+
+    #[test]
+    fn without_an_operation_the_card_is_the_link() {
+        let now = Instant::now();
+        let c = card(None, &State::Off, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
+        assert!(!c.cancel);
+        let c = card(None, &State::Connecting, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
+        let c = card(None, &State::Up { since: Instant::now() }, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
+        let c = card(None, &State::Retrying("нет сети".into()), now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
+        let c = card(None, &State::Failed("нет сети".into()), now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
+        assert!(!c.cancel);
     }
 
     #[test]

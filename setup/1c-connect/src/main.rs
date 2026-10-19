@@ -13,7 +13,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, flow, session, verify};
+use one_c_connect::{cfg, flow, project, session, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -180,11 +180,11 @@ fn run() -> Result<()> {
         }
         Cmd::Connect => connect(&ctx)?,
         Cmd::Export { message } => {
-            let t = flow::export(&ctx, &message).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");
         }
         Cmd::Import => {
-            let t = flow::import(&ctx).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let t = flow::import(&ctx, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");
         }
         Cmd::Check => check(&ctx, None)?,

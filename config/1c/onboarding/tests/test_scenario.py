@@ -21,7 +21,13 @@ class LoadTests(unittest.TestCase):
         self.assertIn('заведите одну номенклатуру', steps[1].body)
 
     def test_no_git_word_anywhere(self):
-        text = ' '.join(s.title + ' ' + s.body for s in load(SCENARIO)).lower()
+        # Слово проверяем во всех текстовых полях шага: заголовок, тело,
+        # кнопки и готовые вопросы — это тоже текст, который видит человек.
+        steps = load(SCENARIO)
+        text = ' '.join(
+            ' '.join((s.title, s.body, *s.buttons, *s.questions))
+            for s in steps
+        ).lower()
         self.assertNotIn('git', text)
 
     def test_unknown_target_kind_is_rejected(self):

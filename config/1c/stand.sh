@@ -133,10 +133,13 @@ seed() { # runs as the workstation user; $HOME is theirs
     fi
     # the starter on the desktop, next to Zed and Gitea (same way as the base
     # image puts those there: a copy with the executable bit)
+    # Refreshed when the image brings a different one, not only created when
+    # missing: the entry carries the command line and the icon name, and a home
+    # is a volume that outlives the image. Same rule as the 1c-connect copy below.
     for l in 1c-start; do
-        d="$HOME/Desktop/$l.desktop"
-        if [ -d "$HOME/Desktop" ] && [ ! -e "$d" ]; then
-            cp "/usr/share/applications/$l.desktop" "$d" && chmod +x "$d"
+        d="$HOME/Desktop/$l.desktop"; s="/usr/share/applications/$l.desktop"
+        if [ -d "$HOME/Desktop" ] && ! cmp -s "$s" "$d"; then
+            cp "$s" "$d" && chmod +x "$d"
         fi
     done
     # the launchers of the first days, superseded by the starter

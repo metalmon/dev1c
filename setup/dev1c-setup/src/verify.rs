@@ -372,9 +372,11 @@ mod tests {
 
     #[test]
     fn the_pilot_numbers_pass_both_counts_at_once() {
-        // Стенд: по 250k на слот, три слота — значит пул 750k, и именно его
-        // сообщает /props (llama.cpp: slot_n_ctx, а при --kv-unified
-        // n_ctx_seq == n_ctx — весь пул). Zed получает долю одного слота.
+        // Стенд: по 250k на слот, три слота. Пул — не 250k × 3: слот держит
+        // окно ВМЕСТЕ с ответом, поэтому его считает pool_for (900 000). И
+        // именно пул сообщает /props (llama.cpp: slot_n_ctx, а при
+        // --kv-unified n_ctx_seq == n_ctx — весь пул); Zed получает долю
+        // одного слота, обратную к pool_for.
         let pool = llama::pool_for(250_000, llama::SLOTS);
         let slot = llama::slot_window_in(pool, llama::SLOTS);
         assert_eq!(slot, 250_000, "пул и окно слота обязаны сходиться туда и назад");

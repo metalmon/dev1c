@@ -68,11 +68,20 @@ fn memory_action(ctx: &Ctx) -> Action {
 /// Параметры запуска без `--cache-ram`: он считается от предела и может
 /// гулять между запусками (предел не узнан — пол), а расхождение должно
 /// означать настоящее изменение.
-fn significant(line: &str) -> String {
+///
+/// `drop_memory` — вычеркнуть и предел памяти. Так сравниваются строки, когда
+/// предела в желаемой нет вовсе: машина не ответила, сколько у неё памяти.
+/// Незнание — не причина пересоздавать работающий контейнер и уж точно не
+/// причина снять с него предел: контейнер без предела и есть та беда, ради
+/// которой всё это считается (кэш подсказок выдавит в подкачку машину вместе
+/// с 1С). Предел, который администратор правда сменил, в желаемой строке
+/// есть — и расхождением остаётся.
+fn significant(line: &str, drop_memory: bool) -> String {
+    const MEMORY: [&str; 3] = ["--memory", "--memory-swap", "--memory-reservation"];
     let mut out = Vec::new();
     let mut it = line.split_whitespace();
     while let Some(w) = it.next() {
-        if w == "--cache-ram" {
+        if w == "--cache-ram" || (drop_memory && MEMORY.contains(&w)) {
             it.next();
             continue;
         }
@@ -83,7 +92,9 @@ fn significant(line: &str) -> String {
 
 pub fn args_drift(want: &[String], baked: &str) -> Option<(String, String)> {
     let w = want.join(" ");
-    (significant(&w) != significant(baked)).then(|| (format!("служба: {baked}"), format!("служба: {w}")))
+    let limit_unknown = !want.iter().any(|a| a == "--memory");
+    (significant(&w, limit_unknown) != significant(baked, limit_unknown))
+        .then(|| (format!("служба: {baked}"), format!("служба: {w}")))
 }
 
 /// Что из окна сервера следует для Zed. `window` — то, что сообщил сервер
@@ -562,6 +573,22 @@ mod tests {
         let want: Vec<String> = ["-m", "x", "--cache-ram", "3072", "--port", "1"].iter().map(|s| s.to_string()).collect();
         assert!(args_drift(&want, "-m x --cache-ram 8192 --port 1").is_none());
         assert!(args_drift(&want, "-m x --cache-ram 8192 --port 2").is_some());
+        // Машина не ответила, сколько у неё памяти: предела в желаемой строке
+        // нет. Это не повод пересоздать работающий контейнер — и тем более не
+        // повод оставить его совсем без предела.
+        let baked_limited = "run --memory 22528m --memory-swap 45056m --memory-reservation 11264m -m x --cache-ram 8192 --port 1";
+        let unknown: Vec<String> = ["run", "-m", "x", "--cache-ram", "1024", "--port", "1"].iter().map(|s| s.to_string()).collect();
+        assert!(args_drift(&unknown, baked_limited).is_none(), "неизвестный предел — не расхождение");
+        // А настоящая смена предела расхождением остаётся.
+        let changed: Vec<String> =
+            ["run", "--memory", "6144m", "--memory-swap", "12288m", "--memory-reservation", "3072m", "-m", "x", "--cache-ram", "3072", "--port", "1"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let (from, to) = args_drift(&changed, baked_limited).unwrap();
+        assert!(from.contains("22528m") && to.contains("6144m"), "{from} → {to}");
+        // И контейнер, у которого предела ещё нет, его получает.
+        assert!(args_drift(&changed, "run -m x --cache-ram 3072 --port 1").is_some());
     }
 
     #[test]

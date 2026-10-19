@@ -398,7 +398,7 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit)
 - Test: the same files
 
 **Interfaces:**
-- Produces: `llama::zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers { window, max_output, max_tokens }`, `verify::declared_window_fact(declared: u32, available: u32) -> Check`, `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`, `llama::kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32`, `llama::window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32`, `llama::warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32`.
+- Produces: `llama::env_limit_mb(from_engine: Option<u64>, from_cfg: &str) -> u64` (`docker inspect` wins over the sample), `llama::zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers { window, max_output, max_tokens }`, `verify::declared_window_fact(declared: u32, available: u32) -> Check`, `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`, `llama::kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32`, `llama::window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32`, `llama::warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32`.
 - Consumes: `/proc/meminfo` on Linux for total and swap; the model server's own report of its KV cache size and window (the measurement step already runs it).
 
 - [ ] **Step 1: Write the failing tests**
@@ -443,6 +443,15 @@ fn the_model_container_gets_what_is_left_of_the_machine() {
     assert_eq!(container_memory_mb(32768, 8192, 2048), 22528);
     // Маленькая машина не уходит в минус и не получает предел ниже пола.
     assert_eq!(container_memory_mb(8192, 8192, 2048), MIN_MODEL_MB);
+}
+
+#[test]
+fn the_environment_limit_is_read_from_the_engine_not_assumed() {
+    // Контейнер среды мог поднять provision.sh со своим числом: берём то,
+    // что стоит на самом деле, а параметры — только когда его ещё нет.
+    assert_eq!(env_limit_mb(Some(12288), "8g"), 12288);
+    assert_eq!(env_limit_mb(None, "8g"), 8192);
+    assert_eq!(env_limit_mb(Some(0), "8g"), 8192); // 0 — предела нет вовсе
 }
 
 #[test]

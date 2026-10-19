@@ -1278,9 +1278,9 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию, 12 мин");
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
-        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию, меньше минуты");
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
         assert_eq!(tray_tooltip(None, &State::Up { since: now }, now), "1c-connect: подключён");
         assert_eq!(tray_tooltip(None, &State::Off, now), "1c-connect: не подключён");
     }
@@ -1429,7 +1429,7 @@ mod tests {
         let now = Instant::now() + Duration::from_secs(3600);
         let at = |secs| Running { which: Which::Export, started: now - Duration::from_secs(secs), phase: Phase::Decompile, seen: now, stale_noted: false };
         let (title, clock) = progress_text(&at(725), now);
-        assert_eq!(title, "Выгружаю конфигурацию");
+        assert_eq!(title, "Выгружаю конфигурацию из 1С");
         assert_eq!(clock, "12:05");
         assert_eq!(progress_text(&at(5), now).1, "0:05");
         assert_eq!(progress_text(&at(65), now).1, "1:05");

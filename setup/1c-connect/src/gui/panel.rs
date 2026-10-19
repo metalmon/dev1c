@@ -769,13 +769,16 @@ impl Render for Panel {
                         .absolute()
                         .top_0()
                         .h(px(2.))
-                        .w(relative(0.25))
+                        // Как у установщика (app.css `.progress`): бегунок 40 %,
+                        // 1.4 с, плавный разгон и торможение — обе программы
+                        // дышат одинаково (заказчик 2026-10-19).
+                        .w(relative(0.4))
                         .rounded_full()
                         .bg(accent)
                         .with_animation(
                             "progress-thumb",
-                            Animation::new(Duration::from_millis(1200)).repeat(),
-                            |d, t| d.left(relative(-0.25 + 1.25 * t)),
+                            Animation::new(Duration::from_millis(1400)).repeat().with_easing(ease_in_out),
+                            |d, t| d.left(relative(-0.4 + 1.4 * t)),
                         ),
                 )
             } else {

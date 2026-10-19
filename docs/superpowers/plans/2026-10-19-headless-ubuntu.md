@@ -26,7 +26,8 @@
 2. **No `nvidia-container-toolkit` on the server**: the install must stop with the kit's own `dpkg` line, not with a raw `docker: Error response from daemon: could not select device driver`. Test in Task 4.
 3. **Docker 20.10 loading `dev1c-image.tar.gz`**: an archive with attestation manifests dies on the customer's machine with a message about an unsupported manifest. Test in Task 2 (the assert runs in our build, not theirs).
 4. **The kit arrives without the model or without the image archive**: each is a named barrier with a `scp` line, and nothing half-installs. Test in Task 4.
-5. **The vGPU share shrinks after installation**: the environment was built around numbers measured when the card was whole; `check` must say the model no longer fits, with both numbers, instead of leaving Zed with a context that silently does not work. Test in Task 6.
+5. **An administrator who refuses to run our binary**: the manual section must carry every command the program would run, in order, for the kit's own `dev1c.toml` — a missing `docker volume create` leaves them with an environment that starts and loses its data on the next restart. Test in Task 7.
+6. **The vGPU share shrinks after installation**: the environment was built around numbers measured when the card was whole; `check` must say the model no longer fits, with both numbers, instead of leaving Zed with a context that silently does not work. Test in Task 6.
 
 ---
 
@@ -324,25 +325,55 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1
 
 ---
 
-### Task 7: The instruction the administrator reads
+### Task 7: The instruction, and the same install without our binary
 
 **Files:**
-- Create: `config/kit/УСТАНОВКА.md` (source), copied into the Linux kit by `pack.sh`
-- Modify: `pack.sh`
+- Create: `config/kit/УСТАНОВКА.md` (the hand-written part), `scripts/manual-path.sh` (generates the command section)
+- Modify: `setup/dev1c-setup/src/main.rs` (`--commands`), `pack.sh`
+- Test: `setup/dev1c-setup/src/main.rs`, plus the generator's own assertions
 
-- [ ] **Step 1: Write the page**
+**Interfaces:**
+- Produces: `dev1c-setup install --dry-run --commands` prints every modifying command, one per line, in the order the operations would run them; `scripts/manual-path.sh <kit dir>` turns that into the instruction's «Ручной путь» section.
+- Consumes: `Event::Command`, which `common::docker` already emits in dry-run without executing anything.
 
-One page, Russian, in this order: what the server needs before we start (Docker, GPU driver, the toolkit if it is not already there — from the kit), what to copy and where (`dev1c-image.tar.gz`, the `.gguf`), the three commands (`./dev1c-setup status`, `./dev1c-setup install`, `./dev1c-setup check`), what is normal to see, and where the log is. Every command ready to paste. No step the program cannot itself check and explain.
+- [ ] **Step 1: Write the failing test for the flag**
 
-- [ ] **Step 2: Walk it yourself against the program's texts**
+```rust
+#[test]
+fn dry_run_with_commands_prints_the_command_lines_and_nothing_else() {
+    // Событие Command печатается как есть, без значка и без «$».
+    assert_eq!(command_line(&Event::Command("docker volume create dev1c-home".into())), Some("docker volume create dev1c-home".to_string()));
+    assert_eq!(command_line(&Event::Ok("готово".into())), None);
+}
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features command_line` — Expected: FAIL.
+
+- [ ] **Step 3: Implement the flag**
+
+`--commands` turns `Event::Command` into a printed line; everything else keeps today's behaviour. Passwords are already redacted upstream by `docker::redact`, so the printed lines are safe to paste into a page.
+
+- [ ] **Step 4: Generate the manual section**
+
+`scripts/manual-path.sh` runs the binary in the kit against the kit's own `dev1c.toml` and writes the section: a line of prose per operation (from the plan the program prints) followed by its commands. It fails if the output carries no `docker load`, no `docker volume create` and no `docker run` — that would mean the generator silently produced an empty path.
+
+Run: `sh scripts/manual-path.sh dist/dev1c-kit-linux` — Expected: a section where those three appear, in that order.
+
+- [ ] **Step 5: Write the hand-written part of the page**
+
+One page, Russian: what the server needs before we start (Docker, GPU driver, the toolkit from the kit), what to copy and where, how to check the sums without us (`sha256sum -c checksums.txt`), the short path of three commands (`./dev1c-setup status`, `install`, `check`), then the generated «Ручной путь» section, and at its only un-pasteable step — the model measurement — which number to read from the server's answer and where to put it. Then: what is normal to see, and where the log is.
+
+- [ ] **Step 6: Walk it yourself against the program's texts**
 
 Read the page next to `dev1c-setup status` output on a machine without the kit files and confirm that each barrier the page mentions is a barrier the program itself prints. Fix whichever is wrong — the program wins.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add config/kit pack.sh
-git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit): the administrator's page travels in the Linux kit"
+git add config/kit scripts/manual-path.sh setup/dev1c-setup/src pack.sh
+git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit): the administrator's page, and the same install without our binary"
 ```
 
 ---
@@ -362,7 +393,11 @@ Run: the workflow. Expected: the job is green, its log contains the barrier text
 
 On a machine with an NVIDIA card (the pilot server, or ours): unpack the Linux kit, follow `УСТАНОВКА.md` as written, install as a non-root user in group `docker`, then again as root on a clean copy. Both must finish; `./dev1c-setup check` must be green; the model server must answer. Record what the page got wrong.
 
-- [ ] **Step 3: Commit the corrections**
+- [ ] **Step 3: The same server, by hand**
+
+On a clean copy of the same machine, bring the environment up **without running our binary at all**: only the commands from the «Ручной путь» section, pasted in order. The result must be the same — the container runs, Gitea answers, the model answers. This is the step that proves the section is not decorative; whatever it is missing goes back into the generator, not into the page by hand.
+
+- [ ] **Step 4: Commit the corrections**
 
 ```bash
 git add -A

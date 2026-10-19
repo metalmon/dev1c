@@ -168,6 +168,7 @@ where
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
+    crate::job::group(&mut cmd);
     let job = crate::job::Job::new();
     let mut child = match cmd.spawn() {
         Ok(c) => c,

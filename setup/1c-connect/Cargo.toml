@@ -69,5 +69,10 @@ version = "0.12"
 default-features = false
 features = ["blocking", "rustls-tls-native-roots"]
 
+[target.'cfg(unix)'.dependencies]
+# Убийство группы процессов: SIGTERM, через 5 с SIGKILL. libc уже в Cargo.lock
+# (его тянет tokio), прямая зависимость ничего не докачивает.
+libc = "0.2"
+
 [target.'cfg(windows)'.build-dependencies]
 embed-resource = { version = "3", optional = true }

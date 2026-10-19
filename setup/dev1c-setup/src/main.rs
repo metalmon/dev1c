@@ -52,7 +52,11 @@ struct Cli {
     yes: bool,
     /// Только командные строки плана, по одной (с --dry-run): из них собрана
     /// страница «Ручной путь» в инструкции администратора.
-    #[arg(long, global = true)]
+    ///
+    /// `requires = "dry_run"` — не удобство, а защита: ключ глушит приёмник
+    /// событий, и без --dry-run `--commands clean --data` снял бы тома молча,
+    /// не напечатав и не записав в журнал ни строки.
+    #[arg(long, global = true, requires = "dry_run")]
     commands: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -142,6 +146,15 @@ fn needs_typed_name_confirmation(data: bool, yes: bool) -> bool {
     data && !yes
 }
 
+/// `--commands` обещает печать вместо работы, и обещание должно держаться у
+/// любой команды, а не только у той, которая его умеет. Ключ глобальный
+/// (иначе `install --dry-run --commands` не разобрать), поэтому он
+/// запрещается там, где печатать нечего: `clean --commands` не печатал бы
+/// команды, зато молча прошёл бы по томам.
+fn commands_fits(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::Install { .. })
+}
+
 /// Строка для `--commands`: команда печатается как есть, чтобы её можно было
 /// скопировать в терминал. Всё остальное — наши пояснения, в этом режиме их
 /// печатает не приёмник событий, а обход операций.
@@ -205,6 +218,10 @@ fn run() -> Result<()> {
     // Нет терминала на stdin — вопрос о подтверждении завис бы навсегда.
     let has_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
     let cmd = cli.cmd.unwrap_or(Cmd::Status);
+    anyhow::ensure!(
+        !cli.commands || commands_fits(&cmd),
+        "--commands печатает установку командами: он только при `install --dry-run --commands`"
+    );
     let answer = answers_without_tty(has_tty, &cmd);
     if refuses_without_tty(answer, cli.yes, cli.dry_run) {
         anyhow::bail!(
@@ -383,8 +400,11 @@ mod tty_tests {
 ///
 /// Операции обходятся подряд, без опроса состояния: страница описывает
 /// установку с нуля, а на машине сборки состояние взять негде.
-/// Ошибка операции не прерывает обход — здесь ничего не ставится, а
-/// `env` упирается в неотвечающий Docker на любой машине сборки.
+/// Ошибка операции не прерывает обход — здесь ничего не ставится, а `env`
+/// упирается в неотвечающий Docker на любой машине сборки. Но и молчать о ней
+/// нельзя: оборвавшаяся операция — это потерянный шаг на странице, поэтому
+/// она называется в stderr (страница собирается из stdout), а полноту пути по
+/// операциям проверяет scripts/manual-path.sh.
 fn print_commands(ctx: &Ctx, ops: &[Box<dyn common::op::Op<Ctx>>]) -> Result<()> {
     anyhow::ensure!(ctx.dry_run, "--commands только с --dry-run: иначе это была бы установка, а не её описание");
     anyhow::ensure!(
@@ -396,7 +416,9 @@ fn print_commands(ctx: &Ctx, ops: &[Box<dyn common::op::Op<Ctx>>]) -> Result<()>
         for a in op.plan(ctx) {
             println!("· {}", a.0);
         }
-        let _ = op.apply(ctx);
+        if let Err(e) = op.apply(ctx) {
+            eprintln!("{}: операция оборвалась, её команд в пути может не быть: {e:#}", op.id());
+        }
     }
     Ok(())
 }
@@ -413,6 +435,19 @@ mod commands_tests {
             Some("docker volume create dev1c-home".to_string())
         );
         assert_eq!(command_line(&Event::Ok("готово".into())), None);
+    }
+
+    #[test]
+    fn commands_is_not_accepted_where_it_would_do_instead_of_print() {
+        // Без --dry-run ключ не принимается вовсе: иначе он заглушил бы
+        // вывод настоящей работы.
+        assert!(Cli::try_parse_from(["dev1c-setup", "--commands", "install"]).is_err());
+        assert!(Cli::try_parse_from(["dev1c-setup", "--commands", "--dry-run", "install"]).is_ok());
+        // И только у install: у остальных печатать нечего, а делать — есть что.
+        assert!(commands_fits(&Cmd::Install { only: None }));
+        assert!(!commands_fits(&Cmd::Clean { stack: false, data: true }));
+        assert!(!commands_fits(&Cmd::Status));
+        assert!(!commands_fits(&Cmd::Check));
     }
 }
 

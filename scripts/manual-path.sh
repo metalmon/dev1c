@@ -53,9 +53,37 @@ awk '
     END { fence() }
 ' "$tmp/raw.txt" | sed 's|\./||g; s|\.\\||g' >"$tmp/section.md"
 
-# A silently empty path would be the worst outcome: the page would look
-# finished and stand nothing up. The three commands the whole install rests on
-# have to be there, in the order the operations run them.
+# A silently lost step would be the worst outcome: the page looks finished and
+# stands up half a server. So every operation is accounted for by name — the
+# five that must carry commands, and the three that carry none by design (env
+# checks, llama.answers measures, services waits). An operation that is not in
+# either list is new, and whether the page needs its commands is a decision,
+# not a default.
+REQUIRED="image volumes model llama.container container"
+SILENT="env llama.answers services"
+awk '
+    /^== / { id = $2; n[id] += 0; order[++k] = id; next }
+    /^· /  { next }
+    { n[id]++ }
+    END { for (i = 1; i <= k; i++) print order[i], n[order[i]] }
+' "$tmp/raw.txt" >"$tmp/ops.txt"
+while read -r id n; do
+    case " $REQUIRED $SILENT " in
+        *" $id "*) ;;
+        *) echo "manual-path.sh: unknown operation $id — decide whether the page carries its commands" >&2; exit 1 ;;
+    esac
+    case " $REQUIRED " in
+        *" $id "*)
+            [ "$n" -gt 0 ] || { echo "manual-path.sh: operation $id printed no commands — the page would lose that step" >&2; exit 1; } ;;
+    esac
+done <"$tmp/ops.txt"
+for id in $REQUIRED; do
+    grep -q "^$id " "$tmp/ops.txt" \
+        || { echo "manual-path.sh: operation $id is missing from the path entirely" >&2; exit 1; }
+done
+
+# And the three commands the whole install rests on, in the order the
+# operations run them.
 grep -v '^\(== \|· \)' "$tmp/raw.txt" >"$tmp/cmd.txt"
 line_of() { # $1 = command prefix → line number of its first occurrence
     grep -n -- "$1" "$tmp/cmd.txt" | head -1 | cut -d: -f1

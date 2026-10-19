@@ -122,6 +122,16 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
     && echo "vrunner-mcp: $(grep -oE '"name":"[a-z_0-9]+"' /tmp/tools.json | sort -u | wc -l) tools" \
     && rm /tmp/tools.json
 
+# --- fonts -------------------------------------------------------------------
+# 1C greets a session with «На сервере отсутствуют шрифты из состава Microsoft
+# Core Fonts» and warns that the interface may look wrong: its layouts are
+# measured in Arial, Times New Roman and Courier New. The Debian installer
+# fetches the original self-extracting archives from SourceForge — the way
+# Microsoft allowed them to be redistributed — so this step needs the network
+# at build time and lives in contrib. Late in the file on purpose: it must not
+# invalidate the platform layer above it.
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources     && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections     && apt-get update     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer     && rm -rf /var/lib/apt/lists/*     && fc-list | grep -q "Arial"     && echo "ms core fonts: $(fc-list | grep -ciE 'arial|times new roman|courier new') faces"
+
 # --- the demo base -----------------------------------------------------------
 # One template base in the image; every workstation gets its own copy on first
 # use (see config/1c/stand.sh). Built from a configuration template in the

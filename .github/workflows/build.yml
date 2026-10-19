@@ -293,7 +293,7 @@ jobs:
           ./pack.sh --os linux dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit-linux
 
-      - name: Install from the Linux kit, container form (the honest stopping point on this runner)
+      - name: Install from the Linux kit, container form (two barriers, same binary)
         # A second install, deliberately — not a rework of "Install through
         # dev1c-setup" above. That step installs through the Linux *binary*
         # before the Linux *kit* exists (the kit is only packed just above)
@@ -301,35 +301,48 @@ jobs:
         # variables, 1C tooling) exercises the container it brought up;
         # pointing it at the kit instead would break that run. This one
         # installs from the actual packed kit with serve = "docker" (the
-        # model server as a second container, not a service on the host)
-        # and proves the one thing a GPU-less runner honestly can: that the
-        # installer reaches the video-card barrier and names it in Russian,
-        # instead of failing some other, less honest way.
+        # model server as a second container, not a service on the host).
         #
-        # --dry-run only: a real `install -y` here would also start the
-        # "дождаться gitea, xrdp, sshd" wait (ops.rs Services, always_run)
-        # against a container that this run never creates (blocked behind
-        # the same model/card gate), which would hang for two minutes and
-        # then fail the job — state() alone is enough to prove the barrier.
+        # --dry-run only, never -y: state() alone is enough to prove either
+        # barrier (run.rs calls it unconditionally; dry_run only skips
+        # apply(), and the "пропущено: …" line prints the same in both
+        # modes). A real install IS feasible here — Env::apply's port probe
+        # only runs when the container isn't already "ours" and running
+        # (ops.rs:189,194), and it is, left up by the earlier install step,
+        # so there is no port collision; Services' 120 s wait would in fact
+        # pass in seconds against that same still-running "dev1c"
+        # (ops.rs:487). The reason to stay with --dry-run is different: a
+        # real run would silently ride on the container the earlier step
+        # left running instead of building one from this kit, so it would
+        # prove nothing about the Linux kit at all.
         #
-        # The kit's own dev1c.toml ships [model] file empty — no .gguf
-        # travels in the kit, the administrator supplies one — and with it
-        # empty the installer stops one gate earlier, at "модель не
-        # выбрана" (ops.rs `Model` / ops_llama.rs `Container`), never
-        # reaching the card. A placeholder name (no file needs to exist for
-        # a dry run — ops_llama's own file check is a string check, not a
-        # stat) walks the check past that gate onto the one this job is
-        # actually proving; the kit's real dev1c.toml is restored before
-        # upload so the artifact stays the honest one.
+        # Two assertions, two states, both from the same binary:
+        #  1. the kit exactly as shipped — [model] file empty, nobody has
+        #     supplied a .gguf yet — stops at "модель не выбрана"
+        #     (ops.rs::Model / ops_llama.rs::Container, both gate on this
+        #     before anything Docker- or GPU-shaped). This is the gate every
+        #     real administrator hits first, and the more valuable of the
+        #     two: it is what the customer will actually see.
+        #  2. with a placeholder name in [model] file (ops_llama's own file
+        #     check is a string check, not a stat — no file needs to exist
+        #     for a dry run), the installer walks past that gate and proves
+        #     the one thing a GPU-less runner honestly can beyond it: the
+        #     video-card barrier, named in Russian. The kit's real
+        #     dev1c.toml is restored before the upload-artifact step below
+        #     so the uploaded kit stays the honest one.
         run: |
+          chmod +x dist/dev1c-kit-linux/dev1c-setup
+          ./dist/dev1c-kit-linux/dev1c-setup --kit dist/dev1c-kit-linux install --dry-run | tee install-linux-kit-untouched.log
+          grep -qF 'модель не выбрана: [model] file — файл в комплекте' install-linux-kit-untouched.log
+
           cp dist/dev1c-kit-linux/dev1c.toml dist/dev1c-kit-linux/dev1c.toml.orig
           sed -i 's/^file = ""$/file = "placeholder.gguf"/' dist/dev1c-kit-linux/dev1c.toml
           grep '^file = ' dist/dev1c-kit-linux/dev1c.toml
-          chmod +x dist/dev1c-kit-linux/dev1c-setup
           ./dist/dev1c-kit-linux/dev1c-setup --kit dist/dev1c-kit-linux install --dry-run | tee install-linux-kit.log
           mv dist/dev1c-kit-linux/dev1c.toml.orig dist/dev1c-kit-linux/dev1c.toml
           grep -qF 'Драйвер NVIDIA на сервере не отвечает (nvidia-smi молчит)' install-linux-kit.log
-          if grep -q '^docker:' install-linux-kit.log; then
+
+          if grep -q '^docker:' install-linux-kit-untouched.log install-linux-kit.log; then
             echo "FAIL: a raw docker: error leaked into the log" >&2
             exit 1
           fi

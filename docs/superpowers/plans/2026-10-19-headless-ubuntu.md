@@ -398,12 +398,25 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit)
 - Test: the same files
 
 **Interfaces:**
-- Produces: `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`.
-- Consumes: `/proc/meminfo` on Linux for total and swap.
+- Produces: `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`, `llama::kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32`, `llama::window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32`, `llama::warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32`.
+- Consumes: `/proc/meminfo` on Linux for total and swap; the model server's own report of its KV cache size and window (the measurement step already runs it).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
+#[test]
+fn the_window_that_fits_comes_from_the_model_not_from_a_table() {
+    // Сервер сообщил: окно 65 536 токенов заняло 640 МиБ кэша →
+    // 10 КиБ на токен (гибридная модель класса Qwen3.6-35B-A3B).
+    assert_eq!(kv_bytes_per_token(640, 65536), 10 * 1024);
+    // 13 ГиБ свободной видеопамяти, три слота: по 250k на слот и ещё остаётся.
+    assert!(window_that_fits(13312, 10 * 1024, 3) >= 250_000);
+    // 32 КиБ на токен (класс Qwen3.8-27B): три слота по 250k уже не помещаются.
+    assert!(window_that_fits(13312, 32 * 1024, 3) < 250_000);
+    // Девять тёплых сеансов по 250k при 10 КиБ — это 22 ГиБ.
+    assert_eq!(warm_sessions_mb(10 * 1024, 250_000, 9), 21_972);
+}
+
 #[test]
 fn the_model_container_gets_what_is_left_of_the_machine() {
     // Стенд: 32 ГБ всего, 8 ГБ среде, 2 ГБ хосту.
@@ -434,7 +447,11 @@ Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-fe
 
 - [ ] **Step 3: Implement**
 
-`[model] memory` joins the sample with a comment saying what empty means. `llama_run_args` gains `--memory <предел>`, `--memory-swap <удвоенный предел>` and `--memory-reservation <половина>`; `serve_args` takes `--cache-ram` from `cache_ram_from_limit`. The swap fact reads `/proc/meminfo`; on Windows it is skipped (no `Check` at all, not a false pass).
+`[model] memory` joins the sample with a comment saying what empty means. `llama_run_args` gains `--memory <предел>`, `--memory-swap <удвоенный предел>` and `--memory-reservation <половина>`; `serve_args` takes `--cache-ram` from `cache_ram_from_limit`, whose ceiling rises from 8192 MiB to the container's own limit minus the server's working set — eight gigabytes is not enough for six sleeping 250k sessions.
+
+The measurement step stores `kv_bytes_per_token` in the kit state the first time the server answers, and `window_that_fits` turns it into the two sentences a person needs: what fits, and what was asked for. Asking for more than fits stops the install with both numbers — never silently installs the smaller window. KV stays `q8_0` everywhere: `-ctk`/`-ctv` are not configurable (customer's decision 2026-10-19, `q4_0` degrades).
+
+The swap fact reads `/proc/meminfo`; on Windows it is skipped (no `Check` at all, not a false pass). Its threshold is what the warm sessions need (`warm_sessions_mb`), not the container limit.
 
 - [ ] **Step 4: Run the tests**
 

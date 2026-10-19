@@ -8,43 +8,110 @@ use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
 
-/// Порядок фактов — часть контракта (см. тест).
-pub const ORDER: [&str; 13] = [
-    "параметры",
-    "платформа 1С",
-    "mcp-1c в комплекте",
-    "инструменты комплекта",
-    "vrunner-mcp отвечает",
-    "проект",
-    "база",
-    "веб-сервер",
-    "публикация и расширение",
-    "Gitea",
-    "Конфигуратор",
-    "комплект на носителе",
-    "туннель",
-];
+// Имена фактов — часть контракта (см. тесты). Общие — не зависят от режима;
+// остальные расставляет `order`/`run` по режиму из `cfg.host.mode`.
+const PARAMS: &str = "параметры";
+const PLATFORM: &str = "платформа 1С";
+const KIT: &str = "mcp-1c в комплекте";
+const TOOLS: &str = "инструменты комплекта";
+const VRUNNER: &str = "vrunner-mcp отвечает";
+const PROJECT: &str = "проект";
+const BASE: &str = "база";
+const WEB: &str = "веб-сервер";
+const PUBLICATION: &str = "публикация и расширение";
+const GITEA: &str = "Gitea";
+const MEDIA: &str = "комплект на носителе";
+const CONFIGURATOR: &str = "Конфигуратор";
+const TUNNEL: &str = "туннель";
+const WORKSTATION_PORTS: &str = "порты рабочего места";
+const OPEN_SESSION: &str = "в базе открыт сеанс";
+
+/// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
+/// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
+/// готовность канала к агенту (`туннель`/`порты рабочего места`).
+pub fn order(mode: &str) -> Vec<&'static str> {
+    let mut v = vec![PARAMS, PLATFORM, KIT, TOOLS, VRUNNER, PROJECT, BASE, WEB, PUBLICATION, GITEA];
+    if mode == "local" {
+        v.push(OPEN_SESSION);
+        v.push(MEDIA);
+        v.push(WORKSTATION_PORTS);
+    } else {
+        v.push(CONFIGURATOR);
+        v.push(MEDIA);
+        v.push(TUNNEL);
+    }
+    v
+}
 
 pub fn gitea_fact(g: &Gitea) -> Check {
     match g {
-        Gitea::Down(e) => Check::fail(ORDER[9], format!("не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
-        Gitea::NoOrg => Check::fail(ORDER[9], "отвечает, но организации dev1c в среде нет", "образ среды старый — dev1c-setup install с новым комплектом"),
-        Gitea::Ok(v) => Check::pass(ORDER[9], format!("Gitea {v}, организация dev1c есть")),
+        Gitea::Down(e) => Check::fail(GITEA, format!("не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
+        Gitea::NoOrg => Check::fail(GITEA, "отвечает, но организации dev1c в среде нет", "образ среды старый — dev1c-setup install с новым комплектом"),
+        Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v}, организация dev1c есть")),
     }
 }
 
 pub fn configurator_fact(n: usize) -> Check {
     if n == 0 {
-        Check::pass(ORDER[10], "не запущен")
+        Check::pass(CONFIGURATOR, "не запущен")
     } else {
-        Check::fail(ORDER[10], format!("запущено процессов 1cv8: {n}"), "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт")
+        Check::fail(CONFIGURATOR, format!("запущено процессов 1cv8: {n}"), "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт")
     }
+}
+
+/// Локальный режим: агент стучится в ту же базу, что человек в Конфигураторе.
+/// Отказ агенту при открытом сеансе человека — ожидаемо, не провал.
+pub fn open_session_fact() -> Check {
+    Check::note(
+        OPEN_SESSION,
+        "если в базе открыт Конфигуратор или клиент 1С, агенту при обращении откажут — это ожидаемо, закройте сеанс, когда агенту нужен доступ",
+    )
+}
+
+/// Порты моста (777N/778N): свободны либо их держит этот же процесс — оба
+/// случая в порядке. Чужой процесс на порту — почти наверняка второй
+/// запущенный коннектор.
+pub fn workstation_ports_fact(mcp: u16, vrunner: u16, foreign: &[u16]) -> Check {
+    if foreign.is_empty() {
+        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"))
+    } else {
+        let list = foreign.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+        Check::fail(
+            WORKSTATION_PORTS,
+            format!("порт(ы) {list} заняты другим процессом"),
+            "похоже, на этой машине уже открыт второй 1c-connect — закройте его и проверьте снова",
+        )
+    }
+}
+
+/// PID процесса, слушающего `127.0.0.1:port` (Windows, через `netstat`); вне
+/// Windows сведений нет — порт не будет признан чужим.
+/// ponytail: не видит бинды на 0.0.0.0, которые тоже закрыли бы loopback;
+/// апгрейд — парсить обе формы адреса, если это станет реальной проблемой.
+fn port_owner_pid(port: u16) -> Option<u32> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let mut c = std::process::Command::new("netstat");
+    c.args(["-ano", "-p", "TCP"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    let out = c.output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let local = format!("127.0.0.1:{port}");
+    text.lines().find_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() >= 5 && f[0] == "TCP" && f[1] == local && f[3] == "LISTENING" { f[4].parse().ok() } else { None }
+    })
 }
 
 pub fn media_fact(kind: Option<String>, root: &str) -> Check {
     match kind {
-        Some(k) => Check::note(ORDER[11], format!("{root}: {k} — инструменты работают из %LOCALAPPDATA%, комплект можно вынуть после install")),
-        None => Check::pass(ORDER[11], format!("{root}: обычный диск")),
+        Some(k) => Check::note(MEDIA, format!("{root}: {k} — инструменты работают из %LOCALAPPDATA%, комплект можно вынуть после install")),
+        None => Check::pass(MEDIA, format!("{root}: обычный диск")),
     }
 }
 
@@ -52,13 +119,13 @@ pub fn media_fact(kind: Option<String>, root: &str) -> Check {
 /// путь — предупреждение, не провал.
 pub fn base_fact(path: &str, exists: bool) -> Check {
     if path.starts_with("\\\\") {
-        return Check::note(ORDER[6], format!("{path} — сетевая база, одна на двоих: cf_load второго затирает работу первого"));
+        return Check::note(BASE, format!("{path} — сетевая база, одна на двоих: cf_load второго затирает работу первого"));
     }
     let server_base = path.contains('\\') && !path.contains(':');
     if server_base || exists {
-        Check::pass(ORDER[6], path.to_string())
+        Check::pass(BASE, path.to_string())
     } else {
-        Check::fail(ORDER[6], format!("каталога {path} нет"), "base_path в 1c-connect.toml")
+        Check::fail(BASE, format!("каталога {path} нет"), "base_path в 1c-connect.toml")
     }
 }
 
@@ -68,9 +135,9 @@ fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     let t0 = std::time::Instant::now();
     let cmd = crate::bridge::vrunner_command(&ctx.cfg, tools).into_std();
     match crate::local::call(cmd, "cache_show", serde_json::json!({}), std::time::Duration::from_secs(60), &|_| {}) {
-        Ok(r) if !r.is_error => Check::pass(ORDER[4], format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
-        Ok(r) => Check::fail(ORDER[4], format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
-        Err(e) => Check::fail(ORDER[4], e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
+        Ok(r) if !r.is_error => Check::pass(VRUNNER, format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
+        Ok(r) => Check::fail(VRUNNER, format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
+        Err(e) => Check::fail(VRUNNER, e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
     }
 }
 
@@ -78,10 +145,10 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     use crate::project::Layout;
     let p = crate::project::Project::from_cfg(&ctx.cfg, tools);
     match crate::project::layout_state(&p) {
-        Layout::Ok => Check::pass(ORDER[5], format!("{}, ветка {}", p.dir.display(), p.branch)),
-        Layout::Missing => Check::fail(ORDER[5], format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
-        Layout::BaseDir(f) => Check::fail(ORDER[5], format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог"),
-        Layout::Drifted(d) => Check::fail(ORDER[5], d, "1c-connect install — поправит ветку, origin и файлы"),
+        Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), p.branch)),
+        Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
+        Layout::BaseDir(f) => Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог"),
+        Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
     }
 }
 
@@ -89,61 +156,77 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
 /// совпасть с образцом.
 pub fn params_fact(file_exists: bool, server: &str) -> Check {
     if file_exists {
-        Check::pass(ORDER[0], format!("среда {server}"))
+        Check::pass(PARAMS, format!("среда {server}"))
     } else {
-        Check::fail(ORDER[0], "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
+        Check::fail(PARAMS, "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
     }
 }
 
 pub fn tunnel_fact(state: Option<&str>) -> Check {
     match state {
-        Some(s) => Check::pass("туннель", s.to_string()),
-        None => Check::note("туннель", "не поднят (поднимается командой connect)"),
+        Some(s) => Check::pass(TUNNEL, s.to_string()),
+        None => Check::note(TUNNEL, "не поднят (поднимается командой connect)"),
     }
 }
 
+/// Факты для режима `cfg.host.mode` (`"tunnel"` или, по умолчанию при любом
+/// другом значении, тот же `"tunnel"` — валидирован раньше, здесь не
+/// перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме:
+/// это состояние сессии, а не то, что можно вычислить здесь.
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     ctx.progress(Phase::Check);
+    let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
     v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), &h.server));
     v.push(match find_1cv8() {
-        Some(p) => Check::pass(ORDER[1], p.display().to_string()),
-        None => Check::fail(ORDER[1], "1cv8.exe не найден", "установите платформу 1С на эту машину"),
+        Some(p) => Check::pass(PLATFORM, p.display().to_string()),
+        None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
     });
     let exe = mcp_exe(&ctx.kit);
     v.push(if exe.exists() {
-        Check::pass(ORDER[2], exe.file_name().unwrap_or_default().to_string_lossy().to_string())
+        Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
     } else {
-        Check::fail(ORDER[2], "файла нет", "комплект неполный — скопируйте заново")
+        Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
     });
     let tools = tools_dir();
     let tools_ok = matches!(tools_state(&ctx.kit.root, &tools), OpState::Done(_));
     v.push(match tools_state(&ctx.kit.root, &tools) {
-        OpState::Done(d) => Check::pass(ORDER[3], d),
-        OpState::Missing => Check::fail(ORDER[3], format!("в {} ничего нет", tools.display()), "1c-connect install"),
-        OpState::Drifted { from, to } => Check::fail(ORDER[3], format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
-        OpState::Blocked(d) => Check::fail(ORDER[3], d, "скопируйте полный комплект заново"),
+        OpState::Done(d) => Check::pass(TOOLS, d),
+        OpState::Missing => Check::fail(TOOLS, format!("в {} ничего нет", tools.display()), "1c-connect install"),
+        OpState::Drifted { from, to } => Check::fail(TOOLS, format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
+        OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
     });
-    v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(ORDER[4], "инструментов на машине нет", "1c-connect install") });
+    v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install") });
     v.push(project_fact(ctx, &tools));
     v.push(base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists()));
     let web = ctx.cfg.web_port();
     let web_ok = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
     v.push(if web_ok {
-        Check::pass(ORDER[7], format!("порт {web} отвечает"))
+        Check::pass(WEB, format!("порт {web} отвечает"))
     } else {
-        Check::fail(ORDER[7], format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
+        Check::fail(WEB, format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
     });
     v.push(match extension_version(&h.base_url, &h.db_user, &h.db_password) {
-        Some(ver) => Check::pass(ORDER[8], format!("{} → расширение {ver}", h.base_url)),
-        None => Check::fail(ORDER[8], format!("{}/version не отвечает", h.base_url), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
+        Some(ver) => Check::pass(PUBLICATION, format!("{} → расширение {ver}", h.base_url)),
+        None => Check::fail(PUBLICATION, format!("{}/version не отвечает", h.base_url), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
     });
     v.push(gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url())));
-    v.push(configurator_fact(crate::bridge::configurator_count()));
+    if local {
+        v.push(open_session_fact());
+    } else {
+        v.push(configurator_fact(crate::bridge::configurator_count()));
+    }
     let root = ctx.kit.root.display().to_string();
     v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), root.get(..3).unwrap_or(&root)));
-    v.push(tunnel_fact(tunnel_state));
+    if local {
+        let p = ctx.cfg.ports();
+        let pid = std::process::id();
+        let foreign: Vec<u16> = [p.mcp, p.vrunner].into_iter().filter(|&port| port_owner_pid(port).is_some_and(|owner| owner != pid)).collect();
+        v.push(workstation_ports_fact(p.mcp, p.vrunner, &foreign));
+    } else {
+        v.push(tunnel_fact(tunnel_state));
+    }
     v
 }
 
@@ -161,21 +244,77 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
 mod tests {
     use super::*;
 
+    fn test_ctx(mode: &str) -> Ctx {
+        let mut cfg = crate::cfg::Cfg::default();
+        cfg.host.mode = mode.to_string();
+        // 127.0.0.1:3 → gitea_url порт 1: закрыт локально, провал мгновенный,
+        // как в ops_host::gitea_probe_on_a_closed_port_is_down.
+        cfg.host.server = "127.0.0.1:3".into();
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        Ctx {
+            kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-missing-kit-{}", std::process::id()))),
+            cfg,
+            dry_run: true,
+            sink,
+            prompt: Box::new(common::AlwaysDefault),
+        }
+    }
+
     #[test]
     fn web_server_fact_comes_before_tunnel_fact() {
         // Order is the contract: a dead web port must not look like a tunnel fault.
-        let names = ORDER;
+        let names = order("tunnel");
         let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
         assert!(at("веб-сервер") < at("публикация и расширение"));
         assert!(at("публикация и расширение") < at("туннель"));
     }
 
     #[test]
-    fn order_has_thirteen_facts_with_the_tunnel_last() {
-        assert_eq!(ORDER.len(), 13);
-        assert_eq!(ORDER[12], "туннель");
-        assert_eq!(ORDER[4], "vrunner-mcp отвечает");
-        assert_eq!(ORDER[9], "Gitea");
+    fn order_has_thirteen_facts_with_the_tunnel_or_ports_last() {
+        let tunnel = order("tunnel");
+        assert_eq!(tunnel.len(), 13);
+        assert_eq!(tunnel[12], "туннель");
+        assert_eq!(tunnel[4], "vrunner-mcp отвечает");
+        assert_eq!(tunnel[9], "Gitea");
+        let local = order("local");
+        assert_eq!(local.len(), 13);
+        assert_eq!(local[12], "порты рабочего места");
+        // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
+        assert_eq!(order("something-else"), tunnel);
+    }
+
+    #[test]
+    fn facts_follow_the_mode() {
+        let tunnel = order("tunnel");
+        assert!(tunnel.contains(&"туннель") && tunnel.contains(&"Конфигуратор"));
+        assert!(!tunnel.contains(&"порты рабочего места") && !tunnel.contains(&"в базе открыт сеанс"));
+        let local = order("local");
+        assert!(local.contains(&"порты рабочего места") && local.contains(&"в базе открыт сеанс"));
+        assert!(!local.contains(&"туннель") && !local.contains(&"Конфигуратор"));
+    }
+
+    #[test]
+    fn every_fact_has_a_name_in_order() {
+        for mode in ["tunnel", "local"] {
+            let ctx = test_ctx(mode);
+            let checks = run(&ctx, Some("работает с 12:40"));
+            let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
+            assert_eq!(names, order(mode), "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn workstation_ports_fact_passes_when_free_or_ours_fails_on_a_stranger() {
+        let c = workstation_ports_fact(7771, 7781, &[]);
+        assert!(c.ok && !c.info, "{c:?}");
+        let c = workstation_ports_fact(7771, 7781, &[7781]);
+        assert!(!c.ok && c.detail.contains("7781") && c.hint.contains("второй"), "{c:?}");
+    }
+
+    #[test]
+    fn open_session_fact_is_always_information_not_a_failure() {
+        let c = open_session_fact();
+        assert!(c.ok && c.info && c.detail.contains("Конфигуратор"), "{c:?}");
     }
 
     #[test]
@@ -208,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_missing_parameters_file_fails_first_and_says_what_to_do() {
-        assert_eq!(ORDER[0], "параметры");
+        assert_eq!(order("tunnel")[0], "параметры");
         let c = params_fact(false, "192.168.1.10:3393");
         assert!(!c.ok && c.hint.contains("example"), "{c:?}");
         // Адрес образца больше не повод для красного: в проде он может совпасть.

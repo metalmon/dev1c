@@ -293,6 +293,47 @@ jobs:
           ./pack.sh --os linux dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit-linux
 
+      - name: Install from the Linux kit, container form (the honest stopping point on this runner)
+        # A second install, deliberately — not a rework of "Install through
+        # dev1c-setup" above. That step installs through the Linux *binary*
+        # before the Linux *kit* exists (the kit is only packed just above)
+        # and everything downstream of it (the tunnel, the sessions'
+        # variables, 1C tooling) exercises the container it brought up;
+        # pointing it at the kit instead would break that run. This one
+        # installs from the actual packed kit with serve = "docker" (the
+        # model server as a second container, not a service on the host)
+        # and proves the one thing a GPU-less runner honestly can: that the
+        # installer reaches the video-card barrier and names it in Russian,
+        # instead of failing some other, less honest way.
+        #
+        # --dry-run only: a real `install -y` here would also start the
+        # "дождаться gitea, xrdp, sshd" wait (ops.rs Services, always_run)
+        # against a container that this run never creates (blocked behind
+        # the same model/card gate), which would hang for two minutes and
+        # then fail the job — state() alone is enough to prove the barrier.
+        #
+        # The kit's own dev1c.toml ships [model] file empty — no .gguf
+        # travels in the kit, the administrator supplies one — and with it
+        # empty the installer stops one gate earlier, at "модель не
+        # выбрана" (ops.rs `Model` / ops_llama.rs `Container`), never
+        # reaching the card. A placeholder name (no file needs to exist for
+        # a dry run — ops_llama's own file check is a string check, not a
+        # stat) walks the check past that gate onto the one this job is
+        # actually proving; the kit's real dev1c.toml is restored before
+        # upload so the artifact stays the honest one.
+        run: |
+          cp dist/dev1c-kit-linux/dev1c.toml dist/dev1c-kit-linux/dev1c.toml.orig
+          sed -i 's/^file = ""$/file = "placeholder.gguf"/' dist/dev1c-kit-linux/dev1c.toml
+          grep '^file = ' dist/dev1c-kit-linux/dev1c.toml
+          chmod +x dist/dev1c-kit-linux/dev1c-setup
+          ./dist/dev1c-kit-linux/dev1c-setup --kit dist/dev1c-kit-linux install --dry-run | tee install-linux-kit.log
+          mv dist/dev1c-kit-linux/dev1c.toml.orig dist/dev1c-kit-linux/dev1c.toml
+          grep -qF 'Драйвер NVIDIA на сервере не отвечает (nvidia-smi молчит)' install-linux-kit.log
+          if grep -q '^docker:' install-linux-kit.log; then
+            echo "FAIL: a raw docker: error leaked into the log" >&2
+            exit 1
+          fi
+
       - name: Layer sizes
         # Printed on every build so growth is noticed when it happens, not when
         # somebody has to transfer the file. Note that `docker image inspect`

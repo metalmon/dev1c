@@ -61,6 +61,20 @@ jobs:
           docker image inspect "ghcr.io/$owner/dev1c-llama:latest" \
             --format 'image size: {{.Size}} bytes'
 
+      - name: Smoke test
+        # No GPU on a CI runner: this only proves the image is not a corpse —
+        # the entrypoint starts, and every shared library it links against
+        # resolves. The flags are checked against llama::serve_args so a flag
+        # that quietly disappeared upstream is caught here, not on the stand.
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$owner/dev1c-llama:${{ steps.ver.outputs.version }}"
+          docker run --rm "$image" --version
+          docker run --rm --entrypoint sh "$image" -c 'ldd /opt/llama/llama-server | grep -q "not found" && exit 1; exit 0'
+          for f in --fit --fit-ctx --fit-target --cache-ram --ctx-checkpoints --kv-unified --flash-attn -ctk -ctv --parallel --api-key-file; do
+            docker run --rm --entrypoint sh "$image" -c "/opt/llama/llama-server --help" | grep -q -- "$f" || { echo "флага $f в новой сборке нет"; exit 1; }
+          done
+
       - name: Push
         run: |
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')

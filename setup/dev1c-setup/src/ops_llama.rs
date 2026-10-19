@@ -111,7 +111,6 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
         "--env-file",
         env_file,
         &cfg.llama_image(),
-        "llama-server",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -313,7 +312,7 @@ impl Op<Ctx> for Container {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![Action::new(format!(
-            "{} run … {} llama-server (три слота, общий кэш, окно не ниже {})",
+            "{} run … {} (три слота, общий кэш, окно не ниже {})",
             ctx.engine(),
             ctx.cfg.llama_image(),
             ctx.cfg.model.fit_ctx
@@ -422,7 +421,10 @@ mod tests {
         c.model.serve = "docker".into();
         c.model.file = "models/x.gguf".into();
         let a = llama_run_args(&c, "/k/llama.env", "127.0.0.1", 4096, 1024).join(" ");
-        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models --env-file /k/llama.env oktaplus/dev1c-llama:latest llama-server"), "{a}");
+        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models --env-file /k/llama.env oktaplus/dev1c-llama:latest -m /opt/models/x.gguf"), "{a}");
+        // The image now has an ENTRYPOINT; a bare "llama-server" after the image
+        // name would land as a stray argument the server does not understand.
+        assert!(!a.contains("latest llama-server"), "{a}");
         assert!(a.contains("-m /opt/models/x.gguf --alias x --host 0.0.0.0 --port 8080"));
         assert!(!a.contains("--api-key-file") && !a.contains("LLAMA_API_KEY="), "токен не в аргументах");
         let ids = ops(Form::Docker).iter().map(|o| o.id().to_string()).collect::<Vec<_>>();

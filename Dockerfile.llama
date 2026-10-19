@@ -6,7 +6,7 @@
 # environment's own files change several times a day. Keeping it here means the
 # main build stays at its six minutes and simply copies the result.
 #
-#   docker build -f Dockerfile.llama -t ghcr.io/<owner>/dev1c-llama:b11606 .
+#   docker build -f Dockerfile.llama -t ghcr.io/<owner>/dev1c-llama:b11734 .
 #
 # The size problem this solves: the official release tarball is 1.1 GB, of which
 # roughly 830 MB is cuBLAS carrying kernels for every GPU generation ever
@@ -26,7 +26,7 @@
 FROM debian:12-slim AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG LLAMA_VERSION=b11606
+ARG LLAMA_VERSION=b11734
 # 86 for Ampere (3060 Ti and the like), 120 for a 5090, and 75-virtual as PTX
 # the driver can compile for anything newer than Turing.
 ARG LLAMA_CUDA_ARCHS="86-real;120-real;75-virtual"
@@ -131,8 +131,17 @@ RUN mkdir -p /opt/llama \
 
 
 # =============================================================================
-# The image itself holds nothing but the result: the main Dockerfile copies
-# /opt/llama out of it.
+# Runtime: a slim Debian 12 base, the same libc the builder used, so the
+# dynamic links `ldd` still finds (libc, libgcc, libstdc++, libgomp) are
+# already present without pulling in the CUDA toolkit — the GPU driver
+# libraries arrive at run time from nvidia-container-toolkit, not here.
+# This also doubles as what the main Dockerfile copies /opt/llama out of.
 # =============================================================================
-FROM scratch
+FROM debian:12-slim
 COPY --from=builder /opt/llama /opt/llama
+ENV PATH=/opt/llama:$PATH \
+    LD_LIBRARY_PATH=/opt/llama \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+WORKDIR /opt/llama
+ENTRYPOINT ["/opt/llama/llama-server"]

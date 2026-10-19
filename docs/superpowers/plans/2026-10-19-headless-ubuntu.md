@@ -26,8 +26,9 @@
 2. **No `nvidia-container-toolkit` on the server**: the install must stop with the kit's own `dpkg` line, not with a raw `docker: Error response from daemon: could not select device driver`. Test in Task 4.
 3. **Docker 20.10 loading `dev1c-image.tar.gz`**: an archive with attestation manifests dies on the customer's machine with a message about an unsupported manifest. Test in Task 2 (the assert runs in our build, not theirs).
 4. **The kit arrives without the model or without the image archive**: each is a named barrier with a `scp` line, and nothing half-installs. Test in Task 4.
-5. **An administrator who refuses to run our binary**: the manual section must carry every command the program would run, in order, for the kit's own `dev1c.toml` — a missing `docker volume create` leaves them with an environment that starts and loses its data on the next restart. Test in Task 7.
-6. **The vGPU share shrinks after installation**: the environment was built around numbers measured when the card was whole; `check` must say the model no longer fits, with both numbers, instead of leaving Zed with a context that silently does not work. Test in Task 6.
+5. **The model container with no limit of its own**: prompt cache plus checkpoints push the host into swap and 1C in the environment container slows with it — the limit, the swap allowance and the warning about a small swap file are the whole of the answer. Test in Task 8.
+6. **An administrator who refuses to run our binary**: the manual section must carry every command the program would run, in order, for the kit's own `dev1c.toml` — a missing `docker volume create` leaves them with an environment that starts and loses its data on the next restart. Test in Task 7.
+7. **The vGPU share shrinks after installation**: the environment was built around numbers measured when the card was whole; `check` must say the model no longer fits, with both numbers, instead of leaving Zed with a context that silently does not work. Test in Task 6.
 
 ---
 
@@ -57,15 +58,27 @@ docker run --rm --entrypoint sh "$image" -c 'ldd /opt/llama/llama-server | grep 
 
 Expected: the version line prints and the library check exits 0. A CI runner has no GPU, so this is a CPU-only start: it proves the image is not a corpse, nothing more.
 
-- [ ] **Step 3: Build and push the new tag**
+- [ ] **Step 3: Raise the llama.cpp pin and prove the flags still exist**
 
-Run the workflow (`gh workflow run llama.yml`), about 40 minutes. Expected: a new `dev1c-llama:b11606` digest in ghcr. Note the digest in the task's ledger line — Task 2 pins it.
-
-- [ ] **Step 4: Commit**
+Upstream has moved on and the image is being rebuilt anyway: set `ARG LLAMA_VERSION` to the current release tag. Then assert, in the same `llama.yml` smoke step, that every flag `llama::serve_args` passes is still understood:
 
 ```bash
-git add Dockerfile.llama .github/workflows/llama.yml
-git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "fix(llama): the model-server image can actually run"
+for f in --fit --fit-ctx --fit-target --cache-ram --ctx-checkpoints --kv-unified --flash-attn -ctk -ctv --parallel --api-key-file; do
+  docker run --rm --entrypoint sh "$image" -c "/opt/llama/llama-server --help" | grep -q -- "$f" || { echo "флага $f в новой сборке нет: $f"; exit 1; }
+done
+```
+
+Expected: every flag found. A flag that quietly disappeared changes how the server behaves on the stand, and nothing else would notice.
+
+- [ ] **Step 4: Build and push the new tag**
+
+Run the workflow (`gh workflow run llama.yml`), about 40 minutes. Expected: a new `dev1c-llama:<version>` digest in ghcr. Note the digest in the task's ledger line — Task 2 pins it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Dockerfile.llama .github/workflows/llama.yml setup/dev1c-setup/src/ops_llama.rs
+git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "fix(llama): the model-server image can actually run, on a current llama.cpp"
 ```
 
 ---
@@ -378,7 +391,65 @@ git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "docs(kit)
 
 ---
 
-### Task 8: Proof
+### Task 8: Memory for a stand that holds many sessions
+
+**Files:**
+- Modify: `setup/dev1c-setup/src/cfg.rs` (`[model] memory`), `setup/dev1c-setup/src/llama.rs` (`cache_ram_mb`), `setup/dev1c-setup/src/ops_llama.rs` (`llama_run_args`), `setup/dev1c-setup/src/verify.rs` (the swap fact)
+- Test: the same files
+
+**Interfaces:**
+- Produces: `cfg::Model::memory` (string like `22g`, empty means «посчитать»), `llama::container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32`, `llama::cache_ram_from_limit(limit_mb: u32) -> u32`, `verify::swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check`.
+- Consumes: `/proc/meminfo` on Linux for total and swap.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test]
+fn the_model_container_gets_what_is_left_of_the_machine() {
+    // Стенд: 32 ГБ всего, 8 ГБ среде, 2 ГБ хосту.
+    assert_eq!(container_memory_mb(32768, 8192, 2048), 22528);
+    // Маленькая машина не уходит в минус и не получает предел ниже пола.
+    assert_eq!(container_memory_mb(8192, 8192, 2048), MIN_MODEL_MB);
+}
+
+#[test]
+fn the_prompt_cache_is_half_the_container_not_half_the_machine() {
+    assert_eq!(cache_ram_from_limit(22528), 8192); // упирается в потолок
+    assert_eq!(cache_ram_from_limit(4096), 2048);
+    assert_eq!(cache_ram_from_limit(1024), 1024); // не ниже пола
+}
+
+#[test]
+fn too_little_swap_is_a_warning_with_both_numbers() {
+    let c = swap_fact(2048, 22528);
+    assert!(!c.ok && c.info, "это предупреждение, а не отказ");
+    assert!(c.detail.contains("2") && c.detail.contains("22"));
+    assert!(swap_fact(32768, 22528).ok);
+}
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cargo test --manifest-path setup/Cargo.toml -p dev1c-setup --no-default-features memory swap_fact cache_ram` — Expected: FAIL.
+
+- [ ] **Step 3: Implement**
+
+`[model] memory` joins the sample with a comment saying what empty means. `llama_run_args` gains `--memory <предел>`, `--memory-swap <удвоенный предел>` and `--memory-reservation <половина>`; `serve_args` takes `--cache-ram` from `cache_ram_from_limit`. The swap fact reads `/proc/meminfo`; on Windows it is skipped (no `Check` at all, not a false pass).
+
+- [ ] **Step 4: Run the tests**
+
+Run: `cargo test --manifest-path setup/Cargo.toml --workspace --no-default-features -j 1` — Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add setup/dev1c-setup/src
+git -c user.name=OktaPlus -c user.email=oktacoder@gmail.com commit -m "feat(dev1c-setup): the model container gets a memory limit of its own"
+```
+
+---
+
+### Task 9: Proof
 
 **Files:**
 - Modify: `.github/workflows/build.yml` (the `dev1c-smoke` job)

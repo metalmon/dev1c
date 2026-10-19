@@ -443,7 +443,7 @@ pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>, host: &str) -> Vec<Acce
             "Сервер модели",
             if model_url.is_empty() { "—".into() } else { model_url },
             match facts {
-                Some((window, max_tokens)) => format!("окно {window} токенов, max_tokens {max_tokens}"),
+                Some((window, max_tokens)) => format!("окно слота {window} токенов, max_tokens {max_tokens}"),
                 None => "замера ещё не было".into(),
             },
         ),
@@ -898,7 +898,7 @@ mod tests {
         assert_eq!(model.detail, "замера ещё не было");
         let rows = access_rows(&c, Some((65536, 8192)), ADDRESS_UNKNOWN);
         let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
-        assert_eq!(model.detail, "окно 65536 токенов, max_tokens 8192");
+        assert_eq!(model.detail, "окно слота 65536 токенов, max_tokens 8192");
     }
 
     #[test]

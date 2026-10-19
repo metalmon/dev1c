@@ -37,6 +37,8 @@ pub struct Model {
     pub name: String,
     /// Порт службы хоста (на петле). Для docker наружу идёт третий порт среды.
     pub port: u16,
+    /// Предел памяти контейнера модели («22g»). Пусто — посчитать от машины.
+    pub memory: String,
     /// На сколько агентов делить окно. 1 — не делить (см. спеку: окно на три не делим).
     pub agents: u16,
     /// Нижняя граница окна для --fit-ctx; меньше — установка проваливается.
@@ -58,6 +60,7 @@ impl Default for Model {
             key: String::new(),
             name: String::new(),
             port: 1235,
+            memory: String::new(),
             agents: 1,
             fit_ctx: 65536,
         }
@@ -77,11 +80,16 @@ pub enum Form {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Facts {
     pub token: String,
+    /// Окно одного слота, объявленное рабочему месту.
     pub window: u32,
     pub max_tokens: u32,
+    /// Ответ агента: пятая часть окна (см. `llama::zed_numbers`).
+    pub max_output: u32,
 }
 
-/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ).
+/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ). Остался нижней
+/// границей ответа и слагаемым в проверке «три числа»: сам ответ теперь
+/// считается от окна слота (`llama::zed_numbers`).
 pub const OUTPUT_TOKENS: u32 = 8192;
 
 impl Default for Cfg {
@@ -196,7 +204,10 @@ impl Cfg {
                 env.push(("CUSTOM_API_KEY".into(), f.token.clone()));
                 env.push(("CUSTOM_MODEL".into(), self.model_alias()));
                 env.push(("CUSTOM_MAX_TOKENS".into(), f.max_tokens.to_string()));
-                env.push(("CUSTOM_MAX_OUTPUT_TOKENS".into(), OUTPUT_TOKENS.to_string()));
+                // Ответ — пятая часть окна слота, а не постоянные 8192: Zed
+                // просит её сам, и расхождение упирается в предел на длинном
+                // диалоге. Ниже OUTPUT_TOKENS не опускаемся.
+                env.push(("CUSTOM_MAX_OUTPUT_TOKENS".into(), f.max_output.max(OUTPUT_TOKENS).to_string()));
             }
         }
         env
@@ -218,6 +229,7 @@ impl Cfg {
                 ("[model]", "key") => format!("{:?}", cfg.model.key),
                 ("[model]", "name") => format!("{:?}", cfg.model.name),
                 ("[model]", "port") => cfg.model.port.to_string(),
+                ("[model]", "memory") => format!("{:?}", cfg.model.memory),
                 ("[model]", "agents") => cfg.model.agents.to_string(),
                 ("[model]", "fit_ctx") => cfg.model.fit_ctx.to_string(),
                 _ => return None,
@@ -325,13 +337,16 @@ mod tests {
         // До замера фактов нет: контейнеру нечего сказать про модель.
         let env = c.container_env(None);
         assert!(env.is_empty(), "{env:?}");
-        let f = Facts { token: "t".into(), window: 131072, max_tokens: 120832 };
+        let f = Facts { token: "t".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
         let env = c.container_env(Some(&f));
         assert!(env.contains(&("CUSTOM_API_URL".into(), "http://host.docker.internal:1235/v1".into())));
         assert!(env.contains(&("CUSTOM_API_KEY".into(), "t".into())));
         assert!(env.contains(&("CUSTOM_MODEL".into(), "x".into())));
-        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), "120832".into())));
-        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "8192".into())));
+        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), "300000".into())));
+        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "50000".into())));
+        // Крошечное окно не отдаёт Zed ответ в полтора абзаца.
+        let small = Facts { token: "t".into(), window: 20_000, max_tokens: 24_000, max_output: 4_000 };
+        assert!(c.container_env(Some(&small)).contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "8192".into())));
     }
 
     #[test]

@@ -587,12 +587,12 @@ mod tests {
     fn a_change_of_the_measured_numbers_is_a_drift_of_the_container() {
         let mut c = Cfg::default();
         c.model.file = "/m/x.gguf".into();
-        let f = Facts { token: "t".into(), window: 131072, max_tokens: 120832 };
+        let f = Facts { token: "t".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
         let env: Vec<String> = c.container_env(Some(&f)).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
         assert!(drift_of(&c, &c.image(), "3390", &env, Some(&f)).is_none());
         let f2 = Facts { max_tokens: 100000, ..f.clone() };
         let (from, to) = drift_of(&c, &c.image(), "3390", &env, Some(&f2)).unwrap();
-        assert!(from.contains("CUSTOM_MAX_TOKENS=120832") && to.contains("CUSTOM_MAX_TOKENS=100000"));
+        assert!(from.contains("CUSTOM_MAX_TOKENS=300000") && to.contains("CUSTOM_MAX_TOKENS=100000"));
     }
 
     #[test]

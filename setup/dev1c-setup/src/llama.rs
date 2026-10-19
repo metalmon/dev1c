@@ -4,17 +4,26 @@
 
 use serde::Deserialize;
 
-pub const OUTPUT_TOKENS: u32 = crate::cfg::OUTPUT_TOKENS;
-/// Запас на приблизительный счёт токенов у Zed.
-pub const MARGIN: u32 = 2048;
 /// Меньше этого на агента — не кодинг на 1С (модуль в 100 КБ ≈ 40 000 токенов).
 pub const MIN_BUDGET: u32 = 16384;
+/// Слотов у сервера (`--parallel`): по одному на рабочее место.
+pub const SLOTS: u16 = 3;
+/// Сколько тёплых сеансов держит один человек: его слот плюс два отложенных
+/// разговора (расчёт стенда в спеке — три пользователя по три сеанса).
+pub const WARM_PER_SLOT: u16 = 3;
+/// Ниже этого предел контейнеру модели не ставим: сервер с таким пределом
+/// убьёт OOM на первом же запросе, и причина будет непонятной.
+pub const MIN_MODEL_MB: u32 = 4096;
+/// Хосту и движку контейнеров — столько, сколько им нужно, чтобы не уйти в
+/// подкачку вместе с 1С (решение заказчика 2026-10-19).
+pub const HOST_RESERVE_MB: u64 = 2048;
 
 pub struct ServeInput<'a> {
     pub model: &'a str,
     pub alias: &'a str,
     pub host: &'a str,
     pub port: u16,
+    /// Окно НА СЛОТ: в строку уходит общий пул, `fit_ctx × SLOTS`.
     pub fit_ctx: u32,
     pub fit_target: u32,
     pub cache_ram: u32,
@@ -26,14 +35,18 @@ pub struct ServeInput<'a> {
 /// Командная строка по спеке volt-llama. Окно НЕ задаём: подбор уменьшит его
 /// под карту, а заданное окно он уменьшить не может и выносит слои на
 /// процессор — генерация падает с 32 до 4 токенов в секунду.
+///
+/// `--fit-ctx` получает ОБЩИЙ пул: при `--kv-unified` кэш у слотов один, и
+/// три занятых слота по `fit_ctx` токенов живут только в пуле втрое большем.
 pub fn serve_args(i: &ServeInput) -> Vec<String> {
     let port = i.port.to_string();
-    let fit_ctx = i.fit_ctx.to_string();
+    let fit_ctx = (i.fit_ctx as u64 * SLOTS as u64).to_string();
+    let slots = SLOTS.to_string();
     let fit_target = i.fit_target.to_string();
     let cache_ram = i.cache_ram.to_string();
     let mut a: Vec<String> = [
         "-m", i.model, "--alias", i.alias, "--host", i.host, "--port", &port,
-        "--parallel", "3", "--kv-unified", "--fit", "on", "--fit-ctx", &fit_ctx, "--fit-target", &fit_target,
+        "--parallel", &slots, "--kv-unified", "--fit", "on", "--fit-ctx", &fit_ctx, "--fit-target", &fit_target,
         "--cache-ram", &cache_ram, "--ctx-checkpoints", "32",
         "-b", "2048", "-ub", "512", "--flash-attn", "on", "-ctk", "q8_0", "-ctv", "q8_0",
         "--jinja", "--reasoning-budget", "0", "--temp", "0.7", "--top-k", "40", "--top-p", "0.95", "--min-p", "0.3", "--metrics",
@@ -48,11 +61,99 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
     a
 }
 
-/// Кэш подсказок: половина свободного ОЗУ, от 1024 до 8192 МиБ. Ноль ломает
-/// слоты (простаивающему слоту некуда переехать), -1 — без предела, и кэш
-/// выдавливает всё в подкачку.
-pub fn cache_ram_mb(free_ram_mb: u64) -> u32 {
-    ((free_ram_mb / 2) as u32).clamp(1024, 8192)
+/// Кэш подсказок: половина предела контейнера модели, от 1024 до 8192 МиБ.
+/// Считается от предела, а не от того, сколько памяти случайно свободно в
+/// минуту установки. Ноль ломает слоты (простаивающему слоту некуда
+/// переехать), -1 — без предела, и кэш выдавливает всё в подкачку. Потолок
+/// 8192 — число стенда из спеки (22 ГБ контейнеру, 8 ГБ кэшу).
+pub fn cache_ram_from_limit(limit_mb: u32) -> u32 {
+    (limit_mb / 2).clamp(1024, 8192)
+}
+
+/// Предел памяти контейнера модели: что осталось от машины после среды и
+/// запаса хосту. Не ниже пола и никогда «в минус».
+pub fn container_memory_mb(total_mb: u64, env_limit_mb: u64, host_reserve_mb: u64) -> u32 {
+    let left = total_mb.saturating_sub(env_limit_mb).saturating_sub(host_reserve_mb);
+    (left.min(u32::MAX as u64) as u32).max(MIN_MODEL_MB)
+}
+
+/// Предел контейнера среды: что стоит на машине (`docker inspect`) — и
+/// только если его там нет, число из параметров. Ноль у движка значит
+/// «предела нет вовсе», и тогда верить ему нельзя.
+pub fn env_limit_mb(from_engine: Option<u64>, from_cfg: &str) -> u64 {
+    from_engine.filter(|n| *n > 0).or_else(|| parse_size_mb(from_cfg)).unwrap_or(0)
+}
+
+/// `24g`, `512m`, `2048` (байты движка) — в МиБ.
+pub fn parse_size_mb(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let (digits, factor) = match t.chars().last()? {
+        'g' | 'G' => (&t[..t.len() - 1], 1024.0),
+        'm' | 'M' => (&t[..t.len() - 1], 1.0),
+        'k' | 'K' => (&t[..t.len() - 1], 1.0 / 1024.0),
+        'b' | 'B' => (&t[..t.len() - 1], 1.0 / (1024.0 * 1024.0)),
+        _ => (t, 1.0 / (1024.0 * 1024.0)),
+    };
+    let n: f64 = digits.trim().parse().ok()?;
+    Some((n * factor) as u64)
+}
+
+/// Сколько байт KV-кэша приходится на токен у ЭТОЙ модели: сервер сообщает
+/// размер кэша и окно, одно делится на другое. Из таблицы это брать нельзя —
+/// она устареет с первой же новой моделью.
+pub fn kv_bytes_per_token(kv_cache_mb: u32, window: u32) -> u32 {
+    if window == 0 {
+        return 0;
+    }
+    (kv_cache_mb as u64 * 1024 * 1024 / window as u64) as u32
+}
+
+/// Сколько токенов НА СЛОТ помещается в видеопамять, оставшуюся под KV.
+pub fn window_that_fits(free_vram_mb: u32, kv_bytes_per_token: u32, slots: u16) -> u32 {
+    if kv_bytes_per_token == 0 {
+        return 0;
+    }
+    let tokens = free_vram_mb as u64 * 1024 * 1024 / kv_bytes_per_token as u64;
+    (tokens / slots.max(1) as u64).min(u32::MAX as u64) as u32
+}
+
+/// Сколько оперативной памяти (и подкачки) займут контрольные точки тёплых
+/// сеансов: столько сеансов по столько токенов.
+pub fn warm_sessions_mb(kv_bytes_per_token: u32, window: u32, sessions: u16) -> u32 {
+    let b = kv_bytes_per_token as u64 * window as u64 * sessions as u64;
+    (b / (1024 * 1024)).min(u32::MAX as u64) as u32
+}
+
+/// Что объявляется рабочему месту. `slot_window` — окно ОДНОГО слота:
+/// на стенде у каждого пользователя свой слот, и объявлять общий пул нельзя.
+/// Zed просит пятую часть объявленного окна под ответ, поэтому `max_tokens`
+/// обязан быть суммой входа и ответа — иначе редактор молча упирается в
+/// предел на длинном диалоге.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ZedNumbers {
+    pub window: u32,
+    pub max_output: u32,
+    pub max_tokens: u32,
+}
+
+/// Несколько агентов у одного человека делят его слот — и только тогда.
+pub fn zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers {
+    let window = slot_window / agents.max(1) as u32;
+    let max_output = window / 5;
+    ZedNumbers { window, max_output, max_tokens: window + max_output }
+}
+
+/// Размер KV-кэша в журнале сервера, сложенный по устройствам: ни `/props`,
+/// ни `/metrics` его не сообщают, а строку «KV buffer size» llama.cpp печатает
+/// при загрузке всегда.
+pub fn kv_cache_mb_from_log(text: &str) -> Option<u32> {
+    let mut sum = 0.0;
+    for l in text.lines().filter(|l| l.contains("KV buffer size")) {
+        if let Some(n) = l.rsplit('=').next().and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse::<f64>().ok()) {
+            sum += n;
+        }
+    }
+    (sum > 0.0).then_some(sum as u32)
 }
 
 /// Карта с рабочим столом занята уже в покое: оставляем ей вдвое больше.
@@ -62,14 +163,6 @@ pub fn fit_target_mb(used_mb_idle: u64) -> u32 {
     } else {
         1024
     }
-}
-
-/// Бюджет одного агента в Zed из окна сервера. Окно на агентов делится
-/// только если так задано (agents > 1).
-pub fn budget(window: u32, agents: u16) -> Option<u32> {
-    let per = window / agents.max(1) as u32;
-    let b = per.checked_sub(OUTPUT_TOKENS + MARGIN)?;
-    (b >= MIN_BUDGET).then_some(b)
 }
 
 pub struct Props {
@@ -315,20 +408,82 @@ pub fn gpu(ctx: &Ctx) -> Option<Gpu> {
     parse_nvidia_smi(&o.text)
 }
 
-pub fn free_ram_mb(ctx: &Ctx) -> u64 {
-    if cfg!(windows) {
-        docker::probe(ctx, "powershell", &["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory"])
+/// Строка `/proc/meminfo` в МиБ (значения там в КиБ).
+#[cfg(not(windows))]
+fn meminfo_mb(key: &str) -> Option<u64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = t.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
+/// Вся память машины: от неё считается предел контейнера модели.
+pub fn total_ram_mb(ctx: &Ctx) -> u64 {
+    #[cfg(windows)]
+    {
+        docker::probe(ctx, "powershell", &["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"])
             .ok()
             .and_then(|o| o.text.trim().lines().next()?.trim().parse::<u64>().ok())
             .map(|kb| kb / 1024)
             .unwrap_or(0)
-    } else {
-        std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|t| t.lines().find(|l| l.starts_with("MemAvailable:"))?.split_whitespace().nth(1)?.parse::<u64>().ok())
-            .map(|kb| kb / 1024)
-            .unwrap_or(0)
     }
+    #[cfg(not(windows))]
+    {
+        let _ = ctx;
+        meminfo_mb("MemTotal:").unwrap_or(0)
+    }
+}
+
+/// Файл подкачки, как его видит ядро. На Windows его размером не управляем
+/// и проверку не показываем вовсе — отсюда None.
+pub fn swap_total_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        None
+    }
+    #[cfg(not(windows))]
+    {
+        meminfo_mb("SwapTotal:")
+    }
+}
+
+/// Предел памяти контейнера среды, который стоит на машине: байты из
+/// `docker inspect`, переведённые в МиБ. Контейнера нет — None.
+pub fn engine_env_limit_mb(ctx: &Ctx) -> Option<u64> {
+    let t = docker::inspect(ctx, &ctx.cfg.server.name, "{{.HostConfig.Memory}}");
+    t.trim().parse::<u64>().ok().map(|b| b / (1024 * 1024))
+}
+
+/// Предел памяти контейнера модели: заданный в параметрах, иначе остаток
+/// машины после контейнера среды и запаса хосту.
+pub fn limit_mb(ctx: &Ctx) -> u32 {
+    if let Some(n) = parse_size_mb(&ctx.cfg.model.memory) {
+        return (n.min(u32::MAX as u64) as u32).max(MIN_MODEL_MB);
+    }
+    let env = env_limit_mb(engine_env_limit_mb(ctx), &ctx.cfg.server.memory);
+    container_memory_mb(total_ram_mb(ctx), env, HOST_RESERVE_MB)
+}
+
+/// Сколько видеопамяти может пойти под KV-кэш: свободное сейчас плюс то, что
+/// кэш нашего сервера уже держит (иначе занятая им память читалась бы как
+/// «карта больше не вмещает окно, которое сама же и вмещает»).
+pub fn vram_for_kv_mb(ctx: &Ctx, kv_bytes_per_token: u32, window: u32) -> u32 {
+    let free = gpu(ctx).map(|g| g.total_mb.saturating_sub(g.used_mb)).unwrap_or(0);
+    let held = kv_bytes_per_token as u64 * window as u64 / (1024 * 1024);
+    (free + held).min(u32::MAX as u64) as u32
+}
+
+/// Журнал сервера модели: там и только там llama.cpp называет размер
+/// KV-кэша. Форма docker — журнал контейнера, форма host — файл службы
+/// (Windows, nssm) или журнал systemd (Linux).
+pub fn server_log(ctx: &Ctx) -> String {
+    if ctx.cfg.form() == Form::Docker {
+        return docker::ask(ctx, &["logs", "--tail", "400", &ctx.cfg.llama_container()]).map(|o| o.text).unwrap_or_default();
+    }
+    let file = std::fs::read_to_string(log_file()).unwrap_or_default();
+    if !file.is_empty() || cfg!(windows) {
+        return file;
+    }
+    docker::probe(ctx, "journalctl", &["-u", SERVICE, "-n", "400", "--no-pager"]).map(|o| o.text).unwrap_or_default()
 }
 
 /// Где слушать: на Windows петля (Docker Desktop доставляет host.docker.internal
@@ -502,6 +657,7 @@ pub fn measure_prefill(url: &str, token: &str) -> Option<f64> {
 pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Result<()> {
     ctx.kit.state_set("llama.window", &f.window.to_string())?;
     ctx.kit.state_set("llama.max_tokens", &f.max_tokens.to_string())?;
+    ctx.kit.state_set("llama.max_output", &f.max_output.to_string())?;
     ctx.kit.state_set("llama.prefill", &prefill.map(|p| format!("{p:.0}")).unwrap_or_default())
 }
 
@@ -510,7 +666,13 @@ pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
         token: read_token(&ctx.kit, ctx.cfg.form())?,
         window: ctx.kit.state_get("llama.window")?.parse().ok()?,
         max_tokens: ctx.kit.state_get("llama.max_tokens")?.parse().ok()?,
+        max_output: ctx.kit.state_get("llama.max_output")?.parse().ok()?,
     })
+}
+
+/// Байт KV на токен, посчитанный замером: число модели, а не таблицы.
+pub fn kv_per_token(ctx: &Ctx) -> Option<u32> {
+    ctx.kit.state_get("llama.kv_bytes_per_token")?.parse().ok()
 }
 
 #[cfg(test)]
@@ -526,7 +688,8 @@ mod tests {
         let a = serve_args(&input(Some("/k/dev1c-llama.token")));
         assert!(!a.iter().any(|x| x == "-c" || x == "--ctx-size"), "окно не задаём: {a:?}");
         let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
-        assert_eq!(at("--fit-ctx").as_deref(), Some("65536"));
+        // Окно задаётся на слот, а серверу уходит общий пул: три слота по 65536.
+        assert_eq!(at("--fit-ctx").as_deref(), Some("196608"));
         assert_eq!(at("--fit-target").as_deref(), Some("1024"));
         assert_eq!(at("--parallel").as_deref(), Some("3"));
         assert!(a.iter().any(|x| x == "--kv-unified"));
@@ -544,10 +707,65 @@ mod tests {
     }
 
     #[test]
-    fn cache_ram_is_half_of_free_memory_within_bounds() {
-        assert_eq!(cache_ram_mb(32000), 8192);
-        assert_eq!(cache_ram_mb(6000), 3000);
-        assert_eq!(cache_ram_mb(500), 1024);
+    fn the_window_that_fits_comes_from_the_model_not_from_a_table() {
+        // Сервер сообщил: окно 65 536 токенов заняло 640 МиБ кэша →
+        // 10 КиБ на токен (гибридная модель класса Qwen3.6-35B-A3B).
+        assert_eq!(kv_bytes_per_token(640, 65536), 10 * 1024);
+        // 13 ГиБ свободной видеопамяти, три слота: по 250k на слот и ещё остаётся.
+        assert!(window_that_fits(13312, 10 * 1024, 3) >= 250_000);
+        // 32 КиБ на токен (класс Qwen3.8-27B): три слота по 250k уже не помещаются.
+        assert!(window_that_fits(13312, 32 * 1024, 3) < 250_000);
+        // Девять тёплых сеансов по 250k при 10 КиБ — это 22 ГиБ.
+        assert_eq!(warm_sessions_mb(10 * 1024, 250_000, 9), 21_972);
+    }
+
+    #[test]
+    fn what_zed_is_told_matches_one_slot_and_carries_the_answer_too() {
+        // Слот 250k, один агент: окно слота целиком, ответ — пятая часть,
+        // max_tokens — их сумма, иначе Zed упрётся в предел на длинном диалоге.
+        let z = zed_numbers(250_000, 1);
+        assert_eq!(z.window, 250_000);
+        assert_eq!(z.max_output, 50_000);
+        assert_eq!(z.max_tokens, 300_000);
+        // Три агента у одного человека делят его слот.
+        assert_eq!(zed_numbers(250_000, 3).window, 83_333);
+    }
+
+    #[test]
+    fn the_model_container_gets_what_is_left_of_the_machine() {
+        // Стенд: 32 ГБ всего, 8 ГБ среде, 2 ГБ хосту.
+        assert_eq!(container_memory_mb(32768, 8192, 2048), 22528);
+        // Маленькая машина не уходит в минус и не получает предел ниже пола.
+        assert_eq!(container_memory_mb(8192, 8192, 2048), MIN_MODEL_MB);
+    }
+
+    #[test]
+    fn the_environment_limit_is_read_from_the_engine_not_assumed() {
+        // Контейнер среды мог поднять provision.sh со своим числом: берём то,
+        // что стоит на самом деле, а параметры — только когда его ещё нет.
+        assert_eq!(env_limit_mb(Some(12288), "8g"), 12288);
+        assert_eq!(env_limit_mb(None, "8g"), 8192);
+        assert_eq!(env_limit_mb(Some(0), "8g"), 8192); // 0 — предела нет вовсе
+    }
+
+    #[test]
+    fn the_prompt_cache_is_half_the_container_not_half_the_machine() {
+        assert_eq!(cache_ram_from_limit(22528), 8192); // упирается в потолок
+        assert_eq!(cache_ram_from_limit(4096), 2048);
+        assert_eq!(cache_ram_from_limit(1024), 1024); // не ниже пола
+    }
+
+    #[test]
+    fn the_size_of_the_kv_cache_is_read_from_the_server_log() {
+        // Размера кэша нет ни в /props, ни в /metrics: llama.cpp называет его
+        // только в журнале, и по устройствам — значит складываем.
+        let log = "llama_kv_cache: CUDA0 KV buffer size =   320.00 MiB\nllama_kv_cache: CUDA1 KV buffer size =   320.00 MiB\nllama_context: n_ctx = 65536\n";
+        assert_eq!(kv_cache_mb_from_log(log), Some(640));
+        assert_eq!(kv_cache_mb_from_log("llama_context: n_ctx = 65536"), None);
+        // Предел памяти движка приходит в байтах; ноль — предела нет.
+        assert_eq!(parse_size_mb("22528m"), Some(22528));
+        assert_eq!(parse_size_mb("22g"), Some(22528));
+        assert_eq!(parse_size_mb(""), None);
     }
 
     #[test]
@@ -555,13 +773,6 @@ mod tests {
         assert_eq!(fit_target_mb(0), 1024);
         assert_eq!(fit_target_mb(200), 1024);
         assert_eq!(fit_target_mb(1250), 2048);
-    }
-
-    #[test]
-    fn the_budget_subtracts_the_answer_and_the_margin_and_refuses_small_windows() {
-        assert_eq!(budget(131072, 1), Some(131072 - 8192 - 2048));
-        assert_eq!(budget(131072, 3), Some(131072 / 3 - 8192 - 2048));
-        assert_eq!(budget(16384, 1), None, "меньше 16384 на агента — не бюджет");
     }
 
     #[test]
@@ -581,14 +792,15 @@ mod tests {
         let kit = common::kit::Kit::at(&dir);
         let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
         assert!(ctx.kit.state_get("llama.window").is_none());
-        let f = crate::cfg::Facts { token: "abc".into(), window: 131072, max_tokens: 120832 };
+        let f = crate::cfg::Facts { token: "abc".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
         facts_save(&ctx, &f, Some(2600.0)).unwrap();
         // Токен в состоянии комплекта не хранится: он только в своём файле.
         assert!(ctx.kit.state_get("llama.token").is_none());
-        assert_eq!(ctx.kit.state_get("llama.window").as_deref(), Some("131072"));
-        assert_eq!(ctx.kit.state_get("llama.max_tokens").as_deref(), Some("120832"));
+        assert_eq!(ctx.kit.state_get("llama.window").as_deref(), Some("250000"));
+        assert_eq!(ctx.kit.state_get("llama.max_tokens").as_deref(), Some("300000"));
+        assert_eq!(ctx.kit.state_get("llama.max_output").as_deref(), Some("50000"));
         if let Some(got) = facts_load(&ctx) {
-            assert_eq!((got.window, got.max_tokens), (131072, 120832));
+            assert_eq!((got.window, got.max_tokens, got.max_output), (250_000, 300_000, 50_000));
         }
         let secret = dir_for_test.join("s.token");
         write_secret(&secret, "x").unwrap();

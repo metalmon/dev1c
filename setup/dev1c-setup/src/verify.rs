@@ -152,10 +152,24 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         });
         if let Some(p) = props {
             v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents));
-            // model_window_fact сверяет окно с тем, что карта может дать сейчас —
-            // в токенах. Задача 8 (kv_bytes_per_token, window_that_fits) переводит
-            // свободные МиБ карты (llama::gpu даёт их в МиБ) в токены; пока этого
-            // числа нет в коде, факт не подключён.
+            // Сервер сообщает окно слота (при --kv-unified это весь общий пул
+            // сразу): доля, на которую можно рассчитывать при всех занятых
+            // слотах, — пул, делённый на слоты, и объявляется рабочим местам
+            // именно она.
+            let slot = p.window / p.slots.max(1) as u32;
+            if let Some(declared) = ctx.kit.state_get("llama.window").and_then(|s| s.parse::<u32>().ok()) {
+                v.push(declared_window_fact(declared, slot));
+            }
+            // Карта общая с vGPU: столько токенов на слот она держит сейчас.
+            if let Some(kv) = llama::kv_per_token(ctx) {
+                let available = llama::window_that_fits(llama::vram_for_kv_mb(ctx, kv, p.window), kv, p.slots);
+                v.push(model_window_fact(slot, available, ctx.cfg.model.fit_ctx));
+            }
+        }
+        // Подкачка — требование к хосту; на Windows её размером не управляем,
+        // и факта нет вовсе (ложного «пройдено» тоже).
+        if let Some(swap) = llama::swap_total_mb() {
+            v.push(swap_fact(swap, llama::limit_mb(ctx)));
         }
     }
     // Для Zed модель всегда провайдер custom: удалённая по имени из toml,
@@ -221,11 +235,42 @@ pub fn numbers_fact(window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Ch
     }
 }
 
+/// Окно, в которое верит Zed, против того, что сервер может дать сейчас.
+/// Это та поломка, которая иначе выглядит как «агент поглупел»: Zed верит
+/// объявленному окну, сервер режет по своему, и виноватым оказывается
+/// качество модели. Оба числа — на слот.
+pub fn declared_window_fact(declared: u32, available: u32) -> Check {
+    if available >= declared {
+        Check::pass("окно, объявленное рабочим местам", format!("объявлено {declared} токенов на слот, сервер даёт {available}"))
+    } else {
+        Check::fail(
+            "окно, объявленное рабочим местам",
+            format!("рабочим местам объявлено {declared} токенов на слот, а сервер даёт {available}"),
+            "dev1c-setup install — пересчитает числа и пересоздаст контейнер среды",
+        )
+    }
+}
+
+/// Подкачки меньше, чем может попросить сервер модели. Предупреждение, а не
+/// отказ: работать будет, но на пределе — поэтому `note`, и `check` не
+/// уходит с ненулевым кодом из-за настройки хоста.
+pub fn swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check {
+    if swap_total_mb >= limit_mb as u64 {
+        return Check::pass("файл подкачки", format!("{swap_total_mb} МиБ при пределе контейнера модели {limit_mb} МиБ"));
+    }
+    let gb = (limit_mb as u64 + 1023) / 1024;
+    Check::note(
+        "файл подкачки",
+        format!(
+            "подкачки {swap_total_mb} МиБ, а контейнер модели может попросить {limit_mb} МиБ; увеличьте файл подкачки до {gb} ГБ — иначе переполнение кэша убьёт сервер модели вместе со всеми сеансами"
+        ),
+    )
+}
+
 /// Карта общая с vGPU: окно, замеренное при настройке, на следующий день
 /// может больше не помещаться. «Было столько, сейчас карта даёт столько» —
-/// всё, что нужно сказать администратору. `available` — токены, не МиБ
-/// (перевод свободных МиБ в токены — задача 8: kv_bytes_per_token,
-/// window_that_fits).
+/// всё, что нужно сказать администратору. Оба числа — токены на слот
+/// (`llama::window_that_fits` переводит в них свободные МиБ карты).
 pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
     // Сравниваем с measured — окном, которое сервер реально загрузил, а не
     // с fit_ctx (настроенной целью): карта могла ещё удовлетворять fit_ctx и
@@ -275,6 +320,38 @@ mod tests {
         assert!(!numbers_fact(131072, Some(60000), 3).ok);
         assert_eq!(zed_max_tokens("  \"max_tokens\": 120832,\n  \"max_output_tokens\": 8192,"), Some(120832));
         assert_eq!(zed_max_tokens("\"max_tokens\": CUSTOM_MAX_TOKENS_PLACEHOLDER,"), None);
+    }
+
+    #[test]
+    fn a_window_zed_believes_but_the_server_cannot_give_is_a_failed_fact() {
+        let c = declared_window_fact(250_000, 180_000);
+        assert!(!c.ok);
+        assert!(c.detail.contains("250") && c.detail.contains("180"));
+        assert!(declared_window_fact(180_000, 180_000).ok);
+    }
+
+    #[test]
+    fn too_little_swap_is_a_warning_with_both_numbers() {
+        let c = swap_fact(2048, 22528);
+        assert!(c.ok && c.info, "это предупреждение, а не отказ");
+        assert!(c.detail.contains("2") && c.detail.contains("22"));
+        let good = swap_fact(32768, 22528);
+        assert!(good.ok && !good.info);
+    }
+
+    #[test]
+    fn the_pilot_numbers_pass_both_counts_at_once() {
+        // Стенд: по 250k на слот, три слота — значит пул 750k, и именно его
+        // сообщает /props (llama.cpp: slot_n_ctx, а при --kv-unified
+        // n_ctx_seq == n_ctx — весь пул). Zed получает долю одного слота.
+        let pool = 250_000 * llama::SLOTS as u32;
+        for agents in 1..=3u16 {
+            let z = llama::zed_numbers(pool / llama::SLOTS as u32, agents);
+            let c = numbers_fact(pool, Some(z.max_tokens), agents);
+            assert!(c.ok, "agents={agents}: {c:?}");
+            assert!(declared_window_fact(z.window, pool / llama::SLOTS as u32).ok);
+        }
+        assert_eq!(llama::zed_numbers(250_000, 1).max_tokens, 300_000);
     }
 
     #[test]

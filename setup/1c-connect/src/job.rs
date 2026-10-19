@@ -109,20 +109,45 @@ impl Job {
     }
 }
 
+/// `killpg(pgid, 0)` никого не трогает, только проверяет, жива ли группа:
+/// `false`, когда ядро отвечает `ESRCH` — группы больше нет (а значит pgid,
+/// возможно, уже отдан другому процессу, и слать ему что-либо нельзя).
+#[cfg(not(windows))]
+fn group_is_alive(pgid: i32) -> bool {
+    // SAFETY: обычный вызов libc, сигнал 0 ничего не посылает, pgid > 0
+    // гарантирован вызывающим кодом (`remember`), указателей нет.
+    let r = unsafe { libc::killpg(pgid, 0) };
+    !(r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+}
+
 #[cfg(not(windows))]
 impl Drop for Job {
     fn drop(&mut self) {
         let pgids = std::mem::take(&mut *self.0.lock().unwrap());
         for &pgid in &pgids {
+            // SAFETY: обычный вызов libc, pgid положителен (см. `remember`),
+            // указателей нет; в этот момент группа — точно та, что мы создали.
             unsafe { libc::killpg(pgid, libc::SIGTERM) };
         }
         if pgids.is_empty() {
             return;
         }
-        // Поток детачится: drop не ждёт 5 секунд эскалации до SIGKILL.
+        // Поток детачится: drop не ждёт эскалации до SIGKILL. Эскалация —
+        // не слепая: каждые 250 мс проверяем, жива ли ещё группа, и выходим,
+        // как только убивать больше некого — иначе через 5 с SIGKILL мог бы
+        // улететь в чужой процесс, которому ядро отдало тот же pgid.
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            for &pgid in &pgids {
+            let mut alive = pgids;
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                alive.retain(|&pgid| group_is_alive(pgid));
+                if alive.is_empty() {
+                    return;
+                }
+            }
+            for &pgid in &alive {
+                // SAFETY: обычный вызов libc, pgid положителен и только что
+                // подтверждён как живая группа (`group_is_alive`), указателей нет.
                 unsafe { libc::killpg(pgid, libc::SIGKILL) };
             }
         });
@@ -192,5 +217,28 @@ mod tests {
         drop(job);
         assert!(waits_for_death(child.id()), "sh жив");
         assert!(waits_for_death(grandchild), "внук жив");
+    }
+
+    /// Группа, которую сразу убил SIGTERM, к моменту проверки эскалации уже
+    /// не существует: `group_is_alive` обязан это увидеть (ESRCH), чтобы
+    /// поток `Drop` не прислал ей вдогонку SIGKILL — он мог бы улететь в
+    /// другой процесс, которому ядро к тому времени отдало тот же pgid.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_group_killed_by_sigterm_has_nothing_left_to_escalate_against() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo $!; wait"]).stdout(std::process::Stdio::piped());
+        group_std(&mut cmd);
+        let job = Job::new().unwrap();
+        let mut child = cmd.spawn().unwrap();
+        assert!(job.assign_std(&child));
+        let grandchild = read_first_line(child.stdout.as_mut().unwrap());
+        let pgid = child.id() as i32;
+        drop(job); // немедленный SIGTERM убивает и sh, и внука.
+        assert!(waits_for_death(child.id()), "sh жив");
+        assert!(waits_for_death(grandchild), "внук жив");
+        // Группы больше нет: именно это условие останавливает поток
+        // эскалации до того, как он дойдёт до SIGKILL.
+        assert!(!group_is_alive(pgid), "группа всё ещё жива для killpg");
     }
 }

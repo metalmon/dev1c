@@ -143,7 +143,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             Some(g) => Check::pass("видеокарта", format!("{}, {} МиБ, занято {} МиБ, драйвер {}", g.name, g.total_mb, g.used_mb, g.driver)),
             None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
         });
-        let token = llama::read_token().unwrap_or_default();
+        let token = llama::read_token(&ctx.kit, ctx.cfg.form()).unwrap_or_default();
         let url = crate::ops_llama::local_url(ctx);
         let props = llama::props(&url, &token);
         v.push(match &props {

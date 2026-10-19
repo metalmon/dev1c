@@ -43,14 +43,18 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 }
 
 /// Что входит в список: всё, кроме самого списка, того, что программа пишет
-/// сама, и файлов параметров — их человек правит по назначению.
+/// сама, файлов параметров — их человек правит по назначению, — и секрета
+/// сервера модели формы docker вместе с его файлом переменных: оба
+/// появляются только на установке, в комплекте их при сборке поставки нет.
 fn listed(rel: &str) -> bool {
     !(rel == LIST
         || rel.ends_with(".log")
         || rel == "install.state"
         || rel == "last-check.txt"
         || rel == "dev1c.toml"
-        || rel == "1c-connect.toml")
+        || rel == "1c-connect.toml"
+        || rel == "dev1c-llama.token"
+        || rel == "llama.env")
 }
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -125,6 +129,10 @@ mod tests {
         // The parameter files are the customer's to edit: never listed.
         std::fs::write(d.join("dev1c.toml"), "[server]\nport = 3390\n").unwrap();
         std::fs::write(d.join("1c-connect.toml"), "[host]\n").unwrap();
+        // The docker form's model-server secret and its env file are
+        // generated at install time, not shipped in the kit: never listed.
+        std::fs::write(d.join("dev1c-llama.token"), "secret").unwrap();
+        std::fs::write(d.join("llama.env"), "LLAMA_API_KEY=secret\n").unwrap();
         Kit::at(d)
     }
 
@@ -132,7 +140,7 @@ mod tests {
     fn list_then_verify_then_detect_damage() {
         let k = tmp_kit();
         let n = write_list(&k, |_| {}).unwrap();
-        assert_eq!(n, 2, "the log and the parameter files are not listed");
+        assert_eq!(n, 2, "the log, the parameter files and the generated secret files are not listed");
         std::fs::write(k.path("dev1c.toml"), "[server]\nport = 4000\n").unwrap();
         assert!(verify(&k, |_, _, _| {}).unwrap().ok(), "editing parameters is not damage");
         assert!(verify(&k, |_, _, _| {}).unwrap().ok());

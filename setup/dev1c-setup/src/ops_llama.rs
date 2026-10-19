@@ -30,7 +30,7 @@ pub fn local_url(ctx: &Ctx) -> String {
 pub fn desired_args(ctx: &Ctx) -> Vec<String> {
     let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
     let host = llama::bind_host(ctx);
-    let token = llama::token_file().to_string_lossy().to_string();
+    let token = llama::token_path(&ctx.kit, ctx.cfg.form()).to_string_lossy().to_string();
     let alias = ctx.cfg.model_alias();
     llama::serve_args(&llama::ServeInput {
         model: &ctx.cfg.model.file,
@@ -320,7 +320,7 @@ impl Op<Ctx> for Container {
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let token = llama::ensure_token(ctx)?;
-        llama::write_env_file(&token)?;
+        llama::write_env_file(&ctx.kit, &token)?;
         let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
         let args = self.wanted(ctx);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -343,7 +343,7 @@ impl Op<Ctx> for Container {
 impl Container {
     fn wanted(&self, ctx: &Ctx) -> Vec<String> {
         let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
-        let env = llama::env_file().to_string_lossy().to_string();
+        let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
         llama_run_args(&ctx.cfg, &env, &llama::bind_host(ctx), llama::cache_ram_mb(llama::free_ram_mb(ctx)), llama::fit_target_mb(used))
     }
 }

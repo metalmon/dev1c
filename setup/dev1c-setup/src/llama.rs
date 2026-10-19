@@ -128,14 +128,19 @@ pub fn parse_nvidia_smi(csv: &str) -> Option<Gpu> {
 
 // ------------------------------------------------------------ обёртки
 
+use crate::cfg::Form;
 use crate::ops::Ctx;
 use anyhow::{Context, Result};
 use common::docker;
+use common::kit::Kit;
 use common::Runner;
 use std::path::PathBuf;
 
 pub const SERVICE: &str = "dev1c-llama";
 
+/// Каталог службы хоста: его закрывают root/SYSTEM, потому что подложенный
+/// туда `llama-server` выполнился бы от её имени. Только форма host кладёт
+/// сюда секрет; форма docker — см. `token_path`.
 pub fn dir() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(r"C:\dev1c\llama")
@@ -146,21 +151,32 @@ pub fn dir() -> PathBuf {
 pub fn server_exe() -> PathBuf {
     dir().join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" })
 }
-pub fn token_file() -> PathBuf {
-    dir().join("dev1c-llama.token")
-}
 pub fn log_file() -> PathBuf {
     dir().join("llama.log")
 }
-/// Файл переменных для контейнера модели (LLAMA_API_KEY=…): лежит в
-/// закрытом каталоге, в аргументы docker попадает путь.
-pub fn env_file() -> PathBuf {
-    dir().join("llama.env")
+
+/// Где лежит токен сервера. Форма host — в закрытом каталоге службы (его
+/// открывает только root/SYSTEM, потому что от его имени выполняется
+/// подложенный `llama-server`). Форма docker не трогает `/opt`: секрет
+/// нужен только установщику и контейнеру, не службе, и лежит в комплекте —
+/// у того, кто ставит, на него и так есть права.
+pub fn token_path(kit: &Kit, form: Form) -> PathBuf {
+    if form == Form::Docker {
+        kit.path("dev1c-llama.token")
+    } else {
+        dir().join("dev1c-llama.token")
+    }
+}
+
+/// Файл переменных для контейнера модели (LLAMA_API_KEY=…): только форма
+/// docker его использует, и лежит он рядом с токеном — в комплекте.
+pub fn env_path(kit: &Kit) -> PathBuf {
+    kit.path("llama.env")
 }
 
 /// Записать файл переменных контейнера заново (токен мог смениться).
-pub fn write_env_file(token: &str) -> Result<()> {
-    let f = env_file();
+pub fn write_env_file(kit: &Kit, token: &str) -> Result<()> {
+    let f = env_path(kit);
     let _ = std::fs::remove_file(&f);
     write_secret(&f, &format!("LLAMA_API_KEY={token}\n"))
 }
@@ -265,25 +281,29 @@ fn os_random(buf: &mut [u8]) -> Result<()> {
 }
 
 /// Токен, если он уже выписан. Живёт только в своём файле.
-pub fn read_token() -> Option<String> {
-    let t = std::fs::read_to_string(token_file()).ok()?;
+pub fn read_token(kit: &Kit, form: Form) -> Option<String> {
+    let t = std::fs::read_to_string(token_path(kit, form)).ok()?;
     let t = t.trim().to_string();
     (!t.is_empty()).then_some(t)
 }
 
-/// Токен службы: файл в закрытом каталоге (права наследуются от него —
-/// SYSTEM и администраторы, Linux: 0600), в команду попадает путь.
-/// Каталог закрывается заново и до чтения существующего файла: так
+/// Токен сервера: файл в закрытом каталоге службы (Linux: 0600, права
+/// наследуются от каталога — SYSTEM и администраторы) для формы host, и в
+/// комплекте для формы docker (её каталог не закрываем — см. `token_path`).
+/// Каталог host закрывается заново и до чтения существующего файла: так
 /// старый токен тоже оказывается под замком.
 pub fn ensure_token(ctx: &Ctx) -> Result<String> {
-    ensure_dir(ctx)?;
-    if let Some(t) = read_token() {
+    let form = ctx.cfg.form();
+    if form != Form::Docker {
+        ensure_dir(ctx)?;
+    }
+    if let Some(t) = read_token(&ctx.kit, form) {
         return Ok(t);
     }
-    let f = token_file();
+    let f = token_path(&ctx.kit, form);
     anyhow::ensure!(!f.exists(), "{} есть, но не читается: проверьте права на каталог", f.display());
     let token = random_hex();
-    write_secret(&token_file(), &token)?;
+    write_secret(&f, &token)?;
     Ok(token)
 }
 
@@ -487,7 +507,7 @@ pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Res
 
 pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
     Some(crate::cfg::Facts {
-        token: read_token()?,
+        token: read_token(&ctx.kit, ctx.cfg.form())?,
         window: ctx.kit.state_get("llama.window")?.parse().ok()?,
         max_tokens: ctx.kit.state_get("llama.max_tokens")?.parse().ok()?,
     })
@@ -577,6 +597,29 @@ mod tests {
         let t2 = random_hex();
         assert_eq!(t1.len(), 32);
         assert!(t1.chars().all(|c| c.is_ascii_hexdigit()) && t1 != t2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_container_form_keeps_its_secret_in_the_kit() {
+        let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("dev1c-llama-token-path-{}", std::process::id())));
+        assert_eq!(token_path(&kit, Form::Docker), kit.path("dev1c-llama.token"));
+        assert_ne!(token_path(&kit, Form::Host), token_path(&kit, Form::Docker));
+        assert_eq!(env_path(&kit), kit.path("llama.env"));
+    }
+
+    #[test]
+    fn the_secret_is_written_closed_to_its_owner() {
+        let dir = std::env::temp_dir().join(format!("dev1c-llama-secret-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("s.token");
+        write_secret(&f, "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&f).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "секрет не закрыт: {mode:o}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

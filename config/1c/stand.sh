@@ -92,7 +92,7 @@ home_of() { getent passwd "$1" | cut -d: -f6; }
 
 seed() { # runs as the workstation user; $HOME is theirs
     payload_present || {
-        log "no platform in this container: the volumes dev1c-platform and dev1c-demo are empty (see provision.sh)" >&2
+        log "no platform in this container: /opt/1cv8t and /opt/1c-demo are empty (see provision.sh)" >&2
         return 1
     }
     # The file, not the directory: the Apache module creates the directory with
@@ -312,7 +312,7 @@ start)
         # Not a failure of the container: the desktop, Zed and Gitea are the
         # base image's and work without 1C. Exiting here would put the
         # container in a restart loop and hide the one line that matters.
-        log "1C is not in this container: the volumes dev1c-platform and dev1c-demo are empty"
+        log "1C is not in this container: /opt/1cv8t and /opt/1c-demo are empty — the two payload volumes"
         log "fill them once:  ./provision.sh import <payload.tar.gz>"
         exec /usr/local/bin/entrypoint
     fi

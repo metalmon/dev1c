@@ -174,10 +174,17 @@ mkdir platform                         # git- and docker-ignored
 docker exec dev1c test-stand           # the check of a running stand
 ```
 
-On a customer's machine only the last three lines happen, with the image tar
-and the payload tar from the kit. The payload is rebuilt only for a new
-platform or a new demo configuration; `payload.conf` inside it records which
-versions it was built from, and `test-stand` prints that line first.
+On another machine only the last three lines happen, carrying two files: the
+image (`docker save oktaplus/dev1c-1c:latest | gzip`) and
+`dev1c-1c-payload.tar.gz`. There is no packed stand kit yet — `pack.sh` builds
+the kit of the development environment, not of the stand. The payload is
+rebuilt only for a new platform or a new demo configuration; `payload.conf`
+inside it records which versions it was built from, and `test-stand` prints
+that line first.
+
+`DEV1C_NAME` renames the container and all four volumes together and
+`DEV1C_PORT_BASE` moves the three ports, so a second stand can be raised
+beside a live one without touching it.
 
 The demo base is the training УНФ 3.0.13.251 without data: the kit's demo base
 with data has users with passwords, and the training licence admits only empty

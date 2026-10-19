@@ -16,7 +16,10 @@
 #   volumes    dev1c-platform -> /opt/1cv8t      the training platform
 #              dev1c-demo     -> /opt/1c-demo    the template base
 #              dev1c-home, dev1c-gitea           as for the plain dev1c image
-#   ports      3390 RDP, 3391 Gitea, 3393 SSH
+#   ports      3390 RDP, 3391 Gitea, 3393 SSH (DEV1C_PORT_BASE moves all three)
+#
+# DEV1C_NAME renames the container and all four volumes together: a second
+# stand beside a live one, and the way `run` is tested without touching it.
 #
 # `run` passes its extra arguments to `docker run`, which is where the model
 # settings go — this script never reads or writes a key:
@@ -36,11 +39,18 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 IMAGE=oktaplus/dev1c-1c:latest
 PAYLOAD_IMAGE=oktaplus/dev1c-1c-payload:latest
-CONTAINER=dev1c
-VOL_PLATFORM=dev1c-platform
-VOL_DEMO=dev1c-demo
-VOL_HOME=dev1c-home
-VOL_GITEA=dev1c-gitea
+# One knob, everything derived from it: the container and all four volumes are
+# named after it, the ports count up from the base. The defaults are the only
+# values anybody should use — a second name exists so that a stand can be
+# raised next to a live one without touching its volumes, which is also how
+# this script gets tested.
+NAME=${DEV1C_NAME:-dev1c}
+PORT_BASE=${DEV1C_PORT_BASE:-3390}
+CONTAINER=$NAME
+VOL_PLATFORM=$NAME-platform
+VOL_DEMO=$NAME-demo
+VOL_HOME=$NAME-home
+VOL_GITEA=$NAME-gitea
 TAR=platform/dev1c-1c-payload.tar.gz
 MOUNTS="-v $VOL_PLATFORM:/opt/1cv8t -v $VOL_DEMO:/opt/1c-demo"
 
@@ -87,10 +97,10 @@ run)
         --shm-size 2g --cap-add SYS_ADMIN \
         --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
         --device /dev/fuse --add-host host.docker.internal:host-gateway \
-        -p 3390:3389 -p 3391:3000 -p 3393:2022 \
+        -p "$PORT_BASE:3389" -p "$((PORT_BASE + 1)):3000" -p "$((PORT_BASE + 3)):2022" \
         -v "$VOL_HOME:/home" -v "$VOL_GITEA:/var/lib/gitea" $MOUNTS \
         "$@" "$IMAGE" >/dev/null
-    say "$CONTAINER is up: RDP 3390, Gitea 3391, SSH 3393"
+    say "$CONTAINER is up: RDP $PORT_BASE, Gitea $((PORT_BASE + 1)), SSH $((PORT_BASE + 3))"
     say "the check of a running stand: docker exec $CONTAINER test-stand"
     ;;
 status)

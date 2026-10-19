@@ -145,7 +145,7 @@ inside. The agent sees the same ports as with the tunnel — `777N` (mcp-1c),
 `778N` (vrunner-mcp) — served locally by `config/1c/stand.sh`, so Zed, the
 skills and the rules do not change; the Configurator is in the application
 menu, and `1cv8` is on the `PATH`. The base of workstation `devN` is
-`~/base`, seeded from the image on first use; the project directory for
+`~/base`, a copy of the template base made on first use; the project directory for
 vrunner is `~/project`.
 
 The platform and the template base are **not in the image**. They come in two
@@ -167,7 +167,7 @@ mkdir platform                         # git- and docker-ignored
 # put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz),
 # unf-ready.dt and DoNotCopy.txt, the demo base of the stand (see below)
 ./provision.sh build                   # the stand image and the payload image
-./provision.sh export                  # -> platform/dev1c-1c-payload.tar.gz
+./provision.sh export                  # -> dist/dev1c-1c-payload.tar.gz, outside the build context
 ./provision.sh import                  # that tar -> the two volumes
 ./provision.sh run -e CUSTOM_API_URL=… -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=…
 ./provision.sh status                  # what the volumes hold

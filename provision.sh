@@ -51,7 +51,9 @@ VOL_PLATFORM=$NAME-platform
 VOL_DEMO=$NAME-demo
 VOL_HOME=$NAME-home
 VOL_GITEA=$NAME-gitea
-TAR=platform/dev1c-1c-payload.tar.gz
+# NOT under platform/: that directory is a build context, and 2.4 GB of payload
+# would be transferred to the daemon on every build of either target.
+TAR=dist/dev1c-1c-payload.tar.gz
 MOUNTS="-v $VOL_PLATFORM:/opt/1cv8t -v $VOL_DEMO:/opt/1c-demo"
 
 say() { printf '[provision] %s\n' "$*"; }
@@ -74,6 +76,7 @@ build)
 export)
     out=${2:-$TAR}
     docker image inspect "$PAYLOAD_IMAGE" >/dev/null 2>&1 || die "no $PAYLOAD_IMAGE: ./provision.sh build"
+    mkdir -p "$(dirname "$out")"
     say "writing $out (this takes a while: about 4 GB through gzip)"
     docker run --rm "$PAYLOAD_IMAGE" 1c-stand export-payload > "$out.part"
     mv "$out.part" "$out"

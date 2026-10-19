@@ -145,8 +145,9 @@ async fn the_mcp_port_does_not_get_our_tools_injected() {
 - [ ] **Шаг 3: гейт.** В `handle_request` перед разбором маршрута: если `!enabled.load(Relaxed)` и запрос — `tools/call`, вернуть `jsonrpc::text_reply(&id, "MCP выключены в 1c-connect: включите переключатель в окне", true)`. `initialize`, `tools/list`, уведомления и отмены проходят как сейчас: соединение Zed остаётся живым.
 - [ ] **Шаг 4: `inject`.** `rewrite_reply`/`rewrite_list_reply` добавляют `our_tools()` только при `inject == true`; `OurCall` при `inject == false` невозможен (инструментов нет в списке), на всякий случай отвечает тем же текстом отказа с именем инструмента. `defaults`/`connection_args` для порта mcp пустые.
 - [ ] **Шаг 5: один путь.** В `session::serve` порт `ports.mcp` идёт через `pipe_jsonrpc` с `Rules::for_mcp`; `pipe_process` остаётся в коде (им пользуется `ops_host`/`local`), но из `serve` уходит. Строки, не являющиеся JSON-RPC (баннеры дочернего процесса), должны проходить насквозь — это уже поведение `Forward`.
-- [ ] **Шаг 6: тесты проходят** в CI (Windows и Linux).
-- [ ] **Шаг 7: коммит.**
+- [ ] **Шаг 6: лимит сеансов строкой в журнал.** Ответ инструмента уходит агенту как есть (это уже так), но если в тексте ответа есть «превышено предельное количество подключений», мост добавляет в журнал `Warn`: «агент не вошёл в базу: <текст платформы>; если 1С открыта у вас — закройте её». Тест `a_session_limit_answer_adds_one_journal_line`: фиктивный дочерний процесс отвечает этим текстом, в журнале ровно одна такая строка, а ответ агенту не изменён.
+- [ ] **Шаг 7: тесты проходят** в CI (Windows и Linux).
+- [ ] **Шаг 8: коммит.**
 
 ```bash
 git add setup/1c-connect/src/bridge.rs setup/1c-connect/src/session.rs
@@ -248,7 +249,7 @@ git commit -m "holder: называем держателя порта; отка�
 - Consumes: `session::Serve::new(..., enabled)` (задача 3).
 - Produces: `Ui.enabled: Arc<AtomicBool>` — живёт дольше сеанса; `gui::toggle_link` в локальном режиме меняет только флаг, в туннельном — как сейчас (поднимает и опускает сеанс), и флаг следует за `link.is_on()`.
 
-- [ ] **Шаг 1: падающие тесты.** `in_local_mode_the_switch_only_flips_the_flag`: при `mode = "local"` и поднятом сеансе двойной `toggle_link` не меняет `session_gen`, а флаг проходит `false` и снова `true`. `card_titles_speak_about_mcp_not_the_tunnel`: `Off` даёт «MCP выключены», `Up` — «MCP включены», `Failed` — причину, и ни в одном заголовке нет слова «туннель». `saving_a_new_base_restarts_the_session_and_writes_one_journal_line`: `save_host` с другим `base_path` при поднятом сеансе увеличивает `session_gen` и пишет ровно одну строку «MCP перезапущены: база <путь>».
+- [ ] **Шаг 1: падающие тесты.** `in_local_mode_the_switch_only_flips_the_flag`: при `mode = "local"` и поднятом сеансе двойной `toggle_link` не меняет `session_gen`, а флаг проходит `false` и снова `true`. `card_titles_speak_about_mcp_not_the_tunnel`: `Off` даёт «MCP выключены», `Up` — «MCP включены», `Failed` — причину, и ни в одном заголовке нет слова «туннель». `saving_a_new_base_restarts_the_session_and_writes_one_journal_line`: `save_host` с другим `base_path` при поднятом сеансе увеличивает `session_gen` и пишет ровно одну строку «MCP перезапущены: база <путь>». `save_is_blocked_while_an_operation_runs`: при `ui.busy.is_some()` или `ui.progress.is_some()` «Сохранить» недоступна и `cfg` не меняется.
 - [ ] **Шаг 2: тесты падают** в CI.
 - [ ] **Шаг 3: флаг.** `Ui.enabled` создаётся при старте приложения и передаётся в `Serve::new`; `stop_session`/`start_session` его не пересоздают. В локальном режиме сеанс поднимается при старте окна независимо от переключателя (слушатели живут всегда), а «подключаться при запуске» решает лишь начальное значение флага.
 - [ ] **Шаг 4: слова.** `State::label` и заголовки карточки берут слова по `cfg.host.mode`: в локальном — «MCP выключены / Включаю… / MCP включены», в туннельном — как сейчас, но без слова «туннель» в заголовке карточки (в журнале подробность остаётся). Пункт трея — «Включить MCP» и «Выключить MCP».

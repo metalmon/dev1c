@@ -201,19 +201,75 @@ pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
     kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" })
 }
 
-/// `1cv8.exe`: the newest version under the standard roots.
-pub fn find_1cv8() -> Option<std::path::PathBuf> {
-    let roots = ["C:\\Program Files\\1cv8", "C:\\Program Files (x86)\\1cv8"];
-    let mut found: Vec<std::path::PathBuf> = roots
-        .iter()
-        .filter_map(|r| std::fs::read_dir(r).ok())
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().join("bin").join("1cv8.exe"))
-        .filter(|p| p.exists())
-        .collect();
-    found.sort();
-    found.pop()
+/// Переменная окружения, которая целиком перекрывает поиск платформы: указывает
+/// каталог, где лежит исполняемый файл (а не каталог версии).
+const ONEC_PLATFORM: &str = "ONEC_PLATFORM";
+
+/// Имена исполняемого файла платформы: обычная и учебная версия (у учебной — суффикс `t`).
+fn platform_exe_names() -> [&'static str; 2] {
+    if cfg!(windows) { ["1cv8.exe", "1cv8t.exe"] } else { ["1cv8", "1cv8t"] }
+}
+
+/// Подкаталог версии, где лежит исполняемый файл: на Windows — `bin`, на Linux
+/// файл лежит прямо в каталоге версии.
+fn version_exe_dir(version_dir: &Path) -> PathBuf {
+    if cfg!(windows) { version_dir.join("bin") } else { version_dir.to_path_buf() }
+}
+
+/// Версия как число по компонентам: текстовое сравнение "8.3.9.1" ставит выше "8.3.27.1786".
+fn version_key(v: &str) -> Vec<u32> {
+    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// Выбирает путь к новейшей версии из найденных (версия, путь к исполняемому файлу).
+/// Чистая функция — тесты подают список руками, платформа на диске не нужна.
+pub fn pick_version(found: Vec<(String, PathBuf)>) -> Option<PathBuf> {
+    found.into_iter().max_by_key(|(v, _)| version_key(v)).map(|(_, p)| p)
+}
+
+/// Один и тот же файл может быть найден по двум путям (в образе `/opt/1cv8` —
+/// ссылка на `/opt/1cv8t`): сворачиваем по `canonicalize`.
+fn dedup_canonical(found: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+    let mut seen = std::collections::HashSet::new();
+    found.into_iter().filter(|(_, p)| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))).collect()
+}
+
+/// Обходит один корень: подкаталоги — версии, в каждой ищем оба имени исполняемого файла.
+fn scan_root(root: &Path, found: &mut Vec<(String, PathBuf)>) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for e in entries.filter_map(|e| e.ok()) {
+        let version = e.file_name().to_string_lossy().to_string();
+        let dir = version_exe_dir(&e.path());
+        for name in platform_exe_names() {
+            let p = dir.join(name);
+            if p.exists() {
+                found.push((version.clone(), p));
+            }
+        }
+    }
+}
+
+fn scan_1cv8() -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    if cfg!(windows) {
+        for base in ["C:\\Program Files\\1cv8", "C:\\Program Files (x86)\\1cv8", "C:\\Program Files\\1cv8t", "C:\\Program Files (x86)\\1cv8t"] {
+            scan_root(Path::new(base), &mut found);
+        }
+    } else {
+        scan_root(Path::new("/opt/1cv8/x86_64"), &mut found);
+        scan_root(Path::new("/opt/1cv8t/x86_64"), &mut found);
+    }
+    found
+}
+
+/// Путь к исполняемому файлу платформы: самая новая версия (обычная или учебная) из
+/// стандартных каталогов, либо принудительно — из `ONEC_PLATFORM`.
+pub fn find_1cv8() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os(ONEC_PLATFORM) {
+        let dir = PathBuf::from(dir);
+        return platform_exe_names().into_iter().map(|n| dir.join(n)).find(|p| p.exists());
+    }
+    pick_version(dedup_canonical(scan_1cv8()))
 }
 
 /// Ключ подключения конфигуратора: /F для файловой базы, /S для сервер\база.
@@ -257,7 +313,7 @@ impl Op<Ctx> for Env {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         match find_1cv8() {
             Some(p) => ctx.ok(format!("платформа: {}", p.display())),
-            None => anyhow::bail!("1cv8.exe не найден в C:\\Program Files\\1cv8 — установите платформу 1С на эту машину"),
+            None => anyhow::bail!("платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM"),
         }
         let exe = mcp_exe(&ctx.kit);
         anyhow::ensure!(exe.exists(), "в комплекте нет {} — комплект неполный", exe.display());
@@ -437,5 +493,51 @@ mod tests {
         let k = Kit::at("X");
         let name = mcp_exe(&k).file_name().unwrap().to_string_lossy().to_string();
         assert!(name.starts_with("mcp-1c-"), "{name}");
+    }
+
+    #[test]
+    fn versions_sort_as_numbers_not_as_text() {
+        // Текстовое сравнение ставит "8.3.9.1" выше "8.3.27.1786" (символ '9' > '2'
+        // на третьей позиции), а числом 27 > 9 — новее должна выиграть 8.5.1.1150.
+        let found = vec![
+            ("8.3.9.1".to_string(), PathBuf::from("v1")),
+            ("8.3.27.1786".to_string(), PathBuf::from("v2")),
+            ("8.5.1.1150".to_string(), PathBuf::from("v3")),
+        ];
+        assert_eq!(pick_version(found), Some(PathBuf::from("v3")));
+    }
+
+    #[test]
+    fn the_same_tree_seen_through_a_symlink_appears_once() {
+        // В образе /opt/1cv8 — ссылка на /opt/1cv8t: два разных пути, один файл.
+        // Проверяем сворачивание через hard-link — он не требует прав на символьную
+        // ссылку (на Windows обычная учётка их не даёт), но даёт то же canonicalize.
+        let tmp = std::env::temp_dir().join(format!("dev1c-1cv8-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let real = tmp.join("1cv8t");
+        std::fs::write(&real, "x").unwrap();
+        let via_symlink = tmp.join("1cv8");
+        std::fs::hard_link(&real, &via_symlink).unwrap();
+        let found = vec![("8.5.1.1150".to_string(), real.clone()), ("8.5.1.1150".to_string(), via_symlink)];
+        let deduped = dedup_canonical(found);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].1, real);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn onec_platform_override_picks_whichever_exe_name_is_present() {
+        let tmp = std::env::temp_dir().join(format!("dev1c-1cv8-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let exe = tmp.join(platform_exe_names()[1]); // учебная платформа — суффикс t
+        std::fs::write(&exe, "x").unwrap();
+        // SAFETY: тест однопоточный для этой переменной; значение снимается сразу после чтения.
+        unsafe { std::env::set_var(ONEC_PLATFORM, &tmp) };
+        let found = find_1cv8();
+        unsafe { std::env::remove_var(ONEC_PLATFORM) };
+        assert_eq!(found, Some(exe));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

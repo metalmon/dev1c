@@ -37,6 +37,10 @@ while [ "${1:-}" = "--llama" ] || [ "${1:-}" = "--os" ]; do
         --os) OS=${2:?linux|windows}; shift 2 ;;
     esac
 done
+case "$OS" in
+    linux|windows) ;;
+    *) echo "--os: linux or windows" >&2; exit 2 ;;
+esac
 IMAGE_TAR=${1:?path to dev1c-image.tar.gz}
 BIN_DIR=${2:?directory with the dev1c-setup binaries}
 OUT=${OUT_DIR:-dist}

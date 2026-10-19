@@ -3,7 +3,7 @@
 //! GPUI, они только кладут событие в канал — его разбирает `on_tray`/`on_menu`
 //! из задачи-читателя в `mod.rs::handle`.
 
-use super::{autostart, badge, note_line, open_web, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG};
+use super::{autostart, badge, note_line, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -39,7 +39,6 @@ pub enum MenuAction {
     Open,
     Toggle,
     Check,
-    Web,
     Theme(theme::Choice),
     Autostart,
     Autoconnect,
@@ -59,7 +58,6 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         "open" => Some(MenuAction::Open),
         "toggle" => Some(MenuAction::Toggle),
         "check" => Some(MenuAction::Check),
-        "web" => Some(MenuAction::Web),
         "autostart" => Some(MenuAction::Autostart),
         "autoconnect" => Some(MenuAction::Autoconnect),
         "quit" => Some(MenuAction::Quit),
@@ -124,7 +122,6 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let open = MenuItem::with_id("open", "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
-    let web = MenuItem::with_id("web", "Открыть веб-клиент", true, None);
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
@@ -138,7 +135,6 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &PredefinedMenuItem::separator(),
         &toggle,
         &check,
-        &web,
         &PredefinedMenuItem::separator(),
         &themes_submenu,
         &autostart,
@@ -217,7 +213,6 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 cx.refresh_windows();
             }
         }
-        MenuAction::Web => open_web(cx),
         MenuAction::Theme(c) => {
             let kit = cx.global::<Ui>().kit.clone();
             if let Err(e) = c.store(&kit) {

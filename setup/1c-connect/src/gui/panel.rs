@@ -265,6 +265,25 @@ pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
     shown_fields(mode).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
+/// Радиус скругления корня окна коннектора: пусто — углы прямые.
+///
+/// На Linux прозрачности в углах добиться не удалось: при `Transparent`
+/// менеджер композитинга оставлял углы квадратными, и под скруглённой рамкой
+/// панели виднелись квадратные пятна подложки (снимки из образа, заказчик
+/// 2026-10-20). Решение заказчика — отказаться от скруглений там вовсе, а не
+/// чинить прозрачность; на Windows всё как было.
+///
+/// Радиус снимается только здесь, у корня панели: 8 px живут в общей теме
+/// (`radius_lg` в `common/theme/1c.json`), и ту же тему носит окно
+/// `dev1c-setup` — её трогать нельзя. Поэтому 8 здесь повторены числом;
+/// значение в теме стережёт свой тест в `common::gui`.
+///
+/// Бледная рамка по краю (`border_1`) остаётся при любых углах: на тёмных
+/// обоях она и отделяет окно от фона.
+pub fn window_radius() -> Option<Pixels> {
+    if cfg!(windows) { Some(px(8.)) } else { None }
+}
+
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
     let (ph, val) = (ph.to_string(), val.to_string());
     cx.new(|cx| {
@@ -931,7 +950,10 @@ impl Render for Panel {
             .text_size(px(15.))
             .border_1()
             .border_color(window_border)
-            .rounded_lg()
+            // Скругление — только там, где его видно (`window_radius`): на
+            // Linux углы прямые. `overflow_hidden` нужен и там — он обрезает
+            // содержимое по рамке окна.
+            .when_some(window_radius(), |d, r| d.rounded(r))
             .overflow_hidden()
             .p_4()
             .gap_3()
@@ -1012,13 +1034,29 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, HINT_PROJECT};
+    use super::{
+        can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, window_radius,
+        HINT_PROJECT,
+    };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
     use crate::session::State;
     use common::check::Check;
     use common::Phase;
+    use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_window_has_no_radius_on_linux() {
+        // На Linux прозрачность в углах не получилась (проверено живьём
+        // дважды: углы оставались квадратными с бледной рамкой), поэтому
+        // скруглений там нет вовсе; на Windows радиус прежний — 8 px.
+        if cfg!(windows) {
+            assert_eq!(window_radius(), Some(px(8.)));
+        } else {
+            assert_eq!(window_radius(), None);
+        }
+    }
 
     #[test]
     fn the_card_follows_the_running_operation() {

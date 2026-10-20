@@ -249,15 +249,18 @@ pub fn show_window(cx: &mut App) {
         focus: true,
         show: true,
         window_decorations: Some(WindowDecorations::Client),
-        // Без этого окно непрозрачно, и свои скруглённые углы `Panel`
-        // (`rounded_lg` + `overflow_hidden` на непрозрачном `bg`, см.
-        // `panel.rs`) рисует поверх квадратной opaque-поверхности — на
-        // композитном рабочем столе (проверено живьём на XFCE/xfwm4) видны
-        // квадратные углы с бледной рамкой вместо скруглённых. Прозрачен
-        // только зазор по углам; тело панели остаётся непрозрачным — его
-        // красит сама панель. Композитинг недоступен — платформа тихо
-        // остаётся с `Opaque`, тогда углы квадратные, но не стеклянные.
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Прозрачность заводили только ради скруглённых углов: иначе панель
+        // рисовала их поверх квадратной opaque-поверхности. На Linux это так
+        // и не получилось (композитинг XFCE/xfwm4 оставлял углы квадратными
+        // с бледной рамкой, снимки заказчика 2026-10-20), и от скруглений
+        // там отказались вовсе (`panel::window_radius`) — а без них и
+        // прозрачность не нужна: она давала только стеклянные пятна по
+        // углам. На Windows углы прежние, поэтому прозрачность остаётся.
+        window_background: if cfg!(windows) {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         icon,
         ..Default::default()
     };

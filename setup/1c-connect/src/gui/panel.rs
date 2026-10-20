@@ -134,6 +134,26 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readin
     Card { dot, title, cancel: false }
 }
 
+/// Заперт ли переключатель. Две причины, и обе временные: идёт операция
+/// (дёргать туннель посреди git-обмена незачем) и холодный замок
+/// (`gui::gate::cold_gate` — включать нечего). Замок запирает только
+/// включение: выключить обслуживание можно всегда, иначе защёлкнувшийся под
+/// живым сеансом замок (правка toml руками) запер бы человека внутри.
+pub fn switch_locked(gate: Option<&str>, on: bool, has_progress: bool) -> bool {
+    has_progress || (gate.is_some() && !on)
+}
+
+/// Подсказка переключателя: причина замка, пока он заперт, — в заголовок
+/// карточки она не идёт («не надо там прозу писать, она не лезет», заказчик
+/// 2026-10-21), а живёт здесь, в подвале и в журнале.
+pub fn switch_tooltip(gate: Option<&str>, mode: &str) -> String {
+    match gate {
+        Some(why) => format!("Включать нечего: {why}"),
+        None if mode == "local" => "Обслуживание вызовов агента (MCP)".into(),
+        None => "Туннель в среду разработки".into(),
+    }
+}
+
 /// Можно ли нажать «Сохранить»: поля отличаются от сохранённых, и прямо
 /// сейчас не идёт операция/проверка и не подключается/перезапускается сеанс —
 /// правка не должна тронуть toml и дёрнуть сеанс посреди них.
@@ -586,7 +606,12 @@ impl Render for Panel {
         let busy_now = busy.is_some();
         let dirty = self.is_dirty(cx);
         let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
-        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
+        let gate = ui.gate.clone();
+        // Причина замка — в левом слоте подвала (спека: «причина идёт туда,
+        // где для неё есть место»), но после подсказки «Сохранить»: та про
+        // кнопку, на которую человек прямо сейчас нажимает.
+        let foot_hint = hint.clone().or_else(|| gate.as_ref().map(|w| format!("Включать нечего: {w}")));
+        let foot_left = foot_left_text(ui.status.as_ref(), foot_hint.as_deref(), &ui.kit.root.display().to_string());
         let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -650,8 +675,8 @@ impl Render for Panel {
             .child(
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
-                    .disabled(has_progress)
-                    .tooltip(if mode == "local" { "Обслуживание вызовов агента (MCP)" } else { "Туннель в среду разработки" })
+                    .disabled(switch_locked(gate.as_deref(), link.is_on(), has_progress))
+                    .tooltip(switch_tooltip(gate.as_deref(), &mode))
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -1084,7 +1109,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         can_save, card, fields_differ, foot_left_text, pick_face, project_rows, save_hint, shown_fields,
-        window_radius, HINT_PROJECT,
+        switch_locked, switch_tooltip, window_radius, HINT_PROJECT,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
@@ -1093,6 +1118,27 @@ mod tests {
     use common::Phase;
     use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    /// Правило заказчика дословно: «Переключатель включения должен быть
+    /// недоступен, пока нет пользователя и пока не установлены MCP». До этой
+    /// задачи переключатель запирала одна-единственная причина — идущая
+    /// операция, и человек мог включить то, что заведомо не заработает.
+    #[test]
+    fn the_switch_is_locked_while_the_gate_holds() {
+        let why = Some("не задан пользователь базы");
+        assert!(switch_locked(why, false, false), "заперто — включать нельзя");
+        assert!(!switch_locked(why, true, false), "уже включено — выключить можно всегда");
+        assert!(!switch_locked(None, false, false), "условия в порядке — переключатель доступен");
+        // Прежняя причина никуда не делась: идёт операция.
+        assert!(switch_locked(None, false, true));
+        assert!(switch_locked(None, true, true));
+        // Причина живёт в подсказке, а не в заголовке карточки.
+        assert_eq!(switch_tooltip(why, "local"), "Включать нечего: не задан пользователь базы");
+        assert_eq!(switch_tooltip(None, "local"), "Обслуживание вызовов агента (MCP)");
+        assert_eq!(switch_tooltip(None, "tunnel"), "Туннель в среду разработки");
+        let c = card(None, &State::Off, "local", &Readiness::Unknown, Instant::now());
+        assert_eq!(c.title, "MCP выключены", "причина в заголовок не идёт — она туда не влезает");
+    }
 
     #[test]
     fn the_window_radius_is_eight_everywhere() {

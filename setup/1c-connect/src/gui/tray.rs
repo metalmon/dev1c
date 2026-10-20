@@ -196,9 +196,13 @@ impl Tray {
     /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
     /// `Ev::Done`, тик) сам зовёт `set_tooltip` следом тем же текстом, иначе
     /// занятость при поднятой связи осталась бы с «не подключён».
-    pub fn set_state(&self, state: TrayState, on: bool) {
+    /// `locked` — холодный замок заперт (`gui::gate::cold_gate`): пункт
+    /// «Включить MCP» недоступен ровно тогда же, когда переключатель в окне,
+    /// а причина едет в подсказку значка (`gui::tray_tooltip`).
+    pub fn set_state(&self, state: TrayState, on: bool, locked: bool) {
         let _ = self.icon.set_icon(Some(icon(state)));
         self.toggle.set_text(if on { "Выключить MCP" } else { "Включить MCP" });
+        self.toggle.set_enabled(toggle_enabled(locked, on));
     }
 
     /// Подсказка трея произвольным текстом (`tray_tooltip`) — единственный
@@ -220,6 +224,15 @@ impl Tray {
             item.set_checked(m == mode);
         }
     }
+}
+
+/// Доступен ли пункт «Включить MCP»: трей живёт по тем же правилам, что окно
+/// (спека, «Трей живёт по тем же правилам») — замок запирает только включение,
+/// выключить обслуживание можно всегда. Обратная сторона `panel::switch_locked`
+/// без хода операции: нативный пункт меню идущая операция не запирала и
+/// раньше, её держит `mode_change_blocked` и сам `toggle_link`.
+fn toggle_enabled(locked: bool, on: bool) -> bool {
+    on || !locked
 }
 
 /// Операция или проверка идёт — тем же критерием, что блокирует «Сохранить»
@@ -334,7 +347,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, MenuAction, TrayState, Ui, MODES};
+    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES};
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -410,6 +423,27 @@ mod tests {
         assert!(mode_change_blocked(&ui), "идёт операция с карточкой хода");
         ui.progress = None;
         assert!(!mode_change_blocked(&ui));
+    }
+
+    /// Пункт трея и переключатель окна запираются одним замком и расходиться
+    /// не могут: у трея нет своего мнения о готовности.
+    #[test]
+    fn the_tray_item_follows_the_same_gate() {
+        use crate::gui::panel::switch_locked;
+        for on in [false, true] {
+            for gate in [None, Some("не задан пользователь базы")] {
+                assert_eq!(
+                    toggle_enabled(gate.is_some(), on),
+                    !switch_locked(gate, on, false),
+                    "трей и окно разошлись: on={on}, gate={gate:?}"
+                );
+            }
+        }
+        // Что именно это значит: заперто — не включить; уже включено —
+        // выключить можно всегда.
+        assert!(!toggle_enabled(true, false));
+        assert!(toggle_enabled(true, true));
+        assert!(toggle_enabled(false, false));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub mod autostart;
+pub mod gate;
 pub mod panel;
 pub mod theme;
 pub mod tray;
@@ -110,6 +111,11 @@ pub struct Ui {
     /// поднятыми; в туннельном — как раньше, переключатель поднимает и
     /// опускает сеанс целиком.
     pub enabled: Arc<AtomicBool>,
+    /// Холодный замок (`gate::cold_gate`): `None` — включать можно,
+    /// `Some(причина)` — включать нечего. Считается не на каждую отрисовку, а
+    /// по тем же событиям, что и вердикт готовности (`refresh_gate` в
+    /// `run_readiness`): за ним стоит диск — платформа, комплект, инструменты.
+    pub gate: Option<String>,
     /// Итог последнего расчёта готовности — см. `Readiness` и
     /// `run_readiness`.
     pub ready: Readiness,
@@ -481,7 +487,12 @@ pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
 /// Подсказка трея: во время операции — фаза строчными и сколько она идёт
 /// («выгружаю конфигурацию, 12 мин»; меньше минуты — «меньше минуты»); без
 /// операции — просто про связь.
-pub fn tray_tooltip(progress: Option<&Running>, link: &State, now: Instant) -> String {
+/// Причина замка попадает в подсказку значка наравне с фазой операции; идущая
+/// операция побеждает — тот же порядок разрешения, что в карточке.
+pub fn tray_tooltip(progress: Option<&Running>, link: &State, gate: Option<&str>, now: Instant) -> String {
+    if let (None, Some(why)) = (progress, gate) {
+        return format!("1c-connect: включать нечего — {why}");
+    }
     match progress {
         Some(r) => {
             let mut chars = r.phase.title().chars();
@@ -726,6 +737,9 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 /// значения из формы затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
+    // Было ли что гасить: замок, запертый ещё до правки, обслуживание уже
+    // погасил — гасить второй раз и писать вторую строку в журнал незачем.
+    let was_open = gate_now(&ui.kit, &ui.cfg).is_none();
     host.gitea = ui.cfg.host.gitea.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
@@ -778,9 +792,47 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
         }
     }
     // Почва могла сдвинуться (база, логин, пароль, порт публикации) —
-    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем.
+    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем. Заодно
+    // пересчитывается и замок (`refresh_gate` внутри).
     run_readiness(ui);
+    // Правка убрала холодное условие (стёрли пользователя базы) — обслуживать
+    // вызовы больше нечем, гасим его. Спросили об этом раньше, до записи
+    // (`save_needs_confirm`/`confirm_database_change`): молчать нельзя, агент
+    // остаётся без обслуживания.
+    if was_open {
+        if let Some(why) = ui.gate.clone() {
+            if ui.enabled.swap(false, Ordering::Relaxed) {
+                note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
+            }
+        }
+    }
     Ok(())
+}
+
+/// Чистое ядро вопроса «погасит ли „Сохранить“ обслуживание»: замок был
+/// открыт, обслуживание живо, а на новых параметрах условия не хватает.
+/// Заперто и до правки — гасить нечего, вопрос не нужен.
+pub fn locks_gate(gate_before: Option<&str>, gate_after: Option<String>, serving: bool) -> Option<String> {
+    if gate_before.is_some() || !serving {
+        return None;
+    }
+    gate_after
+}
+
+/// То же на живых параметрах. Полей, которых окно не показывает, в форме нет —
+/// режим берём из текущих параметров, как это делает сама `save_host`: иначе
+/// туннельная проверка адреса среды применилась бы к локальному рабочему
+/// месту. Замок спрашиваем у диска заново, а не у `ui.gate`: тот считался по
+/// событию и к моменту «Сохранить» мог устареть.
+pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
+    let serving = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
+    if !serving {
+        return None;
+    }
+    let before = gate_now(&ui.kit, &ui.cfg);
+    let mut host = new_host.clone();
+    host.mode = ui.cfg.host.mode.clone();
+    locks_gate(before.as_deref(), gate_now(&ui.kit, &Cfg { host }), serving)
 }
 
 /// Нужно ли спросить перед «Сохранить»: база меняется (`database_changed`
@@ -790,8 +842,13 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
 /// жив (`ui.session`). Любая другая правка — каталог проекта, режим,
 /// рабочее место — сохраняется без вопроса, как и было задумано (заказчик
 /// просил вопрос именно и только в этом сочетании, 2026-10-20).
+/// Второй повод спросить — тот же диалог: правка убирает холодное условие и
+/// тем гасит обслуживание (`save_locks_gate`). Заказчик требовал вопроса
+/// именно в этом сочетании: цель спеки — чтобы смена параметров была
+/// незаметной для Zed, а тут агент остаётся без обслуживания.
 pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
-    database_changed(new_host, &ui.cfg.host) && ui.enabled.load(Ordering::Relaxed) && ui.session.is_some()
+    let live = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
+    (database_changed(new_host, &ui.cfg.host) && live) || save_locks_gate(ui, new_host).is_some()
 }
 
 /// Имя базы для диалога — последний компонент пути («Buh» для C:\Bases\Buh),
@@ -808,6 +865,12 @@ pub fn confirm_text(old_path: &str, new_path: &str) -> (String, String) {
     let message =
         format!("Агент сейчас работает с базой «{}», после сохранения перейдёт на «{}». Сохранить?", base_label(old_path), base_label(new_path));
     (message, format!("{old_path} → {new_path}"))
+}
+
+/// Текст того же диалога, когда правка не меняет базу, а гасит обслуживание:
+/// называем последствие и причину, а не одно «Сохранить?».
+pub fn confirm_gate_text(why: &str) -> (String, String) {
+    ("После сохранения MCP выключатся — агент перестанет отвечать. Сохранить?".to_string(), format!("включать будет нечего: {why}"))
 }
 
 /// Диалог перед «Сохранить», когда база меняется под живым и включённым MCP
@@ -827,7 +890,13 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
     if cx.global::<Ui>().dialog_open {
         return;
     }
-    let (message, detail) = confirm_text(&cx.global::<Ui>().cfg.host.base_path, &new_host.base_path);
+    // Один диалог на оба повода (спека: «тот же диалог подтверждения, что уже
+    // спрашивает при смене базы»); меняется только текст — смена базы и
+    // потухшее обслуживание называются разными словами.
+    let (message, detail) = match save_locks_gate(cx.global::<Ui>(), new_host) {
+        Some(why) => confirm_gate_text(&why),
+        None => confirm_text(&cx.global::<Ui>().cfg.host.base_path, &new_host.base_path),
+    };
     cx.global_mut::<Ui>().dialog_open = true;
     let rx = window.prompt(
         PromptLevel::Warning,
@@ -872,6 +941,57 @@ fn ensure_publication_now(ui: &mut Ui) {
     });
 }
 
+/// Холодный замок на текущих параметрах: всё, за чем надо на диск, спрашиваем
+/// здесь, решает `gate::cold_gate`. Отдельно от `refresh_gate` ниже, потому
+/// что `launch` считает замок до того, как `Ui` вообще появился — начальное
+/// значение переключателя уже обязано его слушаться.
+pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
+    let tools = ops_host::tools_state(&kit.root, &ops_host::tools_dir());
+    gate::cold_gate(
+        cfg,
+        kit.state_path(cfg::FILE).exists(),
+        std::path::Path::new(&cfg.host.base_path).exists(),
+        &tools,
+        ops_host::find_1cv8().as_deref(),
+        ops_host::mcp_exe(kit).exists(),
+        // Срок спрашиваем у часов, а не у запомненного при запуске: окно может
+        // простоять открытым через полночь срока (так же поступает `run_op`).
+        &crate::licence::state_now(),
+    )
+}
+
+/// Пересчитать замок и донести причину до моста: пока замок заперт, отказ
+/// агенту несёт её текстом (`bridge::disabled_text`), иначе ни агент, ни
+/// человек не узнают, что править.
+pub fn refresh_gate(ui: &mut Ui) {
+    ui.gate = gate_now(&ui.kit, &ui.cfg);
+    // Причина отказа — процессный глобал моста, и в тестах крейта он один на
+    // все потоки: окно, посчитавшее замок в своём тесте, сломало бы соседний
+    // тест моста, который ждёт отказ без причины. В живой программе окно одно,
+    // и писать туда некому, кроме этого места и `launch`.
+    #[cfg(not(test))]
+    crate::bridge::set_gate_reason(ui.gate.clone());
+}
+
+/// Включать ли обслуживание при запуске: галочка «подключаться при запуске»
+/// замок не обходит (спека: «Автозапуск не обходит замок»). В локальном
+/// режиме это начальное значение переключателя, в туннельном — ещё и
+/// поднимать ли сеанс.
+pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
+    autoconnect_on && gate.is_none()
+}
+
+/// Обслуживаются ли вызовы агента прямо сейчас. В локальном режиме слушатели
+/// подняты всегда и говорит только флаг; в туннельном обслуживание — это сам
+/// сеанс.
+fn serving(ui: &Ui) -> bool {
+    if ui.cfg.host.mode == "local" {
+        ui.enabled.load(Ordering::Relaxed)
+    } else {
+        ui.link.is_on()
+    }
+}
+
 /// Расчёт готовности (`verify::readiness` — тот же набор фактов, что
 /// печатает «Проверить») в своём потоке: он ходит по сети и поднимает пробу
 /// инструментов, и не должен держать главный поток окна — тем же приёмом,
@@ -882,6 +1002,10 @@ fn ensure_publication_now(ui: &mut Ui) {
 /// «Сохранить» и показ окна. Не на таймере — между этими событиями
 /// `ui.ready` просто не пересчитывается.
 pub fn run_readiness(ui: &mut Ui) {
+    // Замок — по тем же событиям, что и вердикт (почва для них одна), но без
+    // потока: он считается по диску и отвечает сразу, а переключатель обязан
+    // слушаться его уже на ближайшей отрисовке.
+    refresh_gate(ui);
     let Some(gen) = start_readiness(ui) else { return };
     // Молча: `quiet_ctx`, а не `ctx_for` — ни строки в журнале, ни фазы в
     // карточке хода (`verify::readiness` фазу и не объявляет).
@@ -1058,9 +1182,9 @@ fn quiet_ctx(ui: &Ui) -> Ctx {
 fn sync_tray(ui: &Ui, now: Instant) {
     let busy = ui.progress.is_some() || ui.busy.is_some();
     let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
-    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
+    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now);
     if let Some(tray) = &ui.tray {
-        tray.set_state(state, on);
+        tray.set_state(state, on, ui.gate.is_some());
         tray.set_tooltip(&tooltip);
     }
 }
@@ -1163,6 +1287,17 @@ fn bind_failure_display(bind_failed: &Option<String>) -> Option<State> {
 }
 
 pub fn toggle_link(cx: &mut App) {
+    // Замок — один на окно и на трей, и держится он здесь, в общем месте: и
+    // переключатель, и пункт меню приходят сюда. Запирается только включение —
+    // выключить обслуживание можно всегда (замок мог защёлкнуться под живым
+    // сеансом, например правкой toml руками).
+    if !serving(cx.global::<Ui>()) {
+        if let Some(why) = cx.global::<Ui>().gate.clone() {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("включать нечего: {why}") });
+            cx.refresh_windows();
+            return;
+        }
+    }
     if cx.global::<Ui>().cfg.host.mode == "local" {
         let ui = cx.global_mut::<Ui>();
         let on = flip_enabled_only(ui);
@@ -1430,7 +1565,7 @@ fn tick(cx: &mut App) {
         }
         let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
         if due {
-            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, now);
+            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now);
             ui.tooltip_at = Some(now);
             if let Some(tray) = &ui.tray {
                 tray.set_tooltip(&text);
@@ -1636,6 +1771,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // галочка решает только начальное значение переключателя «MCP».
     let autoconnect_on = autoconnect(&kit);
     let local_mode = cfg.host.mode == "local";
+    // Замок считается до первого окна: «включать MCP при запуске» его не
+    // обходит (спека, «Автозапуск не обходит замок»), поэтому начальное
+    // значение флага обслуживания уже обязано его слушаться.
+    let gate = gate_now(&kit, &cfg);
+    let serve_on_start = autostart_enabled(gate.as_deref(), autoconnect_on);
+    crate::bridge::set_gate_reason(gate.clone());
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -1683,7 +1824,8 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             session_gen: 0,
             link: State::Off,
             bind_failed: None,
-            enabled: Arc::new(AtomicBool::new(autoconnect_on)),
+            enabled: Arc::new(AtomicBool::new(serve_on_start)),
+            gate: gate.clone(),
             ready: Readiness::Unknown,
             ready_gen: 0,
             ready_pending: false,
@@ -1758,7 +1900,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // поэтому сеанс поднимается здесь безусловно; «подключаться при
         // запуске» в этом режиме уже отдано начальному значению `enabled`
         // чуть выше. В туннельном режиме — как раньше, по той же галочке.
-        if local_mode || autoconnect_on {
+        // Замок при запуске — строкой в журнал: человек видит серую точку и
+        // запертый переключатель, и обязан прочитать, почему.
+        if let Some(why) = &gate {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
+        }
+        if local_mode || serve_on_start {
             match start_session(cx) {
                 Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
                 Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
@@ -1789,6 +1936,7 @@ impl Ui {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
+            gate: None,
             ready: Readiness::Unknown,
             ready_gen: 0,
             ready_pending: false,
@@ -1821,8 +1969,9 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
-        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_file, note_line, on_done,
+        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_gate_text,
+        confirm_text, drop_stale_readiness,
+        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_state, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
@@ -1831,6 +1980,7 @@ mod tests {
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
     use common::check::Check;
+    use common::op::OpState;
     use common::{Event, Phase, Progress};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
@@ -2122,11 +2272,16 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
-        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
-        assert_eq!(tray_tooltip(None, &State::Up { since: now }, now), "1c-connect: подключён");
-        assert_eq!(tray_tooltip(None, &State::Off, now), "1c-connect: не подключён");
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
+        assert_eq!(tray_tooltip(None, &State::Up { since: now }, None, now), "1c-connect: подключён");
+        assert_eq!(tray_tooltip(None, &State::Off, None, now), "1c-connect: не подключён");
+        // Причина замка — в подсказке значка; идущая операция её побеждает
+        // (тот же порядок разрешения, что в карточке).
+        let why = Some("не задан пользователь базы");
+        assert_eq!(tray_tooltip(None, &State::Off, why, now), "1c-connect: включать нечего — не задан пользователь базы");
+        assert_eq!(tray_tooltip(Some(&r), &State::Off, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
     }
 
     #[test]
@@ -2529,6 +2684,48 @@ mod tests {
         host.base_path = "C:\\Bases\\Other".into();
         save_host(&mut ui, host).unwrap();
         assert_eq!(ui.log.len(), log_before);
+    }
+
+    /// «Подключаться при запуске» замок не обходит: коннектор поднимается,
+    /// обслуживание остаётся выключенным, причина уходит строкой в журнал
+    /// (сама строка — в `launch`, туда теста не дотянуться, как и до всего
+    /// остального в нём).
+    #[test]
+    fn autostart_does_not_enable_while_the_gate_holds() {
+        assert!(!autostart_enabled(Some("не задан пользователь базы"), true), "замок заперт — обслуживание не включается");
+        assert!(autostart_enabled(None, true), "условия в порядке — галочка работает как раньше");
+        assert!(!autostart_enabled(None, false), "галочки нет — включать и нечего");
+        assert!(!autostart_enabled(Some("в комплекте нет mcp-1c"), false));
+    }
+
+    /// «Сохранить», убирающее холодное условие на живом обслуживании,
+    /// спрашивает тем же диалогом, что и смена базы. Живого замка здесь нет
+    /// (в каталоге теста не разложены ни инструменты, ни платформа), поэтому
+    /// проверяется та же пара, что работает в окне: `cold_gate` на новых
+    /// полях и `locks_gate` поверх неё.
+    #[test]
+    fn saving_away_a_cold_condition_asks_first() {
+        use crate::gui::gate::cold_gate;
+        let v8 = std::path::Path::new("1cv8.exe");
+        let tools = OpState::Done("vrunner 3.0.2".into());
+        let before = Cfg::default();
+        let mut after = Cfg::default();
+        after.host.db_user = String::new();
+        let gate_before = cold_gate(&before, true, true, &tools, Some(v8), true, &crate::licence::State::Valid);
+        let gate_after = cold_gate(&after, true, true, &tools, Some(v8), true, &crate::licence::State::Valid);
+        assert_eq!(gate_before, None, "до правки включать было можно");
+        let why = locks_gate(gate_before.as_deref(), gate_after.clone(), true).expect("вопрос обязателен");
+        assert!(why.contains("пользователь базы"), "{why}");
+        // Обслуживания нет — гасить нечего, вопрос не задаём.
+        assert_eq!(locks_gate(gate_before.as_deref(), gate_after.clone(), false), None);
+        // Заперто и до правки — тоже молчим: обслуживание уже погашено.
+        assert_eq!(locks_gate(Some("в комплекте нет mcp-1c"), gate_after.clone(), true), None);
+        // Правка ничего не убрала — обычное «Сохранить» без вопроса.
+        assert_eq!(locks_gate(gate_before.as_deref(), None, true), None);
+        // Диалог называет последствие, а не одно «Сохранить?».
+        let (message, detail) = confirm_gate_text(&why);
+        assert!(message.contains("MCP выключатся"), "{message}");
+        assert!(detail.contains("пользователь базы"), "{detail}");
     }
 
     #[test]

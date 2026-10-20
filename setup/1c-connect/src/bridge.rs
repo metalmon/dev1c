@@ -80,6 +80,37 @@ use tokio::sync::mpsc;
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
+/// Причина холодного замка окна (`gui::gate::cold_gate`), пока он заперт.
+/// Порты в локальном режиме подняты всегда, и вызов инструмента получает
+/// отказ — но MCP не выключены человеком, их нельзя включить, и в тексте
+/// отказа обязана ехать причина: иначе ни агент, ни человек не узнают, что
+/// править (спека, «Пока замок заперт, агент получает отказ с причиной»).
+///
+/// ponytail: глобал на процесс — окно и мост живут в одном процессе, а
+/// `Rules` собирают четверо (окно, `listen`, тесты); понадобится второй
+/// независимый мост — поле `Arc` рядом с `enabled`.
+static GATE_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// Окно пересчитало замок (`gui::refresh_gate`). Отравленный замок не
+/// страшен: читаем и пишем короткую строку, рвать из-за неё отказы агенту
+/// незачем.
+pub fn set_gate_reason(reason: Option<String>) {
+    *GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+}
+
+pub fn gate_reason() -> Option<String> {
+    GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Текст отказа: без замка — прежний («включите переключатель»), с замком —
+/// его причина, потому что включать нечего и совет был бы ложью.
+pub fn disabled_text(reason: Option<&str>) -> String {
+    match reason {
+        Some(why) => format!("MCP выключены в 1c-connect: {why}"),
+        None => DISABLED_TEXT.to_string(),
+    }
+}
+
 /// Правила моста на одно соединение. Строка подключения, её пользователь и
 /// каталог проекта здесь не лежат готовыми — они читаются из `live` на
 /// каждый вызов (см. `handle_request`), а не однократно при подключении:
@@ -548,7 +579,8 @@ async fn handle_request(
     // переключатель», которого не хватит.
     let expired = matches!(crate::licence::state_now(), crate::licence::State::Expired);
     let off = expired || !rules.enabled.load(Ordering::Relaxed);
-    let refusal: &str = if expired { crate::licence::REFUSAL } else { DISABLED_TEXT };
+    let refusal_text: String = if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(gate_reason().as_deref()) };
+    let refusal: &str = &refusal_text;
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
         // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
@@ -1156,6 +1188,14 @@ mod tests {
         assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{raw}");
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был ответить: {raw}");
         assert!(replies.iter().any(|r| r["id"] == 2), "tools/list должен был ответить: {raw}");
+    }
+
+    /// Пока замок заперт, MCP не выключены человеком — их нельзя включить, и
+    /// совет «включите переключатель» был бы ложью: в отказе едет причина.
+    #[test]
+    fn the_refusal_carries_the_gate_reason() {
+        assert_eq!(disabled_text(None), DISABLED_TEXT);
+        assert_eq!(disabled_text(Some("не задан пользователь базы")), "MCP выключены в 1c-connect: не задан пользователь базы");
     }
 
     #[tokio::test]

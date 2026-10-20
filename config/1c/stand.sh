@@ -270,12 +270,20 @@ project)
     msg=${4:-}
     u=$(id -un)
     dir="$HOME/project"
-    # Password equals the login in the pilot. It rides in the URL so every
-    # later git call in this tree is already authenticated — never echo $url.
-    url="http://$u:$u@127.0.0.1:3000/dev1c/$name.git"
+    # Password equals the login in the pilot — but it no longer rides in the
+    # URL: a clean address would otherwise still leak it three ways (process
+    # arguments, the stored "origin" remote in .git/config, and git's own
+    # `fatal:` text on a failed clone/fetch, which this subcommand's own log
+    # lines carry to support). Instead it goes on a header, on every call
+    # that reaches Gitea, mirroring how the connector itself authenticates
+    # (host.rs). credential.helper= is cleared so git never falls back to
+    # asking one or caching what the header already supplies.
+    url="http://127.0.0.1:3000/dev1c/$name.git"
+    auth="Authorization: Basic $(printf '%s' "$u:$u" | base64 | tr -d '\n')"
+    gitc() { git -c credential.helper= -c http.extraHeader="$auth" "$@"; }
     if [ ! -d "$dir/.git" ]; then
         log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
-        git clone --depth 1 -b "$u" "$url" "$dir"
+        gitc clone --depth 1 -b "$u" "$url" "$dir"
     fi
     case "$sub" in
     status)
@@ -291,14 +299,14 @@ project)
         ;;
     pull)
         log "забираю файлы из Gitea"
-        git -C "$dir" pull --rebase origin "$u"
+        gitc -C "$dir" pull --rebase origin "$u"
         ;;
     push)
         log "отправляю файлы в Gitea"
         git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" add -A
         git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" diff --cached --quiet \
             || git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" commit -q -m "${msg:-правка}"
-        git -C "$dir" push origin "$u"
+        gitc -C "$dir" push origin "$u"
         ;;
     *)
         echo "usage: $0 project <repository-name> status|pull|push [message]" >&2

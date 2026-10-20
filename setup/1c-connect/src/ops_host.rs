@@ -135,11 +135,17 @@ pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
 
 const VERSION_FILE: &str = "tools.version";
 
+/// Каталоги комплекта, которые переносятся в `%LOCALAPPDATA%\dev1c`:
+/// vrunner и git для сборки/публикации, httpd — локальный веб-сервер,
+/// которым 1c-connect публикует активную базу без Apache или IIS, ставить
+/// вручную не нужно.
+const KIT_DIRS: &[&str] = &["vrunner", "git", "httpd"];
+
 /// Состояние по отметке версии: комплект пишет `tools.version` (pack.sh),
 /// копия на машине несёт ту же строку.
 pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
-    if !kit_root.join("vrunner").is_dir() || !kit_root.join("git").is_dir() {
-        return OpState::Blocked("в комплекте нет vrunner/ или git/ — скопируйте полный комплект заново".into());
+    if KIT_DIRS.iter().any(|d| !kit_root.join(d).is_dir()) {
+        return OpState::Blocked("в комплекте нет vrunner/, git/ или httpd/ — скопируйте полный комплект заново".into());
     }
     let want = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
     let have = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();
@@ -164,14 +170,14 @@ impl Op<Ctx> for Tools {
         tools_state(&ctx.kit.root, &tools_dir())
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!("скопировать vrunner/ и git/ из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
+        vec![Action::new(format!("скопировать vrunner/, git/ и httpd/ из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let to = tools_dir();
         if ctx.dry_run {
             return Ok(());
         }
-        for d in ["vrunner", "git"] {
+        for d in KIT_DIRS {
             let _ = std::fs::remove_dir_all(to.join(d));
             let n = copy_tree(&ctx.kit.root.join(d), &to.join(d)).with_context(|| format!("копирование {d} в {}", to.display()))?;
             ctx.ok(format!("{d}: {n} файлов"));
@@ -585,6 +591,13 @@ mod tests {
     }
 
     #[test]
+    fn the_kit_dirs_include_httpd() {
+        assert!(KIT_DIRS.contains(&"httpd"), "{KIT_DIRS:?}");
+        assert!(KIT_DIRS.contains(&"vrunner"));
+        assert!(KIT_DIRS.contains(&"git"));
+    }
+
+    #[test]
     fn tools_live_under_the_local_app_data_not_the_kit() {
         let t = tools_dir();
         assert!(t.ends_with("dev1c"), "{}", t.display());
@@ -613,6 +626,7 @@ mod tests {
         let home = tmp.join("home");
         std::fs::create_dir_all(kit.join("vrunner")).unwrap();
         std::fs::create_dir_all(kit.join("git")).unwrap();
+        std::fs::create_dir_all(kit.join("httpd")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(kit.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2\n").unwrap();
         assert!(matches!(tools_state(&kit, &home), OpState::Missing));

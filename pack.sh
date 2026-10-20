@@ -192,6 +192,21 @@ tools_row() {
 }
 tools_row
 
+# The developer's own web server: a trimmed Apache HTTP Server, vendored in
+# the repository rather than downloaded (setup/1c-connect/vendor/httpd/README.md
+# — same reasoning as nssm.exe below: a few MB is cheap to carry, an Apache
+# Lounge URL is not a stable thing to depend on at build time). 1c-connect
+# copies it into %LOCALAPPDATA%\dev1c alongside vrunner/ and git/ (see
+# host.tools) to publish the active 1C database itself.
+httpd_row() {
+    src="$DIR/setup/1c-connect/vendor/httpd"
+    [ -d "$src" ] || { echo "setup/1c-connect/vendor/httpd is missing — the kit would ship with no web server; see setup/1c-connect/vendor/httpd/README.md" >&2; exit 1; }
+    [ -f "$src/bin/httpd.exe" ] || { echo "setup/1c-connect/vendor/httpd: bin/httpd.exe missing" >&2; exit 1; }
+    cp -r "$src" "$CONNECT/httpd"
+    echo "httpd: $(du -sh "$CONNECT/httpd" | cut -f1)"
+}
+httpd_row
+
 # The model server for the host form: llama.cpp with its CUDA runtime, the
 # same build the dev1c-llama image is made from, and nssm that keeps it as a
 # Windows service. nssm comes from the repository (setup/dev1c-setup/vendor,

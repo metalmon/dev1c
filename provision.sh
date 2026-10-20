@@ -40,6 +40,12 @@ export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
 IMAGE=oktaplus/dev1c-1c:latest
 PAYLOAD_IMAGE=oktaplus/dev1c-1c-payload:latest
+# The stand image is built FROM this one (Dockerfile.1c: ARG BASE), and this
+# one holds the desktop, Zed, Gitea and xrdp — everything that does not need
+# the 1C distribution and is therefore built in CI too. Three images is a
+# consequence of the licence, not a taste: the 1C installer cannot live in the
+# repository, so whatever needs it builds only here.
+BASE_IMAGE=${DEV1C_BASE:-oktaplus/dev1c:latest}
 # One knob, everything derived from it: the container and all four volumes are
 # named after it, the ports count up from the base. The defaults are the only
 # values anybody should use — a second name exists so that a stand can be
@@ -66,6 +72,43 @@ TAR=dist/dev1c-1c-payload.tar.gz
 MOUNTS="-v $VOL_PLATFORM:/opt/1cv8t -v $VOL_DEMO:/opt/1c-demo"
 
 say() { printf '[provision] %s\n' "$*"; }
+warn() { echo "[provision] $*" >&2; }
+
+# Самый свежий файл, входящий в базовый образ: Dockerfile и config/, кроме
+# config/1c/ — тот принадлежит образу стенда.
+base_inputs_newest() {
+    find Dockerfile config -path 'config/1c' -prune -o -type f -exec stat -c %Y {} + 2>/dev/null         | sort -nr | head -1
+}
+
+# Собрать базовый образ, если его нет или он старше собственных исходников.
+# Ловушка здесь молчаливая: правка в config/gitea-start.sh попадает в БАЗОВЫЙ
+# образ, сборка стенда его не трогает, стенд наследует вчерашнюю копию — и
+# человек видит «готово», получив образ без своей правки.
+ensure_base() {
+    if [ -n "${DEV1C_SKIP_BASE:-}" ]; then
+        say "базовый образ пропущен (DEV1C_SKIP_BASE)"
+        return 0
+    fi
+    built=$(docker image inspect "$BASE_IMAGE" --format '{{.Created}}' 2>/dev/null || true)
+    if [ -z "$built" ]; then
+        say "базового образа $BASE_IMAGE нет — собираю его первым"
+        docker build -t "$BASE_IMAGE" . || die "базовый образ не собрался"
+        return 0
+    fi
+    newest=$(base_inputs_newest)
+    built_epoch=$(date -d "$built" +%s 2>/dev/null || echo "")
+    if [ -z "$built_epoch" ] || [ -z "$newest" ]; then
+        warn "не смог сравнить возраст базового образа с его файлами — соберите его сами, если правили Dockerfile или config/"
+        return 0
+    fi
+    if [ "$built_epoch" -lt "$newest" ]; then
+        say "базовый образ старше файлов, которые в него входят — собираю заново"
+        docker build -t "$BASE_IMAGE" . || die "базовый образ не собрался"
+    else
+        say "базовый образ свежий"
+    fi
+}
+
 die() { printf '[provision] %s\n' "$*" >&2; exit 1; }
 
 volumes() {
@@ -77,6 +120,9 @@ volumes() {
 case "${1:-}" in
 build)
     [ -d platform ] || die "platform/ is missing: the 1C installer and the demo template live there"
+    # Сперва базовый образ: стенд собирается FROM него, и правка в config/
+    # иначе молча не доедет.
+    ensure_base
     mkdir -p artifacts
     # Each target gets only the context it uses, and BuildKit transfers a named
     # context only when a stage mounts it: the stand image pulls 68 MB of

@@ -108,6 +108,41 @@ log() { printf '[1c-stand] %s\n' "$*"; }
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
 seed() { # runs as the workstation user; $HOME is theirs
+    # Отметка «первый запуск пройден» для Zed. Без неё редактор встречает
+    # гостя собственным онбордингом — «Finish setup», — который закрывает
+    # наш и которого на демонстрации быть не должно: человек пришёл
+    # смотреть 1С и агента, а не настраивать редактор.
+    #
+    # Отметка живёт в kv_store базы Zed, а не в настройках, поэтому её
+    # нельзя положить в образ: дома рабочих мест — том, и образ их не
+    # перекрывает. Ставим на входе, в seed, — тогда почин достаётся и
+    # уже поднятым стендам.
+    #
+    # Таблицу создаём ту же, что создаёт сам Zed (его миграция
+    # KeyValueStore шаг 0 — CREATE TABLE IF NOT EXISTS, проверено), и
+    # вставляем без замены: если гость что-то уже настроил, не трогаем.
+    zed_db=$HOME/.local/share/zed/db/0-stable/db.sqlite
+    mkdir -p "$(dirname "$zed_db")"
+    python3 - "$zed_db" <<'ZEDDB' || log "отметку первого запуска Zed поставить не удалось"
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
+db.execute("INSERT OR IGNORE INTO kv_store (key, value) VALUES ('first_open', 'false')")
+# Сам экран онбординга Zed хранит как вкладку рабочего пространства, и
+# восстанавливает её при каждом запуске — поэтому «Finish setup» его и не
+# закрывает насовсем. Убираем вкладку вместе с её записью в items, иначе
+# в панели останется призрак без содержимого.
+for table in ('onboarding_pages', 'welcome_pages'):
+    try:
+        ids = [r[0] for r in db.execute('SELECT item_id FROM %s' % table)]
+    except sqlite3.OperationalError:
+        continue
+    for item in ids:
+        db.execute('DELETE FROM items WHERE item_id = ?', (item,))
+    db.execute('DELETE FROM %s' % table)
+db.commit()
+ZEDDB
+
     payload_present || {
         log "no platform in this container: /opt/1cv8t and /opt/1c-demo are empty (see provision.sh)" >&2
         return 1

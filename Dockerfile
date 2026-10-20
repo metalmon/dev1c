@@ -385,6 +385,14 @@ COPY config/terminal-accels.scm  /usr/share/oktaplus/terminal/accels.scm
 # Ctrl+V во встроенном терминале Zed: в редакторе он вставляет, а в
 # терминале уходил в оболочку как «следующий символ буквально», и вставить
 # можно было только через меню (стенд, 20.10.2026).
+# Оболочка терминалов стенда: zsh с подсказкой при наборе и подсветкой.
+# Подсказка берётся из истории и дописывается серым прямо в строке —
+# того и просил заказчик, «не по табу, а при вводе». Входная оболочка
+# остаётся bash: её ждут скрипты и ssh, меняется только то, что
+# запускают терминалы (config/terminalrc и config/zed-settings.json).
+RUN apt-get update     && apt-get install -y --no-install-recommends          zsh zsh-autosuggestions zsh-syntax-highlighting     && rm -rf /var/lib/apt/lists/*
+COPY config/zshrc             /etc/skel/.zshrc
+COPY config/zshrc             /usr/share/oktaplus/terminal/zshrc
 COPY config/zed-keymap.json   /etc/skel/.config/zed/keymap.json
 COPY config/zed-keymap.json   /usr/share/oktaplus/terminal/zed-keymap.json
 COPY config/zed-settings.json /etc/skel/.config/zed/settings.json
@@ -525,7 +533,12 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
     && echo 'dev3 ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/dev \
     && chmod 0440 /etc/sudoers.d/dev \
     && for u in dev1 dev2 dev3; do \
-         useradd -m -s /bin/bash "$u"; \
+         # Входная оболочка — zsh: подсказка при наборе и подсветка.
+         # Через настройку терминала этого не добиться: ключи
+         # RunCustomCommand/CustomCommand xfce4-terminal 1.1.4 не
+         # применяет (проверено на стенде), а входную оболочку он
+         # запускает как есть — вместе с меню, ярлыком и ssh.
+         useradd -m -s /usr/bin/zsh "$u"; \
          echo "$u:$u" | chpasswd; \
          usermod -aG sudo "$u"; \
          cp /usr/local/bin/xsession "/home/$u/.xsession"; \

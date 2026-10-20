@@ -1,0 +1,58 @@
+# Оболочка рабочего места демо-стенда.
+#
+# zsh, а не fish, хотя подсказки при наборе есть у обоих: zsh принимает
+# те же команды, что bash. Человек скопирует строку из интернета или из
+# нашего же онбординга — «export ONEC_CONNECT_KIT=…», «cmd && cmd» — и
+# она сработает. В fish половина такого синтаксиса своя.
+#
+# Входная оболочка остаётся bash: её ждут скрипты и ssh. zsh запускают
+# терминалы — xfce4-terminal (CustomCommand в config/terminalrc) и
+# встроенный терминал Zed (config/zed-settings.json).
+
+# --- история ---------------------------------------------------------
+# Гость приходит на час; история нужна ему в пределах сеанса и между
+# окнами сразу, без выхода.
+HISTFILE=~/.zsh_history
+HISTSIZE=50000
+SAVEHIST=50000
+setopt SHARE_HISTORY HIST_IGNORE_DUPS HIST_IGNORE_SPACE HIST_VERIFY
+
+# --- поведение -------------------------------------------------------
+setopt AUTO_CD                 # «cd» можно не писать
+setopt INTERACTIVE_COMMENTS    # «# заметка» в командной строке не ошибка
+setopt NO_BEEP
+
+# --- дополнение ------------------------------------------------------
+# Меню со стрелками, без учёта регистра: человек не обязан помнить,
+# с какой буквы названа папка.
+autoload -Uz compinit && compinit -u
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
+zstyle ':completion:*' list-colors ''
+zstyle ':completion:*:descriptions' format '%F{yellow}%d%f'
+
+# --- приглашение -----------------------------------------------------
+# Рабочее место, каталог и ветка git. Ветка — главное: человек работает
+# с конфигурацией в своей ветке и должен видеть, в какой он сейчас.
+autoload -Uz vcs_info
+precmd_vcs_info() { vcs_info }
+precmd_functions+=( precmd_vcs_info )
+setopt PROMPT_SUBST
+zstyle ':vcs_info:git:*' formats ' %F{magenta}(%b)%f'
+zstyle ':vcs_info:git:*' actionformats ' %F{magenta}(%b|%a)%f'
+PROMPT='%F{green}%n%f %F{blue}%~%f${vcs_info_msg_0_} %F{yellow}❯%f '
+
+# --- подсказка при наборе и подсветка --------------------------------
+# Подсказка берётся из истории и дописывается серым прямо в строке;
+# принять её — стрелка вправо или End. Подсветка показывает неверную
+# команду красным ещё до нажатия ввода.
+[ -r /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ] \
+    && . /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'
+[ -r /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ] \
+    && . /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+
+# --- мелочи ----------------------------------------------------------
+alias ls='ls --color=auto'
+alias ll='ls -lh --color=auto'
+alias grep='grep --color=auto'

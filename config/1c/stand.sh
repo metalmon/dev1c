@@ -210,6 +210,9 @@ ZEDDB
         mkdir -p "$HOME/.config/zed"
         cp "$s" "$d"
     fi
+    # Настройки zsh: подсказка при наборе, подсветка, приглашение с веткой.
+    s=/usr/share/oktaplus/terminal/zshrc
+    [ -f "$s" ] && ! cmp -s "$s" "$HOME/.zshrc" && cp "$s" "$HOME/.zshrc"
     # the launchers of the first days, superseded by the starter
     rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
     # 1c-connect, if the image carries it. The tools it needs (mcp-1c,

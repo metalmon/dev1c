@@ -13,9 +13,13 @@ BAD_ANCHOR_SCENARIO = str(_HERE / 'fixtures' / 'scenario_bad_anchor.toml')
 
 
 class LoadTests(unittest.TestCase):
-    def test_seven_steps_in_order(self):
+    def test_two_acts_numbered_through(self):
         steps = load(SCENARIO)
-        self.assertEqual([s.number for s in steps], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual([s.number for s in steps], list(range(1, 15)))
+        # Нумерация сквозная, а принадлежность к акту — отдельное поле:
+        # человек видит «Шаг 1 из 7» в обоих актах (Machine.position).
+        self.assertEqual([s.number for s in steps if s.act == 1], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual([s.number for s in steps if s.act == 2], [8, 9, 10, 11, 12, 13, 14])
 
     def test_texts_are_verbatim(self):
         steps = load(SCENARIO)
@@ -106,14 +110,17 @@ class ActionTests(unittest.TestCase):
         for s in steps:
             self.assertEqual(set(s.actions), set(s.buttons))
 
-    def test_close_only_on_step_one(self):
+    def test_close_only_where_the_person_is_offered_a_way_out(self):
         steps = load(SCENARIO)
         self.assertEqual(steps[0].actions['Закрыть'].action, 'close')
         self.assertEqual(steps[0].actions['Начать'].action, 'next')
-        # Крестик/Esc закрывают любой шаг (это их дело, не сценария), но
-        # среди кнопок самого сценария 'close' есть только на первом экране.
-        for s in steps[1:]:
-            self.assertTrue(all(a.action != 'close' for a in s.actions.values()))
+        # Крестик/Esc закрывают любой шаг (это их дело, не сценария).
+        # Среди кнопок сценария 'close' стоит ровно там, где человеку
+        # предлагают выход: первый экран, конец первого акта («Готово»
+        # вместо второго акта), развилка второго акта и его конец.
+        closing = {s.number for s in steps
+                   if any(a.action == 'close' for a in s.actions.values())}
+        self.assertEqual(closing, {1, 7, 8, 14})
 
     def test_step_three_button_advances_and_closes_1c(self):
         # Кнопка сама двигает шаг («next» — wait_for у шага 3 больше нет,

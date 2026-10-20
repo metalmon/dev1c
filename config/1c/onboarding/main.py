@@ -232,7 +232,8 @@ class App:
         if self._callout is not None:
             self._callout.destroy()
         self._callout = Callout(display_step, layout, self._on_button, copy_question,
-                                total=self._machine.total, scale=scale)
+                                total=self._machine.total, scale=scale,
+                                position=self._machine.position)
         self._callout.show()
 
 

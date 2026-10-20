@@ -34,8 +34,14 @@ _ADVANCE_ON_KINDS = ('button', 'target')
 # всегда), а окно 1С. По умолчанию None — тогда Machine.tick() ждёт сам
 # target, как было до этого разделения (шаги 4/5 ждут то самое окно Zed,
 # на которое и показывают, им отдельного wait_for не нужно).
-Step = namedtuple('Step', 'number title body target buttons advance_on questions actions wait_for',
-                   defaults=(MappingProxyType({}), None))
+# act — к какому акту принадлежит шаг. Первый акт показывает, что агент
+# умеет читать базу, второй — как правка агента в неё возвращается.
+# Счётчик «Шаг N из M» считает внутри акта, а не по всему сценарию:
+# первый экран обещает «семь коротких шагов», и «Шаг 1 из 14» сделало бы
+# это обещание ложью, хотя второй акт ещё и запускается по желанию.
+# По умолчанию 1 — шаги первого акта поля не несут.
+Step = namedtuple('Step', 'number title body target buttons advance_on questions actions wait_for act',
+                   defaults=(MappingProxyType({}), None, 1))
 Target = namedtuple('Target', 'kind desktop_file name_pattern anchor')
 Action = namedtuple('Action', 'action launch close_window', defaults=(None,))
 
@@ -70,7 +76,8 @@ def _load_step(raw: dict) -> Step:
     questions = tuple(raw.get('questions', ()))
     actions = _load_actions(raw.get('actions', {}), raw['buttons'], number)
     return Step(raw['number'], raw['title'], raw['body'], target,
-                tuple(raw['buttons']), raw['advance_on'], questions, actions, wait_for)
+                tuple(raw['buttons']), raw['advance_on'], questions, actions, wait_for,
+                int(raw.get('act', 1)))
 
 
 def _load_target(raw: dict, step_number) -> Target:

@@ -85,7 +85,7 @@ def tray_area(workarea: Rect) -> Rect:
 # Общий список для anchor_in и для scenario.py (проверка на этапе
 # загрузки TOML — опечатка в anchor обязана упасть при load(), а не
 # когда-нибудь потом внутри World/Machine на живом стенде).
-ANCHOR_KINDS = ('whole', 'right', 'right-bottom')
+ANCHOR_KINDS = ('whole', 'left', 'right', 'right-bottom')
 
 
 def anchor_in(rect: Rect, anchor: str) -> Rect:
@@ -94,10 +94,14 @@ def anchor_in(rect: Rect, anchor: str) -> Rect:
     'whole' — весь прямоугольник. 'right' — правая треть, по всей высоте.
     'right-bottom' — правая треть, нижняя четверть: нужно для панели
     агента Zed, у которой нет своего окна — только доля от окна целиком.
+    'left' — левая треть, по всей высоте: дерево файлов проекта в Zed,
+    у которого своего окна тоже нет.
     """
     if anchor == 'whole':
         return rect
     third = rect.w // 3
+    if anchor == 'left':
+        return Rect(rect.x, rect.y, third, rect.h)
     x = rect.x + rect.w - third
     if anchor == 'right':
         return Rect(x, rect.y, third, rect.h)

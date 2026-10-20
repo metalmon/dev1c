@@ -84,7 +84,7 @@ def _window_rect(layout):
 class Callout:
     """Выноска: один POPUP-попап, вырезанный по контуру своего рисунка."""
 
-    def __init__(self, step, layout, on_button, copy_question=None, total=None, scale=1.0):
+    def __init__(self, step, layout, on_button, copy_question=None, total=None, scale=1.0, position=None):
         self._step = step
         # Все числа рисования заданы в логических пикселях, посчитанных
         # под экран примерно 1280x800. На 2560x1440 выноска занимала бы
@@ -100,6 +100,8 @@ class Callout:
         # в подписи старое число. None (тесты, которым счётчик не важен) —
         # подпись без «из M», а не выдуманное число.
         self._total = total
+        # Номер шага внутри акта; None — берём сквозной номер самого шага.
+        self._position = position
         self._layout = layout
         self._on_button = on_button
         # Готовые вопросы шага 4 копируются в буфер сами, без похода через
@@ -246,7 +248,8 @@ class Callout:
         cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(13)
         cr.move_to(x + 16, y + 20)
-        counter = f'Шаг {step.number}' if self._total is None else f'Шаг {step.number} из {self._total}'
+        number = step.number if self._position is None else self._position
+        counter = f'Шаг {number}' if self._total is None else f'Шаг {number} из {self._total}'
         cr.show_text(counter)
 
     def _draw_title(self, cr, x, y, step):

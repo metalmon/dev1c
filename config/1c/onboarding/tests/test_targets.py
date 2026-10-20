@@ -65,6 +65,12 @@ class AnchorInTests(unittest.TestCase):
         r = anchor_in(Rect(0, 0, 300, 400), 'right')
         self.assertEqual(r, Rect(200, 0, 100, 400))
 
+    def test_left_third_full_height(self):
+        # Дерево файлов проекта в Zed: своего окна у него нет, только
+        # доля от окна редактора — как у панели агента справа.
+        r = anchor_in(Rect(0, 0, 300, 400), 'left')
+        self.assertEqual(r, Rect(0, 0, 100, 400))
+
     def test_right_bottom_third_by_quarter(self):
         r = anchor_in(Rect(0, 0, 300, 400), 'right-bottom')
         self.assertEqual(r, Rect(200, 300, 100, 100))

@@ -190,17 +190,34 @@ mod tests {
         line.trim().parse().unwrap()
     }
 
-    /// Ждёт до 8 с, пока `/proc/<pid>` не исчезнет.
+    /// Ждёт до 8 с, пока процесс не умрёт. Проверять существование
+    /// `/proc/<pid>` недостаточно: пока родитель не забрал код возврата,
+    /// мёртвый процесс остаётся зомби и каталог никуда не девается — на
+    /// этом тест и спотыкался в CI, хотя убийство работало.
     #[cfg(not(windows))]
     fn waits_for_death(pid: u32) -> bool {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
         while std::time::Instant::now() < deadline {
-            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            if is_dead(pid) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         false
+    }
+
+    /// Процесса нет вовсе либо он уже зомби (состояние `Z` в `/proc/<pid>/stat`).
+    /// Состояние — первое поле после закрывающей скобки имени, поэтому имя с
+    /// пробелами или скобками разбор не ломает.
+    #[cfg(not(windows))]
+    fn is_dead(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => match stat.rsplit_once(')') {
+                Some((_, rest)) => rest.split_whitespace().next() == Some("Z"),
+                None => true,
+            },
+        }
     }
 
     #[cfg(all(test, not(windows)))]
@@ -217,6 +234,7 @@ mod tests {
         drop(job);
         assert!(waits_for_death(child.id()), "sh жив");
         assert!(waits_for_death(grandchild), "внук жив");
+        let _ = child.wait();
     }
 
     /// Группа, которую сразу убил SIGTERM, к моменту проверки эскалации уже
@@ -237,6 +255,9 @@ mod tests {
         drop(job); // немедленный SIGTERM убивает и sh, и внука.
         assert!(waits_for_death(child.id()), "sh жив");
         assert!(waits_for_death(grandchild), "внук жив");
+        // Код возврата надо забрать до проверки группы: неубранный зомби
+        // остаётся членом своей группы, и `killpg` его ещё видит.
+        let _ = child.wait();
         // Группы больше нет: именно это условие останавливает поток
         // эскалации до того, как он дойдёт до SIGKILL.
         assert!(!group_is_alive(pgid), "группа всё ещё жива для killpg");

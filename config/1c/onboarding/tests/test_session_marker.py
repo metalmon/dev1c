@@ -76,6 +76,9 @@ class SessionMarkerTests(unittest.TestCase):
         try:
             self.assertFalse(main.already_closed())
             main.mark_closed()  # падать нельзя
+            # Сеанс опознать нельзя, отметка есть — всё равно показываем:
+            # лишний показ лучше, чем молчание (ruling 21.10).
+            self.assertFalse(main.already_closed())
         finally:
             if old is not None:
                 os.environ['DISPLAY'] = old

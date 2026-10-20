@@ -85,7 +85,12 @@ def already_closed() -> bool:
     except OSError:
         return False
     started_at = _session_started_at()
-    return started_at is None or closed_at >= started_at
+    if started_at is None:
+        # Сеанс опознать не удалось. Лишний показ подсказки — мелкая
+        # неловкость, молчание — та самая жалоба, с которой всё
+        # началось: гость не увидел онбординг вовсе. Выбираем показ.
+        return False
+    return closed_at >= started_at
 
 
 def mark_closed() -> None:

@@ -49,6 +49,13 @@ QUESTION_GAP = 8
 # короче строка безопаснее, чем ещё одна обрезанная маской.
 BODY_CHARS_PER_LINE = 70
 
+# Насколько выноска отстоит от цели. Это не то же самое, что отступ от
+# края экрана (margin): там достаточно зазора, здесь между выноской и
+# целью должна поместиться читаемая стрелка. С прежними 24px на неё
+# оставалось 10px шафта при наконечнике в 14 — на экране это выглядело
+# чёрточкой, приклеенной к значку (замечание со стенда 20.10.2026).
+TARGET_STANDOFF = 72
+
 
 def wrap_body(body: str, chars_per_line: int = BODY_CHARS_PER_LINE) -> list[str]:
     """Переносит тело шага по словам в список строк не шире
@@ -92,7 +99,8 @@ def _fits_screen(r: Rect, screen: Rect) -> bool:
             and r.y + r.h <= screen.y + screen.h)
 
 
-def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect):
+def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect,
+                standoff: int = TARGET_STANDOFF):
     # Порядок предпочтений: справа, слева, снизу, сверху.
     #
     # «Снизу»/«сверху» центрированы по x на цель — для цели заметно уже
@@ -113,11 +121,11 @@ def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect):
     # вертикали только ради формального «не пересекается».
     cx = target.x + target.w // 2 - bw // 2
     cy = target.y + target.h // 2 - bh // 2
-    yield Rect(target.x + target.w + margin, cy, bw, bh)
-    yield Rect(target.x - margin - bw, cy, bw, bh)
+    yield Rect(target.x + target.w + standoff, cy, bw, bh)
+    yield Rect(target.x - standoff - bw, cy, bw, bh)
     below_above_x = min(max(cx, screen.x + margin), screen.x + screen.w - bw - margin)
-    yield Rect(below_above_x, target.y + target.h + margin, bw, bh)
-    yield Rect(below_above_x, target.y - margin - bh, bw, bh)
+    yield Rect(below_above_x, target.y + target.h + standoff, bw, bh)
+    yield Rect(below_above_x, target.y - standoff - bh, bw, bh)
 
 
 def _fallback(screen: Rect, target: Rect, bw: int, bh: int, margin: int) -> Rect:
@@ -135,21 +143,34 @@ def _fallback(screen: Rect, target: Rect, bw: int, bh: int, margin: int) -> Rect
     return Rect(x, y, bw, bh)
 
 
+def _edge_point(rect: Rect, towards: tuple) -> tuple:
+    """Точка на границе rect на отрезке от его центра к towards."""
+    cx, cy = rect.x + rect.w / 2, rect.y + rect.h / 2
+    dx, dy = towards[0] - cx, towards[1] - cy
+    if dx == 0 and dy == 0:
+        return (int(cx), int(cy))
+    scale = min((rect.w / 2) / abs(dx) if dx else float('inf'),
+                (rect.h / 2) / abs(dy) if dy else float('inf'))
+    return (int(round(cx + dx * scale)), int(round(cy + dy * scale)))
+
+
 def _arrow(bubble: Rect, target: Rect):
-    # Конец стрелки — на ближней грани цели, не в её центре: наконечник
-    # не должен закрывать то, на что показывает (финальная волна; явная
-    # анти-цель спецификации). Та же логика, что уже была у начала
-    # стрелки (грань пузыря, а не его центр) — зеркально, для цели.
-    bcx, bcy = bubble.x + bubble.w // 2, bubble.y + bubble.h // 2
-    tcx, tcy = target.x + target.w // 2, target.y + target.h // 2
-    dx, dy = tcx - bcx, tcy - bcy
-    if abs(dx) >= abs(dy):
-        start = (bubble.x + bubble.w if dx > 0 else bubble.x, bcy)
-        end = (target.x if dx > 0 else target.x + target.w, tcy)
-    else:
-        start = (bcx, bubble.y + bubble.h if dy > 0 else bubble.y)
-        end = (tcx, target.y if dy > 0 else target.y + target.h)
-    return start, end
+    """Стрелка — отрезок между центрами, обрезанный обеими границами.
+
+    Так она начинается ровно на той грани выноски, которая смотрит на
+    цель, и кончается на ближней грани цели, не закрывая её (явная
+    анти-цель спецификации).
+
+    Прежняя версия выбирала грани по тому, какая разница центров больше
+    по модулю, и промахивалась, когда выноска и цель перекрывались по
+    этой же оси: у шага 6 стрелка начиналась на ПРАВОЙ грани выноски и
+    шла обратно влево, под самой выноской, — на экране от неё виден был
+    только оторванный хвост у трея. Отрезок между центрами такого хода
+    не допускает по построению.
+    """
+    bubble_centre = (bubble.x + bubble.w / 2, bubble.y + bubble.h / 2)
+    target_centre = (target.x + target.w / 2, target.y + target.h / 2)
+    return _edge_point(bubble, target_centre), _edge_point(target, bubble_centre)
 
 
 def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24) -> Layout:

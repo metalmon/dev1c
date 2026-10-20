@@ -56,13 +56,20 @@ def desktop_icon(layout_text: str, desktop_file: str, exists: Callable[[str], bo
 
 
 def window(lister: Callable[[], list[WindowInfo]], name_pattern: str) -> Rect | None:
-    """Прямоугольник окна, чьё имя содержит name_pattern (без учёта регистра).
+    """Прямоугольник окна, чьё имя ИЛИ класс содержит name_pattern.
 
-    Если подходит несколько окон — берётся верхнее по stacking (самое
-    видимое).
+    Без учёта регистра. Если подходит несколько окон — берётся верхнее
+    по stacking (самое видимое).
+
+    Класс смотрим наравне с именем, потому что заголовок окна редактора
+    принадлежит не редактору, а открытому в нём проекту: на стенде Zed
+    показывает «proj — SKILL.md», слова «Zed» в заголовке нет вовсе, и
+    шаги 4 и 5 оставались без стрелки. Класс окна (dev.zed.Zed) от
+    содержимого не зависит. Найдено глазами на стенде 20.10.2026.
     """
     pattern = name_pattern.lower()
-    matches = [w for w in lister() if pattern in w.name.lower()]
+    matches = [w for w in lister()
+               if pattern in w.name.lower() or pattern in w.wclass.lower()]
     if not matches:
         return None
     return max(matches, key=lambda w: w.stacking).rect

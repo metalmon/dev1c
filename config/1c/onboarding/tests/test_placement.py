@@ -235,5 +235,53 @@ class WrapBodyTests(unittest.TestCase):
         self.assertEqual(wrap_body('', chars_per_line=70), [])
 
 
+class ArrowShapeTests(unittest.TestCase):
+    """Две поломки, найденные глазами на стенде 20.10.2026.
+
+    Прежние тесты стрелки проверяли только направление и то, что остриё
+    стоит на грани цели — и обе эти поломки пропустили.
+    """
+
+    SCREEN = Rect(0, 0, 1280, 800)
+
+    def _length(self, layout):
+        (x0, y0), (x1, y1) = layout.arrow_start, layout.arrow_end
+        return math.hypot(x1 - x0, y1 - y0)
+
+    def _inside(self, rect, point, slack=1):
+        x, y = point
+        return (rect.x + slack < x < rect.x + rect.w - slack
+                and rect.y + slack < y < rect.y + rect.h - slack)
+
+    def test_arrow_does_not_run_back_under_the_bubble(self):
+        # Шаг 6: трей в правом нижнем углу, выноска встаёт над ним и
+        # шире его. Стрелка начиналась на ПРАВОЙ грани выноски и шла
+        # обратно влево под ней — на экране оставался оторванный хвост.
+        tray = Rect(1120, 760, 160, 40)
+        layout = place(self.SCREEN, tray, (640, 275))
+        for t in range(0, 101):
+            point = (layout.arrow_start[0] + (layout.arrow_end[0] - layout.arrow_start[0]) * t / 100,
+                     layout.arrow_start[1] + (layout.arrow_end[1] - layout.arrow_start[1]) * t / 100)
+            self.assertFalse(self._inside(layout.bubble, point),
+                             'стрелка проходит сквозь выноску в точке %s' % (point,))
+
+    def test_arrow_is_long_enough_to_read_as_an_arrow(self):
+        # Значок на столе слева: стрелка была 24px при наконечнике в 14,
+        # то есть чёрточка, приклеенная к значку.
+        icon = Rect(36, 334, 48, 48)
+        layout = place(self.SCREEN, icon, (640, 191))
+        self.assertGreaterEqual(self._length(layout), 48)
+
+    def test_arrow_starts_on_the_bubble_edge_and_ends_on_the_target_edge(self):
+        icon = Rect(36, 334, 48, 48)
+        layout = place(self.SCREEN, icon, (640, 191))
+        self.assertFalse(self._inside(layout.bubble, layout.arrow_start))
+        self.assertFalse(self._inside(icon, layout.arrow_end))
+        # Остриё — на грани цели, а не в стороне от неё.
+        self.assertTrue(icon.x <= layout.arrow_end[0] <= icon.x + icon.w)
+        self.assertTrue(icon.y <= layout.arrow_end[1] <= icon.y + icon.h)
+
+
+
 if __name__ == '__main__':
     unittest.main()

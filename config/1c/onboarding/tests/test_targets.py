@@ -39,6 +39,15 @@ class WindowTests(unittest.TestCase):
     def test_no_match_returns_none(self):
         self.assertIsNone(window(lambda: [], 'zed'))
 
+    def test_matches_by_window_class_when_the_title_does_not_say_it(self):
+        # На стенде заголовок окна Zed принадлежит открытому проекту
+        # («proj — SKILL.md»), слова «Zed» в нём нет вовсе, и шаги 4 и 5
+        # оставались без стрелки. Класс окна от содержимого не зависит.
+        windows = [
+            WindowInfo('proj — SKILL.md', 'dev.zed.Zed', Rect(420, 80, 840, 620), stacking=3),
+        ]
+        self.assertEqual(window(lambda: windows, 'Zed'), Rect(420, 80, 840, 620))
+
 
 class TrayAreaTests(unittest.TestCase):
     def test_sits_at_bottom_right_of_workarea(self):

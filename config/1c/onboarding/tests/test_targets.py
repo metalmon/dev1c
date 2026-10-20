@@ -71,6 +71,12 @@ class AnchorInTests(unittest.TestCase):
         r = anchor_in(Rect(0, 0, 300, 400), 'left')
         self.assertEqual(r, Rect(0, 0, 100, 400))
 
+    def test_middle_third_full_height(self):
+        # Дерево файлов проекта в Zed: у редактора на стенде три колонки,
+        # и слева список бесед агента, а не файлы.
+        r = anchor_in(Rect(0, 0, 300, 400), 'middle')
+        self.assertEqual(r, Rect(100, 0, 100, 400))
+
     def test_right_bottom_third_by_quarter(self):
         r = anchor_in(Rect(0, 0, 300, 400), 'right-bottom')
         self.assertEqual(r, Rect(200, 300, 100, 100))

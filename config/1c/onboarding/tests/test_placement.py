@@ -329,5 +329,31 @@ class ScaleTests(unittest.TestCase):
 
 
 
+class AvoidTests(unittest.TestCase):
+    """Выноска оставляет место тому, что человеку предлагают открыть.
+
+    Шаг про коннектор показывает стрелкой на значок в трее, а окно
+    откроется в правом нижнем углу. Без этого выноска вставала ровно
+    туда, и окно открывалось под ней — шаг накрывал собой то, о чём
+    говорит (найдено глазами на стенде 20.10.2026).
+    """
+
+    SCREEN = Rect(0, 0, 1280, 800)
+
+    def test_bubble_keeps_out_of_the_reserved_area(self):
+        tray = Rect(1120, 760, 160, 40)
+        reserved = Rect(880, 220, 380, 560)
+        layout = place(self.SCREEN, tray, (640, 275), avoid=reserved)
+        self.assertFalse(overlaps(layout.bubble, reserved))
+
+    def test_without_a_reserve_the_bubble_may_use_that_corner(self):
+        # Без avoid поведение прежнее — проверяем, что мы не запретили
+        # угол вообще, а только когда о нём просят.
+        tray = Rect(1120, 760, 160, 40)
+        plain = place(self.SCREEN, tray, (640, 275))
+        reserved = Rect(880, 220, 380, 560)
+        self.assertTrue(overlaps(plain.bubble, reserved))
+
+
 if __name__ == '__main__':
     unittest.main()

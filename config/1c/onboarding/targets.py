@@ -75,6 +75,29 @@ def window(lister: Callable[[], list[WindowInfo]], name_pattern: str) -> Rect | 
     return max(matches, key=lambda w: w.stacking).rect
 
 
+# Место, которое занимает окно коннектора, когда его открывают. Оно само
+# прижимается к правому нижнему углу рабочей области с отступом
+# (gui/window.rs: flyout_origin, GAP = 12) и не бывает меньше 380x420
+# (MIN_SIZE); по содержимому может стать выше, поэтому резервируем с
+# запасом по высоте.
+#
+# Нужно шагам про коннектор: они предлагают человеку открыть окно, и
+# выноска обязана оставить ему место заранее. Иначе окно открывается
+# ровно под выноской — и шаг накрывает собой то, о чём говорит (найдено
+# глазами на стенде 20.10.2026).
+CONNECTOR_WIDTH = 380
+CONNECTOR_HEIGHT = 560
+CONNECTOR_GAP = 12
+
+
+def connector_area(workarea: Rect) -> Rect:
+    """Прямоугольник, который займёт окно коннектора в правом нижнем углу."""
+    x = workarea.x + workarea.w - CONNECTOR_WIDTH - CONNECTOR_GAP
+    y = workarea.y + workarea.h - CONNECTOR_HEIGHT - CONNECTOR_GAP
+    return Rect(max(x, workarea.x), max(y, workarea.y),
+                min(CONNECTOR_WIDTH, workarea.w), min(CONNECTOR_HEIGHT, workarea.h))
+
+
 def tray_area(workarea: Rect) -> Rect:
     """Область трея у правого края нижней панели, внутри workarea."""
     x = workarea.x + workarea.w - TRAY_WIDTH

@@ -52,7 +52,8 @@ class LoadTests(unittest.TestCase):
             load(MISSING_FIELD_SCENARIO)
 
     def test_target_kinds_constant(self):
-        self.assertEqual(TARGET_KINDS, ('none', 'desktop_icon', 'window', 'tray'))
+        self.assertEqual(TARGET_KINDS,
+                         ('none', 'desktop_icon', 'window', 'tray', 'connector'))
 
     def test_step_targets_match_brief(self):
         steps = load(SCENARIO)

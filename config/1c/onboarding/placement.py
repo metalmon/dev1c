@@ -177,6 +177,19 @@ def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect,
         yield Rect(below_above_x, target.y - standoff - bh, bw, bh)
 
 
+def _pushed_off(candidate: Rect, avoid: Rect, margin: int) -> Rect:
+    """Тот же кандидат, отодвинутый от avoid по более дешёвой оси."""
+    if not _overlaps(candidate, avoid):
+        return candidate
+    left = avoid.x - margin - candidate.w          # уйти влево от места
+    above = avoid.y - margin - candidate.h         # уйти вверх от места
+    by_x = abs(candidate.x - left)
+    by_y = abs(candidate.y - above)
+    if by_x <= by_y:
+        return Rect(left, candidate.y, candidate.w, candidate.h)
+    return Rect(candidate.x, above, candidate.w, candidate.h)
+
+
 def _fallback(screen: Rect, target: Rect, bw: int, bh: int, margin: int) -> Rect:
     # Ни один вариант не влез целиком и мимо цели — прижимаемся к краю,
     # противоположному цели, но не выходим за экран: читаемость выноски
@@ -227,8 +240,17 @@ def _arrow(bubble: Rect, target: Rect):
     return _edge_point(bubble, target_centre), _edge_point(target, bubble_centre)
 
 
-def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24) -> Layout:
-    """Прямоугольник выноски и концы стрелки для данного экрана и цели."""
+def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24,
+          avoid: Rect | None = None) -> Layout:
+    """Прямоугольник выноски и концы стрелки для данного экрана и цели.
+
+    avoid — место, которое надо оставить свободным, даже если цель
+    совсем в другом углу. Нужно шагам, которые предлагают человеку
+    что-то открыть: окно коннектора встаёт в правый нижний угол, и если
+    выноска займёт этот угол, окно откроется ровно под ней — шаг накроет
+    собой то, о чём говорит. Куда показывает стрелка и где оставить
+    место — разные вещи, как target и wait_for.
+    """
     bw, bh = bubble_size
     if target is None:
         x = screen.x + screen.w // 2 - bw // 2
@@ -246,8 +268,17 @@ def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margi
     # писался: выноска должна стоять как можно ближе к тому, о чём
     # говорит. Равные длины разрешаются прежним порядком — min
     # устойчив.
-    fitting = [c for c in _candidates(target, bw, bh, margin, screen)
-               if _fits_screen(c, screen) and not _overlaps(c, target)]
+    candidates = list(_candidates(target, bw, bh, margin, screen))
+    if avoid is not None:
+        # Кандидата, задевающего оберегаемое место, не выбрасываем, а
+        # отодвигаем от него — то же правило, что для края экрана. Без
+        # этого у цели в углу (трей) не остаётся ни одного кандидата:
+        # все четыре задевают окно, которое откроется рядом, и всё
+        # падает в _fallback с диагональю через весь экран.
+        candidates += [_pushed_off(c, avoid, margin) for c in candidates]
+    fitting = [c for c in candidates
+               if _fits_screen(c, screen) and not _overlaps(c, target)
+               and not (avoid is not None and _overlaps(c, avoid))]
     if fitting:
         bubble = min(fitting, key=lambda c: _arrow_length(c, target))
     else:

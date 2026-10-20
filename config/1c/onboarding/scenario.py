@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 from targets import ANCHOR_KINDS
 
-TARGET_KINDS = ('none', 'desktop_icon', 'window', 'tray')
+TARGET_KINDS = ('none', 'desktop_icon', 'window', 'tray', 'connector')
 _ADVANCE_ON_KINDS = ('button', 'target')
 
 # questions — только у шага 4 (готовые вопросы агенту); у остальных шагов
@@ -40,8 +40,13 @@ _ADVANCE_ON_KINDS = ('button', 'target')
 # первый экран обещает «семь коротких шагов», и «Шаг 1 из 14» сделало бы
 # это обещание ложью, хотя второй акт ещё и запускается по желанию.
 # По умолчанию 1 — шаги первого акта поля не несут.
-Step = namedtuple('Step', 'number title body target buttons advance_on questions actions wait_for act',
-                   defaults=(MappingProxyType({}), None, 1))
+# reserve — что оставить свободным на экране, даже если стрелка
+# показывает в другую сторону. Сейчас одно значение, 'connector': окно
+# коннектора встаёт в правый нижний угол, и шаг, который предлагает его
+# открыть, обязан это место освободить заранее.
+Step = namedtuple('Step',
+                   'number title body target buttons advance_on questions actions wait_for act reserve',
+                   defaults=(MappingProxyType({}), None, 1, None))
 Target = namedtuple('Target', 'kind desktop_file name_pattern anchor')
 Action = namedtuple('Action', 'action launch close_window', defaults=(None,))
 
@@ -77,7 +82,18 @@ def _load_step(raw: dict) -> Step:
     actions = _load_actions(raw.get('actions', {}), raw['buttons'], number)
     return Step(raw['number'], raw['title'], raw['body'], target,
                 tuple(raw['buttons']), raw['advance_on'], questions, actions, wait_for,
-                int(raw.get('act', 1)))
+                int(raw.get('act', 1)), _load_reserve(raw.get('reserve'), number))
+
+
+RESERVE_KINDS = ('connector',)
+
+
+def _load_reserve(value, step_number):
+    if value is None:
+        return None
+    if value not in RESERVE_KINDS:
+        raise ValueError(f'шаг {step_number}: неизвестный reserve {value!r}')
+    return value
 
 
 def _load_target(raw: dict, step_number) -> Target:

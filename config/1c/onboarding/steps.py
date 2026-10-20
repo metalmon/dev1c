@@ -1,7 +1,7 @@
 # Машина шагов онбординга: какой шаг показан и когда переходить дальше.
 # Чистая логика — без gi/GTK, чтобы проверяться против фейкового world
 # (задача 6 даст настоящий, с реальным X11 за методами).
-from targets import tray_area
+from targets import connector_area, tray_area
 
 
 class Machine:
@@ -67,6 +67,10 @@ class Machine:
             # волна: иначе стрелка шага 6 указывала на пустоту над
             # значком, выше панели на её высоту).
             return tray_area(self._world.monitor())
+        if target.kind == 'connector':
+            # Рабочая область, а не монитор: окно коннектора встаёт над
+            # панелью, а не поверх неё (gui/window.rs: work_area).
+            return connector_area(self._world.screen())
         raise ValueError(f'неизвестный тип цели: {target.kind!r}')
 
     def _target_rect(self):
@@ -109,6 +113,13 @@ class Machine:
         if self._world.covered(rect, owner=self._owner_rect(self.current.target)):
             return None
         return rect
+
+    def reserved(self):
+        """Место, которое выноска обязана оставить свободной, или None."""
+        step = self.current
+        if step is None or step.reserve != 'connector':
+            return None
+        return connector_area(self._world.screen())
 
     def tick(self):
         """Вызывается по таймеру. Двигает шаг вперёд, если его

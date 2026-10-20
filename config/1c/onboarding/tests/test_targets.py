@@ -3,7 +3,8 @@
 import pathlib
 import unittest
 
-from targets import Rect, WindowInfo, anchor_in, desktop_icon, tray_area, window
+from targets import (Rect, WindowInfo, anchor_in, connector_area, desktop_icon,
+                     tray_area, window)
 
 FIXTURE = (pathlib.Path(__file__).parent / 'fixtures' / 'icons.screen0.yaml').read_text(encoding='utf-8')
 
@@ -47,6 +48,28 @@ class WindowTests(unittest.TestCase):
             WindowInfo('proj — SKILL.md', 'dev.zed.Zed', Rect(420, 80, 840, 620), stacking=3),
         ]
         self.assertEqual(window(lambda: windows, 'Zed'), Rect(420, 80, 840, 620))
+
+
+class ConnectorAreaTests(unittest.TestCase):
+    """Место, которое займёт окно коннектора, когда его откроют.
+
+    Шаги про коннектор предлагают человеку открыть окно, и выноска
+    обязана оставить ему место заранее: иначе окно открывается ровно под
+    выноской, и шаг накрывает собой то, о чём говорит.
+    """
+
+    def test_sits_in_the_bottom_right_corner_with_a_gap(self):
+        r = connector_area(Rect(0, 0, 2560, 1397))
+        self.assertEqual(r.x + r.w + 12, 2560)
+        self.assertEqual(r.y + r.h + 12, 1397)
+
+    def test_never_leaves_a_small_work_area(self):
+        work = Rect(0, 0, 320, 240)
+        r = connector_area(work)
+        self.assertGreaterEqual(r.x, work.x)
+        self.assertGreaterEqual(r.y, work.y)
+        self.assertLessEqual(r.w, work.w)
+        self.assertLessEqual(r.h, work.h)
 
 
 class TrayAreaTests(unittest.TestCase):

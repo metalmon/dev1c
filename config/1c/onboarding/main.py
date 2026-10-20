@@ -225,7 +225,10 @@ class App:
         screen = self._world.screen()
         scale = ui_scale(screen)
         target_logical = None if target is None else scaled(target, 1 / scale)
-        layout = place(logical(screen, scale), target_logical, bubble_size(display_step))
+        reserved = self._machine.reserved()
+        reserved_logical = None if reserved is None else scaled(reserved, 1 / scale)
+        layout = place(logical(screen, scale), target_logical, bubble_size(display_step),
+                       avoid=reserved_logical)
         if not force and step is self._step and layout == self._layout and self._warning == self._shown_warning:
             return  # ничего не изменилось с прошлого тика — не мигаем окном
         self._step, self._layout, self._shown_warning = step, layout, self._warning

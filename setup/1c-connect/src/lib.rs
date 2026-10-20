@@ -17,5 +17,6 @@ pub mod ops_host;
 pub mod project;
 pub mod publication;
 pub mod session;
+pub mod single_instance;
 pub mod tunnel;
 pub mod verify;

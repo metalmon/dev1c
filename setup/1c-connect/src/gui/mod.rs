@@ -1220,6 +1220,12 @@ fn fatal(text: &str) {
 
 pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
+    // Тот же единственный владелец рабочего места, что у `connect`/`serve` —
+    // см. `crate::single_instance`. Вторая копия окна (двойной щелчок или
+    // автозапуск при живом трее) на Windows тихо поднимает окно первой и
+    // выходит; замок держим до конца `run()` ниже — переменная остаётся на
+    // стеке этой функции, пока приложение не закроется.
+    let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation)?;
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
     let log_path = kit.path(LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {

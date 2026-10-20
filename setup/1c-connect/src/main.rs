@@ -13,7 +13,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, flow, project, session, verify};
+use one_c_connect::{cfg, flow, project, session, single_instance, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -230,6 +230,9 @@ fn connect(ctx: &Ctx) -> Result<()> {
         cfg::FILE,
         cfg::FILE
     );
+    // У рабочего места один владелец (спека): вторая копия не борется за
+    // порты и мьютекс проекта с этой — см. `single_instance`.
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
     let ports = ctx.cfg.ports();
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
@@ -261,6 +264,9 @@ fn serve(ctx: &Ctx) -> Result<()> {
         cfg::FILE,
         cfg::FILE
     );
+    // Тот же единственный владелец рабочего места, что у `connect` — см.
+    // `single_instance`.
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом

@@ -64,7 +64,13 @@ impl Kit {
 {text}"),
             _ => return false,
         };
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.cmd_log()) {
+        let path = self.cmd_log();
+        // Единственный писатель, который не идёт через `write_text` (тот
+        // создаёт родителя сам): каталог состояния может ещё не существовать.
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             use std::io::Write;
             let _ = writeln!(f, "{line}");
         }

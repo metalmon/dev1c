@@ -134,15 +134,21 @@ fn run() -> Result<()> {
     // и `len() == 1`.
     #[cfg(feature = "gui")]
     if let Some(hidden) = gui_launch() {
-        return one_c_connect::gui::launch(ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?), hidden);
+        let kit = ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
+        ops_host::ensure_state(&kit);
+        return one_c_connect::gui::launch(kit, hidden);
     }
     let cli = Cli::parse();
     // `wire_state` разводит чтение и запись: из комплекта читаем, своё пишем
-    // в состояние пользователя — в образе комплект общий и только для чтения.
-    let kit = ops_host::wire_state(match &cli.kit {
+    // в состояние пользователя — в образе комплект общий и только для
+    // чтения. Явный `--kit` этого не касается: он значит «вот этот комплект
+    // целиком», и состояние остаётся в нём — иначе прогон на отдельном
+    // комплекте читал бы и писал настоящее состояние человека.
+    let kit = match &cli.kit {
         Some(p) => Kit::at(p),
-        None => Kit::discover("ONEC_CONNECT_KIT")?,
-    });
+        None => ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?),
+    };
+    ops_host::ensure_state(&kit);
     if let Some(Cmd::Example) = cli.cmd {
         print!("{}", cfg::EXAMPLE);
         return Ok(());
@@ -226,11 +232,12 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
 
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
+    let params = ctx.kit.state_path(cfg::FILE);
     anyhow::ensure!(
-        ctx.kit.state_path(cfg::FILE).exists(),
+        params.exists(),
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
-        cfg::FILE,
-        cfg::FILE
+        params.display(),
+        params.display()
     );
     // У рабочего места один владелец (спека): вторая копия не борется за
     // порты и мьютекс проекта с этой — см. `single_instance`.
@@ -268,11 +275,12 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// Ctrl+C, а на Linux — ещё и по SIGTERM, чтобы `docker stop` и остановка
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
 fn serve(ctx: &Ctx) -> Result<()> {
+    let params = ctx.kit.state_path(cfg::FILE);
     anyhow::ensure!(
-        ctx.kit.state_path(cfg::FILE).exists(),
+        params.exists(),
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
-        cfg::FILE,
-        cfg::FILE
+        params.display(),
+        params.display()
     );
     // Тот же единственный владелец рабочего места, что у `connect` — см.
     // `single_instance`.

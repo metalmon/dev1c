@@ -46,7 +46,7 @@ impl std::fmt::Display for TunnelError {
             TunnelError::Auth => write!(f, "сервер не принял логин и пароль рабочего места — проверьте workstation и password в 1c-connect.toml"),
             TunnelError::HostKeyChanged { old, new } => write!(
                 f,
-                "отпечаток сервера изменился: был {old}, стал {new}. Если среду переустанавливали — удалите known_hosts из комплекта (или 1c-connect uninstall) и подключитесь заново"
+                "отпечаток сервера изменился: был {old}, стал {new}. Если среду переустанавливали — удалите known_hosts рядом с файлом параметров (или 1c-connect uninstall) и подключитесь заново"
             ),
             TunnelError::Forward(p) => write!(
                 f,

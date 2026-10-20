@@ -31,13 +31,21 @@ impl Runner for Ctx {
 
 /// Каталог инструментов на машине: с носителя комплекта (флешка, FAT32,
 /// Defender на каждый запуск) 48 МБ .NET не запускают.
+/// Переменная среды как каталог: пустое значение — это не заданное.
+/// `XDG_DATA_HOME=""` иначе дало бы относительный `dev1c` рядом с текущим
+/// каталогом, и скрипт стенда (`${XDG_DATA_HOME:-$HOME/.local/share}`, где
+/// пустое тоже уходит в умолчание) разошёлся бы с программой.
+fn env_dir(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
 pub fn tools_dir() -> PathBuf {
     if cfg!(windows) {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| ".".into())).join("dev1c")
+        PathBuf::from(env_dir("LOCALAPPDATA").unwrap_or_else(|| ".".into())).join("dev1c")
     } else {
-        match std::env::var_os("XDG_DATA_HOME") {
+        match env_dir("XDG_DATA_HOME") {
             Some(d) => PathBuf::from(d).join("dev1c"),
-            None => PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".local/share/dev1c"),
+            None => PathBuf::from(env_dir("HOME").unwrap_or_else(|| ".".into())).join(".local/share/dev1c"),
         }
     }
 }
@@ -184,11 +192,16 @@ pub fn wire_state(kit: Kit) -> Kit {
     if cfg!(windows) {
         return kit;
     }
-    let state = tools_dir();
-    // Журнал открывается напрямую (`OpenOptions`), без создания каталога —
-    // создаём его здесь, один раз на запуск.
-    let _ = std::fs::create_dir_all(&state);
-    Kit::with_state(kit.root, state)
+    Kit::with_state(kit.root, tools_dir())
+}
+
+/// Каталог состояния на запуске: его ждут замок единственного экземпляра
+/// (`flock` на самом каталоге) и те писатели, что открывают файл напрямую
+/// (`Kit::journal`, журнал окна) — остальные идут через `kit::write_text`,
+/// который родителя создаёт сам. Молча: ошибку увидят те, кому каталог
+/// нужен, и назовут путь.
+pub fn ensure_state(kit: &Kit) {
+    let _ = std::fs::create_dir_all(kit.state());
 }
 
 struct Tools;
@@ -239,11 +252,21 @@ impl Op<Ctx> for Tools {
         Ok(())
     }
     fn revert(&self, _ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
-        matches!(level, CleanLevel::Data).then(|| vec![Action::new(format!("удалить {}", tools_dir().display()))])
+        // Поимённо, а не весь каталог: в состоянии рядом с инструментами
+        // теперь живут файл параметров, журнал, отчёт проверки и публикация —
+        // «очистка данных» уносила бы настройки человека, не сказав об этом.
+        let t = tools_dir();
+        let mut names: Vec<String> = required_kit_dirs().iter().map(|d| t.join(d).display().to_string()).collect();
+        names.push(t.join(VERSION_FILE).display().to_string());
+        matches!(level, CleanLevel::Data).then(|| names.into_iter().map(Action::new).collect())
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
         if matches!(level, CleanLevel::Data) {
-            let _ = std::fs::remove_dir_all(tools_dir());
+            let t = tools_dir();
+            for d in required_kit_dirs() {
+                let _ = std::fs::remove_dir_all(t.join(d));
+            }
+            let _ = std::fs::remove_file(t.join(VERSION_FILE));
             ctx.ok("инструменты удалены с машины");
         }
         Ok(())
@@ -724,7 +747,7 @@ impl Op<Ctx> for Extension {
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
         Some(vec![
             Action::new(format!("1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)", ib_switch(&ctx.cfg.host.base_path))),
-            Action::new("удалить known_hosts из комплекта"),
+            Action::new(format!("удалить {}", ctx.kit.state_path("known_hosts").display())),
         ])
     }
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
@@ -737,7 +760,7 @@ impl Op<Ctx> for Extension {
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
         let o = docker::exec(ctx, &v8.to_string_lossy(), &args)?;
         anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
-        let _ = std::fs::remove_file(ctx.kit.path("known_hosts"));
+        let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
         Ok(())
     }
@@ -858,7 +881,7 @@ mod tests {
         if cfg!(windows) {
             return; // Windows: untouched by this task, the toml stays with the kit.
         }
-        let kit = wire_state(Kit::at(Path::new("/opt/dev1c-kit")));
+        let kit = Kit::with_state(Path::new("/opt/dev1c-kit"), tools_dir());
         let p = kit.state_path(crate::cfg::FILE);
         assert!(!p.starts_with(&kit.root), "{}", p.display());
         assert!(p.starts_with(tools_dir()), "{}", p.display());
@@ -1127,7 +1150,7 @@ mod tests {
         // На Windows наоборот — комплект переносной и свой, писать рядом с
         // ним и нужно.
         let root = if cfg!(windows) { r"C:\dev1c-kit" } else { "/opt/dev1c-kit" };
-        let kit = wire_state(Kit::at(Path::new(root)));
+        let kit = if cfg!(windows) { Kit::at(Path::new(root)) } else { Kit::with_state(Path::new(root), tools_dir()) };
         for name in [crate::cfg::FILE, "1c-connect.log", "last-check.txt", "known_hosts", "install.state"] {
             let p = kit.state_path(name);
             if cfg!(windows) {

@@ -481,7 +481,14 @@ pub fn cancel_op(cx: &mut App) {
 /// прав нет) молча игнорируются — журнал на диске не обязателен для работы.
 fn write_log_file(kit: &Kit, line: &Line) {
     use std::io::Write;
-    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(kit.state_path(LOG_FILE)) else { return };
+    let path = kit.state_path(LOG_FILE);
+    // Каталог состояния создаёт `ops_host::ensure_state` на запуске; здесь
+    // на всякий случай ещё раз — журнал открывается напрямую, без
+    // `kit::write_text`, который родителя создаёт сам.
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) else { return };
     let text = if line.kind == Kind::Head { format!("\n{}\n", line.text) } else { format!("{:<2}{}\n", line.kind.mark(), line.text) };
     let _ = f.write_all(text.as_bytes());
 }
@@ -901,8 +908,9 @@ pub fn autoconnect(kit: &Kit) -> bool {
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
 pub fn start_session(cx: &mut App) -> Result<(), String> {
     let ui = cx.global_mut::<Ui>();
-    if !ui.kit.state_path(cfg::FILE).exists() {
-        return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
+    let params = ui.kit.state_path(cfg::FILE);
+    if !params.exists() {
+        return Err(format!("нет файла параметров {} — заполните поля и нажмите «Сохранить»", params.display()));
     }
     // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
     // в том числе в окно между `session::start_with_enabled` и первым `Connecting`.

@@ -92,6 +92,15 @@ LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
+# The shared kit built into the image (Dockerfile.1c). It is declared there
+# as an ENV, which reaches `1c-stand seed` started by init; but a desktop
+# session arrives through xrdp-sesman and PAM, where the image's ENV is not
+# always visible — and that is exactly where the autostart entry
+# (`1c-stand connect`) comes from. This default removes the dependency
+# altogether: both seed and connect are right whatever the login environment
+# did, and a value set from outside still wins.
+: "${ONEC_CONNECT_KIT:=/opt/dev1c-kit}"
+export ONEC_CONNECT_KIT
 
 log() { printf '[1c-stand] %s\n' "$*"; }
 
@@ -160,27 +169,43 @@ seed() { # runs as the workstation user; $HOME is theirs
     # a volume, and a fixed path in the image is exactly what survives that.
     #
     # Still per-workstation, because this directory holds a copy of the
-    # program itself — the fallback Kit::discover finds when
-    # ONEC_CONNECT_KIT is unset, kept as a defence: each account gets its own
-    # copy, refreshed when the image brings a new build. Its bookkeeping
-    # (setup.log, install.state) no longer lands next to it: on Linux
-    # everything the connector writes goes to the state directory below
-    # (Kit::with_state via ops_host::wire_state).
+    # program itself: each account gets its own, refreshed when the image
+    # brings a new build. It is no longer a kit of its own, though — the
+    # tools and the mcp-1c binary are not linked here any more, they live in
+    # the shared kit — so ONEC_CONNECT_KIT (defaulted at the top of this
+    # script) must always point at /opt/dev1c-kit; Kit::discover's fallback
+    # to this directory would find a kit with no tools in it. Its bookkeeping
+    # (setup.log, install.state) no longer lands next to it either: on Linux
+    # everything the connector writes goes to the state directory below.
     if [ -x "$CONNECT" ]; then
         mkdir -p "$HOME/dev1c"
         cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
         # The lock and pid files of the single-instance guard before it moved
-        # to an advisory flock on the toml itself: nothing creates them any
-        # more, and a volume from those days still carries them.
+        # to an advisory flock on the state directory itself: nothing creates
+        # them any more, and a volume from those days still carries them.
         rm -f "$HOME/dev1c"/instance-*.lock "$HOME/dev1c"/instance-*.pid
-        # State: the toml, the single-instance lock and the tools version
-        # stamp all live here now (ops_host::tools_dir()), never inside the
-        # shared kit — it is one read-only copy for every workstation, and
-        # none of these may be written there. $XDG_DATA_HOME/dev1c mirrors
-        # tools_dir()'s own fallback to ~/.local/share/dev1c.
+        # State: the toml, the tools version stamp, the window's journal and
+        # the publication all live here now (ops_host::tools_dir()), and the
+        # single-instance lock is an advisory flock on this very directory —
+        # never inside the shared kit, which is one read-only copy for every
+        # workstation. $XDG_DATA_HOME/dev1c mirrors tools_dir()'s own
+        # fallback to ~/.local/share/dev1c; an empty value falls back the
+        # same way the program does (ops_host::env_dir).
         t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
+        mkdir -p "$t"
+        # A home is a volume and survives an image change, so carry over what
+        # the person had next to the program before state moved out, rather
+        # than writing the stand's defaults over it: otherwise an edited base
+        # path, db_user, the chosen theme and autoconnect would quietly go
+        # back to factory while the old files sat next door and confused
+        # everyone.
+        for f in "$CONNECT_TOML" install.state setup.log known_hosts; do
+            if [ -f "$HOME/dev1c/$f" ] && [ ! -e "$t/$f" ]; then
+                mv "$HOME/dev1c/$f" "$t/$f"
+                log "1c-connect: $f перенесён в $t" >&2
+            fi
+        done
         if [ ! -e "$t/$CONNECT_TOML" ]; then
-            mkdir -p "$t"
             u=$(id -un); n=${u#dev}
             # The server fields stay at their defaults: in local mode there is
             # no tunnel to raise. The base, its publication and the project
@@ -212,12 +237,23 @@ EOF
         # duplicating ~100 MB per login would buy nothing. The names are the
         # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
         # tools_dir().
-        if [ -f "${ONEC_CONNECT_KIT:-}/tools.version" ]; then
-            mkdir -p "$t"
+        if [ -f "$ONEC_CONNECT_KIT/tools.version" ]; then
+            # The links and the stamp go under one condition. If the tools
+            # are really laid out (the person ran `1c-connect install`, so the
+            # state holds copies, not links), touch neither: replacing just
+            # the stamp would tell ops_host::tools_state that what is laid out
+            # is exactly what the kit ships, and switch off Drifted — the very
+            # case the two stamps are compared for.
+            ours=yes
             for d in vrunner git; do
-                [ -e "$t/$d" ] || ln -s "$ONEC_CONNECT_KIT/$d" "$t/$d"
+                [ ! -e "$t/$d" ] || [ -L "$t/$d" ] || ours=no
             done
-            cmp -s "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"                 || cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
+            if [ "$ours" = yes ]; then
+                for d in vrunner git; do
+                    ln -sfn "$ONEC_CONNECT_KIT/$d" "$t/$d"
+                done
+                cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
+            fi
         fi
     fi
 }
@@ -344,7 +380,11 @@ connect)
     # its own log: an autostart entry has nowhere to print, and today the
     # Linux tray still falls over (GTK is not initialised in the process —
     # see the spec of the window), so the reason must survive the session
-    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
+    # Its own name: the window's journal now lives in the state directory
+    # ($XDG_DATA_HOME/dev1c/1c-connect.log, and the window truncates that one
+    # at a megabyte), while this file only catches what the process printed
+    # past the journal — no reason to give them one name.
+    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/autostart.log" 2>&1
     ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"

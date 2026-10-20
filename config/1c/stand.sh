@@ -226,6 +226,18 @@ connect)
     # see the spec of the window), so the reason must survive the session
     exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
     ;;
+onboarding)
+    # Автозапуск при входе (onboarding-autostart.desktop, с --autostart)
+    # и пункт меню «Знакомство со стендом» (onboarding.desktop, без
+    # флага) зовут одну и ту же команду с разным хвостом — main.py решает
+    # по --autostart, уважать ли отметку «закрыт в этом сеансе» (пункт
+    # меню обязан работать всегда, даже после первого закрытия).
+    # seed первым — значок 1c-start на столе и сама раскладка xfdesktop
+    # нужны world.py, чтобы навести стрелку; то же, что у connect выше.
+    shift
+    export HOME; HOME=$(home_of "$(id -un)"); seed
+    exec python3 /opt/onboarding/main.py "$@"
+    ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"
     # The publication: what webinstt writes, with the HTTP services on and
@@ -345,7 +357,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ... | export-payload | import-payload [--force]" >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | onboarding | seed | publish ... | export-payload | import-payload [--force]" >&2
     exit 2
     ;;
 esac

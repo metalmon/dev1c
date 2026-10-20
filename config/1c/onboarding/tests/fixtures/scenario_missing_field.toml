@@ -1,0 +1,8 @@
+# Фикстура для теста: пропущено обязательное поле body.
+[[step]]
+number = 1
+title = "Тест"
+buttons = ["Далее"]
+advance_on = "button"
+[step.target]
+kind = "none"

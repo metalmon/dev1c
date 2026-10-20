@@ -1,0 +1,9 @@
+# Фикстура для теста: неизвестный тип цели.
+[[step]]
+number = 1
+title = "Тест"
+body = "Тест."
+buttons = ["Далее"]
+advance_on = "button"
+[step.target]
+kind = "луна"

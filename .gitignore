@@ -33,3 +33,7 @@ artifacts/
 
 # Рабочие копии git для параллельных ветвей
 .worktrees/
+
+# Python bytecode of the onboarding overlay
+__pycache__/
+*.pyc

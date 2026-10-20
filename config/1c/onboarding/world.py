@@ -158,7 +158,7 @@ class World:
         rect = _window_rect(self._window_lister, pattern)
         return None if rect is None else anchor_in(rect, anchor)
 
-    def covered(self, rect: Rect) -> bool:
+    def covered(self, rect: Rect, owner: Rect | None = None) -> bool:
         """rect закрыт, если что-то выше его в стеке с ним пересекается.
 
         Для значка и области трея (у них своего окна нет) выше — любое
@@ -166,13 +166,21 @@ class World:
         они перекрывали бы вообще любой значок и любую цель вообще,
         потому что own_stacking ниже не из чего сравнивать: у значка
         нет собственного места в стеке, см. комментарий у
-        _NOT_COVERING_WCLASSES). Для прямоугольника настоящего окна
-        (пришёл из window()) окно с тем же прямоугольником — не чужое, а
-        оно само, и не считается перекрывающим себя."""
+        _NOT_COVERING_WCLASSES).
+
+        owner — полный (без anchor) прямоугольник окна, из которого
+        получен rect, если это часть окна (window(pattern, anchor=...)
+        с anchor != 'whole'): якорный прямоугольник сам по себе ни с
+        одним окном в списке не совпадёт (window() его уже обрезал), и
+        без owner окно считало бы закрытой само себя. При anchor='whole'
+        rect и так совпадает со своим окном, owner можно не передавать —
+        тогда «своим» считается окно с тем же прямоугольником, что и
+        rect, как раньше."""
         windows = [w for w in self._window_lister() if w.wclass not in _NOT_COVERING_WCLASSES]
-        own_stacking = next((w.stacking for w in windows if w.rect == rect), None)
+        identity = rect if owner is None else owner
+        own_stacking = next((w.stacking for w in windows if w.rect == identity), None)
         for w in windows:
-            if w.rect == rect:
+            if w.rect == identity:
                 continue
             if own_stacking is not None and w.stacking <= own_stacking:
                 continue
@@ -181,8 +189,33 @@ class World:
         return False
 
     def screen(self) -> Rect:
-        """Рабочая область основного монитора (без панели) — тем же
-        прямоугольником и для размещения выноски, и для области трея."""
-        screen = Gdk.Screen.get_default()
-        area = screen.get_monitor_workarea(0)
+        """Рабочая область основного монитора (без панели) — для
+        размещения выноски (чтобы пузырь не влезал под панель)."""
+        area = Gdk.Screen.get_default().get_monitor_workarea(0)
         return Rect(area.x, area.y, area.width, area.height)
+
+    def monitor(self) -> Rect:
+        """Весь монитор целиком, включая полосу под панелью — для трея
+        (финальная волна): tray_area считает прямоугольник от нижнего
+        правого угла ТОГО, что ей передали; передать workarea — получить
+        точку над панелью, а не на ней (workarea по определению панель
+        исключает). Трей сидит в панели, значит и мерить нужно от края
+        монитора, не рабочей области."""
+        area = Gdk.Screen.get_default().get_monitor_geometry(0)
+        return Rect(area.x, area.y, area.width, area.height)
+
+    def close_window(self, pattern: str) -> None:
+        """Вежливо просит окно, чьё имя содержит pattern, закрыться —
+        _NET_CLOSE_WINDOW через wmctrl (человек только что вводил
+        данные, kill здесь неуместен). Не ждёт и не проверяет результат:
+        за этим следит main.py отдельным таймером (window_present)."""
+        subprocess.Popen(['wmctrl', '-c', pattern])
+
+    def window_present(self, pattern: str) -> bool:
+        """True, если среди текущих окон есть хотя бы одно, чьё имя
+        содержит pattern (без учёта регистра) — для проверки «закрылось
+        ли оно» через несколько секунд после close_window. Стол и
+        панель не исключаются: их имена ни на что из сценария не похожи,
+        фильтровать незачем."""
+        pattern = pattern.lower()
+        return any(pattern in w.name.lower() for w in self._window_lister())

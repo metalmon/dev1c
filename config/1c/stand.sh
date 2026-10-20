@@ -227,12 +227,16 @@ connect)
     exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
     ;;
 onboarding)
-    # Автозапуск при входе (onboarding-autostart.desktop) и пункт меню
-    # «Знакомство со стендом» (onboarding.desktop) зовут одно и то же.
+    # Автозапуск при входе (onboarding-autostart.desktop, с --autostart)
+    # и пункт меню «Знакомство со стендом» (onboarding.desktop, без
+    # флага) зовут одну и ту же команду с разным хвостом — main.py решает
+    # по --autostart, уважать ли отметку «закрыт в этом сеансе» (пункт
+    # меню обязан работать всегда, даже после первого закрытия).
     # seed первым — значок 1c-start на столе и сама раскладка xfdesktop
     # нужны world.py, чтобы навести стрелку; то же, что у connect выше.
+    shift
     export HOME; HOME=$(home_of "$(id -un)"); seed
-    exec python3 /opt/onboarding/main.py
+    exec python3 /opt/onboarding/main.py "$@"
     ;;
 publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"

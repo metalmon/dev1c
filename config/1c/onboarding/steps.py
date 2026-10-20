@@ -34,7 +34,11 @@ class Machine:
         if target.kind == 'window':
             return self._world.window(target.name_pattern, anchor=target.anchor)
         if target.kind == 'tray':
-            return tray_area(self._world.screen())
+            # Монитор целиком, не рабочая область: трей сидит в панели,
+            # которую рабочая область как раз исключает (финальная
+            # волна: иначе стрелка шага 6 указывала на пустоту над
+            # значком, выше панели на её высоту).
+            return tray_area(self._world.monitor())
         raise ValueError(f'неизвестный тип цели: {target.kind!r}')
 
     def _target_rect(self):
@@ -42,6 +46,18 @@ class Machine:
         там нет (ещё не появилось окно/значок). Про перекрытие другим
         окном ничего не знает — этим занимается visible_target."""
         return self._rect_for(self.current.target)
+
+    def _owner_rect(self, target):
+        """Полный (не обрезанный anchor) прямоугольник окна цели — для
+        covered(): у якорной части (anchor='right-bottom' и т.п.) нет
+        своего места в списке окон, чтобы отличить «моё собственное
+        окно» от «что-то чужое поверх», а у полного окна есть (финальная
+        волна: World.window() отдавал уже обрезанный anchor'ом
+        прямоугольник, он не совпадал ни с одним окном в списке — стрелка
+        на шагах 4/5 считалась закрытой всегда, своим же окном)."""
+        if target.kind == 'window':
+            return self._world.window(target.name_pattern, anchor='whole')
+        return None
 
     def _wait_rect(self):
         """Условие перехода текущего шага: wait_for, если шаг его задал,
@@ -62,7 +78,7 @@ class Machine:
         rect = self._target_rect()
         if rect is None:
             return None
-        if self._world.covered(rect):
+        if self._world.covered(rect, owner=self._owner_rect(self.current.target)):
             return None
         return rect
 

@@ -15,6 +15,20 @@ from targets import Rect
 
 Layout = namedtuple('Layout', 'bubble arrow_start arrow_end')
 
+# Единственный источник этих шести чисел (финальная волна): раньше
+# HEAD/FOOT/LINE_HEIGHT и три числа вопросов были названы константами и
+# тут, и ещё раз в callout.py — тем же значением, но отдельной строкой,
+# которую легко поправить в одном месте и забыть про другое. Именно
+# такое расхождение дало клип текста в фикс-раунде 2 (туда он так и не
+# дошёл — повезло, что числа совпадали; в следующий раз могло не
+# повезти). Теперь callout.py импортирует их отсюда, не переобъявляет.
+HEAD = 64
+FOOT = 24
+LINE_HEIGHT = 21
+QUESTIONS_CAPTION_HEIGHT = 20
+QUESTION_ROW_HEIGHT = 32
+QUESTION_GAP = 8
+
 # Калибровка: сколько символов тела укладывается в одну строку пузыря
 # при ширине по умолчанию (640px, поля 16px с каждой стороны — те же
 # числа, что PAD/x+16 в callout.py — итого 608px на текст). Шрифт тела
@@ -45,8 +59,9 @@ def wrap_body(body: str, chars_per_line: int = BODY_CHARS_PER_LINE) -> list[str]
     return lines
 
 
-def bubble_size(step, width: int = 640, line_height: int = 21, head: int = 64, foot: int = 24,
-                 question_row: int = 32, question_gap: int = 8, questions_caption: int = 20,
+def bubble_size(step, width: int = 640, line_height: int = LINE_HEIGHT, head: int = HEAD, foot: int = FOOT,
+                 question_row: int = QUESTION_ROW_HEIGHT, question_gap: int = QUESTION_GAP,
+                 questions_caption: int = QUESTIONS_CAPTION_HEIGHT,
                  chars_per_line: int = BODY_CHARS_PER_LINE) -> tuple[int, int]:
     """Размер выноски по числу перенесённых строк тела шага (wrap_body)
     плюс, если они есть у шага, готовые вопросы — каждый своей строкой-
@@ -94,14 +109,20 @@ def _fallback(screen: Rect, target: Rect, bw: int, bh: int) -> Rect:
 
 
 def _arrow(bubble: Rect, target: Rect):
+    # Конец стрелки — на ближней грани цели, не в её центре: наконечник
+    # не должен закрывать то, на что показывает (финальная волна; явная
+    # анти-цель спецификации). Та же логика, что уже была у начала
+    # стрелки (грань пузыря, а не его центр) — зеркально, для цели.
     bcx, bcy = bubble.x + bubble.w // 2, bubble.y + bubble.h // 2
     tcx, tcy = target.x + target.w // 2, target.y + target.h // 2
     dx, dy = tcx - bcx, tcy - bcy
     if abs(dx) >= abs(dy):
         start = (bubble.x + bubble.w if dx > 0 else bubble.x, bcy)
+        end = (target.x if dx > 0 else target.x + target.w, tcy)
     else:
         start = (bcx, bubble.y + bubble.h if dy > 0 else bubble.y)
-    return start, (tcx, tcy)
+        end = (tcx, target.y if dy > 0 else target.y + target.h)
+    return start, end
 
 
 def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margin: int = 24) -> Layout:

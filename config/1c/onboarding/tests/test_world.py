@@ -9,7 +9,7 @@ import unittest
 
 from scenario import Step, Target
 from steps import Machine
-from targets import Rect, WindowInfo
+from targets import Rect, WindowInfo, anchor_in
 from world import World
 
 SCREEN = Rect(0, 0, 1280, 800)
@@ -28,8 +28,8 @@ def _icon_step():
                 ('Дальше',), 'target', ())
 
 
-def _window_step(name_pattern='Zed'):
-    return Step(4, 'Шаг', '', Target('window', None, name_pattern, 'whole'),
+def _window_step(name_pattern='Zed', anchor='whole'):
+    return Step(4, 'Шаг', '', Target('window', None, name_pattern, anchor),
                 ('Дальше',), 'button', ())
 
 
@@ -68,6 +68,38 @@ class CoveredByDesktopAndPanelTests(unittest.TestCase):
         dialog = WindowInfo('Подтверждение', '', Rect(300, 300, 200, 100), stacking=2)
         world = World(window_lister=lambda: [DESKTOP, zed, dialog, PANEL])
         m = Machine([_window_step('Zed')], world)
+        self.assertIsNone(m.visible_target())
+
+
+class AnchoredWindowOwnershipTests(unittest.TestCase):
+    # Финальная волна: World.window(pattern, anchor) отдаёт уже обрезанный
+    # anchor'ом прямоугольник (шаги 4 и 5 просят 'right-bottom' — панель
+    # агента в углу окна Zed). covered() искал «своё» окно точным
+    # совпадением rect с прямоугольником из списка окон — якорный
+    # прямоугольник никогда не совпадал ни с одним целым окном, и своё же
+    # окно Zed считалось перекрывающим само себя. Ни одна стрелка на
+    # шагах 4/5 не рисовалась ни на одном живом стенде.
+    def test_whole_anchor_is_not_covered_by_its_own_window(self):
+        zed = WindowInfo('Zed - project', 'dev.zed.Zed', Rect(100, 100, 820, 640), stacking=1)
+        world = World(window_lister=lambda: [DESKTOP, zed, PANEL])
+        m = Machine([_window_step('Zed', anchor='whole')], world)
+        self.assertIsNotNone(m.visible_target())
+
+    def test_right_bottom_anchor_is_not_covered_by_its_own_window(self):
+        # Ровно случай координатора: whole — не закрыто, right-bottom —
+        # было закрыто (баг), проверено симуляцией перед фиксом.
+        zed = WindowInfo('Zed - project', 'dev.zed.Zed', Rect(100, 100, 820, 640), stacking=1)
+        world = World(window_lister=lambda: [DESKTOP, zed, PANEL])
+        m = Machine([_window_step('Zed', anchor='right-bottom')], world)
+        self.assertEqual(m.visible_target(), anchor_in(zed.rect, 'right-bottom'))
+
+    def test_right_bottom_anchor_still_covered_by_a_real_window_on_top(self):
+        # Поведение, которое нужно сохранить: якорный угол Zed закрыт,
+        # если его реально закрывает что-то другое, выше по стеку.
+        zed = WindowInfo('Zed - project', 'dev.zed.Zed', Rect(100, 100, 820, 640), stacking=1)
+        dialog = WindowInfo('Подтверждение', '', Rect(700, 650, 200, 100), stacking=2)
+        world = World(window_lister=lambda: [DESKTOP, zed, dialog, PANEL])
+        m = Machine([_window_step('Zed', anchor='right-bottom')], world)
         self.assertIsNone(m.visible_target())
 
 

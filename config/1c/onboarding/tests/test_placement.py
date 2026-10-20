@@ -78,7 +78,16 @@ class ArrowTests(unittest.TestCase):
         target = Rect(2500, 1400, 24, 24)
         layout = place(SCREEN, target, (640, 150))
         self.assertTrue(on_boundary(layout.bubble, layout.arrow_start))
-        self.assertEqual(layout.arrow_end, (target.x + target.w // 2, target.y + target.h // 2))
+        self.assertTrue(on_boundary(target, layout.arrow_end))
+
+    def test_arrow_end_is_on_the_edge_not_the_centre(self):
+        # Анти-цель спецификации: наконечник не должен закрывать то, на
+        # что показывает. Раньше конец стрелки был ровно центром цели.
+        target = Rect(36, 122, 48, 48)
+        layout = place(SCREEN, target, (640, 150))
+        centre = (target.x + target.w // 2, target.y + target.h // 2)
+        self.assertNotEqual(layout.arrow_end, centre)
+        self.assertTrue(on_boundary(target, layout.arrow_end))
 
 
 class BubbleSizeTests(unittest.TestCase):

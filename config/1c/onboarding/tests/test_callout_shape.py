@@ -2,9 +2,14 @@
 # пузыря и стрелки, а не залито прямоугольником целиком. Проверяется
 # через реальный GTK и Xvfb — геометрия маски формы, которую строит
 # X-сервер, иначе не проверить.
+#
+# Заливка корня и снимок экрана — через Gdk напрямую (root.cairo_create,
+# Gdk.pixbuf_get_from_window), не через xsetroot/scrot: этих утилит в
+# образе нет (финальная волна — без них тест падал с FileNotFoundError у
+# следующего, кто его запустит), а добавлять x11-apps ради двух команд,
+# которые GTK и так умеет сам, незачем.
 import os
 import pathlib
-import subprocess
 import sys
 import time
 import unittest
@@ -13,8 +18,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk
-from PIL import Image
+gi.require_version('Gdk', '3.0')
+from gi.repository import Gdk, Gtk
 
 from scenario import Step, Target
 from targets import Rect
@@ -28,7 +33,6 @@ BUTTON_AMBER = (0xE6, 0xB8, 0x00)
 
 SCREEN = Rect(0, 0, 1280, 800)
 _TARGET = Target('none', None, None, 'whole')
-_SHOT_PATH = '/tmp/onboarding_test_shot.png'
 
 
 def pump_gtk(seconds):
@@ -40,30 +44,38 @@ def pump_gtk(seconds):
         time.sleep(0.01)
 
 
+def _root_window(display):
+    return Gdk.Display.open(display).get_default_screen().get_root_window()
+
+
 def fill_root(display, color):
     """Заливает корневое окно известным цветом — фон, который виден там,
     где фигура окна вырезана."""
     r, g, b = color
-    env = {**os.environ, 'DISPLAY': display}
-    subprocess.run(['xsetroot', '-solid', '#%02x%02x%02x' % (r, g, b)],
-                    env=env, check=True)
+    cr = _root_window(display).cairo_create()
+    cr.set_source_rgb(r / 255, g / 255, b / 255)
+    cr.paint()
 
 
 class _Shot:
-    """Снимок экрана: чтение пикселя по абсолютным координатам."""
+    """Снимок экрана: чтение пикселя по абсолютным координатам, из
+    сырых байтов GdkPixbuf (RGB, без альфы — у корневого окна её нет)."""
 
-    def __init__(self, path):
-        self._image = Image.open(path).convert('RGB')
+    def __init__(self, pixbuf):
+        self._pixels = pixbuf.get_pixels()
+        self._stride = pixbuf.get_rowstride()
+        self._channels = pixbuf.get_n_channels()
 
     def pixel(self, x, y):
-        return self._image.getpixel((x, y))
+        offset = y * self._stride + x * self._channels
+        return tuple(self._pixels[offset:offset + 3])
 
 
 def grab(display):
-    """Снимок экрана заданного дисплея через scrot."""
-    env = {**os.environ, 'DISPLAY': display}
-    subprocess.run(['scrot', '-o', _SHOT_PATH], env=env, check=True)
-    return _Shot(_SHOT_PATH)
+    """Снимок экрана заданного дисплея через Gdk.pixbuf_get_from_window."""
+    root = _root_window(display)
+    pixbuf = Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(), root.get_height())
+    return _Shot(pixbuf)
 
 
 def _step(body='Текст тела.', buttons=('Дальше',), questions=()):

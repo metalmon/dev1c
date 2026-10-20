@@ -3,7 +3,7 @@
 import unittest
 
 from scenario import Step, Target
-from targets import Rect, WindowInfo
+from targets import Rect, WindowInfo, anchor_in, tray_area
 from steps import Machine
 
 SCREEN = Rect(0, 0, 1280, 800)
@@ -24,16 +24,24 @@ class FakeWorld:
         return self.icons.get(desktop_file)
 
     def window(self, pattern, anchor='whole'):
+        # anchor_in по-настоящему, как и у World.window() — иначе этот
+        # фейк не замечает ничего из того, что зависит от обрезки якорем
+        # (ровно баг финальной волны: anchor='right-bottom' шагов 4/5).
         pattern = pattern.lower()
         matches = [w for w in self.windows if pattern in w.name.lower()]
         if not matches:
             return None
-        return max(matches, key=lambda w: w.stacking).rect
+        return anchor_in(max(matches, key=lambda w: w.stacking).rect, anchor)
 
-    def covered(self, rect):
+    def covered(self, rect, owner=None):
         return self.covered_flag
 
     def screen(self):
+        return self._screen
+
+    def monitor(self):
+        # Тестам, которым нужна разница монитор/рабочая область (трей и
+        # панель), проще собрать свой World — см. tests/test_world.py.
         return self._screen
 
 
@@ -198,6 +206,23 @@ class WaitForTests(unittest.TestCase):
         world.icons = {'1c-start.desktop': ICON_RECT}
         m.tick()
         self.assertEqual(m.current.number, 3)        # target == wait_for по умолчанию
+
+
+class TrayTests(unittest.TestCase):
+    def test_tray_target_uses_monitor_not_workarea(self):
+        # Трей сидит в панели, которую screen() (рабочая область)
+        # исключает — Machine обязана мерить трей от monitor() (весь
+        # монитор целиком), иначе стрелка указывает выше значка на
+        # высоту панели (финальная волна).
+        class _World(FakeWorld):
+            def monitor(self):
+                return Rect(0, 0, 1280, 800)  # монитор целиком
+
+        world = _World(screen=Rect(0, 0, 1280, 757))  # рабочая область без 43px панели
+        step = Step(1, 'Шаг', '', Target('tray', None, None, 'whole'), ('Готово',), 'button', ())
+        m = Machine([step], world)
+        self.assertEqual(m.visible_target(), tray_area(Rect(0, 0, 1280, 800)))
+        self.assertNotEqual(m.visible_target(), tray_area(Rect(0, 0, 1280, 757)))
 
 
 if __name__ == '__main__':

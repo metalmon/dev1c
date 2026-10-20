@@ -22,6 +22,13 @@ from world import World
 
 TICK_MS = 1000  # как часто проверять, не появилась ли цель текущего шага
 
+# Сколько ждать перед проверкой, закрылась ли 1С сама после вежливой
+# просьбы (close_window, шаг 3): окну нужно время среагировать на
+# _NET_CLOSE_WINDOW (возможно, спросить «сохранить изменения?»), а
+# разовая проверка — не бесконечный опрос — честно отражает «попросили
+# один раз и посмотрели», как и было решено.
+CLOSE_CHECK_DELAY_S = 4
+
 # Отметка «онбординг закрыт в этом сеансе» — в $XDG_RUNTIME_DIR (tmpfs,
 # живёт до конца сеанса), а не в домашнем каталоге: по решению заказчика
 # стенд показывает онбординг при каждом новом входе, а не один раз на
@@ -81,6 +88,13 @@ class App:
         self._callout = None
         self._step = None
         self._layout = None
+        # Сообщение, которое дописывается к телу текущего шага (не
+        # текст сценария — это main.py говорит от своего имени, что 1С
+        # не закрылась сама, см. _check_close_window). Раз выставленное,
+        # остаётся до конца сеанса онбординга — разовая проверка, не
+        # опрос, см. CLOSE_CHECK_DELAY_S.
+        self._warning = None
+        self._shown_warning = None
         self._refresh()
         GLib.timeout_add(TICK_MS, self._on_tick)
 
@@ -102,34 +116,59 @@ class App:
             self._machine.press('close')
         else:
             action = step.actions[label]
+            if action.close_window:
+                self._world.close_window(action.close_window)
+                GLib.timeout_add_seconds(CLOSE_CHECK_DELAY_S, self._check_close_window, action.close_window)
             _launch(action.launch)
-            self._machine.press(action.action)
+            # 'stay': кнопка не двигает Machine сама — шаг и так уходит
+            # дальше по wait_for, когда его условие выполнится (шаг 3 —
+            # окно Zed появилось). Силой — только 'next'/'close'.
+            if action.action != 'stay':
+                self._machine.press(action.action)
         self._refresh()
 
-    def _refresh(self):
+    def _check_close_window(self, pattern):
+        """Разовая проверка через CLOSE_CHECK_DELAY_S после close_window:
+        окно всё ещё есть — говорим об этом в выноске, а не делаем вид,
+        что всё получилось (решение координатора: не выдавать желаемое
+        за действительное, и не добивать процесс)."""
+        if self._world.window_present(pattern):
+            self._warning = ('Похоже, окно 1С не закрылось само — закройте его '
+                              'вручную, иначе агент не сможет зайти в базу.')
+            self._refresh(force=True)
+        return False  # не повторять: это разовая проверка, не опрос
+
+    def _refresh(self, force=False):
         step = self._machine.current
         if step is None:
             if self._callout is not None:
-                self._callout.hide()
+                self._callout.destroy()
                 self._callout = None
             mark_closed()
             Gtk.main_quit()
             return
+        display_step = step if self._warning is None else step._replace(body=step.body + '\n\n' + self._warning)
         target = self._machine.visible_target()
-        layout = place(self._world.screen(), target, bubble_size(step))
-        if step is self._step and layout == self._layout:
+        layout = place(self._world.screen(), target, bubble_size(display_step))
+        if not force and step is self._step and layout == self._layout and self._warning == self._shown_warning:
             return  # ничего не изменилось с прошлого тика — не мигаем окном
-        self._step, self._layout = step, layout
+        self._step, self._layout, self._shown_warning = step, layout, self._warning
         if self._callout is not None:
-            self._callout.hide()
-        self._callout = Callout(step, layout, self._on_button, copy_question)
+            self._callout.destroy()
+        self._callout = Callout(display_step, layout, self._on_button, copy_question)
         self._callout.show()
 
 
-def run(scenario_path: str) -> int:
-    """Точка входа: 0, если онбординг показан и закрыт (или был закрыт
-    раньше в этом сеансе и не показывался вовсе)."""
-    if already_closed():
+def run(scenario_path: str, gate: bool = False) -> int:
+    """Точка входа: 0, если онбординг показан и закрыт.
+
+    gate=True — уважать отметку «закрыт в этом сеансе» (автозапуск
+    сессии: onboarding-autostart.desktop зовёт `1c-stand onboarding
+    --autostart»). gate=False (по умолчанию) — показать всегда: пункт
+    меню «Знакомство со стендом» (onboarding.desktop, без флага) обязан
+    работать и после первого закрытия — иначе после первого же раза он
+    молчал бы до конца сеанса (финальная волна)."""
+    if gate and already_closed():
         return 0
     steps = scenario.load(scenario_path)
     App(steps)
@@ -138,5 +177,8 @@ def run(scenario_path: str) -> int:
 
 
 if __name__ == '__main__':
+    args = sys.argv[1:]
+    gate = '--autostart' in args
+    args = [a for a in args if a != '--autostart']
     default_path = str(pathlib.Path(__file__).parent / 'scenario.toml')
-    sys.exit(run(sys.argv[1] if len(sys.argv) > 1 else default_path))
+    sys.exit(run(args[0] if args else default_path, gate=gate))

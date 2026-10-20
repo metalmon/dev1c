@@ -1,0 +1,13 @@
+# Фикстура для теста: опечатка в anchor должна падать на загрузке.
+[[step]]
+number = 1
+title = "Тест"
+body = "Тест."
+buttons = ["Далее"]
+advance_on = "button"
+[step.target]
+kind = "window"
+name_pattern = "Zed"
+anchor = "rihgt-bottom"
+[step.actions]
+"Далее" = "next"

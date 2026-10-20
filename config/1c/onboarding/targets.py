@@ -75,6 +75,12 @@ def tray_area(workarea: Rect) -> Rect:
     return Rect(x, y, TRAY_WIDTH, TRAY_HEIGHT)
 
 
+# Общий список для anchor_in и для scenario.py (проверка на этапе
+# загрузки TOML — опечатка в anchor обязана упасть при load(), а не
+# когда-нибудь потом внутри World/Machine на живом стенде).
+ANCHOR_KINDS = ('whole', 'right', 'right-bottom')
+
+
 def anchor_in(rect: Rect, anchor: str) -> Rect:
     """Сужает rect до его части.
 

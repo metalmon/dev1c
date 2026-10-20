@@ -9,6 +9,7 @@ SCENARIO = str(_HERE.parent / 'scenario.toml')
 BROKEN_SCENARIO = str(_HERE / 'fixtures' / 'scenario_broken.toml')
 MISSING_FIELD_SCENARIO = str(_HERE / 'fixtures' / 'scenario_missing_field.toml')
 MISSING_ACTION_SCENARIO = str(_HERE / 'fixtures' / 'scenario_missing_action.toml')
+BAD_ANCHOR_SCENARIO = str(_HERE / 'fixtures' / 'scenario_bad_anchor.toml')
 
 
 class LoadTests(unittest.TestCase):
@@ -35,6 +36,13 @@ class LoadTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load(BROKEN_SCENARIO)   # цель kind = "луна"
 
+    def test_bad_anchor_is_rejected_at_load_time(self):
+        # Финальная волна: опечатка в anchor должна падать здесь, на
+        # load(), а не когда-нибудь потом внутри targets.anchor_in на
+        # живом стенде.
+        with self.assertRaises(ValueError):
+            load(BAD_ANCHOR_SCENARIO)   # anchor = "rihgt-bottom"
+
     def test_missing_required_field_is_rejected(self):
         with self.assertRaises(ValueError):
             load(MISSING_FIELD_SCENARIO)
@@ -56,15 +64,15 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(steps[5].target.kind, 'tray')
 
     def test_wait_for_separates_advance_condition_from_arrow_target(self):
-        # Шаги 2 и 3 показывают на значок запуска (он на столе всегда),
-        # но ждать обязаны не его — окно 1С/Zed, которое появляется по
-        # факту (раздел «Ограничения» спецификации: «шаг закрывается сам,
-        # когда окно 1С появилось»). У остальных шагов wait_for не задан —
+        # Шаг 3 показывает на значок запуска (он на столе всегда), но
+        # ждать обязан не его — окно Zed, которое появляется по факту.
+        # Шаг 2 (ruling финальной волны) wait_for не несёт вовсе: даже
+        # появление окна 1С не значит «человек закончил вводить позицию»,
+        # только кнопка. У остальных шагов wait_for тоже не задан —
         # Machine сама падает обратно на target (см. tests.test_steps).
         steps = load(SCENARIO)
         self.assertIsNone(steps[0].wait_for)
-        self.assertEqual(steps[1].wait_for.kind, 'window')
-        self.assertEqual(steps[1].wait_for.name_pattern, 'Управление нашей фирмой')
+        self.assertIsNone(steps[1].wait_for)
         self.assertEqual(steps[2].wait_for.kind, 'window')
         self.assertEqual(steps[2].wait_for.name_pattern, 'Zed')
         self.assertIsNone(steps[3].wait_for)
@@ -74,7 +82,7 @@ class LoadTests(unittest.TestCase):
     def test_advance_on(self):
         steps = load(SCENARIO)
         self.assertEqual([s.advance_on for s in steps], [
-            'button', 'target', 'target', 'button', 'button', 'button',
+            'button', 'button', 'target', 'button', 'button', 'button',
         ])
 
     def test_step_six_has_only_done_button(self):
@@ -107,7 +115,19 @@ class ActionTests(unittest.TestCase):
         # Крестик/Esc закрывают любой шаг (это их дело, не сценария), но
         # среди кнопок самого сценария 'close' есть только на первом экране.
         for s in steps[1:]:
-            self.assertTrue(all(a.action == 'next' for a in s.actions.values()))
+            self.assertTrue(all(a.action != 'close' for a in s.actions.values()))
+
+    def test_step_three_button_stays_and_closes_1c(self):
+        # Ровно диагноз финальной волны: подпись кнопки не ошибка, ошибка
+        # была в поведении — кнопка не двигала шаг силой («next»), шаг и
+        # так уходит дальше по wait_for (окно Zed), когда оно появится.
+        # Она просит 1С закрыться вежливо (close_window) и открывает
+        # редактор.
+        steps = load(SCENARIO)
+        action = steps[2].actions['Закрыть 1С и открыть редактор']
+        self.assertEqual(action.action, 'stay')
+        self.assertEqual(action.close_window, 'Управление нашей фирмой')
+        self.assertIsNone(steps[2].actions['Дальше'].close_window)
 
     def test_buttons_that_launch_something(self):
         steps = load(SCENARIO)
@@ -119,6 +139,14 @@ class ActionTests(unittest.TestCase):
     def test_missing_action_is_rejected(self):
         with self.assertRaises(ValueError):
             load(MISSING_ACTION_SCENARIO)
+
+    def test_actions_are_not_a_plain_mutable_dict(self):
+        # Финальная волна: Step.actions по умолчанию был {} — один
+        # разделяемый объект на все шаги без своих actions. Попытка
+        # записи в него должна падать, а не тихо портить чужой default.
+        steps = load(SCENARIO)
+        with self.assertRaises(TypeError):
+            steps[0].actions['новая'] = None
 
 
 if __name__ == '__main__':

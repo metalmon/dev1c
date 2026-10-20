@@ -165,5 +165,28 @@ class ActionTests(unittest.TestCase):
             steps[0].actions['новая'] = None
 
 
+class ConnectorReserveTests(unittest.TestCase):
+    """Шаг про значок в трее обязан беречь место окну коннектора.
+
+    В трее стенда живёт только коннектор, и щелчок по значку открывает
+    его окно в правом нижнем углу. Шаг, который зовёт туда щёлкнуть, а
+    место не бережёт, ставит выноску ровно на будущее окно: человек
+    нажимает и получает своё же окно под подсказкой.
+
+    Поймано дважды — во втором акте 20.10.2026 и в первом 21.10.2026,
+    второй раз потому, что правило применялось руками по одному шагу.
+    Теперь его применяет тест.
+    """
+
+    def test_every_tray_step_reserves_the_connector_corner(self):
+        steps = load(SCENARIO)
+        tray = [s for s in steps if s.target.kind == 'tray']
+        self.assertTrue(tray, 'шагов с целью в трее нет вовсе — правило стало бессмысленным')
+        for s in tray:
+            self.assertEqual(
+                s.reserve, 'connector',
+                'шаг %d показывает на значок в трее, но не бережёт место окну' % s.number)
+
+
 if __name__ == '__main__':
     unittest.main()

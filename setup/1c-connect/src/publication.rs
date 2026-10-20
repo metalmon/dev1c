@@ -389,13 +389,27 @@ static WINDOWS_HTTPD: Mutex<Option<WindowsHttpd>> = Mutex::new(None);
 /// перезапустился без чистого выхода) — резервный путь: обычный `-k stop` по
 /// тому же конфигу (его `PidFile` укажет на старый процесс, если тот жив).
 #[cfg(windows)]
+/// Запуск без консольного окна: httpd — обычное консольное приложение, и
+/// без этого флага каждый его запуск и остановка открывают человеку чёрное
+/// окно поверх всего. Тот же приём, что у `common::docker::quiet`.
+#[cfg(windows)]
+fn no_window(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
 fn kill_tracked(p: &Paths) {
     if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
         let _ = h.child.kill();
         let _ = h.child.wait();
         return;
     }
-    let _ = std::process::Command::new(httpd_binary(p)).args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
+    let mut stop = std::process::Command::new(httpd_binary(p));
+    stop.args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]);
+    #[cfg(windows)]
+    no_window(&mut stop);
+    let _ = stop.output();
 }
 
 /// Поднимает HTTP-сервис: httpd.exe — наш прямой ребёнок, в консольном
@@ -421,6 +435,7 @@ pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
     // ждём выхода вовсе (сервер должен остаться жить), либо ждём только
     // короткую паузу ниже.
     cmd.args(["-f", &p.conf.to_string_lossy()]).stdout(Stdio::null()).stderr(Stdio::null());
+    no_window(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("{} не запустился: {e}", bin.display()))?;
     // Короткая пауза — дать серверу шанс упасть сразу (битый конфиг, занятый
     // порт), прежде чем считать процесс запущенным и уходить.

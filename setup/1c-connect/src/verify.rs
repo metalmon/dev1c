@@ -149,16 +149,19 @@ pub fn open_session_fact() -> Check {
 }
 
 /// Занимает ли порты рабочего места тот, для кого считаются факты. Правило
-/// спеки: **порты важны там, где мы их занимаем**. Их занимают окно,
+/// спеки: **порты важны там, где мы их занимаем**. Занимают их окно,
 /// `connect` и `serve` — там занятый чужим порт остаётся провалом: два
 /// коннектора на одних портах дерутся и за порты, и за мьютекс проекта, и за
 /// базу, и человек обязан об этом узнать. `install`, `export`, `import` и
 /// `check` портов не трогают вовсе — им занятый порт только сведение.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortUse {
-    /// Окно, `connect`, `serve` — порты занимаем мы.
+    /// Порты занимаем мы. Просит факты с этим признаком одно окно
+    /// (`gui::run_check`): `connect` и `serve` порты тоже занимают, но набор
+    /// фактов не считают вовсе — некому и некуда его показать.
     WeListen,
-    /// Разовая команда — портов не занимает.
+    /// Разовая команда из командной строки (`check`, и она же в конце
+    /// `install`) — портов не занимает.
     WeDont,
 }
 
@@ -208,6 +211,17 @@ pub fn media_fact(kind: Option<String>, root: &str) -> Check {
         Some(k) => Check::note(MEDIA, format!("{root}: {k} — инструменты работают из %LOCALAPPDATA%, комплект можно вынуть после install")),
         None => Check::pass(MEDIA, format!("{root}: обычный диск")),
     }
+}
+
+/// Существует ли каталог базы — и спрашиваем ли мы об этом диск вообще.
+/// Правило одно на окно и на проверку и живёт в одном месте
+/// (`gate::wants_directory`): у `сервер\база` и у сетевого пути существование
+/// не спрашивают, потому что `exists()` по недоступной шаре висит на таймауте
+/// SMB десятками секунд. Готовность этого стоила особенно дорого (ревью S8):
+/// на сетевой базе уходил весь бюджет в 20 с, и все факты ниже «базы»
+/// приходили как «не проверено».
+fn base_exists_on_disk(path: &str) -> bool {
+    crate::gui::gate::wants_directory(path) && std::path::Path::new(path).exists()
 }
 
 /// База: каталог есть (файловая), либо сервер\база (не проверяется); сетевой
@@ -303,13 +317,32 @@ fn system_web_server_fact() -> Check {
     web_server_fact(apache.as_deref(), module.as_deref())
 }
 
+/// Что делать, когда порт базы молчит. Совет обязан быть правдивым в обоих
+/// режимах публикации и на обеих системах (ревью S7): прежний «запустите
+/// Apache/IIS» врал дважды — IIS на Linux не существует вовсе, а в режиме
+/// `auto` (его пишет и сам стенд) веб-сервер поднимает **коннектор**, и
+/// запускать человеку руками нечего: ему надо включить обслуживание и
+/// прочитать, почему публикация не поднялась.
+///
+/// `own` — публикуем сами (`publication = "auto"`), `windows` — система, где
+/// IIS бывает. Оба параметрами, а не `cfg!` внутри: так правило проверяется
+/// тестом целиком, а не только на той системе, где тест запущен.
+fn web_hint(own: bool, windows: bool) -> &'static str {
+    match (own, windows) {
+        (true, _) => "публикацию поднимает сам коннектор — включите обслуживание MCP; если оно включено, причину смотрите в журнале",
+        (false, true) => "запустите Apache или IIS, на котором опубликована база",
+        (false, false) => "запустите apache2, на котором опубликована база",
+    }
+}
+
 /// HTTP-порт базы отвечает (обычный TCP-коннект, без логина) — `up` уже
 /// посчитан вызывающим (`run`/`readiness`), здесь только оформление факта.
-pub fn web_fact(port: u16, up: bool) -> Check {
+/// `own` — публикуем ли мы сами: от этого зависит совет (см. `web_hint`).
+pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
     if up {
         Check::pass(WEB, format!("порт {port} отвечает"))
     } else {
-        Check::fail(WEB, format!("порт {port} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
+        Check::fail(WEB, format!("порт {port} не отвечает"), web_hint(own, cfg!(windows)))
     }
 }
 
@@ -526,7 +559,7 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         }
     }));
     v.push(within(t0, budget, PROJECT, || project_fact(ctx, &tools)));
-    v.push(within(t0, budget, BASE, || base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists())));
+    v.push(within(t0, budget, BASE, || base_fact(&h.base_path, base_exists_on_disk(&h.base_path))));
     // Без сети и без сроков: это чистая функция от настроек, и считать её под
     // бюджетом было бы враньём — «не проверено» тут не бывает.
     v.push(db_user_fact(&h.db_user));
@@ -541,7 +574,9 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         // советовать «запустите Apache» на этом нельзя.
         let asked = std::time::Instant::now();
         let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), WEB_CONNECT).is_ok();
-        unless_timed_out(web_fact(web, up), asked.elapsed(), WEB_CONNECT)
+        // `auto` — публикацию поднимает сам коннектор, и совет при молчащем
+        // порту другой (`web_hint`).
+        unless_timed_out(web_fact(web, up, h.publication == "auto"), asked.elapsed(), WEB_CONNECT)
     }));
     let base_url = ctx.cfg.base_url();
     v.push(within(t0, budget, PUBLICATION, || {
@@ -823,6 +858,50 @@ mod tests {
         assert!(!media_fact(None, "C:\\").info);
     }
 
+    /// Совет при молчащем порту обязан быть правдой во всех четырёх случаях
+    /// (ревью S7). Прежний «запустите Apache/IIS» врал дважды: IIS на Linux
+    /// не существует, а в режиме `auto` веб-сервер поднимает сам коннектор —
+    /// запускать человеку нечего.
+    #[test]
+    fn a_dead_port_is_advised_by_mode_and_system() {
+        // Публикуем сами — что бы ни стояло в системе, руками не запускают.
+        for windows in [true, false] {
+            let own = web_hint(true, windows);
+            assert!(own.contains("сам коннектор") && own.contains("включите"), "{own}");
+            assert!(!own.contains("IIS") && !own.contains("Apache") && !own.contains("apache2"), "{own}");
+        }
+        // Чужой веб-сервер: IIS называем только там, где он бывает.
+        let win = web_hint(false, true);
+        assert!(win.contains("IIS") && win.contains("Apache"), "{win}");
+        let linux = web_hint(false, false);
+        assert!(linux.contains("apache2") && !linux.contains("IIS"), "{linux}");
+
+        // И сам факт берёт совет оттуда же — зелёный остаётся без советов.
+        assert_eq!(web_fact(1818, false, true).hint, web_hint(true, cfg!(windows)));
+        assert!(web_fact(1818, true, true).hint.is_empty(), "{:?}", web_fact(1818, true, true));
+    }
+
+    /// Существование каталога спрашивают только у файловой базы — то же
+    /// правило, что в воротах (`gate::wants_directory`), и тот же его
+    /// источник. Ревью S8: `exists()` по недоступной шаре висит на таймауте
+    /// SMB и съедал весь бюджет готовности в 20 с, после чего всё, что ниже
+    /// «базы», приходило как «не проверено».
+    #[test]
+    fn a_network_base_is_never_looked_for_on_disk() {
+        for path in ["\\\\nas\\bases\\buh", "srv-1c\\buh"] {
+            assert!(!crate::gui::gate::wants_directory(path), "{path}");
+            // Диска не касаемся вовсе — и ответ фактом не используется:
+            // существование такой базы не проверяется по самому правилу.
+            assert!(!base_exists_on_disk(path), "{path}");
+            assert!(base_fact(path, false).ok, "{path}: факт существования не спрашивает");
+        }
+        // Файловую базу по-прежнему спрашиваем: иначе факт перестал бы ловить
+        // отсутствующий каталог, ради которого он и заведён.
+        let dir = std::env::temp_dir();
+        assert!(base_exists_on_disk(&dir.display().to_string()), "{}", dir.display());
+        assert!(!base_exists_on_disk(&dir.join("нет-такого-каталога-34").display().to_string()));
+    }
+
     #[test]
     fn a_network_base_is_flagged_as_shared() {
         let c = base_fact("\\\\srv\\bases\\Buh", true);
@@ -844,10 +923,12 @@ mod tests {
 
     #[test]
     fn web_fact_and_publication_fact_say_what_to_do() {
-        let up = web_fact(1818, true);
+        let up = web_fact(1818, true, false);
         assert!(up.ok && up.detail.contains("1818"), "{up:?}");
-        let down = web_fact(1818, false);
-        assert!(!down.ok && down.hint.contains("Apache"), "{down:?}");
+        // Чужой веб-сервер — совет запустить его; имя сервера зависит от
+        // системы и проверяется отдельно (`a_dead_port_is_advised_by_mode_and_system`).
+        let down = web_fact(1818, false, false);
+        assert!(!down.ok && down.hint.contains("опубликована база"), "{down:?}");
         let ok = publication_fact("http://x", Some("1.2".into()));
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
         let fail = publication_fact("http://x", None);

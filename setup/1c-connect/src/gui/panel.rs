@@ -18,6 +18,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -135,6 +136,22 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
         None => "проверка",
     };
     Some(format!("Подождите: идёт {what}"))
+}
+
+/// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
+/// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
+/// настоящее сообщение (итог сохранения, ошибка) важнее подсказки, почему
+/// «Сохранить» недоступна, а та — важнее пути комплекта, который слот
+/// показывает, когда сказать больше нечего. Обрезка в одну строку и
+/// подсказка по наведению — дело `render`, здесь только выбор источника.
+pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
+    if let Some(l) = status {
+        return (l.text.clone(), matches!(l.kind, Kind::Fail));
+    }
+    if let Some(h) = hint {
+        return (h.to_string(), false);
+    }
+    (kit_path.to_string(), false)
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -476,10 +493,14 @@ impl Render for Panel {
         let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
         let c = card(ui.progress.as_ref(), &link, &mode, Instant::now());
-        let foot_left = match &ui.status {
-            Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
-            None => (ui.kit.root.display().to_string(), false),
-        };
+        // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
+        // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
+        // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
+        // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
+        let busy_now = busy.is_some();
+        let dirty = self.is_dirty(cx);
+        let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
+        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
         let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -762,37 +783,24 @@ impl Render for Panel {
         // Своё имя на вкладку: меню помнит построенные пункты по имени
         // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
         let more = |id: &'static str| Button::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
-        let busy_now = busy.is_some();
 
         let foot_actions: AnyElement = match tab {
             gui::Tab::Params => {
-                let dirty = self.is_dirty(cx);
                 let allowed = can_save(dirty, busy_now, has_progress);
                 // Кнопка гаснет сама, но молча — заказчик 2026-10-20: почему
-                // нельзя нажать, не видно. Причина — рядом строкой и в
-                // подсказке; когда нажать можно, объяснять нечего (`None`).
-                let hint = save_hint(dirty, busy_now, running_op);
+                // нельзя нажать, не видно. Причина теперь живёт в левом слоте
+                // подвала (`foot_left`, один текст — заказчик 2026-10-20: «две
+                // надписи стало») и в тултипе кнопки, вторая надпись рядом не
+                // добавляется.
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .when_some(hint.clone(), |d, h| {
-                        d.child(
-                            div()
-                                .max_w(px(150.))
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_size(px(12.))
-                                .text_color(caption)
-                                .child(h),
-                        )
-                    })
                     .child(
                         Button::new("save")
                             .primary()
                             .label("Сохранить")
                             .disabled(!allowed)
-                            .when_some(hint, |b, h| b.tooltip(h))
+                            .when_some(hint.clone(), |b, h| b.tooltip(h))
                             .on_click(cx.listener(|panel, _, window, cx| {
                                 // Смена базы при включённых MCP спрашивает
                                 // подтверждение: агент работает прямо сейчас и
@@ -950,18 +958,27 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     .pt_3()
-                    // Итог последнего действия переносится (до двух строк),
-                    // а не обрезается многоточием: плашка растёт по тексту.
-                    .child(
+                    // Один текст, одна строка (заказчик 2026-10-20: перенос
+                    // на вторую строку и подпрыгивание высоты подвала от
+                    // длинного пути комплекта, кириллица в нём в том числе).
+                    // Лишнее режется многоточием, а не переносится; `min_w_0`
+                    // — иначе flex-ребёнок не уже своего текста, и обрезка на
+                    // узком окне срабатывает только упёршись в кнопку.
+                    // Полный текст — подсказкой по наведению.
+                    .child({
+                        let text = foot_left.0.clone();
                         div()
+                            .id("foot-left")
                             .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .text_size(px(13.))
-                            .line_height(relative(1.2))
                             .text_color(if foot_left.1 { danger } else { caption })
-                            .whitespace_normal()
-                            .line_clamp(2)
-                            .child(foot_left.0),
-                    )
+                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                            .child(foot_left.0)
+                    })
                     .child(foot_actions),
             )
     }
@@ -969,9 +986,9 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_save, card, fields_differ, project_rows, save_hint, shown_fields, HINT_PROJECT};
+    use super::{can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
-    use crate::gui::{Dot, ProjectView, Running, Which};
+    use crate::gui::{Dot, Kind, Line, ProjectView, Running, Which};
     use crate::session::State;
     use common::Phase;
     use std::time::{Duration, Instant};
@@ -1144,5 +1161,20 @@ mod tests {
         assert_eq!(save_hint(true, true, Some(Which::Uninstall)).as_deref(), Some("Подождите: идёт работа с расширением"));
         // Занято, но никакая операция не идёт — значит идёт проверка.
         assert_eq!(save_hint(true, true, None).as_deref(), Some("Подождите: идёт проверка"));
+    }
+
+    #[test]
+    fn the_footer_slot_picks_one_text_in_priority_order() {
+        let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
+        // Сказать нечего — путь комплекта, кнопка не красная.
+        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
+        // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
+        assert_eq!(foot_left_text(None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
+        // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
+        // что слот уже занят объяснением (заказчик 2026-10-20).
+        let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
+        assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
+        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
+        assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
     }
 }

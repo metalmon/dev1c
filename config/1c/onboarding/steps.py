@@ -1,0 +1,77 @@
+# Машина шагов онбординга: какой шаг показан и когда переходить дальше.
+# Чистая логика — без gi/GTK, чтобы проверяться против фейкового world
+# (задача 6 даст настоящий, с реальным X11 за методами).
+from targets import tray_area
+
+
+class Machine:
+    """Текущий шаг сценария и переходы между шагами.
+
+    world — объект с методами icon(desktop_file), window(pattern, anchor),
+    covered(rect) -> bool, screen() -> Rect. Сама Machine координат не
+    считает — только решает, какая цель у текущего шага и пора ли дальше.
+    """
+
+    def __init__(self, steps, world):
+        self._steps = list(steps)
+        self._world = world
+        self._index = 0
+        self.done = False
+
+    @property
+    def current(self):
+        return None if self.done else self._steps[self._index]
+
+    def _target_rect(self):
+        """Цель текущего шага на экране прямо сейчас, или None, если её
+        там нет (ещё не появилось окно/значок). Про перекрытие другим
+        окном ничего не знает — этим занимается visible_target."""
+        target = self.current.target
+        if target.kind == 'none':
+            return None
+        if target.kind == 'desktop_icon':
+            return self._world.icon(target.desktop_file)
+        if target.kind == 'window':
+            return self._world.window(target.name_pattern, anchor=target.anchor)
+        if target.kind == 'tray':
+            return tray_area(self._world.screen())
+        raise ValueError(f'неизвестный тип цели: {target.kind!r}')
+
+    def visible_target(self) -> 'Rect | None':
+        """Куда рисовать стрелку. None, если цели нет вовсе (kind='none'),
+        её не видно на экране или её закрывает другое окно — во всех
+        трёх случаях стрелки не будет, а выноска остаётся."""
+        rect = self._target_rect()
+        if rect is None:
+            return None
+        if self._world.covered(rect):
+            return None
+        return rect
+
+    def tick(self):
+        """Вызывается по таймеру. Двигает шаг вперёд, если его
+        advance_on == 'target' и цель уже появилась на экране (закрыта
+        она другим окном или нет — неважно, это только для стрелки)."""
+        if self.done:
+            return
+        step = self.current
+        if step.advance_on == 'target' and self._target_rect() is not None:
+            self._advance()
+
+    def press(self, button: str):
+        """'next' — безусловный переход вперёд (человек имеет право
+        пропустить шаг, даже если цель не появилась). 'close' — конец
+        сценария с любого шага."""
+        if button == 'close':
+            self.done = True
+            return
+        if button == 'next':
+            self._advance()
+            return
+        raise ValueError(f'неизвестная кнопка: {button!r}')
+
+    def _advance(self):
+        if self._index + 1 >= len(self._steps):
+            self.done = True
+        else:
+            self._index += 1

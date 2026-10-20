@@ -61,6 +61,11 @@ pub fn cold_gate(
         return Some("инструменты комплекта не разложены — «Установить»".into());
     }
     let h = &cfg.host;
+    // Пустое поле — «не указана база», а не «каталога  нет»: в пустой строке
+    // человеку нечего прочитать.
+    if h.base_path.trim().is_empty() {
+        return Some("не указана база".into());
+    }
     // Правило про базу не переписываем: оно уже записано фактом проверки
     // (`verify::base_fact`) — каталог обязателен только файловой базе, а
     // `сервер\база` и сетевой путь существованием не проверяются, иначе
@@ -89,6 +94,18 @@ pub fn cold_gate(
         }
     }
     None
+}
+
+/// Нужно ли вообще ходить на диск за каталогом базы. Классификация та же, что
+/// у `verify::base_fact`: сетевой путь (`\\…`) и `сервер\база` существованием
+/// не проверяются — факт их и не смотрит.
+///
+/// Нужна не ради красоты, а ради главного потока окна: `exists()` по
+/// недоступной сетевой шаре висит на таймауте SMB секундами, а замок считается
+/// на показ окна, конец каждой операции и «Сохранить». Раньше существование
+/// базы считалось в `verify::readiness` — в своём потоке.
+pub fn wants_directory(path: &str) -> bool {
+    !path.starts_with("\\\\") && !(path.contains('\\') && !path.contains(':'))
 }
 
 #[cfg(test)]
@@ -151,6 +168,29 @@ mod tests {
         // Сетевой путь — предупреждение проверки, но не замок.
         c.host.base_path = "\\\\nas\\bases\\buh".into();
         assert_eq!(cold_gate(&c, true, false, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
+    }
+
+    /// Пустое поле объясняется словами, а не пустой строкой в середине фразы.
+    #[test]
+    fn an_empty_base_says_so_instead_of_naming_an_empty_directory() {
+        let mut c = Cfg::default();
+        c.host.base_path = "  ".into();
+        assert_eq!(open(&c).as_deref(), Some("не указана база"));
+    }
+
+    /// Кого спрашивать у диска: только файловую базу. Правило сверяется с самим
+    /// фактом проверки — разойтись им нечем, иначе сетевая база повисла бы на
+    /// таймауте SMB прямо на главном потоке окна.
+    #[test]
+    fn only_a_file_base_is_looked_for_on_disk() {
+        for path in ["C:\\Bases\\Buh", "/home/dev1/base", "Buh"] {
+            assert!(wants_directory(path), "{path}");
+            assert!(!crate::verify::base_fact(path, false).ok, "{path}: факт обязан провалиться без каталога");
+        }
+        for path in ["\\\\nas\\bases\\buh", "srv-1c\\buh"] {
+            assert!(!wants_directory(path), "{path}");
+            assert!(crate::verify::base_fact(path, false).ok, "{path}: факт существования не спрашивает");
+        }
     }
 
     #[test]

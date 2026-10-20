@@ -77,6 +77,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Общее начало обоих отказов «MCP выключены» — с советом включить и с
+/// причиной замка. Тестам гейта важен сам отказ, а не его хвост, и смотрят они
+/// сюда: иначе каждый из них зависел бы от того, заперт ли сейчас замок.
+pub const DISABLED_PREFIX: &str = "MCP выключены в 1c-connect";
+
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
@@ -106,7 +111,7 @@ pub fn gate_reason() -> Option<String> {
 /// его причина, потому что включать нечего и совет был бы ложью.
 pub fn disabled_text(reason: Option<&str>) -> String {
     match reason {
-        Some(why) => format!("MCP выключены в 1c-connect: {why}"),
+        Some(why) => format!("{DISABLED_PREFIX}: {why}"),
         None => DISABLED_TEXT.to_string(),
     }
 }
@@ -579,8 +584,9 @@ async fn handle_request(
     // переключатель», которого не хватит.
     let expired = matches!(crate::licence::state_now(), crate::licence::State::Expired);
     let off = expired || !rules.enabled.load(Ordering::Relaxed);
-    let refusal_text: String = if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(gate_reason().as_deref()) };
-    let refusal: &str = &refusal_text;
+    // Текст считаем только когда он нужен: на включённом обслуживании каждый
+    // кадр брал мьютекс замка и выделял строку, которую никто не читает.
+    let refusal_text = || if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(gate_reason().as_deref()) };
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
         // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
@@ -599,7 +605,7 @@ async fn handle_request(
                 forward_counted(stdin, &raw, in_flight, reply_expected).await
             }
             jsonrpc::McpOffGate::Refuse(id) => {
-                let _ = out.send(jsonrpc::text_reply(&id, refusal, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
                 Ok(())
             }
             jsonrpc::McpOffGate::ParseError(id) => {
@@ -643,7 +649,7 @@ async fn handle_request(
             forward_counted(stdin, &line, in_flight, reply_expected).await
         }
         Route::Disabled { id, tool } => {
-            let text = if off { refusal.to_string() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
+            let text = if off { refusal_text() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
             let _ = out.send(jsonrpc::text_reply(&id, &text, true)).await;
             Ok(())
         }
@@ -664,7 +670,7 @@ async fn handle_request(
         }
         Route::OurCall { id, tool, args } => {
             if off {
-                let _ = out.send(jsonrpc::text_reply(&id, refusal, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
                 return Ok(());
             }
             // Свежий `Project` из того же снимка `cfg`, что и выше — не из
@@ -1185,7 +1191,9 @@ mod tests {
         assert!(!raw.contains("CALL cf_load"), "ребёнок не должен был увидеть вызов: {raw}");
         let call = replies.iter().find(|r| r["id"] == 3).unwrap();
         assert_eq!(call["result"]["isError"], true);
-        assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{raw}");
+        // Начало отказа, а не весь текст: хвост зависит от того, заперт ли
+        // сейчас холодный замок окна (`bridge::gate_reason`), а тест — про гейт.
+        assert!(call["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{raw}");
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был ответить: {raw}");
         assert!(replies.iter().any(|r| r["id"] == 2), "tools/list должен был ответить: {raw}");
     }
@@ -1230,7 +1238,7 @@ mod tests {
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был пройти насквозь: {got}");
         let call = replies.iter().find(|r| r["id"] == 2).unwrap();
-        assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+        assert!(call["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{got}");
     }
 
     #[tokio::test]
@@ -1340,7 +1348,7 @@ mod tests {
         tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
         assert_eq!(replies.len(), 2, "{got}");
-        assert_eq!(replies[0]["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+        assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{got}");
         assert_eq!(replies[1]["result"]["content"][0]["text"], "child ran cf_load", "{got}");
     }
 

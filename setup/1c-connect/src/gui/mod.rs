@@ -739,7 +739,9 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     // Было ли что гасить: замок, запертый ещё до правки, обслуживание уже
     // погасил — гасить второй раз и писать вторую строку в журнал незачем.
-    let was_open = gate_now(&ui.kit, &ui.cfg).is_none();
+    // Берём кэш, а не диск: он пересчитывается по тем же событиям, и правда о
+    // замке в окне должна быть одна (`toggle_link` читает его же).
+    let was_open = ui.gate.is_none();
     host.gitea = ui.cfg.host.gitea.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
@@ -801,7 +803,8 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // остаётся без обслуживания.
     if was_open {
         if let Some(why) = ui.gate.clone() {
-            if ui.enabled.swap(false, Ordering::Relaxed) {
+            if ui.enabled.load(Ordering::Relaxed) {
+                douse_serving(ui);
                 note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
             }
         }
@@ -822,17 +825,34 @@ pub fn locks_gate(gate_before: Option<&str>, gate_after: Option<String>, serving
 /// То же на живых параметрах. Полей, которых окно не показывает, в форме нет —
 /// режим берём из текущих параметров, как это делает сама `save_host`: иначе
 /// туннельная проверка адреса среды применилась бы к локальному рабочему
-/// месту. Замок спрашиваем у диска заново, а не у `ui.gate`: тот считался по
-/// событию и к моменту «Сохранить» мог устареть.
+/// месту. «Было» берём из кэша `ui.gate` (он пересчитывается по тем же
+/// событиям и его же читает `toggle_link`), на диск ходим ровно раз — за
+/// «станет»: нажатие «Сохранить» не должно стоить шести обходов `Program
+/// Files` на главном потоке окна.
 pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
     let serving = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
-    if !serving {
+    if !serving || ui.gate.is_some() {
         return None;
     }
-    let before = gate_now(&ui.kit, &ui.cfg);
     let mut host = new_host.clone();
     host.mode = ui.cfg.host.mode.clone();
-    locks_gate(before.as_deref(), gate_now(&ui.kit, &Cfg { host }), serving)
+    locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg { host }), serving)
+}
+
+/// О чём спросить перед «Сохранить», и спрашивать ли вообще: готовый текст
+/// диалога или `None`. Один расчёт на нажатие — и «нужен ли вопрос», и «какой
+/// текст» отвечает он же, а не два одинаковых похода на диск подряд.
+/// Погасшее обслуживание важнее смены базы: оно оставляет агента без ответа
+/// вовсе.
+fn save_question(ui: &Ui, new_host: &Host) -> Option<(String, String)> {
+    if let Some(why) = save_locks_gate(ui, new_host) {
+        return Some(confirm_gate_text(&why));
+    }
+    let live = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
+    if database_changed(new_host, &ui.cfg.host) && live {
+        return Some(confirm_text(&ui.cfg.host.base_path, &new_host.base_path));
+    }
+    None
 }
 
 /// Нужно ли спросить перед «Сохранить»: база меняется (`database_changed`
@@ -847,8 +867,7 @@ pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
 /// именно в этом сочетании: цель спеки — чтобы смена параметров была
 /// незаметной для Zed, а тут агент остаётся без обслуживания.
 pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
-    let live = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
-    (database_changed(new_host, &ui.cfg.host) && live) || save_locks_gate(ui, new_host).is_some()
+    save_question(ui, new_host).is_some()
 }
 
 /// Имя базы для диалога — последний компонент пути («Buh» для C:\Bases\Buh),
@@ -883,20 +902,16 @@ pub fn confirm_gate_text(why: &str) -> (String, String) {
 /// либо никогда (отказ — поля окна остаются как человек их оставил, здесь
 /// ничего не трогаем).
 pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Host, proceed: impl FnOnce(&mut Window, &mut App) + 'static) {
-    if !save_needs_confirm(cx.global::<Ui>(), new_host) {
+    // Один диалог на оба повода (спека: «тот же диалог подтверждения, что уже
+    // спрашивает при смене базы»), и один расчёт на нажатие: текст приходит
+    // вместе с ответом «спрашивать ли».
+    let Some((message, detail)) = save_question(cx.global::<Ui>(), new_host) else {
         proceed(window, cx);
         return;
-    }
+    };
     if cx.global::<Ui>().dialog_open {
         return;
     }
-    // Один диалог на оба повода (спека: «тот же диалог подтверждения, что уже
-    // спрашивает при смене базы»); меняется только текст — смена базы и
-    // потухшее обслуживание называются разными словами.
-    let (message, detail) = match save_locks_gate(cx.global::<Ui>(), new_host) {
-        Some(why) => confirm_gate_text(&why),
-        None => confirm_text(&cx.global::<Ui>().cfg.host.base_path, &new_host.base_path),
-    };
     cx.global_mut::<Ui>().dialog_open = true;
     let rx = window.prompt(
         PromptLevel::Warning,
@@ -947,10 +962,15 @@ fn ensure_publication_now(ui: &mut Ui) {
 /// значение переключателя уже обязано его слушаться.
 pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
     let tools = ops_host::tools_state(&kit.root, &ops_host::tools_dir());
+    // Существование спрашиваем только у файловой базы (`gate::wants_directory`,
+    // правило самого факта «база»): `exists()` по недоступной сетевой шаре
+    // висит на таймауте SMB, а считается это на главном потоке окна.
+    let base = &cfg.host.base_path;
+    let base_exists = gate::wants_directory(base) && std::path::Path::new(base).exists();
     gate::cold_gate(
         cfg,
         kit.state_path(cfg::FILE).exists(),
-        std::path::Path::new(&cfg.host.base_path).exists(),
+        base_exists,
         &tools,
         ops_host::find_1cv8().as_deref(),
         ops_host::mcp_exe(kit).exists(),
@@ -965,12 +985,33 @@ pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
 /// человек не узнают, что править.
 pub fn refresh_gate(ui: &mut Ui) {
     ui.gate = gate_now(&ui.kit, &ui.cfg);
-    // Причина отказа — процессный глобал моста, и в тестах крейта он один на
-    // все потоки: окно, посчитавшее замок в своём тесте, сломало бы соседний
-    // тест моста, который ждёт отказ без причины. В живой программе окно одно,
-    // и писать туда некому, кроме этого места и `launch`.
-    #[cfg(not(test))]
     crate::bridge::set_gate_reason(ui.gate.clone());
+}
+
+/// Погасить обслуживание вызовов, не спрашивая никого: правка убрала холодное
+/// условие. Снять один флаг мало — карточка и переключатель читают `ui.link`, и
+/// без этой строки человек видел бы зелёное «MCP включены» и переключатель,
+/// который нарисован включённым, но на щелчок не отвечает (находка ревью).
+///
+/// В локальном режиме слушатели остаются поднятыми (они живут весь срок жизни
+/// процесса), гаснет только обслуживание — ровно то же, что делает ручное
+/// выключение переключателя. В туннельном обслуживание и есть сеанс, поэтому
+/// он опускается целиком, тем же приёмом, что `stop_session` (ей нужен `cx`,
+/// а здесь его нет).
+fn douse_serving(ui: &mut Ui) {
+    ui.enabled.store(false, Ordering::Relaxed);
+    if ui.cfg.host.mode == "local" {
+        ui.link = local_display("local", false, ui.link.clone());
+    } else {
+        ui.session_gen += 1;
+        if let Some(s) = ui.session.take() {
+            std::thread::spawn(move || {
+                let _ = s.stop();
+            });
+        }
+        ui.link = State::Off;
+    }
+    sync_tray(ui, Instant::now());
 }
 
 /// Включать ли обслуживание при запуске: галочка «подключаться при запуске»
@@ -1322,6 +1363,14 @@ pub fn toggle_link(cx: &mut App) {
         return;
     }
     let on = cx.global::<Ui>().link.is_on();
+    // Флаг обслуживания идёт за сеансом и в туннельном режиме. Раньше он
+    // писался только в `launch` (начальным значением), и это было терпимо,
+    // пока в «выключено» попадал лишь тот, кто сам снял «подключаться при
+    // запуске». С замком туда попадает и обычное рабочее место — а выйти
+    // оттуда было нечем: человек чинил условие, поднимал туннель, карточка
+    // говорила «Подключён», а каждый вызов агента получал отказ с причиной,
+    // которой уже нет (находка ревью).
+    cx.global::<Ui>().enabled.store(!on, Ordering::Relaxed);
     if on {
         stop_session(cx);
         return;
@@ -1928,15 +1977,21 @@ impl Ui {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _rx) = futures::channel::mpsc::unbounded();
+        let (kit, cfg) = (Kit::at(dir), Cfg::default());
+        // Замок считается, как в `launch`, а не заводится пустым: в каталоге
+        // теста нет ни файла параметров, ни разложенных инструментов, и
+        // фикстура с `None` обещала бы «включать можно» там, где нельзя — на
+        // этом обещании тесты «Сохранить» расходились бы с живой программой.
+        let gate = gate_now(&kit, &cfg);
         Ui {
-            kit: Kit::at(dir),
-            cfg: Cfg::default(),
+            kit,
+            cfg,
             session: None,
             session_gen: 0,
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
-            gate: None,
+            gate,
             ready: Readiness::Unknown,
             ready_gen: 0,
             ready_pending: false,
@@ -1972,7 +2027,7 @@ mod tests {
         apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
-        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
+        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, save_host, save_needs_confirm,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_state, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2726,6 +2781,79 @@ mod tests {
         let (message, detail) = confirm_gate_text(&why);
         assert!(message.contains("MCP выключатся"), "{message}");
         assert!(detail.contains("пользователь базы"), "{detail}");
+
+        // И то же через настоящий вход окна. Поле берём такое, которого нет в
+        // списке «сменилась ли база» (`database_changed`), иначе вопрос
+        // пришёл бы по старому поводу и ничего бы не доказал.
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        ui.gate = None;
+        let mut host = ui.cfg.host.clone();
+        host.server = String::new();
+        assert!(save_needs_confirm(&ui, &host), "туннель без адреса среды — обслуживание погаснет, вопрос обязателен");
+        ui.gate = Some("в комплекте нет mcp-1c".into());
+        assert!(!save_needs_confirm(&ui, &host), "замок заперт и так — гасить нечего");
+        let _ = ui.session.take().map(|s| s.stop());
+    }
+
+    /// Проводка замка к мосту: пока он заперт, отказ агенту несёт причину.
+    /// Сверяем не текст (в каталоге теста замок запирает что придётся, и
+    /// соседние тесты пишут в тот же процессный глобал), а то, что причина
+    /// вообще доезжает — без строки в `refresh_gate` глобал остался бы пустым
+    /// и отказ советовал бы включить то, чего включить нельзя.
+    #[test]
+    fn the_gate_reason_reaches_the_bridge() {
+        let mut ui = Ui::for_test();
+        refresh_gate(&mut ui);
+        assert!(ui.gate.is_some(), "в каталоге теста нет ни параметров, ни инструментов — замок заперт");
+        let reason = crate::bridge::gate_reason();
+        assert!(reason.is_some(), "причина замка не доехала до моста");
+        assert!(crate::bridge::disabled_text(reason.as_deref()).starts_with(&format!("{}: ", crate::bridge::DISABLED_PREFIX)));
+    }
+
+    /// Проводка гашения: «Сохранить», убравшее холодное условие, снимает флаг,
+    /// переводит карточку в «выключено» и пишет строку. Без последнего человек
+    /// видел бы зелёное «MCP включены» и переключатель, который нарисован
+    /// включённым, но на щелчок не отвечает (находка ревью).
+    #[test]
+    fn saving_away_a_cold_condition_douses_the_card_too() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.cfg.host.publication = "webserver".into();
+        ui.session = Some(doomed_session(&ui));
+        ui.link = State::Up { since: Instant::now() };
+        // До правки замок был открыт — иначе гасить нечего (в каталоге теста
+        // он заперт сам по себе, поэтому состояние задаём явно).
+        ui.gate = None;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.db_user = String::new();
+        save_host(&mut ui, host).unwrap();
+        assert!(ui.gate.is_some(), "после правки условие пропало");
+        assert!(!ui.enabled.load(Ordering::Relaxed), "обслуживание погашено");
+        assert_eq!(ui.link, State::Off, "карточка и переключатель обязаны показать «выключено»");
+        // Строка про гашение ровно одна (про обновлённые параметры рядом —
+        // своя и законная: это другое событие).
+        let doused: Vec<&Line> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("MCP выключены:")).collect();
+        // Какое именно условие назовёт строка, решает порядок `cold_gate`, а в
+        // каталоге теста не выполнено сразу несколько — здесь проверяется сам
+        // факт гашения со строкой, а список условий стережёт `gate::tests`.
+        assert_eq!(doused.len(), 1, "{:?}", &ui.log[log_before..]);
+        let _ = ui.session.take().map(|s| s.stop());
+    }
+
+    /// Обратное: замок был заперт и до правки — обслуживание уже погашено,
+    /// второй раз гасить и писать в журнал нечего.
+    #[test]
+    fn saving_under_an_already_held_gate_stays_quiet() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.publication = "webserver".into();
+        assert!(ui.gate.is_some(), "фикстура заводит замок запертым");
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.project = "D:\\other\\proj".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.log.len(), log_before);
     }
 
     #[test]

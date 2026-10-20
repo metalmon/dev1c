@@ -204,6 +204,12 @@ ZEDDB
             cp "$s" "$d"
         fi
     done
+    # Та же беда во встроенном терминале Zed: Ctrl+V там не вставлял вовсе.
+    s=/usr/share/oktaplus/terminal/zed-keymap.json; d="$HOME/.config/zed/keymap.json"
+    if [ -f "$s" ] && ! cmp -s "$s" "$d"; then
+        mkdir -p "$HOME/.config/zed"
+        cp "$s" "$d"
+    fi
     # the launchers of the first days, superseded by the starter
     rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
     # 1c-connect, if the image carries it. The tools it needs (mcp-1c,

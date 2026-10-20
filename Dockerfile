@@ -382,6 +382,11 @@ COPY config/terminalrc           /etc/skel/.config/xfce4/terminal/terminalrc
 COPY config/terminal-accels.scm  /etc/skel/.config/xfce4/terminal/accels.scm
 COPY config/terminalrc           /usr/share/oktaplus/terminal/terminalrc
 COPY config/terminal-accels.scm  /usr/share/oktaplus/terminal/accels.scm
+# Ctrl+V во встроенном терминале Zed: в редакторе он вставляет, а в
+# терминале уходил в оболочку как «следующий символ буквально», и вставить
+# можно было только через меню (стенд, 20.10.2026).
+COPY config/zed-keymap.json   /etc/skel/.config/zed/keymap.json
+COPY config/zed-keymap.json   /usr/share/oktaplus/terminal/zed-keymap.json
 COPY config/zed-settings.json /etc/skel/.config/zed/settings.json
 # The 1C themes for Zed: the same tokens as the desktop and 1c-connect.
 COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json

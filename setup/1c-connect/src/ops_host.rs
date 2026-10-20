@@ -553,9 +553,10 @@ impl Op<Ctx> for Publication {
             return Ok(());
         }
         let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
-        std::fs::create_dir_all(&p.pub_dir).with_context(|| format!("каталог публикации {}", p.pub_dir.display()))?;
-        // Дескриптор несёт пароль базы — в журнал не идёт, только в файл.
-        std::fs::write(p.pub_dir.join("default.vrd"), crate::publication::vrd(&ctx.cfg)).context("default.vrd не записан")?;
+        // Дескриптор несёт пароль базы — в журнал не идёт, только в файл, и
+        // только с правами на владельца (образ делит диск между рабочими
+        // местами).
+        crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(|e| anyhow::anyhow!("{e}"))?;
         std::fs::write(&p.conf, crate::publication::httpd_conf(&p)).context("httpd.conf не записан")?;
         crate::publication::start(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
         ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));

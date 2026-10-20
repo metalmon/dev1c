@@ -178,7 +178,10 @@ fn move_to(_window: &Window, _origin: Point<Pixels>) {}
 /// `(r, r)`: берётся центр пикселя (`-0.5`), поэтому ступеньки ложатся туда
 /// же, куда их рисует панель своим `rounded(r)`. Радиус больше половины
 /// меньшей стороны ужимается — иначе верх и низ наложились бы друг на друга.
-pub fn rounded_region(w: u16, h: u16, r: u16) -> Vec<(i16, i16, u16, u16)> {
+// Зовёт её только `shape_corners` на Linux, а считается и проверяется она
+// везде: правило формы одно, и ломаться оно должно на любой сборке.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rounded_region(w: u16, h: u16, r: u16) -> Vec<(i16, i16, u16, u16)> {
     let r = r.min(w / 2).min(h / 2);
     if r == 0 {
         return vec![(0, 0, w, h)];
@@ -210,32 +213,40 @@ pub fn rounded_region(w: u16, h: u16, r: u16) -> Vec<(i16, i16, u16, u16)> {
 /// размера — дело `reshape`.
 ///
 /// Любой отказ проглатывается: окно обязано открыться и без формы, тогда у
-/// него просто прямые углы (так было до этой правки).
+/// него просто прямые углы (так было до этой правки). Отказ при этом виден
+/// возвратом — `false`: дескриптора ещё нет, соединение не открылось, запрос
+/// не прошёл. По нему `reshape` и решает, запоминать ли размер.
 #[cfg(target_os = "linux")]
-fn shape_corners(window: &Window, w: u16, h: u16, r: u16) {
+fn shape_corners(window: &Window, w: u16, h: u16, r: u16) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
     use x11rb::protocol::xproto::{ClipOrdering, Rectangle};
-    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
-    let RawWindowHandle::Xcb(hw) = handle.as_raw() else { return };
-    let Ok((conn, _)) = x11rb::connect(None) else { return };
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
+    let RawWindowHandle::Xcb(hw) = handle.as_raw() else { return false };
+    let Ok((conn, _)) = x11rb::connect(None) else { return false };
     let rects: Vec<Rectangle> =
         rounded_region(w, h, r).into_iter().map(|(x, y, width, height)| Rectangle { x, y, width, height }).collect();
     // Одним выражением — по той же причине, что в `move_to`: расписка
     // одалживает соединение.
-    let _ = conn
-        .shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, hw.window.get(), 0, 0, &rects)
-        .map(|cookie| cookie.check());
+    conn.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, hw.window.get(), 0, 0, &rects)
+        .map(|cookie| cookie.check().is_ok())
+        .unwrap_or(false)
 }
 
+/// Не X11 — формы окна нет и резать нечем: `false`, то есть «не поставлена».
+/// На Windows углы даёт прозрачность, и это верно по существу, а не отговорка.
 #[cfg(not(target_os = "linux"))]
-fn shape_corners(_window: &Window, _w: u16, _h: u16, _r: u16) {}
+fn shape_corners(_window: &Window, _w: u16, _h: u16, _r: u16) -> bool {
+    false
+}
 
-/// Размер (в пикселях устройства), под который форма уже вырезана: `w << 16 |
-/// h`, ноль — не вырезана ни под какой. Нужен, чтобы `reshape` можно было
-/// звать хоть каждый кадр: совпал размер — ни соединения, ни запроса.
-/// Окно одно, живёт в главном потоке, так что этого счётчика хватает вместо
-/// поля в `Ui` (его модуль сейчас правит другой исполнитель).
+/// Размер (в пикселях устройства), под который форма уже **поставлена**:
+/// `w << 16 | h`, ноль — ни под какой. Запоминается только после успеха: иначе
+/// отказ (дескриптора ещё нет, соединение не открылось) запирал бы повтор
+/// навсегда — размер помечен, а формы нет.
+///
+/// Окно одно и живёт в главном потоке, так что счётчика хватает вместо поля в
+/// `Ui` (его модуль правит другой исполнитель).
 static SHAPED: AtomicU32 = AtomicU32::new(0);
 
 /// Пересчитать форму окна под размер `s`, если под него ещё не резали.
@@ -245,26 +256,28 @@ static SHAPED: AtomicU32 = AtomicU32::new(0);
 /// высоту. Из-за этого форма и разъехалась с окном живьём (замер 2026-10-21:
 /// окно `380x434`, форма `380x420` — срезаны нижние 14 точек). Звать нужно с
 /// той высотой, которую только что попросили, а не с той, которую окно пока
-/// признаёт.
+/// признаёт. По этой же причине здесь нет страховки «форма по нынешнему
+/// размеру каждый кадр»: она читала бы всё тот же отстающий `bounds()` и
+/// перерезала форму обратно на прежний размер. Окно нерастяжимое
+/// (`is_resizable: false`), а оба места, где размер меняется, зовут отсюда.
 ///
-/// Радиуса нет (тема его не просит) — резать нечего.
+/// Радиуса нет (тема его не просит) или размер вырожден — резать нечего.
 fn reshape(window: &Window, s: Size<Pixels>) {
     let Some(r) = super::panel::window_radius() else { return };
     let k = window.scale_factor();
     let (w, h) = ((s.width.as_f32() * k) as u16, (s.height.as_f32() * k) as u16);
-    let key = (w as u32) << 16 | h as u32;
-    if key == 0 || SHAPED.swap(key, Ordering::Relaxed) == key {
+    // Любая нулевая сторона — пустая область и невидимое окно; такого
+    // «скругления» лучше не ставить вовсе.
+    if w == 0 || h == 0 {
         return;
     }
-    shape_corners(window, w, h, (r.as_f32() * k).round() as u16);
-}
-
-/// Форма под настоящий нынешний размер окна — страховка на случай, когда
-/// размер поменялся не нашей подгонкой высоты (менеджер окон, смена масштаба).
-/// Зовётся каждый кадр из `Panel::measured`; пока размер тот же, это одно
-/// чтение `SHAPED`.
-pub fn reshape_to_current(window: &Window) {
-    reshape(window, window.bounds().size);
+    let key = (w as u32) << 16 | h as u32;
+    if SHAPED.load(Ordering::Relaxed) == key {
+        return;
+    }
+    if shape_corners(window, w, h, (r.as_f32() * k).round() as u16) {
+        SHAPED.store(key, Ordering::Relaxed);
+    }
 }
 
 /// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
@@ -533,9 +546,18 @@ mod tests {
     #[test]
     fn a_zero_radius_is_one_rectangle() {
         // Радиуса нет — форма совпадает с самим окном, ступенек строить не из
-        // чего. Та же ветка страхует вырожденный размер.
+        // чего. Это и есть правило: окно целиком, а не пустая область.
         assert_eq!(rounded_region(380, 420, 0), vec![(0, 0, 380, 420)]);
-        assert_eq!(rounded_region(0, 0, 8), vec![(0, 0, 0, 0)]);
+        // Вырожденный размер даёт область нулевой площади — и потому до
+        // X-сервера не доходит вовсе: такую форму `reshape` отсекает у себя,
+        // иначе окно стало бы невидимым. Здесь закреплено, что ничего
+        // рисуемого из нуля не берётся, а не что пустую форму ставить можно.
+        for (w, h) in [(0u16, 0u16), (0, 420), (380, 0)] {
+            assert!(
+                rounded_region(w, h, 8).iter().all(|(_, _, rw, rh)| *rw == 0 || *rh == 0),
+                "из размера {w}x{h} не может взяться рисуемая область"
+            );
+        }
     }
 
     #[test]

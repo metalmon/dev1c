@@ -15,26 +15,39 @@ BAD_ANCHOR_SCENARIO = str(_HERE / 'fixtures' / 'scenario_bad_anchor.toml')
 class LoadTests(unittest.TestCase):
     def test_two_acts_numbered_through(self):
         steps = load(SCENARIO)
-        self.assertEqual([s.number for s in steps], list(range(1, 15)))
+        self.assertEqual([s.number for s in steps], list(range(1, 16)))
         # Нумерация сквозная, а принадлежность к акту — отдельное поле:
         # человек видит «Шаг 1 из 7» в обоих актах (Machine.position).
         self.assertEqual([s.number for s in steps if s.act == 1], [1, 2, 3, 4, 5, 6, 7])
-        self.assertEqual([s.number for s in steps if s.act == 2], [8, 9, 10, 11, 12, 13, 14])
+        self.assertEqual([s.number for s in steps if s.act == 2],
+                         [8, 9, 10, 11, 12, 13, 14, 15])
 
     def test_texts_are_verbatim(self):
         steps = load(SCENARIO)
         self.assertEqual(steps[1].title, 'Сначала знакомое')
         self.assertIn('заведите одну номенклатуру', steps[1].body)
 
-    def test_no_git_word_anywhere(self):
-        # Слово проверяем во всех текстовых полях шага: заголовок, тело,
-        # кнопки и готовые вопросы — это тоже текст, который видит человек.
-        steps = load(SCENARIO)
-        text = ' '.join(
-            ' '.join((s.title, s.body, *s.buttons, *s.questions))
-            for s in steps
-        ).lower()
-        self.assertNotIn('git', text)
+    def _text(self, steps):
+        # Все текстовые поля шага: заголовок, тело, кнопки и готовые
+        # вопросы — это тоже текст, который видит человек.
+        return ' '.join(' '.join((s.title, s.body, *s.buttons, *s.questions))
+                        for s in steps).lower()
+
+    def test_first_act_says_nothing_about_git(self):
+        # В первом акте git и правда нет: человек открывает 1С, спрашивает
+        # агента, смотрит ответ. Называть там инструмент незачем.
+        steps = [s for s in load(SCENARIO) if s.act == 1]
+        self.assertNotIn('git', self._text(steps))
+
+    def test_second_act_names_git_and_teaches_the_command(self):
+        # Правило изменено владельцем продукта 20.10.2026: если говорим
+        # про git, называем его git и учим им пользоваться. Эвфемизм на
+        # месте настоящей команды — обман: повторить у себя человек не
+        # сможет.
+        steps = [s for s in load(SCENARIO) if s.act == 2]
+        text = self._text(steps)
+        self.assertIn('git', text)
+        self.assertIn('git clone', text)
 
     def test_unknown_target_kind_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -121,7 +134,7 @@ class ActionTests(unittest.TestCase):
         # вместо второго акта), развилка второго акта и его конец.
         closing = {s.number for s in steps
                    if any(a.action == 'close' for a in s.actions.values())}
-        self.assertEqual(closing, {1, 7, 8, 14})
+        self.assertEqual(closing, {1, 7, 8, 15})
 
     def test_step_three_button_advances_and_closes_1c(self):
         # Кнопка сама двигает шаг («next» — wait_for у шага 3 больше нет,

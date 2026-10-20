@@ -58,6 +58,20 @@ _REQUIRED_TARGET_FIELDS = {
 }
 
 
+# Подстановка в текстах: имя рабочего места. Команда git на экране должна
+# быть верной для того, кто её читает, — гость на dev2 не должен видеть
+# ветку dev1. Токен, а не форматирование строки: в текстах есть фигурные
+# скобки сами по себе, и format_map на них спотыкается.
+WORKSTATION_TOKEN = '{рабочее место}'
+
+
+def substitute(steps: list, workstation: str) -> list:
+    """Подставляет имя рабочего места в заголовки и тела шагов."""
+    return [step._replace(title=step.title.replace(WORKSTATION_TOKEN, workstation),
+                          body=step.body.replace(WORKSTATION_TOKEN, workstation))
+            for step in steps]
+
+
 def load(path: str) -> list[Step]:
     """Читает сценарий из TOML-файла, проверяет и возвращает список шагов.
 

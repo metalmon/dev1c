@@ -248,11 +248,19 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
 /// вызов не доходит до ребёнка никогда и ни на каком порту, независимо от
 /// переключателя: безопаснее тихо отбросить, чем один раз обойти проверку
 /// вызовом без идентификатора.
+///
+/// Ключи читаются через `key_ci` — тем же способом, что и `route_request_with`
+/// чуть ниже. Это не новая проверка «на всякий случай» (её сознательно не
+/// заводили для 777N, см. `mcp_gate_while_off`), а устранение несогласия
+/// внутри одного файла: при точном сравнении имени ключа `{"Method":
+/// "tools/call", ...}` без `id` не опознавался этой функцией как `tools/call`
+/// вовсе, рассматривался дальше как обычная строка и там, где он на самом
+/// деле `tools/call`, уходил ребёнку мимо этой проверки.
 pub fn is_tools_call_without_id(line: &[u8]) -> bool {
     let Some(v) = parse(line) else { return false };
     let Some(obj) = v.as_object() else { return false };
-    let Some(method) = obj.get("method").and_then(Value::as_str) else { return false };
-    method.eq_ignore_ascii_case("tools/call") && obj.get("id").is_none()
+    let Some(method) = key_ci(obj, "method").ok().flatten().and_then(Value::as_str) else { return false };
+    method.eq_ignore_ascii_case("tools/call") && !matches!(key_ci(obj, "id"), Ok(Some(_)))
 }
 
 /// Куда идёт строка от агента на трубе mcp-1c (777N), пока переключатель
@@ -265,12 +273,18 @@ pub fn is_tools_call_without_id(line: &[u8]) -> bool {
 /// переключателя. `tools/call` без `id` сюда не долетает: он отбрасывается
 /// раньше и везде, см. `is_tools_call_without_id`.
 ///
-/// Дубликаты ключей и прочие тонкости разбора здесь не разбираются отдельно
-/// (решение заказчика): с этой трубой говорит собственный агент пользователя
-/// в его же контейнере, а не чужой недоверенный клиент, и обычное для
-/// `serde_json` «последний ключ побеждает» — достаточная защита для этого
-/// случая; цена более строгой проверки (как у `route_request_with` для
-/// 778N) здесь не оправдана.
+/// Ключи `method`/`id` читаются через `key_ci`, как у `is_tools_call_without_id`
+/// и у `route_request_with`: не согласованные между собой способы читать один
+/// и тот же ключ — это и была дыра, а не повод завести третий.
+///
+/// Дубликаты одного и того же ключа (двух `id` сразу) и прочие тонкости
+/// разбора здесь не разбираются отдельно (решение заказчика) — это другой
+/// вопрос, чем регистр имени ключа: `key_ci` сам возвращает «не нашёл»
+/// (`Err`) при таком дубликате, и здесь это просто равносильно отсутствию
+/// ключа. Пока с этой трубой говорит собственный агент пользователя в его же
+/// контейнере, а не чужой недоверенный клиент — этого достаточно; цена
+/// более строгой проверки (как самой `route_request_with` для 778N, которая
+/// на такой дубликат отвечает явным отказом) здесь не оправдана.
 pub enum McpOffGate {
     /// Метод известен и это не `tools/call` — пропустить как есть.
     Forward,
@@ -286,8 +300,8 @@ pub enum McpOffGate {
 pub fn mcp_gate_while_off(line: &[u8]) -> McpOffGate {
     let Some(v) = parse(line) else { return McpOffGate::Drop };
     let Some(obj) = v.as_object() else { return McpOffGate::Drop };
-    let id = obj.get("id").cloned();
-    match obj.get("method").and_then(Value::as_str) {
+    let id = key_ci(obj, "id").ok().flatten().cloned();
+    match key_ci(obj, "method").ok().flatten().and_then(Value::as_str) {
         Some(m) if m.eq_ignore_ascii_case("tools/call") => match id {
             Some(id) => McpOffGate::Refuse(id),
             // Перестраховка: is_tools_call_without_id должен был отбросить
@@ -514,6 +528,20 @@ mod tests {
         assert!(!is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"initialize"}"#));
         assert!(!is_tools_call_without_id(b"not json"));
         assert!(!is_tools_call_without_id(b"[1,2]"));
+    }
+
+    #[test]
+    fn tools_call_without_id_agrees_with_route_request_with_on_a_differently_cased_key() {
+        // The bug the second review found: a differently-cased "method" or
+        // "id" key must be read the same way here and in route_request_with,
+        // or one half of the bridge sees a tools/call the other half misses.
+        let no_id = br#"{"jsonrpc":"2.0","Method":"tools/call","params":{"name":"cf_load"}}"#;
+        assert!(is_tools_call_without_id(no_id), "a differently-cased method must still read as tools/call");
+        assert!(matches!(route_request(no_id, &["cf_load".to_string()]), Route::PlatformCall { .. }), "route_request_with already finds it via key_ci");
+
+        let odd_id = br#"{"method":"tools/call","ID":5,"params":{"name":"cf_load"}}"#;
+        assert!(!is_tools_call_without_id(odd_id), "an id spelled ID is still an id");
+        assert!(matches!(route_request(odd_id, &["cf_load".to_string()]), Route::PlatformCall { id, .. } if id == json!(5)));
     }
 
     #[test]

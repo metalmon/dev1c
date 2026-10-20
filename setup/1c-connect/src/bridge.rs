@@ -196,6 +196,10 @@ where
     let pending: Pending = Arc::default();
     let running: Running = Arc::default();
     let rules = Arc::new(rules);
+    // Один Warn в журнал на «строка от агента не опознана, пока MCP
+    // выключены» за всё соединение: иначе баннер или keepalive, повторяющийся
+    // на каждой строке, залил бы журнал человеку одинаковыми записями.
+    let mcp_off_warned = Arc::new(AtomicBool::new(false));
 
     let writer = tokio::spawn(async move {
         while let Some(b) = out_rx.recv().await {
@@ -208,7 +212,8 @@ where
 
     // Агент → ребёнок.
     let to_child = {
-        let (out, pending, running, rules, log) = (out_tx.clone(), pending.clone(), running.clone(), rules.clone(), log.clone());
+        let (out, pending, running, rules, log, mcp_off_warned) =
+            (out_tx.clone(), pending.clone(), running.clone(), rules.clone(), log.clone(), mcp_off_warned.clone());
         tokio::spawn(async move {
             let mut f = Framer::new();
             let mut buf = vec![0u8; 64 * 1024];
@@ -218,13 +223,13 @@ where
                     Ok(n) => n,
                 };
                 for fr in f.push(&buf[..n]) {
-                    if handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log).await.is_err() {
+                    if handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log, &mcp_off_warned).await.is_err() {
                         return;
                     }
                 }
             }
             if let Some(fr) = f.finish() {
-                let _ = handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log).await;
+                let _ = handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log, &mcp_off_warned).await;
             }
             let _ = stdin.shutdown().await;
         })
@@ -307,6 +312,7 @@ async fn handle_request(
     running: &Running,
     stdin: &mut tokio::process::ChildStdin,
     log: &Sink,
+    mcp_off_warned: &AtomicBool,
 ) -> Result<(), ()> {
     // A line over the Framer's cap is never passed on, on either port: a
     // line the bridge did not buffer whole is not one it can gate or route.
@@ -355,7 +361,14 @@ async fn handle_request(
                 Ok(())
             }
             jsonrpc::McpOffGate::Drop => {
-                log(Event::Warn("mcp-1c: нераспознанная строка от агента отброшена, пока MCP выключены".into()));
+                // Пустая строка (голый \n от баннера или keepalive) — вообще
+                // не повод для журнала; на не пустых — одна запись за всё
+                // соединение, иначе шквал одинаковых строк залил бы журнал.
+                if !line.is_empty() && !mcp_off_warned.swap(true, Ordering::Relaxed) {
+                    log(Event::Warn(
+                        "mcp-1c: нераспознанная строка от агента отброшена, пока MCP выключены (дальнейшие такие строки в журнал не пишутся)".into(),
+                    ));
+                }
                 Ok(())
             }
         };
@@ -464,10 +477,16 @@ const SESSION_LIMIT_TEXT: &str = "превышено предельное кол
 /// пишет строку в журнал; иначе ничего не делает. Ответ агенту эта функция
 /// не трогает и не меняет. Разбор как JSON — не бесплатный (ответы с
 /// деревом метаданных бывают мегабайтами), поэтому сначала строка
-/// проверяется на фразу в сырых байтах, и только если она нашлась — парсится.
+/// проверяется на ASCII-метку `isError` в сырых байтах, и только если она
+/// нашлась — строка парсится и там уже ищется сама фраза. Искать в сырых
+/// байтах саму кириллическую фразу нельзя: ребёнок вправе экранировать
+/// не-ASCII как `\uXXXX`, и тогда байты фразы не встретятся вовсе, а разбор
+/// JSON их всё равно вернул бы (serde сам снимает экранирование) — именно
+/// это и было найдено ревью. `isError` — ASCII и в обычных (неошибочных)
+/// ответах, в т.ч. мегабайтных деревьях метаданных, не встречается.
 fn warn_on_session_limit(fr: &Frame, log: &Sink) {
     let Frame::Line(l) = fr else { return };
-    if !bytes_contain(l, SESSION_LIMIT_TEXT.as_bytes()) {
+    if !bytes_contain(l, b"isError") {
         return;
     }
     let Ok(v) = serde_json::from_slice::<Value>(l) else { return };
@@ -505,6 +524,12 @@ mod tests {
 
     #[test]
     fn __echo_child() {
+        // Dies at once with a message on stderr — a portable "child never
+        // got going" failure, for on_exit/redact_text coverage.
+        if let Ok(msg) = std::env::var("BRIDGE_DIE") {
+            eprintln!("{msg}");
+            std::process::exit(3);
+        }
         // A scripted MCP server: lists three tools, echoes the called tool's
         // name, prints a plain line on a cancel notification. NOISY: first
         // 200 KB of stderr, the way OneScript logs a long command.
@@ -546,10 +571,14 @@ mod tests {
                         if std::env::var("BRIDGE_SCRIPT_ARGS").is_ok() {
                             text = format!("{text} args={}", v["params"]["arguments"]);
                         }
-                        if std::env::var("BRIDGE_SCRIPT_LIMIT").is_ok() {
+                        // Real MCP tool errors carry isError:true — the limit
+                        // reply must shape it the same way, since the bridge's
+                        // prefilter now anchors on that ASCII key.
+                        let is_error = std::env::var("BRIDGE_SCRIPT_LIMIT").is_ok();
+                        if is_error {
                             text = "ошибка сервера: превышено предельное количество подключений".into();
                         }
-                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}]}})
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"content":[{"type":"text","text":text}],"isError":is_error}})
                     }
                     Some("notifications/cancelled") => {
                         writeln!(out, "child saw cancel {}", v["params"]["requestId"]).unwrap();
@@ -796,6 +825,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_mcp_off_path_journals_unrecognised_lines_once_per_connection() {
+        // A banner or a keepalive repeating on every line must not fill the
+        // journal with identical entries, and a bare newline (an empty line
+        // frame) must not produce one at all.
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let log: Sink = Arc::new(move |e: Event| {
+            if let Event::Warn(w) = e {
+                seen2.lock().unwrap().push(w);
+            }
+        });
+        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, log, move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (r, mut w) = tokio::io::split(ours);
+        for l in ["junk1", "", "junk2", "junk3"] {
+            w.write_all(l.as_bytes()).await.unwrap();
+            w.write_all(b"\n").await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        w.shutdown().await.unwrap();
+        let mut got = String::new();
+        tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
+        assert!(!got.contains("GOT"), "ничего не должно было дойти до ребёнка: {got}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "одна запись на всё соединение, не на каждую строку: {seen:?}");
+        assert!(seen[0].contains("не пишутся"), "{}", seen[0]);
+    }
+
+    #[tokio::test]
     async fn flipping_the_switch_mid_connection_starts_serving() {
         let enabled = Arc::new(AtomicBool::new(false));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
@@ -957,6 +1019,31 @@ mod tests {
         assert_eq!(replies[0]["id"], 7);
         let names: Vec<&str> = replies[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["project_status", "project_pull", "project_push"]);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_dies_at_once_reports_a_redacted_stderr_tail() {
+        // Coverage lost when pipe_process (and its own version of this test)
+        // was deleted: pipe_jsonrpc carries the same on_exit/redact_text
+        // wiring and deserves the same proof — a secret in the child's
+        // stderr must never reach the journal in the clear.
+        let (ours, theirs) = tokio::io::duplex(4096);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(
+            theirs,
+            child(("BRIDGE_DIE", "ошибка подключения: --db-password hunter2")),
+            rules(&[], 0),
+            no_log(),
+            move |code, err| {
+                let _ = tx.send((code, err));
+            },
+        ));
+        let (mut r, _w) = tokio::io::split(ours);
+        let mut got = Vec::new();
+        r.read_to_end(&mut got).await.unwrap(); // EOF: the stream closed
+        let (code, err) = rx.await.unwrap();
+        assert_eq!(code, 3);
+        assert!(!err.contains("hunter2") && err.contains("--db-password=…"), "{err}");
     }
 
     #[tokio::test]

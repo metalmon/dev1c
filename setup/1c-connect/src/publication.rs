@@ -117,7 +117,7 @@ fn tighten_dir(dir: &Path) -> Result<(), String> {
 #[cfg(unix)]
 fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)

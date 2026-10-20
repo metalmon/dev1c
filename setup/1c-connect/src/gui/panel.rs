@@ -123,32 +123,66 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     rows
 }
 
-/// Параметры из полей. `dump`, `tools` и `base_url` пустые — их подставит
-/// `save_host` из текущих, в окне этих полей нет.
-pub fn host_of(f: &Fields, cx: &App) -> Host {
-    let v = |e: &Entity<InputState>| e.read(cx).value().to_string();
+/// Поля вкладки «Параметры», которые режим реально показывает. В локальном
+/// режиме коннектор слушает loopback, а не поднимает туннель в среду —
+/// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
+/// и показывать их незачем. Всё, что не `"local"`, — режим `tunnel`.
+/// Отрисовка рядов и сравнение «изменилось ли» ходят только через этот список.
+pub fn shown_fields(mode: &str) -> &'static [&'static str] {
+    if mode == "local" {
+        &["base_path", "db_user", "db_password", "project"]
+    } else {
+        &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"]
+    }
+}
+
+fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
+    match name {
+        "server" => &h.server,
+        "password" => &h.password,
+        "workstation" => &h.workstation,
+        "base_path" => &h.base_path,
+        "db_user" => &h.db_user,
+        "db_password" => &h.db_password,
+        "project" => &h.project,
+        _ => "",
+    }
+}
+
+/// Параметры из полей. `dump`, `tools`, `mode` и `base_url` пустые — их
+/// подставит `save_host` из текущих, в окне этих полей нет. Поля, которых
+/// режим не показывает, тоже пустые — набранное в них (если там что-то
+/// осталось от прежнего режима) в toml не попадёт; `Panel::save` сам
+/// переносит рабочее место, адрес среды и пароль рабочего места из текущих
+/// параметров, как `save_host` уже делает для `dump`/`tools`/`mode`.
+pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
+    let shown = shown_fields(mode);
+    let v = |name: &str, e: &Entity<InputState>| {
+        if shown.contains(&name) { e.read(cx).value().to_string() } else { String::new() }
+    };
     Host {
-        server: v(&f.server),
-        password: v(&f.password),
-        workstation: v(&f.workstation),
-        base_path: v(&f.base_path),
-        db_user: v(&f.db_user),
-        db_password: v(&f.db_password),
+        server: v("server", &f.server),
+        password: v("password", &f.password),
+        workstation: v("workstation", &f.workstation),
+        base_path: v("base_path", &f.base_path),
+        db_user: v("db_user", &f.db_user),
+        db_password: v("db_password", &f.db_password),
         base_url: String::new(),
         dump: String::new(),
-        project: v(&f.project),
+        project: v("project", &f.project),
         tools: Vec::new(),
         mode: String::new(),
     }
 }
 
-/// Поля окна отличаются от сохранённых? `dump`, `tools` и `base_url` в окне
-/// не редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
-pub fn fields_differ(a: &Host, b: &Host) -> bool {
-    fn key(h: &Host) -> [&str; 7] {
-        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.project]
-    }
-    key(a) != key(b)
+/// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
+/// режим показывает: правка скрытого поля (адрес среды, пароль рабочего
+/// места, рабочее место в локальном режиме) не должна зажигать «Сохранить» —
+/// оно ни на что не влияет, пока режим не сменился. `dump`, `tools`,
+/// `base_url` и `mode` в окне не редактируются (`host_of` отдаёт их
+/// пустыми/нулями), поэтому и так не входят в список.
+pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
+    shown_fields(mode).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
@@ -274,14 +308,27 @@ impl Panel {
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        fields_differ(&host_of(&self.fields, cx), &self.original)
+        let mode = cx.global::<Ui>().cfg.host.mode.clone();
+        fields_differ(&host_of(&self.fields, &mode, cx), &self.original, &mode)
     }
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
     /// проверки — строкой, toml не тронут, набранное остаётся в поле.
     /// Возвращает, удалось ли: по неудаче сеанс не перезапускают.
     fn save(&mut self, cx: &mut Context<Self>) -> bool {
-        let host = host_of(&self.fields, cx);
+        let mode = cx.global::<Ui>().cfg.host.mode.clone();
+        let mut host = host_of(&self.fields, &mode, cx);
+        if mode == "local" {
+            // Адрес среды, пароль рабочего места и имя рабочего места скрыты
+            // в этом режиме — переносим их из текущих параметров, как
+            // `save_host` уже делает для `dump`/`tools`/`mode`/`base_url`.
+            // Рабочее место обязано остаться в toml: от него `cfg::Cfg::ports`
+            // считает порты 7770+N и 7780+N.
+            let current = cx.global::<Ui>().cfg.host.clone();
+            host.server = current.server;
+            host.password = current.password;
+            host.workstation = current.workstation;
+        }
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
         cx.global_mut::<Ui>().status = Some(match &r {
@@ -381,6 +428,8 @@ impl Render for Panel {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
             None => (ui.kit.root.display().to_string(), false),
         };
+        let mode = ui.cfg.host.mode.clone();
+        let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -502,48 +551,58 @@ impl Render for Panel {
                 .id("params")
                 .size_full()
                 .overflow_y_scroll()
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx))
-                        .child(
+                .child({
+                    // В локальном режиме коннектор слушает loopback, а не
+                    // поднимает туннель в среду: адрес среды, рабочее место и
+                    // его пароль ничего не меняют — показывать их незачем
+                    // (поле без действия роняет доверие к экрану параметров).
+                    // Без них ряд не рисуется вовсе — ни дыры, ни подписи
+                    // без поля: высота окна не прыгает между режимами, она
+                    // просто меньше.
+                    let mut col = v_flex().gap_3();
+                    if shown.contains(&"server") {
+                        col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
+                    }
+                    if shown.contains(&"workstation") {
+                        col = col.child(
                             h_flex()
                                 .gap_3()
                                 .items_end()
                                 .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
                                 .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_size(px(13.)).text_color(caption).child("База"))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                        .child(pick("pick-base", f.base_path.clone(), cx)),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
-                                .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                        .child(pick("pick-project", f.project.clone(), cx)),
-                                ),
-                        ),
-                )
+                        );
+                    }
+                    col.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_size(px(13.)).text_color(caption).child("База"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
+                                    .child(pick("pick-base", f.base_path.clone(), cx)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                            .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                    .child(pick("pick-project", f.project.clone(), cx)),
+                            ),
+                    )
+                })
                 .into_any_element(),
             // «Проект» = прежние «Расширение» и «Проект» одной лентой:
             // сверху операции на машине, ниже — каталог и состояние ветки.
@@ -810,7 +869,7 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{card, fields_differ, project_rows, HINT_PROJECT};
+    use super::{card, fields_differ, project_rows, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
     use crate::gui::{Dot, ProjectView, Running, Which};
     use crate::session::State;
@@ -869,12 +928,39 @@ mod tests {
         let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
         // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
         let shown = Host { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
-        assert!(!fields_differ(&shown, &saved));
+        assert!(!fields_differ(&shown, &saved, "tunnel"));
         let edited = Host { server: "h:1".into(), ..shown.clone() };
-        assert!(fields_differ(&edited, &saved));
+        assert!(fields_differ(&edited, &saved, "tunnel"));
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
-        assert!(fields_differ(&moved, &saved));
+        assert!(fields_differ(&moved, &saved, "tunnel"));
+    }
+
+    #[test]
+    fn local_mode_hides_the_environment_fields() {
+        assert_eq!(shown_fields("local").to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
+        assert_eq!(shown_fields("tunnel").len(), 7);
+        // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
+        assert_eq!(shown_fields("bogus"), shown_fields("tunnel"));
+    }
+
+    #[test]
+    fn changing_a_hidden_field_does_not_enable_save() {
+        let saved = Host { mode: "local".into(), ..Host::default() };
+        // Адрес среды, пароль рабочего места и само рабочее место правятся,
+        // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
+        let edited = Host {
+            server: "10.0.0.5:3393".into(),
+            password: "другой".into(),
+            workstation: "dev2".into(),
+            ..saved.clone()
+        };
+        assert!(!fields_differ(&edited, &saved, "local"));
+        // А то же самое в туннельном режиме — заметная правка.
+        assert!(fields_differ(&edited, &saved, "tunnel"));
+        // Видимое поле в локальном режиме по-прежнему включает «Сохранить».
+        let moved = Host { project: "D:\\other\\Buh".into(), ..saved.clone() };
+        assert!(fields_differ(&moved, &saved, "local"));
     }
 
     #[test]

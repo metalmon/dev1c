@@ -399,6 +399,10 @@ fn no_window(cmd: &mut std::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
+/// Гасит отслеженный httpd (или просит его остановиться), прежде чем
+/// поднимать новый. Только Windows: на Linux остановкой ведает `-k stop`
+/// по своему файлу идентификатора.
+#[cfg(windows)]
 fn kill_tracked(p: &Paths) {
     if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
         let _ = h.child.kill();

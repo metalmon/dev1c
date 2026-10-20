@@ -301,12 +301,15 @@ pub fn window_radius() -> Option<Pixels> {
     if cfg!(windows) { Some(px(8.)) } else { None }
 }
 
-/// Подсказка кнопок выбора каталога. Подписи на кнопке нет — слово «Выбрать…»
-/// съедало половину строки пути (заказчик 2026-10-20), его место занял значок
-/// папки. Но без слова квадратную кнопку не опознать, поэтому оно остаётся
-/// подсказкой по наведению.
-pub fn pick_tooltip() -> &'static str {
-    "Выбрать…"
+/// Лицо кнопок выбора каталога: подпись и подсказка. Подписи нет — слово
+/// «Выбрать…» съедало половину строки пути (заказчик 2026-10-20), его место
+/// занял значок папки. Но без слова квадратную кнопку не опознать, поэтому оно
+/// остаётся подсказкой по наведению.
+///
+/// Решение «подпись или значок» живёт здесь, а не в сборке кнопки: иначе
+/// подпись можно вернуть, не тронув ни одного теста.
+fn pick_face() -> (Option<&'static str>, &'static str) {
+    (None, "Выбрать…")
 }
 
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
@@ -681,10 +684,12 @@ impl Render for Panel {
         // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
         // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
         let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
+            let (label, tooltip) = pick_face();
             Button::new(id)
                 .outline()
+                .when_some(label, |b, l| b.label(l))
                 .icon(Icon::default().data(FOLDER_SVG))
-                .tooltip(pick_tooltip())
+                .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
         let f = &self.fields;
@@ -1065,7 +1070,7 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_save, card, fields_differ, foot_left_text, pick_tooltip, project_rows, save_hint, shown_fields,
+        can_save, card, fields_differ, foot_left_text, pick_face, project_rows, save_hint, shown_fields,
         window_radius, HINT_PROJECT,
     };
     use crate::cfg::Host;
@@ -1316,10 +1321,15 @@ mod tests {
 
     #[test]
     fn the_picker_button_has_no_label_and_keeps_its_tooltip() {
-        // Подписи на кнопке больше нет — её место занял значок папки, а
-        // ширина ушла полю ввода (заказчик 2026-10-20: путь `/home/dev3/base`
-        // занимал половину поля). Слово остаётся подсказкой по наведению: иначе
-        // назначение квадратной кнопки не угадать.
-        assert_eq!(pick_tooltip(), "Выбрать…");
+        // Оба конца правила за раз: подписи на кнопке нет — её место занял
+        // значок папки, а ширина ушла полю ввода (заказчик 2026-10-20: путь
+        // `/home/dev3/base` занимал половину поля); слово при этом не
+        // потерялось, оно стало подсказкой по наведению — иначе назначение
+        // квадратной кнопки не угадать. Кнопка берёт и подпись, и подсказку
+        // только отсюда, так что вернуть «Выбрать…» на кнопку, не уронив
+        // этот тест, не получится.
+        let (label, tooltip) = pick_face();
+        assert_eq!(label, None, "подпись вернулась на кнопку и снова съедает строку пути");
+        assert_eq!(tooltip, "Выбрать…");
     }
 }

@@ -26,6 +26,20 @@ else
     say "FAIL payload: /opt/1cv8t and /opt/1c-demo are empty — ./provision.sh import"
     exit 1
 fi
+# dev1c-onboarding: файлы на месте — программа, оба пункта запуска
+# (меню и автозапуск сессии). Не per-workstation: программа одна на образ.
+if [ -f /opt/onboarding/main.py ] && [ -f /opt/onboarding/scenario.toml ] \
+    && [ -f /usr/share/applications/1c-onboarding.desktop ] \
+    && [ -f /etc/xdg/autostart/zz-1c-onboarding.desktop ]; then
+    if (cd /opt/onboarding && python3 -c 'import main' >$T/onboarding.out 2>&1); then
+        say "ok   onboarding: /opt/onboarding, точка входа импортируется"
+    else
+        say "FAIL onboarding: main.py не импортируется: $(tr '\n' ' ' <$T/onboarding.out)"; fail=1
+    fi
+else
+    say "FAIL onboarding: не все файлы на месте (/opt/onboarding или один из двух .desktop)"
+    fail=1
+fi
 LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 INFO='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_configuration_info","arguments":{}}}'
 for n in 1 2 3; do

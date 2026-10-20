@@ -94,6 +94,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       `#   Verified in the image with a test indicator: the icon appears in the` \
       `#   panel next to the clock.` \
       libayatana-appindicator3-1 \
+      `# dev1c-onboarding: шесть шагов поверх рабочего стола (config/1c/` \
+      `# onboarding/) — чистый GTK3, без собственного композитора; xprop и` \
+      `# xwininfo (x11-utils) ему тоже нужны, но они уже стоят в базовом` \
+      `# образе ради других задач.` \
+      python3-gi python3-gi-cairo gir1.2-gtk-3.0 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- mcp-1c: the Linux binary and the extension ------------------------------
@@ -290,6 +295,13 @@ COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.deskto
 # `1c-stand connect` says so in the log and exits, which is better than an
 # autostart entry that appears and disappears between image versions.
 COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.desktop
+# dev1c-onboarding: шесть шагов поверх рабочего стола, см. config/1c/
+# onboarding/. Тот же приём, что у 1c-connect выше — пункт меню и автозапуск
+# зовут одну и ту же команду, «1c-stand onboarding», а не python3 напрямую,
+# так что путь к интерпретатору и к сценарию остаётся в одном месте.
+COPY config/1c/onboarding                   /opt/onboarding
+COPY config/1c/onboarding.desktop           /usr/share/applications/1c-onboarding.desktop
+COPY config/1c/onboarding-autostart.desktop /etc/xdg/autostart/zz-1c-onboarding.desktop
 # 1c-connect for Linux, built with its window by CI (artifact 1c-connect-linux).
 # Optional: put the file into `artifacts/` to have it in the image.
 #

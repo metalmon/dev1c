@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Знакомство со стендом
+Comment=Шесть шагов: где 1С, что за редактор, что спросить у агента и что он держит на базе
+Exec=/usr/local/bin/1c-stand onboarding
+Icon=help-about
+Terminal=false
+Categories=Office;Education;
+StartupNotify=true

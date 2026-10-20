@@ -132,6 +132,29 @@ pub fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs((2u64 << attempt.min(5)).min(60))
 }
 
+/// Сколько отказов именно проброса подряд терпим, прежде чем решить, что
+/// рабочее место занято кем-то другим, а не просто ждёт переподключения
+/// старой сессии.
+const MAX_FORWARD_REFUSALS: u32 = 3;
+
+/// Текст терминальной ошибки после `MAX_FORWARD_REFUSALS` отказов подряд:
+/// протокол не говорит, кто держит порт, поэтому называем рабочее место и
+/// все правдоподобные причины, а не сервер.
+fn workstation_busy_text(workstation: &str) -> String {
+    format!(
+        "рабочее место {workstation} занято: другой коннектор (в среде или на другой машине) либо старый проброс спящей машины, который сам отпустится за три минуты"
+    )
+}
+
+/// Ещё один отказ проброса подряд: считает его отдельно от общего счётчика
+/// переподключений (`attempt`), чтобы обрыв связи и отказ проброса не делили
+/// один лимит. Возвращает новое значение счётчика и, после третьего отказа
+/// подряд, терминальный текст — иначе `None` (повторить как раньше).
+fn forward_refusal_step(workstation: &str, refusals_so_far: u32) -> (u32, Option<String>) {
+    let n = refusals_so_far + 1;
+    if n >= MAX_FORWARD_REFUSALS { (n, Some(workstation_busy_text(workstation))) } else { (n, None) }
+}
+
 /// What a person has to fix is never retried: a refused password, a changed
 /// key, a fault on this machine. The rest depends on history. Before the
 /// first session, a refused port is somebody else's tunnel and no link is a
@@ -158,6 +181,7 @@ pub async fn run(
     let ports = cfg.ports();
     let mut attempt = 0u32;
     let mut had_session = false;
+    let mut forward_refusals = 0u32;
     loop {
         if *stop.borrow() {
             return Ok(());
@@ -165,6 +189,7 @@ pub async fn run(
         match Tunnel::connect(&cfg.host.server, &cfg.host.workstation, &cfg.host.password, &known_hosts, &[ports.mcp, ports.vrunner, ports.web]).await {
             Ok(mut t) => {
                 attempt = 0;
+                forward_refusals = 0;
                 had_session = true;
                 on_event(common::Event::Ok(format!(
                     "туннель поднят: {} → порты {} (mcp-1c), {} (vrunner) и {} (веб-клиент)",
@@ -188,6 +213,20 @@ pub async fn run(
                 let te = classify(e);
                 if is_terminal(&te, had_session) {
                     return Err(te.into());
+                }
+                // Отказ именно проброса (возможен тут только когда уже была
+                // сессия — иначе он терминален выше) считается отдельно от
+                // обрыва связи: три раза подряд — и дальше не повторяем,
+                // потому что это не старая сессия сервера, а чей-то ещё
+                // туннель этого рабочего места.
+                if let TunnelError::Forward(_) = te {
+                    let (n, give_up) = forward_refusal_step(&cfg.host.workstation, forward_refusals);
+                    forward_refusals = n;
+                    if let Some(text) = give_up {
+                        return Err(anyhow::anyhow!(text));
+                    }
+                } else {
+                    forward_refusals = 0;
                 }
                 // After a drop the server may still hold our own forward:
                 // that is not a neighbour's tunnel, just the old session dying.
@@ -248,6 +287,26 @@ mod loop_tests {
         assert!(TunnelError::Forward(7771).to_string().contains("7771"));
         assert!(TunnelError::Net("x".into()).to_string().contains("server"));
         assert!(TunnelError::Local("known_hosts: нет прав".into()).to_string().contains("known_hosts"));
+    }
+
+    #[test]
+    fn forwarding_refused_stops_after_three_tries() {
+        // Фиктивный проброс, который всегда отказывает: три попытки — и
+        // дальше терминальный Fail, текст называет рабочее место.
+        let forward_always_refuses = || false;
+        let mut refusals = 0u32;
+        let mut tries = 0u32;
+        let text = loop {
+            tries += 1;
+            assert!(!forward_always_refuses());
+            let (n, give_up) = forward_refusal_step("dev2", refusals);
+            refusals = n;
+            if let Some(text) = give_up {
+                break text;
+            }
+        };
+        assert_eq!(tries, MAX_FORWARD_REFUSALS);
+        assert!(text.contains("dev2") && text.contains("занято") && text.contains("три минуты"), "{text}");
     }
 
     #[test]

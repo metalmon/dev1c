@@ -84,28 +84,10 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, foreign: &[u16]) -> Check 
     }
 }
 
-/// PID процесса, слушающего `127.0.0.1:port` (Windows, через `netstat`); вне
-/// Windows сведений нет — порт не будет признан чужим.
-/// ponytail: не видит бинды на 0.0.0.0, которые тоже закрыли бы loopback;
-/// апгрейд — парсить обе формы адреса, если это станет реальной проблемой.
-fn port_owner_pid(port: u16) -> Option<u32> {
-    if !cfg!(windows) {
-        return None;
-    }
-    let mut c = std::process::Command::new("netstat");
-    c.args(["-ano", "-p", "TCP"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
-    }
-    let out = c.output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let local = format!("127.0.0.1:{port}");
-    text.lines().find_map(|l| {
-        let f: Vec<&str> = l.split_whitespace().collect();
-        if f.len() >= 5 && f[0] == "TCP" && f[1] == local && f[3] == "LISTENING" { f[4].parse().ok() } else { None }
-    })
+/// pid из `holder::of_port` (строка вида `"имя (pid N)"`) — сравнить с
+/// `std::process::id()`, не разбирая вывод `ss`/`netstat` заново.
+fn holder_pid(desc: &str) -> Option<u32> {
+    desc.rsplit("pid ").next()?.trim_end_matches(')').parse().ok()
 }
 
 pub fn media_fact(kind: Option<String>, root: &str) -> Check {
@@ -222,7 +204,8 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     if local {
         let p = ctx.cfg.ports();
         let pid = std::process::id();
-        let foreign: Vec<u16> = [p.mcp, p.vrunner].into_iter().filter(|&port| port_owner_pid(port).is_some_and(|owner| owner != pid)).collect();
+        let foreign: Vec<u16> =
+            [p.mcp, p.vrunner].into_iter().filter(|&port| crate::holder::of_port(port).and_then(|d| holder_pid(&d)).is_some_and(|owner| owner != pid)).collect();
         v.push(workstation_ports_fact(p.mcp, p.vrunner, &foreign));
     } else {
         v.push(tunnel_fact(tunnel_state));
@@ -309,6 +292,12 @@ mod tests {
         assert!(c.ok && !c.info, "{c:?}");
         let c = workstation_ports_fact(7771, 7781, &[7781]);
         assert!(!c.ok && c.detail.contains("7781") && c.hint.contains("второй"), "{c:?}");
+    }
+
+    #[test]
+    fn holder_pid_reads_the_trailing_pid_or_nothing() {
+        assert_eq!(holder_pid("1c-connect (pid 812)"), Some(812));
+        assert_eq!(holder_pid("junk"), None);
     }
 
     #[test]

@@ -6,12 +6,26 @@
 //! состояния `Retrying` в этом режиме не бывает.
 
 use crate::cfg::Ports;
+use crate::holder;
 use crate::session::Serve;
 use common::Event;
 use std::net::Shutdown;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+
+/// Текст отказа бинда: при `AddrInUse` называет держателя порта, если его
+/// видно (`holder::of_port`); иначе — как раньше, голое «занято».
+fn busy_port_text(port: u16, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        match holder::of_port(port) {
+            Some(who) => format!("порт {port} занят процессом {who}"),
+            None => format!("порт {port} уже занят другим процессом"),
+        }
+    } else {
+        format!("порт {port}: {e}")
+    }
+}
 
 /// Поднимает слушатели mcp и vrunner на петле (веб-порт в локальном режиме
 /// не слушается) и раздаёт принятые соединения `serve`. Ошибка второго бинда
@@ -21,12 +35,12 @@ use tokio::sync::watch;
 /// `shutdown` общего сокета доходит до моста, что бы тот сейчас ни делал, и
 /// расходится по обеим его копиям дескриптора.
 pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut stop: watch::Receiver<bool>) -> anyhow::Result<()> {
-    let mcp_listener = TcpListener::bind(("127.0.0.1", ports.mcp)).await.map_err(|e| anyhow::anyhow!("порт {} занят: {e}", ports.mcp))?;
+    let mcp_listener = TcpListener::bind(("127.0.0.1", ports.mcp)).await.map_err(|e| anyhow::anyhow!(busy_port_text(ports.mcp, &e)))?;
     let vrunner_listener = match TcpListener::bind(("127.0.0.1", ports.vrunner)).await {
         Ok(l) => l,
         Err(e) => {
             drop(mcp_listener);
-            return Err(anyhow::anyhow!("порт {} занят: {e}", ports.vrunner));
+            return Err(anyhow::anyhow!(busy_port_text(ports.vrunner, &e)));
         }
     };
     on_event(Event::Ok(format!("MCP включены: порты {} и {}", ports.mcp, ports.vrunner)));

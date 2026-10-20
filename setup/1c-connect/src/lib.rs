@@ -8,6 +8,7 @@ pub mod cfg;
 pub mod flow;
 #[cfg(feature = "gui")]
 pub mod gui;
+pub mod holder;
 pub mod job;
 pub mod jsonrpc;
 pub mod listen;

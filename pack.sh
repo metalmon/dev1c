@@ -1,4 +1,7 @@
 #!/bin/sh
+# Состав комплектов описан в одном месте — разделе «Комплекты» спецификации
+# docs/superpowers/specs/2026-10-16-setup-binaries-design.md. Этот скрипт
+# собирает по нему; расхождение — дефект спецификации, а не скрипта.
 # Assemble the kits from already built parts: the image archive and the
 # installer binaries come from CI (or from a local build), nothing is compiled
 # here. Keeps the laptop out of the loop: it has neither the memory for the

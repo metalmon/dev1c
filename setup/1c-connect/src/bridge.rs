@@ -58,7 +58,6 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     c
 }
 
-use crate::cfg::Cfg;
 use crate::jsonrpc::{self, Frame, Framer, Route};
 use crate::session::Live;
 use common::{Event, Sink};
@@ -841,6 +840,8 @@ fn bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Короткое имя нужно только тестам: рабочий код пишет полный путь.
+    use crate::cfg::Cfg;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// The test binary itself as the child: `__echo_child` below runs one of

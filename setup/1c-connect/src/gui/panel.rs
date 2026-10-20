@@ -369,9 +369,10 @@ impl Panel {
     }
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
-    /// проверки — строкой, toml не тронут, набранное остаётся в поле.
-    /// Возвращает, удалось ли: по неудаче сеанс не перезапускают.
-    fn save(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Поля формы как `Host`: в локальном режиме скрытые поля переносятся из
+    /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
+    /// спросить подтверждение смены базы и только потом писать.
+    fn host_from_fields(&self, cx: &mut Context<Self>) -> Host {
         let mode = cx.global::<Ui>().cfg.host.mode.clone();
         let mut host = host_of(&self.fields, &mode, cx);
         if mode == "local" {
@@ -385,6 +386,12 @@ impl Panel {
             host.password = current.password;
             host.workstation = current.workstation;
         }
+        host
+    }
+
+    /// Запись в toml и всё, что за ней следует: итог в подвал, обновление
+    /// вкладок, перезапуск сеанса внутри `gui::save_host`.
+    fn write(&mut self, host: Host, cx: &mut Context<Self>) -> bool {
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
         cx.global_mut::<Ui>().status = Some(match &r {
@@ -815,12 +822,25 @@ impl Render for Panel {
                             .label("Сохранить")
                             .disabled(!allowed)
                             .when_some(hint, |b, h| b.tooltip(h))
-                            .on_click(cx.listener(|panel, _, _, cx| {
-                                // Перезапуск сеанса по удачной записи (если он
-                                // был поднят) и строка об этом в журнал —
-                                // внутри `gui::save_host`, не здесь.
-                                panel.save(cx);
-                                cx.refresh_windows();
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                // Смена базы при включённых MCP спрашивает
+                                // подтверждение: агент работает прямо сейчас и
+                                // после записи перейдёт на другую базу. Во всех
+                                // прочих случаях вопроса нет и запись идёт сразу.
+                                // Перезапуск сеанса и строка в журнал — внутри
+                                // `gui::save_host`, не здесь.
+                                let host = panel.host_from_fields(cx);
+                                let to_write = host.clone();
+                                gui::confirm_database_change(window, cx, &host, move |_window, cx| {
+                                    let ui = cx.global::<Ui>();
+                                    let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
+                                    let _ = w.update(cx, |_, _window, cx| {
+                                        panel.update(cx, |this, cx| {
+                                            this.write(to_write, cx);
+                                        });
+                                    });
+                                    cx.refresh_windows();
+                                });
                             })),
                     )
                     .into_any_element()

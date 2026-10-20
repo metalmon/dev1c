@@ -252,6 +252,20 @@ RUN --mount=type=bind,from=platform,target=/platform \
     # Regenerate it whenever the template is regenerated — a stale identifier
     # only brings the question back, it breaks nothing.
     && if [ -f /platform/DoNotCopy.txt ]; then cp /platform/DoNotCopy.txt "$B/"; fi \
+    # Снятие с поддержки. Решение владельца продукта (спека, раздел про второй
+    # акт): пока конфигурация на поддержке с запретом изменений, пообъектная
+    # загрузка в базу невозможна — «Загрузка невозможна: редактирование объекта
+    # метаданных Catalog.Номенклатура запрещено!» — и второй акт онбординга,
+    # который возвращает правку агента в базу, показать нечем. Полная загрузка
+    # проходит и на поддержке, но идёт сорок минут вместо двух.
+    # Измерено на стенде 2026-10-20: само снятие 67 секунд, после него загрузка
+    # одного объекта 107 секунд, и база отвечает новым синонимом.
+    # Только когда база строится из шаблона: пустая конфигурация ни на какой
+    # поддержке не стоит, и команда на ней осмысленно упала бы.
+    && if [ -n "${DEMO_TEMPLATE}" ]; then \
+         D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
+           /ManageCfgSupport -disableSupport -force; \
+       fi \
     # two Designer runs: two -Extension keys in one command line are refused
     && D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
          /LoadCfg /opt/mcp-1c/MCP_HTTPService.cfe -Extension MCP_HTTPService \

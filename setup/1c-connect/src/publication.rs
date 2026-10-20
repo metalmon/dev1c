@@ -326,6 +326,24 @@ pub fn httpd_responds(port: u16) -> bool {
     !port_is_free(port)
 }
 
+/// Время жизни поднятого httpd относительно вызвавшего процесса.
+///
+/// `Detached` — публикация обязана пережить того, кто её поднял: разовая
+/// команда `1c-connect install` (или кнопка «Установить» в окне) делает своё
+/// дело и выходит/продолжает жить дальше, но сервис — это публикация базы, а
+/// не ребёнок установщика, и её не касается ни штатный выход процесса, ни его
+/// крах.
+///
+/// `WithCaller` — сервис обязан умереть вместе с вызвавшим процессом: `serve`
+/// держит сеанс до Ctrl+C/SIGTERM, окно — пока открыто, и падение любого из
+/// них (не штатный выход, а крах) не должно оставлять сироту на порту со
+/// старой конфигурацией, которую больше никто не обслуживает.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifetime {
+    Detached,
+    WithCaller,
+}
+
 /// Последние непустые строки журнала ошибок httpd — для сообщения в журнал
 /// коннектора, когда старт не удался: причину пишет сам httpd туда, не в
 /// stdout/stderr (которые мы теперь не пайпим и не ждём — см. `start`).
@@ -371,8 +389,15 @@ fn kill_tracked(p: &Paths) {
 /// диспетчеру служб, и выживший процесс нам уже не принадлежит, а Job-бэкстоп
 /// держит нечего. Идемпотентно: уже отслеженный процесс сперва гасится —
 /// повторный вызов после смены пароля/базы не падает на «порт занят».
+///
+/// `lifetime` решает, что происходит с httpd, когда этот процесс
+/// заканчивается (штатно или крахом): `Detached` — ничего, сервис остаётся
+/// жить сам по себе (`child` просто роняется — `Drop` у `std::process::Child`
+/// закрывает только наш хэндл, самого процесса не касается); `WithCaller` —
+/// кладём в Job Object с `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, и уход
+/// последнего хэндла (конец этого процесса) гасит httpd вместе с ним.
 #[cfg(windows)]
-pub fn start(p: &Paths) -> Result<(), String> {
+pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
     use std::process::Stdio;
     kill_tracked(p);
     let bin = httpd_binary(p);
@@ -389,9 +414,20 @@ pub fn start(p: &Paths) -> Result<(), String> {
     if let Ok(Some(status)) = child.try_wait() {
         return Err(format!("httpd завершился сразу (код {:?}): {}", status.code(), error_log_tail(&p.log, 5)));
     }
-    let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
-    job.assign_std(&child);
-    *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
+    match lifetime {
+        Lifetime::Detached => {
+            // Публикация базы, не ребёнок установщика: намеренно не кладём
+            // процесс ни в Job, ни в WINDOWS_HTTPD — выход этого процесса (в
+            // т.ч. крах) httpd не касается. Остановить его позже сможет
+            // kill_tracked() через резервный `-k stop` по тому же конфигу.
+            drop(child);
+        }
+        Lifetime::WithCaller => {
+            let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
+            job.assign_std(&child);
+            *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
+        }
+    }
     Ok(())
 }
 
@@ -423,8 +459,12 @@ fn apache2_on_path() -> Option<PathBuf> {
 /// опасно — к моменту вызова ядро могло отдать тот же номер другому
 /// процессу. Идемпотентно: сначала глушим то, что уже могло быть поднято
 /// (ошибку «не запущено» игнорируем), затем стартуем заново.
+///
+/// `lifetime` здесь ничего не решает (сигнатура — общая с Windows): apache2
+/// и так всегда выживает вызвавший процесс, какой бы он ни был — разница
+/// Detached/WithCaller — чисто windows-овская, Job Object там не бывает.
 #[cfg(not(windows))]
-pub fn start(p: &Paths) -> Result<(), String> {
+pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
     apache2_on_path().ok_or_else(|| "apache2 не найден в $PATH — установите пакет apache2 (на образе он должен быть) или переключите publication на \"webserver\"".to_string())?;
     let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
     let out = std::process::Command::new("apache2")

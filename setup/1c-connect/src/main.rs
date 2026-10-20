@@ -261,6 +261,11 @@ fn serve(ctx: &Ctx) -> Result<()> {
         cfg::FILE,
         cfg::FILE
     );
+    // Без сеанса на стенде никто больше базу не публикует (см. спеку
+    // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
+    // начать слушать, тем же сервисом, что умрёт вместе с этим процессом
+    // (ops_host::ensure_publication, Lifetime::WithCaller).
+    ops_host::ensure_publication(ctx)?;
     let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {

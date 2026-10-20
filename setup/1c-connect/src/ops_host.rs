@@ -509,6 +509,49 @@ impl Op<Ctx> for ProjectOp {
     // uninstall leaves the project alone: it is the person's work.
 }
 
+/// Пишет дескриптор и конфигурацию, затем стартует httpd с заданным временем
+/// жизни (`publication::Lifetime`). Общая часть `Publication::apply` (разовая
+/// установка — публикация должна пережить того, кто её поднял) и
+/// `ensure_publication` (serve/окно — сервис живёт вместе с вызвавшим
+/// процессом).
+fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Result<()> {
+    let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Дескриптор несёт пароль базы — в журнал не идёт, только в файл, и
+    // только с правами на владельца (образ делит диск между рабочими
+    // местами).
+    crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let conf_text = crate::publication::httpd_conf(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::write(&p.conf, conf_text).context("httpd.conf не записан")?;
+    // start() идемпотентен сам по себе (перезапускает уже поднятый сервис
+    // поверх новой конфигурации) — второй вызов после смены пароля или базы
+    // не падает на «порт занят».
+    crate::publication::start(&p, lifetime).map_err(|e| anyhow::anyhow!("{e}"))?;
+    ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
+    Ok(())
+}
+
+/// Поднимает публикацию базы, если она ещё не «сделано»: общая точка входа
+/// для headless `serve` и для окна (включение MCP, сохранение изменившейся
+/// базы, «Установить» — см. спеку «HTTP-сервис базы ведёт коннектор»).
+///
+/// В режиме `"webserver"` ничего не поднимает — как и `Publication::apply`,
+/// только проверяет публикацию и предупреждает, если та не отвечает.
+///
+/// В режиме `"auto"` сервис стартует с `Lifetime::WithCaller` (в отличие от
+/// `Publication::apply`, которая использует `Detached`): вызвавший эту
+/// функцию процесс — это и есть сеанс (serve держит его до
+/// Ctrl+C/SIGTERM, окно — пока открыто), и крах этого процесса обязан забрать
+/// httpd с собой, а не оставить сироту на порту со старой конфигурацией.
+pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
+    if ctx.cfg.host.publication == "webserver" {
+        return Publication.apply(ctx);
+    }
+    if ctx.dry_run || matches!(Publication.state(ctx), OpState::Done(_)) {
+        return Ok(());
+    }
+    raise_publication(ctx, crate::publication::Lifetime::WithCaller)
+}
+
 /// Поднимает HTTP-сервис базы: своим httpd под пользователем (`"auto"`) или
 /// только проверяет уже существующую публикацию (`"webserver"`). Зовётся до
 /// `host.extension` — иначе расширение ставить некуда.
@@ -564,19 +607,10 @@ impl Op<Ctx> for Publication {
         if ctx.dry_run {
             return Ok(());
         }
-        let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
-        // Дескриптор несёт пароль базы — в журнал не идёт, только в файл, и
-        // только с правами на владельца (образ делит диск между рабочими
-        // местами).
-        crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let conf_text = crate::publication::httpd_conf(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
-        std::fs::write(&p.conf, conf_text).context("httpd.conf не записан")?;
-        // start() идемпотентен сам по себе (перезапускает уже поднятый сервис
-        // поверх новой конфигурации) — второй apply после смены пароля или
-        // базы не падает на «порт занят».
-        crate::publication::start(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
-        ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
-        Ok(())
+        // Lifetime::Detached: публикация базы, а не ребёнок установщика — ни
+        // штатный выход, ни крах разовой команды (или окна, нажавшего
+        // «Установить») не должны её касаться (см. publication::Lifetime).
+        raise_publication(ctx, crate::publication::Lifetime::Detached)
     }
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
         (ctx.cfg.host.publication != "webserver").then(|| vec![Action::new("остановить свой httpd")])
@@ -690,6 +724,37 @@ mod tests {
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit: Kit::at("."), cfg, dry_run: true, sink, prompt: Box::new(common::AlwaysDefault) };
         assert_eq!(Publication.state(&ctx), OpState::Missing);
+    }
+
+    /// Создаёт `Ctx` для тестов `ensure_publication`: не настоящая платформа,
+    /// не настоящий httpd — только то, что решает сама функция, прежде чем
+    /// дойти до файловой системы или сети.
+    fn publication_ctx(cfg: Cfg, dry_run: bool) -> Ctx {
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        Ctx { kit: Kit::at("."), cfg, dry_run, sink, prompt: Box::new(common::AlwaysDefault) }
+    }
+
+    #[test]
+    fn ensure_publication_in_webserver_mode_only_checks_and_never_starts_anything() {
+        // "webserver": ensure_publication не должна пытаться поднять что-то
+        // своё — делегирует в Publication::apply, которая лишь проверяет и
+        // предупреждает. Здесь нет настоящего веб-сервера — важно, что
+        // функция не падает и не пытается писать на диск httpd.conf/vrd.
+        let mut cfg = Cfg::default();
+        cfg.host.publication = "webserver".into();
+        cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
+        let ctx = publication_ctx(cfg, true);
+        assert!(ensure_publication(&ctx).is_ok());
+    }
+
+    #[test]
+    fn ensure_publication_is_a_dry_run_noop() {
+        // --dry-run у serve: ensure_publication ничего не должна менять на
+        // машине — ни писать файлы, ни поднимать httpd.
+        let mut cfg = Cfg::default();
+        cfg.host.publication = "auto".into();
+        let ctx = publication_ctx(cfg, true);
+        assert!(ensure_publication(&ctx).is_ok());
     }
 
     #[test]

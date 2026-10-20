@@ -162,20 +162,16 @@ impl Cfg {
         Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
     }
 
-    /// Порт веб-сервера из base_url; 80, если не указан.
+    /// Порт веб-сервера из действующего адреса публикации (`base_url()`, не
+    /// хранимое поле `host.base_url`); 80, если не указан. В режиме `auto`
+    /// действующий адрес считается от `http_port()` — читать хранимое поле
+    /// напрямую означало форвардить веб-канал туннеля не туда (шестой
+    /// читатель адреса публикации из спеки — см. тест ниже).
     pub fn web_port(&self) -> u16 {
-        let rest = self.host.base_url.trim_start_matches("http://");
+        let url = self.base_url();
+        let rest = url.trim_start_matches("http://");
         let hostport = rest.split('/').next().unwrap_or("");
         hostport.split_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(80)
-    }
-
-    /// Путь публикации с косыми чертами: `/Buh/` из `http://localhost/Buh/hs/mcp-1c`.
-    /// Не режим публикации (тот — `Host.publication`) — путь в адресе.
-    pub fn publication_path(&self) -> String {
-        let rest = self.host.base_url.trim_start_matches("http://");
-        let path = &rest[rest.find('/').unwrap_or(rest.len())..];
-        let before_hs = path.split("/hs/").next().unwrap_or("/");
-        format!("{}/", before_hs.trim_end_matches('/'))
     }
 
     /// Порт своего httpd в режиме `auto`: `http_port`, иначе `8080 + N`.
@@ -256,13 +252,18 @@ mod tests {
     }
 
     #[test]
-    fn web_port_and_publication_come_from_the_url() {
+    fn web_port_follows_cfg_base_url_not_the_stored_field() {
+        // Регрессия: web_port() раньше читал host.base_url напрямую. В режиме
+        // "auto" действующий адрес (Cfg::base_url()) считается от http_port()
+        // и у него другой порт, чем у хранимого поля (там по умолчанию 80) —
+        // веб-канал туннеля форвардил не туда.
         let mut c = sample();
-        assert_eq!(c.web_port(), 80);
-        assert_eq!(c.publication_path(), "/Buh/");
+        assert_eq!(c.host.publication, "auto");
+        assert_eq!(c.web_port(), 8081); // http_port() для dev1, не 80 из host.base_url
+        c.host.publication = "webserver".into();
+        assert_eq!(c.web_port(), 80); // webserver: читаем хранимое поле как есть
         c.host.base_url = "http://localhost:8081/InfoBase/hs/mcp-1c".into();
         assert_eq!(c.web_port(), 8081);
-        assert_eq!(c.publication_path(), "/InfoBase/");
         c.host.base_url = "http://other-host/Buh/hs/mcp-1c".into();
         assert!(c.validate().unwrap_err().to_string().contains("localhost"));
     }

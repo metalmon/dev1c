@@ -126,7 +126,7 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
             // одного сеанса; чтение/запись из окна подключается отдельной
             // задачей (подменю «Режим работы»).
             let enabled = Arc::new(AtomicBool::new(true));
-            let serve = Arc::new(Serve::new(&cfg, &kit, log.clone(), enabled));
+            let serve = Arc::new(Serve::new(&cfg, &kit, log.clone(), cfg.ports(), enabled));
             let on_event = |e: Event| {
                 log(e.clone());
                 let mut s = state.lock().unwrap();
@@ -145,6 +145,11 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
             on_state(State::ended(&r));
             r
         });
+        // Задачи моста (и дети под ними) живут на этом `rt` — уронить его
+        // здесь и ждёт их завершения раньше, чем окно узнает «не подключён»;
+        // иначе человек видит разрыв, а `oscript` под ним ещё жив и держит
+        // единственный сеанс учебной лицензии в образе.
+        drop(rt);
         let _ = done_tx.send(r);
     });
     Session { stop: stop_tx, done: Some(done_rx) }
@@ -168,10 +173,13 @@ pub struct Serve {
 }
 
 impl Serve {
-    pub fn new(cfg: &Cfg, kit: &Kit, log: Sink, enabled: Arc<AtomicBool>) -> Serve {
+    /// `ports` приходит от вызывающего (а не считается заново из `cfg`
+    /// внутри), чтобы тесты могли завести слушатели на эфемерных портах и
+    /// `Serve` узнавал об этом напрямую, не трогая 777x/778x.
+    pub fn new(cfg: &Cfg, kit: &Kit, log: Sink, ports: Ports, enabled: Arc<AtomicBool>) -> Serve {
         let tools_dir = crate::ops_host::tools_dir();
         let project = Arc::new(crate::project::Project::from_cfg(cfg, &tools_dir));
-        Serve { cfg: cfg.clone(), kit: kit.clone(), log, ports: cfg.ports(), web_port: cfg.web_port(), tools_dir, project, enabled }
+        Serve { cfg: cfg.clone(), kit: kit.clone(), log, ports, web_port: cfg.web_port(), tools_dir, project, enabled }
     }
 
     /// Разобрать одно принятое соединение: порт решает, какой процесс за ним

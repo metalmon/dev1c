@@ -11,8 +11,10 @@ use crate::session::Serve;
 use common::Event;
 use std::net::Shutdown;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 /// Текст отказа бинда: при `AddrInUse` называет держателя порта, если его
 /// видно (`holder::of_port`); иначе — как раньше, голое «занято».
@@ -26,6 +28,13 @@ fn busy_port_text(port: u16, e: &std::io::Error) -> String {
         format!("порт {port}: {e}")
     }
 }
+
+/// После скольких подряд ошибок `accept()` сеанс сдаётся вместо того, чтобы
+/// крутиться впустую (кончились дескрипторы или ошибка не проходит сама).
+const MAX_ACCEPT_ERRORS: u32 = 20;
+/// Пауза между попытками `accept()` после ошибки — не даёт циклу сжечь ядро,
+/// пока ошибка не ушла сама (например, кто-то другой освободил дескрипторы).
+const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(200);
 
 /// Поднимает слушатели mcp и vrunner на петле (веб-порт в локальном режиме
 /// не слушается) и раздаёт принятые соединения `serve`. Ошибка второго бинда
@@ -44,29 +53,69 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
         }
     };
     on_event(Event::Ok(format!("MCP включены: порты {} и {}", ports.mcp, ports.vrunner)));
-    let mut open: Vec<std::net::TcpStream> = Vec::new();
+    // Пара (задача моста, дубликат дескриптора) на каждое живое соединение.
+    // Задача снимается из списка сама, как только закончилась — иначе список
+    // и число открытых дескрипторов растут без предела за долгий рабочий
+    // день реконнектов.
+    let mut open: Vec<(JoinHandle<()>, std::net::TcpStream)> = Vec::new();
+    let mut mcp_errors = 0u32;
+    let mut vrunner_errors = 0u32;
     loop {
         tokio::select! {
             r = mcp_listener.accept() => {
-                if let Ok((stream, _)) = r {
-                    if let Ok(watcher) = accept_for(&serve, ports.mcp, stream) {
-                        open.push(watcher);
-                    }
-                }
+                handle_accept(r, &serve, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
             }
             r = vrunner_listener.accept() => {
-                if let Ok((stream, _)) = r {
-                    if let Ok(watcher) = accept_for(&serve, ports.vrunner, stream) {
-                        open.push(watcher);
-                    }
-                }
+                handle_accept(r, &serve, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
             }
             _ = stop.changed() => {
-                for w in &open {
-                    let _ = w.shutdown(Shutdown::Both);
+                if *stop.borrow() {
+                    for (_, w) in &open {
+                        let _ = w.shutdown(Shutdown::Both);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
             }
+        }
+    }
+}
+
+/// Один исход `accept()`: на успехе — подготовить соединение и добавить его
+/// в список живых (предварительно вымести завершившиеся — это и есть
+/// уборка), на ошибке — предупреждение в журнал, пауза и, если ошибка не
+/// отпускает `MAX_ACCEPT_ERRORS` раз подряд, завершение сеанса вместо
+/// бесконечного холостого цикла.
+async fn handle_accept(
+    r: std::io::Result<(TcpStream, std::net::SocketAddr)>,
+    serve: &Arc<Serve>,
+    port: u16,
+    on_event: &impl Fn(Event),
+    open: &mut Vec<(JoinHandle<()>, std::net::TcpStream)>,
+    errors: &mut u32,
+) -> anyhow::Result<()> {
+    match r {
+        Ok((stream, _)) => {
+            *errors = 0;
+            open.retain(|(h, _)| !h.is_finished());
+            match accept_for(serve, port, stream) {
+                Ok(Some(entry)) => open.push(entry),
+                // ponytail: порт всегда совпадает с тем, что знает `Serve` —
+                // оба берутся из одного `cfg.ports()` при сборке сеанса;
+                // `None` здесь означало бы рассогласование конфигурации, а
+                // не рабочий случай, поэтому не журналируется отдельно.
+                Ok(None) => {}
+                Err(e) => on_event(Event::Warn(format!("порт {port}: не удалось подготовить соединение для моста: {e}"))),
+            }
+            Ok(())
+        }
+        Err(e) => {
+            *errors += 1;
+            on_event(Event::Warn(format!("порт {port}: не удалось принять соединение: {e}")));
+            if *errors >= MAX_ACCEPT_ERRORS {
+                return Err(anyhow::anyhow!("порт {port}: приём соединений не восстанавливается подряд уже {MAX_ACCEPT_ERRORS} раз: {e}"));
+            }
+            tokio::time::sleep(ACCEPT_ERROR_PAUSE).await;
+            Ok(())
         }
     }
 }
@@ -75,53 +124,41 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
 /// мосту: вторая копия остаётся здесь на случай `stop` и уже не зависит от
 /// того, что мост с первой копией делает (держит в мосте, читает построчно,
 /// уже уронил). `shutdown` на любой копии закрывает общий сокет целиком.
-fn accept_for(serve: &Serve, port: u16, stream: TcpStream) -> std::io::Result<std::net::TcpStream> {
+fn accept_for(serve: &Serve, port: u16, stream: TcpStream) -> std::io::Result<Option<(JoinHandle<()>, std::net::TcpStream)>> {
     let std_stream = stream.into_std()?;
     let watcher = std_stream.try_clone()?;
     let async_stream = TcpStream::from_std(std_stream)?;
-    serve.dispatch(port, async_stream);
-    Ok(watcher)
+    Ok(serve.dispatch(port, async_stream).map(|h| (h, watcher)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge;
     use common::kit::Kit;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use tokio::io::AsyncReadExt;
 
-    /// Три теста этого модуля делят всего два запасных рабочих места
-    /// (dev2/dev3) — без замка параллельный запуск мог бы столкнуть два
-    /// теста на одной паре портов.
-    static PORT_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Порт свободен прямо сейчас: бинд успел и тут же отпущен. Короткое
-    /// окно гонки терпимо — так же делают существующие тесты session.rs.
-    fn free(port: u16) -> bool {
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    /// Порт 0 — пусть ОС выберет сама и тут же вернёт выбранный номер;
+    /// короткий зонд-и-отпустить не трогает 777x/778x вовсе и не привязан к
+    /// рабочим местам — коллизия с живым коннектором на машине исключена.
+    fn ephemeral_port() -> u16 {
+        std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
     }
 
-    /// dev2/dev3: dev1 — реальное рабочее место, там может стоять живой
-    /// коннектор; тесты никогда не трогают его порты (7771/7781).
-    fn free_ports() -> crate::cfg::Cfg {
-        let mut cfg = crate::cfg::Cfg::default();
-        for ws in ["dev3", "dev2"] {
-            cfg.host.workstation = ws.into();
-            let p = cfg.ports();
-            if free(p.mcp) && free(p.vrunner) {
-                return cfg;
-            }
-        }
-        panic!("ни dev2, ни dev3 не свободны для теста");
+    /// `Ports` не `Clone` — `Serve` и `run()` каждый берут свой экземпляр,
+    /// построенный из одних и тех же чисел.
+    fn ephemeral_ports() -> (u16, u16) {
+        (ephemeral_port(), ephemeral_port())
     }
 
     /// `Kit` без настоящего комплекта: бинарей mcp-1c/vrunner в нём нет —
     /// ровно то, что нужно тесту, которому важен только факт, что соединение
     /// дошло до моста, а не живая 1С.
     fn fake_kit() -> (Kit, std::path::PathBuf) {
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("onec-listen-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         (Kit::at(&dir), dir)
@@ -135,15 +172,16 @@ mod tests {
 
     #[tokio::test]
     async fn both_listeners_come_up_and_a_connection_reaches_the_bridge() {
-        let _guard = PORT_LOCK.lock().unwrap();
-        let cfg = free_ports();
-        let (mcp_port, vrunner_port) = (cfg.ports().mcp, cfg.ports().vrunner);
+        let cfg = crate::cfg::Cfg::default();
+        let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
         let (bridge_log, bridge_seen) = recording_sink();
-        let serve = Arc::new(Serve::new(&cfg, &kit, bridge_log, Arc::new(AtomicBool::new(true))));
+        let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let serve = Arc::new(Serve::new(&cfg, &kit, bridge_log, serve_ports, Arc::new(AtomicBool::new(true))));
         let (stop_tx, stop_rx) = watch::channel(false);
         let (on_event, events) = recording_sink();
-        let task = tokio::spawn(async move { run(serve, cfg.ports(), move |e| on_event(e), stop_rx).await });
+        let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let task = tokio::spawn(async move { run(serve, run_ports, move |e| on_event(e), stop_rx).await });
 
         // Ждём, пока оба слушателя поднимутся, вместо фиксированной паузы.
         for _ in 0..50 {
@@ -179,15 +217,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_busy_port_fails_the_whole_session_and_frees_the_first_listener() {
-        let _guard = PORT_LOCK.lock().unwrap();
-        let cfg = free_ports();
-        let (mcp_port, vrunner_port) = (cfg.ports().mcp, cfg.ports().vrunner);
+        let cfg = crate::cfg::Cfg::default();
+        let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
-        let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), Arc::new(AtomicBool::new(true))));
+        let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
         let busy = std::net::TcpListener::bind(("127.0.0.1", vrunner_port)).unwrap();
         let (_stop_tx, stop_rx) = watch::channel(false);
 
-        let r = run(serve, cfg.ports(), |_: Event| {}, stop_rx).await;
+        let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let r = run(serve, run_ports, |_: Event| {}, stop_rx).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains(&vrunner_port.to_string()), "{err}");
 
@@ -199,13 +238,14 @@ mod tests {
 
     #[tokio::test]
     async fn stop_closes_accepted_connections() {
-        let _guard = PORT_LOCK.lock().unwrap();
-        let cfg = free_ports();
-        let mcp_port = cfg.ports().mcp;
+        let cfg = crate::cfg::Cfg::default();
+        let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
-        let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), Arc::new(AtomicBool::new(true))));
+        let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
         let (stop_tx, stop_rx) = watch::channel(false);
-        let task = tokio::spawn(async move { run(serve, cfg.ports(), |_: Event| {}, stop_rx).await });
+        let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let task = tokio::spawn(async move { run(serve, run_ports, |_: Event| {}, stop_rx).await });
 
         let mut client = loop {
             match TcpStream::connect(("127.0.0.1", mcp_port)).await {
@@ -214,7 +254,9 @@ mod tests {
             }
         };
 
-        // Живо: чтение не возвращает ничего за отведённое время.
+        // Живо: чтение не возвращает ничего за отведённое время (здесь мост
+        // падает за миллисекунды — соединение живо только нашим дубликатом
+        // дескриптора; случай с реально заблокированным мостом — тест ниже).
         let mut buf = [0u8; 1];
         let before = tokio::time::timeout(std::time::Duration::from_millis(150), client.read(&mut buf)).await;
         assert!(before.is_err(), "соединение не должно было закрыться само");
@@ -226,5 +268,54 @@ mod tests {
         let after = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert_eq!(after.unwrap().unwrap(), 0, "после stop соединение должно быть закрыто");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Самовызывающийся фиктивный ребёнок (тот же приём, что у
+    /// `bridge::tests::__echo_child`): читает построчно и не отвечает,
+    /// EOF игнорирует — ровно то, что нужно следующему тесту, чтобы мост
+    /// был реально заблокирован на чтении, а не просто не успел упасть.
+    #[test]
+    fn __lingering_child() {
+        if std::env::var("LISTEN_LINGER").is_ok() {
+            let mut s = String::new();
+            while std::io::stdin().read_line(&mut s).map(|n| n > 0).unwrap_or(false) {}
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            std::process::exit(0);
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_closes_a_connection_whose_bridge_is_genuinely_blocked() {
+        // В отличие от теста выше, ребёнок здесь по-настоящему запускается и
+        // висит: `to_child` моста реально заблокирован на чтении у клиента,
+        // как в жизни при молчащем агенте. Соединение закрывает именно наш
+        // дубликат дескриптора — мосту тут помогать нечем.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (log, _seen) = recording_sink();
+        let rules = bridge::Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let mut cmd = tokio::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "listen::tests::__lingering_child", "--nocapture", "--quiet"]);
+        cmd.env("LISTEN_LINGER", "1");
+
+        let accept_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let std_stream = stream.into_std().unwrap();
+            let watcher = std_stream.try_clone().unwrap();
+            let async_stream = TcpStream::from_std(std_stream).unwrap();
+            tokio::spawn(bridge::pipe_jsonrpc(async_stream, cmd, rules, log, |_code, _err| {}));
+            watcher
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let watcher = accept_task.await.unwrap();
+
+        let mut buf = [0u8; 1];
+        let before = tokio::time::timeout(std::time::Duration::from_millis(300), client.read(&mut buf)).await;
+        assert!(before.is_err(), "мост реально заблокирован на чтении — соединение не должно было закрыться само");
+
+        watcher.shutdown(Shutdown::Both).unwrap();
+        let after = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await;
+        assert_eq!(after.unwrap().unwrap(), 0, "shutdown должен был закрыть соединение несмотря на заблокированный мост");
     }
 }

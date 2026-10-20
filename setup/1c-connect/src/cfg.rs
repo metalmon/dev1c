@@ -104,8 +104,8 @@ impl Cfg {
     pub fn load(kit: &Kit) -> Result<Cfg> {
         // На Windows это тот же путь, что и раньше (toml при комплекте); на
         // Linux — состояние пользователя, не общий только-для-чтения
-        // комплект (см. `ops_host::toml_path`, задача «комплект в образе»).
-        let p = crate::ops_host::toml_path(kit);
+        // комплект (см. `ops_host::wire_state`, задача «комплект в образе»).
+        let p = kit.state_path(crate::cfg::FILE);
         if !p.exists() {
             return Ok(Cfg::default());
         }

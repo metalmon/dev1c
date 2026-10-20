@@ -159,14 +159,20 @@ seed() { # runs as the workstation user; $HOME is theirs
     # nothing here links anything for them any more: a workstation's home is
     # a volume, and a fixed path in the image is exactly what survives that.
     #
-    # Still per-workstation, because this directory is where a copy of the
-    # program itself and its own bookkeeping (setup.log, install.state) sit
-    # when ONEC_CONNECT_KIT is unset (Kit::discover's fallback, kept as a
-    # defence): each account gets its own copy, refreshed when the image
-    # brings a new build.
+    # Still per-workstation, because this directory holds a copy of the
+    # program itself — the fallback Kit::discover finds when
+    # ONEC_CONNECT_KIT is unset, kept as a defence: each account gets its own
+    # copy, refreshed when the image brings a new build. Its bookkeeping
+    # (setup.log, install.state) no longer lands next to it: on Linux
+    # everything the connector writes goes to the state directory below
+    # (Kit::with_state via ops_host::wire_state).
     if [ -x "$CONNECT" ]; then
         mkdir -p "$HOME/dev1c"
         cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
+        # The lock and pid files of the single-instance guard before it moved
+        # to an advisory flock on the toml itself: nothing creates them any
+        # more, and a volume from those days still carries them.
+        rm -f "$HOME/dev1c"/instance-*.lock "$HOME/dev1c"/instance-*.pid
         # State: the toml, the single-instance lock and the tools version
         # stamp all live here now (ops_host::tools_dir()), never inside the
         # shared kit — it is one read-only copy for every workstation, and
@@ -196,6 +202,22 @@ db_user = "$DB_USER"
 db_password = ""
 EOF
             log "1c-connect: $t/$CONNECT_TOML written for $u" >&2
+        fi
+        # Tools: here the shared kit IS what is laid out. ops_host compares
+        # the kit's tools.version (stamped at build time) with the state's
+        # (written when `host.tools` copies the tools onto a machine) — and
+        # without the second one the connector reports its tools missing and
+        # the window says the agent will not see the base. Links, not copies:
+        # /opt/dev1c-kit is one read-only copy for every account, and
+        # duplicating ~100 MB per login would buy nothing. The names are the
+        # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
+        # tools_dir().
+        if [ -f "${ONEC_CONNECT_KIT:-}/tools.version" ]; then
+            mkdir -p "$t"
+            for d in vrunner git; do
+                [ -e "$t/$d" ] || ln -s "$ONEC_CONNECT_KIT/$d" "$t/$d"
+            done
+            cmp -s "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"                 || cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
         fi
     fi
 }

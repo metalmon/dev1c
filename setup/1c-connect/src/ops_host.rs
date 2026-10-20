@@ -173,12 +173,22 @@ pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
     }
 }
 
-/// Где лежит `1c-connect.toml`: на Windows — в комплекте (он свой, на
-/// флешке, эта задача его не трогает); на Linux — в состоянии пользователя,
-/// потому что комплект теперь один общий на все рабочие места и доступен
-/// только для чтения — свой toml в него не положить.
-pub fn toml_path(kit: &Kit) -> PathBuf {
-    if cfg!(windows) { kit.path(crate::cfg::FILE) } else { tools_dir().join(crate::cfg::FILE) }
+/// Комплект, как его видит коннектор: читают из комплекта, пишут в состояние.
+/// На Windows комплект приезжает на носителе, он свой и писуемый — состояние
+/// лежит там же, как и было. На Linux комплект собран в образ по пути
+/// `/opt/dev1c-kit`, он один на все рабочие места и только для чтения; всё,
+/// что программа пишет — файл параметров, замок единственного экземпляра,
+/// журнал, отчёт проверки, `known_hosts`, память между прогонами, — уезжает
+/// в состояние пользователя рядом с публикацией.
+pub fn wire_state(kit: Kit) -> Kit {
+    if cfg!(windows) {
+        return kit;
+    }
+    let state = tools_dir();
+    // Журнал открывается напрямую (`OpenOptions`), без создания каталога —
+    // создаём его здесь, один раз на запуск.
+    let _ = std::fs::create_dir_all(&state);
+    Kit::with_state(kit.root, state)
 }
 
 struct Tools;
@@ -848,8 +858,8 @@ mod tests {
         if cfg!(windows) {
             return; // Windows: untouched by this task, the toml stays with the kit.
         }
-        let kit = Kit::at(Path::new("/opt/dev1c-kit"));
-        let p = toml_path(&kit);
+        let kit = wire_state(Kit::at(Path::new("/opt/dev1c-kit")));
+        let p = kit.state_path(crate::cfg::FILE);
         assert!(!p.starts_with(&kit.root), "{}", p.display());
         assert!(p.starts_with(tools_dir()), "{}", p.display());
     }
@@ -1106,5 +1116,26 @@ mod tests {
         assert!(add_installed_location(&cfg_path, &location).is_err());
         assert_eq!(std::fs::read(&cfg_path).unwrap(), before);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn nothing_the_connector_writes_lands_in_the_kit() {
+        // Правило задачи 20 целиком, на проводке `wire_state`: файл
+        // параметров, журнал, отчёт проверки, `known_hosts` и память между
+        // прогонами на Linux уходят в состояние пользователя, потому что
+        // комплект в образе один на всех и смонтирован только для чтения.
+        // На Windows наоборот — комплект переносной и свой, писать рядом с
+        // ним и нужно.
+        let root = if cfg!(windows) { r"C:\dev1c-kit" } else { "/opt/dev1c-kit" };
+        let kit = wire_state(Kit::at(Path::new(root)));
+        for name in [crate::cfg::FILE, "1c-connect.log", "last-check.txt", "known_hosts", "install.state"] {
+            let p = kit.state_path(name);
+            if cfg!(windows) {
+                assert!(p.starts_with(&kit.root), "{}", p.display());
+            } else {
+                assert!(!p.starts_with(&kit.root), "{}", p.display());
+                assert!(p.starts_with(tools_dir()), "{}", p.display());
+            }
+        }
     }
 }

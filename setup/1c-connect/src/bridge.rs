@@ -28,7 +28,11 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     if !cfg.host.dump.is_empty() {
         c.args(["--dump", &cfg.host.dump]);
     }
-    c.current_dir(&kit.root);
+    // cwd — состояние, не комплект: путь к программе выше абсолютный, от
+    // текущего каталога ничего не ищется, а комплект в образе только для
+    // чтения — если mcp-1c однажды решит что-то положить рядом с собой, он
+    // положит это туда, где писать можно (на Windows это тот же комплект).
+    c.current_dir(kit.state());
     c
 }
 

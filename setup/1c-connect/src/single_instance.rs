@@ -13,7 +13,7 @@
 //!   (`taskkill /F`, обрыв питания), и руками снимать нечего. Файла на диске
 //!   для этого замка не было и нет.
 //! - Linux: советный `flock` на файле, который уже существует и который мы
-//!   сами никогда не пишем, — `1c-connect.toml` (`ops_host::toml_path`).
+//!   сами никогда не пишем, — `1c-connect.toml` (`Kit::state_path`).
 //!   Отдельного файла-замка больше нет: общий комплект теперь один на все
 //!   рабочие места и доступен только для чтения, а advisory-замок держится
 //!   на дескрипторе, открытом НА ЧТЕНИЕ, — это работает даже если каталог,
@@ -75,7 +75,7 @@ unsafe impl Send for Guard {}
 unsafe impl Sync for Guard {}
 
 /// Взять замок по ключу или увидеть, что он уже занят. `lock_on` — файл,
-/// который держит замок на Linux (`ops_host::toml_path`); на Windows не
+/// который держит замок на Linux (`Kit::state_path`); на Windows не
 /// используется (там замок не файловый, а именованный мьютекс), но остаётся
 /// параметром, чтобы вызывающему было не важно, какая платформа.
 #[cfg(windows)]
@@ -116,7 +116,7 @@ pub struct Guard(std::fs::File);
 /// системной ошибки в хвосте — для диагностики, не для первого взгляда.
 /// Файл открывается только на чтение (ниже), так что обычная причина отказа
 /// — не отсутствие прав на запись (их и не нужно), а то, что файла вообще
-/// нет: `toml_path` зовут уже после проверки, что `1c-connect.toml`
+/// нет: `state_path` зовут уже после проверки, что `1c-connect.toml`
 /// существует, так что на практике это, скорее, незрелый вызов не оттуда.
 #[cfg(not(windows))]
 fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
@@ -124,7 +124,7 @@ fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
 }
 
 /// Советный `flock` на файле, который мы никогда не пишем (`1c-connect.toml`,
-/// `ops_host::toml_path`) — занимается открытым на ЧТЕНИЕ дескриптором живого
+/// `Kit::state_path`) — занимается открытым на ЧТЕНИЕ дескриптором живого
 /// процесса и снимается ядром, когда дескриптор закрывается — обычным уходом
 /// `File` из области видимости (`Drop` ничего не пишет сам, добавлять его
 /// незачем). Открытие на чтение, а не на запись, — единственное, что даёт
@@ -270,7 +270,7 @@ fn raise_other() -> bool {
 /// ранний `drop` снимает замок раньше срока.
 pub fn acquire(kit: &Kit, workstation: &str) -> anyhow::Result<Guard> {
     let key = guard_key(&current_user(), workstation);
-    let lock_on = crate::ops_host::toml_path(kit);
+    let lock_on = kit.state_path(crate::cfg::FILE);
     match try_acquire(&key, &lock_on)? {
         Some(guard) => Ok(guard),
         None => {
@@ -352,6 +352,12 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
+    // Только для Unix: там рабочие места различает сам файл замка, и ключ в
+    // деле не участвует. На Windows наоборот — замок это именованный объект
+    // ядра, различает их ключ, а файл не смотрят вовсе; с одним и тем же
+    // ключом второй захват там обязан провалиться, что и проверяет
+    // `a_second_acquire_of_the_same_key_fails_while_the_first_is_held_and_succeeds_after_it_drops`.
+    #[cfg(unix)]
     #[test]
     fn two_different_files_never_collide() {
         // В деле ключ больше не участвует на Linux — два рабочих места
@@ -370,15 +376,15 @@ mod tests {
     #[test]
     fn the_lock_lives_in_the_state_not_in_the_kit() {
         // Замок на Linux держится на toml, найденном через
-        // `ops_host::toml_path` — тот же путь, что `acquire` передаёт в
+        // `Kit::state_path` — тот же путь, что `acquire` передаёт в
         // `try_acquire`. Он обязан лежать в состоянии пользователя и никогда
         // внутри общего комплекта (тот — только для чтения и один на всех).
         // Windows эта задача не трогает: там toml по-прежнему при комплекте.
         if cfg!(windows) {
             return;
         }
-        let kit = Kit::at(std::path::Path::new("/opt/dev1c-kit"));
-        let lock_on = crate::ops_host::toml_path(&kit);
+        let kit = crate::ops_host::wire_state(Kit::at(std::path::Path::new("/opt/dev1c-kit")));
+        let lock_on = kit.state_path(crate::cfg::FILE);
         assert!(!lock_on.starts_with(&kit.root), "{}", lock_on.display());
         assert!(lock_on.starts_with(crate::ops_host::tools_dir()), "{}", lock_on.display());
     }

@@ -201,7 +201,7 @@ pub fn start_with_enabled(cfg: Cfg, kit: Kit, log: Sink, enabled: Arc<AtomicBool
                 let on_incoming = move |inc: tunnel::Incoming| {
                     dispatch.dispatch(inc.port, inc.channel.into_stream());
                 };
-                tunnel::run(&cfg, kit.path("known_hosts"), on_event, on_incoming, stop_rx).await
+                tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx).await
             };
             on_state(State::ended(&r));
             r

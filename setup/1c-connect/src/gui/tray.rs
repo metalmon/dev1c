@@ -335,7 +335,6 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{icon_rgba, menu_action, mode_change_blocked, save_host, MenuAction, TrayState, Ui, MODES};
-    use crate::cfg;
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -385,7 +384,7 @@ mod tests {
         let host = ui.cfg.host.clone();
         save_host(&mut ui, host).unwrap();
         assert_eq!(ui.cfg.host.mode, "local");
-        let text = std::fs::read_to_string(ui.kit.path(cfg::FILE)).unwrap();
+        let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
         assert!(text.contains("mode = \"local\""), "{text}");
     }
 

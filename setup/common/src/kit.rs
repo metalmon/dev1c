@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Kit {
     pub root: PathBuf,
+    /// Куда писать своё — память между прогонами, журнал команд, файл
+    /// параметров. Обычно это сам комплект: он свой и писуемый. В образе
+    /// комплект один общий и смонтирован только для чтения, и тогда
+    /// состояние уезжает к пользователю (`Kit::with_state`).
+    state: PathBuf,
 }
 
 impl Kit {
@@ -18,20 +23,36 @@ impl Kit {
         }
         let exe = std::env::current_exe().context("не удалось узнать путь к программе")?;
         let dir = exe.parent().context("у программы нет каталога")?.to_path_buf();
-        Ok(Self { root: dir })
+        Ok(Self::at(dir))
     }
 
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        Self { state: root.clone(), root }
+    }
+
+    /// Комплект, из которого только читают: состояние лежит отдельно.
+    pub fn with_state(root: impl Into<PathBuf>, state: impl Into<PathBuf>) -> Self {
+        Self { root: root.into(), state: state.into() }
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {
         self.root.join(rel)
     }
 
+    /// Путь для того, что программа пишет сама: см. поле `state`.
+    pub fn state_path(&self, rel: &str) -> PathBuf {
+        self.state.join(rel)
+    }
+
+    /// Сам каталог состояния — когда нужен он, а не файл в нём.
+    pub fn state(&self) -> &Path {
+        &self.state
+    }
+
     /// Журнал команд и их вывода: сюда идёт то, что не печатается в терминал.
     pub fn cmd_log(&self) -> PathBuf {
-        self.path("setup.log")
+        self.state_path("setup.log")
     }
 
     /// Пишет в журнал то, что в терминал и в окно не идёт: команды и их
@@ -51,7 +72,7 @@ impl Kit {
     }
 
     fn state_file(&self) -> PathBuf {
-        self.path("install.state")
+        self.state_path("install.state")
     }
 
     /// Запомненное между прогонами, чтобы повторный запуск не спрашивал заново.

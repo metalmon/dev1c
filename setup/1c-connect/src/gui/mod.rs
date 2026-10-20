@@ -481,7 +481,7 @@ pub fn cancel_op(cx: &mut App) {
 /// прав нет) молча игнорируются — журнал на диске не обязателен для работы.
 fn write_log_file(kit: &Kit, line: &Line) {
     use std::io::Write;
-    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(kit.path(LOG_FILE)) else { return };
+    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(kit.state_path(LOG_FILE)) else { return };
     let text = if line.kind == Kind::Head { format!("\n{}\n", line.text) } else { format!("{:<2}{}\n", line.kind.mark(), line.text) };
     let _ = f.write_all(text.as_bytes());
 }
@@ -656,7 +656,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
-    write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
     let base_path = cfg.host.base_path.clone();
     // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
     // пароль — переподнять его нужно при смене любого из трёх, не только
@@ -901,7 +901,7 @@ pub fn autoconnect(kit: &Kit) -> bool {
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
 pub fn start_session(cx: &mut App) -> Result<(), String> {
     let ui = cx.global_mut::<Ui>();
-    if !ui.kit.path(cfg::FILE).exists() {
+    if !ui.kit.state_path(cfg::FILE).exists() {
         return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
     }
     // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
@@ -1116,7 +1116,7 @@ pub fn run_check(cx: &mut App) {
                 let state = link.is_up().then(|| link.label(&mode));
                 let checks = verify::run(&ctx, state.as_deref());
                 let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
-                let _ = write_text(&ctx.kit.path("last-check.txt"), &text);
+                let _ = write_text(&ctx.kit.state_path("last-check.txt"), &text);
                 Ev::Checks(checks)
             },
             || Ev::Checks(Vec::new()),
@@ -1311,12 +1311,14 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             ui.busy = None;
             // Пункта меню «Открыть отчёт» больше нет (заказчик 2026-10-20:
-            // два пункта делали одно и то же) — файл называем здесь, с местом,
-            // полным именем в комплекте человек найдёт его сам.
+            // два пункта делали одно и то же) — файл называем здесь полным
+            // путём: «в комплекте» он лежит только на Windows, на Linux
+            // комплект общий и только для чтения, отчёт уходит в состояние.
+            let report = ui.kit.state_path("last-check.txt").display().to_string();
             let status = if failed > 0 {
-                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Подробности — файл last-check.txt в комплекте") }
+                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Подробности — отчёт {report}") }
             } else {
-                Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — файл last-check.txt в комплекте".into() }
+                Line { kind: Kind::Ok, text: format!("Проверка пройдена. Отчёт — {report}") }
             };
             note_line(ui, status.clone());
             ui.status = Some(status);
@@ -1420,7 +1422,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // стеке этой функции, пока приложение не закроется.
     let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation)?;
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
-    let log_path = kit.path(LOG_FILE);
+    let log_path = kit.state_path(LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
         let _ = std::fs::remove_file(&log_path);
     }
@@ -1729,7 +1731,7 @@ mod tests {
         let mut ui = Ui::for_test();
         note_line(&mut ui, Line { kind: Kind::Head, text: "— устанавливаю — · 12:34".into() });
         note_line(&mut ui, Line { kind: Kind::Ok, text: "готово".into() });
-        let text = std::fs::read_to_string(ui.kit.path(LOG_FILE)).unwrap();
+        let text = std::fs::read_to_string(ui.kit.state_path(LOG_FILE)).unwrap();
         assert_eq!(text, "\n— устанавливаю — · 12:34\n✓ готово\n");
     }
 
@@ -1824,12 +1826,12 @@ mod tests {
     #[test]
     fn a_bad_server_leaves_the_toml_alone_and_says_why() {
         let mut ui = Ui::for_test();
-        let before = std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok();
+        let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
         let mut host = ui.cfg.host.clone();
         host.server = "no-port".into();
         let err = save_host(&mut ui, host).unwrap_err();
         assert!(!err.is_empty());
-        assert_eq!(std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok(), before);
+        assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before);
     }
 
     #[test]
@@ -2234,12 +2236,12 @@ mod tests {
         // toml не тронут без явного вызова `save_host`).
         let mut ui = Ui::for_test();
         ui.session = Some(doomed_session(&ui));
-        let before = std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok();
+        let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
         let mut new_base = ui.cfg.host.clone();
         new_base.base_path = "C:\\Bases\\Other".into();
         assert!(save_needs_confirm(&ui, &new_base), "сценарий должен требовать вопрос");
         // Отказ = не позвать save_host; toml как был.
-        assert_eq!(std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok(), before);
+        assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before);
         let _ = ui.session.take().unwrap().stop();
     }
 

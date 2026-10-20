@@ -134,13 +134,15 @@ fn run() -> Result<()> {
     // и `len() == 1`.
     #[cfg(feature = "gui")]
     if let Some(hidden) = gui_launch() {
-        return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, hidden);
+        return one_c_connect::gui::launch(ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?), hidden);
     }
     let cli = Cli::parse();
-    let kit = match &cli.kit {
+    // `wire_state` разводит чтение и запись: из комплекта читаем, своё пишем
+    // в состояние пользователя — в образе комплект общий и только для чтения.
+    let kit = ops_host::wire_state(match &cli.kit {
         Some(p) => Kit::at(p),
         None => Kit::discover("ONEC_CONNECT_KIT")?,
-    };
+    });
     if let Some(Cmd::Example) = cli.cmd {
         print!("{}", cfg::EXAMPLE);
         return Ok(());
@@ -213,7 +215,7 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     let checks = verify::run(ctx, tunnel_state);
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
-    let path = ctx.kit.path("last-check.txt");
+    let path = ctx.kit.state_path("last-check.txt");
     let text = common::check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
     common::kit::write_text(&path, &text)?;
     println!();
@@ -225,7 +227,7 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(
-        ops_host::toml_path(&ctx.kit).exists(),
+        ctx.kit.state_path(cfg::FILE).exists(),
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         cfg::FILE,
         cfg::FILE
@@ -267,7 +269,7 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
 fn serve(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(
-        ops_host::toml_path(&ctx.kit).exists(),
+        ctx.kit.state_path(cfg::FILE).exists(),
         "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         cfg::FILE,
         cfg::FILE

@@ -896,7 +896,7 @@ impl Render for Panel {
                     // называет сама строка в журнале после проверки
                     // (`Ev::Checks` в `mod.rs`).
                     menu.item(PopupMenuItem::new("Открыть журнал").disabled(busy_now).on_click(|_, _, cx| {
-                        let path = cx.global::<Ui>().kit.path(gui::LOG_FILE);
+                        let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
                         gui::open_path(cx, &path);
                     }))
                     .item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {

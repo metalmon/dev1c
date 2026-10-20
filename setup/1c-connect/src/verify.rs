@@ -120,26 +120,63 @@ pub fn open_session_fact() -> Check {
     )
 }
 
-/// Порты моста (777N/778N): свободны либо их держит этот же процесс — оба
-/// случая в порядке. Чужой процесс на порту — почти наверняка второй
-/// запущенный коннектор.
-pub fn workstation_ports_fact(mcp: u16, vrunner: u16, foreign: &[u16]) -> Check {
-    if foreign.is_empty() {
-        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"))
-    } else {
-        let list = foreign.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
-        Check::fail(
+/// Кто держит порт рабочего места. Своим считается не только этот самый
+/// процесс, но и коннектор того же рабочего места: трей держит порты всё
+/// время работы — это штатное состояние, и разовой команде (`install`,
+/// `check`, `export`) он не помеха, она этих портов не занимает.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    /// Мы сами — порт занят этим же процессом.
+    Ours,
+    /// Другой процесс, но тот же исполняемый файл коннектора: трей (или
+    /// `serve`) этого рабочего места.
+    OurConnector,
+    /// Кто-то ещё — вот это и есть провал.
+    Stranger,
+}
+
+/// Порты моста (777N/778N): свободны, заняты нами самими либо своим же
+/// коннектором этого рабочего места — все три случая в порядке. Провал —
+/// только чужой процесс на порту. `holders` называет лишь занятые порты;
+/// свободные в список не попадают.
+pub fn workstation_ports_fact(mcp: u16, vrunner: u16, holders: &[(u16, Holder)]) -> Check {
+    let strangers: Vec<String> = holders.iter().filter(|(_, h)| *h == Holder::Stranger).map(|(p, _)| p.to_string()).collect();
+    if !strangers.is_empty() {
+        return Check::fail(
             WORKSTATION_PORTS,
-            format!("порт(ы) {list} заняты другим процессом"),
+            format!("порт(ы) {} заняты другим процессом", strangers.join(", ")),
             "похоже, на этой машине уже открыт второй 1c-connect — закройте его и проверьте снова",
-        )
+        );
+    }
+    // Способ называем вслух: «занято» без объяснения на зелёном факте
+    // человека только тревожит.
+    if holders.iter().any(|(_, h)| *h == Holder::OurConnector) {
+        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: заняты коннектором этого рабочего места — разовой команде это не мешает"))
+    } else {
+        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"))
     }
 }
 
-/// pid из `holder::of_port` (строка вида `"имя (pid N)"`) — сравнить с
-/// `std::process::id()`, не разбирая вывод `ss`/`netstat` заново.
+/// pid из `holder::of_port` (строка вида `"имя (pid N)"`), не разбирая вывод
+/// `ss`/`netstat` заново.
 fn holder_pid(desc: &str) -> Option<u32> {
     desc.rsplit("pid ").next()?.trim_end_matches(')').parse().ok()
+}
+
+/// Чей это pid: наш собственный, нашего же коннектора или чужой. Признак
+/// «наш коннектор» — тот же, которым замок единственного экземпляра отличает
+/// свою копию: совпадение образа программы (`single_instance::same_image`).
+/// Рабочее место сверять отдельно не нужно — порты в `holders` взяты из
+/// конфигурации этого рабочего места, и коннектор с нашим образом на них
+/// именно его и обслуживает.
+fn holder_of(pid: u32, me: u32, ours: Option<&std::path::Path>) -> Holder {
+    if pid == me {
+        return Holder::Ours;
+    }
+    match ours {
+        Some(o) if crate::single_instance::same_image(crate::holder::image_of(pid).as_deref(), o) => Holder::OurConnector,
+        _ => Holder::Stranger,
+    }
 }
 
 pub fn media_fact(kind: Option<String>, root: &str) -> Check {
@@ -304,10 +341,16 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), media));
     if local {
         let p = ctx.cfg.ports();
-        let pid = std::process::id();
-        let foreign: Vec<u16> =
-            [p.mcp, p.vrunner].into_iter().filter(|&port| crate::holder::of_port(port).and_then(|d| holder_pid(&d)).is_some_and(|owner| owner != pid)).collect();
-        v.push(workstation_ports_fact(p.mcp, p.vrunner, &foreign));
+        let me = std::process::id();
+        let ours = std::env::current_exe().ok();
+        // Порт, про который держателя не выяснить (свободен, или pid не
+        // прочитать), в список не попадает вовсе — обвинять человека не в
+        // чем.
+        let holders: Vec<(u16, Holder)> = [p.mcp, p.vrunner]
+            .into_iter()
+            .filter_map(|port| Some((port, holder_of(holder_pid(&crate::holder::of_port(port)?)?, me, ours.as_deref()))))
+            .collect();
+        v.push(workstation_ports_fact(p.mcp, p.vrunner, &holders));
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
@@ -393,12 +436,30 @@ mod tests {
         }
     }
 
+    /// Штатное состояние рабочего места: трей держит оба порта. Процесс
+    /// другой, но коннектор тот же — разовой команде он не помеха, и факт
+    /// обязан назвать способ, чтобы человек не гадал, почему порты заняты.
     #[test]
-    fn workstation_ports_fact_passes_when_free_or_ours_fails_on_a_stranger() {
-        let c = workstation_ports_fact(7771, 7781, &[]);
+    fn our_own_tray_holding_the_ports_is_not_a_failure() {
+        let c = workstation_ports_fact(7773, 7783, &[(7773, Holder::OurConnector), (7783, Holder::OurConnector)]);
         assert!(c.ok && !c.info, "{c:?}");
-        let c = workstation_ports_fact(7771, 7781, &[7781]);
-        assert!(!c.ok && c.detail.contains("7781") && c.hint.contains("второй"), "{c:?}");
+        assert!(c.detail.contains("коннектором этого рабочего места"), "{c:?}");
+    }
+
+    /// Чужой процесс на порту — прежний провал с прежним текстом; свой же
+    /// порт рядом в список не попадает.
+    #[test]
+    fn a_stranger_on_the_same_port_still_fails() {
+        let c = workstation_ports_fact(7773, 7783, &[(7773, Holder::Ours), (7783, Holder::Stranger)]);
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("7783") && !c.detail.contains("7773"), "{c:?}");
+        assert!(c.hint.contains("второй"), "{c:?}");
+    }
+
+    #[test]
+    fn a_free_port_passes() {
+        let c = workstation_ports_fact(7773, 7783, &[]);
+        assert!(c.ok && !c.info, "{c:?}");
     }
 
     #[test]

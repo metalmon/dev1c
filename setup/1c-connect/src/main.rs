@@ -149,6 +149,7 @@ fn run() -> Result<()> {
         None => ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?),
     };
     ops_host::ensure_state(&kit);
+
     if let Some(Cmd::Example) = cli.cmd {
         print!("{}", cfg::EXAMPLE);
         return Ok(());

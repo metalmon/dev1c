@@ -161,6 +161,12 @@ RUN mkdir -p /opt/dev1c-kit/vrunner/bin /opt/dev1c-kit/git/bin \
 # connect -> 1c-connect --tray) and a hand-run `1c-connect serve` alike — an
 # image-wide ENV reaches both without stand.sh having to export it itself.
 ENV ONEC_CONNECT_KIT=/opt/dev1c-kit
+# Belt for a login shell: a desktop session comes through xrdp-sesman and PAM,
+# which do not have to carry the image's ENV, and someone who runs
+# ~/dev1c/1c-connect by hand from that session's terminal would otherwise fall
+# back to a kit with no tools in it. stand.sh defaults the variable itself for
+# every path that goes through it (see its header) — this covers the rest.
+RUN echo 'export ONEC_CONNECT_KIT=/opt/dev1c-kit' >/etc/profile.d/dev1c-kit.sh
 
 # --- fonts -------------------------------------------------------------------
 # 1C greets a session with «На сервере отсутствуют шрифты из состава Microsoft

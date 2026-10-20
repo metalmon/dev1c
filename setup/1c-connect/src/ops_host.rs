@@ -201,7 +201,12 @@ pub fn wire_state(kit: Kit) -> Kit {
 /// который родителя создаёт сам. Молча: ошибку увидят те, кому каталог
 /// нужен, и назовут путь.
 pub fn ensure_state(kit: &Kit) {
-    let _ = std::fs::create_dir_all(kit.state());
+    // Только когда состояние — не сам комплект: при явном `--kit` создавать
+    // каталог не наше дело, иначе опечатка в пути молча плодит каталоги
+    // вместо внятного «нет файла параметров».
+    if kit.state() != kit.root {
+        let _ = std::fs::create_dir_all(kit.state());
+    }
 }
 
 struct Tools;
@@ -256,8 +261,8 @@ impl Op<Ctx> for Tools {
         // теперь живут файл параметров, журнал, отчёт проверки и публикация —
         // «очистка данных» уносила бы настройки человека, не сказав об этом.
         let t = tools_dir();
-        let mut names: Vec<String> = required_kit_dirs().iter().map(|d| t.join(d).display().to_string()).collect();
-        names.push(t.join(VERSION_FILE).display().to_string());
+        let mut names: Vec<String> = required_kit_dirs().iter().map(|d| format!("удалить {}", t.join(d).display())).collect();
+        names.push(format!("удалить {}", t.join(VERSION_FILE).display()));
         matches!(level, CleanLevel::Data).then(|| names.into_iter().map(Action::new).collect())
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
@@ -881,7 +886,7 @@ mod tests {
         if cfg!(windows) {
             return; // Windows: untouched by this task, the toml stays with the kit.
         }
-        let kit = Kit::with_state(Path::new("/opt/dev1c-kit"), tools_dir());
+        let kit = wire_state(Kit::at(Path::new("/opt/dev1c-kit")));
         let p = kit.state_path(crate::cfg::FILE);
         assert!(!p.starts_with(&kit.root), "{}", p.display());
         assert!(p.starts_with(tools_dir()), "{}", p.display());
@@ -1150,7 +1155,7 @@ mod tests {
         // На Windows наоборот — комплект переносной и свой, писать рядом с
         // ним и нужно.
         let root = if cfg!(windows) { r"C:\dev1c-kit" } else { "/opt/dev1c-kit" };
-        let kit = if cfg!(windows) { Kit::at(Path::new(root)) } else { Kit::with_state(Path::new(root), tools_dir()) };
+        let kit = wire_state(Kit::at(Path::new(root)));
         for name in [crate::cfg::FILE, "1c-connect.log", "last-check.txt", "known_hosts", "install.state"] {
             let p = kit.state_path(name);
             if cfg!(windows) {

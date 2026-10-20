@@ -29,7 +29,10 @@
 //! конфигурации (`cfg::Host::workstation`), а не машина: два разных
 //! человека на одной машине или два рабочих места — не конфликт. На Windows
 //! это имя мьютекса; на Linux отдельный ключ не нужен — каталог состояния
-//! свой у каждого рабочего места, значит и замок свой.
+//! там один на учётную запись ОС, а в образе стенда у каждого рабочего
+//! места своя учётная запись (dev1, dev2, dev3), так что замок и так свой.
+//! Два рабочих места под одним пользователем Linux разошлись бы только
+//! через `XDG_DATA_HOME`.
 //!
 //! Вторая копия не умирает молча. На Windows ищет окно первой — перебирает
 //! все верхнеуровневые окна и поднимает то, чей процесс — тот же исполняемый
@@ -419,7 +422,7 @@ mod tests {
         if cfg!(windows) {
             return;
         }
-        let kit = Kit::with_state(std::path::Path::new("/opt/dev1c-kit"), crate::ops_host::tools_dir());
+        let kit = crate::ops_host::wire_state(Kit::at(std::path::Path::new("/opt/dev1c-kit")));
         let lock_on = lock_target(&kit);
         assert!(!lock_on.starts_with(&kit.root), "{}", lock_on.display());
         assert!(lock_on.starts_with(crate::ops_host::tools_dir()), "{}", lock_on.display());

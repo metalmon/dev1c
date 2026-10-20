@@ -64,6 +64,11 @@ tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"]
 # нас нужны только базовые xproto-запросы без лишних фич) — новой зависимости
 # в дереве сборки это не добавляет.
 x11rb = { version = "=0.13.2", optional = true }
+# Ради идентификатора окна X11: `gui::window::move_to` двигает флайаут сам
+# (оконный менеджер за нас этого не делает), а номер окна отдаёт только
+# дескриптор от GPUI. Крейт уже в дереве сборки — он есть у gpui, — и ниже
+# тот же крейт объявлен для Windows ради HWND.
+raw-window-handle = { version = "0.6", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не

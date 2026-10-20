@@ -226,6 +226,25 @@ impl Tray {
     }
 }
 
+/// Состояние значка по точке карточки: трей следует тому же порядку
+/// разрешения (спека, «Трей живёт по тем же правилам»), а считать его дважды
+/// незачем — порядок уже разобран в `panel::card`, значку остаётся перевести
+/// точку в своё состояние. Отсюда и «при идущей операции побеждает операция»:
+/// точка в этот момент уже `Dot::Busy`.
+///
+/// Провал вердикта (`Dot::Warn`) показывается тем же жёлтым бейджем, что и
+/// занятость: отдельного, четвёртого состояния у `TrayState` пока нет — это
+/// одна строка в `gui/mod.rs` (`TrayState::Warn` плюс её цвет в `badge`),
+/// чужой файл, см. отчёт задачи 24. Главное правило уже соблюдено: зелёным
+/// провалившийся вердикт не бывает.
+pub fn tray_state_of(dot: super::Dot) -> TrayState {
+    match dot {
+        super::Dot::Up => TrayState::Up,
+        super::Dot::Busy | super::Dot::Warn => TrayState::Busy,
+        super::Dot::Off | super::Dot::Down => TrayState::Off,
+    }
+}
+
 /// Доступен ли пункт «Включить MCP»: трей живёт по тем же правилам, что окно
 /// (спека, «Трей живёт по тем же правилам») — замок запирает только включение,
 /// выключить обслуживание можно всегда. Обратная сторона `panel::switch_locked`
@@ -347,7 +366,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES};
+    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, tray_state_of, MenuAction, TrayState, Ui, MODES};
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -444,6 +463,35 @@ mod tests {
         assert!(!toggle_enabled(true, false));
         assert!(toggle_enabled(true, true));
         assert!(toggle_enabled(false, false));
+    }
+
+    /// Значок идёт тем же порядком разрешения, что и точка в карточке:
+    /// считает его `panel::card` один раз, трею остаётся перевести точку в
+    /// своё состояние. Главное — идущая операция побеждает провалившийся
+    /// вердикт, а сам провал зелёным больше не бывает.
+    #[test]
+    fn the_tray_follows_the_card_order() {
+        use crate::gui::panel::card;
+        use crate::gui::Readiness;
+        use crate::session::State;
+        use common::check::Check;
+
+        let now = Instant::now();
+        let up = State::Up { since: now };
+        let fail = Readiness::Warn(Check::fail("проект", "не разложен", "1c-connect install"));
+        let state = |c: crate::gui::panel::Card| tray_state_of(c.dot);
+
+        assert_eq!(state(card(None, &up, "local", &Readiness::Ok, None, now)), TrayState::Up);
+        // Вердикт провален — не зелёный.
+        assert_ne!(state(card(None, &up, "local", &fail, None, now)), TrayState::Up);
+        // Вердикт ещё не посчитан — тоже не зелёный.
+        assert_ne!(state(card(None, &up, "local", &Readiness::Unknown, None, now)), TrayState::Up);
+        // Идёт операция — побеждает она, даже поверх провалившегося вердикта.
+        let r = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
+        assert_eq!(state(card(Some(&r), &up, "local", &fail, None, now)), TrayState::Busy);
+        // Замок и выключенное обслуживание — серый.
+        assert_eq!(state(card(None, &up, "local", &Readiness::Ok, Some("не задан пользователь базы"), now)), TrayState::Off);
+        assert_eq!(state(card(None, &State::Off, "local", &Readiness::Ok, None, now)), TrayState::Off);
     }
 
     #[test]

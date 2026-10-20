@@ -226,6 +226,19 @@ connect)
     # see the spec of the window), so the reason must survive the session
     exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
     ;;
+import)
+    # Вторая половина круга второго акта: вернуть правку агента в базу.
+    # Зовётся кнопкой онбординга, как и всё остальное, через 1c-stand —
+    # путь к коннектору остаётся в одном месте, а не разъезжается по
+    # сценарию и ярлыкам (тот же приём, что у connect и onboarding выше).
+    #
+    # Первая половина, раскладка конфигурации в файлы, в акт не входит:
+    # она идёт около тринадцати минут, а акт обещает пять. На стенде
+    # проект разложен заранее.
+    export HOME; HOME=$(home_of "$(id -un)"); seed
+    [ -x "$HOME/dev1c/1c-connect" ] || { log "1c-connect is not in this image"; exit 1; }
+    exec "$HOME/dev1c/1c-connect" import
+    ;;
 onboarding)
     # Автозапуск при входе (onboarding-autostart.desktop, с --autostart)
     # и пункт меню «Знакомство со стендом» (onboarding.desktop, без
@@ -357,7 +370,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | onboarding | seed | publish ... | export-payload | import-payload [--force]" >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | import | onboarding | seed | publish ... | export-payload | import-payload [--force]" >&2
     exit 2
     ;;
 esac

@@ -863,6 +863,49 @@ git commit -m "Комплект в образе: один общий тольк�
 - [ ] **Шаг 5: живьём.** Снимок из образа: прямые углы без стеклянных пятен; окно `dev1c-setup` не изменилось.
 - [ ] **Шаг 6: коммит.** `git commit -m "На Linux окно без скруглений: прозрачность в углах там не работает"`
 
+
+---
+
+### Task 30: Экран для конфигуратора даёт коннектор
+
+**Files:**
+- Modify: `setup/1c-connect/src/ops_host.rs` (`with_display`, факт «экран для конфигуратора»)
+- Modify: `setup/1c-connect/src/bridge.rs` (`vrunner_command`)
+- Modify: `setup/1c-connect/src/verify.rs` (факт в наборе на Linux)
+- Test: inline в `ops_host.rs` и `verify.rs`
+
+**Interfaces:**
+- Produces: `ops_host::display_prefix(has_display: bool, xvfb: Option<&Path>) -> Option<PathBuf>` — чистая функция: `None`, если дисплей уже есть или оборачивать нечем; путь к `xvfb-run`, если нужен и он найден. На Windows всегда `None`.
+- Produces: `ops_host::with_display(cmd: Command) -> Command` — переписывает команду в `xvfb-run -a <программа> <аргументы>`, когда `display_prefix` сказал «надо».
+- Produces: `verify::display_fact(prefix_needed: bool, xvfb: Option<&Path>) -> Check` — провал только когда дисплея нет и `xvfb-run` не найден.
+
+- [ ] **Шаг 1: падающие тесты.** `ops_host`: `display_prefix_is_none_when_display_is_set`; `display_prefix_names_xvfb_when_display_is_missing`; `display_prefix_is_none_on_windows`; `with_display_keeps_program_and_args_in_order` (после обёртки первым идёт `xvfb-run`, затем `-a`, затем прежняя программа и её аргументы без перестановки). `verify`: `display_fact_fails_only_without_display_and_without_xvfb`.
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib`).
+- [ ] **Шаг 3: обёртка.** `with_display` применяется там, где поднимается конфигуратор: `bridge::vrunner_command` (через него идут `cf_decompile`/`cf_load`) и прямые вызовы `1cv8 DESIGNER` в `ops_host` (установка и снятие расширения).
+- [ ] **Шаг 4: факт.** На Linux в набор проверки добавляется «экран для конфигуратора»: есть `DISPLAY` — ok; нет, но есть `xvfb-run` — ok с названием способа; нет ни того, ни другого — провал с подсказкой поставить `xvfb`.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: живьём.** В контейнере под dev3: `env -u DISPLAY 1c-connect export --dry-run` и настоящий `export` без `DISPLAY` в окружении проходят; в журнале видно, каким способом дан экран.
+- [ ] **Шаг 7: коммит.** `git commit -m "Экран для конфигуратора на Linux даёт коннектор, а не вызывающий"`
+
+---
+
+### Task 31: Разовая команда не воюет со своим же коннектором
+
+**Files:**
+- Modify: `setup/1c-connect/src/verify.rs` (`ports_fact`, признак «свой»)
+- Modify: `setup/1c-connect/src/ops_host.rs` (`holder` — образ процесса)
+- Test: inline в `verify.rs`
+
+**Interfaces:**
+- Produces: `verify::ports_fact(mcp: u16, vrunner: u16, holders: &[(u16, Holder)]) -> Check`, где `Holder` различает «мы сами», «наш коннектор этого рабочего места» и «чужой процесс». Провал — только на третьем.
+
+- [ ] **Шаг 1: падающие тесты.** `our_own_tray_holding_the_ports_is_not_a_failure`; `a_stranger_on_the_same_port_still_fails`; `a_free_port_passes`.
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: признак «свой».** Держатель считается своим, если это тот же исполняемый файл коннектора (как уже отличает свою копию `single_instance::same_image`), а не только если его `pid` равен нашему.
+- [ ] **Шаг 4: тесты проходят.**
+- [ ] **Шаг 5: живьём.** При работающем трее на dev3: `install -y`, `check` и `export --dry-run` проходят; факт портов зелёный и называет способ («заняты коннектором этого рабочего места»).
+- [ ] **Шаг 6: коммит.** `git commit -m "Свои же порты разовой команде не мешают"`
+
 ## Что остаётся исполнителю
 
 - Как делить `session.rs`: оставить `Serve` в нём или вынести в свой модуль — по размеру кода после задачи 3.

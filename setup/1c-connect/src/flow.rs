@@ -6,6 +6,8 @@ use crate::local::Reply;
 use crate::ops_host::Ctx;
 use common::{Phase, Runner};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 pub struct Deps<'a> {
@@ -17,6 +19,128 @@ pub struct Deps<'a> {
     /// `--dry-run`: только план, ни одного вызова.
     pub dry_run: bool,
     pub phase: &'a dyn Fn(Phase),
+    /// Пишет `.dev1c-dump` рядом с деревом после выгрузки (версия платформы
+    /// и версия формата). Ошибка не валит выгрузку — файлы уже выгружены и
+    /// отправлены важнее отметки, поэтому только предупреждение в журнал.
+    pub write_mark: &'a dyn Fn() -> Result<(), String>,
+    /// Сверка версии формата дерева с версией нашей платформы перед
+    /// загрузкой. `None` — сверить нечем (отметки нет, или не нашли свою
+    /// платформу/её формат); это не отказ, просто сверка не идёт.
+    pub mark_check: &'a dyn Fn() -> Option<Mark>,
+}
+
+/// Имя файла-отметки о платформе и формате выгрузки рядом с деревом.
+/// В `.gitignore` проекта его не добавляют: он мал и нужен второй стороне.
+const DUMP_MARK_FILE: &str = ".dev1c-dump";
+
+/// Версия платформы из пути к `1cv8.exe`, который возвращает
+/// `ops_host::find_1cv8()`: имя каталога двумя уровнями выше исполняемого
+/// файла (`.../8.5.1.1150/bin/1cv8.exe` → `8.5.1.1150`).
+fn platform_version_from_exe(exe: &Path) -> Option<String> {
+    exe.parent()?.parent()?.file_name()?.to_str().map(str::to_string)
+}
+
+/// Версия нашей платформы — через найденный `1cv8.exe`.
+fn our_platform_version() -> Option<String> {
+    platform_version_from_exe(&crate::ops_host::find_1cv8()?)
+}
+
+/// Версия формата выгрузки, которую производит сборка платформы — короткая
+/// таблица по примечаниям к выпускам платформы и по замеру на этой машине
+/// (design-док, «Отладка в образе на учебной платформе»): 8.3.20 → 2.13,
+/// 8.3.21 → 2.14, 8.3.27 → 2.20, 8.5.1 → 2.21, 8.5.4 → 2.22. Платформа новее
+/// последней строки или вовсе не из таблицы — формат не знаем, сверку перед
+/// загрузкой тогда пропускаем: это безопаснее угадывания.
+/// ponytail: маленькая таблица вместо разбора схемы формата из самой
+/// платформы (`backendt_root.res`, пакет `xcf/dumpinfo`); дополнить строкой
+/// при новом выпуске платформы, или перейти на чтение схемы, если таблица
+/// станет неудобной.
+fn format_for_platform(platform: &str) -> Option<&'static str> {
+    let short = platform.splitn(4, '.').take(3).collect::<Vec<_>>().join(".");
+    Some(match short.as_str() {
+        "8.3.20" => "2.13",
+        "8.3.21" => "2.14",
+        "8.3.27" => "2.20",
+        "8.5.1" => "2.21",
+        "8.5.4" => "2.22",
+        _ => return None,
+    })
+}
+
+/// Читает отметку `.dev1c-dump` в каталоге проекта: версия платформы и
+/// версия формата, которыми дерево было выгружено. `None`, если отметки нет
+/// или она повреждена (например, дерево пришло от другой машины через
+/// Gitea, минуя наш `export`).
+pub fn dump_mark(project: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(project.join(DUMP_MARK_FILE)).ok()?;
+    let mut platform = None;
+    let mut format = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("platform=") {
+            platform = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("format=") {
+            format = Some(v.trim().to_string());
+        }
+    }
+    Some((platform?, format?))
+}
+
+/// Пишет отметку `.dev1c-dump` рядом с деревом: версия платформы, которая
+/// выгружала, и версия формата выгрузки.
+pub fn write_dump_mark(project: &Path, platform: &str, format: &str) -> Result<(), String> {
+    std::fs::write(project.join(DUMP_MARK_FILE), format!("platform={platform}\nformat={format}\n"))
+        .map_err(|e| format!("не удалось записать отметку о платформе ({DUMP_MARK_FILE}): {e}"))
+}
+
+/// Версия формата выгрузки — атрибут `version` корневого элемента
+/// `ConfigDumpInfo` в `src/ConfigDumpInfo.xml`. Дерево — десятки тысяч
+/// файлов, поэтому читаем только этот файл и только его начало текстом, не
+/// XML-парсером; файл начинается с BOM, его снимаем перед поиском.
+pub fn dump_format(project: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = [0u8; 512];
+    let mut f = std::fs::File::open(project.join("src").join("ConfigDumpInfo.xml")).ok()?;
+    let n = f.read(&mut buf).ok()?;
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let head = head.strip_prefix('\u{feff}').unwrap_or(&head);
+    let tail = &head[head.find("ConfigDumpInfo")?..];
+    let tail = &tail[tail.find("version=\"")? + "version=\"".len()..];
+    Some(tail[..tail.find('"')?].to_string())
+}
+
+/// Версия формата покомпонентно как числа: `2.9` старее `2.20` (текстовое
+/// сравнение строк тут путает: "2.9" > "2.20" как строки).
+fn parse_format(v: &str) -> Vec<u32> {
+    v.split('.').filter_map(|p| p.parse().ok()).collect()
+}
+
+/// Итог сверки версии формата дерева с версией нашей платформы.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// Версии совпадают — грузим молча.
+    Same,
+    /// Дерево старее нашей платформы — грузится с предупреждением в журнал.
+    Older(String),
+    /// Дерево новее нашей платформы — платформа такой формат не прочитает,
+    /// загрузка не начинается.
+    Newer(String),
+}
+
+/// Чистая функция сверки — без файлов, без платформы, тесты проверяют
+/// именно её.
+pub fn check_mark(tree_format: Option<&str>, ours: Option<&str>) -> Mark {
+    let (Some(t), Some(o)) = (tree_format, ours) else {
+        return Mark::Same;
+    };
+    match parse_format(t).cmp(&parse_format(o)) {
+        Ordering::Equal => Mark::Same,
+        Ordering::Less => Mark::Older(format!(
+            "файлы выгружены в формате {t}, ваша платформа работает с форматом {o}; после выгрузки из этой базы дерево станет формата {o}, и платформа с форматом {t} его уже не примет"
+        )),
+        Ordering::Greater => Mark::Newer(format!(
+            "эти файлы выгружены в формате {t}, ваша платформа читает только до формата {o} — загрузить нельзя"
+        )),
+    }
 }
 
 fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -46,6 +170,9 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
     if !r.text.trim().is_empty() {
         log(r.text);
     }
+    if let Err(e) = (d.write_mark)() {
+        log(format!("не удалось записать отметку о платформе рядом с выгрузкой: {e}"));
+    }
     (d.phase)(Phase::Push);
     log("отправляю файлы агенту — первая выгрузка это десятки тысяч файлов, минуты (git add, commit, push в Gitea)".into());
     (d.push)(message)
@@ -66,6 +193,12 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
     log((d.pull)()?);
     if !d.dump_index_exists {
         log("src/ConfigDumpInfo.xml нет — загрузка будет полной, не инкрементом (первая после клонирования)".into());
+    }
+    match (d.mark_check)() {
+        None => log("отметки о платформе нет, проверить формат не могу".into()),
+        Some(Mark::Same) => {}
+        Some(Mark::Older(msg)) => log(format!("предупреждение: {msg}")),
+        Some(Mark::Newer(msg)) => return Err(msg),
     }
     (d.phase)(Phase::Load);
     log("загружаю конфигурацию в 1С из файлов проекта — минуты (cf_load ← src)".into());
@@ -98,6 +231,27 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
     let push = |m: &str| crate::project::push(&p, m, cancel);
     let pull = || crate::project::pull(&p, cancel);
     let phase = |ph: Phase| ctx.progress(ph);
+    let write_mark = || -> Result<(), String> {
+        // Своей версии платформы или формата не нашли — отметку не пишем
+        // молча; файлы уже выгружены и отправлены, это важнее отметки.
+        let Some(platform) = our_platform_version() else { return Ok(()) };
+        let Some(format) = dump_format(&p.dir) else { return Ok(()) };
+        write_dump_mark(&p.dir, &platform, &format)
+    };
+    let mark_check = || -> Option<Mark> {
+        let (tree_platform, tree_format) = dump_mark(&p.dir)?;
+        let our_platform = our_platform_version()?;
+        let our_fmt = format_for_platform(&our_platform)?;
+        Some(match check_mark(Some(&tree_format), Some(our_fmt)) {
+            Mark::Same => Mark::Same,
+            Mark::Older(_) => Mark::Older(format!(
+                "файлы выгружены платформой {tree_platform} (формат {tree_format}), ваша платформа {our_platform} (формат {our_fmt}); после выгрузки из этой базы дерево станет формата {our_fmt}, и платформа {tree_platform} его больше не примет"
+            )),
+            Mark::Newer(_) => Mark::Newer(format!(
+                "эти файлы выгружены платформой {tree_platform} (формат {tree_format}), ваша база работает на {our_platform} (формат {our_fmt}) — загрузить нельзя"
+            )),
+        })
+    };
     let d = Deps {
         call: &call,
         platform_running: &crate::bridge::configurator_count,
@@ -106,6 +260,8 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
         phase: &phase,
+        write_mark: &write_mark,
+        mark_check: &mark_check,
     };
     f(&d, &log)
 }
@@ -162,6 +318,11 @@ mod tests {
                 Ok("pulled".to_string())
             };
             let phase = |ph: Phase| self.phases.borrow_mut().push(ph);
+            let write_mark = || -> Result<(), String> { Ok(()) };
+            // По умолчанию в тестах отметки нет — ровно сценарий
+            // `a_missing_mark_is_not_a_failure`: сверить нечем, но загрузка
+            // не падает.
+            let mark_check = || -> Option<Mark> { None };
             f(&Deps {
                 call: &call,
                 platform_running: &platform_running,
@@ -170,6 +331,8 @@ mod tests {
                 dump_index_exists: self.index,
                 dry_run: self.dry,
                 phase: &phase,
+                write_mark: &write_mark,
+                mark_check: &mark_check,
             })
         }
     }
@@ -298,5 +461,68 @@ mod tests {
         let f = Fake::new(&[("платформа: ошибка", true)]);
         f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert_eq!(*f.phases.borrow(), vec![Phase::Decompile]);
+    }
+
+    #[test]
+    fn same_version_loads_silently() {
+        assert_eq!(check_mark(Some("2.21"), Some("2.21")), Mark::Same);
+    }
+
+    #[test]
+    fn older_files_load_with_a_warning() {
+        let Mark::Older(msg) = check_mark(Some("2.20"), Some("2.21")) else {
+            panic!("ожидали Mark::Older")
+        };
+        assert!(msg.contains("2.20") && msg.contains("2.21") && msg.contains("не примет"), "{msg}");
+    }
+
+    #[test]
+    fn newer_files_are_refused() {
+        // Это тот же отказ, что платформа даёт текстом «Неизвестная версия
+        // формата 2.21», но мы ловим его до запуска конфигуратора.
+        let Mark::Newer(msg) = check_mark(Some("2.21"), Some("2.20")) else {
+            panic!("ожидали Mark::Newer")
+        };
+        assert!(msg.contains("2.21") && msg.contains("2.20") && msg.contains("нельзя"), "{msg}");
+    }
+
+    #[test]
+    fn format_versions_compare_as_numbers() {
+        // Текстом "2.9" > "2.20" (девятка больше двойки в начале), а по
+        // номерам формата 2.9 старее 2.20 — покомпонентное сравнение.
+        assert!(matches!(check_mark(Some("2.9"), Some("2.20")), Mark::Older(_)));
+    }
+
+    #[test]
+    fn a_missing_mark_is_not_a_failure() {
+        let _s = serial();
+        let f = Fake::new(&[("загружено", false)]);
+        let log = RefCell::new(Vec::new());
+        let r = f.run(|d| import_with(d, &|s| log.borrow_mut().push(s))).unwrap();
+        assert!(r.contains("загружено"), "{r}");
+        assert!(log.borrow().iter().any(|l| l.contains("отметки о платформе нет") && l.contains("формат")), "{:?}", log.borrow());
+    }
+
+    #[test]
+    fn dump_format_reads_the_version_through_the_bom() {
+        let dir = std::env::temp_dir().join(format!("dev1c-flow-test-{:?}", std::thread::current().id()));
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("ConfigDumpInfo.xml"),
+            "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ConfigDumpInfo xmlns=\"http://v8.1c.ru/8.3/xcf/dumpinfo\" format=\"Hierarchical\" version=\"2.21\">\n",
+        )
+        .unwrap();
+        assert_eq!(dump_format(&dir).as_deref(), Some("2.21"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_dump_mark_round_trips() {
+        let dir = std::env::temp_dir().join(format!("dev1c-flow-test-mark-{:?}", std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_dump_mark(&dir, "8.5.1.1150", "2.21").unwrap();
+        assert_eq!(dump_mark(&dir), Some(("8.5.1.1150".to_string(), "2.21".to_string())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

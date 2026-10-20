@@ -31,6 +31,10 @@ const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 /// Значок меню «Ещё»: три линии (Lucide `menu`).
 const MENU_SVG: &[u8] = include_bytes!("../../icons/menu.svg");
 
+/// Значок кнопок выбора каталога: папка с уголком, в том же весе и тех же
+/// габаритах (4..20 по обеим осям), что `menu.svg` рядом.
+const FOLDER_SVG: &[u8] = include_bytes!("../../icons/folder.svg");
+
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
@@ -282,6 +286,14 @@ pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
 /// обоях она и отделяет окно от фона.
 pub fn window_radius() -> Option<Pixels> {
     if cfg!(windows) { Some(px(8.)) } else { None }
+}
+
+/// Подсказка кнопок выбора каталога. Подписи на кнопке нет — слово «Выбрать…»
+/// съедало половину строки пути (заказчик 2026-10-20), его место занял значок
+/// папки. Но без слова квадратную кнопку не опознать, поэтому оно остаётся
+/// подсказкой по наведению.
+pub fn pick_tooltip() -> &'static str {
+    "Выбрать…"
 }
 
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
@@ -652,10 +664,14 @@ impl Render for Panel {
                 cx.refresh_windows();
             }));
 
+        // Кнопка выбора — значок без подписи: такая кнопка сама становится
+        // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
+        // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
         let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
             Button::new(id)
                 .outline()
-                .label("Выбрать…")
+                .icon(Icon::default().data(FOLDER_SVG))
+                .tooltip(pick_tooltip())
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
         let f = &self.fields;
@@ -1035,8 +1051,8 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, window_radius,
-        HINT_PROJECT,
+        can_save, card, fields_differ, foot_left_text, pick_tooltip, project_rows, save_hint, shown_fields,
+        window_radius, HINT_PROJECT,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
@@ -1281,5 +1297,14 @@ mod tests {
         assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
         assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
+    }
+
+    #[test]
+    fn the_picker_button_has_no_label_and_keeps_its_tooltip() {
+        // Подписи на кнопке больше нет — её место занял значок папки, а
+        // ширина ушла полю ввода (заказчик 2026-10-20: путь `/home/dev3/base`
+        // занимал половину поля). Слово остаётся подсказкой по наведению: иначе
+        // назначение квадратной кнопки не угадать.
+        assert_eq!(pick_tooltip(), "Выбрать…");
     }
 }

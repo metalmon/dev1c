@@ -4,7 +4,8 @@ import unittest
 
 from scenario import Step, Target
 from targets import Rect, tray_area
-from placement import FOOT, HEAD, bubble_size, place, wrap_body
+from placement import (FOOT, HEAD, MAX_SCALE, bubble_size, logical, place, scaled,
+                       ui_scale, wrap_body)
 
 SCREEN = Rect(0, 0, 2560, 1440)
 
@@ -280,6 +281,42 @@ class ArrowShapeTests(unittest.TestCase):
         # Остриё — на грани цели, а не в стороне от неё.
         self.assertTrue(icon.x <= layout.arrow_end[0] <= icon.x + icon.w)
         self.assertTrue(icon.y <= layout.arrow_end[1] <= icon.y + icon.h)
+
+
+
+class ScaleTests(unittest.TestCase):
+    """Выноска должна занимать одну и ту же долю экрана на любом из них.
+
+    На сеансе xrdp в 2560x1440 (стенд, 20.10.2026) выноска в 640px
+    занимала четверть ширины вместо половины, текст в 14px читался как
+    мелкий, а стрелка в 72px — как царапина.
+    """
+
+    def test_reference_screen_is_not_scaled(self):
+        self.assertEqual(ui_scale(Rect(0, 0, 1280, 800)), 1.0)
+
+    def test_small_screen_is_not_shrunk(self):
+        # Уменьшать некуда: там выноска и так занимает почти всю высоту.
+        self.assertEqual(ui_scale(Rect(0, 0, 1024, 600)), 1.0)
+
+    def test_big_screen_is_scaled_up(self):
+        self.assertAlmostEqual(ui_scale(Rect(0, 0, 2560, 1440)), 1.8)
+
+    def test_scale_has_a_ceiling(self):
+        self.assertEqual(ui_scale(Rect(0, 0, 7680, 4320)), MAX_SCALE)
+
+    def test_bubble_keeps_its_share_of_the_screen(self):
+        step = Step(2, 'Заголовок', 'Одна строка текста.', _TARGET, ('Дальше',), 'button', ())
+        shares = []
+        for screen in (Rect(0, 0, 1280, 800), Rect(0, 0, 2560, 1440)):
+            scale = ui_scale(screen)
+            layout = place(logical(screen, scale), None, bubble_size(step))
+            shares.append(scaled(layout.bubble, scale).w / screen.w)
+        # Не «ровно столько же»: масштаб считается по высоте, а экраны
+        # разной пропорции (1.6 против 1.78), поэтому доля ширины чуть
+        # другая. Важно, что она не обвалилась вдвое, как было до правки
+        # (640 из 2560 — четверть вместо половины).
+        self.assertGreaterEqual(shares[1], shares[0] * 0.8)
 
 
 

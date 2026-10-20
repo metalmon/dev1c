@@ -8,6 +8,7 @@
 # меньше нарисованного и фигура снова обрезает текст (фикс-раунд 2:
 # ровно так и было — тело шага 1 было одной длинной строкой без переноса,
 # рисовалось за правый край пузыря и обрезалось маской формы).
+import math
 import textwrap
 from collections import namedtuple
 
@@ -55,6 +56,35 @@ BODY_CHARS_PER_LINE = 70
 # оставалось 10px шафта при наконечнике в 14 — на экране это выглядело
 # чёрточкой, приклеенной к значку (замечание со стенда 20.10.2026).
 TARGET_STANDOFF = 72
+
+
+# Экран, под который посчитаны все числа выше. Выноска на 2560x1440
+# должна занимать ту же долю экрана, что и на 1280x800, иначе на большом
+# мониторе она выглядит коробочкой в углу, а стрелка — царапиной
+# (замечание со стенда 20.10.2026, сеанс xrdp в 2560x1440).
+REFERENCE_HEIGHT = 800
+MAX_SCALE = 3.0
+
+
+def ui_scale(screen: Rect) -> float:
+    """Во сколько раз рисовать крупнее эталонного экрана.
+
+    Меньше единицы не бывает: на низком экране уменьшать текст некуда,
+    там выноска и так занимает почти всю высоту. Сверху — предел, чтобы
+    на нестандартно высоком мониторе выноска не раздулась во весь экран.
+    """
+    return max(1.0, min(screen.h / REFERENCE_HEIGHT, MAX_SCALE))
+
+
+def logical(screen: Rect, scale: float) -> Rect:
+    """Экран в логических единицах — в них считается всё размещение."""
+    return Rect(int(screen.x / scale), int(screen.y / scale),
+                int(screen.w / scale), int(screen.h / scale))
+
+
+def scaled(rect: Rect, scale: float) -> Rect:
+    return Rect(int(round(rect.x * scale)), int(round(rect.y * scale)),
+                int(round(rect.w * scale)), int(round(rect.h * scale)))
 
 
 def wrap_body(body: str, chars_per_line: int = BODY_CHARS_PER_LINE) -> list[str]:
@@ -114,18 +144,32 @@ def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect,
     # margin, что и у экрана вообще (сам экран не трогаем, трогаем
     # только x этих двух кандидатов).
     #
-    # «Справа»/«слева» не сдвигаются по y: если по вертикали места не
-    # хватило, сторона, скорее всего, в принципе не годится (цель
-    # слишком близко к верхнему/нижнему краю) — следующий кандидат или
-    # честный _fallback лучше, чем пузырь, уехавший от цели далеко по
-    # вертикали только ради формального «не пересекается».
-    cx = target.x + target.w // 2 - bw // 2
-    cy = target.y + target.h // 2 - bh // 2
-    yield Rect(target.x + target.w + standoff, cy, bw, bh)
-    yield Rect(target.x - standoff - bw, cy, bw, bh)
+    # «Справа»/«слева» сдвигаются по y ровно так же. Раньше не
+    # сдвигались — довод был, что уехавший по вертикали пузырь хуже
+    # следующего кандидата. На большом экране довод не выдержал: значки
+    # стола жмутся к верхнему краю, центрированный на них пузырь
+    # вылезает за верх, боковой кандидат отбрасывается, и шаг 3 получал
+    # выноску снизу с диагональной стрелкой вверх-влево. Сдвиг вдоль
+    # края даёт выноску сбоку и горизонтальную стрелку — то, что на
+    # макете (замечание со стенда 20.10.2026, сеанс 2560x1440).
+    tcx = target.x + target.w // 2
+    tcy = target.y + target.h // 2
+    cx = tcx - bw // 2
+    cy = tcy - bh // 2
+
+    # Сдвиг вдоль края ограничен тем, что цель обязана остаться
+    # напротив выноски: иначе «сбоку» и «снизу» перестают быть правдой,
+    # стрелка уходит вкось, а сам выбор стороны теряет смысл. Для трея
+    # в правом нижнем углу это и отсекает боковых кандидатов — выноске
+    # там место над ним, как на утверждённом макете.
+    side_y = min(max(cy, screen.y + margin), screen.y + screen.h - bh - margin)
+    if side_y <= tcy <= side_y + bh:
+        yield Rect(target.x + target.w + standoff, side_y, bw, bh)
+        yield Rect(target.x - standoff - bw, side_y, bw, bh)
     below_above_x = min(max(cx, screen.x + margin), screen.x + screen.w - bw - margin)
-    yield Rect(below_above_x, target.y + target.h + standoff, bw, bh)
-    yield Rect(below_above_x, target.y - standoff - bh, bw, bh)
+    if below_above_x <= tcx <= below_above_x + bw:
+        yield Rect(below_above_x, target.y + target.h + standoff, bw, bh)
+        yield Rect(below_above_x, target.y - standoff - bh, bw, bh)
 
 
 def _fallback(screen: Rect, target: Rect, bw: int, bh: int, margin: int) -> Rect:
@@ -152,6 +196,11 @@ def _edge_point(rect: Rect, towards: tuple) -> tuple:
     scale = min((rect.w / 2) / abs(dx) if dx else float('inf'),
                 (rect.h / 2) / abs(dy) if dy else float('inf'))
     return (int(round(cx + dx * scale)), int(round(cy + dy * scale)))
+
+
+def _arrow_length(bubble: Rect, target: Rect) -> float:
+    (sx, sy), (ex, ey) = _arrow(bubble, target)
+    return math.hypot(ex - sx, ey - sy)
 
 
 def _arrow(bubble: Rect, target: Rect):
@@ -183,10 +232,19 @@ def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margi
         centre = (bubble.x + bubble.w // 2, bubble.y + bubble.h // 2)
         return Layout(bubble, centre, centre)
 
-    for candidate in _candidates(target, bw, bh, margin, screen):
-        if _fits_screen(candidate, screen) and not _overlaps(candidate, target):
-            bubble = candidate
-            break
+    # Из всех подходящих кандидатов берётся тот, у кого стрелка короче.
+    # Раньше брался первый подошедший по жёсткому порядку «справа,
+    # слева, снизу, сверху», и порядок приходилось чинить под каждый
+    # новый случай: сперва под трей в углу, потом под значки стола,
+    # прижатые к верхнему краю большого экрана, — причём вторая правка
+    # ломала первую. Длина стрелки выражает то, ради чего порядок и
+    # писался: выноска должна стоять как можно ближе к тому, о чём
+    # говорит. Равные длины разрешаются прежним порядком — min
+    # устойчив.
+    fitting = [c for c in _candidates(target, bw, bh, margin, screen)
+               if _fits_screen(c, screen) and not _overlaps(c, target)]
+    if fitting:
+        bubble = min(fitting, key=lambda c: _arrow_length(c, target))
     else:
         bubble = _fallback(screen, target, bw, bh, margin)
 

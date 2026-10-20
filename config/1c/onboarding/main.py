@@ -16,7 +16,7 @@ from gi.repository import Gdk, GLib, Gtk
 
 import scenario
 from callout import Callout
-from placement import bubble_size, place
+from placement import bubble_size, logical, place, scaled, ui_scale
 from steps import Machine
 from world import World
 
@@ -219,14 +219,20 @@ class App:
             return
         display_step = step if self._warning is None else step._replace(body=step.body + '\n\n' + self._warning)
         target = self._machine.visible_target()
-        layout = place(self._world.screen(), target, bubble_size(display_step))
+        # Размещение считается в логических единицах: экран делится на
+        # масштаб, цель — тоже, иначе на 2560x1440 выноска оказалась бы
+        # вчетверо мельче, чем задумано, а стрелка — царапиной.
+        screen = self._world.screen()
+        scale = ui_scale(screen)
+        target_logical = None if target is None else scaled(target, 1 / scale)
+        layout = place(logical(screen, scale), target_logical, bubble_size(display_step))
         if not force and step is self._step and layout == self._layout and self._warning == self._shown_warning:
             return  # ничего не изменилось с прошлого тика — не мигаем окном
         self._step, self._layout, self._shown_warning = step, layout, self._warning
         if self._callout is not None:
             self._callout.destroy()
         self._callout = Callout(display_step, layout, self._on_button, copy_question,
-                                total=self._machine.total)
+                                total=self._machine.total, scale=scale)
         self._callout.show()
 
 

@@ -76,8 +76,17 @@ def _window_rect(layout):
 class Callout:
     """Выноска: один POPUP-попап, вырезанный по контуру своего рисунка."""
 
-    def __init__(self, step, layout, on_button, copy_question=None, total=None):
+    def __init__(self, step, layout, on_button, copy_question=None, total=None, scale=1.0):
         self._step = step
+        # Все числа рисования заданы в логических пикселях, посчитанных
+        # под экран примерно 1280x800. На 2560x1440 выноска занимала бы
+        # вчетверо меньшую долю экрана, а текст в 14px и стрелка в 72px
+        # читались бы как царапины — ровно это и увидел заказчик на
+        # своём сеансе 20.10.2026. Поэтому вся геометрия считается в
+        # логических единицах, а экранные координаты получаются
+        # умножением на scale; рисование делает то же самое одним
+        # cr.scale, не трогая ни одной константы.
+        self._scale = scale
         # Сколько всего шагов — приходит из сценария (Machine.total), а
         # не зашито в рисование: иначе добавленный шаг молча оставляет
         # в подписи старое число. None (тесты, которым счётчик не важен) —
@@ -97,9 +106,10 @@ class Callout:
         self._copied_question = None
 
         window_rect = _window_rect(layout)
-        self._origin = (window_rect.x, window_rect.y)
-        self._width = window_rect.w
-        self._height = window_rect.h
+        self._origin = (int(window_rect.x * scale), int(window_rect.y * scale))
+        self._logical_origin = (window_rect.x, window_rect.y)
+        self._width = int(round(window_rect.w * scale))
+        self._height = int(round(window_rect.h * scale))
 
         self.window = Gtk.Window(type=Gtk.WindowType.POPUP)
         self.window.set_app_paintable(True)
@@ -131,6 +141,7 @@ class Callout:
     # -- рисование -----------------------------------------------------
 
     def _on_draw(self, _widget, cr):
+        cr.scale(self._scale, self._scale)
         self._draw(cr)
         return False
 
@@ -140,11 +151,14 @@ class Callout:
         # (куда реагирует мышь) — только прямоугольник пузыря, тем же
         # способом через заливку.
         shape_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self._width, self._height)
-        self._draw(cairo.Context(shape_surface))
+        shape_cr = cairo.Context(shape_surface)
+        shape_cr.scale(self._scale, self._scale)
+        self._draw(shape_cr)
         self.window.shape_combine_region(Gdk.cairo_region_create_from_surface(shape_surface))
 
         input_surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self._width, self._height)
         icr = cairo.Context(input_surface)
+        icr.scale(self._scale, self._scale)
         bx, by = self._local(self._layout.bubble.x, self._layout.bubble.y)
         icr.rectangle(bx, by, self._layout.bubble.w, self._layout.bubble.h)
         icr.set_source_rgba(0, 0, 0, 1)
@@ -152,7 +166,7 @@ class Callout:
         self.window.input_shape_combine_region(Gdk.cairo_region_create_from_surface(input_surface))
 
     def _local(self, x, y):
-        ox, oy = self._origin
+        ox, oy = self._logical_origin
         return x - ox, y - oy
 
     def _draw(self, cr):
@@ -334,15 +348,19 @@ class Callout:
     # -- ввод ------------------------------------------------------------
 
     def _on_click(self, _widget, event):
-        if self._hit(self._close_rect, event.x, event.y):
+        # Прямоугольники кнопок посчитаны в логических единицах, а
+        # событие приходит в экранных — делим, иначе на масштабе больше
+        # единицы попадать в кнопки пришлось бы мимо них.
+        ex, ey = event.x / self._scale, event.y / self._scale
+        if self._hit(self._close_rect, ex, ey):
             self._on_button('close')
             return True
         for text, rect in self._question_rects:
-            if self._hit(rect, event.x, event.y):
+            if self._hit(rect, ex, ey):
                 self._copy_clicked_question(text)
                 return True
         for label, rect in self._button_rects:
-            if self._hit(rect, event.x, event.y):
+            if self._hit(rect, ex, ey):
                 self._on_button(label)
                 return True
         return False

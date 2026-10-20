@@ -55,6 +55,22 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(steps[4].target.anchor, 'right-bottom')
         self.assertEqual(steps[5].target.kind, 'tray')
 
+    def test_wait_for_separates_advance_condition_from_arrow_target(self):
+        # Шаги 2 и 3 показывают на значок запуска (он на столе всегда),
+        # но ждать обязаны не его — окно 1С/Zed, которое появляется по
+        # факту (раздел «Ограничения» спецификации: «шаг закрывается сам,
+        # когда окно 1С появилось»). У остальных шагов wait_for не задан —
+        # Machine сама падает обратно на target (см. tests.test_steps).
+        steps = load(SCENARIO)
+        self.assertIsNone(steps[0].wait_for)
+        self.assertEqual(steps[1].wait_for.kind, 'window')
+        self.assertEqual(steps[1].wait_for.name_pattern, 'Управление нашей фирмой')
+        self.assertEqual(steps[2].wait_for.kind, 'window')
+        self.assertEqual(steps[2].wait_for.name_pattern, 'Zed')
+        self.assertIsNone(steps[3].wait_for)
+        self.assertIsNone(steps[4].wait_for)
+        self.assertIsNone(steps[5].wait_for)
+
     def test_advance_on(self):
         steps = load(SCENARIO)
         self.assertEqual([s.advance_on for s in steps], [

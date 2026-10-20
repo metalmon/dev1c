@@ -22,11 +22,11 @@ class Machine:
     def current(self):
         return None if self.done else self._steps[self._index]
 
-    def _target_rect(self):
-        """Цель текущего шага на экране прямо сейчас, или None, если её
-        там нет (ещё не появилось окно/значок). Про перекрытие другим
-        окном ничего не знает — этим занимается visible_target."""
-        target = self.current.target
+    def _rect_for(self, target):
+        """Прямоугольник на экране для данного Target прямо сейчас, или
+        None, если его там нет. Общий поиск для цели стрелки (target) и
+        условия перехода (wait_for) — разные Target, один и тот же способ
+        их проверить."""
         if target.kind == 'none':
             return None
         if target.kind == 'desktop_icon':
@@ -36,6 +36,21 @@ class Machine:
         if target.kind == 'tray':
             return tray_area(self._world.screen())
         raise ValueError(f'неизвестный тип цели: {target.kind!r}')
+
+    def _target_rect(self):
+        """Цель текущего шага на экране прямо сейчас, или None, если её
+        там нет (ещё не появилось окно/значок). Про перекрытие другим
+        окном ничего не знает — этим занимается visible_target."""
+        return self._rect_for(self.current.target)
+
+    def _wait_rect(self):
+        """Условие перехода текущего шага: wait_for, если шаг его задал,
+        иначе тот же target (так вело себя tick() до разделения этих
+        двух понятий). Цель стрелки (target) значка может стоять на
+        экране всегда — ждать переход обязан не её, а wait_for (окно,
+        которое правда появляется только по факту)."""
+        step = self.current
+        return self._rect_for(step.wait_for or step.target)
 
     def visible_target(self) -> 'Rect | None':
         """Куда рисовать стрелку. None, если цели нет вовсе (kind='none'),
@@ -53,12 +68,13 @@ class Machine:
 
     def tick(self):
         """Вызывается по таймеру. Двигает шаг вперёд, если его
-        advance_on == 'target' и цель уже появилась на экране (закрыта
-        она другим окном или нет — неважно, это только для стрелки)."""
+        advance_on == 'target' и условие перехода (wait_for, а если шаг
+        его не задал — target) уже выполнено (закрыто оно другим окном
+        или нет — неважно, перекрытие важно только для стрелки)."""
         if self.done:
             return
         step = self.current
-        if step.advance_on == 'target' and self._target_rect() is not None:
+        if step.advance_on == 'target' and self._wait_rect() is not None:
             self._advance()
 
     def press(self, button: str):

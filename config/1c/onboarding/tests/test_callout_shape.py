@@ -66,8 +66,17 @@ def grab(display):
     return _Shot(_SHOT_PATH)
 
 
-def _step(body='Текст тела.', buttons=('Дальше',)):
-    return Step(1, 'Заголовок', body, _TARGET, buttons, 'button', ())
+def _step(body='Текст тела.', buttons=('Дальше',), questions=()):
+    return Step(1, 'Заголовок', body, _TARGET, buttons, 'button', questions)
+
+
+class _FakeEvent:
+    """Хватает _on_click: ей нужны только x и y в локальных координатах
+    окна — тех же, что несут _question_rects/_button_rects/_close_rect."""
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
 
 
 class ShapeTests(unittest.TestCase):
@@ -123,6 +132,55 @@ class ShapeTests(unittest.TestCase):
                 return (ox + rect.x + 6, oy + rect.y + rect.h // 2)
             self.assertEqual(img.pixel(*sample_point(primary)), BUTTON_AMBER)
             self.assertEqual(img.pixel(*sample_point(secondary)), WHITE)
+        finally:
+            callout.hide()
+
+
+class QuestionTests(unittest.TestCase):
+    # Фикс-раунд 1, задача 6: шаг 4 без этого показывает три вопроса, на
+    # которые нельзя нажать. Клик должен и вызвать copy_question, и
+    # заметно пометить именно ту строку — без этого человек не узнает,
+    # что клик вообще сработал.
+    def test_clicking_a_question_copies_it_and_marks_it(self):
+        text = 'Какая номенклатура есть в базе'
+        step = _step(questions=(text, 'Другой вопрос'))
+        layout = place(SCREEN, None, bubble_size(step))
+        copied = []
+        callout = Callout(step, layout, on_button=lambda _: None,
+                           copy_question=lambda q: copied.append(q) or True)
+        try:
+            callout.show()
+            pump_gtk(0.5)
+            self.assertEqual([t for t, _ in callout._question_rects], [text, 'Другой вопрос'])
+            clicked_text, rect = callout._question_rects[0]
+            # Точка внутри заливки строки, левее текста (который начинается
+            # на +8 от rect.x) — та же логика отступа, что у теста кнопок
+            # ниже: подложку, а не чернила текста или тонкую 1px-рамку.
+            sample = (callout._origin[0] + rect.x + 3, callout._origin[1] + rect.y + rect.h // 2)
+            img_before = grab(DISPLAY)
+            self.assertEqual(img_before.pixel(*sample), (0xF2, 0xF1, 0xEC))  # _QUESTION_BG
+
+            callout._on_click(None, _FakeEvent(rect.x + 10, rect.y + rect.h // 2))
+
+            self.assertEqual(copied, [text])
+            self.assertEqual(clicked_text, text)
+            self.assertEqual(callout._copied_question, text)
+            pump_gtk(0.5)
+            img_after = grab(DISPLAY)
+            # Подложка строки сменилась на янтарный оттенок — заметная
+            # отметка, что клик сработал, а не осталась прежней бледной.
+            self.assertEqual(img_after.pixel(*sample), (0xF7, 0xE8, 0xB8))  # _QUESTION_BG_COPIED
+        finally:
+            callout.hide()
+
+    def test_bubble_without_questions_draws_no_rows(self):
+        step = _step()  # questions=() по умолчанию
+        layout = place(SCREEN, None, bubble_size(step))
+        callout = Callout(step, layout, on_button=lambda _: None)
+        try:
+            callout.show()
+            pump_gtk(0.5)
+            self.assertEqual(callout._question_rects, ())
         finally:
             callout.hide()
 

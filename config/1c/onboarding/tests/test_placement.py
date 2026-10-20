@@ -104,6 +104,27 @@ class BubbleSizeTests(unittest.TestCase):
         w, h = bubble_size(self._step('Строка.'), width=480)
         self.assertEqual(w, 480)
 
+    def test_questions_grow_the_bubble(self):
+        # Шаг 4: три готовых вопроса — каждый своей строкой внутри пузыря,
+        # не просто текстом тела. Без этого bubble_size возвращает место
+        # только под body, а callout рисует вопросы за пределами фигуры.
+        no_questions = Step(1, 'Заголовок', 'Текст.', _TARGET, ('Дальше',), 'button', ())
+        with_questions = Step(1, 'Заголовок', 'Текст.', _TARGET, ('Дальше',), 'button',
+                               ('Вопрос один', 'Вопрос два', 'Вопрос три'))
+        h_plain = bubble_size(no_questions)[1]
+        h_with_questions = bubble_size(with_questions)[1]
+        self.assertGreater(h_with_questions, h_plain)
+
+    def test_each_question_adds_the_same_height(self):
+        one = Step(1, 'Заголовок', 'Текст.', _TARGET, ('Дальше',), 'button', ('Вопрос один',))
+        two = Step(1, 'Заголовок', 'Текст.', _TARGET, ('Дальше',), 'button', ('Вопрос один', 'Вопрос два'))
+        h_one = bubble_size(one)[1]
+        h_two = bubble_size(two)[1]
+        three = Step(1, 'Заголовок', 'Текст.', _TARGET, ('Дальше',), 'button',
+                     ('Вопрос один', 'Вопрос два', 'Вопрос три'))
+        h_three = bubble_size(three)[1]
+        self.assertEqual(h_two - h_one, h_three - h_two)
+
 
 if __name__ == '__main__':
     unittest.main()

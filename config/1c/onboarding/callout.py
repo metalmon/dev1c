@@ -36,6 +36,13 @@ BUTTON_GAP = 10
 ARROW_WIDTH = 6
 ARROW_HEAD = 14
 
+# Те же числа, что placement.bubble_size считает по умолчанию для готовых
+# вопросов (фикс-раунд 1, задача 6) — чтобы строки вопросов укладывались в
+# прямоугольник, который был посчитан под них.
+QUESTIONS_CAPTION_HEIGHT = 20
+QUESTION_ROW_HEIGHT = 32
+QUESTION_GAP = 8
+
 # Палитра из утверждённых макетов.
 _WHITE = (1, 1, 1)
 _BORDER = (0x1B / 255, 0x1B / 255, 0x1B / 255)
@@ -43,6 +50,13 @@ _COUNTER = (0x8A / 255, 0x6D / 255, 0x00 / 255)
 _BUTTON = (0xE6 / 255, 0xB8 / 255, 0x00 / 255)
 _SECONDARY_BORDER = (0x88 / 255, 0x88 / 255, 0x88 / 255)
 _SHADOW = (0x4D / 255, 0x4D / 255, 0x4D / 255)
+# Бледная подложка строки вопроса — макеты рисуют вопросы рамкой на
+# бледном фоне, не белым, как сам пузырь (иначе их не отличить от тела).
+_QUESTION_BG = (0xF2 / 255, 0xF1 / 255, 0xEC / 255)
+# Пометка «скопировано» — мягкий янтарный оттенок той же подложки, не
+# просто смена рамки: тонкую границу легко не заметить, а заливку видно
+# сразу (и пиксель её можно проверить тестом надёжно, рамку в 1px — нет).
+_QUESTION_BG_COPIED = (0xF7 / 255, 0xE8 / 255, 0xB8 / 255)
 
 
 def _content_rect(layout):
@@ -63,12 +77,20 @@ def _window_rect(layout):
 class Callout:
     """Выноска: один POPUP-попап, вырезанный по контуру своего рисунка."""
 
-    def __init__(self, step, layout, on_button):
+    def __init__(self, step, layout, on_button, copy_question=None):
         self._step = step
         self._layout = layout
         self._on_button = on_button
+        # Готовые вопросы шага 4 копируются в буфер сами, без похода через
+        # Machine — клик на вопрос не двигает шаг и не трогает on_button.
+        # copy_question — та же функция, что main.py уже тестирует отдельно
+        # (tests.test_clipboard); опциональна, чтобы задачи 4/5 и старые
+        # тесты, которым вопросы не нужны, не должны были её передавать.
+        self._copy_question = copy_question
         self._close_rect = None
         self._button_rects = ()
+        self._question_rects = ()
+        self._copied_question = None
 
         window_rect = _window_rect(layout)
         self._origin = (window_rect.x, window_rect.y)
@@ -147,6 +169,7 @@ class Callout:
         self._draw_counter(cr, bx, by, step)
         self._draw_title(cr, bx, by, step)
         self._draw_body(cr, bx, by, step)
+        self._question_rects = self._draw_questions(cr, bx, by, bw, step)
         self._close_rect = self._draw_close(cr, bx, by, bw)
         self._button_rects = self._draw_buttons(cr, bx, by, bw, bh, step.buttons)
 
@@ -193,6 +216,52 @@ class Callout:
         for i, line in enumerate(step.body.splitlines()):
             cr.move_to(x + 16, y + HEAD + (i + 1) * LINE_HEIGHT - 6)
             cr.show_text(line)
+
+    def _draw_questions(self, cr, x, y, w, step):
+        """Готовые вопросы шага 4 — строкой-коробкой каждый, на бледной
+        подложке, под телом и над кнопками (bubble_size уже выделил им
+        место — см. placement.py). Подпись-пояснение рисуется только
+        тогда, когда вопросы вообще есть: это не текст сценария, а общая
+        подсказка механики клика, одна и та же для любого шага."""
+        if not step.questions:
+            return ()
+
+        row_y = y + HEAD + len(step.body.splitlines()) * LINE_HEIGHT
+        row_w = w - 32
+
+        cr.set_source_rgb(*_SECONDARY_BORDER)
+        cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(12)
+        cr.move_to(x + 16, row_y + QUESTIONS_CAPTION_HEIGHT - 6)
+        cr.show_text('Нажмите на вопрос — он скопируется в буфер обмена')
+        row_y += QUESTIONS_CAPTION_HEIGHT
+
+        rects = []
+        for text in step.questions:
+            copied = text == self._copied_question
+
+            cr.set_source_rgb(*(_QUESTION_BG_COPIED if copied else _QUESTION_BG))
+            cr.rectangle(x + 16, row_y, row_w, QUESTION_ROW_HEIGHT)
+            cr.fill()
+            cr.set_source_rgb(*(_BUTTON if copied else _SECONDARY_BORDER))
+            cr.set_line_width(2 if copied else 1)
+            cr.rectangle(x + 16, row_y, row_w, QUESTION_ROW_HEIGHT)
+            cr.stroke()
+
+            cr.set_source_rgb(*_BORDER)
+            cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+            cr.set_font_size(13)
+            cr.move_to(x + 24, row_y + QUESTION_ROW_HEIGHT // 2 + 5)
+            cr.show_text(text)
+            if copied:
+                # Отметка, что клик сработал — рядом с текстом, тем же
+                # цветом, что счётчик шага, а не ещё одним новым оттенком.
+                cr.set_source_rgb(*_COUNTER)
+                cr.show_text('   ✓ скопировано')
+
+            rects.append((text, Rect(int(x + 16), int(row_y), int(row_w), QUESTION_ROW_HEIGHT)))
+            row_y += QUESTION_ROW_HEIGHT + QUESTION_GAP
+        return rects
 
     def _draw_close(self, cr, x, y, w):
         r = Rect(x + w - CLOSE_MARGIN - CLOSE_SIZE, y + CLOSE_MARGIN, CLOSE_SIZE, CLOSE_SIZE)
@@ -245,11 +314,25 @@ class Callout:
         if self._hit(self._close_rect, event.x, event.y):
             self._on_button('close')
             return True
+        for text, rect in self._question_rects:
+            if self._hit(rect, event.x, event.y):
+                self._copy_clicked_question(text)
+                return True
         for label, rect in self._button_rects:
             if self._hit(rect, event.x, event.y):
                 self._on_button(label)
                 return True
         return False
+
+    def _copy_clicked_question(self, text):
+        # Не идёт через on_button/Machine: копирование в буфер не двигает
+        # шаг и не закрывает выноску — только помечает строку и просит
+        # перерисоваться (без пересборки формы окна: размер фигуры не
+        # меняется, меняется только то, что внутри неё нарисовано).
+        if self._copy_question is not None:
+            self._copy_question(text)
+        self._copied_question = text
+        self.window.queue_draw()
 
     def _on_key(self, _widget, event):
         # Окно не принимает фокус, поэтому до этого обработчика клавиша

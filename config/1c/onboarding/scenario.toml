@@ -34,6 +34,11 @@ advance_on = "target"
 [step.target]
 kind = "desktop_icon"
 desktop_file = "1c-start.desktop"
+# Значок на столе уже при входе (кладёт seed) — ждать его появления
+# бессмысленно, шаг ушёл бы вперёд на первом тике. Ждём окно 1С.
+[step.wait_for]
+kind = "window"
+name_pattern = "Управление нашей фирмой"
 [step.actions]
 "Открыть 1С" = { action = "next", launch = ["1c-stand", "start1c"] }
 "Дальше" = "next"
@@ -54,6 +59,11 @@ advance_on = "target"
 [step.target]
 kind = "desktop_icon"
 desktop_file = "dev.zed.Zed.desktop"
+# Значок Zed на столе уже со сборки образа — тот же случай, что у шага 2.
+# Ждём окно Zed, а не значок его запуска.
+[step.wait_for]
+kind = "window"
+name_pattern = "Zed"
 [step.actions]
 "Закрыть 1С и открыть редактор" = { action = "next", launch = ["zed"] }
 "Дальше" = "next"

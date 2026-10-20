@@ -149,5 +149,56 @@ class MachineTests(unittest.TestCase):
         self.assertEqual(m.current.number, 1)
 
 
+class WaitForTests(unittest.TestCase):
+    # Баг, который нашла задача 6 на настоящем World: цель стрелки —
+    # значок запуска, который стоит на столе уже при входе; без отдельного
+    # условия перехода tick() уходил бы вперёд на первом же тике, не дав
+    # человеку даже прочитать шаг. wait_for — отдельный Target именно для
+    # этого условия, независимый от того, куда показывает стрелка.
+    def _step_with_wait_for(self):
+        return Step(
+            1, 'Шаг', '', Target('desktop_icon', '1c-start.desktop', None, 'whole'),
+            ('Дальше',), 'target', (), wait_for=Target('window', None, '1cv8', 'whole'))
+
+    def test_always_present_icon_does_not_advance_the_step(self):
+        # Значок есть с самого начала (как в реальности) — но окна 1С ещё нет.
+        world = FakeWorld(icons={'1c-start.desktop': ICON_RECT})
+        m = Machine([self._step_with_wait_for(),
+                     Step(2, 'Шаг 2', '', Target('none', None, None, 'whole'), ('Готово',), 'button', ())],
+                    world)
+        m.tick()
+        self.assertEqual(m.current.number, 1)      # окна 1cv8 нет — не ушли
+
+    def test_arrow_still_points_at_the_icon_while_waiting(self):
+        # target (стрелка) и wait_for (условие перехода) — независимы:
+        # стрелка остаётся на значке весь шаг, даже пока условие не готово.
+        world = FakeWorld(icons={'1c-start.desktop': ICON_RECT})
+        m = Machine([self._step_with_wait_for()], world)
+        self.assertEqual(m.visible_target(), ICON_RECT)
+
+    def test_advances_once_the_window_appears(self):
+        world = FakeWorld(icons={'1c-start.desktop': ICON_RECT})
+        m = Machine([self._step_with_wait_for(),
+                     Step(2, 'Шаг 2', '', Target('none', None, None, 'whole'), ('Готово',), 'button', ())],
+                    world)
+        m.tick()
+        self.assertEqual(m.current.number, 1)
+        world.windows = [WindowInfo('Конфигуратор 1cv8', '', WINDOW_RECT, 0)]
+        m.tick()
+        self.assertEqual(m.current.number, 2)       # окно появилось — ушли
+
+    def test_wait_for_defaults_to_target_when_not_set(self):
+        # Старое поведение (задачи 4/5, шаги без wait_for): tick() ждёт
+        # сам target, как и до разделения этих двух понятий.
+        world = FakeWorld()
+        m = Machine(_steps(), world)
+        m.press('next')                             # шаг 1 -> 2
+        m.tick()
+        self.assertEqual(m.current.number, 2)       # значка ещё нет — не ушли
+        world.icons = {'1c-start.desktop': ICON_RECT}
+        m.tick()
+        self.assertEqual(m.current.number, 3)        # target == wait_for по умолчанию
+
+
 if __name__ == '__main__':
     unittest.main()

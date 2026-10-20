@@ -10,10 +10,16 @@ from targets import Rect
 Layout = namedtuple('Layout', 'bubble arrow_start arrow_end')
 
 
-def bubble_size(step, width: int = 640, line_height: int = 21, head: int = 64, foot: int = 24) -> tuple[int, int]:
-    """Размер выноски по числу строк тела шага. Ширина — фиксированное число."""
+def bubble_size(step, width: int = 640, line_height: int = 21, head: int = 64, foot: int = 24,
+                 question_row: int = 32, question_gap: int = 8, questions_caption: int = 20) -> tuple[int, int]:
+    """Размер выноски по числу строк тела шага плюс, если они есть у
+    шага, готовые вопросы — каждый своей строкой-кнопкой, не частью
+    текста тела (фикс-раунд 1, задача 6: без этого места под вопросы
+    callout не считал, и строки рисовались за пределами фигуры)."""
     lines = step.body.splitlines()
     height = head + foot + len(lines) * line_height
+    if step.questions:
+        height += questions_caption + len(step.questions) * (question_row + question_gap)
     return (width, height)
 
 

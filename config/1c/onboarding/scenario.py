@@ -18,8 +18,15 @@ _ADVANCE_ON_KINDS = ('button', 'target')
 # приходит из callout.py напрямую, мимо этой карты.
 # actions по умолчанию {} — так старые вызовы Step(...) без него (задачи
 # 4 и 5, фейковые шаги в тестах машины и выноски) не ломаются.
-Step = namedtuple('Step', 'number title body target buttons advance_on questions actions',
-                   defaults=({},))
+#
+# wait_for — условие перехода для advance_on='target', отдельно от target
+# (куда рисовать стрелку). Это разные вещи: цель шага 2 — значок запуска
+# 1С, он на столе уже при входе, а ждать шаг обязан не значок (он виден
+# всегда), а окно 1С. По умолчанию None — тогда Machine.tick() ждёт сам
+# target, как было до этого разделения (шаги 4/5 ждут то самое окно Zed,
+# на которое и показывают, им отдельного wait_for не нужно).
+Step = namedtuple('Step', 'number title body target buttons advance_on questions actions wait_for',
+                   defaults=({}, None))
 Target = namedtuple('Target', 'kind desktop_file name_pattern anchor')
 Action = namedtuple('Action', 'action launch')
 
@@ -50,10 +57,11 @@ def _load_step(raw: dict) -> Step:
     if raw['advance_on'] not in _ADVANCE_ON_KINDS:
         raise ValueError(f'шаг {number}: неизвестный advance_on {raw["advance_on"]!r}')
     target = _load_target(raw['target'], number)
+    wait_for = _load_target(raw['wait_for'], number) if 'wait_for' in raw else None
     questions = tuple(raw.get('questions', ()))
     actions = _load_actions(raw.get('actions', {}), raw['buttons'], number)
     return Step(raw['number'], raw['title'], raw['body'], target,
-                tuple(raw['buttons']), raw['advance_on'], questions, actions)
+                tuple(raw['buttons']), raw['advance_on'], questions, actions, wait_for)
 
 
 def _load_target(raw: dict, step_number) -> Target:

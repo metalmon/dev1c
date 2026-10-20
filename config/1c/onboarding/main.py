@@ -122,7 +122,7 @@ class App:
         self._step, self._layout = step, layout
         if self._callout is not None:
             self._callout.hide()
-        self._callout = Callout(step, layout, self._on_button)
+        self._callout = Callout(step, layout, self._on_button, copy_question)
         self._callout.show()
 
 

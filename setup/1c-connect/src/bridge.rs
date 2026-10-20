@@ -59,7 +59,13 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     c.env("VRUNNER_DBPWD", &cfg.host.db_password);
     c.env("NO_PROXY", cfg.host.server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.host.server));
     c.env("GIT_TERMINAL_PROMPT", "0");
-    c
+    // Экран Конфигуратору даёт коннектор, а не вызывающий: через эту команду
+    // идут `cf_decompile`/`cf_load`, а vanessa-runner поднимает ими
+    // Конфигуратор — оконную программу. Без экрана `1c-connect export` из
+    // командной строки падал с «Unable to initialize GTK+ or connect to the
+    // windowing system», код 255 (замер 2026-10-20 в контейнере). На Windows
+    // `with_display` возвращает команду как была.
+    crate::ops_host::with_display(c.into_std()).into()
 }
 
 use crate::jsonrpc::{self, Frame, Framer, Route};
@@ -1058,7 +1064,12 @@ mod tests {
         assert!(env["PATH"].starts_with(&format!("{bin}{}{git}", if cfg!(windows) { ';' } else { ':' })), "{}", env["PATH"]);
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        assert!(args[0].ends_with("mcp.os"), "{args:?}");
+        // На машине без `DISPLAY`, но с `xvfb-run`, команда обёрнута
+        // (`ops_host::with_display`): первыми идут `-a` и прежняя программа,
+        // `mcp.os` съезжает на третье место. Окружение и каталог обёртку
+        // переживают — это проверено выше, и ровно это здесь важно.
+        let at = if crate::ops_host::display_wrapper().is_some() { 2 } else { 0 };
+        assert!(args[at].ends_with("mcp.os"), "{args:?}");
     }
 
     #[test]

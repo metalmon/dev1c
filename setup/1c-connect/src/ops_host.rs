@@ -358,6 +358,85 @@ pub fn find_1cv8() -> Option<PathBuf> {
     pick_version(dedup_canonical(scan_1cv8()))
 }
 
+/// `xvfb-run` в `PATH`. Обходим каталоги сами, тем же приёмом, что
+/// `platform_from` выше (первый существующий путь) — ради одной программы
+/// крейт вокруг `which` не нужен.
+pub fn find_xvfb_run() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("xvfb-run")).find(|p| p.exists())
+}
+
+/// Задан ли экран в окружении.
+pub fn has_display() -> bool {
+    std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+}
+
+/// Нужен ли Конфигуратору экран и чем его дать: `None` — экран уже есть либо
+/// обернуть нечем; путь к `xvfb-run` — если нужен и он найден. Чистая
+/// функция, окружение и `PATH` ей называет вызывающий (`display_wrapper`).
+///
+/// Зачем вообще: на Linux выгрузка и загрузка идут через vanessa-runner, а он
+/// поднимает Конфигуратор — оконную программу. Без экрана он не стартует, и
+/// `1c-connect export` из командной строки падал с «Unable to initialize GTK+
+/// or connect to the windowing system. Is DISPLAY set properly?», код 255
+/// (замер 2026-10-20 в контейнере). Экран даёт коннектор сам — тем же
+/// способом, каким стенд уже обходит эту беду для своего `vrunner-mcp`
+/// (`config/1c/stand.sh`, `xvfb-run -a`). На Windows беды нет: там
+/// Конфигуратор рисует в сеансе пользователя.
+pub fn display_prefix(has_display: bool, xvfb: Option<&Path>) -> Option<PathBuf> {
+    if cfg!(windows) || has_display {
+        return None;
+    }
+    xvfb.map(Path::to_path_buf)
+}
+
+/// `display_prefix` на этой машине: сам спрашивает `DISPLAY` и `PATH`.
+pub fn display_wrapper() -> Option<PathBuf> {
+    display_prefix(has_display(), find_xvfb_run().as_deref())
+}
+
+/// Переписать команду в `xvfb-run -a <программа> <аргументы>`. Отдельно от
+/// `with_display`, чтобы порядок аргументов проверялся тестом на любой машине,
+/// а не только там, где `xvfb-run` есть.
+fn wrap_in_display(cmd: std::process::Command, xvfb: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new(xvfb);
+    c.arg("-a").arg(cmd.get_program()).args(cmd.get_args());
+    if let Some(d) = cmd.get_current_dir() {
+        c.current_dir(d);
+    }
+    // Перенос окружения: `get_envs` отдаёт и снятые переменные (`None`).
+    // Потоки (stdin/stdout/stderr) из `Command` не вычитываются вовсе — их
+    // вызывающие ставят уже после этой обёртки (`local::call`, `bridge`).
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
+    c
+}
+
+/// Дать Конфигуратору экран, если его нет: `xvfb-run -a <программа> …`.
+/// Экран — забота коннектора, а не вызывающего (см. `display_prefix`).
+pub fn with_display(cmd: std::process::Command) -> std::process::Command {
+    match display_wrapper() {
+        Some(x) => wrap_in_display(cmd, &x),
+        None => cmd,
+    }
+}
+
+/// То же для `docker::exec`, который берёт программу и аргументы строками, а
+/// не `Command`: отдаёт пару «программа, аргументы» уже с обёрткой.
+fn display_argv(program: &str, args: &[&str]) -> (String, Vec<String>) {
+    let tail = args.iter().map(|s| s.to_string());
+    match display_wrapper() {
+        Some(x) => (x.to_string_lossy().into_owned(), ["-a".to_string(), program.to_string()].into_iter().chain(tail).collect()),
+        None => (program.to_string(), tail.collect()),
+    }
+}
+
 /// Жёсткая ссылка на файл под новым именем; если том не позволяет ссылки
 /// (съёмный диск, другой раздел), копирует файл — не проваливает всю раскладку
 /// теневого каталога из-за одного файла. Старую ссылку/копию сперва убираем,
@@ -732,7 +811,10 @@ impl Op<Ctx> for Extension {
         ctx.progress(Phase::Install);
         let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
-        let o = docker::exec(ctx, &exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password])?;
+        // `mcp-1c --install` поднимает Конфигуратор — экран ему даём здесь же
+        // (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует.
+        let (prog, args) = display_argv(&exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password]);
+        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
         anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
@@ -763,7 +845,9 @@ impl Op<Ctx> for Extension {
         let n = format!("/N{}", h.db_user);
         let p = format!("/P{}", h.db_password);
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
-        let o = docker::exec(ctx, &v8.to_string_lossy(), &args)?;
+        // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
+        let (prog, args) = display_argv(&v8.to_string_lossy(), &args);
+        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
@@ -1164,6 +1248,70 @@ mod tests {
                 assert!(!p.starts_with(&kit.root), "{}", p.display());
                 assert!(p.starts_with(tools_dir()), "{}", p.display());
             }
+        }
+    }
+
+    /// Живой отказ, ради которого вся эта обвязка: в контейнере (замер
+    /// 2026-10-20) `1c-connect export` без `DISPLAY` падал с «Unable to
+    /// initialize GTK+ or connect to the windowing system» и кодом 255 —
+    /// vrunner поднимает Конфигуратор, а тот оконный. Экран уже есть —
+    /// обёртка не нужна, иначе она отрезала бы человека от своего же экрана.
+    #[test]
+    fn display_prefix_is_none_when_display_is_set() {
+        let x = PathBuf::from("/usr/bin/xvfb-run");
+        assert_eq!(display_prefix(true, Some(&x)), None);
+        assert_eq!(display_prefix(true, None), None);
+    }
+
+    #[test]
+    fn display_prefix_names_xvfb_when_display_is_missing() {
+        let x = PathBuf::from("/usr/bin/xvfb-run");
+        if !cfg!(windows) {
+            assert_eq!(display_prefix(false, Some(&x)), Some(x));
+        }
+        // Оборачивать нечем — зовём напрямую: пусть падает со своим текстом,
+        // а `display_fact` в проверке скажет, что поставить.
+        assert_eq!(display_prefix(false, None), None);
+    }
+
+    #[test]
+    fn display_prefix_is_none_on_windows() {
+        // На Windows Конфигуратор рисует в сеансе пользователя, никакого
+        // xvfb там нет: ни одна новая ветка не должна срабатывать.
+        let got = display_prefix(false, Some(Path::new(r"C:\tools\xvfb-run")));
+        if cfg!(windows) {
+            assert_eq!(got, None, "обёртки на Windows быть не должно");
+            assert!(find_xvfb_run().is_none(), "xvfb на Windows не ищем вовсе");
+        } else {
+            assert!(got.is_some(), "на Linux обёртка обязана найтись");
+        }
+    }
+
+    #[test]
+    fn with_display_keeps_program_and_args_in_order() {
+        let mut c = std::process::Command::new("oscript");
+        c.args(["mcp.os", "--once"]);
+        c.env("VRUNNER_DBUSER", "Администратор");
+        c.current_dir("/home/dev3/project");
+        let w = wrap_in_display(c, Path::new("/usr/bin/xvfb-run"));
+        assert_eq!(w.get_program(), "/usr/bin/xvfb-run");
+        let args: Vec<String> = w.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-a", "oscript", "mcp.os", "--once"]);
+        // Каталог и окружение переживают обёртку: без них vrunner не найдёт
+        // ни проект, ни базу.
+        assert_eq!(w.get_current_dir(), Some(Path::new("/home/dev3/project")));
+        let envs: Vec<(String, Option<String>)> =
+            w.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        assert!(envs.contains(&("VRUNNER_DBUSER".to_string(), Some("Администратор".to_string()))), "{envs:?}");
+
+        // Экран есть (или оборачивать нечем) — команда уходит как была.
+        let mut c = std::process::Command::new("oscript");
+        c.arg("mcp.os");
+        let w = with_display(c);
+        if display_wrapper().is_none() {
+            assert_eq!(w.get_program(), "oscript");
+            let args: Vec<String> = w.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(args, ["mcp.os"]);
         }
     }
 }

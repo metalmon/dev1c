@@ -12,6 +12,7 @@ use common::{Phase, Runner};
 // остальные расставляет `order`/`run` по режиму из `cfg.host.mode`.
 const PARAMS: &str = "параметры";
 const PLATFORM: &str = "платформа 1С";
+const DISPLAY: &str = "экран для конфигуратора";
 const KIT: &str = "mcp-1c в комплекте";
 const TOOLS: &str = "инструменты комплекта";
 const VRUNNER: &str = "vrunner-mcp отвечает";
@@ -30,7 +31,15 @@ const OPEN_SESSION: &str = "в базе открыт сеанс";
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
 /// готовность канала к агенту (`туннель`/`порты рабочего места`).
 pub fn order(mode: &str) -> Vec<&'static str> {
-    let mut v = vec![PARAMS, PLATFORM, KIT, TOOLS, VRUNNER, PROJECT, BASE, WEB, PUBLICATION, GITEA];
+    let mut v = vec![PARAMS, PLATFORM];
+    // Экран — сразу за платформой: без него Конфигуратор не стартует вовсе,
+    // и провалится всё, что ниже (vrunner, загрузка, расширение). Факт
+    // только на Linux: на Windows экран у Конфигуратора есть по устройству
+    // системы, и проверять нечего (см. `display_fact`).
+    if cfg!(unix) {
+        v.push(DISPLAY);
+    }
+    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, WEB, PUBLICATION, GITEA]);
     if mode == "local" {
         v.push(OPEN_SESSION);
         v.push(MEDIA);
@@ -48,6 +57,27 @@ pub fn gitea_fact(g: &Gitea) -> Check {
         Gitea::Down(e) => Check::fail(GITEA, format!("не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
         Gitea::NoOrg => Check::fail(GITEA, "отвечает, но организации dev1c в среде нет", "образ среды старый — dev1c-setup install с новым комплектом"),
         Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v}, организация dev1c есть")),
+    }
+}
+
+/// Linux: vanessa-runner поднимает Конфигуратор — оконную программу, и без
+/// экрана он не стартует («Unable to initialize GTK+ or connect to the
+/// windowing system», код 255 — замер 2026-10-20 в контейнере). Экран даёт
+/// коннектор сам: либо его уже дал сеанс (`DISPLAY`), либо `xvfb-run`
+/// (так же, как стенд делает это для своего `vrunner-mcp`). Провал — только
+/// когда нет ни того, ни другого; в остальных случаях человек видит, каким
+/// способом экран дан.
+pub fn display_fact(prefix_needed: bool, xvfb: Option<&std::path::Path>) -> Check {
+    if !prefix_needed {
+        return Check::pass(DISPLAY, "DISPLAY задан — Конфигуратор идёт в этот экран");
+    }
+    match xvfb {
+        Some(p) => Check::pass(DISPLAY, format!("DISPLAY не задан, экран даёт {} (виртуальный, никто в него не смотрит)", p.display())),
+        None => Check::fail(
+            DISPLAY,
+            "DISPLAY не задан и xvfb-run не найден",
+            "поставьте xvfb (apt install xvfb) — иначе Конфигуратор не стартует: «Unable to initialize GTK+ or connect to the windowing system»",
+        ),
     }
 }
 
@@ -214,6 +244,10 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         Some(p) => Check::pass(PLATFORM, p.display().to_string()),
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
     });
+    if cfg!(unix) {
+        let xvfb = crate::ops_host::find_xvfb_run();
+        v.push(display_fact(!crate::ops_host::has_display(), xvfb.as_deref()));
+    }
     let exe = mcp_exe(&ctx.kit);
     v.push(if exe.exists() {
         Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
@@ -297,14 +331,20 @@ mod tests {
 
     #[test]
     fn order_has_thirteen_facts_with_the_tunnel_or_ports_last() {
+        // На Linux сразу за платформой стоит «экран для конфигуратора» (его
+        // на Windows нет вовсе), и всё дальше сдвинуто на один факт.
+        let d = usize::from(cfg!(unix));
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 13);
-        assert_eq!(tunnel[12], "туннель");
-        assert_eq!(tunnel[4], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[9], "Gitea");
+        assert_eq!(tunnel.len(), 13 + d);
+        assert_eq!(tunnel[12 + d], "туннель");
+        assert_eq!(tunnel[4 + d], "vrunner-mcp отвечает");
+        assert_eq!(tunnel[9 + d], "Gitea");
+        if d == 1 {
+            assert_eq!(tunnel[2], "экран для конфигуратора");
+        }
         let local = order("local");
-        assert_eq!(local.len(), 13);
-        assert_eq!(local[12], "порты рабочего места");
+        assert_eq!(local.len(), 13 + d);
+        assert_eq!(local[12 + d], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -438,6 +478,21 @@ mod tests {
         let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
         assert_eq!(names, vec![TOOLS, WEB, PUBLICATION]);
         assert!(!checks[0].ok, "{:?}", checks[0]);
+    }
+
+    /// Провал — только когда дать экран нечем. Экран уже есть или есть
+    /// `xvfb-run` — оба случая в порядке, но человек должен видеть, каким
+    /// способом экран дан: это ровно то, что отличает прошедший `export` от
+    /// падения «Unable to initialize GTK+» (замер 2026-10-20).
+    #[test]
+    fn display_fact_fails_only_without_display_and_without_xvfb() {
+        let x = std::path::PathBuf::from("/usr/bin/xvfb-run");
+        let own = display_fact(false, None);
+        assert!(own.ok && !own.info && own.detail.contains("DISPLAY"), "{own:?}");
+        let wrapped = display_fact(true, Some(&x));
+        assert!(wrapped.ok && wrapped.detail.contains("xvfb-run"), "{wrapped:?}");
+        let nothing = display_fact(true, None);
+        assert!(!nothing.ok && nothing.hint.contains("xvfb"), "{nothing:?}");
     }
 
     #[test]

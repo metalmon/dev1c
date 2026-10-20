@@ -239,7 +239,11 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         v.push(configurator_fact(crate::bridge::configurator_count()));
     }
     let root = ctx.kit.root.display().to_string();
-    v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), root.get(..3).unwrap_or(&root)));
+    // Носитель называем так, как его понимает человек: на Windows это буква
+    // диска («C:\»), на Linux буквы нет — там показываем путь комплекта
+    // целиком, иначе в отчёт попадает огрызок вида «/op».
+    let media = if cfg!(windows) { root.get(..3).unwrap_or(&root) } else { root.as_str() };
+    v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), media));
     if local {
         let p = ctx.cfg.ports();
         let pid = std::process::id();

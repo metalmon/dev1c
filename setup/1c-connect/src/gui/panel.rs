@@ -259,14 +259,29 @@ pub const FOOT_LINES: usize = 2;
 
 /// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
 /// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
-/// настоящее сообщение (итог сохранения, ошибка) важнее подсказки, почему
-/// «Сохранить» недоступна, а та — важнее пути комплекта, который слот
-/// показывает, когда сказать больше нечего. Раскладка по двум строкам,
-/// обрезка третьей и подсказка по наведению — дело `render`, здесь только
-/// выбор источника.
-pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
+///
+/// 1. настоящее сообщение (итог сохранения, ошибка) — человек только что
+///    нажал и ждёт ответа;
+/// 2. причина текущего состояния (`reason`: отказ, замок, провал вердикта) —
+///    она про то, почему работа не идёт;
+/// 3. подсказка, почему «Сохранить» недоступна, — она про кнопку, и своя
+///    подсказка по наведению у кнопки есть и без слота;
+/// 4. путь комплекта — когда сказать больше нечего.
+///
+/// Пункты 2 и 3 стояли наоборот, и причина не показывалась почти никогда:
+/// «Параметры» — вкладка по умолчанию, поля на ней не тронуты, а `save_hint`
+/// на нетронутых полях всегда говорит «Нечего сохранять». Человек видел
+/// оранжевую точку, «Не всё готово» и «Нечего сохранять» рядом — и ничего
+/// о том, что именно не готово (находка S3 итогового ревью).
+///
+/// Раскладка по двум строкам, обрезка третьей и подсказка по наведению —
+/// дело `render`, здесь только выбор источника.
+pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
     if let Some(l) = status {
         return (l.text.clone(), matches!(l.kind, Kind::Fail));
+    }
+    if let Some(why) = reason {
+        return (why.to_string(), false);
     }
     if let Some(h) = hint {
         return (h.to_string(), false);
@@ -683,10 +698,9 @@ impl Render for Panel {
         let busy_now = busy.is_some();
         let dirty = self.is_dirty(cx);
         let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
-        // Причина — в левом слоте подвала, но после подсказки «Сохранить»:
-        // та про кнопку, на которую человек прямо сейчас нажимает.
-        let foot_hint = hint.clone().or_else(|| why.clone());
-        let foot_left = foot_left_text(ui.status.as_ref(), foot_hint.as_deref(), &ui.kit.root.display().to_string());
+        // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
+        // порядок держит сама `foot_left_text`, здесь только источники.
+        let foot_left = foot_left_text(ui.status.as_ref(), why.as_deref(), hint.as_deref(), &ui.kit.root.display().to_string());
         // Подсказка к итогу (путь отчёта проверки) — только пока слот занят
         // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
         // себя.
@@ -1567,15 +1581,30 @@ mod tests {
     fn the_footer_slot_picks_one_text_in_priority_order() {
         let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
         // Сказать нечего — путь комплекта, кнопка не красная.
-        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
+        assert_eq!(foot_left_text(None, None, None, path), (path.to_string(), false));
         // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
-        assert_eq!(foot_left_text(None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
+        assert_eq!(foot_left_text(None, None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
         // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
         // что слот уже занят объяснением (заказчик 2026-10-20).
         let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
-        assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
+        assert_eq!(foot_left_text(Some(&ok), None, Some("Нечего сохранять"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
+        assert_eq!(foot_left_text(Some(&err), None, Some("Нечего сохранять"), path), (err.text.clone(), true));
+    }
+
+    /// Причина важнее подсказки про сохранение: иначе её не видно почти
+    /// никогда — «Параметры» открыты по умолчанию, поля не тронуты, и слот
+    /// занят вечным «Нечего сохранять». Человек видел оранжевую точку и ни
+    /// слова о том, что не готово (находка S3 итогового ревью).
+    #[test]
+    fn the_reason_outranks_the_save_hint_in_the_footer() {
+        let path = "C:\\dev1c";
+        let why = "Не всё готово: проект: /home/dev3/project не разложен";
+        assert_eq!(foot_left_text(None, Some(why), Some("Нечего сохранять — поля ещё не менялись"), path), (why.to_string(), false));
+        // Но настоящий итог всё ещё сильнее причины: человек только что
+        // нажал и ждёт ответа именно на своё нажатие.
+        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
+        assert_eq!(foot_left_text(Some(&err), Some(why), None, path), (err.text.clone(), true));
     }
 
     /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки

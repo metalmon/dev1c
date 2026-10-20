@@ -44,6 +44,17 @@ pub enum TrayState {
     Warn,
 }
 
+/// Что значок показывает: бейдж, положение переключателя в меню, заперт ли
+/// пункт «Включить MCP» и подсказка. Собирается в `sync_tray` одним местом —
+/// и отдаётся значку, и кладётся в `Ui`, чтобы было чем сторожить проводку.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TrayView {
+    pub state: TrayState,
+    pub on: bool,
+    pub locked: bool,
+    pub tooltip: String,
+}
+
 /// Значок трея со статусом: кружок в правом нижнем углу — зелёный (подключён),
 /// жёлтый (занят), оранжевый (не всё готово) или серый (без связи); обесцвечен
 /// значок только без связи — занятость и провал вердикта тоже заметны цветным
@@ -172,6 +183,12 @@ pub struct Ui {
     /// пережила бы итог, к которому её написали.
     pub status_tip: Option<String>,
     pub tray: Option<tray::Tray>,
+    /// Что значок показывает прямо сейчас — последнее, что ему отдала
+    /// `sync_tray`. Нужно не значку (он помнит сам), а тесту: без этого
+    /// «дошло ли до трея» не отличить от «не дошло», и проводка остаётся
+    /// непокрытой (находки S1/S2 итогового ревью). `None` — `sync_tray` ещё
+    /// ни разу не звали.
+    pub tray_shown: Option<TrayView>,
     /// `gpui_kit::open_window` оборачивает панель в свой корневой вид,
     /// поэтому ручка окна — безтиповая (`downcast::<Panel>()` дал бы `None`),
     /// а до самой панели ведёт отдельная сущность рядом.
@@ -454,8 +471,13 @@ fn licence_line(state: crate::licence::State) -> Option<Line> {
 /// и на каждом тике: окно может простоять открытым через полночь срока, и
 /// тогда оно молча расходилось бы с мостом, который уже отказывает.
 fn note_licence_change(cx: &mut App) {
+    note_licence_change_ui(cx.global_mut::<Ui>());
+}
+
+/// То же без `cx`: смена срока — такое же событие, меняющее почву, как
+/// «Сохранить» или конец операции, и кончается тем же пересчётом.
+fn note_licence_change_ui(ui: &mut Ui) {
     let state = crate::licence::state_now();
-    let ui = cx.global_mut::<Ui>();
     if ui.licence == state {
         return;
     }
@@ -463,6 +485,12 @@ fn note_licence_change(cx: &mut App) {
     if let Some(line) = licence_line(state) {
         note_line(ui, line);
     }
+    // Строки мало (находка S4): истёкший срок мост уже знает — он спрашивает
+    // часы на каждый вызов, — а окно смотрело в запомненное и показывало
+    // зелёное «MCP включены», пока агенту отказывали. Пересчёт запирает
+    // ворота (`cold_gate` срок знает первым), гасит обслуживание и двигает
+    // значок — как любое другое событие.
+    run_readiness(ui);
 }
 
 /// Заголовок раздела журнала: название операции и час её начала.
@@ -1035,15 +1063,21 @@ pub fn refresh_gate(ui: &mut Ui) {
     // Обратное ворота не делают: условие вернулось — переключатель
     // отпирается сам (`panel::switch_locked` смотрит на `ui.gate`), но
     // обслуживание включает человек, а не пересчёт за его спиной.
-    if !was_open {
-        return;
-    }
-    if let Some(why) = ui.gate.clone() {
-        if ui.enabled.load(Ordering::Relaxed) {
-            douse_serving(ui);
-            note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
+    if was_open {
+        if let Some(why) = ui.gate.clone() {
+            if ui.enabled.load(Ordering::Relaxed) {
+                douse_serving(ui);
+                note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
+            }
         }
     }
+    // Замок доезжает до трея всегда, а не только когда что-то погасил
+    // (находка S2): пункт «Включить MCP» обязан запираться и отпираться
+    // ровно тогда же, когда переключатель в окне. Раньше `sync_tray` стояла
+    // только внутри `douse_serving`, и открывшийся замок (вписали
+    // пользователя базы) оставлял пункт серым до следующей операции, а
+    // защёлкнувшийся при выключенных MCP — нажимаемым.
+    sync_tray(ui, Instant::now());
 }
 
 /// Погасить обслуживание вызовов, не спрашивая никого: правка убрала холодное
@@ -1185,6 +1219,7 @@ fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
     }
     let again = std::mem::take(&mut ui.ready_again);
     if !again {
+        let was = warn_reason(&ui.ready);
         ui.ready = match first_fail {
             Some(c) => Readiness::Warn(c),
             None => Readiness::Ok,
@@ -1192,8 +1227,32 @@ fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
         // Вердикт стал известен прямо сейчас — отсюда и час, который подвал
         // называет рядом с причиной.
         ui.ready_at = Some(clock());
+        // Причина жёлтого вердикта — строкой в журнал (спека называет три
+        // канала: подсказка, подвал и журнал; журнал молчал — находка S3).
+        // Только на смене причины: вердикт пересчитывается по каждому
+        // событию, и повторять одну и ту же строку значит засыпать журнал.
+        let now = warn_reason(&ui.ready);
+        if let Some(why) = now {
+            if Some(&why) != was.as_ref() {
+                note_line(ui, Line { kind: Kind::Warn, text: format!("не всё готово: {why}") });
+            }
+        }
     }
+    // Значок считается по вердикту (`tray_state_now` → `panel::card`): без
+    // этой строки карточка желтела, а значок оставался прежним — зелёным или
+    // «занято» (находка S1 итогового ревью).
+    sync_tray(ui, Instant::now());
     again
+}
+
+/// Причина жёлтого вердикта человеческими словами, `None` — вердикт не
+/// жёлтый. Одна формулировка на журнал и на подвал (`panel::reason` берёт
+/// ту же `readiness_reason`).
+fn warn_reason(ready: &Readiness) -> Option<String> {
+    match ready {
+        Readiness::Warn(c) => Some(readiness_reason(c)),
+        _ => None,
+    }
 }
 
 /// Итог «Проверить» и есть вердикт (спека): полный набор в этот момент уже
@@ -1299,17 +1358,27 @@ fn tray_state_now(ui: &Ui, now: Instant) -> TrayState {
 }
 
 /// Синхронизировать трей с `Ui`: состояние (по точке карточки) и подсказка
-/// на текущий момент. Общий конец всех мест, что меняют
-/// `busy`/`progress`/`link` — `set_link`, `run_op`, `Ev::Done`, `Ev::Checks`;
-/// один из них забыл это раньше (S1) — значок трея застревал жёлтым после
-/// проверки.
-fn sync_tray(ui: &Ui, now: Instant) {
-    let (state, on) = (tray_state_now(ui, now), ui.link.is_on());
-    let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now);
+/// на текущий момент. Общий конец всех мест, что меняют почву под значком —
+/// `set_link`, `run_op`, `Ev::Done`, `Ev::Checks`, `Ev::Ready` (вердикт),
+/// `refresh_gate` (замок); каждый забытый вызов — это значок, застрявший на
+/// прежнем состоянии, и ровно так жили находки S1 и S2 итогового ревью.
+///
+/// Показанное запоминается в `ui.tray_shown`: иначе «значок узнал» — побочное
+/// действие, которого тесту не видно (настоящего `Tray` в тестах нет), и
+/// проводку приходится сторожить сверкой чистых функций между собой. Три
+/// таких зелёных теста при сломанном поведении эта работа уже пережила.
+fn sync_tray(ui: &mut Ui, now: Instant) {
+    let view = TrayView {
+        state: tray_state_now(ui, now),
+        on: ui.link.is_on(),
+        locked: ui.gate.is_some(),
+        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now),
+    };
     if let Some(tray) = &ui.tray {
-        tray.set_state(state, on, ui.gate.is_some());
-        tray.set_tooltip(&tooltip);
+        tray.set_state(view.state, view.on, view.locked);
+        tray.set_tooltip(&view.tooltip);
     }
+    ui.tray_shown = Some(view);
 }
 
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
@@ -1974,6 +2043,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             status: None,
             status_tip: None,
             tray: Some(tray),
+            tray_shown: None,
             window: None,
             panel: None,
             height: None,
@@ -2093,6 +2163,7 @@ impl Ui {
             status: None,
             status_tip: None,
             tray: None,
+            tray_shown: None,
             window: None,
             panel: None,
             height: None,
@@ -2110,7 +2181,8 @@ mod tests {
         apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
-        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host, save_needs_confirm,
+        note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
+        save_needs_confirm,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2942,6 +3014,90 @@ mod tests {
         // факт гашения со строкой, а список условий стережёт `gate::tests`.
         assert_eq!(doused.len(), 1, "{:?}", &ui.log[log_before..]);
         let _ = ui.session.take().map(|s| s.stop());
+    }
+
+    /// Проводка, а не чистая функция (находка S1): вердикт становится
+    /// известен в `apply_ready`, и оттуда он обязан дойти до значка и до
+    /// журнала. Раньше `Ev::Ready` звал только перерисовку окна, и
+    /// установившееся положение дел было «карточка жёлтая, значок зелёный».
+    #[test]
+    fn a_verdict_reaches_the_tray_and_the_log() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.link = State::Up { since: Instant::now() };
+        // Замок закрыл бы карточку собой (в каталоге теста он заперт), а речь
+        // здесь про вердикт.
+        ui.gate = None;
+        ui.tray_shown = None;
+        let gen = ui.ready_gen;
+        let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
+
+        let log_before = ui.log.len();
+        ui.ready_pending = true;
+        assert!(!apply_ready(&mut ui, gen, Some(fail.clone())));
+        let shown = ui.tray_shown.clone().expect("вердикт не дошёл до значка");
+        assert_eq!(shown.state, TrayState::Warn, "значок остался прежним, пока карточка жёлтая");
+        // И строкой в журнал: подсказка по наведению — не единственный канал
+        // (спека называет три, журнал молчал — находка S3).
+        assert_eq!(ui.log.len(), log_before + 1, "{:?}", &ui.log[log_before..]);
+        let line = ui.log.last().unwrap();
+        assert_eq!(line.kind, Kind::Warn);
+        assert!(line.text.contains("/home/dev3/project не разложен"), "{}", line.text);
+
+        // Та же причина во второй раз журнал не засыпает: вердикт
+        // пересчитывается по каждому событию.
+        ui.ready_pending = true;
+        apply_ready(&mut ui, gen, Some(fail));
+        assert_eq!(ui.log.len(), log_before + 1, "{:?}", &ui.log[log_before..]);
+
+        // А зелёный вердикт доезжает до значка так же.
+        ui.ready_pending = true;
+        apply_ready(&mut ui, gen, None);
+        assert_eq!(ui.tray_shown.unwrap().state, TrayState::Up);
+    }
+
+    /// Проводка замка до трея (находка S2): `sync_tray` стояла только внутри
+    /// ветки гашения, поэтому замок, защёлкнувшийся при выключённом
+    /// обслуживании, оставлял пункт «Включить MCP» нажимаемым — меню обещало
+    /// то, в чём `toggle_link` потом отказывал.
+    #[test]
+    fn a_latching_gate_reaches_the_tray_even_with_nothing_to_douse() {
+        let mut ui = Ui::for_test();
+        // Гасить нечего — ветка `douse_serving` не берётся вовсе.
+        ui.enabled.store(false, Ordering::Relaxed);
+        ui.gate = None;
+        ui.tray_shown = None;
+        refresh_gate(&mut ui);
+        assert!(ui.gate.is_some(), "в каталоге теста замок обязан защёлкнуться");
+        let shown = ui.tray_shown.clone().expect("замок не дошёл до трея");
+        assert!(shown.locked, "пункт меню остался нажимаемым при запертом замке");
+        // Пункт трея и переключатель окна читают один и тот же замок.
+        assert_eq!(shown.locked, ui.gate.is_some());
+    }
+
+    /// Проводка срока (находка S4): мост спрашивает часы на каждый вызов и
+    /// после полуночи отказывает всем, а окно смотрело в запомненное и
+    /// показывало зелёное. Смена состояния лицензии — такое же событие,
+    /// меняющее почву, и кончается тем же пересчётом.
+    #[test]
+    fn a_licence_change_recomputes_readiness() {
+        let mut ui = Ui::for_test();
+        // Запомненное состояние заведомо отличается от настоящего, какое бы
+        // оно ни было сегодня.
+        let real = crate::licence::state_now();
+        ui.licence = if real == crate::licence::State::Expired { crate::licence::State::Valid } else { crate::licence::State::Expired };
+        // Поток фактов в тесте нам не нужен: «уже считается» заставляет
+        // пересчёт только пометить повтор — эта пометка и есть доказательство,
+        // что `run_readiness` позвали.
+        ui.ready_pending = true;
+        ui.ready_again = false;
+        ui.tray_shown = None;
+
+        note_licence_change_ui(&mut ui);
+
+        assert_eq!(ui.licence, real, "новое состояние срока не запомнено");
+        assert!(ui.ready_again, "смена срока не привела к пересчёту готовности");
+        assert!(ui.tray_shown.is_some(), "пересчёт не дошёл до значка");
     }
 
     /// Замок гасит обслуживание везде, где защёлкивается, а не только на

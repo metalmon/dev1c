@@ -113,6 +113,11 @@ pub struct Ui {
     /// Итог последней быстрой проверки «дойдёт ли агент до базы» — см.
     /// `Readiness` и `run_readiness`.
     pub ready: Readiness,
+    /// Состояние заглушки лицензии, о котором уже сказано в журнале. Решений
+    /// на нём не принимают — и кнопки (`run_op`), и мост спрашивают часы
+    /// заново; поле нужно только чтобы заметить смену под открытым окном и
+    /// сказать о ней один раз, а не каждый тик.
+    pub licence: crate::licence::State,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -383,6 +388,16 @@ pub fn clock() -> String {
     format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
 }
 
+/// Отказ операции, меняющей машину, по истёкшему сроку: `Some` — начинать
+/// нельзя, строка уходит в журнал. Кнопки окна ведут к тем же четырём
+/// операциям, что `install`/`uninstall`/`export`/`import` в командной строке
+/// (`Which` — ровно они), и ворота у них должны быть одни: окно и есть
+/// главный путь человека к ним, запрет только в argv ничего не запрещает.
+/// Пока срок идёт — даже в последний его день — операции работают как обычно.
+fn op_refusal(state: crate::licence::State) -> Option<Line> {
+    matches!(state, crate::licence::State::Expired).then(|| Line { kind: Kind::Fail, text: crate::licence::REFUSAL.to_string() })
+}
+
 /// Строка журнала о сроке заглушки лицензии: вышел — отказ его текстом,
 /// скоро выйдет — сколько осталось, иначе молчим. Молча умирающая программа —
 /// худшее, что можно сделать (спека, п. 9), поэтому окно открывается и
@@ -391,11 +406,27 @@ pub fn clock() -> String {
 fn licence_line(state: crate::licence::State) -> Option<Line> {
     use crate::licence::State;
     match state {
-        State::Expired => Some(Line { kind: Kind::Fail, text: crate::licence::REFUSAL.to_string() }),
+        State::Expired => op_refusal(state),
         State::Soon { days } => {
             Some(Line { kind: Kind::Warn, text: format!("срок действия 1c-connect — до {}, осталось дней: {days}", crate::licence::until_text()) })
         }
         State::Valid => None,
+    }
+}
+
+/// Сказать о сроке, если он сменился с того, о чём уже сказано. Зовут и при
+/// запуске окна (запомнено `Valid`, и `Soon`/`Expired` сразу ложатся строкой),
+/// и на каждом тике: окно может простоять открытым через полночь срока, и
+/// тогда оно молча расходилось бы с мостом, который уже отказывает.
+fn note_licence_change(cx: &mut App) {
+    let state = crate::licence::state_now();
+    let ui = cx.global_mut::<Ui>();
+    if ui.licence == state {
+        return;
+    }
+    ui.licence = state;
+    if let Some(line) = licence_line(state) {
+        note_line(ui, line);
     }
 }
 
@@ -1043,6 +1074,16 @@ pub fn toggle_link(cx: &mut App) {
 /// ход — событиями из `ctx_for`, конец — `Ev::Done`. Заголовок работы ложится
 /// в журнал, и журнал же показывается: за ходом смотрят там.
 pub fn run_op(cx: &mut App, which: Which) {
+    // Срок спрашиваем у часов здесь, на нажатие, а не берём запомненное при
+    // запуске: окно может простоять открытым через полночь срока.
+    if let Some(line) = op_refusal(crate::licence::state_now()) {
+        let ui = cx.global_mut::<Ui>();
+        ui.tab = Tab::Log;
+        ui.unread = 0;
+        note_line(ui, line);
+        cx.refresh_windows();
+        return;
+    }
     let ui = cx.global_mut::<Ui>();
     ui.busy = Some(match which {
         Which::Export | Which::Import => Busy::Project,
@@ -1262,6 +1303,7 @@ fn tick(cx: &mut App) {
             }
         }
     }
+    note_licence_change(cx);
 }
 
 fn handle(ev: Ev, cx: &mut App) {
@@ -1507,6 +1549,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(autoconnect_on)),
             ready: Readiness::Unknown,
+            licence: crate::licence::State::Valid,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1570,9 +1613,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         .detach();
         refresh_ops(cx);
         // Про срок — до подъёма сеанса: первое, что человек читает в журнале.
-        if let Some(line) = licence_line(crate::licence::state_now()) {
-            note_line(cx.global_mut::<Ui>(), line);
-        }
+        note_licence_change(cx);
         // В локальном режиме слушатели держат порты весь срок жизни
         // процесса (Zed не переподключается сам — см. заголовок модуля),
         // поэтому сеанс поднимается здесь безусловно; «подключаться при
@@ -1610,6 +1651,7 @@ impl Ui {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
             ready: Readiness::Unknown,
+            licence: crate::licence::State::Valid,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1639,7 +1681,7 @@ mod tests {
     use super::{
         autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_line, on_done,
-        on_line, on_progress, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
+        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
         stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
@@ -1753,6 +1795,18 @@ mod tests {
         assert_eq!(took(Duration::from_secs(12)), "12 с");
         assert_eq!(took(Duration::from_secs(72)), "1 мин 12 с");
         assert_eq!(took(Duration::from_secs(0)), "0 с");
+    }
+
+    /// Кнопки окна ведут к тем же четырём операциям, что запрещённые команды
+    /// (`Which` — ровно `install`/`uninstall`/`export`/`import`), и после
+    /// срока не начинают работу: `run_op` спрашивает эти ворота первым делом.
+    /// Пока срок идёт, даже в последний его день, ворота открыты.
+    #[test]
+    fn an_expired_licence_refuses_the_window_buttons_that_change_the_machine() {
+        let no = op_refusal(crate::licence::State::Expired).expect("после срока операция не начинается");
+        assert!(no.kind == Kind::Fail && no.text == crate::licence::REFUSAL, "{no:?}");
+        assert!(op_refusal(crate::licence::State::Soon { days: 0 }).is_none());
+        assert!(op_refusal(crate::licence::State::Valid).is_none());
     }
 
     /// Окно обязано объяснить, что случилось и до какого числа срок был;

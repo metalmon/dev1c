@@ -3,7 +3,7 @@ import unittest
 
 from scenario import Step, Target
 from targets import Rect
-from placement import bubble_size, place
+from placement import bubble_size, place, wrap_body
 
 SCREEN = Rect(0, 0, 2560, 1440)
 
@@ -124,6 +124,53 @@ class BubbleSizeTests(unittest.TestCase):
                      ('Вопрос один', 'Вопрос два', 'Вопрос три'))
         h_three = bubble_size(three)[1]
         self.assertEqual(h_two - h_one, h_three - h_two)
+
+    def test_long_body_counts_wrapped_lines_not_logical_lines(self):
+        # Фикс-раунд 2: тело сценария — один длинный абзац без переносов
+        # (TOML "\"-продолжение превращает его в одну логическую строку).
+        # bubble_size обязан выделить место под перенесённые строки, а не
+        # под одну — иначе высота меньше того, что реально нарисовано, и
+        # фигура обрежет текст (ровно баг со скриншота координатора).
+        long_body = ('Здесь уже стоит учебная 1С с «Управлением нашей фирмой» и редактор, '
+                     'в котором живёт ИИ-агент. Ставить ничего не нужно, ломать тут нечего. '
+                     'Шесть коротких шагов, минуты три.')
+        step = Step(1, 'Заголовок', long_body, _TARGET, ('Дальше',), 'button', ())
+        logical_lines = 1
+        self.assertGreater(len(long_body.splitlines()), 0)
+        self.assertEqual(len(long_body.splitlines()), logical_lines)
+        _, h = bubble_size(step)
+        wrapped = len(wrap_body(long_body))
+        self.assertGreater(wrapped, logical_lines)
+        self.assertEqual(h, 64 + 24 + wrapped * 21)
+
+
+class WrapBodyTests(unittest.TestCase):
+    def test_long_paragraph_wraps_to_several_lines_that_all_fit(self):
+        body = ('Здесь уже стоит учебная 1С с «Управлением нашей фирмой» и редактор, '
+                'в котором живёт ИИ-агент. Ставить ничего не нужно, ломать тут нечего. '
+                'Шесть коротких шагов, минуты три.')
+        lines = wrap_body(body, chars_per_line=40)
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertLessEqual(len(line), 40)
+        # Слова не потеряны и не переставлены — просто расставлены по строкам.
+        self.assertEqual(' '.join(lines), body)
+
+    def test_blank_line_between_paragraphs_survives_wrapping(self):
+        body = 'Первый абзац, короткий.\n\nВторой абзац, тоже короткий.'
+        lines = wrap_body(body, chars_per_line=40)
+        self.assertIn('', lines)
+        blank_at = lines.index('')
+        before = ' '.join(lines[:blank_at])
+        after = ' '.join(lines[blank_at + 1:])
+        self.assertEqual(before, 'Первый абзац, короткий.')
+        self.assertEqual(after, 'Второй абзац, тоже короткий.')
+
+    def test_short_body_is_a_single_line(self):
+        self.assertEqual(wrap_body('Коротко.', chars_per_line=70), ['Коротко.'])
+
+    def test_empty_body_wraps_to_no_lines(self):
+        self.assertEqual(wrap_body('', chars_per_line=70), [])
 
 
 if __name__ == '__main__':

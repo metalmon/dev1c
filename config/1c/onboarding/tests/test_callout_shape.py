@@ -19,7 +19,7 @@ from PIL import Image
 from scenario import Step, Target
 from targets import Rect
 from placement import bubble_size, place
-from callout import Callout
+from callout import HEAD, LINE_HEIGHT, Callout
 
 DISPLAY = os.environ.get('ONBOARDING_TEST_DISPLAY', ':77')
 BLUE = (0, 0, 255)
@@ -132,6 +132,38 @@ class ShapeTests(unittest.TestCase):
                 return (ox + rect.x + 6, oy + rect.y + rect.h // 2)
             self.assertEqual(img.pixel(*sample_point(primary)), BUTTON_AMBER)
             self.assertEqual(img.pixel(*sample_point(secondary)), WHITE)
+        finally:
+            callout.hide()
+
+
+class WrapTests(unittest.TestCase):
+    # Фикс-раунд 2: тело шага 1 — один длинный абзац без переносов (TOML
+    # "\"-продолжение склеивает его в одну логическую строку). Без переноса
+    # в placement.wrap_body эта строка рисовалась от x+16 на всю свою
+    # ширину — далеко за правый край пузыря — и обрезалась маской формы
+    # окна; именно это видно на скриншоте координатора.
+    def test_long_body_text_does_not_run_past_the_right_margin(self):
+        long_body = (
+            'Здесь уже стоит учебная 1С с «Управлением нашей фирмой» и редактор, '
+            'в котором живёт ИИ-агент. Ставить ничего не нужно, ломать тут нечего. '
+            'Шесть коротких шагов, минуты три.'
+        )
+        step = _step(body=long_body)
+        layout = place(SCREEN, None, bubble_size(step))
+        callout = Callout(step, layout, on_button=lambda _: None)
+        try:
+            callout.show()
+            pump_gtk(1.0)
+            img = grab(DISPLAY)
+            # Первая строка тела (i=0 в _draw_body), у правого внутреннего
+            # края пузыря (20px от рамки — внутри неё, но не на самой
+            # рамке, у которой тут же есть свой 3px чёрный штрих): до
+            # фикса здесь были чернила неперенесённой строки (проверено
+            # руками — на этом самом тексте, тем же сэмплом, без wrap_body
+            # пиксель (87, 87, 87), не белый), после фикса — только заливка.
+            sample_x = layout.bubble.x + layout.bubble.w - 20
+            sample_y = layout.bubble.y + HEAD + 1 * LINE_HEIGHT - 6
+            self.assertEqual(img.pixel(sample_x, sample_y), WHITE)
         finally:
             callout.hide()
 

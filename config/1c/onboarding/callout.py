@@ -15,6 +15,7 @@ gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
 from gi.repository import Gdk, Gtk
 
+from placement import wrap_body
 from targets import Rect
 
 # Те же числа, что placement.bubble_size считает по умолчанию — чтобы
@@ -166,10 +167,15 @@ class Callout:
                      bw - BORDER_WIDTH, bh - BORDER_WIDTH)
         cr.stroke()
 
+        # Один и тот же список строк для счёта высоты (placement.bubble_size)
+        # и для рисования — никакого второго разбиения здесь: разойдись они,
+        # высота пузыря и нарисованный текст снова разъедутся (фикс-раунд 2).
+        body_lines = wrap_body(step.body)
+
         self._draw_counter(cr, bx, by, step)
         self._draw_title(cr, bx, by, step)
-        self._draw_body(cr, bx, by, step)
-        self._question_rects = self._draw_questions(cr, bx, by, bw, step)
+        self._draw_body(cr, bx, by, body_lines)
+        self._question_rects = self._draw_questions(cr, bx, by, bw, step, body_lines)
         self._close_rect = self._draw_close(cr, bx, by, bw)
         self._button_rects = self._draw_buttons(cr, bx, by, bw, bh, step.buttons)
 
@@ -209,15 +215,17 @@ class Callout:
         cr.move_to(x + 16, y + 44)
         cr.show_text(step.title)
 
-    def _draw_body(self, cr, x, y, step):
+    def _draw_body(self, cr, x, y, body_lines):
+        # body_lines — то, что вернул placement.wrap_body (посчитано один
+        # раз в _draw); здесь только рисуем, ничего заново не разбиваем.
         cr.set_source_rgb(*_BORDER)
         cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
         cr.set_font_size(14)
-        for i, line in enumerate(step.body.splitlines()):
+        for i, line in enumerate(body_lines):
             cr.move_to(x + 16, y + HEAD + (i + 1) * LINE_HEIGHT - 6)
             cr.show_text(line)
 
-    def _draw_questions(self, cr, x, y, w, step):
+    def _draw_questions(self, cr, x, y, w, step, body_lines):
         """Готовые вопросы шага 4 — строкой-коробкой каждый, на бледной
         подложке, под телом и над кнопками (bubble_size уже выделил им
         место — см. placement.py). Подпись-пояснение рисуется только
@@ -226,7 +234,7 @@ class Callout:
         if not step.questions:
             return ()
 
-        row_y = y + HEAD + len(step.body.splitlines()) * LINE_HEIGHT
+        row_y = y + HEAD + len(body_lines) * LINE_HEIGHT
         row_w = w - 32
 
         cr.set_source_rgb(*_SECONDARY_BORDER)

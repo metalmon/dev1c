@@ -594,6 +594,15 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
+/// Поля, что решают, какую базу обслуживает публикация/MCP — путь, логин и
+/// пароль дескриптора `publication::vrd`. Единый список: `save_host` смотрит
+/// на него, не поднять ли публикацию заново, а подтверждение перед
+/// «Сохранить» (`save_needs_confirm`) — не сменилась ли сама база — читает
+/// тот же список, а не второй, отдельно придуманный.
+fn database_changed(a: &Host, b: &Host) -> bool {
+    a.base_path != b.base_path || a.db_user != b.db_user || a.db_password != b.db_password
+}
+
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
 /// режима публикации, её порта и адреса публикации в окне нет (правятся в
 /// toml): берём их из текущих параметров, иначе пустые значения из формы
@@ -615,8 +624,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // пути: иначе смена пароля/логина оставляла бы старый дескриптор живым,
     // и публикация продолжала бы открывать базу под старыми учётными
     // данными (находка повторного ревью).
-    let descriptor_changed =
-        cfg.host.base_path != old_host.base_path || cfg.host.db_user != old_host.db_user || cfg.host.db_password != old_host.db_password;
+    let descriptor_changed = database_changed(&cfg.host, &old_host);
     // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
     // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
     // здесь — смена режима в трее поднимает его сама, отдельным путём
@@ -652,6 +660,76 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Нужно ли спросить перед «Сохранить»: база меняется (`database_changed`
+/// выше — тот же список полей, что у публикации, не второй, отдельно
+/// придуманный), агент прямо сейчас может отвечать (`enabled` — его читает
+/// мост на каждый вызов, в обоих режимах, не только в локальном), и сеанс
+/// жив (`ui.session`). Любая другая правка — каталог проекта, режим,
+/// рабочее место — сохраняется без вопроса, как и было задумано (заказчик
+/// просил вопрос именно и только в этом сочетании, 2026-10-20).
+pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
+    database_changed(new_host, &ui.cfg.host) && ui.enabled.load(Ordering::Relaxed) && ui.session.is_some()
+}
+
+/// Имя базы для диалога — последний компонент пути («Buh» для C:\Bases\Buh),
+/// как 1С-разработчик называет базу в разговоре; полный путь уходит в
+/// detail, не в это имя. Пустой/корневой путь без компонента — путь целиком,
+/// лишь бы в диалоге не было пустой строки.
+fn base_label(path: &str) -> &str {
+    std::path::Path::new(path).file_name().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or(path)
+}
+
+/// Текст диалога подтверждения: два предложения (что сейчас, что станет
+/// после, и сам вопрос) и деталь с обоими полными путями.
+pub fn confirm_text(old_path: &str, new_path: &str) -> (String, String) {
+    let message =
+        format!("Агент сейчас работает с базой «{}», после сохранения перейдёт на «{}». Сохранить?", base_label(old_path), base_label(new_path));
+    (message, format!("{old_path} → {new_path}"))
+}
+
+/// Диалог перед «Сохранить», когда база меняется под живым и включённым MCP
+/// (см. `save_needs_confirm`) — иначе `proceed` зовётся сразу, без вопроса.
+/// Платформенный диалог (`Window::prompt`), тот же приём, что у выбора
+/// каталога (`Panel::pick_dir`): `dialog_open` не даёт окну спрятаться под
+/// диалогом (`Panel::new`'s `observe_window_activation`) и не даёт открыть
+/// его второй раз; ответ приходит в своём потоке задачи — главный поток
+/// ничего не ждёт. `proceed` зовётся ровно раз («да», или вопроса не было)
+/// либо никогда (отказ — поля окна остаются как человек их оставил, здесь
+/// ничего не трогаем).
+pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Host, proceed: impl FnOnce(&mut Window, &mut App) + 'static) {
+    if !save_needs_confirm(cx.global::<Ui>(), new_host) {
+        proceed(window, cx);
+        return;
+    }
+    if cx.global::<Ui>().dialog_open {
+        return;
+    }
+    let (message, detail) = confirm_text(&cx.global::<Ui>().cfg.host.base_path, &new_host.base_path);
+    cx.global_mut::<Ui>().dialog_open = true;
+    let rx = window.prompt(
+        PromptLevel::Warning,
+        &message,
+        Some(&detail),
+        &[PromptButton::ok("Да, сохранить"), PromptButton::cancel("Нет, не сохранять")],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        let yes = matches!(rx.await, Ok(0));
+        let _ = cx.update(|cx| {
+            cx.global_mut::<Ui>().dialog_open = false;
+            if !yes {
+                return;
+            }
+            let Some(w) = cx.global::<Ui>().window else { return };
+            let _ = w.update(cx, |_, window, cx| {
+                window.activate_window();
+                proceed(window, cx);
+            });
+        });
+    })
+    .detach();
 }
 
 /// Поднять/проверить HTTP-сервис на уже записанных `ui.cfg`: после смены
@@ -1400,10 +1478,10 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, first_phase, flip_enabled_only, is_stale,
-        line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text, project_primary,
-        publication_detail, save_host, stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line,
-        OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
+        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, first_phase, flip_enabled_only,
+        is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text,
+        project_primary, publication_detail, save_host, save_needs_confirm, stale_line, stale_text, took, tick_redraw, tray_state,
+        tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
@@ -1934,5 +2012,66 @@ mod tests {
         host.base_path = "C:\\Bases\\Other".into();
         save_host(&mut ui, host).unwrap();
         assert_eq!(ui.log.len(), log_before);
+    }
+
+    #[test]
+    fn save_needs_confirm_only_when_all_three_hold() {
+        // Три условия сразу: база меняется, MCP включены, сеанс жив —
+        // вопрос нужен.
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+        assert!(save_needs_confirm(&ui, &new_base));
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn save_needs_confirm_is_false_on_each_near_miss() {
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+
+        // Промах 1: MCP выключены.
+        ui.enabled.store(false, Ordering::Relaxed);
+        assert!(!save_needs_confirm(&ui, &new_base));
+        ui.enabled.store(true, Ordering::Relaxed);
+
+        // Промах 2: база та же, поменялось другое поле — оно не входит в
+        // список, что решает «изменилась ли база» (`database_changed`).
+        let mut other_field = ui.cfg.host.clone();
+        other_field.project = "D:\\other\\proj".into();
+        assert!(!save_needs_confirm(&ui, &other_field));
+
+        // Промах 3: сеанса нет.
+        let session = ui.session.take().unwrap();
+        assert!(!save_needs_confirm(&ui, &new_base));
+        let _ = session.stop();
+    }
+
+    #[test]
+    fn declining_the_confirmation_leaves_the_toml_untouched() {
+        // Пока вопрос не задан и не отвечен «да», «Сохранить» не должен
+        // звать `save_host` вовсе — отказ ничего не пишет, поля окна
+        // остаются как человек их оставил (сюда это проверяется тем, что
+        // toml не тронут без явного вызова `save_host`).
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let before = std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok();
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+        assert!(save_needs_confirm(&ui, &new_base), "сценарий должен требовать вопрос");
+        // Отказ = не позвать save_host; toml как был.
+        assert_eq!(std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok(), before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn confirm_text_names_folders_and_keeps_full_paths_in_the_detail() {
+        let (message, detail) = confirm_text("C:\\Bases\\Buh", "C:\\Bases\\УНФ");
+        assert_eq!(message, "Агент сейчас работает с базой «Buh», после сохранения перейдёт на «УНФ». Сохранить?");
+        assert_eq!(detail, "C:\\Bases\\Buh → C:\\Bases\\УНФ");
     }
 }

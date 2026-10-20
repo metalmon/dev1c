@@ -10,7 +10,7 @@
 use crate::cfg::Host;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Readiness, Running, Ui, Which};
 use crate::session::State;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -90,13 +90,33 @@ pub struct Card {
 /// держат порты сами, см. `session::start`), а не про связь со средой; отказ
 /// там же показывает саму причину (порт занят и т.п.), а не общее «не
 /// подключён». В туннельном режиме — как раньше.
-pub fn card(progress: Option<&Running>, link: &State, mode: &str, now: Instant) -> Card {
+///
+/// `ready` — вердикт `verify::readiness`, посчитанный отдельно и не на
+/// главном потоке (`gui::run_readiness`): пока связь/MCP не «включены»,
+/// карточка его не смотрит вовсе — выключенный или подключающийся переключатель
+/// ничего не обещает агенту, смотреть там нечего. Зелёная «MCP включены»/
+/// «Подключён» становится жёлтой, только когда готовность реально
+/// провалилась (`Readiness::Warn`) — `Unknown` (поток ещё считает) и `Ok`
+/// показывают прежний зелёный текст, значение переключателя при этом не
+/// меняется: это по-прежнему «включить/выключить обслуживание вызовов».
+pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
         let title = format!("{} · {}", r.phase.title(), clock);
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
     let local = mode == "local";
+    // Текст «MCP включены, но …» — местная формулировка (заказчик и дефект
+    // целиком про локальный режим, см. журнал модуля); туннельный режим
+    // показывает прежнее «Подключён» — его собственный провал публикации уже
+    // становится `State::Failed` (красным) в `Ev::Publish`, второй жёлтый
+    // смысл ему не нужен.
+    if local {
+        if let (State::Up { .. }, Readiness::Warn(check)) = (link, ready) {
+            let title = format!("MCP включены, но агент базу не увидит — {}", gui::readiness_reason(check));
+            return Card { dot: Dot::Warn, title, cancel: false };
+        }
+    }
     let (dot, title): (Dot, String) = match link {
         State::Off => (Dot::Off, if local { "MCP выключены".into() } else { "Не подключён".into() }),
         State::Connecting => (Dot::Busy, if local { "Включаю…".into() } else { "Подключаюсь…".into() }),
@@ -466,6 +486,7 @@ impl Panel {
             Dot::Busy => t.primary,
             Dot::Up => t.success,
             Dot::Down => t.danger,
+            Dot::Warn => t.warning,
         }
     }
 }
@@ -484,6 +505,7 @@ impl Render for Panel {
 
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
+        let ready = ui.ready.clone();
         let (unread, failed) = (ui.unread, ui.failed_checks);
         let has_progress = ui.progress.is_some();
         // Какая операция идёт, если идёт — для текста под «Сохранить»
@@ -492,7 +514,7 @@ impl Render for Panel {
         // выставляют разное).
         let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
-        let c = card(ui.progress.as_ref(), &link, &mode, Instant::now());
+        let c = card(ui.progress.as_ref(), &link, &mode, &ready, Instant::now());
         // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
@@ -866,12 +888,12 @@ impl Render for Panel {
             gui::Tab::Log => h_flex()
                 .gap_2()
                 .child(more("more-log").dropdown_menu(move |menu, _, _| {
+                    // «Открыть отчёт last-check.txt» убран (заказчик
+                    // 2026-10-20: зачем два пункта) — файл остаётся, на него
+                    // называет сама строка в журнале после проверки
+                    // (`Ev::Checks` в `mod.rs`).
                     menu.item(PopupMenuItem::new("Открыть журнал").disabled(busy_now).on_click(|_, _, cx| {
                         let path = cx.global::<Ui>().kit.path(gui::LOG_FILE);
-                        gui::open_path(cx, &path);
-                    }))
-                    .item(PopupMenuItem::new("Открыть отчёт last-check.txt").disabled(busy_now).on_click(|_, _, cx| {
-                        let path = cx.global::<Ui>().kit.path("last-check.txt");
                         gui::open_path(cx, &path);
                     }))
                     .item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
@@ -988,8 +1010,9 @@ impl Render for Panel {
 mod tests {
     use super::{can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
-    use crate::gui::{Dot, Kind, Line, ProjectView, Running, Which};
+    use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
     use crate::session::State;
+    use common::check::Check;
     use common::Phase;
     use std::time::{Duration, Instant};
 
@@ -1006,7 +1029,7 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        let c = card(Some(&r), &State::Off, "tunnel", now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
@@ -1018,7 +1041,7 @@ mod tests {
         // «Прервать» не показывается, в отличие от git-обмена выше.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
-        let c = card(Some(&r), &State::Off, "tunnel", now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!(c.dot, Dot::Busy);
         assert!(!c.cancel);
     }
@@ -1026,16 +1049,16 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
-        let c = card(None, &State::Off, "tunnel", now);
+        let c = card(None, &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
         assert!(!c.cancel);
-        let c = card(None, &State::Connecting, "tunnel", now);
+        let c = card(None, &State::Connecting, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", now);
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
-        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", now);
+        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
-        let c = card(None, &State::Failed("нет сети".into()), "tunnel", now);
+        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
     }
@@ -1043,12 +1066,12 @@ mod tests {
     #[test]
     fn card_titles_speak_about_mcp_not_the_tunnel() {
         let now = Instant::now();
-        assert_eq!(card(None, &State::Off, "local", now).title, "MCP выключены");
-        assert_eq!(card(None, &State::Connecting, "local", now).title, "Включаю…");
-        assert_eq!(card(None, &State::Up { since: now }, "local", now).title, "MCP включены");
+        assert_eq!(card(None, &State::Off, "local", &Readiness::Unknown, now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Connecting, "local", &Readiness::Unknown, now).title, "Включаю…");
+        assert_eq!(card(None, &State::Up { since: now }, "local", &Readiness::Unknown, now).title, "MCP включены");
         // Отказ — причина, не общее «не подключён»: порт занят независимо
         // от переключателя, человеку нужно знать, чем именно.
-        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", now);
+        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Readiness::Unknown, now);
         assert_eq!(c.title, "порт 7771 занят процессом 1234");
         for mode in ["local", "tunnel"] {
             for link in [
@@ -1058,10 +1081,50 @@ mod tests {
                 State::Retrying("нет сети".into()),
                 State::Failed("порт занят".into()),
             ] {
-                let title = card(None, &link, mode, now).title;
+                let title = card(None, &link, mode, &Readiness::Unknown, now).title;
                 assert!(!title.to_lowercase().contains("туннель"), "{mode}/{link:?}: {title}");
             }
         }
+    }
+
+    /// Дефект (заказчик 2026-10-20, трижды в один день): зелёная карточка
+    /// обещала «агент дойдёт до базы», хотя инструменты не разложены — первый
+    /// провалившийся факт готовности (`Readiness::Warn`) должен перекрасить
+    /// карточку в жёлтый и назвать причину, не трогая смысл самого
+    /// переключателя (`Switch` в `render` не зависит от `ready`).
+    #[test]
+    fn a_failed_readiness_fact_turns_the_green_card_into_a_named_warning() {
+        let now = Instant::now();
+        let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let ready = Readiness::Warn(fail);
+        let c = card(None, &State::Up { since: now }, "local", &ready, now);
+        assert_eq!(c.dot, Dot::Warn);
+        assert!(c.title.starts_with("MCP включены, но агент базу не увидит"), "{}", c.title);
+        assert!(c.title.contains("инструменты комплекта") && c.title.contains("1c-connect install"), "{}", c.title);
+        assert!(!c.title.contains("факт"), "{}", c.title);
+    }
+
+    /// Неизвестно (поток ещё считает) или пройдено — карточка остаётся
+    /// зелёной, как раньше; «ещё не посчитано» не должно выглядеть как
+    /// провал.
+    #[test]
+    fn unknown_or_passed_readiness_keeps_the_green_card() {
+        let now = Instant::now();
+        for ready in [Readiness::Unknown, Readiness::Ok] {
+            let c = card(None, &State::Up { since: now }, "local", &ready, now);
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"), "{ready:?}");
+        }
+    }
+
+    /// Туннельный режим не говорит «MCP» и не смотрит готовность — его
+    /// собственный провал публикации уже красный (`State::Failed`) отдельным
+    /// путём (`Ev::Publish` в `gui::mod`).
+    #[test]
+    fn tunnel_mode_ignores_the_readiness_warning() {
+        let now = Instant::now();
+        let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let c = card(None, &State::Up { since: now }, "tunnel", &Readiness::Warn(fail), now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
     }
 
     #[test]

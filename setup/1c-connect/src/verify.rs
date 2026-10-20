@@ -111,6 +111,55 @@ pub fn base_fact(path: &str, exists: bool) -> Check {
     }
 }
 
+/// Разложены ли инструменты комплекта (`vrunner/`, `git/`, `httpd/`) на
+/// машине. Та же функция считает этот факт в `run()` и в `readiness()` —
+/// второй, отдельно придуманный набор фактов не заводится.
+pub fn tools_fact(kit_root: &std::path::Path, tools: &std::path::Path) -> Check {
+    match tools_state(kit_root, tools) {
+        OpState::Done(d) => Check::pass(TOOLS, d),
+        OpState::Missing => Check::fail(TOOLS, format!("в {} ничего нет", tools.display()), "1c-connect install"),
+        OpState::Drifted { from, to } => Check::fail(TOOLS, format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
+        OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
+    }
+}
+
+/// HTTP-порт базы отвечает (обычный TCP-коннект, без логина) — `up` уже
+/// посчитан вызывающим (`run`/`readiness`), здесь только оформление факта.
+pub fn web_fact(port: u16, up: bool) -> Check {
+    if up {
+        Check::pass(WEB, format!("порт {port} отвечает"))
+    } else {
+        Check::fail(WEB, format!("порт {port} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
+    }
+}
+
+/// Расширение отвечает по настроенному адресу настроенными учётными данными —
+/// `ver` уже посчитан (`extension_version`), здесь только оформление факта.
+pub fn publication_fact(base_url: &str, ver: Option<String>) -> Check {
+    match ver {
+        Some(ver) => Check::pass(PUBLICATION, format!("{base_url} → расширение {ver}")),
+        None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
+    }
+}
+
+/// Факты, что решают, дойдёт ли вызов агента до базы: разложены ли
+/// инструменты комплекта, отвечает ли HTTP-сервис базы по настроенному адресу
+/// настроенными учётными данными, стоит ли расширение. Подмножество `run()`,
+/// в том же порядке и теми же функциями (`tools_fact`/`web_fact`/
+/// `publication_fact`) — второй набор фактов, который мог бы разойтись с
+/// полной проверкой, здесь не заводится. Окно зовёт это при включении MCP и
+/// при автозапуске с уже включённым переключателем (`gui::run_readiness`),
+/// не на таймере и не блокируя сами порты: те подняты раньше, вердикт только
+/// подписывает витрину.
+pub fn readiness(ctx: &Ctx) -> Vec<Check> {
+    let tools = tools_dir();
+    let web = ctx.cfg.http_port();
+    let web_up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
+    let base_url = ctx.cfg.base_url();
+    let ver = extension_version(&base_url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password);
+    vec![tools_fact(&ctx.kit.root, &tools), web_fact(web, web_up), publication_fact(&base_url, ver)]
+}
+
 /// Локальный `initialize` + безвредный инструмент: процесс поднимается из
 /// копии на машине с cwd = project; туннель не нужен.
 fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
@@ -172,28 +221,17 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
     });
     let tools = tools_dir();
-    let tools_ok = matches!(tools_state(&ctx.kit.root, &tools), OpState::Done(_));
-    v.push(match tools_state(&ctx.kit.root, &tools) {
-        OpState::Done(d) => Check::pass(TOOLS, d),
-        OpState::Missing => Check::fail(TOOLS, format!("в {} ничего нет", tools.display()), "1c-connect install"),
-        OpState::Drifted { from, to } => Check::fail(TOOLS, format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
-        OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
-    });
+    let tf = tools_fact(&ctx.kit.root, &tools);
+    let tools_ok = tf.ok;
+    v.push(tf);
     v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install") });
     v.push(project_fact(ctx, &tools));
     v.push(base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists()));
     let web = ctx.cfg.http_port();
-    let web_ok = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
-    v.push(if web_ok {
-        Check::pass(WEB, format!("порт {web} отвечает"))
-    } else {
-        Check::fail(WEB, format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
-    });
+    let web_up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
+    v.push(web_fact(web, web_up));
     let base_url = ctx.cfg.base_url();
-    v.push(match extension_version(&base_url, &h.db_user, &h.db_password) {
-        Some(ver) => Check::pass(PUBLICATION, format!("{base_url} → расширение {ver}")),
-        None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
-    });
+    v.push(publication_fact(&base_url, extension_version(&base_url, &h.db_user, &h.db_password)));
     v.push(gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url())));
     if local {
         v.push(open_session_fact());
@@ -373,6 +411,29 @@ mod tests {
         // Адрес образца больше не повод для красного: в проде он может совпасть.
         assert!(params_fact(true, "192.168.1.10:3393").ok);
         assert!(params_fact(true, "10.0.0.5:3393").ok);
+    }
+
+    #[test]
+    fn web_fact_and_publication_fact_say_what_to_do() {
+        let up = web_fact(1818, true);
+        assert!(up.ok && up.detail.contains("1818"), "{up:?}");
+        let down = web_fact(1818, false);
+        assert!(!down.ok && down.hint.contains("Apache"), "{down:?}");
+        let ok = publication_fact("http://x", Some("1.2".into()));
+        assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
+        let fail = publication_fact("http://x", None);
+        assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
+    }
+
+    #[test]
+    fn readiness_is_tools_web_and_publication_in_order() {
+        // Каталог комплекта в test_ctx пуст (его и нет на диске) — ровно то
+        // же, что строит `run()`'s TOOLS-факт, здесь не второй расчёт.
+        let ctx = test_ctx("local");
+        let checks = readiness(&ctx);
+        let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
+        assert_eq!(names, vec![TOOLS, WEB, PUBLICATION]);
+        assert!(!checks[0].ok, "{:?}", checks[0]);
     }
 
     #[test]

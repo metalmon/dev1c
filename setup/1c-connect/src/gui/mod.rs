@@ -110,6 +110,9 @@ pub struct Ui {
     /// поднятыми; в туннельном — как раньше, переключатель поднимает и
     /// опускает сеанс целиком.
     pub enabled: Arc<AtomicBool>,
+    /// Итог последней быстрой проверки «дойдёт ли агент до базы» — см.
+    /// `Readiness` и `run_readiness`.
+    pub ready: Readiness,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -274,6 +277,25 @@ pub enum Dot {
     Busy,
     Up,
     Down,
+    /// MCP включены, но быстрая проверка (`verify::readiness`) нашла
+    /// провалившийся факт — карточка жёлтая, а не зелёная или красная: ворота
+    /// открыты и обслуживают вызовы, просто агент получит отказ от базы.
+    Warn,
+}
+
+/// Итог быстрой проверки «дойдёт ли агент до базы» (`verify::readiness`),
+/// пересчитывается только по событию, что могло сдвинуть почву — включение
+/// MCP, автозапуск с уже включённым переключателем, конец «Установить» и
+/// «Сохранить» (см. `run_readiness` и её вызовы), не на таймере.
+#[derive(Clone, Debug)]
+pub enum Readiness {
+    /// Переключатель выключен либо поток ещё считает — карточка показывает
+    /// обычное «MCP включены», как и до этой проверки.
+    Unknown,
+    Ok,
+    /// Первый провалившийся факт — его `what`/`detail`/`hint` и есть причина,
+    /// которую видит человек в карточке.
+    Warn(Check),
 }
 
 #[derive(Clone, Debug)]
@@ -304,6 +326,9 @@ pub enum Ev {
     /// проверка расширения в режиме «webserver» и ожидание после spawn не
     /// должны держать главный поток окна (находка повторного ревью).
     Publish(Result<(), String>),
+    /// Первый провалившийся факт `verify::readiness`, посчитанный в своём
+    /// потоке (`run_readiness`); `None` — пройдено.
+    Ready(Option<Check>),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -574,6 +599,20 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
     out
 }
 
+/// Причина, по которой карточка жёлтая (`Dot::Warn`): первый провалившийся
+/// факт `verify::readiness`, одной строкой — что не так и что сделать, без
+/// «факт N провален» (заказчик 2026-10-20 читает это как 1С-разработчик).
+/// Подсказка не дублируется, когда она уже вписана в само `detail` (так у
+/// TOOLS-факта «в комплекте нет … — скопируйте заново»), иначе человек видел
+/// бы один совет дважды.
+pub fn readiness_reason(check: &Check) -> String {
+    if check.hint.is_empty() || check.detail.contains(check.hint.as_str()) {
+        format!("{}: {}", check.what, check.detail)
+    } else {
+        format!("{}: {} — {}", check.what, check.detail, check.hint)
+    }
+}
+
 /// Файл или каталог средствами системы: на Windows — `explorer`, иначе
 /// `xdg-open`. Не открылось — строкой в журнал, молча не теряем.
 pub fn open_path(cx: &mut App, path: &std::path::Path) {
@@ -659,6 +698,9 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
             restart_session(ui, base_path);
         }
     }
+    // Почва могла сдвинуться (база, логин, пароль, порт публикации) —
+    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем.
+    run_readiness(ui);
     Ok(())
 }
 
@@ -749,6 +791,34 @@ fn ensure_publication_now(ui: &mut Ui) {
         let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
         let _ = tx.unbounded_send(Ev::Publish(r));
     });
+}
+
+/// Быстрая проверка «дойдёт ли агент до базы» (`verify::readiness`) в своём
+/// потоке — она ходит по сети (HTTP к расширению) и не должна держать главный
+/// поток окна, тем же приёмом, что `ensure_publication_now` выше. Зовётся,
+/// когда почва могла сдвинуться: карточка стала «MCP включены» (включили
+/// переключатель, либо сеанс пришёл уже включённым — автозапуск), кончилось
+/// «Установить» (и любая другая операция — дешевле перепроверить лишний раз,
+/// чем отличать операции друг от друга), и после «Сохранить». Не на таймере —
+/// между этими событиями `ui.ready` просто не пересчитывается.
+pub fn run_readiness(ui: &mut Ui) {
+    // Старый вердикт не должен пережить смену почвы — сброс синхронный,
+    // ещё до похода по сети (`drop_stale_readiness`, тестируется отдельно
+    // от самого похода).
+    drop_stale_readiness(ui);
+    let ctx = ctx_for(ui);
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let first_fail = verify::readiness(&ctx).into_iter().find(|c| !c.ok);
+        let _ = tx.unbounded_send(Ev::Ready(first_fail));
+    });
+}
+
+/// Сброс вердикта в `Readiness::Unknown`: сама почва ещё не проверена заново,
+/// но и старый ответ — уже не про неё. Ядро `run_readiness` без её похода по
+/// сети, тестируется само по себе (см. тесты модуля).
+fn drop_stale_readiness(ui: &mut Ui) {
+    ui.ready = Readiness::Unknown;
 }
 
 /// Перезапустить сеанс после удачной записи параметров (только туннельный
@@ -909,6 +979,10 @@ pub fn toggle_link(cx: &mut App) {
     if cx.global::<Ui>().cfg.host.mode == "local" {
         let ui = cx.global_mut::<Ui>();
         let on = flip_enabled_only(ui);
+        // Вердикт прошлого состояния переключателя устарел в любую сторону —
+        // следующий зелёный «MCP включены» подтвердит себя сам (`run_readiness`
+        // ниже/в `Ev::Publish`), а не унаследует чужую проверку.
+        drop_stale_readiness(ui);
         if let Some(l) = bind_failure_display(&ui.bind_failed) {
             set_link(cx, l);
             return;
@@ -1182,6 +1256,12 @@ fn handle(ev: Ev, cx: &mut App) {
                 }
                 let shown = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
                 set_link(cx, shown);
+                // Вердикт готовности здесь не считается: `launch`/`toggle_link`
+                // зовут `ensure_publication_now` на каждый случай, когда могла
+                // подняться связь, и `Ev::Publish` ниже — единое место, что
+                // перепроверяет готовность, уже после того, как HTTP-сервис
+                // подтверждён, а не наперегонки с его стартом (гонка дала бы
+                // ложный жёлтый на старте, который потом некому было бы снять).
             }
         }
         Ev::Line(line) => {
@@ -1217,6 +1297,9 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             refresh_ops(cx);
             refresh_project(cx);
+            // Почва могла сдвинуться («Установить» в т.ч.) — вердикт
+            // «дойдёт ли агент до базы» устарел, пересчитываем.
+            run_readiness(cx.global_mut::<Ui>());
         }
         Ev::Checks(checks) => {
             let failed = checks.iter().filter(|c| !c.ok).count();
@@ -1227,10 +1310,13 @@ fn handle(ev: Ev, cx: &mut App) {
                 note_line(ui, line);
             }
             ui.busy = None;
+            // Пункта меню «Открыть отчёт» больше нет (заказчик 2026-10-20:
+            // два пункта делали одно и то же) — файл называем здесь, с местом,
+            // полным именем в комплекте человек найдёт его сам.
             let status = if failed > 0 {
-                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Отчёт — last-check.txt в комплекте") }
+                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Подробности — файл last-check.txt в комплекте") }
             } else {
-                Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — last-check.txt".into() }
+                Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — файл last-check.txt в комплекте".into() }
             };
             note_line(ui, status.clone());
             ui.status = Some(status);
@@ -1255,6 +1341,8 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Publish(r) => match r {
             Ok(()) => {
                 let ui = cx.global::<Ui>();
+                let local = ui.cfg.host.mode == "local";
+                let enabled = ui.enabled.load(Ordering::Relaxed);
                 // Только здесь: локальный режим, переключатель включён и
                 // карточка ещё показывает «Включаю…» от этого самого клика
                 // (`toggle_link`) — настоящий сеанс в локальном режиме
@@ -1262,9 +1350,20 @@ fn handle(ev: Ev, cx: &mut App) {
                 // перезапускаются переключателем). В остальных случаях
                 // (туннель, «Сохранить») показом уже ведёт сеанс — трогать
                 // нечего.
-                let settle = ui.cfg.host.mode == "local" && ui.enabled.load(Ordering::Relaxed) && matches!(ui.link, State::Connecting);
+                let settle = local && enabled && matches!(ui.link, State::Connecting);
                 if settle {
                     set_link(cx, State::Up { since: Instant::now() });
+                }
+                // Публикация подтверждена прямо сейчас — `ensure_publication`
+                // уже дождалась готовности своего HTTP-сервиса, так что это
+                // (а не момент bind'а слушателей в `Ev::Link`, который мог
+                // прийти раньше её старта) и есть момент, когда почва для
+                // «дойдёт ли агент до базы» устоялась. Зовётся при каждом
+                // случае, когда могла подняться связь — щелчке и автозапуске
+                // с уже включённым переключателем (оба зовут
+                // `ensure_publication_now`), не только при «settle» выше.
+                if local && enabled {
+                    run_readiness(cx.global_mut::<Ui>());
                 }
             }
             // Карточка не должна врать «MCP включены», когда агент не видит
@@ -1272,6 +1371,14 @@ fn handle(ev: Ev, cx: &mut App) {
             // отказа сеанса, с текстом причины (находка повторного ревью).
             Err(e) => set_link(cx, State::Failed(format!("публикация: {e}"))),
         },
+        Ev::Ready(first_fail) => {
+            let ui = cx.global_mut::<Ui>();
+            ui.ready = match first_fail {
+                Some(c) => Readiness::Warn(c),
+                None => Readiness::Ok,
+            };
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -1372,6 +1479,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(autoconnect_on)),
+            ready: Readiness::Unknown,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1470,6 +1578,7 @@ impl Ui {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
+            ready: Readiness::Unknown,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1497,11 +1606,11 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, exit_code_for, first_phase,
-        flip_enabled_only, is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress,
-        progress_text, project_primary, publication_detail, save_host, save_needs_confirm, stale_line, stale_text, took, tick_redraw,
-        tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE,
-        TRAY_PNG,
+        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
+        exit_code_for, first_phase, flip_enabled_only, is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done,
+        on_line, on_progress, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
+        stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Readiness, Running, Tab, TrayState,
+        Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
@@ -1513,6 +1622,44 @@ mod tests {
 
     fn op(id: &str, dot: Dot) -> OpView {
         OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
+    }
+
+    #[test]
+    fn a_fresh_ui_has_not_run_the_readiness_check_yet() {
+        let ui = Ui::for_test();
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Переключатель (в любую сторону) делает старый вердикт неактуальным
+    /// немедленно, до похода по сети — `toggle_link` зовёт именно это ядро
+    /// синхронно, поход (`run_readiness`) не тестируется здесь отдельно: он
+    /// настоящий TCP/HTTP, не для юнит-теста (спека «держать их чистыми»).
+    #[test]
+    fn drop_stale_readiness_resets_to_unknown() {
+        let mut ui = Ui::for_test();
+        ui.ready = Readiness::Warn(Check::fail("х", "y", "z"));
+        drop_stale_readiness(&mut ui);
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,
+    /// уже вписанную в сам текст факта (TOOLS-Blocked несёт её внутри
+    /// `detail`, см. `ops_host::tools_state`), и никогда не говорит
+    /// «факт N провален».
+    #[test]
+    fn readiness_reason_says_what_and_what_to_do_without_echoing_the_hint() {
+        let blocked = Check::fail(
+            "инструменты комплекта",
+            "в комплекте нет vrunner/, git/ или httpd/ — скопируйте полный комплект заново",
+            "скопируйте полный комплект заново",
+        );
+        let text = readiness_reason(&blocked);
+        assert_eq!(text.matches("скопируйте полный комплект заново").count(), 1, "{text}");
+        assert!(!text.to_lowercase().contains("факт"), "{text}");
+
+        let web = Check::fail("веб-сервер", "порт 1818 не отвечает", "запустите Apache/IIS, на котором опубликована база");
+        let text = readiness_reason(&web);
+        assert!(text.contains("порт 1818 не отвечает") && text.contains("запустите Apache/IIS"), "{text}");
     }
 
     #[test]

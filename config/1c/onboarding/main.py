@@ -3,7 +3,6 @@
 # desktop) и из меню приложений (onboarding.desktop) — оба зовут
 # «1c-stand onboarding», а не python3 напрямую: путь к интерпретатору и
 # к сценарию остаётся в одном месте, в stand.sh.
-import getpass
 import os
 import pathlib
 import subprocess
@@ -252,7 +251,7 @@ def run(scenario_path: str, gate: bool = False) -> int:
     молчал бы до конца сеанса (финальная волна)."""
     if gate and already_closed():
         return 0
-    steps = scenario.substitute(scenario.load(scenario_path), getpass.getuser())
+    steps = scenario.load(scenario_path)
     App(steps)
     Gtk.main()
     return 0

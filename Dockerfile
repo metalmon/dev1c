@@ -364,6 +364,15 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
 # Global settings: telemetry and auto-updates off, language server and models
 # configured. Global rather than per-project — Restricted Mode does not block
 # those.
+# Терминал: копирование выделением и вставка на Ctrl+V — человек приходит
+# из Windows и ждёт именно этого. Ctrl+C под копирование не отдан: им
+# прерывают работающую команду, другого способа у человека нет.
+# Две копии: в /etc/skel для новых учётных записей и в /usr/share/oktaplus
+# для сверки на входе (дома рабочих мест — том, образ их не перекрывает).
+COPY config/terminalrc           /etc/skel/.config/xfce4/terminal/terminalrc
+COPY config/terminal-accels.scm  /etc/skel/.config/xfce4/terminal/accels.scm
+COPY config/terminalrc           /usr/share/oktaplus/terminal/terminalrc
+COPY config/terminal-accels.scm  /usr/share/oktaplus/terminal/accels.scm
 COPY config/zed-settings.json /etc/skel/.config/zed/settings.json
 # The 1C themes for Zed: the same tokens as the desktop and 1c-connect.
 COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json

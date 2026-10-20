@@ -194,6 +194,16 @@ ZEDDB
             cp "$s" "$d" && chmod +x "$d"
         fi
     done
+    # Настройки терминала: копирование выделением и вставка на Ctrl+V.
+    # Сверяем при каждом входе, как и ярлыки выше: файлы лежат в томе
+    # домашнего каталога, и обновление образа их не трогает.
+    for f in terminalrc accels.scm; do
+        s="/usr/share/oktaplus/terminal/$f"; d="$HOME/.config/xfce4/terminal/$f"
+        if [ -f "$s" ] && ! cmp -s "$s" "$d"; then
+            mkdir -p "$HOME/.config/xfce4/terminal"
+            cp "$s" "$d"
+        fi
+    done
     # the launchers of the first days, superseded by the starter
     rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
     # 1c-connect, if the image carries it. The tools it needs (mcp-1c,

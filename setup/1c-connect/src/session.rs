@@ -2,12 +2,14 @@
 //! и мост на проброшенные порты. Общая часть команды `connect` и окна: обе
 //! зовут `start`, держат `Session` и в конце — `stop`.
 
-use crate::cfg::Cfg;
+use crate::cfg::{Cfg, Ports};
 use crate::{bridge, tunnel};
 use common::kit::Kit;
 use common::{Event, Sink};
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, watch};
 
 /// Что с туннелем. Переходы — по событиям `tunnel::run` (и только по ним:
@@ -100,7 +102,10 @@ impl Session {
 }
 
 /// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
-/// моста), `on_state` — каждый переход состояния.
+/// моста), `on_state` — каждый переход состояния. Транспорт — по
+/// `cfg.host.mode`: `tunnel` держит SSH с переподключением, `local` слушает
+/// оба порта на петле сам (база внутри образа — переподключаться там не от
+/// чего, `Retrying` в этом режиме не бывает).
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
     let (stop_tx, stop_rx) = watch::channel(false);
     let (done_tx, done_rx) = oneshot::channel();
@@ -116,14 +121,27 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
         let r = rt.block_on(async {
             on_state(State::Connecting);
             let state = Mutex::new(State::Connecting);
-            let serve = serve(&cfg, &kit, log.clone());
+            // ponytail: переключатель «MCP включены» пока не связан с окном — в
+            // этой задаче важна только проводка через Rules на оба порта
+            // одного сеанса; чтение/запись из окна подключается отдельной
+            // задачей (подменю «Режим работы»).
+            let enabled = Arc::new(AtomicBool::new(true));
+            let serve = Arc::new(Serve::new(&cfg, &kit, log.clone(), enabled));
             let on_event = |e: Event| {
                 log(e.clone());
                 let mut s = state.lock().unwrap();
                 *s = s.clone().next(&e);
                 on_state(s.clone());
             };
-            let r = tunnel::run(&cfg, kit.path("known_hosts"), on_event, serve, stop_rx).await;
+            let r = if cfg.host.mode == "local" {
+                crate::listen::run(serve, cfg.ports(), on_event, stop_rx).await
+            } else {
+                let dispatch = serve.clone();
+                let on_incoming = move |inc: tunnel::Incoming| {
+                    dispatch.dispatch(inc.port, inc.channel.into_stream());
+                };
+                tunnel::run(&cfg, kit.path("known_hosts"), on_event, on_incoming, stop_rx).await
+            };
             on_state(State::ended(&r));
             r
         });
@@ -132,55 +150,73 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
     Session { stop: stop_tx, done: Some(done_rx) }
 }
 
-/// Что отвечает на проброшенное соединение: на порту mcp-1c — мост
-/// `pipe_jsonrpc` с процессом mcp-1c на stdio, на порту vrunner — тот же мост
-/// с процессом `vrunner-mcp`, на порту веб-клиента — локальный веб-сервер.
-pub fn serve(cfg: &Cfg, kit: &Kit, log: Sink) -> impl Fn(tunnel::Incoming) + Send + Sync + 'static {
-    let cfg = cfg.clone();
-    let kit = kit.clone();
-    let ports = cfg.ports();
-    let web_port = cfg.web_port();
-    let tools_dir = crate::ops_host::tools_dir();
-    let project = std::sync::Arc::new(crate::project::Project::from_cfg(&cfg, &tools_dir));
-    // ponytail: переключатель «MCP включены» пока не связан с окном — в этой
-    // задаче важна только проводка через Rules на оба порта одного сеанса;
-    // чтение/запись из окна подключается отдельной задачей (подменю «Режим работы»).
-    let enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    move |inc: tunnel::Incoming| {
-        let stream = inc.channel.into_stream();
-        if inc.port == ports.vrunner {
-            let cmd = bridge::vrunner_command(&cfg, &tools_dir);
+/// Что отвечает на соединение, принятое на порт: на mcp-1c — мост
+/// `pipe_jsonrpc` с процессом mcp-1c на stdio, на vrunner — тот же мост с
+/// процессом `vrunner-mcp`, на порту веб-клиента — локальный веб-сервер.
+/// Один разбор «порт → мост» на оба транспорта: туннель отдаёт сюда канал
+/// russh как поток (`into_stream`), локальный слушатель — `TcpStream`; оба —
+/// через один и тот же `dispatch`.
+pub struct Serve {
+    cfg: Cfg,
+    kit: Kit,
+    log: Sink,
+    ports: Ports,
+    web_port: u16,
+    tools_dir: std::path::PathBuf,
+    project: Arc<crate::project::Project>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl Serve {
+    pub fn new(cfg: &Cfg, kit: &Kit, log: Sink, enabled: Arc<AtomicBool>) -> Serve {
+        let tools_dir = crate::ops_host::tools_dir();
+        let project = Arc::new(crate::project::Project::from_cfg(cfg, &tools_dir));
+        Serve { cfg: cfg.clone(), kit: kit.clone(), log, ports: cfg.ports(), web_port: cfg.web_port(), tools_dir, project, enabled }
+    }
+
+    /// Разобрать одно принятое соединение: порт решает, какой процесс за ним
+    /// стоит. Неизвестный порт — `None`, ничего не запускается и `stream`
+    /// просто закрывается, когда функция вернётся.
+    pub fn dispatch<S>(&self, port: u16, stream: S) -> Option<tokio::task::JoinHandle<()>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        if port == self.ports.vrunner {
+            let cmd = bridge::vrunner_command(&self.cfg, &self.tools_dir);
             let rules = bridge::Rules::for_vrunner(
-                cfg.host.tools.clone(),
-                project.clone(),
-                std::sync::Arc::new(bridge::configurator_count),
-                bridge::connection_args(&cfg),
-                enabled.clone(),
+                self.cfg.host.tools.clone(),
+                self.project.clone(),
+                Arc::new(bridge::configurator_count),
+                bridge::connection_args(&self.cfg),
+                self.enabled.clone(),
             );
-            let log_journal = log.clone();
-            let log_exit = log.clone();
-            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
+            let log_journal = self.log.clone();
+            let log_exit = self.log.clone();
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
                 if code != 0 {
                     log_exit(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
                 }
-            }));
-        } else if inc.port == ports.mcp {
-            let cmd = bridge::mcp_command(&cfg, &kit);
-            let rules = bridge::Rules::for_mcp(enabled.clone());
-            let log_journal = log.clone();
-            let log_exit = log.clone();
-            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
+            })))
+        } else if port == self.ports.mcp {
+            let cmd = bridge::mcp_command(&self.cfg, &self.kit);
+            let rules = bridge::Rules::for_mcp(self.enabled.clone());
+            let log_journal = self.log.clone();
+            let log_exit = self.log.clone();
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
                 if code != 0 {
                     log_exit(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
                 }
-            }));
-        } else if inc.port == ports.web {
-            let log = log.clone();
-            tokio::spawn(async move {
+            })))
+        } else if port == self.ports.web {
+            let log = self.log.clone();
+            let web_port = self.web_port;
+            Some(tokio::spawn(async move {
                 if let Err(e) = bridge::pipe_tcp(stream, web_port).await {
                     log(Event::Warn(e));
                 }
-            });
+            }))
+        } else {
+            None
         }
     }
 }

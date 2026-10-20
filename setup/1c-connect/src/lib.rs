@@ -10,6 +10,7 @@ pub mod flow;
 pub mod gui;
 pub mod job;
 pub mod jsonrpc;
+pub mod listen;
 pub mod local;
 pub mod ops_host;
 pub mod project;

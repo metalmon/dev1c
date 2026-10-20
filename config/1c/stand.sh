@@ -282,6 +282,18 @@ db_password = ""
 EOF
             log "1c-connect: $t/$CONNECT_TOML written for $u" >&2
         fi
+        # Пустой пользователь базы в уже написанном toml — чиним.
+        # Файл пишется один раз и больше не трогается, поэтому стенд,
+        # поднятый до того, как сюда стали подставлять DEMO_DB_USER,
+        # несёт db_user = "" — а с пустым логином конфигуратор отвечает
+        # «Пользователь ИБ не идентифицирован» (публикация по HTTP такой
+        # логин принимает, и оттого отказ выглядит загадочно). Правим
+        # только эту строку и только когда она пуста: остальное в файле
+        # мог поменять человек.
+        if [ -n "$DB_USER" ] && [ -f "$t/$CONNECT_TOML" ]            && grep -q '^db_user = ""' "$t/$CONNECT_TOML"; then
+            sed -i "s|^db_user = \"\"|db_user = \"$DB_USER\"|" "$t/$CONNECT_TOML"
+            log "1c-connect: пустой db_user в $CONNECT_TOML заменён на $DB_USER" >&2
+        fi
         # Tools: here the shared kit IS what is laid out. ops_host compares
         # the kit's tools.version (stamped at build time) with the state's
         # (written when `host.tools` copies the tools onto a machine) — and

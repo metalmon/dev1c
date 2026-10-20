@@ -54,9 +54,13 @@ pub fn guard_key(user: &str, workstation: &str) -> String {
 /// (`install.state`, `1c-connect.log`) — отдельного каталога под замок не
 /// заводим. Содержимое — вспомогательное: используется только чтобы найти
 /// окно первой копии на Windows, в самом решении «занято или нет» участия не
-/// принимает (то решает `try_acquire`), так что устаревшее значение (прежний
-/// процесс не успел его обновить или уже не существует) не опаснее, чем
-/// отсутствие файла — `raise_other` просто не найдёт окно.
+/// принимает (то решает `try_acquire`). Пишется ПОСЛЕ взятия замка
+/// (`remember_pid` зовётся из `acquire` только в ветке «взял») — вторая
+/// копия, подоспевшая в этот короткий промежуток, прочитает отсутствующий
+/// или прошлый файл; авторитетным его не читать нигде — `raise_other` ниже
+/// не верит записанному pid на слово, а проверяет образ процесса, и для
+/// этого узкого окна (как и для устаревшего/отсутствующего файла) просто
+/// падает в «не нашли», ту же ветку, что и для серверной головы.
 fn pid_file(kit: &Kit, key: &str) -> std::path::PathBuf {
     kit.path(&format!("instance-{key}.pid"))
 }
@@ -188,12 +192,62 @@ fn raise_window_of(pid: u32) -> bool {
     true
 }
 
+/// Решение «процесс за этим pid — правда наша первая копия», отдельно от
+/// того, как добыт путь образа — чтобы его можно было проверить без
+/// Win32-вызовов. `candidate` — что система называет образом этого pid
+/// (`None` — процесса нет, или прочитать не вышло: закрыт доступ, слишком
+/// быстро вышел); `ours` — свой образ (`std::env::current_exe`). Пустого
+/// совпадения «оба `None`» нет и не может быть — `ours` всегда `&Path`, не
+/// `Option`.
+fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bool {
+    candidate == Some(ours)
+}
+
+/// Путь образа процесса `pid`, как его называет сама система —
+/// `QueryFullProcessImageNameW` по `OpenProcess` с минимальными правами
+/// (`PROCESS_QUERY_LIMITED_INFORMATION` хватает даже для процесса не под
+/// текущим пользователем, в отличие от `PROCESS_QUERY_INFORMATION`). `None`
+/// — процесса с таким pid уже нет, он нам недоступен, или путь не прочитать:
+/// во всех случаях вызывающему должно быть всё равно, это не наша копия.
+#[cfg(windows)]
+fn process_image(pid: u32) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: обычный вызов kernel32, pid — число из файла (может называть
+    // не существующий или чужой процесс — на этот случай и есть проверка
+    // `is_null`), прав запрошено по минимуму.
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        return None;
+    }
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` — буфер на стеке этой функции нужного размера, `len` —
+    // указатель на локальную переменную с его вместимостью в элементах;
+    // `h` только что получен от `OpenProcess` и ещё не закрыт.
+    let ok = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) };
+    unsafe { CloseHandle(h) };
+    if ok == 0 {
+        return None;
+    }
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+}
+
+/// Поднять окно первой копии по записанному pid — но только после того, как
+/// сам процесс подтвердил, что это действительно мы, а не чужая программа,
+/// которой ОС давно переотдала тот же номер. Без этой проверки раньше можно
+/// было тихо (`exit(0)`, без единой строки) поднять окно случайного соседа —
+/// ровно та молчаливая смерть, которую спека запрещает; любой другой исход
+/// (файла нет, процесса нет, образ не совпал, окна у подтверждённого
+/// процесса не нашлось) — это «не нашли», а не «нашли что-то».
 #[cfg(windows)]
 fn raise_other(kit: &Kit, key: &str) -> bool {
-    match std::fs::read_to_string(pid_file(kit, key)).ok().and_then(|s| s.trim().parse::<u32>().ok()) {
-        Some(pid) => raise_window_of(pid),
-        None => false,
+    let Some(pid) = std::fs::read_to_string(pid_file(kit, key)).ok().and_then(|s| s.trim().parse::<u32>().ok()) else { return false };
+    let Ok(ours) = std::env::current_exe() else { return false };
+    if !same_image(process_image(pid).as_deref(), &ours) {
+        return false;
     }
+    raise_window_of(pid)
 }
 
 /// На Linux поднимать окно дешёвым способом нечем (ни общего протокола между
@@ -236,6 +290,15 @@ mod tests {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         format!("{tag}-{}-{n}", std::process::id())
+    }
+
+    #[test]
+    fn same_image_accepts_our_own_and_rejects_a_different_or_missing_process() {
+        let ours = std::path::Path::new(r"C:\kit\1c-connect.exe");
+        assert!(same_image(Some(ours), ours), "наш собственный образ должен совпасть");
+        let other = std::path::Path::new(r"C:\Windows\notepad.exe");
+        assert!(!same_image(Some(other), ours), "чужой образ не должен приниматься за нашу копию");
+        assert!(!same_image(None, ours), "процесса нет — не наша копия");
     }
 
     #[test]

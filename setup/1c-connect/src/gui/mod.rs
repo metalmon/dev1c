@@ -28,30 +28,26 @@ pub mod window;
 
 pub const TRAY_PNG: &[u8] = include_bytes!("../../icons/tray.png");
 
-/// Три состояния трея: занят (операция/проверка идёт) берёт верх над связью —
-/// `tray_state` ниже решает, какое из них сейчас.
+/// Четыре состояния трея. Своего мнения у них нет: какое сейчас — решает
+/// точка карточки (`tray_state_now` ниже переводит `Dot` в бейдж), поэтому
+/// значок и окно расходиться не могут и порядок разрешения описан в одном
+/// месте — `panel::card`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TrayState {
     Off,
     Up,
+    /// Операция идёт (или связь поднимается) — жёлтый.
     Busy,
-}
-
-/// Занято — всегда жёлтый (идёт операция, связь тут не важна); иначе зелёный
-/// при поднятой связи, серый без неё.
-pub fn tray_state(link: &State, busy: bool) -> TrayState {
-    if busy {
-        TrayState::Busy
-    } else if link.is_up() {
-        TrayState::Up
-    } else {
-        TrayState::Off
-    }
+    /// Вердикт готовности провалился — оранжевый: «не всё готово», а не
+    /// «занято» и не «всё хорошо». Зелёным это состояние не бывает — ради
+    /// этого и заведено (спека, «Трей живёт по тем же правилам»).
+    Warn,
 }
 
 /// Значок трея со статусом: кружок в правом нижнем углу — зелёный (подключён),
-/// жёлтый (занят) или серый (без связи); обесцвечен значок только без связи —
-/// занятость тоже заметна цветным значком.
+/// жёлтый (занят), оранжевый (не всё готово) или серый (без связи); обесцвечен
+/// значок только без связи — занятость и провал вердикта тоже заметны цветным
+/// значком.
 pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
     let (w, h) = base.dimensions();
     let mut out = base.clone();
@@ -68,6 +64,9 @@ pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
     let (cx, cy) = (w as f32 - r - 1.0, h as f32 - r - 1.0);
     let colour: [u8; 4] = match state {
         TrayState::Busy => [0xfa, 0xcc, 0x1f, 255],
+        // Провал вердикта — оранжевый: рядом с жёлтым «занято» он различим,
+        // а с зелёным «всё хорошо» не спутаешь и краем глаза.
+        TrayState::Warn => [0xe8, 0x7a, 0x14, 255],
         TrayState::Up => [0x2f, 0x8f, 0x4e, 255],
         TrayState::Off => [0x8d, 0x86, 0x7e, 255],
     };
@@ -300,8 +299,11 @@ pub enum Dot {
     Up,
     Down,
     /// MCP включены, но быстрая проверка (`verify::readiness`) нашла
-    /// провалившийся факт — карточка жёлтая, а не зелёная или красная: ворота
-    /// открыты и обслуживают вызовы, просто агент получит отказ от базы.
+    /// провалившийся факт — карточка жёлтая, а не зелёная или красная:
+    /// обслуживание идёт, просто не всё готово. Провалиться может и то, что
+    /// базы не касается (проект не разложен, среда не отвечает), поэтому
+    /// заголовок говорит общее «Не всё готово», а что именно — говорит
+    /// причина рядом (`panel::reason`).
     Warn,
 }
 
@@ -311,8 +313,11 @@ pub enum Dot {
 /// «Сохранить» (см. `run_readiness` и её вызовы), не на таймере.
 #[derive(Clone, Debug)]
 pub enum Readiness {
-    /// Переключатель выключен либо поток ещё считает — карточка показывает
-    /// обычное «MCP включены», как и до этой проверки.
+    /// Переключатель выключен либо поток ещё считает. Зелёным это не бывает:
+    /// при включённом обслуживании карточка показывает «Проверяю…» с точкой
+    /// «занято» (спека: «Зелёной точки до вердикта готовности не бывает»), а
+    /// при выключенном — обычное «MCP выключены», потому что вердикт тогда и
+    /// не считается.
     Unknown,
     Ok,
     /// Первый провалившийся факт — его `what`/`detail`/`hint` и есть причина,
@@ -810,19 +815,23 @@ pub fn locks_gate(gate_before: Option<&str>, gate_after: Option<String>, serving
 }
 
 /// То же на живых параметрах. Полей, которых окно не показывает, в форме нет —
-/// режим берём из текущих параметров, как это делает сама `save_host`: иначе
-/// туннельная проверка адреса среды применилась бы к локальному рабочему
-/// месту. «Было» берём из кэша `ui.gate` (он пересчитывается по тем же
-/// событиям и его же читает `toggle_link`), на диск ходим ровно раз — за
-/// «станет»: нажатие «Сохранить» не должно стоить шести обходов `Program
-/// Files` на главном потоке окна.
+/// пустой режим берём из текущих параметров, как это делает сама `save_host`:
+/// иначе туннельная проверка адреса среды применилась бы к локальному рабочему
+/// месту. Непустой режим — это смена режима из трея, и спрашивать надо как
+/// раз про новый: замки у режимов разные (туннелю нужны адрес среды, пароль
+/// и имя рабочего места, локальному — нет). «Было» берём из кэша `ui.gate`
+/// (он пересчитывается по тем же событиям и его же читает `toggle_link`), на
+/// диск ходим ровно раз — за «станет»: нажатие «Сохранить» не должно стоить
+/// шести обходов `Program Files` на главном потоке окна.
 pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
     let serving = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
     if !serving || ui.gate.is_some() {
         return None;
     }
     let mut host = new_host.clone();
-    host.mode = ui.cfg.host.mode.clone();
+    if host.mode.is_empty() {
+        host.mode = ui.cfg.host.mode.clone();
+    }
     locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg { host }), serving)
 }
 
@@ -1225,14 +1234,31 @@ fn quiet_ctx(ui: &Ui) -> Ctx {
     Ctx { kit: ui.kit.clone(), cfg: ui.cfg.clone(), dry_run: false, sink: Arc::new(|_: Event| {}), prompt: Box::new(AlwaysDefault) }
 }
 
-/// Синхронизировать трей с `Ui`: состояние (занято — жёлтый, иначе по
-/// связи) и подсказка на текущий момент. Общий конец всех мест, что меняют
+/// Состояние значка — это точка карточки, переведённая в бейдж
+/// (`tray::tray_state_of`). Порядок разрешения живёт в одном месте
+/// (`panel::card`: операция → отказ → замок → вердикт не посчитан →
+/// провалившийся факт → всё в порядке), и значок не может разойтись с окном:
+/// раньше у него было своё правило («поднята связь — зелёный»), и он
+/// оставался зелёным при непосчитанном и провалившемся вердикте — ровно та
+/// ложь, против которой писан раздел спеки «Зелёный значит „работает“».
+///
+/// Идущая проверка — единственное, чего карточка не видит: «Проверить»
+/// держит `ui.busy`, но не `ui.progress` (карточки хода у проверки нет).
+/// Для значка это та же занятость, что и операция.
+fn tray_state_now(ui: &Ui, now: Instant) -> TrayState {
+    if ui.busy.is_some() {
+        return TrayState::Busy;
+    }
+    tray::tray_state_of(panel::card(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.ready, ui.gate.as_deref(), now).dot)
+}
+
+/// Синхронизировать трей с `Ui`: состояние (по точке карточки) и подсказка
+/// на текущий момент. Общий конец всех мест, что меняют
 /// `busy`/`progress`/`link` — `set_link`, `run_op`, `Ev::Done`, `Ev::Checks`;
 /// один из них забыл это раньше (S1) — значок трея застревал жёлтым после
 /// проверки.
 fn sync_tray(ui: &Ui, now: Instant) {
-    let busy = ui.progress.is_some() || ui.busy.is_some();
-    let (state, on) = (tray_state(&ui.link, busy), ui.link.is_on());
+    let (state, on) = (tray_state_now(ui, now), ui.link.is_on());
     let tooltip = tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now);
     if let Some(tray) = &ui.tray {
         tray.set_state(state, on, ui.gate.is_some());
@@ -2038,7 +2064,7 @@ mod tests {
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, save_host, save_needs_confirm,
-        stale_line, stale_text, start_readiness, took, tick_redraw, tray_state, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
+        stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
@@ -2301,6 +2327,9 @@ mod tests {
         assert_eq!(at(&up, c, c), vec![0x2f, 0x8f, 0x4e]);
         let down = badge(&base, TrayState::Off);
         assert_eq!(at(&down, c, c), vec![0x8d, 0x86, 0x7e]);
+        // Провал вердикта — свой цвет, не зелёный и не жёлтый «занято».
+        let warn = badge(&base, TrayState::Warn);
+        assert_eq!(at(&warn, c, c), vec![0xe8, 0x7a, 0x14]);
         let p = at(&down, 2, 2);
         assert!(p[0] == p[1] && p[1] == p[2], "{p:?}");
     }
@@ -2318,15 +2347,10 @@ mod tests {
         assert_eq!(at(&busy, 2, 2), at(&base, 2, 2));
     }
 
-    #[test]
-    fn busy_wins_over_the_link_state() {
-        let up = State::Up { since: Instant::now() };
-        assert_eq!(tray_state(&up, true), TrayState::Busy);
-        assert_eq!(tray_state(&up, false), TrayState::Up);
-        assert_eq!(tray_state(&State::Off, false), TrayState::Off);
-        assert_eq!(tray_state(&State::Connecting, false), TrayState::Off);
-    }
-
+    /// Прежняя `tray_state` (своё правило значка: «поднята связь — зелёный»)
+    /// удалена вместе с этим тестом: двух правд о значке быть не должно, а
+    /// состояние теперь считает точка карточки — `tray_state_now`, и
+    /// сторожит его `tray::tests::the_tray_follows_the_card_order`.
     #[test]
     fn tooltip_names_the_phase_and_minutes() {
         let now = Instant::now() + Duration::from_secs(3600);

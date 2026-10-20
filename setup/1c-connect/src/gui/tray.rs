@@ -4,8 +4,8 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, note_line, quit, run_check, save_host, start_session, stop_session, theme, toggle_link, window, Ev, Kind, Line, Tab,
-    TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, start_session, stop_session, theme,
+    toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
@@ -232,15 +232,16 @@ impl Tray {
 /// точку в своё состояние. Отсюда и «при идущей операции побеждает операция»:
 /// точка в этот момент уже `Dot::Busy`.
 ///
-/// Провал вердикта (`Dot::Warn`) показывается тем же жёлтым бейджем, что и
-/// занятость: отдельного, четвёртого состояния у `TrayState` пока нет — это
-/// одна строка в `gui/mod.rs` (`TrayState::Warn` плюс её цвет в `badge`),
-/// чужой файл, см. отчёт задачи 24. Главное правило уже соблюдено: зелёным
-/// провалившийся вердикт не бывает.
+/// Провал вердикта — своё, четвёртое состояние значка (`TrayState::Warn`,
+/// оранжевый бейдж): «не всё готово» нельзя спутать ни с «занято», ни с
+/// «всё хорошо». Отказ (`Dot::Down`) показывается серым, как и выключенное
+/// обслуживание: своего цвета у него нет и не было — причину человек читает
+/// в подсказке значка.
 pub fn tray_state_of(dot: super::Dot) -> TrayState {
     match dot {
         super::Dot::Up => TrayState::Up,
-        super::Dot::Busy | super::Dot::Warn => TrayState::Busy,
+        super::Dot::Busy => TrayState::Busy,
+        super::Dot::Warn => TrayState::Warn,
         super::Dot::Off | super::Dot::Down => TrayState::Off,
     }
 }
@@ -261,6 +262,37 @@ fn toggle_enabled(locked: bool, on: bool) -> bool {
 /// ревью).
 fn mode_change_blocked(ui: &Ui) -> bool {
     ui.busy.is_some() || ui.progress.is_some()
+}
+
+/// Записать новый режим и поднять сеанс заново. Зовётся после согласия
+/// человека (`confirm_database_change`), поэтому `ui.cfg.host.mode` правится
+/// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
+/// иначе переписал бы его обратно.
+fn apply_mode(cx: &mut App, mode: &'static str) {
+    cx.global_mut::<Ui>().cfg.host.mode = mode.into();
+    let host = cx.global::<Ui>().cfg.host.clone();
+    match save_host(cx.global_mut::<Ui>(), host) {
+        Ok(()) => {
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_mode(mode);
+            }
+            // Новый транспорт — сеанс поднимается заново; `stop_session`
+            // безвредна, если сеанса и не было.
+            stop_session(cx);
+            if let Err(e) = start_session(cx) {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            }
+            let mut label = mode;
+            for (m, _, text) in MODES {
+                if m == mode {
+                    label = text;
+                }
+            }
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
+        }
+        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+    }
+    cx.refresh_windows();
 }
 
 /// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
@@ -298,36 +330,40 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             // меню уже успел отметить себя сам — возвращаем галочку на
             // настоящий режим, раз действие не состоялось.
             let ui = cx.global::<Ui>();
-            if mode_change_blocked(ui) {
+            let current = ui.cfg.host.mode.clone();
+            if mode_change_blocked(ui) || mode == current {
                 if let Some(tray) = &ui.tray {
-                    tray.set_mode(&ui.cfg.host.mode);
+                    tray.set_mode(&current);
                 }
                 return;
             }
-            cx.global_mut::<Ui>().cfg.host.mode = mode.into();
-            let host = cx.global::<Ui>().cfg.host.clone();
-            match save_host(cx.global_mut::<Ui>(), host) {
-                Ok(()) => {
-                    if let Some(tray) = &cx.global::<Ui>().tray {
-                        tray.set_mode(mode);
-                    }
-                    // Новый транспорт — сеанс поднимается заново; `stop_session`
-                    // безвредна, если сеанса и не было.
-                    stop_session(cx);
-                    if let Err(e) = start_session(cx) {
-                        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                    }
-                    let mut label = mode;
-                    for (m, _, text) in MODES {
-                        if m == mode {
-                            label = text;
-                        }
-                    }
-                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
-                }
-                Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+            // Галочка возвращается на действующий режим сразу: состоится ли
+            // смена, решает вопрос ниже, а пункт отметил себя сам ещё до нас.
+            // Согласие вернёт её на новый режим (`apply_mode`).
+            if let Some(tray) = &ui.tray {
+                tray.set_mode(&current);
             }
-            cx.refresh_windows();
+            // Тот же вопрос, что у «Сохранить»: смена режима может погасить
+            // обслуживание — замки у режимов разные (туннелю нужны адрес
+            // среды, пароль и имя рабочего места). Параметры меняем только
+            // после согласия, а не до вопроса: иначе «было ли обслуживание
+            // живым» считалось бы уже по новому режиму, и вопрос не
+            // появлялся бы вовсе (находка ревью задачи 23).
+            let mut host = ui.cfg.host.clone();
+            host.mode = mode.into();
+            // Спрашивать не о чем (или спросить негде — значок живёт и без
+            // окна) — пишем сразу, как делали раньше.
+            if !save_needs_confirm(ui, &host) || ui.window.is_none() {
+                apply_mode(cx, mode);
+                return;
+            }
+            // Диалог платформенный и принадлежит окну: на спрятанном окне
+            // его человеку не видно, а смена режима тихо ждала бы ответа.
+            window::show_window(cx);
+            let Some(w) = cx.global::<Ui>().window else { return };
+            let _ = w.update(cx, |_, window, cx| {
+                confirm_database_change(window, cx, &host, move |_window, cx| apply_mode(cx, mode));
+            });
         }
         MenuAction::Theme(c) => {
             let kit = cx.global::<Ui>().kit.clone();
@@ -366,7 +402,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, tray_state_of, MenuAction, TrayState, Ui, MODES};
+    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES};
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -465,33 +501,51 @@ mod tests {
         assert!(toggle_enabled(false, false));
     }
 
-    /// Значок идёт тем же порядком разрешения, что и точка в карточке:
-    /// считает его `panel::card` один раз, трею остаётся перевести точку в
-    /// своё состояние. Главное — идущая операция побеждает провалившийся
-    /// вердикт, а сам провал зелёным больше не бывает.
+    /// Значок идёт тем же порядком разрешения, что и точка в карточке.
+    /// Проверяется боевой путь — `tray_state_now`, то самое, что зовёт
+    /// `sync_tray`: прежний тест звал `tray_state_of` напрямую и оставался
+    /// зелёным, пока значок считался старым правилом (находка ревью).
     #[test]
     fn the_tray_follows_the_card_order() {
-        use crate::gui::panel::card;
+        use crate::gui::tray_state_now;
         use crate::gui::Readiness;
         use crate::session::State;
         use common::check::Check;
 
         let now = Instant::now();
-        let up = State::Up { since: now };
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.link = State::Up { since: now };
+        // `Ui::for_test` считает замок по каталогу теста, и там он заперт
+        // (ни инструментов, ни платформы) — а речь здесь про цвет значка при
+        // открытом замке; запертый проверяется ниже отдельно.
+        ui.gate = None;
         let fail = Readiness::Warn(Check::fail("проект", "не разложен", "1c-connect install"));
-        let state = |c: crate::gui::panel::Card| tray_state_of(c.dot);
 
-        assert_eq!(state(card(None, &up, "local", &Readiness::Ok, None, now)), TrayState::Up);
-        // Вердикт провален — не зелёный.
-        assert_ne!(state(card(None, &up, "local", &fail, None, now)), TrayState::Up);
-        // Вердикт ещё не посчитан — тоже не зелёный.
-        assert_ne!(state(card(None, &up, "local", &Readiness::Unknown, None, now)), TrayState::Up);
+        ui.ready = Readiness::Ok;
+        assert_eq!(tray_state_now(&ui, now), TrayState::Up, "всё сошлось — зелёный");
+        // Вердикт провален — своё состояние, и зелёным оно не бывает.
+        ui.ready = fail.clone();
+        assert_eq!(tray_state_now(&ui, now), TrayState::Warn);
+        // Вердикт ещё не посчитан — «занято», не зелёный.
+        ui.ready = Readiness::Unknown;
+        assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
         // Идёт операция — побеждает она, даже поверх провалившегося вердикта.
-        let r = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
-        assert_eq!(state(card(Some(&r), &up, "local", &fail, None, now)), TrayState::Busy);
+        ui.ready = fail.clone();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
+        assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
+        ui.progress = None;
+        // Идёт проверка — карточки хода у неё нет, но значку это занятость.
+        ui.busy = Some(Busy::Check);
+        assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
+        ui.busy = None;
         // Замок и выключенное обслуживание — серый.
-        assert_eq!(state(card(None, &up, "local", &Readiness::Ok, Some("не задан пользователь базы"), now)), TrayState::Off);
-        assert_eq!(state(card(None, &State::Off, "local", &Readiness::Ok, None, now)), TrayState::Off);
+        ui.ready = Readiness::Ok;
+        ui.gate = Some("не задан пользователь базы".into());
+        assert_eq!(tray_state_now(&ui, now), TrayState::Off);
+        ui.gate = None;
+        ui.link = State::Off;
+        assert_eq!(tray_state_now(&ui, now), TrayState::Off);
     }
 
     #[test]

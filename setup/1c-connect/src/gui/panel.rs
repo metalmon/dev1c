@@ -161,7 +161,7 @@ pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>) -
         return Some(why.clone());
     }
     if let Some(why) = gate {
-        return Some(format!("Включать нечего: {why}"));
+        return Some(gate_text(why));
     }
     if mode == "local" && link.is_up() {
         if let Readiness::Warn(check) = ready {
@@ -180,15 +180,25 @@ pub fn switch_locked(gate: Option<&str>, on: bool, has_progress: bool) -> bool {
     has_progress || (gate.is_some() && !on)
 }
 
-/// Подсказка переключателя: причина текущего состояния (`reason`), пока она
-/// есть, — в заголовок карточки она не идёт («не надо там прозу писать, она
-/// не лезет», заказчик 2026-10-21), а живёт здесь, в подвале и в журнале.
-/// Сказать нечего — подсказка объясняет сам переключатель.
-pub fn switch_tooltip(reason: Option<&str>, mode: &str) -> String {
-    match reason {
-        Some(why) => why.to_string(),
-        None if mode == "local" => "Обслуживание вызовов агента (MCP)".into(),
-        None => "Туннель в среду разработки".into(),
+/// Причина замка человеческими словами — одна формулировка на подсказку,
+/// подвал и журнал.
+fn gate_text(why: &str) -> String {
+    format!("Включать нечего: {why}")
+}
+
+/// Подсказка переключателя. Замок — первым, даже когда есть отказ связи:
+/// запирает переключатель именно он (`switch_locked`), и человек, прочитав
+/// про занятый порт, снял бы чужой процесс и остался с запертым
+/// переключателем без объяснения (находка ревью). Отказ и провал вердикта он
+/// прочтёт в подвале, где говорит `reason`. В заголовок карточки причина не
+/// идёт ни в каком виде («не надо там прозу писать, она не лезет», заказчик
+/// 2026-10-21). Сказать нечего — подсказка объясняет сам переключатель.
+pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>, mode: &str) -> String {
+    match (gate, reason) {
+        (Some(why), _) => gate_text(why),
+        (None, Some(why)) => why.to_string(),
+        (None, None) if mode == "local" => "Обслуживание вызовов агента (MCP)".into(),
+        (None, None) => "Туннель в среду разработки".into(),
     }
 }
 
@@ -713,7 +723,7 @@ impl Render for Panel {
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
                     .disabled(switch_locked(gate.as_deref(), link.is_on(), has_progress))
-                    .tooltip(switch_tooltip(why.as_deref(), &mode))
+                    .tooltip(switch_tooltip(gate.as_deref(), why.as_deref(), &mode))
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -1170,13 +1180,31 @@ mod tests {
         assert!(switch_locked(None, false, true));
         assert!(switch_locked(None, true, true));
         // Причина живёт в подсказке, а не в заголовке карточки.
-        let why = reason(&State::Off, "local", &Readiness::Unknown, why);
-        assert_eq!(why.as_deref(), Some("Включать нечего: не задан пользователь базы"));
-        assert_eq!(switch_tooltip(why.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
-        assert_eq!(switch_tooltip(None, "local"), "Обслуживание вызовов агента (MCP)");
-        assert_eq!(switch_tooltip(None, "tunnel"), "Туннель в среду разработки");
+        let text = reason(&State::Off, "local", &Readiness::Unknown, why);
+        assert_eq!(text.as_deref(), Some("Включать нечего: не задан пользователь базы"));
+        assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
+        assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
+        assert_eq!(switch_tooltip(None, None, "tunnel"), "Туннель в среду разработки");
         let c = card(None, &State::Off, "local", &Readiness::Unknown, None, Instant::now());
         assert_eq!(c.title, "MCP выключены", "причина в заголовок не идёт — она туда не влезает");
+    }
+
+    /// Подсказка запертого переключателя называет причину замка, а не отказ
+    /// связи: заперт он именно замком. Иначе человек снимает чужой процесс с
+    /// порта и остаётся с запертым переключателем без объяснения (находка
+    /// ревью задачи 24).
+    #[test]
+    fn the_locked_switch_names_the_gate_not_the_bind() {
+        let gate = "не задан пользователь базы";
+        let link = State::Failed("порт 7771 занят процессом 1234".into());
+        let why = reason(&link, "local", &Readiness::Ok, Some(gate));
+        // В подвале — отказ: он выше в порядке разрешения, и карточка красная.
+        assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
+        // А переключатель заперт замком — и говорит про замок.
+        assert!(switch_locked(Some(gate), link.is_on(), false));
+        assert_eq!(switch_tooltip(Some(gate), why.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
+        // Замка нет — подсказка отдаёт то же, что подвал.
+        assert_eq!(switch_tooltip(None, why.as_deref(), "local"), "порт 7771 занят процессом 1234");
     }
 
     /// Зелёной точки до вердикта не бывает: пока готовность считается, точка

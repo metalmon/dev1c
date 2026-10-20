@@ -154,9 +154,9 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
     let s = window.scale_factor();
     let (x, y) = ((origin.x.as_f32() * s) as i32, (origin.y.as_f32() * s) as i32);
     let aux = ConfigureWindowAux::new().x(x).y(y);
-    if let Ok(cookie) = conn.configure_window(h.window.get(), &aux) {
-        let _ = cookie.check();
-    }
+    // Одним выражением: расписка о запросе одалживает соединение, и в `if let`
+    // она пережила бы его на один шаг разрушения — сборка на Linux это ловит.
+    let _ = conn.configure_window(h.window.get(), &aux).map(|cookie| cookie.check());
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

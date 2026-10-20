@@ -26,3 +26,7 @@ platform/
 # CI artifacts for Dockerfile.1c (1c-connect-linux): their own small build
 # context, so a rebuild of the stand image does not drag the 1C installer
 artifacts/
+
+# Python bytecode of the onboarding overlay
+__pycache__/
+*.pyc

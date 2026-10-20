@@ -18,6 +18,7 @@ const TOOLS: &str = "инструменты комплекта";
 const VRUNNER: &str = "vrunner-mcp отвечает";
 const PROJECT: &str = "проект";
 const BASE: &str = "база";
+const DB_USER: &str = "пользователь базы";
 const WEB: &str = "веб-сервер";
 const PUBLICATION: &str = "публикация и расширение";
 const GITEA: &str = "Gitea";
@@ -42,7 +43,9 @@ pub fn order(mode: &str) -> Vec<&'static str> {
     if cfg!(target_os = "linux") {
         v.push(DISPLAY);
     }
-    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, WEB, PUBLICATION, GITEA]);
+    // «Пользователь базы» — сразу за базой и до веб-сервера с публикацией:
+    // без него работы не будет, как бы хорошо ни отвечала публикация.
+    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, DB_USER, WEB, PUBLICATION, GITEA]);
     if mode == "local" {
         v.push(OPEN_SESSION);
         v.push(MEDIA);
@@ -217,6 +220,23 @@ pub fn tools_fact(kit_root: &std::path::Path, tools: &std::path::Path) -> Check 
         OpState::Missing => Check::fail(TOOLS, format!("в {} ничего нет", tools.display()), "1c-connect install"),
         OpState::Drifted { from, to } => Check::fail(TOOLS, format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
         OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
+    }
+}
+
+/// Пользователь базы задан. Чистая функция от настроек: ни одного запроса в
+/// сеть, и проваливает готовность сама по себе — до публикации и расширения.
+///
+/// Почему не хватает проверки публикации (замер 2026-10-20, стенд): она ходит
+/// с basic-auth из полей, а учебная база пускает и анонима — `GET …/version`
+/// отвечает 200 без заголовка авторизации, карточка горит зелёным. Дальше
+/// начинается настоящая работа, и Конфигуратор отказывает: «Пользователь ИБ не
+/// идентифицирован». Зелёный держался на терпимости конкретной базы и обещал
+/// работу, которой нет; с этим фактом он держится на собственных настройках.
+pub fn db_user_fact(user: &str) -> Check {
+    if user.trim().is_empty() {
+        Check::fail(DB_USER, "не задан", "заполните поле «Пользователь базы» и нажмите «Сохранить»")
+    } else {
+        Check::pass(DB_USER, user.to_string())
     }
 }
 
@@ -444,6 +464,9 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     }));
     v.push(within(t0, budget, PROJECT, || project_fact(ctx, &tools)));
     v.push(within(t0, budget, BASE, || base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists())));
+    // Без сети и без сроков: это чистая функция от настроек, и считать её под
+    // бюджетом было бы враньём — «не проверено» тут не бывает.
+    v.push(db_user_fact(&h.db_user));
     let web = ctx.cfg.http_port();
     v.push(within(t0, budget, WEB, || {
         // Закрытый порт отказывает мгновенно, так что весь срок здесь — это
@@ -543,16 +566,16 @@ mod tests {
         // Windows и macOS его нет вовсе), и всё дальше сдвинуто на один факт.
         let d = usize::from(cfg!(target_os = "linux"));
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 14 + d);
-        assert_eq!(tunnel[13 + d], "туннель");
+        assert_eq!(tunnel.len(), 15 + d);
+        assert_eq!(tunnel[14 + d], "туннель");
         assert_eq!(tunnel[5 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[10 + d], "Gitea");
+        assert_eq!(tunnel[11 + d], "Gitea");
         if d == 1 {
             assert_eq!(tunnel[3], "экран для конфигуратора");
         }
         let local = order("local");
-        assert_eq!(local.len(), 14 + d);
-        assert_eq!(local[13 + d], "порты рабочего места");
+        assert_eq!(local.len(), 15 + d);
+        assert_eq!(local[14 + d], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -645,6 +668,36 @@ mod tests {
         let publication = checks.iter().find(|c| c.what == PUBLICATION).unwrap();
         assert!(publication.detail.contains("18080"), "{publication:?}");
         assert!(!publication.detail.contains("9999") && !publication.detail.contains("Buh"), "{publication:?}");
+    }
+
+    /// Пустое поле «Пользователь базы» — собственный провал, и он обязан
+    /// случиться раньше публикации. Живой замер 2026-10-20: база учебного
+    /// стенда пускает анонима, `GET …/version` отвечает 200 и без заголовка
+    /// авторизации — публикация зеленеет, а Конфигуратор потом отказывает
+    /// («Пользователь ИБ не идентифицирован»). Зелёный, держащийся на
+    /// терпимости конкретной базы, обещает работу, которой нет.
+    #[test]
+    fn an_empty_db_user_fails_before_any_request() {
+        let empty = db_user_fact("");
+        assert!(!empty.ok && !empty.info, "{empty:?}");
+        assert!(empty.hint.contains("Пользователь базы"), "{empty:?}");
+        assert!(db_user_fact("Администратор").ok, "{:?}", db_user_fact("Администратор"));
+        // Пробелы — то же пустое поле: «Пользователь ИБ не идентифицирован».
+        assert!(!db_user_fact("   ").ok);
+
+        // Факт стоит раньше публикации — и в порядке, и в самом наборе.
+        let names = order("local");
+        let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
+        assert!(at(DB_USER) < at(PUBLICATION) && at(DB_USER) < at(WEB), "{names:?}");
+
+        let mut ctx = test_ctx("local");
+        ctx.cfg.host.db_user = String::new();
+        let checks = run(&ctx, None, PortUse::WeDont);
+        // Причина — пустой пользователь, а не «публикация не отвечает»:
+        // смотрим с его места вниз, выше него в наборе свои провалы
+        // (параметры, платформа) и к этому правилу они отношения не имеют.
+        let tail: Vec<Check> = checks.iter().skip_while(|c| c.what != DB_USER).cloned().collect();
+        assert_eq!(first_fail(&tail).unwrap().what, DB_USER, "{tail:?}");
     }
 
     #[test]

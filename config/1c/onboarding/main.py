@@ -181,7 +181,8 @@ class App:
         self._step, self._layout, self._shown_warning = step, layout, self._warning
         if self._callout is not None:
             self._callout.destroy()
-        self._callout = Callout(display_step, layout, self._on_button, copy_question)
+        self._callout = Callout(display_step, layout, self._on_button, copy_question,
+                                total=self._machine.total)
         self._callout.show()
 
 

@@ -22,7 +22,8 @@ from gi.repository import Gdk, Gtk
 # одни и те же шесть чисел отдельными строками — ровно та развилка,
 # из-за которой в фикс-раунде 2 высота пузыря и нарисованный текст
 # однажды чуть не разошлись).
-from placement import FOOT, HEAD, LINE_HEIGHT, QUESTION_GAP, QUESTION_ROW_HEIGHT, QUESTIONS_CAPTION_HEIGHT, wrap_body
+from placement import (BUTTON_BOTTOM_GAP, BUTTON_HEIGHT, FOOT, HEAD, LINE_HEIGHT, QUESTION_GAP,
+                       QUESTION_ROW_HEIGHT, QUESTIONS_CAPTION_HEIGHT, wrap_body)
 from targets import Rect
 
 # Запас вокруг пузыря и стрелки: под тень и чтобы окно гарантированно
@@ -33,8 +34,11 @@ BORDER_WIDTH = 3
 SHADOW_OFFSET = 6
 CLOSE_SIZE = 16
 CLOSE_MARGIN = 10
-BUTTON_HEIGHT = 20
 BUTTON_GAP = 10
+# Поля внутри кнопки по горизонтали и кегль подписи: кнопка должна быть
+# заметной целью мыши, а не полоской в один текст.
+BUTTON_PAD_X = 18
+BUTTON_FONT_SIZE = 14
 ARROW_WIDTH = 6
 ARROW_HEAD = 14
 
@@ -72,8 +76,13 @@ def _window_rect(layout):
 class Callout:
     """Выноска: один POPUP-попап, вырезанный по контуру своего рисунка."""
 
-    def __init__(self, step, layout, on_button, copy_question=None):
+    def __init__(self, step, layout, on_button, copy_question=None, total=None):
         self._step = step
+        # Сколько всего шагов — приходит из сценария (Machine.total), а
+        # не зашито в рисование: иначе добавленный шаг молча оставляет
+        # в подписи старое число. None (тесты, которым счётчик не важен) —
+        # подпись без «из M», а не выдуманное число.
+        self._total = total
         self._layout = layout
         self._on_button = on_button
         # Готовые вопросы шага 4 копируются в буфер сами, без похода через
@@ -208,7 +217,8 @@ class Callout:
         cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(13)
         cr.move_to(x + 16, y + 20)
-        cr.show_text(f'Шаг {step.number} из 6')
+        counter = f'Шаг {step.number}' if self._total is None else f'Шаг {step.number} из {self._total}'
+        cr.show_text(counter)
 
     def _draw_title(self, cr, x, y, step):
         cr.set_source_rgb(*_BORDER)
@@ -286,10 +296,10 @@ class Callout:
 
     def _draw_buttons(self, cr, x, y, w, h, buttons):
         rects = []
-        by = y + h - BUTTON_HEIGHT - 4
+        by = y + h - BUTTON_HEIGHT - BUTTON_BOTTOM_GAP
         bx = x + w - 16
         cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
-        cr.set_font_size(12)
+        cr.set_font_size(BUTTON_FONT_SIZE)
         for label in reversed(buttons):
             # Первая кнопка списка — главное действие шага (так решено в
             # утверждённых макетах на каждом экране: «Начать» важнее
@@ -297,7 +307,7 @@ class Callout:
             # закрашивается; остальные — вторичные, без заливки.
             primary = label == buttons[0]
             extents = cr.text_extents(label)
-            btn_w = extents.width + 24
+            btn_w = extents.width + 2 * BUTTON_PAD_X
             bx -= btn_w
 
             if primary:
@@ -311,7 +321,10 @@ class Callout:
             cr.stroke()
 
             cr.set_source_rgb(*_BORDER)
-            cr.move_to(bx + 12, by + BUTTON_HEIGHT - 6)
+            # Базовая линия по центру кнопки, а не на глаз от нижнего
+            # края: высота кнопки теперь задаётся константой, и подпись
+            # обязана ездить вместе с ней.
+            cr.move_to(bx + BUTTON_PAD_X, by + (BUTTON_HEIGHT - extents.height) / 2 - extents.y_bearing)
             cr.show_text(label)
 
             rects.append((label, Rect(int(bx), int(by), int(btn_w), BUTTON_HEIGHT)))

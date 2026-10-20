@@ -4,7 +4,7 @@ import unittest
 
 from scenario import Step, Target
 from targets import Rect, tray_area
-from placement import bubble_size, place, wrap_body
+from placement import FOOT, HEAD, bubble_size, place, wrap_body
 
 SCREEN = Rect(0, 0, 2560, 1440)
 
@@ -160,7 +160,7 @@ class BubbleSizeTests(unittest.TestCase):
 
     def test_empty_body_is_still_valid(self):
         w, h = bubble_size(self._step(''))
-        self.assertEqual(h, 64 + 24)
+        self.assertEqual(h, HEAD + FOOT)
 
     def test_custom_width(self):
         w, h = bubble_size(self._step('Строка.'), width=480)
@@ -203,7 +203,7 @@ class BubbleSizeTests(unittest.TestCase):
         _, h = bubble_size(step)
         wrapped = len(wrap_body(long_body))
         self.assertGreater(wrapped, logical_lines)
-        self.assertEqual(h, 64 + 24 + wrapped * 21)
+        self.assertEqual(h, HEAD + FOOT + wrapped * 21)
 
 
 class WrapBodyTests(unittest.TestCase):

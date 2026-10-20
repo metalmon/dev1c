@@ -13,9 +13,9 @@ BAD_ANCHOR_SCENARIO = str(_HERE / 'fixtures' / 'scenario_bad_anchor.toml')
 
 
 class LoadTests(unittest.TestCase):
-    def test_six_steps_in_order(self):
+    def test_seven_steps_in_order(self):
         steps = load(SCENARIO)
-        self.assertEqual([s.number for s in steps], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([s.number for s in steps], [1, 2, 3, 4, 5, 6, 7])
 
     def test_texts_are_verbatim(self):
         steps = load(SCENARIO)
@@ -62,6 +62,8 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(steps[4].target.kind, 'window')
         self.assertEqual(steps[4].target.anchor, 'right-bottom')
         self.assertEqual(steps[5].target.kind, 'tray')
+        self.assertEqual(steps[6].target.kind, 'desktop_icon')
+        self.assertEqual(steps[6].target.desktop_file, 'gitea.desktop')
 
     def test_no_step_carries_a_wait_for(self):
         # Шаги 2 и 3 (ruling второй и этой волны) wait_for не несут
@@ -77,13 +79,13 @@ class LoadTests(unittest.TestCase):
 
     def test_advance_on(self):
         steps = load(SCENARIO)
-        self.assertEqual([s.advance_on for s in steps], [
-            'button', 'button', 'button', 'button', 'button', 'button',
-        ])
+        # Каждый шаг ждёт кнопку, без исключений — проверяем именно это,
+        # а не длину списка: число шагов сценария меняется, правило нет.
+        self.assertEqual({s.advance_on for s in steps}, {'button'})
 
-    def test_step_six_has_only_done_button(self):
+    def test_last_step_has_only_done_button(self):
         steps = load(SCENARIO)
-        self.assertEqual(steps[5].buttons, ('Готово',))
+        self.assertEqual(steps[-1].buttons, ('Готово',))
 
     def test_step_four_questions_are_separate_from_body(self):
         steps = load(SCENARIO)

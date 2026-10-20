@@ -23,7 +23,14 @@ Layout = namedtuple('Layout', 'bubble arrow_start arrow_end')
 # дошёл — повезло, что числа совпадали; в следующий раз могло не
 # повезти). Теперь callout.py импортирует их отсюда, не переобъявляет.
 HEAD = 64
-FOOT = 24
+# Подвал — это ровно полоса кнопок с воздухом сверху и снизу. Держим его
+# производным от трёх чисел, а не отдельной константой: раньше FOOT=24 в
+# точности равнялся кнопке в 20px плюс 4px отступа, и любое увеличение
+# кнопки молча съедало зазор над ней.
+BUTTON_HEIGHT = 30
+BUTTON_TOP_GAP = 14
+BUTTON_BOTTOM_GAP = 20
+FOOT = BUTTON_TOP_GAP + BUTTON_HEIGHT + BUTTON_BOTTOM_GAP
 LINE_HEIGHT = 21
 QUESTIONS_CAPTION_HEIGHT = 20
 QUESTION_ROW_HEIGHT = 32

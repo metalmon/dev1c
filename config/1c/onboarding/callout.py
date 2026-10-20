@@ -212,7 +212,11 @@ class Callout:
         cr.select_font_face('sans-serif', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
         cr.set_font_size(12)
         for label in reversed(buttons):
-            primary = label == buttons[-1]
+            # Первая кнопка списка — главное действие шага (так решено в
+            # утверждённых макетах на каждом экране: «Начать» важнее
+            # «Закрыть», «Открыть 1С» важнее «Дальше» и т.д.) — она и
+            # закрашивается; остальные — вторичные, без заливки.
+            primary = label == buttons[0]
             extents = cr.text_extents(label)
             btn_w = extents.width + 24
             bx -= btn_w

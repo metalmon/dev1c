@@ -92,6 +92,12 @@ LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
+# The image's own Gitea, as it is reachable from inside the container. One
+# constant for the two users of it: the toml a workstation's connector reads
+# (host.gitea — without it the connector derives the address from the SSH port,
+# which in local mode leads nowhere) and `1c-stand project`, the agent's own
+# side of the circle. Checked live in the image: /api/v1/version answers here.
+GITEA_URL=http://localhost:3000
 # The shared kit built into the image (Dockerfile.1c). It is declared there
 # as an ENV, which reaches `1c-stand seed` started by init; but a desktop
 # session arrives through xrdp-sesman and PAM, where the image's ENV is not
@@ -218,6 +224,7 @@ seed() { # runs as the workstation user; $HOME is theirs
             cat >"$t/$CONNECT_TOML" <<EOF
 [host]
 mode = "local"
+gitea = "$GITEA_URL"
 workstation = "$u"
 base_path = "$HOME/base"
 base_url = "http://localhost:$((8080 + n))/hs/mcp-1c"
@@ -227,6 +234,37 @@ db_user = "$DB_USER"
 db_password = ""
 EOF
             log "1c-connect: $t/$CONNECT_TOML written for $u" >&2
+        fi
+        # The address of the image's Gitea goes into an ALREADY EXISTING toml
+        # too, not only into a new one: a home is a volume, the file is
+        # normally already there, and otherwise the address would never
+        # appear — the connector would keep deriving it from the SSH port and
+        # the check would stay yellow forever. Idempotent and blind to the
+        # other lines; appended at the end of the file, where [host] is the
+        # only table (both the connector's own render and the heredoc above
+        # write just that one). The leading newline guards against a last
+        # line with no newline of its own.
+        if ! grep -q '^[[:space:]]*gitea[[:space:]]*=' "$t/$CONNECT_TOML"; then
+            printf '\ngitea = "%s"\n' "$GITEA_URL" >>"$t/$CONNECT_TOML"
+            log "1c-connect: адрес Gitea ($GITEA_URL) дописан в $t/$CONNECT_TOML" >&2
+        fi
+        # A project laid out before the address moved keeps the old `origin`,
+        # which the connector then reports as drift (project::layout_state)
+        # and nothing here would ever fix: install is what repairs it on a
+        # developer's machine, and nobody runs install in the stand. Only the
+        # address part is rewritten — the repository name belongs to whoever
+        # cloned the directory (`1c-stand project <name>`).
+        if [ -d "$HOME/project/.git" ]; then
+            old=$(git -C "$HOME/project" remote get-url origin 2>/dev/null) || old=
+            case "$old" in
+            http://*|https://*)
+                new="$GITEA_URL/$(printf '%s' "$old" | cut -d/ -f4-)"
+                if [ "$new" != "$old" ]; then
+                    git -C "$HOME/project" remote set-url origin "$new"
+                    log "1c-connect: origin проекта переведён на $new" >&2
+                fi
+                ;;
+            esac
         fi
         # Tools: here the shared kit IS what is laid out. ops_host compares
         # the kit's tools.version (stamped at build time) with the state's
@@ -331,7 +369,10 @@ project)
     # GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n from the
     # environment, so credential.helper and the Authorization header never
     # appear as a "-c" argument that `ps` on this machine could show anyone.
-    url="http://127.0.0.1:3000/dev1c/$name.git"
+    # One address for the image's Gitea (GITEA_URL at the top), the same one
+    # `seed` writes into the workstation's toml: two spellings of one server
+    # would show up as `origin` drift in the connector's check.
+    url="$GITEA_URL/dev1c/$name.git"
     auth="Authorization: Basic $(printf '%s' "$u:$u" | base64 | tr -d '\n')"
     gitc() {
         GIT_CONFIG_COUNT=2 \
@@ -340,7 +381,7 @@ project)
             git "$@"
     }
     if [ ! -d "$dir/.git" ]; then
-        log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
+        log "клонирую dev1c/$name из Gitea ($GITEA_URL), ветка $u"
         gitc clone --depth 1 -b "$u" "$url" "$dir"
     fi
     case "$sub" in

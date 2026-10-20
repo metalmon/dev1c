@@ -650,11 +650,12 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 }
 
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
-/// режима публикации, её порта и адреса публикации в окне нет (правятся в
-/// toml): берём их из текущих параметров, иначе пустые значения из формы
-/// затёрли бы toml. Каталог проекта — из формы.
+/// режима публикации, её порта, адреса Gitea среды и адреса публикации в окне
+/// нет (правятся в toml): берём их из текущих параметров, иначе пустые
+/// значения из формы затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
+    host.gitea = ui.cfg.host.gitea.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();

@@ -36,6 +36,11 @@ pub struct Cfg {
 #[serde(default, deny_unknown_fields)]
 pub struct Host {
     pub server: String,
+    /// Адрес Gitea среды целиком; пусто — прежний вывод от `server` («порт
+    /// SSH минус два», см. `Cfg::gitea_url`). Поле нужно локальному режиму:
+    /// туннеля там нет, пробрасывать некому, и выведенный адрес указывает в
+    /// пустоту — настоящий адрес Gitea образа пишет в toml сам стенд.
+    pub gitea: String,
     pub password: String,
     pub workstation: String,
     pub base_path: String,
@@ -72,6 +77,7 @@ impl Default for Host {
     fn default() -> Self {
         Self {
             server: "192.168.1.10:3393".into(),
+            gitea: String::new(),
             password: "dev1".into(),
             workstation: "dev1".into(),
             base_path: "C:\\Bases\\Buh".into(),
@@ -122,6 +128,11 @@ impl Cfg {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
         anyhow::ensure!(self.host.server.contains(':'), "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393");
+        let g = self.host.gitea.trim();
+        anyhow::ensure!(
+            g.is_empty() || g.starts_with("http://") || g.starts_with("https://"),
+            "[host]: gitea — полный адрес Gitea среды, например http://localhost:3000 (пусто — считается от server)"
+        );
         anyhow::ensure!(matches!(self.host.mode.as_str(), "tunnel" | "local"), "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)");
         anyhow::ensure!(
             matches!(self.host.publication.as_str(), "auto" | "webserver"),
@@ -144,8 +155,15 @@ impl Cfg {
         Ok(())
     }
 
-    /// Gitea среды: на два порта ниже SSH (блок из четырёх подряд у dev1c-setup).
+    /// Gitea среды: поле `gitea`, если непусто; иначе на два порта ниже SSH
+    /// (блок из четырёх подряд у dev1c-setup). Вывод верен для туннеля —
+    /// там Gitea среды приезжает на машину проброшенным портом; в локальном
+    /// режиме адрес задаёт поле.
     pub fn gitea_url(&self) -> String {
+        let explicit = self.host.gitea.trim().trim_end_matches('/');
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
         let (host, port) = self.host.server.rsplit_once(':').unwrap_or((&self.host.server, "3393"));
         let port: u32 = port.parse().unwrap_or(3393);
         format!("http://{host}:{}", port.saturating_sub(2))
@@ -200,6 +218,7 @@ impl Cfg {
             }
             Some(match k {
                 "server" => format!("{:?}", h.server),
+                "gitea" => format!("{:?}", h.gitea),
                 "password" => format!("{:?}", h.password),
                 "workstation" => format!("{:?}", h.workstation),
                 "base_path" => format!("{:?}", h.base_path),
@@ -317,6 +336,50 @@ mod tests {
         assert_eq!(c.gitea_url(), "http://192.168.1.10:3391");
         c.host.server = "10.0.0.5:4403".into();
         assert_eq!(c.gitea_url(), "http://10.0.0.5:4401");
+    }
+
+    /// Заполненное поле — и есть адрес среды; вывод от порта SSH больше не
+    /// участвует (в локальном режиме он указывает в пустоту).
+    #[test]
+    fn an_explicit_gitea_wins_over_the_derived_one() {
+        let mut c = sample();
+        c.host.gitea = "http://localhost:3000".into();
+        assert_eq!(c.gitea_url(), "http://localhost:3000");
+        c.host.server = "10.0.0.5:4403".into();
+        assert_eq!(c.gitea_url(), "http://localhost:3000");
+        // Хвостовой слэш не рождает двойного в адресе репозитория.
+        c.host.gitea = "http://localhost:3000/".into();
+        assert_eq!(c.gitea_url(), "http://localhost:3000");
+        c.host.gitea = "localhost:3000".into();
+        assert!(c.validate().unwrap_err().to_string().contains("gitea"));
+    }
+
+    /// Пусто — прежний вывод, так что ни одно существующее туннельное
+    /// рабочее место ничего не замечает; и toml без ключа читается.
+    #[test]
+    fn an_empty_gitea_keeps_the_old_derivation() {
+        let without: Cfg = toml::from_str(&EXAMPLE.replace("gitea = \"\"", "")).unwrap();
+        assert!(without.host.gitea.is_empty());
+        assert_eq!(without.gitea_url(), "http://192.168.1.10:3391");
+        assert_eq!(sample().gitea_url(), "http://192.168.1.10:3391");
+        let mut c = sample();
+        c.host.gitea = "   ".into();
+        assert_eq!(c.gitea_url(), "http://192.168.1.10:3391");
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn example_prints_gitea_with_its_rule() {
+        let lines: Vec<&str> = EXAMPLE.lines().collect();
+        let i = lines.iter().position(|l| l.starts_with("gitea = ")).unwrap_or_else(|| panic!("в образце нет поля gitea"));
+        assert_eq!(lines[i], "gitea = \"\"", "в образце поле пустое — иначе туннельное рабочее место заметило бы правку");
+        let rule: String = lines[..i].iter().rev().take_while(|l| l.starts_with('#')).fold(String::new(), |a, l| format!("{l}\n{a}"));
+        assert!(rule.contains("Пусто") && rule.contains("на два ниже"), "правило вывода не напечатано: {rule}");
+        // Заполненное поле доходит до toml через render() и читается обратно.
+        let filled = EXAMPLE.replace("gitea = \"\"", "gitea = \"http://localhost:3000\"");
+        let c: Cfg = toml::from_str(&filled).unwrap();
+        assert_eq!(c.render(), filled);
+        assert_eq!(c.gitea_url(), "http://localhost:3000");
     }
 
     #[test]

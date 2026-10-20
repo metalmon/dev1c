@@ -137,7 +137,7 @@ pub fn icon(state: TrayState) -> Icon {
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     #[cfg(target_os = "linux")]
     let open = MenuItem::with_id("open", "Открыть окно", true, None);
-    let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
+    let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     // Отметка при создании меню: умолчание `Host::default()`, пока не
     // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
@@ -190,7 +190,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
-    /// Значок badge(state) и надпись переключателя «Отключить»/«Подключить».
+    /// Значок badge(state) и надпись переключателя «Выключить MCP»/«Включить MCP».
     /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
     /// подключён, нет связи) и само по себе не знает фазу операции — её
     /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
@@ -198,7 +198,7 @@ impl Tray {
     /// занятость при поднятой связи осталась бы с «не подключён».
     pub fn set_state(&self, state: TrayState, on: bool) {
         let _ = self.icon.set_icon(Some(icon(state)));
-        self.toggle.set_text(if on { "Отключить" } else { "Подключить" });
+        self.toggle.set_text(if on { "Выключить MCP" } else { "Включить MCP" });
     }
 
     /// Подсказка трея произвольным текстом (`tray_tooltip`) — единственный

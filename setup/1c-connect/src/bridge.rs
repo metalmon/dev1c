@@ -249,25 +249,74 @@ where
     // дело дойдёт до рестарта) — свежей сборкой по `rules.rebuild`.
     let mut next_cmd = Some(cmd);
 
-    let (code, tail) = loop {
-        let (is_restart, mut cmd) = match next_cmd.take() {
+    let (code, tail) = 'connection: loop {
+        let (mut is_restart, mut cmd) = match next_cmd.take() {
             Some(c) => (false, c),
             None => match &rules.rebuild {
                 Some(rebuild) => (true, rebuild(&cfg)),
                 // Рестарт только и всегда гейтится наличием `rebuild` (см.
                 // ниже) — сюда попасть без него нельзя; но падать насмерть
                 // вместо непонятного паникующего unwrap лучше честной ошибкой.
-                None => break (-1, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
+                None => break 'connection (-1, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
             },
         };
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
         crate::job::group(&mut cmd);
-        let job = crate::job::Job::new();
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => break (-1, format!("не удалось запустить: {e}")),
+        let mut job = crate::job::Job::new();
+        // Запуск — с повтором: команда не находится (бинарь, каталог) — не
+        // повод рвать соединение или отвечать тишиной. Zed держит это
+        // соединение весь сеанс, и разрыв означает для человека ручной
+        // перезапуск обоих портов в Zed ровно тогда, когда он разбирается с
+        // настройками. Каждый следующий запрос — новая попытка на свежих
+        // параметрах; до первой удачи каждый вызов получает честный отказ
+        // (`degraded_reply`).
+        let mut last_logged_error: Option<String> = None;
+        let mut child = loop {
+            match cmd.spawn() {
+                Ok(c) => break c,
+                Err(e) => {
+                    let Some(rebuild) = &rules.rebuild else {
+                        break 'connection (-1, format!("не удалось запустить: {e}"));
+                    };
+                    let msg = e.to_string();
+                    if last_logged_error.as_deref() != Some(msg.as_str()) {
+                        log(Event::Warn(format!("{who}: не удалось запустить: {msg} — отвечаю отказом вызовам, пока не исправится")));
+                        last_logged_error = Some(msg);
+                    }
+                    // Ждём следующий запрос (или конец соединения): отвечаем
+                    // ему отказом и пробуем снова, а не спавним вслепую по кругу.
+                    loop {
+                        if !pending_frames.is_empty() {
+                            let fr = pending_frames.pop_front().unwrap();
+                            if let Frame::Line(l) = &fr {
+                                capture_handshake(l, &handshake);
+                                if let Some(reply) = degraded_reply(l, rules.inject, who, &e.to_string()) {
+                                    let _ = out_tx.send(reply).await;
+                                }
+                            }
+                            break;
+                        }
+                        tokio::select! {
+                            n = sr.read(&mut buf) => match n {
+                                Ok(0) | Err(_) => break 'connection (-1, "агент отключился, пока ребёнок не запускался".to_string()),
+                                Ok(n) => pending_frames.extend(f.push(&buf[..n])),
+                            }
+                        }
+                    }
+                    // Следующий ребёнок никогда не видел рукопожатия, даже
+                    // если первая попытка была самой первой на этом
+                    // соединении — его переиграют ниже (см. `is_restart`).
+                    is_restart = true;
+                    cmd = rebuild(&cfg);
+                    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                    #[cfg(windows)]
+                    cmd.creation_flags(0x0800_0000);
+                    crate::job::group(&mut cmd);
+                    job = crate::job::Job::new();
+                }
+            }
         };
         if let Some(j) = &job {
             j.assign(&child);
@@ -481,17 +530,7 @@ async fn handle_request(
     // Рукопожатие этого соединения — на всякий случай, независимо от
     // переключателя и порта: `initialize`/`notifications/initialized` и так
     // идут как обычно (см. ветки ниже), запоминается только их факт.
-    if let Some(m) = method_of(&line) {
-        if m.eq_ignore_ascii_case("initialize") {
-            let mut raw = line.clone();
-            raw.push(b'\n');
-            handshake.lock().unwrap().initialize = Some(raw);
-        } else if m.eq_ignore_ascii_case("notifications/initialized") {
-            let mut raw = line.clone();
-            raw.push(b'\n');
-            handshake.lock().unwrap().initialized = Some(raw);
-        }
-    }
+    capture_handshake(&line, handshake);
     let off = !rules.enabled.load(Ordering::Relaxed);
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
@@ -653,6 +692,54 @@ fn method_of(line: &[u8]) -> Option<String> {
 /// не удалось передать рукопожатие (см. `replay_handshake`).
 fn request_id(line: &[u8]) -> Option<Value> {
     serde_json::from_slice::<Value>(line).ok()?.get("id").cloned()
+}
+
+/// Запомнить рукопожатие, если эта строка — `initialize` или
+/// `notifications/initialized`; остальное не трогает. Общая часть для
+/// обычной обработки (`handle_request`) и режима без ребёнка (см.
+/// `degraded_reply`) — там, где это работает заранее, прежде чем ребёнок
+/// вообще поднимется.
+fn capture_handshake(line: &[u8], handshake: &HandshakeCell) {
+    let Some(m) = method_of(line) else { return };
+    if m.eq_ignore_ascii_case("initialize") {
+        let mut raw = line.to_vec();
+        raw.push(b'\n');
+        handshake.lock().unwrap().initialize = Some(raw);
+    } else if m.eq_ignore_ascii_case("notifications/initialized") {
+        let mut raw = line.to_vec();
+        raw.push(b'\n');
+        handshake.lock().unwrap().initialized = Some(raw);
+    }
+}
+
+/// Пока ребёнка нет (запуск не удался) — читаемый ответ вместо тишины или
+/// разрыва соединения: иначе Zed решит, что сервер упал, и человеку придётся
+/// руками поднимать оба порта заново. `initialize`/`tools/list` отвечают
+/// так, будто сервер жив (свои инструменты — свои, их и спрашивать не у
+/// кого, в списке только они, у 777N — пусто), `tools/call` и всё прочее
+/// именованное с `id` — явным отказом с причиной; уведомление (нет `id`) —
+/// отвечать нечем, и это не повод для записи в журнал.
+fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec<u8>> {
+    let v: Value = serde_json::from_slice(line).ok()?;
+    let method = v.get("method")?.as_str()?.to_string();
+    let id = v.get("id").cloned();
+    if method.eq_ignore_ascii_case("initialize") {
+        let id = id?;
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "1c-connect", "version": "0"}},
+        });
+        let mut out = serde_json::to_vec(&reply).unwrap();
+        out.push(b'\n');
+        Some(out)
+    } else if method.eq_ignore_ascii_case("tools/list") {
+        let id = id?;
+        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools() } else { Vec::new() }))
+    } else {
+        let id = id?;
+        Some(jsonrpc::text_reply(&id, &format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите"), true))
+    }
 }
 
 /// Рукопожатие одного соединения: `initialize` и, если он пришёл, идущий
@@ -891,6 +978,36 @@ mod tests {
     /// Журнал, который ничего не делает — тестам, которым нужны только ответы агенту.
     fn no_log() -> Sink {
         Arc::new(|_: Event| {})
+    }
+
+    /// Строка-ответ с этим `id` уже встретилась среди накопленных строк.
+    fn has_reply(text: &str, id: i64) -> bool {
+        text.lines().any(|l| serde_json::from_str::<Value>(l).ok().map_or(false, |v| v["id"] == id))
+    }
+
+    /// Читать из `r` в `got`, пока `pred` по накопленному тексту не станет
+    /// true или не истечёт `budget`. Опрос вместо фиксированной паузы: под
+    /// нагрузкой (полный прогон тестов) спавн и обмен с ребёнком иногда
+    /// занимают дольше любой разумной константы — тест должен ждать
+    /// условие, а не угадывать время.
+    async fn read_until(r: &mut (impl AsyncRead + Unpin), got: &mut Vec<u8>, pred: impl Fn(&str) -> bool, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let mut buf = [0u8; 4096];
+        loop {
+            if pred(&String::from_utf8_lossy(got)) {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(remaining.min(std::time::Duration::from_millis(50)), r.read(&mut buf)).await {
+                Ok(Ok(0)) => return false,
+                Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => return false,
+                Err(_) => {}
+            }
+        }
     }
 
     /// Drive the bridge: send the lines, wait, close; return the JSON replies,
@@ -1441,11 +1558,19 @@ mod tests {
             let _ = tx.send((code, err));
         }));
         let (mut r, mut w) = tokio::io::split(ours);
+        let mut got: Vec<u8> = Vec::new();
         w.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await.unwrap();
         w.write_all(b"\n").await.unwrap();
         w.write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Ждём именно ответ на initialize, а не фиксированную паузу — под
+        // нагрузкой полного прогона тестов спавн фиктивного ребёнка может
+        // занять заметно дольше, чем в одиночном запуске.
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 1), std::time::Duration::from_secs(10)).await,
+            "нет ответа на initialize: {}",
+            String::from_utf8_lossy(&got)
+        );
 
         // Смена базы — второй ребёнок на том же соединении, который самого
         // рукопожатия никогда не видел.
@@ -1454,11 +1579,19 @@ mod tests {
         live.set(cfg_b);
         w.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // То же: рестарт (убить старого, поднять нового, переиграть
+        // рукопожатие) занимает переменное время — ждём ответ, не час.
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 2), std::time::Duration::from_secs(10)).await,
+            "нет ответа на tools/call: {}",
+            String::from_utf8_lossy(&got)
+        );
         w.shutdown().await.unwrap();
+        let mut tail = Vec::new();
+        let _ = r.read_to_end(&mut tail).await;
+        got.extend_from_slice(&tail);
 
-        let mut got = String::new();
-        r.read_to_string(&mut got).await.unwrap();
+        let got = String::from_utf8_lossy(&got).into_owned();
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
         assert_eq!(replies.iter().filter(|r| r["id"] == 1).count(), 1, "ровно один ответ на initialize, без дубля от нового ребёнка: {got}");
         assert_eq!(replies.iter().filter(|r| r["id"] == 2).count(), 1, "ровно один ответ на tools/call: {got}");

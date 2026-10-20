@@ -138,7 +138,7 @@ mod tests {
     use common::kit::Kit;
     use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Порт 0 — пусть ОС выберет сама и тут же вернёт выбранный номер;
     /// короткий зонд-и-отпустить не трогает 777x/778x вовсе и не привязан к
@@ -267,6 +267,64 @@ mod tests {
         // Закрыто: чтение теперь даёт 0 байт (EOF), а не висит и не падает.
         let after = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf)).await;
         assert_eq!(after.unwrap().unwrap(), 0, "после stop соединение должно быть закрыто");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 6B: комплект сломан (как у `fake_kit`) — ребёнка не поднять ни разу,
+    /// но соединение не рвётся. Agent получает честный отказ на каждый
+    /// запрос, а не тишину и не разрыв — иначе Zed счёл бы сервер упавшим и
+    /// человеку пришлось бы руками поднимать оба порта заново.
+    #[tokio::test]
+    async fn a_broken_kit_answers_every_request_with_a_refusal_and_keeps_the_connection_open() {
+        let cfg = crate::cfg::Cfg::default();
+        let (mcp_port, vrunner_port) = ephemeral_ports();
+        let (kit, dir) = fake_kit();
+        let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
+        let task = tokio::spawn(async move { run(serve, run_ports, |_: Event| {}, stop_rx).await });
+
+        let mut client = loop {
+            match TcpStream::connect(("127.0.0.1", vrunner_port)).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        };
+
+        client.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+        client.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        for _ in 0..100 {
+            if got.iter().filter(|&&b| b == b'\n').count() >= 2 {
+                break;
+            }
+            match tokio::time::timeout(std::time::Duration::from_millis(50), client.read(&mut buf)).await {
+                Ok(Ok(0)) => panic!("соединение закрылось само, хотя ребёнка никто не трогал: {}", String::from_utf8_lossy(&got)),
+                Ok(Ok(n)) => got.extend_from_slice(&buf[..n]),
+                Ok(Err(e)) => panic!("{e}"),
+                Err(_) => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&got).into_owned();
+        let replies: Vec<serde_json::Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        let init = replies.iter().find(|r| r["id"] == 1).unwrap_or_else(|| panic!("нет ответа на initialize: {text}"));
+        assert!(init["result"]["protocolVersion"].is_string(), "{text}");
+        let call = replies.iter().find(|r| r["id"] == 2).unwrap_or_else(|| panic!("нет ответа на tools/call: {text}"));
+        assert_eq!(call["result"]["isError"], true, "{text}");
+        assert!(call["result"]["content"][0]["text"].as_str().unwrap().contains("не запускается"), "{text}");
+
+        // Живо: дальше читать — не EOF и не обрыв, несмотря на то что
+        // ребёнок так и не поднялся.
+        let still_open = tokio::time::timeout(std::time::Duration::from_millis(200), client.read(&mut buf)).await;
+        assert!(still_open.is_err(), "соединение должно было остаться открытым: {text}");
+
+        stop_tx.send(true).unwrap();
+        assert!(task.await.unwrap().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

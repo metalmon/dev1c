@@ -71,6 +71,13 @@ DEFAULT_BRANCH = main
 # this removes the whole "create a repository in the web UI first" step
 ENABLE_PUSH_CREATE_USER = true
 ENABLE_PUSH_CREATE_ORG = true
+# Репозиторий, созданный отправкой, виден без входа. Gitea по умолчанию
+# создаёт такие приватными, и анонимный браузер не видит ни репозитория,
+# ни организации — пустая страница. Седьмой шаг онбординга ведёт человека
+# на значок «Репозитории» и обещает, что там видно каждую правку; с
+# приватным репозиторием он увидел бы пустоту и решил, что ничего не
+# сохранилось. Это демонстрационный стенд, скрывать тут нечего.
+DEFAULT_PUSH_CREATE_PRIVATE = false
 
 [service]
 DISABLE_REGISTRATION = false
@@ -101,6 +108,27 @@ MODE = file
 LEVEL = info
 ROOT_PATH = $GITEA_HOME/log
 EOF
+fi
+
+# Досыл ключа в уже поднятые стенды. Конфигурация пишется только когда её
+# нет, а лежит она в томе /var/lib/gitea — то есть на машине, где стенд уже
+# работал, обновление образа её не трогает. Тот же случай, что с ярлыками
+# рабочего стола: однажды записанное на томе живёт дольше образа.
+if ! grep -q DEFAULT_PUSH_CREATE_PRIVATE "$GITEA_CONF"; then
+    python3 - "$GITEA_CONF" <<'ENSURE'
+import sys
+path = sys.argv[1]
+with open(path, encoding='utf-8') as f:
+    text = f.read()
+text = text.replace('[repository]
+',
+                    '[repository]
+DEFAULT_PUSH_CREATE_PRIVATE = false
+', 1)
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(text)
+ENSURE
+    echo "[gitea] репозитории, созданные отправкой, теперь видны без входа"
 fi
 
 export GITEA_WORK_DIR="$GITEA_HOME"

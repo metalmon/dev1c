@@ -411,31 +411,16 @@ start)
     fi
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
-        h="$(home_of "$u")"
-        # The workstation's own connector session, in place of the socat
-        # lines that used to bind these two ports straight to "1c-stand
-        # mcp"/"vrunner": its bridge calls those same subcommands now, so the
-        # connector's switch, journal and project mutex actually govern the
-        # agent's calls. A supervised loop, not one shot: on a fresh volume
-        # the binary and its toml are not there yet (seed() writes both, in
-        # the background below, deliberately — a УНФ base is 1.9 GB), and
-        # the socat lines this replaces tolerated that by binding the socket
-        # immediately and only running anything on the first connection.
-        # Wait for seed to land, then run; restart if the session ever
-        # exits, so a crash does not leave the ports silently dead. runuser
-        # does not reset HOME (unlike "su -"), hence the explicit env.
-        # The HTTP service of the base is no longer this script's doing: the
-        # connector publishes it itself ("host.publication", $HOME/dev1c/pub,
-        # its own Apache) when `serve` starts — one owner for the base's
-        # publication instead of the stand and the connector both reaching
-        # for port 808N.
-        ( while :; do
-              until [ -x "$h/dev1c/1c-connect" ] && [ -e "$h/dev1c/$CONNECT_TOML" ]; do sleep 2; done
-              runuser -u "$u" -- env HOME="$h" "$h/dev1c/1c-connect" serve
-              log "$u: 1c-connect serve exited, restarting in 5s"
-              sleep 5
-          done ) >>"$LOG/$u-connect.log" 2>&1 &
-        log "$u: HTTP service on $((8080 + n)) (the connector's own), mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
+        # No connector started here, and no supervised loop: there is no
+        # headless owner of these ports (see the spec). The ports live only
+        # while a connector runs — the desktop autostart's "1c-connect --tray"
+        # once the person logs in, or a hand-run "1c-stand serve" — and that
+        # connector also raises the base's publication itself
+        # (host.publication, $HOME/dev1c/pub, its own Apache). Starting one
+        # here as well is exactly the old bug: two connectors fighting over
+        # the same two ports. test-stand starts its own `serve` for the
+        # check and stops only that one.
+        log "$u: mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n)), HTTP service on $((8080 + n)) — owned by whichever connector the person or test-stand runs"
     done
     # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the
     # first agent call would otherwise wait for the copy. In the background,

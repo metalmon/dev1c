@@ -4,7 +4,7 @@
 //! фокуса раньше, чем клик по трею успевает его поднять заново).
 
 use super::panel::Panel;
-use super::{note_line, run_readiness, Kind, Line, Tab, Ui};
+use super::{note_file, note_line, run_readiness, Kind, Line, Tab, Ui};
 use crate::cfg::Cfg;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -302,12 +302,12 @@ pub fn show_window(cx: &mut App) {
     let origin = flyout_origin(wa, s, GAP);
     // Диагностика наезда на панель задач (заказчик 2026-10-20): без этой
     // строки жалоба «флайаут торчит за панелью» решается только через
-    // скриншот + вопрос, какая рабочая область была в тот момент — с ней
-    // решается одним скриншотом журнала. Строка служебная (`Kind::Say`),
-    // человеку читать незачем.
-    note_line(
-        cx.global_mut::<Ui>(),
-        Line {
+    // скриншот + вопрос, какая рабочая область была в тот момент. Пишется
+    // только в файл журнала (`note_file`): в окне она у человека занимала
+    // половину списка на каждом открытии (заказчик 2026-10-21).
+    note_file(
+        &cx.global::<Ui>().kit,
+        &Line {
             kind: Kind::Say,
             text: format!(
                 "рабочая область и угол флайаута: {}x{}+{}+{} → {},{}",

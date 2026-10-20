@@ -605,6 +605,14 @@ pub fn note_line(ui: &mut Ui, line: Line) {
     }
 }
 
+/// Строка только в файл журнала (`1c-connect.log`), мимо окна: диагностика
+/// для разбора по снимку, которую человеку читать незачем (геометрия, обмеры).
+/// В журнале окна — только то, что человеку надо прочесть; пометка `Kind::Say`
+/// сама по себе не повод показывать строку, выбирает канал тот, кто пишет.
+pub fn note_file(kit: &Kit, line: &Line) {
+    write_log_file(kit, line);
+}
+
 /// Карточка операции из состояния `apply_all`/`status`.
 pub fn op_view(id: String, title: String, st: OpState) -> OpView {
     let (dot, detail) = match st {
@@ -1814,7 +1822,7 @@ impl Ui {
 mod tests {
     use super::{
         apply_ready, autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
-        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_line, on_done,
+        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_file, note_line, on_done,
         on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_state, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
@@ -2041,6 +2049,21 @@ mod tests {
         let soon = licence_line(crate::licence::State::Soon { days: 5 }).expect("предупреждение — строка в журнале");
         assert!(soon.kind == Kind::Warn && soon.text.contains('5'), "{soon:?}");
         assert!(licence_line(crate::licence::State::Valid).is_none());
+    }
+
+    #[test]
+    fn note_file_writes_the_file_and_not_the_window() {
+        let mut ui = Ui::for_test();
+        note_file(&ui.kit, &Line { kind: Kind::Say, text: "рабочая область и угол флайаута: 2560x1397+0+0 → 2168,965".into() });
+        let text = std::fs::read_to_string(ui.kit.state_path(LOG_FILE)).unwrap();
+        assert!(text.contains("рабочая область и угол флайаута"), "{text:?}");
+        // Главное: служебная строка не попала ни в список окна, ни в счётчик
+        // непрочитанных — человеку её читать незачем.
+        assert!(ui.log.is_empty(), "{:?}", ui.log);
+        assert_eq!(ui.unread, 0);
+        // `note_line` рядом — по-прежнему и в файл, и в окно.
+        note_line(&mut ui, Line { kind: Kind::Ok, text: "готово".into() });
+        assert_eq!(ui.log.len(), 1);
     }
 
     #[test]

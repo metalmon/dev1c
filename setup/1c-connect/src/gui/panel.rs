@@ -624,6 +624,7 @@ impl Render for Panel {
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
                 let ops = ui.ops.clone();
+                let cfg = ui.cfg.clone();
                 let rows = project_rows(ui.project.as_ref());
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
@@ -642,7 +643,18 @@ impl Render for Panel {
                         // 12 px между операциями и строками проекта: это два
                         // списка, а не один.
                         .gap_3()
-                        .child(v_flex().gap_2().children(ops.iter().map(|o| fact(o.dot, o.title.clone(), o.detail.clone()))))
+                        .child(v_flex().gap_2().children(ops.iter().map(|o| {
+                            // Строка публикации — словами разработчика 1С
+                            // (адрес, не дескрипторы/httpd.conf): та же
+                            // карточка `fact`, только заголовок и подробность
+                            // берутся у `gui::publication_detail`, а не у
+                            // технического текста операции.
+                            if o.id == "host.publication" {
+                                fact(o.dot, gui::PUBLICATION_TITLE.into(), gui::publication_detail(&cfg))
+                            } else {
+                                fact(o.dot, o.title.clone(), o.detail.clone())
+                            }
+                        })))
                         .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
                             // Подсказка — не факт о проекте: мелкий текст без кружка.
                             match d {

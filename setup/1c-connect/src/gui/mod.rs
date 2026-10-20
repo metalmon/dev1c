@@ -505,6 +505,23 @@ pub fn op_view(id: String, title: String, st: OpState) -> OpView {
     OpView { id, title, dot, detail }
 }
 
+/// Заголовок строки `host.publication` в «Проекте»: слова 1С-разработчика
+/// вместо «публикация»/реверс-прокси — база отвечает по HTTP, вот и всё.
+pub const PUBLICATION_TITLE: &str = "HTTP-сервис базы";
+
+/// Подробность той же строки: адрес, на который смотреть браузером
+/// (`auto` — свой httpd на 127.0.0.1:<порт>, как в `ops_host::Publication`),
+/// либо прямое указание, что публикацию настроил человек (`webserver`).
+/// Дескрипторы, httpd.conf и прочее — в журнал (`ops_host`/`publication`),
+/// не в эту строку: окно не должно объяснять реверс-прокси.
+pub fn publication_detail(cfg: &Cfg) -> String {
+    if cfg.host.publication == "webserver" {
+        "публикация настроена вручную".into()
+    } else {
+        format!("база отвечает по HTTP: 127.0.0.1:{}", cfg.http_port())
+    }
+}
+
 /// Главное действие вкладки «Проект»: пока расширение не стоит — «Установить»,
 /// дальше человеку нужен обмен с git, и главной становится «Выгрузить».
 /// Остальное — в меню «…».
@@ -1248,8 +1265,8 @@ mod tests {
     use super::{
         autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, flip_enabled_only, is_stale, line_of,
         link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text, project_primary,
-        save_host, stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab,
-        TrayState, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        publication_detail, save_host, stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line,
+        OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
@@ -1701,6 +1718,21 @@ mod tests {
         assert_eq!(ui.session_gen, gen_before);
         assert_eq!(ui.log.len(), log_before);
         let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn project_tab_shows_the_publication_row() {
+        // Заголовок и адрес понятны 1С-разработчику независимо от режима
+        // подключения («local»/«tunnel») — публикация не про туннель.
+        assert_eq!(PUBLICATION_TITLE, "HTTP-сервис базы");
+        for mode in ["local", "tunnel"] {
+            let mut cfg = Cfg { host: Host { mode: mode.into(), publication: "auto".into(), ..Host::default() } };
+            let want = format!("127.0.0.1:{}", cfg.http_port());
+            let detail = publication_detail(&cfg);
+            assert!(detail.contains(&want), "{mode}: {detail:?}");
+            cfg.host.publication = "webserver".into();
+            assert_eq!(publication_detail(&cfg), "публикация настроена вручную");
+        }
     }
 
     #[test]

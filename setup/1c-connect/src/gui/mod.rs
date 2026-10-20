@@ -737,11 +737,6 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 /// значения из формы затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
-    // Было ли что гасить: замок, запертый ещё до правки, обслуживание уже
-    // погасил — гасить второй раз и писать вторую строку в журнал незачем.
-    // Берём кэш, а не диск: он пересчитывается по тем же событиям, и правда о
-    // замке в окне должна быть одна (`toggle_link` читает его же).
-    let was_open = ui.gate.is_none();
     host.gitea = ui.cfg.host.gitea.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
@@ -794,21 +789,13 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
         }
     }
     // Почва могла сдвинуться (база, логин, пароль, порт публикации) —
-    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем. Заодно
-    // пересчитывается и замок (`refresh_gate` внутри).
+    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем. Здесь же
+    // пересчитывается замок, и если правка убрала холодное условие (стёрли
+    // пользователя базы), `refresh_gate` сам гасит обслуживание и говорит об
+    // этом в журнал — своей ветки «Сохранить» для этого больше не держит.
+    // Спросили об этом раньше, до записи (`save_needs_confirm`): молчать
+    // нельзя, агент остаётся без обслуживания.
     run_readiness(ui);
-    // Правка убрала холодное условие (стёрли пользователя базы) — обслуживать
-    // вызовы больше нечем, гасим его. Спросили об этом раньше, до записи
-    // (`save_needs_confirm`/`confirm_database_change`): молчать нельзя, агент
-    // остаётся без обслуживания.
-    if was_open {
-        if let Some(why) = ui.gate.clone() {
-            if ui.enabled.load(Ordering::Relaxed) {
-                douse_serving(ui);
-                note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
-            }
-        }
-    }
     Ok(())
 }
 
@@ -984,8 +971,31 @@ pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
 /// агенту несёт её текстом (`bridge::disabled_text`), иначе ни агент, ни
 /// человек не узнают, что править.
 pub fn refresh_gate(ui: &mut Ui) {
+    // Замок именно **защёлкивается**: был открыт — стал заперт. Замок,
+    // запертый и до пересчёта, обслуживание уже погасил этим же местом, и
+    // гасить второй раз (и говорить второй раз) незачем.
+    let was_open = ui.gate.is_none();
     ui.gate = gate_now(&ui.kit, &ui.cfg);
     crate::bridge::set_gate_reason(ui.gate.clone());
+    // Защёлкнувшийся замок гасит обслуживание — здесь, в единственном месте,
+    // где он защёлкивается, а не у каждого вызывающего по-своему. Иначе
+    // замок правил бы одни слова в отказе: человек правит toml руками,
+    // условие пропадает, окно на показе перечитывает файл и пересчитывает
+    // ворота — карточка говорит «MCP выключены», а агента продолжают
+    // обслуживать, потому что флаг никто не снял (находка ревью задачи 24).
+    //
+    // Обратное ворота не делают: условие вернулось — переключатель
+    // отпирается сам (`panel::switch_locked` смотрит на `ui.gate`), но
+    // обслуживание включает человек, а не пересчёт за его спиной.
+    if !was_open {
+        return;
+    }
+    if let Some(why) = ui.gate.clone() {
+        if ui.enabled.load(Ordering::Relaxed) {
+            douse_serving(ui);
+            note_line(ui, Line { kind: Kind::Warn, text: format!("MCP выключены: {why}") });
+        }
+    }
 }
 
 /// Погасить обслуживание вызовов, не спрашивая никого: правка убрала холодное
@@ -2822,8 +2832,9 @@ mod tests {
         ui.cfg.host.publication = "webserver".into();
         ui.session = Some(doomed_session(&ui));
         ui.link = State::Up { since: Instant::now() };
-        // До правки замок был открыт — иначе гасить нечего (в каталоге теста
-        // он заперт сам по себе, поэтому состояние задаём явно).
+        // До правки замок был открыт — тот самый случай, ради которого
+        // «Сохранить» и спрашивает подтверждение (в каталоге теста он заперт
+        // сам по себе, поэтому состояние задаём явно).
         ui.gate = None;
         let log_before = ui.log.len();
         let mut host = ui.cfg.host.clone();
@@ -2842,18 +2853,46 @@ mod tests {
         let _ = ui.session.take().map(|s| s.stop());
     }
 
-    /// Обратное: замок был заперт и до правки — обслуживание уже погашено,
-    /// второй раз гасить и писать в журнал нечего.
+    /// Замок гасит обслуживание везде, где защёлкивается, а не только на
+    /// «Сохранить». Сценарий заказчика: человек правит toml руками, условие
+    /// пропадает, окно на показе перечитывает файл и пересчитывает ворота —
+    /// карточка говорит «MCP выключены», и агента обслуживать больше нельзя.
+    /// Раньше замок правил одни слова в отказе, а флаг оставался поднятым.
     #[test]
-    fn saving_under_an_already_held_gate_stays_quiet() {
+    fn a_gate_that_latches_douses_serving_once() {
         let mut ui = Ui::for_test();
-        ui.cfg.host.publication = "webserver".into();
-        assert!(ui.gate.is_some(), "фикстура заводит замок запертым");
+        ui.cfg.host.mode = "local".into();
+        ui.link = State::Up { since: Instant::now() };
+        assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит обслуживание включённым");
+        // Замок был открыт, обслуживание шло — ровно то положение, из которого
+        // правка toml руками роняет условие. «Сохранить» здесь никто не жал.
+        ui.gate = None;
         let log_before = ui.log.len();
-        let mut host = ui.cfg.host.clone();
-        host.project = "D:\\other\\proj".into();
-        save_host(&mut ui, host).unwrap();
-        assert_eq!(ui.log.len(), log_before);
+        refresh_gate(&mut ui);
+        assert!(ui.gate.is_some(), "в каталоге теста условия не выполнены");
+        assert!(!ui.enabled.load(Ordering::Relaxed), "обслуживание погашено пересчётом, а не «Сохранить»");
+        assert_eq!(ui.link, State::Off, "карточка и переключатель показывают «выключено»");
+        assert_eq!(ui.log.len(), log_before + 1, "о гашении сказано один раз");
+        // Второй пересчёт при том же замке молчит: гасить уже нечего.
+        let log_after = ui.log.len();
+        refresh_gate(&mut ui);
+        assert_eq!(ui.log.len(), log_after);
+    }
+
+    /// Обратное направление: включать обслуживание ворота не умеют — это дело
+    /// человека. Пересчёт при выключенном обслуживании не трогает ни флага,
+    /// ни журнала; переключатель отпирается сам, по `ui.gate`
+    /// (`panel::switch_locked`).
+    #[test]
+    fn the_gate_never_switches_serving_back_on() {
+        let mut ui = Ui::for_test();
+        ui.enabled.store(false, Ordering::Relaxed);
+        ui.gate = None;
+        let log_before = ui.log.len();
+        refresh_gate(&mut ui);
+        assert!(ui.gate.is_some(), "замок защёлкнулся");
+        assert!(!ui.enabled.load(Ordering::Relaxed), "ворота обслуживание не включают");
+        assert_eq!(ui.log.len(), log_before, "гасить было нечего — говорить не о чем");
     }
 
     #[test]

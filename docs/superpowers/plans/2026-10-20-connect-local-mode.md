@@ -735,10 +735,10 @@ git commit -m "Комплект в образе: один общий тольк�
 - Test: inline в `gate.rs`, `panel.rs`, `tray.rs`, `mod.rs`
 
 **Interfaces:**
-- Produces: `gui::gate::cold_gate(cfg: &Cfg, tools: &OpState, platform: Option<&Path>, mcp_in_kit: bool) -> Option<String>` — `None` = можно включать, `Some(причина)` = заперто. Чистая функция, без сети и без файловой системы: существование каталога базы и наличие платформы передаются аргументами.
+- Produces: `gui::gate::cold_gate(cfg: &Cfg, tools: &OpState, platform: Option<&Path>, mcp_in_kit: bool, licence: &licence::State) -> Option<String>` — `None` = можно включать, `Some(причина)` = заперто. Чистая функция, без сети и без файловой системы: существование каталога базы и наличие платформы передаются аргументами.
 - Produces: `bridge::disabled_text(reason: Option<&str>) -> String` — к «MCP выключены в 1c-connect» добавляет причину замка.
 
-- [ ] **Шаг 1: падающие тесты.** `gate`: по тесту на каждое условие (`пустой db_user`, `файловая база без каталога`, `серверная база — не запирает`, `нет платформы`, `нет mcp-1c`, `инструменты не разложены`, `туннельный режим без адреса среды`, `всё на месте → None`). `panel`: `the_switch_is_locked_while_the_gate_holds`. `tray`: `the_tray_item_follows_the_same_gate`. `mod`: `autostart_does_not_enable_while_the_gate_holds`; `saving_away_a_cold_condition_asks_first`.
+- [ ] **Шаг 1: падающие тесты.** `gate`: по тесту на каждое условие (`истёкший срок действия` — см. задачу 32, `пустой db_user`, `файловая база без каталога`, `серверная база — не запирает`, `нет платформы`, `нет mcp-1c`, `инструменты не разложены`, `туннельный режим без адреса среды`, `всё на месте → None`). `panel`: `the_switch_is_locked_while_the_gate_holds`. `tray`: `the_tray_item_follows_the_same_gate`. `mod`: `autostart_does_not_enable_while_the_gate_holds`; `saving_away_a_cold_condition_asks_first`.
 - [ ] **Шаг 2: тесты падают.**
 - [ ] **Шаг 3: ворота.** `cold_gate` по разделу спеки; причина — короткая строка для подсказки.
 - [ ] **Шаг 4: читатели.** Переключатель и пункт трея запираются; автозапуск не включает обслуживание; `save_host` при живом обслуживании и пропавшем условии идёт через тот же диалог, что смена базы; отказ агенту несёт причину.

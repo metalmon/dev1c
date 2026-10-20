@@ -21,7 +21,7 @@ path = "src/main.rs"
 # (`--no-default-features`) там остаётся только CLI для живого теста туннеля.
 [features]
 default = ["gui"]
-gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk"]
+gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk", "dep:x11rb"]
 
 [dependencies]
 common = { path = "../common" }
@@ -47,11 +47,23 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "proces
 gtk = { version = "0.18", optional = true }
 # Значку в трее на Linux нужен бэкенд, иначе `tray-icon` отказывается
 # собираться: «either the `libappindicator` or `ksni` feature must be enabled».
-# Берём libappindicator: панель XFCE показывает его элементы (проверено в
-# образе живым значком), а меню у `muda` на Linux всё равно через GTK, так что
-# `ksni` без GTK не обошёлся бы. На сборке нужны libgtk-3-dev и
-# libayatana-appindicator3-dev, в образе — libayatana-appindicator3-1.
-tray-icon = { version = "=0.26.1", default-features = false, features = ["libappindicator"], optional = true }
+# Было `libappindicator`: панель XFCE показывает его элементы, но сам бэкенд
+# не сообщает о щелчке по значку вовсе — левая кнопка там открывала то же
+# меню, что и правая, и достать окно можно было только пунктом «Открыть окно».
+# `ksni` — тот же StatusNotifierItem через D-Bus — отдаёт настоящую активацию
+# (`TrayIconEvent::Click`, `MouseButton::Left`/`Up`), которую `tray::on_tray`
+# уже умеет разбирать (тот же код, что на Windows). Меню — всё равно через
+# `muda`/GTK (у него свой дефолт `gtk3`, от бэкенда значка не зависит), так
+# что `gtk::init()`/`tray::pump` выше остаются. Пункт «Открыть окно» в меню не
+# снят: если панель когда-нибудь не отдаст активацию, это единственный путь к
+# окну.
+tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"], optional = true }
+# Рабочая область без панели (`_NET_WORKAREA`, `gui::window::work_area`) —
+# своё, короткоживущее X11-соединение только на этот запрос. Версия та же,
+# что уже разрешена транзитивно через gpui (`x11rb-xcb`/`x11rb-client` там, у
+# нас нужны только базовые xproto-запросы без лишних фич) — новой зависимости
+# в дереве сборки это не добавляет.
+x11rb = { version = "=0.13.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не

@@ -1296,6 +1296,14 @@ fn fatal(text: &str) {
     eprintln!("{text}");
 }
 
+/// Код выхода для провалившегося трея (`Some(1)`) или `None`, когда он
+/// построился и выходить незачем. Отдельная чистая функция от типа трея и
+/// ошибки — решение «ошибка здесь ведёт к выходу» проверяется тестом без
+/// настоящего `Tray`/GTK.
+fn exit_code_for<T, E>(tray: &Result<T, E>) -> Option<i32> {
+    tray.is_err().then_some(1)
+}
+
 pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
     // Тот же единственный владелец рабочего места, что у `connect`/`serve` —
@@ -1330,16 +1338,27 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // уведомления к процессу по нему.
         cx.set_app_identity("OktaPlus.1c-connect", "1c-connect");
         // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
-        // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
-        // напрямую, а не через `quit()` этого модуля.
-        let tray = match tray::init().and_then(|()| tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on)) {
-            Ok(t) => t,
-            Err(e) => {
-                fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
-                cx.quit();
-                return;
-            }
-        };
+        // глобал `Ui` ещё не выставлен, поэтому `quit()` этого модуля не
+        // годится. Раньше здесь звали `cx.quit()` — он просит GPUI уйти
+        // своим чередом, но до открытия первого окна цикл обработки ещё не
+        // крутится, попросить его не успевает никто, и процесс вместо
+        // обещанного завершения висел живым (проверено на экране: больше
+        // минуты) и держал замок `single_instance` — ровно от чего
+        // сообщение обещало избавить следующий запуск. `exit_code_for`
+        // отдельно от этого, чтобы решение «ошибка — на выход» проверялось
+        // тестом без живого трея и GTK.
+        let tray_result = tray::init().and_then(|()| tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on));
+        if let Err(e) = &tray_result {
+            fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
+        }
+        if let Some(code) = exit_code_for(&tray_result) {
+            // Замок единственного экземпляра (`single_instance::Guard`) — на
+            // Windows объект ядра, на Linux файловый дескриптор с `flock`; оба
+            // снимаются самой системой при завершении процесса, этим выходом
+            // в т.ч., отдельно освобождать нечего.
+            std::process::exit(code);
+        }
+        let tray = tray_result.expect("exit_code_for вернул None только для Ok");
         // Пункт подменю «Режим работы» строился без ведома сохранённого
         // режима и всегда отмечал «Через туннель» первым — здесь сразу
         // поправляется на настоящий, тем же методом, что потом зовёт смена
@@ -1478,10 +1497,11 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, first_phase, flip_enabled_only,
-        is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text,
-        project_primary, publication_detail, save_host, save_needs_confirm, stale_line, stale_text, took, tick_redraw, tray_state,
-        tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
+        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, exit_code_for, first_phase,
+        flip_enabled_only, is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress,
+        progress_text, project_primary, publication_detail, save_host, save_needs_confirm, stale_line, stale_text, took, tick_redraw,
+        tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE,
+        TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
@@ -1493,6 +1513,14 @@ mod tests {
 
     fn op(id: &str, dot: Dot) -> OpView {
         OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
+    }
+
+    #[test]
+    fn a_failed_tray_icon_leads_to_the_exit_path_not_a_silent_hang() {
+        let ok: Result<(), &str> = Ok(());
+        assert_eq!(exit_code_for(&ok), None, "трей построился — выходить незачем");
+        let failed: Result<(), &str> = Err("GTK не инициализирован");
+        assert_eq!(exit_code_for(&failed), Some(1), "без значка окно не закрыть — код выхода ненулевой");
     }
 
     #[test]

@@ -53,7 +53,35 @@ pub fn work_area(cx: &App) -> Bounds<Pixels> {
             );
         }
     }
+    if let Some(wa) = x11_work_area() {
+        return wa;
+    }
     cx.primary_display().map(|d| d.bounds()).unwrap_or_default()
+}
+
+/// Рабочая область из `_NET_WORKAREA` корневого окна X11 — её выставляет сам
+/// оконный менеджер (у xfwm4 это область без панели XFCE) по тому же стандарту
+/// (EWMH), что форма «спрятать за панелью» ищет на Windows через
+/// `SPI_GETWORKAREA`. `None` — не X11 (Wayland без XWayland, тест без дисплея)
+/// или оконный менеджер свойство не выставил; тогда `work_area` падает на
+/// границы всего дисплея, как было раньше. Соединение отдельное от того,
+/// через которое GPUI уже говорит с сервером — короткоживущее, только на этот
+/// один запрос, и закрывается в конце функции вместе с `RustConnection`.
+#[cfg(target_os = "linux")]
+fn x11_work_area() -> Option<Bounds<Pixels>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let atom = conn.intern_atom(false, b"_NET_WORKAREA").ok()?.reply().ok()?.atom;
+    let reply = conn.get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4).ok()?.reply().ok()?;
+    let v: Vec<u32> = reply.value32()?.collect();
+    (v.len() >= 4).then(|| Bounds::new(point(px(v[0] as f32), px(v[1] as f32)), size(px(v[2] as f32), px(v[3] as f32))))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn x11_work_area() -> Option<Bounds<Pixels>> {
+    None
 }
 
 /// Размер окна для нового показа: ширина постоянная, высота — подобранная в
@@ -146,6 +174,15 @@ pub fn show_window(cx: &mut App) {
         focus: true,
         show: true,
         window_decorations: Some(WindowDecorations::Client),
+        // Без этого окно непрозрачно, и свои скруглённые углы `Panel`
+        // (`rounded_lg` + `overflow_hidden` на непрозрачном `bg`, см.
+        // `panel.rs`) рисует поверх квадратной opaque-поверхности — на
+        // композитном рабочем столе (проверено живьём на XFCE/xfwm4) видны
+        // квадратные углы с бледной рамкой вместо скруглённых. Прозрачен
+        // только зазор по углам; тело панели остаётся непрозрачным — его
+        // красит сама панель. Композитинг недоступен — платформа тихо
+        // остаётся с `Opaque`, тогда углы квадратные, но не стеклянные.
+        window_background: WindowBackgroundAppearance::Transparent,
         icon,
         ..Default::default()
     };
@@ -232,6 +269,23 @@ mod tests {
         assert_eq!(flyout_origin(wa, MIN_SIZE, GAP), point(px(608.), px(268.)));
         let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
         assert_eq!(flyout_origin(tiny, MIN_SIZE, GAP), point(px(100.), px(50.)));
+        // Дефект 1: рабочая область меньше дисплея (панель XFCE внизу срезает
+        // 40 px из 1080) и содержимое выше, чем осталось свободного места —
+        // высота подбирается под реальную рабочую область, и окно целиком
+        // остаётся внутри неё, а не торчит нижним краем за экран.
+        let shrunk = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1040.)));
+        let h = fit_height_for(MIN_SIZE.height, px(1200.), px(560.), shrunk.size.height, GAP).unwrap();
+        let origin = flyout_origin(shrunk, size(MIN_SIZE.width, h), GAP);
+        assert!(origin.y + h <= shrunk.size.height, "нижний край окна за рабочей областью");
+        assert_eq!(origin.y, px(12.));
+        // Та же высота содержимого, но по ошибке — на границах всего дисплея
+        // (1080 без вычета панели, ровно старый баг): низ окна проезжает за
+        // настоящую рабочую область (1040) — учёт панели в `work_area` и
+        // исправляет именно это.
+        let whole_display = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1080.)));
+        let h_wrong = fit_height_for(MIN_SIZE.height, px(1200.), px(560.), whole_display.size.height, GAP).unwrap();
+        let origin_wrong = flyout_origin(whole_display, size(MIN_SIZE.width, h_wrong), GAP);
+        assert!(origin_wrong.y + h_wrong > shrunk.size.height, "без учёта панели низ окна должен был уйти под неё");
     }
 
     #[test]

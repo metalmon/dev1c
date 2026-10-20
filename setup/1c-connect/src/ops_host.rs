@@ -518,7 +518,7 @@ impl Op<Ctx> for Extension {
         "Расширение mcp-1c в базе"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        match extension_version(&ctx.cfg.host.base_url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
+        match extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
             Some(v) => OpState::Done(format!("расширение {v}, публикация отвечает")),
             None => OpState::Missing,
         }
@@ -541,10 +541,11 @@ impl Op<Ctx> for Extension {
         if ctx.dry_run {
             return Ok(());
         }
-        if extension_version(&h.base_url, &h.db_user, &h.db_password).is_none() {
+        let base_url = ctx.cfg.base_url();
+        if extension_version(&base_url, &h.db_user, &h.db_password).is_none() {
             ctx.warn(format!(
                 "публикация {} не отвечает. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
-                h.base_url
+                base_url
             ));
         }
         Ok(())

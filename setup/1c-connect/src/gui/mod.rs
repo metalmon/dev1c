@@ -549,14 +549,16 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
-/// Сохранить параметры сервера. Списка инструментов, каталога выгрузки и
-/// адреса публикации в окне нет (правятся в toml): берём их из текущих
-/// параметров, иначе пустые значения из формы затёрли бы toml. Каталог
-/// проекта — из формы.
+/// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
+/// режима публикации, её порта и адреса публикации в окне нет (правятся в
+/// toml): берём их из текущих параметров, иначе пустые значения из формы
+/// затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
+    host.publication = ui.cfg.host.publication.clone();
+    host.http_port = ui.cfg.host.http_port;
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;

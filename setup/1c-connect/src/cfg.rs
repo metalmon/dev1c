@@ -49,6 +49,23 @@ pub struct Host {
     /// `local` — база внутри образа. Пока только читается и сохраняется;
     /// переключатель и поведение — спека окна, раздел «Режим работы».
     pub mode: String,
+    /// Кто публикует базу: `auto` — сама программа своим httpd (адрес считает
+    /// `Cfg::base_url`), `webserver` — уже опубликовано вручную на Apache/IIS
+    /// (адрес берётся из `base_url`).
+    pub publication: String,
+    /// Порт своего httpd в режиме `auto`; `None` — `8080 + N` (номер рабочего
+    /// места). В toml хранится как число, `0` значит «не задан».
+    #[serde(deserialize_with = "http_port_de", skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
+}
+
+/// `http_port`: `0` в toml — «не задан» (`None`), иначе порт как есть.
+fn http_port_de<'de, D>(d: D) -> std::result::Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let n = u16::deserialize(d)?;
+    Ok((n != 0).then_some(n))
 }
 
 impl Default for Host {
@@ -65,6 +82,8 @@ impl Default for Host {
             project: "C:\\proj\\Buh".into(),
             tools: DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect(),
             mode: "tunnel".into(),
+            publication: "auto".into(),
+            http_port: None,
         }
     }
 }
@@ -101,6 +120,10 @@ impl Cfg {
         anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
         anyhow::ensure!(self.host.server.contains(':'), "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393");
         anyhow::ensure!(matches!(self.host.mode.as_str(), "tunnel" | "local"), "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)");
+        anyhow::ensure!(
+            matches!(self.host.publication.as_str(), "auto" | "webserver"),
+            "[host]: publication — \"auto\" (публикует сама программа) или \"webserver\" (уже опубликовано на Apache/IIS)"
+        );
         let u = &self.host.base_url;
         anyhow::ensure!(
             u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
@@ -147,11 +170,27 @@ impl Cfg {
     }
 
     /// Путь публикации с косыми чертами: `/Buh/` из `http://localhost/Buh/hs/mcp-1c`.
-    pub fn publication(&self) -> String {
+    /// Не режим публикации (тот — `Host.publication`) — путь в адресе.
+    pub fn publication_path(&self) -> String {
         let rest = self.host.base_url.trim_start_matches("http://");
         let path = &rest[rest.find('/').unwrap_or(rest.len())..];
         let before_hs = path.split("/hs/").next().unwrap_or("/");
         format!("{}/", before_hs.trim_end_matches('/'))
+    }
+
+    /// Порт своего httpd в режиме `auto`: `http_port`, иначе `8080 + N`.
+    pub fn http_port(&self) -> u16 {
+        self.host.http_port.unwrap_or(8080 + self.number().unwrap_or(1))
+    }
+
+    /// Адрес публикации: в режиме `auto` считает от своего httpd (`http_port`),
+    /// в `webserver` отдаёт хранимое поле `base_url` как есть.
+    pub fn base_url(&self) -> String {
+        if self.host.publication == "auto" {
+            format!("http://localhost:{}/hs/mcp-1c", self.http_port())
+        } else {
+            self.host.base_url.clone()
+        }
     }
 
     pub fn render(&self) -> String {
@@ -172,6 +211,8 @@ impl Cfg {
                 "project" => format!("{:?}", h.project),
                 "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
                 "mode" => format!("{:?}", h.mode),
+                "publication" => format!("{:?}", h.publication),
+                "http_port" => h.http_port.unwrap_or(0).to_string(),
                 _ => return None,
             })
         })
@@ -218,12 +259,42 @@ mod tests {
     fn web_port_and_publication_come_from_the_url() {
         let mut c = sample();
         assert_eq!(c.web_port(), 80);
-        assert_eq!(c.publication(), "/Buh/");
+        assert_eq!(c.publication_path(), "/Buh/");
         c.host.base_url = "http://localhost:8081/InfoBase/hs/mcp-1c".into();
         assert_eq!(c.web_port(), 8081);
-        assert_eq!(c.publication(), "/InfoBase/");
+        assert_eq!(c.publication_path(), "/InfoBase/");
         c.host.base_url = "http://other-host/Buh/hs/mcp-1c".into();
         assert!(c.validate().unwrap_err().to_string().contains("localhost"));
+    }
+
+    #[test]
+    fn auto_computes_the_base_url() {
+        let mut c = sample();
+        assert_eq!(c.host.publication, "auto");
+        c.host.workstation = "dev2".into();
+        assert_eq!(c.base_url(), "http://localhost:8082/hs/mcp-1c");
+        assert_eq!(c.host.base_url, Host::default().base_url);
+    }
+
+    #[test]
+    fn webserver_keeps_the_field() {
+        let mut c = sample();
+        c.host.publication = "webserver".into();
+        assert_eq!(c.base_url(), c.host.base_url);
+    }
+
+    #[test]
+    fn an_explicit_port_wins() {
+        let mut c = sample();
+        c.host.http_port = Some(9000);
+        assert_eq!(c.base_url(), "http://localhost:9000/hs/mcp-1c");
+    }
+
+    #[test]
+    fn validate_rejects_an_unknown_publication() {
+        let mut c = sample();
+        c.host.publication = "iis".into();
+        assert!(c.validate().unwrap_err().to_string().contains("publication"));
     }
 
     #[test]

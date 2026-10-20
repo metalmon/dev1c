@@ -149,12 +149,13 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
     }
 }
 
-/// Параметры из полей. `dump`, `tools`, `mode` и `base_url` пустые — их
-/// подставит `save_host` из текущих, в окне этих полей нет. Поля, которых
-/// режим не показывает, тоже пустые — набранное в них (если там что-то
-/// осталось от прежнего режима) в toml не попадёт; `Panel::save` сам
-/// переносит рабочее место, адрес среды и пароль рабочего места из текущих
-/// параметров, как `save_host` уже делает для `dump`/`tools`/`mode`.
+/// Параметры из полей. `dump`, `tools`, `mode`, `publication`, `http_port` и
+/// `base_url` пустые — их подставит `save_host` из текущих, в окне этих полей
+/// нет. Поля, которых режим не показывает, тоже пустые — набранное в них
+/// (если там что-то осталось от прежнего режима) в toml не попадёт;
+/// `Panel::save` сам переносит рабочее место, адрес среды и пароль рабочего
+/// места из текущих параметров, как `save_host` уже делает для
+/// `dump`/`tools`/`mode`/`publication`/`http_port`.
 pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
     let shown = shown_fields(mode);
     let v = |name: &str, e: &Entity<InputState>| {
@@ -172,6 +173,8 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
         project: v("project", &f.project),
         tools: Vec::new(),
         mode: String::new(),
+        publication: String::new(),
+        http_port: None,
     }
 }
 

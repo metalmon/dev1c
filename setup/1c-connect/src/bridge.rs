@@ -24,7 +24,7 @@ where
 pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::process::Command {
     let exe = kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" });
     let mut c = tokio::process::Command::new(exe);
-    c.args(["--base", &cfg.host.base_url, "--user", &cfg.host.db_user, "--password", &cfg.host.db_password, "--quiet"]);
+    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--password", &cfg.host.db_password, "--quiet"]);
     if !cfg.host.dump.is_empty() {
         c.args(["--dump", &cfg.host.dump]);
     }

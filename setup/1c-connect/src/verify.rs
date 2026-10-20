@@ -35,8 +35,9 @@ pub fn order(mode: &str) -> Vec<&'static str> {
     // Экран — сразу за платформой: без него Конфигуратор не стартует вовсе,
     // и провалится всё, что ниже (vrunner, загрузка, расширение). Факт
     // только на Linux: на Windows экран у Конфигуратора есть по устройству
-    // системы, и проверять нечего (см. `display_fact`).
-    if cfg!(unix) {
+    // системы, а на macOS платформы нет вовсе — и там и там факт был бы
+    // красным зря (см. `display_fact`).
+    if cfg!(target_os = "linux") {
         v.push(DISPLAY);
     }
     v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, WEB, PUBLICATION, GITEA]);
@@ -64,20 +65,26 @@ pub fn gitea_fact(g: &Gitea) -> Check {
 /// экрана он не стартует («Unable to initialize GTK+ or connect to the
 /// windowing system», код 255 — замер 2026-10-20 в контейнере). Экран даёт
 /// коннектор сам: либо его уже дал сеанс (`DISPLAY`), либо `xvfb-run`
-/// (так же, как стенд делает это для своего `vrunner-mcp`). Провал — только
-/// когда нет ни того, ни другого; в остальных случаях человек видит, каким
-/// способом экран дан.
-pub fn display_fact(prefix_needed: bool, xvfb: Option<&std::path::Path>) -> Check {
-    if !prefix_needed {
-        return Check::pass(DISPLAY, "DISPLAY задан — Конфигуратор идёт в этот экран");
+/// (так же, как стенд делает это для своего `vrunner-mcp`).
+///
+/// Три исхода человек должен различать, поэтому `display` — значение из
+/// окружения как оно есть, а `alive` — есть ли за ним X-сервер
+/// (`ops_host::display_alive`; при `display = None` не смотрим): экран
+/// сеанса, свой Xvfb вместо заданного-но-мёртвого, и провал, когда дать
+/// экран нечем. Заданный мёртвый `DISPLAY` молча зелёным больше не проходит.
+pub fn display_fact(display: Option<&str>, alive: bool, xvfb: Option<&std::path::Path>) -> Check {
+    if let (Some(d), true) = (display, alive) {
+        return Check::pass(DISPLAY, format!("DISPLAY={d} — Конфигуратор идёт в этот экран сеанса"));
     }
+    // Что именно не так — в текст: без значения человек не поймёт, о каком
+    // экране речь, а «задан, но мёртв» и «не задан» лечатся по-разному.
+    let why = match display {
+        Some(d) => format!("DISPLAY={d} задан, но X-сервера за ним нет"),
+        None => "DISPLAY не задан".to_string(),
+    };
     match xvfb {
-        Some(p) => Check::pass(DISPLAY, format!("DISPLAY не задан, экран даёт {} (виртуальный, никто в него не смотрит)", p.display())),
-        None => Check::fail(
-            DISPLAY,
-            "DISPLAY не задан и xvfb-run не найден",
-            "поставьте xvfb (apt install xvfb) — иначе Конфигуратор не стартует: «Unable to initialize GTK+ or connect to the windowing system»",
-        ),
+        Some(p) => Check::pass(DISPLAY, format!("{why}; экран даёт {} (виртуальный, никто в него не смотрит)", p.display())),
+        None => Check::fail(DISPLAY, why, crate::ops_host::SCREEN_HINT),
     }
 }
 
@@ -244,9 +251,10 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
         Some(p) => Check::pass(PLATFORM, p.display().to_string()),
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
     });
-    if cfg!(unix) {
+    if cfg!(target_os = "linux") {
+        let d = crate::ops_host::display_env();
         let xvfb = crate::ops_host::find_xvfb_run();
-        v.push(display_fact(!crate::ops_host::has_display(), xvfb.as_deref()));
+        v.push(display_fact(d.as_deref(), d.as_deref().is_some_and(crate::ops_host::display_alive), xvfb.as_deref()));
     }
     let exe = mcp_exe(&ctx.kit);
     v.push(if exe.exists() {
@@ -330,10 +338,10 @@ mod tests {
     }
 
     #[test]
-    fn order_has_thirteen_facts_with_the_tunnel_or_ports_last() {
-        // На Linux сразу за платформой стоит «экран для конфигуратора» (его
-        // на Windows нет вовсе), и всё дальше сдвинуто на один факт.
-        let d = usize::from(cfg!(unix));
+    fn order_ends_with_the_tunnel_or_the_ports_and_puts_the_screen_after_the_platform() {
+        // На Linux сразу за платформой стоит «экран для конфигуратора» (на
+        // Windows и macOS его нет вовсе), и всё дальше сдвинуто на один факт.
+        let d = usize::from(cfg!(target_os = "linux"));
         let tunnel = order("tunnel");
         assert_eq!(tunnel.len(), 13 + d);
         assert_eq!(tunnel[12 + d], "туннель");
@@ -480,19 +488,32 @@ mod tests {
         assert!(!checks[0].ok, "{:?}", checks[0]);
     }
 
-    /// Провал — только когда дать экран нечем. Экран уже есть или есть
-    /// `xvfb-run` — оба случая в порядке, но человек должен видеть, каким
-    /// способом экран дан: это ровно то, что отличает прошедший `export` от
-    /// падения «Unable to initialize GTK+» (замер 2026-10-20).
+    /// Провал — только когда дать экран нечем. Экран сеанса или `xvfb-run` —
+    /// оба случая в порядке, но человек должен видеть, каким способом экран
+    /// дан: это ровно то, что отличает прошедший `export` от падения «Unable
+    /// to initialize GTK+» (замер 2026-10-20). И три исхода должны
+    /// различаться: заданный мёртвый `DISPLAY` зелёным не проходит.
     #[test]
     fn display_fact_fails_only_without_display_and_without_xvfb() {
         let x = std::path::PathBuf::from("/usr/bin/xvfb-run");
-        let own = display_fact(false, None);
-        assert!(own.ok && !own.info && own.detail.contains("DISPLAY"), "{own:?}");
-        let wrapped = display_fact(true, Some(&x));
-        assert!(wrapped.ok && wrapped.detail.contains("xvfb-run"), "{wrapped:?}");
-        let nothing = display_fact(true, None);
-        assert!(!nothing.ok && nothing.hint.contains("xvfb"), "{nothing:?}");
+
+        // экран сеанса — свой, обёртки не будет
+        let own = display_fact(Some(":0"), true, Some(&x));
+        assert!(own.ok && !own.info && own.detail.contains(":0") && own.detail.contains("сеанса"), "{own:?}");
+
+        // DISPLAY нет — экран даёт xvfb-run, и это видно
+        let wrapped = display_fact(None, false, Some(&x));
+        assert!(wrapped.ok && wrapped.detail.contains("не задан") && wrapped.detail.contains("xvfb-run"), "{wrapped:?}");
+
+        // DISPLAY задан, но мёртв — тоже xvfb-run, и причина названа значением
+        let dead = display_fact(Some(":99"), false, Some(&x));
+        assert!(dead.ok && dead.detail.contains(":99") && dead.detail.contains("нет") && dead.detail.contains("xvfb-run"), "{dead:?}");
+
+        // дать нечем — единственный провал; оба случая, и пустой, и мёртвый
+        for d in [None, Some(":99")] {
+            let nothing = display_fact(d, false, None);
+            assert!(!nothing.ok && nothing.hint.contains("xvfb") && nothing.hint.contains("xauth"), "{nothing:?}");
+        }
     }
 
     #[test]

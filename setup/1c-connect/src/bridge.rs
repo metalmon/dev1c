@@ -1064,12 +1064,23 @@ mod tests {
         assert!(env["PATH"].starts_with(&format!("{bin}{}{git}", if cfg!(windows) { ';' } else { ':' })), "{}", env["PATH"]);
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        // На машине без `DISPLAY`, но с `xvfb-run`, команда обёрнута
-        // (`ops_host::with_display`): первыми идут `-a` и прежняя программа,
-        // `mcp.os` съезжает на третье место. Окружение и каталог обёртку
-        // переживают — это проверено выше, и ровно это здесь важно.
-        let at = if crate::ops_host::display_wrapper().is_some() { 2 } else { 0 };
-        assert!(args[at].ends_with("mcp.os"), "{args:?}");
+        // Обе ветки проверяются по тому, что получилось, а не тем же решением,
+        // которое на результат влияло (иначе тест зелен при любом ответе).
+        // На машине без живого `DISPLAY`, но с `xvfb-run`, команда обёрнута
+        // (`ops_host::with_display`): `xvfb-run`, `-a`, прежняя программа, и
+        // только потом `mcp.os`. В CI (`ubuntu-24.04` без `DISPLAY`) берётся
+        // именно эта ветка — проверка обязана работать там, а не молчать.
+        let prog = c.get_program().to_string_lossy().to_string();
+        if prog.ends_with("xvfb-run") {
+            assert_eq!(args[0], "-a", "{args:?}");
+            assert!(args[1].contains("oscript"), "{args:?}");
+            assert!(args[2].ends_with("mcp.os"), "{args:?}");
+            assert_eq!(args.len(), 3, "{args:?}");
+        } else {
+            assert!(prog.contains("oscript"), "{prog}");
+            assert!(args[0].ends_with("mcp.os"), "{args:?}");
+            assert_eq!(args.len(), 1, "{args:?}");
+        }
     }
 
     #[test]

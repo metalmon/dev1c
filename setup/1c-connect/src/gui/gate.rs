@@ -105,7 +105,10 @@ pub fn cold_gate(
 /// на показ окна, конец каждой операции и «Сохранить». Раньше существование
 /// базы считалось в `verify::readiness` — в своём потоке.
 pub fn wants_directory(path: &str) -> bool {
-    !path.starts_with("\\\\") && !(path.contains('\\') && !path.contains(':'))
+    // Само правило живёт в `verify` — в слое, который собирается всегда:
+    // окно идёт по фиче `gui`, и обратное направление (`verify` → `gui`)
+    // ломало бы сборку без окна.
+    crate::verify::wants_directory(path)
 }
 
 #[cfg(test)]

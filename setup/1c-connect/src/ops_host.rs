@@ -628,7 +628,14 @@ pub fn ib_switch(base_path: &str) -> String {
 
 /// Версия расширения, которую отдаёт публикация; пусто — не отвечает.
 pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<String> {
-    let c = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(60)).build().ok()?;
+    extension_version_in(base_url, user, password, std::time::Duration::from_secs(60))
+}
+
+/// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
+/// мгновенно), а вердикт готовности — коротко, чтобы уложиться в бюджет
+/// (`verify::Limits`).
+pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
+    let c = reqwest::blocking::Client::builder().timeout(timeout).build().ok()?;
     let r = c.get(format!("{base_url}/version")).basic_auth(user, Some(password)).send().ok()?;
     if !r.status().is_success() {
         return None;

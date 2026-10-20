@@ -110,9 +110,20 @@ pub struct Ui {
     /// поднятыми; в туннельном — как раньше, переключатель поднимает и
     /// опускает сеанс целиком.
     pub enabled: Arc<AtomicBool>,
-    /// Итог последней быстрой проверки «дойдёт ли агент до базы» — см.
-    /// `Readiness` и `run_readiness`.
+    /// Итог последнего расчёта готовности — см. `Readiness` и
+    /// `run_readiness`.
     pub ready: Readiness,
+    /// Поколение вердикта: растёт на каждый начатый расчёт и на каждый итог
+    /// «Проверить». Ответ чужого поколения отбрасывается — так же, как
+    /// хвостовое событие прежнего сеанса (`session_gen`): набор считается
+    /// десяток секунд, и окно для гонки широкое.
+    pub ready_gen: u64,
+    /// Расчёт готовности идёт прямо сейчас — второй поток не заводится.
+    pub ready_pending: bool,
+    /// Пока поток считал, почва сдвинулась ещё раз: пересчитать один раз по
+    /// его возвращении. Иначе цепочка «Сохранить → публикация → операция»
+    /// поднимала бы три пробы подряд.
+    pub ready_again: bool,
     /// Состояние заглушки лицензии, о котором уже сказано в журнале. Решений
     /// на нём не принимают — и кнопки (`run_op`), и мост спрашивают часы
     /// заново; поле нужно только чтобы заметить смену под открытым окном и
@@ -331,9 +342,10 @@ pub enum Ev {
     /// проверка расширения в режиме «webserver» и ожидание после spawn не
     /// должны держать главный поток окна (находка повторного ревью).
     Publish(Result<(), String>),
-    /// Первый провалившийся факт `verify::readiness`, посчитанный в своём
-    /// потоке (`run_readiness`); `None` — пройдено.
-    Ready(Option<Check>),
+    /// Поколение расчёта и его вердикт — первый провалившийся факт
+    /// `verify::readiness`, посчитанный в своём потоке (`run_readiness`);
+    /// `None` — пройдено.
+    Ready(u64, Option<Check>),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -848,25 +860,78 @@ fn ensure_publication_now(ui: &mut Ui) {
     });
 }
 
-/// Быстрая проверка «дойдёт ли агент до базы» (`verify::readiness`) в своём
-/// потоке — она ходит по сети (HTTP к расширению) и не должна держать главный
-/// поток окна, тем же приёмом, что `ensure_publication_now` выше. Зовётся,
-/// когда почва могла сдвинуться: карточка стала «MCP включены» (включили
-/// переключатель, либо сеанс пришёл уже включённым — автозапуск), кончилось
-/// «Установить» (и любая другая операция — дешевле перепроверить лишний раз,
-/// чем отличать операции друг от друга), и после «Сохранить». Не на таймере —
-/// между этими событиями `ui.ready` просто не пересчитывается.
+/// Расчёт готовности (`verify::readiness` — тот же набор фактов, что
+/// печатает «Проверить») в своём потоке: он ходит по сети и поднимает пробу
+/// инструментов, и не должен держать главный поток окна — тем же приёмом,
+/// что `ensure_publication_now` выше. Зовётся, когда почва могла сдвинуться:
+/// карточка стала «MCP включены» (включили переключатель, либо сеанс пришёл
+/// уже включённым — автозапуск), кончилась любая операция (дешевле
+/// перепроверить лишний раз, чем отличать операции друг от друга),
+/// «Сохранить» и показ окна. Не на таймере — между этими событиями
+/// `ui.ready` просто не пересчитывается.
 pub fn run_readiness(ui: &mut Ui) {
+    let Some(gen) = start_readiness(ui) else { return };
+    // Молча: `quiet_ctx`, а не `ctx_for` — ни строки в журнале, ни фазы в
+    // карточке хода (`verify::readiness` фазу и не объявляет).
+    let ctx = quiet_ctx(ui);
+    let mode = ui.cfg.host.mode.clone();
+    let link = ui.link.clone();
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let state = link.is_up().then(|| link.label(&mode));
+        let first_fail = verify::first_fail(&verify::readiness(&ctx, state.as_deref()));
+        let _ = tx.unbounded_send(Ev::Ready(gen, first_fail));
+    });
+}
+
+/// Ядро `run_readiness` без потока: сброс устаревшего вердикта, поколение и
+/// отметка повтора. `None` — считать не надо: поток уже считает, пересчёт
+/// помечен и пойдёт один раз по его возвращении.
+fn start_readiness(ui: &mut Ui) -> Option<u64> {
     // Старый вердикт не должен пережить смену почвы — сброс синхронный,
     // ещё до похода по сети (`drop_stale_readiness`, тестируется отдельно
     // от самого похода).
     drop_stale_readiness(ui);
-    let ctx = ctx_for(ui);
-    let tx = ui.tx.clone();
-    std::thread::spawn(move || {
-        let first_fail = verify::readiness(&ctx).into_iter().find(|c| !c.ok);
-        let _ = tx.unbounded_send(Ev::Ready(first_fail));
-    });
+    if ui.ready_pending {
+        ui.ready_again = true;
+        return None;
+    }
+    ui.ready_pending = true;
+    ui.ready_gen += 1;
+    Some(ui.ready_gen)
+}
+
+/// Ответ потока готовности. Чужое поколение (его обогнал итог «Проверить»)
+/// и ответ про уже сдвинувшуюся почву вердикта не трогают. Возвращает
+/// `true`, когда набор надо посчитать заново — ровно один раз.
+fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
+    ui.ready_pending = false;
+    let again = std::mem::take(&mut ui.ready_again);
+    if gen == ui.ready_gen && !again {
+        ui.ready = match first_fail {
+            Some(c) => Readiness::Warn(c),
+            None => Readiness::Ok,
+        };
+    }
+    again
+}
+
+/// Итог «Проверить» и есть вердикт (спека): полный набор в этот момент уже
+/// посчитан, первый провал — причина в карточке. Без этой связки живой
+/// случай заказчика 2026-10-20 повторяется дословно: вердикт посчитан
+/// раньше, проверка нашла провалы, точка осталась зелёной. Поколение растёт
+/// заодно — идущий расчёт готовности этот свежий вердикт не затрёт. Пустой
+/// набор — упавший поток проверки (`guarded`), а не «всё хорошо»: такой
+/// вердикт не трогаем вовсе.
+fn verdict_from_checks(ui: &mut Ui, checks: &[Check]) {
+    if checks.is_empty() {
+        return;
+    }
+    ui.ready_gen += 1;
+    ui.ready = match verify::first_fail(checks) {
+        Some(c) => Readiness::Warn(c),
+        None => Readiness::Ok,
+    };
 }
 
 /// Сброс вердикта в `Readiness::Unknown`: сама почва ещё не проверена заново,
@@ -917,6 +982,16 @@ fn ctx_for(ui: &Ui) -> Ctx {
         }
     });
     Ctx { kit: ui.kit.clone(), cfg: ui.cfg.clone(), dry_run: false, sink, prompt: Box::new(AlwaysDefault) }
+}
+
+/// `Ctx` без голоса — для расчёта готовности: его события никуда не идут, ни
+/// строкой в журнал окна, ни фазой в карточку хода. Спека требует этого
+/// прямо: готовность считается молча, иначе окно принимает расчёт за
+/// начавшуюся операцию (запираются переключатель и «Сохранить», значок трея
+/// желтеет, а журнал заполняется строками пробы). Всё прочее — то же, что у
+/// `ctx_for`.
+fn quiet_ctx(ui: &Ui) -> Ctx {
+    Ctx { kit: ui.kit.clone(), cfg: ui.cfg.clone(), dry_run: false, sink: Arc::new(|_: Event| {}), prompt: Box::new(AlwaysDefault) }
 }
 
 /// Синхронизировать трей с `Ui`: состояние (занято — жёлтый, иначе по
@@ -1372,6 +1447,9 @@ fn handle(ev: Ev, cx: &mut App) {
             let failed = checks.iter().filter(|c| !c.ok).count();
             let lines = check_lines(&checks);
             let ui = cx.global_mut::<Ui>();
+            // Итог «Проверить» и есть вердикт готовности: карточка и проверка
+            // не могут расходиться (спека).
+            verdict_from_checks(ui, &checks);
             ui.failed_checks = failed;
             for line in lines {
                 note_line(ui, line);
@@ -1440,13 +1518,12 @@ fn handle(ev: Ev, cx: &mut App) {
             // отказа сеанса, с текстом причины (находка повторного ревью).
             Err(e) => set_link(cx, State::Failed(format!("публикация: {e}"))),
         },
-        Ev::Ready(first_fail) => {
-            let ui = cx.global_mut::<Ui>();
-            ui.ready = match first_fail {
-                Some(c) => Readiness::Warn(c),
-                None => Readiness::Ok,
-            };
+        Ev::Ready(gen, first_fail) => {
+            let again = apply_ready(cx.global_mut::<Ui>(), gen, first_fail);
             cx.refresh_windows();
+            if again {
+                run_readiness(cx.global_mut::<Ui>());
+            }
         }
     }
 }
@@ -1549,6 +1626,9 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(autoconnect_on)),
             ready: Readiness::Unknown,
+            ready_gen: 0,
+            ready_pending: false,
+            ready_again: false,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
             unread: 0,
@@ -1651,6 +1731,9 @@ impl Ui {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
             ready: Readiness::Unknown,
+            ready_gen: 0,
+            ready_pending: false,
+            ready_again: false,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
             unread: 0,
@@ -1679,10 +1762,11 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
+        apply_ready, autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_line, on_done,
         on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
-        stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Readiness, Running, Tab, TrayState,
+        stale_line, stale_text, start_readiness, took, tick_redraw, tray_state, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
+        Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
@@ -1713,6 +1797,71 @@ mod tests {
         ui.ready = Readiness::Warn(Check::fail("х", "y", "z"));
         drop_stale_readiness(&mut ui);
         assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Итог «Проверить» и есть вердикт (спека): полный набор в этот момент
+    /// уже посчитан, первый провал — причина в карточке. Без этой связки
+    /// живой случай заказчика 2026-10-20 повторяется дословно: точка
+    /// зелёная, а проверка тут же нашла два провала.
+    #[test]
+    fn a_finished_check_becomes_the_verdict() {
+        let mut ui = Ui::for_test();
+        ui.ready = Readiness::Ok;
+        let checks = vec![
+            Check::pass("платформа 1С", "есть"),
+            Check::note("комплект на носителе", "FAT32"),
+            Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"),
+            Check::fail("Gitea", "не отвечает", "dev1c-setup check"),
+        ];
+        verdict_from_checks(&mut ui, &checks);
+        match &ui.ready {
+            Readiness::Warn(c) => assert_eq!(c.what, "проект", "первый провал, сведение пропущено"),
+            other => panic!("{other:?}"),
+        }
+        // Проверка прошла — вердикт зелёный, тем же набором.
+        verdict_from_checks(&mut ui, &[Check::pass("платформа 1С", "есть"), Check::note("комплект на носителе", "FAT32")]);
+        assert!(matches!(ui.ready, Readiness::Ok), "{:?}", ui.ready);
+        // Пустой набор — это упавший поток проверки, а не «всё хорошо».
+        verdict_from_checks(&mut ui, &[]);
+        assert!(matches!(ui.ready, Readiness::Ok), "{:?}", ui.ready);
+    }
+
+    /// Поколение вердикта — та же защита, что у состояния связи
+    /// (`link_is_current`): набор считается десяток секунд, и ответ прежнего
+    /// расчёта не должен затереть свежий.
+    #[test]
+    fn a_stale_generation_answer_is_dropped() {
+        let mut ui = Ui::for_test();
+        ui.ready_gen = 2;
+        ui.ready_pending = true;
+        assert!(!apply_ready(&mut ui, 2, Some(Check::fail("Gitea", "не отвечает", "dev1c-setup check"))));
+        assert!(matches!(ui.ready, Readiness::Warn(_)), "{:?}", ui.ready);
+
+        // Ответ первого поколения приходит позже — вердикт он не трогает.
+        ui.ready_pending = true;
+        assert!(!apply_ready(&mut ui, 1, None));
+        assert!(matches!(ui.ready, Readiness::Warn(_)), "{:?}", ui.ready);
+        assert!(!ui.ready_pending, "поток всё равно закончился");
+    }
+
+    /// Цепочка «Сохранить → публикация → операция» не должна поднимать три
+    /// пробы подряд и держать точку «занято» минуту: пока поток считает,
+    /// новое событие только помечает повтор.
+    #[test]
+    fn a_second_recompute_waits_for_the_first() {
+        let mut ui = Ui::for_test();
+        let gen = start_readiness(&mut ui).expect("первый расчёт идёт сам");
+        assert!(ui.ready_pending);
+
+        assert!(start_readiness(&mut ui).is_none(), "второго потока нет");
+        assert!(ui.ready_again, "повтор помечен");
+        assert_eq!(ui.ready_gen, gen, "поколение не трогаем — считает всё тот же поток");
+
+        // Возврат потока: ровно один пересчёт, и ответ про старую почву не применён.
+        assert!(apply_ready(&mut ui, gen, None), "по возврату — пересчитать");
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+        assert!(!ui.ready_pending && !ui.ready_again);
+        assert_eq!(start_readiness(&mut ui), Some(gen + 1));
     }
 
     /// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,

@@ -4,7 +4,8 @@
 //! фокуса раньше, чем клик по трею успевает его поднять заново).
 
 use super::panel::Panel;
-use super::{note_line, Kind, Line, Tab, Ui};
+use super::{note_line, run_readiness, Kind, Line, Tab, Ui};
+use crate::cfg::Cfg;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -185,9 +186,24 @@ pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Показ окна — событие пересчёта готовности (спека): человек открывает
+/// флайаут именно затем, чтобы увидеть, как дела, а вердикт бывает
+/// устаревшим. Файл параметров перечитывается здесь же и до постройки панели
+/// (та читает `ui.cfg` при создании): правку toml руками иначе никто не
+/// заметил бы до перезапуска. Файл не читается или сломан — остаёмся на
+/// прежних параметрах молча, о них человеку уже сказали при запуске.
+fn reread_and_recheck(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    if let Ok(cfg) = Cfg::load(&ui.kit) {
+        ui.cfg = cfg;
+    }
+    run_readiness(ui);
+}
+
 /// Показать флайаут: если уже открыт — поднять на передний план, иначе
 /// открыть новое окно у угла трея.
 pub fn show_window(cx: &mut App) {
+    reread_and_recheck(cx);
     if let Some(w) = cx.global::<Ui>().window {
         let _ = w.update(cx, |_, window, _| window.activate_window());
         return;

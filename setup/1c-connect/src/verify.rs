@@ -3,7 +3,7 @@
 //! среда (Gitea) → что мешает загрузке → туннель. Человек читает сверху
 //! вниз и останавливается на первом провале.
 
-use crate::ops_host::{extension_version, find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
+use crate::ops_host::{find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -103,11 +103,23 @@ pub fn display_fact(display: Option<&str>, alive: bool, xvfb: Option<&std::path:
     }
 }
 
+/// Запущенный Конфигуратор — не поломка, а «сейчас занято человеком»: по
+/// спеке («Исключение одно и названо списком») такие факты — сведения и
+/// цвет точки не красят, иначе точка желтела бы у каждого, кто открыл 1С.
+/// Совет, что делать перед загрузкой, остаётся при факте: его читают.
 pub fn configurator_fact(n: usize) -> Check {
     if n == 0 {
         Check::pass(CONFIGURATOR, "не запущен")
     } else {
-        Check::fail(CONFIGURATOR, format!("запущено процессов 1cv8: {n}"), "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт")
+        Check {
+            ok: true,
+            info: true,
+            ..Check::fail(
+                CONFIGURATOR,
+                format!("запущено процессов 1cv8: {n}"),
+                "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт",
+            )
+        }
     }
 }
 
@@ -231,30 +243,72 @@ pub fn publication_fact(base_url: &str, ver: Option<String>) -> Check {
     }
 }
 
-/// Факты, что решают, дойдёт ли вызов агента до базы: разложены ли
-/// инструменты комплекта, отвечает ли HTTP-сервис базы по настроенному адресу
-/// настроенными учётными данными, стоит ли расширение. Подмножество `run()`,
-/// в том же порядке и теми же функциями (`tools_fact`/`web_fact`/
-/// `publication_fact`) — второй набор фактов, который мог бы разойтись с
-/// полной проверкой, здесь не заводится. Окно зовёт это при включении MCP и
-/// при автозапуске с уже включённым переключателем (`gui::run_readiness`),
-/// не на таймере и не блокируя сами порты: те подняты раньше, вердикт только
-/// подписывает витрину.
-pub fn readiness(ctx: &Ctx) -> Vec<Check> {
-    let tools = tools_dir();
-    let web = ctx.cfg.http_port();
-    let web_up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
-    let base_url = ctx.cfg.base_url();
-    let ver = extension_version(&base_url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password);
-    vec![tools_fact(&ctx.kit.root, &tools), web_fact(web, web_up), publication_fact(&base_url, ver)]
+/// Сроки сбора фактов. «Проверить» и командная строка считают без
+/// ограничения по времени — человек ждёт ответа сознательно; готовность
+/// считается под рукой у него и молча, поэтому у неё свои короткие сроки и
+/// общий бюджет (спека, «у готовности свои сроки»).
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Срок пробы инструментов (`vrunner-mcp` поднимает свой процесс, живой
+    /// замер — 8–11 с).
+    pub tools: std::time::Duration,
+    /// Срок одного сетевого запроса (версия расширения). Коннект к порту
+    /// веб-сервера и Gitea и так коротки (3 с и 5 с), их не растягиваем.
+    pub net: std::time::Duration,
+    /// Общий бюджет на весь набор; `None` — без бюджета.
+    pub budget: Option<std::time::Duration>,
+}
+
+impl Limits {
+    /// «Проверить» и `1c-connect check`: сроки прежние, бюджета нет.
+    pub fn full() -> Self {
+        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None }
+    }
+
+    /// Готовность: короткие сроки и общий бюджет в 20 с.
+    pub fn quick() -> Self {
+        Self { tools: std::time::Duration::from_secs(15), net: std::time::Duration::from_secs(5), budget: Some(std::time::Duration::from_secs(20)) }
+    }
+}
+
+/// Факт под общим бюджетом: когда бюджет уже вышел, факт не считается вовсе —
+/// вместо выдуманного провала человек читает «не проверено». Точка от этого
+/// не зелёная (факт не `ok`), но и вины человека в таком факте нет.
+fn within(started: std::time::Instant, budget: Option<std::time::Duration>, name: &'static str, f: impl FnOnce() -> Check) -> Check {
+    match budget {
+        Some(b) if started.elapsed() >= b => Check::fail(
+            name,
+            format!("не проверено за {} с", b.as_secs()),
+            "готовность считается коротко — нажмите «Проверить», она считает без ограничения по времени",
+        ),
+        _ => f(),
+    }
+}
+
+/// Первый провалившийся факт — он и есть причина жёлтого вердикта. Сведения
+/// («в базе открыт сеанс», «Конфигуратор запущен», «комплект на носителе»)
+/// пропускаются: они говорят «сейчас занято человеком», а не «сломано».
+pub fn first_fail(checks: &[Check]) -> Option<Check> {
+    checks.iter().find(|c| !c.ok && !c.info).cloned()
+}
+
+/// Тот же набор фактов, что печатает `run`, но молча: ни `Phase::Check`, ни
+/// одной строки в журнале окна (окно приняло бы фазу за начавшуюся операцию
+/// и заперло бы переключатель с «Сохранить»), и по коротким срокам
+/// `Limits::quick`. Карточка и «Проверить» обязаны считать одно и то же —
+/// второй, отдельно придуманный набор здесь не заводится.
+pub fn readiness(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
+    facts_for_readiness(ctx, tunnel_state, Limits::quick())
 }
 
 /// Локальный `initialize` + безвредный инструмент: процесс поднимается из
-/// копии на машине с cwd = project; туннель не нужен.
-fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
+/// копии на машине с cwd = project; туннель не нужен. Инструмент нарочно
+/// без сеанса «Предприятия» (`cache_show`) — иначе пересчёт готовности
+/// отбирал бы единственный сеанс учебной платформы.
+fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path, timeout: std::time::Duration) -> Check {
     let t0 = std::time::Instant::now();
     let cmd = crate::bridge::vrunner_command(&ctx.cfg, tools).into_std();
-    match crate::local::call(cmd, "cache_show", serde_json::json!({}), std::time::Duration::from_secs(60), &|_| {}) {
+    match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &|_| {}) {
         Ok(r) if !r.is_error => Check::pass(VRUNNER, format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
         Ok(r) => Check::fail(VRUNNER, format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
         Err(e) => Check::fail(VRUNNER, e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
@@ -294,44 +348,72 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
 /// перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме:
 /// это состояние сессии, а не то, что можно вычислить здесь.
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
+    // Фаза — только здесь: по ней окно показывает карточку хода и запирает
+    // кнопки. Сбор фактов её не объявляет, иначе молчаливый расчёт
+    // готовности выглядел бы начавшейся операцией (спека).
     ctx.progress(Phase::Check);
+    facts_for_readiness(ctx, tunnel_state, Limits::full())
+}
+
+/// Сам сбор фактов — общий для «Проверить» и для вердикта готовности.
+/// Ничего не печатает и не объявляет фазы; всё, что может задержаться,
+/// считается под общим бюджетом (`within`) и со своим сроком (`Limits`).
+pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits) -> Vec<Check> {
+    let t0 = std::time::Instant::now();
+    let budget = limits.budget;
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
-    v.push(licence_fact(&crate::licence::state_now()));
-    v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server));
-    v.push(match find_1cv8() {
+    v.push(within(t0, budget, DEADLINE, || licence_fact(&crate::licence::state_now())));
+    v.push(within(t0, budget, PARAMS, || params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server)));
+    v.push(within(t0, budget, PLATFORM, || match find_1cv8() {
         Some(p) => Check::pass(PLATFORM, p.display().to_string()),
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
-    });
+    }));
     if cfg!(target_os = "linux") {
-        let d = crate::ops_host::display_env();
-        let xvfb = crate::ops_host::find_xvfb_run();
-        v.push(display_fact(d.as_deref(), d.as_deref().is_some_and(crate::ops_host::display_alive), xvfb.as_deref()));
+        v.push(within(t0, budget, DISPLAY, || {
+            let d = crate::ops_host::display_env();
+            let xvfb = crate::ops_host::find_xvfb_run();
+            display_fact(d.as_deref(), d.as_deref().is_some_and(crate::ops_host::display_alive), xvfb.as_deref())
+        }));
     }
-    let exe = mcp_exe(&ctx.kit);
-    v.push(if exe.exists() {
-        Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
-    } else {
-        Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
-    });
+    v.push(within(t0, budget, KIT, || {
+        let exe = mcp_exe(&ctx.kit);
+        if exe.exists() {
+            Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
+        } else {
+            Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
+        }
+    }));
     let tools = tools_dir();
-    let tf = tools_fact(&ctx.kit.root, &tools);
+    let tf = within(t0, budget, TOOLS, || tools_fact(&ctx.kit.root, &tools));
+    // Инструментов нет — пробу не поднимаем вовсе; но и «не проверено за N с»
+    // инструментов не значит «их нет», поэтому решение целиком под `within`.
     let tools_ok = tf.ok;
     v.push(tf);
-    v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install") });
-    v.push(project_fact(ctx, &tools));
-    v.push(base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists()));
+    v.push(within(t0, budget, VRUNNER, || {
+        if tools_ok {
+            vrunner_fact(ctx, &tools, limits.tools)
+        } else {
+            Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install")
+        }
+    }));
+    v.push(within(t0, budget, PROJECT, || project_fact(ctx, &tools)));
+    v.push(within(t0, budget, BASE, || base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists())));
     let web = ctx.cfg.http_port();
-    let web_up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
-    v.push(web_fact(web, web_up));
+    v.push(within(t0, budget, WEB, || {
+        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
+        web_fact(web, up)
+    }));
     let base_url = ctx.cfg.base_url();
-    v.push(publication_fact(&base_url, extension_version(&base_url, &h.db_user, &h.db_password)));
-    v.push(gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url())));
+    v.push(within(t0, budget, PUBLICATION, || {
+        publication_fact(&base_url, crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net))
+    }));
+    v.push(within(t0, budget, GITEA, || gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url()))));
     if local {
         v.push(open_session_fact());
     } else {
-        v.push(configurator_fact(crate::bridge::configurator_count()));
+        v.push(within(t0, budget, CONFIGURATOR, || configurator_fact(crate::bridge::configurator_count())));
     }
     let root = ctx.kit.root.display().to_string();
     // Носитель называем так, как его понимает человек: на Windows это буква
@@ -340,17 +422,21 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     let media = if cfg!(windows) { root.get(..3).unwrap_or(&root) } else { root.as_str() };
     v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), media));
     if local {
-        let p = ctx.cfg.ports();
-        let me = std::process::id();
-        let ours = std::env::current_exe().ok();
-        // Порт, про который держателя не выяснить (свободен, или pid не
-        // прочитать), в список не попадает вовсе — обвинять человека не в
-        // чем.
-        let holders: Vec<(u16, Holder)> = [p.mcp, p.vrunner]
-            .into_iter()
-            .filter_map(|port| Some((port, holder_of(holder_pid(&crate::holder::of_port(port)?)?, me, ours.as_deref()))))
-            .collect();
-        v.push(workstation_ports_fact(p.mcp, p.vrunner, &holders));
+        // Держатель порта считается подпроцессом (`netstat`/`ss`) — под
+        // бюджетом, как и прочее небыстрое.
+        v.push(within(t0, budget, WORKSTATION_PORTS, || {
+            let p = ctx.cfg.ports();
+            let me = std::process::id();
+            let ours = std::env::current_exe().ok();
+            // Порт, про который держателя не выяснить (свободен, или pid не
+            // прочитать), в список не попадает вовсе — обвинять человека не в
+            // чем.
+            let holders: Vec<(u16, Holder)> = [p.mcp, p.vrunner]
+                .into_iter()
+                .filter_map(|port| Some((port, holder_of(holder_pid(&crate::holder::of_port(port)?)?, me, ours.as_deref()))))
+                .collect();
+            workstation_ports_fact(p.mcp, p.vrunner, &holders)
+        }));
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
@@ -534,11 +620,16 @@ mod tests {
         assert!(ok.ok && ok.detail.contains("1.22"));
     }
 
+    /// «Конфигуратор запущен» — не поломка, а «сейчас занято человеком»:
+    /// по спеке такие факты переводятся в сведения и остаются сведениями,
+    /// иначе точка желтела бы у каждого, кто открыл 1С. Совет, что делать
+    /// перед загрузкой, при этом никуда не девается.
     #[test]
     fn configurator_and_media_facts_say_what_to_do() {
         let c = configurator_fact(2);
-        assert!(!c.ok && c.detail.contains('2') && c.hint.contains("загруз"), "{c:?}");
-        assert!(configurator_fact(0).ok);
+        assert!(c.ok && c.info, "{c:?}");
+        assert!(c.detail.contains('2') && c.hint.contains("загруз"), "{c:?}");
+        assert!(configurator_fact(0).ok && !configurator_fact(0).info);
         let m = media_fact(Some("FAT32".into()), "E:\\");
         assert!(m.ok && m.info && m.detail.contains("FAT32"), "{m:?}");
         assert!(!media_fact(None, "C:\\").info);
@@ -575,15 +666,55 @@ mod tests {
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 
+    /// Карточка и «Проверить» не могут расходиться (спека, раздел «Зелёный
+    /// значит „работает“»): набор фактов у готовности — тот же, что печатает
+    /// проверка, и тем же порядком. Различаются они только сроками, не
+    /// составом: три факта из тринадцати и были причиной живого случая
+    /// заказчика 2026-10-20 (точка зелёная, проверка тут же нашла два провала).
     #[test]
-    fn readiness_is_tools_web_and_publication_in_order() {
-        // Каталог комплекта в test_ctx пуст (его и нет на диске) — ровно то
-        // же, что строит `run()`'s TOOLS-факт, здесь не второй расчёт.
-        let ctx = test_ctx("local");
-        let checks = readiness(&ctx);
-        let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
-        assert_eq!(names, vec![TOOLS, WEB, PUBLICATION]);
-        assert!(!checks[0].ok, "{:?}", checks[0]);
+    fn readiness_has_the_same_facts_as_check() {
+        for mode in ["tunnel", "local"] {
+            let ctx = test_ctx(mode);
+            let quick: Vec<String> = readiness(&ctx, None).into_iter().map(|c| c.what).collect();
+            let full: Vec<String> = run(&ctx, None).into_iter().map(|c| c.what).collect();
+            assert_eq!(quick, full, "mode {mode}");
+            assert_eq!(quick, order(mode), "mode {mode}");
+        }
+    }
+
+    /// Вердикт считает первый *провал*, а сведения пропускает: «в базе открыт
+    /// сеанс», «Конфигуратор запущен» и «комплект на носителе» говорят «сейчас
+    /// занято человеком», а не «сломано», и цвет точки не красят.
+    #[test]
+    fn first_fail_skips_notes() {
+        let checks = vec![
+            Check::pass(PLATFORM, "есть"),
+            Check::note(OPEN_SESSION, "занято человеком"),
+            Check::fail(PROJECT, "не разложен", "1c-connect install"),
+            Check::fail(GITEA, "не отвечает", "dev1c-setup check"),
+        ];
+        assert_eq!(first_fail(&checks).unwrap().what, PROJECT);
+        assert!(first_fail(&[Check::pass(PLATFORM, "есть")]).is_none());
+        // Сведение остаётся сведением, даже если помечено неудачей.
+        let odd = Check { ok: false, info: true, ..Check::fail(CONFIGURATOR, "запущен", "закройте") };
+        assert!(first_fail(&[odd]).is_none(), "сведение вердикт не красит");
+    }
+
+    /// Факт, на который не хватило общего бюджета, — «не проверено», а не
+    /// выдуманный провал: точка от этого не зелёная, но и вины человека в
+    /// таком факте нет.
+    #[test]
+    fn a_fact_that_did_not_fit_the_budget_is_not_a_made_up_failure() {
+        let long_ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(30)).expect("часы без 30 с");
+        let c = within(long_ago, Some(std::time::Duration::from_secs(20)), GITEA, || unreachable!("бюджет вышел — факт не считают"));
+        assert_eq!(c.what, GITEA);
+        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("не проверено за 20 с"), "{c:?}");
+        // Бюджет ещё есть — факт считается как обычно.
+        let ok = within(std::time::Instant::now(), Some(std::time::Duration::from_secs(20)), GITEA, || Check::pass(GITEA, "1.25"));
+        assert!(ok.ok, "{ok:?}");
+        // Без бюджета (`1c-connect check`) срок не наступает никогда.
+        assert!(within(long_ago, None, GITEA, || Check::pass(GITEA, "1.25")).ok);
     }
 
     /// Провал — только когда дать экран нечем. Экран сеанса или `xvfb-run` —

@@ -8,6 +8,7 @@ _HERE = pathlib.Path(__file__).parent
 SCENARIO = str(_HERE.parent / 'scenario.toml')
 BROKEN_SCENARIO = str(_HERE / 'fixtures' / 'scenario_broken.toml')
 MISSING_FIELD_SCENARIO = str(_HERE / 'fixtures' / 'scenario_missing_field.toml')
+MISSING_ACTION_SCENARIO = str(_HERE / 'fixtures' / 'scenario_missing_action.toml')
 
 
 class LoadTests(unittest.TestCase):
@@ -72,6 +73,36 @@ class LoadTests(unittest.TestCase):
             'Покажи структуру документа «Заказ покупателя»',
             'Сколько справочников и документов в этой конфигурации',
         ))
+
+
+class ActionTests(unittest.TestCase):
+    # Подпись кнопки -> каноническое действие Machine.press ('next'/'close')
+    # и, у двух кнопок, команда, которую нужно запустить. Задача 6: main.py
+    # не хранит эту карту в коде, она лежит здесь же, рядом с подписями.
+    def test_every_button_has_an_action(self):
+        steps = load(SCENARIO)
+        for s in steps:
+            self.assertEqual(set(s.actions), set(s.buttons))
+
+    def test_close_only_on_step_one(self):
+        steps = load(SCENARIO)
+        self.assertEqual(steps[0].actions['Закрыть'].action, 'close')
+        self.assertEqual(steps[0].actions['Начать'].action, 'next')
+        # Крестик/Esc закрывают любой шаг (это их дело, не сценария), но
+        # среди кнопок самого сценария 'close' есть только на первом экране.
+        for s in steps[1:]:
+            self.assertTrue(all(a.action == 'next' for a in s.actions.values()))
+
+    def test_buttons_that_launch_something(self):
+        steps = load(SCENARIO)
+        self.assertEqual(steps[1].actions['Открыть 1С'].launch, ('1c-stand', 'start1c'))
+        self.assertIsNone(steps[1].actions['Дальше'].launch)
+        self.assertEqual(steps[2].actions['Закрыть 1С и открыть редактор'].launch, ('zed',))
+        self.assertIsNone(steps[2].actions['Дальше'].launch)
+
+    def test_missing_action_is_rejected(self):
+        with self.assertRaises(ValueError):
+            load(MISSING_ACTION_SCENARIO)
 
 
 if __name__ == '__main__':

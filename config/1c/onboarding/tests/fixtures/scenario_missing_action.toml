@@ -1,0 +1,10 @@
+# Фикстура для теста: у кнопки нет действия в [step.actions].
+[[step]]
+number = 1
+title = "Тест"
+body = "Тест."
+buttons = ["Далее"]
+advance_on = "button"
+[step.target]
+kind = "none"
+[step.actions]

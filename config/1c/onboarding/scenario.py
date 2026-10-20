@@ -10,9 +10,20 @@ _ADVANCE_ON_KINDS = ('button', 'target')
 # questions — только у шага 4 (готовые вопросы агенту); у остальных шагов
 # пустой кортеж. buttons и questions — кортежи, а не списки: шаг неизменяем
 # после загрузки.
-Step = namedtuple('Step', 'number title body target buttons advance_on questions')
+#
+# actions — что подпись кнопки значит для Machine.press ('next'/'close') и,
+# у двух кнопок сценария, что запустить (main.py решает только КАК запустить
+# — subprocess.Popen, не дожидаясь; ЧТО запустить — это тоже данные сценария,
+# не словарь в коде main.py). Крестик/Esc выноски — не отсюда: их 'close'
+# приходит из callout.py напрямую, мимо этой карты.
+# actions по умолчанию {} — так старые вызовы Step(...) без него (задачи
+# 4 и 5, фейковые шаги в тестах машины и выноски) не ломаются.
+Step = namedtuple('Step', 'number title body target buttons advance_on questions actions',
+                   defaults=({},))
 Target = namedtuple('Target', 'kind desktop_file name_pattern anchor')
+Action = namedtuple('Action', 'action launch')
 
+_ACTION_KINDS = ('next', 'close')
 _REQUIRED_STEP_FIELDS = ('number', 'title', 'body', 'target', 'buttons', 'advance_on')
 _REQUIRED_TARGET_FIELDS = {
     'desktop_icon': ('desktop_file',),
@@ -40,8 +51,9 @@ def _load_step(raw: dict) -> Step:
         raise ValueError(f'шаг {number}: неизвестный advance_on {raw["advance_on"]!r}')
     target = _load_target(raw['target'], number)
     questions = tuple(raw.get('questions', ()))
+    actions = _load_actions(raw.get('actions', {}), raw['buttons'], number)
     return Step(raw['number'], raw['title'], raw['body'], target,
-                tuple(raw['buttons']), raw['advance_on'], questions)
+                tuple(raw['buttons']), raw['advance_on'], questions, actions)
 
 
 def _load_target(raw: dict, step_number) -> Target:
@@ -53,3 +65,26 @@ def _load_target(raw: dict, step_number) -> Target:
             raise ValueError(f'шаг {step_number}: нет обязательного поля цели {field!r}')
     return Target(kind, raw.get('desktop_file'), raw.get('name_pattern'),
                   raw.get('anchor', 'whole'))
+
+
+def _load_actions(raw: dict, buttons, step_number) -> dict:
+    """Карта подпись кнопки -> Action(action, launch) для одного шага.
+
+    Каждая кнопка шага обязана иметь запись: иначе main.py при клике не
+    узнает, что передать Machine.press. launch — команда (кортеж строк)
+    для subprocess.Popen или None, если кнопка ничего не запускает.
+    """
+    actions = {}
+    for label in buttons:
+        entry = raw.get(label)
+        if entry is None:
+            raise ValueError(f'шаг {step_number}: нет действия для кнопки {label!r}')
+        if isinstance(entry, str):
+            action, launch = entry, None
+        else:
+            action = entry.get('action')
+            launch = tuple(entry['launch']) if 'launch' in entry else None
+        if action not in _ACTION_KINDS:
+            raise ValueError(f'шаг {step_number}: неизвестное действие {action!r} для кнопки {label!r}')
+        actions[label] = Action(action, launch)
+    return actions

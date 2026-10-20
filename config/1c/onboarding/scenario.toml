@@ -17,6 +17,9 @@ buttons = ["Начать", "Закрыть"]
 advance_on = "button"
 [step.target]
 kind = "none"
+[step.actions]
+"Начать" = "next"
+"Закрыть" = "close"
 
 [[step]]
 number = 2
@@ -31,6 +34,9 @@ advance_on = "target"
 [step.target]
 kind = "desktop_icon"
 desktop_file = "1c-start.desktop"
+[step.actions]
+"Открыть 1С" = { action = "next", launch = ["1c-stand", "start1c"] }
+"Дальше" = "next"
 
 [[step]]
 number = 3
@@ -48,6 +54,9 @@ advance_on = "target"
 [step.target]
 kind = "desktop_icon"
 desktop_file = "dev.zed.Zed.desktop"
+[step.actions]
+"Закрыть 1С и открыть редактор" = { action = "next", launch = ["zed"] }
+"Дальше" = "next"
 
 [[step]]
 number = 4
@@ -67,6 +76,8 @@ advance_on = "button"
 kind = "window"
 name_pattern = "Zed"
 anchor = "right-bottom"
+[step.actions]
+"Дальше" = "next"
 
 [[step]]
 number = 5
@@ -85,6 +96,8 @@ advance_on = "button"
 kind = "window"
 name_pattern = "Zed"
 anchor = "right-bottom"
+[step.actions]
+"Дальше" = "next"
 
 [[step]]
 number = 6
@@ -102,3 +115,5 @@ buttons = ["Готово"]
 advance_on = "button"
 [step.target]
 kind = "tray"
+[step.actions]
+"Готово" = "next"

@@ -25,13 +25,15 @@ const MEDIA: &str = "комплект на носителе";
 const CONFIGURATOR: &str = "Конфигуратор";
 const TUNNEL: &str = "туннель";
 const WORKSTATION_PORTS: &str = "порты рабочего места";
+const DEADLINE: &str = "срок действия";
 const OPEN_SESSION: &str = "в базе открыт сеанс";
 
 /// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
 /// готовность канала к агенту (`туннель`/`порты рабочего места`).
 pub fn order(mode: &str) -> Vec<&'static str> {
-    let mut v = vec![PARAMS, PLATFORM];
+    // Срок — раньше всего остального: когда он вышел, ниже смотреть нечего.
+    let mut v = vec![DEADLINE, PARAMS, PLATFORM];
     // Экран — сразу за платформой: без него Конфигуратор не стартует вовсе,
     // и провалится всё, что ниже (vrunner, загрузка, расширение). Факт
     // только на Linux: на Windows экран у Конфигуратора есть по устройству
@@ -51,6 +53,19 @@ pub fn order(mode: &str) -> Vec<&'static str> {
         v.push(TUNNEL);
     }
     v
+}
+
+/// Срок зашитой заглушки лицензии (`crate::licence`). Первый факт набора:
+/// когда срок вышел, всё, что ниже, уже не имеет значения — коннектор работу
+/// не обслуживает, как бы хорошо ни стояли платформа, база и среда.
+/// Предупреждение заранее — сведение, а не приговор: работа идёт.
+pub fn licence_fact(state: &crate::licence::State) -> Check {
+    let until = crate::licence::until_text();
+    match state {
+        crate::licence::State::Expired => Check::fail(DEADLINE, format!("истёк {until}"), crate::licence::REFUSAL),
+        crate::licence::State::Soon { days } => Check::note(DEADLINE, format!("до {until} — осталось дней: {days}")),
+        crate::licence::State::Valid => Check::pass(DEADLINE, format!("до {until}")),
+    }
 }
 
 pub fn gitea_fact(g: &Gitea) -> Check {
@@ -246,6 +261,7 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
+    v.push(licence_fact(&crate::licence::state_now()));
     v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server));
     v.push(match find_1cv8() {
         Some(p) => Check::pass(PLATFORM, p.display().to_string()),
@@ -343,16 +359,16 @@ mod tests {
         // Windows и macOS его нет вовсе), и всё дальше сдвинуто на один факт.
         let d = usize::from(cfg!(target_os = "linux"));
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 13 + d);
-        assert_eq!(tunnel[12 + d], "туннель");
-        assert_eq!(tunnel[4 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[9 + d], "Gitea");
+        assert_eq!(tunnel.len(), 14 + d);
+        assert_eq!(tunnel[13 + d], "туннель");
+        assert_eq!(tunnel[5 + d], "vrunner-mcp отвечает");
+        assert_eq!(tunnel[10 + d], "Gitea");
         if d == 1 {
-            assert_eq!(tunnel[2], "экран для конфигуратора");
+            assert_eq!(tunnel[3], "экран для конфигуратора");
         }
         let local = order("local");
-        assert_eq!(local.len(), 13 + d);
-        assert_eq!(local[12 + d], "порты рабочего места");
+        assert_eq!(local.len(), 14 + d);
+        assert_eq!(local[13 + d], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -427,6 +443,26 @@ mod tests {
         assert!(c.ok && c.info && c.detail.contains("Конфигуратор"), "{c:?}");
     }
 
+    /// Истёкший срок — провал: человек обязан увидеть красное и дату, до
+    /// которой срок был. Предупреждение заранее работу не ломает — это
+    /// сведение со сроком и числом оставшихся дней.
+    #[test]
+    fn an_expired_licence_fails_and_a_warning_is_only_information() {
+        let until = crate::licence::until_text();
+
+        let dead = licence_fact(&crate::licence::State::Expired);
+        assert!(!dead.ok && !dead.info, "{dead:?}");
+        assert!(dead.detail.contains(&until), "{dead:?}");
+
+        let soon = licence_fact(&crate::licence::State::Soon { days: 3 });
+        assert!(soon.ok && soon.info, "{soon:?}");
+        assert!(soon.detail.contains('3') && soon.detail.contains(&until), "{soon:?}");
+
+        let ok = licence_fact(&crate::licence::State::Valid);
+        assert!(ok.ok && !ok.info, "{ok:?}");
+        assert!(ok.detail.contains(&until), "{ok:?}");
+    }
+
     #[test]
     fn gitea_fact_distinguishes_no_server_from_no_org() {
         let down = gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()));
@@ -457,7 +493,8 @@ mod tests {
 
     #[test]
     fn a_missing_parameters_file_fails_first_and_says_what_to_do() {
-        assert_eq!(order("tunnel")[0], "параметры");
+        // Первый факт набора — «срок действия» (см. `order`), параметры за ним.
+        assert_eq!(order("tunnel")[1], "параметры");
         let c = params_fact(false, "192.168.1.10:3393");
         assert!(!c.ok && c.hint.contains("example"), "{c:?}");
         // Адрес образца больше не повод для красного: в проде он может совпасть.

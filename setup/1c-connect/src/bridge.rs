@@ -540,7 +540,15 @@ async fn handle_request(
     // переключателя и порта: `initialize`/`notifications/initialized` и так
     // идут как обычно (см. ветки ниже), запоминается только их факт.
     capture_handshake(&line, handshake);
-    let off = !rules.enabled.load(Ordering::Relaxed);
+    // Истёкший срок заглушки лицензии запирает вызовы тем же путём, что
+    // снятый переключатель (спека, п. 9): не своей веткой на каждый отказ, а
+    // тем же `off` — иначе пришлось бы продублировать все ветки ниже, и
+    // какая-нибудь из них однажды разошлась бы с остальными. Меняется только
+    // текст отказа: человек должен прочитать причину, а не «включите
+    // переключатель», которого не хватит.
+    let expired = matches!(crate::licence::state_now(), crate::licence::State::Expired);
+    let off = expired || !rules.enabled.load(Ordering::Relaxed);
+    let refusal: &str = if expired { crate::licence::REFUSAL } else { DISABLED_TEXT };
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
         // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
@@ -559,7 +567,7 @@ async fn handle_request(
                 forward_counted(stdin, &raw, in_flight, reply_expected).await
             }
             jsonrpc::McpOffGate::Refuse(id) => {
-                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, refusal, true)).await;
                 Ok(())
             }
             jsonrpc::McpOffGate::ParseError(id) => {
@@ -603,7 +611,7 @@ async fn handle_request(
             forward_counted(stdin, &line, in_flight, reply_expected).await
         }
         Route::Disabled { id, tool } => {
-            let text = if off { DISABLED_TEXT.to_string() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
+            let text = if off { refusal.to_string() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
             let _ = out.send(jsonrpc::text_reply(&id, &text, true)).await;
             Ok(())
         }
@@ -624,7 +632,7 @@ async fn handle_request(
         }
         Route::OurCall { id, tool, args } => {
             if off {
-                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, refusal, true)).await;
                 return Ok(());
             }
             // Свежий `Project` из того же снимка `cfg`, что и выше — не из

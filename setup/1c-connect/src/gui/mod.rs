@@ -383,6 +383,22 @@ pub fn clock() -> String {
     format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
 }
 
+/// Строка журнала о сроке заглушки лицензии: вышел — отказ его текстом,
+/// скоро выйдет — сколько осталось, иначе молчим. Молча умирающая программа —
+/// худшее, что можно сделать (спека, п. 9), поэтому окно открывается и
+/// объясняет. Отдельная чистая функция — чтобы решение «что сказать» читалось
+/// без живого окна.
+fn licence_line(state: crate::licence::State) -> Option<Line> {
+    use crate::licence::State;
+    match state {
+        State::Expired => Some(Line { kind: Kind::Fail, text: crate::licence::REFUSAL.to_string() }),
+        State::Soon { days } => {
+            Some(Line { kind: Kind::Warn, text: format!("срок действия 1c-connect — до {}, осталось дней: {days}", crate::licence::until_text()) })
+        }
+        State::Valid => None,
+    }
+}
+
 /// Заголовок раздела журнала: название операции и час её начала.
 pub fn head_line(title: &str) -> Line {
     Line { kind: Kind::Head, text: format!("{title} · {}", clock()) }
@@ -1553,6 +1569,10 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         })
         .detach();
         refresh_ops(cx);
+        // Про срок — до подъёма сеанса: первое, что человек читает в журнале.
+        if let Some(line) = licence_line(crate::licence::state_now()) {
+            note_line(cx.global_mut::<Ui>(), line);
+        }
         // В локальном режиме слушатели держат порты весь срок жизни
         // процесса (Zed не переподключается сам — см. заголовок модуля),
         // поэтому сеанс поднимается здесь безусловно; «подключаться при
@@ -1618,7 +1638,7 @@ impl Ui {
 mod tests {
     use super::{
         autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
-        exit_code_for, first_phase, flip_enabled_only, is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done,
+        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, note_line, on_done,
         on_line, on_progress, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
         stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -1733,6 +1753,17 @@ mod tests {
         assert_eq!(took(Duration::from_secs(12)), "12 с");
         assert_eq!(took(Duration::from_secs(72)), "1 мин 12 с");
         assert_eq!(took(Duration::from_secs(0)), "0 с");
+    }
+
+    /// Окно обязано объяснить, что случилось и до какого числа срок был;
+    /// пока срок идёт — ни строки, журнал не место для пустых напоминаний.
+    #[test]
+    fn the_window_explains_an_expired_licence_and_stays_quiet_while_it_runs() {
+        let dead = licence_line(crate::licence::State::Expired).expect("истёкший срок — строка в журнале");
+        assert!(dead.kind == Kind::Fail && dead.text.contains(&crate::licence::until_text()), "{dead:?}");
+        let soon = licence_line(crate::licence::State::Soon { days: 5 }).expect("предупреждение — строка в журнале");
+        assert!(soon.kind == Kind::Warn && soon.text.contains('5'), "{soon:?}");
+        assert!(licence_line(crate::licence::State::Valid).is_none());
     }
 
     #[test]

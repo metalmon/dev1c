@@ -15,6 +15,13 @@
 #   1c-stand designer         the Configurator on the user's base, directly
 #   1c-stand enterprise       the thick client on it (menu entry); holds the
 #                             base's one Enterprise session while open
+#   1c-stand project <repository-name> status|pull|push [message]
+#                             the agent's own side of the tunnel-mode circle:
+#                             the bridge's project_pull/project_push run on
+#                             the developer's machine, not here, so this
+#                             clones $HOME/project from the local Gitea on
+#                             first use and then pulls/pushes it, as the
+#                             calling workstation account (login dev<N>)
 #   1c-stand publish <user> <port> <base dir> <out dir>
 #                             writes the publication (default.vrd) and the
 #                             Apache config for one base; `start` uses it per
@@ -216,6 +223,56 @@ seed)
     # runuser without -l keeps root's HOME: take the caller's own
     export HOME; HOME=$(home_of "$(id -un)"); seed
     ;;
+project)
+    # The agent's own side of the circle (design doc, "Как ветка попадает в
+    # контейнер"): project_status/project_pull/project_push are bridge tools
+    # and run on the developer's machine, not here, so the container's
+    # project directory needs its own way to reach the same Gitea — this is
+    # it. Run as the workstation account itself (not root), so $HOME is
+    # already that account's; the repository name is the last path segment
+    # of the project on the developer's machine, which this side cannot
+    # guess — project_status (the bridge tool) names it for the agent.
+    name=${2:?"usage: $0 project <repository-name> status|pull|push [message]"}
+    sub=${3:?"usage: $0 project <repository-name> status|pull|push [message]"}
+    msg=${4:-}
+    u=$(id -un)
+    dir="$HOME/project"
+    # Password equals the login in the pilot. It rides in the URL so every
+    # later git call in this tree is already authenticated — never echo $url.
+    url="http://$u:$u@127.0.0.1:3000/dev1c/$name.git"
+    if [ ! -d "$dir/.git" ]; then
+        log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
+        git clone --depth 1 -b "$u" "$url" "$dir"
+    fi
+    case "$sub" in
+    status)
+        branch=$(git -C "$dir" symbolic-ref --short HEAD)
+        if ahead=$(git -C "$dir" rev-list --count "origin/$u..HEAD" 2>/dev/null); then :; else ahead=все; fi
+        changed=$(git -C "$dir" status --porcelain | wc -l)
+        log "ветка $branch"
+        log "неотправленных коммитов: $ahead"
+        log "изменено: $changed"
+        if [ "$ahead" != 0 ] || [ "$changed" -gt 0 ]; then
+            log "эти правки в базу загрузить нельзя, пока они не отправлены"
+        fi
+        ;;
+    pull)
+        log "забираю файлы из Gitea"
+        git -C "$dir" pull --rebase origin "$u"
+        ;;
+    push)
+        log "отправляю файлы в Gitea"
+        git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" add -A
+        git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" diff --cached --quiet \
+            || git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" commit -q -m "${msg:-правка}"
+        git -C "$dir" push origin "$u"
+        ;;
+    *)
+        echo "usage: $0 project <repository-name> status|pull|push [message]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
 connect)
     # the autostart entry of the session: seed first (the toml and the copy
     # live in the home, which may be a fresh volume), then the tray.
@@ -358,7 +415,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | publish ... | export-payload | import-payload [--force]" >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | seed | project <repository-name> status|pull|push [message] | publish ... | export-payload | import-payload [--force]" >&2
     exit 2
     ;;
 esac

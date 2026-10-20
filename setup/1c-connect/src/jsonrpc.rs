@@ -353,18 +353,18 @@ pub fn our_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "project_status",
-            "description": "Состояние проекта: ветка, последний коммит, неотправленные коммиты, изменённые файлы, есть ли ConfigDumpInfo.xml (индекс инкремента).",
+            "description": "Состояние проекта: ветка, последний коммит, неотправленные коммиты, изменённые файлы, есть ли ConfigDumpInfo.xml (индекс инкремента), а также имя репозитория в Gitea (dev1c/<имя>) и ветка рабочего места — их неоткуда больше узнать.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": true}
         }),
         json!({
             "name": "project_pull",
-            "description": "Забрать свою ветку из Gitea (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load.",
+            "description": "Забрать свою ветку из Gitea (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load. Забирает то, что отправлено в Gitea; правки, лежащие у вас незакоммиченными, сюда не попадут.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
             "name": "project_push",
-            "description": "Закоммитить src и отправить свою ветку в Gitea. Перед этим — cf_decompile. Первый push создаёт репозиторий и ветку main.",
+            "description": "Закоммитить src и отправить свою ветку в Gitea. Перед этим — cf_decompile. Первый push создаёт репозиторий и ветку main. Пока не отправлено, человек правок не увидит и загрузить их в базу нельзя.",
             "inputSchema": {"type": "object", "properties": {"message": {"type": "string", "description": "Сообщение коммита"}}, "required": ["message"]}
         }),
     ]

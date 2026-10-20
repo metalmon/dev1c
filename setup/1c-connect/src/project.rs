@@ -267,6 +267,18 @@ fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
     Ok(o.ok && o.text.contains(&format!("refs/heads/{branch}")))
 }
 
+/// `dev1c/<имя>` из `remote` (`.../dev1c/<имя>.git`) — агент это имя
+/// угадать не может: его собственный каталог зовётся просто `project`.
+fn repo_name(p: &Project) -> String {
+    let s = p.remote.strip_suffix(".git").unwrap_or(&p.remote);
+    let mut parts = s.rsplitn(3, '/');
+    let name = parts.next().unwrap_or(s);
+    let org = parts.next().unwrap_or("dev1c");
+    format!("{org}/{name}")
+}
+
+const CANNOT_REACH_THE_BASE: &str = "эти правки в базу загрузить нельзя, пока они не отправлены";
+
 pub fn status(p: &Project) -> Result<String, String> {
     ensure_origin(p)?;
     let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
@@ -274,7 +286,16 @@ pub fn status(p: &Project) -> Result<String, String> {
     let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
     let index = if p.dir.join("src").join("ConfigDumpInfo.xml").exists() { "есть" } else { "нет — первая загрузка будет полной" };
-    Ok(format!("ветка {branch}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}"))
+    let mut out = format!(
+        "ветка {branch}\nрепозиторий: {}\nветка рабочего места: {}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}",
+        repo_name(p),
+        p.branch
+    );
+    if ahead != "0" || changed > 0 {
+        out.push('\n');
+        out.push_str(CANNOT_REACH_THE_BASE);
+    }
+    Ok(out)
 }
 
 pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
@@ -567,6 +588,36 @@ mod tests {
         std::fs::write(p.dir.join("src").join("ConfigDumpInfo.xml"), "<x/>").unwrap();
         let s = status(&p).unwrap();
         assert!(s.contains("ветка dev2") && s.contains("ConfigDumpInfo.xml: есть") && s.contains("изменено: 1"), "{s}");
+    }
+
+    /// Агент не знает и не может угадать имя своего репозитория в Gitea
+    /// (его каталог зовётся просто `project`) — `status` обязан его назвать.
+    #[test]
+    fn status_names_the_repository_and_the_branch() {
+        let (_t, mut p) = fixture();
+        p.remote = "http://127.0.0.1:3000/dev1c/UNF.git".into();
+        let s = status(&p).unwrap();
+        assert!(s.contains("репозиторий: dev1c/UNF"), "{s}");
+        assert!(s.contains("ветка рабочего места: dev2"), "{s}");
+    }
+
+    /// В туннельном режиме `cf_load` грузит каталог проекта на машине
+    /// человека, куда файлы попадают только через Gitea — незакоммиченная
+    /// или неотправленная правка недоступна никакому вызову, и агент
+    /// обязан это узнать из текста, а не по молчанию базы.
+    #[test]
+    fn status_warns_that_unsent_work_cannot_reach_the_base() {
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "a", &NEVER).unwrap();
+        assert!(!status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "clean tree must not warn");
+        std::fs::write(p.dir.join("src").join("M.bsl"), "2").unwrap();
+        assert!(status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "changed file must warn");
+        let (_t2, p2) = fixture();
+        std::fs::write(p2.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p2, "unpushed", &NEVER).unwrap();
+        git(&p2.dir, &["commit", "-q", "--allow-empty", "-m", "local only"]);
+        assert!(status(&p2).unwrap().contains(CANNOT_REACH_THE_BASE), "unpushed commit must warn");
     }
 
     #[test]

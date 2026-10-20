@@ -18,7 +18,6 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -136,22 +135,6 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
         None => "проверка",
     };
     Some(format!("Подождите: идёт {what}"))
-}
-
-/// Имя папки базы для карточки состояния — полный путь остаётся в подсказке
-/// по наведению (заказчик 2026-10-20: смену базы не видно нигде, кроме
-/// самого поля). `None`, пока база не задана — карточка не рисует пустой
-/// слот.
-pub fn base_name(path: &str) -> Option<String> {
-    let path = path.trim();
-    if path.is_empty() {
-        return None;
-    }
-    std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .filter(|n| !n.is_empty())
-        .or_else(|| Some(path.to_string()))
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -492,11 +475,6 @@ impl Render for Panel {
         // выставляют разное).
         let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
-        // Сохранённая база — из конфига, а не из поля формы: правка базы до
-        // «Сохранить» ещё не в силе (заказчик 2026-10-20: после смены базы
-        // на лету агент продолжает работать со старой, пока её не видно).
-        let base_path = ui.cfg.host.base_path.clone();
-        let base = base_name(&base_path);
         let c = card(ui.progress.as_ref(), &link, &mode, Instant::now());
         let foot_left = match &ui.status {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
@@ -539,12 +517,8 @@ impl Render for Panel {
                 // Имя базы дописывается в тот же заголовок через « · », как
                 // уже фаза с часами выше: у карточки один слот под текст,
                 // второй строки это не прибавляет (заказчик 2026-10-19).
-                // Полный путь — не здесь, а в подсказке по наведению
-                // (заказчик 2026-10-20: за него спросили отдельно).
-                let title_text = match &base {
-                    Some(name) => format!("{} · {}", c.title, name),
-                    None => c.title.clone(),
-                };
+                // Базу здесь не пишем: длинное имя сюда не влезет, а человек
+                // видит её в поле «База» на «Параметрах» (заказчик 2026-10-20).
                 div()
                     .id("status-title")
                     .flex_1()
@@ -553,10 +527,7 @@ impl Render for Panel {
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .when_some(base.as_ref().map(|_| base_path.clone()), |d, p| {
-                        d.tooltip(move |window, cx| Tooltip::new(p.clone()).build(window, cx))
-                    })
-                    .child(title_text)
+                    .child(c.title.clone())
             })
             // «Прервать» — перед переключателем, только пока можно отменить
             // (git-обмен; cf_decompile/cf_load не прерываются).
@@ -998,7 +969,7 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{base_name, can_save, card, fields_differ, project_rows, save_hint, shown_fields, HINT_PROJECT};
+    use super::{can_save, card, fields_differ, project_rows, save_hint, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
     use crate::gui::{Dot, ProjectView, Running, Which};
     use crate::session::State;
@@ -1173,15 +1144,5 @@ mod tests {
         assert_eq!(save_hint(true, true, Some(Which::Uninstall)).as_deref(), Some("Подождите: идёт работа с расширением"));
         // Занято, но никакая операция не идёт — значит идёт проверка.
         assert_eq!(save_hint(true, true, None).as_deref(), Some("Подождите: идёт проверка"));
-    }
-
-    #[test]
-    fn the_card_carries_the_base_folder_name_or_nothing() {
-        assert_eq!(base_name("C:\\Bases\\Buh"), Some("Buh".into()));
-        // Хвостовой разделитель не оставляет пустое имя.
-        assert_eq!(base_name("C:\\Bases\\Buh\\"), Some("Buh".into()));
-        // Базы ещё нет — пустой слот не рисуем, а не показываем его пустым.
-        assert_eq!(base_name(""), None);
-        assert_eq!(base_name("   "), None);
     }
 }

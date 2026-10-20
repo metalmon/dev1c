@@ -207,6 +207,14 @@ where
     // не ноль, смена параметров его не трогает: середина чужого вызова
     // никому не достаётся, ни старому, ни новому.
     let in_flight = Arc::new(AtomicU64::new(0));
+    // Рукопожатие этого соединения (`initialize` и, если пришёл, следующий
+    // за ним `notifications/initialized`) — переигрывается свежему ребёнку
+    // при рестарте (см. `replay_handshake`), иначе тот, будучи обычным
+    // MCP-сервером, вправе отказать первому же `tools/call`.
+    let handshake: HandshakeCell = Arc::default();
+    // id переигранного `initialize`, чей ответ агенту не нужен (свой он уже
+    // получил) — `from_child` ниже сам его не пропустит.
+    let swallow: Swallow = Arc::default();
     let who = if rules.inject { "vrunner-mcp" } else { "mcp-1c" };
 
     let writer = tokio::spawn(async move {
@@ -242,10 +250,10 @@ where
     let mut next_cmd = Some(cmd);
 
     let (code, tail) = loop {
-        let mut cmd = match next_cmd.take() {
-            Some(c) => c,
+        let (is_restart, mut cmd) = match next_cmd.take() {
+            Some(c) => (false, c),
             None => match &rules.rebuild {
-                Some(rebuild) => rebuild(&cfg),
+                Some(rebuild) => (true, rebuild(&cfg)),
                 // Рестарт только и всегда гейтится наличием `rebuild` (см.
                 // ниже) — сюда попасть без него нельзя; но падать насмерть
                 // вместо непонятного паникующего unwrap лучше честной ошибкой.
@@ -271,7 +279,7 @@ where
         // Ребёнок → агент: своя пара задач на каждого ребёнка (стдин/стдаут
         // предыдущего уже не существуют), но пишут в тот же `out_tx`.
         let from_child = {
-            let (out, pending, log, in_flight, inject) = (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject);
+            let (out, pending, log, in_flight, inject, swallow) = (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
             tokio::spawn(async move {
                 let mut f = Framer::new();
                 let mut buf = vec![0u8; 64 * 1024];
@@ -283,7 +291,13 @@ where
                     for fr in f.push(&buf[..n]) {
                         warn_on_session_limit(&fr, &log);
                         if let Frame::Line(l) = &fr {
-                            if jsonrpc::is_response_with_id(l).is_some() {
+                            if let Some(id) = jsonrpc::is_response_with_id(l) {
+                                // Ответ на переигранный initialize: клиент уже
+                                // получил свой, второй с тем же id сбил бы
+                                // Zed с толку, а не относящийся к его вызову.
+                                if swallow.lock().unwrap().remove(&key(&id)) {
+                                    continue;
+                                }
                                 dec_in_flight(&in_flight);
                             }
                         }
@@ -295,7 +309,10 @@ where
                 if let Some(fr) = f.finish() {
                     warn_on_session_limit(&fr, &log);
                     if let Frame::Line(l) = &fr {
-                        if jsonrpc::is_response_with_id(l).is_some() {
+                        if let Some(id) = jsonrpc::is_response_with_id(l) {
+                            if swallow.lock().unwrap().remove(&key(&id)) {
+                                return;
+                            }
                             dec_in_flight(&in_flight);
                         }
                     }
@@ -309,6 +326,26 @@ where
             let lines: Vec<&str> = s.lines().collect();
             lines[lines.len().saturating_sub(5)..].join("\n")
         });
+
+        // Рестарт: переиграть рукопожатие свежему ребёнку, прежде чем до
+        // него дойдёт вызов, который рестарт вызвал — иначе обычный
+        // MCP-сервер вправе отказать первому же tools/call как
+        // необинициализированному. Неудача переигровки — не повод делать
+        // вид, что ребёнок готов: вызов, который ждёт в `pending_frames`,
+        // получает честный отказ, а не тишину или ответ от сырого процесса.
+        if is_restart {
+            let snapshot = handshake.lock().unwrap().clone();
+            if (snapshot.initialize.is_some() || snapshot.initialized.is_some())
+                && replay_handshake(&mut stdin, &snapshot, &swallow).await.is_err()
+            {
+                if let Some(Frame::Line(l)) = pending_frames.pop_front() {
+                    if let Some(id) = request_id(&l) {
+                        let _ = out_tx.send(jsonrpc::text_reply(&id, RESTART_REFUSAL_TEXT, true)).await;
+                    }
+                }
+                log(Event::Warn(format!("{who}: рукопожатие не переигралось свежему ребёнку после смены базы — повторите вызов")));
+            }
+        }
 
         // Агент → ребёнок: читается прямо здесь (не в отдельной задаче),
         // чтобы `sr` можно было забрать назад и отдать следующему ребёнку
@@ -330,7 +367,7 @@ where
                     }
                 }
                 let fr = pending_frames.pop_front().unwrap();
-                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight).await.is_err() {
+                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight, &handshake).await.is_err() {
                     break EpochEnd::WriteFailed;
                 }
                 continue;
@@ -414,6 +451,7 @@ async fn handle_request(
     log: &Sink,
     mcp_off_warned: &AtomicBool,
     in_flight: &AtomicU64,
+    handshake: &HandshakeCell,
 ) -> Result<(), ()> {
     // A line over the Framer's cap is never passed on, on either port: a
     // line the bridge did not buffer whole is not one it can gate or route.
@@ -440,6 +478,20 @@ async fn handle_request(
     // `in_flight` (см. заголовок `pipe_jsonrpc`), чтобы смена параметров не
     // ударила по вызову, который уже в работе.
     let reply_expected = expects_reply(&line);
+    // Рукопожатие этого соединения — на всякий случай, независимо от
+    // переключателя и порта: `initialize`/`notifications/initialized` и так
+    // идут как обычно (см. ветки ниже), запоминается только их факт.
+    if let Some(m) = method_of(&line) {
+        if m.eq_ignore_ascii_case("initialize") {
+            let mut raw = line.clone();
+            raw.push(b'\n');
+            handshake.lock().unwrap().initialize = Some(raw);
+        } else if m.eq_ignore_ascii_case("notifications/initialized") {
+            let mut raw = line.clone();
+            raw.push(b'\n');
+            handshake.lock().unwrap().initialized = Some(raw);
+        }
+    }
     let off = !rules.enabled.load(Ordering::Relaxed);
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
@@ -588,6 +640,53 @@ fn expects_reply(line: &[u8]) -> bool {
 /// заблокировать рестарт.
 fn dec_in_flight(in_flight: &AtomicU64) {
     let _ = in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+}
+
+/// Метод строки от агента, если это JSON-объект с понятным `method`: грубое
+/// распознавание `initialize`/`notifications/initialized` для рукопожатия
+/// (см. `Handshake`), без претензии на строгость `route_request_with`.
+fn method_of(line: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(line).ok()?.get("method")?.as_str().map(str::to_string)
+}
+
+/// `id` строки, если он есть — чтобы ответить прямым отказом вызову, которому
+/// не удалось передать рукопожатие (см. `replay_handshake`).
+fn request_id(line: &[u8]) -> Option<Value> {
+    serde_json::from_slice::<Value>(line).ok()?.get("id").cloned()
+}
+
+/// Рукопожатие одного соединения: `initialize` и, если он пришёл, идущий
+/// следом `notifications/initialized` — ровно то, что агент послал бы
+/// заново сам, если бы Zed переподключался. Нужно пережить рестарт ребёнка
+/// (см. `pipe_jsonrpc`): свежий процесс — обычный MCP-сервер и вправе
+/// отказать первому же `tools/call`, если до него не было `initialize`.
+#[derive(Default, Clone)]
+struct Handshake {
+    initialize: Option<Vec<u8>>,
+    initialized: Option<Vec<u8>>,
+}
+
+type HandshakeCell = Arc<Mutex<Handshake>>;
+/// id переигранных `initialize`, чей ответ агенту отправлять не нужно: свой
+/// он уже получил от первого ребёнка, второй с тем же id сбил бы Zed с толку.
+type Swallow = Arc<Mutex<std::collections::HashSet<String>>>;
+
+const RESTART_REFUSAL_TEXT: &str = "мост 1c-connect: сервер перезапущен на новой базе — повторите вызов";
+
+/// Переиграть рукопожатие свежему ребёнку. Отдельный вызов `forward`, а не
+/// `forward_counted`: это не вызов агента, и в `in_flight` ему не место —
+/// ответ на `initialize` ловится через `swallow`, а не через обычный учёт.
+async fn replay_handshake(stdin: &mut tokio::process::ChildStdin, handshake: &Handshake, swallow: &Swallow) -> Result<(), ()> {
+    if let Some(init) = &handshake.initialize {
+        if let Some(id) = request_id(init) {
+            swallow.lock().unwrap().insert(key(&id));
+        }
+        forward(stdin, init).await?;
+    }
+    if let Some(ready) = &handshake.initialized {
+        forward(stdin, ready).await?;
+    }
+    Ok(())
 }
 
 /// Одна строка от ребёнка: ответ на tools/list переписывается, но только у
@@ -1323,6 +1422,52 @@ mod tests {
         // Ни строка подключения, ни пользователь одного снимка не просочились в ответ другого.
         assert_ne!(args1["ibconnection"], args2["ibconnection"], "{got}");
         assert_ne!(args1["db-user"], args2["db-user"], "{got}");
+    }
+
+    /// 6B, довершение: свежий ребёнок после рестарта — обычный MCP-сервер и
+    /// вправе отказать первому tools/call, если до него не было initialize.
+    /// Мост обязан переиграть рукопожатие сам, и агент должен получить ровно
+    /// один ответ на каждый свой запрос — не два на initialize.
+    #[tokio::test]
+    async fn restart_replays_the_handshake_and_the_client_sees_one_reply_per_request() {
+        let cfg_a = test_cfg(&["cf_load"]);
+        let live = Live::new(cfg_a.clone());
+        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT_RECORD", "1"));
+        let cmd0 = make_cmd(&cfg_a);
+        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        w.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        w.write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // Смена базы — второй ребёнок на том же соединении, который самого
+        // рукопожатия никогда не видел.
+        let mut cfg_b = live.get().1;
+        cfg_b.host.base_path = "C:\\Bases\\B".into();
+        live.set(cfg_b);
+        w.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        w.shutdown().await.unwrap();
+
+        let mut got = String::new();
+        r.read_to_string(&mut got).await.unwrap();
+        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        assert_eq!(replies.iter().filter(|r| r["id"] == 1).count(), 1, "ровно один ответ на initialize, без дубля от нового ребёнка: {got}");
+        assert_eq!(replies.iter().filter(|r| r["id"] == 2).count(), 1, "ровно один ответ на tools/call: {got}");
+        assert_eq!(replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["content"][0]["text"], "child ran cf_load", "{got}");
+        // "GOT ..." печатается на каждую строку, которую ребёнок прочитал
+        // (см. __echo_child): два вхождения — рукопожатие дошло и до
+        // первого, и до второго (переигранного) ребёнка.
+        assert_eq!(got.matches(r#""method":"initialize""#).count(), 2, "рукопожатие должно было дойти и до нового ребёнка: {got}");
+        assert_eq!(got.matches("notifications/initialized").count(), 2, "{got}");
     }
 
     #[tokio::test]

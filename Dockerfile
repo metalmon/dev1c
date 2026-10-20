@@ -369,6 +369,15 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
 # прерывают работающую команду, другого способа у человека нет.
 # Две копии: в /etc/skel для новых учётных записей и в /usr/share/oktaplus
 # для сверки на входе (дома рабочих мест — том, образ их не перекрывает).
+# Скобочная вставка в readline. Без неё вставка во встроенный терминал Zed
+# приходит с маркерами наружу: bash печатает «^[[200~текст~» и ругается на
+# несуществующую команду (поймано на стенде 20.10.2026). Zed оборачивает
+# вставляемое в маркеры, а bash их не понимает, пока режим выключен.
+# В Debian этот ключ выключен, хотя сам bash 5.2 включает его по умолчанию.
+# Включённый режим заодно не даёт вставленным многострочным командам
+# выполниться самим: человек увидит их и нажмёт ввод сам.
+RUN { echo ""; echo "# Вставка приходит как текст, а не как набор с клавиатуры"; echo "set enable-bracketed-paste on"; } >> /etc/inputrc
+
 COPY config/terminalrc           /etc/skel/.config/xfce4/terminal/terminalrc
 COPY config/terminal-accels.scm  /etc/skel/.config/xfce4/terminal/accels.scm
 COPY config/terminalrc           /usr/share/oktaplus/terminal/terminalrc

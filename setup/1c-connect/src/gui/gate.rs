@@ -68,7 +68,9 @@ pub fn cold_gate(
     if !crate::verify::base_fact(&h.base_path, base_exists).ok {
         return Some(format!("каталога базы {} нет", h.base_path));
     }
-    if h.db_user.trim().is_empty() {
+    // Правило про пользователя базы — там же, где факт (`verify::db_user_is_set`):
+    // поверхностей две, но расходиться им нельзя.
+    if !crate::verify::db_user_is_set(&h.db_user) {
         return Some("не задан пользователь базы".into());
     }
     // Данные для подключения к среде есть только у туннеля: в локальном режиме

@@ -9,15 +9,36 @@
 //! файл («Ошибка при разборе»).
 
 use crate::cfg::Cfg;
+#[cfg(windows)]
 use crate::job;
 use crate::ops_host;
 use common::kit::Kit;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::Mutex;
 
 /// Имя HTTP-сервиса и его путь внутри публикации — то же, что ставит
 /// расширение (`host.extension`).
 const SERVICE_ROOT_URL: &str = "mcp-1c";
+
+/// Экранирует пять спецсимволов XML. Путь базы, логин и пароль идут в
+/// атрибуты дескриптора как есть — кавычка или амперсанд в пароле иначе рвут
+/// XML, платформа отвергает весь файл, а причина оседает в журнале
+/// веб-сервера, не в журнале коннектора: агент просто не видит адреса.
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// Текст `default.vrd`: публикация в корень своего порта (`base="/"`, у
 /// каждого рабочего места свой порт — корень свободен), с паролем базы
@@ -33,11 +54,31 @@ pub fn vrd(cfg: &Cfg) -> String {
 \t\t\t\treuseSessions=\"dontuse\" sessionMaxAge=\"1\" poolSize=\"1\" poolTimeout=\"1\"/>\n\
 \t</httpServices>\n\
 </point>\n",
-        base = cfg.host.base_path,
-        user = cfg.host.db_user,
-        password = cfg.host.db_password,
+        base = xml_escape(&cfg.host.base_path),
+        user = xml_escape(&cfg.host.db_user),
+        password = xml_escape(&cfg.host.db_password),
         root = SERVICE_ROOT_URL,
     )
+}
+
+/// Дескриптор на диске — ровно то, что `vrd(cfg)` написал бы сейчас. Иначе
+/// пароль/пользователь/база поменялись (человек нажал «Сохранить»), а
+/// HTTP-сервис всё ещё держит старый текст — `state()` обязан увидеть это как
+/// расхождение, а не читать совпадение порта за «сделано».
+pub fn descriptor_matches(pub_dir: &Path, cfg: &Cfg) -> bool {
+    std::fs::read_to_string(pub_dir.join("default.vrd")).map(|on_disk| on_disk == vrd(cfg)).unwrap_or(false)
+}
+
+/// `GET <base_url>/version` отвечает HTTP (любым статусом) — отличает наш
+/// httpd (платформа ответит под опубликованным сервисом, даже пока
+/// расширение ещё не поставлено) от чужой программы на том же порту, которая
+/// на HTTP не похожа вовсе (reqwest не сможет разобрать ответ как HTTP и
+/// вернёт ошибку). Не доказательство владения портом абсолютно во всех
+/// случаях (можно представить чужой HTTP-сервер на том же порту), но вместе с
+/// `descriptor_matches` — наша конфигурация плюс наш порт — этого достаточно.
+pub fn service_responds(base_url: &str) -> bool {
+    let Ok(c) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(3)).build() else { return false };
+    c.get(format!("{base_url}/version")).send().is_ok()
 }
 
 /// Готовит каталог публикации и пишет в него `default.vrd` с правами только
@@ -119,7 +160,7 @@ pub struct Paths {
 /// образе. Чистая функция — каталог называет вызывающий, тест подаёт
 /// временный, настоящий 1cv8 искать не нужно.
 fn module_in(bin: &Path) -> Result<PathBuf, String> {
-    let names: &[&str] = if cfg!(windows) { &["wsap24.dll", "wsap24t.dll"] } else { &["wsap24t.so"] };
+    let names: &[&str] = if cfg!(windows) { &["wsap24.dll", "wsap24t.dll"] } else { &["wsap24.so", "wsap24t.so"] };
     names
         .iter()
         .map(|n| bin.join(n))
@@ -168,10 +209,10 @@ impl Paths {
 /// образ — та же форма, что уже работает в стенде (`config/1c/stand.sh`,
 /// функция `publish`): на Debian те пять модулей живут не под `ServerRoot`,
 /// явные `modules/mod_*.so` не резолвятся — ведёт `IncludeOptional
-/// mods-enabled/*`.
-pub fn httpd_conf(p: &Paths) -> String {
+/// mods-enabled/*`. Linux-ветка может провалиться — см. `linux_httpd_conf`.
+pub fn httpd_conf(p: &Paths) -> Result<String, String> {
     if cfg!(windows) {
-        windows_httpd_conf(p)
+        Ok(windows_httpd_conf(p))
     } else {
         linux_httpd_conf(p)
     }
@@ -191,6 +232,7 @@ LoadModule alias_module modules/mod_alias.so\n\
 LoadModule mime_module modules/mod_mime.so\n\
 LoadModule dir_module modules/mod_dir.so\n\
 LoadModule _1cws_module \"{module}\"\n\
+TypesConfig \"{mime_types}\"\n\
 ThreadsPerChild 16\n\
 DocumentRoot \"{pub_dir}\"\n\
 <Directory \"{pub_dir}\">\n\
@@ -205,6 +247,12 @@ DocumentRoot \"{pub_dir}\"\n\
         pid = p.pid.display(),
         log = p.log.display(),
         module = p.module.display(),
+        // Явно, а не положившись на скомпилированное умолчание mod_mime —
+        // ровно так, как бежал спайк 2026-10-20. Строкой, не `.join()`: эта
+        // функция всегда пишет путь по-Windows, даже когда тестовый бинарник
+        // собран на Linux (CI может собирать и там) — `.join()` добавил бы
+        // '/' вместо '\' на не-Windows таргете и разошёлся бы с эталоном.
+        mime_types = format!("{}\\conf\\mime.types", p.root.display()),
         pub_dir = p.pub_dir.display(),
     )
 }
@@ -217,9 +265,12 @@ DocumentRoot \"{pub_dir}\"\n\
 /// `ServerLimit 1`/`StartServers 1` и лимиты потоков — не стиль, а то, что
 /// держит единственный сеанс «Предприятия» на базу: второй процесс-воркер
 /// значил бы второй сеанс, а учебная лицензия его не даёт.
-fn linux_httpd_conf(p: &Paths) -> String {
-    let tools = p.pid.parent().map(|d| d.display().to_string()).unwrap_or_default();
-    format!(
+fn linux_httpd_conf(p: &Paths) -> Result<String, String> {
+    // `Path::parent()` у однокомпонентного относительного пути отдаёт
+    // `Some("")`, не `None` — пустой `DefaultRuntimeDir` молча прошёл бы мимо
+    // `.unwrap_or_default()`. Проверяем явно и отказываем читаемой строкой.
+    let tools = p.pid.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("у {} нет каталога — не могу вычислить DefaultRuntimeDir", p.pid.display()))?;
+    Ok(format!(
         "ServerRoot \"{root}\"\n\
 ServerName localhost\n\
 DefaultRuntimeDir \"{tools}\"\n\
@@ -245,19 +296,21 @@ DocumentRoot \"{pub_dir}\"\n\
     ManagedApplicationDescriptor \"{pub_dir}/default.vrd\"\n\
 </Directory>\n",
         root = p.root.display(),
-        tools = tools,
+        tools = tools.display(),
         pid = p.pid.display(),
         port = p.port,
         log = p.log.display(),
         module = p.module.display(),
         pub_dir = p.pub_dir.display(),
-    )
+    ))
 }
 
-/// Бинарь, которым поднимается веб-сервер: свой httpd из комплекта на
-/// Windows, системный `apache2` в образе — то, что уже делает стенд.
+/// Бинарь httpd — используется только резервным путём на Windows (fallback
+/// в `kill_tracked`, когда процесс почему-то не отслежен) и для диагностики;
+/// основной Linux-путь зовёт системный `apache2` по имени напрямую.
+#[cfg(windows)]
 fn httpd_binary(p: &Paths) -> PathBuf {
-    if cfg!(windows) { p.root.join("bin").join("httpd.exe") } else { PathBuf::from("apache2") }
+    p.root.join("bin").join("httpd.exe")
 }
 
 /// Грубая проверка «порт свободен»: TCP-соединение на петлю не прошло.
@@ -265,73 +318,141 @@ fn port_is_free(port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)), std::time::Duration::from_millis(200)).is_err()
 }
 
-/// Грубая проверка «httpd рабочего места отвечает»: TCP-соединение на петлю
-/// прошло. Не HTTP-запрос — сервер может ещё не нести ни одной публикации,
-/// порт уже слушается, этого достаточно для факта «веб-сервер».
+/// Грубая проверка «на петле кто-то слушает» — не доказательство, что это
+/// именно наш httpd (см. `service_responds`/`descriptor_matches` для этого),
+/// а только информация: после своей остановки видеть чужую программу на том
+/// же порту — не наша ошибка (см. `ops_host::Publication::revert_apply`).
 pub fn httpd_responds(port: u16) -> bool {
     !port_is_free(port)
 }
 
-/// Job Object (Windows) / группа процессов (Unix) под сервер, которую
-/// коннектор держит весь свой процесс целиком, а не только на время вызова
-/// `start()`. На Unix `job::group_std` уже посадил бы httpd в свою группу, и
-/// обычный путь «quit → stop()» достаточно надёжен; здесь то же самое работает
-/// и как бэкстоп на случай, если `stop()` никогда не позвали. На Windows
-/// `job::group_std` — no-op (нет fork/pgid), и без своего Job Object крах
-/// самого коннектора (паника, снятие из диспетчера задач — не штатный «quit»)
-/// не запускает `stop()`, и httpd остаётся висеть. Job здесь держит это за
-/// нас: потомки httpd автоматически попадают в тот же Job (пока сами не
-/// запросили breakaway), и ядро убивает всех, кто в нём остался, когда
-/// закрывается последний описатель (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
-/// `crate::job::Job::new`). Нормальная остановка (`stop`) явно очищает эту
-/// переменную — бэкстоп нужен только на крах, не на каждый вызов.
-static HTTPD_JOB: Mutex<Option<job::Job>> = Mutex::new(None);
+/// Последние непустые строки журнала ошибок httpd — для сообщения в журнал
+/// коннектора, когда старт не удался: причину пишет сам httpd туда, не в
+/// stdout/stderr (которые мы теперь не пайпим и не ждём — см. `start`).
+fn error_log_tail(log: &Path, n: usize) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
 
-/// Поднимает HTTP-сервис из уже записанных `p.conf`/`default.vrd`:
-/// `httpd -f <conf> -k start`. Дескриптор и конфигурация сюда не пишутся —
-/// это дело вызывающего (пароль базы не должен попасть в эту функцию только
-/// затем, чтобы тут же лечь в текст, который можно случайно залогировать).
+// --------------------------------------------------------------- Windows --
+
+/// Процесс httpd и его Job Object — держим на весь процесс коннектора, не
+/// только на время вызова `start()`. Это наш собственный ребёнок (не
+/// служба — без `-k`, см. `start`), поэтому Job действительно может его
+/// убить: крах самого коннектора (не штатный «quit», а паника или снятие из
+/// диспетчера задач) всё равно гасит httpd — ядро убивает всех, кто остался
+/// в Job, когда закрывается последний описатель
+/// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `crate::job::Job::new`).
+#[cfg(windows)]
+struct WindowsHttpd {
+    child: std::process::Child,
+    _job: job::Job,
+}
+
+#[cfg(windows)]
+static WINDOWS_HTTPD: Mutex<Option<WindowsHttpd>> = Mutex::new(None);
+
+/// Гасит то, что отслежено как наше; если почему-то не отслежено (коннектор
+/// перезапустился без чистого выхода) — резервный путь: обычный `-k stop` по
+/// тому же конфигу (его `PidFile` укажет на старый процесс, если тот жив).
+#[cfg(windows)]
+fn kill_tracked(p: &Paths) {
+    if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
+        let _ = h.child.kill();
+        let _ = h.child.wait();
+        return;
+    }
+    let _ = std::process::Command::new(httpd_binary(p)).args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
+}
+
+/// Поднимает HTTP-сервис: httpd.exe — наш прямой ребёнок, в консольном
+/// режиме (`-f <conf>`, без `-k`) — с `-k start` httpd передаёт работу
+/// диспетчеру служб, и выживший процесс нам уже не принадлежит, а Job-бэкстоп
+/// держит нечего. Идемпотентно: уже отслеженный процесс сперва гасится —
+/// повторный вызов после смены пароля/базы не падает на «порт занят».
+#[cfg(windows)]
 pub fn start(p: &Paths) -> Result<(), String> {
     use std::process::Stdio;
+    kill_tracked(p);
     let bin = httpd_binary(p);
     let mut cmd = std::process::Command::new(&bin);
-    cmd.args(["-f", &p.conf.to_string_lossy(), "-k", "start"]).stdout(Stdio::piped()).stderr(Stdio::piped());
-    job::group_std(&mut cmd);
-    let child = cmd.spawn().map_err(|e| format!("{} не запустился: {e}", bin.display()))?;
-    if let Some(job) = job::Job::new() {
-        job.assign_std(&child);
-        *HTTPD_JOB.lock().unwrap() = Some(job);
+    // В /dev/null, не в пайп: пайп, который некому вычитывать, блокирует
+    // демона навсегда, если тот решит в него что-то написать — а мы либо не
+    // ждём выхода вовсе (сервер должен остаться жить), либо ждём только
+    // короткую паузу ниже.
+    cmd.args(["-f", &p.conf.to_string_lossy()]).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = cmd.spawn().map_err(|e| format!("{} не запустился: {e}", bin.display()))?;
+    // Короткая пауза — дать серверу шанс упасть сразу (битый конфиг, занятый
+    // порт), прежде чем считать процесс запущенным и уходить.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Ok(Some(status)) = child.try_wait() {
+        return Err(format!("httpd завершился сразу (код {:?}): {}", status.code(), error_log_tail(&p.log, 5)));
     }
-    let out = child.wait_with_output().map_err(|e| format!("{} не вышел: {e}", bin.display()))?;
+    let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
+    job.assign_std(&child);
+    *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
+    Ok(())
+}
+
+/// Гасит сервис: наш собственный ребёнок — `kill()` плюс `wait()` и есть
+/// проверка «наш процесс действительно остановлен» (`wait()` возвращает
+/// только после выхода), без разговора про занятый порт: тот, кто там
+/// окажется после нас — не наша забота здесь (см. `httpd_responds` выше).
+#[cfg(windows)]
+pub fn stop(p: &Paths) -> Result<(), String> {
+    kill_tracked(p);
+    Ok(())
+}
+
+// ----------------------------------------------------------------- Linux --
+
+/// `apache2` в `$PATH` — читаемая ошибка вместо «No such file or directory»
+/// из недр `Command::spawn`.
+#[cfg(not(windows))]
+fn apache2_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join("apache2")).find(|p| p.exists())
+}
+
+/// Поднимает HTTP-сервис: системный `apache2`, как уже делает стенд.
+/// `apache2 -k start` демонизируется в свою сессию — никогда не наш ребёнок и
+/// не наша группа процессов, поэтому здесь нет Job/pgid-бэкстопа (в отличие
+/// от Windows выше): сам pid-файл (`p.pid`, которым управляет httpd) —
+/// единственный надёжный хэндл, и убивать по когда-то виденному pgid было бы
+/// опасно — к моменту вызова ядро могло отдать тот же номер другому
+/// процессу. Идемпотентно: сначала глушим то, что уже могло быть поднято
+/// (ошибку «не запущено» игнорируем), затем стартуем заново.
+#[cfg(not(windows))]
+pub fn start(p: &Paths) -> Result<(), String> {
+    apache2_on_path().ok_or_else(|| "apache2 не найден в $PATH — установите пакет apache2 (на образе он должен быть) или переключите publication на \"webserver\"".to_string())?;
+    let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
+    let out = std::process::Command::new("apache2")
+        .args(["-f", &p.conf.to_string_lossy(), "-k", "start"])
+        .output()
+        .map_err(|e| format!("apache2 не запустился: {e}"))?;
     if !out.status.success() {
-        return Err(format!("httpd -k start: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        let tail = error_log_tail(&p.log, 5);
+        let detail = if tail.is_empty() { String::from_utf8_lossy(&out.stderr).trim().to_string() } else { tail };
+        return Err(format!("apache2 -k start: {detail}"));
     }
     Ok(())
 }
 
-/// Гасит сервис: `httpd -f <conf> -k stop`, затем ждёт, пока порт не
-/// освободится — остановка не мгновенна. Бюджет 5 с (20 попыток по 250 мс) —
-/// догадка со спайка, не измеренная на настоящей остановке; если в живом
-/// запуске она окажется мала, правка — поднять число попыток здесь, а не
-/// городить отдельный backoff.
+/// Гасит сервис через собственный pid-файл httpd (`-k stop`). Успешный код
+/// возврата означает, что httpd нашёл и сигналил именно наш процесс — это и
+/// есть проверка «наш сервис остановлен»; та же оговорка, что на Windows:
+/// кто-то другой на этом порту после нас — не повод для ошибки здесь.
+#[cfg(not(windows))]
 pub fn stop(p: &Paths) -> Result<(), String> {
-    let bin = httpd_binary(p);
-    let out = std::process::Command::new(&bin)
+    let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "stop"])
         .output()
-        .map_err(|e| format!("{} не запустился: {e}", bin.display()))?;
+        .map_err(|e| format!("apache2 не запустился: {e}"))?;
     if !out.status.success() {
-        return Err(format!("httpd -k stop: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!("apache2 -k stop: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    for _ in 0..20 {
-        if port_is_free(p.port) {
-            // Штатная остановка — Job-бэкстоп на крах здесь больше не нужен.
-            *HTTPD_JOB.lock().unwrap() = None;
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    Err(format!("порт 127.0.0.1:{} всё ещё занят после httpd -k stop", p.port))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -364,6 +485,67 @@ mod tests {
         }
         // Пароль там, но строкой, не для печати (см. host.publication::apply).
         assert!(text.contains("Pwd=&quot;секрет&quot;"));
+    }
+
+    #[test]
+    fn the_pool_attributes_are_pinned_to_the_service_element_not_just_present_anywhere() {
+        // Проверяем именно элемент <service ...>, а не "где-то в файле" — те
+        // же слова в комментарии или в другом месте не считаются.
+        let text = vrd(&cfg_for_test());
+        let start = text.find("<service").expect("в дескрипторе есть <service");
+        let end = start + text[start..].find("/>").expect("элемент <service> закрыт");
+        let service_tag = &text[start..end];
+        for needle in ["rootUrl=\"mcp-1c\"", "enable=\"true\"", "reuseSessions=\"dontuse\"", "sessionMaxAge=\"1\"", "poolSize=\"1\"", "poolTimeout=\"1\""] {
+            assert!(service_tag.contains(needle), "в <service> нет {needle:?}:\n{service_tag}");
+        }
+    }
+
+    #[test]
+    fn vrd_escapes_xml_special_characters_in_every_substituted_value() {
+        // Кавычка или амперсанд в пароле иначе рвут XML — платформа отвергает
+        // весь файл, и агент не видит адреса базы вовсе.
+        let mut c = cfg_for_test();
+        c.host.db_password = "p@ss\"&<>'".into();
+        let text = vrd(&c);
+        assert!(text.contains("Pwd=&quot;p@ss&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
+        // В значении атрибута не осталось «сырых» спецсимволов — только их escape-формы.
+        let pwd_start = text.find("Pwd=&quot;").unwrap() + "Pwd=&quot;".len();
+        let pwd_end = pwd_start + text[pwd_start..].find("&quot;;").unwrap();
+        let raw_value = &text[pwd_start..pwd_end];
+        assert!(!raw_value.contains('"') && !raw_value.contains('<') && !raw_value.contains('>'), "{raw_value:?}");
+    }
+
+    #[test]
+    fn descriptor_matches_detects_a_changed_password() {
+        // «Сохранить» с новым паролем — старый файл на диске больше не
+        // совпадает с тем, что vrd(cfg) написал бы сейчас: state() обязан
+        // увидеть расхождение, а не читать совпадение порта за «сделано».
+        let tmp = std::env::temp_dir().join(format!("dev1c-pub-descriptor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("pub");
+        let before = cfg_for_test();
+        write_vrd(&dir, &vrd(&before)).unwrap();
+
+        assert!(descriptor_matches(&dir, &before));
+
+        let mut after = before.clone();
+        after.host.db_password = "новый-пароль".into();
+        assert!(!descriptor_matches(&dir, &after));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn descriptor_matches_is_false_when_nothing_was_ever_written() {
+        let tmp = std::env::temp_dir().join(format!("dev1c-pub-descriptor-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!descriptor_matches(&tmp.join("pub"), &cfg_for_test()));
+    }
+
+    #[test]
+    fn service_responds_is_false_when_nothing_listens() {
+        // Порт 1 — никакого httpd там нет и быть не может; reqwest получает
+        // отказ в соединении, не HTTP-ответ.
+        assert!(!service_responds("http://127.0.0.1:1/hs/mcp-1c"));
     }
 
     #[test]
@@ -403,6 +585,7 @@ LoadModule alias_module modules/mod_alias.so\n\
 LoadModule mime_module modules/mod_mime.so\n\
 LoadModule dir_module modules/mod_dir.so\n\
 LoadModule _1cws_module \"C:\\Program Files\\1cv8t\\8.5.1.1150\\bin\\wsap24t.dll\"\n\
+TypesConfig \"C:\\Users\\dev\\AppData\\Local\\dev1c\\httpd\\conf\\mime.types\"\n\
 ThreadsPerChild 16\n\
 DocumentRoot \"C:\\Users\\dev\\AppData\\Local\\dev1c\\pub\"\n\
 <Directory \"C:\\Users\\dev\\AppData\\Local\\dev1c\\pub\">\n\
@@ -482,7 +665,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     SetHandler 1c-application\n\
     ManagedApplicationDescriptor \"/home/dev2/dev1c/pub/default.vrd\"\n\
 </Directory>\n";
-        assert_eq!(linux_httpd_conf(&linux_sample_paths()), expected);
+        assert_eq!(linux_httpd_conf(&linux_sample_paths()).unwrap(), expected);
     }
 
     #[test]
@@ -490,13 +673,13 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         // Стенд поднимает Apache от root и явно переключает его на владельца
         // базы (User/Group); коннектор уже запущен от имени рабочего места —
         // эти директивы были бы бессмысленны (и некого было бы менять).
-        let text = linux_httpd_conf(&linux_sample_paths());
+        let text = linux_httpd_conf(&linux_sample_paths()).unwrap();
         assert!(!text.lines().any(|l| l.starts_with("User ") || l.starts_with("Group ")), "{text}");
     }
 
     #[test]
     fn linux_conf_also_listens_on_loopback_only() {
-        let text = linux_httpd_conf(&linux_sample_paths());
+        let text = linux_httpd_conf(&linux_sample_paths()).unwrap();
         let listens: Vec<&str> = text.lines().filter(|l| l.starts_with("Listen")).collect();
         assert_eq!(listens.len(), 1, "{listens:?}");
         assert!(listens[0].starts_with("Listen 127.0.0.1:"), "{}", listens[0]);
@@ -508,9 +691,9 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         // той, для которой собран тестовый бинарник — проверяем именно это,
         // а не гадаем по cfg!(windows) внутри теста.
         if cfg!(windows) {
-            assert_eq!(httpd_conf(&sample_paths()), windows_httpd_conf(&sample_paths()));
+            assert_eq!(httpd_conf(&sample_paths()).unwrap(), windows_httpd_conf(&sample_paths()));
         } else {
-            assert_eq!(httpd_conf(&linux_sample_paths()), linux_httpd_conf(&linux_sample_paths()));
+            assert_eq!(httpd_conf(&linux_sample_paths()).unwrap(), linux_httpd_conf(&linux_sample_paths()).unwrap());
         }
     }
 
@@ -537,8 +720,11 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
             std::fs::write(tmp.join("wsap24t.dll"), "x").unwrap();
             assert_eq!(module_in(&tmp).unwrap(), tmp.join("wsap24.dll"));
         } else {
+            // Коммерческая платформа на Linux несёт wsap24.so, не только
+            // учебную wsap24t.so — тот же порядок предпочтения, что на Windows.
+            std::fs::write(tmp.join("wsap24.so"), "x").unwrap();
             std::fs::write(tmp.join("wsap24t.so"), "x").unwrap();
-            assert_eq!(module_in(&tmp).unwrap(), tmp.join("wsap24t.so"));
+            assert_eq!(module_in(&tmp).unwrap(), tmp.join("wsap24.so"));
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -579,5 +765,36 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         assert_eq!(dir_mode, 0o700, "{dir_mode:o}");
         assert_eq!(file_mode, 0o600, "{file_mode:o}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_left_wide_open_by_an_older_run_gets_tightened() {
+        // Каталог мог остаться с версии до этого фикса (или с прошлого
+        // прогона) с более широкими правами — `write_vrd` обязан поджать их,
+        // а не оставить как есть, раз уж всё равно сюда зашёл.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("dev1c-pub-vrd-tighten-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("pub");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        write_vrd(&dir, "x").unwrap();
+
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "{dir_mode:o}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn linux_httpd_conf_fails_readably_instead_of_writing_an_empty_runtime_dir() {
+        // Path::parent() у однокомпонентного относительного пути отдаёт
+        // Some("") — без явной проверки DefaultRuntimeDir "" тихо ушёл бы в
+        // файл конфигурации.
+        let mut p = linux_sample_paths();
+        p.pid = PathBuf::from("httpd.pid");
+        let e = linux_httpd_conf(&p).unwrap_err();
+        assert!(e.contains("DefaultRuntimeDir"), "{e}");
     }
 }

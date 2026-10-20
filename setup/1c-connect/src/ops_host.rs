@@ -529,10 +529,22 @@ impl Op<Ctx> for Publication {
                 None => OpState::Missing,
             };
         }
-        match crate::publication::Paths::of(&ctx.cfg, &ctx.kit) {
-            Ok(p) if crate::publication::httpd_responds(p.port) => OpState::Done(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port)),
-            Ok(_) => OpState::Missing,
-            Err(e) => OpState::Blocked(e),
+        let p = match crate::publication::Paths::of(&ctx.cfg, &ctx.kit) {
+            Ok(p) => p,
+            Err(e) => return OpState::Blocked(e),
+        };
+        // Раздельная проверка, не просто «порт занят»: иначе после «Сохранить»
+        // со сменившимся паролем старый HTTP-сервис остаётся жив и слушает тот
+        // же порт, а состояние молча читается как «сделано». responds — что
+        // по адресу вообще отвечает HTTP (не чужая не-HTTP программа на том же
+        // порту); matches — что дескриптор на диске это именно текущие
+        // параметры базы, а не прежние.
+        let responds = crate::publication::service_responds(&ctx.cfg.base_url());
+        let matches = crate::publication::descriptor_matches(&p.pub_dir, &ctx.cfg);
+        match (responds, matches) {
+            (true, true) => OpState::Done(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port)),
+            (true, false) => OpState::Drifted { from: "старый дескриптор на диске".into(), to: "текущие параметры базы".into() },
+            (false, _) => OpState::Missing,
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
@@ -557,13 +569,17 @@ impl Op<Ctx> for Publication {
         // только с правами на владельца (образ делит диск между рабочими
         // местами).
         crate::publication::write_vrd(&p.pub_dir, &crate::publication::vrd(&ctx.cfg)).map_err(|e| anyhow::anyhow!("{e}"))?;
-        std::fs::write(&p.conf, crate::publication::httpd_conf(&p)).context("httpd.conf не записан")?;
+        let conf_text = crate::publication::httpd_conf(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+        std::fs::write(&p.conf, conf_text).context("httpd.conf не записан")?;
+        // start() идемпотентен сам по себе (перезапускает уже поднятый сервис
+        // поверх новой конфигурации) — второй apply после смены пароля или
+        // базы не падает на «порт занят».
         crate::publication::start(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
         ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
         Ok(())
     }
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
-        (ctx.cfg.host.publication != "webserver").then(|| vec![Action::new("httpd -k stop")])
+        (ctx.cfg.host.publication != "webserver").then(|| vec![Action::new("остановить свой httpd")])
     }
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
         if ctx.cfg.host.publication == "webserver" {
@@ -571,7 +587,13 @@ impl Op<Ctx> for Publication {
         }
         let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
         crate::publication::stop(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
-        ctx.ok("HTTP-сервис базы остановлен");
+        // Наш сервис точно остановлен (stop() это гарантирует) — если порт
+        // всё равно занят, там чужая программа: не наша ошибка, а информация.
+        if crate::publication::httpd_responds(p.port) {
+            ctx.warn(format!("HTTP-сервис базы остановлен, но порт 127.0.0.1:{} всё ещё занят другим процессом", p.port));
+        } else {
+            ctx.ok("HTTP-сервис базы остановлен");
+        }
         Ok(())
     }
 }

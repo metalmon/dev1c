@@ -42,27 +42,50 @@
 
 ## Комплекты
 
-```
-dev1c-kit/                       администратору, один раз
-  dev1c-setup.exe, dev1c-setup   программа (Windows, Linux)
-  dev1c.toml                     параметры, единственный источник
-  dev1c-image.tar.gz             образ
-  model/*.gguf                   модель, если локальная
-  checksums.txt
+**Решение заказчика 20.10.2026: комплект один, частей в нём две.** Раньше
+здесь стояли два отдельных комплекта. Теперь заказчик получает `dev1c-kit`, а
+внутри — `server-linux/` администратору сервера и `connector-windows/`
+разработчику 1С. Причина простая: это одна поставка, её везут одним куском, а
+две папки внутри говорят сами за себя, кому что.
 
-1c-connect/                      разработчику, на флешку
-  1c-connect.exe                 программа (Windows)
-  1c-connect.toml                параметры
-  mcp-1c-windows-amd64.exe       MCP-сервер живой базы, той же версии, что
-  MCP_HTTPService.cfe              расширение; версия и хеши пинованы в pack.sh
-  vrunner/bin/                   OneScript 2.2.0 (самодостаточный .NET, как в архиве)
-  vrunner/lib/                   библиотеки OneScript + vanessa-runner 3.0.2
+**И в серверной части лежат архивы не только образов, но и томов.** Образы
+несут программы, а платформа 1С с демо-базой живёт в томах: её дистрибутив
+лицензионный, в сборку образа и в CI он не попадает и собирается только на
+машине с `platform/`. Без архива тома заказчик получил бы пустой стенд, в
+который нечего внести. Выгрузка и внесение — тем же способом, которым их
+делает `provision.sh export` / `import`.
+
+Собирает комплект `kit.sh`: `plan` показывает, что войдёт и чего не хватает,
+`build` собирает. Отсутствие части не молчит — `build` останавливается.
+
+```
+dev1c-kit/
+  ЧТО-ЗДЕСЬ.md                   две части и кому какая
+
+  server-linux/                  администратору сервера, один раз
+    dev1c-setup                  программа установки
+    УСТАНОВКА.md                 порядок действий
+    dev1c-image.tar.gz           образ среды
+    dev1c-1c-image.tar.gz        образ стенда 1С
+    dev1c-1c-payload.tar.gz      ТОМ: платформа 1С и демо-база
+    nvidia-container-toolkit/    пакеты для доступа к карте
+    dev1c.toml                   параметры, единственный источник
+    model/*.gguf                 модель, если локальная (приносит заказчик)
+    checksums.txt
+
+  connector-windows/             разработчику 1С, на флешку
+    1c-connect.exe               программа (Windows)
+    1c-connect.toml              параметры
+    mcp-1c-windows-amd64.exe     MCP-сервер живой базы, той же версии, что
+    MCP_HTTPService.cfe          расширение; версия и хеши пинованы в pack.sh
+    vrunner/bin/                 OneScript 2.2.0 (самодостаточный .NET)
+    vrunner/lib/                 библиотеки OneScript + vanessa-runner 3.0.2
                                  (зависимости внутри) + add 6.8.0 (xddTestRunner.epf);
                                  дерево opm — по манифесту vendor/vrunner-lib.sha256
-  git/                           MinGit 2.56.0.2
-  tools.version                  отметка версий; host.tools копирует vrunner/ и git/
+    git/                         MinGit 2.56.0.2
+    tools.version                отметка версий; host.tools копирует vrunner/ и git/
                                  в %LOCALAPPDATA%\dev1c
-  checksums.txt
+    checksums.txt
 ```
 
 ## Общий каркас (crate `common`)

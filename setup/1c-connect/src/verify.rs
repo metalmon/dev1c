@@ -182,16 +182,17 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     v.push(if tools_ok { vrunner_fact(ctx, &tools) } else { Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install") });
     v.push(project_fact(ctx, &tools));
     v.push(base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists()));
-    let web = ctx.cfg.web_port();
+    let web = ctx.cfg.http_port();
     let web_ok = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
     v.push(if web_ok {
         Check::pass(WEB, format!("порт {web} отвечает"))
     } else {
         Check::fail(WEB, format!("порт {web} не отвечает"), "запустите Apache/IIS, на котором опубликована база")
     });
-    v.push(match extension_version(&h.base_url, &h.db_user, &h.db_password) {
-        Some(ver) => Check::pass(PUBLICATION, format!("{} → расширение {ver}", h.base_url)),
-        None => Check::fail(PUBLICATION, format!("{}/version не отвечает", h.base_url), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
+    let base_url = ctx.cfg.base_url();
+    v.push(match extension_version(&base_url, &h.db_user, &h.db_password) {
+        Some(ver) => Check::pass(PUBLICATION, format!("{base_url} → расширение {ver}")),
+        None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
     });
     v.push(gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url())));
     if local {
@@ -298,6 +299,36 @@ mod tests {
     fn holder_pid_reads_the_trailing_pid_or_nothing() {
         assert_eq!(holder_pid("1c-connect (pid 812)"), Some(812));
         assert_eq!(holder_pid("junk"), None);
+    }
+
+    /// В режиме `auto` адрес, который реально слушает мост, — `Cfg::base_url()`
+    /// (считает от `http_port`), а не хранимое поле `[host] base_url`: они
+    /// нарочно различаются портом и путём, чтобы проверка не прошла тихо по
+    /// случайному совпадению. `веб-сервер` и «публикация и расширение» должны
+    /// назвать именно вычисленный порт/адрес, а не хранимый.
+    #[test]
+    fn web_and_publication_facts_use_the_computed_address_in_auto_mode() {
+        let mut cfg = crate::cfg::Cfg::default();
+        cfg.host.server = "127.0.0.1:3".into();
+        cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(18080);
+        cfg.host.base_url = "http://localhost:9999/Buh/hs/mcp-1c".into();
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        let ctx = Ctx {
+            kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-pub-addr-{}", std::process::id()))),
+            cfg,
+            dry_run: true,
+            sink,
+            prompt: Box::new(common::AlwaysDefault),
+        };
+        let checks = run(&ctx, None);
+
+        let web = checks.iter().find(|c| c.what == WEB).unwrap();
+        assert!(web.detail.contains("18080") && !web.detail.contains("9999"), "{web:?}");
+
+        let publication = checks.iter().find(|c| c.what == PUBLICATION).unwrap();
+        assert!(publication.detail.contains("18080"), "{publication:?}");
+        assert!(!publication.detail.contains("9999") && !publication.detail.contains("Buh"), "{publication:?}");
     }
 
     #[test]

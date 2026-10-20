@@ -307,11 +307,20 @@ const PULL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
 /// не отдать все нужные объекты («сервер не отдал все нужные объекты»), а
 /// через пару секунд то же самое получается само. Первая неудача наружу не
 /// идёт — сообщаем, только если не получилось и со второго раза.
-fn retry_once<T>(pause: std::time::Duration, attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
-    attempt().or_else(|_| {
-        std::thread::sleep(pause);
-        attempt()
-    })
+///
+/// Отмена проверяется до паузы, не после: первая неудача из-за того, что
+/// человек прервал операцию (а не из-за временного сбоя сервера), не должна
+/// стоить ещё одной паузы и попытки — отмена обязана вернуть «прервано»
+/// немедленно, а не вдобавок ждать `pause`.
+fn retry_once<T>(pause: std::time::Duration, cancel: &AtomicBool, attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
+    match attempt() {
+        Ok(v) => Ok(v),
+        Err(e) if cancel.load(Ordering::Relaxed) => Err(e),
+        Err(_) => {
+            std::thread::sleep(pause);
+            attempt()
+        }
+    }
 }
 
 pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
@@ -332,7 +341,7 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
             Err(o.text)
         }
     };
-    match retry_once(PULL_RETRY_PAUSE, attempt) {
+    match retry_once(PULL_RETRY_PAUSE, cancel, attempt) {
         Ok(v) => Ok(v),
         Err(e) => {
             let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -732,7 +741,7 @@ mod tests {
     #[test]
     fn retry_once_recovers_after_a_single_transient_failure() {
         let calls = std::cell::Cell::new(0u32);
-        let r = retry_once(std::time::Duration::from_millis(1), || {
+        let r = retry_once(std::time::Duration::from_millis(1), &AtomicBool::new(false), || {
             calls.set(calls.get() + 1);
             if calls.get() == 1 {
                 Err("сервер не отдал все нужные объекты".to_string())
@@ -747,12 +756,29 @@ mod tests {
     #[test]
     fn retry_once_reports_when_the_second_attempt_fails_too() {
         let calls = std::cell::Cell::new(0u32);
-        let r = retry_once(std::time::Duration::from_millis(1), || {
+        let r = retry_once(std::time::Duration::from_millis(1), &AtomicBool::new(false), || {
             calls.set(calls.get() + 1);
             Err::<String, _>("сервер не отдал все нужные объекты".to_string())
         });
         assert_eq!(r, Err("сервер не отдал все нужные объекты".to_string()));
         assert_eq!(calls.get(), 2, "ровно одна попытка и ровно один повтор — не больше");
+    }
+
+    #[test]
+    fn retry_once_does_not_pause_or_retry_a_cancelled_attempt() {
+        // Отмена, взведённая до или во время первой попытки: вторая попытка
+        // и, главное, пауза перед ней не должны случиться вовсе — иначе
+        // отмена стоит человеку лишних двух секунд ожидания перед «прервано».
+        let calls = std::cell::Cell::new(0u32);
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let r = retry_once(std::time::Duration::from_secs(2), &cancel, || {
+            calls.set(calls.get() + 1);
+            Err::<String, _>("прервано".to_string())
+        });
+        assert_eq!(r, Err("прервано".to_string()));
+        assert_eq!(calls.get(), 1, "отмена не должна приводить к повтору");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "отмена не должна платить паузу повтора");
     }
 
     #[test]

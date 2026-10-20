@@ -344,6 +344,20 @@ pub enum Lifetime {
     WithCaller,
 }
 
+/// Правило владения: сервис, который уже отвечает под сегодняшней
+/// конфигурацией, уже у кого-то на привязи — у этого же процесса
+/// (`WithCaller`, живое окно или `serve`), у другого окна, у `serve` на
+/// соседнем процессе — а разовая `Detached`-команда не может заглянуть в
+/// чужую память и узнать, чья это привязка. Поэтому `Detached`, найдя живой
+/// и верно настроенный сервис, не трогает его вовсе: убить и поднять заново
+/// отвязанным сняло бы привязку впустую, и крах настоящего владельца потом
+/// оставил бы ровно того сироту, которого привязка должна предотвращать.
+/// `WithCaller` же всегда забирает сервис под себя — это и есть становление
+/// владельцем, а не чужая кража.
+pub fn detached_should_leave_alone(lifetime: Lifetime, responds: bool, descriptor_matches: bool) -> bool {
+    lifetime == Lifetime::Detached && responds && descriptor_matches
+}
+
 /// Последние непустые строки журнала ошибок httpd — для сообщения в журнал
 /// коннектора, когда старт не удался: причину пишет сам httpd туда, не в
 /// stdout/stderr (которые мы теперь не пайпим и не ждём — см. `start`).
@@ -777,6 +791,19 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let e = module_in(&tmp).unwrap_err();
         assert!(e.contains("wsap24"), "{e}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn detached_leaves_a_live_owners_server_alone_but_with_caller_always_takes_over() {
+        // Живой владелец, верная конфигурация — разовая команда не трогает.
+        assert!(detached_should_leave_alone(Lifetime::Detached, true, true));
+        // Отвечает, но под старым дескриптором (пароль/база сменились) —
+        // разовая команда обязана перезапустить, а не оставить стоять старое.
+        assert!(!detached_should_leave_alone(Lifetime::Detached, true, false));
+        // Ничего не отвечает — разовой команде есть что поднимать.
+        assert!(!detached_should_leave_alone(Lifetime::Detached, false, true));
+        // WithCaller становится владельцем сам — правило его не касается.
+        assert!(!detached_should_leave_alone(Lifetime::WithCaller, true, true));
     }
 
     #[test]

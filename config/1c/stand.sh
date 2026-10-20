@@ -276,11 +276,20 @@ project)
     # `fatal:` text on a failed clone/fetch, which this subcommand's own log
     # lines carry to support). Instead it goes on a header, on every call
     # that reaches Gitea, mirroring how the connector itself authenticates
-    # (host.rs). credential.helper= is cleared so git never falls back to
-    # asking one or caching what the header already supplies.
+    # (host.rs).
+    #
+    # That header itself stays out of the process table too: git reads
+    # GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n from the
+    # environment, so credential.helper and the Authorization header never
+    # appear as a "-c" argument that `ps` on this machine could show anyone.
     url="http://127.0.0.1:3000/dev1c/$name.git"
     auth="Authorization: Basic $(printf '%s' "$u:$u" | base64 | tr -d '\n')"
-    gitc() { git -c credential.helper= -c http.extraHeader="$auth" "$@"; }
+    gitc() {
+        GIT_CONFIG_COUNT=2 \
+            GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+            GIT_CONFIG_KEY_1=http.extraHeader GIT_CONFIG_VALUE_1="$auth" \
+            git "$@"
+    }
     if [ ! -d "$dir/.git" ]; then
         log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
         gitc clone --depth 1 -b "$u" "$url" "$dir"

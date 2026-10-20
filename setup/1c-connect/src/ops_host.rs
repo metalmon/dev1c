@@ -516,6 +516,20 @@ impl Op<Ctx> for ProjectOp {
 /// процессом).
 fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Result<()> {
     let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Разовая команда (Detached — «Установить», headless install), нашедшая
+    // уже отвечающий и верно настроенный сервис, его не трогает: он уже у
+    // кого-то на привязи (этот же процесс как WithCaller, живое окно, serve
+    // на соседнем процессе), а убить и поднять заново отвязанным значило бы
+    // снять эту привязку впустую — крах настоящего владельца потом оставил
+    // бы ровно того сироту, которого привязка и должна предотвращать (см.
+    // publication::detached_should_leave_alone). Только подтверждаем, что
+    // сервис отвечает, и выходим без kill_tracked()/start().
+    let responds = crate::publication::service_responds(&ctx.cfg.base_url());
+    let matches = crate::publication::descriptor_matches(&p.pub_dir, &ctx.cfg);
+    if crate::publication::detached_should_leave_alone(lifetime, responds, matches) {
+        ctx.ok(format!("HTTP-сервис базы уже поднят и отвечает на 127.0.0.1:{} — не трогаем", p.port));
+        return Ok(());
+    }
     // Дескриптор несёт пароль базы — в журнал не идёт, только в файл, и
     // только с правами на владельца (образ делит диск между рабочими
     // местами).
@@ -738,13 +752,28 @@ mod tests {
     fn ensure_publication_in_webserver_mode_only_checks_and_never_starts_anything() {
         // "webserver": ensure_publication не должна пытаться поднять что-то
         // своё — делегирует в Publication::apply, которая лишь проверяет и
-        // предупреждает. Здесь нет настоящего веб-сервера — важно, что
-        // функция не падает и не пытается писать на диск httpd.conf/vrd.
+        // предупреждает. dry_run здесь нарочно false: с dry_run=true тест
+        // проходил бы и после удаления всей ветки "webserver" — функция
+        // вышла бы в "auto" и всё равно вернула бы Ok просто из-за самого
+        // dry_run, не доходя до какой-либо настоящей ветки. Здесь нет
+        // платформы 1С и httpd — если бы ветки "webserver" не было, функция
+        // ушла бы в "auto" и либо провалилась на Paths::of (платформа не
+        // найдена), либо не выдала бы предупреждение «не отвечает», которое
+        // выдаёт только настоящая проверка webserver-режима.
         let mut cfg = Cfg::default();
         cfg.host.publication = "webserver".into();
         cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
-        let ctx = publication_ctx(cfg, true);
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = warnings.clone();
+        let sink: common::Sink = std::sync::Arc::new(move |e| {
+            if let common::Event::Warn(t) = e {
+                w.lock().unwrap().push(t);
+            }
+        });
+        let ctx = Ctx { kit: Kit::at("."), cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
         assert!(ensure_publication(&ctx).is_ok());
+        let warnings = warnings.lock().unwrap();
+        assert!(warnings.iter().any(|w| w.contains("не отвечает")), "{warnings:?}");
     }
 
     #[test]

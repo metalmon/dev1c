@@ -182,6 +182,30 @@ db_password = ""
 EOF
             log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
         fi
+        # The bridge execs its two children by fixed path, not by PATH
+        # lookup (bridge.rs: mcp_command/vrunner_command) — and the socat
+        # lines that used to run "1c-stand mcp"/"vrunner" directly (which do
+        # use PATH) no longer stand between it and a missing binary. Links,
+        # not 16 MB copies per workstation: the connector only executes
+        # these, never writes through them.
+        # mcp-1c: common::kit::Kit is the directory 1c-connect itself runs
+        # from ($HOME/dev1c here), and mcp_command() execs
+        # "<kit>/mcp-1c-linux-amd64" inside it.
+        ln -sf /usr/local/bin/mcp-1c "$HOME/dev1c/mcp-1c-linux-amd64"
+        # vanessa-runner: a different root — ops_host::tools_dir(), not the
+        # kit — $XDG_DATA_HOME/dev1c or ~/.local/share/dev1c if unset.
+        # vrunner_command() execs "<tools>/vrunner/bin/oscript" against
+        # "<tools>/vrunner/lib/vanessa-runner/src/mcp.os", and its own
+        # background re-exec of oscript finds it by putting that same bin/
+        # (and "<tools>/git/bin") ahead of PATH.
+        t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
+        mkdir -p "$t/vrunner/bin" "$t/git/bin"
+        ln -sf /usr/local/bin/oscript "$t/vrunner/bin/oscript"
+        ln -sf "$(command -v git)" "$t/git/bin/git"
+        # The vendored vanessa-runner tree and its own oscript_modules (see
+        # Dockerfile.1c, the "vanessa-runner" stage) — one link for the
+        # whole tree stands in for the kit's private vrunner/lib.
+        [ -e "$t/vrunner/lib" ] || ln -s /opt/vrunner "$t/vrunner/lib"
     fi
 }
 

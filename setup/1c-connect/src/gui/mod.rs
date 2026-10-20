@@ -93,6 +93,15 @@ pub struct Ui {
     /// несёт старое значение и отбрасывается в `handle`.
     pub session_gen: u64,
     pub link: State,
+    /// Настоящий отказ bind локального слушателя («порт занят» и т.п.),
+    /// независимый от переключателя: слушатели в локальном режиме не
+    /// поднимаются заново ни «включить», ни «выключить» (см. `launch`), так
+    /// что ни один клик его не чинит — только заводится (`Ev::Link` с
+    /// `Failed`) и снимается (`Ev::Link` с `Up`) настоящим сеансом. Без
+    /// отдельного поля `toggle_link` стирал бы `Failed` в `Off`/`Up` первым
+    /// же щелчком, и второй клик уже не видел бы отказа (находка повторного
+    /// ревью: прежний `keep_failure_on_enable` ловил лишь один клик).
+    pub bind_failed: Option<String>,
     /// Обслуживаются ли вызовы агента: живёт дольше любого сеанса (заводится
     /// один раз в `launch`, `start_session`/`stop_session`/«Сохранить» его не
     /// пересоздают), передаётся в `session::Serve` через `session::start_with_enabled` и
@@ -291,6 +300,10 @@ pub enum Ev {
     Ops(Vec<OpView>),
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`).
     Project(ProjectView),
+    /// Ответ `ensure_publication`, поднятой в своём потоке: проба (до 3 с),
+    /// проверка расширения в режиме «webserver» и ожидание после spawn не
+    /// должны держать главный поток окна (находка повторного ревью).
+    Publish(Result<(), String>),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -597,7 +610,13 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
     let base_path = cfg.host.base_path.clone();
-    let base_changed = cfg.host.base_path != old_host.base_path;
+    // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
+    // пароль — переподнять его нужно при смене любого из трёх, не только
+    // пути: иначе смена пароля/логина оставляла бы старый дескриптор живым,
+    // и публикация продолжала бы открывать базу под старыми учётными
+    // данными (находка повторного ревью).
+    let descriptor_changed =
+        cfg.host.base_path != old_host.base_path || cfg.host.db_user != old_host.db_user || cfg.host.db_password != old_host.db_password;
     // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
     // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
     // здесь — смена режима в трее поднимает его сама, отдельным путём
@@ -610,7 +629,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // целостного ревью) — до следующего вызова она обязана смотреть на
     // новую. `ensure_publication` сама решает «auto»/«webserver» и когда уже
     // «сделано» — здесь только зовём её, не повторяя эту логику.
-    if base_changed {
+    if descriptor_changed {
         ensure_publication_now(ui);
     }
     if changed && ui.session.is_some() {
@@ -636,15 +655,22 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
 }
 
 /// Поднять/проверить HTTP-сервис на уже записанных `ui.cfg`: после смены
-/// базы («Сохранить», см. выше) и при включении MCP (`toggle_link`).
-/// `ensure_publication` сама идемпотентна и решает режим — отказ здесь не
-/// проглатывается молча: строка в журнал, как у провала операции, иначе
-/// карточка соврала бы, что всё в порядке, пока агент отвечает с ошибкой.
+/// базы («Сохранить», см. выше), при включении MCP (`toggle_link`) и при
+/// старте с «подключаться при запуске» (`launch`). `ensure_publication` сама
+/// идемпотентна и решает режим, но пробует связь с таймаутом в 3 с, в режиме
+/// «webserver» ходит в сеть за версией расширения, а после запуска своего
+/// httpd ждёт его готовности — всё это в своём потоке, а не на главном
+/// потоке окна (находка повторного ревью: окно подвисало на эти секунды).
+/// Ответ идёт `Ev::Publish`: журнал на отказе и карточка — в `handle`, не
+/// здесь, иначе карточка соврала бы, что всё в порядке, пока агент отвечает
+/// с ошибкой.
 fn ensure_publication_now(ui: &mut Ui) {
     let ctx = ctx_for(ui);
-    if let Err(e) = ops_host::ensure_publication(&ctx) {
-        note_line(ui, Line { kind: Kind::Fail, text: format!("публикация: {e:#}") });
-    }
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
+        let _ = tx.unbounded_send(Ev::Publish(r));
+    });
 }
 
 /// Перезапустить сеанс после удачной записи параметров (только туннельный
@@ -788,26 +814,36 @@ fn local_display(mode: &str, enabled: bool, l: State) -> State {
     }
 }
 
-/// Включили, но `ui.link` уже несёт настоящий отказ («порт занят») — его не
-/// затирать: переключатель в локальном режиме не поднимает слушатели заново
-/// (см. `launch`), так что «включить» после провала ничего не чинит, и
-/// карточка обязана продолжать говорить правду, а не «MCP включены».
-fn keep_failure_on_enable(on: bool, link: &State) -> bool {
-    on && matches!(link, State::Failed(_))
+/// Отображение настоящего отказа bind (`ui.bind_failed`) — независимо от
+/// того, включили или выключили переключатель: слушатели в локальном режиме
+/// не поднимаются заново ни тем, ни другим кликом (см. `launch`), так что
+/// «включить» после провала ничего не чинит, и карточка обязана продолжать
+/// говорить правду, а не «MCP включены». Решает по сохранённому отказу, а не
+/// по текущему показанному состоянию — иначе один клик «выключить» стирал
+/// бы его раньше, чем следующий клик «включить» успел бы его увидеть
+/// (находка повторного ревью: прежний `keep_failure_on_enable` ловил лишь
+/// один клик).
+fn bind_failure_display(bind_failed: &Option<String>) -> Option<State> {
+    bind_failed.clone().map(State::Failed)
 }
 
 pub fn toggle_link(cx: &mut App) {
     if cx.global::<Ui>().cfg.host.mode == "local" {
         let ui = cx.global_mut::<Ui>();
         let on = flip_enabled_only(ui);
-        if keep_failure_on_enable(on, &ui.link) {
-            cx.refresh_windows();
+        if let Some(l) = bind_failure_display(&ui.bind_failed) {
+            set_link(cx, l);
             return;
         }
-        let l = if on { State::Up { since: Instant::now() } } else { State::Off };
-        set_link(cx, l);
         if on {
+            // «Включаю…», пока публикация (проба до 3 с, ожидание httpd)
+            // идёт в своём потоке — иначе карточка сказала бы «MCP включены»
+            // раньше, чем проба успела ответить (находка повторного ревью:
+            // карточка оставалась зелёной даже после отказа публикации).
+            set_link(cx, State::Connecting);
             ensure_publication_now(cx.global_mut::<Ui>());
+        } else {
+            set_link(cx, State::Off);
         }
         return;
     }
@@ -1057,9 +1093,17 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Menu(e) => tray::on_menu(e, cx),
         Ev::Link(gen, l) => {
             if link_is_current(cx.global::<Ui>(), gen) {
-                let ui = cx.global::<Ui>();
-                let l = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
-                set_link(cx, l);
+                let ui = cx.global_mut::<Ui>();
+                // Настоящий отказ/успех bind живёт отдельно от показанного
+                // состояния — `bind_failure_display` читает именно его,
+                // переключатель его не трогает (см. `toggle_link`).
+                match &l {
+                    State::Failed(reason) => ui.bind_failed = Some(reason.clone()),
+                    State::Up { .. } => ui.bind_failed = None,
+                    _ => {}
+                }
+                let shown = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
+                set_link(cx, shown);
             }
         }
         Ev::Line(line) => {
@@ -1130,6 +1174,26 @@ fn handle(ev: Ev, cx: &mut App) {
             ui.pending = ui.pending.saturating_sub(1);
             cx.refresh_windows();
         }
+        Ev::Publish(r) => match r {
+            Ok(()) => {
+                let ui = cx.global::<Ui>();
+                // Только здесь: локальный режим, переключатель включён и
+                // карточка ещё показывает «Включаю…» от этого самого клика
+                // (`toggle_link`) — настоящий сеанс в локальном режиме
+                // больше никаких событий не пришлёт (слушатели не
+                // перезапускаются переключателем). В остальных случаях
+                // (туннель, «Сохранить») показом уже ведёт сеанс — трогать
+                // нечего.
+                let settle = ui.cfg.host.mode == "local" && ui.enabled.load(Ordering::Relaxed) && matches!(ui.link, State::Connecting);
+                if settle {
+                    set_link(cx, State::Up { since: Instant::now() });
+                }
+            }
+            // Карточка не должна врать «MCP включены», когда агент не видит
+            // базу — отказ публикации становится тем же `Failed`, что и у
+            // отказа сеанса, с текстом причины (находка повторного ревью).
+            Err(e) => set_link(cx, State::Failed(format!("публикация: {e}"))),
+        },
     }
 }
 
@@ -1203,6 +1267,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             session: None,
             session_gen: 0,
             link: State::Off,
+            bind_failed: None,
             enabled: Arc::new(AtomicBool::new(autoconnect_on)),
             log: Vec::new(),
             unread: 0,
@@ -1272,8 +1337,9 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // запуске» в этом режиме уже отдано начальному значению `enabled`
         // чуть выше. В туннельном режиме — как раньше, по той же галочке.
         if local_mode || autoconnect_on {
-            if let Err(e) = start_session(cx) {
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            match start_session(cx) {
+                Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
+                Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
             }
         }
         if !hidden {
@@ -1299,6 +1365,7 @@ impl Ui {
             session: None,
             session_gen: 0,
             link: State::Off,
+            bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
             log: Vec::new(),
             unread: 0,
@@ -1327,7 +1394,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, flip_enabled_only, is_stale, keep_failure_on_enable,
+        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, first_phase, flip_enabled_only, is_stale,
         line_of, link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text, project_primary,
         publication_detail, save_host, stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line,
         OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -1537,14 +1604,15 @@ mod tests {
     }
 
     #[test]
-    fn enabling_after_a_bind_failure_does_not_pretend_it_is_up() {
-        // Отказ («порт занят») переживает одно нажатие «включить»: карточка
-        // не должна соврать «MCP включены», когда ничего не слушает.
-        let failed = State::Failed("порт занят".into());
-        assert!(keep_failure_on_enable(true, &failed));
-        assert!(!keep_failure_on_enable(false, &failed));
-        assert!(!keep_failure_on_enable(true, &State::Off));
-        assert!(!keep_failure_on_enable(true, &State::Up { since: Instant::now() }));
+    fn a_bind_failure_stays_visible_regardless_of_the_switch() {
+        // Отказ («порт занят») переживает любое число щелчков: карточка не
+        // должна соврать «MCP включены», когда ничего не слушает. Решает по
+        // сохранённому `bind_failed`, а не по текущему показанному
+        // состоянию — повторная находка ревью: прежний
+        // `keep_failure_on_enable` ловил лишь один клик «включить», а
+        // «выключить» перед ним стирал отказ в `Off`.
+        assert_eq!(bind_failure_display(&Some("порт занят".into())), Some(State::Failed("порт занят".into())));
+        assert_eq!(bind_failure_display(&None), None);
     }
 
     #[test]

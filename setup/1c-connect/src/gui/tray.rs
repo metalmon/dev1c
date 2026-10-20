@@ -337,7 +337,9 @@ mod tests {
     use super::{icon_rgba, menu_action, mode_change_blocked, save_host, MenuAction, TrayState, Ui, MODES};
     use crate::cfg;
     use crate::gui::theme;
-    use crate::gui::{Busy, TRAY_PNG};
+    use crate::gui::{Busy, Running, Which, TRAY_PNG};
+    use common::Phase;
+    use std::time::Instant;
     use tray_icon::menu::{CheckMenuItem, IsMenuItem, Submenu};
 
     #[test]
@@ -400,6 +402,13 @@ mod tests {
         ui.busy = Some(Busy::Project);
         assert!(mode_change_blocked(&ui), "идёт экспорт/импорт");
         ui.busy = None;
+        assert!(!mode_change_blocked(&ui));
+        // Повторная находка ревью: тест никогда не заводил `ui.progress` —
+        // без этого случая он прошёл бы и без ветки `progress.is_some()` в
+        // `mode_change_blocked` (т.е. не поймал бы её удаление).
+        let now = Instant::now();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
+        assert!(mode_change_blocked(&ui), "идёт операция с карточкой хода");
         ui.progress = None;
         assert!(!mode_change_blocked(&ui));
     }

@@ -3,13 +3,24 @@
 # через реальный GTK и Xvfb — геометрия маски формы, которую строит
 # X-сервер, иначе не проверить.
 #
-# Заливка корня и снимок экрана — через Gdk напрямую (root.cairo_create,
-# Gdk.pixbuf_get_from_window), не через xsetroot/scrot: этих утилит в
-# образе нет (финальная волна — без них тест падал с FileNotFoundError у
-# следующего, кто его запустит), а добавлять x11-apps ради двух команд,
-# которые GTK и так умеет сам, незачем.
+# Сама обрезка формы проверяется запросом к окну (xwininfo -shape,
+# x11-utils, уже в образе), не чтением пикселя фона: координатор поймал
+# это нестабильным в чистом контейнере без рабочего стола — заливка
+# корневого окна через отдельное соединение Gdk.Display.open() и снимок
+# экрана через другое такое же соединение ничем не гарантированно
+# согласованы друг с другом (ни sync, ни то, что это вообще один и тот
+# же X-сервер между вызовами), и в контейнере без предыдущих прогонов,
+# оставивших в корневом окне что-то отличное от чёрного, тест падал. То,
+# что окно обрезано, — факт самого окна (форма, которую применил
+# X-сервер), а не следствие, которое нужно подглядывать в пикселе фона
+# за его пределами. Снимок экрана (grab) остался — но только для точек
+# ВНУТРИ самого пузыря (своя же заливка, цвет кнопки и т.п.), это
+# рисует этот же процесс в этом же кадре и ни от чего постороннего не
+# зависит.
 import os
 import pathlib
+import re
+import subprocess
 import sys
 import time
 import unittest
@@ -27,12 +38,13 @@ from placement import bubble_size, place
 from callout import HEAD, LINE_HEIGHT, Callout
 
 DISPLAY = os.environ.get('ONBOARDING_TEST_DISPLAY', ':77')
-BLUE = (0, 0, 255)
 WHITE = (255, 255, 255)
 BUTTON_AMBER = (0xE6, 0xB8, 0x00)
 
 SCREEN = Rect(0, 0, 1280, 800)
 _TARGET = Target('none', None, None, 'whole')
+
+_SHAPE_EXTENTS_RE = re.compile(r'Window shape extents:\s*(\d+)x(\d+)\+(\d+)\+(\d+)')
 
 
 def pump_gtk(seconds):
@@ -48,13 +60,19 @@ def _root_window(display):
     return Gdk.Display.open(display).get_default_screen().get_root_window()
 
 
-def fill_root(display, color):
-    """Заливает корневое окно известным цветом — фон, который виден там,
-    где фигура окна вырезана."""
-    r, g, b = color
-    cr = _root_window(display).cairo_create()
-    cr.set_source_rgb(r / 255, g / 255, b / 255)
-    cr.paint()
+def shape_extents(display, xid):
+    """Прямоугольник (локальные координаты окна), на который X-сервер
+    реально обрезал окно формой — `None`, если формы вовсе нет (окно
+    прямоугольное). Спрашивает у самого окна (xwininfo -shape), не
+    выводит из пикселя за его пределами."""
+    env = {**os.environ, 'DISPLAY': display}
+    out = subprocess.run(['xwininfo', '-shape', '-id', hex(xid)],
+                          capture_output=True, text=True, env=env, check=True).stdout
+    m = _SHAPE_EXTENTS_RE.search(out)
+    if m is None:
+        return None
+    w, h, x, y = (int(v) for v in m.groups())
+    return Rect(x, y, w, h)
 
 
 class _Shot:
@@ -93,7 +111,6 @@ class _FakeEvent:
 
 class ShapeTests(unittest.TestCase):
     def setUp(self):
-        fill_root(DISPLAY, BLUE)
         os.environ['DISPLAY'] = DISPLAY
 
     def test_window_is_shaped_not_rectangular(self):
@@ -107,14 +124,25 @@ class ShapeTests(unittest.TestCase):
         try:
             callout.show()
             pump_gtk(1.0)
-            img = grab(DISPLAY)
-            # Внутри прямоугольника окна, но вне фигуры — должен просвечивать фон.
-            self.assertEqual(img.pixel(layout.bubble.x - 10, layout.bubble.y - 10), BLUE)
+            xid = callout.window.get_window().get_xid()
+            shape = shape_extents(DISPLAY, xid)
+            # Форма вообще есть (не None — не прямоугольное окно без
+            # обрезки) и со всех четырёх сторон меньше самого окна —
+            # значит углы окна обрезаны, а не залиты прямоугольником
+            # целиком. Запрос к самому окну, не пиксель фона за ним.
+            self.assertIsNotNone(shape)
+            self.assertGreater(shape.x, 0)
+            self.assertGreater(shape.y, 0)
+            self.assertLess(shape.x + shape.w, callout._width)
+            self.assertLess(shape.y + shape.h, callout._height)
             # Внутри самого пузыря — должна быть его белая заливка. Точка
             # выбрана ниже заголовка (его чернила заканчиваются примерно на
             # 48px от верха пузыря при пустом теле), выше строки кнопок
             # (она начинается на 64px от верха) и лишь немного правее левой
             # рамки — пустая полоса между текстом и кнопками, без шрифта.
+            # Это пиксель содержимого самого окна (своя же заливка), не
+            # фона за его пределами — от чужого состояния не зависит.
+            img = grab(DISPLAY)
             self.assertEqual(img.pixel(layout.bubble.x + 12, layout.bubble.y + 58), WHITE)
         finally:
             callout.hide()

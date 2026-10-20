@@ -141,10 +141,10 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let check = MenuItem::with_id("check", "Проверить", true, None);
     // Отметка при создании меню: умолчание `Host::default()`, пока не
     // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
-    // (тот читает `theme::Choice::load` до вызова). ponytail: если
-    // сохранённый режим — «local», галочка на миг отстаёт от реального до
-    // первого клика по пункту; заводить параметр ради этого — трогать
-    // вызывающую сторону за пределами tray.rs.
+    // (тот читает `theme::Choice::load` до вызова). `launch` поправляет её на
+    // настоящий сохранённый режим сразу после `build`, до показа окна
+    // (`Tray::set_mode`) — так что галочка никогда не достаётся человеку
+    // неверной.
     let mode_items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "tunnel", None));
     let mode_refs: Vec<&dyn IsMenuItem> = mode_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let mode_submenu = Submenu::with_items("Режим работы", true, &mode_refs)?;
@@ -222,6 +222,15 @@ impl Tray {
     }
 }
 
+/// Операция или проверка идёт — тем же критерием, что блокирует «Сохранить»
+/// (`panel::can_save`) и переключатель (`Switch::disabled`). Смена режима
+/// посреди неё переписала бы конфигурацию и перезапустила сеанс под её
+/// ногами — у подменю «Режим работы» этой защиты не было (находка целостного
+/// ревью).
+fn mode_change_blocked(ui: &Ui) -> bool {
+    ui.busy.is_some() || ui.progress.is_some()
+}
+
 /// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
 /// только по правому, сюда не попадает.
 pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
@@ -249,6 +258,20 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             }
         }
         MenuAction::Mode(mode) => {
+            // Та же защита, что у «Сохранить» и у переключателя
+            // (`panel::can_save`, `Switch::disabled`): смена режима
+            // переписывает toml и перезапускает сеанс — под идущей
+            // операцией (например, «Выгрузить») это переписало бы
+            // конфигурацию и оборвало бы её посреди работы. Нативный пункт
+            // меню уже успел отметить себя сам — возвращаем галочку на
+            // настоящий режим, раз действие не состоялось.
+            let ui = cx.global::<Ui>();
+            if mode_change_blocked(ui) {
+                if let Some(tray) = &ui.tray {
+                    tray.set_mode(&ui.cfg.host.mode);
+                }
+                return;
+            }
             cx.global_mut::<Ui>().cfg.host.mode = mode.into();
             let host = cx.global::<Ui>().cfg.host.clone();
             match save_host(cx.global_mut::<Ui>(), host) {
@@ -311,10 +334,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, save_host, MenuAction, TrayState, Ui, MODES};
+    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, MenuAction, TrayState, Ui, MODES};
     use crate::cfg;
     use crate::gui::theme;
-    use crate::gui::TRAY_PNG;
+    use crate::gui::{Busy, TRAY_PNG};
     use tray_icon::menu::{CheckMenuItem, IsMenuItem, Submenu};
 
     #[test]
@@ -368,6 +391,17 @@ mod tests {
     fn tray_icon_is_the_badged_png() {
         let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
         assert_eq!(icon_rgba(TrayState::Up).len(), (base.width() * base.height() * 4) as usize);
+    }
+
+    #[test]
+    fn mode_switch_is_blocked_while_an_operation_or_a_check_runs() {
+        let mut ui = Ui::for_test();
+        assert!(!mode_change_blocked(&ui), "в покое ничего не мешает");
+        ui.busy = Some(Busy::Project);
+        assert!(mode_change_blocked(&ui), "идёт экспорт/импорт");
+        ui.busy = None;
+        ui.progress = None;
+        assert!(!mode_change_blocked(&ui));
     }
 
     #[test]

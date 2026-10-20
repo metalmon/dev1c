@@ -244,23 +244,45 @@ EOF
         # only table (both the connector's own render and the heredoc above
         # write just that one). The leading newline guards against a last
         # line with no newline of its own.
-        if ! grep -q '^[[:space:]]*gitea[[:space:]]*=' "$t/$CONNECT_TOML"; then
-            printf '\ngitea = "%s"\n' "$GITEA_URL" >>"$t/$CONNECT_TOML"
+        have=$(sed -n 's|^[[:space:]]*gitea[[:space:]]*=[[:space:]]*"\(.*\)"|\1|p' "$t/$CONNECT_TOML" | tail -1)
+        case "$have" in
+        "")
+            { echo; echo "gitea = \"$GITEA_URL\""; } >>"$t/$CONNECT_TOML"
             log "1c-connect: адрес Gitea ($GITEA_URL) дописан в $t/$CONNECT_TOML" >&2
-        fi
+            ;;
+        "$GITEA_URL") ;;
+        http://localhost:*|http://127.0.0.1:*|"http://[::1]:"*)
+            # Written by an older image under a different port: ours to move.
+            # A real hostname is the person's own choice and stays untouched,
+            # the same rule as for the project's origin below.
+            grep -v '^[[:space:]]*gitea[[:space:]]*=' "$t/$CONNECT_TOML" >"$t/$CONNECT_TOML.new"
+            echo "gitea = \"$GITEA_URL\"" >>"$t/$CONNECT_TOML.new"
+            mv "$t/$CONNECT_TOML.new" "$t/$CONNECT_TOML"
+            log "1c-connect: адрес Gitea обновлён на $GITEA_URL в $t/$CONNECT_TOML" >&2
+            ;;
+        esac
         # A project laid out before the address moved keeps the old `origin`,
         # which the connector then reports as drift (project::layout_state)
         # and nothing here would ever fix: install is what repairs it on a
         # developer's machine, and nobody runs install in the stand. Only the
         # address part is rewritten — the repository name belongs to whoever
         # cloned the directory (`1c-stand project <name>`).
-        if [ -d "$HOME/project/.git" ]; then
-            old=$(git -C "$HOME/project" remote get-url origin 2>/dev/null) || old=
+        #
+        # And only an address that is ours to move: a loopback host is this
+        # stand's own Gitea under some older port, nothing else can live
+        # there. Anything with a real hostname is the person's own remote —
+        # a company Gitea, github.com — and rewriting it would quietly point
+        # their work at the image and push-create a stranger's repository
+        # here (found in review 2026-10-20).
+        proj=$(sed -n 's|^project *= *"\(.*\)"|\1|p' "$t/$CONNECT_TOML" 2>/dev/null | tail -1)
+        [ -n "$proj" ] || proj="$HOME/project"
+        if [ -d "$proj/.git" ]; then
+            old=$(git -C "$proj" remote get-url origin 2>/dev/null) || old=
             case "$old" in
-            http://*|https://*)
+            http://localhost:*|http://127.0.0.1:*|http://[::1]:*|https://localhost:*|https://127.0.0.1:*)
                 new="$GITEA_URL/$(printf '%s' "$old" | cut -d/ -f4-)"
                 if [ "$new" != "$old" ]; then
-                    git -C "$HOME/project" remote set-url origin "$new"
+                    git -C "$proj" remote set-url origin "$new"
                     log "1c-connect: origin проекта переведён на $new" >&2
                 fi
                 ;;

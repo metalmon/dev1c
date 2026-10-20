@@ -45,25 +45,6 @@ pub fn of_port(port: u16) -> Option<String> {
     }
 }
 
-/// Путь к исполняемому файлу процесса `pid` — по нему держателя порта узнают
-/// как свой же коннектор этого рабочего места (`verify::holder_of`,
-/// `single_instance::same_image`), а не как вторую чужую копию. Берём то, что
-/// у системы и так под рукой: на Windows — `QueryFullProcessImageNameW`,
-/// которым замок единственного экземпляра уже опознаёт свою копию, на Linux —
-/// ссылку `/proc/<pid>/exe`, которую ядро держит само. `None` — процесса уже
-/// нет, он чужой (прав не хватило) или путь не прочитать: для вызывающего это
-/// во всех случаях «не наш».
-pub fn image_of(pid: u32) -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        crate::single_instance::process_image(pid)
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
-    }
-}
-
 /// Путь без внешних команд: ядро уже знает это через `/proc`. Образ среды не
 /// содержит ни `ss`, ни `netstat` — это единственный путь, который там
 /// работает.
@@ -237,15 +218,6 @@ TCP    127.0.0.1:17771        0.0.0.0:0              LISTENING       123
         assert_eq!(parse_netstat(NETSTAT_SAMPLE, 17771), Some(123), "17771 не должен спутаться с 7771");
         assert_eq!(parse_netstat(NETSTAT_SAMPLE, 7772), None);
         assert_eq!(parse_netstat("", 7771), None);
-    }
-
-    /// Признак «свой» держится на пути к образу процесса: для самого себя
-    /// система обязана назвать ровно свой исполняемый файл — иначе трей
-    /// никогда не опознается и человек снова получит отказ на занятых им же
-    /// портах.
-    #[test]
-    fn image_of_names_our_own_executable() {
-        assert_eq!(image_of(std::process::id()), std::env::current_exe().ok());
     }
 
     #[test]

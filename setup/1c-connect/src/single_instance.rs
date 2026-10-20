@@ -217,7 +217,7 @@ fn raise_window_of_our_other_instance(ours: &std::path::Path) -> bool {
 /// быстро вышел); `ours` — свой образ (`std::env::current_exe`). Пустого
 /// совпадения «оба `None`» нет и не может быть — `ours` всегда `&Path`, не
 /// `Option`.
-pub fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bool {
+fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bool {
     candidate == Some(ours)
 }
 
@@ -228,7 +228,7 @@ pub fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -
 /// — процесса с таким pid уже нет, он нам недоступен, или путь не прочитать:
 /// во всех случаях вызывающему должно быть всё равно, это не наша копия.
 #[cfg(windows)]
-pub fn process_image(pid: u32) -> Option<std::path::PathBuf> {
+fn process_image(pid: u32) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     // SAFETY: обычный вызов kernel32, pid — число из файла (может называть

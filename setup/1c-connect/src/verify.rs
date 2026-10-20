@@ -132,63 +132,59 @@ pub fn open_session_fact() -> Check {
     )
 }
 
-/// Кто держит порт рабочего места. Своим считается не только этот самый
-/// процесс, но и коннектор того же рабочего места: трей держит порты всё
-/// время работы — это штатное состояние, и разовой команде (`install`,
-/// `check`, `export`) он не помеха, она этих портов не занимает.
+/// Занимает ли порты рабочего места тот, для кого считаются факты. Правило
+/// спеки: **порты важны там, где мы их занимаем**. Их занимают окно,
+/// `connect` и `serve` — там занятый чужим порт остаётся провалом: два
+/// коннектора на одних портах дерутся и за порты, и за мьютекс проекта, и за
+/// базу, и человек обязан об этом узнать. `install`, `export`, `import` и
+/// `check` портов не трогают вовсе — им занятый порт только сведение.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Holder {
-    /// Мы сами — порт занят этим же процессом.
-    Ours,
-    /// Другой процесс, но тот же исполняемый файл коннектора: трей (или
-    /// `serve`) этого рабочего места.
-    OurConnector,
-    /// Кто-то ещё — вот это и есть провал.
-    Stranger,
+pub enum PortUse {
+    /// Окно, `connect`, `serve` — порты занимаем мы.
+    WeListen,
+    /// Разовая команда — портов не занимает.
+    WeDont,
 }
 
-/// Порты моста (777N/778N): свободны, заняты нами самими либо своим же
-/// коннектором этого рабочего места — все три случая в порядке. Провал —
-/// только чужой процесс на порту. `holders` называет лишь занятые порты;
-/// свободные в список не попадают.
-pub fn workstation_ports_fact(mcp: u16, vrunner: u16, holders: &[(u16, Holder)]) -> Check {
-    let strangers: Vec<String> = holders.iter().filter(|(_, h)| *h == Holder::Stranger).map(|(p, _)| p.to_string()).collect();
-    if !strangers.is_empty() {
-        return Check::fail(
-            WORKSTATION_PORTS,
-            format!("порт(ы) {} заняты другим процессом", strangers.join(", ")),
-            "похоже, на этой машине уже открыт второй 1c-connect — закройте его и проверьте снова",
-        );
+/// Порты моста (777N/778N). `busy` — занятые **не нами** порты вместе с
+/// описанием держателя, как его называет `holder::of_port`
+/// («`1c-connect (pid 812)`»); свободные и занятые этим же процессом в список
+/// не попадают.
+///
+/// Чей это процесс — свой или чужой — здесь не разбирается вовсе, и это
+/// нарочно (ревью 2026-10-21): опознать своего надёжно не выходит — путь к
+/// образу программы признаёт своим коннектор другого пользователя ОС с тем же
+/// именем рабочего места (порты `7770+N` считаются от имени рабочего места, не
+/// от пользователя), а чтение чужого образа зависит от прав, и вердикт начинал
+/// бы зависеть от того, из-под кого запущена команда. Важно единственное:
+/// занимаем ли порты мы сами.
+pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], ports: PortUse) -> Check {
+    if busy.is_empty() {
+        return Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"));
     }
-    // Способ называем вслух: «занято» без объяснения на зелёном факте
-    // человека только тревожит.
-    if holders.iter().any(|(_, h)| *h == Holder::OurConnector) {
-        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: заняты коннектором этого рабочего места — разовой команде это не мешает"))
-    } else {
-        Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"))
+    match ports {
+        // Текст прежний слово в слово: тому, кто сам собирался занять эти
+        // порты, занятый порт и правда мешает — он их не получит.
+        PortUse::WeListen => Check::fail(
+            WORKSTATION_PORTS,
+            format!("порт(ы) {} заняты другим процессом", busy.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(", ")),
+            "похоже, на этой машине уже открыт второй 1c-connect — закройте его и проверьте снова",
+        ),
+        // Держателя называем по имени: оно уже добыто, а человеку полезно
+        // видеть, кто держит порт, даже когда это ничему не мешает.
+        PortUse::WeDont => Check::note(
+            WORKSTATION_PORTS,
+            format!("{} — порты разовой команде не нужны", busy.iter().map(|(p, who)| format!("{p} держит {who}")).collect::<Vec<_>>().join(", ")),
+        ),
     }
 }
 
 /// pid из `holder::of_port` (строка вида `"имя (pid N)"`), не разбирая вывод
-/// `ss`/`netstat` заново.
+/// `ss`/`netstat` заново. Нужен ровно для одного — отсеять свой же процесс
+/// (окно проверяет само себя): это сравнение с `std::process::id()`, без
+/// чтения чужих процессов и без всякой зависимости от прав.
 fn holder_pid(desc: &str) -> Option<u32> {
     desc.rsplit("pid ").next()?.trim_end_matches(')').parse().ok()
-}
-
-/// Чей это pid: наш собственный, нашего же коннектора или чужой. Признак
-/// «наш коннектор» — тот же, которым замок единственного экземпляра отличает
-/// свою копию: совпадение образа программы (`single_instance::same_image`).
-/// Рабочее место сверять отдельно не нужно — порты в `holders` взяты из
-/// конфигурации этого рабочего места, и коннектор с нашим образом на них
-/// именно его и обслуживает.
-fn holder_of(pid: u32, me: u32, ours: Option<&std::path::Path>) -> Holder {
-    if pid == me {
-        return Holder::Ours;
-    }
-    match ours {
-        Some(o) if crate::single_instance::same_image(crate::holder::image_of(pid).as_deref(), o) => Holder::OurConnector,
-        _ => Holder::Stranger,
-    }
 }
 
 pub fn media_fact(kind: Option<String>, root: &str) -> Check {
@@ -257,17 +253,29 @@ pub struct Limits {
     pub net: std::time::Duration,
     /// Общий бюджет на весь набор; `None` — без бюджета.
     pub budget: Option<std::time::Duration>,
+    /// Занимает ли порты рабочего места тот, кто просит факты — от этого
+    /// зависит факт портов (`workstation_ports_fact`). Второго похожего
+    /// параметра у набора фактов не завели: контекст вызывающего едет здесь.
+    pub ports: PortUse,
 }
 
 impl Limits {
-    /// «Проверить» и `1c-connect check`: сроки прежние, бюджета нет.
-    pub fn full() -> Self {
-        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None }
+    /// «Проверить» и `1c-connect check`: сроки прежние, бюджета нет. `ports`
+    /// у этих двоих разный — окно порты занимает, командная строка нет,
+    /// поэтому он параметром, а не зашит.
+    pub fn full(ports: PortUse) -> Self {
+        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None, ports }
     }
 
-    /// Готовность: короткие сроки и общий бюджет в 20 с.
+    /// Готовность: короткие сроки и общий бюджет в 20 с. Считает её только
+    /// окно, а оно порты занимает — выбора здесь нет.
     pub fn quick() -> Self {
-        Self { tools: std::time::Duration::from_secs(15), net: std::time::Duration::from_secs(5), budget: Some(std::time::Duration::from_secs(20)) }
+        Self {
+            tools: std::time::Duration::from_secs(15),
+            net: std::time::Duration::from_secs(5),
+            budget: Some(std::time::Duration::from_secs(20)),
+            ports: PortUse::WeListen,
+        }
     }
 }
 
@@ -346,13 +354,16 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
 /// Факты для режима `cfg.host.mode` (`"tunnel"` или, по умолчанию при любом
 /// другом значении, тот же `"tunnel"` — валидирован раньше, здесь не
 /// перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме:
-/// это состояние сессии, а не то, что можно вычислить здесь.
-pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
+/// это состояние сессии, а не то, что можно вычислить здесь. `ports` —
+/// занимает ли порты тот, кто просит проверку: окно (`PortUse::WeListen`) и
+/// командная строка (`PortUse::WeDont`) зовут одну и ту же `run`, а порты
+/// занимает только окно.
+pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> {
     // Фаза — только здесь: по ней окно показывает карточку хода и запирает
     // кнопки. Сбор фактов её не объявляет, иначе молчаливый расчёт
     // готовности выглядел бы начавшейся операцией (спека).
     ctx.progress(Phase::Check);
-    facts_for_readiness(ctx, tunnel_state, Limits::full())
+    facts_for_readiness(ctx, tunnel_state, Limits::full(ports))
 }
 
 /// Сам сбор фактов — общий для «Проверить» и для вердикта готовности.
@@ -427,15 +438,17 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         v.push(within(t0, budget, WORKSTATION_PORTS, || {
             let p = ctx.cfg.ports();
             let me = std::process::id();
-            let ours = std::env::current_exe().ok();
-            // Порт, про который держателя не выяснить (свободен, или pid не
-            // прочитать), в список не попадает вовсе — обвинять человека не в
-            // чем.
-            let holders: Vec<(u16, Holder)> = [p.mcp, p.vrunner]
+            // В список идут только порты, занятые НЕ нами: порт свободный,
+            // занятый этим же процессом (окно проверяет само себя) или такой,
+            // про который держателя не выяснить, обвинять человека не даёт.
+            let busy: Vec<(u16, String)> = [p.mcp, p.vrunner]
                 .into_iter()
-                .filter_map(|port| Some((port, holder_of(holder_pid(&crate::holder::of_port(port)?)?, me, ours.as_deref()))))
+                .filter_map(|port| {
+                    let who = crate::holder::of_port(port)?;
+                    (holder_pid(&who)? != me).then_some((port, who))
+                })
                 .collect();
-            workstation_ports_fact(p.mcp, p.vrunner, &holders)
+            workstation_ports_fact(p.mcp, p.vrunner, &busy, limits.ports)
         }));
     } else {
         v.push(tunnel_fact(tunnel_state));
@@ -516,36 +529,44 @@ mod tests {
     fn every_fact_has_a_name_in_order() {
         for mode in ["tunnel", "local"] {
             let ctx = test_ctx(mode);
-            let checks = run(&ctx, Some("работает с 12:40"));
+            let checks = run(&ctx, Some("работает с 12:40"), PortUse::WeDont);
             let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
             assert_eq!(names, order(mode), "mode {mode}");
         }
     }
 
-    /// Штатное состояние рабочего места: трей держит оба порта. Процесс
-    /// другой, но коннектор тот же — разовой команде он не помеха, и факт
-    /// обязан назвать способ, чтобы человек не гадал, почему порты заняты.
+    /// Штатное состояние рабочего места: трей держит оба порта, а человек
+    /// запускает разовую команду (`install`, `check`, `export`). Портов она не
+    /// занимает, поэтому занятый порт — сведение, а не провал; и держателя
+    /// факт называет по имени, чтобы человек не гадал, кто его держит.
     #[test]
-    fn our_own_tray_holding_the_ports_is_not_a_failure() {
-        let c = workstation_ports_fact(7773, 7783, &[(7773, Holder::OurConnector), (7783, Holder::OurConnector)]);
-        assert!(c.ok && !c.info, "{c:?}");
-        assert!(c.detail.contains("коннектором этого рабочего места"), "{c:?}");
+    fn a_busy_port_is_only_a_note_for_a_command_that_does_not_listen() {
+        let busy = [(7773, "1c-connect (pid 812)".to_string()), (7783, "1c-connect (pid 812)".to_string())];
+        let c = workstation_ports_fact(7773, 7783, &busy, PortUse::WeDont);
+        assert!(c.ok && c.info, "сведение, а не провал: {c:?}");
+        assert!(c.detail.contains("1c-connect (pid 812)"), "держателя надо назвать: {c:?}");
+        assert!(c.detail.contains("порты разовой команде не нужны"), "{c:?}");
     }
 
-    /// Чужой процесс на порту — прежний провал с прежним текстом; свой же
-    /// порт рядом в список не попадает.
+    /// Тому, кто сам собирается занять порты (окно, `connect`, `serve`),
+    /// занятый порт мешает по-настоящему — прежний провал прежним текстом.
     #[test]
-    fn a_stranger_on_the_same_port_still_fails() {
-        let c = workstation_ports_fact(7773, 7783, &[(7773, Holder::Ours), (7783, Holder::Stranger)]);
-        assert!(!c.ok, "{c:?}");
-        assert!(c.detail.contains("7783") && !c.detail.contains("7773"), "{c:?}");
-        assert!(c.hint.contains("второй"), "{c:?}");
+    fn a_busy_port_still_fails_whoever_needs_to_listen() {
+        let busy = [(7783, "nginx (pid 500)".to_string())];
+        let c = workstation_ports_fact(7773, 7783, &busy, PortUse::WeListen);
+        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("порт(ы) 7783 заняты другим процессом"), "{c:?}");
+        assert!(c.hint.contains("второй 1c-connect"), "{c:?}");
     }
 
+    /// Свободные порты зелены в обоих случаях — правило о занятых, а не о
+    /// самой проверке.
     #[test]
-    fn a_free_port_passes() {
-        let c = workstation_ports_fact(7773, 7783, &[]);
-        assert!(c.ok && !c.info, "{c:?}");
+    fn a_free_port_passes_either_way() {
+        for ports in [PortUse::WeListen, PortUse::WeDont] {
+            let c = workstation_ports_fact(7773, 7783, &[], ports);
+            assert!(c.ok && !c.info, "{ports:?}: {c:?}");
+        }
     }
 
     #[test]
@@ -574,7 +595,7 @@ mod tests {
             sink,
             prompt: Box::new(common::AlwaysDefault),
         };
-        let checks = run(&ctx, None);
+        let checks = run(&ctx, None, PortUse::WeDont);
 
         let web = checks.iter().find(|c| c.what == WEB).unwrap();
         assert!(web.detail.contains("18080") && !web.detail.contains("9999"), "{web:?}");
@@ -676,7 +697,7 @@ mod tests {
         for mode in ["tunnel", "local"] {
             let ctx = test_ctx(mode);
             let quick: Vec<String> = readiness(&ctx, None).into_iter().map(|c| c.what).collect();
-            let full: Vec<String> = run(&ctx, None).into_iter().map(|c| c.what).collect();
+            let full: Vec<String> = run(&ctx, None, PortUse::WeDont).into_iter().map(|c| c.what).collect();
             assert_eq!(quick, full, "mode {mode}");
             assert_eq!(quick, order(mode), "mode {mode}");
         }

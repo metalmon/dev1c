@@ -1255,7 +1255,10 @@ pub fn run_check(cx: &mut App) {
             &tx,
             || {
                 let state = link.is_up().then(|| link.label(&mode));
-                let checks = verify::run(&ctx, state.as_deref());
+                // Порты рабочего места занимает само окно: занятый кем-то
+                // ещё порт для него — настоящий провал, а не сведение
+                // (спека, «порты важны там, где мы их занимаем»).
+                let checks = verify::run(&ctx, state.as_deref(), verify::PortUse::WeListen);
                 let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
                 let _ = write_text(&ctx.kit.state_path("last-check.txt"), &text);
                 Ev::Checks(checks)

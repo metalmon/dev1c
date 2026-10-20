@@ -94,7 +94,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       `#   Verified in the image with a test indicator: the icon appears in the` \
       `#   panel next to the clock.` \
       libayatana-appindicator3-1 \
-      `# dev1c-onboarding: шесть шагов поверх рабочего стола (config/1c/` \
+      `# dev1c-onboarding: семь шагов поверх рабочего стола (config/1c/` \
       `# onboarding/) — чистый GTK3, без собственного композитора; xprop и` \
       `# xwininfo (x11-utils) ему тоже нужны, но они уже стоят в базовом` \
       `# образе ради других задач. wmctrl — вежливое закрытие окна 1С на` \
@@ -298,7 +298,7 @@ COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.deskto
 # `1c-stand connect` says so in the log and exits, which is better than an
 # autostart entry that appears and disappears between image versions.
 COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.desktop
-# dev1c-onboarding: шесть шагов поверх рабочего стола, см. config/1c/
+# dev1c-onboarding: семь шагов поверх рабочего стола, см. config/1c/
 # onboarding/. Тот же приём, что у 1c-connect выше — пункт меню и автозапуск
 # зовут одну и ту же команду, «1c-stand onboarding», а не python3 напрямую,
 # так что путь к интерпретатору и к сценарию остаётся в одном месте.

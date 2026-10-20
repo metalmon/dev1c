@@ -15,6 +15,7 @@ pub mod listen;
 pub mod local;
 pub mod ops_host;
 pub mod project;
+pub mod publication;
 pub mod session;
 pub mod tunnel;
 pub mod verify;

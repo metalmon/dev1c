@@ -509,6 +509,72 @@ impl Op<Ctx> for ProjectOp {
     // uninstall leaves the project alone: it is the person's work.
 }
 
+/// Поднимает HTTP-сервис базы: своим httpd под пользователем (`"auto"`) или
+/// только проверяет уже существующую публикацию (`"webserver"`). Зовётся до
+/// `host.extension` — иначе расширение ставить некуда.
+struct Publication;
+impl Op<Ctx> for Publication {
+    fn id(&self) -> &'static str {
+        "host.publication"
+    }
+    fn title(&self) -> &'static str {
+        "Публикация базы (HTTP-сервис)"
+    }
+    fn state(&self, ctx: &Ctx) -> OpState {
+        if ctx.cfg.host.publication == "webserver" {
+            // Публикация не наша — показываем то же, что видит host.extension:
+            // отдельного факта «свой httpd» здесь нет.
+            return match extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
+                Some(v) => OpState::Done(format!("публикация отвечает (расширение {v})")),
+                None => OpState::Missing,
+            };
+        }
+        match crate::publication::Paths::of(&ctx.cfg, &ctx.kit) {
+            Ok(p) if crate::publication::httpd_responds(p.port) => OpState::Done(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port)),
+            Ok(_) => OpState::Missing,
+            Err(e) => OpState::Blocked(e),
+        }
+    }
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        if ctx.cfg.host.publication == "webserver" {
+            return vec![Action::new(format!("публикация на вашем веб-сервере ({}) — ничего не делаем, кроме проверки", ctx.cfg.base_url()))];
+        }
+        vec![Action::new(format!("записать default.vrd и httpd.conf, поднять httpd на 127.0.0.1:{}", ctx.cfg.http_port()))]
+    }
+    fn apply(&self, ctx: &Ctx) -> Result<()> {
+        if ctx.cfg.host.publication == "webserver" {
+            // Публикация — забота человека; только проверяем и предупреждаем.
+            if extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password).is_none() {
+                ctx.warn(format!("публикация {} не отвечает — проверьте веб-сервер", ctx.cfg.base_url()));
+            }
+            return Ok(());
+        }
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+        std::fs::create_dir_all(&p.pub_dir).with_context(|| format!("каталог публикации {}", p.pub_dir.display()))?;
+        // Дескриптор несёт пароль базы — в журнал не идёт, только в файл.
+        std::fs::write(p.pub_dir.join("default.vrd"), crate::publication::vrd(&ctx.cfg)).context("default.vrd не записан")?;
+        std::fs::write(&p.conf, crate::publication::httpd_conf(&p)).context("httpd.conf не записан")?;
+        crate::publication::start(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+        ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
+        Ok(())
+    }
+    fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
+        (ctx.cfg.host.publication != "webserver").then(|| vec![Action::new("httpd -k stop")])
+    }
+    fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
+        if ctx.cfg.host.publication == "webserver" {
+            return Ok(());
+        }
+        let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::publication::stop(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+        ctx.ok("HTTP-сервис базы остановлен");
+        Ok(())
+    }
+}
+
 struct Extension;
 impl Op<Ctx> for Extension {
     fn id(&self) -> &'static str {
@@ -573,12 +639,35 @@ impl Op<Ctx> for Extension {
 }
 
 pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
-    vec![Box::new(Env), Box::new(Tools), Box::new(ProjectOp), Box::new(Extension)]
+    vec![Box::new(Env), Box::new(Tools), Box::new(ProjectOp), Box::new(Publication), Box::new(Extension)]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_sits_between_project_and_extension() {
+        // host.publication должна идти до host.extension — иначе расширение
+        // ставить некуда (публикация готовит каталог и поднимает HTTP-сервис).
+        let ids: Vec<&str> = host().iter().map(|op| op.id()).collect();
+        let project = ids.iter().position(|&i| i == "host.project").unwrap();
+        let publication = ids.iter().position(|&i| i == "host.publication").unwrap();
+        let extension = ids.iter().position(|&i| i == "host.extension").unwrap();
+        assert!(project < publication && publication < extension, "{ids:?}");
+    }
+
+    #[test]
+    fn publication_in_webserver_mode_is_missing_when_nothing_answers() {
+        // Режим "webserver": состояние — тот же факт, что у host.extension,
+        // никакого своего httpd тут нет и подниматься нечему.
+        let mut cfg = Cfg::default();
+        cfg.host.publication = "webserver".into();
+        cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        let ctx = Ctx { kit: Kit::at("."), cfg, dry_run: true, sink, prompt: Box::new(common::AlwaysDefault) };
+        assert_eq!(Publication.state(&ctx), OpState::Missing);
+    }
 
     #[test]
     fn gitea_probe_on_a_closed_port_is_down() {

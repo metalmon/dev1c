@@ -195,7 +195,9 @@ pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
 fn reread_and_recheck(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
     if let Ok(cfg) = Cfg::load(&ui.kit) {
-        ui.cfg = cfg;
+        // Не только в окно, но и в живой сеанс — иначе агент остался бы на
+        // старой базе (`gui::adopt_cfg`).
+        super::adopt_cfg(ui, cfg);
     }
     run_readiness(ui);
 }

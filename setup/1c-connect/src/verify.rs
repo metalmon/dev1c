@@ -239,6 +239,10 @@ pub fn publication_fact(base_url: &str, ver: Option<String>) -> Check {
     }
 }
 
+/// Срок коннекта к порту веб-сервера — один на оба набора: он и так короче
+/// любого из них, и растягивать его незачем.
+const WEB_CONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Сроки сбора фактов. «Проверить» и командная строка считают без
 /// ограничения по времени — человек ждёт ответа сознательно; готовность
 /// считается под рукой у него и молча, поэтому у неё свои короткие сроки и
@@ -279,25 +283,53 @@ impl Limits {
     }
 }
 
+/// «Не проверено за N с» — своё состояние факта, ни зелёное, ни приговор:
+/// `!ok` (точка не зелёная, и причину человек читает) вместе с `info` (это не
+/// поломка — советовать «переустановите» тут нечего, совет один: спросить
+/// заново). Так выглядит и сорванный срок самого факта, и вышедший общий
+/// бюджет: спека требует именно этого, а не выдуманного провала.
+pub fn not_checked(name: &str, waited: std::time::Duration) -> Check {
+    Check {
+        ok: false,
+        info: true,
+        ..Check::fail(
+            name,
+            format!("не проверено за {} с", waited.as_secs()),
+            "готовность считается коротко — нажмите «Проверить», она считает без ограничения по времени",
+        )
+    }
+}
+
 /// Факт под общим бюджетом: когда бюджет уже вышел, факт не считается вовсе —
-/// вместо выдуманного провала человек читает «не проверено». Точка от этого
-/// не зелёная (факт не `ok`), но и вины человека в таком факте нет.
+/// вместо выдуманного провала человек читает «не проверено».
 fn within(started: std::time::Instant, budget: Option<std::time::Duration>, name: &'static str, f: impl FnOnce() -> Check) -> Check {
     match budget {
-        Some(b) if started.elapsed() >= b => Check::fail(
-            name,
-            format!("не проверено за {} с", b.as_secs()),
-            "готовность считается коротко — нажмите «Проверить», она считает без ограничения по времени",
-        ),
+        Some(b) if started.elapsed() >= b => not_checked(name, b),
         _ => f(),
     }
 }
 
-/// Первый провалившийся факт — он и есть причина жёлтого вердикта. Сведения
+/// Неудача, на которую ушёл весь срок, — не отказ, а сорванный срок: отличить
+/// их внутри самого факта нечем (`extension_version` отдаёт `None` на любую
+/// беду, `local::call` — строку), а вот по времени ожидания видно. Проба
+/// инструментов отвечает 8–11 с при сроке 15, расширение — до 60 с при сроке
+/// 5: срок рвётся штатно, и приговор «переустановите расширение» на нём — та
+/// самая ложь карточки, против которой задача и делалась. Удачный факт сроком
+/// не портится, быстрый отказ остаётся отказом со своим советом.
+fn unless_timed_out(fact: Check, waited: std::time::Duration, limit: std::time::Duration) -> Check {
+    if !fact.ok && !fact.info && waited >= limit {
+        return not_checked(&fact.what, limit);
+    }
+    fact
+}
+
+/// Первый не зелёный факт — он и есть причина жёлтого вердикта. Сведения
 /// («в базе открыт сеанс», «Конфигуратор запущен», «комплект на носителе»)
-/// пропускаются: они говорят «сейчас занято человеком», а не «сломано».
+/// пропускаются: они `ok` и говорят «сейчас занято человеком», а не
+/// «сломано». «Не проверено» (`!ok` при `info`) пропускать нельзя — зелёной
+/// точке непосчитанный факт основанием не бывает.
 pub fn first_fail(checks: &[Check]) -> Option<Check> {
-    checks.iter().find(|c| !c.ok && !c.info).cloned()
+    checks.iter().find(|c| !c.ok).cloned()
 }
 
 /// Тот же набор фактов, что печатает `run`, но молча: ни `Phase::Check`, ни
@@ -316,11 +348,12 @@ pub fn readiness(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
 fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path, timeout: std::time::Duration) -> Check {
     let t0 = std::time::Instant::now();
     let cmd = crate::bridge::vrunner_command(&ctx.cfg, tools).into_std();
-    match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &|_| {}) {
+    let fact = match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &|_| {}) {
         Ok(r) if !r.is_error => Check::pass(VRUNNER, format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
         Ok(r) => Check::fail(VRUNNER, format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
         Err(e) => Check::fail(VRUNNER, e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
-    }
+    };
+    unless_timed_out(fact, t0.elapsed(), timeout)
 }
 
 fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
@@ -413,12 +446,21 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     v.push(within(t0, budget, BASE, || base_fact(&h.base_path, std::path::Path::new(&h.base_path).exists())));
     let web = ctx.cfg.http_port();
     v.push(within(t0, budget, WEB, || {
-        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), std::time::Duration::from_secs(3)).is_ok();
-        web_fact(web, up)
+        // Закрытый порт отказывает мгновенно, так что весь срок здесь — это
+        // не «не отвечает», а «не дозвонились» (брандмауэр, мёртвый адрес):
+        // советовать «запустите Apache» на этом нельзя.
+        let asked = std::time::Instant::now();
+        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), WEB_CONNECT).is_ok();
+        unless_timed_out(web_fact(web, up), asked.elapsed(), WEB_CONNECT)
     }));
     let base_url = ctx.cfg.base_url();
     v.push(within(t0, budget, PUBLICATION, || {
-        publication_fact(&base_url, crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net))
+        // Срок сетевого запроса отличается от отказа только временем:
+        // `extension_version_in` отдаёт `None` и на «не отвечает», и на
+        // «не успел» (см. `unless_timed_out`).
+        let asked = std::time::Instant::now();
+        let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net);
+        unless_timed_out(publication_fact(&base_url, ver), asked.elapsed(), limits.net)
     }));
     v.push(within(t0, budget, GITEA, || gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url()))));
     if local {
@@ -687,25 +729,42 @@ mod tests {
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 
-    /// Карточка и «Проверить» не могут расходиться (спека, раздел «Зелёный
-    /// значит „работает“»): набор фактов у готовности — тот же, что печатает
-    /// проверка, и тем же порядком. Различаются они только сроками, не
-    /// составом: три факта из тринадцати и были причиной живого случая
-    /// заказчика 2026-10-20 (точка зелёная, проверка тут же нашла два провала).
+    /// Главное правило спеки про сроки: факт, чей срок сорвался, —
+    /// «не проверено», а не приговор. Прежний тест на это место сверял имена
+    /// фактов `readiness` и `run`, но после правки оба зовут один и тот же
+    /// сбор — совпадение обеспечено конструкцией, а не проверкой (состав и
+    /// порядок всё равно сверяет `every_fact_has_a_name_in_order`), и именно
+    /// поэтому мимо прошёл живой случай: срок у пробы инструментов и у
+    /// расширения рвётся штатно, а человек читал «1c-connect install» и
+    /// «публикация в Конфигураторе» — лечение того, что цело.
     #[test]
-    fn readiness_has_the_same_facts_as_check() {
-        for mode in ["tunnel", "local"] {
-            let ctx = test_ctx(mode);
-            let quick: Vec<String> = readiness(&ctx, None).into_iter().map(|c| c.what).collect();
-            let full: Vec<String> = run(&ctx, None, PortUse::WeDont).into_iter().map(|c| c.what).collect();
-            assert_eq!(quick, full, "mode {mode}");
-            assert_eq!(quick, order(mode), "mode {mode}");
-        }
+    fn a_broken_deadline_is_not_checked_rather_than_a_failure() {
+        let net = std::time::Duration::from_secs(5);
+        let refusal = Check::fail(PUBLICATION, "http://x/version не отвечает", "1c-connect install, затем публикация в Конфигураторе");
+
+        // Отказ пришёл сразу — настоящий провал со своим советом.
+        let fast = unless_timed_out(refusal.clone(), std::time::Duration::from_millis(80), net);
+        assert!(!fast.ok && !fast.info, "{fast:?}");
+        assert!(fast.hint.contains("install"), "{fast:?}");
+
+        // На отказ ушёл весь срок — приговора нет, есть «не проверено».
+        let slow = unless_timed_out(refusal, net, net);
+        assert_eq!(slow.what, PUBLICATION);
+        assert!(!slow.ok && slow.info, "ни зелёный, ни провал: {slow:?}");
+        assert!(slow.detail.contains("не проверено за 5 с"), "{slow:?}");
+        assert!(!slow.hint.contains("install"), "чужого лечения в непроверенном факте быть не может: {slow:?}");
+        // Точка на таком факте не зелёная — он и есть причина.
+        assert_eq!(first_fail(&[slow]).unwrap().what, PUBLICATION);
+
+        // Удачный факт сроком не портится, сведение — тоже.
+        let took_long = std::time::Duration::from_secs(99);
+        assert!(unless_timed_out(Check::pass(VRUNNER, "AutumnMCP"), took_long, net).ok);
+        assert!(unless_timed_out(open_session_fact(), took_long, net).info);
     }
 
-    /// Вердикт считает первый *провал*, а сведения пропускает: «в базе открыт
-    /// сеанс», «Конфигуратор запущен» и «комплект на носителе» говорят «сейчас
-    /// занято человеком», а не «сломано», и цвет точки не красят.
+    /// Вердикт считает первый не зелёный факт, а сведения пропускает: «в базе
+    /// открыт сеанс», «Конфигуратор запущен» и «комплект на носителе» говорят
+    /// «сейчас занято человеком», а не «сломано», и цвет точки не красят.
     #[test]
     fn first_fail_skips_notes() {
         let checks = vec![
@@ -715,22 +774,20 @@ mod tests {
             Check::fail(GITEA, "не отвечает", "dev1c-setup check"),
         ];
         assert_eq!(first_fail(&checks).unwrap().what, PROJECT);
-        assert!(first_fail(&[Check::pass(PLATFORM, "есть")]).is_none());
-        // Сведение остаётся сведением, даже если помечено неудачей.
-        let odd = Check { ok: false, info: true, ..Check::fail(CONFIGURATOR, "запущен", "закройте") };
-        assert!(first_fail(&[odd]).is_none(), "сведение вердикт не красит");
+        assert!(first_fail(&[Check::pass(PLATFORM, "есть"), configurator_fact(2), media_fact(Some("FAT32".into()), "E:\\")]).is_none());
     }
 
-    /// Факт, на который не хватило общего бюджета, — «не проверено», а не
-    /// выдуманный провал: точка от этого не зелёная, но и вины человека в
-    /// таком факте нет.
+    /// Факт, на который не хватило общего бюджета, — то же «не проверено», а
+    /// не выдуманный провал; бюджета нет (командная строка) — срок не
+    /// наступает никогда.
     #[test]
     fn a_fact_that_did_not_fit_the_budget_is_not_a_made_up_failure() {
         let long_ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(30)).expect("часы без 30 с");
         let c = within(long_ago, Some(std::time::Duration::from_secs(20)), GITEA, || unreachable!("бюджет вышел — факт не считают"));
         assert_eq!(c.what, GITEA);
-        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(!c.ok && c.info, "{c:?}");
         assert!(c.detail.contains("не проверено за 20 с"), "{c:?}");
+        assert_eq!(first_fail(&[c]).unwrap().what, GITEA, "непосчитанный факт зелёной точке основанием не бывает");
         // Бюджет ещё есть — факт считается как обычно.
         let ok = within(std::time::Instant::now(), Some(std::time::Duration::from_secs(20)), GITEA, || Check::pass(GITEA, "1.25"));
         assert!(ok.ok, "{ok:?}");

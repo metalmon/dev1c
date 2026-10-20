@@ -651,10 +651,14 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
     let mut out = Vec::with_capacity(checks.len());
     for c in checks {
         // Информационный факт — не приговор: как серый кружок прежней
-        // вкладки «Проверка», обычная строка, а не провал.
+        // вкладки «Проверка», обычная строка, а не провал. «Не проверено»
+        // (`!ok` при `info`, см. `verify::not_checked`) — посередине:
+        // предупреждение, а не красное, иначе сорванный срок читался бы как
+        // поломка.
         let kind = match (c.ok, c.info) {
             (true, false) => Kind::Ok,
             (true, true) => Kind::Say,
+            (false, true) => Kind::Warn,
             _ => Kind::Fail,
         };
         out.push(Line { kind, text: format!("{}: {}", c.what, c.detail) });
@@ -877,11 +881,40 @@ pub fn run_readiness(ui: &mut Ui) {
     let mode = ui.cfg.host.mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
+    // `guarded`, как у всех прочих фоновых потоков окна: паника внутри сбора
+    // фактов (подпроцессы, reqwest, чтение путей) обязана договорить ответом,
+    // иначе `ready_pending` остался бы взведённым навсегда и вердикт не
+    // считался бы больше ни разу — а `Unknown` карточка рисует зелёным.
+    // На панике отдаём не `None` («всё хорошо»), а причину: она и покажется
+    // в карточке.
     std::thread::spawn(move || {
-        let state = link.is_up().then(|| link.label(&mode));
-        let first_fail = verify::first_fail(&verify::readiness(&ctx, state.as_deref()));
-        let _ = tx.unbounded_send(Ev::Ready(gen, first_fail));
+        guarded(
+            &tx,
+            || {
+                let state = link.is_up().then(|| link.label(&mode));
+                Ev::Ready(gen, verify::first_fail(&verify::readiness(&ctx, state.as_deref())))
+            },
+            || Ev::Ready(gen, Some(Check::fail("готовность", PANIC_TEXT, "нажмите «Проверить»"))),
+        );
     });
+}
+
+/// Принять перечитанный с диска `Cfg` (`window::show_window`): он должен
+/// доехать не только до окна, но и до живого сеанса — иначе карточка,
+/// вердикт и «Проверить» говорят про новую базу, а мост на каждое соединение
+/// берёт старую (находка ревью). Приём тот же, что у «Сохранить» в локальном
+/// режиме (`save_host`): `update_cfg` кладёт параметры в общую ячейку, и
+/// следующий вызов агента уходит уже в новую базу, не разрывая поднятых
+/// слушателей и принятых соединений. В туннельном режиме подменой параметров
+/// не обойтись (порты живут внутри SSH — там `restart_session`), а рвать
+/// туннель под человеком на показе окна нельзя: правку подхватит «Сохранить».
+pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
+    ui.cfg = cfg;
+    if ui.cfg.host.mode == "local" {
+        if let Some(s) = &ui.session {
+            s.update_cfg(ui.cfg.clone());
+        }
+    }
 }
 
 /// Ядро `run_readiness` без потока: сброс устаревшего вердикта, поколение и
@@ -896,18 +929,31 @@ fn start_readiness(ui: &mut Ui) -> Option<u64> {
         ui.ready_again = true;
         return None;
     }
+    // Этот расчёт и есть обещанный повтор — отметку снимаем здесь, а не в
+    // ответе: иначе она пережила бы собственное исполнение и дала лишний
+    // проход.
+    ui.ready_again = false;
     ui.ready_pending = true;
     ui.ready_gen += 1;
     Some(ui.ready_gen)
 }
 
-/// Ответ потока готовности. Чужое поколение (его обогнал итог «Проверить»)
-/// и ответ про уже сдвинувшуюся почву вердикта не трогают. Возвращает
-/// `true`, когда набор надо посчитать заново — ровно один раз.
+/// Ответ потока готовности; `pending` снимается всегда — ответ пришёл, поток
+/// кончился. Возвращает `true`, когда набор надо посчитать заново — ровно
+/// один раз.
+///
+/// Чужое поколение значит, что вердикт моложе этого ответа: его поставил итог
+/// «Проверить». Тогда не трогаем ни вердикт, ни отметку повтора — съесть её
+/// здесь означало бы обнулить вердикт в `Unknown` (то есть снова в зелёное)
+/// сразу после того, как проверка нашла провалы. Отметку исполнит и снимет
+/// тот расчёт, который её и прочтёт (`start_readiness`).
 fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
     ui.ready_pending = false;
+    if gen != ui.ready_gen {
+        return false;
+    }
     let again = std::mem::take(&mut ui.ready_again);
-    if gen == ui.ready_gen && !again {
+    if !again {
         ui.ready = match first_fail {
             Some(c) => Readiness::Warn(c),
             None => Readiness::Ok,
@@ -921,13 +967,15 @@ fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
 /// случай заказчика 2026-10-20 повторяется дословно: вердикт посчитан
 /// раньше, проверка нашла провалы, точка осталась зелёной. Поколение растёт
 /// заодно — идущий расчёт готовности этот свежий вердикт не затрёт. Пустой
-/// набор — упавший поток проверки (`guarded`), а не «всё хорошо»: такой
-/// вердикт не трогаем вовсе.
+/// набор — упавший поток проверки (`guarded`), а не «всё хорошо»: прежний
+/// вердикт тоже не годится (он мог быть `Ok`, и точка осталась бы зелёной
+/// при упавшей проверке), поэтому там честнее «не считано».
 fn verdict_from_checks(ui: &mut Ui, checks: &[Check]) {
+    ui.ready_gen += 1;
     if checks.is_empty() {
+        ui.ready = Readiness::Unknown;
         return;
     }
-    ui.ready_gen += 1;
     ui.ready = match verify::first_fail(checks) {
         Some(c) => Readiness::Warn(c),
         None => Readiness::Ok,
@@ -1824,9 +1872,32 @@ mod tests {
         // Проверка прошла — вердикт зелёный, тем же набором.
         verdict_from_checks(&mut ui, &[Check::pass("платформа 1С", "есть"), Check::note("комплект на носителе", "FAT32")]);
         assert!(matches!(ui.ready, Readiness::Ok), "{:?}", ui.ready);
-        // Пустой набор — это упавший поток проверки, а не «всё хорошо».
+        // Пустой набор — упавший поток проверки: ни «всё хорошо», ни прежний
+        // вердикт (тот был `Ok`, и точка осталась бы зелёной).
         verdict_from_checks(&mut ui, &[]);
-        assert!(matches!(ui.ready, Readiness::Ok), "{:?}", ui.ready);
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Находка ревью: `again` съедался и при чужом поколении, и тогда
+    /// `handle` звал пересчёт, сбрасывая вердикт в `Unknown` (то есть снова в
+    /// зелёное) сразу после того, как «Проверить» нашла провалы. Это ровно
+    /// случай заказчика со снимка, только в другой ветке.
+    #[test]
+    fn a_stale_generation_answer_keeps_the_remembered_repeat() {
+        let mut ui = Ui::for_test();
+        let first = start_readiness(&mut ui).expect("расчёт после операции пошёл");
+        // «Сохранить» пока считают — повтор помечен, второго потока нет.
+        assert!(start_readiness(&mut ui).is_none());
+        assert!(ui.ready_again);
+        // «Проверить» нашла провал — вердикт жёлтый, поколение чужое.
+        verdict_from_checks(&mut ui, &[Check::fail("проект", "не разложен", "1c-connect install")]);
+
+        assert!(!apply_ready(&mut ui, first, None), "ответ прежнего поколения пересчёта не просит");
+        assert!(matches!(ui.ready, Readiness::Warn(_)), "свежий итог «Проверить» уцелел: {:?}", ui.ready);
+        assert!(ui.ready_again, "обещанный повтор не съеден");
+        // Исполняет и снимает отметку тот расчёт, который её читает.
+        assert!(start_readiness(&mut ui).is_some());
+        assert!(!ui.ready_again);
     }
 
     /// Поколение вердикта — та же защита, что у состояния связи

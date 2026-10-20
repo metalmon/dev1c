@@ -1114,15 +1114,39 @@ pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
     autoconnect_on && gate.is_none()
 }
 
-/// Обслуживаются ли вызовы агента прямо сейчас. В локальном режиме слушатели
-/// подняты всегда и говорит только флаг; в туннельном обслуживание — это сам
-/// сеанс.
+/// Отказ публикации: гасит обслуживание и говорит, что показать. Спека
+/// называет этот ряд красным («Отказ занять порт или поднять публикацию» →
+/// «Не подключён»), поэтому выбран первый из двух выходов: карточка остаётся
+/// красной, а настоящее обслуживание подводится под показанное, а не
+/// наоборот.
+///
+/// Раньше отказ только красил карточку: `enabled` оставался поднятым, мост
+/// продолжал обслуживать вызовы под красным «Не подключён», а первый щелчок
+/// по переключателю **выключал** обслуживание вместо того, чтобы включить, —
+/// показанное и настоящее разошлись (находка S6 итогового ревью). Теперь
+/// щелчок после отказа означает «попробовать снова»: `toggle_link` поднимет
+/// флаг и позовёт публикацию заново.
+///
+/// Цена названа прямо: инструменты, которым публикация не нужна
+/// (`cf_decompile`/`cf_load` через `vrunner-mcp`), на время отказа тоже не
+/// обслуживаются. Это следствие обещания карточки: красное значит «не
+/// работает», а не «работает наполовину».
+fn publication_failure(ui: &mut Ui, why: &str) -> State {
+    ui.enabled.store(false, Ordering::Relaxed);
+    State::Failed(format!("публикация: {why}"))
+}
+
+/// Обслуживаются ли вызовы агента прямо сейчас — по тому самому флагу,
+/// который мост читает на каждый вызов. В туннельном режиме нужен ещё и
+/// поднятый сеанс: без него вызову некуда ехать.
+///
+/// Раньше туннель смотрел только на сеанс, и флаг с ним расходился: замок,
+/// защёлкнувшийся при смене режима, гасил флаг, а сеанс поднимался следом
+/// безусловно — карточка показывала зелёное «Подключён», мост отказывал
+/// каждому вызову, и первый щелчок по переключателю не включал обслуживание,
+/// а останавливал туннель (находка S5 итогового ревью).
 fn serving(ui: &Ui) -> bool {
-    if ui.cfg.host.mode == "local" {
-        ui.enabled.load(Ordering::Relaxed)
-    } else {
-        ui.link.is_on()
-    }
+    ui.enabled.load(Ordering::Relaxed) && (ui.cfg.host.mode == "local" || ui.link.is_on())
 }
 
 /// Расчёт готовности (`verify::readiness` — тот же набор фактов, что
@@ -1907,7 +1931,10 @@ fn handle(ev: Ev, cx: &mut App) {
             // Карточка не должна врать «MCP включены», когда агент не видит
             // базу — отказ публикации становится тем же `Failed`, что и у
             // отказа сеанса, с текстом причины (находка повторного ревью).
-            Err(e) => set_link(cx, State::Failed(format!("публикация: {e}"))),
+            Err(e) => {
+                let l = publication_failure(cx.global_mut::<Ui>(), &e);
+                set_link(cx, l);
+            }
         },
         Ev::Ready(gen, first_fail) => {
             let again = apply_ready(cx.global_mut::<Ui>(), gen, first_fail);
@@ -2182,7 +2209,7 @@ mod tests {
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
-        save_needs_confirm,
+        publication_failure, save_needs_confirm, serving,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -3014,6 +3041,45 @@ mod tests {
         // факт гашения со строкой, а список условий стережёт `gate::tests`.
         assert_eq!(doused.len(), 1, "{:?}", &ui.log[log_before..]);
         let _ = ui.session.take().map(|s| s.stop());
+    }
+
+    /// «Обслуживаем» значит то, что читает мост, — флаг. Туннелю нужен ещё и
+    /// сеанс, но сеанс сам по себе обслуживанием не является: с погашенным
+    /// флагом поднятый туннель показывал зелёное «Подключён», пока агенту
+    /// отказывали на каждом вызове (находка S5 итогового ревью).
+    #[test]
+    fn serving_means_the_flag_the_bridge_reads() {
+        let mut ui = Ui::for_test();
+        assert_eq!(ui.cfg.host.mode, "tunnel");
+        ui.link = State::Up { since: Instant::now() };
+        ui.enabled.store(false, Ordering::Relaxed);
+        assert!(!serving(&ui), "туннель поднят, а обслуживание погашено — это не «обслуживаем»");
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(serving(&ui));
+        ui.link = State::Off;
+        assert!(!serving(&ui), "в туннеле без сеанса вызову некуда ехать");
+        // В локальном режиме слушатели подняты всегда — говорит только флаг.
+        ui.cfg.host.mode = "local".into();
+        assert!(serving(&ui));
+        ui.enabled.store(false, Ordering::Relaxed);
+        assert!(!serving(&ui));
+    }
+
+    /// Отказ публикации гасит обслуживание, а не только красит карточку:
+    /// иначе показанное («Не подключён») расходится с настоящим, и первый
+    /// щелчок по переключателю выключает вместо того, чтобы включить
+    /// (находка S6 итогового ревью).
+    #[test]
+    fn a_failed_publication_douses_serving() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        let shown = publication_failure(&mut ui, "расширение не ответило");
+        match &shown {
+            State::Failed(why) => assert!(why.contains("расширение не ответило"), "{why}"),
+            other => panic!("ожидался отказ, а не {other:?}"),
+        }
+        assert!(!serving(&ui), "карточка говорит «Не подключён», а вызовы обслуживаются");
     }
 
     /// Проводка, а не чистая функция (находка S1): вердикт становится

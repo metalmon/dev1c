@@ -264,6 +264,20 @@ fn mode_change_blocked(ui: &Ui) -> bool {
     ui.busy.is_some() || ui.progress.is_some()
 }
 
+/// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
+/// пересчитан (`save_host` → `run_readiness` → `refresh_gate`), и если он
+/// защёлкнулся, обслуживание уже погашено.
+///
+/// В туннельном режиме сеанс и есть обслуживание: поднять туннель поверх
+/// погашенного флага значило бы показать зелёное «Подключён», пока мост
+/// отказывает каждому вызову — ровно находка S5 итогового ревью. В локальном
+/// режиме слушатели держат порты всегда, независимо от замка и
+/// переключателя: иначе агент получил бы отказ соединения вместо причины
+/// (спека: «Пока замок заперт, агент получает отказ с причиной»).
+fn raise_session_after_mode_change(mode: &str, gate: Option<&str>) -> bool {
+    mode == "local" || gate.is_none()
+}
+
 /// Записать новый режим и поднять сеанс заново. Зовётся после согласия
 /// человека (`confirm_database_change`), поэтому `ui.cfg.host.mode` правится
 /// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
@@ -279,8 +293,11 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // Новый транспорт — сеанс поднимается заново; `stop_session`
             // безвредна, если сеанса и не было.
             stop_session(cx);
-            if let Err(e) = start_session(cx) {
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            let ui = cx.global::<Ui>();
+            if raise_session_after_mode_change(&ui.cfg.host.mode, ui.gate.as_deref()) {
+                if let Err(e) = start_session(cx) {
+                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                }
             }
             let mut label = mode;
             for (m, _, text) in MODES {
@@ -402,7 +419,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES};
+    use super::{
+        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES,
+    };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -546,6 +565,20 @@ mod tests {
         ui.gate = None;
         ui.link = State::Off;
         assert_eq!(tray_state_now(&ui, now), TrayState::Off);
+    }
+
+    /// Смена режима не поднимает сеанс поверх погашенного обслуживания:
+    /// туннель, поднятый при запертом замке, показал бы зелёное «Подключён»,
+    /// пока мост отказывает каждому вызову (находка S5). Локальные слушатели
+    /// при этом поднимаются всегда — они держат порты и несут агенту причину
+    /// отказа, а не «соединение отклонено».
+    #[test]
+    fn a_locked_gate_keeps_the_tunnel_down_after_a_mode_change() {
+        let why = Some("не задан пользователь базы");
+        assert!(!raise_session_after_mode_change("tunnel", why), "туннель поверх запертого замка");
+        assert!(raise_session_after_mode_change("tunnel", None));
+        assert!(raise_session_after_mode_change("local", why), "порты в локальном режиме подняты всегда");
+        assert!(raise_session_after_mode_change("local", None));
     }
 
     #[test]

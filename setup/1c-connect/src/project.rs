@@ -298,6 +298,22 @@ pub fn status(p: &Project) -> Result<String, String> {
     Ok(out)
 }
 
+/// Пауза перед повтором `pull`: короткая, но настоящая — ровно то время,
+/// которое Gitea занимает, чтобы разобрать только что принятый пакет.
+const PULL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Повторяет `attempt` один раз после паузы, если первая попытка вернула
+/// ошибку. Нужен ровно для pull сразу после чужой отправки: Gitea могла ещё
+/// не отдать все нужные объекты («сервер не отдал все нужные объекты»), а
+/// через пару секунд то же самое получается само. Первая неудача наружу не
+/// идёт — сообщаем, только если не получилось и со второго раза.
+fn retry_once<T>(pause: std::time::Duration, attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
+    attempt().or_else(|_| {
+        std::thread::sleep(pause);
+        attempt()
+    })
+}
+
 pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     ensure_origin(p)?;
     // A fresh project has no branch on the server yet — that comes first:
@@ -308,23 +324,32 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     if !must(p, &["status", "--porcelain"])?.is_empty() {
         return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
     }
-    let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
-    if o.ok {
-        return Ok(format!("{}\nтеперь cf_load", o.text));
+    let attempt = || -> Result<String, String> {
+        let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
+        if o.ok {
+            Ok(format!("{}\nтеперь cf_load", o.text))
+        } else {
+            Err(o.text)
+        }
+    };
+    match retry_once(PULL_RETRY_PAUSE, attempt) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            if !conflicted.is_empty() {
+                // Half-applied rebase is worse than none: cf_load would read a tree
+                // with conflict markers. Back out and hand the merge to a human.
+                let _ = git(p, &["rebase", "--abort"]);
+                return Err(format!(
+                    "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
+                    conflicted.replace('\n', ", "),
+                    p.dir.display(),
+                    p.branch
+                ));
+            }
+            Err(e)
+        }
     }
-    let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-    if !conflicted.is_empty() {
-        // Half-applied rebase is worse than none: cf_load would read a tree
-        // with conflict markers. Back out and hand the merge to a human.
-        let _ = git(p, &["rebase", "--abort"]);
-        return Err(format!(
-            "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
-            conflicted.replace('\n', ", "),
-            p.dir.display(),
-            p.branch
-        ));
-    }
-    Err(o.text)
 }
 
 pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, String> {
@@ -699,6 +724,35 @@ mod tests {
         let (_t2, p2) = fixture(); // branch dev2, origin set, three files present
         git(&p2.dir, &["checkout", "-q", "-b", "main"]);
         assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains("ветка")));
+    }
+
+    /// Фальшивый «бегунок»: первая попытка отказывает так, как отказывает
+    /// git сразу после чужой отправки («сервер не отдал все нужные
+    /// объекты»), вторая — как будто Gitea уже дообработала пакет.
+    #[test]
+    fn retry_once_recovers_after_a_single_transient_failure() {
+        let calls = std::cell::Cell::new(0u32);
+        let r = retry_once(std::time::Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err("сервер не отдал все нужные объекты".to_string())
+            } else {
+                Ok("готово".to_string())
+            }
+        });
+        assert_eq!(r, Ok("готово".to_string()));
+        assert_eq!(calls.get(), 2, "первая неудача должна была привести ровно к одному повтору");
+    }
+
+    #[test]
+    fn retry_once_reports_when_the_second_attempt_fails_too() {
+        let calls = std::cell::Cell::new(0u32);
+        let r = retry_once(std::time::Duration::from_millis(1), || {
+            calls.set(calls.get() + 1);
+            Err::<String, _>("сервер не отдал все нужные объекты".to_string())
+        });
+        assert_eq!(r, Err("сервер не отдал все нужные объекты".to_string()));
+        assert_eq!(calls.get(), 2, "ровно одна попытка и ровно один повтор — не больше");
     }
 
     #[test]

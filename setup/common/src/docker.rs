@@ -72,7 +72,7 @@ pub fn redact_text(text: &str) -> String {
 fn blot_words(line: &str) -> String {
     let mut out = Vec::new();
     let mut blot_next = false;
-    for w in line.split(' ') {
+    for w in split_respecting_quotes(line) {
         let blotted = if blot_next {
             blot_next = false;
             "…".to_string()
@@ -87,6 +87,29 @@ fn blot_words(line: &str) -> String {
         out.push(blotted);
     }
     out.join(" ")
+}
+
+/// Разбивает строку на «слова» как `split(' ')`, но кавычки защищают от
+/// разбиения: строка подключения 1С кладёт пароль в кавычки
+/// (`Pwd="p w";`), и пробел внутри них — часть значения, а не разделитель
+/// между словами. Без этого слово обрывается на первом пробеле, и хвост
+/// пароля после него остаётся незатёртым словом без `=` в начале.
+fn split_respecting_quotes(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes => {
+                out.push(&line[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&line[start..]);
+    out
 }
 
 /// Внутри одного «слова» секрет может быть не единственной парой
@@ -256,6 +279,34 @@ mod tests {
         assert!(!r.contains("secret"), "{r}");
         assert!(r.contains("Pwd=…"), "{r}");
         assert!(r.contains(r#"File="C:\Bases\UNF""#), "{r}");
+    }
+
+    #[test]
+    fn a_quoted_password_with_a_space_inside_is_hidden_whole() {
+        // Пароль в кавычках со своим пробелом внутри — ровно случай, на
+        // котором наивный split(' ') резал кавычку пополам и оставлял
+        // второе слово пароля незатёртым.
+        let r = redact_text(r#"File="C:\Bases\UNF";Usr="mcp";Pwd="p w";"#);
+        assert!(!r.contains("p w") && !r.contains(" w"), "{r}");
+        assert!(r.contains("Pwd=…"), "{r}");
+        assert!(r.contains(r#"File="C:\Bases\UNF""#) && r.contains(r#"Usr="mcp""#), "{r}");
+    }
+
+    #[test]
+    fn a_semicolon_right_after_the_closing_quote_still_separates_segments() {
+        let r = redact_text(r#"Usr="mcp";Pwd="p w";Next="n""#);
+        assert!(!r.contains("p w"), "{r}");
+        assert!(r.contains("Pwd=…") && r.contains(r#"Usr="mcp""#) && r.contains(r#"Next="n""#), "{r}");
+    }
+
+    #[test]
+    fn the_previously_covered_unquoted_forms_still_hide_the_password_and_keep_path_and_user() {
+        // Регрессия: тот же набор форм, что покрывали до правки — путь и
+        // имя пользователя должны пережить затирку, а пароль — никогда.
+        let r = redact_text(r#"path=C:\Bases\UNF --db-user mcp --db-password hunter2 Usr="mcp";Pwd="secret";"#);
+        assert!(!r.contains("hunter2") && !r.contains("secret"), "{r}");
+        assert!(r.contains(r#"path=C:\Bases\UNF"#) && r.contains("--db-user mcp") && r.contains(r#"Usr="mcp""#), "{r}");
+        assert!(r.contains("--db-password …") && r.contains("Pwd=…"), "{r}");
     }
 
     #[test]

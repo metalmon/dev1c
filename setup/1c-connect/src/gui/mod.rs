@@ -118,6 +118,12 @@ pub struct Ui {
     /// Итог последнего расчёта готовности — см. `Readiness` и
     /// `run_readiness`.
     pub ready: Readiness,
+    /// На какой час верен вердикт (`gui::clock`, «15:54»); `None` — вердикта
+    /// нет (`Readiness::Unknown`). Вердикт пересчитывается по событиям, а не
+    /// на таймере (спека, «Чем за это платим»), значит бывает устаревшим —
+    /// и человек должен видеть, на какой момент он верен. Пишется там же,
+    /// где вердикт становится известен: `apply_ready` и `verdict_from_checks`.
+    pub ready_at: Option<String>,
     /// Поколение вердикта: растёт на каждый начатый расчёт и на каждый итог
     /// «Проверить». Ответ чужого поколения отбрасывается — так же, как
     /// хвостовое событие прежнего сеанса (`session_gen`): набор считается
@@ -159,6 +165,12 @@ pub struct Ui {
     /// в `working()`: полоса хода в разделителе над подвалом.
     pub pending: usize,
     pub status: Option<Line>,
+    /// Что подвал говорит по наведению сверх самого итога — путь отчёта
+    /// после проверки. Сам итог короткий (`check_status`): длинный путь
+    /// рядом с кнопкой не помещается, а потерять его нельзя. Ставится и
+    /// снимается только вместе со `status` (`set_status`), иначе подсказка
+    /// пережила бы итог, к которому её написали.
+    pub status_tip: Option<String>,
     pub tray: Option<tray::Tray>,
     /// `gpui_kit::open_window` оборачивает панель в свой корневой вид,
     /// поэтому ручка окна — безтиповая (`downcast::<Panel>()` дал бы `None`),
@@ -693,6 +705,33 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
     out
 }
 
+/// Итог проверки одной строкой — в подвал и последней строкой раздела
+/// журнала. Только числа: путь отчёта сюда не идёт (заказчик 2026-10-21 —
+/// на снимке строка обрывалась на «Проблем: 2. Подробности — отчё…»), его
+/// называет отдельная строка журнала (`report_line`), она же — подсказка
+/// подвала.
+pub fn check_status(failed: usize) -> Line {
+    if failed > 0 {
+        Line { kind: Kind::Fail, text: format!("Проблем: {failed}") }
+    } else {
+        Line { kind: Kind::Ok, text: "Проверка пройдена".into() }
+    }
+}
+
+/// Итог последнего действия в подвал — вместе с подсказкой к нему. Одной
+/// функцией, чтобы подсказка прошлого итога не осталась висеть на следующем.
+pub fn set_status(ui: &mut Ui, line: Line, tip: Option<String>) {
+    ui.status = Some(line);
+    ui.status_tip = tip;
+}
+
+/// Где лежит отчёт проверки — строкой журнала и подсказкой подвала. «В
+/// комплекте» он лежит только на Windows: на Linux комплект общий и только
+/// для чтения, отчёт уходит в состояние, поэтому путь называется целиком.
+pub fn report_line(report: &str) -> Line {
+    Line { kind: Kind::Say, text: format!("Отчёт — {report}") }
+}
+
 /// Причина, по которой карточка жёлтая (`Dot::Warn`): первый провалившийся
 /// факт `verify::readiness`, одной строкой — что не так и что сделать, без
 /// «факт N провален» (заказчик 2026-10-20 читает это как 1С-разработчик).
@@ -1150,6 +1189,9 @@ fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
             Some(c) => Readiness::Warn(c),
             None => Readiness::Ok,
         };
+        // Вердикт стал известен прямо сейчас — отсюда и час, который подвал
+        // называет рядом с причиной.
+        ui.ready_at = Some(clock());
     }
     again
 }
@@ -1165,13 +1207,14 @@ fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
 fn verdict_from_checks(ui: &mut Ui, checks: &[Check]) {
     ui.ready_gen += 1;
     if checks.is_empty() {
-        ui.ready = Readiness::Unknown;
+        drop_stale_readiness(ui);
         return;
     }
     ui.ready = match verify::first_fail(checks) {
         Some(c) => Readiness::Warn(c),
         None => Readiness::Ok,
     };
+    ui.ready_at = Some(clock());
 }
 
 /// Сброс вердикта в `Readiness::Unknown`: сама почва ещё не проверена заново,
@@ -1179,6 +1222,9 @@ fn verdict_from_checks(ui: &mut Ui, checks: &[Check]) {
 /// сети, тестируется само по себе (см. тесты модуля).
 fn drop_stale_readiness(ui: &mut Ui) {
     ui.ready = Readiness::Unknown;
+    // Час вердикта уходит вместе с вердиктом: «проверено в 15:54» без
+    // самого вердикта — обещание того, чего больше нет.
+    ui.ready_at = None;
 }
 
 /// Перезапустить сеанс после удачной записи параметров (только туннельный
@@ -1699,7 +1745,7 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global_mut::<Ui>();
             let line = on_done(ui, err, cancelled);
             note_line(ui, line.clone());
-            ui.status = Some(line.clone());
+            set_status(ui, line.clone(), None);
             // Подсказка без операции: `on_done` уже опустил `progress`/`busy`.
             // `tooltip_at` тоже назад в `None` — следующая операция не должна
             // наследовать свежий штамп и ждать до TOOLTIP_EVERY своей подсказки.
@@ -1735,17 +1781,14 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             ui.busy = None;
             // Пункта меню «Открыть отчёт» больше нет (заказчик 2026-10-20:
-            // два пункта делали одно и то же) — файл называем здесь полным
-            // путём: «в комплекте» он лежит только на Windows, на Linux
-            // комплект общий и только для чтения, отчёт уходит в состояние.
+            // два пункта делали одно и то же) — файл называет строка журнала
+            // и подсказка подвала, но не сам итог рядом с кнопкой: туда путь
+            // не влезал (заказчик 2026-10-21).
             let report = ui.kit.state_path("last-check.txt").display().to_string();
-            let status = if failed > 0 {
-                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Подробности — отчёт {report}") }
-            } else {
-                Line { kind: Kind::Ok, text: format!("Проверка пройдена. Отчёт — {report}") }
-            };
+            let status = check_status(failed);
             note_line(ui, status.clone());
-            ui.status = Some(status);
+            note_line(ui, report_line(&report));
+            set_status(ui, status, Some(report_line(&report).text));
             // Трей (S1): проверка — другое место, где `busy` возвращается в
             // `None`, и значок/подсказку надо подвинуть, как у `Ev::Done` —
             // иначе жёлтый («занят») может застрять до следующего перехода.
@@ -1912,6 +1955,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             enabled: Arc::new(AtomicBool::new(serve_on_start)),
             gate: gate.clone(),
             ready: Readiness::Unknown,
+            ready_at: None,
             ready_gen: 0,
             ready_pending: false,
             ready_again: false,
@@ -1928,6 +1972,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             busy: None,
             pending: 0,
             status: None,
+            status_tip: None,
             tray: Some(tray),
             window: None,
             panel: None,
@@ -2029,6 +2074,7 @@ impl Ui {
             enabled: Arc::new(AtomicBool::new(true)),
             gate,
             ready: Readiness::Unknown,
+            ready_at: None,
             ready_gen: 0,
             ready_pending: false,
             ready_again: false,
@@ -2045,6 +2091,7 @@ impl Ui {
             busy: None,
             pending: 0,
             status: None,
+            status_tip: None,
             tray: None,
             window: None,
             panel: None,
@@ -2060,10 +2107,10 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_gate_text,
+        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
-        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, save_host, save_needs_confirm,
+        on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host, save_needs_confirm,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2205,6 +2252,26 @@ mod tests {
         let web = Check::fail("веб-сервер", "порт 1818 не отвечает", "запустите Apache/IIS, на котором опубликована база");
         let text = readiness_reason(&web);
         assert!(text.contains("порт 1818 не отвечает") && text.contains("запустите Apache/IIS"), "{text}");
+    }
+
+    /// Дефект (заказчик 2026-10-21): в строку итога вписали полный путь
+    /// отчёта, и она перестала помещаться в подвал — на снимке «Проблем: 2.
+    /// Подробности — отчё…». Итог называет только числа, а путь отчёта
+    /// уходит отдельной строкой журнала и подсказкой подвала.
+    #[test]
+    fn the_check_status_line_stays_short() {
+        for failed in [1usize, 2, 99] {
+            let l = check_status(failed);
+            assert_eq!((l.kind, l.text.as_str()), (Kind::Fail, format!("Проблем: {failed}").as_str()));
+            assert!(!l.text.contains("last-check"), "путь отчёта вернулся в строку подвала: {}", l.text);
+            assert!(l.text.chars().count() <= 80, "строка итога не влезает в подвал: {}", l.text);
+        }
+        let ok = check_status(0);
+        assert_eq!((ok.kind, ok.text.as_str()), (Kind::Ok, "Проверка пройдена"));
+        assert!(ok.text.chars().count() <= 80, "{}", ok.text);
+        // Путь не пропал — он уехал в строку журнала (она же подсказка подвала).
+        let report = "/home/dev3/.local/share/dev1c/last-check.txt";
+        assert_eq!(report_line(report), Line { kind: Kind::Say, text: format!("Отчёт — {report}") });
     }
 
     #[test]

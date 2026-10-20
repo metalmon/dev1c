@@ -71,9 +71,11 @@ pub struct Panel {
     /// Пара (видимая область, содержимое), по которой подбирали высоту в
     /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
     /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
-    /// подвал, переносящийся на вторую строку после первого подбора, меняет
-    /// видимую область и без повторной подгонки окно прокручивалось бы на
-    /// высоту этой строки.
+    /// содержимое «Параметров» меняется под окном (режим прячет три поля,
+    /// диалог выбора каталога возвращает путь), и без повторной подгонки окно
+    /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: его
+    /// высота закреплена двумя строками (`FOOT_LINE`/`FOOT_LINES`) и от
+    /// длины текста не зависит.
     last_fit: Option<(Pixels, Pixels)>,
     /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
     /// не дублирует.
@@ -156,7 +158,15 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readin
 /// (он узкий), а живёт в подсказке переключателя и в левом слоте подвала.
 /// `None` — объяснять нечего: всё в порядке, идёт операция или вердикт ещё
 /// считается.
-pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>) -> Option<String> {
+///
+/// `at` — час вердикта (`Ui::ready_at`): вердикт пересчитывается по событиям,
+/// а не на таймере, значит бывает устаревшим — среда могла подняться через
+/// минуту после отказа. Поэтому рядом с причиной подвал называет, на какой
+/// момент она верна (спека, «Чем за это платим»: «проверено в 15:54»), а
+/// «Проверить» остаётся способом спросить заново. Час приписывается только
+/// к причине вердикта: отказ занять порт и холодный замок — факты «прямо
+/// сейчас», им час ни к чему.
+pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, at: Option<&str>) -> Option<String> {
     if let State::Failed(why) = link {
         return Some(why.clone());
     }
@@ -165,7 +175,11 @@ pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>) -
     }
     if mode == "local" && link.is_up() {
         if let Readiness::Warn(check) = ready {
-            return Some(format!("Не всё готово: {}", gui::readiness_reason(check)));
+            let why = format!("Не всё готово: {}", gui::readiness_reason(check));
+            return Some(match at {
+                Some(t) => format!("{why} · проверено в {t}"),
+                None => why,
+            });
         }
     }
     None
@@ -233,12 +247,23 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
     Some(format!("Подождите: идёт {what}"))
 }
 
+/// Высота строки левого слота подвала при размере текста 13 и число строк,
+/// которые слот резервирует всегда — даже когда текст в одну. Две строки по
+/// 16 px — ровно высота кнопки рядом (`Button` размера Medium, `h_8` =
+/// 32 px), и подвал не растёт по тексту: подбор высоты окна
+/// (`window::needs_fit`) построен на неизменной высоте подвала, а растущая
+/// плашка заставляла окно подпрыгивать. Третья строка не переносится, а
+/// режется многоточием; полный текст — подсказкой по наведению.
+pub const FOOT_LINE: f32 = 16.;
+pub const FOOT_LINES: usize = 2;
+
 /// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
 /// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
 /// настоящее сообщение (итог сохранения, ошибка) важнее подсказки, почему
 /// «Сохранить» недоступна, а та — важнее пути комплекта, который слот
-/// показывает, когда сказать больше нечего. Обрезка в одну строку и
-/// подсказка по наведению — дело `render`, здесь только выбор источника.
+/// показывает, когда сказать больше нечего. Раскладка по двум строкам,
+/// обрезка третьей и подсказка по наведению — дело `render`, здесь только
+/// выбор источника.
 pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
     if let Some(l) = status {
         return (l.text.clone(), matches!(l.kind, Kind::Fail));
@@ -542,10 +567,13 @@ impl Panel {
     fn write(&mut self, host: Host, cx: &mut Context<Self>) -> bool {
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
-        cx.global_mut::<Ui>().status = Some(match &r {
+        let line = match &r {
             Ok(_) => Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() },
             Err(e) => Line { kind: Kind::Fail, text: e.clone() },
-        });
+        };
+        // Через `set_status`: подсказка прошлого итога (путь отчёта проверки)
+        // не должна пережить его и повиснуть на этом.
+        gui::set_status(cx.global_mut::<Ui>(), line, None);
         if ok {
             self.original = host;
             // Каталог проекта мог смениться — вкладка «Проект» уже про другой.
@@ -647,7 +675,7 @@ impl Render for Panel {
         // Причина — один расчёт на весь `render`: та же строка уходит и в
         // подсказку переключателя, и в левый слот подвала (спека: «причина
         // идёт туда, где для неё есть место»).
-        let why = reason(&link, &mode, &ready, gate.as_deref());
+        let why = reason(&link, &mode, &ready, gate.as_deref(), ui.ready_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
@@ -659,6 +687,10 @@ impl Render for Panel {
         // та про кнопку, на которую человек прямо сейчас нажимает.
         let foot_hint = hint.clone().or_else(|| why.clone());
         let foot_left = foot_left_text(ui.status.as_ref(), foot_hint.as_deref(), &ui.kit.root.display().to_string());
+        // Подсказка к итогу (путь отчёта проверки) — только пока слот занят
+        // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
+        // себя.
+        let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
         let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -1126,25 +1158,31 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     .pt_3()
-                    // Один текст, одна строка (заказчик 2026-10-20: перенос
-                    // на вторую строку и подпрыгивание высоты подвала от
-                    // длинного пути комплекта, кириллица в нём в том числе).
-                    // Лишнее режется многоточием, а не переносится; `min_w_0`
-                    // — иначе flex-ребёнок не уже своего текста, и обрезка на
+                    // Один текст, но место под две строки — всегда, даже
+                    // когда текст в одну (`FOOT_LINE`/`FOOT_LINES`): высота
+                    // подвала не зависит от длины текста, иначе окно
+                    // подпрыгивает на подборе. Третья строка режется
+                    // многоточием (`line_clamp`), а не переносится; `min_w_0`
+                    // — иначе flex-ребёнок не уже своего текста, и перенос на
                     // узком окне срабатывает только упёршись в кнопку.
-                    // Полный текст — подсказкой по наведению.
+                    // Полный текст — подсказкой по наведению, а после
+                    // проверки к нему прибавляется путь отчёта
+                    // (`Ui::status_tip`): в саму строку он не влезает.
                     .child({
-                        let text = foot_left.0.clone();
+                        let tip = match &foot_tip {
+                            Some(extra) => format!("{}\n{extra}", foot_left.0),
+                            None => foot_left.0.clone(),
+                        };
                         div()
                             .id("foot-left")
                             .flex_1()
                             .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
+                            .h(px(FOOT_LINE * FOOT_LINES as f32))
+                            .line_clamp(FOOT_LINES)
                             .text_size(px(13.))
+                            .line_height(px(FOOT_LINE))
                             .text_color(if foot_left.1 { danger } else { caption })
-                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             .child(foot_left.0)
                     })
                     .child(foot_actions),
@@ -1156,7 +1194,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         can_save, card, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
-        switch_locked, switch_tooltip, window_radius, HINT_PROJECT,
+        switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
@@ -1180,7 +1218,7 @@ mod tests {
         assert!(switch_locked(None, false, true));
         assert!(switch_locked(None, true, true));
         // Причина живёт в подсказке, а не в заголовке карточки.
-        let text = reason(&State::Off, "local", &Readiness::Unknown, why);
+        let text = reason(&State::Off, "local", &Readiness::Unknown, why, None);
         assert_eq!(text.as_deref(), Some("Включать нечего: не задан пользователь базы"));
         assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
         assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
@@ -1197,7 +1235,7 @@ mod tests {
     fn the_locked_switch_names_the_gate_not_the_bind() {
         let gate = "не задан пользователь базы";
         let link = State::Failed("порт 7771 занят процессом 1234".into());
-        let why = reason(&link, "local", &Readiness::Ok, Some(gate));
+        let why = reason(&link, "local", &Readiness::Ok, Some(gate), None);
         // В подвале — отказ: он выше в порядке разрешения, и карточка красная.
         assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
         // А переключатель заперт замком — и говорит про замок.
@@ -1254,7 +1292,7 @@ mod tests {
         let c = card(None, &link, "local", &Readiness::Ok, Some("не задан пользователь базы"), now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         // Сама причина не пропала — она в подсказке, подвале и журнале.
-        assert_eq!(reason(&link, "local", &Readiness::Ok, Some("не задан пользователь базы")).as_deref(), Some("порт 7771 занят процессом 1234"));
+        assert_eq!(reason(&link, "local", &Readiness::Ok, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
     }
 
     /// «Не надо там прозу писать, она не лезет» (заказчик 2026-10-21):
@@ -1298,7 +1336,7 @@ mod tests {
         let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
         let c = card(None, &State::Off, "local", &Readiness::Warn(fail.clone()), None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
-        assert_eq!(reason(&State::Off, "local", &Readiness::Warn(fail), None), None);
+        assert_eq!(reason(&State::Off, "local", &Readiness::Warn(fail), None, None), None);
     }
 
     #[test]
@@ -1396,7 +1434,7 @@ mod tests {
         let up = State::Up { since: now };
         let c = card(None, &up, "local", &ready, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Warn, "Не всё готово"));
-        let why = reason(&up, "local", &ready, None).unwrap();
+        let why = reason(&up, "local", &ready, None, None).unwrap();
         assert!(why.starts_with("Не всё готово:"), "{why}");
         assert!(why.contains("инструменты комплекта") && why.contains("1c-connect install"), "{why}");
         assert!(!why.contains("факт"), "{why}");
@@ -1422,7 +1460,7 @@ mod tests {
         for ready in [Readiness::Warn(fail), Readiness::Unknown] {
             let c = card(None, &up, "tunnel", &ready, None, now);
             assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"), "{ready:?}");
-            assert_eq!(reason(&up, "tunnel", &ready, None), None, "{ready:?}");
+            assert_eq!(reason(&up, "tunnel", &ready, None, None), None, "{ready:?}");
         }
     }
 
@@ -1538,6 +1576,38 @@ mod tests {
         assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
         assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
+    }
+
+    /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки
+    /// рядом (`Button` Medium — `h_8`, 32 px). Поменяют межстрочный интервал
+    /// или число строк — равенство сломается здесь, а не на снимке из
+    /// образа, где высота окна начинает прыгать на подборе
+    /// (`window::needs_fit` построен на неизменной высоте подвала).
+    #[test]
+    fn the_footer_reserves_exactly_the_height_of_the_button() {
+        assert_eq!(FOOT_LINE * FOOT_LINES as f32, 32., "подвал разошёлся с высотой кнопки h_8");
+        assert_eq!(FOOT_LINES, 2, "две строки, не больше и не меньше");
+    }
+
+    /// Вердикт считается по событиям, а не на таймере, значит бывает
+    /// устаревшим — подвал называет, на какой момент причина верна (спека,
+    /// «Чем за это платим»). Час идёт только к причине вердикта: отказ занять
+    /// порт и холодный замок — факты «прямо сейчас».
+    #[test]
+    fn the_footer_names_the_time_of_the_verdict() {
+        let now = Instant::now();
+        let up = State::Up { since: now };
+        let ready = Readiness::Warn(Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"));
+        let why = reason(&up, "local", &ready, None, Some("15:54")).unwrap();
+        assert!(why.ends_with(" · проверено в 15:54"), "{why}");
+        assert!(why.starts_with("Не всё готово: "), "{why}");
+        // Вердикта нет (ещё не считали) — час не выдумывается.
+        assert!(!reason(&up, "local", &ready, None, None).unwrap().contains("проверено"));
+        // Отказ и замок час не получают: они про «прямо сейчас».
+        let bind = State::Failed("порт 7771 занят процессом 1234".into());
+        assert_eq!(reason(&bind, "local", &ready, None, Some("15:54")).as_deref(), Some("порт 7771 занят процессом 1234"));
+        let gate = reason(&State::Off, "local", &ready, Some("не задан пользователь базы"), Some("15:54")).unwrap();
+        assert_eq!(gate, "Включать нечего: не задан пользователь базы");
     }
 
     #[test]

@@ -12,6 +12,32 @@ use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{oneshot, watch};
 
+/// Параметры с номером поколения: `set` меняет оба одним захватом мьютекса,
+/// так что `get` видит либо целиком старое, либо целиком новое — никогда
+/// смесь полей одной конфигурации с полями другой. `get`/`set` только
+/// клонируют и сразу отпускают мьютекс — лока через `await` здесь нет и
+/// быть не должно (см. `bridge::pipe_jsonrpc`, главный читатель).
+#[derive(Clone)]
+pub struct Live(Arc<Mutex<(u64, Cfg)>>);
+
+impl Live {
+    pub fn new(cfg: Cfg) -> Live {
+        Live(Arc::new(Mutex::new((0, cfg))))
+    }
+
+    /// Поколение и снимок параметров одним захватом — пара всегда согласована.
+    pub fn get(&self) -> (u64, Cfg) {
+        let g = self.0.lock().unwrap();
+        (g.0, g.1.clone())
+    }
+
+    pub fn set(&self, cfg: Cfg) {
+        let mut g = self.0.lock().unwrap();
+        g.0 = g.0.wrapping_add(1);
+        g.1 = cfg;
+    }
+}
+
 /// Что с туннелем. Переходы — по событиям `tunnel::run` (и только по ним:
 /// предупреждения моста состояние не меняют) и по его завершению.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,8 +110,10 @@ pub struct Session {
     /// «Сохранить» в локальном режиме (`gui::save_host`) меняет параметры
     /// через неё, не поднимая новый сеанс — слушатели и уже принятые
     /// соединения это не трогает, следующий же вызов агента просто уходит в
-    /// новую базу (спека «Смена проекта/базы… незаметна для Zed»).
-    cfg: Arc<Mutex<Cfg>>,
+    /// новую базу (спека «Смена проекта/базы… незаметна для Zed»). Мост сам
+    /// перечитывает её на каждый запрос и, если ребёнок уже запущен не на
+    /// тех параметрах, перезапускает его — см. `bridge::pipe_jsonrpc`.
+    cfg: Live,
 }
 
 impl Session {
@@ -111,13 +139,14 @@ impl Session {
         }
     }
 
-    /// Подменить параметры, которые `Serve::dispatch` читает на каждое новое
-    /// соединение — без перезапуска сеанса. В туннельном режиме не зовётся
+    /// Подменить параметры, которые мост перечитывает на каждый запрос —
+    /// без перезапуска сеанса. Уже идущий у ребёнка вызов доигрывает со
+    /// старыми; следующий застанет мост свободным и пересоздаст ребёнка на
+    /// новых (см. `bridge::pipe_jsonrpc`). В туннельном режиме не зовётся
     /// (там порты живут внутри SSH и сеанс всё равно перезапускают целиком),
-    /// но и там это не повредит: следующее принятое соединение просто
-    /// возьмёт новые параметры.
+    /// но и там это не повредит.
     pub fn update_cfg(&self, cfg: Cfg) {
-        *self.cfg.lock().unwrap() = cfg;
+        self.cfg.set(cfg);
     }
 }
 
@@ -142,9 +171,9 @@ pub fn start_with_enabled(cfg: Cfg, kit: Kit, log: Sink, enabled: Arc<AtomicBool
     let (done_tx, done_rx) = oneshot::channel();
     // Общая ячейка параметров: заведена здесь (не внутри `Serve::new`), чтобы
     // и поток сеанса, и вызывающий (через `Session::update_cfg`) держали один
-    // и тот же `Arc` — иначе подмена снаружи не дошла бы до того `Serve`,
+    // и тот же `Live` — иначе подмена снаружи не дошла бы до того `Serve`,
     // что реально обслуживает соединения.
-    let shared_cfg = Arc::new(Mutex::new(cfg.clone()));
+    let shared_cfg = Live::new(cfg.clone());
     let session_cfg = shared_cfg.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -195,15 +224,14 @@ pub fn start_with_enabled(cfg: Cfg, kit: Kit, log: Sink, enabled: Arc<AtomicBool
 /// через один и тот же `dispatch`.
 pub struct Serve {
     /// Общая ячейка: «Сохранить» (`Session::update_cfg`) подменяет её на
-    /// лету, и `dispatch` ниже берёт для каждого нового соединения свежий
-    /// снимок — слушатели от этого не трогаются (см. заголовок сессии).
-    cfg: Arc<Mutex<Cfg>>,
+    /// лету, и мост (`bridge::pipe_jsonrpc`) перечитывает её на каждый
+    /// запрос — не только при приёме соединения (см. заголовок сессии).
+    cfg: Live,
     kit: Kit,
     log: Sink,
     ports: Ports,
     web_port: u16,
     tools_dir: std::path::PathBuf,
-    project: Arc<crate::project::Project>,
     enabled: Arc<AtomicBool>,
 }
 
@@ -214,53 +242,56 @@ impl Serve {
     /// неподменяемы (своя ячейка на один раз) — для этого у вызывающего,
     /// которому нужна подмена на ходу, есть `shared` ниже.
     pub fn new(cfg: &Cfg, kit: &Kit, log: Sink, ports: Ports, enabled: Arc<AtomicBool>) -> Serve {
-        Serve::shared(Arc::new(Mutex::new(cfg.clone())), cfg, kit, log, ports, enabled)
+        Serve::shared(Live::new(cfg.clone()), cfg, kit, log, ports, enabled)
     }
 
     /// Как `new`, но с уже заведённой снаружи общей ячейкой `cfg` — чтобы
-    /// `start_with_enabled` мог отдать тот же `Arc` и в `Session`
+    /// `start_with_enabled` мог отдать тот же `Live` и в `Session`
     /// (`update_cfg` подменяет её, не трогая `Serve`). `cfg_now` — разовое
     /// чтение того, что не должно меняться на ходу одного сеанса (порт
-    /// веб-клиента, каталог проекта): смена режима/портов и так перезапускает
-    /// сеанс целиком.
-    fn shared(cfg: Arc<Mutex<Cfg>>, cfg_now: &Cfg, kit: &Kit, log: Sink, ports: Ports, enabled: Arc<AtomicBool>) -> Serve {
+    /// веб-клиента): смена режима/портов и так перезапускает сеанс целиком.
+    fn shared(cfg: Live, cfg_now: &Cfg, kit: &Kit, log: Sink, ports: Ports, enabled: Arc<AtomicBool>) -> Serve {
         let tools_dir = crate::ops_host::tools_dir();
-        let project = Arc::new(crate::project::Project::from_cfg(cfg_now, &tools_dir));
-        Serve { cfg, kit: kit.clone(), log, ports, web_port: cfg_now.web_port(), tools_dir, project, enabled }
+        Serve { cfg, kit: kit.clone(), log, ports, web_port: cfg_now.web_port(), tools_dir, enabled }
     }
 
     /// Разобрать одно принятое соединение: порт решает, какой процесс за ним
     /// стоит. Неизвестный порт — `None`, ничего не запускается и `stream`
-    /// просто закрывается, когда функция вернётся. Параметры читаются заново
-    /// на каждый вызов (а не однократно в `new`/`shared`) — это и даёт
-    /// «Сохранить» менять базу без перезапуска слушателей.
+    /// просто закрывается, когда функция вернётся. Строка подключения,
+    /// пользователь базы и каталог проекта мост берёт не отсюда (однократно
+    /// на соединение), а на каждый запрос внутри себя (`rules.live`) — Zed
+    /// держит это соединение весь сеанс и сам не переподключается, так что
+    /// однократного чтения здесь было бы недостаточно (см. `bridge::pipe_jsonrpc`).
     pub fn dispatch<S>(&self, port: u16, stream: S) -> Option<tokio::task::JoinHandle<()>>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let cfg = self.cfg.lock().unwrap().clone();
         if port == self.ports.vrunner {
-            let cmd = bridge::vrunner_command(&cfg, &self.tools_dir);
-            let rules = bridge::Rules::for_vrunner(
-                cfg.host.tools.clone(),
-                self.project.clone(),
-                Arc::new(bridge::configurator_count),
-                bridge::connection_args(&cfg),
-                self.enabled.clone(),
-            );
+            let (_, cfg0) = self.cfg.get();
+            let tools_dir = self.tools_dir.clone();
+            let cmd0 = bridge::vrunner_command(&cfg0, &tools_dir);
+            let rebuild: Arc<dyn Fn(&Cfg) -> tokio::process::Command + Send + Sync> = {
+                let tools_dir = tools_dir.clone();
+                Arc::new(move |cfg: &Cfg| bridge::vrunner_command(cfg, &tools_dir))
+            };
+            let rules = bridge::Rules::for_vrunner(self.cfg.clone(), tools_dir, rebuild, Arc::new(bridge::configurator_count), self.enabled.clone());
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, err| {
                 if code != 0 {
                     log_exit(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
                 }
             })))
         } else if port == self.ports.mcp {
-            let cmd = bridge::mcp_command(&cfg, &self.kit);
-            let rules = bridge::Rules::for_mcp(self.enabled.clone());
+            let (_, cfg0) = self.cfg.get();
+            let kit = self.kit.clone();
+            let cmd0 = bridge::mcp_command(&cfg0, &kit);
+            let mut rules = bridge::Rules::for_mcp(self.enabled.clone());
+            rules.live = self.cfg.clone();
+            rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command(cfg, &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd, rules, log_journal, move |code, err| {
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, err| {
                 if code != 0 {
                     log_exit(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
                 }
@@ -312,6 +343,36 @@ mod tests {
         // Отказ — сама причина, без слова «подключён»: в локальном режиме
         // связи со средой нет, есть только слушатели на петле.
         assert_eq!(State::Failed("порт занят".into()).label("local"), "порт занят");
+    }
+
+    /// Главная опасность 6B: вызов, получивший строку подключения одной базы
+    /// и каталог проекта другой. `Live::get` обязана отдавать поколение и
+    /// `Cfg` одним захватом мьютекса — никогда вперемешку, сколько бы
+    /// `set` ни звал параллельный поток.
+    #[test]
+    fn live_cfg_never_hands_out_a_mix_of_two_configurations() {
+        let mut a = Cfg::default();
+        a.host.base_path = "C:\\Bases\\A".into();
+        a.host.db_user = "UserA".into();
+        let mut b = Cfg::default();
+        b.host.base_path = "C:\\Bases\\B".into();
+        b.host.db_user = "UserB".into();
+        let live = Live::new(a.clone());
+        let writer_live = live.clone();
+        let (wa, wb) = (a.clone(), b.clone());
+        let writer = std::thread::spawn(move || {
+            for _ in 0..2000 {
+                writer_live.set(wb.clone());
+                writer_live.set(wa.clone());
+            }
+        });
+        for _ in 0..20_000 {
+            let (_, cfg) = live.get();
+            let whole_a = cfg.host.base_path == a.host.base_path && cfg.host.db_user == a.host.db_user;
+            let whole_b = cfg.host.base_path == b.host.base_path && cfg.host.db_user == b.host.db_user;
+            assert!(whole_a || whole_b, "смешались половины двух конфигураций: {:?}", cfg.host);
+        }
+        writer.join().unwrap();
     }
 
     #[test]

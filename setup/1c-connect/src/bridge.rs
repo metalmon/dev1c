@@ -58,26 +58,36 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     c
 }
 
+use crate::cfg::Cfg;
 use crate::jsonrpc::{self, Frame, Framer, Route};
+use crate::session::Live;
 use common::{Event, Sink};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
-/// Правила моста на одно соединение.
+/// Правила моста на одно соединение. Строка подключения, её пользователь и
+/// каталог проекта здесь не лежат готовыми — они читаются из `live` на
+/// каждый вызов (см. `handle_request`), а не однократно при подключении:
+/// Zed держит это соединение весь сеанс и сам не переподключается, так что
+/// однократного чтения было бы недостаточно, чтобы «Сохранить» подействовало.
 pub struct Rules {
-    pub allowed: Vec<String>,
-    pub project: Arc<crate::project::Project>,
+    pub live: Live,
+    /// Как пересобрать команду ребёнка на свежих параметрах, когда `live`
+    /// сменился под работающим соединением. `None` — рестарт недоступен
+    /// (один ребёнок на всю жизнь соединения, как было раньше): так у
+    /// вызывающих, которым смена параметров на ходу не нужна (`listen.rs`,
+    /// тесты), — ничего не меняется.
+    pub rebuild: Option<Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>>,
+    /// Каталог инструментов на машине — только для своих инструментов
+    /// (`project::Project::from_cfg`).
+    pub tools_dir: std::path::PathBuf,
     pub configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
-    /// Аргументы подключения, подставляемые в каждый вызов инструмента vrunner
-    /// (см. `connection_args`). У порта mcp-1c пустые: туда подставлять
-    /// нечего, база и так передана процессу в командной строке.
-    pub defaults: Value,
     /// Переключатель «MCP включены» окна — общий на оба порта одного сеанса.
     /// Выключен — каждый вызов инструмента получает отказ, не доходя до
     /// ребёнка; `initialize`, `tools/list`, уведомления и отмены идут как
@@ -93,38 +103,30 @@ impl Rules {
     /// Мост 778N: `vrunner-mcp`. Белый список из `[host] tools`, свои
     /// инструменты подмешиваются в `tools/list` и исполняются мостом.
     pub fn for_vrunner(
-        allowed: Vec<String>,
-        project: Arc<crate::project::Project>,
+        live: Live,
+        tools_dir: std::path::PathBuf,
+        rebuild: Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>,
         configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
-        defaults: Value,
         enabled: Arc<AtomicBool>,
     ) -> Rules {
-        Rules { allowed, project, configurator_running, defaults, enabled, inject: true }
+        Rules { live, rebuild: Some(rebuild), tools_dir, configurator_running, enabled, inject: true }
     }
 
     /// Мост 777N: `mcp-1c`. Голый проброс — ни белого списка инструментов,
-    /// ни наших, ни аргументов подключения.
+    /// ни наших, ни аргументов подключения. Без рестарта и без «живых»
+    /// параметров по умолчанию — вызывающий, которому они нужны (`Serve::dispatch`),
+    /// подставляет свои `live`/`rebuild` в уже созданное значение, поля для
+    /// этого публичные.
     pub fn for_mcp(enabled: Arc<AtomicBool>) -> Rules {
-        Rules {
-            allowed: Vec::new(),
-            project: Arc::new(crate::project::Project {
-                dir: std::path::PathBuf::new(),
-                git: std::path::PathBuf::new(),
-                branch: String::new(),
-                remote: String::new(),
-                login: String::new(),
-            }),
-            configurator_running: Arc::new(|| 0),
-            defaults: Value::Null,
-            enabled,
-            inject: false,
-        }
+        Rules { live: Live::new(crate::cfg::Cfg::default()), rebuild: None, tools_dir: std::path::PathBuf::new(), configurator_running: Arc::new(|| 0), enabled, inject: false }
     }
 }
 
 /// Подключение к базе и её пользователь как аргументы инструмента vrunner:
 /// `vrunner-mcp` читает их отсюда, а не из переменных окружения. Пустой
 /// пароль не передаётся — иначе платформа получит `/P` с пустым значением.
+/// Зовётся на каждый подходящий вызов (см. `handle_request`), а не один раз
+/// на соединение — иначе смена базы не дошла бы до уже открытого у Zed порта.
 pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
     let mut a = serde_json::json!({"ibconnection": crate::ops_host::ib_switch(&cfg.host.base_path), "db-user": cfg.host.db_user});
     if !cfg.host.db_password.is_empty() {
@@ -154,7 +156,11 @@ fn count_platform(csv: &str) -> usize {
     csv.lines().filter(|l| l.starts_with("\"1cv8.exe\"") || l.starts_with("\"1cv8c.exe\"")).count()
 }
 
-type Pending = Arc<Mutex<HashMap<String, Value>>>;
+/// id → (id, список допущенных инструментов, действовавший на момент
+/// запроса) — ответ на `tools/list` обязан фильтроваться тем же списком,
+/// каким был отфильтрован сам запрос, даже если параметры успели смениться
+/// до того, как ребёнок ответил.
+type Pending = Arc<Mutex<HashMap<String, (Value, Vec<String>)>>>;
 type Running = Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>;
 
 fn key(id: &Value) -> String {
@@ -166,33 +172,30 @@ fn key(id: &Value) -> String {
 /// и наши инструменты перехватываются; у 777N (`Rules::for_mcp`) — голый
 /// проброс. Переключатель «MCP» выключен — любой `tools/call` получает
 /// отказ, не доходя до ребёнка. В канал пишет один писатель — за `out_tx`.
-pub async fn pipe_jsonrpc<S>(stream: S, mut cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, String))
+///
+/// Zed держит одно соединение на весь сеанс и сам никогда не переподключается
+/// — поэтому строка подключения, её пользователь и каталог проекта читаются
+/// не один раз при приёме соединения, а на каждый запрос (`rules.live`, см.
+/// `handle_request`). Для аргументов вызова и своих инструментов этого
+/// достаточно; но окружение и рабочий каталог самого ребёнка задаются при
+/// его запуске и не переживают правку на лету. Если у `rules` есть
+/// `rebuild` и параметры сменились под работающим соединением, функция сама
+/// завершает текущего ребёнка и поднимает нового по `rebuild` — но только на
+/// следующем запросе, застающем её свободной (`in_flight == 0`); вызов, уже
+/// ушедший ребёнку, спокойно доигрывает со старыми параметрами. Без
+/// `rebuild` (`Rules::for_mcp` без доустройки) — один ребёнок на всю жизнь
+/// соединения, как и было.
+pub async fn pipe_jsonrpc<S>(stream: S, cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, String))
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000);
-    crate::job::group(&mut cmd);
-    let job = crate::job::Job::new();
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            on_exit(-1, format!("не удалось запустить: {e}"));
-            return;
-        }
-    };
-    if let Some(j) = &job {
-        j.assign(&child);
-    }
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
     let (mut sr, mut sw) = tokio::io::split(stream);
     // Bounded: a multi-megabyte report waits for the tunnel instead of piling
     // up in memory while it stalls.
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
     // Ответы ребёнка на tools/list, которых ещё ждут; ключ — id как JSON.
+    // Общие на всё соединение, не на одного ребёнка: к моменту рестарта они
+    // в любом случае пусты (см. `in_flight` ниже).
     let pending: Pending = Arc::default();
     let running: Running = Arc::default();
     let rules = Arc::new(rules);
@@ -200,6 +203,11 @@ where
     // выключены» за всё соединение: иначе баннер или keepalive, повторяющийся
     // на каждой строке, залил бы журнал человеку одинаковыми записями.
     let mcp_off_warned = Arc::new(AtomicBool::new(false));
+    // Сколько запросов уже ушло текущему ребёнку и не получило ответа — пока
+    // не ноль, смена параметров его не трогает: середина чужого вызова
+    // никому не достаётся, ни старому, ни новому.
+    let in_flight = Arc::new(AtomicU64::new(0));
+    let who = if rules.inject { "vrunner-mcp" } else { "mcp-1c" };
 
     let writer = tokio::spawn(async move {
         while let Some(b) = out_rx.recv().await {
@@ -210,82 +218,176 @@ where
         let _ = sw.shutdown().await;
     });
 
-    // Агент → ребёнок.
-    let to_child = {
-        let (out, pending, running, rules, log, mcp_off_warned) =
-            (out_tx.clone(), pending.clone(), running.clone(), rules.clone(), log.clone(), mcp_off_warned.clone());
-        tokio::spawn(async move {
-            let mut f = Framer::new();
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = match sr.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                for fr in f.push(&buf[..n]) {
-                    if handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log, &mcp_off_warned).await.is_err() {
-                        return;
+    /// Чем закончился разговор с одним конкретным ребёнком.
+    enum EpochEnd {
+        /// Канал к агенту закрылся.
+        AgentEof,
+        /// Не удалось записать ребёнку (его stdin закрылся) — тот же итог.
+        WriteFailed,
+        /// Ребёнок вышел сам.
+        ChildExited(std::io::Result<std::process::ExitStatus>),
+        /// Параметры сменились, и ни один вызов не висит без ответа: поднять
+        /// нового ребёнка на свежих параметрах, не трогая само соединение.
+        Restart,
+    }
+
+    let mut f = Framer::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    // Строки, уже вынутые из потока агента, но ещё не доставленные ребёнку:
+    // при рестарте остаются здесь и уходят уже новому, в своём порядке.
+    let mut pending_frames: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
+    let (mut gen, mut cfg) = rules.live.get();
+    // Первый ребёнок — тем же `cmd`, что передал вызывающий; следующие (если
+    // дело дойдёт до рестарта) — свежей сборкой по `rules.rebuild`.
+    let mut next_cmd = Some(cmd);
+
+    let (code, tail) = loop {
+        let mut cmd = match next_cmd.take() {
+            Some(c) => c,
+            None => match &rules.rebuild {
+                Some(rebuild) => rebuild(&cfg),
+                // Рестарт только и всегда гейтится наличием `rebuild` (см.
+                // ниже) — сюда попасть без него нельзя; но падать насмерть
+                // вместо непонятного паникующего unwrap лучше честной ошибкой.
+                None => break (-1, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
+            },
+        };
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        crate::job::group(&mut cmd);
+        let job = crate::job::Job::new();
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => break (-1, format!("не удалось запустить: {e}")),
+        };
+        if let Some(j) = &job {
+            j.assign(&child);
+        }
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+
+        // Ребёнок → агент: своя пара задач на каждого ребёнка (стдин/стдаут
+        // предыдущего уже не существуют), но пишут в тот же `out_tx`.
+        let from_child = {
+            let (out, pending, log, in_flight, inject) = (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject);
+            tokio::spawn(async move {
+                let mut f = Framer::new();
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = match stdout.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    for fr in f.push(&buf[..n]) {
+                        warn_on_session_limit(&fr, &log);
+                        if let Frame::Line(l) = &fr {
+                            if jsonrpc::is_response_with_id(l).is_some() {
+                                dec_in_flight(&in_flight);
+                            }
+                        }
+                        if out.send(rewrite_reply(fr, inject, &pending)).await.is_err() {
+                            return;
+                        }
                     }
                 }
+                if let Some(fr) = f.finish() {
+                    warn_on_session_limit(&fr, &log);
+                    if let Frame::Line(l) = &fr {
+                        if jsonrpc::is_response_with_id(l).is_some() {
+                            dec_in_flight(&in_flight);
+                        }
+                    }
+                    let _ = out.send(rewrite_reply(fr, inject, &pending)).await;
+                }
+            })
+        };
+        let err_tail = tokio::spawn(async move {
+            let mut s = String::new();
+            let _ = stderr.read_to_string(&mut s).await;
+            let lines: Vec<&str> = s.lines().collect();
+            lines[lines.len().saturating_sub(5)..].join("\n")
+        });
+
+        // Агент → ребёнок: читается прямо здесь (не в отдельной задаче),
+        // чтобы `sr` можно было забрать назад и отдать следующему ребёнку
+        // при рестарте — то же самое соединение, другой процесс позади него.
+        let end = loop {
+            if !pending_frames.is_empty() {
+                // Перед каждой строкой, а не только между партиями из
+                // одного `read`: иначе первый же запрос после смены
+                // параметров ушёл бы ещё старому ребёнку, и рестарт
+                // откладывался бы до запроса, который его застанет праздным.
+                // Без `rebuild` рестарта вообще не бывает — один ребёнок на
+                // всю жизнь соединения, как у `Rules::for_mcp` без доустройки.
+                if rules.rebuild.is_some() && in_flight.load(Ordering::Relaxed) == 0 {
+                    let (now_gen, now_cfg) = rules.live.get();
+                    if now_gen != gen {
+                        gen = now_gen;
+                        cfg = now_cfg;
+                        break EpochEnd::Restart;
+                    }
+                }
+                let fr = pending_frames.pop_front().unwrap();
+                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight).await.is_err() {
+                    break EpochEnd::WriteFailed;
+                }
+                continue;
             }
-            if let Some(fr) = f.finish() {
-                let _ = handle_request(fr, &rules, &out, &pending, &running, &mut stdin, &log, &mcp_off_warned).await;
+            tokio::select! {
+                n = sr.read(&mut buf) => {
+                    match n {
+                        Ok(0) | Err(_) => break EpochEnd::AgentEof,
+                        Ok(n) => pending_frames.extend(f.push(&buf[..n])),
+                    }
+                }
+                status = child.wait() => break EpochEnd::ChildExited(status),
             }
+        };
+
+        // Канал закрылся (или рестарт), а ребёнок не вышел сам: несколько
+        // секунд на выход, затем принудительно — иначе `oscript.exe` с
+        // Конфигуратором под ним живут до перезапуска, а следующий вызов
+        // видит «закройте Конфигуратор».
+        let grace_kill = |mut stdin: tokio::process::ChildStdin, mut child: tokio::process::Child| async move {
             let _ = stdin.shutdown().await;
-        })
+            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+            }
+        };
+        match end {
+            EpochEnd::ChildExited(status) => {
+                let _ = from_child.await;
+                let tail = err_tail.await.unwrap_or_default();
+                drop(job);
+                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), tail);
+            }
+            EpochEnd::AgentEof | EpochEnd::WriteFailed => {
+                let status = grace_kill(stdin, child).await;
+                let _ = from_child.await;
+                let tail = err_tail.await.unwrap_or_default();
+                drop(job);
+                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), tail);
+            }
+            EpochEnd::Restart => {
+                let _ = grace_kill(stdin, child).await;
+                let _ = from_child.await;
+                let _ = err_tail.await;
+                drop(job);
+                log(Event::Say(format!("{who}: параметры базы сменились, следующий вызов идёт в {}", cfg.host.base_path)));
+                continue;
+            }
+        }
     };
 
-    // Ребёнок → агент.
-    let from_child = {
-        let (out, pending, rules, log) = (out_tx.clone(), pending.clone(), rules.clone(), log.clone());
-        tokio::spawn(async move {
-            let mut f = Framer::new();
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = match stdout.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                for fr in f.push(&buf[..n]) {
-                    warn_on_session_limit(&fr, &log);
-                    if out.send(rewrite_reply(fr, &rules.allowed, rules.inject, &pending)).await.is_err() {
-                        return;
-                    }
-                }
-            }
-            if let Some(fr) = f.finish() {
-                warn_on_session_limit(&fr, &log);
-                let _ = out.send(rewrite_reply(fr, &rules.allowed, rules.inject, &pending)).await;
-            }
-        })
-    };
-    let err_tail = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        let lines: Vec<&str> = s.lines().collect();
-        lines[lines.len().saturating_sub(5)..].join("\n")
-    });
-    // Канал закрылся, а ребёнок не вышел по EOF: несколько секунд на выход,
-    // затем принудительно — иначе `oscript.exe` с Конфигуратором под ним
-    // живут до перезапуска, а следующий вызов видит «закройте Конфигуратор».
-    let mut to_child = to_child;
-    let status = tokio::select! {
-        s = child.wait() => {
-            to_child.abort();
-            s
-        }
-        _ = &mut to_child => match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = child.start_kill();
-                child.wait().await
-            }
-        },
-    };
-    let _ = from_child.await;
     // Ребёнок ушёл, не ответив на tools/list: наши инструменты агент получает
     // всё равно — но только у моста, который их вообще подмешивает.
-    let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, id)| id).collect();
+    let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, (id, _))| id).collect();
     if rules.inject {
         for id in unanswered {
             let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
@@ -298,9 +400,7 @@ where
     }
     drop(out_tx);
     let _ = writer.await;
-    drop(job);
-    let tail = err_tail.await.unwrap_or_default();
-    on_exit(status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), common::docker::redact_text(&tail));
+    on_exit(code, common::docker::redact_text(&tail));
 }
 
 /// Одна строка от агента: кому она. `Err` — ребёнок закрыл stdin.
@@ -313,6 +413,7 @@ async fn handle_request(
     stdin: &mut tokio::process::ChildStdin,
     log: &Sink,
     mcp_off_warned: &AtomicBool,
+    in_flight: &AtomicU64,
 ) -> Result<(), ()> {
     // A line over the Framer's cap is never passed on, on either port: a
     // line the bridge did not buffer whole is not one it can gate or route.
@@ -334,6 +435,11 @@ async fn handle_request(
         log(Event::Warn("вызов инструмента без идентификатора отброшен".into()));
         return Ok(());
     }
+    // Несёт ли исходная строка верхнеключевой `id`: если дойдёт до ребёнка,
+    // тот обязан ответить на неё ровно один раз — на этом считает
+    // `in_flight` (см. заголовок `pipe_jsonrpc`), чтобы смена параметров не
+    // ударила по вызову, который уже в работе.
+    let reply_expected = expects_reply(&line);
     let off = !rules.enabled.load(Ordering::Relaxed);
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
@@ -344,13 +450,13 @@ async fn handle_request(
         if !off {
             let mut raw = line;
             raw.push(b'\n');
-            return forward(stdin, &raw).await;
+            return forward_counted(stdin, &raw, in_flight, reply_expected).await;
         }
         return match jsonrpc::mcp_gate_while_off(&line) {
             jsonrpc::McpOffGate::Forward => {
                 let mut raw = line;
                 raw.push(b'\n');
-                forward(stdin, &raw).await
+                forward_counted(stdin, &raw, in_flight, reply_expected).await
             }
             jsonrpc::McpOffGate::Refuse(id) => {
                 let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
@@ -374,21 +480,27 @@ async fn handle_request(
         };
     }
     // 778N (vrunner-mcp): полный разбор — белый список, наши инструменты.
-    // Переключатель — тем же механизмом, что обычный белый список: пустой
-    // список на время разбора строки проводит любой tools/call через
-    // Route::Disabled/Route::OurCall, и обе ветки ниже тут же отвечают
-    // отказом по переключателю вместо обычного текста.
+    // Свежий снимок параметров на этот самый вызов — не раньше (иначе
+    // «Сохранить» между вызовами осталось бы незаметным) и не позже (иначе
+    // один вызов мог бы собрать строку подключения из одной конфигурации, а
+    // каталог проекта — из другой). Переключатель — тем же механизмом, что
+    // обычный белый список: пустой список на время разбора строки проводит
+    // любой tools/call через Route::Disabled/Route::OurCall, и обе ветки
+    // ниже тут же отвечают отказом по переключателю вместо обычного текста.
+    let (_, cfg) = rules.live.get();
     let empty: Vec<String> = Vec::new();
-    let allowed: &[String] = if off { &empty } else { &rules.allowed };
-    match jsonrpc::route_request_with(&line, allowed, &rules.defaults) {
+    let tools = cfg.host.tools.clone();
+    let allowed: &[String] = if off { &empty } else { &tools };
+    let defaults = connection_args(&cfg);
+    match jsonrpc::route_request_with(&line, allowed, &defaults) {
         Route::Drop => Ok(()),
         Route::Reject { id, code, why } => {
             let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
             Ok(())
         }
         Route::ListRequest { id, line } => {
-            pending.lock().unwrap().insert(key(&id), id);
-            forward(stdin, &line).await
+            pending.lock().unwrap().insert(key(&id), (id, tools.clone()));
+            forward_counted(stdin, &line, in_flight, reply_expected).await
         }
         Route::Disabled { id, tool } => {
             let text = if off { DISABLED_TEXT.to_string() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
@@ -407,7 +519,7 @@ async fn handle_request(
                     .await;
                 Ok(())
             } else {
-                forward(stdin, &line).await
+                forward_counted(stdin, &line, in_flight, reply_expected).await
             }
         }
         Route::OurCall { id, tool, args } => {
@@ -415,7 +527,11 @@ async fn handle_request(
                 let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
                 return Ok(());
             }
-            let (out, project) = (out.clone(), rules.project.clone());
+            // Свежий `Project` из того же снимка `cfg`, что и выше — не из
+            // ячейки, замороженной при подключении: каталог и ветка идут за
+            // «Сохранить», как и строка подключения.
+            let project = Arc::new(crate::project::Project::from_cfg(&cfg, &rules.tools_dir));
+            let out = out.clone();
             let k = key(&id);
             let h = tokio::spawn(async move {
                 let (text, is_error) = tokio::task::spawn_blocking(move || crate::project::call(&project, &tool, &args))
@@ -438,10 +554,10 @@ async fn handle_request(
             if ours {
                 Ok(())
             } else {
-                forward(stdin, &line).await
+                forward_counted(stdin, &line, in_flight, reply_expected).await
             }
         }
-        Route::Forward(line) => forward(stdin, &line).await,
+        Route::Forward(line) => forward_counted(stdin, &line, in_flight, reply_expected).await,
     }
 }
 
@@ -450,16 +566,45 @@ async fn forward(stdin: &mut tokio::process::ChildStdin, line: &[u8]) -> Result<
     stdin.write_all(line).await.map_err(|_| ())
 }
 
+/// Как `forward`, но считает «отправлено ребёнку — ждёт ответа» (см.
+/// `in_flight` в `pipe_jsonrpc`): пока счётчик не ноль, менять ребёнка под
+/// разговором нельзя, только когда он сам опустеет на следующем запросе.
+async fn forward_counted(stdin: &mut tokio::process::ChildStdin, line: &[u8], in_flight: &AtomicU64, reply_expected: bool) -> Result<(), ()> {
+    if reply_expected {
+        in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+    forward(stdin, line).await
+}
+
+/// Несёт ли строка от агента верхнеключевой `id` — грубая проверка (не
+/// через `key_ci`, как `route_request_with`): для подсчёта висящих вызовов
+/// точность разбора не нужна, а дубль ключа здесь не повод отказывать.
+fn expects_reply(line: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(line).ok().and_then(|v| v.as_object().map(|o| o.contains_key("id"))).unwrap_or(false)
+}
+
+/// Снять со счётчика висящих вызовов без риска уйти в минус: ответ, пришедший
+/// без пары (ребёнок и сам может прислать лишнее), не должен навечно
+/// заблокировать рестарт.
+fn dec_in_flight(in_flight: &AtomicU64) {
+    let _ = in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+}
+
 /// Одна строка от ребёнка: ответ на tools/list переписывается, но только у
-/// моста, который подмешивает свои инструменты; остальное как есть.
-fn rewrite_reply(fr: Frame, allowed: &[String], inject: bool, pending: &Pending) -> Vec<u8> {
+/// моста, который подмешивает свои инструменты; остальное как есть. Список
+/// допущенных инструментов для фильтрации берётся не из текущих параметров
+/// (к моменту ответа они могли уже смениться), а из того, что действовало
+/// на момент самого запроса — он и лежит в `pending` рядом с `id`.
+fn rewrite_reply(fr: Frame, inject: bool, pending: &Pending) -> Vec<u8> {
     match fr {
         Frame::Raw(b) => b,
         Frame::Line(mut l) => {
-            let is_pending = jsonrpc::is_response_with_id(&l).map_or(false, |id| pending.lock().unwrap().remove(&key(&id)).is_some());
-            if inject && is_pending {
-                if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed) {
-                    return out;
+            let entry = jsonrpc::is_response_with_id(&l).and_then(|id| pending.lock().unwrap().remove(&key(&id)));
+            if inject {
+                if let Some((_, allowed)) = &entry {
+                    if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed) {
+                        return out;
+                    }
                 }
             }
             l.push(b'\n');
@@ -543,6 +688,15 @@ mod tests {
             use std::io::{BufRead, Write};
             let stdin = std::io::stdin();
             let mut out = std::io::stdout();
+            // Доказательство того, НА КАКИХ параметрах этого ребёнка подняли:
+            // `make_cmd` в тесте кладёт их в переменную окружения, ребёнок
+            // печатает её значение один раз при старте, не дожидаясь строк —
+            // без этого тест не отличил бы «тот же процесс ответил снова» от
+            // «подняли нового на свежих параметрах».
+            if let Ok(m) = std::env::var("BRIDGE_MARKER") {
+                writeln!(out, "MARKER {m}").unwrap();
+                out.flush().unwrap();
+            }
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
                 // A test wants proof of exactly what the child did or did not
@@ -607,20 +761,30 @@ mod tests {
         }
     }
 
+    /// `Cfg` для тестов: белый список и каталог проекта (временный, не
+    /// git-репозиторий — хватает для путей, где `project_status` обязан
+    /// просто ответить ошибкой быстро, без настоящего git).
+    fn test_cfg(allowed: &[&str]) -> Cfg {
+        let mut cfg = Cfg::default();
+        cfg.host.tools = allowed.iter().map(|s| s.to_string()).collect();
+        cfg.host.project = std::env::temp_dir().to_string_lossy().into_owned();
+        cfg
+    }
+
     fn rules(allowed: &[&str], running: usize) -> Rules {
         rules_with(allowed, running, Arc::new(AtomicBool::new(true)))
     }
 
     /// Как `rules`, но с заданным переключателем — чтобы тест мог выключать
-    /// и включать MCP прямо посреди разговора.
+    /// и включать MCP прямо посреди разговора. `rebuild` — заглушка: эти
+    /// тесты не меняют `live` после создания, так что рестарт никогда не
+    /// срабатывает и пересборщик не зовётся.
     fn rules_with(allowed: &[&str], running: usize, enabled: Arc<AtomicBool>) -> Rules {
-        let dir = std::env::temp_dir();
-        let project = crate::project::Project { dir, git: "git".into(), branch: "dev1".into(), remote: "x".into(), login: "dev1".into() };
         Rules::for_vrunner(
-            allowed.iter().map(|s| s.to_string()).collect(),
-            std::sync::Arc::new(project),
+            Live::new(test_cfg(allowed)),
+            std::path::PathBuf::new(),
+            std::sync::Arc::new(|_: &Cfg| tokio::process::Command::new("rebuild-unused")),
             std::sync::Arc::new(move || running),
-            Value::Null,
             enabled,
         )
     }
@@ -862,9 +1026,15 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(false));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT", "1")), rules_with(&["cf_load"], 0, enabled.clone()), no_log(), move |code, err| {
-            let _ = tx.send((code, err));
-        }));
+        tokio::spawn(pipe_jsonrpc(
+            theirs,
+            child(("BRIDGE_SCRIPT", "1")),
+            rules_with(&["cf_load"], 0, enabled.clone()),
+            no_log(),
+            move |code, err| {
+                let _ = tx.send((code, err));
+            },
+        ));
         let (r, mut w) = tokio::io::split(ours);
         let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call).await.unwrap();
@@ -1046,6 +1216,113 @@ mod tests {
         // `redact_text` затирает значение после флага, разделённого пробелом,
         // то есть получается `--db-password …`, а не `--db-password=…`.
         assert!(!err.contains("hunter2") && err.contains("--db-password") && err.contains('…'), "{err}");
+    }
+
+    /// 6B, главный сценарий: Zed держит одно соединение на весь сеанс и сам
+    /// не переподключается. После «Сохранить» с новой базой второй вызов на
+    /// ТОМ ЖЕ соединении обязан попасть к ребёнку, поднятому уже на новых
+    /// параметрах, — не к старому, у которого они намертво зашиты при
+    /// запуске (строка подключения, пользователь, рабочий каталог).
+    #[tokio::test]
+    async fn config_change_restarts_the_child_with_fresh_values() {
+        let mut cfg_a = test_cfg(&["cf_load"]);
+        cfg_a.host.db_user = "UserA".into();
+        let live = Live::new(cfg_a.clone());
+        // `make_cmd` — ровно то, что делает настоящий `vrunner_command`: берёт
+        // параметры из `Cfg` на момент запуска ребёнка и зашивает их туда,
+        // откуда на лету их уже не поменять (здесь — переменная окружения,
+        // которую фальшивый ребёнок печатает один раз при старте).
+        let make_cmd = |cfg: &Cfg| {
+            let mut c = child(("BRIDGE_SCRIPT_RECORD", "1"));
+            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            c
+        };
+        let cmd0 = make_cmd(&cfg_a);
+        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let mut cfg_b = live.get().1;
+        cfg_b.host.db_user = "UserB".into();
+        live.set(cfg_b);
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        w.shutdown().await.unwrap();
+
+        let mut got = String::new();
+        r.read_to_string(&mut got).await.unwrap();
+        let markers: Vec<&str> = got.lines().filter(|l| l.starts_with("MARKER ")).collect();
+        assert_eq!(markers, ["MARKER UserA", "MARKER UserB"], "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах: {got}");
+    }
+
+    /// Не половина старой и половина новой конфигурации в одном вызове:
+    /// каждый ответ несёт строку подключения, пользователя и пароль из
+    /// одного и того же снимка `Cfg` — то, что подставляет мост в аргументы
+    /// вызова (`connection_args`), читается один раз на весь вызов.
+    #[tokio::test]
+    async fn config_change_never_mixes_old_and_new_into_one_calls_arguments() {
+        let mut cfg_a = test_cfg(&["cf_load"]);
+        cfg_a.host.base_path = "C:\\Bases\\A".into();
+        cfg_a.host.db_user = "UserA".into();
+        cfg_a.host.db_password = "pwA".into();
+        let mut cfg_b = test_cfg(&["cf_load"]);
+        cfg_b.host.base_path = "C:\\Bases\\B".into();
+        cfg_b.host.db_user = "UserB".into();
+        cfg_b.host.db_password = "pwB".into();
+        let live = Live::new(cfg_a.clone());
+        let make_cmd = |_: &Cfg| {
+            let mut c = child(("BRIDGE_SCRIPT", "1"));
+            c.env("BRIDGE_SCRIPT_ARGS", "1");
+            c
+        };
+        let cmd0 = make_cmd(&cfg_a);
+        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        live.set(cfg_b.clone());
+        w.write_all(call).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        w.shutdown().await.unwrap();
+
+        let mut got = String::new();
+        r.read_to_string(&mut got).await.unwrap();
+        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        assert_eq!(replies.len(), 2, "{got}");
+        let args_of = |reply: &Value| -> Value {
+            let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+            serde_json::from_str(text.split("args=").nth(1).unwrap()).unwrap()
+        };
+        let args1 = args_of(&replies[0]);
+        let args2 = args_of(&replies[1]);
+        let expected_a = connection_args(&cfg_a);
+        let expected_b = connection_args(&cfg_b);
+        assert_eq!(args1["ibconnection"], expected_a["ibconnection"]);
+        assert_eq!(args1["db-user"], expected_a["db-user"]);
+        assert_eq!(args1["db-pwd"], expected_a["db-pwd"]);
+        assert_eq!(args2["ibconnection"], expected_b["ibconnection"]);
+        assert_eq!(args2["db-user"], expected_b["db-user"]);
+        assert_eq!(args2["db-pwd"], expected_b["db-pwd"]);
+        // Ни строка подключения, ни пользователь одного снимка не просочились в ответ другого.
+        assert_ne!(args1["ibconnection"], args2["ibconnection"], "{got}");
+        assert_ne!(args1["db-user"], args2["db-user"], "{got}");
     }
 
     #[tokio::test]

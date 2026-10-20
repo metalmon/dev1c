@@ -113,7 +113,10 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readin
     // смысл ему не нужен.
     if local {
         if let (State::Up { .. }, Readiness::Warn(check)) = (link, ready) {
-            let title = format!("MCP включены, но агент базу не увидит — {}", gui::readiness_reason(check));
+            // Коротко: в карточке одна строка на 230 точек, и длинный заголовок
+            // обрезался на «но агент б…». Положение переключателя и так говорит,
+            // что MCP включены, поэтому заголовок отвечает на главный вопрос.
+            let title = format!("Агент базу не увидит: {}", gui::readiness_reason(check));
             return Card { dot: Dot::Warn, title, cancel: false };
         }
     }
@@ -1099,7 +1102,7 @@ mod tests {
         let ready = Readiness::Warn(fail);
         let c = card(None, &State::Up { since: now }, "local", &ready, now);
         assert_eq!(c.dot, Dot::Warn);
-        assert!(c.title.starts_with("MCP включены, но агент базу не увидит"), "{}", c.title);
+        assert!(c.title.starts_with("Агент базу не увидит:"), "{}", c.title);
         assert!(c.title.contains("инструменты комплекта") && c.title.contains("1c-connect install"), "{}", c.title);
         assert!(!c.title.contains("факт"), "{}", c.title);
     }

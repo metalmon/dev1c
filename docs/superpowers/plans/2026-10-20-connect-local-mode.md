@@ -683,6 +683,186 @@ git add Dockerfile.1c config/1c/stand.sh setup/1c-connect/src/ops_host.rs setup/
 git commit -m "Комплект в образе: один общий только для чтения, состояние у пользователя"
 ```
 
+---
+
+### Task 21: Один вердикт на карточку и «Проверить», расчёт молча
+
+**Files:**
+- Modify: `setup/1c-connect/src/verify.rs` (`readiness`, новый `facts_for_readiness`)
+- Modify: `setup/1c-connect/src/gui/mod.rs` (`run_readiness`, `Ev::Ready`, `Ev::Checks`, `Readiness`)
+- Test: inline в обоих файлах
+
+**Interfaces:**
+- Produces: `verify::readiness(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check>` — тот же набор, что `verify::run`, но без `ctx.progress(Phase::Check)` и без строк в журнале.
+- Produces: `verify::first_fail(checks: &[Check]) -> Option<Check>` — первый `!ok && !info`.
+- Produces: `Ev::Ready(u64, Option<Check>)` — поколение и вердикт; `Ui::ready_gen: u64`, `Ui::ready_pending: bool`.
+
+- [ ] **Шаг 1: падающие тесты.** `verify`: `readiness_has_the_same_facts_as_check` (имена фактов `readiness(&ctx, None)` равны именам `run(&ctx, None)`); `first_fail_skips_notes` (сведение между двумя провалами не выигрывает). `gui`: `a_finished_check_becomes_the_verdict` (`Ev::Checks` с провалом → `ui.ready` стал `Warn` с тем же `what`); `a_stale_generation_answer_is_dropped` (`Ev::Ready(1, …)` после `Ev::Ready(2, …)` не меняет `ui.ready`); `a_second_recompute_waits_for_the_first` (`run_readiness` при `ready_pending` не плодит поток, а помечает повтор).
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib`).
+- [ ] **Шаг 3: состав и молчание.** `verify::run` разбивается на сбор фактов и печать: сбор переезжает в `facts_for_readiness`, `run` остаётся обёрткой с `Phase::Check` и печатью, `readiness` зовёт сбор без фазы.
+- [ ] **Шаг 4: вердикт один.** `Ev::Checks` кладёт `first_fail` в `ui.ready`; `run_readiness` считает поколение и пропускает расчёт, если один уже идёт.
+- [ ] **Шаг 4а: сроки и события.** Каждому факту короткий срок (инструменты 15 с, сетевые 5 с), общий бюджет 20 с; не уложившийся факт — «не проверено за 20 с», не выдуманный провал. Инструмент пробы остаётся без сеанса «Предприятия» (`cache_show`). К событиям пересчёта добавляется показ окна, и там же перечитывается toml — правку файла руками иначе никто не заметит.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: коммит.** `git commit -m "Готовность и проверка считают одно и то же, расчёт молчит"`
+
+---
+
+### Task 22: Пустой пользователь базы — собственный факт
+
+**Files:**
+- Modify: `setup/1c-connect/src/verify.rs` (`db_user_fact`, место в наборе)
+- Test: inline там же
+
+**Interfaces:**
+- Produces: `verify::db_user_fact(user: &str) -> Check` — чистая функция, без сети: пусто → `Check::fail("пользователь базы", "не задан", "заполните поле «Пользователь базы» и нажмите «Сохранить»")`.
+
+- [ ] **Шаг 1: падающий тест.** `an_empty_db_user_fails_before_any_request`: `db_user_fact("")` не `ok`; `db_user_fact("Администратор")` `ok`; и `readiness` с пустым `db_user` отдаёт первым провалом именно его (а не публикацию).
+- [ ] **Шаг 2: тест падает.**
+- [ ] **Шаг 3: факт в наборе** — до фактов публикации и расширения, чтобы причина была верной.
+- [ ] **Шаг 4: тест проходит.**
+- [ ] **Шаг 5: коммит.** `git commit -m "Пустой пользователь базы — провал проверки, а не терпимость базы"`
+
+---
+
+### Task 23: Замок переключателя, трея и автозапуска
+
+**Files:**
+- Create: `setup/1c-connect/src/gui/gate.rs` (`cold_gate`)
+- Modify: `setup/1c-connect/src/gui/panel.rs` (`Switch::disabled`, подсказка)
+- Modify: `setup/1c-connect/src/gui/tray.rs` (пункт «Включить MCP»)
+- Modify: `setup/1c-connect/src/gui/mod.rs` (`launch` — автозапуск, `save_host` — подтверждение)
+- Modify: `setup/1c-connect/src/bridge.rs` (`DISABLED_TEXT` с причиной)
+- Test: inline в `gate.rs`, `panel.rs`, `tray.rs`, `mod.rs`
+
+**Interfaces:**
+- Produces: `gui::gate::cold_gate(cfg: &Cfg, tools: &OpState, platform: Option<&Path>, mcp_in_kit: bool) -> Option<String>` — `None` = можно включать, `Some(причина)` = заперто. Чистая функция, без сети и без файловой системы: существование каталога базы и наличие платформы передаются аргументами.
+- Produces: `bridge::disabled_text(reason: Option<&str>) -> String` — к «MCP выключены в 1c-connect» добавляет причину замка.
+
+- [ ] **Шаг 1: падающие тесты.** `gate`: по тесту на каждое условие (`пустой db_user`, `файловая база без каталога`, `серверная база — не запирает`, `нет платформы`, `нет mcp-1c`, `инструменты не разложены`, `туннельный режим без адреса среды`, `всё на месте → None`). `panel`: `the_switch_is_locked_while_the_gate_holds`. `tray`: `the_tray_item_follows_the_same_gate`. `mod`: `autostart_does_not_enable_while_the_gate_holds`; `saving_away_a_cold_condition_asks_first`.
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: ворота.** `cold_gate` по разделу спеки; причина — короткая строка для подсказки.
+- [ ] **Шаг 4: читатели.** Переключатель и пункт трея запираются; автозапуск не включает обслуживание; `save_host` при живом обслуживании и пропавшем условии идёт через тот же диалог, что смена базы; отказ агенту несёт причину.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: коммит.** `git commit -m "Переключатель заперт, пока включать нечего"`
+
+---
+
+### Task 24: Точка и заголовок по порядку разрешения
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/panel.rs` (`card`)
+- Test: inline там же
+
+**Interfaces:**
+- Consumes: `gui::gate::cold_gate` (Task 23), `Readiness` (Task 21).
+- Produces: `panel::card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, now: Instant) -> Card` — порядок разрешения: операция → `Failed` → замок → `Unknown` → провал → ок.
+
+- [ ] **Шаг 1: падающие тесты.** `unknown_is_never_green`; `the_gate_wins_over_an_idle_state`; `a_running_operation_wins_over_the_gate`; `a_failed_bind_wins_over_the_gate`; `the_title_never_carries_the_reason` (заголовок не содержит текста причины ни в одном состоянии); `off_ignores_hot_facts` (выключено + `Warn` → серая «MCP выключены»).
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: карточка** по таблице спеки; причина уходит в подсказку и подвал, в заголовке только состояние.
+- [ ] **Шаг 3а: трей тем же порядком.** `TrayState` получает четвёртое состояние (провал вердикта); при идущей операции побеждает «занято». Причина замка попадает в подсказку значка наравне с фазой.
+- [ ] **Шаг 4: тесты проходят.**
+- [ ] **Шаг 5: коммит.** `git commit -m "Заголовок называет состояние, причина живёт рядом"`
+
+---
+
+### Task 25: Адрес среды — поле в toml
+
+**Files:**
+- Modify: `setup/1c-connect/src/cfg.rs` (`Host::gitea`, `gitea_url`, `EXAMPLE`)
+- Modify: `setup/1c-connect/src/ops_host.rs` (правка `origin` при расхождении)
+- Modify: `config/1c/stand.sh` (`seed` дописывает `gitea` в существующий toml)
+- Test: inline в `cfg.rs`, `project.rs`
+
+**Interfaces:**
+- Produces: `Cfg::gitea_url()` — `host.gitea`, если непусто; иначе прежний вывод «порт SSH минус два».
+
+- [ ] **Шаг 1: падающие тесты.** `cfg`: `an_explicit_gitea_wins_over_the_derived_one`; `an_empty_gitea_keeps_the_old_derivation`; `example_prints_gitea_with_its_rule`. `project`: `the_remote_follows_the_explicit_gitea`.
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: поле и вывод.**
+- [ ] **Шаг 4: стенд.** `seed` дописывает `gitea` в существующий toml (идемпотентно, не трогая остальное); у разложенного проекта правится `origin`.
+- [ ] **Шаг 5: тесты проходят**, `bash -n config/1c/stand.sh`.
+- [ ] **Шаг 6: коммит.** `git commit -m "Адрес среды задаётся полем, а не выводится из порта SSH"`
+
+---
+
+### Task 26: Подвал — одна надпись в две строки
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/panel.rs` (левый слот подвала)
+- Modify: `setup/1c-connect/src/gui/mod.rs` (строка итога проверки — короткая)
+- Modify: `docs/superpowers/specs/2026-10-18-dev1c-setup-window-design.md` (подвал всегда две строки)
+- Test: inline в `panel.rs`
+
+**Interfaces:**
+- Consumes: `panel::foot_left_text(status, hint, kit_path) -> (String, bool)` — подпись та же.
+- Produces: слот подвала фиксированной высоты 32 px: `line_clamp(2)`, `text_size(13)`, `line_height(16)`.
+
+- [ ] **Шаг 1: падающий тест.** `the_check_status_line_stays_short`: строка итога проверки не содержит пути отчёта (путь уходит в журнал и подсказку), длина не больше 80 знаков на числах до 99.
+- [ ] **Шаг 2: тест падает.**
+- [ ] **Шаг 3: текст и слот.** Итог проверки — «Проблем: N» / «Проверка пройдена»; путь отчёта остаётся строкой журнала. Слот: две строки всегда, третья под многоточие, полный текст подсказкой.
+- [ ] **Шаг 4: тест проходит**, спека окна поправлена (подвал не растёт по тексту).
+- [ ] **Шаг 5: живьём.** Снимок из образа: обе строки целиком, высота подвала не прыгает.
+- [ ] **Шаг 6: коммит.** `git commit -m "Подвал: две строки постоянной высоты, путь отчёта — в журнал"`
+
+---
+
+### Task 27: Журнал — для человека, не для отладки
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/mod.rs` (запись «только в файл»)
+- Modify: `setup/1c-connect/src/gui/window.rs` (строки про геометрию и обмеры)
+- Test: inline в `mod.rs`
+
+**Interfaces:**
+- Produces: `gui::note_file(kit: &Kit, line: &Line)` — пишет в `1c-connect.log` и не трогает список окна (`note_line` остаётся для человеческих строк).
+
+- [ ] **Шаг 1: падающий тест.** `note_file_writes_the_file_and_not_the_window`: после вызова файл содержит строку, `ui.log` пуст.
+- [ ] **Шаг 2: тест падает.**
+- [ ] **Шаг 3: канал и переезд.** Диагностика геометрии (`work_area`/`flyout_origin`, низ флайаута за рабочей областью) уходит через `note_file`.
+- [ ] **Шаг 4: тест проходит.**
+- [ ] **Шаг 5: живьём.** Открыть и закрыть окно десять раз: в журнале окна нет ни одной служебной строки, в файле диагностика есть.
+- [ ] **Шаг 6: коммит.** `git commit -m "Служебные строки — в файл журнала, окно их не показывает"`
+
+---
+
+### Task 28: «Выбрать…» становится значком
+
+**Files:**
+- Create: `setup/1c-connect/icons/folder.svg`
+- Modify: `setup/1c-connect/src/gui/panel.rs` (`pick`)
+- Test: inline там же
+
+**Interfaces:**
+- Consumes: приём `menu.svg` — `include_bytes!` плюс `Icon::default().data(...)`.
+
+- [ ] **Шаг 1: падающий тест.** `the_picker_button_has_no_label_and_keeps_its_tooltip` — чистая функция подписи/подсказки кнопки выбора (`pick_tooltip() -> &str`), чтобы проверяемое не зависело от рисования.
+- [ ] **Шаг 2: тест падает.**
+- [ ] **Шаг 3: значок.** `folder.svg` в тех же пропорциях, что `menu.svg`; кнопка — квадрат высоты `h_8`, подпись «Выбрать…» уходит в подсказку.
+- [ ] **Шаг 4: тест проходит.**
+- [ ] **Шаг 5: живьём.** Снимок из образа: путь в поле «База» виден целиком.
+- [ ] **Шаг 6: коммит.** `git commit -m "Кнопки выбора каталога — значком, ширина уходит полю"`
+
+---
+
+### Task 29: На Linux углы прямые
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/panel.rs` (корень панели)
+- Modify: `setup/1c-connect/src/gui/window.rs` (`window_background`)
+- Modify: `docs/superpowers/specs/2026-10-18-dev1c-setup-window-design.md` (про Linux)
+- Test: inline в `panel.rs`
+
+**Interfaces:**
+- Produces: `panel::window_radius() -> Option<Pixels>` — `None` на Linux, прежний радиус на Windows; общая тема не трогается (её носит окно `dev1c-setup`).
+
+- [ ] **Шаг 1: падающий тест.** `the_window_has_no_radius_on_linux` — `window_radius()` пуст на Linux и непуст на Windows.
+- [ ] **Шаг 2: тест падает.**
+- [ ] **Шаг 3: прямые углы.** Корень панели без радиуса на Linux; `window_background` там снова `Opaque` — прозрачность нужна была только ради углов. Рамка `border_1` остаётся.
+- [ ] **Шаг 4: тест проходит.**
+- [ ] **Шаг 5: живьём.** Снимок из образа: прямые углы без стеклянных пятен; окно `dev1c-setup` не изменилось.
+- [ ] **Шаг 6: коммит.** `git commit -m "На Linux окно без скруглений: прозрачность в углах там не работает"`
+
 ## Что остаётся исполнителю
 
 - Как делить `session.rs`: оставить `Serve` в нём или вынести в свой модуль — по размеру кода после задачи 3.

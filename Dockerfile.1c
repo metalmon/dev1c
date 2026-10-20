@@ -81,6 +81,11 @@ FROM ${BASE} AS tools
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PLATFORM_VERSION
 ARG MCP_1C_VERSION=v1.22.3
+# Re-declared from the "vrunner" stage (ARGs do not cross stages on their
+# own, see PLATFORM_VERSION above): only needed here to stamp the kit's own
+# tools.version (built below).
+ARG VRUNNER_VERSION=3.0.2
+ARG ADD_VERSION=6.8.0
 
 # webkit 4.1 + GLU: the client's own dependencies (v8_install_deps is disabled
 # in the payload stage — it would apt on its own, outside our control).
@@ -137,6 +142,40 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
     && echo "vrunner-mcp: $(grep -oE '"name":"[a-z_0-9]+"' /tmp/tools.json | sort -u | wc -l) tools" \
     && rm /tmp/tools.json
 
+# --- the shared kit: /opt/dev1c-kit ------------------------------------------
+# One kit, built here and nowhere else, under the exact names
+# ops_host.rs expects (mcp_exe/oscript_exe/vrunner_lib/git_exe — the single
+# place that spells out the shape; this step must only ever link to it, never
+# repeat it). Every workstation's home is a volume (see stand.sh), so nothing
+# baked under /home/devN survives a restart — this is why the kit lives at a
+# fixed path instead, and why `seed` no longer links any of this per login.
+# Links, not copies: the kit is read-only and these binaries already live on
+# the same image layer, so a symlink costs nothing and stays honest about
+# where the real file is.
+#
+# tools.version here is the KIT's own stamp — what was shipped, written once
+# now and never touched again. It is NOT the same file as the one `host.tools`
+# writes into tools_dir() at install time (what is actually laid out on a
+# given machine) — `ops_host::tools_state` compares the two.
+RUN mkdir -p /opt/dev1c-kit/vrunner/bin /opt/dev1c-kit/git/bin \
+    && ln -s /usr/local/bin/mcp-1c /opt/dev1c-kit/mcp-1c-linux-amd64 \
+    && ln -s /opt/mcp-1c/MCP_HTTPService.cfe /opt/dev1c-kit/MCP_HTTPService.cfe \
+    && ln -s "$(command -v oscript)" /opt/dev1c-kit/vrunner/bin/oscript \
+    && ln -s /opt/vrunner /opt/dev1c-kit/vrunner/lib \
+    && ln -s "$(command -v git)" /opt/dev1c-kit/git/bin/git \
+    && printf 'OneScript 2.2.0; vanessa-runner %s; add %s; mcp-1c %s\n' "${VRUNNER_VERSION}" "${ADD_VERSION}" "${MCP_1C_VERSION}" >/opt/dev1c-kit/tools.version \
+    && echo "комплект: $(find /opt/dev1c-kit | wc -l) записей, $(cat /opt/dev1c-kit/tools.version)"
+# Every workstation process sees this: the desktop autostart (1c-stand
+# connect -> 1c-connect --tray) and a hand-run `1c-connect serve` alike — an
+# image-wide ENV reaches both without stand.sh having to export it itself.
+ENV ONEC_CONNECT_KIT=/opt/dev1c-kit
+# Belt for a login shell: a desktop session comes through xrdp-sesman and PAM,
+# which do not have to carry the image's ENV, and someone who runs
+# ~/dev1c/1c-connect by hand from that session's terminal would otherwise fall
+# back to a kit with no tools in it. stand.sh defaults the variable itself for
+# every path that goes through it (see its header) — this covers the rest.
+RUN echo 'export ONEC_CONNECT_KIT=/opt/dev1c-kit' >/etc/profile.d/dev1c-kit.sh
+
 # --- fonts -------------------------------------------------------------------
 # 1C greets a session with «На сервере отсутствуют шрифты из состава Microsoft
 # Core Fonts» and warns that the interface may look wrong: its layouts are
@@ -164,9 +203,11 @@ RUN ln -s /opt/1cv8t /opt/1cv8 \
     && ln -s /opt/1cv8/x86_64/${PLATFORM_VERSION}/1cv8 /usr/local/bin/1cv8
 
 # --- the runtime script ------------------------------------------------------
-# In `tools` because the payload build uses it too: the demo base is published
-# with `1c-stand publish` so that the build checks the same publication the
-# stand serves, not a second copy of it that could drift.
+# In `tools` because the payload build uses it too: `1c-stand publish` checks
+# the demo base template at build time (below, port 8089). It is no longer
+# how a workstation's base gets published at run time — the connector does
+# that itself (host.publication, its own Apache under $HOME/dev1c/pub) — so
+# this is a build-time-only check now, not a mirror of the running stand.
 # DEMO_DB_USER: the infobase user the configuration's welcome wizard made in
 # the template base (see the payload stage). The publication, the base list and
 # vrunner all read it from here. Empty means a base with no users at all.

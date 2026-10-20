@@ -8,11 +8,15 @@ pub mod cfg;
 pub mod flow;
 #[cfg(feature = "gui")]
 pub mod gui;
+pub mod holder;
 pub mod job;
 pub mod jsonrpc;
+pub mod listen;
 pub mod local;
 pub mod ops_host;
 pub mod project;
+pub mod publication;
 pub mod session;
+pub mod single_instance;
 pub mod tunnel;
 pub mod verify;

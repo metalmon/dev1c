@@ -45,6 +45,7 @@ pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Du
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
+    crate::job::group_std(&mut cmd);
     let job = crate::job::Job::new();
     let mut child = cmd.spawn().map_err(|e| format!("vrunner-mcp не запустился: {e} — выполните 1c-connect install"))?;
     if let Some(j) = &job {

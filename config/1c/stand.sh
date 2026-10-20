@@ -4,9 +4,10 @@
 # 1C platform"), so Zed, the skills and the agent rules do not know which of
 # the two they talk to.
 #
-#   1c-stand start            root, from the image's CMD: one Apache per
-#                             workstation, the 777N/778N listeners, then the
-#                             base image's entrypoint
+#   1c-stand start            root, from the image's CMD: one connector
+#                             session per workstation (it publishes its own
+#                             base and binds the 777N/778N listeners), then
+#                             the base image's entrypoint
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
 #   1c-stand vrunner <N>      one vrunner-mcp on stdio for workstation dev<N>
 #   1c-stand start1c          the 1C starter on the user's base list (the
@@ -15,11 +16,19 @@
 #   1c-stand designer         the Configurator on the user's base, directly
 #   1c-stand enterprise       the thick client on it (menu entry); holds the
 #                             base's one Enterprise session while open
+#   1c-stand project <repository-name> status|pull|push [message]
+#                             the agent's own side of the tunnel-mode circle:
+#                             the bridge's project_pull/project_push run on
+#                             the developer's machine, not here, so this
+#                             clones $HOME/project from the local Gitea on
+#                             first use and then pulls/pushes it, as the
+#                             calling workstation account (login dev<N>)
 #   1c-stand publish <user> <port> <base dir> <out dir>
 #                             writes the publication (default.vrd) and the
-#                             Apache config for one base; `start` uses it per
-#                             workstation, the image build uses it to check
-#                             the demo base
+#                             Apache config for one base; only the image
+#                             build uses it now, to check the demo base —
+#                             workstations are published by the connector
+#                             itself (host.publication), not by this script
 #   1c-stand export-payload   stdout: a gzip tar of the platform and the
 #                             template base, run in the payload image
 #   1c-stand import-payload [--force]
@@ -79,11 +88,19 @@ payload_present() { [ -x "/opt/1cv8t/x86_64/$PLATFORM_VERSION/1cv8t" ] && [ -f "
 DB_USER=${DEMO_DB_USER-Администратор}
 IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
 IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
-RUN=/run/1c
 LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
+# The shared kit built into the image (Dockerfile.1c). It is declared there
+# as an ENV, which reaches `1c-stand seed` started by init; but a desktop
+# session arrives through xrdp-sesman and PAM, where the image's ENV is not
+# always visible — and that is exactly where the autostart entry
+# (`1c-stand connect`) comes from. This default removes the dependency
+# altogether: both seed and connect are right whatever the login environment
+# did, and a value set from outside still wins.
+: "${ONEC_CONNECT_KIT:=/opt/dev1c-kit}"
+export ONEC_CONNECT_KIT
 
 log() { printf '[1c-stand] %s\n' "$*"; }
 
@@ -144,29 +161,99 @@ seed() { # runs as the workstation user; $HOME is theirs
     done
     # the launchers of the first days, superseded by the starter
     rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
-    # 1c-connect, if the image carries it. Its kit is the directory of the
-    # binary (common::kit), and every workstation needs its own parameters —
-    # so each gets its own copy next to its own toml, refreshed when the image
-    # brings a new build.
+    # 1c-connect, if the image carries it. The tools it needs (mcp-1c,
+    # vrunner, git) live in one place now, built once into the image —
+    # /opt/dev1c-kit, see Dockerfile.1c — and ONEC_CONNECT_KIT (set there as
+    # an image-wide ENV) points every workstation's 1c-connect at it, so
+    # nothing here links anything for them any more: a workstation's home is
+    # a volume, and a fixed path in the image is exactly what survives that.
+    #
+    # Still per-workstation, because this directory holds a copy of the
+    # program itself: each account gets its own, refreshed when the image
+    # brings a new build. It is no longer a kit of its own, though — the
+    # tools and the mcp-1c binary are not linked here any more, they live in
+    # the shared kit — so ONEC_CONNECT_KIT (defaulted at the top of this
+    # script) must always point at /opt/dev1c-kit; Kit::discover's fallback
+    # to this directory would find a kit with no tools in it. Its bookkeeping
+    # (setup.log, install.state) no longer lands next to it either: on Linux
+    # everything the connector writes goes to the state directory below.
     if [ -x "$CONNECT" ]; then
         mkdir -p "$HOME/dev1c"
         cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
-        if [ ! -e "$HOME/dev1c/$CONNECT_TOML" ]; then
+        # The lock and pid files of the single-instance guard before it moved
+        # to an advisory flock on the state directory itself: nothing creates
+        # them any more, and a volume from those days still carries them.
+        rm -f "$HOME/dev1c"/instance-*.lock "$HOME/dev1c"/instance-*.pid
+        # State: the toml, the tools version stamp, the window's journal and
+        # the publication all live here now (ops_host::tools_dir()), and the
+        # single-instance lock is an advisory flock on this very directory —
+        # never inside the shared kit, which is one read-only copy for every
+        # workstation. $XDG_DATA_HOME/dev1c mirrors tools_dir()'s own
+        # fallback to ~/.local/share/dev1c; an empty value falls back the
+        # same way the program does (ops_host::env_dir).
+        t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
+        mkdir -p "$t"
+        # A home is a volume and survives an image change, so carry over what
+        # the person had next to the program before state moved out, rather
+        # than writing the stand's defaults over it: otherwise an edited base
+        # path, db_user, the chosen theme and autoconnect would quietly go
+        # back to factory while the old files sat next door and confused
+        # everyone.
+        for f in "$CONNECT_TOML" install.state setup.log known_hosts; do
+            if [ -f "$HOME/dev1c/$f" ] && [ ! -e "$t/$f" ]; then
+                mv "$HOME/dev1c/$f" "$t/$f"
+                log "1c-connect: $f перенесён в $t" >&2
+            fi
+        done
+        if [ ! -e "$t/$CONNECT_TOML" ]; then
             u=$(id -un); n=${u#dev}
             # The server fields stay at their defaults: in local mode there is
             # no tunnel to raise. The base, its publication and the project
             # are the stand's own, the same ones the agent's tools see.
-            cat >"$HOME/dev1c/$CONNECT_TOML" <<EOF
+            # publication = "auto": the connector writes its own default.vrd
+            # and apache.conf under $HOME/dev1c/pub and runs its own Apache —
+            # the stand no longer publishes workstation bases itself (see
+            # `start`). base_url matches what Cfg::base_url() computes for
+            # that publication: the root of its own port, no "/base" segment.
+            cat >"$t/$CONNECT_TOML" <<EOF
 [host]
 mode = "local"
 workstation = "$u"
 base_path = "$HOME/base"
-base_url = "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+base_url = "http://localhost:$((8080 + n))/hs/mcp-1c"
+publication = "auto"
 project = "$HOME/project"
 db_user = "$DB_USER"
 db_password = ""
 EOF
-            log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
+            log "1c-connect: $t/$CONNECT_TOML written for $u" >&2
+        fi
+        # Tools: here the shared kit IS what is laid out. ops_host compares
+        # the kit's tools.version (stamped at build time) with the state's
+        # (written when `host.tools` copies the tools onto a machine) — and
+        # without the second one the connector reports its tools missing and
+        # the window says the agent will not see the base. Links, not copies:
+        # /opt/dev1c-kit is one read-only copy for every account, and
+        # duplicating ~100 MB per login would buy nothing. The names are the
+        # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
+        # tools_dir().
+        if [ -f "$ONEC_CONNECT_KIT/tools.version" ]; then
+            # The links and the stamp go under one condition. If the tools
+            # are really laid out (the person ran `1c-connect install`, so the
+            # state holds copies, not links), touch neither: replacing just
+            # the stamp would tell ops_host::tools_state that what is laid out
+            # is exactly what the kit ships, and switch off Drifted — the very
+            # case the two stamps are compared for.
+            ours=yes
+            for d in vrunner git; do
+                [ ! -e "$t/$d" ] || [ -L "$t/$d" ] || ours=no
+            done
+            if [ "$ours" = yes ]; then
+                for d in vrunner git; do
+                    ln -sfn "$ONEC_CONNECT_KIT/$d" "$t/$d"
+                done
+                cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
+            fi
         fi
     fi
 }
@@ -174,8 +261,10 @@ EOF
 case "${1:-}" in
 mcp)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed
-    # --base is the HTTP service itself, not the publication (as in 1c-connect.toml)
-    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+    # --base is the HTTP service itself, not the publication (as in
+    # 1c-connect.toml). The connector publishes it at the root of its own
+    # port now (host.publication), no "/base" segment.
+    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/hs/mcp-1c"
     ;;
 vrunner)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed
@@ -216,6 +305,73 @@ seed)
     # runuser without -l keeps root's HOME: take the caller's own
     export HOME; HOME=$(home_of "$(id -un)"); seed
     ;;
+project)
+    # The agent's own side of the circle (design doc, "Как ветка попадает в
+    # контейнер"): project_status/project_pull/project_push are bridge tools
+    # and run on the developer's machine, not here, so the container's
+    # project directory needs its own way to reach the same Gitea — this is
+    # it. Run as the workstation account itself (not root), so $HOME is
+    # already that account's; the repository name is the last path segment
+    # of the project on the developer's machine, which this side cannot
+    # guess — project_status (the bridge tool) names it for the agent.
+    name=${2:?"usage: $0 project <repository-name> status|pull|push [message]"}
+    sub=${3:?"usage: $0 project <repository-name> status|pull|push [message]"}
+    msg=${4:-}
+    u=$(id -un)
+    dir="$HOME/project"
+    # Password equals the login in the pilot — but it no longer rides in the
+    # URL: a clean address would otherwise still leak it three ways (process
+    # arguments, the stored "origin" remote in .git/config, and git's own
+    # `fatal:` text on a failed clone/fetch, which this subcommand's own log
+    # lines carry to support). Instead it goes on a header, on every call
+    # that reaches Gitea, mirroring how the connector itself authenticates
+    # (host.rs).
+    #
+    # That header itself stays out of the process table too: git reads
+    # GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n from the
+    # environment, so credential.helper and the Authorization header never
+    # appear as a "-c" argument that `ps` on this machine could show anyone.
+    url="http://127.0.0.1:3000/dev1c/$name.git"
+    auth="Authorization: Basic $(printf '%s' "$u:$u" | base64 | tr -d '\n')"
+    gitc() {
+        GIT_CONFIG_COUNT=2 \
+            GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
+            GIT_CONFIG_KEY_1=http.extraHeader GIT_CONFIG_VALUE_1="$auth" \
+            git "$@"
+    }
+    if [ ! -d "$dir/.git" ]; then
+        log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
+        gitc clone --depth 1 -b "$u" "$url" "$dir"
+    fi
+    case "$sub" in
+    status)
+        branch=$(git -C "$dir" symbolic-ref --short HEAD)
+        if ahead=$(git -C "$dir" rev-list --count "origin/$u..HEAD" 2>/dev/null); then :; else ahead=все; fi
+        changed=$(git -C "$dir" status --porcelain | wc -l)
+        log "ветка $branch"
+        log "неотправленных коммитов: $ahead"
+        log "изменено: $changed"
+        if [ "$ahead" != 0 ] || [ "$changed" -gt 0 ]; then
+            log "эти правки в базу загрузить нельзя, пока они не отправлены"
+        fi
+        ;;
+    pull)
+        log "забираю файлы из Gitea"
+        gitc -C "$dir" pull --rebase origin "$u"
+        ;;
+    push)
+        log "отправляю файлы в Gitea"
+        git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" add -A
+        git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" diff --cached --quiet \
+            || git -c "user.name=$u" -c "user.email=$u@dev1c.local" -C "$dir" commit -q -m "${msg:-правка}"
+        gitc -C "$dir" push origin "$u"
+        ;;
+    *)
+        echo "usage: $0 project <repository-name> status|pull|push [message]" >&2
+        exit 2
+        ;;
+    esac
+    ;;
 connect)
     # the autostart entry of the session: seed first (the toml and the copy
     # live in the home, which may be a fresh volume), then the tray.
@@ -224,7 +380,11 @@ connect)
     # its own log: an autostart entry has nowhere to print, and today the
     # Linux tray still falls over (GTK is not initialised in the process —
     # see the spec of the window), so the reason must survive the session
-    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/1c-connect.log" 2>&1
+    # Its own name: the window's journal now lives in the state directory
+    # ($XDG_DATA_HOME/dev1c/1c-connect.log, and the window truncates that one
+    # at a megabyte), while this file only catches what the process printed
+    # past the journal — no reason to give them one name.
+    exec "$HOME/dev1c/1c-connect" --tray >>"$HOME/dev1c/autostart.log" 2>&1
     ;;
 import)
     # Вторая половина круга второго акта: вернуть правку агента в базу.
@@ -335,7 +495,7 @@ import-payload)
     log "payload in place: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"
     ;;
 start)
-    mkdir -p "$RUN" "$LOG"
+    mkdir -p "$LOG"
     if ! payload_present; then
         # Not a failure of the container: the desktop, Zed and Gitea are the
         # base image's and work without 1C. Exiting here would put the
@@ -346,16 +506,16 @@ start)
     fi
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
-        d="$RUN/$u"
-        "$0" publish "$u" $((8080 + n)) "$(home_of "$u")/base" "$d"
-        apache2 -f "$d/apache.conf" -k start
-        # One MCP server per connection, as the workstation user; nc -N on the
-        # Zed side closes the socket at EOF and the server exits with it.
-        socat "TCP4-LISTEN:$((7770 + n)),bind=127.0.0.1,reuseaddr,fork" \
-              "EXEC:/usr/local/bin/1c-stand mcp $n,su=$u" >"$LOG/$u-mcp.log" 2>&1 &
-        socat "TCP4-LISTEN:$((7780 + n)),bind=127.0.0.1,reuseaddr,fork" \
-              "EXEC:/usr/local/bin/1c-stand vrunner $n,su=$u" >"$LOG/$u-vrunner.log" 2>&1 &
-        log "$u: HTTP service 127.0.0.1:$((8080 + n))/base, mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
+        # No connector started here, and no supervised loop: there is no
+        # headless owner of these ports (see the spec). The ports live only
+        # while a connector runs — the desktop autostart's "1c-connect --tray"
+        # once the person logs in, or a hand-run "1c-stand serve" — and that
+        # connector also raises the base's publication itself
+        # (host.publication, $HOME/dev1c/pub, its own Apache). Starting one
+        # here as well is exactly the old bug: two connectors fighting over
+        # the same two ports. test-stand starts its own `serve` for the
+        # check and stops only that one.
+        log "$u: mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n)), HTTP service on $((8080 + n)) — owned by whichever connector the person or test-stand runs"
     done
     # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the
     # first agent call would otherwise wait for the copy. In the background,
@@ -370,7 +530,7 @@ start)
     exec /usr/local/bin/entrypoint
     ;;
 *)
-    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | import | onboarding | seed | publish ... | export-payload | import-payload [--force]" >&2
+    echo "usage: 1c-stand start | mcp <N> | vrunner <N> | start1c | designer | enterprise | connect | import | onboarding | seed | project <repository-name> status|pull|push [message] | publish ... | export-payload | import-payload [--force]" >&2
     exit 2
     ;;
 esac

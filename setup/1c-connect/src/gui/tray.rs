@@ -3,7 +3,10 @@
 //! GPUI, они только кладут событие в канал — его разбирает `on_tray`/`on_menu`
 //! из задачи-читателя в `mod.rs::handle`.
 
-use super::{autostart, badge, note_line, quit, run_check, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG};
+use super::{
+    autostart, badge, note_line, quit, run_check, save_host, start_session, stop_session, theme, toggle_link, window, Ev, Kind, Line, Tab,
+    TrayState, Ui, TRAY_PNG,
+};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -16,11 +19,13 @@ const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
 #[cfg(not(windows))]
 const AUTOSTART_TEXT: &str = "Запускать при входе";
 
-/// Трей: значок, пункт-переключатель (меняет надпись), три пункта темы
-/// (отмечен ровно один) и два пункта-галочки — автозапуск и автоподключение.
+/// Трей: значок, пункт-переключатель (меняет надпись), подменю «Режим
+/// работы» (отмечен ровно один), три пункта темы (отмечен ровно один) и два
+/// пункта-галочки — автозапуск и автоподключение.
 pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
+    modes: [CheckMenuItem; 2],
     themes: [CheckMenuItem; 3],
     autostart: CheckMenuItem,
     autoconnect: CheckMenuItem,
@@ -29,6 +34,11 @@ pub struct Tray {
 /// Выбор темы → id пункта меню и наоборот.
 const THEMES: [(theme::Choice, &str, &str); 3] =
     [(theme::Choice::System, "theme:system", "Системная"), (theme::Choice::Light, "theme:light", "Светлая"), (theme::Choice::Dark, "theme:dark", "Тёмная")];
+
+/// Режим работы (`cfg.host.mode`, "tunnel"/"local") → id пункта меню и его
+/// подпись. Поля в окне нет — режим пишет только этот пункт (см.
+/// `gui::save_host`).
+const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через туннель"), ("local", "mode:local", "Локально")];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
@@ -39,6 +49,8 @@ pub enum MenuAction {
     Open,
     Toggle,
     Check,
+    /// Выбор пункта подменю «Режим работы» — несёт "tunnel" или "local".
+    Mode(&'static str),
     Theme(theme::Choice),
     Autostart,
     Autoconnect,
@@ -51,6 +63,11 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     for (choice, theme_id, _) in THEMES {
         if id == theme_id {
             return Some(MenuAction::Theme(choice));
+        }
+    }
+    for (mode, mode_id, _) in MODES {
+        if id == mode_id {
+            return Some(MenuAction::Mode(mode));
         }
     }
     match id {
@@ -120,8 +137,17 @@ pub fn icon(state: TrayState) -> Icon {
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     #[cfg(target_os = "linux")]
     let open = MenuItem::with_id("open", "Открыть окно", true, None);
-    let toggle = MenuItem::with_id("toggle", "Подключить", true, None);
+    let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
+    // Отметка при создании меню: умолчание `Host::default()`, пока не
+    // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
+    // (тот читает `theme::Choice::load` до вызова). `launch` поправляет её на
+    // настоящий сохранённый режим сразу после `build`, до показа окна
+    // (`Tray::set_mode`) — так что галочка никогда не достаётся человеку
+    // неверной.
+    let mode_items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "tunnel", None));
+    let mode_refs: Vec<&dyn IsMenuItem> = mode_items.iter().map(|i| i as &dyn IsMenuItem).collect();
+    let mode_submenu = Submenu::with_items("Режим работы", true, &mode_refs)?;
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
@@ -136,6 +162,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &toggle,
         &check,
         &PredefinedMenuItem::separator(),
+        &mode_submenu,
         &themes_submenu,
         &autostart,
         &autoconnect,
@@ -158,11 +185,12 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     }));
 
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
-    Ok(Tray { icon: tray, toggle, themes, autostart, autoconnect })
+    let modes = [mode_items[0].clone(), mode_items[1].clone()];
+    Ok(Tray { icon: tray, toggle, modes, themes, autostart, autoconnect })
 }
 
 impl Tray {
-    /// Значок badge(state) и надпись переключателя «Отключить»/«Подключить».
+    /// Значок badge(state) и надпись переключателя «Выключить MCP»/«Включить MCP».
     /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
     /// подключён, нет связи) и само по себе не знает фазу операции — её
     /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
@@ -170,7 +198,7 @@ impl Tray {
     /// занятость при поднятой связи осталась бы с «не подключён».
     pub fn set_state(&self, state: TrayState, on: bool) {
         let _ = self.icon.set_icon(Some(icon(state)));
-        self.toggle.set_text(if on { "Отключить" } else { "Подключить" });
+        self.toggle.set_text(if on { "Выключить MCP" } else { "Включить MCP" });
     }
 
     /// Подсказка трея произвольным текстом (`tray_tooltip`) — единственный
@@ -185,6 +213,22 @@ impl Tray {
             item.set_checked(c == choice);
         }
     }
+
+    /// Отмечает ровно один пункт подменю «Режим работы».
+    pub fn set_mode(&self, mode: &str) {
+        for (item, (m, ..)) in self.modes.iter().zip(MODES) {
+            item.set_checked(m == mode);
+        }
+    }
+}
+
+/// Операция или проверка идёт — тем же критерием, что блокирует «Сохранить»
+/// (`panel::can_save`) и переключатель (`Switch::disabled`). Смена режима
+/// посреди неё переписала бы конфигурацию и перезапустила сеанс под её
+/// ногами — у подменю «Режим работы» этой защиты не было (находка целостного
+/// ревью).
+fn mode_change_blocked(ui: &Ui) -> bool {
+    ui.busy.is_some() || ui.progress.is_some()
 }
 
 /// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
@@ -212,6 +256,46 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             } else {
                 cx.refresh_windows();
             }
+        }
+        MenuAction::Mode(mode) => {
+            // Та же защита, что у «Сохранить» и у переключателя
+            // (`panel::can_save`, `Switch::disabled`): смена режима
+            // переписывает toml и перезапускает сеанс — под идущей
+            // операцией (например, «Выгрузить») это переписало бы
+            // конфигурацию и оборвало бы её посреди работы. Нативный пункт
+            // меню уже успел отметить себя сам — возвращаем галочку на
+            // настоящий режим, раз действие не состоялось.
+            let ui = cx.global::<Ui>();
+            if mode_change_blocked(ui) {
+                if let Some(tray) = &ui.tray {
+                    tray.set_mode(&ui.cfg.host.mode);
+                }
+                return;
+            }
+            cx.global_mut::<Ui>().cfg.host.mode = mode.into();
+            let host = cx.global::<Ui>().cfg.host.clone();
+            match save_host(cx.global_mut::<Ui>(), host) {
+                Ok(()) => {
+                    if let Some(tray) = &cx.global::<Ui>().tray {
+                        tray.set_mode(mode);
+                    }
+                    // Новый транспорт — сеанс поднимается заново; `stop_session`
+                    // безвредна, если сеанса и не было.
+                    stop_session(cx);
+                    if let Err(e) = start_session(cx) {
+                        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                    }
+                    let mut label = mode;
+                    for (m, _, text) in MODES {
+                        if m == mode {
+                            label = text;
+                        }
+                    }
+                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
+                }
+                Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+            }
+            cx.refresh_windows();
         }
         MenuAction::Theme(c) => {
             let kit = cx.global::<Ui>().kit.clone();
@@ -250,9 +334,12 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_rgba, menu_action, MenuAction, TrayState};
+    use super::{icon_rgba, menu_action, mode_change_blocked, save_host, MenuAction, TrayState, Ui, MODES};
     use crate::gui::theme;
-    use crate::gui::TRAY_PNG;
+    use crate::gui::{Busy, Running, Which, TRAY_PNG};
+    use common::Phase;
+    use std::time::Instant;
+    use tray_icon::menu::{CheckMenuItem, IsMenuItem, Submenu};
 
     #[test]
     fn menu_ids_map_to_actions_and_unknown_ids_to_nothing() {
@@ -262,13 +349,67 @@ mod tests {
         assert_eq!(menu_action("theme:system"), Some(MenuAction::Theme(theme::Choice::System)));
         assert_eq!(menu_action("autostart"), Some(MenuAction::Autostart));
         assert_eq!(menu_action("autoconnect"), Some(MenuAction::Autoconnect));
+        assert_eq!(menu_action("mode:tunnel"), Some(MenuAction::Mode("tunnel")));
+        assert_eq!(menu_action("mode:local"), Some(MenuAction::Mode("local")));
         assert_eq!(menu_action("nope"), None);
+    }
+
+    #[test]
+    fn mode_submenu_has_two_checked_items() {
+        // Тот же порядок конструирования, что в `build`: пункты подменю —
+        // данные, не требуют ни настоящего значка трея, ни (на Windows, где
+        // и крутится этот тест) инициализированного GTK.
+        let items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "local", None));
+        let refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
+        let submenu = Submenu::with_items("Режим работы", true, &refs).unwrap();
+        assert_eq!(submenu.text(), "Режим работы");
+        assert_eq!(submenu.items().len(), 2);
+        assert_eq!(items[0].text(), "Через туннель");
+        assert_eq!(items[1].text(), "Локально");
+        // Отмечен ровно текущий — здесь «local».
+        assert!(!items[0].is_checked());
+        assert!(items[1].is_checked());
+    }
+
+    #[test]
+    fn choosing_a_mode_writes_the_toml_and_restarts_the_session() {
+        // `MenuAction::Mode`'s handler in `on_menu` needs `cx: &mut App`
+        // (GPUI), which has no headless test harness here — same gap as the
+        // window's own save path. What's testable without it, and what the
+        // name promises: the config write that `stop_session`/`start_session`
+        // key off next (mode lives in the config, not in extra state).
+        let mut ui = Ui::for_test();
+        assert_eq!(ui.cfg.host.mode, "tunnel");
+        ui.cfg.host.mode = "local".into();
+        let host = ui.cfg.host.clone();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.host.mode, "local");
+        let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
+        assert!(text.contains("mode = \"local\""), "{text}");
     }
 
     #[test]
     fn tray_icon_is_the_badged_png() {
         let base = image::load_from_memory(TRAY_PNG).unwrap().to_rgba8();
         assert_eq!(icon_rgba(TrayState::Up).len(), (base.width() * base.height() * 4) as usize);
+    }
+
+    #[test]
+    fn mode_switch_is_blocked_while_an_operation_or_a_check_runs() {
+        let mut ui = Ui::for_test();
+        assert!(!mode_change_blocked(&ui), "в покое ничего не мешает");
+        ui.busy = Some(Busy::Project);
+        assert!(mode_change_blocked(&ui), "идёт экспорт/импорт");
+        ui.busy = None;
+        assert!(!mode_change_blocked(&ui));
+        // Повторная находка ревью: тест никогда не заводил `ui.progress` —
+        // без этого случая он прошёл бы и без ветки `progress.is_some()` в
+        // `mode_change_blocked` (т.е. не поймал бы её удаление).
+        let now = Instant::now();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
+        assert!(mode_change_blocked(&ui), "идёт операция с карточкой хода");
+        ui.progress = None;
+        assert!(!mode_change_blocked(&ui));
     }
 
     #[test]

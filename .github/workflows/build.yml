@@ -67,7 +67,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          # Not ubuntu-latest: that label moved to Ubuntu 26 (glibc 2.43) on
+          # 2026-10-19, and the binary it produces refuses to start inside our
+          # own image — Debian 13 ships glibc 2.41. The runner's glibc must
+          # never be newer than the image's; checked live in the container.
+          - os: ubuntu-24.04
             name: linux
             bin: dev1c-setup
           - os: windows-latest

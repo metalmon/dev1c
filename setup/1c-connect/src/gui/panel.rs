@@ -10,7 +10,7 @@
 use crate::cfg::Host;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Readiness, Running, Ui, Which};
 use crate::session::State;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -18,6 +18,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -85,20 +86,95 @@ pub struct Card {
     pub cancel: bool,
 }
 
-pub fn card(progress: Option<&Running>, link: &State, now: Instant) -> Card {
+/// Заголовок — по `cfg.host.mode`: в локальном режиме речь про MCP (слушатели
+/// держат порты сами, см. `session::start`), а не про связь со средой; отказ
+/// там же показывает саму причину (порт занят и т.п.), а не общее «не
+/// подключён». В туннельном режиме — как раньше.
+///
+/// `ready` — вердикт `verify::readiness`, посчитанный отдельно и не на
+/// главном потоке (`gui::run_readiness`): пока связь/MCP не «включены»,
+/// карточка его не смотрит вовсе — выключенный или подключающийся переключатель
+/// ничего не обещает агенту, смотреть там нечего. Зелёная «MCP включены»/
+/// «Подключён» становится жёлтой, только когда готовность реально
+/// провалилась (`Readiness::Warn`) — `Unknown` (поток ещё считает) и `Ok`
+/// показывают прежний зелёный текст, значение переключателя при этом не
+/// меняется: это по-прежнему «включить/выключить обслуживание вызовов».
+pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
         let title = format!("{} · {}", r.phase.title(), clock);
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
-    let (dot, title): (Dot, &'static str) = match link {
-        State::Off => (Dot::Off, "Не подключён"),
-        State::Connecting => (Dot::Busy, "Подключаюсь…"),
-        State::Up { .. } => (Dot::Up, "Подключён"),
-        State::Retrying(_) => (Dot::Busy, "Переподключаюсь"),
-        State::Failed(_) => (Dot::Down, "Не подключён"),
+    let local = mode == "local";
+    // Текст «MCP включены, но …» — местная формулировка (заказчик и дефект
+    // целиком про локальный режим, см. журнал модуля); туннельный режим
+    // показывает прежнее «Подключён» — его собственный провал публикации уже
+    // становится `State::Failed` (красным) в `Ev::Publish`, второй жёлтый
+    // смысл ему не нужен.
+    if local {
+        if let (State::Up { .. }, Readiness::Warn(check)) = (link, ready) {
+            // Коротко: в карточке одна строка на 230 точек, и длинный заголовок
+            // обрезался на «но агент б…». Положение переключателя и так говорит,
+            // что MCP включены, поэтому заголовок отвечает на главный вопрос.
+            let title = format!("Агент базу не увидит: {}", gui::readiness_reason(check));
+            return Card { dot: Dot::Warn, title, cancel: false };
+        }
+    }
+    let (dot, title): (Dot, String) = match link {
+        State::Off => (Dot::Off, if local { "MCP выключены".into() } else { "Не подключён".into() }),
+        State::Connecting => (Dot::Busy, if local { "Включаю…".into() } else { "Подключаюсь…".into() }),
+        State::Up { .. } => (Dot::Up, if local { "MCP включены".into() } else { "Подключён".into() }),
+        State::Retrying(_) => (Dot::Busy, "Переподключаюсь".into()),
+        State::Failed(why) => (Dot::Down, if local { why.clone() } else { "Не подключён".into() }),
     };
-    Card { dot, title: title.to_string(), cancel: false }
+    Card { dot, title, cancel: false }
+}
+
+/// Можно ли нажать «Сохранить»: поля отличаются от сохранённых, и прямо
+/// сейчас не идёт операция/проверка и не подключается/перезапускается сеанс —
+/// правка не должна тронуть toml и дёрнуть сеанс посреди них.
+pub fn can_save(dirty: bool, busy: bool, progress: bool) -> bool {
+    dirty && !busy && !progress
+}
+
+/// Почему «Сохранить» недоступна — словами разработчика 1С, а не молчанием
+/// (заказчик 2026-10-20: кнопка просто гаснет, непонятно почему). Ровно те
+/// же условия, что держит `can_save` — `busy` тут и есть «операция или
+/// проверка идёт» (`can_save`'s `busy || progress`; идущая операция всегда
+/// держит и то, и другое, см. `run_op`). `op` называет операцию, когда она
+/// идёт — экспорт и импорт говорят разное, расширение (установка/снятие)
+/// общо; `None` при занятости значит идёт проверка, а не операция.
+/// `None` результата — кнопку можно нажать, объяснять нечего.
+pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
+    if !dirty {
+        return Some("Нечего сохранять — поля ещё не менялись".into());
+    }
+    if !busy {
+        return None;
+    }
+    let what = match op {
+        Some(Which::Export) => "выгрузка из 1С",
+        Some(Which::Import) => "загрузка в 1С",
+        Some(Which::Install) | Some(Which::Uninstall) => "работа с расширением",
+        None => "проверка",
+    };
+    Some(format!("Подождите: идёт {what}"))
+}
+
+/// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
+/// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
+/// настоящее сообщение (итог сохранения, ошибка) важнее подсказки, почему
+/// «Сохранить» недоступна, а та — важнее пути комплекта, который слот
+/// показывает, когда сказать больше нечего. Обрезка в одну строку и
+/// подсказка по наведению — дело `render`, здесь только выбор источника.
+pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
+    if let Some(l) = status {
+        return (l.text.clone(), matches!(l.kind, Kind::Fail));
+    }
+    if let Some(h) = hint {
+        return (h.to_string(), false);
+    }
+    (kit_path.to_string(), false)
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -123,32 +199,69 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     rows
 }
 
-/// Параметры из полей. `dump`, `tools` и `base_url` пустые — их подставит
-/// `save_host` из текущих, в окне этих полей нет.
-pub fn host_of(f: &Fields, cx: &App) -> Host {
-    let v = |e: &Entity<InputState>| e.read(cx).value().to_string();
-    Host {
-        server: v(&f.server),
-        password: v(&f.password),
-        workstation: v(&f.workstation),
-        base_path: v(&f.base_path),
-        db_user: v(&f.db_user),
-        db_password: v(&f.db_password),
-        base_url: String::new(),
-        dump: String::new(),
-        project: v(&f.project),
-        tools: Vec::new(),
-        mode: String::new(),
+/// Поля вкладки «Параметры», которые режим реально показывает. В локальном
+/// режиме коннектор слушает loopback, а не поднимает туннель в среду —
+/// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
+/// и показывать их незачем. Всё, что не `"local"`, — режим `tunnel`.
+/// Отрисовка рядов и сравнение «изменилось ли» ходят только через этот список.
+pub fn shown_fields(mode: &str) -> &'static [&'static str] {
+    if mode == "local" {
+        &["base_path", "db_user", "db_password", "project"]
+    } else {
+        &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"]
     }
 }
 
-/// Поля окна отличаются от сохранённых? `dump`, `tools` и `base_url` в окне
-/// не редактируются (`host_of` отдаёт их пустыми), поэтому не сравниваются.
-pub fn fields_differ(a: &Host, b: &Host) -> bool {
-    fn key(h: &Host) -> [&str; 7] {
-        [&h.server, &h.workstation, &h.password, &h.base_path, &h.db_user, &h.db_password, &h.project]
+fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
+    match name {
+        "server" => &h.server,
+        "password" => &h.password,
+        "workstation" => &h.workstation,
+        "base_path" => &h.base_path,
+        "db_user" => &h.db_user,
+        "db_password" => &h.db_password,
+        "project" => &h.project,
+        _ => "",
     }
-    key(a) != key(b)
+}
+
+/// Параметры из полей. `dump`, `tools`, `mode`, `publication`, `http_port` и
+/// `base_url` пустые — их подставит `save_host` из текущих, в окне этих полей
+/// нет. Поля, которых режим не показывает, тоже пустые — набранное в них
+/// (если там что-то осталось от прежнего режима) в toml не попадёт;
+/// `Panel::save` сам переносит рабочее место, адрес среды и пароль рабочего
+/// места из текущих параметров, как `save_host` уже делает для
+/// `dump`/`tools`/`mode`/`publication`/`http_port`.
+pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
+    let shown = shown_fields(mode);
+    let v = |name: &str, e: &Entity<InputState>| {
+        if shown.contains(&name) { e.read(cx).value().to_string() } else { String::new() }
+    };
+    Host {
+        server: v("server", &f.server),
+        password: v("password", &f.password),
+        workstation: v("workstation", &f.workstation),
+        base_path: v("base_path", &f.base_path),
+        db_user: v("db_user", &f.db_user),
+        db_password: v("db_password", &f.db_password),
+        base_url: String::new(),
+        dump: String::new(),
+        project: v("project", &f.project),
+        tools: Vec::new(),
+        mode: String::new(),
+        publication: String::new(),
+        http_port: None,
+    }
+}
+
+/// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
+/// режим показывает: правка скрытого поля (адрес среды, пароль рабочего
+/// места, рабочее место в локальном режиме) не должна зажигать «Сохранить» —
+/// оно ни на что не влияет, пока режим не сменился. `dump`, `tools`,
+/// `base_url` и `mode` в окне не редактируются (`host_of` отдаёт их
+/// пустыми/нулями), поэтому и так не входят в список.
+pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
+    shown_fields(mode).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
@@ -274,14 +387,34 @@ impl Panel {
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        fields_differ(&host_of(&self.fields, cx), &self.original)
+        let mode = cx.global::<Ui>().cfg.host.mode.clone();
+        fields_differ(&host_of(&self.fields, &mode, cx), &self.original, &mode)
     }
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
-    /// проверки — строкой, toml не тронут, набранное остаётся в поле.
-    /// Возвращает, удалось ли: по неудаче сеанс не перезапускают.
-    fn save(&mut self, cx: &mut Context<Self>) -> bool {
-        let host = host_of(&self.fields, cx);
+    /// Поля формы как `Host`: в локальном режиме скрытые поля переносятся из
+    /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
+    /// спросить подтверждение смены базы и только потом писать.
+    fn host_from_fields(&self, cx: &mut Context<Self>) -> Host {
+        let mode = cx.global::<Ui>().cfg.host.mode.clone();
+        let mut host = host_of(&self.fields, &mode, cx);
+        if mode == "local" {
+            // Адрес среды, пароль рабочего места и имя рабочего места скрыты
+            // в этом режиме — переносим их из текущих параметров, как
+            // `save_host` уже делает для `dump`/`tools`/`mode`/`base_url`.
+            // Рабочее место обязано остаться в toml: от него `cfg::Cfg::ports`
+            // считает порты 7770+N и 7780+N.
+            let current = cx.global::<Ui>().cfg.host.clone();
+            host.server = current.server;
+            host.password = current.password;
+            host.workstation = current.workstation;
+        }
+        host
+    }
+
+    /// Запись в toml и всё, что за ней следует: итог в подвал, обновление
+    /// вкладок, перезапуск сеанса внутри `gui::save_host`.
+    fn write(&mut self, host: Host, cx: &mut Context<Self>) -> bool {
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
         cx.global_mut::<Ui>().status = Some(match &r {
@@ -356,6 +489,7 @@ impl Panel {
             Dot::Busy => t.primary,
             Dot::Up => t.success,
             Dot::Down => t.danger,
+            Dot::Warn => t.warning,
         }
     }
 }
@@ -374,13 +508,25 @@ impl Render for Panel {
 
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
+        let ready = ui.ready.clone();
         let (unread, failed) = (ui.unread, ui.failed_checks);
         let has_progress = ui.progress.is_some();
-        let c = card(ui.progress.as_ref(), &link, Instant::now());
-        let foot_left = match &ui.status {
-            Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
-            None => (ui.kit.root.display().to_string(), false),
-        };
+        // Какая операция идёт, если идёт — для текста под «Сохранить»
+        // (`save_hint`): экспорт, импорт и расширение называются разным
+        // словом, идущая проверка им не является (`run_op`/`run_check`
+        // выставляют разное).
+        let running_op = ui.progress.as_ref().map(|r| r.which);
+        let mode = ui.cfg.host.mode.clone();
+        let c = card(ui.progress.as_ref(), &link, &mode, &ready, Instant::now());
+        // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
+        // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
+        // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
+        // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
+        let busy_now = busy.is_some();
+        let dirty = self.is_dirty(cx);
+        let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
+        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
+        let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -413,16 +559,22 @@ impl Render for Panel {
             .gap_3()
             .p_3()
             .child(div().size_3().flex_shrink_0().rounded_full().bg(Self::dot(c.dot, &theme)))
-            .child(
+            .child({
+                // Имя базы дописывается в тот же заголовок через « · », как
+                // уже фаза с часами выше: у карточки один слот под текст,
+                // второй строки это не прибавляет (заказчик 2026-10-19).
+                // Базу здесь не пишем: длинное имя сюда не влезет, а человек
+                // видит её в поле «База» на «Параметрах» (заказчик 2026-10-20).
                 div()
+                    .id("status-title")
                     .flex_1()
                     .min_w_0()
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(c.title.clone()),
-            )
+                    .child(c.title.clone())
+            })
             // «Прервать» — перед переключателем, только пока можно отменить
             // (git-обмен; cf_decompile/cf_load не прерываются).
             .when(c.cancel, |d| {
@@ -438,7 +590,7 @@ impl Render for Panel {
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
                     .disabled(has_progress)
-                    .tooltip("Туннель в среду разработки")
+                    .tooltip(if mode == "local" { "Обслуживание вызовов агента (MCP)" } else { "Туннель в среду разработки" })
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -502,54 +654,65 @@ impl Render for Panel {
                 .id("params")
                 .size_full()
                 .overflow_y_scroll()
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx))
-                        .child(
+                .child({
+                    // В локальном режиме коннектор слушает loopback, а не
+                    // поднимает туннель в среду: адрес среды, рабочее место и
+                    // его пароль ничего не меняют — показывать их незачем
+                    // (поле без действия роняет доверие к экрану параметров).
+                    // Без них ряд не рисуется вовсе — ни дыры, ни подписи
+                    // без поля: высота окна не прыгает между режимами, она
+                    // просто меньше.
+                    let mut col = v_flex().gap_3();
+                    if shown.contains(&"server") {
+                        col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
+                    }
+                    if shown.contains(&"workstation") {
+                        col = col.child(
                             h_flex()
                                 .gap_3()
                                 .items_end()
                                 .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
                                 .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_size(px(13.)).text_color(caption).child("База"))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                        .child(pick("pick-base", f.base_path.clone(), cx)),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_3()
-                                .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
-                                .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                        .child(pick("pick-project", f.project.clone(), cx)),
-                                ),
-                        ),
-                )
+                        );
+                    }
+                    col.child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_size(px(13.)).text_color(caption).child("База"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
+                                    .child(pick("pick-base", f.base_path.clone(), cx)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_3()
+                            .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                            .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                    .child(pick("pick-project", f.project.clone(), cx)),
+                            ),
+                    )
+                })
                 .into_any_element(),
             // «Проект» = прежние «Расширение» и «Проект» одной лентой:
             // сверху операции на машине, ниже — каталог и состояние ветки.
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
                 let ops = ui.ops.clone();
+                let cfg = ui.cfg.clone();
                 let rows = project_rows(ui.project.as_ref());
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
@@ -568,7 +731,18 @@ impl Render for Panel {
                         // 12 px между операциями и строками проекта: это два
                         // списка, а не один.
                         .gap_3()
-                        .child(v_flex().gap_2().children(ops.iter().map(|o| fact(o.dot, o.title.clone(), o.detail.clone()))))
+                        .child(v_flex().gap_2().children(ops.iter().map(|o| {
+                            // Строка публикации — словами разработчика 1С
+                            // (адрес, не дескрипторы/httpd.conf): та же
+                            // карточка `fact`, только заголовок и подробность
+                            // берутся у `gui::publication_detail`, а не у
+                            // технического текста операции.
+                            if o.id == "host.publication" {
+                                fact(o.dot, gui::PUBLICATION_TITLE.into(), gui::publication_detail(&cfg))
+                            } else {
+                                fact(o.dot, o.title.clone(), o.detail.clone())
+                            }
+                        })))
                         .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
                             // Подсказка — не факт о проекте: мелкий текст без кружка.
                             match d {
@@ -634,27 +808,45 @@ impl Render for Panel {
         // Своё имя на вкладку: меню помнит построенные пункты по имени
         // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
         let more = |id: &'static str| Button::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
-        let busy_now = busy.is_some();
 
         let foot_actions: AnyElement = match tab {
             gui::Tab::Params => {
-                let dirty = self.is_dirty(cx);
-                Button::new("save")
-                    .primary()
-                    .label("Сохранить")
-                    .disabled(!dirty)
-                    .on_click(cx.listener(|panel, _, _, cx| {
-                        let was_on_cur = cx.global::<Ui>().link.is_on();
-                        // Сеанс перезапускаем только по удачной записи: иначе
-                        // живой туннель оборвался бы ради непринятых параметров.
-                        if panel.save(cx) && was_on_cur {
-                            gui::stop_session(cx);
-                            if let Err(e) = gui::start_session(cx) {
-                                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                            }
-                        }
-                        cx.refresh_windows();
-                    }))
+                let allowed = can_save(dirty, busy_now, has_progress);
+                // Кнопка гаснет сама, но молча — заказчик 2026-10-20: почему
+                // нельзя нажать, не видно. Причина теперь живёт в левом слоте
+                // подвала (`foot_left`, один текст — заказчик 2026-10-20: «две
+                // надписи стало») и в тултипе кнопки, вторая надпись рядом не
+                // добавляется.
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("save")
+                            .primary()
+                            .label("Сохранить")
+                            .disabled(!allowed)
+                            .when_some(hint.clone(), |b, h| b.tooltip(h))
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                // Смена базы при включённых MCP спрашивает
+                                // подтверждение: агент работает прямо сейчас и
+                                // после записи перейдёт на другую базу. Во всех
+                                // прочих случаях вопроса нет и запись идёт сразу.
+                                // Перезапуск сеанса и строка в журнал — внутри
+                                // `gui::save_host`, не здесь.
+                                let host = panel.host_from_fields(cx);
+                                let to_write = host.clone();
+                                gui::confirm_database_change(window, cx, &host, move |_window, cx| {
+                                    let ui = cx.global::<Ui>();
+                                    let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
+                                    let _ = w.update(cx, |_, _window, cx| {
+                                        panel.update(cx, |this, cx| {
+                                            this.write(to_write, cx);
+                                        });
+                                    });
+                                    cx.refresh_windows();
+                                });
+                            })),
+                    )
                     .into_any_element()
             }
             // Главная кнопка ведёт человека по порядку: сначала поставить
@@ -699,12 +891,12 @@ impl Render for Panel {
             gui::Tab::Log => h_flex()
                 .gap_2()
                 .child(more("more-log").dropdown_menu(move |menu, _, _| {
+                    // «Открыть отчёт last-check.txt» убран (заказчик
+                    // 2026-10-20: зачем два пункта) — файл остаётся, на него
+                    // называет сама строка в журнале после проверки
+                    // (`Ev::Checks` в `mod.rs`).
                     menu.item(PopupMenuItem::new("Открыть журнал").disabled(busy_now).on_click(|_, _, cx| {
-                        let path = cx.global::<Ui>().kit.path(gui::LOG_FILE);
-                        gui::open_path(cx, &path);
-                    }))
-                    .item(PopupMenuItem::new("Открыть отчёт last-check.txt").disabled(busy_now).on_click(|_, _, cx| {
-                        let path = cx.global::<Ui>().kit.path("last-check.txt");
+                        let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
                         gui::open_path(cx, &path);
                     }))
                     .item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
@@ -791,18 +983,27 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     .pt_3()
-                    // Итог последнего действия переносится (до двух строк),
-                    // а не обрезается многоточием: плашка растёт по тексту.
-                    .child(
+                    // Один текст, одна строка (заказчик 2026-10-20: перенос
+                    // на вторую строку и подпрыгивание высоты подвала от
+                    // длинного пути комплекта, кириллица в нём в том числе).
+                    // Лишнее режется многоточием, а не переносится; `min_w_0`
+                    // — иначе flex-ребёнок не уже своего текста, и обрезка на
+                    // узком окне срабатывает только упёршись в кнопку.
+                    // Полный текст — подсказкой по наведению.
+                    .child({
+                        let text = foot_left.0.clone();
                         div()
+                            .id("foot-left")
                             .flex_1()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .text_size(px(13.))
-                            .line_height(relative(1.2))
                             .text_color(if foot_left.1 { danger } else { caption })
-                            .whitespace_normal()
-                            .line_clamp(2)
-                            .child(foot_left.0),
-                    )
+                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                            .child(foot_left.0)
+                    })
                     .child(foot_actions),
             )
     }
@@ -810,10 +1011,11 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{card, fields_differ, project_rows, HINT_PROJECT};
+    use super::{can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
-    use crate::gui::{Dot, ProjectView, Running, Which};
+    use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
     use crate::session::State;
+    use common::check::Check;
     use common::Phase;
     use std::time::{Duration, Instant};
 
@@ -830,7 +1032,7 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        let c = card(Some(&r), &State::Off, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
@@ -842,7 +1044,7 @@ mod tests {
         // «Прервать» не показывается, в отличие от git-обмена выше.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
-        let c = card(Some(&r), &State::Off, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!(c.dot, Dot::Busy);
         assert!(!c.cancel);
     }
@@ -850,18 +1052,82 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
-        let c = card(None, &State::Off, now);
+        let c = card(None, &State::Off, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
         assert!(!c.cancel);
-        let c = card(None, &State::Connecting, now);
+        let c = card(None, &State::Connecting, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, now);
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
-        let c = card(None, &State::Retrying("нет сети".into()), now);
+        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
-        let c = card(None, &State::Failed("нет сети".into()), now);
+        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Readiness::Unknown, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
+    }
+
+    #[test]
+    fn card_titles_speak_about_mcp_not_the_tunnel() {
+        let now = Instant::now();
+        assert_eq!(card(None, &State::Off, "local", &Readiness::Unknown, now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Connecting, "local", &Readiness::Unknown, now).title, "Включаю…");
+        assert_eq!(card(None, &State::Up { since: now }, "local", &Readiness::Unknown, now).title, "MCP включены");
+        // Отказ — причина, не общее «не подключён»: порт занят независимо
+        // от переключателя, человеку нужно знать, чем именно.
+        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Readiness::Unknown, now);
+        assert_eq!(c.title, "порт 7771 занят процессом 1234");
+        for mode in ["local", "tunnel"] {
+            for link in [
+                State::Off,
+                State::Connecting,
+                State::Up { since: now },
+                State::Retrying("нет сети".into()),
+                State::Failed("порт занят".into()),
+            ] {
+                let title = card(None, &link, mode, &Readiness::Unknown, now).title;
+                assert!(!title.to_lowercase().contains("туннель"), "{mode}/{link:?}: {title}");
+            }
+        }
+    }
+
+    /// Дефект (заказчик 2026-10-20, трижды в один день): зелёная карточка
+    /// обещала «агент дойдёт до базы», хотя инструменты не разложены — первый
+    /// провалившийся факт готовности (`Readiness::Warn`) должен перекрасить
+    /// карточку в жёлтый и назвать причину, не трогая смысл самого
+    /// переключателя (`Switch` в `render` не зависит от `ready`).
+    #[test]
+    fn a_failed_readiness_fact_turns_the_green_card_into_a_named_warning() {
+        let now = Instant::now();
+        let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let ready = Readiness::Warn(fail);
+        let c = card(None, &State::Up { since: now }, "local", &ready, now);
+        assert_eq!(c.dot, Dot::Warn);
+        assert!(c.title.starts_with("Агент базу не увидит:"), "{}", c.title);
+        assert!(c.title.contains("инструменты комплекта") && c.title.contains("1c-connect install"), "{}", c.title);
+        assert!(!c.title.contains("факт"), "{}", c.title);
+    }
+
+    /// Неизвестно (поток ещё считает) или пройдено — карточка остаётся
+    /// зелёной, как раньше; «ещё не посчитано» не должно выглядеть как
+    /// провал.
+    #[test]
+    fn unknown_or_passed_readiness_keeps_the_green_card() {
+        let now = Instant::now();
+        for ready in [Readiness::Unknown, Readiness::Ok] {
+            let c = card(None, &State::Up { since: now }, "local", &ready, now);
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"), "{ready:?}");
+        }
+    }
+
+    /// Туннельный режим не говорит «MCP» и не смотрит готовность — его
+    /// собственный провал публикации уже красный (`State::Failed`) отдельным
+    /// путём (`Ev::Publish` в `gui::mod`).
+    #[test]
+    fn tunnel_mode_ignores_the_readiness_warning() {
+        let now = Instant::now();
+        let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let c = card(None, &State::Up { since: now }, "tunnel", &Readiness::Warn(fail), now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
     }
 
     #[test]
@@ -869,12 +1135,39 @@ mod tests {
         let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
         // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
         let shown = Host { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
-        assert!(!fields_differ(&shown, &saved));
+        assert!(!fields_differ(&shown, &saved, "tunnel"));
         let edited = Host { server: "h:1".into(), ..shown.clone() };
-        assert!(fields_differ(&edited, &saved));
+        assert!(fields_differ(&edited, &saved, "tunnel"));
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
-        assert!(fields_differ(&moved, &saved));
+        assert!(fields_differ(&moved, &saved, "tunnel"));
+    }
+
+    #[test]
+    fn local_mode_hides_the_environment_fields() {
+        assert_eq!(shown_fields("local").to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
+        assert_eq!(shown_fields("tunnel").len(), 7);
+        // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
+        assert_eq!(shown_fields("bogus"), shown_fields("tunnel"));
+    }
+
+    #[test]
+    fn changing_a_hidden_field_does_not_enable_save() {
+        let saved = Host { mode: "local".into(), ..Host::default() };
+        // Адрес среды, пароль рабочего места и само рабочее место правятся,
+        // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
+        let edited = Host {
+            server: "10.0.0.5:3393".into(),
+            password: "другой".into(),
+            workstation: "dev2".into(),
+            ..saved.clone()
+        };
+        assert!(!fields_differ(&edited, &saved, "local"));
+        // А то же самое в туннельном режиме — заметная правка.
+        assert!(fields_differ(&edited, &saved, "tunnel"));
+        // Видимое поле в локальном режиме по-прежнему включает «Сохранить».
+        let moved = Host { project: "D:\\other\\Buh".into(), ..saved.clone() };
+        assert!(fields_differ(&moved, &saved, "local"));
     }
 
     #[test]
@@ -911,5 +1204,43 @@ mod tests {
     #[test]
     fn the_hint_no_longer_points_at_a_tab_that_is_gone() {
         assert!(!HINT_PROJECT.contains("Расширение"), "{HINT_PROJECT}");
+    }
+
+    #[test]
+    fn save_is_blocked_while_an_operation_runs() {
+        assert!(can_save(true, false, false));
+        assert!(!can_save(false, false, false), "ничего не менялось");
+        assert!(!can_save(true, true, false), "идёт операция/проверка");
+        assert!(!can_save(true, false, true), "сеанс подключается/перезапускается");
+    }
+
+    #[test]
+    fn save_hint_names_the_reason_it_is_disabled() {
+        // Можно нажать — объяснять нечего.
+        assert_eq!(save_hint(true, false, None), None);
+        // Нечего сохранять: поля не трогали.
+        assert_eq!(save_hint(false, false, None).as_deref(), Some("Нечего сохранять — поля ещё не менялись"));
+        // Идёт операция — названная, а не общим словом.
+        assert_eq!(save_hint(true, true, Some(Which::Export)).as_deref(), Some("Подождите: идёт выгрузка из 1С"));
+        assert_eq!(save_hint(true, true, Some(Which::Import)).as_deref(), Some("Подождите: идёт загрузка в 1С"));
+        assert_eq!(save_hint(true, true, Some(Which::Install)).as_deref(), Some("Подождите: идёт работа с расширением"));
+        assert_eq!(save_hint(true, true, Some(Which::Uninstall)).as_deref(), Some("Подождите: идёт работа с расширением"));
+        // Занято, но никакая операция не идёт — значит идёт проверка.
+        assert_eq!(save_hint(true, true, None).as_deref(), Some("Подождите: идёт проверка"));
+    }
+
+    #[test]
+    fn the_footer_slot_picks_one_text_in_priority_order() {
+        let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
+        // Сказать нечего — путь комплекта, кнопка не красная.
+        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
+        // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
+        assert_eq!(foot_left_text(None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
+        // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
+        // что слот уже занят объяснением (заказчик 2026-10-20).
+        let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
+        assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
+        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
+        assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
     }
 }

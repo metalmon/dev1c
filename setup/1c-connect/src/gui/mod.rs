@@ -93,6 +93,26 @@ pub struct Ui {
     /// несёт старое значение и отбрасывается в `handle`.
     pub session_gen: u64,
     pub link: State,
+    /// Настоящий отказ bind локального слушателя («порт занят» и т.п.),
+    /// независимый от переключателя: слушатели в локальном режиме не
+    /// поднимаются заново ни «включить», ни «выключить» (см. `launch`), так
+    /// что ни один клик его не чинит — только заводится (`Ev::Link` с
+    /// `Failed`) и снимается (`Ev::Link` с `Up`) настоящим сеансом. Без
+    /// отдельного поля `toggle_link` стирал бы `Failed` в `Off`/`Up` первым
+    /// же щелчком, и второй клик уже не видел бы отказа (находка повторного
+    /// ревью: прежний `keep_failure_on_enable` ловил лишь один клик).
+    pub bind_failed: Option<String>,
+    /// Обслуживаются ли вызовы агента: живёт дольше любого сеанса (заводится
+    /// один раз в `launch`, `start_session`/`stop_session`/«Сохранить» его не
+    /// пересоздают), передаётся в `session::Serve` через `session::start_with_enabled` и
+    /// читается мостом (`bridge::Rules`) на каждый вызов. В локальном режиме
+    /// переключатель окна меняет только этот флаг — слушатели остаются
+    /// поднятыми; в туннельном — как раньше, переключатель поднимает и
+    /// опускает сеанс целиком.
+    pub enabled: Arc<AtomicBool>,
+    /// Итог последней быстрой проверки «дойдёт ли агент до базы» — см.
+    /// `Readiness` и `run_readiness`.
+    pub ready: Readiness,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -257,6 +277,25 @@ pub enum Dot {
     Busy,
     Up,
     Down,
+    /// MCP включены, но быстрая проверка (`verify::readiness`) нашла
+    /// провалившийся факт — карточка жёлтая, а не зелёная или красная: ворота
+    /// открыты и обслуживают вызовы, просто агент получит отказ от базы.
+    Warn,
+}
+
+/// Итог быстрой проверки «дойдёт ли агент до базы» (`verify::readiness`),
+/// пересчитывается только по событию, что могло сдвинуть почву — включение
+/// MCP, автозапуск с уже включённым переключателем, конец «Установить» и
+/// «Сохранить» (см. `run_readiness` и её вызовы), не на таймере.
+#[derive(Clone, Debug)]
+pub enum Readiness {
+    /// Переключатель выключен либо поток ещё считает — карточка показывает
+    /// обычное «MCP включены», как и до этой проверки.
+    Unknown,
+    Ok,
+    /// Первый провалившийся факт — его `what`/`detail`/`hint` и есть причина,
+    /// которую видит человек в карточке.
+    Warn(Check),
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +322,13 @@ pub enum Ev {
     Ops(Vec<OpView>),
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`).
     Project(ProjectView),
+    /// Ответ `ensure_publication`, поднятой в своём потоке: проба (до 3 с),
+    /// проверка расширения в режиме «webserver» и ожидание после spawn не
+    /// должны держать главный поток окна (находка повторного ревью).
+    Publish(Result<(), String>),
+    /// Первый провалившийся факт `verify::readiness`, посчитанный в своём
+    /// потоке (`run_readiness`); `None` — пройдено.
+    Ready(Option<Check>),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -435,7 +481,14 @@ pub fn cancel_op(cx: &mut App) {
 /// прав нет) молча игнорируются — журнал на диске не обязателен для работы.
 fn write_log_file(kit: &Kit, line: &Line) {
     use std::io::Write;
-    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(kit.path(LOG_FILE)) else { return };
+    let path = kit.state_path(LOG_FILE);
+    // Каталог состояния создаёт `ops_host::ensure_state` на запуске; здесь
+    // на всякий случай ещё раз — журнал открывается напрямую, без
+    // `kit::write_text`, который родителя создаёт сам.
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) else { return };
     let text = if line.kind == Kind::Head { format!("\n{}\n", line.text) } else { format!("{:<2}{}\n", line.kind.mark(), line.text) };
     let _ = f.write_all(text.as_bytes());
 }
@@ -455,10 +508,17 @@ pub fn line_of(e: &Event) -> Option<Line> {
 
 /// Строка перехода сеанса — тексты как в сегодняшнем `gui.rs::set_link`.
 /// Начало и конец видны и в журнале: туннель сам пишет только про поднятую
-/// связь и обрывы, а отказ возвращает ошибкой.
-pub fn link_line(l: &State, host: &Host) -> Option<Line> {
+/// связь и обрывы, а отказ возвращает ошибкой. `Connecting` — по режиму:
+/// адрес среды, пароль и имя рабочего места в локальном режиме скрыты в
+/// «Параметрах» (`panel::shown_fields`) и ничего не значат — печатать их в
+/// журнал всё равно было бы находкой целостного ревью (строка говорила про
+/// туннель, которого там нет).
+pub fn link_line(l: &State, host: &Host, mode: &str) -> Option<Line> {
     match l {
-        State::Connecting => Some(Line { kind: Kind::Say, text: format!("подключаюсь к {} как {}", host.server, host.workstation) }),
+        State::Connecting => {
+            let text = if mode == "local" { "включаю MCP".to_string() } else { format!("подключаюсь к {} как {}", host.server, host.workstation) };
+            Some(Line { kind: Kind::Say, text })
+        }
         State::Failed(why) => Some(Line { kind: Kind::Fail, text: why.clone() }),
         State::Off => Some(Line { kind: Kind::Say, text: "отключено".into() }),
         State::Up { .. } | State::Retrying(_) => None,
@@ -497,6 +557,23 @@ pub fn op_view(id: String, title: String, st: OpState) -> OpView {
     OpView { id, title, dot, detail }
 }
 
+/// Заголовок строки `host.publication` в «Проекте»: слова 1С-разработчика
+/// вместо «публикация»/реверс-прокси — база отвечает по HTTP, вот и всё.
+pub const PUBLICATION_TITLE: &str = "HTTP-сервис базы";
+
+/// Подробность той же строки: адрес, на который смотреть браузером
+/// (`auto` — свой httpd на 127.0.0.1:<порт>, как в `ops_host::Publication`),
+/// либо прямое указание, что публикацию настроил человек (`webserver`).
+/// Дескрипторы, httpd.conf и прочее — в журнал (`ops_host`/`publication`),
+/// не в эту строку: окно не должно объяснять реверс-прокси.
+pub fn publication_detail(cfg: &Cfg) -> String {
+    if cfg.host.publication == "webserver" {
+        "публикация настроена вручную".into()
+    } else {
+        format!("база отвечает по HTTP: 127.0.0.1:{}", cfg.http_port())
+    }
+}
+
 /// Главное действие вкладки «Проект»: пока расширение не стоит — «Установить»,
 /// дальше человеку нужен обмен с git, и главной становится «Выгрузить».
 /// Остальное — в меню «…».
@@ -529,6 +606,20 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
     out
 }
 
+/// Причина, по которой карточка жёлтая (`Dot::Warn`): первый провалившийся
+/// факт `verify::readiness`, одной строкой — что не так и что сделать, без
+/// «факт N провален» (заказчик 2026-10-20 читает это как 1С-разработчик).
+/// Подсказка не дублируется, когда она уже вписана в само `detail` (так у
+/// TOOLS-факта «в комплекте нет … — скопируйте заново»), иначе человек видел
+/// бы один совет дважды.
+pub fn readiness_reason(check: &Check) -> String {
+    if check.hint.is_empty() || check.detail.contains(check.hint.as_str()) {
+        format!("{}: {}", check.what, check.detail)
+    } else {
+        format!("{}: {} — {}", check.what, check.detail, check.hint)
+    }
+}
+
 /// Файл или каталог средствами системы: на Windows — `explorer`, иначе
 /// `xdg-open`. Не открылось — строкой в журнал, молча не теряем.
 pub fn open_path(cx: &mut App, path: &std::path::Path) {
@@ -549,20 +640,216 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
-/// Сохранить параметры сервера. Списка инструментов, каталога выгрузки и
-/// адреса публикации в окне нет (правятся в toml): берём их из текущих
-/// параметров, иначе пустые значения из формы затёрли бы toml. Каталог
-/// проекта — из формы.
+/// Поля, что решают, какую базу обслуживает публикация/MCP — путь, логин и
+/// пароль дескриптора `publication::vrd`. Единый список: `save_host` смотрит
+/// на него, не поднять ли публикацию заново, а подтверждение перед
+/// «Сохранить» (`save_needs_confirm`) — не сменилась ли сама база — читает
+/// тот же список, а не второй, отдельно придуманный.
+fn database_changed(a: &Host, b: &Host) -> bool {
+    a.base_path != b.base_path || a.db_user != b.db_user || a.db_password != b.db_password
+}
+
+/// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
+/// режима публикации, её порта и адреса публикации в окне нет (правятся в
+/// toml): берём их из текущих параметров, иначе пустые значения из формы
+/// затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
+    let old_host = ui.cfg.host.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
+    host.publication = ui.cfg.host.publication.clone();
+    host.http_port = ui.cfg.host.http_port;
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
-    write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    let base_path = cfg.host.base_path.clone();
+    // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
+    // пароль — переподнять его нужно при смене любого из трёх, не только
+    // пути: иначе смена пароля/логина оставляла бы старый дескриптор живым,
+    // и публикация продолжала бы открывать базу под старыми учётными
+    // данными (находка повторного ревью).
+    let descriptor_changed = database_changed(&cfg.host, &old_host);
+    // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
+    // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
+    // здесь — смена режима в трее поднимает его сама, отдельным путём
+    // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
+    // лишней строкой в журнал и лишним миганием портов.
+    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
     ui.cfg = cfg;
+    // Публикация не должна молчать про старую базу: иначе агент отвечает из
+    // прежней, пока кто-нибудь не перезапустит HTTP-сервис руками (находка
+    // целостного ревью) — до следующего вызова она обязана смотреть на
+    // новую. `ensure_publication` сама решает «auto»/«webserver» и когда уже
+    // «сделано» — здесь только зовём её, не повторяя эту логику.
+    if descriptor_changed {
+        ensure_publication_now(ui);
+    }
+    if changed && ui.session.is_some() {
+        if ui.cfg.host.mode == "local" {
+            // Локальный режим: слушатели подняты на весь срок жизни процесса
+            // и не трогаются переключателем/«Сохранить» (см. `launch`) —
+            // спека прямо требует, чтобы смена базы была незаметна для Zed:
+            // слушатели и уже принятые соединения не рвутся, следующий вызов
+            // агента просто уходит в новую базу. `Serve::dispatch` берёт её
+            // из этой же общей ячейки на каждое новое соединение — полный
+            // перезапуск сеанса (`restart_session`) здесь не нужен и раньше
+            // был блокирующей находкой целостного ревью (человеку пришлось
+            // бы переподключать два сервера в Zed руками).
+            if let Some(s) = &ui.session {
+                s.update_cfg(ui.cfg.clone());
+            }
+            note_line(ui, Line { kind: Kind::Say, text: format!("MCP: параметры обновлены, база {base_path}") });
+        } else {
+            restart_session(ui, base_path);
+        }
+    }
+    // Почва могла сдвинуться (база, логин, пароль, порт публикации) —
+    // вердикт «дойдёт ли агент до базы» устарел, пересчитываем.
+    run_readiness(ui);
     Ok(())
+}
+
+/// Нужно ли спросить перед «Сохранить»: база меняется (`database_changed`
+/// выше — тот же список полей, что у публикации, не второй, отдельно
+/// придуманный), агент прямо сейчас может отвечать (`enabled` — его читает
+/// мост на каждый вызов, в обоих режимах, не только в локальном), и сеанс
+/// жив (`ui.session`). Любая другая правка — каталог проекта, режим,
+/// рабочее место — сохраняется без вопроса, как и было задумано (заказчик
+/// просил вопрос именно и только в этом сочетании, 2026-10-20).
+pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
+    database_changed(new_host, &ui.cfg.host) && ui.enabled.load(Ordering::Relaxed) && ui.session.is_some()
+}
+
+/// Имя базы для диалога — последний компонент пути («Buh» для C:\Bases\Buh),
+/// как 1С-разработчик называет базу в разговоре; полный путь уходит в
+/// detail, не в это имя. Пустой/корневой путь без компонента — путь целиком,
+/// лишь бы в диалоге не было пустой строки.
+fn base_label(path: &str) -> &str {
+    std::path::Path::new(path).file_name().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or(path)
+}
+
+/// Текст диалога подтверждения: два предложения (что сейчас, что станет
+/// после, и сам вопрос) и деталь с обоими полными путями.
+pub fn confirm_text(old_path: &str, new_path: &str) -> (String, String) {
+    let message =
+        format!("Агент сейчас работает с базой «{}», после сохранения перейдёт на «{}». Сохранить?", base_label(old_path), base_label(new_path));
+    (message, format!("{old_path} → {new_path}"))
+}
+
+/// Диалог перед «Сохранить», когда база меняется под живым и включённым MCP
+/// (см. `save_needs_confirm`) — иначе `proceed` зовётся сразу, без вопроса.
+/// Платформенный диалог (`Window::prompt`), тот же приём, что у выбора
+/// каталога (`Panel::pick_dir`): `dialog_open` не даёт окну спрятаться под
+/// диалогом (`Panel::new`'s `observe_window_activation`) и не даёт открыть
+/// его второй раз; ответ приходит в своём потоке задачи — главный поток
+/// ничего не ждёт. `proceed` зовётся ровно раз («да», или вопроса не было)
+/// либо никогда (отказ — поля окна остаются как человек их оставил, здесь
+/// ничего не трогаем).
+pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Host, proceed: impl FnOnce(&mut Window, &mut App) + 'static) {
+    if !save_needs_confirm(cx.global::<Ui>(), new_host) {
+        proceed(window, cx);
+        return;
+    }
+    if cx.global::<Ui>().dialog_open {
+        return;
+    }
+    let (message, detail) = confirm_text(&cx.global::<Ui>().cfg.host.base_path, &new_host.base_path);
+    cx.global_mut::<Ui>().dialog_open = true;
+    let rx = window.prompt(
+        PromptLevel::Warning,
+        &message,
+        Some(&detail),
+        &[PromptButton::ok("Да, сохранить"), PromptButton::cancel("Нет, не сохранять")],
+        cx,
+    );
+    cx.spawn(async move |cx| {
+        let yes = matches!(rx.await, Ok(0));
+        let _ = cx.update(|cx| {
+            cx.global_mut::<Ui>().dialog_open = false;
+            if !yes {
+                return;
+            }
+            let Some(w) = cx.global::<Ui>().window else { return };
+            let _ = w.update(cx, |_, window, cx| {
+                window.activate_window();
+                proceed(window, cx);
+            });
+        });
+    })
+    .detach();
+}
+
+/// Поднять/проверить HTTP-сервис на уже записанных `ui.cfg`: после смены
+/// базы («Сохранить», см. выше), при включении MCP (`toggle_link`) и при
+/// старте с «подключаться при запуске» (`launch`). `ensure_publication` сама
+/// идемпотентна и решает режим, но пробует связь с таймаутом в 3 с, в режиме
+/// «webserver» ходит в сеть за версией расширения, а после запуска своего
+/// httpd ждёт его готовности — всё это в своём потоке, а не на главном
+/// потоке окна (находка повторного ревью: окно подвисало на эти секунды).
+/// Ответ идёт `Ev::Publish`: журнал на отказе и карточка — в `handle`, не
+/// здесь, иначе карточка соврала бы, что всё в порядке, пока агент отвечает
+/// с ошибкой.
+fn ensure_publication_now(ui: &mut Ui) {
+    let ctx = ctx_for(ui);
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
+        let _ = tx.unbounded_send(Ev::Publish(r));
+    });
+}
+
+/// Быстрая проверка «дойдёт ли агент до базы» (`verify::readiness`) в своём
+/// потоке — она ходит по сети (HTTP к расширению) и не должна держать главный
+/// поток окна, тем же приёмом, что `ensure_publication_now` выше. Зовётся,
+/// когда почва могла сдвинуться: карточка стала «MCP включены» (включили
+/// переключатель, либо сеанс пришёл уже включённым — автозапуск), кончилось
+/// «Установить» (и любая другая операция — дешевле перепроверить лишний раз,
+/// чем отличать операции друг от друга), и после «Сохранить». Не на таймере —
+/// между этими событиями `ui.ready` просто не пересчитывается.
+pub fn run_readiness(ui: &mut Ui) {
+    // Старый вердикт не должен пережить смену почвы — сброс синхронный,
+    // ещё до похода по сети (`drop_stale_readiness`, тестируется отдельно
+    // от самого похода).
+    drop_stale_readiness(ui);
+    let ctx = ctx_for(ui);
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        let first_fail = verify::readiness(&ctx).into_iter().find(|c| !c.ok);
+        let _ = tx.unbounded_send(Ev::Ready(first_fail));
+    });
+}
+
+/// Сброс вердикта в `Readiness::Unknown`: сама почва ещё не проверена заново,
+/// но и старый ответ — уже не про неё. Ядро `run_readiness` без её похода по
+/// сети, тестируется само по себе (см. тесты модуля).
+fn drop_stale_readiness(ui: &mut Ui) {
+    ui.ready = Readiness::Unknown;
+}
+
+/// Перезапустить сеанс после удачной записи параметров (только туннельный
+/// режим — там порты живут внутри SSH, и подменить базу под уже идущим
+/// сеансом нечем): старому потоку просят остановиться (в своём потоке, не
+/// блокируя этот), новый поднимают сразу с уже записанными параметрами —
+/// тем же флагом `enabled`, он живёт дольше сеанса. Переход в
+/// «подключаюсь»/«подключён» придёт позже обычным `Ev::Link`, здесь —
+/// только одна строка в журнал про сам факт перезапуска.
+fn restart_session(ui: &mut Ui, base_path: String) {
+    ui.session_gen += 1;
+    let gen = ui.session_gen;
+    if let Some(s) = ui.session.take() {
+        std::thread::spawn(move || {
+            let _ = s.stop();
+        });
+    }
+    let ctx = ctx_for(ui);
+    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
+        let _ = tx.unbounded_send(Ev::Link(gen, l));
+    });
+    ui.session = Some(session);
+    note_line(ui, Line { kind: Kind::Say, text: format!("MCP перезапущены: база {base_path}") });
 }
 
 /// Контекст одного прогона: события идут в журнал на диске (команды и их
@@ -602,7 +889,7 @@ fn sync_tray(ui: &Ui, now: Instant) {
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
 fn set_link(cx: &mut App, l: State) {
     let host = cx.global::<Ui>().cfg.host.clone();
-    let line = link_line(&l, &host);
+    let line = link_line(&l, &host, &host.mode);
     let ui = cx.global_mut::<Ui>();
     ui.link = l.clone();
     if let Some(line) = line {
@@ -621,11 +908,12 @@ pub fn autoconnect(kit: &Kit) -> bool {
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
 pub fn start_session(cx: &mut App) -> Result<(), String> {
     let ui = cx.global_mut::<Ui>();
-    if !ui.kit.path(cfg::FILE).exists() {
-        return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
+    let params = ui.kit.state_path(cfg::FILE);
+    if !params.exists() {
+        return Err(format!("нет файла параметров {} — заполните поля и нажмите «Сохранить»", params.display()));
     }
     // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
-    // в том числе в окно между `session::start` и первым `Connecting`.
+    // в том числе в окно между `session::start_with_enabled` и первым `Connecting`.
     if ui.session.is_some() && !matches!(ui.link, State::Failed(_)) {
         return Ok(());
     }
@@ -634,8 +922,8 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     ui.session_gen += 1;
     let gen = ui.session_gen;
     let ctx = ctx_for(ui);
-    let (cfg, kit, tx) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone());
-    let session = session::start(cfg, kit, ctx.sink, move |l| {
+    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     cx.global_mut::<Ui>().session = Some(session);
@@ -657,16 +945,80 @@ pub fn stop_session(cx: &mut App) {
     set_link(cx, State::Off);
 }
 
+/// Переключатель в локальном режиме не трогает сеанс — слушатели уже подняты
+/// и остаются поднятыми (см. `launch`), меняется только то, отвечают ли
+/// вызовы агента. Возвращает новое состояние флага.
+fn flip_enabled_only(ui: &mut Ui) -> bool {
+    let on = !ui.enabled.load(Ordering::Relaxed);
+    ui.enabled.store(on, Ordering::Relaxed);
+    on
+}
+
+/// В локальном режиме слушатели поднимаются при старте и остаются поднятыми
+/// независимо от переключателя — настоящее состояние сеанса почти всегда
+/// `Up`/`Connecting`. Экран обязан при этом показывать «MCP выключены», пока
+/// флаг снят: подменяем `Connecting`/`Up` на `Off`. Отказ (`Failed`) виден
+/// всегда — порт занят независимо от переключателя.
+fn local_display(mode: &str, enabled: bool, l: State) -> State {
+    if mode == "local" && !enabled {
+        match l {
+            State::Up { .. } | State::Connecting => State::Off,
+            other => other,
+        }
+    } else {
+        l
+    }
+}
+
+/// Отображение настоящего отказа bind (`ui.bind_failed`) — независимо от
+/// того, включили или выключили переключатель: слушатели в локальном режиме
+/// не поднимаются заново ни тем, ни другим кликом (см. `launch`), так что
+/// «включить» после провала ничего не чинит, и карточка обязана продолжать
+/// говорить правду, а не «MCP включены». Решает по сохранённому отказу, а не
+/// по текущему показанному состоянию — иначе один клик «выключить» стирал
+/// бы его раньше, чем следующий клик «включить» успел бы его увидеть
+/// (находка повторного ревью: прежний `keep_failure_on_enable` ловил лишь
+/// один клик).
+fn bind_failure_display(bind_failed: &Option<String>) -> Option<State> {
+    bind_failed.clone().map(State::Failed)
+}
+
 pub fn toggle_link(cx: &mut App) {
+    if cx.global::<Ui>().cfg.host.mode == "local" {
+        let ui = cx.global_mut::<Ui>();
+        let on = flip_enabled_only(ui);
+        // Вердикт прошлого состояния переключателя устарел в любую сторону —
+        // следующий зелёный «MCP включены» подтвердит себя сам (`run_readiness`
+        // ниже/в `Ev::Publish`), а не унаследует чужую проверку.
+        drop_stale_readiness(ui);
+        if let Some(l) = bind_failure_display(&ui.bind_failed) {
+            set_link(cx, l);
+            return;
+        }
+        if on {
+            // «Включаю…», пока публикация (проба до 3 с, ожидание httpd)
+            // идёт в своём потоке — иначе карточка сказала бы «MCP включены»
+            // раньше, чем проба успела ответить (находка повторного ревью:
+            // карточка оставалась зелёной даже после отказа публикации).
+            set_link(cx, State::Connecting);
+            ensure_publication_now(cx.global_mut::<Ui>());
+        } else {
+            set_link(cx, State::Off);
+        }
+        return;
+    }
     let on = cx.global::<Ui>().link.is_on();
     if on {
         stop_session(cx);
         return;
     }
-    if let Err(e) = start_session(cx) {
-        window::show_window(cx);
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-        cx.refresh_windows();
+    match start_session(cx) {
+        Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
+        Err(e) => {
+            window::show_window(cx);
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -762,16 +1114,17 @@ pub fn run_check(cx: &mut App) {
     ui.unread = 0;
     let ctx = ctx_for(ui);
     let link = ui.link.clone();
+    let mode = ui.cfg.host.mode.clone();
     let tx = ui.tx.clone();
     cx.refresh_windows();
     std::thread::spawn(move || {
         guarded(
             &tx,
             || {
-                let state = link.is_up().then(|| link.label());
+                let state = link.is_up().then(|| link.label(&mode));
                 let checks = verify::run(&ctx, state.as_deref());
                 let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
-                let _ = write_text(&ctx.kit.path("last-check.txt"), &text);
+                let _ = write_text(&ctx.kit.state_path("last-check.txt"), &text);
                 Ev::Checks(checks)
             },
             || Ev::Checks(Vec::new()),
@@ -900,7 +1253,23 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Menu(e) => tray::on_menu(e, cx),
         Ev::Link(gen, l) => {
             if link_is_current(cx.global::<Ui>(), gen) {
-                set_link(cx, l);
+                let ui = cx.global_mut::<Ui>();
+                // Настоящий отказ/успех bind живёт отдельно от показанного
+                // состояния — `bind_failure_display` читает именно его,
+                // переключатель его не трогает (см. `toggle_link`).
+                match &l {
+                    State::Failed(reason) => ui.bind_failed = Some(reason.clone()),
+                    State::Up { .. } => ui.bind_failed = None,
+                    _ => {}
+                }
+                let shown = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
+                set_link(cx, shown);
+                // Вердикт готовности здесь не считается: `launch`/`toggle_link`
+                // зовут `ensure_publication_now` на каждый случай, когда могла
+                // подняться связь, и `Ev::Publish` ниже — единое место, что
+                // перепроверяет готовность, уже после того, как HTTP-сервис
+                // подтверждён, а не наперегонки с его стартом (гонка дала бы
+                // ложный жёлтый на старте, который потом некому было бы снять).
             }
         }
         Ev::Line(line) => {
@@ -936,6 +1305,9 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             refresh_ops(cx);
             refresh_project(cx);
+            // Почва могла сдвинуться («Установить» в т.ч.) — вердикт
+            // «дойдёт ли агент до базы» устарел, пересчитываем.
+            run_readiness(cx.global_mut::<Ui>());
         }
         Ev::Checks(checks) => {
             let failed = checks.iter().filter(|c| !c.ok).count();
@@ -946,10 +1318,15 @@ fn handle(ev: Ev, cx: &mut App) {
                 note_line(ui, line);
             }
             ui.busy = None;
+            // Пункта меню «Открыть отчёт» больше нет (заказчик 2026-10-20:
+            // два пункта делали одно и то же) — файл называем здесь полным
+            // путём: «в комплекте» он лежит только на Windows, на Linux
+            // комплект общий и только для чтения, отчёт уходит в состояние.
+            let report = ui.kit.state_path("last-check.txt").display().to_string();
             let status = if failed > 0 {
-                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Отчёт — last-check.txt в комплекте") }
+                Line { kind: Kind::Fail, text: format!("Проблем: {failed}. Подробности — отчёт {report}") }
             } else {
-                Line { kind: Kind::Ok, text: "Проверка пройдена. Отчёт — last-check.txt".into() }
+                Line { kind: Kind::Ok, text: format!("Проверка пройдена. Отчёт — {report}") }
             };
             note_line(ui, status.clone());
             ui.status = Some(status);
@@ -969,6 +1346,47 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global_mut::<Ui>();
             ui.project = Some(v);
             ui.pending = ui.pending.saturating_sub(1);
+            cx.refresh_windows();
+        }
+        Ev::Publish(r) => match r {
+            Ok(()) => {
+                let ui = cx.global::<Ui>();
+                let local = ui.cfg.host.mode == "local";
+                let enabled = ui.enabled.load(Ordering::Relaxed);
+                // Только здесь: локальный режим, переключатель включён и
+                // карточка ещё показывает «Включаю…» от этого самого клика
+                // (`toggle_link`) — настоящий сеанс в локальном режиме
+                // больше никаких событий не пришлёт (слушатели не
+                // перезапускаются переключателем). В остальных случаях
+                // (туннель, «Сохранить») показом уже ведёт сеанс — трогать
+                // нечего.
+                let settle = local && enabled && matches!(ui.link, State::Connecting);
+                if settle {
+                    set_link(cx, State::Up { since: Instant::now() });
+                }
+                // Публикация подтверждена прямо сейчас — `ensure_publication`
+                // уже дождалась готовности своего HTTP-сервиса, так что это
+                // (а не момент bind'а слушателей в `Ev::Link`, который мог
+                // прийти раньше её старта) и есть момент, когда почва для
+                // «дойдёт ли агент до базы» устоялась. Зовётся при каждом
+                // случае, когда могла подняться связь — щелчке и автозапуске
+                // с уже включённым переключателем (оба зовут
+                // `ensure_publication_now`), не только при «settle» выше.
+                if local && enabled {
+                    run_readiness(cx.global_mut::<Ui>());
+                }
+            }
+            // Карточка не должна врать «MCP включены», когда агент не видит
+            // базу — отказ публикации становится тем же `Failed`, что и у
+            // отказа сеанса, с текстом причины (находка повторного ревью).
+            Err(e) => set_link(cx, State::Failed(format!("публикация: {e}"))),
+        },
+        Ev::Ready(first_fail) => {
+            let ui = cx.global_mut::<Ui>();
+            ui.ready = match first_fail {
+                Some(c) => Readiness::Warn(c),
+                None => Readiness::Ok,
+            };
             cx.refresh_windows();
         }
     }
@@ -995,15 +1413,34 @@ fn fatal(text: &str) {
     eprintln!("{text}");
 }
 
+/// Код выхода для провалившегося трея (`Some(1)`) или `None`, когда он
+/// построился и выходить незачем. Отдельная чистая функция от типа трея и
+/// ошибки — решение «ошибка здесь ведёт к выходу» проверяется тестом без
+/// настоящего `Tray`/GTK.
+fn exit_code_for<T, E>(tray: &Result<T, E>) -> Option<i32> {
+    tray.is_err().then_some(1)
+}
+
 pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     let cfg = Cfg::load(&kit)?;
+    // Тот же единственный владелец рабочего места, что у `connect`/`serve` —
+    // см. `crate::single_instance`. Вторая копия окна (двойной щелчок или
+    // автозапуск при живом трее) на Windows тихо поднимает окно первой и
+    // выходит; замок держим до конца `run()` ниже — переменная остаётся на
+    // стеке этой функции, пока приложение не закроется.
+    let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation)?;
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
-    let log_path = kit.path(LOG_FILE);
+    let log_path = kit.state_path(LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
         let _ = std::fs::remove_file(&log_path);
     }
     let autostart_on = autostart::is_on();
+    // «Подключаться при запуске»: в туннельном режиме — решает, поднимать ли
+    // сеанс при старте, как раньше; в локальном — сеанс поднимается всегда
+    // (слушатели должны жить, пока жив процесс — см. `launch` ниже), а эта
+    // галочка решает только начальное значение переключателя «MCP».
     let autoconnect_on = autoconnect(&kit);
+    let local_mode = cfg.host.mode == "local";
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -1018,22 +1455,41 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // уведомления к процессу по нему.
         cx.set_app_identity("OktaPlus.1c-connect", "1c-connect");
         // Трей, который не удалось построить, здесь смертелен (см. `fatal`):
-        // глобал `Ui` ещё не выставлен, поэтому выходим через `cx.quit()`
-        // напрямую, а не через `quit()` этого модуля.
-        let tray = match tray::init().and_then(|()| tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on)) {
-            Ok(t) => t,
-            Err(e) => {
-                fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
-                cx.quit();
-                return;
-            }
-        };
+        // глобал `Ui` ещё не выставлен, поэтому `quit()` этого модуля не
+        // годится. Раньше здесь звали `cx.quit()` — он просит GPUI уйти
+        // своим чередом, но до открытия первого окна цикл обработки ещё не
+        // крутится, попросить его не успевает никто, и процесс вместо
+        // обещанного завершения висел живым (проверено на экране: больше
+        // минуты) и держал замок `single_instance` — ровно от чего
+        // сообщение обещало избавить следующий запуск. `exit_code_for`
+        // отдельно от этого, чтобы решение «ошибка — на выход» проверялось
+        // тестом без живого трея и GTK.
+        let tray_result = tray::init().and_then(|()| tray::build(tx.clone(), theme::Choice::load(&kit), autostart_on, autoconnect_on));
+        if let Err(e) = &tray_result {
+            fatal(&format!("Значок в трее не создался: {e:#}\nБез него программу нельзя закрыть, поэтому она завершается."));
+        }
+        if let Some(code) = exit_code_for(&tray_result) {
+            // Замок единственного экземпляра (`single_instance::Guard`) — на
+            // Windows объект ядра, на Linux файловый дескриптор с `flock`; оба
+            // снимаются самой системой при завершении процесса, этим выходом
+            // в т.ч., отдельно освобождать нечего.
+            std::process::exit(code);
+        }
+        let tray = tray_result.expect("exit_code_for вернул None только для Ok");
+        // Пункт подменю «Режим работы» строился без ведома сохранённого
+        // режима и всегда отмечал «Через туннель» первым — здесь сразу
+        // поправляется на настоящий, тем же методом, что потом зовёт смена
+        // режима в трее (`tray::on_menu`).
+        tray.set_mode(&cfg.host.mode);
         cx.set_global(Ui {
             kit,
             cfg,
             session: None,
             session_gen: 0,
             link: State::Off,
+            bind_failed: None,
+            enabled: Arc::new(AtomicBool::new(autoconnect_on)),
+            ready: Readiness::Unknown,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1096,9 +1552,15 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         })
         .detach();
         refresh_ops(cx);
-        if autoconnect_on {
-            if let Err(e) = start_session(cx) {
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+        // В локальном режиме слушатели держат порты весь срок жизни
+        // процесса (Zed не переподключается сам — см. заголовок модуля),
+        // поэтому сеанс поднимается здесь безусловно; «подключаться при
+        // запуске» в этом режиме уже отдано начальному значению `enabled`
+        // чуть выше. В туннельном режиме — как раньше, по той же галочке.
+        if local_mode || autoconnect_on {
+            match start_session(cx) {
+                Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
+                Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
             }
         }
         if !hidden {
@@ -1124,6 +1586,9 @@ impl Ui {
             session: None,
             session_gen: 0,
             link: State::Off,
+            bind_failed: None,
+            enabled: Arc::new(AtomicBool::new(true)),
+            ready: Readiness::Unknown,
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1151,13 +1616,14 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
-        link_line, note_line, on_done, on_line, on_progress, progress_text, project_primary, save_host, stale_line, stale_text,
-        took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP,
-        LOG_FILE, TRAY_PNG,
+        autoconnect, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, confirm_text, drop_stale_readiness,
+        exit_code_for, first_phase, flip_enabled_only, is_stale, line_of, link_is_current, link_line, local_display, note_line, on_done,
+        on_line, on_progress, progress_text, project_primary, publication_detail, readiness_reason, save_host, save_needs_confirm,
+        stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Readiness, Running, Tab, TrayState,
+        Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
-    use crate::session::State;
+    use crate::session::{self, State};
     use common::check::Check;
     use common::{Event, Phase, Progress};
     use std::sync::atomic::Ordering;
@@ -1166,6 +1632,52 @@ mod tests {
 
     fn op(id: &str, dot: Dot) -> OpView {
         OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
+    }
+
+    #[test]
+    fn a_fresh_ui_has_not_run_the_readiness_check_yet() {
+        let ui = Ui::for_test();
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Переключатель (в любую сторону) делает старый вердикт неактуальным
+    /// немедленно, до похода по сети — `toggle_link` зовёт именно это ядро
+    /// синхронно, поход (`run_readiness`) не тестируется здесь отдельно: он
+    /// настоящий TCP/HTTP, не для юнит-теста (спека «держать их чистыми»).
+    #[test]
+    fn drop_stale_readiness_resets_to_unknown() {
+        let mut ui = Ui::for_test();
+        ui.ready = Readiness::Warn(Check::fail("х", "y", "z"));
+        drop_stale_readiness(&mut ui);
+        assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
+    }
+
+    /// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,
+    /// уже вписанную в сам текст факта (TOOLS-Blocked несёт её внутри
+    /// `detail`, см. `ops_host::tools_state`), и никогда не говорит
+    /// «факт N провален».
+    #[test]
+    fn readiness_reason_says_what_and_what_to_do_without_echoing_the_hint() {
+        let blocked = Check::fail(
+            "инструменты комплекта",
+            "в комплекте нет vrunner/, git/ или httpd/ — скопируйте полный комплект заново",
+            "скопируйте полный комплект заново",
+        );
+        let text = readiness_reason(&blocked);
+        assert_eq!(text.matches("скопируйте полный комплект заново").count(), 1, "{text}");
+        assert!(!text.to_lowercase().contains("факт"), "{text}");
+
+        let web = Check::fail("веб-сервер", "порт 1818 не отвечает", "запустите Apache/IIS, на котором опубликована база");
+        let text = readiness_reason(&web);
+        assert!(text.contains("порт 1818 не отвечает") && text.contains("запустите Apache/IIS"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_tray_icon_leads_to_the_exit_path_not_a_silent_hang() {
+        let ok: Result<(), &str> = Ok(());
+        assert_eq!(exit_code_for(&ok), None, "трей построился — выходить незачем");
+        let failed: Result<(), &str> = Err("GTK не инициализирован");
+        assert_eq!(exit_code_for(&failed), Some(1), "без значка окно не закрыть — код выхода ненулевой");
     }
 
     #[test]
@@ -1227,7 +1739,7 @@ mod tests {
         let mut ui = Ui::for_test();
         note_line(&mut ui, Line { kind: Kind::Head, text: "— устанавливаю — · 12:34".into() });
         note_line(&mut ui, Line { kind: Kind::Ok, text: "готово".into() });
-        let text = std::fs::read_to_string(ui.kit.path(LOG_FILE)).unwrap();
+        let text = std::fs::read_to_string(ui.kit.state_path(LOG_FILE)).unwrap();
         assert_eq!(text, "\n— устанавливаю — · 12:34\n✓ готово\n");
     }
 
@@ -1322,12 +1834,12 @@ mod tests {
     #[test]
     fn a_bad_server_leaves_the_toml_alone_and_says_why() {
         let mut ui = Ui::for_test();
-        let before = std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok();
+        let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
         let mut host = ui.cfg.host.clone();
         host.server = "no-port".into();
         let err = save_host(&mut ui, host).unwrap_err();
         assert!(!err.is_empty());
-        assert_eq!(std::fs::read_to_string(ui.kit.path(cfg::FILE)).ok(), before);
+        assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before);
     }
 
     #[test]
@@ -1345,9 +1857,31 @@ mod tests {
     #[test]
     fn link_lines_say_where_and_as_whom() {
         let h = Host { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
-        assert_eq!(link_line(&State::Connecting, &h).unwrap().text, "подключаюсь к s:1 как dev2");
-        assert_eq!(link_line(&State::Off, &h).unwrap().text, "отключено");
-        assert!(link_line(&State::Up { since: Instant::now() }, &h).is_none());
+        assert_eq!(link_line(&State::Connecting, &h, "tunnel").unwrap().text, "подключаюсь к s:1 как dev2");
+        assert_eq!(link_line(&State::Off, &h, "tunnel").unwrap().text, "отключено");
+        assert!(link_line(&State::Up { since: Instant::now() }, &h, "tunnel").is_none());
+    }
+
+    #[test]
+    fn local_mode_connecting_line_hides_the_environment_fields() {
+        // Адрес среды, пароль и имя рабочего места скрыты в «Параметрах» в
+        // локальном режиме и ничего не значат — журнал не должен о них
+        // говорить (находка целостного ревью).
+        let h = Host { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
+        let text = link_line(&State::Connecting, &h, "local").unwrap().text;
+        assert!(!text.contains("s:1") && !text.contains("dev2"), "{text}");
+    }
+
+    #[test]
+    fn a_bind_failure_stays_visible_regardless_of_the_switch() {
+        // Отказ («порт занят») переживает любое число щелчков: карточка не
+        // должна соврать «MCP включены», когда ничего не слушает. Решает по
+        // сохранённому `bind_failed`, а не по текущему показанному
+        // состоянию — повторная находка ревью: прежний
+        // `keep_failure_on_enable` ловил лишь один клик «включить», а
+        // «выключить» перед ним стирал отказ в `Off`.
+        assert_eq!(bind_failure_display(&Some("порт занят".into())), Some(State::Failed("порт занят".into())));
+        assert_eq!(bind_failure_display(&None), None);
     }
 
     #[test]
@@ -1529,5 +2063,200 @@ mod tests {
         ui.status = Some(line);
         assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "прервано".into() }));
         assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
+    }
+
+    /// Сеанс, которому заведомо некуда дозвониться (порт только что закрыт) —
+    /// тот же приём, что в `session.rs`: тест не ждёт настоящей связи, ему
+    /// важно лишь то, что `ui.session` не пусто.
+    fn doomed_session(ui: &Ui) -> crate::session::Session {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let mut cfg = ui.cfg.clone();
+        cfg.host.server = format!("127.0.0.1:{port}");
+        session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {})
+    }
+
+    #[test]
+    fn in_local_mode_the_switch_only_flips_the_flag() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
+        assert!(!flip_enabled_only(&mut ui));
+        assert!(!ui.enabled.load(Ordering::Relaxed));
+        assert!(flip_enabled_only(&mut ui));
+        assert!(ui.enabled.load(Ordering::Relaxed));
+        // Локальный режим: слушатели живут своей жизнью, переключатель их не
+        // трогает — поколение сеанса ровно то же, что и до двух щелчков.
+        assert_eq!(ui.session_gen, gen_before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn local_mode_hides_up_behind_the_flag_but_shows_a_failure_regardless() {
+        let now = Instant::now();
+        assert_eq!(local_display("local", false, State::Up { since: now }), State::Off);
+        assert_eq!(local_display("local", false, State::Connecting), State::Off);
+        assert_eq!(local_display("local", true, State::Up { since: now }), State::Up { since: now });
+        let failed = State::Failed("порт занят".into());
+        assert_eq!(local_display("local", false, failed.clone()), failed);
+        // Туннельный режим — состояние сеанса идёт как есть, флаг тут ни при чём.
+        assert_eq!(local_display("tunnel", false, State::Up { since: now }), State::Up { since: now });
+    }
+
+    #[test]
+    fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
+        let mut ui = Ui::for_test();
+        // "webserver": ensure_publication_now (зовётся теперь и отсюда) не
+        // должна трогать настоящий httpd/1cv8 этой машины — тест про
+        // перезапуск сеанса, не про публикацию.
+        ui.cfg.host.publication = "webserver".into();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.base_path = "C:\\Bases\\Other".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.session_gen, gen_before + 1, "сеанс перезапущен один раз");
+        let new_lines = &ui.log[log_before..];
+        assert_eq!(new_lines.len(), 1, "{new_lines:?}");
+        assert_eq!(new_lines[0].text, "MCP перезапущены: база C:\\Bases\\Other");
+        assert!(ui.session.is_some());
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn saving_a_new_base_in_local_mode_keeps_the_session_and_does_not_restart() {
+        // Блокирующая находка целостного ревью: раньше «Сохранить» рвало
+        // слушатели и принятые соединения в локальном режиме, и человеку
+        // приходилось переподключать два сервера в Zed руками. Спека прямо
+        // требует, чтобы это было незаметно: слушатели не трогаются, сеанс
+        // не перезапускается, следующий вызов уходит в новую базу через
+        // `Session::update_cfg`.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.cfg.host.publication = "webserver".into();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.base_path = "C:\\Bases\\Other".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.session_gen, gen_before, "сеанс не перезапущен");
+        let new_lines = &ui.log[log_before..];
+        assert_eq!(new_lines.len(), 1, "{new_lines:?}");
+        assert_eq!(new_lines[0].text, "MCP: параметры обновлены, база C:\\Bases\\Other");
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn saving_unchanged_fields_does_not_restart_a_live_session() {
+        // Смена режима в трее меняет `cfg.host.mode` и зовёт `save_host`
+        // напрямую (не через панель), не трогая поля, которые показывает
+        // окно — `tray::on_menu` перезапускает сеанс сама следом, отдельным
+        // путём; лишнего перезапуска (и лишней строки «MCP перезапущены») на
+        // стороне `save_host` здесь быть не должно.
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.mode = "local".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.session_gen, gen_before);
+        assert_eq!(ui.log.len(), log_before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn project_tab_shows_the_publication_row() {
+        // Заголовок и адрес понятны 1С-разработчику независимо от режима
+        // подключения («local»/«tunnel») — публикация не про туннель.
+        assert_eq!(PUBLICATION_TITLE, "HTTP-сервис базы");
+        for mode in ["local", "tunnel"] {
+            let mut cfg = Cfg { host: Host { mode: mode.into(), publication: "auto".into(), ..Host::default() } };
+            let want = format!("127.0.0.1:{}", cfg.http_port());
+            let detail = publication_detail(&cfg);
+            assert!(detail.contains(&want), "{mode}: {detail:?}");
+            cfg.host.publication = "webserver".into();
+            assert_eq!(publication_detail(&cfg), "публикация настроена вручную");
+        }
+    }
+
+    #[test]
+    fn save_host_without_a_live_session_writes_no_restart_line() {
+        // Поднятого сеанса нет — перезаписать toml, и всё; журнал не трогаем.
+        // "webserver": ensure_publication_now не должна трогать настоящий
+        // httpd/1cv8 этой машины.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.publication = "webserver".into();
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.base_path = "C:\\Bases\\Other".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.log.len(), log_before);
+    }
+
+    #[test]
+    fn save_needs_confirm_only_when_all_three_hold() {
+        // Три условия сразу: база меняется, MCP включены, сеанс жив —
+        // вопрос нужен.
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+        assert!(save_needs_confirm(&ui, &new_base));
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn save_needs_confirm_is_false_on_each_near_miss() {
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+
+        // Промах 1: MCP выключены.
+        ui.enabled.store(false, Ordering::Relaxed);
+        assert!(!save_needs_confirm(&ui, &new_base));
+        ui.enabled.store(true, Ordering::Relaxed);
+
+        // Промах 2: база та же, поменялось другое поле — оно не входит в
+        // список, что решает «изменилась ли база» (`database_changed`).
+        let mut other_field = ui.cfg.host.clone();
+        other_field.project = "D:\\other\\proj".into();
+        assert!(!save_needs_confirm(&ui, &other_field));
+
+        // Промах 3: сеанса нет.
+        let session = ui.session.take().unwrap();
+        assert!(!save_needs_confirm(&ui, &new_base));
+        let _ = session.stop();
+    }
+
+    #[test]
+    fn declining_the_confirmation_leaves_the_toml_untouched() {
+        // Пока вопрос не задан и не отвечен «да», «Сохранить» не должен
+        // звать `save_host` вовсе — отказ ничего не пишет, поля окна
+        // остаются как человек их оставил (сюда это проверяется тем, что
+        // toml не тронут без явного вызова `save_host`).
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
+        let mut new_base = ui.cfg.host.clone();
+        new_base.base_path = "C:\\Bases\\Other".into();
+        assert!(save_needs_confirm(&ui, &new_base), "сценарий должен требовать вопрос");
+        // Отказ = не позвать save_host; toml как был.
+        assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn confirm_text_names_folders_and_keeps_full_paths_in_the_detail() {
+        let (message, detail) = confirm_text("C:\\Bases\\Buh", "C:\\Bases\\УНФ");
+        assert_eq!(message, "Агент сейчас работает с базой «Buh», после сохранения перейдёт на «УНФ». Сохранить?");
+        assert_eq!(detail, "C:\\Bases\\Buh → C:\\Bases\\УНФ");
     }
 }

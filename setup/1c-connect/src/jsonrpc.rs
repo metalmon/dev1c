@@ -1,6 +1,8 @@
 //! Чистая часть моста 778N: рамка «строка на сообщение» и правила, что
 //! уходит ребёнку, что отвечает мост сам и как переписывается `tools/list`.
 //! Байты и JSON, никаких процессов — всё проверяется тестами на строках.
+//! Сюда же вынесены две проверки общие для 778N и 777N (гейт `tools/call`
+//! без `id`) и своя, для 777N, пока переключатель выключен (`mcp_gate_while_off`).
 
 use serde_json::{json, Value};
 
@@ -174,8 +176,12 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
     const PARAMS: i64 = -32602;
     let Some(v) = parse(line) else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
     let Some(obj) = v.as_object() else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
-    let Ok(id) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
-    let id = id.cloned().unwrap_or(Value::Null);
+    let Ok(id_field) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
+    // Присутствие ключа `id`, а не только его значение: уведомление вообще
+    // не несёт этого ключа, и ответ `"id":null` превратил бы его для
+    // ребёнка в запрос, которого тот не посылал.
+    let has_id = id_field.is_some();
+    let id = id_field.cloned().unwrap_or(Value::Null);
     // Уведомление (без id) ответа не ждёт: неизвестное — молча мимо.
     let reject = |code: i64, why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), code, why: why.to_string() } };
     let method = match key_ci(obj, "method") {
@@ -187,8 +193,19 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
         Ok(p) => p.cloned().unwrap_or(json!({})),
         Err(()) => return reject(PARAMS, "params задан дважды"),
     };
-    // Пересобранное сообщение: только проверенные поля, канонические имена.
-    let rebuilt = |params: Value| canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+    // Пересобранное сообщение: только проверенные поля, канонические имена —
+    // но уведомление (нет ключа `id`, например `notifications/initialized`
+    // или `notifications/cancelled`) уходит ребёнку байт в байт, как
+    // пришло: добавленный ключ `"id":null` сделал бы из него запрос.
+    let rebuilt = |params: Value| {
+        if has_id {
+            canonical(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+        } else {
+            let mut verbatim = line.to_vec();
+            verbatim.push(b'\n');
+            verbatim
+        }
+    };
     match *method {
         "tools/list" => Route::ListRequest { id: id.clone(), line: rebuilt(params) },
         "tools/call" => {
@@ -222,6 +239,80 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
             None => Route::Forward(rebuilt(params)),
         },
         _ => Route::Forward(rebuilt(params)),
+    }
+}
+
+/// `tools/call` без ключа `id` — ответить ему нечем (нет адреса для
+/// ответа), а пропустить его к ребёнку — значит исполнить побочный эффект
+/// (например, `cf_load`) без единого следа в ответах агенту. Поэтому такой
+/// вызов не доходит до ребёнка никогда и ни на каком порту, независимо от
+/// переключателя: безопаснее тихо отбросить, чем один раз обойти проверку
+/// вызовом без идентификатора.
+///
+/// Ключи читаются через `key_ci` — тем же способом, что и `route_request_with`
+/// чуть ниже. Это не новая проверка «на всякий случай» (её сознательно не
+/// заводили для 777N, см. `mcp_gate_while_off`), а устранение несогласия
+/// внутри одного файла: при точном сравнении имени ключа `{"Method":
+/// "tools/call", ...}` без `id` не опознавался этой функцией как `tools/call`
+/// вовсе, рассматривался дальше как обычная строка и там, где он на самом
+/// деле `tools/call`, уходил ребёнку мимо этой проверки.
+pub fn is_tools_call_without_id(line: &[u8]) -> bool {
+    let Some(v) = parse(line) else { return false };
+    let Some(obj) = v.as_object() else { return false };
+    let Some(method) = key_ci(obj, "method").ok().flatten().and_then(Value::as_str) else { return false };
+    method.eq_ignore_ascii_case("tools/call") && !matches!(key_ci(obj, "id"), Ok(Some(_)))
+}
+
+/// Куда идёт строка от агента на трубе mcp-1c (777N), пока переключатель
+/// выключен. Этот порт не ведёт разбор JSON-RPC вовсе (голый проброс — см.
+/// `Rules::for_mcp`), поэтому правило — не «пропускать всё, кроме
+/// запрещённого», а наоборот: вперёд уходит только то, что уверенно опознано
+/// безопасным (один JSON-объект со своим методом, и это не `tools/call`).
+/// Всё прочее — не JSON-объект, батч, объект без понятного метода — закрыто
+/// по умолчанию, иначе такая строка стала бы тихой лазейкой в обход
+/// переключателя. `tools/call` без `id` сюда не долетает: он отбрасывается
+/// раньше и везде, см. `is_tools_call_without_id`.
+///
+/// Ключи `method`/`id` читаются через `key_ci`, как у `is_tools_call_without_id`
+/// и у `route_request_with`: не согласованные между собой способы читать один
+/// и тот же ключ — это и была дыра, а не повод завести третий.
+///
+/// Дубликаты одного и того же ключа (двух `id` сразу) и прочие тонкости
+/// разбора здесь не разбираются отдельно (решение заказчика) — это другой
+/// вопрос, чем регистр имени ключа: `key_ci` сам возвращает «не нашёл»
+/// (`Err`) при таком дубликате, и здесь это просто равносильно отсутствию
+/// ключа. Пока с этой трубой говорит собственный агент пользователя в его же
+/// контейнере, а не чужой недоверенный клиент — этого достаточно; цена
+/// более строгой проверки (как самой `route_request_with` для 778N, которая
+/// на такой дубликат отвечает явным отказом) здесь не оправдана.
+pub enum McpOffGate {
+    /// Метод известен и это не `tools/call` — пропустить как есть.
+    Forward,
+    /// `tools/call` с `id` — отказ по переключателю этим `id`.
+    Refuse(Value),
+    /// Распознать не удалось, но `id` в объекте есть — ответить им ошибкой.
+    ParseError(Value),
+    /// Распознать не удалось и ответить нечем — тихо отбросить (журнал — на
+    /// совести вызывающего кода, здесь просто сигнал «не пропускать»).
+    Drop,
+}
+
+pub fn mcp_gate_while_off(line: &[u8]) -> McpOffGate {
+    let Some(v) = parse(line) else { return McpOffGate::Drop };
+    let Some(obj) = v.as_object() else { return McpOffGate::Drop };
+    let id = key_ci(obj, "id").ok().flatten().cloned();
+    match key_ci(obj, "method").ok().flatten().and_then(Value::as_str) {
+        Some(m) if m.eq_ignore_ascii_case("tools/call") => match id {
+            Some(id) => McpOffGate::Refuse(id),
+            // Перестраховка: is_tools_call_without_id должен был отбросить
+            // это раньше, но на две проверки надёжнее положиться, чем на одну.
+            None => McpOffGate::Drop,
+        },
+        Some(_) => McpOffGate::Forward,
+        None => match id {
+            Some(id) => McpOffGate::ParseError(id),
+            None => McpOffGate::Drop,
+        },
     }
 }
 
@@ -262,18 +353,18 @@ pub fn our_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "project_status",
-            "description": "Состояние проекта: ветка, последний коммит, неотправленные коммиты, изменённые файлы, есть ли ConfigDumpInfo.xml (индекс инкремента).",
+            "description": "Состояние проекта: ветка, последний коммит, неотправленные коммиты, изменённые файлы, есть ли ConfigDumpInfo.xml (индекс инкремента), а также имя репозитория в Gitea (dev1c/<имя>) и ветка рабочего места — их неоткуда больше узнать.",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": {"readOnlyHint": true}
         }),
         json!({
             "name": "project_pull",
-            "description": "Забрать свою ветку из Gitea (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load.",
+            "description": "Забрать свою ветку из Gitea (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load. Забирает то, что отправлено в Gitea; правки, лежащие у вас незакоммиченными, сюда не попадут.",
             "inputSchema": {"type": "object", "properties": {}}
         }),
         json!({
             "name": "project_push",
-            "description": "Закоммитить src и отправить свою ветку в Gitea. Перед этим — cf_decompile. Первый push создаёт репозиторий и ветку main.",
+            "description": "Закоммитить src и отправить свою ветку в Gitea. Перед этим — cf_decompile. Первый push создаёт репозиторий и ветку main. Пока не отправлено, человек правок не увидит и загрузить их в базу нельзя.",
             "inputSchema": {"type": "object", "properties": {"message": {"type": "string", "description": "Сообщение коммита"}}, "required": ["message"]}
         }),
     ]
@@ -398,6 +489,85 @@ mod tests {
         // table — the bridge forwards what it does not own (tested in bridge.rs).
         let r = route_request(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#, &allowed());
         assert!(matches!(r, Route::Cancel { id, .. } if id == json!(9)));
+    }
+
+    #[test]
+    fn a_notification_is_forwarded_byte_exact_without_an_id() {
+        // No "id" key at all (a notification, not "id":null) must reach the
+        // child exactly as it arrived — an added "id":null would turn it
+        // into a request the child never sent, and mcp-1c may refuse that.
+        let line: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        match route_request(line, &allowed()) {
+            Route::Forward(out) => {
+                let mut want = line.to_vec();
+                want.push(b'\n');
+                assert_eq!(out, want);
+            }
+            _ => panic!("notifications/initialized must forward"),
+        }
+        // Same for notifications/cancelled without a matching running id: the
+        // bridge does not own it, so it is forwarded, and still byte-exact.
+        let line: &[u8] = br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":9}}"#;
+        match route_request(line, &allowed()) {
+            Route::Cancel { line: out, .. } => {
+                let mut want = line.to_vec();
+                want.push(b'\n');
+                assert_eq!(out, want);
+            }
+            _ => panic!("notifications/cancelled must carry the raw line"),
+        }
+    }
+
+    #[test]
+    fn tools_call_without_id_is_recognised_regardless_of_case_or_port() {
+        assert!(is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"cf_load"}}"#));
+        // Case does not matter — OneScript compares method names the same way.
+        assert!(is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"Tools/Call"}"#));
+        // An id, any method other than tools/call, or junk — not this rule's business.
+        assert!(!is_tools_call_without_id(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#));
+        assert!(!is_tools_call_without_id(br#"{"jsonrpc":"2.0","method":"initialize"}"#));
+        assert!(!is_tools_call_without_id(b"not json"));
+        assert!(!is_tools_call_without_id(b"[1,2]"));
+    }
+
+    #[test]
+    fn tools_call_without_id_agrees_with_route_request_with_on_a_differently_cased_key() {
+        // The bug the second review found: a differently-cased "method" or
+        // "id" key must be read the same way here and in route_request_with,
+        // or one half of the bridge sees a tools/call the other half misses.
+        let no_id = br#"{"jsonrpc":"2.0","Method":"tools/call","params":{"name":"cf_load"}}"#;
+        assert!(is_tools_call_without_id(no_id), "a differently-cased method must still read as tools/call");
+        assert!(matches!(route_request(no_id, &["cf_load".to_string()]), Route::PlatformCall { .. }), "route_request_with already finds it via key_ci");
+
+        let odd_id = br#"{"method":"tools/call","ID":5,"params":{"name":"cf_load"}}"#;
+        assert!(!is_tools_call_without_id(odd_id), "an id spelled ID is still an id");
+        assert!(matches!(route_request(odd_id, &["cf_load".to_string()]), Route::PlatformCall { id, .. } if id == json!(5)));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_forwards_only_a_recognised_non_tools_call_method() {
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), McpOffGate::Forward));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), McpOffGate::Forward));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_refuses_a_tools_call_that_has_an_id() {
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#), McpOffGate::Refuse(id) if id == json!(7)));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), McpOffGate::Refuse(id) if id == json!("a")));
+    }
+
+    #[test]
+    fn mcp_gate_while_off_fails_closed_on_anything_unclassifiable() {
+        // A batch, junk, and an object without a usable method are not
+        // positively known safe — none of them reach the child.
+        assert!(matches!(mcp_gate_while_off(b"[1,2]"), McpOffGate::Drop));
+        assert!(matches!(mcp_gate_while_off(b"not json"), McpOffGate::Drop));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":3}"#), McpOffGate::ParseError(id) if id == json!(3)));
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0"}"#), McpOffGate::Drop));
+        // A tools/call without an id never reaches this far in the bridge
+        // (handle_request drops it earlier for both ports), but the gate
+        // itself still fails closed on it rather than forwarding.
+        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","method":"tools/call"}"#), McpOffGate::Drop));
     }
 
     #[test]

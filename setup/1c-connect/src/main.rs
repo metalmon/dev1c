@@ -11,9 +11,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
-use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
+use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, flow, project, session, verify};
+use one_c_connect::{cfg, flow, project, session, single_instance, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -56,6 +56,9 @@ enum Cmd {
     Uninstall,
     /// Поднять туннель и мост; работает, пока не нажать Ctrl+C.
     Connect,
+    /// Без окна: поднять сеанс и держать его до Ctrl+C/SIGTERM. Для стенда и
+    /// другого автозапуска без рабочего стола.
+    Serve,
     /// Выгрузить конфигурацию в src (cf_decompile) и отправить ветку в Gitea.
     Export {
         /// Сообщение коммита.
@@ -131,13 +134,22 @@ fn run() -> Result<()> {
     // и `len() == 1`.
     #[cfg(feature = "gui")]
     if let Some(hidden) = gui_launch() {
-        return one_c_connect::gui::launch(Kit::discover("ONEC_CONNECT_KIT")?, hidden);
+        let kit = ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
+        ops_host::ensure_state(&kit);
+        return one_c_connect::gui::launch(kit, hidden);
     }
     let cli = Cli::parse();
+    // `wire_state` разводит чтение и запись: из комплекта читаем, своё пишем
+    // в состояние пользователя — в образе комплект общий и только для
+    // чтения. Явный `--kit` этого не касается: он значит «вот этот комплект
+    // целиком», и состояние остаётся в нём — иначе прогон на отдельном
+    // комплекте читал бы и писал настоящее состояние человека.
     let kit = match &cli.kit {
         Some(p) => Kit::at(p),
-        None => Kit::discover("ONEC_CONNECT_KIT")?,
+        None => ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?),
     };
+    ops_host::ensure_state(&kit);
+
     if let Some(Cmd::Example) = cli.cmd {
         print!("{}", cfg::EXAMPLE);
         return Ok(());
@@ -179,6 +191,7 @@ fn run() -> Result<()> {
             ext.revert_apply(&ctx, CleanLevel::Stack)?;
         }
         Cmd::Connect => connect(&ctx)?,
+        Cmd::Serve => serve(&ctx)?,
         Cmd::Export { message } => {
             let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");
@@ -209,7 +222,7 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     let checks = verify::run(ctx, tunnel_state);
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
-    let path = ctx.kit.path("last-check.txt");
+    let path = ctx.kit.state_path("last-check.txt");
     let text = common::check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
     common::kit::write_text(&path, &text)?;
     println!();
@@ -220,12 +233,16 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
 
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
+    let params = ctx.kit.state_path(cfg::FILE);
     anyhow::ensure!(
-        ctx.kit.path(cfg::FILE).exists(),
-        "в комплекте нет {} — создайте его из образца: 1c-connect example > {}",
-        cfg::FILE,
-        cfg::FILE
+        params.exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
+        params.display(),
+        params.display()
     );
+    // У рабочего места один владелец (спека): вторая копия не борется за
+    // порты и мьютекс проекта с этой — см. `single_instance`.
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
     let ports = ctx.cfg.ports();
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
@@ -244,4 +261,107 @@ fn connect(ctx: &Ctx) -> Result<()> {
     stopped?;
     println!("Отключено.");
     Ok(())
+}
+
+/// Текст для журнала, если публикация не поднялась — `None`, если всё в
+/// порядке. Отдельная чистая функция (не внутри `serve`) — чтобы решение
+/// «что сказать при отказе» проверялось без настоящего httpd/apache и без
+/// реального сеанса.
+fn publication_failure_text(result: &Result<()>) -> Option<String> {
+    result.as_ref().err().map(|e| format!("публикация базы не поднята: {e:#}"))
+}
+
+/// То же самое, что `connect`, но без вопросов и без печати плана: для
+/// запуска без рабочего стола (стенд, автозапуск). Останавливается по
+/// Ctrl+C, а на Linux — ещё и по SIGTERM, чтобы `docker stop` и остановка
+/// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
+fn serve(ctx: &Ctx) -> Result<()> {
+    let params = ctx.kit.state_path(cfg::FILE);
+    anyhow::ensure!(
+        params.exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
+        params.display(),
+        params.display()
+    );
+    // Тот же единственный владелец рабочего места, что у `connect` — см.
+    // `single_instance`.
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
+    // Без сеанса на стенде никто больше базу не публикует (см. спеку
+    // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
+    // начать слушать, тем же сервисом, что умрёт вместе с этим процессом
+    // (ops_host::ensure_publication, Lifetime::WithCaller).
+    //
+    // Отказ не останавливает serve: транспорт MCP (порты mcp-1c/vrunner) не
+    // зависит от публикации вовсе — она нужна только агенту, который зовёт
+    // HTTP-сервис базы отдельно. Оборвать здесь весь сеанс значило бы гасить
+    // работающий транспорт из-за соседней проблемы (например, порт занят
+    // чужим apache2), которую человек ещё не разрешил — и заставлять
+    // перезапускать всё заново, когда освободит порт. Громко сообщаем
+    // (Fail — это и строка в журнале, и то, что видно на экране) и идём
+    // дальше: `1c-connect check` уже знает отдельный факт о публикации
+    // (`host.publication`), там отказ и смотреть.
+    if let Some(text) = publication_failure_text(&ops_host::ensure_publication(ctx)) {
+        ctx.fail(text);
+    }
+    let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
+    let rt = tokio::runtime::Runtime::new()?;
+    let r = rt.block_on(async {
+        // Условный атрибут внутри `select!` макрос не принимает, поэтому
+        // ожидание SIGTERM — отдельное будущее: на Linux оно ждёт сигнал, на
+        // Windows не завершается никогда и ветка просто не срабатывает.
+        let term = async {
+            #[cfg(unix)]
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut t) => {
+                    t.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+            #[cfg(not(unix))]
+            std::future::pending::<()>().await
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Ok(()),
+            _ = term => Ok(()),
+            r = s.wait() => r,
+        }
+    });
+    let stopped = s.stop();
+    r?;
+    stopped?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_is_a_subcommand() {
+        let cli = Cli::try_parse_from(["1c-connect", "serve"]).expect("serve разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Serve)));
+    }
+
+    #[test]
+    fn serve_takes_no_flags_of_its_own() {
+        assert!(Cli::try_parse_from(["1c-connect", "serve", "--port", "1"]).is_err());
+    }
+
+    #[test]
+    fn a_failed_publication_is_reported_but_serve_keeps_going() {
+        // Решение из отчёта: занятый порт публикации не должен обрывать
+        // сеанс MCP — только громко сообщить. Здесь проверяем именно текст
+        // и факт «есть сообщение», не настоящий serve (тот поднимает
+        // реальные сокеты и ждёт Ctrl+C).
+        let err: Result<()> = Err(anyhow::anyhow!("HTTP-сервис базы не поднят: порт 127.0.0.1:8083 уже занят"));
+        let text = publication_failure_text(&err).expect("отказ должен дать сообщение");
+        assert!(text.contains("публикация"), "{text}");
+        assert!(text.contains("8083"), "{text}");
+    }
+
+    #[test]
+    fn a_successful_publication_has_nothing_to_report() {
+        let ok: Result<()> = Ok(());
+        assert!(publication_failure_text(&ok).is_none());
+    }
 }

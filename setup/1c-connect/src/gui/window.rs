@@ -53,7 +53,35 @@ pub fn work_area(cx: &App) -> Bounds<Pixels> {
             );
         }
     }
+    if let Some(wa) = x11_work_area() {
+        return wa;
+    }
     cx.primary_display().map(|d| d.bounds()).unwrap_or_default()
+}
+
+/// Рабочая область из `_NET_WORKAREA` корневого окна X11 — её выставляет сам
+/// оконный менеджер (у xfwm4 это область без панели XFCE) по тому же стандарту
+/// (EWMH), что форма «спрятать за панелью» ищет на Windows через
+/// `SPI_GETWORKAREA`. `None` — не X11 (Wayland без XWayland, тест без дисплея)
+/// или оконный менеджер свойство не выставил; тогда `work_area` падает на
+/// границы всего дисплея, как было раньше. Соединение отдельное от того,
+/// через которое GPUI уже говорит с сервером — короткоживущее, только на этот
+/// один запрос, и закрывается в конце функции вместе с `RustConnection`.
+#[cfg(target_os = "linux")]
+fn x11_work_area() -> Option<Bounds<Pixels>> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+    let (conn, screen_num) = x11rb::connect(None).ok()?;
+    let root = conn.setup().roots.get(screen_num)?.root;
+    let atom = conn.intern_atom(false, b"_NET_WORKAREA").ok()?.reply().ok()?.atom;
+    let reply = conn.get_property(false, root, atom, AtomEnum::CARDINAL, 0, 4).ok()?.reply().ok()?;
+    let v: Vec<u32> = reply.value32()?.collect();
+    (v.len() >= 4).then(|| Bounds::new(point(px(v[0] as f32), px(v[1] as f32)), size(px(v[2] as f32), px(v[3] as f32))))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn x11_work_area() -> Option<Bounds<Pixels>> {
+    None
 }
 
 /// Размер окна для нового показа: ширина постоянная, высота — подобранная в
@@ -102,7 +130,36 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
     }
 }
 
-#[cfg(not(windows))]
+/// То же самое на X11: своего «переставь окно» у GPUI тут тоже нет, а
+/// `SetWindowPos` выше — Windows-only. Флайаут на Linux — `WindowKind::Dialog`
+/// (управляемое менеджером окно, см. `show_window`: заказчик 2026-10-20 не
+/// мог печатать в полях на `PopUp`/override-redirect — такие окна менеджер
+/// не фокусирует вовсе), так что это обычный `ConfigureWindow` на уже
+/// отображённое окно — оконный менеджер перехватывает такие запросы у себя
+/// (`SubstructureRedirect` на корне) и для своих же управляемых окон отдаёт их
+/// как есть, без права вето. До этой правки здесь была пустая функция: после
+/// первого же `fit_height` окно меняло высоту, но не угол, и съезжало вниз на
+/// разницу высот — измеренная геометрия (`380x476+2170+965` при рабочей
+/// области `0,0,2560,1397`) — это именно старый угол, посчитанный под
+/// `MIN_SIZE.height`, с уже выросшей высотой содержимого (дефект 2026-10-20).
+/// Соединение — как в `x11_work_area`, короткоживущее и только на этот запрос.
+#[cfg(target_os = "linux")]
+fn move_to(window: &Window, origin: Point<Pixels>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Xcb(h) = handle.as_raw() else { return };
+    let Ok((conn, _)) = x11rb::connect(None) else { return };
+    let s = window.scale_factor();
+    let (x, y) = ((origin.x.as_f32() * s) as i32, (origin.y.as_f32() * s) as i32);
+    let aux = ConfigureWindowAux::new().x(x).y(y);
+    // Одним выражением: расписка о запросе одалживает соединение, и в `if let`
+    // она пережила бы его на один шаг разрушения — сборка на Linux это ловит.
+    let _ = conn.configure_window(h.window.get(), &aux).map(|cookie| cookie.check());
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn move_to(_window: &Window, _origin: Point<Pixels>) {}
 
 /// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
@@ -137,20 +194,67 @@ pub fn show_window(cx: &mut App) {
     }
     let icon = image::load_from_memory(include_bytes!("../../icons/icon.png")).ok().map(|i| Arc::new(i.to_rgba8()));
     let s = wanted_size(cx);
+    let wa = work_area(cx);
+    let origin = flyout_origin(wa, s, GAP);
+    // Диагностика наезда на панель задач (заказчик 2026-10-20): без этой
+    // строки жалоба «флайаут торчит за панелью» решается только через
+    // скриншот + вопрос, какая рабочая область была в тот момент — с ней
+    // решается одним скриншотом журнала. Строка служебная (`Kind::Say`),
+    // человеку читать незачем.
+    note_line(
+        cx.global_mut::<Ui>(),
+        Line {
+            kind: Kind::Say,
+            text: format!(
+                "рабочая область и угол флайаута: {}x{}+{}+{} → {},{}",
+                wa.size.width.as_f32() as i32,
+                wa.size.height.as_f32() as i32,
+                wa.origin.x.as_f32() as i32,
+                wa.origin.y.as_f32() as i32,
+                origin.x.as_f32() as i32,
+                origin.y.as_f32() as i32,
+            ),
+        },
+    );
     let opts = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(flyout_origin(work_area(cx), s, GAP), s))),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, s))),
         titlebar: None,
-        kind: WindowKind::PopUp,
+        // На Windows `PopUp` и так получает фокус — ветка не трогается. На
+        // Linux/X11 `PopUp` оборачивается в override-redirect с типом
+        // «уведомление» (см. `move_to`): оконный менеджер такие окна вообще
+        // не фокусирует, и в поля ничего не вводилось (заказчик 2026-10-20).
+        // `Dialog` — управляемое окно (менеджер его фокусирует), с типом
+        // `_NET_WM_WINDOW_TYPE_DIALOG`, который менеджеры обычно прячут из
+        // панели задач и Alt-Tab — ровно то, что нужно треевому флайауту;
+        // своей рамки у нас и так нет (`window_decorations: Client` ниже).
+        kind: if cfg!(windows) { WindowKind::PopUp } else { WindowKind::Dialog },
         is_resizable: false,
         is_minimizable: false,
         focus: true,
         show: true,
         window_decorations: Some(WindowDecorations::Client),
+        // Без этого окно непрозрачно, и свои скруглённые углы `Panel`
+        // (`rounded_lg` + `overflow_hidden` на непрозрачном `bg`, см.
+        // `panel.rs`) рисует поверх квадратной opaque-поверхности — на
+        // композитном рабочем столе (проверено живьём на XFCE/xfwm4) видны
+        // квадратные углы с бледной рамкой вместо скруглённых. Прозрачен
+        // только зазор по углам; тело панели остаётся непрозрачным — его
+        // красит сама панель. Композитинг недоступен — платформа тихо
+        // остаётся с `Opaque`, тогда углы квадратные, но не стеклянные.
+        window_background: WindowBackgroundAppearance::Transparent,
         icon,
         ..Default::default()
     };
     match gpui_kit::open_window(opts, cx, |window, cx| cx.new(|cx| Panel::new(window, cx))) {
         Ok((handle, panel)) => {
+            // `Dialog` на Linux — управляемое окно, и угол при самом первом
+            // показе решает не наш хинт `window_bounds`, а размещение самого
+            // менеджера (`WM_SIZE_HINTS` страхует только размер, не позицию);
+            // `fit_height` этим же `move_to` уже доводит угол верно после
+            // подгонки высоты — тем же способом поправляем и первый кадр, не
+            // трогая саму формулу (`flyout_origin`/`fit_height_for`).
+            #[cfg(target_os = "linux")]
+            let _ = handle.update(cx, |_, window, _| move_to(window, origin));
             let ui = cx.global_mut::<Ui>();
             ui.window = Some(handle);
             ui.panel = Some(panel);
@@ -232,6 +336,52 @@ mod tests {
         assert_eq!(flyout_origin(wa, MIN_SIZE, GAP), point(px(608.), px(268.)));
         let tiny = Bounds::new(point(px(100.), px(50.)), size(px(300.), px(300.)));
         assert_eq!(flyout_origin(tiny, MIN_SIZE, GAP), point(px(100.), px(50.)));
+        // Дефект 1: рабочая область меньше дисплея (панель XFCE внизу срезает
+        // 40 px из 1080) и содержимое выше, чем осталось свободного места —
+        // высота подбирается под реальную рабочую область, и окно целиком
+        // остаётся внутри неё, а не торчит нижним краем за экран.
+        let shrunk = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1040.)));
+        let h = fit_height_for(MIN_SIZE.height, px(1200.), px(560.), shrunk.size.height, GAP).unwrap();
+        let origin = flyout_origin(shrunk, size(MIN_SIZE.width, h), GAP);
+        assert!(origin.y + h <= shrunk.size.height, "нижний край окна за рабочей областью");
+        assert_eq!(origin.y, px(12.));
+        // Та же высота содержимого, но по ошибке — на границах всего дисплея
+        // (1080 без вычета панели, ровно старый баг): низ окна проезжает за
+        // настоящую рабочую область (1040) — учёт панели в `work_area` и
+        // исправляет именно это.
+        let whole_display = Bounds::new(point(px(0.), px(0.)), size(px(1920.), px(1080.)));
+        let h_wrong = fit_height_for(MIN_SIZE.height, px(1200.), px(560.), whole_display.size.height, GAP).unwrap();
+        let origin_wrong = flyout_origin(whole_display, size(MIN_SIZE.width, h_wrong), GAP);
+        assert!(origin_wrong.y + h_wrong > shrunk.size.height, "без учёта панели низ окна должен был уйти под неё");
+
+        // То же самое на живых числах заказчика 2026-10-20: ноутбук
+        // 2560x1440 с панелью XFCE внизу, `_NET_WORKAREA` = 2560x1397. Для
+        // любой высоты содержимого — от меньше наименьшей до намного больше
+        // рабочей области — ни низ, ни правый край окна не уходят за рабочую
+        // область с зазором. `fit_height_for` вернёт `None`, когда искомая
+        // высота совпала с текущей (420, `MIN_SIZE.height`) — тогда она и
+        // есть нужная, `unwrap_or` восстанавливает её для проверки.
+        let laptop_wa = Bounds::new(point(px(0.), px(0.)), size(px(2560.), px(1397.)));
+        for content in [px(100.), px(460.), px(1200.), px(1397.), px(5000.)] {
+            let h = fit_height_for(MIN_SIZE.height, content, px(560.), laptop_wa.size.height, GAP).unwrap_or(MIN_SIZE.height);
+            let origin = flyout_origin(laptop_wa, size(MIN_SIZE.width, h), GAP);
+            assert!(
+                origin.y + h <= laptop_wa.size.height - GAP,
+                "низ флайаута за рабочей областью: содержимое {content:?}, угол {origin:?}, высота {h:?}"
+            );
+            assert!(
+                origin.x + MIN_SIZE.width <= laptop_wa.size.width - GAP,
+                "правый край флайаута за рабочей областью: содержимое {content:?}, угол {origin:?}"
+            );
+        }
+        // Измеренный на живом окне случай дефекта: содержимое чуть меньше
+        // видимой области (460 при 560) держит окно на `MIN_SIZE.height` —
+        // угол 965 по Y это и даёт (`1397 - 420 - 12`), ровно то число,
+        // которое показал `xwininfo` до того, как `fit_height` сдвинул угол
+        // следом за выросшей высотой.
+        let h_min = fit_height_for(MIN_SIZE.height, px(460.), px(560.), laptop_wa.size.height, GAP);
+        assert_eq!(h_min, None, "высота уже на полу — подбирать нечего");
+        assert_eq!(flyout_origin(laptop_wa, MIN_SIZE, GAP).y, px(965.));
     }
 
     #[test]

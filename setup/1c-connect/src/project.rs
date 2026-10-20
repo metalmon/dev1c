@@ -267,6 +267,18 @@ fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
     Ok(o.ok && o.text.contains(&format!("refs/heads/{branch}")))
 }
 
+/// `dev1c/<имя>` из `remote` (`.../dev1c/<имя>.git`) — агент это имя
+/// угадать не может: его собственный каталог зовётся просто `project`.
+fn repo_name(p: &Project) -> String {
+    let s = p.remote.strip_suffix(".git").unwrap_or(&p.remote);
+    let mut parts = s.rsplitn(3, '/');
+    let name = parts.next().unwrap_or(s);
+    let org = parts.next().unwrap_or("dev1c");
+    format!("{org}/{name}")
+}
+
+const CANNOT_REACH_THE_BASE: &str = "эти правки в базу загрузить нельзя, пока они не отправлены";
+
 pub fn status(p: &Project) -> Result<String, String> {
     ensure_origin(p)?;
     let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
@@ -274,7 +286,41 @@ pub fn status(p: &Project) -> Result<String, String> {
     let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
     let index = if p.dir.join("src").join("ConfigDumpInfo.xml").exists() { "есть" } else { "нет — первая загрузка будет полной" };
-    Ok(format!("ветка {branch}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}"))
+    let mut out = format!(
+        "ветка {branch}\nрепозиторий: {}\nветка рабочего места: {}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}",
+        repo_name(p),
+        p.branch
+    );
+    if ahead != "0" || changed > 0 {
+        out.push('\n');
+        out.push_str(CANNOT_REACH_THE_BASE);
+    }
+    Ok(out)
+}
+
+/// Пауза перед повтором `pull`: короткая, но настоящая — ровно то время,
+/// которое Gitea занимает, чтобы разобрать только что принятый пакет.
+const PULL_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Повторяет `attempt` один раз после паузы, если первая попытка вернула
+/// ошибку. Нужен ровно для pull сразу после чужой отправки: Gitea могла ещё
+/// не отдать все нужные объекты («сервер не отдал все нужные объекты»), а
+/// через пару секунд то же самое получается само. Первая неудача наружу не
+/// идёт — сообщаем, только если не получилось и со второго раза.
+///
+/// Отмена проверяется до паузы, не после: первая неудача из-за того, что
+/// человек прервал операцию (а не из-за временного сбоя сервера), не должна
+/// стоить ещё одной паузы и попытки — отмена обязана вернуть «прервано»
+/// немедленно, а не вдобавок ждать `pause`.
+fn retry_once<T>(pause: std::time::Duration, cancel: &AtomicBool, attempt: impl Fn() -> Result<T, String>) -> Result<T, String> {
+    match attempt() {
+        Ok(v) => Ok(v),
+        Err(e) if cancel.load(Ordering::Relaxed) => Err(e),
+        Err(_) => {
+            std::thread::sleep(pause);
+            attempt()
+        }
+    }
 }
 
 pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
@@ -287,23 +333,32 @@ pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     if !must(p, &["status", "--porcelain"])?.is_empty() {
         return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
     }
-    let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
-    if o.ok {
-        return Ok(format!("{}\nтеперь cf_load", o.text));
+    let attempt = || -> Result<String, String> {
+        let o = git_wait(p, &["pull", "--rebase", "origin", &p.branch], cancel)?;
+        if o.ok {
+            Ok(format!("{}\nтеперь cf_load", o.text))
+        } else {
+            Err(o.text)
+        }
+    };
+    match retry_once(PULL_RETRY_PAUSE, cancel, attempt) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            if !conflicted.is_empty() {
+                // Half-applied rebase is worse than none: cf_load would read a tree
+                // with conflict markers. Back out and hand the merge to a human.
+                let _ = git(p, &["rebase", "--abort"]);
+                return Err(format!(
+                    "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
+                    conflicted.replace('\n', ", "),
+                    p.dir.display(),
+                    p.branch
+                ));
+            }
+            Err(e)
+        }
     }
-    let conflicted = must(p, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-    if !conflicted.is_empty() {
-        // Half-applied rebase is worse than none: cf_load would read a tree
-        // with conflict markers. Back out and hand the merge to a human.
-        let _ = git(p, &["rebase", "--abort"]);
-        return Err(format!(
-            "конфликт в {} — разрешите в каталоге проекта {} (git pull --rebase origin {} и правка файлов); дерево возвращено в состояние до pull",
-            conflicted.replace('\n', ", "),
-            p.dir.display(),
-            p.branch
-        ));
-    }
-    Err(o.text)
 }
 
 pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, String> {
@@ -569,6 +624,36 @@ mod tests {
         assert!(s.contains("ветка dev2") && s.contains("ConfigDumpInfo.xml: есть") && s.contains("изменено: 1"), "{s}");
     }
 
+    /// Агент не знает и не может угадать имя своего репозитория в Gitea
+    /// (его каталог зовётся просто `project`) — `status` обязан его назвать.
+    #[test]
+    fn status_names_the_repository_and_the_branch() {
+        let (_t, mut p) = fixture();
+        p.remote = "http://127.0.0.1:3000/dev1c/UNF.git".into();
+        let s = status(&p).unwrap();
+        assert!(s.contains("репозиторий: dev1c/UNF"), "{s}");
+        assert!(s.contains("ветка рабочего места: dev2"), "{s}");
+    }
+
+    /// В туннельном режиме `cf_load` грузит каталог проекта на машине
+    /// человека, куда файлы попадают только через Gitea — незакоммиченная
+    /// или неотправленная правка недоступна никакому вызову, и агент
+    /// обязан это узнать из текста, а не по молчанию базы.
+    #[test]
+    fn status_warns_that_unsent_work_cannot_reach_the_base() {
+        let (_t, p) = fixture();
+        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p, "a", &NEVER).unwrap();
+        assert!(!status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "clean tree must not warn");
+        std::fs::write(p.dir.join("src").join("M.bsl"), "2").unwrap();
+        assert!(status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "changed file must warn");
+        let (_t2, p2) = fixture();
+        std::fs::write(p2.dir.join("src").join("M.bsl"), "1").unwrap();
+        push(&p2, "unpushed", &NEVER).unwrap();
+        git(&p2.dir, &["commit", "-q", "--allow-empty", "-m", "local only"]);
+        assert!(status(&p2).unwrap().contains(CANNOT_REACH_THE_BASE), "unpushed commit must warn");
+    }
+
     #[test]
     fn a_panic_inside_a_tool_does_not_jam_the_project_forever() {
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -648,6 +733,52 @@ mod tests {
         let (_t2, p2) = fixture(); // branch dev2, origin set, three files present
         git(&p2.dir, &["checkout", "-q", "-b", "main"]);
         assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains("ветка")));
+    }
+
+    /// Фальшивый «бегунок»: первая попытка отказывает так, как отказывает
+    /// git сразу после чужой отправки («сервер не отдал все нужные
+    /// объекты»), вторая — как будто Gitea уже дообработала пакет.
+    #[test]
+    fn retry_once_recovers_after_a_single_transient_failure() {
+        let calls = std::cell::Cell::new(0u32);
+        let r = retry_once(std::time::Duration::from_millis(1), &AtomicBool::new(false), || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err("сервер не отдал все нужные объекты".to_string())
+            } else {
+                Ok("готово".to_string())
+            }
+        });
+        assert_eq!(r, Ok("готово".to_string()));
+        assert_eq!(calls.get(), 2, "первая неудача должна была привести ровно к одному повтору");
+    }
+
+    #[test]
+    fn retry_once_reports_when_the_second_attempt_fails_too() {
+        let calls = std::cell::Cell::new(0u32);
+        let r = retry_once(std::time::Duration::from_millis(1), &AtomicBool::new(false), || {
+            calls.set(calls.get() + 1);
+            Err::<String, _>("сервер не отдал все нужные объекты".to_string())
+        });
+        assert_eq!(r, Err("сервер не отдал все нужные объекты".to_string()));
+        assert_eq!(calls.get(), 2, "ровно одна попытка и ровно один повтор — не больше");
+    }
+
+    #[test]
+    fn retry_once_does_not_pause_or_retry_a_cancelled_attempt() {
+        // Отмена, взведённая до или во время первой попытки: вторая попытка
+        // и, главное, пауза перед ней не должны случиться вовсе — иначе
+        // отмена стоит человеку лишних двух секунд ожидания перед «прервано».
+        let calls = std::cell::Cell::new(0u32);
+        let cancel = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        let r = retry_once(std::time::Duration::from_secs(2), &cancel, || {
+            calls.set(calls.get() + 1);
+            Err::<String, _>("прервано".to_string())
+        });
+        assert_eq!(r, Err("прервано".to_string()));
+        assert_eq!(calls.get(), 1, "отмена не должна приводить к повтору");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "отмена не должна платить паузу повтора");
     }
 
     #[test]

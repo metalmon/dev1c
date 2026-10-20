@@ -299,24 +299,33 @@ class ScaleTests(unittest.TestCase):
         # Уменьшать некуда: там выноска и так занимает почти всю высоту.
         self.assertEqual(ui_scale(Rect(0, 0, 1024, 600)), 1.0)
 
-    def test_big_screen_is_scaled_up(self):
-        self.assertAlmostEqual(ui_scale(Rect(0, 0, 2560, 1440)), 1.8)
+    def test_big_screen_is_scaled_up_but_not_doubled(self):
+        # Корень от отношения высот: экран вдвое выше, но смотрят на
+        # него не вдвое ближе — прямая пропорция давала 1.8, и выноска
+        # выходила чрезмерно крупной.
+        scale = ui_scale(Rect(0, 0, 2560, 1440))
+        self.assertGreater(scale, 1.2)
+        self.assertLess(scale, 1.5)
 
     def test_scale_has_a_ceiling(self):
         self.assertEqual(ui_scale(Rect(0, 0, 7680, 4320)), MAX_SCALE)
 
-    def test_bubble_keeps_its_share_of_the_screen(self):
+    def test_bubble_is_neither_lost_nor_overgrown_on_a_big_screen(self):
         step = Step(2, 'Заголовок', 'Одна строка текста.', _TARGET, ('Дальше',), 'button', ())
         shares = []
         for screen in (Rect(0, 0, 1280, 800), Rect(0, 0, 2560, 1440)):
             scale = ui_scale(screen)
             layout = place(logical(screen, scale), None, bubble_size(step))
             shares.append(scaled(layout.bubble, scale).w / screen.w)
-        # Не «ровно столько же»: масштаб считается по высоте, а экраны
-        # разной пропорции (1.6 против 1.78), поэтому доля ширины чуть
-        # другая. Важно, что она не обвалилась вдвое, как было до правки
-        # (640 из 2560 — четверть вместо половины).
-        self.assertGreaterEqual(shares[1], shares[0] * 0.8)
+        # Доля на большом экране намеренно меньше, чем на эталонном:
+        # монитор больше, но смотрят на него не вдвое ближе. Границы
+        # ловят обе крайности — выноску, потерявшуюся четвертью ширины
+        # (так было до масштаба), и выноску, раздутую в половину экрана
+        # (так было при прямой пропорции; заказчик назвал это
+        # чрезмерным).
+        unscaled_share = 640 / 2560
+        self.assertGreater(shares[1], unscaled_share)
+        self.assertLess(shares[1], 0.45)
 
 
 

@@ -39,8 +39,16 @@ BUTTON_GAP = 10
 # заметной целью мыши, а не полоской в один текст.
 BUTTON_PAD_X = 18
 BUTTON_FONT_SIZE = 14
-ARROW_WIDTH = 6
-ARROW_HEAD = 14
+# Наконечник обязан быть заметно шире хвоста, иначе стрелка читается
+# как жирная чёрточка с точкой на конце — ровно так она и выглядела в
+# упор на 2560x1440. При прежних 14px длины и развороте в 25 градусов
+# наконечник выходил шириной 11.8 при хвосте в 6.
+ARROW_WIDTH = 4
+ARROW_HEAD = 18
+ARROW_SPREAD_DEG = 32
+# Остриё не упирается в цель, а останавливается чуть раньше: иначе
+# треугольник ложится прямо на значок, о котором и идёт речь.
+ARROW_GAP = 6
 
 # Палитра из утверждённых макетов.
 _WHITE = (1, 1, 1)
@@ -207,15 +215,22 @@ class Callout:
     def _draw_arrow(self, cr):
         sx, sy = self._local(*self._layout.arrow_start)
         ex, ey = self._local(*self._layout.arrow_end)
+        angle = math.atan2(ey - sy, ex - sx)
+        # Отступаем от цели и укорачиваем хвост до основания наконечника:
+        # круглый колпачок иначе вылезал бы за остриё прямо на цель.
+        ex -= ARROW_GAP * math.cos(angle)
+        ey -= ARROW_GAP * math.sin(angle)
+        base_x = ex - ARROW_HEAD * math.cos(angle) * 0.9
+        base_y = ey - ARROW_HEAD * math.sin(angle) * 0.9
+
         cr.set_source_rgb(*_BORDER)
         cr.set_line_width(ARROW_WIDTH)
-        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_cap(cairo.LINE_CAP_BUTT)
         cr.move_to(sx, sy)
-        cr.line_to(ex, ey)
+        cr.line_to(base_x, base_y)
         cr.stroke()
 
-        angle = math.atan2(ey - sy, ex - sx)
-        spread = math.radians(25)
+        spread = math.radians(ARROW_SPREAD_DEG)
         x1 = ex - ARROW_HEAD * math.cos(angle - spread)
         y1 = ey - ARROW_HEAD * math.sin(angle - spread)
         x2 = ex - ARROW_HEAD * math.cos(angle + spread)

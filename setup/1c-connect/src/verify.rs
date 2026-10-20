@@ -19,6 +19,7 @@ const VRUNNER: &str = "vrunner-mcp отвечает";
 const PROJECT: &str = "проект";
 const BASE: &str = "база";
 const DB_USER: &str = "пользователь базы";
+const SYSTEM_WEB: &str = "веб-сервер в системе";
 const WEB: &str = "веб-сервер";
 const PUBLICATION: &str = "публикация и расширение";
 const GITEA: &str = "Gitea";
@@ -45,7 +46,16 @@ pub fn order(mode: &str) -> Vec<&'static str> {
     }
     // «Пользователь базы» — сразу за базой и до веб-сервера с публикацией:
     // без него работы не будет, как бы хорошо ни отвечала публикация.
-    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, DB_USER, WEB, PUBLICATION, GITEA]);
+    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, DB_USER]);
+    // «Веб-сервер в системе» — перед портом веб-сервера и до публикации:
+    // без системного apache2 и модуля платформы ни порт не ответит, ни
+    // публикация не поднимется, и причина должна быть настоящей, а не
+    // «порт не отвечает». Факт только на Linux: на Windows веб-сервер лежит
+    // в комплекте, и его отсутствие ловит факт `инструменты комплекта`.
+    if cfg!(target_os = "linux") {
+        v.push(SYSTEM_WEB);
+    }
+    v.extend([WEB, PUBLICATION, GITEA]);
     if mode == "local" {
         v.push(OPEN_SESSION);
         v.push(MEDIA);
@@ -238,6 +248,47 @@ pub fn db_user_fact(user: &str) -> Check {
     } else {
         Check::pass(DB_USER, user.to_string())
     }
+}
+
+/// Чем публиковать базу под Linux: системный `apache2` и модуль платформы
+/// (`wsap24.so`/`wsap24t.so`). Веб-сервер под Linux — системный, и это
+/// решение заказчика (спека, «Веб-сервер под Linux — системный»): в комплекте
+/// его нет, в образе он есть, а на машине разработчика может не быть.
+///
+/// Отказ при запуске публикации («apache2 не найден в $PATH…») остаётся —
+/// этот факт нужен, чтобы человек узнал о нехватке **до** того, как нажмёт, и
+/// чтобы точка не была зелёной там, где публиковать нечем. Чистая функция:
+/// оба пути ищет вызывающий (`publication::apache2_on_path`/`module_in` —
+/// те же, которыми пользуется сама публикация), сюда приходит результат.
+pub fn web_server_fact(apache: Option<&std::path::Path>, module: Option<&std::path::Path>) -> Check {
+    let Some(apache) = apache else {
+        return Check::fail(
+            SYSTEM_WEB,
+            "apache2 не найден в $PATH",
+            "установите пакет apache2 — под Linux базу публикует веб-сервер системы, своего в комплекте нет",
+        );
+    };
+    let Some(module) = module else {
+        return Check::fail(
+            SYSTEM_WEB,
+            format!("{} есть, но рядом с платформой нет модуля 1С (wsap24.so/wsap24t.so)", apache.display()),
+            "переустановите платформу 1С с компонентом «Модули расширения веб-сервера»",
+        );
+    };
+    Check::pass(SYSTEM_WEB, format!("{}, модуль {}", apache.display(), module.display()))
+}
+
+/// Пути для `web_server_fact` на этой машине. Отдельной функцией и под
+/// `cfg`: `publication::apache2_on_path` существует только не на Windows, а
+/// `cfg!(target_os = ...)` в теле `facts_for_readiness` компилировался бы и
+/// там тоже.
+#[cfg(target_os = "linux")]
+fn system_web_server_fact() -> Check {
+    let apache = crate::publication::apache2_on_path();
+    // Модуль ищем ровно там же, где его берёт конфигурация публикации
+    // (`Paths::of`): рядом с найденным 1cv8, второго способа не заводим.
+    let module = find_1cv8().and_then(|exe| crate::publication::module_in(exe.parent()?).ok());
+    web_server_fact(apache.as_deref(), module.as_deref())
 }
 
 /// HTTP-порт базы отвечает (обычный TCP-коннект, без логина) — `up` уже
@@ -467,6 +518,10 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     // Без сети и без сроков: это чистая функция от настроек, и считать её под
     // бюджетом было бы враньём — «не проверено» тут не бывает.
     v.push(db_user_fact(&h.db_user));
+    // Поиск по `$PATH` и каталогу платформы — быстрый, но под бюджетом, как и
+    // остальное: порядок фактов важнее экономии на одном `exists()`.
+    #[cfg(target_os = "linux")]
+    v.push(within(t0, budget, SYSTEM_WEB, system_web_server_fact));
     let web = ctx.cfg.http_port();
     v.push(within(t0, budget, WEB, || {
         // Закрытый порт отказывает мгновенно, так что весь срок здесь — это
@@ -562,20 +617,25 @@ mod tests {
 
     #[test]
     fn order_ends_with_the_tunnel_or_the_ports_and_puts_the_screen_after_the_platform() {
-        // На Linux сразу за платформой стоит «экран для конфигуратора» (на
-        // Windows и macOS его нет вовсе), и всё дальше сдвинуто на один факт.
+        // На Linux у набора два своих факта, которых нет ни на Windows, ни на
+        // macOS: «экран для конфигуратора» сразу за платформой и «веб-сервер в
+        // системе» перед портом веб-сервера. `d` сдвигает то, что стоит после
+        // экрана, `w` — то, что стоит после обоих.
         let d = usize::from(cfg!(target_os = "linux"));
+        let w = 2 * d;
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 15 + d);
-        assert_eq!(tunnel[14 + d], "туннель");
+        assert_eq!(tunnel.len(), 15 + w);
+        assert_eq!(tunnel[14 + w], "туннель");
         assert_eq!(tunnel[5 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[11 + d], "Gitea");
+        assert_eq!(tunnel[11 + w], "Gitea");
         if d == 1 {
             assert_eq!(tunnel[3], "экран для конфигуратора");
+            assert_eq!(tunnel[10], "веб-сервер в системе");
+            assert_eq!(tunnel[11], "веб-сервер");
         }
         let local = order("local");
-        assert_eq!(local.len(), 15 + d);
-        assert_eq!(local[14 + d], "порты рабочего места");
+        assert_eq!(local.len(), 15 + w);
+        assert_eq!(local[14 + w], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -874,6 +934,44 @@ mod tests {
             let nothing = display_fact(d, false, None);
             assert!(!nothing.ok && nothing.hint.contains("xvfb") && nothing.hint.contains("xauth"), "{nothing:?}");
         }
+    }
+
+    /// Под Linux веб-сервер — системный, и это решение заказчика (спека,
+    /// «Веб-сервер под Linux — системный»): в комплекте его нет, на машине
+    /// разработчика он может не стоять. Отказ при публикации уже есть, но
+    /// человек обязан узнать про это **до** того, как нажмёт: точка на машине
+    /// без сервера зелёной быть не может.
+    #[test]
+    fn a_missing_apache_names_the_package() {
+        let module = std::path::PathBuf::from("/opt/1cv8t/x86_64/8.5.1.1150/wsap24t.so");
+        let c = web_server_fact(None, Some(&module));
+        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("apache2"), "{c:?}");
+        assert!(c.hint.contains("apache2"), "пакет надо назвать: {c:?}");
+    }
+
+    /// Apache на месте, а модуля платформы нет — беда другая и лечится другим:
+    /// пакет тут ни при чём, не хватает компонента самой платформы 1С.
+    #[test]
+    fn a_missing_1c_module_names_the_platform_component() {
+        let apache = std::path::PathBuf::from("/usr/sbin/apache2");
+        let c = web_server_fact(Some(&apache), None);
+        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("wsap24"), "{c:?}");
+        assert!(c.hint.contains("веб-сервера"), "компонент платформы: {c:?}");
+        assert!(!c.hint.contains("apache2"), "apache2 на месте — лечить его незачем: {c:?}");
+    }
+
+    /// Оба на месте — зелёный с путями: человек видит, какой именно apache2 и
+    /// какой модуль будут подняты, а не голое «всё хорошо».
+    #[test]
+    fn both_present_pass_and_name_the_path() {
+        let apache = std::path::PathBuf::from("/usr/sbin/apache2");
+        let module = std::path::PathBuf::from("/opt/1cv8t/x86_64/8.5.1.1150/wsap24t.so");
+        let c = web_server_fact(Some(&apache), Some(&module));
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("/usr/sbin/apache2"), "{c:?}");
+        assert!(c.detail.contains("wsap24t.so"), "{c:?}");
     }
 
     #[test]

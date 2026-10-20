@@ -161,7 +161,7 @@ pub struct Paths {
 /// коммерческой сборки, `wsap24t.dll` — у учебной (Windows), `wsap24t.so` — в
 /// образе. Чистая функция — каталог называет вызывающий, тест подаёт
 /// временный, настоящий 1cv8 искать не нужно.
-fn module_in(bin: &Path) -> Result<PathBuf, String> {
+pub(crate) fn module_in(bin: &Path) -> Result<PathBuf, String> {
     let names: &[&str] = if cfg!(windows) { &["wsap24.dll", "wsap24t.dll"] } else { &["wsap24.so", "wsap24t.so"] };
     names
         .iter()
@@ -481,7 +481,7 @@ pub fn stop(p: &Paths) -> Result<(), String> {
 /// `apache2` в `$PATH` — читаемая ошибка вместо «No such file or directory»
 /// из недр `Command::spawn`.
 #[cfg(not(windows))]
-fn apache2_on_path() -> Option<PathBuf> {
+pub(crate) fn apache2_on_path() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join("apache2")).find(|p| p.exists())
 }

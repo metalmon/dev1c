@@ -1,8 +1,9 @@
 # Тесты модуля placement. Чистая геометрия — без gi/GTK.
+import math
 import unittest
 
 from scenario import Step, Target
-from targets import Rect
+from targets import Rect, tray_area
 from placement import bubble_size, place, wrap_body
 
 SCREEN = Rect(0, 0, 2560, 1440)
@@ -72,11 +73,16 @@ class ArrowTests(unittest.TestCase):
         self.assertTrue(on_boundary(layout.bubble, layout.arrow_start))
         self.assertTrue(inside(target, layout.arrow_end))
 
-    def test_bottom_right_tray_target_is_a_fallback_case(self):
-        # Эта цель не влезает ни в одно из четырёх предпочтительных мест —
-        # место 2 в комментарии «куда поставили» подтвердило: это fallback.
-        target = Rect(2500, 1400, 24, 24)
-        layout = place(SCREEN, target, (640, 150))
+    def test_fallback_when_sliding_genuinely_cannot_help(self):
+        # Цель занимает почти весь экран — ни с одной стороны нет места
+        # даже в 24px (margin), и сдвиг вдоль края (финальная правка)
+        # тут не спасает ни одного из четырёх кандидатов: это и есть
+        # настоящий, не выдуманный fallback-случай, не просто «центр
+        # кандидата попал на край», как было у трея в углу раньше (тот
+        # случай сдвиг теперь решает без fallback — см. TrayPlacementTests).
+        screen = Rect(0, 0, 800, 600)
+        target = Rect(50, 50, 700, 500)  # 50px до каждого края — меньше, чем нужно
+        layout = place(screen, target, (640, 150))
         self.assertTrue(on_boundary(layout.bubble, layout.arrow_start))
         self.assertTrue(on_boundary(target, layout.arrow_end))
 
@@ -88,6 +94,53 @@ class ArrowTests(unittest.TestCase):
         centre = (target.x + target.w // 2, target.y + target.h // 2)
         self.assertNotEqual(layout.arrow_end, centre)
         self.assertTrue(on_boundary(target, layout.arrow_end))
+
+
+class TrayPlacementTests(unittest.TestCase):
+    # Баг координатора на шаге 6: трей — узкая (160px) цель у самого
+    # нижнего правого угла. Единственный кандидат, который к ней в
+    # принципе подходит, — «сверху» (справа/слева не хватает высоты у
+    # самого низа экрана, снизу — только пустота за краем монитора), а
+    # «сверху» центрирован по x на цель и вылезает за правый край.
+    # Переполнение раньше отбрасывало кандидата целиком, роняя всё в
+    # _fallback — противоположный (левый верхний) угол, стрелку через
+    # весь экран. Экран здесь согласован сам с собой (трей посчитан от
+    # того же прямоугольника, что передан как экран) — реальный
+    # перекос world.screen()/world.monitor() в main.py (экран — рабочая
+    # область без панели, а трей меряется от монитора целиком) не
+    # предмет этой правки.
+    SCREEN = Rect(0, 0, 1280, 800)
+    MARGIN = 24
+    BUBBLE_SIZE = (640, 235)  # типичный размер шага 6 — два абзаца текста
+
+    def _tray_layout(self):
+        target = tray_area(self.SCREEN)
+        return place(self.SCREEN, target, self.BUBBLE_SIZE, margin=self.MARGIN), target
+
+    def test_bubble_sits_above_the_tray_inside_the_screen_with_margin(self):
+        layout, target = self._tray_layout()
+        b = layout.bubble
+        # Выше цели (трея), не сбоку и не ниже — туда, где его рисует
+        # утверждённый макет.
+        self.assertLessEqual(b.y + b.h, target.y)
+        # Внутри экрана, с отступом, а не впритык к рамке (координатор:
+        # «give it the margin the rest of the placement uses»).
+        self.assertGreaterEqual(b.x, self.SCREEN.x + self.MARGIN)
+        self.assertGreaterEqual(b.y, self.SCREEN.y + self.MARGIN)
+        self.assertLessEqual(b.x + b.w, self.SCREEN.x + self.SCREEN.w - self.MARGIN)
+        self.assertLessEqual(b.y + b.h, self.SCREEN.y + self.SCREEN.h - self.MARGIN)
+
+    def test_tray_arrow_stays_short(self):
+        # Ровно то свойство, которое было не так, и единственное, что
+        # видит человек: раньше стрелка шла через весь экран по
+        # диагонали (~1200px). Длина относительно диагонали экрана, а
+        # не точка — число говорит «коротко», не «именно сюда».
+        layout, _ = self._tray_layout()
+        sx, sy = layout.arrow_start
+        ex, ey = layout.arrow_end
+        length = math.hypot(ex - sx, ey - sy)
+        diagonal = math.hypot(self.SCREEN.w, self.SCREEN.h)
+        self.assertLess(length, diagonal * 0.2)
 
 
 class BubbleSizeTests(unittest.TestCase):

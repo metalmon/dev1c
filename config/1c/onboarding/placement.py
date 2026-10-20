@@ -85,26 +85,46 @@ def _fits_screen(r: Rect, screen: Rect) -> bool:
             and r.y + r.h <= screen.y + screen.h)
 
 
-def _candidates(target: Rect, bw: int, bh: int, margin: int):
+def _candidates(target: Rect, bw: int, bh: int, margin: int, screen: Rect):
     # Порядок предпочтений: справа, слева, снизу, сверху.
+    #
+    # «Снизу»/«сверху» центрированы по x на цель — для цели заметно уже
+    # пузыря (например, 160px трей против 640px пузыря) это уводит
+    # кандидата за боковой край экрана. Раньше такой кандидат просто
+    # выбрасывался (overflow -> reject), роняя всё в _fallback и
+    # противоположный угол — ровно баг с шестым шагом: стрелка через
+    # весь экран, пузырь в углу без отступов. Кандидат на верной
+    # стороне от цели, который всего лишь вылез за край, не выбрасывают
+    # — сдвигают вдоль этого края внутрь экрана, с тем же отступом
+    # margin, что и у экрана вообще (сам экран не трогаем, трогаем
+    # только x этих двух кандидатов).
+    #
+    # «Справа»/«слева» не сдвигаются по y: если по вертикали места не
+    # хватило, сторона, скорее всего, в принципе не годится (цель
+    # слишком близко к верхнему/нижнему краю) — следующий кандидат или
+    # честный _fallback лучше, чем пузырь, уехавший от цели далеко по
+    # вертикали только ради формального «не пересекается».
     cx = target.x + target.w // 2 - bw // 2
     cy = target.y + target.h // 2 - bh // 2
     yield Rect(target.x + target.w + margin, cy, bw, bh)
     yield Rect(target.x - margin - bw, cy, bw, bh)
-    yield Rect(cx, target.y + target.h + margin, bw, bh)
-    yield Rect(cx, target.y - margin - bh, bw, bh)
+    below_above_x = min(max(cx, screen.x + margin), screen.x + screen.w - bw - margin)
+    yield Rect(below_above_x, target.y + target.h + margin, bw, bh)
+    yield Rect(below_above_x, target.y - margin - bh, bw, bh)
 
 
-def _fallback(screen: Rect, target: Rect, bw: int, bh: int) -> Rect:
+def _fallback(screen: Rect, target: Rect, bw: int, bh: int, margin: int) -> Rect:
     # Ни один вариант не влез целиком и мимо цели — прижимаемся к краю,
     # противоположному цели, но не выходим за экран: читаемость выноски
-    # важнее, чем свобода от цели.
+    # важнее, чем свобода от цели. С отступом margin, тем же, что и у
+    # остального размещения — иначе пузырь садится впритык к рамке
+    # экрана, без зазора вообще.
     screen_cx = screen.x + screen.w // 2
     screen_cy = screen.y + screen.h // 2
     target_cx = target.x + target.w // 2
     target_cy = target.y + target.h // 2
-    x = screen.x if target_cx > screen_cx else screen.x + screen.w - bw
-    y = screen.y if target_cy > screen_cy else screen.y + screen.h - bh
+    x = screen.x + margin if target_cx > screen_cx else screen.x + screen.w - bw - margin
+    y = screen.y + margin if target_cy > screen_cy else screen.y + screen.h - bh - margin
     return Rect(x, y, bw, bh)
 
 
@@ -135,12 +155,12 @@ def place(screen: Rect, target: Rect | None, bubble_size: tuple[int, int], margi
         centre = (bubble.x + bubble.w // 2, bubble.y + bubble.h // 2)
         return Layout(bubble, centre, centre)
 
-    for candidate in _candidates(target, bw, bh, margin):
+    for candidate in _candidates(target, bw, bh, margin, screen):
         if _fits_screen(candidate, screen) and not _overlaps(candidate, target):
             bubble = candidate
             break
     else:
-        bubble = _fallback(screen, target, bw, bh)
+        bubble = _fallback(screen, target, bw, bh, margin)
 
     start, end = _arrow(bubble, target)
     return Layout(bubble, start, end)

@@ -3,8 +3,8 @@
 import pathlib
 import unittest
 
-from targets import (Rect, WindowInfo, anchor_in, connector_area, desktop_icon,
-                     tray_area, window)
+from targets import (TRAY_HEIGHT, TRAY_RIGHT_MARGIN, TRAY_WIDTH, Rect, WindowInfo,
+                     anchor_in, connector_area, desktop_icon, tray_area, window)
 
 FIXTURE = (pathlib.Path(__file__).parent / 'fixtures' / 'icons.screen0.yaml').read_text(encoding='utf-8')
 
@@ -73,10 +73,15 @@ class ConnectorAreaTests(unittest.TestCase):
 
 
 class TrayAreaTests(unittest.TestCase):
-    def test_sits_at_bottom_right_of_workarea(self):
+    def test_sits_on_the_bottom_panel_left_of_the_clock(self):
+        # Не у самого края: правее трея на панели стенда стоят раскладка,
+        # часы и значок сеанса. Без поправки стрелка показывала на часы,
+        # а не на коннектор (стенд, 20.10.2026).
         r = tray_area(Rect(0, 0, 1920, 1080))
-        self.assertEqual((r.x + r.w, r.y + r.h), (1920, 1080))
-        self.assertEqual((r.w, r.h), (160, 40))
+        self.assertEqual(r.y + r.h, 1080)
+        self.assertEqual((r.w, r.h), (TRAY_WIDTH, TRAY_HEIGHT))
+        self.assertEqual(r.x + r.w, 1920 - TRAY_RIGHT_MARGIN)
+        self.assertLess(r.x + r.w, 1920)
 
 
 class AnchorInTests(unittest.TestCase):

@@ -18,6 +18,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -111,6 +112,46 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, now: Instant) 
 /// правка не должна тронуть toml и дёрнуть сеанс посреди них.
 pub fn can_save(dirty: bool, busy: bool, progress: bool) -> bool {
     dirty && !busy && !progress
+}
+
+/// Почему «Сохранить» недоступна — словами разработчика 1С, а не молчанием
+/// (заказчик 2026-10-20: кнопка просто гаснет, непонятно почему). Ровно те
+/// же условия, что держит `can_save` — `busy` тут и есть «операция или
+/// проверка идёт» (`can_save`'s `busy || progress`; идущая операция всегда
+/// держит и то, и другое, см. `run_op`). `op` называет операцию, когда она
+/// идёт — экспорт и импорт говорят разное, расширение (установка/снятие)
+/// общо; `None` при занятости значит идёт проверка, а не операция.
+/// `None` результата — кнопку можно нажать, объяснять нечего.
+pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
+    if !dirty {
+        return Some("Нечего сохранять — поля ещё не менялись".into());
+    }
+    if !busy {
+        return None;
+    }
+    let what = match op {
+        Some(Which::Export) => "выгрузка из 1С",
+        Some(Which::Import) => "загрузка в 1С",
+        Some(Which::Install) | Some(Which::Uninstall) => "работа с расширением",
+        None => "проверка",
+    };
+    Some(format!("Подождите: идёт {what}"))
+}
+
+/// Имя папки базы для карточки состояния — полный путь остаётся в подсказке
+/// по наведению (заказчик 2026-10-20: смену базы не видно нигде, кроме
+/// самого поля). `None`, пока база не задана — карточка не рисует пустой
+/// слот.
+pub fn base_name(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .or_else(|| Some(path.to_string()))
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -438,7 +479,17 @@ impl Render for Panel {
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
         let (unread, failed) = (ui.unread, ui.failed_checks);
         let has_progress = ui.progress.is_some();
+        // Какая операция идёт, если идёт — для текста под «Сохранить»
+        // (`save_hint`): экспорт, импорт и расширение называются разным
+        // словом, идущая проверка им не является (`run_op`/`run_check`
+        // выставляют разное).
+        let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
+        // Сохранённая база — из конфига, а не из поля формы: правка базы до
+        // «Сохранить» ещё не в силе (заказчик 2026-10-20: после смены базы
+        // на лету агент продолжает работать со старой, пока её не видно).
+        let base_path = ui.cfg.host.base_path.clone();
+        let base = base_name(&base_path);
         let c = card(ui.progress.as_ref(), &link, &mode, Instant::now());
         let foot_left = match &ui.status {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
@@ -477,16 +528,29 @@ impl Render for Panel {
             .gap_3()
             .p_3()
             .child(div().size_3().flex_shrink_0().rounded_full().bg(Self::dot(c.dot, &theme)))
-            .child(
+            .child({
+                // Имя базы дописывается в тот же заголовок через « · », как
+                // уже фаза с часами выше: у карточки один слот под текст,
+                // второй строки это не прибавляет (заказчик 2026-10-19).
+                // Полный путь — не здесь, а в подсказке по наведению
+                // (заказчик 2026-10-20: за него спросили отдельно).
+                let title_text = match &base {
+                    Some(name) => format!("{} · {}", c.title, name),
+                    None => c.title.clone(),
+                };
                 div()
+                    .id("status-title")
                     .flex_1()
                     .min_w_0()
                     .whitespace_nowrap()
                     .overflow_hidden()
                     .text_ellipsis()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(c.title.clone()),
-            )
+                    .when_some(base.as_ref().map(|_| base_path.clone()), |d, p| {
+                        d.tooltip(move |window, cx| Tooltip::new(p.clone()).build(window, cx))
+                    })
+                    .child(title_text)
+            })
             // «Прервать» — перед переключателем, только пока можно отменить
             // (git-обмен; cf_decompile/cf_load не прерываются).
             .when(c.cancel, |d| {
@@ -726,17 +790,39 @@ impl Render for Panel {
             gui::Tab::Params => {
                 let dirty = self.is_dirty(cx);
                 let allowed = can_save(dirty, busy_now, has_progress);
-                Button::new("save")
-                    .primary()
-                    .label("Сохранить")
-                    .disabled(!allowed)
-                    .on_click(cx.listener(|panel, _, _, cx| {
-                        // Перезапуск сеанса по удачной записи (если он был
-                        // поднят) и строка об этом в журнал — внутри
-                        // `gui::save_host`, не здесь.
-                        panel.save(cx);
-                        cx.refresh_windows();
-                    }))
+                // Кнопка гаснет сама, но молча — заказчик 2026-10-20: почему
+                // нельзя нажать, не видно. Причина — рядом строкой и в
+                // подсказке; когда нажать можно, объяснять нечего (`None`).
+                let hint = save_hint(dirty, busy_now, running_op);
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(hint.clone(), |d, h| {
+                        d.child(
+                            div()
+                                .max_w(px(150.))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(12.))
+                                .text_color(caption)
+                                .child(h),
+                        )
+                    })
+                    .child(
+                        Button::new("save")
+                            .primary()
+                            .label("Сохранить")
+                            .disabled(!allowed)
+                            .when_some(hint, |b, h| b.tooltip(h))
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                // Перезапуск сеанса по удачной записи (если он
+                                // был поднят) и строка об этом в журнал —
+                                // внутри `gui::save_host`, не здесь.
+                                panel.save(cx);
+                                cx.refresh_windows();
+                            })),
+                    )
                     .into_any_element()
             }
             // Главная кнопка ведёт человека по порядку: сначала поставить
@@ -892,7 +978,7 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_save, card, fields_differ, project_rows, shown_fields, HINT_PROJECT};
+    use super::{base_name, can_save, card, fields_differ, project_rows, save_hint, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
     use crate::gui::{Dot, ProjectView, Running, Which};
     use crate::session::State;
@@ -1052,5 +1138,30 @@ mod tests {
         assert!(!can_save(false, false, false), "ничего не менялось");
         assert!(!can_save(true, true, false), "идёт операция/проверка");
         assert!(!can_save(true, false, true), "сеанс подключается/перезапускается");
+    }
+
+    #[test]
+    fn save_hint_names_the_reason_it_is_disabled() {
+        // Можно нажать — объяснять нечего.
+        assert_eq!(save_hint(true, false, None), None);
+        // Нечего сохранять: поля не трогали.
+        assert_eq!(save_hint(false, false, None).as_deref(), Some("Нечего сохранять — поля ещё не менялись"));
+        // Идёт операция — названная, а не общим словом.
+        assert_eq!(save_hint(true, true, Some(Which::Export)).as_deref(), Some("Подождите: идёт выгрузка из 1С"));
+        assert_eq!(save_hint(true, true, Some(Which::Import)).as_deref(), Some("Подождите: идёт загрузка в 1С"));
+        assert_eq!(save_hint(true, true, Some(Which::Install)).as_deref(), Some("Подождите: идёт работа с расширением"));
+        assert_eq!(save_hint(true, true, Some(Which::Uninstall)).as_deref(), Some("Подождите: идёт работа с расширением"));
+        // Занято, но никакая операция не идёт — значит идёт проверка.
+        assert_eq!(save_hint(true, true, None).as_deref(), Some("Подождите: идёт проверка"));
+    }
+
+    #[test]
+    fn the_card_carries_the_base_folder_name_or_nothing() {
+        assert_eq!(base_name("C:\\Bases\\Buh"), Some("Buh".into()));
+        // Хвостовой разделитель не оставляет пустое имя.
+        assert_eq!(base_name("C:\\Bases\\Buh\\"), Some("Buh".into()));
+        // Базы ещё нет — пустой слот не рисуем, а не показываем его пустым.
+        assert_eq!(base_name(""), None);
+        assert_eq!(base_name("   "), None);
     }
 }

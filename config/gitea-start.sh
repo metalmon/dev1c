@@ -247,4 +247,27 @@ if [ "$FIRST_RUN" = "1" ] && [ -d "$SEED_DIR" ]; then
     done
 fi
 
+# Приватные репозитории организации делаются видимыми при каждом запуске.
+# Ключ DEFAULT_PUSH_CREATE_PRIVATE действует только на вновь создаваемые, а
+# в организации могут лежать созданные раньше — в том числе dev1c/project,
+# ровно тот, куда отправляет коннектор рабочего места. Седьмой шаг
+# онбординга ведёт человека на значок «Репозитории» и обещает, что там
+# видно каждую правку; приватный репозиторий показал бы ему пустую
+# страницу. Проверено на стенде: три репозитория организации были
+# приватными, анонимный список отдавал [].
+#
+# Обход, а не разовая правка: конфигурация и данные Gitea лежат в томе и
+# переживают обновление образа, а репозитории появляются и после него.
+private_repos=$(curl -s -m 30 -u "${GITEA_ADMIN}:${GITEA_PASSWORD}"     "http://localhost:3000/api/v1/orgs/dev1c/repos" 2>/dev/null     | python3 -c 'import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = []
+print(" ".join(r["name"] for r in data if r.get("private")))' 2>/dev/null || true)
+for name in $private_repos; do
+    if [ "$(api PATCH "/repos/dev1c/$name" '{"private": false}')" = 200 ]; then
+        echo "repository dev1c/$name made visible without signing in" >>"$GITEA_LOG"
+    fi
+done
+
 wait "$GITEA_PID"

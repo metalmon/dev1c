@@ -225,8 +225,8 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(
-        ctx.kit.path(cfg::FILE).exists(),
-        "в комплекте нет {} — создайте его из образца: 1c-connect example > {}",
+        ops_host::toml_path(&ctx.kit).exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         cfg::FILE,
         cfg::FILE
     );
@@ -267,8 +267,8 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
 fn serve(ctx: &Ctx) -> Result<()> {
     anyhow::ensure!(
-        ctx.kit.path(cfg::FILE).exists(),
-        "в комплекте нет {} — создайте его из образца: 1c-connect example > {}",
+        ops_host::toml_path(&ctx.kit).exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
         cfg::FILE,
         cfg::FILE
     );

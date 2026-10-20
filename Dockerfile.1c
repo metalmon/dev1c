@@ -81,6 +81,11 @@ FROM ${BASE} AS tools
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PLATFORM_VERSION
 ARG MCP_1C_VERSION=v1.22.3
+# Re-declared from the "vrunner" stage (ARGs do not cross stages on their
+# own, see PLATFORM_VERSION above): only needed here to stamp the kit's own
+# tools.version (built below).
+ARG VRUNNER_VERSION=3.0.2
+ARG ADD_VERSION=6.8.0
 
 # webkit 4.1 + GLU: the client's own dependencies (v8_install_deps is disabled
 # in the payload stage — it would apt on its own, outside our control).
@@ -128,6 +133,34 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
     && grep -q '"cf_decompile"' /tmp/tools.json && grep -q '"cf_load"' /tmp/tools.json \
     && echo "vrunner-mcp: $(grep -oE '"name":"[a-z_0-9]+"' /tmp/tools.json | sort -u | wc -l) tools" \
     && rm /tmp/tools.json
+
+# --- the shared kit: /opt/dev1c-kit ------------------------------------------
+# One kit, built here and nowhere else, under the exact names
+# ops_host.rs expects (mcp_exe/oscript_exe/vrunner_lib/git_exe — the single
+# place that spells out the shape; this step must only ever link to it, never
+# repeat it). Every workstation's home is a volume (see stand.sh), so nothing
+# baked under /home/devN survives a restart — this is why the kit lives at a
+# fixed path instead, and why `seed` no longer links any of this per login.
+# Links, not copies: the kit is read-only and these binaries already live on
+# the same image layer, so a symlink costs nothing and stays honest about
+# where the real file is.
+#
+# tools.version here is the KIT's own stamp — what was shipped, written once
+# now and never touched again. It is NOT the same file as the one `host.tools`
+# writes into tools_dir() at install time (what is actually laid out on a
+# given machine) — `ops_host::tools_state` compares the two.
+RUN mkdir -p /opt/dev1c-kit/vrunner/bin /opt/dev1c-kit/git/bin \
+    && ln -s /usr/local/bin/mcp-1c /opt/dev1c-kit/mcp-1c-linux-amd64 \
+    && ln -s /opt/mcp-1c/MCP_HTTPService.cfe /opt/dev1c-kit/MCP_HTTPService.cfe \
+    && ln -s "$(command -v oscript)" /opt/dev1c-kit/vrunner/bin/oscript \
+    && ln -s /opt/vrunner /opt/dev1c-kit/vrunner/lib \
+    && ln -s "$(command -v git)" /opt/dev1c-kit/git/bin/git \
+    && printf 'OneScript 2.2.0; vanessa-runner %s; add %s; mcp-1c %s\n' "${VRUNNER_VERSION}" "${ADD_VERSION}" "${MCP_1C_VERSION}" >/opt/dev1c-kit/tools.version \
+    && echo "комплект: $(find /opt/dev1c-kit | wc -l) записей, $(cat /opt/dev1c-kit/tools.version)"
+# Every workstation process sees this: the desktop autostart (1c-stand
+# connect -> 1c-connect --tray) and a hand-run `1c-connect serve` alike — an
+# image-wide ENV reaches both without stand.sh having to export it itself.
+ENV ONEC_CONNECT_KIT=/opt/dev1c-kit
 
 # --- fonts -------------------------------------------------------------------
 # 1C greets a session with «На сервере отсутствуют шрифты из состава Microsoft

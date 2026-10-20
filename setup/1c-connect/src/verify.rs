@@ -209,7 +209,7 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
-    v.push(params_fact(ctx.kit.path(crate::cfg::FILE).exists(), &h.server));
+    v.push(params_fact(crate::ops_host::toml_path(&ctx.kit).exists(), &h.server));
     v.push(match find_1cv8() {
         Some(p) => Check::pass(PLATFORM, p.display().to_string()),
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),

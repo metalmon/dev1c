@@ -133,29 +133,52 @@ pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
     Ok(n)
 }
 
+/// Имя файла с отметкой версии — одно и то же в обоих местах, но то, ЧТО по
+/// нему лежит, разное: `kit_root.join(VERSION_FILE)` — штамп КОМПЛЕКТА
+/// (что было собрано: Dockerfile.1c на Linux, `pack.sh` на Windows, пишут
+/// один раз и больше не трогают); `tools.join(VERSION_FILE)` — штамп
+/// СОСТОЯНИЯ (что фактически разложено на этой машине: пишет `host.tools`
+/// при раскладке, то есть `Tools::apply` ниже). `tools_state` — и есть
+/// сверка этих двух величин.
 const VERSION_FILE: &str = "tools.version";
 
-/// Каталоги комплекта, которые переносятся в `%LOCALAPPDATA%\dev1c`:
-/// vrunner и git для сборки/публикации, httpd — локальный веб-сервер,
-/// которым 1c-connect публикует активную базу без Apache или IIS, ставить
-/// вручную не нужно.
-const KIT_DIRS: &[&str] = &["vrunner", "git", "httpd"];
+/// Каталоги, которых мост и `host.tools` ждут от комплекта: vrunner и git —
+/// на обеих ОС (сборка/публикация), httpd — только на Windows (свой
+/// локальный веб-сервер, которым 1c-connect публикует базу без ручной
+/// установки Apache/IIS). На Linux эту роль уже играет системный apache2
+/// образа — второй веб-сервер в комплект незачем класть. Единственное место
+/// в коде, где раскладка комплекта названа — остальные функции этого файла
+/// (`mcp_exe`, `oscript_exe`, `vrunner_lib`, `git_exe`) описывают имена
+/// внутри неё, но не то, какие каталоги обязаны быть.
+fn required_kit_dirs() -> &'static [&'static str] {
+    if cfg!(windows) { &["vrunner", "git", "httpd"] } else { &["vrunner", "git"] }
+}
 
-/// Состояние по отметке версии: комплект пишет `tools.version` (pack.sh),
-/// копия на машине несёт ту же строку.
+/// Состояние по отметке версии: комплект пишет `tools.version` при сборке
+/// (штамп комплекта, не меняется), `host.tools` — свою копию в состоянии
+/// при раскладке (штамп состояния). Расхождение этих двух и есть `Drifted`.
 pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
-    if KIT_DIRS.iter().any(|d| !kit_root.join(d).is_dir()) {
-        return OpState::Blocked("в комплекте нет vrunner/, git/ или httpd/ — скопируйте полный комплект заново".into());
+    let missing: Vec<&str> = required_kit_dirs().iter().copied().filter(|d| !kit_root.join(d).is_dir()).collect();
+    if !missing.is_empty() {
+        return OpState::Blocked(format!("в комплекте нет {} — скопируйте полный комплект заново", missing.iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ")));
     }
-    let want = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
-    let have = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();
-    if have.trim().is_empty() {
+    let shipped = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
+    let laid_out = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();
+    if laid_out.trim().is_empty() {
         OpState::Missing
-    } else if have.trim() == want.trim() {
-        OpState::Done(format!("{} в {}", want.trim(), tools.display()))
+    } else if laid_out.trim() == shipped.trim() {
+        OpState::Done(format!("{} в {}", shipped.trim(), tools.display()))
     } else {
-        OpState::Drifted { from: have.trim().to_string(), to: want.trim().to_string() }
+        OpState::Drifted { from: laid_out.trim().to_string(), to: shipped.trim().to_string() }
     }
+}
+
+/// Где лежит `1c-connect.toml`: на Windows — в комплекте (он свой, на
+/// флешке, эта задача его не трогает); на Linux — в состоянии пользователя,
+/// потому что комплект теперь один общий на все рабочие места и доступен
+/// только для чтения — свой toml в него не положить.
+pub fn toml_path(kit: &Kit) -> PathBuf {
+    if cfg!(windows) { kit.path(crate::cfg::FILE) } else { tools_dir().join(crate::cfg::FILE) }
 }
 
 struct Tools;
@@ -170,14 +193,15 @@ impl Op<Ctx> for Tools {
         tools_state(&ctx.kit.root, &tools_dir())
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!("скопировать vrunner/, git/ и httpd/ из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
+        let dirs = required_kit_dirs().iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ");
+        vec![Action::new(format!("скопировать {dirs} из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let to = tools_dir();
         if ctx.dry_run {
             return Ok(());
         }
-        for d in KIT_DIRS {
+        for d in required_kit_dirs() {
             let _ = std::fs::remove_dir_all(to.join(d));
             let n = copy_tree(&ctx.kit.root.join(d), &to.join(d)).with_context(|| format!("копирование {d} в {}", to.display()))?;
             ctx.ok(format!("{d}: {n} файлов"));
@@ -798,10 +822,70 @@ mod tests {
     }
 
     #[test]
-    fn the_kit_dirs_include_httpd() {
-        assert!(KIT_DIRS.contains(&"httpd"), "{KIT_DIRS:?}");
-        assert!(KIT_DIRS.contains(&"vrunner"));
-        assert!(KIT_DIRS.contains(&"git"));
+    fn required_kit_dirs_need_httpd_only_on_windows() {
+        let dirs = required_kit_dirs();
+        assert!(dirs.contains(&"vrunner"), "{dirs:?}");
+        assert!(dirs.contains(&"git"), "{dirs:?}");
+        assert_eq!(dirs.contains(&"httpd"), cfg!(windows), "{dirs:?}");
+    }
+
+    #[test]
+    fn the_tools_stamp_lives_in_the_state_not_in_the_kit() {
+        // The state-side stamp (`host.tools` writes it while laying tools
+        // out) must resolve under `tools_dir()`, never under the kit —
+        // `tools_state` reads it from `tools.join(VERSION_FILE)`, and
+        // nothing in this module ever joins VERSION_FILE onto `tools_dir()`
+        // under a path that also starts with a kit root.
+        let kit_root = Path::new("/opt/dev1c-kit");
+        let state = tools_dir();
+        let laid_out_stamp = state.join(VERSION_FILE);
+        assert!(!laid_out_stamp.starts_with(kit_root), "{}", laid_out_stamp.display());
+        assert!(laid_out_stamp.starts_with(&state), "{}", laid_out_stamp.display());
+    }
+
+    #[test]
+    fn toml_path_never_resolves_under_the_kit_on_linux() {
+        if cfg!(windows) {
+            return; // Windows: untouched by this task, the toml stays with the kit.
+        }
+        let kit = Kit::at(Path::new("/opt/dev1c-kit"));
+        let p = toml_path(&kit);
+        assert!(!p.starts_with(&kit.root), "{}", p.display());
+        assert!(p.starts_with(tools_dir()), "{}", p.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_kit_still_starts() {
+        // A genuinely read-only mount, simulated by directory permissions:
+        // `tools_state` only ever reads from `kit_root` (checking the
+        // required directories, reading its version stamp) — it must not
+        // need write access there to decide the state.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!("dev1c-kit-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let kit = tmp.join("kit");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(kit.join("vrunner")).unwrap();
+        std::fs::create_dir_all(kit.join("git")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(kit.join(VERSION_FILE), "x\n").unwrap();
+        let ro = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(kit.join("vrunner"), ro.clone()).unwrap();
+        std::fs::set_permissions(kit.join("git"), ro.clone()).unwrap();
+        std::fs::set_permissions(&kit, ro).unwrap();
+
+        let state = tools_state(&kit, &home);
+
+        let rw = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&kit, rw.clone()).unwrap();
+        std::fs::set_permissions(kit.join("vrunner"), rw.clone()).unwrap();
+        std::fs::set_permissions(kit.join("git"), rw).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Nothing laid out in `home` yet — that is Missing, not a panic or
+        // an io error from a kit we could not write to.
+        assert!(matches!(state, OpState::Missing), "{state:?}");
     }
 
     #[test]

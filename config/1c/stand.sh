@@ -152,14 +152,29 @@ seed() { # runs as the workstation user; $HOME is theirs
     done
     # the launchers of the first days, superseded by the starter
     rm -f "$HOME/Desktop/1c-configurator.desktop" "$HOME/Desktop/1c-enterprise.desktop"
-    # 1c-connect, if the image carries it. Its kit is the directory of the
-    # binary (common::kit), and every workstation needs its own parameters —
-    # so each gets its own copy next to its own toml, refreshed when the image
+    # 1c-connect, if the image carries it. The tools it needs (mcp-1c,
+    # vrunner, git) live in one place now, built once into the image —
+    # /opt/dev1c-kit, see Dockerfile.1c — and ONEC_CONNECT_KIT (set there as
+    # an image-wide ENV) points every workstation's 1c-connect at it, so
+    # nothing here links anything for them any more: a workstation's home is
+    # a volume, and a fixed path in the image is exactly what survives that.
+    #
+    # Still per-workstation, because this directory is where a copy of the
+    # program itself and its own bookkeeping (setup.log, install.state) sit
+    # when ONEC_CONNECT_KIT is unset (Kit::discover's fallback, kept as a
+    # defence): each account gets its own copy, refreshed when the image
     # brings a new build.
     if [ -x "$CONNECT" ]; then
         mkdir -p "$HOME/dev1c"
         cmp -s "$CONNECT" "$HOME/dev1c/1c-connect" || cp "$CONNECT" "$HOME/dev1c/1c-connect"
-        if [ ! -e "$HOME/dev1c/$CONNECT_TOML" ]; then
+        # State: the toml, the single-instance lock and the tools version
+        # stamp all live here now (ops_host::tools_dir()), never inside the
+        # shared kit — it is one read-only copy for every workstation, and
+        # none of these may be written there. $XDG_DATA_HOME/dev1c mirrors
+        # tools_dir()'s own fallback to ~/.local/share/dev1c.
+        t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
+        if [ ! -e "$t/$CONNECT_TOML" ]; then
+            mkdir -p "$t"
             u=$(id -un); n=${u#dev}
             # The server fields stay at their defaults: in local mode there is
             # no tunnel to raise. The base, its publication and the project
@@ -169,7 +184,7 @@ seed() { # runs as the workstation user; $HOME is theirs
             # the stand no longer publishes workstation bases itself (see
             # `start`). base_url matches what Cfg::base_url() computes for
             # that publication: the root of its own port, no "/base" segment.
-            cat >"$HOME/dev1c/$CONNECT_TOML" <<EOF
+            cat >"$t/$CONNECT_TOML" <<EOF
 [host]
 mode = "local"
 workstation = "$u"
@@ -180,32 +195,8 @@ project = "$HOME/project"
 db_user = "$DB_USER"
 db_password = ""
 EOF
-            log "1c-connect: $HOME/dev1c/$CONNECT_TOML written for $u" >&2
+            log "1c-connect: $t/$CONNECT_TOML written for $u" >&2
         fi
-        # The bridge execs its two children by fixed path, not by PATH
-        # lookup (bridge.rs: mcp_command/vrunner_command) — and the socat
-        # lines that used to run "1c-stand mcp"/"vrunner" directly (which do
-        # use PATH) no longer stand between it and a missing binary. Links,
-        # not 16 MB copies per workstation: the connector only executes
-        # these, never writes through them.
-        # mcp-1c: common::kit::Kit is the directory 1c-connect itself runs
-        # from ($HOME/dev1c here), and mcp_command() execs
-        # "<kit>/mcp-1c-linux-amd64" inside it.
-        ln -sf /usr/local/bin/mcp-1c "$HOME/dev1c/mcp-1c-linux-amd64"
-        # vanessa-runner: a different root — ops_host::tools_dir(), not the
-        # kit — $XDG_DATA_HOME/dev1c or ~/.local/share/dev1c if unset.
-        # vrunner_command() execs "<tools>/vrunner/bin/oscript" against
-        # "<tools>/vrunner/lib/vanessa-runner/src/mcp.os", and its own
-        # background re-exec of oscript finds it by putting that same bin/
-        # (and "<tools>/git/bin") ahead of PATH.
-        t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
-        mkdir -p "$t/vrunner/bin" "$t/git/bin"
-        ln -sf /usr/local/bin/oscript "$t/vrunner/bin/oscript"
-        ln -sf "$(command -v git)" "$t/git/bin/git"
-        # The vendored vanessa-runner tree and its own oscript_modules (see
-        # Dockerfile.1c, the "vanessa-runner" stage) — one link for the
-        # whole tree stands in for the kit's private vrunner/lib.
-        [ -e "$t/vrunner/lib" ] || ln -s /opt/vrunner "$t/vrunner/lib"
     fi
 }
 

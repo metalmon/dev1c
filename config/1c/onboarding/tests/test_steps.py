@@ -38,13 +38,15 @@ class FakeWorld:
 
 
 def _steps():
-    # Три шага: none/button, desktop_icon/target, window/target — этого
-    # хватает, чтобы проверить все переходы и видимость цели.
+    # Четыре шага: none/button, desktop_icon/target, window/target,
+    # снова none/button — последний нужен, чтобы увидеть переход ЗА шаг 3,
+    # а не просто остановку на нём.
     return [
         Step(1, 'Шаг 1', '', Target('none', None, None, 'whole'), ('Начать',), 'button', ()),
         Step(2, 'Шаг 2', '', Target('desktop_icon', '1c-start.desktop', None, 'whole'),
              ('Дальше',), 'target', ()),
         Step(3, 'Шаг 3', '', Target('window', None, '1cv8', 'whole'), ('Дальше',), 'target', ()),
+        Step(4, 'Шаг 4', '', Target('none', None, None, 'whole'), ('Готово',), 'button', ()),
     ]
 
 
@@ -54,14 +56,19 @@ class MachineTests(unittest.TestCase):
         m = Machine(_steps(), world)
         m.press('next')                           # шаг 1 -> 2, цель — значок 1С
         self.assertEqual(m.current.number, 2)
-        world.windows = [WindowInfo('Управление нашей фирмой (учебная)', '1cv8', WINDOW_RECT, 0)]
+        # Окно шага 3 уже стоит в world — ДО того, как мы туда попали.
+        # Совпадение идёт по .name (как в настоящем targets.window), а
+        # не по .wclass, поэтому имя должно и впрямь содержать '1cv8'.
+        world.windows = [WindowInfo('Конфигуратор 1cv8', '1cv8', WINDOW_RECT, 0)]
         m.tick()                                   # значок на шаге 2 так и не появился
         self.assertEqual(m.current.number, 2)
         world.icons = {'1c-start.desktop': ICON_RECT}
         m.tick()
         self.assertEqual(m.current.number, 3)      # значок появился — шаг 3
         m.tick()
-        self.assertEqual(m.current.number, 3)      # окно уже стояло в world — тоже готово к переходу
+        # Цель шага 3 была готова с самого начала — тик сразу уводит
+        # дальше, на шаг 4, а не просто держит нас на месте.
+        self.assertEqual(m.current.number, 4)
 
     def test_tick_does_nothing_until_target_appears(self):
         world = FakeWorld()
@@ -121,6 +128,19 @@ class MachineTests(unittest.TestCase):
         m.press('close')
         m.tick()                                   # не должно падать
         self.assertTrue(m.done)
+
+    def test_visible_target_after_close_is_none(self):
+        m = Machine(_steps(), FakeWorld())
+        m.press('close')
+        self.assertIsNone(m.visible_target())       # не должно падать
+
+    def test_visible_target_after_walking_off_the_end_is_none(self):
+        world = FakeWorld()
+        m = Machine(_steps(), world)
+        for _ in range(len(_steps())):
+            m.press('next')
+        self.assertTrue(m.done)
+        self.assertIsNone(m.visible_target())       # не должно падать
 
     def test_tick_does_not_advance_a_button_step(self):
         world = FakeWorld(icons={'1c-start.desktop': ICON_RECT})

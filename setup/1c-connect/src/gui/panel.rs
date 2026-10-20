@@ -387,6 +387,11 @@ impl Panel {
     /// подбор — отложенно (`defer_in`): менять размер окна прямо посреди
     /// раскладки нельзя.
     fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Страховка формы окна: размер мог поменяться и мимо `fit_height`
+        // (менеджер окон, смена масштаба), а форма, отставшая от размера,
+        // срезает окну край (замер 2026-10-21). Пока размер тот же, это одно
+        // чтение счётчика — звать каждый кадр не жалко.
+        crate::gui::window::reshape_to_current(window);
         self.viewport_h = viewport.or(self.viewport_h);
         self.params_h = params.or(self.params_h);
         let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };

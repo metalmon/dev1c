@@ -85,20 +85,32 @@ pub struct Card {
     pub cancel: bool,
 }
 
-pub fn card(progress: Option<&Running>, link: &State, now: Instant) -> Card {
+/// Заголовок — по `cfg.host.mode`: в локальном режиме речь про MCP (слушатели
+/// держат порты сами, см. `session::start`), а не про связь со средой; отказ
+/// там же показывает саму причину (порт занят и т.п.), а не общее «не
+/// подключён». В туннельном режиме — как раньше.
+pub fn card(progress: Option<&Running>, link: &State, mode: &str, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
         let title = format!("{} · {}", r.phase.title(), clock);
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
-    let (dot, title): (Dot, &'static str) = match link {
-        State::Off => (Dot::Off, "Не подключён"),
-        State::Connecting => (Dot::Busy, "Подключаюсь…"),
-        State::Up { .. } => (Dot::Up, "Подключён"),
-        State::Retrying(_) => (Dot::Busy, "Переподключаюсь"),
-        State::Failed(_) => (Dot::Down, "Не подключён"),
+    let local = mode == "local";
+    let (dot, title): (Dot, String) = match link {
+        State::Off => (Dot::Off, if local { "MCP выключены".into() } else { "Не подключён".into() }),
+        State::Connecting => (Dot::Busy, if local { "Включаю…".into() } else { "Подключаюсь…".into() }),
+        State::Up { .. } => (Dot::Up, if local { "MCP включены".into() } else { "Подключён".into() }),
+        State::Retrying(_) => (Dot::Busy, "Переподключаюсь".into()),
+        State::Failed(why) => (Dot::Down, if local { why.clone() } else { "Не подключён".into() }),
     };
-    Card { dot, title: title.to_string(), cancel: false }
+    Card { dot, title, cancel: false }
+}
+
+/// Можно ли нажать «Сохранить»: поля отличаются от сохранённых, и прямо
+/// сейчас не идёт операция/проверка и не подключается/перезапускается сеанс —
+/// правка не должна тронуть toml и дёрнуть сеанс посреди них.
+pub fn can_save(dirty: bool, busy: bool, progress: bool) -> bool {
+    dirty && !busy && !progress
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -426,12 +438,12 @@ impl Render for Panel {
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
         let (unread, failed) = (ui.unread, ui.failed_checks);
         let has_progress = ui.progress.is_some();
-        let c = card(ui.progress.as_ref(), &link, Instant::now());
+        let mode = ui.cfg.host.mode.clone();
+        let c = card(ui.progress.as_ref(), &link, &mode, Instant::now());
         let foot_left = match &ui.status {
             Some(l) => (l.text.clone(), matches!(l.kind, Kind::Fail)),
             None => (ui.kit.root.display().to_string(), false),
         };
-        let mode = ui.cfg.host.mode.clone();
         let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -490,7 +502,7 @@ impl Render for Panel {
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
                     .disabled(has_progress)
-                    .tooltip("Туннель в среду разработки")
+                    .tooltip(if mode == "local" { "Обслуживание вызовов агента (MCP)" } else { "Туннель в среду разработки" })
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -701,20 +713,16 @@ impl Render for Panel {
         let foot_actions: AnyElement = match tab {
             gui::Tab::Params => {
                 let dirty = self.is_dirty(cx);
+                let allowed = can_save(dirty, busy_now, has_progress);
                 Button::new("save")
                     .primary()
                     .label("Сохранить")
-                    .disabled(!dirty)
+                    .disabled(!allowed)
                     .on_click(cx.listener(|panel, _, _, cx| {
-                        let was_on_cur = cx.global::<Ui>().link.is_on();
-                        // Сеанс перезапускаем только по удачной записи: иначе
-                        // живой туннель оборвался бы ради непринятых параметров.
-                        if panel.save(cx) && was_on_cur {
-                            gui::stop_session(cx);
-                            if let Err(e) = gui::start_session(cx) {
-                                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                            }
-                        }
+                        // Перезапуск сеанса по удачной записи (если он был
+                        // поднят) и строка об этом в журнал — внутри
+                        // `gui::save_host`, не здесь.
+                        panel.save(cx);
                         cx.refresh_windows();
                     }))
                     .into_any_element()
@@ -872,7 +880,7 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{card, fields_differ, project_rows, shown_fields, HINT_PROJECT};
+    use super::{can_save, card, fields_differ, project_rows, shown_fields, HINT_PROJECT};
     use crate::cfg::Host;
     use crate::gui::{Dot, ProjectView, Running, Which};
     use crate::session::State;
@@ -892,7 +900,7 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        let c = card(Some(&r), &State::Off, now);
+        let c = card(Some(&r), &State::Off, "tunnel", now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
@@ -904,7 +912,7 @@ mod tests {
         // «Прервать» не показывается, в отличие от git-обмена выше.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
-        let c = card(Some(&r), &State::Off, now);
+        let c = card(Some(&r), &State::Off, "tunnel", now);
         assert_eq!(c.dot, Dot::Busy);
         assert!(!c.cancel);
     }
@@ -912,18 +920,42 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
-        let c = card(None, &State::Off, now);
+        let c = card(None, &State::Off, "tunnel", now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
         assert!(!c.cancel);
-        let c = card(None, &State::Connecting, now);
+        let c = card(None, &State::Connecting, "tunnel", now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, now);
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
-        let c = card(None, &State::Retrying("нет сети".into()), now);
+        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
-        let c = card(None, &State::Failed("нет сети".into()), now);
+        let c = card(None, &State::Failed("нет сети".into()), "tunnel", now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
+    }
+
+    #[test]
+    fn card_titles_speak_about_mcp_not_the_tunnel() {
+        let now = Instant::now();
+        assert_eq!(card(None, &State::Off, "local", now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Connecting, "local", now).title, "Включаю…");
+        assert_eq!(card(None, &State::Up { since: now }, "local", now).title, "MCP включены");
+        // Отказ — причина, не общее «не подключён»: порт занят независимо
+        // от переключателя, человеку нужно знать, чем именно.
+        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", now);
+        assert_eq!(c.title, "порт 7771 занят процессом 1234");
+        for mode in ["local", "tunnel"] {
+            for link in [
+                State::Off,
+                State::Connecting,
+                State::Up { since: now },
+                State::Retrying("нет сети".into()),
+                State::Failed("порт занят".into()),
+            ] {
+                let title = card(None, &link, mode, now).title;
+                assert!(!title.to_lowercase().contains("туннель"), "{mode}/{link:?}: {title}");
+            }
+        }
     }
 
     #[test]
@@ -1000,5 +1032,13 @@ mod tests {
     #[test]
     fn the_hint_no_longer_points_at_a_tab_that_is_gone() {
         assert!(!HINT_PROJECT.contains("Расширение"), "{HINT_PROJECT}");
+    }
+
+    #[test]
+    fn save_is_blocked_while_an_operation_runs() {
+        assert!(can_save(true, false, false));
+        assert!(!can_save(false, false, false), "ничего не менялось");
+        assert!(!can_save(true, true, false), "идёт операция/проверка");
+        assert!(!can_save(true, false, true), "сеанс подключается/перезапускается");
     }
 }

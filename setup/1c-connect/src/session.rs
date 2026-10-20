@@ -52,20 +52,25 @@ impl State {
         }
     }
 
-    pub fn label(&self) -> String {
+    /// Слова по `cfg.host.mode`: в туннельном — как раньше, в локальном —
+    /// про MCP (слушатели держат порты сами, переподключаться там не от
+    /// чего — см. `start`), а не про сеанс связи со средой.
+    pub fn label(&self, mode: &str) -> String {
+        let local = mode == "local";
         match self {
-            State::Off => "не подключён".into(),
-            State::Connecting => "подключаюсь…".into(),
+            State::Off => if local { "MCP выключены".into() } else { "не подключён".into() },
+            State::Connecting => if local { "включаю…".into() } else { "подключаюсь…".into() },
             State::Up { since } => {
                 let m = since.elapsed().as_secs() / 60;
+                let verb = if local { "MCP включены" } else { "подключён" };
                 if m < 60 {
-                    format!("подключён {m} мин")
+                    format!("{verb} {m} мин")
                 } else {
-                    format!("подключён {} ч {:02} мин", m / 60, m % 60)
+                    format!("{verb} {} ч {:02} мин", m / 60, m % 60)
                 }
             }
             State::Retrying(why) => format!("переподключаюсь: {why}"),
-            State::Failed(why) => format!("не подключён: {why}"),
+            State::Failed(why) => if local { why.clone() } else { format!("не подключён: {why}") },
         }
     }
 }
@@ -101,12 +106,23 @@ impl Session {
     }
 }
 
-/// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
-/// моста), `on_state` — каждый переход состояния. Транспорт — по
-/// `cfg.host.mode`: `tunnel` держит SSH с переподключением, `local` слушает
-/// оба порта на петле сам (база внутри образа — переподключаться там не от
-/// чего, `Retrying` в этом режиме не бывает).
+/// Как `start_with_enabled`, но с MCP всегда включённым — для CLI
+/// (`main.rs`: `connect`/`serve`), у которого нет окна и некому держать
+/// переключатель дольше одного сеанса.
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
+    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), on_state)
+}
+
+/// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
+/// моста), `on_state` — каждый переход состояния. `enabled` — переключатель
+/// «обслуживаются ли вызовы агента»: заводит и держит его окно (`gui::Ui`),
+/// он живёт дольше любого одного сеанса (переживает «Сохранить» и
+/// переключатель в локальном режиме), сюда только передаётся, а не
+/// создаётся заново на каждый перезапуск. Транспорт — по `cfg.host.mode`:
+/// `tunnel` держит SSH с переподключением, `local` слушает оба порта на
+/// петле сам (база внутри образа — переподключаться там не от чего,
+/// `Retrying` в этом режиме не бывает).
+pub fn start_with_enabled(cfg: Cfg, kit: Kit, log: Sink, enabled: Arc<AtomicBool>, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
     let (stop_tx, stop_rx) = watch::channel(false);
     let (done_tx, done_rx) = oneshot::channel();
     std::thread::spawn(move || {
@@ -121,11 +137,6 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
         let r = rt.block_on(async {
             on_state(State::Connecting);
             let state = Mutex::new(State::Connecting);
-            // ponytail: переключатель «MCP включены» пока не связан с окном — в
-            // этой задаче важна только проводка через Rules на оба порта
-            // одного сеанса; чтение/запись из окна подключается отдельной
-            // задачей (подменю «Режим работы»).
-            let enabled = Arc::new(AtomicBool::new(true));
             let serve = Arc::new(Serve::new(&cfg, &kit, log.clone(), cfg.ports(), enabled));
             let on_event = |e: Event| {
                 log(e.clone());
@@ -249,9 +260,19 @@ mod tests {
 
     #[test]
     fn labels_say_how_long_and_why() {
-        assert_eq!(State::Up { since: Instant::now() }.label(), "подключён 0 мин");
-        assert!(State::Retrying("нет связи".into()).label().contains("нет связи"));
-        assert_eq!(State::Off.label(), "не подключён");
+        assert_eq!(State::Up { since: Instant::now() }.label("tunnel"), "подключён 0 мин");
+        assert!(State::Retrying("нет связи".into()).label("tunnel").contains("нет связи"));
+        assert_eq!(State::Off.label("tunnel"), "не подключён");
+    }
+
+    #[test]
+    fn local_mode_labels_speak_about_mcp() {
+        assert_eq!(State::Off.label("local"), "MCP выключены");
+        assert_eq!(State::Connecting.label("local"), "включаю…");
+        assert_eq!(State::Up { since: Instant::now() }.label("local"), "MCP включены 0 мин");
+        // Отказ — сама причина, без слова «подключён»: в локальном режиме
+        // связи со средой нет, есть только слушатели на петле.
+        assert_eq!(State::Failed("порт занят".into()).label("local"), "порт занят");
     }
 
     #[test]

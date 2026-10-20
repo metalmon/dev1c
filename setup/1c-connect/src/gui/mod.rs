@@ -93,6 +93,14 @@ pub struct Ui {
     /// несёт старое значение и отбрасывается в `handle`.
     pub session_gen: u64,
     pub link: State,
+    /// Обслуживаются ли вызовы агента: живёт дольше любого сеанса (заводится
+    /// один раз в `launch`, `start_session`/`stop_session`/«Сохранить» его не
+    /// пересоздают), передаётся в `session::Serve` через `session::start_with_enabled` и
+    /// читается мостом (`bridge::Rules`) на каждый вызов. В локальном режиме
+    /// переключатель окна меняет только этот флаг — слушатели остаются
+    /// поднятыми; в туннельном — как раньше, переключатель поднимает и
+    /// опускает сеанс целиком.
+    pub enabled: Arc<AtomicBool>,
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
@@ -554,6 +562,7 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
 /// toml): берём их из текущих параметров, иначе пустые значения из формы
 /// затёрли бы toml. Каталог проекта — из формы.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
+    let old_host = ui.cfg.host.clone();
     host.dump = ui.cfg.host.dump.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
@@ -563,8 +572,40 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     write_text(&ui.kit.path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    let base_path = cfg.host.base_path.clone();
+    // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
+    // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
+    // здесь — смена режима в трее поднимает его сама, отдельным путём
+    // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
+    // лишней строкой в журнал и лишним миганием портов.
+    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
     ui.cfg = cfg;
+    if changed && ui.session.is_some() {
+        restart_session(ui, base_path);
+    }
     Ok(())
+}
+
+/// Перезапустить сеанс после удачной записи параметров: старому потоку
+/// просят остановиться (в своём потоке, не блокируя этот), новый поднимают
+/// сразу с уже записанными параметрами — тем же флагом `enabled`, он живёт
+/// дольше сеанса. Переход в «подключаюсь»/«подключён» придёт позже обычным
+/// `Ev::Link`, здесь — только одна строка в журнал про сам факт перезапуска.
+fn restart_session(ui: &mut Ui, base_path: String) {
+    ui.session_gen += 1;
+    let gen = ui.session_gen;
+    if let Some(s) = ui.session.take() {
+        std::thread::spawn(move || {
+            let _ = s.stop();
+        });
+    }
+    let ctx = ctx_for(ui);
+    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
+        let _ = tx.unbounded_send(Ev::Link(gen, l));
+    });
+    ui.session = Some(session);
+    note_line(ui, Line { kind: Kind::Say, text: format!("MCP перезапущены: база {base_path}") });
 }
 
 /// Контекст одного прогона: события идут в журнал на диске (команды и их
@@ -627,7 +668,7 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
         return Err("в комплекте нет 1c-connect.toml — заполните параметры и нажмите «Сохранить»".into());
     }
     // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
-    // в том числе в окно между `session::start` и первым `Connecting`.
+    // в том числе в окно между `session::start_with_enabled` и первым `Connecting`.
     if ui.session.is_some() && !matches!(ui.link, State::Failed(_)) {
         return Ok(());
     }
@@ -636,8 +677,8 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     ui.session_gen += 1;
     let gen = ui.session_gen;
     let ctx = ctx_for(ui);
-    let (cfg, kit, tx) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone());
-    let session = session::start(cfg, kit, ctx.sink, move |l| {
+    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     cx.global_mut::<Ui>().session = Some(session);
@@ -659,7 +700,39 @@ pub fn stop_session(cx: &mut App) {
     set_link(cx, State::Off);
 }
 
+/// Переключатель в локальном режиме не трогает сеанс — слушатели уже подняты
+/// и остаются поднятыми (см. `launch`), меняется только то, отвечают ли
+/// вызовы агента. Возвращает новое состояние флага.
+fn flip_enabled_only(ui: &mut Ui) -> bool {
+    let on = !ui.enabled.load(Ordering::Relaxed);
+    ui.enabled.store(on, Ordering::Relaxed);
+    on
+}
+
+/// В локальном режиме слушатели поднимаются при старте и остаются поднятыми
+/// независимо от переключателя — настоящее состояние сеанса почти всегда
+/// `Up`/`Connecting`. Экран обязан при этом показывать «MCP выключены», пока
+/// флаг снят: подменяем `Connecting`/`Up` на `Off`. Отказ (`Failed`) виден
+/// всегда — порт занят независимо от переключателя.
+fn local_display(mode: &str, enabled: bool, l: State) -> State {
+    if mode == "local" && !enabled {
+        match l {
+            State::Up { .. } | State::Connecting => State::Off,
+            other => other,
+        }
+    } else {
+        l
+    }
+}
+
 pub fn toggle_link(cx: &mut App) {
+    if cx.global::<Ui>().cfg.host.mode == "local" {
+        let ui = cx.global_mut::<Ui>();
+        let on = flip_enabled_only(ui);
+        let l = if on { State::Up { since: Instant::now() } } else { State::Off };
+        set_link(cx, l);
+        return;
+    }
     let on = cx.global::<Ui>().link.is_on();
     if on {
         stop_session(cx);
@@ -764,13 +837,14 @@ pub fn run_check(cx: &mut App) {
     ui.unread = 0;
     let ctx = ctx_for(ui);
     let link = ui.link.clone();
+    let mode = ui.cfg.host.mode.clone();
     let tx = ui.tx.clone();
     cx.refresh_windows();
     std::thread::spawn(move || {
         guarded(
             &tx,
             || {
-                let state = link.is_up().then(|| link.label());
+                let state = link.is_up().then(|| link.label(&mode));
                 let checks = verify::run(&ctx, state.as_deref());
                 let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &checks);
                 let _ = write_text(&ctx.kit.path("last-check.txt"), &text);
@@ -902,6 +976,8 @@ fn handle(ev: Ev, cx: &mut App) {
         Ev::Menu(e) => tray::on_menu(e, cx),
         Ev::Link(gen, l) => {
             if link_is_current(cx.global::<Ui>(), gen) {
+                let ui = cx.global::<Ui>();
+                let l = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
                 set_link(cx, l);
             }
         }
@@ -1005,7 +1081,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&log_path);
     }
     let autostart_on = autostart::is_on();
+    // «Подключаться при запуске»: в туннельном режиме — решает, поднимать ли
+    // сеанс при старте, как раньше; в локальном — сеанс поднимается всегда
+    // (слушатели должны жить, пока жив процесс — см. `launch` ниже), а эта
+    // галочка решает только начальное значение переключателя «MCP».
     let autoconnect_on = autoconnect(&kit);
+    let local_mode = cfg.host.mode == "local";
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -1030,12 +1111,18 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
                 return;
             }
         };
+        // Пункт подменю «Режим работы» строился без ведома сохранённого
+        // режима и всегда отмечал «Через туннель» первым — здесь сразу
+        // поправляется на настоящий, тем же методом, что потом зовёт смена
+        // режима в трее (`tray::on_menu`).
+        tray.set_mode(&cfg.host.mode);
         cx.set_global(Ui {
             kit,
             cfg,
             session: None,
             session_gen: 0,
             link: State::Off,
+            enabled: Arc::new(AtomicBool::new(autoconnect_on)),
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1098,7 +1185,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         })
         .detach();
         refresh_ops(cx);
-        if autoconnect_on {
+        // В локальном режиме слушатели держат порты весь срок жизни
+        // процесса (Zed не переподключается сам — см. заголовок модуля),
+        // поэтому сеанс поднимается здесь безусловно; «подключаться при
+        // запуске» в этом режиме уже отдано начальному значению `enabled`
+        // чуть выше. В туннельном режиме — как раньше, по той же галочке.
+        if local_mode || autoconnect_on {
             if let Err(e) = start_session(cx) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
             }
@@ -1126,6 +1218,7 @@ impl Ui {
             session: None,
             session_gen: 0,
             link: State::Off,
+            enabled: Arc::new(AtomicBool::new(true)),
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
@@ -1153,13 +1246,13 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, is_stale, line_of, link_is_current,
-        link_line, note_line, on_done, on_line, on_progress, progress_text, project_primary, save_host, stale_line, stale_text,
-        took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab, TrayState, Ui, Which, LOG_CAP,
-        LOG_FILE, TRAY_PNG,
+        autoconnect, badge, can_cancel, carried_base_url, check_lines, first_phase, flip_enabled_only, is_stale, line_of,
+        link_is_current, link_line, local_display, note_line, on_done, on_line, on_progress, progress_text, project_primary,
+        save_host, stale_line, stale_text, took, tick_redraw, tray_state, tray_tooltip, Dot, Kind, Line, OpView, Running, Tab,
+        TrayState, Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
-    use crate::session::State;
+    use crate::session::{self, State};
     use common::check::Check;
     use common::{Event, Phase, Progress};
     use std::sync::atomic::Ordering;
@@ -1531,5 +1624,93 @@ mod tests {
         ui.status = Some(line);
         assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "прервано".into() }));
         assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
+    }
+
+    /// Сеанс, которому заведомо некуда дозвониться (порт только что закрыт) —
+    /// тот же приём, что в `session.rs`: тест не ждёт настоящей связи, ему
+    /// важно лишь то, что `ui.session` не пусто.
+    fn doomed_session(ui: &Ui) -> crate::session::Session {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let mut cfg = ui.cfg.clone();
+        cfg.host.server = format!("127.0.0.1:{port}");
+        session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {})
+    }
+
+    #[test]
+    fn in_local_mode_the_switch_only_flips_the_flag() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
+        assert!(!flip_enabled_only(&mut ui));
+        assert!(!ui.enabled.load(Ordering::Relaxed));
+        assert!(flip_enabled_only(&mut ui));
+        assert!(ui.enabled.load(Ordering::Relaxed));
+        // Локальный режим: слушатели живут своей жизнью, переключатель их не
+        // трогает — поколение сеанса ровно то же, что и до двух щелчков.
+        assert_eq!(ui.session_gen, gen_before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn local_mode_hides_up_behind_the_flag_but_shows_a_failure_regardless() {
+        let now = Instant::now();
+        assert_eq!(local_display("local", false, State::Up { since: now }), State::Off);
+        assert_eq!(local_display("local", false, State::Connecting), State::Off);
+        assert_eq!(local_display("local", true, State::Up { since: now }), State::Up { since: now });
+        let failed = State::Failed("порт занят".into());
+        assert_eq!(local_display("local", false, failed.clone()), failed);
+        // Туннельный режим — состояние сеанса идёт как есть, флаг тут ни при чём.
+        assert_eq!(local_display("tunnel", false, State::Up { since: now }), State::Up { since: now });
+    }
+
+    #[test]
+    fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.base_path = "C:\\Bases\\Other".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.session_gen, gen_before + 1, "сеанс перезапущен один раз");
+        let new_lines = &ui.log[log_before..];
+        assert_eq!(new_lines.len(), 1, "{new_lines:?}");
+        assert_eq!(new_lines[0].text, "MCP перезапущены: база C:\\Bases\\Other");
+        assert!(ui.session.is_some());
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn saving_unchanged_fields_does_not_restart_a_live_session() {
+        // Смена режима в трее меняет `cfg.host.mode` и зовёт `save_host`
+        // напрямую (не через панель), не трогая поля, которые показывает
+        // окно — `tray::on_menu` перезапускает сеанс сама следом, отдельным
+        // путём; лишнего перезапуска (и лишней строки «MCP перезапущены») на
+        // стороне `save_host` здесь быть не должно.
+        let mut ui = Ui::for_test();
+        ui.session = Some(doomed_session(&ui));
+        let gen_before = ui.session_gen;
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.mode = "local".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.session_gen, gen_before);
+        assert_eq!(ui.log.len(), log_before);
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    #[test]
+    fn save_host_without_a_live_session_writes_no_restart_line() {
+        // Поднятого сеанса нет — перезаписать toml, и всё; журнал не трогаем.
+        let mut ui = Ui::for_test();
+        let log_before = ui.log.len();
+        let mut host = ui.cfg.host.clone();
+        host.base_path = "C:\\Bases\\Other".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.log.len(), log_before);
     }
 }

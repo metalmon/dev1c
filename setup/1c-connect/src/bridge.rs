@@ -1043,7 +1043,9 @@ mod tests {
         r.read_to_end(&mut got).await.unwrap(); // EOF: the stream closed
         let (code, err) = rx.await.unwrap();
         assert_eq!(code, 3);
-        assert!(!err.contains("hunter2") && err.contains("--db-password=…"), "{err}");
+        // `redact_text` затирает значение после флага, разделённого пробелом,
+        // то есть получается `--db-password …`, а не `--db-password=…`.
+        assert!(!err.contains("hunter2") && err.contains("--db-password") && err.contains('…'), "{err}");
     }
 
     #[tokio::test]

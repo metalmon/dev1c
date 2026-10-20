@@ -298,20 +298,35 @@ mod tests {
         cmd.args(["--exact", "listen::tests::__lingering_child", "--nocapture", "--quiet"]);
         cmd.env("LISTEN_LINGER", "1");
 
+        // Исход потомка запоминаем: без этого провал запуска выглядел бы как
+        // «соединение закрылось само» и причину пришлось бы искать руками.
+        let (exit_tx, mut exit_rx) = tokio::sync::mpsc::unbounded_channel();
         let accept_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let std_stream = stream.into_std().unwrap();
             let watcher = std_stream.try_clone().unwrap();
             let async_stream = TcpStream::from_std(std_stream).unwrap();
-            tokio::spawn(bridge::pipe_jsonrpc(async_stream, cmd, rules, log, |_code, _err| {}));
+            tokio::spawn(bridge::pipe_jsonrpc(async_stream, cmd, rules, log, move |code, err| {
+                let _ = exit_tx.send((code, err));
+            }));
             watcher
         });
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let watcher = accept_task.await.unwrap();
 
+        // Фиктивный потомок — это тестовый бинарь, и запускатель тестов печатает
+        // в стандартный вывод свой баннер («running 1 test»). Мост честно
+        // пересылает его клиенту, поэтому сначала вычитываем всё, что пришло
+        // сразу, и только потом проверяем, что дальше тишина.
+        let mut banner = [0u8; 256];
+        while tokio::time::timeout(std::time::Duration::from_millis(200), client.read(&mut banner)).await.is_ok() {}
+
         let mut buf = [0u8; 1];
         let before = tokio::time::timeout(std::time::Duration::from_millis(300), client.read(&mut buf)).await;
+        if let Ok(Some((code, err))) = tokio::time::timeout(std::time::Duration::from_millis(1), exit_rx.recv()).await {
+            panic!("фиктивный потомок не запустился (код {code}): {err}");
+        }
         assert!(before.is_err(), "мост реально заблокирован на чтении — соединение не должно было закрыться само");
 
         watcher.shutdown(Shutdown::Both).unwrap();

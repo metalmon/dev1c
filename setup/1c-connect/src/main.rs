@@ -264,12 +264,23 @@ fn serve(ctx: &Ctx) -> Result<()> {
     let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {
-        #[cfg(unix)]
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        // Условный атрибут внутри `select!` макрос не принимает, поэтому
+        // ожидание SIGTERM — отдельное будущее: на Linux оно ждёт сигнал, на
+        // Windows не завершается никогда и ветка просто не срабатывает.
+        let term = async {
+            #[cfg(unix)]
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut t) => {
+                    t.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+            #[cfg(not(unix))]
+            std::future::pending::<()>().await
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => Ok(()),
-            #[cfg(unix)]
-            _ = term.recv() => Ok(()),
+            _ = term => Ok(()),
             r = s.wait() => r,
         }
     });

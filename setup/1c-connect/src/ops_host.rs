@@ -780,17 +780,18 @@ mod tests {
 
     #[test]
     fn the_same_tree_seen_through_a_symlink_appears_once() {
-        // В образе /opt/1cv8 — ссылка на /opt/1cv8t: два разных пути, один файл.
-        // Проверяем сворачивание через hard-link — он не требует прав на символьную
-        // ссылку (на Windows обычная учётка их не даёт), но даёт то же canonicalize.
+        // В образе /opt/1cv8 — символьная ссылка на /opt/1cv8t: два разных пути,
+        // один файл. Символьную ссылку в тесте создать нельзя (на Windows обычной
+        // учётке не дают прав), а жёсткая ссылка там даёт РАЗНЫЕ canonicalize —
+        // проверено живьём. Поэтому берём два разных написания одного пути: это
+        // ровно то, что сворачивает `dedup_canonical`.
         let tmp = std::env::temp_dir().join(format!("dev1c-1cv8-dedup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let real = tmp.join("1cv8t");
         std::fs::write(&real, "x").unwrap();
-        let via_symlink = tmp.join("1cv8");
-        std::fs::hard_link(&real, &via_symlink).unwrap();
-        let found = vec![("8.5.1.1150".to_string(), real.clone()), ("8.5.1.1150".to_string(), via_symlink)];
+        let same_other_spelling = tmp.join(".").join("1cv8t");
+        let found = vec![("8.5.1.1150".to_string(), real.clone()), ("8.5.1.1150".to_string(), same_other_spelling)];
         let deduped = dedup_canonical(found);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].1, real);

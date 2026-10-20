@@ -63,26 +63,22 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(steps[4].target.anchor, 'right-bottom')
         self.assertEqual(steps[5].target.kind, 'tray')
 
-    def test_wait_for_separates_advance_condition_from_arrow_target(self):
-        # Шаг 3 показывает на значок запуска (он на столе всегда), но
-        # ждать обязан не его — окно Zed, которое появляется по факту.
-        # Шаг 2 (ruling финальной волны) wait_for не несёт вовсе: даже
-        # появление окна 1С не значит «человек закончил вводить позицию»,
-        # только кнопка. У остальных шагов wait_for тоже не задан —
-        # Machine сама падает обратно на target (см. tests.test_steps).
+    def test_no_step_carries_a_wait_for(self):
+        # Шаги 2 и 3 (ruling второй и этой волны) wait_for не несут
+        # вовсе: появление окна 1С/Zed значит «человек начал», не
+        # «закончил» — вводить позицию (шаг 2) или нажимать кнопку,
+        # которая закрывает 1С (шаг 3, пока Zed не открылся сам и шаг не
+        # проскочил мимо неё). Остальные шаги никогда wait_for не несли.
+        # Machine в его отсутствие падает обратно на target (см.
+        # tests.test_steps) — поле у Step осталось, просто сценарию
+        # больше негде им пользоваться.
         steps = load(SCENARIO)
-        self.assertIsNone(steps[0].wait_for)
-        self.assertIsNone(steps[1].wait_for)
-        self.assertEqual(steps[2].wait_for.kind, 'window')
-        self.assertEqual(steps[2].wait_for.name_pattern, 'Zed')
-        self.assertIsNone(steps[3].wait_for)
-        self.assertIsNone(steps[4].wait_for)
-        self.assertIsNone(steps[5].wait_for)
+        self.assertTrue(all(s.wait_for is None for s in steps))
 
     def test_advance_on(self):
         steps = load(SCENARIO)
         self.assertEqual([s.advance_on for s in steps], [
-            'button', 'button', 'target', 'button', 'button', 'button',
+            'button', 'button', 'button', 'button', 'button', 'button',
         ])
 
     def test_step_six_has_only_done_button(self):
@@ -117,15 +113,12 @@ class ActionTests(unittest.TestCase):
         for s in steps[1:]:
             self.assertTrue(all(a.action != 'close' for a in s.actions.values()))
 
-    def test_step_three_button_stays_and_closes_1c(self):
-        # Ровно диагноз финальной волны: подпись кнопки не ошибка, ошибка
-        # была в поведении — кнопка не двигала шаг силой («next»), шаг и
-        # так уходит дальше по wait_for (окно Zed), когда оно появится.
-        # Она просит 1С закрыться вежливо (close_window) и открывает
-        # редактор.
+    def test_step_three_button_advances_and_closes_1c(self):
+        # Кнопка сама двигает шаг («next» — wait_for у шага 3 больше нет,
+        # ждать нечего) и вежливо просит 1С закрыться (close_window).
         steps = load(SCENARIO)
         action = steps[2].actions['Закрыть 1С и открыть редактор']
-        self.assertEqual(action.action, 'stay')
+        self.assertEqual(action.action, 'next')
         self.assertEqual(action.close_window, 'Управление нашей фирмой')
         self.assertIsNone(steps[2].actions['Дальше'].close_window)
 

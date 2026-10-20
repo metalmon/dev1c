@@ -24,10 +24,15 @@ TICK_MS = 1000  # как часто проверять, не появилась 
 
 # Сколько ждать перед проверкой, закрылась ли 1С сама после вежливой
 # просьбы (close_window, шаг 3): окну нужно время среагировать на
-# _NET_CLOSE_WINDOW (возможно, спросить «сохранить изменения?»), а
-# разовая проверка — не бесконечный опрос — честно отражает «попросили
-# один раз и посмотрели», как и было решено.
+# _NET_CLOSE_WINDOW (возможно, спросить «сохранить изменения?»).
 CLOSE_CHECK_DELAY_S = 4
+
+# Тот же текст для обоих поводов его показать: окно всё ещё есть через
+# CLOSE_CHECK_DELAY_S, или wmctrl в образе вовсе нет (FileNotFoundError —
+# тот самый образ, который ещё не пересобрали с новым пакетом). Человеку
+# не важно, почему не получилось закрыть — важно, что не получилось.
+_WINDOW_NOT_CLOSED_WARNING = ('Похоже, окно 1С не закрылось само — закройте его '
+                              'вручную, иначе агент не сможет зайти в базу.')
 
 # Отметка «онбординг закрыт в этом сеансе» — в $XDG_RUNTIME_DIR (tmpfs,
 # живёт до конца сеанса), а не в домашнем каталоге: по решению заказчика
@@ -88,12 +93,14 @@ class App:
         self._callout = None
         self._step = None
         self._layout = None
-        # Сообщение, которое дописывается к телу текущего шага (не
-        # текст сценария — это main.py говорит от своего имени, что 1С
-        # не закрылась сама, см. _check_close_window). Раз выставленное,
-        # остаётся до конца сеанса онбординга — разовая проверка, не
-        # опрос, см. CLOSE_CHECK_DELAY_S.
+        # Сообщение, которое дописывается к телу текущего шага (не текст
+        # сценария — это main.py говорит от своего имени, что 1С не
+        # закрылась сама). _warning_pattern — какое окно отслеживается,
+        # чтобы снять предупреждение, когда оно и правда закрылось (см.
+        # _on_tick) — человек мог закрыть 1С вручную уже на шаге 4 или
+        # позже, после того как разовая проверка решила, что не вышло.
         self._warning = None
+        self._warning_pattern = None
         self._shown_warning = None
         self._refresh()
         GLib.timeout_add(TICK_MS, self._on_tick)
@@ -101,6 +108,8 @@ class App:
     def _on_tick(self):
         if self._machine.done:
             return False
+        if self._warning_pattern is not None and not self._world.window_present(self._warning_pattern):
+            self._clear_warning()
         self._machine.tick()
         self._refresh()
         return not self._machine.done
@@ -116,13 +125,21 @@ class App:
             self._machine.press('close')
         else:
             action = step.actions[label]
-            if action.close_window:
-                self._world.close_window(action.close_window)
-                GLib.timeout_add_seconds(CLOSE_CHECK_DELAY_S, self._check_close_window, action.close_window)
+            # launch и таймер — раньше попытки close_window и несмотря
+            # на её исход: если wmctrl в образе нет (FileNotFoundError —
+            # образ ещё не пересобран с новым пакетом), редактор всё
+            # равно должен открыться и предупреждение всё равно должно
+            # появиться, а не провалить весь обработчик молча.
             _launch(action.launch)
+            if action.close_window:
+                GLib.timeout_add_seconds(CLOSE_CHECK_DELAY_S, self._check_close_window, action.close_window)
+                try:
+                    self._world.close_window(action.close_window)
+                except FileNotFoundError:
+                    self._set_warning(action.close_window, _WINDOW_NOT_CLOSED_WARNING)
             # 'stay': кнопка не двигает Machine сама — шаг и так уходит
-            # дальше по wait_for, когда его условие выполнится (шаг 3 —
-            # окно Zed появилось). Силой — только 'next'/'close'.
+            # дальше по wait_for, когда его условие выполнится. Силой —
+            # только 'next'/'close'.
             if action.action != 'stay':
                 self._machine.press(action.action)
         self._refresh()
@@ -130,13 +147,22 @@ class App:
     def _check_close_window(self, pattern):
         """Разовая проверка через CLOSE_CHECK_DELAY_S после close_window:
         окно всё ещё есть — говорим об этом в выноске, а не делаем вид,
-        что всё получилось (решение координатора: не выдавать желаемое
-        за действительное, и не добивать процесс)."""
+        что всё получилось. Дальше предупреждение снимает _on_tick, как
+        только окно и правда исчезнет — не обязательно от этой самой
+        проверки."""
         if self._world.window_present(pattern):
-            self._warning = ('Похоже, окно 1С не закрылось само — закройте его '
-                              'вручную, иначе агент не сможет зайти в базу.')
-            self._refresh(force=True)
-        return False  # не повторять: это разовая проверка, не опрос
+            self._set_warning(pattern, _WINDOW_NOT_CLOSED_WARNING)
+        return False  # не повторять: дальше следит _on_tick
+
+    def _set_warning(self, pattern, text):
+        self._warning = text
+        self._warning_pattern = pattern
+        self._refresh(force=True)
+
+    def _clear_warning(self):
+        self._warning = None
+        self._warning_pattern = None
+        self._refresh(force=True)
 
     def _refresh(self, force=False):
         step = self._machine.current

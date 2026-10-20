@@ -77,9 +77,13 @@ if [ "$OS" = "linux" ]; then
     [ -f "$BIN_DIR/dev1c-setup" ] || { echo "pack.sh --os linux: dev1c-setup (Linux binary) not in $BIN_DIR" >&2; exit 1; }
     cp "$BIN_DIR/dev1c-setup" "$KIT/"
 else
-    for b in dev1c-setup dev1c-setup.exe; do
-        [ -f "$BIN_DIR/$b" ] && cp "$BIN_DIR/$b" "$KIT/"
-    done
+    # One kit, one OS — the mirror of the rule above. This kit runs on a
+    # Windows host, so the Linux binary has no business in it even when
+    # BIN_DIR carries both: a kit that holds two platforms invites the
+    # wrong one to be run, and the customer has no way to tell which is
+    # meant for them (the customer asked for this, 20.10.2026).
+    [ -f "$BIN_DIR/dev1c-setup.exe" ] || { echo "pack.sh --os windows: dev1c-setup.exe not in $BIN_DIR" >&2; exit 1; }
+    cp "$BIN_DIR/dev1c-setup.exe" "$KIT/"
 fi
 chmod +x "$KIT/dev1c-setup" 2>/dev/null || true
 if [ "$OS" = "linux" ]; then

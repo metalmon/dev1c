@@ -1,7 +1,8 @@
 #!/bin/sh
 # The runnable check of the demo stand, inside a running container:
 #   docker exec <container> test-stand
-# Every workstation: its Apache answers the HTTP service of the base, mcp-1c
+# Every workstation: the connector's own Apache answers the HTTP service of
+# the base (host.publication, no stand-owned publish anymore), mcp-1c
 # answers initialize through the same port Zed uses, vrunner-mcp lists its
 # tools through its port. Fails loudly on the first miss.
 set -u
@@ -58,7 +59,7 @@ for n in 1 2 3; do
     # call above (the pool keeps it 20 s): on the connection-limit answer,
     # wait and ask again rather than fail
     for try in 1 2 3 4 5 6; do
-        code=$(curl -s -o $T/hs.$n -w '%{http_code}' "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c/version")
+        code=$(curl -s -o $T/hs.$n -w '%{http_code}' "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version")
         grep -q 'количество подключений\|connections limitation' $T/hs.$n || break
         sleep 15
     done

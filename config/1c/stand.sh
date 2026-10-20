@@ -4,9 +4,10 @@
 # 1C platform"), so Zed, the skills and the agent rules do not know which of
 # the two they talk to.
 #
-#   1c-stand start            root, from the image's CMD: one Apache per
-#                             workstation, the 777N/778N listeners, then the
-#                             base image's entrypoint
+#   1c-stand start            root, from the image's CMD: one connector
+#                             session per workstation (it publishes its own
+#                             base and binds the 777N/778N listeners), then
+#                             the base image's entrypoint
 #   1c-stand mcp <N>          one mcp-1c on stdio for workstation dev<N>
 #   1c-stand vrunner <N>      one vrunner-mcp on stdio for workstation dev<N>
 #   1c-stand start1c          the 1C starter on the user's base list (the
@@ -24,9 +25,10 @@
 #                             calling workstation account (login dev<N>)
 #   1c-stand publish <user> <port> <base dir> <out dir>
 #                             writes the publication (default.vrd) and the
-#                             Apache config for one base; `start` uses it per
-#                             workstation, the image build uses it to check
-#                             the demo base
+#                             Apache config for one base; only the image
+#                             build uses it now, to check the demo base —
+#                             workstations are published by the connector
+#                             itself (host.publication), not by this script
 #   1c-stand export-payload   stdout: a gzip tar of the platform and the
 #                             template base, run in the payload image
 #   1c-stand import-payload [--force]
@@ -86,7 +88,6 @@ payload_present() { [ -x "/opt/1cv8t/x86_64/$PLATFORM_VERSION/1cv8t" ] && [ -f "
 DB_USER=${DEMO_DB_USER-Администратор}
 IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
 IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
-RUN=/run/1c
 LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
@@ -163,12 +164,18 @@ seed() { # runs as the workstation user; $HOME is theirs
             # The server fields stay at their defaults: in local mode there is
             # no tunnel to raise. The base, its publication and the project
             # are the stand's own, the same ones the agent's tools see.
+            # publication = "auto": the connector writes its own default.vrd
+            # and apache.conf under $HOME/dev1c/pub and runs its own Apache —
+            # the stand no longer publishes workstation bases itself (see
+            # `start`). base_url matches what Cfg::base_url() computes for
+            # that publication: the root of its own port, no "/base" segment.
             cat >"$HOME/dev1c/$CONNECT_TOML" <<EOF
 [host]
 mode = "local"
 workstation = "$u"
 base_path = "$HOME/base"
-base_url = "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+base_url = "http://localhost:$((8080 + n))/hs/mcp-1c"
+publication = "auto"
 project = "$HOME/project"
 db_user = "$DB_USER"
 db_password = ""
@@ -181,8 +188,10 @@ EOF
 case "${1:-}" in
 mcp)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed
-    # --base is the HTTP service itself, not the publication (as in 1c-connect.toml)
-    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/base/hs/mcp-1c"
+    # --base is the HTTP service itself, not the publication (as in
+    # 1c-connect.toml). The connector publishes it at the root of its own
+    # port now (host.publication), no "/base" segment.
+    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/hs/mcp-1c"
     ;;
 vrunner)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed
@@ -367,7 +376,7 @@ import-payload)
     log "payload in place: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"
     ;;
 start)
-    mkdir -p "$RUN" "$LOG"
+    mkdir -p "$LOG"
     if ! payload_present; then
         # Not a failure of the container: the desktop, Zed and Gitea are the
         # base image's and work without 1C. Exiting here would put the
@@ -379,9 +388,6 @@ start)
     for n in 1 2 3; do
         u="dev$n"; id "$u" >/dev/null 2>&1 || continue
         h="$(home_of "$u")"
-        d="$RUN/$u"
-        "$0" publish "$u" $((8080 + n)) "$h/base" "$d"
-        apache2 -f "$d/apache.conf" -k start
         # The workstation's own connector session, in place of the socat
         # lines that used to bind these two ports straight to "1c-stand
         # mcp"/"vrunner": its bridge calls those same subcommands now, so the
@@ -394,13 +400,18 @@ start)
         # Wait for seed to land, then run; restart if the session ever
         # exits, so a crash does not leave the ports silently dead. runuser
         # does not reset HOME (unlike "su -"), hence the explicit env.
+        # The HTTP service of the base is no longer this script's doing: the
+        # connector publishes it itself ("host.publication", $HOME/dev1c/pub,
+        # its own Apache) when `serve` starts — one owner for the base's
+        # publication instead of the stand and the connector both reaching
+        # for port 808N.
         ( while :; do
               until [ -x "$h/dev1c/1c-connect" ] && [ -e "$h/dev1c/$CONNECT_TOML" ]; do sleep 2; done
               runuser -u "$u" -- env HOME="$h" "$h/dev1c/1c-connect" serve
               log "$u: 1c-connect serve exited, restarting in 5s"
               sleep 5
           done ) >>"$LOG/$u-connect.log" 2>&1 &
-        log "$u: HTTP service 127.0.0.1:$((8080 + n))/base, mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
+        log "$u: HTTP service on $((8080 + n)) (the connector's own), mcp-1c on $((7770 + n)), vrunner-mcp on $((7780 + n))"
     done
     # Seed the bases ahead of the first use: a УНФ base is 1.9 GB, and the
     # first agent call would otherwise wait for the copy. In the background,

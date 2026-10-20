@@ -156,9 +156,11 @@ RUN ln -s /opt/1cv8t /opt/1cv8 \
     && ln -s /opt/1cv8/x86_64/${PLATFORM_VERSION}/1cv8 /usr/local/bin/1cv8
 
 # --- the runtime script ------------------------------------------------------
-# In `tools` because the payload build uses it too: the demo base is published
-# with `1c-stand publish` so that the build checks the same publication the
-# stand serves, not a second copy of it that could drift.
+# In `tools` because the payload build uses it too: `1c-stand publish` checks
+# the demo base template at build time (below, port 8089). It is no longer
+# how a workstation's base gets published at run time — the connector does
+# that itself (host.publication, its own Apache under $HOME/dev1c/pub) — so
+# this is a build-time-only check now, not a mirror of the running stand.
 # DEMO_DB_USER: the infobase user the configuration's welcome wizard made in
 # the template base (see the payload stage). The publication, the base list and
 # vrunner all read it from here. Empty means a base with no users at all.

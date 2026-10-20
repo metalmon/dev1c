@@ -105,7 +105,11 @@ pub fn try_acquire(key: &str, _state_dir: &std::path::Path) -> std::io::Result<O
     // разных пользователей друг от друга.
     let h = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
     if h.is_null() {
-        return Err(std::io::Error::last_os_error());
+        // Та же причина, что и у файлового замка на Linux ниже (`lock_error`):
+        // голый `Permission denied (os error N)` без единого слова о том, что
+        // вообще делалось, ничего человеку не говорит.
+        let e = std::io::Error::last_os_error();
+        return Err(std::io::Error::new(e.kind(), format!("не удалось взять замок единственного экземпляра (системный мьютекс {name}): {e}")));
     }
     // `GetLastError` — первым же следующим вызовом, до любого другого Win32
     // API: иначе он рассказал бы не про `CreateMutexW`.
@@ -120,15 +124,26 @@ pub fn try_acquire(key: &str, _state_dir: &std::path::Path) -> std::io::Result<O
 #[cfg(not(windows))]
 pub struct Guard(std::fs::File);
 
+/// Оборачивает отказ создать каталог состояния или открыть файл замка в
+/// читаемую причину: что делалось (брали замок единственного экземпляра), по
+/// какому пути, и что с этим делать при отказе в правах (кит мог принадлежать
+/// другому пользователю — учётной записи нужна запись туда). Голый
+/// `Permission denied (os error 13)`, который раньше долетал до человека как
+/// есть, остаётся в хвосте — для диагностики, не для первого взгляда.
+#[cfg(not(windows))]
+fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(e.kind(), format!("не удалось взять замок единственного экземпляра: {} — учётной записи нужны права на запись туда: {e}", path.display()))
+}
+
 /// Советный `flock`: занимается открытым дескриптором живого процесса и
 /// снимается ядром, когда дескриптор закрывается — обычным уходом `File` из
 /// области видимости (`Drop` ничего не пишет сам, добавлять его незачем).
 #[cfg(not(windows))]
 pub fn try_acquire(key: &str, state_dir: &std::path::Path) -> std::io::Result<Option<Guard>> {
     use std::os::unix::io::AsRawFd;
-    std::fs::create_dir_all(state_dir)?;
+    std::fs::create_dir_all(state_dir).map_err(|e| lock_error(state_dir, e))?;
     let path = state_dir.join(format!("instance-{key}.lock"));
-    let file = std::fs::OpenOptions::new().create(true).write(true).open(&path)?;
+    let file = std::fs::OpenOptions::new().create(true).write(true).open(&path).map_err(|e| lock_error(&path, e))?;
     // SAFETY: обычный вызов libc на дескрипторе только что открытого файла;
     // LOCK_NB не блокирует поток — занято, значит просто отказ, а не ожидание.
     let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -317,6 +332,30 @@ mod tests {
         drop(first);
         let third = try_acquire(&key, &dir).unwrap();
         assert!(third.is_some(), "после ухода держателя замок должен снова взяться");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_permission_failure_names_the_path_and_the_missing_write_right() {
+        // Ровно живой случай: каталог комплекта принадлежит другому
+        // пользователю. r-x без записи не даёт создать файл замка внутри —
+        // `try_acquire` обязан назвать путь и сказать, что не хватает права
+        // на запись, а не отдать голый `Permission denied (os error 13)`.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(unique("1c-connect-lock-perm"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let key = unique("perm-key");
+        // ponytail: в контейнере тесты иногда бегут от root — тогда права не
+        // проверяются вовсе, и это не повод валить тест: просто ничего не
+        // утверждаем про текст ошибки, раз её и не было.
+        if let Err(err) = try_acquire(&key, &dir) {
+            let msg = err.to_string();
+            assert!(msg.contains(&dir.display().to_string()), "путь должен быть назван: {msg}");
+            assert!(msg.contains("прав") && msg.contains("запис"), "должно быть сказано о праве записи: {msg}");
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

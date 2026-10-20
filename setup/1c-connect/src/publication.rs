@@ -9,6 +9,8 @@
 //! файл («Ошибка при разборе»).
 
 use crate::cfg::Cfg;
+#[cfg(not(windows))]
+use crate::holder;
 #[cfg(windows)]
 use crate::job;
 use crate::ops_host;
@@ -484,6 +486,24 @@ fn apache2_on_path() -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join("apache2")).find(|p| p.exists())
 }
 
+/// Текст отказа подъёма сервиса из вывода apache2: сам httpd говорит по-английски
+/// и ни слова не говорит о базе — переводим суть на русский. Когда причина
+/// действительно конфликт порта (apache2 метит её фирменным «Address already
+/// in use»), называем порт и, если видно, его держателя (`holder::of_port` —
+/// параметром, а не вызовом внутри: так текст проверяется без реального
+/// занятого порта); иначе — только то, что сказал сам apache2. Текст apache2
+/// остаётся в хвосте сообщения целиком — для поддержки, уже после того, как
+/// человек прочитал по-русски, что случилось.
+#[cfg(not(windows))]
+fn start_failure_text(port: u16, apache_text: &str, holder: Option<&str>) -> String {
+    if apache_text.contains("Address already in use") {
+        let who = holder.map(|h| format!(" ({h})")).unwrap_or_default();
+        format!("HTTP-сервис базы не поднят: порт 127.0.0.1:{port} уже занят{who} — {apache_text}")
+    } else {
+        format!("HTTP-сервис базы не поднят: {apache_text}")
+    }
+}
+
 /// Поднимает HTTP-сервис: системный `apache2`, как уже делает стенд.
 /// `apache2 -k start` демонизируется в свою сессию — никогда не наш ребёнок и
 /// не наша группа процессов, поэтому здесь нет Job/pgid-бэкстопа (в отличие
@@ -507,7 +527,8 @@ pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
     if !out.status.success() {
         let tail = error_log_tail(&p.log, 5);
         let detail = if tail.is_empty() { String::from_utf8_lossy(&out.stderr).trim().to_string() } else { tail };
-        return Err(format!("apache2 -k start: {detail}"));
+        let apache_text = format!("apache2 -k start: {detail}");
+        return Err(start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref()));
     }
     Ok(())
 }
@@ -871,6 +892,37 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "{dir_mode:o}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn start_failure_names_the_port_and_the_holder_when_known() {
+        // Ровно живой случай из отчёта: контейнерный apache2 уже держит порт.
+        let apache_text = "apache2 -k start: (98)Address already in use: AH00072: make_sock: could not bind to address 127.0.0.1:8083\nno listening sockets available, shutting down";
+        let msg = start_failure_text(8083, apache_text, Some("apache2 (pid 456)"));
+        assert!(msg.contains("порт 127.0.0.1:8083"), "{msg}");
+        assert!(msg.contains("уже занят"), "{msg}");
+        assert!(msg.contains("apache2 (pid 456)"), "{msg}");
+        // Текст apache2 остаётся в хвосте целиком — для поддержки.
+        assert!(msg.ends_with(apache_text), "{msg}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn start_failure_without_a_known_holder_still_names_the_port() {
+        let apache_text = "apache2 -k start: (98)Address already in use: AH00072: make_sock: could not bind to address 127.0.0.1:8083";
+        let msg = start_failure_text(8083, apache_text, None);
+        assert!(msg.contains("порт 127.0.0.1:8083") && msg.contains("уже занят"), "{msg}");
+        assert!(!msg.contains("()"), "держатель неизвестен — пустых скобок быть не должно: {msg}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn start_failure_for_another_cause_keeps_apaches_own_text_without_claiming_a_busy_port() {
+        let apache_text = "apache2 -k start: Syntax error on line 5 of httpd.conf";
+        let msg = start_failure_text(8083, apache_text, Some("apache2 (pid 456)"));
+        assert!(!msg.contains("уже занят"), "{msg}");
+        assert!(msg.contains(apache_text), "{msg}");
     }
 
     #[test]

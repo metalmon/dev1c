@@ -11,7 +11,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
-use common::{AlwaysDefault, Event, Prompt, StdinPrompt};
+use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
 use one_c_connect::{cfg, flow, project, session, single_instance, verify};
 use std::sync::Arc;
@@ -253,6 +253,14 @@ fn connect(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Текст для журнала, если публикация не поднялась — `None`, если всё в
+/// порядке. Отдельная чистая функция (не внутри `serve`) — чтобы решение
+/// «что сказать при отказе» проверялось без настоящего httpd/apache и без
+/// реального сеанса.
+fn publication_failure_text(result: &Result<()>) -> Option<String> {
+    result.as_ref().err().map(|e| format!("публикация базы не поднята: {e:#}"))
+}
+
 /// То же самое, что `connect`, но без вопросов и без печати плана: для
 /// запуска без рабочего стола (стенд, автозапуск). Останавливается по
 /// Ctrl+C, а на Linux — ещё и по SIGTERM, чтобы `docker stop` и остановка
@@ -271,7 +279,19 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом
     // (ops_host::ensure_publication, Lifetime::WithCaller).
-    ops_host::ensure_publication(ctx)?;
+    //
+    // Отказ не останавливает serve: транспорт MCP (порты mcp-1c/vrunner) не
+    // зависит от публикации вовсе — она нужна только агенту, который зовёт
+    // HTTP-сервис базы отдельно. Оборвать здесь весь сеанс значило бы гасить
+    // работающий транспорт из-за соседней проблемы (например, порт занят
+    // чужим apache2), которую человек ещё не разрешил — и заставлять
+    // перезапускать всё заново, когда освободит порт. Громко сообщаем
+    // (Fail — это и строка в журнале, и то, что видно на экране) и идём
+    // дальше: `1c-connect check` уже знает отдельный факт о публикации
+    // (`host.publication`), там отказ и смотреть.
+    if let Some(text) = publication_failure_text(&ops_host::ensure_publication(ctx)) {
+        ctx.fail(text);
+    }
     let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {
@@ -314,5 +334,23 @@ mod tests {
     #[test]
     fn serve_takes_no_flags_of_its_own() {
         assert!(Cli::try_parse_from(["1c-connect", "serve", "--port", "1"]).is_err());
+    }
+
+    #[test]
+    fn a_failed_publication_is_reported_but_serve_keeps_going() {
+        // Решение из отчёта: занятый порт публикации не должен обрывать
+        // сеанс MCP — только громко сообщить. Здесь проверяем именно текст
+        // и факт «есть сообщение», не настоящий serve (тот поднимает
+        // реальные сокеты и ждёт Ctrl+C).
+        let err: Result<()> = Err(anyhow::anyhow!("HTTP-сервис базы не поднят: порт 127.0.0.1:8083 уже занят"));
+        let text = publication_failure_text(&err).expect("отказ должен дать сообщение");
+        assert!(text.contains("публикация"), "{text}");
+        assert!(text.contains("8083"), "{text}");
+    }
+
+    #[test]
+    fn a_successful_publication_has_nothing_to_report() {
+        let ok: Result<()> = Ok(());
+        assert!(publication_failure_text(&ok).is_none());
     }
 }

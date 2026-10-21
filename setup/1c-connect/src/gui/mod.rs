@@ -806,6 +806,20 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
+/// Каталог выгрузки для записи — тот же приём, что у адреса публикации.
+/// `install` дописывает выведенный `<project>\src` в toml, и записанное
+/// умолчание обязано и дальше идти за каталогом проекта: иначе смена проекта
+/// оставила бы выгрузку в старом месте. Свой каталог (отличается от
+/// выведенного) смену `project` переживает. Пустое поле остаётся пустым: там
+/// умолчание и так считается при каждом чтении (`Cfg::dump_dir`).
+pub fn carried_dump(saved: &Host, new_project: &str) -> String {
+    if saved.dump == cfg::derived_dump(&saved.project) {
+        cfg::derived_dump(new_project)
+    } else {
+        saved.dump.clone()
+    }
+}
+
 /// Поля, что решают, какую базу обслуживает публикация/MCP — путь, логин и
 /// пароль дескриптора `publication::vrd`. Единый список: `save_host` смотрит
 /// на него, не поднять ли публикацию заново, а подтверждение перед
@@ -818,11 +832,13 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
 /// режима публикации, её порта, адреса Gitea среды и адреса публикации в окне
 /// нет (правятся в toml): берём их из текущих параметров, иначе пустые
-/// значения из формы затёрли бы toml. Каталог проекта — из формы.
+/// значения из формы затёрли бы toml. Каталог проекта — из формы, и за ним
+/// едут два умолчания: адрес публикации (`carried_base_url`) и каталог
+/// выгрузки (`carried_dump`).
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
-    host.dump = ui.cfg.host.dump.clone();
+    host.dump = carried_dump(&ui.cfg.host, &host.project);
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
@@ -1690,6 +1706,16 @@ pub fn run_op(cx: &mut App, which: Which) {
     // Подсказка фазы сразу, а не через TOOLTIP_EVERY: иначе первые 60 с
     // новой операции висела бы подсказка от прежней (или «подключён»).
     ui.tooltip_at = Some(now);
+    // «Установить» — та же настройка, что `1c-connect install`: выводимые
+    // значения считаются здесь один раз и уезжают в toml, а дальше читаются
+    // только оттуда (спека, «программа не выдумывает адресов»).
+    if which == Which::Install {
+        match ops_host::write_derived_fields(&ui.kit, &mut ui.cfg) {
+            Ok(wrote) if !wrote.is_empty() => note_line(ui, Line { kind: Kind::Ok, text: format!("в {} записано: {}", cfg::FILE, wrote.join(", ")) }),
+            Ok(_) => {}
+            Err(e) => note_line(ui, Line { kind: Kind::Fail, text: format!("параметры не дописаны: {e:#}") }),
+        }
+    }
     sync_tray(ui, now);
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
@@ -1735,6 +1761,7 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::Ok => (true, String::new()),
                     Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
+                    Layout::NoGitea => (false, cfg::NO_GITEA.into()),
                     Layout::Drifted(d) => (false, d),
                 };
                 // Тот же инструмент, что зовёт агент, под тем же замком
@@ -2310,7 +2337,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, check_status, confirm_gate_text,
+        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, check_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
@@ -2708,6 +2735,36 @@ mod tests {
         assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost:8081/InfoBase/hs/mcp-1c");
         saved.base_url = String::new();
         assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost/Torg/hs/mcp-1c");
+    }
+
+    /// `install` записывает выведенный каталог выгрузки в toml — и записанное
+    /// умолчание обязано и дальше идти за каталогом проекта, иначе смена
+    /// проекта оставила бы выгрузку в старом месте. Свой каталог не трогаем.
+    #[test]
+    fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
+        let new = cfg::derived_dump("C:\\proj\\Torg");
+        let mut saved = Host { project: "C:\\proj\\Buh".into(), dump: cfg::derived_dump("C:\\proj\\Buh"), ..Host::default() };
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), new);
+        saved.dump = "D:\\dump".into();
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "D:\\dump");
+        // Пустое поле остаётся пустым: умолчание и так считается при чтении.
+        saved.dump = String::new();
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
+    }
+
+    /// Та же ловушка на живом «Сохранить»: записанный выведенный каталог
+    /// выгрузки переезжает вместе с каталогом проекта.
+    #[test]
+    fn saving_a_new_project_moves_a_derived_dump_with_it() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.project = "C:\\proj\\Buh".into();
+        ui.cfg.host.dump = cfg::derived_dump("C:\\proj\\Buh");
+        let mut host = ui.cfg.host.clone();
+        host.project = "C:\\proj\\Torg".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.host.dump, cfg::derived_dump("C:\\proj\\Torg"));
+        let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+        assert!(text.contains(&format!("dump = {:?}", cfg::derived_dump("C:\\proj\\Torg"))), "{text}");
     }
 
     #[test]

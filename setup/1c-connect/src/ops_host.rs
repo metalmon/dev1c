@@ -75,6 +75,55 @@ pub enum Gitea {
     Ok(String),
 }
 
+/// Адрес Gitea среды, выведенный из адреса среды: тот же хост, порт на два
+/// ниже SSH (блок из четырёх подряд у dev1c-setup). Вывод верен для
+/// туннеля — там Gitea среды приезжает на машину проброшенным портом.
+/// Зовётся **только при настройке** (`write_derived_gitea`): при каждом
+/// чтении этот счёт давал мёртвый адрес в образе, где туннеля нет.
+pub fn derived_gitea(server: &str) -> Option<String> {
+    let (host, port) = server.rsplit_once(':')?;
+    let port: u32 = port.parse().ok()?;
+    (!host.is_empty() && port > 2).then(|| format!("http://{host}:{}", port - 2))
+}
+
+/// Настройка дописывает в toml всё, что программа выводила сама: адрес среды,
+/// каталог выгрузки и порт своей публикации. После настройки файл параметров —
+/// полная картина того, чем программа пользуется (решение заказчика
+/// 2026-10-21). Пишется только пустое поле: написанное человеком (или `seed`
+/// стенда) не трогается, остальные строки файла — тоже (`Cfg::render` правит
+/// значения на месте). Отдаёт список записанного для журнала; пусто — писать
+/// было нечего.
+pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg) -> Result<Vec<String>> {
+    let path = kit.state_path(crate::cfg::FILE);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut wrote = Vec::new();
+    if cfg.gitea_url().is_none() {
+        // Выводить не из чего (`server` без порта) — поле остаётся пустым, и
+        // проверка скажет про поле, а не подставит выдуманный адрес.
+        if let Some(addr) = derived_gitea(&cfg.host.server) {
+            cfg.host.gitea = addr.clone();
+            wrote.push(format!("gitea = {addr}"));
+        }
+    }
+    if cfg.host.dump.is_empty() {
+        let dir = cfg.dump_dir();
+        cfg.host.dump = dir.clone();
+        wrote.push(format!("dump = {dir}"));
+    }
+    if cfg.host.http_port.is_none() {
+        let port = cfg.http_port();
+        cfg.host.http_port = Some(port);
+        wrote.push(format!("http_port = {port}"));
+    }
+    if wrote.is_empty() {
+        return Ok(Vec::new());
+    }
+    common::kit::write_text(&path, &cfg.render())?;
+    Ok(wrote)
+}
+
 /// Gitea среды напрямую (без туннеля): версия и организация dev1c.
 pub fn gitea_probe(url: &str) -> Gitea {
     let c = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
@@ -693,6 +742,7 @@ impl Op<Ctx> for ProjectOp {
         match crate::project::layout_state(&p) {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
+            Layout::NoGitea => OpState::Blocked(crate::cfg::NO_GITEA.into()),
             Layout::Drifted(d) => OpState::Drifted { from: d, to: format!("ветка {}, origin {}", p.branch, p.remote) },
             Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), p.branch)),
         }
@@ -1011,6 +1061,91 @@ mod tests {
     #[test]
     fn gitea_probe_on_a_closed_port_is_down() {
         assert!(matches!(gitea_probe("http://127.0.0.1:1"), Gitea::Down(_)));
+    }
+
+    #[test]
+    fn derived_gitea_sits_two_ports_below_ssh() {
+        assert_eq!(derived_gitea("192.168.1.10:3393").as_deref(), Some("http://192.168.1.10:3391"));
+        assert_eq!(derived_gitea("10.0.0.5:4403").as_deref(), Some("http://10.0.0.5:4401"));
+        // Выводить не из чего — и выдумывать нечего.
+        assert_eq!(derived_gitea("192.168.1.10"), None);
+        assert_eq!(derived_gitea("192.168.1.10:порт"), None);
+        assert_eq!(derived_gitea(":3393"), None);
+        assert_eq!(derived_gitea("192.168.1.10:1"), None);
+    }
+
+    /// Каталог состояния на свой тест: писать в чужой toml нельзя.
+    fn toml_kit(tag: &str) -> Kit {
+        let dir = std::env::temp_dir().join(format!("gitea-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Kit::at(dir)
+    }
+
+    #[test]
+    fn install_writes_the_derived_address_once() {
+        let kit = toml_kit("derived");
+        let path = kit.state_path(crate::cfg::FILE);
+        std::fs::write(&path, crate::cfg::EXAMPLE).unwrap();
+        let mut cfg: Cfg = toml::from_str(crate::cfg::EXAMPLE).unwrap();
+        assert_eq!(cfg.gitea_url(), None, "образец идёт с пустым полем");
+
+        let wrote = write_derived_fields(&kit, &mut cfg).unwrap();
+        assert!(wrote.iter().any(|w| w == "gitea = http://192.168.1.10:3391"), "{wrote:?}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("gitea = \"http://192.168.1.10:3391\""), "{written}");
+        // Остальные строки на месте: правится значение, а не файл целиком.
+        assert!(written.contains("server = \"192.168.1.10:3393\"") && written.contains("# Адрес Gitea среды целиком"), "{written}");
+        let back: Cfg = toml::from_str(&written).unwrap();
+        assert_eq!(back.gitea_url(), Some("http://192.168.1.10:3391"));
+
+        // Второй прогон настройки уже ничего не выводит и не пишет.
+        assert!(write_derived_fields(&kit, &mut cfg).unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+        let _ = std::fs::remove_dir_all(kit.state());
+    }
+
+    /// Единообразие: после настройки файл — полная картина того, чем
+    /// программа пользуется (решение заказчика 2026-10-21). Каталог выгрузки
+    /// и порт публикации пишутся тем же правилом, что адрес среды.
+    #[test]
+    fn install_writes_the_derived_dump_and_http_port() {
+        let kit = toml_kit("fields");
+        let path = kit.state_path(crate::cfg::FILE);
+        std::fs::write(&path, crate::cfg::EXAMPLE).unwrap();
+        let mut cfg: Cfg = toml::from_str(crate::cfg::EXAMPLE).unwrap();
+        cfg.host.workstation = "dev2".into();
+        let dump = cfg.dump_dir();
+        let wrote = write_derived_fields(&kit, &mut cfg).unwrap();
+
+        assert_eq!(cfg.host.dump, dump);
+        assert_eq!(cfg.host.http_port, Some(8082), "8080 + номер рабочего места");
+        assert!(wrote.iter().any(|w| w == &format!("dump = {dump}")) && wrote.iter().any(|w| w == "http_port = 8082"), "{wrote:?}");
+        let back: Cfg = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.host.dump, dump);
+        assert_eq!(back.host.http_port, Some(8082));
+        // Записанное умолчание действующих адресов не меняет.
+        assert_eq!(back.base_url(), "http://localhost:8082/hs/mcp-1c");
+        assert_eq!(back.dump_dir(), dump);
+        let _ = std::fs::remove_dir_all(kit.state());
+    }
+
+    #[test]
+    fn install_never_touches_a_written_address() {
+        let kit = toml_kit("written");
+        let path = kit.state_path(crate::cfg::FILE);
+        let text = crate::cfg::EXAMPLE
+            .replace("gitea = \"\"", "gitea = \"http://localhost:3000\"")
+            .replace("dump = \"\"", "dump = \"D:\\\\dump\"")
+            .replace("http_port = 0", "http_port = 9000");
+        std::fs::write(&path, &text).unwrap();
+        let mut cfg: Cfg = toml::from_str(&text).unwrap();
+        assert!(write_derived_fields(&kit, &mut cfg).unwrap().is_empty());
+        assert_eq!(cfg.gitea_url(), Some("http://localhost:3000"));
+        assert_eq!(cfg.host.dump, "D:\\dump");
+        assert_eq!(cfg.host.http_port, Some(9000));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_dir_all(kit.state());
     }
 
     #[test]

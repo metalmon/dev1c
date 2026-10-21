@@ -179,6 +179,17 @@ fn run() -> Result<()> {
             println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить из 1С: 1c-connect export.");
         }
         Cmd::Install => {
+            // Выводимые значения считаются один раз — здесь, при настройке, и
+            // уезжают в toml; дальше правда только в файле (спека, «программа
+            // не выдумывает адресов»). Дописываются до операций: их состояние
+            // считается уже по записанному.
+            let mut ctx = ctx;
+            if !ctx.dry_run {
+                let wrote = ops_host::write_derived_fields(&ctx.kit, &mut ctx.cfg)?;
+                if !wrote.is_empty() {
+                    ctx.ok(format!("в {} записано: {}", cfg::FILE, wrote.join(", ")));
+                }
+            }
             common::run::apply_all(&ctx, &ops, None, false)?;
             if !ctx.dry_run {
                 println!();

@@ -78,6 +78,10 @@ if [ -f "$ZED_SETTINGS" ] && [ -f "$ZED_BIN" ]; then
                | tr -d ' ":' | sort -u); do
         case "$k" in
             custom|bsl|bsl-reference|1c|vrunner) continue ;;
+            # Имя штатного провайдера модели (llama.cpp) в исключениях
+            # намеренно НЕ стоит: шаблон выше ловит его как ключ, в бинаре Zed
+            # оно есть, и пусть проверяется. Уберут провайдер в новой версии —
+            # сборка упадёт здесь, а не выяснится молчащим агентом у заказчика.
             its_help|cf_load|cf_decompile|project_pull|project_push) continue ;;
             infobase_update|task_cancel|cache_show|cache_clear) continue ;;
             test_xunit|test_vanessa|test_yaxunit) continue ;;

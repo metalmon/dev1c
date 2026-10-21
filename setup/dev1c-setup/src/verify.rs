@@ -27,9 +27,13 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
 /// Настройки Zed отражают выбранную модель: провайдер на месте, заготовки
 /// адреса и имени подставлены, имя — то, что задано.
 pub fn settings_ok(settings: &str, provider: &str, model_name: &str) -> bool {
+    // Заготовка адреса проверяется только у рабочего провайдера: файл несёт
+    // оба, и у простаивающего она остаётся по построению.
+    let url_placeholder = if provider == "custom" { "CUSTOM_API_URL_PLACEHOLDER" } else { "LLAMA_API_URL_PLACEHOLDER" };
     settings.contains(&format!("\"provider\": \"{provider}\""))
-        && !settings.contains("CUSTOM_API_URL_PLACEHOLDER")
-        && !settings.contains("CUSTOM_MODEL_PLACEHOLDER")
+        && !settings.contains(url_placeholder)
+        && !settings.contains("MODEL_NAME_PLACEHOLDER")
+        && !settings.contains("MODEL_PROVIDER_PLACEHOLDER")
         && settings.contains(model_name)
 }
 
@@ -154,16 +158,16 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             None => no_props_fact(&url, unreadable.then(|| token_file.display().to_string())),
         });
         if let Some(p) = props {
-            v.push(numbers_fact(p.window, zed_max_tokens(&settings), ctx.cfg.model.agents));
+            v.push(numbers_fact(p.window, ctx.cfg.model.agents));
             // Сервер сообщает окно слота (при --kv-unified это весь общий пул
             // сразу): окно, которое слот честно держит вместе с ответом,
             // отдаёт контекст СЛОТА (slot_n_ctx), а не пул: без унификации
             // кэша это его собственная доля, и делить её не на что.
             let slot = p.window;
-            // Объявленное — из самих настроек рабочего места; их нет (или они
-            // с заготовками) — из состояния комплекта, как записал замер.
-            let declared = zed_declared_window(&settings).or_else(|| ctx.kit.state_get("llama.window").and_then(|s| s.parse().ok()));
-            if let Some(declared) = declared {
+            // Объявленного окна в настройках больше нет: штатный провайдер
+            // забирает его с /props. Сравнивать есть смысл только с тем, что
+            // записал замер: карта могла сжаться после него.
+            if let Some(declared) = ctx.kit.state_get("llama.window").and_then(|s| s.parse().ok()) {
                 v.push(declared_window_fact(declared, slot));
             }
             // Карта общая с vGPU: столько токенов на слот она держит сейчас.
@@ -180,9 +184,14 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             v.push(swap_fact(swap, limit));
         }
     }
-    // Для Zed модель всегда провайдер custom: удалённая по имени из toml,
-    // локальная — по имени файла.
-    let (want_provider, want_model) = ("custom", ctx.cfg.model_alias());
+    // Провайдер зависит от формы: наш сервер — штатный `llama.cpp`, чужой
+    // OpenAI-совместимый — `custom` (решение владельца 2026-10-21). Имя
+    // модели: удалённая по имени из toml, локальная — по имени файла.
+    let want_provider = match ctx.cfg.form() {
+        crate::cfg::Form::Remote => "custom",
+        _ => "llama.cpp",
+    };
+    let want_model = ctx.cfg.model_alias();
     v.push(
         if settings_ok(&settings, want_provider, &want_model) {
             Check::pass(
@@ -240,27 +249,29 @@ pub fn no_props_fact(url: &str, unreadable_token: Option<String>) -> Check {
     }
 }
 
-/// Три числа обязаны сойтись НА СЛОТЕ: вход (`max_tokens` в Zed), ответ и запас
-/// укладываются в контекст слота, который сервер сообщил сам. Слоты здесь не
-/// множатся: у каждого свой контекст, `/props` отдаёт долю слота, а не пул.
-/// Несколько агентов у одного человека делят его слот — на них и делим.
-pub fn numbers_fact(slot_window: u32, zed_max_tokens: Option<u32>, agents: u16) -> Check {
-    let Some(mt) = zed_max_tokens else {
-        return Check::fail("три числа", "в настройках Zed нет max_tokens", "dev1c-setup install — замер запишет числа в настройки");
-    };
+/// Хватает ли окна агенту. Раньше здесь сходились три числа — вход, ответ и
+/// запас, — потому что вход мы объявляли Zed сами. Со штатным провайдером
+/// `llama.cpp` (решение владельца 2026-10-21) объявлять нечего: окно приходит
+/// с `/props`, и редактор делит его сам. Осталось одно сравнение, зато то,
+/// которое правда зависит от карты.
+///
+/// Слоты здесь не множатся: у каждого свой контекст, `/props` отдаёт долю
+/// слота, а не пул. Несколько агентов одного человека делят его слот — на них
+/// и делим.
+pub fn numbers_fact(slot_window: u32, agents: u16) -> Check {
     let a = agents.max(1);
-    let per_agent = slot_window / a as u32;
-    let need = mt as u64 + llama::answer_tokens(per_agent) as u64 + llama::ZED_MARGIN as u64;
-    if need <= per_agent as u64 {
+    let per_agent = llama::per_agent(slot_window, a);
+    let need = llama::MIN_BUDGET + llama::ANSWER_FLOOR;
+    if per_agent >= need {
         Check::pass(
-            "три числа",
-            format!("слот {slot_window} на {a} агентов = {per_agent}; вход {mt} + ответ {} + запас {} = {need} ≤ окна агента", llama::answer_tokens(per_agent), llama::ZED_MARGIN),
+            "окно агента",
+            format!("слот {slot_window} на {a} агентов = {per_agent} ≥ {need} (вход {} и ответ {})", llama::MIN_BUDGET, llama::ANSWER_FLOOR),
         )
     } else {
         Check::fail(
-            "три числа",
-            format!("окно агента {per_agent}, а вход {mt} + ответ {} + запас {} = {need}", llama::answer_tokens(per_agent), llama::ZED_MARGIN),
-            "dev1c-setup install — пересчитает и пересоздаст контейнер",
+            "окно агента",
+            format!("слот {slot_window} на {a} агентов даёт {per_agent}, а нужно {need} (вход {} и ответ {})", llama::MIN_BUDGET, llama::ANSWER_FLOOR),
+            "dev1c-setup install — пересчитает и пересоздаст контейнер; либо agents в dev1c.toml меньше",
         )
     }
 }
@@ -316,28 +327,8 @@ pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
     }
 }
 
-/// Число из settings.json рабочего места; плейсхолдер или его отсутствие — None.
-fn zed_number(settings: &str, key: &str) -> Option<u32> {
-    let prefix = format!("\"{key}\":");
-    settings
-        .lines()
-        .find_map(|l| l.trim().strip_prefix(prefix.as_str()).map(|v| v.to_string()))
-        .and_then(|v| v.trim().trim_end_matches(',').parse().ok())
-}
 
-fn zed_max_tokens(settings: &str) -> Option<u32> {
-    zed_number(settings, "max_tokens")
-}
 
-/// Какое окно рабочее место считает своим. `max_tokens` для Zed — это ВХОД, и
-/// ответ он просит сверх него, поэтому окно это сумма входа, ответа и запаса
-/// (см. `llama::zed_numbers`). Берётся из самих настроек — проверять надо то,
-/// во что верит Zed, а не то, что мы когда-то записали в состояние комплекта.
-fn zed_declared_window(settings: &str) -> Option<u32> {
-    let mt = zed_max_tokens(settings)?;
-    let out = zed_number(settings, "max_output_tokens")?;
-    Some(mt.saturating_add(out).saturating_add(llama::ZED_MARGIN))
-}
 
 /// Записать отчёт в комплект и вернуть путь.
 pub fn report(ctx: &Ctx, checks: &[Check]) -> Result<PathBuf> {
@@ -375,36 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn the_window_zed_believes_is_read_back_from_its_own_settings() {
-        // Из настроек должно получаться ровно то окно, из которого числа и
-        // считались: иначе проверка «карта сжалась» молча перестаёт срабатывать.
-        let z = llama::zed_numbers(250_000, 1);
-        // Числа в настройках живут каждое на своей строке — так их и читает
-        // zed_number, и так их пишет entrypoint.
-        let settings = format!(
-            "            \"max_tokens\": {},
-            \"max_output_tokens\": {},
-",
-            z.max_tokens, z.max_output
-        );
-        assert_eq!(zed_declared_window(&settings), Some(250_000));
-    }
-
-    #[test]
-    fn the_three_numbers_must_agree() {
-        // Стенд: слот 250k, один агент. Вход, ответ и запас обязаны уложиться
-        // в контекст слота — его сервер сообщает сам.
-        let z = llama::zed_numbers(250_000, 1);
-        let c = numbers_fact(250_000, Some(z.max_tokens), 1);
-        assert!(c.ok, "{c:?}");
-        // Правленный руками max_tokens, который не оставляет места ответу,
-        // обязан провалиться — и назвать оба числа.
-        let c = numbers_fact(250_000, Some(249_000), 1);
-        assert!(!c.ok && c.detail.contains("249000") && c.detail.contains("250000"), "{c:?}");
-        // Агенты делят слот: тот же вход на трёх агентов уже не проходит.
-        assert!(!numbers_fact(250_000, Some(z.max_tokens), 3).ok);
-        let c = numbers_fact(250_000, None, 1);
-        assert!(!c.ok && c.detail.contains("max_tokens"), "{c:?}");
+    fn the_agent_window_must_hold_the_input_and_the_answer() {
+        // Стенд: слот 250k. На одного агента хватает с запасом.
+        assert!(numbers_fact(250_000, 1).ok);
+        // И на трёх: 83 333 больше 24 576.
+        assert!(numbers_fact(250_000, 3).ok);
+        // А вот слот, которого не хватает, обязан провалиться и назвать оба
+        // числа: что вышло и что нужно.
+        let c = numbers_fact(49_152, 3);
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("16384") && c.detail.contains("24576"), "{c:?}");
     }
 
     #[test]
@@ -423,22 +394,30 @@ mod tests {
         // цепочки ушла: что сервер сказал, то и проверяем.
         let slot = 250_000;
         for agents in 1..=3u16 {
-            let z = llama::zed_numbers(slot, agents);
-            let c = numbers_fact(slot, Some(z.max_tokens), agents);
+            let c = numbers_fact(slot, agents);
             assert!(c.ok, "agents={agents}: {c:?}");
-            assert!(declared_window_fact(z.window, slot / agents as u32).ok);
+            assert!(declared_window_fact(llama::per_agent(slot, agents), slot / agents as u32).ok);
         }
-        assert_eq!(llama::zed_numbers(slot, 1).max_tokens, 250_000 - 31_250 - llama::ZED_MARGIN);
+        // Замер записал окно слота, карта его и даёт — расхождения нет.
+        assert!(declared_window_fact(slot, slot).ok);
     }
     #[test]
-    fn settings_pass_only_with_the_custom_provider_filled_in() {
-        // No model configured: the placeholders stay, and that is a failed fact.
-        let unset = r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "CUSTOM_MODEL_PLACEHOLDER""#;
-        assert!(!settings_ok(unset, "custom", "x"));
+    fn settings_pass_only_with_the_live_provider_filled_in() {
+        // Модель не настроена: заготовки на месте, и это провалившийся факт.
+        let unset = r#""provider": "MODEL_PROVIDER_PLACEHOLDER", "api_url": "LLAMA_API_URL_PLACEHOLDER", "model": "MODEL_NAME_PLACEHOLDER""#;
+        assert!(!settings_ok(unset, "llama.cpp", "x"));
+        // Наш сервер: штатный провайдер, адрес подставлен.
+        let local = r#""provider": "llama.cpp", "api_url": "http://host.docker.internal:1235", "model": "Q""#;
+        assert!(settings_ok(local, "llama.cpp", "Q"));
+        assert!(!settings_ok(local, "llama.cpp", "Other"));
+        // Чужой сервер: вторая ветвь, и проверяется её собственная заготовка.
         let remote = r#""provider": "custom", "api_url": "https://m", "model": "Q""#;
         assert!(settings_ok(remote, "custom", "Q"));
         assert!(!settings_ok(r#""provider": "custom", "api_url": "CUSTOM_API_URL_PLACEHOLDER", "model": "Q""#, "custom", "Q"));
-        assert!(!settings_ok(remote, "custom", "Other"));
+        // Заготовка простаивающей ветви рабочему провайдеру не мешает: файл
+        // несёт оба, и у неподключённого она остаётся по построению.
+        let both = r#""provider": "llama.cpp", "api_url": "http://host:1235", "x": "CUSTOM_API_URL_PLACEHOLDER", "model": "Q""#;
+        assert!(settings_ok(both, "llama.cpp", "Q"));
     }
 
     #[test]

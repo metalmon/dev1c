@@ -16,8 +16,9 @@ log() { echo "[entrypoint] $*"; }
 # by PAM, which builds the environment anew from /etc/environment. Without this
 # the model key is visible in `docker exec` but not to Zed — exactly the case of
 # "everything is passed, nothing works".
-for var in CUSTOM_API_KEY CUSTOM_API_URL CUSTOM_MODEL \
-           CUSTOM_MAX_TOKENS CUSTOM_MAX_OUTPUT_TOKENS \
+for var in MODEL_PROVIDER MODEL_NAME CUSTOM_MODEL \
+           LLAMA_API_URL LLAMACPP_API_KEY \
+           CUSTOM_API_KEY CUSTOM_API_URL \
            ANTHROPIC_API_KEY OPENAI_API_KEY \
            HTTP_PROXY HTTPS_PROXY NO_PROXY
 do
@@ -130,8 +131,8 @@ for home in /home/*; do
         # same image with a new model re-seeds settings.json (a hand edit in it
         # is lost then — the .bak keeps it), the other files are untouched by this.
         if [ "$f" = zed/settings.json ]; then
-            shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${CUSTOM_API_URL:-}" "${CUSTOM_MODEL:-}" \
-                "${CUSTOM_MAX_TOKENS:-}" "${CUSTOM_MAX_OUTPUT_TOKENS:-}" | md5sum | cut -d' ' -f1)
+            shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${MODEL_PROVIDER:-}" "${MODEL_NAME:-}" \
+                "${LLAMA_API_URL:-}" "${CUSTOM_API_URL:-}" | md5sum | cut -d' ' -f1)
         fi
         [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && continue
         [ -f "$dst" ] && cp --remove-destination "$dst" "$dst.bak"
@@ -152,11 +153,13 @@ done
 # --- Model server in Zed settings ---------------------------------------------
 # Nobody edits JSON to point the environment at a model. The settings ship with
 # placeholders; everything concrete is filled in here from the environment:
-# CUSTOM_API_URL, CUSTOM_API_KEY and CUSTOM_MODEL name the OpenAI-compatible
-# server — a remote one, or the one dev1c-setup runs next to this container —
-# and CUSTOM_MAX_TOKENS / CUSTOM_MAX_OUTPUT_TOKENS carry the window it measured.
-# No CUSTOM_API_URL means no model: the editor works, the agent stays silent,
-# and dev1c-setup check says so.
+# The settings carry two providers and MODEL_PROVIDER says which one is live:
+# "llama.cpp" is our own server (LLAMA_API_URL, LLAMACPP_API_KEY) and takes its
+# context window from the server's own /props — nothing of ours is declared for
+# it; "custom" is any other OpenAI-compatible server (CUSTOM_API_URL,
+# CUSTOM_API_KEY), which has no /props, so the window stays declared there.
+# MODEL_NAME names the model for both. No address at all means no model: the
+# editor works, the agent stays silent, and dev1c-setup check says so.
 #
 # Only placeholders are replaced. If someone edited the settings by hand, their
 # change stays: there is no placeholder left to overwrite.
@@ -203,15 +206,42 @@ for cfg in /home/*/.config/zed/settings.json; do
         -e "s|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER|${CUSTOM_MAX_OUTPUT_TOKENS:-8192}|" \
         "$cfg"
 
+    # Which of the two providers in the settings is the live one. dev1c-setup
+    # says so with MODEL_PROVIDER; with nothing said, the one whose address
+    # arrived wins, so a kit that predates this variable keeps working.
+    provider="${MODEL_PROVIDER:-}"
+    if [ -z "$provider" ] && [ -n "${LLAMA_API_URL:-}" ]; then
+        provider="llama.cpp"
+    fi
+    if [ -z "$provider" ] && [ -n "${CUSTOM_API_URL:-}" ]; then
+        provider="custom"
+    fi
+    # CUSTOM_MODEL — прежнее имя переменной: комплект и CI, собранные до
+    # перехода на штатный провайдер, присылают его, и ломать их незачем.
+    name="${MODEL_NAME:-${CUSTOM_MODEL:-model}}"
+
+    # Both addresses are substituted whenever they are known: the file carries
+    # both providers, and a placeholder left in the idle branch harms nobody —
+    # it is never read — while a missing substitution in the live one shows up
+    # as "the agent does not answer" with no reason given.
+    if [ -n "${LLAMA_API_URL:-}" ]; then
+        sed -i -e "s|LLAMA_API_URL_PLACEHOLDER|$LLAMA_API_URL|" "$cfg"
+    fi
     if [ -n "${CUSTOM_API_URL:-}" ]; then
-        name="${CUSTOM_MODEL:-model}"
+        sed -i -e "s|CUSTOM_API_URL_PLACEHOLDER|$CUSTOM_API_URL|" "$cfg"
+    fi
+
+    if [ -n "$provider" ]; then
         sed -i \
-            -e "s|CUSTOM_API_URL_PLACEHOLDER|$CUSTOM_API_URL|" \
-            -e "s|CUSTOM_MODEL_PLACEHOLDER|$name|g" \
+            -e "s|MODEL_PROVIDER_PLACEHOLDER|$provider|" \
+            -e "s|MODEL_NAME_PLACEHOLDER|$name|g" \
             "$cfg"
-        log "model: $name at $CUSTOM_API_URL ($cfg)"
+        case "$provider" in
+            llama.cpp) log "model: $name at ${LLAMA_API_URL:-?} (native provider) ($cfg)" ;;
+            *)         log "model: $name at ${CUSTOM_API_URL:-?} (openai_compatible) ($cfg)" ;;
+        esac
     else
-        log "model: not configured — CUSTOM_API_URL is empty ($cfg)"
+        log "model: not configured — neither LLAMA_API_URL nor CUSTOM_API_URL is set ($cfg)"
     fi
 done
 

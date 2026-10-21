@@ -17,16 +17,14 @@ pub const MIN_MODEL_MB: u32 = 4096;
 /// Хосту и движку контейнеров — столько, сколько им нужно, чтобы не уйти в
 /// подкачку вместе с 1С (решение заказчика 2026-10-19).
 pub const HOST_RESERVE_MB: u64 = 2048;
-/// Нижняя граница ответа агента и верхняя. Qwen3.6 просит 32768 на ответ;
-/// замер на категории A PRISM (2026-10-21, размышления выключены) дал ответы
-/// по 300–900 токенов, то есть даже 8192 — десятикратный запас. Отсюда правило
-/// `answer_tokens`: восьмая часть окна, зажатая этими границами.
+/// Сколько окна уходит на ответ. Qwen3.6 просит 32768; замер на категории A
+/// PRISM (2026-10-21, размышления выключены) дал ответы по 300–900 токенов, то
+/// есть и 8192 — десятикратный запас. Это не наша настройка Zed, а свойство
+/// модели: место под ответ обязано остаться в окне независимо от того, кто
+/// объявляет числа редактору.
 pub const ANSWER_FLOOR: u32 = 8192;
-pub const ANSWER_MAX: u32 = 32768;
-/// Zed считает токены приблизительно, и этот запас куплен поломкой: при
-/// `max_tokens` вплотную к окну сервер отказывал посреди вызова инструмента, а
-/// выглядело это как «агент поглупел» (см. комментарий в zed-settings.json).
-pub const ZED_MARGIN: u32 = 4096;
+/// Умолчание `--cache-ram` у сервера, МиБ. Совпал расчёт — флаг не передаём.
+pub const CACHE_RAM_DEFAULT: u32 = 8192;
 
 pub struct ServeInput<'a> {
     pub model: &'a str,
@@ -38,7 +36,6 @@ pub struct ServeInput<'a> {
     /// задаются на всех, и он сам делит на слоты с выравниванием до кратного
     /// 256 (`llama-context.cpp:379`). Окно НЕ назначаем — его выбирает `--fit`.
     pub slot_floor: u32,
-    pub fit_target: u32,
     pub cache_ram: u32,
     /// Токен путём к файлу (служба хоста); контейнер получает его
     /// переменной LLAMA_API_KEY через --env-file, и в строке его нет.
@@ -63,7 +60,6 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
     // Нижняя граница — на всех слотах: единица измерения `-c` у сервера.
     let fit_ctx = total_window(slot_floor_aligned(i.slot_floor), SLOTS).to_string();
     let slots = SLOTS.to_string();
-    let fit_target = i.fit_target.to_string();
     let cache_ram = i.cache_ram.to_string();
     let mut a: Vec<String> = [
         "-m", i.model, "--alias", i.alias, "--host", i.host, "--port", &port,
@@ -71,8 +67,7 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
         // без подбора окно берётся из метаданных модели, и сервер либо не
         // влезает в карту, либо выносит слои на процессор (32 → 4 токена в
         // секунду). Смена этого умолчания в апстриме прошла бы молча.
-        "--parallel", &slots, "--fit", "on", "--fit-ctx", &fit_ctx, "--fit-target", &fit_target,
-        "--cache-ram", &cache_ram,
+        "--parallel", &slots, "--fit", "on", "--fit-ctx", &fit_ctx,
         "--flash-attn", "on", "-ctk", "q8_0", "-ctv", "q8_0",
         "--reasoning", "off",
         "--temp", "0.6", "--min-p", "0.03",
@@ -81,6 +76,14 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect();
+    // Решение 2026-10-21: `--cache-ram` передаём только если посчитанное
+    // отличается от умолчания сервера. Совпало — флага в строке быть не
+    // должно: каждая лишняя ручка это обещание, которое кто-то потом будет
+    // сверять с апстримом.
+    if i.cache_ram != CACHE_RAM_DEFAULT {
+        a.push("--cache-ram".into());
+        a.push(cache_ram);
+    }
     if let Some(f) = i.token_file {
         a.push("--api-key-file".into());
         a.push(f.into());
@@ -166,34 +169,19 @@ pub fn total_window(slot_window: u32, slots: u16) -> u32 {
     (slot_window as u64 * slots.max(1) as u64).min(u32::MAX as u64) as u32
 }
 
-/// Сколько резервировать под ответ при таком окне: восьмая часть, зажатая
-/// между `ANSWER_FLOOR` и `ANSWER_MAX`. При окне 262 144 это 32768 (столько и
-/// просит Qwen3.6), при 65536 — 8192.
-pub fn answer_tokens(window: u32) -> u32 {
-    (window / 8).clamp(ANSWER_FLOOR, ANSWER_MAX)
-}
-
-/// Что объявляется рабочему месту. `slot_window` — контекст ОДНОГО слота, как
-/// его сообщает сам сервер (`/props` отдаёт `slot_n_ctx`, а не пул:
-/// `server-context.cpp:1355`), поэтому делить и домножать здесь нечего.
+/// Окно, которое достаётся одному агенту. `slot_window` — контекст ОДНОГО
+/// слота, как его сообщает сам сервер (`/props` отдаёт `slot_n_ctx`, а не пул:
+/// `server-context.cpp:1355`), поэтому делить его больше не на что: несколько
+/// агентов у одного человека делят его слот — и только тогда.
 ///
-/// Zed трактует `max_tokens` как ВХОД и просит ответ сверх него, поэтому вход
-/// обязан быть окном МИНУС ответ и минус запас — иначе редактор молча упирается
-/// в предел на длинном диалоге. Это же правило записано в спеке
-/// (`max_tokens = W − G − запас`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ZedNumbers {
-    pub window: u32,
-    pub max_output: u32,
-    pub max_tokens: u32,
-}
-
-/// Несколько агентов у одного человека делят его слот — и только тогда.
-pub fn zed_numbers(slot_window: u32, agents: u16) -> ZedNumbers {
-    let window = slot_window / agents.max(1) as u32;
-    let max_output = answer_tokens(window);
-    let max_tokens = window.saturating_sub(max_output).saturating_sub(ZED_MARGIN);
-    ZedNumbers { window, max_output, max_tokens }
+/// Это всё, что осталось от прежней арифметики. Раньше здесь считались
+/// `max_tokens` и `max_output` для Zed, потому что провайдер
+/// `openai_compatible` требует объявить их самому, а Zed трактует `max_tokens`
+/// как ВХОД и просит ответ сверх него. Со штатным провайдером `llama.cpp`
+/// (решение владельца 2026-10-21) окно приходит в Zed с `/props`, и редактор
+/// делит его сам — объявлять нечего, а значит и расходиться не с чем.
+pub fn per_agent(slot_window: u32, agents: u16) -> u32 {
+    slot_window / agents.max(1) as u32
 }
 
 /// Размер KV-кэша в журнале сервера, сложенный по устройствам: ни `/props`,
@@ -220,14 +208,6 @@ pub fn kv_cache_mb_from_log(text: &str) -> Option<u32> {
     (sum > 0.0).then_some(sum as u32)
 }
 
-/// Карта с рабочим столом занята уже в покое: оставляем ей вдвое больше.
-pub fn fit_target_mb(used_mb_idle: u64) -> u32 {
-    if used_mb_idle > 300 {
-        2048
-    } else {
-        1024
-    }
-}
 
 pub struct Props {
     pub window: u32,
@@ -728,8 +708,6 @@ pub fn measure_prefill(url: &str, token: &str) -> Option<f64> {
 /// читается из своего файла (комплект лежит на флешке с обычными правами).
 pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Result<()> {
     ctx.kit.state_set("llama.window", &f.window.to_string())?;
-    ctx.kit.state_set("llama.max_tokens", &f.max_tokens.to_string())?;
-    ctx.kit.state_set("llama.max_output", &f.max_output.to_string())?;
     ctx.kit.state_set("llama.prefill", &prefill.map(|p| format!("{p:.0}")).unwrap_or_default())
 }
 
@@ -737,8 +715,6 @@ pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
     Some(crate::cfg::Facts {
         token: read_token(&ctx.kit, ctx.cfg.form())?,
         window: ctx.kit.state_get("llama.window")?.parse().ok()?,
-        max_tokens: ctx.kit.state_get("llama.max_tokens")?.parse().ok()?,
-        max_output: ctx.kit.state_get("llama.max_output")?.parse().ok()?,
     })
 }
 
@@ -774,7 +750,7 @@ mod tests {
     use super::*;
 
     fn input<'a>(token_file: Option<&'a str>) -> ServeInput<'a> {
-        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, slot_floor: 65536, fit_target: 1024, cache_ram: 4096, token_file }
+        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, slot_floor: 65536, cache_ram: 4096, token_file }
     }
 
     #[test]
@@ -785,7 +761,9 @@ mod tests {
         // Нижняя граница задаётся на слот, а серверу уходит общий размер:
         // 65536 × 3 слота. Делит обратно и выравнивает он сам.
         assert_eq!(at("--fit-ctx").as_deref(), Some("196608"));
-        assert_eq!(at("--fit-target").as_deref(), Some("1024"));
+        // --fit-target убран решением владельца 2026-10-21: карту сервер
+        // занимает целиком, делящий её сосед — не наша забота.
+        assert!(!a.iter().any(|x| x == "--fit-target"), "{a:?}");
         assert_eq!(at("--parallel").as_deref(), Some("3"));
         // Унификации кэша нет: иначе /props отдаёт пул вместо доли слота.
         assert!(!a.iter().any(|x| x == "--kv-unified"));
@@ -842,23 +820,19 @@ mod tests {
     }
 
     #[test]
-    fn what_zed_is_told_is_the_slot_minus_the_answer_and_the_margin() {
-        // Контекст слота 250k, один агент: ответ — восьмая часть (31 250),
-        // вход — остаток минус запас. Сумма входа и ответа обязана уложиться в
-        // окно: Zed просит ответ СВЕРХ max_tokens.
-        let z = zed_numbers(250_000, 1);
-        assert_eq!(z.window, 250_000);
-        assert_eq!(z.max_output, 31_250);
-        assert_eq!(z.max_tokens, 250_000 - 31_250 - ZED_MARGIN);
-        assert!(z.max_tokens + z.max_output <= z.window, "вход и ответ обязаны уложиться в окно");
-        // Нативное окно модели: ответ упирается в потолок 32768.
-        let z = zed_numbers(262_144, 1);
-        assert_eq!(z.max_output, ANSWER_MAX);
-        assert_eq!(z.max_tokens, 262_144 - ANSWER_MAX - ZED_MARGIN);
-        // Маленькое окно: ответ не ниже пола.
-        assert_eq!(zed_numbers(32_768, 1).max_output, ANSWER_FLOOR);
-        // Три агента у одного человека делят его слот.
-        assert_eq!(zed_numbers(250_000, 3).window, 83_333);
+    fn the_agent_window_is_the_slot_divided_by_the_agents() {
+        // Один агент получает весь слот: делить не на что.
+        assert_eq!(per_agent(250_000, 1), 250_000);
+        // Три агента у одного человека делят его слот — и только тогда.
+        assert_eq!(per_agent(250_000, 3), 83_333);
+        // Ноль агентов — не деление на ноль: параметр уже проверен в cfg, но
+        // падать здесь было бы хуже всего.
+        assert_eq!(per_agent(250_000, 0), 250_000);
+        // Чисел для Zed здесь больше нет: окно он забирает с /props сам
+        // (решение владельца 2026-10-21). Осталось одно сравнение — хватает ли
+        // окна агенту на вход и ответ вместе, и оно живёт в ops_llama::verdict.
+        assert!(per_agent(24_576, 1) >= MIN_BUDGET + ANSWER_FLOOR);
+        assert!(per_agent(24_575, 1) < MIN_BUDGET + ANSWER_FLOOR);
     }
 
     #[test]
@@ -876,19 +850,24 @@ mod tests {
 
     #[test]
     fn the_administrators_page_divides_the_slot_by_agents_before_the_answer() {
-        // Страница заказчика выписывает те же три числа руками, и на одном
-        // агенте арифметика сходится и без деления: при agents > 1 контекст
-        // слота делится ПЕРВЫМ, а ответ берётся уже от доли агента. Проверка
-        // смотрит на формулы страницы, потому что ломается именно она.
+        // Страница заказчика считает то же, что программа, и ломается именно
+        // она: после перехода на штатный провайдер Zed (2026-10-21) чисел для
+        // редактора на ней быть не должно, а проверка окна агента — должна.
         let page = include_str!("../../../config/kit/УСТАНОВКА.md");
         assert!(page.contains("окно агента = n_ctx ÷ agents"), "в странице нет деления на agents");
-        assert!(page.contains("max_tokens  = окно агента − ответ − 4096"), "max_tokens страницы считается не по новой формуле");
+        assert!(page.contains("MODEL_PROVIDER=llama.cpp"), "страница не называет штатный провайдер");
+        assert!(page.contains("LLAMACPP_API_KEY"), "страница не называет переменную ключа, которую диктует Zed");
         assert!(
-            page.contains("CUSTOM_MAX_OUTPUT_TOKENS=<ответ: окно агента ÷ 8, в границах 8192…32768>"),
-            "ответ в странице считается не от окна агента"
+            !page.contains("max_tokens  = окно агента"),
+            "на странице осталась формула max_tokens: её считает теперь сам Zed"
+        );
+        assert!(
+            page.contains(&(MIN_BUDGET + ANSWER_FLOOR).to_string()),
+            "страница не называет нижнюю границу окна агента ({})",
+            MIN_BUDGET + ANSWER_FLOOR
         );
         // И те же слова у программы: окно агента — это слот ÷ agents.
-        assert_eq!(zed_numbers(250_000, 3).window, 250_000 / 3);
+        assert_eq!(per_agent(250_000, 3), 250_000 / 3);
     }
 
     #[test]
@@ -933,12 +912,6 @@ mod tests {
         assert_eq!(parse_size_mb(""), None);
     }
 
-    #[test]
-    fn a_desktop_on_the_card_doubles_the_fit_target() {
-        assert_eq!(fit_target_mb(0), 1024);
-        assert_eq!(fit_target_mb(200), 1024);
-        assert_eq!(fit_target_mb(1250), 2048);
-    }
 
     #[test]
     fn props_and_timings_are_read_from_the_server_json() {
@@ -957,15 +930,13 @@ mod tests {
         let kit = common::kit::Kit::at(&dir);
         let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
         assert!(ctx.kit.state_get("llama.window").is_none());
-        let f = crate::cfg::Facts { token: "abc".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
+        let f = crate::cfg::Facts { token: "abc".into(), window: 250_000 };
         facts_save(&ctx, &f, Some(2600.0)).unwrap();
         // Токен в состоянии комплекта не хранится: он только в своём файле.
         assert!(ctx.kit.state_get("llama.token").is_none());
         assert_eq!(ctx.kit.state_get("llama.window").as_deref(), Some("250000"));
-        assert_eq!(ctx.kit.state_get("llama.max_tokens").as_deref(), Some("300000"));
-        assert_eq!(ctx.kit.state_get("llama.max_output").as_deref(), Some("50000"));
         if let Some(got) = facts_load(&ctx) {
-            assert_eq!((got.window, got.max_tokens, got.max_output), (250_000, 300_000, 50_000));
+            assert_eq!(got.window, 250_000);
         }
         let secret = dir_for_test.join("s.token");
         write_secret(&secret, "x").unwrap();

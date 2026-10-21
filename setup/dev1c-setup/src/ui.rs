@@ -431,8 +431,8 @@ pub fn local_addresses() -> Vec<String> {
 /// Адреса среды, выведенные из параметров: четыре порта подряд от
 /// `server.port` и адрес сервера модели. `host` — адрес этой машины
 /// (`local_address`) или заглушка; `facts` — числа последнего замера
-/// локального сервера (окно, max_tokens), если он был.
-pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>, host: &str) -> Vec<AccessRow> {
+/// локального сервера (окно слота), если он был.
+pub fn access_rows(cfg: &Cfg, facts: Option<u32>, host: &str) -> Vec<AccessRow> {
     let [rdp, gitea, _, ssh] = cfg.ports();
     let model_url = cfg.model_url();
     let row = |what: &'static str, value: String, detail: String| AccessRow { what, value, detail };
@@ -443,7 +443,7 @@ pub fn access_rows(cfg: &Cfg, facts: Option<(u32, u32)>, host: &str) -> Vec<Acce
             "Сервер модели",
             if model_url.is_empty() { "—".into() } else { model_url },
             match facts {
-                Some((window, max_tokens)) => format!("окно слота {window} токенов, max_tokens {max_tokens}"),
+                Some(window) => format!("окно слота {window} токенов"),
                 None => "замера ещё не было".into(),
             },
         ),
@@ -896,9 +896,9 @@ mod tests {
         let rows = access_rows(&c, None, ADDRESS_UNKNOWN);
         let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
         assert_eq!(model.detail, "замера ещё не было");
-        let rows = access_rows(&c, Some((65536, 8192)), ADDRESS_UNKNOWN);
+        let rows = access_rows(&c, Some(65536), ADDRESS_UNKNOWN);
         let model = rows.iter().find(|r| r.what == "Сервер модели").unwrap();
-        assert_eq!(model.detail, "окно слота 65536 токенов, max_tokens 8192");
+        assert_eq!(model.detail, "окно слота 65536 токенов");
     }
 
     #[test]

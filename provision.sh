@@ -25,7 +25,8 @@
 # `run` passes its extra arguments to `docker run`, which is where the model
 # settings go — this script never reads or writes a key:
 #
-#   ./provision.sh run -e CUSTOM_API_URL=… -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=…
+#   ./provision.sh run -e MODEL_PROVIDER=llama.cpp -e LLAMA_API_URL=… \
+#        -e LLAMACPP_API_KEY=… -e MODEL_NAME=…
 #
 # The build needs `platform/` (the 1C installer, the demo template, see
 # Dockerfile.1c); import and run need only the tar and Docker.

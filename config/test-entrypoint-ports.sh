@@ -28,10 +28,24 @@ fi
 
 # The window numbers are substituted for every workstation: a placeholder
 # left behind is invalid JSON, and Zed would drop the whole provider block.
+# They belong to the openai_compatible branch, which stays in the file even
+# when the live provider is the native llama.cpp one.
 for u in dev1 dev2 dev3; do
     f=/home/$u/.config/zed/settings.json
     grep -q 'CUSTOM_MAX_TOKENS_PLACEHOLDER\|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER' "$f" && fail "$u: window placeholder not substituted"
     grep -q '"max_tokens": [0-9]' "$f" || fail "$u: max_tokens is not a number"
+    # Which provider is live is said by MODEL_PROVIDER, and whichever it is,
+    # its own address placeholder must be gone. The idle branch keeps its
+    # placeholder by design: nobody reads it, and burning it would make the
+    # environment impossible to repoint at the other kind of server.
+    grep -q 'MODEL_PROVIDER_PLACEHOLDER' "$f" && fail "$u: provider placeholder not substituted"
+    grep -q 'MODEL_NAME_PLACEHOLDER' "$f" && fail "$u: model name placeholder not substituted"
+    provider=$(grep -A2 '"default_model"' "$f" | grep '"provider"' | cut -d'"' -f4)
+    case "$provider" in
+        llama.cpp) grep -q 'LLAMA_API_URL_PLACEHOLDER' "$f" && fail "$u: llama.cpp is live but its address is a placeholder" ;;
+        custom)    grep -q 'CUSTOM_API_URL_PLACEHOLDER' "$f" && fail "$u: custom is live but its address is a placeholder" ;;
+        *)         fail "$u: default_model names no known provider ($provider)" ;;
+    esac
 done
 
 # One Match block per workstation, each allowed to listen on its own three

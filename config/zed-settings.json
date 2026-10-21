@@ -115,18 +115,48 @@
   },
 
   // --- Models -----------------------------------------------------------
-  // One provider: custom — any OpenAI-compatible server. Either the model
-  // server dev1c-setup runs next to this container (as a service on the host
-  // or as the sibling container dev1c-llama, reached as host.docker.internal)
-  // or a remote one. Address, key and model name arrive as CUSTOM_API_URL,
-  // CUSTOM_API_KEY and CUSTOM_MODEL; the entrypoint substitutes them for the
-  // placeholders below. Nothing of ours is in the repository, and nobody
-  // edits JSON to point the environment at a different server.
+  // Два провайдера, и ровно один из них рабочий: какой — говорит установщик
+  // переменной MODEL_PROVIDER (см. default_model ниже).
   //
-  // The provider name dictates the key variable: Zed looks for
-  // <PROVIDER>_API_KEY, so "custom" means CUSTOM_API_KEY. That is why it is
-  // named this way and not after us.
+  // `llama.cpp` — наш сервер модели: служба на этой машине или соседний
+  // контейнер dev1c-llama, видимый как host.docker.internal.
+  // `openai_compatible.custom` — чужой сервер (serve = "remote").
+  //
+  // Адрес, ключ и имя модели приходят переменными LLAMA_API_URL /
+  // LLAMACPP_API_KEY либо CUSTOM_API_URL / CUSTOM_API_KEY, имя модели —
+  // MODEL_NAME; entrypoint подставляет их вместо заготовок ниже. В
+  // репозитории нет ничего нашего, и JSON ради смены сервера никто не правит.
+  //
+  // Имя переменной ключа диктует Zed: он ищет <ПРОВАЙДЕР>_API_KEY, поэтому
+  // LLAMACPP_API_KEY и CUSTOM_API_KEY названы так, а не по нашему вкусу.
   "language_models": {
+    // Наш сервер модели: штатный провайдер Zed. Решение владельца 2026-10-21,
+    // отменяет прежнее «для Zed модель всегда провайдер custom».
+    //
+    // Чем он лучше совместимого: окно он забирает с `/props` сам, и объявлять
+    // его не нужно — а вместе с объявлением уходит весь класс поломок, за
+    // который мы уже заплатили. Раньше установщик считал max_tokens как
+    // «окно минус ответ минус запас», потому что Zed трактует max_tokens как
+    // ВХОД и просит ответ сверх него; расхождение на единицу рвало поток
+    // посреди вызова инструмента, а выглядело как «агент поглупел». Теперь
+    // считать нечего: сервер говорит окно, редактор делит его сам.
+    //
+    // auto_discover — модели сервер перечисляет сам, список в настройках не
+    // нужен. Ключ Zed берёт из LLAMACPP_API_KEY: имя переменной диктует имя
+    // провайдера, поэтому оно такое, а не наше.
+    //
+    // Адрес — КОРЕНЬ сервера, без /v1: провайдер сам ходит в /props и
+    // /v1/models, и адрес с /v1 дал бы /v1/v1/....
+    "llama.cpp": {
+      "api_url": "LLAMA_API_URL_PLACEHOLDER",
+      "auto_discover": true
+    },
+    // Чужой OpenAI-совместимый сервер (serve = "remote" в dev1c.toml):
+    // штатный провайдер с ним не говорит — у него нет ни /props, ни
+    // /v1/models в том виде, который тот ждёт. Поэтому вторая ветвь остаётся,
+    // и числа окна здесь объявляются по-прежнему: взять их с сервера нельзя.
+    // Прежняя спека убирала эту ветвь ради простоты файла; отказ от простоты
+    // осознанный, цена записана в спеке установщика.
     "openai_compatible": {
       "custom": {
         // Full path up to, but excluding, /chat/completions — Zed appends that.
@@ -135,8 +165,8 @@
         "api_url": "CUSTOM_API_URL_PLACEHOLDER",
         "available_models": [
           {
-            "name": "CUSTOM_MODEL_PLACEHOLDER",
-            "display_name": "CUSTOM_MODEL_PLACEHOLDER",
+            "name": "MODEL_NAME_PLACEHOLDER",
+            "display_name": "MODEL_NAME_PLACEHOLDER",
             // Context window and answer size are set separately, on purpose.
             //
             // Zed treats max_tokens as the INPUT and asks for the answer on top
@@ -305,9 +335,12 @@
     // Default model: the one the custom provider names; the entrypoint fills
     // the name in from CUSTOM_MODEL, so the environment uses whichever model
     // dev1c-setup configured, with no editing by hand.
+    // Какой из двух провайдеров выше рабочий, решает установщик и говорит
+    // переменной MODEL_PROVIDER: файл настроек один на все рабочие места, и
+    // выбирать ветку в нём некому.
     "default_model": {
-      "provider": "custom",
-      "model": "CUSTOM_MODEL_PLACEHOLDER"
+      "provider": "MODEL_PROVIDER_PLACEHOLDER",
+      "model": "MODEL_NAME_PLACEHOLDER"
     }
   },
 

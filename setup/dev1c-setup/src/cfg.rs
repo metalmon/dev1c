@@ -82,18 +82,11 @@ pub enum Form {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Facts {
     pub token: String,
-    /// Окно одного слота, объявленное рабочему месту.
+    /// Окно одного слота, как его сообщил сервер. Чисел для Zed здесь больше
+    /// нет: штатный провайдер `llama.cpp` забирает окно с `/props` сам
+    /// (решение владельца 2026-10-21).
     pub window: u32,
-    pub max_tokens: u32,
-    /// Ответ агента: восьмая часть окна в границах 8192…32768
-    /// (`llama::answer_tokens`).
-    pub max_output: u32,
 }
-
-/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ). Нижняя граница
-/// того, что уходит рабочему месту: сам ответ считается от окна слота
-/// (`llama::answer_tokens`), и его пол — это же число.
-pub const OUTPUT_TOKENS: u32 = 8192;
 
 impl Default for Cfg {
     fn default() -> Self {
@@ -135,7 +128,9 @@ impl Cfg {
         tail.rsplit_once('.').map(|(s, _)| s).unwrap_or(tail).to_string()
     }
 
-    /// Адрес сервера модели, как его видит контейнер среды.
+    /// Адрес сервера модели, как его видит контейнер среды. С `/v1` — это то,
+    /// что ждёт провайдер `openai_compatible`: путь до, но не включая
+    /// `/chat/completions`, который Zed достраивает сам.
     pub fn model_url(&self) -> String {
         match self.form() {
             Form::Remote => self.model.url.clone(),
@@ -144,25 +139,33 @@ impl Cfg {
         }
     }
 
+    /// Тот же сервер, но корнем — без `/v1`. Штатному провайдеру `llama.cpp`
+    /// нужен именно корень: он сам ходит в `/props` за окном и в `/v1/models`
+    /// за моделями, и адрес с `/v1` превратил бы это в `/v1/v1/...`.
+    pub fn model_root(&self) -> String {
+        let u = self.model_url();
+        u.strip_suffix("/v1").unwrap_or(&u).to_string()
+    }
+
     /// Ошибка называет поле и что с ним делать.
     pub fn validate(&self) -> Result<()> {
         let m = &self.model;
         anyhow::ensure!(matches!(m.serve.as_str(), "host" | "docker" | "remote"), "[model]: serve — host, docker или remote");
         anyhow::ensure!((1..=3).contains(&m.agents), "[model]: agents — от 1 до 3");
-        // Окно обязано вмещать вход не меньше MIN_BUDGET, ответ и запас Zed:
+        // Окно обязано вмещать вход не меньше MIN_BUDGET и место под ответ:
         // иначе параметр не отказал бы здесь, а провалил установку после
         // замера, когда сервер уже поднят.
-        // На agents умножаем: zed_numbers делит окно слота ПЕРВЫМ, и при
-        // agents = 3 окно 28672 давало бы 9557 на агента — вход ушёл бы в
-        // ноль, и отказала бы установка после замера, а не этот параметр.
-        let floor = (crate::llama::MIN_BUDGET + crate::llama::ANSWER_FLOOR + crate::llama::ZED_MARGIN)
-            * m.agents.max(1) as u32;
+        // На agents умножаем: окно слота делится на агентов ПЕРВЫМ, и при
+        // agents = 3 окно 28672 давало бы 9557 на агента — на вход не осталось
+        // бы ничего, и отказала бы установка после замера, а не этот параметр.
+        // Запаса Zed в сумме больше нет: со штатным провайдером окно приходит
+        // с `/props`, и редактор делит его сам, а не по нашему объявлению.
+        let floor = (crate::llama::MIN_BUDGET + crate::llama::ANSWER_FLOOR) * m.agents.max(1) as u32;
         anyhow::ensure!(
             m.fit_ctx >= floor,
-            "[model]: fit_ctx — не меньше {floor} (вход {} + ответ {} + запас {}); при меньшем окне на 1С не хватит даже одного модуля",
+            "[model]: fit_ctx — не меньше {floor} (вход {} + ответ {}); при меньшем окне на 1С не хватит даже одного модуля",
             crate::llama::MIN_BUDGET,
-            crate::llama::ANSWER_FLOOR,
-            crate::llama::ZED_MARGIN
+            crate::llama::ANSWER_FLOOR
         );
         // Предел памяти, который администратор написал, а мы молча отбросили,
         // хуже отказа: "22" — это 22 байта, "22gb" не читается вовсе.
@@ -215,28 +218,36 @@ impl Cfg {
     }
 
     /// Что уходит в контейнер через -e. Локальные формы говорят про модель
-    /// только после замера (`facts`): адрес, токен, имя и числа окна для Zed.
+    /// только после замера (`facts`): адрес, токен и имя.
+    ///
+    /// Провайдер называется здесь, а не в настройках: их один файл на все
+    /// рабочие места, и выбирать ветку в нём некому. Наш сервер — штатный
+    /// `llama.cpp`, он забирает окно с `/props` сам, поэтому чисел для Zed мы
+    /// больше не передаём. Чужой OpenAI-совместимый сервер (`serve =
+    /// "remote"`) штатный провайдер не понимает, и для него остаётся
+    /// `openai_compatible.custom` — у него `/props` нет, окно объявляется
+    /// умолчаниями entrypoint.
+    ///
+    /// Имя переменной ключа диктует Zed: он ищет `<ПРОВАЙДЕР>_API_KEY`, то
+    /// есть `LLAMACPP_API_KEY` у штатного и `CUSTOM_API_KEY` у совместимого.
     pub fn container_env(&self, facts: Option<&Facts>) -> Vec<(String, String)> {
         let m = &self.model;
         let mut env = Vec::new();
         match self.form() {
             Form::Remote => {
+                env.push(("MODEL_PROVIDER".into(), "custom".into()));
                 env.push(("CUSTOM_API_URL".into(), m.url.clone()));
                 if !m.key.is_empty() {
                     env.push(("CUSTOM_API_KEY".into(), m.key.clone()));
                 }
-                env.push(("CUSTOM_MODEL".into(), m.name.clone()));
+                env.push(("MODEL_NAME".into(), m.name.clone()));
             }
             Form::Host | Form::Docker => {
                 let Some(f) = facts else { return env };
-                env.push(("CUSTOM_API_URL".into(), self.model_url()));
-                env.push(("CUSTOM_API_KEY".into(), f.token.clone()));
-                env.push(("CUSTOM_MODEL".into(), self.model_alias()));
-                env.push(("CUSTOM_MAX_TOKENS".into(), f.max_tokens.to_string()));
-                // Ответ — пятая часть окна слота, а не постоянные 8192: Zed
-                // просит её сам, и расхождение упирается в предел на длинном
-                // диалоге. Ниже OUTPUT_TOKENS не опускаемся.
-                env.push(("CUSTOM_MAX_OUTPUT_TOKENS".into(), f.max_output.max(OUTPUT_TOKENS).to_string()));
+                env.push(("MODEL_PROVIDER".into(), "llama.cpp".into()));
+                env.push(("LLAMA_API_URL".into(), self.model_root()));
+                env.push(("LLAMACPP_API_KEY".into(), f.token.clone()));
+                env.push(("MODEL_NAME".into(), self.model_alias()));
             }
         }
         env
@@ -328,7 +339,7 @@ mod tests {
         let env = c.container_env(None);
         assert!(env.contains(&("CUSTOM_API_URL".into(), "https://m.example.com/v1".into())));
         assert!(env.contains(&("CUSTOM_API_KEY".into(), "k".into())));
-        assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
+        assert!(env.contains(&("MODEL_NAME".into(), "Q".into())));
         assert!(env.iter().all(|(k, _)| k != "LLAMA_ENABLED"), "внутренней лламы больше нет");
     }
 
@@ -374,19 +385,20 @@ mod tests {
         // До замера фактов нет: контейнеру нечего сказать про модель.
         let env = c.container_env(None);
         assert!(env.is_empty(), "{env:?}");
-        // Числа — ровно те, что даёт замер слота в 250k (см. llama::zed_numbers):
-        // вход это окно минус ответ минус запас, а не окно плюс ответ.
-        let z = crate::llama::zed_numbers(250_000, 1);
-        let f = Facts { token: "t".into(), window: z.window, max_tokens: z.max_tokens, max_output: z.max_output };
+        // Локальный сервер — штатный провайдер Zed: адрес КОРНЕМ, без /v1,
+        // ключ переменной, имя которой диктует Zed, и ни одного числа окна —
+        // его провайдер забирает с /props сам.
+        let f = Facts { token: "t".into(), window: 250_000 };
         let env = c.container_env(Some(&f));
-        assert!(env.contains(&("CUSTOM_API_URL".into(), "http://host.docker.internal:1235/v1".into())));
-        assert!(env.contains(&("CUSTOM_API_KEY".into(), "t".into())));
-        assert!(env.contains(&("CUSTOM_MODEL".into(), "x".into())));
-        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), z.max_tokens.to_string())));
-        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "31250".into())));
-        // Крошечное окно не отдаёт Zed ответ в полтора абзаца.
-        let small = Facts { token: "t".into(), window: 20_000, max_tokens: 7_000, max_output: 4_000 };
-        assert!(c.container_env(Some(&small)).contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "8192".into())));
+        assert!(env.contains(&("MODEL_PROVIDER".into(), "llama.cpp".into())), "{env:?}");
+        assert!(env.contains(&("LLAMA_API_URL".into(), "http://host.docker.internal:1235".into())), "{env:?}");
+        assert!(env.contains(&("LLAMACPP_API_KEY".into(), "t".into())), "{env:?}");
+        assert!(env.contains(&("MODEL_NAME".into(), "x".into())), "{env:?}");
+        let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            !names.iter().any(|k| k.starts_with("CUSTOM_MAX")),
+            "числа окна в переменных больше не передаются: {names:?}"
+        );
     }
 
     #[test]
@@ -397,19 +409,19 @@ mod tests {
         c.model.agents = 1;
         c.model.fit_ctx = 1000;
         assert!(c.validate().unwrap_err().to_string().contains("fit_ctx"));
-        // 16384 раньше проходило, а теперь нет: вход при таком окне — 4096,
-        // то есть меньше того же MIN_BUDGET. Пусть отказывает конфиг, а не
-        // замер на поднятом сервере.
+        // 16384 раньше проходило, а теперь нет: на ответ при таком окне не
+        // остаётся ничего. Пусть отказывает конфиг, а не замер на поднятом
+        // сервере. Пол — вход плюс ответ, запаса Zed в нём больше нет.
         c.model.fit_ctx = 16384;
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("28672"), "{e}");
-        c.model.fit_ctx = 28672;
+        assert!(e.contains("24576"), "{e}");
+        c.model.fit_ctx = 24576;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
         // Деление на агентов учитывается: то же окно на трёх агентов не годится.
         c.model.agents = 3;
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("86016"), "{e}");
-        c.model.fit_ctx = 86016;
+        assert!(e.contains("73728"), "{e}");
+        c.model.fit_ctx = 73728;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
     }
 
@@ -448,7 +460,7 @@ mod tests {
         c.validate().unwrap();
         let env = c.container_env(None);
         assert!(env.iter().all(|(k, _)| k != "CUSTOM_API_KEY"));
-        assert!(env.contains(&("CUSTOM_MODEL".into(), "Q".into())));
+        assert!(env.contains(&("MODEL_NAME".into(), "Q".into())));
     }
 
     #[test]

@@ -29,7 +29,6 @@ pub fn local_url(ctx: &Ctx) -> String {
 
 /// Командная строка, какой она должна быть сейчас (служба хоста).
 pub fn desired_args(ctx: &Ctx) -> Vec<String> {
-    let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
     let host = llama::bind_host(ctx);
     let token = llama::token_path(&ctx.kit, ctx.cfg.form()).to_string_lossy().to_string();
     let alias = ctx.cfg.model_alias();
@@ -39,7 +38,6 @@ pub fn desired_args(ctx: &Ctx) -> Vec<String> {
         host: &host,
         port: ctx.cfg.model.port,
         slot_floor: ctx.cfg.model.fit_ctx,
-        fit_target: llama::fit_target_mb(used),
         // Предел не узнан — кэш остаётся на полу: лучше потеря настройки, чем
         // число, выдуманное от неизвестной памяти.
         cache_ram: llama::cache_ram_from_limit(llama::limit_mb(ctx).unwrap_or(0)),
@@ -103,7 +101,7 @@ pub fn args_drift(want: &[String], baked: &str) -> Option<(String, String)> {
 ///
 /// Сервер дал меньше, чем просили, — провал с обоими числами: молча поставить
 /// окно меньше нельзя, человек, просивший 250 000, о подмене не узнает.
-pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<llama::ZedNumbers> {
+pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<u32> {
     // Сравниваем с тем числом, которое человек написал в настройках, а не с
     // выровненным: выравнивание живёт на стороне ЗАПРОСА (`slot_floor_aligned`
     // в serve_args), и сервер поэтому всегда отдаёт не меньше. Сравнение с
@@ -115,29 +113,27 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<llama::
         cfg.model.fit_ctx,
         slots
     );
-    let z = llama::zed_numbers(window, cfg.model.agents);
+    // Одно число вместо трёх: окно агента. Со штатным провайдером `llama.cpp`
+    // Zed забирает окно с `/props` и сам делит его на вход и ответ, поэтому
+    // сходиться должно только то, что от нас зависит, — хватает ли окна
+    // агенту на вход и ответ вместе.
+    let per_agent = llama::per_agent(window, cfg.model.agents);
     anyhow::ensure!(
-        z.max_tokens >= llama::MIN_BUDGET,
-        "окно {window} на {} агентов даёт {} токенов входа (ответ {}, запас {}) — для кодинга на 1С это меньше {}",
+        per_agent >= llama::MIN_BUDGET + llama::ANSWER_FLOOR,
+        "окно {window} на {} агентов даёт {per_agent} токенов на агента — для кодинга на 1С нужно хотя бы {} (вход {} и ответ {})",
         cfg.model.agents,
-        z.max_tokens,
-        z.max_output,
-        llama::ZED_MARGIN,
-        llama::MIN_BUDGET
+        llama::MIN_BUDGET + llama::ANSWER_FLOOR,
+        llama::MIN_BUDGET,
+        llama::ANSWER_FLOOR
     );
-    Ok(z)
+    Ok(per_agent)
 }
 
-/// Строка замера. `window` — контекст слота от сервера; рабочему месту
-/// объявляется вход (`max_tokens`), а не окно целиком, поэтому в строке стоят
-/// оба числа: что дал сервер и что из этого досталось входу.
-fn answers_line(window: u32, slots: u16, model: &str, z: &llama::ZedNumbers) -> String {
-    format!(
-        "сервер отвечает: {model}, {slots} слота по {window} токенов; рабочему месту вход {} + ответ {} (запас {})",
-        z.max_tokens,
-        z.max_output,
-        llama::ZED_MARGIN
-    )
+/// Строка замера. `window` — контекст слота от сервера, `per_agent` — его доля
+/// на одного агента. Чисел для Zed в строке больше нет: редактор забирает окно
+/// с `/props` сам, и объявлять ему нечего.
+fn answers_line(window: u32, slots: u16, model: &str, per_agent: u32) -> String {
+    format!("сервер отвечает: {model}, {slots} слота по {window} токенов; на агента {per_agent}")
 }
 
 /// Что остаётся в каталоге службы при раскладке из комплекта: файлы
@@ -165,7 +161,7 @@ pub fn keep_in_service_dir(name: &str, kit_files: &[String]) -> bool {
 /// `limit_mb` = None — машина не ответила, сколько у неё памяти: пределов не
 /// ставим вовсе. Пол в этом месте выглядел бы как решение, а на деле это
 /// 4 ГБ работающему серверу и пересоздание контейнера на пустом месте.
-pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str, limit_mb: Option<u32>, fit_target: u32) -> Vec<String> {
+pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str, limit_mb: Option<u32>) -> Vec<String> {
     let base = cfg.model.file.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
     let model = format!("/opt/models/{base}");
     let alias = cfg.model_alias();
@@ -209,7 +205,6 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
         host: "0.0.0.0",
         port: 8080,
         slot_floor: cfg.model.fit_ctx,
-        fit_target,
         cache_ram,
         token_file: None,
     }));
@@ -478,9 +473,8 @@ impl Op<Ctx> for Container {
 
 impl Container {
     fn wanted(&self, ctx: &Ctx) -> Vec<String> {
-        let used = llama::gpu(ctx).map(|g| g.used_mb).unwrap_or(0);
-        let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
-        llama_run_args(&ctx.cfg, &env, &llama::bind_host(ctx), llama::limit_mb(ctx), llama::fit_target_mb(used))
+            let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
+        llama_run_args(&ctx.cfg, &env, &llama::bind_host(ctx), llama::limit_mb(ctx))
     }
 }
 
@@ -522,8 +516,8 @@ impl Op<Ctx> for Answers {
         let url = local_url(ctx);
         llama::wait_health(&url, &token, 300).map_err(|e| anyhow::anyhow!("{e:#} — смотрите {}", llama::log_file().display()))?;
         let p = llama::props(&url, &token).ok_or_else(|| anyhow::anyhow!("сервер не отдал /props"))?;
-        let z = verdict(&ctx.cfg, p.window, p.slots)?;
-        ctx.ok(answers_line(p.window, p.slots, &p.model, &z));
+        let per_agent = verdict(&ctx.cfg, p.window, p.slots)?;
+        ctx.ok(answers_line(p.window, p.slots, &p.model, per_agent));
         // Размер KV на токен — число этой модели, а не таблицы: дальше он
         // считает и то, что помещается в карту, и то, сколько нужно подкачки.
         if let Some(mb) = llama::kv_cache_mb_from_log(&llama::server_log(ctx)) {
@@ -534,10 +528,10 @@ impl Op<Ctx> for Answers {
             ctx.kit.state_set("llama.kv_bytes_per_token", &kv.to_string())?;
             let fits = llama::window_that_fits(llama::vram_for_kv_mb(ctx, kv, whole), kv, p.slots);
             let sessions = p.slots.max(1) * llama::WARM_PER_SLOT;
-            let warm = llama::warm_sessions_mb(kv, z.window, sessions);
+            let warm = llama::warm_sessions_mb(kv, per_agent, sessions);
             ctx.ok(format!(
                 "KV-кэш {mb} МиБ на {} токенов всех слотов — {kv} байт на токен; карта держит {fits} токенов на слот, {sessions} тёплых сеансов по {} — {warm} МиБ оперативной памяти и подкачки",
-                whole, z.window
+                whole, per_agent
             ));
         } else {
             ctx.warn("размер KV-кэша не прочитан из журнала сервера: проверки окна по видеопамяти и подкачке будут пропущены");
@@ -547,7 +541,7 @@ impl Op<Ctx> for Answers {
             Some(s) => ctx.ok(format!("скорость разбора {s:.0} токенов в секунду")),
             None => ctx.warn("скорость разбора замерить не вышло (ответ без timings)"),
         }
-        llama::facts_save(ctx, &Facts { token, window: z.window, max_tokens: z.max_tokens, max_output: z.max_output }, prefill)?;
+        llama::facts_save(ctx, &Facts { token, window: p.window }, prefill)?;
         if let Some(g) = llama::gpu(ctx) {
             if g.total_mb > 0 && g.used_mb * 100 / g.total_mb > 95 {
                 ctx.warn(format!("карта занята на {} из {} МиБ: соседняя нагрузка будет вытеснять модель", g.used_mb, g.total_mb));
@@ -574,13 +568,15 @@ mod tests {
         let mut c = Cfg::default();
         c.model.serve = "docker".into();
         c.model.file = "models/x.gguf".into();
-        let a = llama_run_args(&c, "/k/llama.env", "127.0.0.1", Some(22528), 1024).join(" ");
+        let a = llama_run_args(&c, "/k/llama.env", "127.0.0.1", Some(22528)).join(" ");
         assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all --memory 22528m --memory-swap 45056m --memory-reservation 11264m -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models --env-file /k/llama.env oktaplus/dev1c-llama:latest -m /opt/models/x.gguf"), "{a}");
-        // Кэш подсказок — половина предела контейнера, с потолком 8 ГиБ.
-        assert!(a.contains("--cache-ram 8192"), "{a}");
+        // Кэш подсказок — половина предела контейнера, с потолком 8 ГиБ. При
+        // 22528 МиБ это ровно 8192, то есть умолчание сервера, и флага в
+        // строке быть не должно (решение 2026-10-21).
+        assert!(!a.contains("--cache-ram"), "{a}");
         // Машина не ответила, сколько у неё памяти: пределов нет вовсе —
         // пол выглядел бы как решение и пересоздавал бы живой контейнер.
-        let none = llama_run_args(&c, "/k/llama.env", "127.0.0.1", None, 1024).join(" ");
+        let none = llama_run_args(&c, "/k/llama.env", "127.0.0.1", None).join(" ");
         assert!(!none.contains("--memory"), "{none}");
         assert!(none.contains("--cache-ram 1024"), "{none}");
         // The image now has an ENTRYPOINT; a bare "llama-server" after the image
@@ -660,14 +656,12 @@ mod tests {
         assert!(verdict(&c, 36408, 3).is_err());
         let e = verdict(&c, 36408, 3).unwrap_err().to_string();
         assert!(e.contains("65536") && e.contains("36408"), "{e}");
-        // Стенд: сервер отдал 250k на слот — ровно это окно и объявляется, за
-        // вычетом ответа и запаса.
+        // Стенд: сервер отдал 250k на слот — на одного агента это весь слот.
         c.model.fit_ctx = 250_000;
-        let z = verdict(&c, 250_000, 3).unwrap();
-        assert_eq!((z.window, z.max_output), (250_000, 31_250));
-        assert_eq!(z.max_tokens, 250_000 - 31_250 - llama::ZED_MARGIN);
-        // Слот, которого не хватает даже на один модуль 1С, — отказ по входу,
-        // а не по окну: 49152 на три агента это 16384 окна и 4096 входа.
+        assert_eq!(verdict(&c, 250_000, 3).unwrap(), 250_000);
+        // Слот, которого не хватает даже на один модуль 1С, — отказ по окну
+        // агента, а не по окну слота: 49152 на три агента это 16384, то есть
+        // на вход и ответ вместе не хватает.
         c.model.fit_ctx = 16384;
         c.model.agents = 3;
         let e = verdict(&c, 49152, 3).unwrap_err().to_string();
@@ -681,13 +675,13 @@ mod tests {
         // нашей арифметики — её больше нет.
         let mut c = Cfg::default();
         c.model.agents = 1;
-        // Ниже 28672 окно нерабочее по построению (вход + ответ + запас), и
-        // такие значения не пускает уже cfg::validate — здесь только рабочие.
-        for fit in [28_672u32, 65_536, 65_537, 131_072, 250_000, 262_144] {
+        // Ниже 24576 окно нерабочее по построению (вход и ответ), и такие
+        // значения не пускает уже cfg::validate — здесь только рабочие.
+        for fit in [24_576u32, 65_536, 65_537, 131_072, 250_000, 262_144] {
             c.model.fit_ctx = fit;
-            let z = verdict(&c, fit, llama::SLOTS).unwrap_or_else(|e| panic!("fit_ctx {fit}: {e}"));
-            assert_eq!(z.window, fit, "fit_ctx {fit}");
-            assert!(z.max_tokens + z.max_output <= z.window, "вход и ответ обязаны уложиться в окно");
+            let per = verdict(&c, fit, llama::SLOTS).unwrap_or_else(|e| panic!("fit_ctx {fit}: {e}"));
+            assert_eq!(per, fit, "fit_ctx {fit}");
+            assert!(per >= llama::MIN_BUDGET + llama::ANSWER_FLOOR, "окно агента обязано вмещать вход и ответ");
         }
     }
 
@@ -710,14 +704,14 @@ mod tests {
     }
 
     #[test]
-    fn the_measurement_line_names_both_the_slot_window_and_the_input() {
-        // Рабочему месту объявляется вход, а не окно целиком: в строке обязаны
-        // стоять оба числа, иначе администратор сверяет не то с не тем.
+    fn the_measurement_line_names_the_slot_window_and_the_agent_share() {
+        // Чисел для Zed в строке больше нет — объявлять их некому; но доля
+        // агента обязана стоять рядом с окном слота, иначе при agents > 1
+        // администратор сверяет не то с не тем.
         let slot = 250_000;
-        let z = llama::zed_numbers(slot, 1);
-        let line = answers_line(slot, llama::SLOTS, "x.gguf", &z);
+        let line = answers_line(slot, llama::SLOTS, "x.gguf", llama::per_agent(slot, 3));
         assert!(line.contains("3 слота по 250000"), "{line}");
-        assert!(line.contains(&format!("вход {}", z.max_tokens)), "{line}");
-        assert!(line.contains(&format!("ответ {}", z.max_output)), "{line}");
+        assert!(line.contains(&format!("на агента {}", 250_000 / 3)), "{line}");
+        assert!(!line.contains("вход") && !line.contains("запас"), "{line}");
     }
 }

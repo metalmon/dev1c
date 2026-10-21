@@ -31,6 +31,8 @@ name: inspect environment
 #   TS_OAUTH_CLIENT_ID, TS_OAUTH_SECRET — a Tailscale OAuth client with the
 #     auth_keys scope, and tag:ci listed in tagOwners in your ACL
 #   CUSTOM_API_URL, CUSTOM_API_KEY, CUSTOM_MODEL — optional, to give the agent a
+#   model. They reach the container as the openai_compatible branch: the native
+#   llama.cpp provider needs a llama.cpp server, which CI has none of.
 #     remote model
 
 on:
@@ -102,7 +104,7 @@ jobs:
         env:
           CUSTOM_API_URL: ${{ secrets.CUSTOM_API_URL }}
           CUSTOM_API_KEY: ${{ secrets.CUSTOM_API_KEY }}
-          CUSTOM_MODEL: ${{ secrets.CUSTOM_MODEL }}
+          MODEL_NAME: ${{ secrets.CUSTOM_MODEL }}
         run: |
           # Same flags as dev1c.sh, minus the GPU: xrdp-sesman needs SYS_ADMIN
           # for its PAM session, and drive forwarding needs /dev/fuse.
@@ -115,7 +117,7 @@ jobs:
           # -e NAME without a value: docker takes it from its own environment,
           # so the key never appears in the command line — where anyone with a
           # shell on the runner could read it out of the process list.
-          for v in CUSTOM_API_URL CUSTOM_API_KEY CUSTOM_MODEL; do
+          for v in CUSTOM_API_URL CUSTOM_API_KEY MODEL_NAME; do
             eval "val=\$$v"
             [ -n "$val" ] && args="$args -e $v"
           done

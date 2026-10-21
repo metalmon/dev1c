@@ -589,12 +589,14 @@ mod tests {
     fn a_change_of_the_measured_numbers_is_a_drift_of_the_container() {
         let mut c = Cfg::default();
         c.model.file = "/m/x.gguf".into();
-        let f = Facts { token: "t".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
+        let f = Facts { token: "t".into(), window: 250_000 };
         let env: Vec<String> = c.container_env(Some(&f)).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
         assert!(drift_of(&c, &c.image(), "3390", &env, Some(&f)).is_none());
-        let f2 = Facts { max_tokens: 100000, ..f.clone() };
+        // Числа окна в переменных больше не ездят, а токен — ездит: смена
+        // ключа после перезамера обязана остаться расхождением.
+        let f2 = Facts { token: "other".into(), ..f.clone() };
         let (from, to) = drift_of(&c, &c.image(), "3390", &env, Some(&f2)).unwrap();
-        assert!(from.contains("CUSTOM_MAX_TOKENS=300000") && to.contains("CUSTOM_MAX_TOKENS=100000"));
+        assert!(from.contains("LLAMACPP_API_KEY") && to.contains("LLAMACPP_API_KEY"), "{from} -> {to}");
     }
 
     #[test]
@@ -645,15 +647,23 @@ mod tests {
         r.model.url = "https://m".into();
         r.model.key = "k".into();
         r.model.name = "Q".into();
-        // The first difference is reported, so the variables before CUSTOM_MODEL
+        // The first difference is reported, so the variables before MODEL_NAME
         // must match for the model to be the one named.
-        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "CUSTOM_MODEL=Old"].iter().map(|s| s.to_string()).collect();
+        let env: Vec<String> = ["MODEL_PROVIDER=custom", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=k", "MODEL_NAME=Old"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
-        assert!(d.0.contains("CUSTOM_MODEL=Old") && d.1.contains("CUSTOM_MODEL=Q"), "{d:?}");
+        assert!(d.0.contains("MODEL_NAME=Old") && d.1.contains("MODEL_NAME=Q"), "{d:?}");
         // A missing variable is named without its value, and the key never shows.
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &base, None).unwrap();
-        assert_eq!(d.0, "CUSTOM_API_URL не задан");
-        let env: Vec<String> = ["CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(d, ("MODEL_PROVIDER не задан".into(), "MODEL_PROVIDER=custom".into()));
+        // Ключ маскируется с обеих сторон; провайдер и адрес здесь совпадают
+        // намеренно, иначе первым расхождением окажется не ключ.
+        let env: Vec<String> = ["MODEL_PROVIDER=custom", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
     }

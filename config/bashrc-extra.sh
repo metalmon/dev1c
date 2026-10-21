@@ -1,5 +1,11 @@
 # bash additions for the 1C working environment.
 # Sourced from /etc/bash.bashrc, applies to every user.
+#
+# The file lives in /etc/profile.d, so /etc/profile walks it with sh as well —
+# and `shopt` below then prints "shopt: not found" into every login, the RDP
+# session's startup log included. Nothing here means anything outside bash, so
+# leave at once when that is not the shell.
+[ -n "${BASH_VERSION-}" ] || return 0
 
 # --- History ----------------------------------------------------------------
 # By default history is lost with parallel sessions and gets truncated. A

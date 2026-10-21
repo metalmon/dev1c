@@ -444,6 +444,26 @@ COPY config/gitea.desktop     /usr/share/applications/gitea.desktop
 COPY config/bashrc-extra.sh /etc/profile.d/zz-dev1c.sh
 RUN echo '. /etc/profile.d/zz-dev1c.sh' >> /etc/bash.bashrc
 
+# The system binaries in a workstation's PATH. Debian gives /usr/sbin and
+# /sbin to root only, and that is right for a shared machine where an ordinary
+# account is not an admin — but every account on this stand administers its own
+# stand and has passwordless sudo. The breakage that found this: apache2 lives
+# in /usr/sbin, 1c-connect calls it by name from $PATH, and the base's
+# publication did not come up on an RDP login although the package was there.
+#
+# Two levers, because PATH arrives by two different roads: /etc/profile (which
+# the RDP session reaches through /etc/xrdp/startwm.sh, and which reads
+# profile.d AFTER setting PATH itself), and ENV_PATH in /etc/login.defs, which
+# login and `runuser -l` use INSTEAD of /etc/profile. zsh needs no lever of its
+# own: it does not read /etc/profile on Debian (/etc/zsh/zprofile is empty) but
+# inherits the session's PATH.
+COPY config/profile-path.sh /etc/profile.d/10-dev1c-path.sh
+RUN sed -i 's|^ENV_PATH\tPATH=.*|ENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/games:/usr/games|' /etc/login.defs \
+    && grep -q '^ENV_PATH.*:/usr/sbin:' /etc/login.defs \
+    && useradd -m -s /bin/sh pathprobe \
+    && su -l pathprobe -c 'command -v usermod' \
+    && userdel -r pathprobe
+
 # 1C files open in Zed on double click. Without the association Thunar does not
 # know what to do with .bsl and asks to pick a program every time.
 # The visible comment stays Russian: it is shown in the file manager, and the

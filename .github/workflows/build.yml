@@ -262,7 +262,17 @@ jobs:
         run: |
           docker exec dev1c grep -q 'CUSTOM_API_URL=' /etc/environment && echo "ok: variables carried into /etc/environment"
           docker exec dev1c grep -q '"provider": "custom"' /home/dev1/.config/zed/settings.json && echo "ok: provider switched to custom"
-          ! docker exec dev1c grep -q 'PLACEHOLDER"' /home/dev1/.config/zed/settings.json || { echo "FAIL: placeholder left"; exit 1; }
+          # Файл несёт оба провайдера, llama.cpp и custom, а entrypoint
+          # подставляет адрес только того, чей адрес задан. Плейсхолдер в
+          # неработающей ветке никто не читает — так и написано в
+          # entrypoint.sh рядом с подстановкой. Поэтому проверяем не «нет ни
+          # одного PLACEHOLDER», а что подставлено у работающего провайдера:
+          # этот прогон задаёт CUSTOM_API_URL.
+          ! docker exec dev1c grep -q 'CUSTOM_API_URL_PLACEHOLDER' /home/dev1/.config/zed/settings.json \
+            || { echo "FAIL: адрес custom не подставлен"; exit 1; }
+          ! docker exec dev1c grep -q 'MODEL_NAME_PLACEHOLDER' /home/dev1/.config/zed/settings.json \
+            || { echo "FAIL: имя модели не подставлено"; exit 1; }
+          echo "ok: подстановка работающего провайдера выполнена"
 
       - name: 1C tooling works
         run: |

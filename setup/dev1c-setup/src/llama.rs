@@ -538,10 +538,31 @@ pub fn server_log(ctx: &Ctx) -> String {
     docker::probe(ctx, "journalctl", &["-u", SERVICE, "-n", "400", "--no-pager"]).map(|o| o.text).unwrap_or_default()
 }
 
+/// Движок — Docker Desktop? Он отличается от обычного Docker тем, что
+/// проброс порта у него идёт через свой форвардер, и тот знает только петлю
+/// и 0.0.0.0. `docker info` называет себя сам: в OperatingSystem у него
+/// «Docker Desktop». Неответ движка считаем «обычный Docker»: так ведёт себя
+/// сервер заказчика, и ошибаться в эту сторону безопаснее.
+fn docker_desktop(ctx: &Ctx) -> bool {
+    docker::probe(ctx, &ctx.engine(), &["info", "-f", "{{.OperatingSystem}}"])
+        .ok()
+        .filter(|o| o.ok())
+        .map(|o| o.text.to_lowercase().contains("docker desktop"))
+        .unwrap_or(false)
+}
+
 /// Где слушать: на Windows петля (Docker Desktop доставляет host.docker.internal
 /// до неё — замерено), на Linux адрес моста — виден контейнерам и машине, не сети.
 pub fn bind_host(ctx: &Ctx) -> String {
     if cfg!(windows) {
+        return "127.0.0.1".into();
+    }
+    // Docker Desktop — в том числе запущенный в WSL — пробрасывает порт
+    // только на 127.0.0.1 или 0.0.0.0: на адрес моста его /forwards/expose
+    // отвечает 500, и установка останавливается на контейнере модели. Для
+    // Windows это обойдено строкой выше, а линуксовая сборка под Docker
+    // Desktop в то условие не попадала. Спрашиваем движок прямо.
+    if docker_desktop(ctx) {
         return "127.0.0.1".into();
     }
     docker::probe(ctx, &ctx.engine(), &["network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"])

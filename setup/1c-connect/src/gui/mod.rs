@@ -140,6 +140,11 @@ pub struct Ui {
     /// хвостовое событие прежнего сеанса (`session_gen`): набор считается
     /// десяток секунд, и окно для гонки широкое.
     pub ready_gen: u64,
+    /// Поколение расчёта, который прямо сейчас держит защёлку
+    /// `ready_pending`. Не то же, что `ready_gen`: тот двигает и
+    /// «Проверить», ничего не запуская, — а защёлку обязан снимать
+    /// только свой поток (находка N1 повторного ревью).
+    pub ready_run: u64,
     /// Расчёт готовности идёт прямо сейчас — второй поток не заводится.
     pub ready_pending: bool,
     /// Когда начался идущий расчёт. Нужен сторожу `readiness_lost`: поток
@@ -945,7 +950,12 @@ pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
 /// detail, не в это имя. Пустой/корневой путь без компонента — путь целиком,
 /// лишь бы в диалоге не было пустой строки.
 fn base_label(path: &str) -> &str {
-    std::path::Path::new(path).file_name().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).unwrap_or(path)
+    // Режем по обоим разделителям сами, а не средствами системы: на Linux
+    // `Path::file_name` не считает `\` разделителем, и из `сервер\база`
+    // (такую базу коннектор принимает на обеих системах) имя не выделилось
+    // бы вовсе — в диалоге оказалась бы вся строка. Нашлось, когда тесты
+    // окна впервые пошли на Linux (CI, 2026-10-21).
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or(path)
 }
 
 /// Текст диалога подтверждения: два предложения (что сейчас, что станет
@@ -1059,7 +1069,6 @@ pub fn refresh_gate(ui: &mut Ui) {
     // гасить второй раз (и говорить второй раз) незачем.
     let was_open = ui.gate.is_none();
     ui.gate = gate_now(&ui.kit, &ui.cfg);
-    crate::bridge::set_gate_reason(ui.gate.clone());
     // Защёлкнувшийся замок гасит обслуживание — здесь, в единственном месте,
     // где он защёлкивается, а не у каждого вызывающего по-своему. Иначе
     // замок правил бы одни слова в отказе: человек правит toml руками,
@@ -1138,6 +1147,19 @@ pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
 /// (`cf_decompile`/`cf_load` через `vrunner-mcp`), на время отказа тоже не
 /// обслуживаются. Это следствие обещания карточки: красное значит «не
 /// работает», а не «работает наполовину».
+///
+/// **Красное не лечится само, и это нарочно** (ревью N5). Удавшаяся
+/// публикация (скажем, после «Сохранить») карточку не зеленит: `enabled`
+/// снят здесь, а поднимать обслуживание за спиной человека программа не
+/// умеет нигде — тем же правилом живёт замок («обратное ворота не делают:
+/// условие вернулось — переключатель отпирается сам, но обслуживание
+/// включает человек», см. `refresh_gate`). Красная карточка в это время не
+/// врёт: вызовы правда не обслуживаются. Выход один и он на виду —
+/// переключатель нарисован выключенным, причина в подвале и в подсказке, и
+/// один щелчок означает «попробовать снова». Не надо «чинить» это
+/// самозеленением: оно вернёт ровно тот дефект, против которого писан
+/// раздел спеки «Зелёный значит „работает“» — экран, обещающий работу,
+/// которую никто не подтверждал.
 fn publication_failure(ui: &mut Ui, why: &str) -> State {
     ui.enabled.store(false, Ordering::Relaxed);
     State::Failed(format!("публикация: {why}"))
@@ -1266,6 +1288,7 @@ fn start_readiness(ui: &mut Ui, now: Instant) -> Option<u64> {
     ui.ready_pending = true;
     ui.ready_since = Some(now);
     ui.ready_gen += 1;
+    ui.ready_run = ui.ready_gen;
     Some(ui.ready_gen)
 }
 
@@ -1279,8 +1302,21 @@ fn start_readiness(ui: &mut Ui, now: Instant) -> Option<u64> {
 /// сразу после того, как проверка нашла провалы. Отметку исполнит и снимет
 /// тот расчёт, который её и прочтёт (`start_readiness`).
 fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
-    ui.ready_pending = false;
-    ui.ready_since = None;
+    // Защёлку снимает только тот расчёт, который её держит (`ready_run`), —
+    // его ответ и значит «поток кончился». Раньше её снимал любой ответ, и
+    // опоздавший ответ потерянного потока отпирал защёлку живого: следующее
+    // событие поднимало вторую пробу инструментов поверх первой (находка
+    // N1). Ответ не-владельца защёлку не трогает вовсе; если владелец не
+    // ответит никогда, её подберёт сторож `readiness_lost`.
+    //
+    // Поколение вердикта (`ready_gen`) — отдельный вопрос: его двигает и
+    // «Проверить» (`verdict_from_checks`), ничего при этом не запуская.
+    // Поэтому ответ владельца защёлки вполне может оказаться устаревшим для
+    // вердикта — защёлку он снимет, а вердикт уже не его.
+    if gen == ui.ready_run {
+        ui.ready_pending = false;
+        ui.ready_since = None;
+    }
     if gen != ui.ready_gen {
         return false;
     }
@@ -1446,6 +1482,28 @@ fn sync_tray(ui: &mut Ui, now: Instant) {
         tray.set_tooltip(&view.tooltip);
     }
     ui.tray_shown = Some(view);
+    // Заодно и мост: причина отказа агенту меняется ровно тогда же, когда
+    // состояние значка (замок, отказ, выключили), и считать её в каждом из
+    // этих мест по-своему — значит снова разойтись. Раньше её писала одна
+    // `refresh_gate`, и после отказа публикации агент слышал «включите
+    // переключатель» про то, чего никто не выключал (находка N2).
+    crate::bridge::set_off_reason(off_reason(ui));
+}
+
+/// Почему обслуживание не идёт — одной строкой для отказа агенту. Порядок
+/// тот же, что у карточки: сперва замок (включать нечего), потом отказ,
+/// который обслуживание погасил (занят порт, не поднялась публикация).
+/// Обслуживание идёт — причины нет; выключил человек — причины тоже нет, и
+/// отказ советует прежнее «включите переключатель», что в этом случае и
+/// правда (`bridge::disabled_text`).
+fn off_reason(ui: &Ui) -> Option<String> {
+    if serving(ui) {
+        return None;
+    }
+    ui.gate.clone().or_else(|| match &ui.link {
+        State::Failed(why) => Some(why.clone()),
+        _ => None,
+    })
 }
 
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
@@ -2043,7 +2101,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // значение флага обслуживания уже обязано его слушаться.
     let gate = gate_now(&kit, &cfg);
     let serve_on_start = autostart_enabled(gate.as_deref(), autoconnect_on);
-    crate::bridge::set_gate_reason(gate.clone());
+    crate::bridge::set_off_reason(gate.clone());
     gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         // До `tray::build`: `install` красит и меню трея (`apply_menu_theme`),
@@ -2096,6 +2154,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             ready: Readiness::Unknown,
             ready_at: None,
             ready_gen: 0,
+            ready_run: 0,
             ready_pending: false,
             ready_since: None,
             ready_again: false,
@@ -2217,6 +2276,7 @@ impl Ui {
             ready: Readiness::Unknown,
             ready_at: None,
             ready_gen: 0,
+            ready_run: 0,
             ready_pending: false,
             ready_since: None,
             ready_again: false,
@@ -2254,7 +2314,7 @@ mod tests {
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
-        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, READINESS_LOST,
+        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, READINESS_LOST,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2352,10 +2412,19 @@ mod tests {
         assert!(matches!(ui.ready, Readiness::Warn(_)), "{:?}", ui.ready);
 
         // Ответ первого поколения приходит позже — вердикт он не трогает.
+        // И защёлку тоже: её держит другой, идущий прямо сейчас расчёт
+        // (`ready_run`), а снять её чужим ответом значило бы пустить вторую
+        // пробу инструментов поверх живой (находка N1 повторного ревью).
         ui.ready_pending = true;
+        ui.ready_since = Some(Instant::now());
+        ui.ready_run = 2;
         assert!(!apply_ready(&mut ui, 1, None));
         assert!(matches!(ui.ready, Readiness::Warn(_)), "{:?}", ui.ready);
-        assert!(!ui.ready_pending, "поток всё равно закончился");
+        assert!(ui.ready_pending, "чужой ответ снял защёлку с живого расчёта");
+        assert!(ui.ready_since.is_some(), "и отметку времени — сторожу нечем было бы мерить");
+        // Ответ владельца снимает и то, и другое.
+        assert!(!apply_ready(&mut ui, 2, None));
+        assert!(!ui.ready_pending && ui.ready_since.is_none());
     }
 
     /// Цепочка «Сохранить → публикация → операция» не должна поднимать три
@@ -3044,16 +3113,41 @@ mod tests {
     /// Проводка замка к мосту: пока он заперт, отказ агенту несёт причину.
     /// Сверяем не текст (в каталоге теста замок запирает что придётся, и
     /// соседние тесты пишут в тот же процессный глобал), а то, что причина
-    /// вообще доезжает — без строки в `refresh_gate` глобал остался бы пустым
-    /// и отказ советовал бы включить то, чего включить нельзя.
+    /// вообще доезжает — без неё отказ советовал бы включить то, чего
+    /// включить нельзя.
     #[test]
     fn the_gate_reason_reaches_the_bridge() {
         let mut ui = Ui::for_test();
         refresh_gate(&mut ui);
         assert!(ui.gate.is_some(), "в каталоге теста нет ни параметров, ни инструментов — замок заперт");
-        let reason = crate::bridge::gate_reason();
+        let reason = crate::bridge::off_reason();
         assert!(reason.is_some(), "причина замка не доехала до моста");
         assert!(crate::bridge::disabled_text(reason.as_deref()).starts_with(&format!("{}: ", crate::bridge::DISABLED_PREFIX)));
+    }
+
+    /// То же для отказа публикации (находка N2): человек ничего не выключал,
+    /// и «включите переключатель в окне» было бы советом не по делу —
+    /// агент должен услышать, что лежит публикация.
+    #[test]
+    fn a_failed_publication_tells_the_agent_what_really_happened() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.gate = None;
+        ui.enabled.store(true, Ordering::Relaxed);
+
+        let shown = publication_failure(&mut ui, "расширение не ответило");
+        ui.link = shown;
+        sync_tray(&mut ui, Instant::now());
+
+        let text = crate::bridge::disabled_text(crate::bridge::off_reason().as_deref());
+        assert!(text.contains("расширение не ответило"), "{text}");
+        assert_ne!(text, crate::bridge::DISABLED_TEXT, "агенту советуют включить то, чего никто не выключал");
+
+        // А когда выключил человек, прежний совет и есть правда.
+        ui.link = State::Off;
+        ui.bind_failed = None;
+        sync_tray(&mut ui, Instant::now());
+        assert_eq!(crate::bridge::disabled_text(crate::bridge::off_reason().as_deref()), crate::bridge::DISABLED_TEXT);
     }
 
     /// Проводка гашения: «Сохранить», убравшее холодное условие, снимает флаг,

@@ -85,26 +85,30 @@ pub const DISABLED_PREFIX: &str = "MCP выключены в 1c-connect";
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
-/// Причина холодного замка окна (`gui::gate::cold_gate`), пока он заперт.
-/// Порты в локальном режиме подняты всегда, и вызов инструмента получает
-/// отказ — но MCP не выключены человеком, их нельзя включить, и в тексте
+/// Почему обслуживание не идёт, пока оно не идёт: причина холодного замка
+/// (`gui::gate::cold_gate`) или отказ, который его погасил (занят порт, не
+/// поднялась публикация). Порты в локальном режиме подняты всегда, и вызов
+/// инструмента получает отказ — но MCP не выключены человеком, и в тексте
 /// отказа обязана ехать причина: иначе ни агент, ни человек не узнают, что
 /// править (спека, «Пока замок заперт, агент получает отказ с причиной»).
+/// Отказ публикации сюда доезжает по той же надобности: человек ничего не
+/// выключал, и «включите переключатель» было бы советом не по делу
+/// (находка N2 повторного ревью).
 ///
 /// ponytail: глобал на процесс — окно и мост живут в одном процессе, а
 /// `Rules` собирают четверо (окно, `listen`, тесты); понадобится второй
 /// независимый мост — поле `Arc` рядом с `enabled`.
-static GATE_REASON: Mutex<Option<String>> = Mutex::new(None);
+static OFF_REASON: Mutex<Option<String>> = Mutex::new(None);
 
 /// Окно пересчитало замок (`gui::refresh_gate`). Отравленный замок не
 /// страшен: читаем и пишем короткую строку, рвать из-за неё отказы агенту
 /// незачем.
-pub fn set_gate_reason(reason: Option<String>) {
-    *GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+pub fn set_off_reason(reason: Option<String>) {
+    *OFF_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
 }
 
-pub fn gate_reason() -> Option<String> {
-    GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone()
+pub fn off_reason() -> Option<String> {
+    OFF_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Текст отказа: без замка — прежний («включите переключатель»), с замком —
@@ -586,7 +590,7 @@ async fn handle_request(
     let off = expired || !rules.enabled.load(Ordering::Relaxed);
     // Текст считаем только когда он нужен: на включённом обслуживании каждый
     // кадр брал мьютекс замка и выделял строку, которую никто не читает.
-    let refusal_text = || if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(gate_reason().as_deref()) };
+    let refusal_text = || if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(off_reason().as_deref()) };
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
         // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
@@ -898,7 +902,7 @@ mod tests {
     use super::*;
     // Короткое имя нужно только тестам: рабочий код пишет полный путь.
     use crate::cfg::Cfg;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     /// The test binary itself as the child: `__echo_child` below runs one of
     /// the scripted shapes picked by an env var — a portable fake mcp-1c/
@@ -1201,7 +1205,7 @@ mod tests {
     /// Пока замок заперт, MCP не выключены человеком — их нельзя включить, и
     /// совет «включите переключатель» был бы ложью: в отказе едет причина.
     #[test]
-    fn the_refusal_carries_the_gate_reason() {
+    fn the_refusal_carries_the_off_reason() {
         assert_eq!(disabled_text(None), DISABLED_TEXT);
         assert_eq!(disabled_text(Some("не задан пользователь базы")), "MCP выключены в 1c-connect: не задан пользователь базы");
     }
@@ -1543,24 +1547,52 @@ mod tests {
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
             let _ = tx.send((code, err));
         }));
-        let (mut r, mut w) = tokio::io::split(ours);
+        let (r, mut w) = tokio::io::split(ours);
+        // Ждём сам маркер, а не «столько-то миллисекунд»: ребёнок здесь —
+        // целый процесс, и под нагрузкой (чужая сборка рядом, CI) он не
+        // укладывается в фиксированную паузу. Срок большой и один на обоих,
+        // падать по нему тест будет только на настоящей поломке.
+        let mut lines = tokio::io::BufReader::new(r).lines();
         let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(wait_line(&mut lines, |l| l.starts_with("MARKER ")).await, "MARKER UserA");
+        // Дожидаемся именно **ответа** на первый вызов: мост меняет ребёнка
+        // только на праздном соединении (`in_flight == 0`), и послать второй
+        // вызов раньше ответа значило бы отдать его старому ребёнку — не
+        // потому что рестарт сломан, а потому что мы поторопились.
+        wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":1")).await;
 
         let mut cfg_b = live.get().1;
         cfg_b.host.db_user = "UserB".into();
         live.set(cfg_b);
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            wait_line(&mut lines, |l| l.starts_with("MARKER ")).await,
+            "MARKER UserB",
+            "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах"
+        );
         w.shutdown().await.unwrap();
+    }
 
-        let mut got = String::new();
-        r.read_to_string(&mut got).await.unwrap();
-        let markers: Vec<&str> = got.lines().filter(|l| l.starts_with("MARKER ")).collect();
-        assert_eq!(markers, ["MARKER UserA", "MARKER UserB"], "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах: {got}");
+    /// Ближайшая строка ответа моста, подходящая под условие; всё прочее
+    /// пропускаем. Ждёт событие, а не «столько-то миллисекунд»: ребёнок
+    /// здесь — целый процесс, и под нагрузкой (чужая сборка рядом, CI) он не
+    /// укладывается в фиксированную паузу — прежние `sleep(300 мс)`/
+    /// `sleep(500 мс)` и давали мигающий тест. Срок большой: падать по нему
+    /// тест будет только на настоящей поломке.
+    async fn wait_line(lines: &mut tokio::io::Lines<tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>>, ok: impl Fn(&str) -> bool) -> String {
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(20), lines.next_line())
+                .await
+                .expect("мост молчит дольше 20 с")
+                .expect("чтение ответа моста")
+                .expect("поток кончился раньше ожидаемой строки");
+            if ok(&line) {
+                return line;
+            }
+        }
     }
 
     /// Не половина старой и половина новой конфигурации в одном вызове:

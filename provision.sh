@@ -221,11 +221,10 @@ kit)
     # коннектора команда берёт из CI сама; RUN_ID задаёт конкретный прогон,
     # DEV1C_FETCH=1 обновляет уже лежащие.
     #
-    # Порядок важен: pack.sh стирает каталог комплекта целиком — так и надо,
-    # иначе в нём копятся следы прошлых сборок. Поэтому всё готовится во
-    # временном каталоге, а раскладывает pack.sh сам, последним шагом считая
-    # суммы. Модель на это время отводится в сторону: двадцать гигабайт,
-    # которых больше нигде нет.
+    # Порядок важен: pack.sh стирает каталог комплекта (кроме model) — так и
+    # надо, иначе в нём копятся следы прошлых сборок. Поэтому всё готовится
+    # во временном каталоге, а раскладывает pack.sh сам, последним шагом
+    # считая суммы — по всему, что в комплекте, включая модель.
     out=${2:-dist/dev1c-kit-linux}
     bins=${3:-bins}
     llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:b11734}
@@ -308,25 +307,20 @@ kit)
             > "$tmp/nvidia/$f.part" && mv "$tmp/nvidia/$f.part" "$tmp/nvidia/$f"; }
     done
 
-    # Модель до раскладки лежит в стороне: pack.sh стирает каталог комплекта
-    # целиком. Он же её и внесёт — вместе с архивом платформы и до подсчёта
-    # сумм, иначе оба окажутся в комплекте без строки в checksums.txt.
-    keep="$tmp/model-keep"
+    # Модель лежит в комплекте и остаётся там: раскладка каталог model не
+    # трогает (pack.sh), так что переносить двадцать гигабайт никуда не надо
+    # — и суммы по ней посчитаются вместе со всем остальным.
     if [ -n "${MODEL_FILE:-}" ]; then
-        rm -rf "$keep"
-        mkdir -p "$keep"
-        cp "$MODEL_FILE" "$keep/"
-    elif [ -d "$out/model" ]; then
-        rm -rf "$keep"
-        mv "$out/model" "$keep"
-        say "модель отложена на время раскладки"
+        say "модель"
+        mkdir -p "$out/model"
+        cp "$MODEL_FILE" "$out/model/"
     fi
-    model=$(ls "$keep"/*.gguf 2>/dev/null | head -1 || true)
+    model=$(ls "$out"/model/*.gguf 2>/dev/null | head -1 || true)
     [ -n "$model" ] || die "нет модели: положите .gguf в $out/model или задайте MODEL_FILE"
 
     say "раскладка"
     NVIDIA_TOOLKIT_DIR="$tmp/nvidia" LLAMA_IMAGE="$tmp/dev1c-llama-image.tar.gz" \
-        PAYLOAD_ARCHIVE="$tmp/dev1c-1c-payload.tar.gz" MODEL_DIR="$keep" \
+        PAYLOAD_ARCHIVE="$tmp/dev1c-1c-payload.tar.gz" \
         OUT_DIR=$(dirname "$out") ./pack.sh --os linux "$tmp/dev1c-image.tar.gz" "$bins"
 
     # Путь к модели в параметрах: образец печатает его пустым, и заказчик на

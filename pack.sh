@@ -63,8 +63,12 @@ else
     KIT="$OUT/dev1c-kit"
 fi
 CONNECT="$OUT/1c-connect"
-rm -rf "$KIT"
+# Каталог комплекта стирается целиком — иначе в нём копятся следы прошлых
+# сборок. Кроме model: модель кладут туда руками, она весит двадцать
+# гигабайт, и стирать её за человека нечего. Так она и попадает в суммы
+# ниже, не переезжая никуда.
 mkdir -p "$KIT"
+find "$KIT" -mindepth 1 -maxdepth 1 ! -name model -exec rm -rf {} +
 if [ "$OS" = "windows" ]; then
     rm -rf "$CONNECT"
     mkdir -p "$CONNECT"
@@ -321,16 +325,6 @@ if [ -n "${PAYLOAD_ARCHIVE:-}" ]; then
     [ -f "$PAYLOAD_ARCHIVE" ] || { echo "pack.sh: PAYLOAD_ARCHIVE=$PAYLOAD_ARCHIVE not found" >&2; exit 1; }
     cp "$PAYLOAD_ARCHIVE" "$KIT/dev1c-1c-payload.tar.gz"
     echo "1C platform and demo base: $(du -h "$KIT/dev1c-1c-payload.tar.gz" | cut -f1)"
-fi
-
-# The model: the directory is MOVED in, not copied — twenty gigabytes have no
-# business travelling twice on the same disk. Also before the checksums: the
-# model is the one file whose truncation nobody notices until the server
-# refuses to start.
-if [ -n "${MODEL_DIR:-}" ]; then
-    [ -d "$MODEL_DIR" ] || { echo "pack.sh: MODEL_DIR=$MODEL_DIR not found" >&2; exit 1; }
-    mv "$MODEL_DIR" "$KIT/model"
-    echo "model: $(du -sh "$KIT/model" | cut -f1)"
 fi
 
 # Суммы считает он же — заказчик проверяет комплект тем же кодом.

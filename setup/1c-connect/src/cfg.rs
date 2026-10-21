@@ -31,6 +31,18 @@ pub fn derived_base_url(base_path: &str) -> String {
     format!("http://localhost/{}/hs/mcp-1c", if ok { name } else { "Buh" })
 }
 
+/// Номер рабочего места: `dev1`, `dev2` или `dev3`. От него считаются порты.
+pub fn number_of(workstation: &str) -> Option<u16> {
+    workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
+}
+
+/// Порт своего httpd по умолчанию: `8080 + N` рабочего места. Поля в окне
+/// нет — умолчание идёт за рабочим местом, а правку переносит
+/// `gui::carried_http_port`.
+pub fn derived_http_port(workstation: &str) -> u16 {
+    8080 + number_of(workstation).unwrap_or(1)
+}
+
 /// Каталог выгрузки по умолчанию: `<project>/src`. Поля в окне нет —
 /// умолчание идёт за каталогом проекта, а правку переносит
 /// `gui::carried_dump` (тот же приём, что у адреса публикации).
@@ -136,7 +148,7 @@ impl Cfg {
     }
 
     pub fn number(&self) -> Option<u16> {
-        self.host.workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
+        number_of(&self.host.workstation)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -206,7 +218,7 @@ impl Cfg {
 
     /// Порт своего httpd в режиме `auto`: `http_port`, иначе `8080 + N`.
     pub fn http_port(&self) -> u16 {
-        self.host.http_port.unwrap_or(8080 + self.number().unwrap_or(1))
+        self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation))
     }
 
     /// Адрес публикации: в режиме `auto` считает от своего httpd (`http_port`),

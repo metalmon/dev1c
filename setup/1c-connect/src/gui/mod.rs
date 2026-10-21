@@ -820,6 +820,25 @@ pub fn carried_dump(saved: &Host, new_project: &str) -> String {
     }
 }
 
+/// Порт своей публикации для записи — тот же приём, что у каталога выгрузки:
+/// `install` дописывает выведенный `8080 + N` в toml, и записанное умолчание
+/// обязано и дальше идти за рабочим местом. Свой порт (отличается от
+/// выведенного) смену рабочего места переживает; незаданный остаётся
+/// незаданным.
+///
+/// Переезд не молчаливый: новый порт может оказаться занят — например, вторым
+/// коннектором другого рабочего места на этой же машине, — поэтому
+/// `save_host` пишет о переезде строку в журнал, а поднять HTTP-сервис на
+/// занятом порту всё равно не выйдет, и операция публикации скажет, кто его
+/// держит.
+pub fn carried_http_port(saved: &Host, new_workstation: &str) -> Option<u16> {
+    if saved.http_port == Some(cfg::derived_http_port(&saved.workstation)) {
+        Some(cfg::derived_http_port(new_workstation))
+    } else {
+        saved.http_port
+    }
+}
+
 /// Поля, что решают, какую базу обслуживает публикация/MCP — путь, логин и
 /// пароль дескриптора `publication::vrd`. Единый список: `save_host` смотрит
 /// на него, не поднять ли публикацию заново, а подтверждение перед
@@ -833,8 +852,9 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 /// режима публикации, её порта, адреса Gitea среды и адреса публикации в окне
 /// нет (правятся в toml): берём их из текущих параметров, иначе пустые
 /// значения из формы затёрли бы toml. Каталог проекта — из формы, и за ним
-/// едут два умолчания: адрес публикации (`carried_base_url`) и каталог
-/// выгрузки (`carried_dump`).
+/// едут умолчания: адрес публикации (`carried_base_url`), каталог выгрузки
+/// (`carried_dump`) и — за рабочим местом — порт публикации
+/// (`carried_http_port`).
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
@@ -842,8 +862,14 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
-    host.http_port = ui.cfg.host.http_port;
+    host.http_port = carried_http_port(&ui.cfg.host, &host.workstation);
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
+    // Переезд порта публикации за рабочим местом — не молчком: новый порт
+    // может быть занят (см. `carried_http_port`).
+    let port_moved = match (old_host.http_port, host.http_port) {
+        (Some(from), Some(to)) if from != to => Some((from, to)),
+        _ => None,
+    };
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
@@ -861,6 +887,9 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // лишней строкой в журнал и лишним миганием портов.
     let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
     ui.cfg = cfg;
+    if let Some((from, to)) = port_moved {
+        note_line(ui, Line { kind: Kind::Warn, text: format!("порт публикации переехал за рабочим местом: {from} → {to}") });
+    }
     // Публикация не должна молчать про старую базу: иначе агент отвечает из
     // прежней, пока кто-нибудь не перезапустит HTTP-сервис руками (находка
     // целостного ревью) — до следующего вызова она обязана смотреть на
@@ -2337,7 +2366,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, check_lines, check_status, confirm_gate_text,
+        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
@@ -2750,6 +2779,32 @@ mod tests {
         // Пустое поле остаётся пустым: умолчание и так считается при чтении.
         saved.dump = String::new();
         assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
+    }
+
+    /// Та же ловушка у порта публикации: записанный `8080 + N` идёт за
+    /// рабочим местом, свой порт остаётся, незаданный — незаданным.
+    #[test]
+    fn carried_http_port_follows_the_workstation_unless_it_was_chosen_by_hand() {
+        let mut saved = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port("dev1")), ..Host::default() };
+        assert_eq!(carried_http_port(&saved, "dev2"), Some(8082));
+        saved.http_port = Some(9000);
+        assert_eq!(carried_http_port(&saved, "dev2"), Some(9000));
+        saved.http_port = None;
+        assert_eq!(carried_http_port(&saved, "dev2"), None);
+    }
+
+    /// Переезд порта не молчком: новый порт может быть занят, и человек
+    /// должен прочитать про переезд, а не искать, почему публикация упала.
+    #[test]
+    fn saving_a_new_workstation_moves_a_derived_port_and_says_so() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
+        let mut host = ui.cfg.host.clone();
+        host.workstation = "dev3".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.host.http_port, Some(8083));
+        assert_eq!(ui.cfg.base_url(), "http://localhost:8083/hs/mcp-1c");
+        assert!(ui.log.iter().any(|l| l.text.contains("порт публикации переехал") && l.text.contains("8083")), "{:?}", ui.log);
     }
 
     /// Та же ловушка на живом «Сохранить»: записанный выведенный каталог

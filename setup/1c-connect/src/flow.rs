@@ -283,11 +283,33 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
     f(&d, &log)
 }
 
+/// Отказ до начала, а не после минут работы: `cf_decompile` каталогу проекта
+/// рад и без git, поэтому на неразложенном проекте выгрузка шла целиком, а
+/// падала на отправке — и падала сырым git («не найден git репозиторий …
+/// GIT_DISCOVERY_ACROSS_FILESYSTEM»). Живой случай заказчика 2026-10-21.
+/// Причина и совет — те же слова, что у `project::push` (`not_laid_out`): один
+/// отказ на всех, кто его называет.
+///
+/// `--dry-run` не запираем: план на неразложенном проекте печатать можно, он
+/// ничего не делает и как раз показывает, чего не хватает.
+fn laid_out(ctx: &Ctx) -> Result<(), String> {
+    if ctx.dry_run {
+        return Ok(());
+    }
+    let p = crate::project::Project::from_cfg(&ctx.cfg, &crate::ops_host::tools_dir());
+    if p.dir.join(".git").exists() {
+        return Ok(());
+    }
+    Err(crate::project::not_laid_out(&p.dir))
+}
+
 pub fn export(ctx: &Ctx, message: &str, cancel: &AtomicBool) -> Result<String, String> {
+    laid_out(ctx)?;
     with_real(ctx, cancel, |d, log| export_with(d, message, log))
 }
 
 pub fn import(ctx: &Ctx, cancel: &AtomicBool) -> Result<String, String> {
+    laid_out(ctx)?;
     with_real(ctx, cancel, |d, log| import_with(d, log))
 }
 

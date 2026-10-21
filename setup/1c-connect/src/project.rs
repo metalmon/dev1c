@@ -273,11 +273,28 @@ fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, 
 /// создаст первый push) — тоже «нет ветки», а не ошибка.
 /// `origin` всегда равен настроенному адресу: каталог мог быть git-инициализирован
 /// руками или указывать на старую среду, а status/pull/push говорят про `origin`.
+/// Почему круг не идёт, когда каталог проекта не разложен — словами и один
+/// раз на всех. Живой случай 2026-10-21 (заказчик на стенде): `install` не
+/// выполняли, `cf_decompile` отработал (ему хватает каталога), а на отправке
+/// человек получил сырой git: «fatal: не найден git репозиторий … Останавливаю
+/// поиск на границе файловой системы (GIT_DISCOVERY_ACROSS_FILESYSTEM не
+/// установлен)». Проверка в это время говорила правду — «проект не разложен,
+/// 1c-connect install (host.project)», — а операция сообщала о внутренностях
+/// git вместо причины.
+pub fn not_laid_out(dir: &std::path::Path) -> String {
+    format!("{} не разложен: нет git-репозитория — нажмите «Установить» в окне или выполните 1c-connect install (host.project)", dir.display())
+}
+
 fn ensure_origin(p: &Project) -> Result<(), String> {
     // Один заслон на `init`, `pull` и `push`: пустой адрес не уезжает в
     // `git remote set-url` и не превращается в «origin не отвечает».
     if p.remote.is_empty() {
         return Err(crate::cfg::no_gitea());
+    }
+    // Каталог без `.git` — не «ошибка git», а невыполненная установка; `init`
+    // сюда приходит уже после `git init`, поэтому заслон общий.
+    if !p.dir.join(".git").exists() {
+        return Err(not_laid_out(&p.dir));
     }
     match git(p, &["remote", "get-url", "origin"])? {
         Out { ok: true, text } if text.trim() == p.remote => Ok(()),
@@ -757,6 +774,23 @@ mod tests {
 
     /// Файл анализатора уезжает вместе с выгрузкой: он нужен второй стороне,
     /// и корень проекта у агента обязан быть пригодным сам, без его действий.
+    /// Отправка на неразложенном проекте объясняет причину, а не пересказывает
+    /// внутренности git. Живой случай 2026-10-21: выгрузка прошла, а человек
+    /// прочитал «не найден git репозиторий … GIT_DISCOVERY_ACROSS_FILESYSTEM».
+    #[test]
+    fn push_on_an_unprepared_project_names_the_cause() {
+        let t = tempdir::Dir::new();
+        let dir = t.path().join("project");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev1".into(), remote: "http://localhost:3000/dev1c/project.git".into(), login: "dev1".into() };
+        let e = push(&p, "выгрузка", &AtomicBool::new(false)).unwrap_err();
+        assert!(e.contains("не разложен") && e.contains("install"), "{e}");
+        assert!(!e.contains("GIT_DISCOVERY"), "сырой git наружу не идёт: {e}");
+        // Та же причина и у приёма ветки.
+        let e = pull(&p, &AtomicBool::new(false)).unwrap_err();
+        assert!(e.contains("не разложен"), "{e}");
+    }
+
     #[test]
     fn the_analyzer_file_goes_into_the_commit() {
         let (_t, p) = fixture();

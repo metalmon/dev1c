@@ -548,7 +548,10 @@ mod tests {
     #[test]
     fn the_version_comes_from_either_layout() {
         assert_eq!(platform_version_from_exe(Path::new("/opt/1cv8/x86_64/8.5.1.1150/1cv8")).as_deref(), Some("8.5.1.1150"));
-        assert_eq!(platform_version_from_exe(Path::new(r"C:\Program Files\1cv8\8.3.27.1508\bin\1cv8.exe")).as_deref(), Some("8.3.27.1508"));
+        // Раскладка с `bin` — тем же путём с косой чертой: строка Windows с
+        // обратными косыми на Linux не разбирается вовсе (у `PathBuf` там нет
+        // разделителей), и тест упал бы в CI, а не поймал ошибку.
+        assert_eq!(platform_version_from_exe(Path::new("C:/Program Files/1cv8/8.3.27.1508/bin/1cv8.exe")).as_deref(), Some("8.3.27.1508"));
         // И версия должна быть пригодна таблице формата — иначе отметка
         // выгрузки снова пропадёт без слова.
         assert!(format_for_platform(&platform_version_from_exe(Path::new("/opt/1cv8t/x86_64/8.3.27.1508/1cv8t")).unwrap()).is_some());

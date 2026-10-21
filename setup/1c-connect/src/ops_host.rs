@@ -334,7 +334,7 @@ impl Op<Ctx> for Tools {
         ctx.ok(o.text.trim().to_string());
         std::fs::copy(ctx.kit.root.join(VERSION_FILE), to.join(VERSION_FILE)).context("отметка версии")?;
         if cfg!(windows) {
-            let exe = find_1cv8();
+            let exe = find_1cv8(&ctx.cfg);
             if let Some(platform) = exe.as_deref().and_then(|exe| exe.parent()).and_then(|bin| bin.parent()) {
                 match shadow_platform(platform, &to) {
                     Ok(shadow_dir) if shadow_dir.starts_with(&to) => match add_installed_location(&one_c_estart_cfg(), &shadow_dir) {
@@ -441,13 +441,71 @@ fn platform_from(dir: &Path) -> Option<PathBuf> {
     platform_exe_names().into_iter().map(|n| dir.join(n)).find(|p| p.exists())
 }
 
-/// Путь к исполняемому файлу платформы: самая новая версия (обычная или учебная) из
-/// стандартных каталогов, либо принудительно — из `ONEC_PLATFORM`.
-pub fn find_1cv8() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(ONEC_PLATFORM) {
-        return platform_from(&PathBuf::from(dir));
+/// Что нашлось на диске: стандартные каталоги плюс каталоги установки из
+/// `1CEStart.cfg` (их пишет и наш же `install` — теневая учебная платформа
+/// лежит вне `Program Files`). Дубли сворачиваются по `canonicalize`.
+pub fn installed_platforms() -> Vec<(String, PathBuf)> {
+    let mut found = scan_1cv8();
+    for dir in starter_locations() {
+        // Строка может называть и корень установки, и сам каталог версии:
+        // смотрим оба, лишнего это не даёт — дубли свернёт `dedup_canonical`.
+        scan_root(&dir, &mut found);
+        if let (Some(exe), Some(version)) = (platform_from(&version_exe_dir(&dir)), dir.file_name().and_then(|n| n.to_str())) {
+            found.push((version.to_string(), exe));
+        }
     }
-    pick_version(dedup_canonical(scan_1cv8()))
+    dedup_canonical(found)
+}
+
+/// Каталоги установки из файлов лаунчера — единственное, зачем `ops_host`
+/// читает их сам (разбор строк живёт в `platform`).
+fn starter_locations() -> Vec<PathBuf> {
+    if !cfg!(windows) {
+        return Vec::new();
+    }
+    read_1cestart_cfg(&one_c_estart_cfg()).map(|t| crate::platform::installed_locations(&t)).unwrap_or_default()
+}
+
+/// Выбранная платформа и **почему** она: лестница 1С
+/// (`platform::resolve`). Переменная `ONEC_PLATFORM` стоит выше лестницы и
+/// разбирается здесь: она называет каталог с исполняемым файлом, а не
+/// версию, и в списке установленного её может не быть вовсе.
+pub fn platform_choice(cfg: &crate::cfg::Cfg) -> Result<crate::platform::Choice, String> {
+    platform_report(cfg).0
+}
+
+/// То же и заодно **другие** установленные версии — то, что факт проверки
+/// обязан назвать: человек должен видеть, что на машине лежит ещё, иначе
+/// «взяли новейшую» звучит как «выбора не было». Один обход диска на оба
+/// ответа.
+pub fn platform_report(cfg: &crate::cfg::Cfg) -> (Result<crate::platform::Choice, String>, Vec<String>) {
+    use crate::platform::{Choice, Why};
+    if let Some(dir) = std::env::var_os(ONEC_PLATFORM) {
+        let dir = PathBuf::from(dir);
+        let choice = platform_from(&dir)
+            .ok_or_else(|| format!("в каталоге {} из ONEC_PLATFORM нет исполняемого файла платформы", dir.display()))
+            .map(|exe| {
+                let version = crate::flow::platform_version_from_exe(&exe).unwrap_or_else(|| "неизвестна".into());
+                Choice { exe, version, why: Why::Env }
+            });
+        // Переменная перекрывает поиск целиком — остального на машине для
+        // этого выбора не существует, и называть его было бы лишним шумом.
+        return (choice, Vec::new());
+    }
+    let installed = installed_platforms();
+    let choice = crate::platform::resolve(cfg, &installed, &crate::platform::pins_on_disk(cfg));
+    let chosen = choice.as_ref().ok().map(|c| c.version.clone());
+    let mut others: Vec<String> = installed.into_iter().map(|(v, _)| v).filter(|v| Some(v) != chosen.as_ref()).collect();
+    others.sort_by_key(|v| version_key(v));
+    others.dedup();
+    (choice, others)
+}
+
+/// Путь к исполняемому файлу платформы по той же лестнице. Параметров под
+/// рукой нет у всех вызывающих, поэтому читаем их сами; выбор от этого не
+/// меняется — поле `platform` всё равно берётся из файла.
+pub fn find_1cv8(cfg: &crate::cfg::Cfg) -> Option<PathBuf> {
+    platform_choice(cfg).ok().map(|c| c.exe)
 }
 
 /// `xvfb-run` в `PATH`. Обходим каталоги сами, тем же приёмом, что
@@ -755,7 +813,7 @@ impl Op<Ctx> for Env {
         vec![Action::new("проверить платформу 1С, mcp-1c в комплекте и адрес среды")]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        match find_1cv8() {
+        match find_1cv8(&ctx.cfg) {
             Some(p) => ctx.ok(format!("платформа: {}", p.display())),
             None => anyhow::bail!("платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM"),
         }
@@ -769,6 +827,23 @@ impl Op<Ctx> for Env {
         ctx.ok(format!("среда: {}", ctx.cfg.host.server));
         Ok(())
     }
+}
+
+/// Строки платформы для `bsl-analyzer.toml` этой машины: версия от найденной
+/// платформы, линия каталога — из кэша анализатора, а без кэша встроенная
+/// (`crate::analyzer`). Платформы нет — пусто, и файл не появляется.
+pub fn analyzer_lines(cfg: &crate::cfg::Cfg) -> Vec<(&'static str, String)> {
+    analyzer_lines_of(find_1cv8(cfg).as_deref())
+}
+
+/// То же, но по уже найденной платформе: проверка ищет её для своего факта и
+/// незачем сканировать каталоги второй раз (находка ревью задачи 36).
+pub fn analyzer_lines_of(exe: Option<&std::path::Path>) -> Vec<(&'static str, String)> {
+    let Some(version) = exe.and_then(crate::flow::platform_version_from_exe) else {
+        return Vec::new();
+    };
+    let catalogue = crate::analyzer::cache_dir().map(|c| crate::analyzer::catalogue_line(&c)).unwrap_or_else(|| crate::analyzer::BUNDLED.to_string());
+    crate::analyzer::expected(&version, &catalogue)
 }
 
 struct ProjectOp;
@@ -792,14 +867,17 @@ impl Op<Ctx> for ProjectOp {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
-        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json", p.dir.display(), p.branch, p.remote))]
+        let analyzer = analyzer_lines(&ctx.cfg);
+        let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
+        let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
+        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json{bsl}", p.dir.display(), p.branch, p.remote))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
         }
         let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
-        crate::project::init(&p, &tools_dir(), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+        crate::project::init(&p, &tools_dir(), &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
     }
     // uninstall leaves the project alone: it is the person's work.
 }
@@ -1008,7 +1086,7 @@ impl Op<Ctx> for Extension {
         if !ctx.dry_run {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        let Some(v8) = find_1cv8() else { anyhow::bail!("1cv8.exe не найден") };
+        let Some(v8) = find_1cv8(&ctx.cfg) else { anyhow::bail!("1cv8.exe не найден") };
         let h = &ctx.cfg.host;
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);

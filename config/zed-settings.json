@@ -237,6 +237,12 @@
         "context_servers": {
           "bsl-reference": { "tools": { "its_help": false } },
           "vrunner": {
+            // Список согласован тестом рядом с самим списком инструментов:
+            // setup/1c-connect/src/cfg.rs, CHANGES_STATE и
+            // the_review_profile_mutes_every_tool_that_changes_state. Новый
+            // инструмент моста приходит включённым (enable_all_context_servers),
+            // и забыть погасить его тут можно было молча — теперь это падение
+            // тестов коннектора, а не находка в работе агента.
             "tools": {
               "cf_load": false,
               "cf_decompile": false,
@@ -248,7 +254,18 @@
               "test_yaxunit": false,
               "task_cancel": false,
               "cache_show": false,
-              "cache_clear": false
+              "cache_clear": false,
+              // Перезаписывает src/ — десятки тысяч файлов и минуты; на
+              // разборе это не сбор факта, а правка дерева.
+              "cf_decompile": false,
+              // Забирает ветку поверх дерева: тот же случай.
+              "project_pull": false,
+              // Тесты исполняют код по базе: данные после них не те, что до.
+              "test_xunit": false,
+              "test_vanessa": false,
+              "test_yaxunit": false,
+              // Снимает уже идущую задачу — чужую работу.
+              "task_cancel": false
             }
           }
         }

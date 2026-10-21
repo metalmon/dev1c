@@ -1004,6 +1004,77 @@ git commit -m "Комплект в образе: один общий тольк�
 - [ ] **Шаг 6: живьём.** В контейнере: рабочее место без поля — проверка говорит «адрес среды не задан» (а не «Gitea не отвечает» по выдуманному порту); после `install` поле на месте и проверка зелёная.
 - [ ] **Шаг 7: коммит.** `git commit -m "Адрес среды не выводится при каждом чтении: его записывают при настройке"`
 
+### Task 36: Строка платформы для анализатора — в корне проекта
+
+Спека, раздел «Строка платформы для анализатора: её пишет коннектор».
+Смысл ключа узкий: он гасит ложные «нет такого имени», когда платформа
+клиента новее каталога анализатора, и больше ничего не умеет. Поэтому
+пишем ровно в этом случае.
+
+**Files:**
+- Create: `setup/1c-connect/src/analyzer.rs`
+- Modify: `setup/1c-connect/src/lib.rs` (`mod analyzer;`)
+- Modify: `setup/1c-connect/src/project.rs` (`init` кладёт файл рядом с `.gitattributes`)
+- Modify: `setup/1c-connect/src/ops_host.rs` (`ProjectOp` передаёт найденную платформу)
+- Modify: `setup/1c-connect/src/verify.rs` (факт о расхождении строки)
+- Test: inline в `analyzer.rs`, `project.rs`, `verify.rs`
+
+**Interfaces:**
+- Produces: `analyzer::FILE: &str = "bsl-analyzer.toml"`, `analyzer::BUNDLED: &str = "8.3.27"` — встроенная линия фактов анализатора 0.3.2 в образе (замер 2026-10-21; сверять при обновлении анализатора).
+- Produces: `analyzer::catalogue_line(home: &Path) -> String` — `platform-help/auto/current` → `auto/<хеш>/manifest.json` → `platform_version`, три компонента; манифеста нет или он не читается — `BUNDLED`.
+- Produces: `analyzer::line_to_write(client: &str, catalogue: &str) -> Option<String>` — три компонента версии клиента, если она **строго новее** каталога; иначе `None`. Сравнение покомпонентно числами (как `flow::parse_format`): `8.3.9` старее `8.3.27`.
+- Produces: `analyzer::ensure(project: &Path, line: &str) -> Result<bool, String>` — `true`, если ключ записан; `false`, если файл уже содержит `target_platform_version` (чужую строку не переписываем). Файла нет — создаём с комментарием, откуда строка; файл есть без ключа — правим на месте через `common::toml_render::set(text, "", "target_platform_version", …)`.
+- Produces: `verify::analyzer_fact(in_file: Option<&str>, client: Option<&str>, catalogue: &str) -> Check` — провал только при расхождении: в файле строка, которая не равна ожидаемой по правилу (устарела после смены платформы). Нет файла и ключ не нужен — `pass` со словами «ключ не нужен: платформа не новее каталога».
+- Consumes: `ops_host::find_1cv8()`, `flow::our_platform_version()` (сделать `pub(crate)`).
+
+- [ ] **Шаг 1: падающие тесты.** `analyzer`: `a_newer_client_gets_the_key` (клиент `8.5.1.1150`, каталог `8.3.27` → `Some("8.5.1")`), `an_equal_or_older_client_gets_nothing` (`8.3.27.1508` и `8.3.21.1234` → `None`), `versions_compare_as_numbers_not_text` (`8.3.9` против `8.3.27`), `the_manifest_names_the_catalogue_line` (временный каталог с `current` и `manifest.json` → `8.3.27`), `without_a_manifest_the_bundled_line_stands`, `a_written_line_is_left_alone` (файл с чужим `target_platform_version` → `Ok(false)`, текст файла не изменился), `an_existing_file_keeps_its_other_keys` (файл с комментарием и своим ключом → наш ключ дописан, остальное целое). `project`: `init_writes_the_analyzer_line_when_the_client_is_newer`. `verify`: `a_stale_analyzer_line_is_named_as_such`.
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib analyzer`).
+- [ ] **Шаг 3: модуль.** `analyzer.rs` по интерфейсам выше; `manifest.json` читаем `serde_json` (уже в зависимостях), на любой осечке — `BUNDLED`, без паники и без сети.
+- [ ] **Шаг 4: раскладка.** `project::init` получает линию клиента аргументом (`Option<&str>`) и при `Some` кладёт файл; `ProjectOp::apply` берёт её из `flow::our_platform_version()`, `plan()` называет файл в строке операции. Платформы нет — файла нет, и операция об этом не врёт.
+- [ ] **Шаг 5: факт.** `verify::analyzer_fact` в порядок фактов после `PLATFORM`; строку из файла читаем тем же чтением, что `ensure` (одна функция разбора, не две).
+- [ ] **Шаг 6: тесты проходят**, `cargo check -p onec-connect --all-targets` и `--no-default-features` чисто.
+- [ ] **Шаг 7: живьём в контейнере.** `install` на рабочем месте: в корне проекта появился `bsl-analyzer.toml` со строкой платформы (на 8.5 — `8.5.1`, на 8.3.27 — файла нет, и факт говорит «ключ не нужен»); повторный `install` файл не меняет; правка строки человеком переживает `install`, а факт при расхождении красный.
+- [ ] **Шаг 8: коммит.** `git commit -m "Строка платформы для анализатора: коннектор пишет её в корень проекта"`
+
+### Task 37: Версия платформы по лестнице 1С, одна на всех
+
+Спека, раздел «Версия платформы: та же, что выберет 1С, а не просто самая
+новая». Сегодня `find_1cv8` берёт новейшую, а vanessa-runner выбирает
+отдельно от нас: на машине с тремя версиями это две платформы в одном
+круге работы.
+
+**Files:**
+- Create: `setup/1c-connect/src/platform.rs`
+- Modify: `setup/1c-connect/src/lib.rs` (`pub mod platform;`)
+- Modify: `setup/1c-connect/src/cfg.rs` (поле `platform`, валидация, отчёт)
+- Modify: `setup/1c-connect/src/ops_host.rs` (`find_1cv8` — обёртка над лестницей)
+- Modify: `setup/1c-connect/src/bridge.rs` (`VRUNNER_V8VERSION` в `vrunner_command`)
+- Modify: `setup/1c-connect/src/verify.rs` (факт «платформа 1С» называет причину и другие установленные)
+- Modify: `setup/1c-connect/src/gui/gate.rs` (невыполнимый пин запирает переключатель)
+- Test: inline в `platform.rs`, `cfg.rs`, `verify.rs`, `gate.rs`
+
+**Interfaces:**
+- Produces: `platform::Choice { exe: PathBuf, version: String, why: Why }`, где `Why` — `Env`, `Field`, `BasePin`, `DefaultVersion`, `Newest`; `Display` для `Why` даёт слова факта («переменная ONEC_PLATFORM», «поле platform в 1c-connect.toml», «пин базы в ibases.v8i», «DefaultVersion в 1CEStart.cfg», «самая новая из установленных»).
+- Produces: `platform::resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Result<Choice, String>` — **чистая**: установленное и пины ей передают. `Err` — пин есть, а версии под него нет (список установленных в тексте ошибки).
+- Produces: `platform::Pins { base: Option<String>, default: Option<String> }` и два читателя: `platform::base_pin(v8i_text: &str, base: &str) -> Option<String>` (строку базы ищем по `Connect=File="…"` для файловой, по `Srvr="…";Ref="…"` для серверной; ключ `Version=`), `platform::default_version(cfg_text: &str, mask_of: &str) -> Option<String>` (строки `DefaultVersion=<маска>=<версия>`, пользовательский файл перекрывает общий).
+- Produces: `platform::matches_mask(version: &str, mask: &str) -> bool` — префикс по компонентам (`8.3` подходит `8.3.21.1484`).
+- Produces: `platform::installed_locations(cfg_text: &str) -> Vec<PathBuf>` — строки `InstalledLocation=`; к стандартным каталогам добавляются, а не заменяют их.
+- Produces: `platform::pins_on_disk(cfg: &Cfg) -> Pins` — единственная функция, которая ходит на диск: `ibases.v8i` и оба `1CEStart.cfg` (на Windows UTF-16LE с BOM — читать тем же `read_1cestart_cfg`, что уже есть; `ibases.v8i` — UTF-8 с BOM).
+- Consumes: `ops_host::version_key` (числовое сравнение компонентов), `ops_host::read_1cestart_cfg`, `ops_host::scan_1cv8`.
+- Produces: `verify::platform_fact(choice: &Result<Choice, String>, others: &[String]) -> Check` — в удаче называет версию, причину и другие установленные версии; в отказе — чего не хватает.
+
+- [ ] **Шаг 1: падающие тесты лестницы.** `platform`: `the_field_beats_the_pins` (поле `platform` сильнее пина базы), `the_base_pin_beats_the_default_version`, `a_mask_takes_the_newest_match` (`8.3` при 8.3.21 и 8.3.27 → 8.3.27), `versions_compare_as_numbers` (`8.3.9` старее `8.3.27`), `an_unsatisfiable_pin_is_an_error_not_the_newest` (пин `8.2.19`, установлены 8.3.27 и 8.5.1 → `Err`, и в тексте обе установленные), `no_pins_means_the_newest`, `the_env_variable_wins_over_everything`.
+- [ ] **Шаг 2: падающие тесты читателей.** `base_pin_finds_our_file_base` (две базы в `ibases.v8i`, у нашей `Version=8.3.21`), `base_pin_matches_a_server_base` (`Srvr="srv-1c";Ref="buh"`), `a_base_absent_from_the_list_has_no_pin`, `default_version_reads_the_mask_form` (`DefaultVersion=8.3=8.3.21.1484`), `the_user_cfg_overrides_the_common_one`, `installed_locations_add_to_the_standard_dirs`. Образцы текстов — как в живых файлах: BOM на месте, разделители строк `
+` в `1CEStart.cfg`.
+- [ ] **Шаг 3: тесты падают** (`cargo test -p onec-connect --lib platform`).
+- [ ] **Шаг 4: модуль.** `platform.rs` по интерфейсам выше. Чистые функции отдельно от чтения диска — весь выбор проверяется тестом, а не живой машиной.
+- [ ] **Шаг 5: поле в toml.** `platform` в `[host]`, необязательное, пустое по умолчанию; валидация — только непустая строка вида версии или маски; в отчёте `cfg_for_report` показывается как есть.
+- [ ] **Шаг 6: один выбор на всех.** `find_1cv8` отдаёт `resolve(...).ok().map(|c| c.exe)` (поведение прежних вызывающих не меняется), `vrunner_command` получает `VRUNNER_V8VERSION` с разрешённой версией. Отметка `.dev1c-dump` и строка для анализатора берут версию оттуда же — по построению, а не по совпадению.
+- [ ] **Шаг 7: факт и замок.** Факт «платформа 1С» называет версию, причину и другие установленные; невыполнимый пин — провал факта и причина холодного замка («версия 8.2.19 из 1c-connect.toml не установлена»), а не молчаливый откат на новейшую.
+- [ ] **Шаг 8: тесты проходят**, `cargo check -p onec-connect --all-targets` и `--no-default-features` чисто.
+- [ ] **Шаг 9: живьём в контейнере.** Версия одна, поэтому проверяем сами правила: `ONEC_PLATFORM` на несуществующий каталог — отказ словами; поле `platform = "8.3.27"` — факт говорит «поле platform», круг `install`/`export` проходит; поле `platform = "8.2.19"` — переключатель заперт, причина названа, и `export` не запускается; `Version=8.3.27` в `ibases.v8i` стенда — факт говорит «пин базы». Проверить, что `VRUNNER_V8VERSION` доходит: `cf_decompile` в отладочном логе vanessa-runner печатает «Установка версии платформы».
+- [ ] **Шаг 10: коммит.** `git commit -m "Версия платформы выбирается по лестнице 1С, и она одна на всех"`
+
 ## Что остаётся исполнителю
 
 - Как делить `session.rs`: оставить `Serve` в нём или вынести в свой модуль — по размеру кода после задачи 3.

@@ -3,7 +3,7 @@
 //! среда (Gitea) → что мешает загрузке → туннель. Человек читает сверху
 //! вниз и останавливается на первом провале.
 
-use crate::ops_host::{find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
+use crate::ops_host::{mcp_exe, tools_dir, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -13,6 +13,7 @@ use common::{Phase, Runner};
 const PARAMS: &str = "параметры";
 const PLATFORM: &str = "платформа 1С";
 const DISPLAY: &str = "экран для конфигуратора";
+const ANALYZER: &str = "платформа для анализатора";
 const KIT: &str = "mcp-1c в комплекте";
 const TOOLS: &str = "инструменты комплекта";
 const VRUNNER: &str = "vrunner-mcp отвечает";
@@ -38,7 +39,7 @@ const OPEN_SESSION: &str = "в базе открыт сеанс";
 /// готовность канала к агенту (`туннель`/`порты рабочего места`).
 pub fn order(mode: &str) -> Vec<&'static str> {
     // Срок — раньше всего остального: когда он вышел, ниже смотреть нечего.
-    let mut v = vec![DEADLINE, PARAMS, PLATFORM];
+    let mut v = vec![DEADLINE, PARAMS, PLATFORM, ANALYZER];
     // Экран — сразу за платформой: без него Конфигуратор не стартует вовсе,
     // и провалится всё, что ниже (vrunner, загрузка, расширение). Факт
     // только на Linux: на Windows экран у Конфигуратора есть по устройству
@@ -81,6 +82,83 @@ pub fn licence_fact(state: &crate::licence::State) -> Check {
         crate::licence::State::Expired => Check::fail(DEADLINE, format!("истёк {until}"), crate::licence::REFUSAL),
         crate::licence::State::Soon { days } => Check::note(DEADLINE, format!("до {until} — осталось дней: {days}")),
         crate::licence::State::Valid => Check::pass(DEADLINE, format!("до {until}")),
+    }
+}
+
+/// Строки платформы в `bsl-analyzer.toml` проекта (модуль `analyzer`). Факт
+/// нужен ровно потому, что поверх строки человека программа не пишет: без
+/// него чужая строка жила бы молча, а молчание тут и есть отказ — ради него
+/// файл и затевался.
+///
+/// Провал — ровно по одной строке, `target_platform_version`: она говорит
+/// анализатору, на какой линии платформы код, и значение не от этой машины
+/// гасит проверку имён. `min_platform_version` коннектор не пишет вовсе
+/// (решение заказчика 2026-10-21: версия машины — не минимум заказчика), и
+/// расхождением она быть не может — только сведением: её поставил человек.
+///
+/// Чистая. `ours` — линия платформы этой машины (`analyzer::machine_line`);
+/// `None` значит, что платформы нет и сверять нечем — тогда факт так и
+/// говорит, а не выдаёт непроверенное за проверенное (находка повторного
+/// ревью задачи 36). `want` — что эта машина записала бы
+/// (`analyzer::expected`), `have` — что стоит в корне файла
+/// (`analyzer::found`). Показываем то, что в файле, а не то, что мы бы
+/// написали: иначе зелёный факт называл бы строку, которой там нет.
+pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: &[(&'static str, String)]) -> Check {
+    use crate::analyzer::{FILE, MIN, TARGET};
+    let got = |key: &str| have.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+    let shown = || have.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join(", ");
+    let Some(ours) = ours else {
+        return match have.is_empty() {
+            true => Check::note(ANALYZER, "версия платформы неизвестна — строку не пишем"),
+            false => Check::note(ANALYZER, format!("платформу 1С не нашли — строки в {FILE} не сверяли: {}", shown())),
+        };
+    };
+    if let Some(target) = got(TARGET) {
+        if target != ours {
+            return Check::fail(
+                ANALYZER,
+                format!("{TARGET} = {target}, а платформа этой машины {ours}"),
+                format!("чужая строка гасит проверку имён — поправьте {FILE} в проекте или удалите строку, 1c-connect install запишет свою"),
+            );
+        }
+    }
+    let missing: Vec<&str> = want.iter().map(|(k, _)| *k).filter(|k| got(k).is_none()).collect();
+    if !missing.is_empty() {
+        let where_ = if have.is_empty() { format!("{FILE} в проекте нет") } else { format!("в {FILE} нет строк") };
+        return Check::note(ANALYZER, format!("{where_}: {} — их запишет 1c-connect install", missing.join(", ")));
+    }
+    if have.is_empty() {
+        // Файла нет, и он не нужен: линия машины не новее каталога
+        // анализатора, а минимум — не наше дело.
+        return Check::note(ANALYZER, format!("платформа {ours} — строка анализатору не нужна"));
+    }
+    let mut lines = vec![shown()];
+    // Минимум в файле — всегда рука человека: программа его не пишет.
+    if got(MIN).is_some() {
+        lines.push("минимум задан вручную".into());
+    }
+    Check::pass(ANALYZER, lines.join(", "))
+}
+
+/// Какая платформа и **почему** она (`platform::Why`), а не только путь:
+/// выбор идёт по лестнице 1С, и человек должен видеть, что его решило —
+/// поле в toml, пин базы, общий пин или «не было выбора». Другие
+/// установленные версии называются тут же: иначе «самая новая» звучит как
+/// «единственная».
+///
+/// Отказ — это и пустая машина, и названный пин, которого на ней нет; текст
+/// приходит из `platform::resolve` и годится без переделки, потому что он
+/// же становится причиной холодного замка.
+pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &[String]) -> Check {
+    match choice {
+        Err(e) => Check::fail(PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml"),
+        Ok(c) => {
+            let mut detail = format!("{} ({}) — {}", c.version, c.exe.display(), c.why);
+            if !others.is_empty() {
+                detail.push_str(&format!("; на машине есть ещё: {}", others.join(", ")));
+            }
+            Check::pass(PLATFORM, detail)
+        }
     }
 }
 
@@ -325,11 +403,11 @@ pub fn web_server_fact(apache: Option<&std::path::Path>, module: Option<&std::pa
 /// `cfg!(target_os = ...)` в теле `facts_for_readiness` компилировался бы и
 /// там тоже.
 #[cfg(target_os = "linux")]
-fn system_web_server_fact() -> Check {
+fn system_web_server_fact(cfg: &crate::cfg::Cfg) -> Check {
     let apache = crate::publication::apache2_on_path();
     // Модуль ищем ровно там же, где его берёт конфигурация публикации
     // (`Paths::of`): рядом с найденным 1cv8, второго способа не заводим.
-    let module = find_1cv8().and_then(|exe| crate::publication::module_in(exe.parent()?).ok());
+    let module = crate::ops_host::find_1cv8(cfg).and_then(|exe| crate::publication::module_in(exe.parent()?).ok());
     web_server_fact(apache.as_deref(), module.as_deref())
 }
 
@@ -543,9 +621,18 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     let h = &ctx.cfg.host;
     v.push(within(t0, budget, DEADLINE, || licence_fact(&crate::licence::state_now())));
     v.push(within(t0, budget, PARAMS, || params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server)));
-    v.push(within(t0, budget, PLATFORM, || match find_1cv8() {
-        Some(p) => Check::pass(PLATFORM, p.display().to_string()),
-        None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
+    // Платформу ищем один раз на два факта: сканирование каталогов не нужно
+    // повторять, а строки для анализатора без неё не считаются вовсе.
+    let mut platform = None;
+    v.push(within(t0, budget, PLATFORM, || {
+        let (choice, others) = crate::ops_host::platform_report(&ctx.cfg);
+        platform = choice.as_ref().ok().map(|c| c.exe.clone());
+        platform_fact(&choice, &others)
+    }));
+    v.push(within(t0, budget, ANALYZER, || {
+        let ours = platform.as_deref().and_then(crate::flow::platform_version_from_exe).and_then(|v| crate::analyzer::machine_line(&v));
+        let want = crate::ops_host::analyzer_lines_of(platform.as_deref());
+        analyzer_fact(ours.as_deref(), &want, &crate::analyzer::found(std::path::Path::new(&h.project)))
     }));
     if cfg!(target_os = "linux") {
         v.push(within(t0, budget, DISPLAY, || {
@@ -583,7 +670,7 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     // Поиск по `$PATH` и каталогу платформы — быстрый, но под бюджетом, как и
     // остальное: порядок фактов важнее экономии на одном `exists()`.
     #[cfg(target_os = "linux")]
-    v.push(within(t0, budget, SYSTEM_WEB, system_web_server_fact));
+    v.push(within(t0, budget, SYSTEM_WEB, || system_web_server_fact(&ctx.cfg)));
     let web = ctx.cfg.http_port();
     v.push(within(t0, budget, WEB, || {
         // Закрытый порт отказывает мгновенно, так что весь срок здесь — это
@@ -715,18 +802,22 @@ mod tests {
         let d = usize::from(cfg!(target_os = "linux"));
         let w = 2 * d;
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 15 + w);
-        assert_eq!(tunnel[14 + w], "туннель");
-        assert_eq!(tunnel[5 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[11 + w], "Gitea");
+        assert_eq!(tunnel.len(), 16 + w);
+        assert_eq!(tunnel[15 + w], "туннель");
+        // Платформа и строка платформы для анализатора — рядом: вторая без
+        // первой не считается вовсе.
+        assert_eq!(tunnel[2], "платформа 1С");
+        assert_eq!(tunnel[3], "платформа для анализатора");
+        assert_eq!(tunnel[6 + d], "vrunner-mcp отвечает");
+        assert_eq!(tunnel[12 + w], "Gitea");
         if d == 1 {
-            assert_eq!(tunnel[3], "экран для конфигуратора");
-            assert_eq!(tunnel[10], "веб-сервер в системе");
-            assert_eq!(tunnel[11], "порт веб-сервера");
+            assert_eq!(tunnel[4], "экран для конфигуратора");
+            assert_eq!(tunnel[11], "веб-сервер в системе");
+            assert_eq!(tunnel[12], "порт веб-сервера");
         }
         let local = order("local");
-        assert_eq!(local.len(), 15 + w);
-        assert_eq!(local[14 + w], "порты рабочего места");
+        assert_eq!(local.len(), 16 + w);
+        assert_eq!(local[15 + w], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -877,6 +968,61 @@ mod tests {
         assert!(ok.detail.contains(&until), "{ok:?}");
     }
 
+    /// Чужая строка `target` опаснее её отсутствия: она гасит проверку имён
+    /// молча. Поэтому расхождение — провал со словами, а не тихая правка
+    /// файла.
+    #[test]
+    fn a_stale_analyzer_line_is_named_as_such() {
+        use crate::analyzer::TARGET;
+        let want = crate::analyzer::expected("8.5.1.1150", "8.3.27");
+        let c = analyzer_fact(Some("8.5.1"), &want, &[(TARGET, "8.3.21".to_string())]);
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("8.3.21") && c.detail.contains("8.5.1"), "{c:?}");
+        assert!(c.hint.contains(crate::analyzer::FILE), "{c:?}");
+        // Совпало — зелено и названо значением, а не словом «ок».
+        let ok = analyzer_fact(Some("8.5.1"), &want, &want);
+        assert!(ok.ok && !ok.info && ok.detail.contains("8.5.1"), "{ok:?}");
+        // Файла нет — сведение, а не провал: его запишет install.
+        let none = analyzer_fact(Some("8.5.1"), &want, &[]);
+        assert!(none.ok && none.info && none.detail.contains(crate::analyzer::FILE), "{none:?}");
+        // Строка не нужна вовсе (линия машины не новее каталога) — тоже
+        // сведение, и оно называет платформу, а не молчит.
+        let not_needed = analyzer_fact(Some("8.3.27"), &[], &[]);
+        assert!(not_needed.ok && not_needed.info && not_needed.detail.contains("8.3.27"), "{not_needed:?}");
+    }
+
+    /// Исходы, которых прежний факт не различал (находки ревью задачи 36):
+    /// строка `target`, которой мы бы не написали, — тихо выключенная
+    /// проверка имён, и потому провал; `min`, поставленный человеком, — не
+    /// расхождение вовсе (коннектор его не пишет); а без найденной платформы
+    /// факт не утверждает, что сверил.
+    #[test]
+    fn the_fact_judges_what_is_in_the_file_not_what_we_would_write() {
+        use crate::analyzer::{MIN, TARGET};
+        // Платформа и каталог одной линии — `target` мы бы не писали; он в
+        // файле есть и от чужой линии: гасит проверку имён молча.
+        let want = crate::analyzer::expected("8.3.27.1508", "8.3.27");
+        assert!(want.is_empty(), "в этом случае строка не наша");
+        let c = analyzer_fact(Some("8.3.27"), &want, &[(TARGET, "8.5.1".into())]);
+        assert!(!c.ok && c.detail.contains(TARGET) && c.detail.contains("8.5.1"), "{c:?}");
+        // Минимум человека — ручка, а не расхождение: факт зелёный и
+        // говорит, что значение задано вручную.
+        let newer = crate::analyzer::expected("8.5.1.1150", "8.3.27");
+        let by_hand = analyzer_fact(Some("8.5.1"), &newer, &[(MIN, "8.2.19".into()), (TARGET, "8.5.1".into())]);
+        assert!(by_hand.ok && !by_hand.info, "{by_hand:?}");
+        assert!(by_hand.detail.contains("8.2.19") && by_hand.detail.contains("вручную"), "{by_hand:?}");
+        // Строка, которую человек удалил, не называется зелёным фактом как
+        // стоящая в файле: сведение называет именно её.
+        let gone = analyzer_fact(Some("8.5.1"), &newer, &[(MIN, "8.5.1".into())]);
+        assert!(gone.ok && gone.info, "{gone:?}");
+        assert!(gone.detail.contains(TARGET) && !gone.detail.contains(MIN), "{gone:?}");
+        // Платформы нет — сверять нечем, и факт этого не скрывает.
+        let blind = analyzer_fact(None, &[], &[(TARGET, "8.5.1".into())]);
+        assert!(blind.ok && blind.info, "{blind:?}");
+        assert!(blind.detail.contains("не сверяли") && blind.detail.contains("8.5.1"), "{blind:?}");
+        assert!(analyzer_fact(None, &[], &[]).detail.contains("неизвестна"));
+    }
+
     /// Пустое поле — провал про поле, а не «Gitea не отвечает» по
     /// выдуманному адресу: человек не должен искать неисправность в среде,
     /// которую он не настраивал.
@@ -957,6 +1103,10 @@ mod tests {
     #[test]
     fn a_network_base_is_never_looked_for_on_disk() {
         for path in ["\\\\nas\\bases\\buh", "srv-1c\\buh"] {
+            assert!(!wants_directory(path), "{path}");
+            // Та же проверка со стороны ворот — только в сборке с окном:
+            // без фичи `gui` модуля нет вовсе (сборка `--no-default-features`).
+            #[cfg(feature = "gui")]
             assert!(!crate::gui::gate::wants_directory(path), "{path}");
             // Диска не касаемся вовсе — и ответ фактом не используется:
             // существование такой базы не проверяется по самому правилу.

@@ -56,6 +56,15 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     path.push(sep);
     path.push(std::env::var_os("PATH").unwrap_or_default());
     c.env("PATH", path);
+    // Версия платформы — одна на всех: ту, что выбрала лестница 1С
+    // (`platform::resolve`), получает и vanessa-runner. Без этого он выбирает
+    // сам, и на машине с несколькими версиями Конфигуратор из `cf_decompile`
+    // мог оказаться не той платформы, что публикация и отметка выгрузки
+    // (опция `v8version`, окружение `VRUNNER_V8VERSION` — проверено по
+    // исходникам vanessa-runner в комплекте).
+    if let Ok(choice) = crate::ops_host::platform_choice(cfg) {
+        c.env("VRUNNER_V8VERSION", &choice.version);
+    }
     c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.host.base_path));
     c.env("VRUNNER_DBUSER", &cfg.host.db_user);
     c.env("VRUNNER_DBPWD", &cfg.host.db_password);

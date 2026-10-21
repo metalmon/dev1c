@@ -3,6 +3,7 @@
 //! the developer's base behind each forwarded connection. Nothing is
 //! installed on this machine; the program lives on a flash drive.
 
+pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
 pub mod flow;
@@ -15,6 +16,7 @@ pub mod licence;
 pub mod listen;
 pub mod local;
 pub mod ops_host;
+pub mod platform;
 pub mod project;
 pub mod publication;
 pub mod session;

@@ -31,13 +31,13 @@ use std::path::Path;
 /// диск»: `params_exists` — лежит ли файл параметров, `base_exists` — есть ли
 /// каталог файловой базы, `tools` — разложены ли инструменты комплекта
 /// (`ops_host::tools_state`), `platform` — найдена ли платформа
-/// (`ops_host::find_1cv8`), `mcp_in_kit` — есть ли `mcp-1c` в комплекте.
+/// (`ops_host::platform_choice` — `Err` несёт причину словами), `mcp_in_kit` — есть ли `mcp-1c` в комплекте.
 pub fn cold_gate(
     cfg: &Cfg,
     params_exists: bool,
     base_exists: bool,
     tools: &OpState,
-    platform: Option<&Path>,
+    platform: Result<&Path, &str>,
     mcp_in_kit: bool,
     licence: &licence::State,
 ) -> Option<String> {
@@ -49,8 +49,12 @@ pub fn cold_gate(
     if !params_exists {
         return Some("нет файла параметров — заполните поля и нажмите «Сохранить»".into());
     }
-    if platform.is_none() {
-        return Some("платформа 1С не найдена".into());
+    // Отказ лестницы 1С приходит словами и годится как есть: «платформа не
+    // найдена» или «версия 8.2.19 (поле platform в 1c-connect.toml) не
+    // установлена». Молчаливый откат на новейшую был бы ложью про то, на чём
+    // идёт работа (спека, «Версия платформы: та же, что выберет 1С»).
+    if let Err(why) = platform {
+        return Some(why.to_string());
     }
     if !mcp_in_kit {
         return Some("в комплекте нет mcp-1c".into());
@@ -121,7 +125,7 @@ mod tests {
 
     /// Всё на месте — туннельное рабочее место по умолчанию.
     fn open(cfg: &Cfg) -> Option<String> {
-        cold_gate(cfg, true, true, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid)
+        cold_gate(cfg, true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
     }
 
     #[test]
@@ -134,15 +138,15 @@ mod tests {
 
     #[test]
     fn an_expired_deadline_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Expired).unwrap();
+        let why = cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Expired).unwrap();
         assert!(why.contains("срок действия") && why.contains(&licence::until_text()), "{why}");
         // Предупреждение заранее — не замок: работа идёт.
-        assert_eq!(cold_gate(&Cfg::default(), true, true, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Soon { days: 3 }), None);
+        assert_eq!(cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Soon { days: 3 }), None);
     }
 
     #[test]
     fn a_missing_params_file_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), false, true, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&Cfg::default(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
         assert!(why.contains("параметров"), "{why}");
     }
 
@@ -157,7 +161,7 @@ mod tests {
     #[test]
     fn a_file_base_without_its_directory_holds_the_switch() {
         let c = Cfg::default();
-        let why = cold_gate(&c, true, false, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
         assert!(why.contains(&c.host.base_path), "{why}");
     }
 
@@ -167,10 +171,10 @@ mod tests {
         // вовсе, иначе переключатель был бы заперт навсегда.
         let mut c = Cfg::default();
         c.host.base_path = "srv-1c\\buh".into();
-        assert_eq!(cold_gate(&c, true, false, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
+        assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
         // Сетевой путь — предупреждение проверки, но не замок.
         c.host.base_path = "\\\\nas\\bases\\buh".into();
-        assert_eq!(cold_gate(&c, true, false, &done(), Some(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
+        assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
     }
 
     /// Пустое поле объясняется словами, а не пустой строкой в середине фразы.
@@ -198,20 +202,24 @@ mod tests {
 
     #[test]
     fn a_missing_platform_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), None, true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&Cfg::default(), true, true, &done(), Err("платформа 1С не найдена"), true, &licence::State::Valid).unwrap();
         assert!(why.contains("платформа"), "{why}");
+        // Причина приходит из лестницы как есть: невыполнимый пин запирает
+        // переключатель своими словами, а не общим «не найдена».
+        let pin = cold_gate(&Cfg::default(), true, true, &done(), Err("версия 8.2.19 (поле platform в 1c-connect.toml) на машине не установлена; установлено: 8.3.27.1508"), true, &licence::State::Valid).unwrap();
+        assert!(pin.contains("8.2.19") && pin.contains("не установлена"), "{pin}");
     }
 
     #[test]
     fn a_kit_without_mcp_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), Some(Path::new("1cv8.exe")), false, &licence::State::Valid).unwrap();
+        let why = cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), false, &licence::State::Valid).unwrap();
         assert!(why.contains("mcp-1c"), "{why}");
     }
 
     #[test]
     fn tools_not_laid_out_hold_the_switch() {
         for st in [OpState::Missing, OpState::Drifted { from: "3.0.1".into(), to: "3.0.2".into() }, OpState::Blocked("нет vrunner/".into())] {
-            let why = cold_gate(&Cfg::default(), true, true, &st, Some(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+            let why = cold_gate(&Cfg::default(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
             assert!(why.contains("инструменты"), "{st:?}: {why}");
         }
     }

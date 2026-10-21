@@ -355,6 +355,9 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
         password: v("password", &f.password),
         workstation: v("workstation", &f.workstation),
         base_path: v("base_path", &f.base_path),
+        // Поля в окне нет: версию платформы правят в toml, и `save_host`
+        // переносит её из текущих параметров, как `tools` и `mode`.
+        platform: String::new(),
         db_user: v("db_user", &f.db_user),
         db_password: v("db_password", &f.db_password),
         base_url: String::new(),

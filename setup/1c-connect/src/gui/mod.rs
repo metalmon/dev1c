@@ -1059,6 +1059,10 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         return;
     };
     if cx.global::<Ui>().dialog_open {
+        // Молчать нельзя: человек нажал кнопку и обязан узнать, почему ничего
+        // не произошло. Молчаливый выход отсюда и был вторым тупиком той же
+        // кнопки.
+        set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: "Сначала ответьте на уже открытый вопрос".into() }, None);
         return;
     }
     cx.global_mut::<Ui>().dialog_open = true;

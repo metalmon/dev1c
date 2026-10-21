@@ -771,6 +771,17 @@ impl Op<Ctx> for Env {
     }
 }
 
+/// Строки платформы для `bsl-analyzer.toml` этой машины: версия от найденной
+/// платформы, линия каталога — из кэша анализатора, а без кэша встроенная
+/// (`crate::analyzer`). Платформы нет — пусто, и файл не появляется.
+pub fn analyzer_lines() -> Vec<(&'static str, String)> {
+    let Some(version) = find_1cv8().and_then(|exe| exe.parent()?.parent()?.file_name()?.to_str().map(str::to_string)) else {
+        return Vec::new();
+    };
+    let catalogue = crate::analyzer::cache_dir().map(|c| crate::analyzer::catalogue_line(&c)).unwrap_or_else(|| crate::analyzer::BUNDLED.to_string());
+    crate::analyzer::expected(&version, &catalogue)
+}
+
 struct ProjectOp;
 impl Op<Ctx> for ProjectOp {
     fn id(&self) -> &'static str {
@@ -792,14 +803,17 @@ impl Op<Ctx> for ProjectOp {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
-        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json", p.dir.display(), p.branch, p.remote))]
+        let analyzer = analyzer_lines();
+        let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
+        let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
+        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json{bsl}", p.dir.display(), p.branch, p.remote))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
         }
         let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
-        crate::project::init(&p, &tools_dir(), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+        crate::project::init(&p, &tools_dir(), &analyzer_lines(), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
     }
     // uninstall leaves the project alone: it is the person's work.
 }

@@ -65,7 +65,11 @@ pub fn layout_state(p: &Project) -> Layout {
 /// Разложить проект: каталог, git с веткой рабочего места и origin на Gitea,
 /// три служебных файла (существующие не трогаются). Доказывает круг на
 /// месте: git и oscript отвечают из этого каталога.
-pub fn init(p: &Project, tools: &Path, log: &dyn Fn(String)) -> Result<(), String> {
+///
+/// `analyzer` — строки платформы для `bsl-analyzer.toml`
+/// (`crate::analyzer::expected`); пусто — версия платформы неизвестна, и
+/// файла не будет вовсе.
+pub fn init(p: &Project, tools: &Path, analyzer: &[(&'static str, String)], log: &dyn Fn(String)) -> Result<(), String> {
     if let Some(f) = looks_like_a_base(&p.dir) {
         return Err(format!("{} — это каталог базы ({f}), не проекта; укажите другой каталог в project", p.dir.display()));
     }
@@ -94,6 +98,9 @@ pub fn init(p: &Project, tools: &Path, log: &dyn Fn(String)) -> Result<(), Strin
             std::fs::write(&f, body).map_err(|e| format!("{name}: {e}"))?;
             log(format!("{name} создан"));
         }
+    }
+    for key in crate::analyzer::ensure(&p.dir, analyzer)? {
+        log(format!("{}: {key}", crate::analyzer::FILE));
     }
     must(p, &["status", "--porcelain"])?;
     let mut c = Command::new(crate::ops_host::oscript_exe(tools));
@@ -452,7 +459,7 @@ pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
 }
 
 #[cfg(test)]
-mod tempdir {
+pub(crate) mod tempdir {
     pub struct Dir(std::path::PathBuf);
     impl Dir {
         pub fn new() -> Self {
@@ -715,7 +722,7 @@ mod tests {
         p.remote = Project::from_cfg(&cfg, Path::new("/tools")).remote;
         assert_eq!(p.remote, "");
         assert!(matches!(layout_state(&p), Layout::NoGitea));
-        let e = init(&p, Path::new("nowhere"), &|_| {}).unwrap_err();
+        let e = init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_err();
         assert!(e.contains("адрес среды не задан") && e.contains("gitea"), "{e}");
         // Все четыре входа в git за одним заслоном — `status` в том числе:
         // через него идут вкладка «Проект» и инструмент агента.
@@ -738,9 +745,21 @@ mod tests {
         let old = p.remote.clone();
         p.remote = "http://localhost:3000/dev1c/project.git".into();
         assert!(matches!(layout_state(&p), Layout::Drifted(d) if d.contains("origin")), "расхождение адреса обязано называться");
-        init(&p, Path::new("nowhere"), &|_| {}).unwrap_or_else(|e| panic!("{e}"));
+        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
         assert_ne!(p.remote, old);
+    }
+
+    /// Строка платформы для анализатора появляется при раскладке — и только
+    /// когда её передали: платформы нет, файла нет.
+    #[test]
+    fn init_writes_the_analyzer_lines_it_is_given() {
+        let (_t, p) = fixture();
+        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
+        assert!(!p.dir.join(crate::analyzer::FILE).exists(), "без версии платформы файла быть не должно");
+        let want = crate::analyzer::expected("8.5.1.1150", "8.3.27");
+        init(&p, Path::new("nowhere"), &want, &|_| {}).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(crate::analyzer::found(&p.dir), want);
     }
 
     #[test]
@@ -752,7 +771,7 @@ mod tests {
         let p = Project { dir: dir.clone(), git: system_git(), branch: "dev3".into(), remote: origin.to_string_lossy().into(), login: "dev3".into() };
         assert!(matches!(layout_state(&p), Layout::Missing));
         let lines = std::cell::RefCell::new(Vec::new());
-        init(&p, Path::new("nowhere"), &|s| lines.borrow_mut().push(s)).unwrap_or_else(|e| panic!("{e}"));
+        init(&p, Path::new("nowhere"), &[], &|s| lines.borrow_mut().push(s)).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(git(&dir, &["symbolic-ref", "--short", "HEAD"]), "dev3");
         assert_eq!(git(&dir, &["remote", "get-url", "origin"]), p.remote);
         assert_eq!(std::fs::read_to_string(dir.join(".gitattributes")).unwrap(), GITATTRIBUTES);
@@ -762,7 +781,7 @@ mod tests {
         assert!(lines.borrow().iter().any(|l| l.contains("git init")), "{:?}", lines.borrow());
         // A second init changes nothing and keeps a hand-edited file.
         std::fs::write(dir.join(".gitignore"), "mine\n").unwrap();
-        init(&p, Path::new("nowhere"), &|_| {}).unwrap();
+        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "mine\n");
     }
 
@@ -775,7 +794,7 @@ mod tests {
         push(&p, "work on dev2", &NEVER).unwrap();
         git(&p.dir, &["checkout", "-q", "-b", "main"]);
         git(&p.dir, &["commit", "-q", "--allow-empty", "-m", "main moved on"]);
-        init(&p, Path::new("nowhere"), &|_| {}).unwrap();
+        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap();
         assert_eq!(git(&p.dir, &["symbolic-ref", "--short", "HEAD"]), "dev2");
         assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "work on dev2");
     }
@@ -788,7 +807,7 @@ mod tests {
         std::fs::write(dir.join("1Cv8.1CD"), "").unwrap();
         let p = Project { dir: dir.clone(), git: system_git(), branch: "dev1".into(), remote: "x".into(), login: "dev1".into() };
         assert!(matches!(layout_state(&p), Layout::BaseDir(_)));
-        assert!(init(&p, Path::new("nowhere"), &|_| {}).unwrap_err().contains("каталог базы"));
+        assert!(init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_err().contains("каталог базы"));
         let (_t2, p2) = fixture(); // branch dev2, origin set, three files present
         git(&p2.dir, &["checkout", "-q", "-b", "main"]);
         assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains("ветка")));

@@ -239,8 +239,11 @@ ENV DEMO_TITLE="${DEMO_TITLE}"
 RUN ln -sf /usr/sbin/apache2 /usr/local/bin/apache2 \
     && env -i PATH=/usr/local/bin:/usr/bin:/bin sh -c 'command -v apache2'
 
-COPY config/1c/stand.sh /usr/local/bin/1c-stand
-RUN sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand
+# config/1c/stand.sh сюда НЕ копируется, хотя это и выглядит естественным
+# местом. Слой payload идёт FROM tools, и правка одной строки в скрипте
+# времени выполнения заставляла бы заново ставить платформу — двадцать
+# пять минут за опечатку в комментарии. Поэтому он копируется ниже,
+# отдельно в payload и в stand, последним слоем каждого.
 
 # =============================================================================
 # payload — the platform and the template base, for the two volumes
@@ -271,6 +274,12 @@ RUN --mount=type=bind,from=platform,target=/platform \
     && xvfb-run -a "$P/1cv8t" CREATEINFOBASE "File=/tmp/smoke" /DisableStartupDialogs /DisableStartupMessages /Out /tmp/smoke.log \
     && test -s /tmp/smoke/1Cv8.1CD && rm -rf /tmp/smoke /tmp/smoke.log \
     && echo "platform ${PLATFORM_VERSION}: ok"
+
+# 1c-stand нужен ниже: блок демо-базы поднимает им одноразовый Apache.
+# Стоит он ИМЕННО здесь, после установки платформы, а не в начале слоя —
+# иначе правка скрипта снова тянула бы за собой её переустановку.
+COPY config/1c/stand.sh /usr/local/bin/1c-stand
+RUN sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand
 
 # --- the demo base -----------------------------------------------------------
 # One template base; every workstation gets its own copy on first use (see
@@ -374,6 +383,8 @@ RUN --mount=type=bind,from=platform,target=/platform \
 # and the runtime as CMD. The starter is what the desktop gets; the two direct
 # launchers stay in the menu for when one is wanted by itself.
 FROM tools AS stand
+COPY config/1c/stand.sh /usr/local/bin/1c-stand
+RUN sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand
 COPY config/1c/start.desktop        /usr/share/applications/1c-start.desktop
 COPY config/1c/configurator.desktop /usr/share/applications/1c-configurator.desktop
 COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.desktop

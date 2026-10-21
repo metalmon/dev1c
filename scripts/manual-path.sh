@@ -3,7 +3,12 @@
 # config/kit/УСТАНОВКА.md with its @MANUAL-PATH@ line replaced by the «Ручной
 # путь» section, generated from the installer itself.
 #
-#   sh scripts/manual-path.sh <kit dir>        → <kit dir>/УСТАНОВКА.md
+#   sh scripts/manual-path.sh <kit dir> [dev1c-setup]  → <kit dir>/УСТАНОВКА.md
+#
+# Вторым аргументом — программа, которой генерировать: в комплекте для
+# линукса она ELF, и машина сборки (windows при разработке) запустить её не
+# может. pack.sh передаёт ту, которую нашёл пробой. Без аргумента скрипт
+# ищет в комплекте сам.
 #
 # The customer asked to be able to stand the environment up without our
 # binary, so the page carries every modifying command. They are not written by
@@ -27,9 +32,15 @@ PAGE="$DIR/config/kit/УСТАНОВКА.md"
 MARK='@MANUAL-PATH@'
 MODEL=модель.gguf
 
-SETUP="$KIT/dev1c-setup"
-[ -x "$SETUP" ] || SETUP="$KIT/dev1c-setup.exe"
-[ -x "$SETUP" ] || { echo "manual-path.sh: no dev1c-setup in $KIT" >&2; exit 1; }
+SETUP=${2:-}
+if [ -z "$SETUP" ]; then
+    SETUP="$KIT/dev1c-setup"
+    [ -x "$SETUP" ] || SETUP="$KIT/dev1c-setup.exe"
+fi
+[ -x "$SETUP" ] || { echo "manual-path.sh: $SETUP не запускается — передайте вторым аргументом программу для этой машины" >&2; exit 1; }
+# Прогон делается из временного каталога, так что относительный путь к
+# программе оттуда не нашёлся бы.
+SETUP=$(cd "$(dirname "$SETUP")" && pwd)/$(basename "$SETUP")
 [ -f "$KIT/dev1c.toml" ] || { echo "manual-path.sh: no dev1c.toml in $KIT" >&2; exit 1; }
 grep -q "^$MARK\$" "$PAGE" || { echo "manual-path.sh: no $MARK line in $PAGE" >&2; exit 1; }
 

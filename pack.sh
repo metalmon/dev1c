@@ -301,7 +301,7 @@ if [ "$OS" = "linux" ]; then
     # installer's own window. The «Ручной путь» section is generated from the
     # installer in the kit, so the commands cannot drift from what the program
     # does — see scripts/manual-path.sh.
-    sh scripts/manual-path.sh "$KIT"
+    sh scripts/manual-path.sh "$KIT" "$SETUP"
 fi
 
 # The model server travels in its own archive, and only in the Linux kit:

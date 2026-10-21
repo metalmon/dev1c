@@ -25,7 +25,7 @@ class LoadTests(unittest.TestCase):
     def test_texts_are_verbatim(self):
         steps = load(SCENARIO)
         self.assertEqual(steps[1].title, 'Сначала знакомое')
-        self.assertIn('добавьте к ним один свой товар', steps[1].body)
+        self.assertIn('заведите одну свою номенклатуру', steps[1].body)
 
     def _text(self, steps):
         # Все текстовые поля шага: заголовок, тело, кнопки и готовые
@@ -107,10 +107,10 @@ class LoadTests(unittest.TestCase):
 
     def test_step_four_questions_are_separate_from_body(self):
         steps = load(SCENARIO)
-        self.assertNotIn('Какие товары', steps[3].body)
+        self.assertNotIn('Какая номенклатура', steps[3].body)
         self.assertEqual(steps[3].questions, (
-            'Какие товары есть в базе',
-            'Покажи структуру документа «Заказ»',
+            'Какая номенклатура есть в базе',
+            'Покажи структуру документа «Заказ покупателя»',
             'Сколько справочников и документов в этой конфигурации',
         ))
 
@@ -142,7 +142,7 @@ class ActionTests(unittest.TestCase):
         steps = load(SCENARIO)
         action = steps[2].actions['Закрыть 1С и открыть редактор']
         self.assertEqual(action.action, 'next')
-        self.assertEqual(action.close_window, 'Демонстрационное приложение')
+        self.assertEqual(action.close_window, 'Управление нашей фирмой')
         self.assertIsNone(steps[2].actions['Дальше'].close_window)
 
     def test_buttons_that_launch_something(self):

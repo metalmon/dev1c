@@ -67,7 +67,7 @@
 # only for the length of a request.
 set -eu
 
-PLATFORM_VERSION=${PLATFORM_VERSION:-8.3.27.1508}
+PLATFORM_VERSION=${PLATFORM_VERSION:-8.5.1.1150}
 V8=/opt/1cv8/x86_64/$PLATFORM_VERSION
 DEMO=/opt/1c-demo/base
 # The two trees the volumes carry, and the one test for "is the stand usable".
@@ -198,8 +198,12 @@ ZEDDB
     # конфигурацию по имени той, которой в стенде больше нет. Правим только
     # строку заголовка нашей записи и только когда там стоит прошлое имя:
     # всё остальное в файле мог поменять человек.
-    if [ -e "$v8i" ] && grep -aq '^\[Управление нашей фирмой (учебная)\]' "$v8i"; then
-        sed -i "s|^\[Управление нашей фирмой (учебная)\]|[$DEMO_TITLE]|" "$v8i"
+    # Без якоря на начало строки: файл начинается с BOM (ef bb bf), и
+    # «^\[» по первой строке не совпадает никогда — на этом починка и
+    # промолчала в первый раз. Строка «[имя]» в v8i и так встречается
+    # только как заголовок записи.
+    if [ -e "$v8i" ] && grep -aq '\[Управление нашей фирмой (учебная)\]' "$v8i"; then
+        sed -i "s|\[Управление нашей фирмой (учебная)\]|[$DEMO_TITLE]|" "$v8i"
         log "1C: имя базы в $v8i обновлено на $DEMO_TITLE" >&2
     fi
     # the starter on the desktop, next to Zed and Gitea (same way as the base
@@ -311,6 +315,27 @@ EOF
         # сроком обслуживание не включится, и карточка скажет почему.
         # Пишем только когда ключа нет: выключивший его человек должен
         # остаться выключенным и после перезапуска контейнера.
+        # Индекс справки платформы строится при первом обращении и лежит в
+        # ~/.cache/bsl-analyzer, то есть на томе — один раз на учётную
+        # запись, а не при каждом запуске контейнера. Двенадцать секунд по
+        # замеру, и всё это время поиск отвечает «индекс строится». Гость
+        # доходит до вопроса агенту минуты через три, так что почти
+        # наверняка не попадёт в это окно, — но «почти наверняка» на
+        # демонстрации плохое слово. Один запрос фоном, и к приходу гостя
+        # индекс уже лежит. Молча и не держа старт: если анализатора нет
+        # или он ответит отказом, стенду это ничем не грозит.
+        if [ -x /opt/bsl-analyzer/bsl-analyzer ] \
+           && [ ! -d "$HOME/.cache/bsl-analyzer/platform-help" ]; then
+            (
+                printf '%s\n%s\n%s\n' \
+                  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"seed","version":"0"}}}' \
+                  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+                  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"syntax_help","arguments":{"name":"СтрДлина"}}}' \
+                | timeout 180 /opt/bsl-analyzer/bsl-analyzer mcp serve --profile reference \
+                >/dev/null 2>&1
+            ) &
+            log "справка платформы: индекс прогревается фоном" >&2
+        fi
         if [ ! -f "$t/install.state" ] || ! grep -q '^autoconnect=' "$t/install.state" 2>/dev/null; then
             # Блок идёт как сам пользователь рабочего места, поэтому ни
             # chown, ни $u тут не нужны: $u задаётся только в ветке выше, и

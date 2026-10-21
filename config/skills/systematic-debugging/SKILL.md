@@ -281,3 +281,22 @@ These techniques are part of systematic debugging and available in this director
 - **`root-cause-tracing.md`** - Trace bugs backward through call stack to find original trigger
 - **`defense-in-depth.md`** - Add validation at multiple layers after finding root cause
 - **`condition-based-waiting.md`** - Replace arbitrary timeouts with condition polling
+
+## Инструменты 1С на этом шаге
+
+Факты о сбое в 1С берутся инструментами, а не рассуждением:
+
+- **что произошло в базе** — `get_event_log` сервера `1c`: время,
+  пользователь, сеанс, текст ошибки. «Не работает» без журнала — не симптом,
+  а пересказ;
+- **в каком состоянии данные** — `execute_query` на чтение, прежде чем менять;
+- **что говорит анализатор** — диагностики `bsl-analyzer` по файлу, который
+  правили;
+- **чем кончилась долгая операция** — `task_result`, а не `task_status`;
+- **существует ли имя, на котором падает** — `syntax_help`.
+
+Воспроизведение: алгоритмику — отдельным скриптом через `oscript`, это быстрее
+и не требует канала к платформе. Модуль конфигурации — `cf_load` инкрементом
+в базу разработчика, и только если канал поднят.
+
+Полная карта — «Какой инструмент на каком шаге» в `~/.config/zed/AGENTS.md`.

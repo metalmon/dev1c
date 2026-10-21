@@ -66,10 +66,20 @@ if [ -f "$ZED_SETTINGS" ] && [ -f "$ZED_BIN" ]; then
     # hence the exception list. It has to match the names in settings.json: when
     # the provider was renamed from a branded name to "custom", a stale entry
     # here would have failed the build.
+    #
+    # The second group is tool names. The agent profiles switch individual MCP
+    # tools off by name (agent.profiles.*.context_servers.*.tools), and a tool
+    # of our own servers is as absent from the Zed binary as the server itself.
+    # Built-in tool names are deliberately NOT listed: read_file, terminal and
+    # the rest must stay checked, because a profile that names a built-in Zed
+    # no longer has would silently lose it.
     UNKNOWN=""
     for k in $(grep -oE '^[[:space:]]*"[a-z_.]+"[[:space:]]*:' "$ZED_SETTINGS" \
                | tr -d ' ":' | sort -u); do
-        case "$k" in custom|bsl|bsl-reference|1c|vrunner) continue ;; esac
+        case "$k" in
+            custom|bsl|bsl-reference|1c|vrunner) continue ;;
+            its_help|cf_load|project_push|infobase_update|cache_show|cache_clear) continue ;;
+        esac
         grep -aq "$k" "$ZED_BIN" || UNKNOWN="$UNKNOWN $k"
     done
     [ -z "$UNKNOWN" ] || fail "settings.json has keys absent from this Zed version:$UNKNOWN"

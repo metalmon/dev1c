@@ -41,6 +41,15 @@ for u in dev1 dev2 dev3; do
         cp -a /etc/skel/. "$home/" 2>/dev/null || true
         log "created missing home for $u"
     fi
+    # The project directory exists even before anything puts a project in it.
+    # Two things want it: vrunner works there and the dump lands there, and
+    # bsl-analyzer's `workspace` profile refuses to start at all when its root
+    # is missing — it exits 1 with `Os { code: 2, kind: NotFound }` and takes
+    # `syntax_help` down with it, so the agent loses the platform reference
+    # over a missing directory. An existing empty one is fine: the server
+    # starts and answers «indexing, try again» for what is not ready yet.
+    # In local mode stand.sh makes it; in tunnel mode nobody did.
+    mkdir -p "$home/project"
     # Ownership is checked every time, not only on creation: root-owned files in
     # a user's home are exactly what breaks key-based login.
     [ "$(stat -c '%U' "$home")" = "$u" ] || chown -R "$u:$u" "$home"

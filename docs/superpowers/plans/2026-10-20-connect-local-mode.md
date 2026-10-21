@@ -1004,6 +1004,38 @@ git commit -m "Комплект в образе: один общий тольк�
 - [ ] **Шаг 6: живьём.** В контейнере: рабочее место без поля — проверка говорит «адрес среды не задан» (а не «Gitea не отвечает» по выдуманному порту); после `install` поле на месте и проверка зелёная.
 - [ ] **Шаг 7: коммит.** `git commit -m "Адрес среды не выводится при каждом чтении: его записывают при настройке"`
 
+### Task 36: Строка платформы для анализатора — в корне проекта
+
+Спека, раздел «Строка платформы для анализатора: её пишет коннектор».
+Смысл ключа узкий: он гасит ложные «нет такого имени», когда платформа
+клиента новее каталога анализатора, и больше ничего не умеет. Поэтому
+пишем ровно в этом случае.
+
+**Files:**
+- Create: `setup/1c-connect/src/analyzer.rs`
+- Modify: `setup/1c-connect/src/lib.rs` (`mod analyzer;`)
+- Modify: `setup/1c-connect/src/project.rs` (`init` кладёт файл рядом с `.gitattributes`)
+- Modify: `setup/1c-connect/src/ops_host.rs` (`ProjectOp` передаёт найденную платформу)
+- Modify: `setup/1c-connect/src/verify.rs` (факт о расхождении строки)
+- Test: inline в `analyzer.rs`, `project.rs`, `verify.rs`
+
+**Interfaces:**
+- Produces: `analyzer::FILE: &str = "bsl-analyzer.toml"`, `analyzer::BUNDLED: &str = "8.3.27"` — встроенная линия фактов анализатора 0.3.2 в образе (замер 2026-10-21; сверять при обновлении анализатора).
+- Produces: `analyzer::catalogue_line(home: &Path) -> String` — `platform-help/auto/current` → `auto/<хеш>/manifest.json` → `platform_version`, три компонента; манифеста нет или он не читается — `BUNDLED`.
+- Produces: `analyzer::line_to_write(client: &str, catalogue: &str) -> Option<String>` — три компонента версии клиента, если она **строго новее** каталога; иначе `None`. Сравнение покомпонентно числами (как `flow::parse_format`): `8.3.9` старее `8.3.27`.
+- Produces: `analyzer::ensure(project: &Path, line: &str) -> Result<bool, String>` — `true`, если ключ записан; `false`, если файл уже содержит `target_platform_version` (чужую строку не переписываем). Файла нет — создаём с комментарием, откуда строка; файл есть без ключа — правим на месте через `common::toml_render::set(text, "", "target_platform_version", …)`.
+- Produces: `verify::analyzer_fact(in_file: Option<&str>, client: Option<&str>, catalogue: &str) -> Check` — провал только при расхождении: в файле строка, которая не равна ожидаемой по правилу (устарела после смены платформы). Нет файла и ключ не нужен — `pass` со словами «ключ не нужен: платформа не новее каталога».
+- Consumes: `ops_host::find_1cv8()`, `flow::our_platform_version()` (сделать `pub(crate)`).
+
+- [ ] **Шаг 1: падающие тесты.** `analyzer`: `a_newer_client_gets_the_key` (клиент `8.5.1.1150`, каталог `8.3.27` → `Some("8.5.1")`), `an_equal_or_older_client_gets_nothing` (`8.3.27.1508` и `8.3.21.1234` → `None`), `versions_compare_as_numbers_not_text` (`8.3.9` против `8.3.27`), `the_manifest_names_the_catalogue_line` (временный каталог с `current` и `manifest.json` → `8.3.27`), `without_a_manifest_the_bundled_line_stands`, `a_written_line_is_left_alone` (файл с чужим `target_platform_version` → `Ok(false)`, текст файла не изменился), `an_existing_file_keeps_its_other_keys` (файл с комментарием и своим ключом → наш ключ дописан, остальное целое). `project`: `init_writes_the_analyzer_line_when_the_client_is_newer`. `verify`: `a_stale_analyzer_line_is_named_as_such`.
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib analyzer`).
+- [ ] **Шаг 3: модуль.** `analyzer.rs` по интерфейсам выше; `manifest.json` читаем `serde_json` (уже в зависимостях), на любой осечке — `BUNDLED`, без паники и без сети.
+- [ ] **Шаг 4: раскладка.** `project::init` получает линию клиента аргументом (`Option<&str>`) и при `Some` кладёт файл; `ProjectOp::apply` берёт её из `flow::our_platform_version()`, `plan()` называет файл в строке операции. Платформы нет — файла нет, и операция об этом не врёт.
+- [ ] **Шаг 5: факт.** `verify::analyzer_fact` в порядок фактов после `PLATFORM`; строку из файла читаем тем же чтением, что `ensure` (одна функция разбора, не две).
+- [ ] **Шаг 6: тесты проходят**, `cargo check -p onec-connect --all-targets` и `--no-default-features` чисто.
+- [ ] **Шаг 7: живьём в контейнере.** `install` на рабочем месте: в корне проекта появился `bsl-analyzer.toml` со строкой платформы (на 8.5 — `8.5.1`, на 8.3.27 — файла нет, и факт говорит «ключ не нужен»); повторный `install` файл не меняет; правка строки человеком переживает `install`, а факт при расхождении красный.
+- [ ] **Шаг 8: коммит.** `git commit -m "Строка платформы для анализатора: коннектор пишет её в корень проекта"`
+
 ## Что остаётся исполнителю
 
 - Как делить `session.rs`: оставить `Serve` в нём или вынести в свой модуль — по размеру кода после задачи 3.

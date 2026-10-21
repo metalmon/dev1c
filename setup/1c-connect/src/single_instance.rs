@@ -217,6 +217,11 @@ fn raise_window_of_our_other_instance(ours: &std::path::Path) -> bool {
 /// быстро вышел); `ours` — свой образ (`std::env::current_exe`). Пустого
 /// совпадения «оба `None`» нет и не может быть — `ours` всегда `&Path`, не
 /// `Option`.
+///
+/// Только Windows: единственный, кто его зовёт, — поиск окна первой копии, а
+/// он сам под `cfg(windows)`; без этого признака на Linux осталась бы
+/// неиспользуемая функция (предупреждение сборки).
+#[cfg(windows)]
 fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bool {
     candidate == Some(ours)
 }
@@ -311,6 +316,9 @@ mod tests {
         format!("{tag}-{}-{n}", std::process::id())
     }
 
+    /// Только Windows — вместе с самой `same_image` (на Linux окно первой
+    /// копии не ищут, и функции там нет).
+    #[cfg(windows)]
     #[test]
     fn same_image_accepts_our_own_and_rejects_a_different_or_missing_process() {
         let ours = std::path::Path::new(r"C:\kit\1c-connect.exe");

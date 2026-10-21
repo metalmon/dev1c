@@ -381,11 +381,23 @@ mod tests {
         while tokio::time::timeout(std::time::Duration::from_millis(200), client.read(&mut banner)).await.is_ok() {}
 
         let mut buf = [0u8; 1];
-        let before = tokio::time::timeout(std::time::Duration::from_millis(300), client.read(&mut buf)).await;
+        // Ждём тишины, а не «за 300 мс не пришло ни байта»: под нагрузкой
+        // (чужая сборка рядом, CI) потомок — а это целый тестовый бинарь —
+        // успевает напечатать баннер уже после вычитывания выше, и прежняя
+        // проверка падала на безобидных его байтах. Важно не молчание само
+        // по себе, а то, что соединение не закрылось: закрытие — это `Ok(0)`,
+        // всё остальное — тот же баннер, его просто пропускаем.
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(300), client.read(&mut buf)).await {
+                Err(_) => break,
+                Ok(Ok(0)) => panic!("мост реально заблокирован на чтении — соединение не должно было закрыться само"),
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => panic!("чтение до shutdown не удалось: {e}"),
+            }
+        }
         if let Ok(Some((code, err))) = tokio::time::timeout(std::time::Duration::from_millis(1), exit_rx.recv()).await {
             panic!("фиктивный потомок не запустился (код {code}): {err}");
         }
-        assert!(before.is_err(), "мост реально заблокирован на чтении — соединение не должно было закрыться само");
 
         watcher.shutdown(Shutdown::Both).unwrap();
         let after = tokio::time::timeout(std::time::Duration::from_secs(5), client.read(&mut buf)).await;

@@ -684,6 +684,23 @@ mod tests {
         assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
     }
 
+    /// Адрес среды задан полем — `origin` собирается от него. И у уже
+    /// разложенного проекта расхождение адреса раскладка лечит, а не только
+    /// называет: в локальном режиме прежний адрес указывает в пустоту.
+    #[test]
+    fn the_remote_follows_the_explicit_gitea() {
+        let mut cfg = Cfg::default();
+        cfg.host.gitea = "http://localhost:3000".into();
+        assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://localhost:3000/dev1c/Buh.git");
+        let (_t, mut p) = fixture();
+        let old = p.remote.clone();
+        p.remote = "http://localhost:3000/dev1c/project.git".into();
+        assert!(matches!(layout_state(&p), Layout::Drifted(d) if d.contains("origin")), "расхождение адреса обязано называться");
+        init(&p, Path::new("nowhere"), &|_| {}).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
+        assert_ne!(p.remote, old);
+    }
+
     #[test]
     fn init_lays_out_a_project_with_a_cyrillic_path() {
         let t = tempdir::Dir::new();

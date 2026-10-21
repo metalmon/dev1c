@@ -735,10 +735,10 @@ git commit -m "Комплект в образе: один общий тольк�
 - Test: inline в `gate.rs`, `panel.rs`, `tray.rs`, `mod.rs`
 
 **Interfaces:**
-- Produces: `gui::gate::cold_gate(cfg: &Cfg, tools: &OpState, platform: Option<&Path>, mcp_in_kit: bool) -> Option<String>` — `None` = можно включать, `Some(причина)` = заперто. Чистая функция, без сети и без файловой системы: существование каталога базы и наличие платформы передаются аргументами.
+- Produces: `gui::gate::cold_gate(cfg: &Cfg, tools: &OpState, platform: Option<&Path>, mcp_in_kit: bool, licence: &licence::State) -> Option<String>` — `None` = можно включать, `Some(причина)` = заперто. Чистая функция, без сети и без файловой системы: существование каталога базы и наличие платформы передаются аргументами.
 - Produces: `bridge::disabled_text(reason: Option<&str>) -> String` — к «MCP выключены в 1c-connect» добавляет причину замка.
 
-- [ ] **Шаг 1: падающие тесты.** `gate`: по тесту на каждое условие (`пустой db_user`, `файловая база без каталога`, `серверная база — не запирает`, `нет платформы`, `нет mcp-1c`, `инструменты не разложены`, `туннельный режим без адреса среды`, `всё на месте → None`). `panel`: `the_switch_is_locked_while_the_gate_holds`. `tray`: `the_tray_item_follows_the_same_gate`. `mod`: `autostart_does_not_enable_while_the_gate_holds`; `saving_away_a_cold_condition_asks_first`.
+- [ ] **Шаг 1: падающие тесты.** `gate`: по тесту на каждое условие (`истёкший срок действия` — см. задачу 32, `пустой db_user`, `файловая база без каталога`, `серверная база — не запирает`, `нет платформы`, `нет mcp-1c`, `инструменты не разложены`, `туннельный режим без адреса среды`, `всё на месте → None`). `panel`: `the_switch_is_locked_while_the_gate_holds`. `tray`: `the_tray_item_follows_the_same_gate`. `mod`: `autostart_does_not_enable_while_the_gate_holds`; `saving_away_a_cold_condition_asks_first`.
 - [ ] **Шаг 2: тесты падают.**
 - [ ] **Шаг 3: ворота.** `cold_gate` по разделу спеки; причина — короткая строка для подсказки.
 - [ ] **Шаг 4: читатели.** Переключатель и пункт трея запираются; автозапуск не включает обслуживание; `save_host` при живом обслуживании и пропавшем условии идёт через тот же диалог, что смена базы; отказ агенту несёт причину.
@@ -862,6 +862,123 @@ git commit -m "Комплект в образе: один общий тольк�
 - [ ] **Шаг 4: тест проходит.**
 - [ ] **Шаг 5: живьём.** Снимок из образа: прямые углы без стеклянных пятен; окно `dev1c-setup` не изменилось.
 - [ ] **Шаг 6: коммит.** `git commit -m "На Linux окно без скруглений: прозрачность в углах там не работает"`
+
+
+---
+
+### Task 30: Экран для конфигуратора даёт коннектор
+
+**Files:**
+- Modify: `setup/1c-connect/src/ops_host.rs` (`with_display`, факт «экран для конфигуратора»)
+- Modify: `setup/1c-connect/src/bridge.rs` (`vrunner_command`)
+- Modify: `setup/1c-connect/src/verify.rs` (факт в наборе на Linux)
+- Test: inline в `ops_host.rs` и `verify.rs`
+
+**Interfaces:**
+- Produces: `ops_host::display_prefix(has_display: bool, xvfb: Option<&Path>) -> Option<PathBuf>` — чистая функция: `None`, если дисплей уже есть или оборачивать нечем; путь к `xvfb-run`, если нужен и он найден. На Windows всегда `None`.
+- Produces: `ops_host::with_display(cmd: Command) -> Command` — переписывает команду в `xvfb-run -a <программа> <аргументы>`, когда `display_prefix` сказал «надо».
+- Produces: `verify::display_fact(prefix_needed: bool, xvfb: Option<&Path>) -> Check` — провал только когда дисплея нет и `xvfb-run` не найден.
+
+- [ ] **Шаг 1: падающие тесты.** `ops_host`: `display_prefix_is_none_when_display_is_set`; `display_prefix_names_xvfb_when_display_is_missing`; `display_prefix_is_none_on_windows`; `with_display_keeps_program_and_args_in_order` (после обёртки первым идёт `xvfb-run`, затем `-a`, затем прежняя программа и её аргументы без перестановки). `verify`: `display_fact_fails_only_without_display_and_without_xvfb`.
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib`).
+- [ ] **Шаг 3: обёртка.** `with_display` применяется там, где поднимается конфигуратор: `bridge::vrunner_command` (через него идут `cf_decompile`/`cf_load`) и прямые вызовы `1cv8 DESIGNER` в `ops_host` (установка и снятие расширения).
+- [ ] **Шаг 4: факт.** На Linux в набор проверки добавляется «экран для конфигуратора»: есть `DISPLAY` — ok; нет, но есть `xvfb-run` — ok с названием способа; нет ни того, ни другого — провал с подсказкой поставить `xvfb`.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: живьём.** В контейнере под dev3: `env -u DISPLAY 1c-connect export --dry-run` и настоящий `export` без `DISPLAY` в окружении проходят; в журнале видно, каким способом дан экран.
+- [ ] **Шаг 7: коммит.** `git commit -m "Экран для конфигуратора на Linux даёт коннектор, а не вызывающий"`
+
+---
+
+### Task 31: Разовая команда не воюет со своим же коннектором
+
+**Files:**
+- Modify: `setup/1c-connect/src/verify.rs` (`ports_fact`, признак «свой»)
+- Modify: `setup/1c-connect/src/ops_host.rs` (`holder` — образ процесса)
+- Test: inline в `verify.rs`
+
+**Interfaces:**
+- Produces: `verify::ports_fact(mcp: u16, vrunner: u16, holders: &[(u16, Holder)]) -> Check`, где `Holder` различает «мы сами», «наш коннектор этого рабочего места» и «чужой процесс». Провал — только на третьем.
+
+- [ ] **Шаг 1: падающие тесты.** `our_own_tray_holding_the_ports_is_not_a_failure`; `a_stranger_on_the_same_port_still_fails`; `a_free_port_passes`.
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: признак «свой».** Держатель считается своим, если это тот же исполняемый файл коннектора (как уже отличает свою копию `single_instance::same_image`), а не только если его `pid` равен нашему.
+- [ ] **Шаг 4: тесты проходят.**
+- [ ] **Шаг 5: живьём.** При работающем трее на dev3: `install -y`, `check` и `export --dry-run` проходят; факт портов зелёный и называет способ («заняты коннектором этого рабочего места»).
+- [ ] **Шаг 6: коммит.** `git commit -m "Свои же порты разовой команде не мешают"`
+
+
+---
+
+### Task 32: Заглушка под лицензию — срок до 22.12.2026
+
+**Files:**
+- Create: `setup/1c-connect/src/licence.rs`
+- Modify: `setup/1c-connect/src/lib.rs` (модуль в дерево)
+- Modify: `setup/1c-connect/src/verify.rs` (факт «срок действия»)
+- Modify: `setup/1c-connect/src/bridge.rs` (отказ вызову агента)
+- Modify: `setup/1c-connect/src/main.rs` (отказ командам, меняющим машину)
+- Modify: `setup/1c-connect/src/gui/mod.rs` (строка в журнале при запуске)
+- Test: inline в `licence.rs` и `verify.rs`
+
+**Interfaces:**
+- Produces: `licence::UNTIL: (i32, u32, u32)` — зашитая дата `(2026, 12, 22)`, единственное место, где она записана.
+- Produces: `licence::state_on(y: i32, m: u32, d: u32) -> State` — чистая функция от даты; `State::Valid`, `State::Soon { days: u32 }` (14 дней и меньше до срока), `State::Expired`. Дата **передаётся**, часы внутрь не заглядывают — иначе тест на «день после» пришлось бы ставить переводом времени.
+- Produces: `licence::today() -> (i32, u32, u32)` — местная дата машины; единственное место, которое смотрит на часы.
+- Produces: `licence::REFUSAL: &str` — текст отказа, одинаковый у моста, у команд и в окне: называет, что срок истёк и какого числа.
+- Produces: `verify::licence_fact(state: &State) -> Check` — `Expired` провал, `Soon` сведение со сроком, `Valid` — ok.
+
+- [ ] **Шаг 1: падающие тесты.** `licence`: `a_day_before_the_deadline_is_valid`, `the_deadline_day_itself_is_valid` (срок включительно — «после 22.12» значит с 23-го), `a_day_after_is_expired`, `two_weeks_before_warns_with_days_left`, `a_year_before_is_quiet` (никакого предупреждения), `today_matches_the_system_date` (единственная проверка часов: год не меньше 2026). `verify`: `an_expired_licence_fails_and_a_warning_is_only_information`.
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib`).
+- [ ] **Шаг 3: модуль.** Дата в календарь переводится своими силами (в дереве нет ни `chrono`, ни `time`, и тащить их ради одной даты незачем): `SystemTime` → секунды → местная дата. Новых зависимостей не добавлять.
+- [ ] **Шаг 4: читатели.** Факт в наборе проверки; мост отвечает на вызов агента отказом тем же путём, что и на выключённый переключатель (`Route::Disabled`), с текстом `REFUSAL`; `install`, `uninstall`, `export`, `import` отказывают с ним же; `status`, `check` и `example` остаются доступны — человеку надо чем-то показать поддержке; окно открывается и пишет причину строкой в журнал.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: коммит.** `git commit -m "Заглушка под лицензию: после 22.12.2026 коннектор работу не обслуживает"`
+
+**Примечание для исполнителя задачи 23** (замок переключателя): истёкший срок — такое же холодное условие, как незаданный пользователь базы, и попадает в `cold_gate` вместе с остальными. Пока задача 23 не сделана, переключатель запирать нечем — хватит отказа моста и факта проверки.
+
+
+---
+
+### Task 33: Скругление на Linux вырезаем формой окна
+
+**Files:**
+- Modify: `setup/1c-connect/src/gui/window.rs` (форма окна на Linux)
+- Modify: `setup/1c-connect/src/gui/panel.rs` (радиус корня снова есть и на Linux)
+- Modify: `setup/1c-connect/Cargo.toml` (фича `shape` у `x11rb`, если она не включена)
+- Test: inline в `window.rs`
+
+**Interfaces:**
+- Produces: `window::rounded_region(w: u16, h: u16, r: u16) -> Vec<(i16, i16, u16, u16)>` — чистая функция: список прямоугольников, из которых складывается скруглённый прямоугольник (построчные пролёты по углам). Без X11, тестируется сама по себе.
+- Produces: `window::shape_corners(window: &Window, r: Pixels)` — ставит форму окну по его размеру; отказ проглатывается (окно обязано открыться и без формы).
+
+- [ ] **Шаг 1: падающие тесты.** `rounded_region`: `a_zero_radius_is_one_rectangle` (радиус 0 → один прямоугольник во всю величину); `the_region_never_leaves_the_window` (ни один прямоугольник не выходит за `w`×`h`); `the_corners_are_symmetric` (пролёты верхних и нижних строк совпадают по ширине); `a_radius_bigger_than_half_is_clamped` (радиус больше половины меньшей стороны не ломает список).
+- [ ] **Шаг 2: тесты падают** (`cargo test -p onec-connect --lib`).
+- [ ] **Шаг 3: форма.** `shape_corners` берёт идентификатор окна X11 тем же путём, что `move_to` (дескриптор от GPUI), и ставит ограничивающую форму `shape::rectangles` своим коротким соединением — как уже сделано в `work_area`. Пересчёт при смене размера: там же, где окно уже двигают после подбора высоты.
+- [ ] **Шаг 4: радиус возвращается.** `window_radius()` на Linux снова отдаёт радиус — панель рисует скруглённые углы, а форма их вырезает. `window_background` на Linux остаётся непрозрачным: без композитора прозрачность бессмысленна.
+- [ ] **Шаг 5: тесты проходят.**
+- [ ] **Шаг 6: живьём.** В образе: `xwininfo -id <окно> -shape` показывает непрямоугольную форму со ступеньками по углам; окно принимает ввод и стоит на своём месте; снимок заказчику.
+- [ ] **Шаг 7: коммит.** `git commit -m "На Linux углы вырезаем формой окна: композитора нет, а SHAPE есть"`
+
+
+---
+
+### Task 34: Веб-сервер системы — факт проверки, а не сюрприз при публикации
+
+**Files:**
+- Modify: `setup/1c-connect/src/verify.rs` (факт «веб-сервер в системе», только Linux)
+- Test: inline там же
+
+**Interfaces:**
+- Consumes: `publication::apache2_on_path()` — уже есть, вернуть из неё путь (сделать видимой внутри крейта, не публичной наружу).
+- Produces: `verify::web_server_fact(apache: Option<&Path>, module: Option<&Path>) -> Check` — чистая функция: нет apache2 — провал с советом «установите пакет apache2»; нет модуля `wsap24.so` — провал с советом поставить веб-расширение платформы; оба на месте — ok с путём.
+
+- [ ] **Шаг 1: падающие тесты.** `a_missing_apache_names_the_package`; `a_missing_1c_module_names_the_platform_component`; `both_present_pass_and_name_the_path`.
+- [ ] **Шаг 2: тесты падают.**
+- [ ] **Шаг 3: факт.** На Linux встаёт в набор рядом с фактом веб-сервера (порт), **до** публикации и расширения: без сервера они всё равно не поднимутся, и причина должна быть настоящей. На Windows факта нет — там веб-сервер в комплекте, и его отсутствие уже ловит `host.tools`.
+- [ ] **Шаг 4: тесты проходят.**
+- [ ] **Шаг 5: коммит.** `git commit -m "Нет системного Apache — это факт проверки, а не отказ посреди публикации"`
+
+**Примечание.** Отказ при запуске публикации («apache2 не найден в $PATH — установите пакет apache2…») уже есть и остаётся: факт нужен, чтобы человек узнал об этом **до** того, как нажмёт, и чтобы точка не была зелёной на машине, где публиковать нечем.
 
 ## Что остаётся исполнителю
 

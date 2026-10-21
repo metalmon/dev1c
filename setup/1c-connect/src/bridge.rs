@@ -59,7 +59,13 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     c.env("VRUNNER_DBPWD", &cfg.host.db_password);
     c.env("NO_PROXY", cfg.host.server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.host.server));
     c.env("GIT_TERMINAL_PROMPT", "0");
-    c
+    // Экран Конфигуратору даёт коннектор, а не вызывающий: через эту команду
+    // идут `cf_decompile`/`cf_load`, а vanessa-runner поднимает ими
+    // Конфигуратор — оконную программу. Без экрана `1c-connect export` из
+    // командной строки падал с «Unable to initialize GTK+ or connect to the
+    // windowing system», код 255 (замер 2026-10-20 в контейнере). На Windows
+    // `with_display` возвращает команду как была.
+    crate::ops_host::with_display(c.into_std()).into()
 }
 
 use crate::jsonrpc::{self, Frame, Framer, Route};
@@ -71,8 +77,48 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// Общее начало обоих отказов «MCP выключены» — с советом включить и с
+/// причиной замка. Тестам гейта важен сам отказ, а не его хвост, и смотрят они
+/// сюда: иначе каждый из них зависел бы от того, заперт ли сейчас замок.
+pub const DISABLED_PREFIX: &str = "MCP выключены в 1c-connect";
+
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
+
+/// Почему обслуживание не идёт, пока оно не идёт: причина холодного замка
+/// (`gui::gate::cold_gate`) или отказ, который его погасил (занят порт, не
+/// поднялась публикация). Порты в локальном режиме подняты всегда, и вызов
+/// инструмента получает отказ — но MCP не выключены человеком, и в тексте
+/// отказа обязана ехать причина: иначе ни агент, ни человек не узнают, что
+/// править (спека, «Пока замок заперт, агент получает отказ с причиной»).
+/// Отказ публикации сюда доезжает по той же надобности: человек ничего не
+/// выключал, и «включите переключатель» было бы советом не по делу
+/// (находка N2 повторного ревью).
+///
+/// ponytail: глобал на процесс — окно и мост живут в одном процессе, а
+/// `Rules` собирают четверо (окно, `listen`, тесты); понадобится второй
+/// независимый мост — поле `Arc` рядом с `enabled`.
+static OFF_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// Окно пересчитало замок (`gui::refresh_gate`). Отравленный замок не
+/// страшен: читаем и пишем короткую строку, рвать из-за неё отказы агенту
+/// незачем.
+pub fn set_off_reason(reason: Option<String>) {
+    *OFF_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+}
+
+pub fn off_reason() -> Option<String> {
+    OFF_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Текст отказа: без замка — прежний («включите переключатель»), с замком —
+/// его причина, потому что включать нечего и совет был бы ложью.
+pub fn disabled_text(reason: Option<&str>) -> String {
+    match reason {
+        Some(why) => format!("{DISABLED_PREFIX}: {why}"),
+        None => DISABLED_TEXT.to_string(),
+    }
+}
 
 /// Правила моста на одно соединение. Строка подключения, её пользователь и
 /// каталог проекта здесь не лежат готовыми — они читаются из `live` на
@@ -534,7 +580,17 @@ async fn handle_request(
     // переключателя и порта: `initialize`/`notifications/initialized` и так
     // идут как обычно (см. ветки ниже), запоминается только их факт.
     capture_handshake(&line, handshake);
-    let off = !rules.enabled.load(Ordering::Relaxed);
+    // Истёкший срок заглушки лицензии запирает вызовы тем же путём, что
+    // снятый переключатель (спека, п. 9): не своей веткой на каждый отказ, а
+    // тем же `off` — иначе пришлось бы продублировать все ветки ниже, и
+    // какая-нибудь из них однажды разошлась бы с остальными. Меняется только
+    // текст отказа: человек должен прочитать причину, а не «включите
+    // переключатель», которого не хватит.
+    let expired = matches!(crate::licence::state_now(), crate::licence::State::Expired);
+    let off = expired || !rules.enabled.load(Ordering::Relaxed);
+    // Текст считаем только когда он нужен: на включённом обслуживании каждый
+    // кадр брал мьютекс замка и выделял строку, которую никто не читает.
+    let refusal_text = || if expired { crate::licence::REFUSAL.to_string() } else { disabled_text(off_reason().as_deref()) };
     if !rules.inject {
         // 777N (mcp-1c) не ведёт разбор JSON-RPC вовсе — голый проброс, как
         // раньше у pipe_process. Включён — байт в байт, что угодно; выключен
@@ -553,7 +609,7 @@ async fn handle_request(
                 forward_counted(stdin, &raw, in_flight, reply_expected).await
             }
             jsonrpc::McpOffGate::Refuse(id) => {
-                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
                 Ok(())
             }
             jsonrpc::McpOffGate::ParseError(id) => {
@@ -597,7 +653,7 @@ async fn handle_request(
             forward_counted(stdin, &line, in_flight, reply_expected).await
         }
         Route::Disabled { id, tool } => {
-            let text = if off { DISABLED_TEXT.to_string() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
+            let text = if off { refusal_text() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
             let _ = out.send(jsonrpc::text_reply(&id, &text, true)).await;
             Ok(())
         }
@@ -618,7 +674,7 @@ async fn handle_request(
         }
         Route::OurCall { id, tool, args } => {
             if off {
-                let _ = out.send(jsonrpc::text_reply(&id, DISABLED_TEXT, true)).await;
+                let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
                 return Ok(());
             }
             // Свежий `Project` из того же снимка `cfg`, что и выше — не из
@@ -846,7 +902,7 @@ mod tests {
     use super::*;
     // Короткое имя нужно только тестам: рабочий код пишет полный путь.
     use crate::cfg::Cfg;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     /// The test binary itself as the child: `__echo_child` below runs one of
     /// the scripted shapes picked by an env var — a portable fake mcp-1c/
@@ -1058,7 +1114,23 @@ mod tests {
         assert!(env["PATH"].starts_with(&format!("{bin}{}{git}", if cfg!(windows) { ';' } else { ':' })), "{}", env["PATH"]);
         assert_eq!(c.get_current_dir().unwrap(), std::path::Path::new("C:\\proj\\Бух"));
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-        assert!(args[0].ends_with("mcp.os"), "{args:?}");
+        // Обе ветки проверяются по тому, что получилось, а не тем же решением,
+        // которое на результат влияло (иначе тест зелен при любом ответе).
+        // На машине без живого `DISPLAY`, но с `xvfb-run`, команда обёрнута
+        // (`ops_host::with_display`): `xvfb-run`, `-a`, прежняя программа, и
+        // только потом `mcp.os`. В CI (`ubuntu-24.04` без `DISPLAY`) берётся
+        // именно эта ветка — проверка обязана работать там, а не молчать.
+        let prog = c.get_program().to_string_lossy().to_string();
+        if prog.ends_with("xvfb-run") {
+            assert_eq!(args[0], "-a", "{args:?}");
+            assert!(args[1].contains("oscript"), "{args:?}");
+            assert!(args[2].ends_with("mcp.os"), "{args:?}");
+            assert_eq!(args.len(), 3, "{args:?}");
+        } else {
+            assert!(prog.contains("oscript"), "{prog}");
+            assert!(args[0].ends_with("mcp.os"), "{args:?}");
+            assert_eq!(args.len(), 1, "{args:?}");
+        }
     }
 
     #[test]
@@ -1123,9 +1195,19 @@ mod tests {
         assert!(!raw.contains("CALL cf_load"), "ребёнок не должен был увидеть вызов: {raw}");
         let call = replies.iter().find(|r| r["id"] == 3).unwrap();
         assert_eq!(call["result"]["isError"], true);
-        assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{raw}");
+        // Начало отказа, а не весь текст: хвост зависит от того, заперт ли
+        // сейчас холодный замок окна (`bridge::gate_reason`), а тест — про гейт.
+        assert!(call["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{raw}");
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был ответить: {raw}");
         assert!(replies.iter().any(|r| r["id"] == 2), "tools/list должен был ответить: {raw}");
+    }
+
+    /// Пока замок заперт, MCP не выключены человеком — их нельзя включить, и
+    /// совет «включите переключатель» был бы ложью: в отказе едет причина.
+    #[test]
+    fn the_refusal_carries_the_off_reason() {
+        assert_eq!(disabled_text(None), DISABLED_TEXT);
+        assert_eq!(disabled_text(Some("не задан пользователь базы")), "MCP выключены в 1c-connect: не задан пользователь базы");
     }
 
     #[tokio::test]
@@ -1160,7 +1242,7 @@ mod tests {
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
         assert!(replies.iter().any(|r| r["id"] == 1), "initialize должен был пройти насквозь: {got}");
         let call = replies.iter().find(|r| r["id"] == 2).unwrap();
-        assert_eq!(call["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+        assert!(call["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{got}");
     }
 
     #[tokio::test]
@@ -1270,7 +1352,7 @@ mod tests {
         tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
         assert_eq!(replies.len(), 2, "{got}");
-        assert_eq!(replies[0]["result"]["content"][0]["text"], DISABLED_TEXT, "{got}");
+        assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{got}");
         assert_eq!(replies[1]["result"]["content"][0]["text"], "child ran cf_load", "{got}");
     }
 
@@ -1465,24 +1547,52 @@ mod tests {
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
             let _ = tx.send((code, err));
         }));
-        let (mut r, mut w) = tokio::io::split(ours);
+        let (r, mut w) = tokio::io::split(ours);
+        // Ждём сам маркер, а не «столько-то миллисекунд»: ребёнок здесь —
+        // целый процесс, и под нагрузкой (чужая сборка рядом, CI) он не
+        // укладывается в фиксированную паузу. Срок большой и один на обоих,
+        // падать по нему тест будет только на настоящей поломке.
+        let mut lines = tokio::io::BufReader::new(r).lines();
         let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(wait_line(&mut lines, |l| l.starts_with("MARKER ")).await, "MARKER UserA");
+        // Дожидаемся именно **ответа** на первый вызов: мост меняет ребёнка
+        // только на праздном соединении (`in_flight == 0`), и послать второй
+        // вызов раньше ответа значило бы отдать его старому ребёнку — не
+        // потому что рестарт сломан, а потому что мы поторопились.
+        wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":1")).await;
 
         let mut cfg_b = live.get().1;
         cfg_b.host.db_user = "UserB".into();
         live.set(cfg_b);
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            wait_line(&mut lines, |l| l.starts_with("MARKER ")).await,
+            "MARKER UserB",
+            "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах"
+        );
         w.shutdown().await.unwrap();
+    }
 
-        let mut got = String::new();
-        r.read_to_string(&mut got).await.unwrap();
-        let markers: Vec<&str> = got.lines().filter(|l| l.starts_with("MARKER ")).collect();
-        assert_eq!(markers, ["MARKER UserA", "MARKER UserB"], "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах: {got}");
+    /// Ближайшая строка ответа моста, подходящая под условие; всё прочее
+    /// пропускаем. Ждёт событие, а не «столько-то миллисекунд»: ребёнок
+    /// здесь — целый процесс, и под нагрузкой (чужая сборка рядом, CI) он не
+    /// укладывается в фиксированную паузу — прежние `sleep(300 мс)`/
+    /// `sleep(500 мс)` и давали мигающий тест. Срок большой: падать по нему
+    /// тест будет только на настоящей поломке.
+    async fn wait_line(lines: &mut tokio::io::Lines<tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>>, ok: impl Fn(&str) -> bool) -> String {
+        loop {
+            let line = tokio::time::timeout(std::time::Duration::from_secs(20), lines.next_line())
+                .await
+                .expect("мост молчит дольше 20 с")
+                .expect("чтение ответа моста")
+                .expect("поток кончился раньше ожидаемой строки");
+            if ok(&line) {
+                return line;
+            }
+        }
     }
 
     /// Не половина старой и половина новой конфигурации в одном вызове:

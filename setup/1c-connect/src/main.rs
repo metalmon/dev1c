@@ -13,7 +13,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, flow, project, session, single_instance, verify};
+use one_c_connect::{cfg, flow, licence, project, session, single_instance, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -156,7 +156,17 @@ fn run() -> Result<()> {
     }
     let ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
     let ops = ops_host::host();
-    match cli.cmd.unwrap_or(Cmd::Status) {
+    let cmd = cli.cmd.unwrap_or(Cmd::Status);
+    // Срок заглушки лицензии вышел — разовые команды, меняющие машину, не
+    // работают (спека, п. 9). `status`, `check` и `example` остаются: человеку
+    // надо чем-то показать поддержке. `connect`/`serve` тоже поднимаются —
+    // отказывает мост на каждый вызов агента, с тем же текстом.
+    if matches!(cmd, Cmd::Install | Cmd::Uninstall | Cmd::Export { .. } | Cmd::Import)
+        && matches!(licence::state_now(), licence::State::Expired)
+    {
+        anyhow::bail!("{}", licence::REFUSAL);
+    }
+    match cmd {
         Cmd::Example => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
@@ -219,7 +229,10 @@ fn run() -> Result<()> {
 
 fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     println!("Проверка:");
-    let checks = verify::run(ctx, tunnel_state);
+    // Командная строка (`check`, и `install` сразу за установкой) портов
+    // рабочего места не занимает: занятый порт для неё — сведение, а не
+    // провал (спека, «порты важны там, где мы их занимаем»).
+    let checks = verify::run(ctx, tunnel_state, verify::PortUse::WeDont);
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
     let path = ctx.kit.state_path("last-check.txt");

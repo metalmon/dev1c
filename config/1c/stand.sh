@@ -92,6 +92,12 @@ LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
 CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
+# The image's own Gitea, as it is reachable from inside the container. One
+# constant for the two users of it: the toml a workstation's connector reads
+# (host.gitea — without it the connector derives the address from the SSH port,
+# which in local mode leads nowhere) and `1c-stand project`, the agent's own
+# side of the circle. Checked live in the image: /api/v1/version answers here.
+GITEA_URL=http://localhost:3000
 # The shared kit built into the image (Dockerfile.1c). It is declared there
 # as an ENV, which reaches `1c-stand seed` started by init; but a desktop
 # session arrives through xrdp-sesman and PAM, where the image's ENV is not
@@ -272,6 +278,7 @@ ZEDDB
             cat >"$t/$CONNECT_TOML" <<EOF
 [host]
 mode = "local"
+gitea = "$GITEA_URL"
 workstation = "$u"
 base_path = "$HOME/base"
 base_url = "http://localhost:$((8080 + n))/hs/mcp-1c"
@@ -293,6 +300,59 @@ EOF
         if [ -n "$DB_USER" ] && [ -f "$t/$CONNECT_TOML" ]            && grep -q '^db_user = ""' "$t/$CONNECT_TOML"; then
             sed -i "s|^db_user = \"\"|db_user = \"$DB_USER\"|" "$t/$CONNECT_TOML"
             log "1c-connect: пустой db_user в $CONNECT_TOML заменён на $DB_USER" >&2
+        fi
+        # The address of the image's Gitea goes into an ALREADY EXISTING toml
+        # too, not only into a new one: a home is a volume, the file is
+        # normally already there, and otherwise the address would never
+        # appear — the connector would keep deriving it from the SSH port and
+        # the check would stay yellow forever. Idempotent and blind to the
+        # other lines; appended at the end of the file, where [host] is the
+        # only table (both the connector's own render and the heredoc above
+        # write just that one). The leading newline guards against a last
+        # line with no newline of its own.
+        have=$(sed -n 's|^[[:space:]]*gitea[[:space:]]*=[[:space:]]*"\(.*\)"|\1|p' "$t/$CONNECT_TOML" | tail -1)
+        case "$have" in
+        "")
+            { echo; echo "gitea = \"$GITEA_URL\""; } >>"$t/$CONNECT_TOML"
+            log "1c-connect: адрес Gitea ($GITEA_URL) дописан в $t/$CONNECT_TOML" >&2
+            ;;
+        "$GITEA_URL") ;;
+        http://localhost:*|http://127.0.0.1:*|"http://[::1]:"*)
+            # Written by an older image under a different port: ours to move.
+            # A real hostname is the person's own choice and stays untouched,
+            # the same rule as for the project's origin below.
+            grep -v '^[[:space:]]*gitea[[:space:]]*=' "$t/$CONNECT_TOML" >"$t/$CONNECT_TOML.new"
+            echo "gitea = \"$GITEA_URL\"" >>"$t/$CONNECT_TOML.new"
+            mv "$t/$CONNECT_TOML.new" "$t/$CONNECT_TOML"
+            log "1c-connect: адрес Gitea обновлён на $GITEA_URL в $t/$CONNECT_TOML" >&2
+            ;;
+        esac
+        # A project laid out before the address moved keeps the old `origin`,
+        # which the connector then reports as drift (project::layout_state)
+        # and nothing here would ever fix: install is what repairs it on a
+        # developer's machine, and nobody runs install in the stand. Only the
+        # address part is rewritten — the repository name belongs to whoever
+        # cloned the directory (`1c-stand project <name>`).
+        #
+        # And only an address that is ours to move: a loopback host is this
+        # stand's own Gitea under some older port, nothing else can live
+        # there. Anything with a real hostname is the person's own remote —
+        # a company Gitea, github.com — and rewriting it would quietly point
+        # their work at the image and push-create a stranger's repository
+        # here (found in review 2026-10-20).
+        proj=$(sed -n 's|^project *= *"\(.*\)"|\1|p' "$t/$CONNECT_TOML" 2>/dev/null | tail -1)
+        [ -n "$proj" ] || proj="$HOME/project"
+        if [ -d "$proj/.git" ]; then
+            old=$(git -C "$proj" remote get-url origin 2>/dev/null) || old=
+            case "$old" in
+            http://localhost:*|http://127.0.0.1:*|http://[::1]:*|https://localhost:*|https://127.0.0.1:*)
+                new="$GITEA_URL/$(printf '%s' "$old" | cut -d/ -f4-)"
+                if [ "$new" != "$old" ]; then
+                    git -C "$proj" remote set-url origin "$new"
+                    log "1c-connect: origin проекта переведён на $new" >&2
+                fi
+                ;;
+            esac
         fi
         # Tools: here the shared kit IS what is laid out. ops_host compares
         # the kit's tools.version (stamped at build time) with the state's
@@ -397,7 +457,10 @@ project)
     # GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n from the
     # environment, so credential.helper and the Authorization header never
     # appear as a "-c" argument that `ps` on this machine could show anyone.
-    url="http://127.0.0.1:3000/dev1c/$name.git"
+    # One address for the image's Gitea (GITEA_URL at the top), the same one
+    # `seed` writes into the workstation's toml: two spellings of one server
+    # would show up as `origin` drift in the connector's check.
+    url="$GITEA_URL/dev1c/$name.git"
     auth="Authorization: Basic $(printf '%s' "$u:$u" | base64 | tr -d '\n')"
     gitc() {
         GIT_CONFIG_COUNT=2 \
@@ -406,7 +469,7 @@ project)
             git "$@"
     }
     if [ ! -d "$dir/.git" ]; then
-        log "клонирую dev1c/$name из Gitea (http://127.0.0.1:3000), ветка $u"
+        log "клонирую dev1c/$name из Gitea ($GITEA_URL), ветка $u"
         gitc clone --depth 1 -b "$u" "$url" "$dir"
     fi
     case "$sub" in

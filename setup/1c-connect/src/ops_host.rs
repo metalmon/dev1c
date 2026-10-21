@@ -358,6 +358,139 @@ pub fn find_1cv8() -> Option<PathBuf> {
     pick_version(dedup_canonical(scan_1cv8()))
 }
 
+/// `xvfb-run` в `PATH`. Обходим каталоги сами, тем же приёмом, что
+/// `platform_from` выше (первый существующий путь) — ради одной программы
+/// крейт вокруг `which` не нужен.
+pub fn find_xvfb_run() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("xvfb-run")).find(|p| p.exists())
+}
+
+/// `DISPLAY` как он задан в окружении (пустое значение — что не задан вовсе).
+pub fn display_env() -> Option<String> {
+    std::env::var("DISPLAY").ok().filter(|v| !v.is_empty())
+}
+
+/// Пригоден ли заданный `DISPLAY`. Чистая функция: значение ей называет
+/// вызывающий.
+///
+/// Для местного дисплея вида `:N` (и `:N.S`) живой X-сервер — это сокет
+/// `/tmp/.X11-unix/XN`: нет сокета — нет и сервера. Случай не выдуманный:
+/// `DISPLAY=:0`, унаследованный через `su -` или юнит init, остаётся в
+/// окружении, когда графического сеанса за ним уже нет; раньше обёртка тогда
+/// не включалась, и человек получал всё тот же сырой отказ GTK+, а проверка
+/// показывала по этому поводу зелёный факт. Нечисловые и сетевые адреса
+/// (`host:0`) считаем пригодными как есть: дёшево их не проверить, а отнимать
+/// у человека его же экран хуже, чем довериться.
+pub fn display_alive(display: &str) -> bool {
+    let Some(tail) = display.strip_prefix(':') else { return true };
+    let n = tail.split('.').next().unwrap_or(tail);
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    Path::new("/tmp/.X11-unix").join(format!("X{n}")).exists()
+}
+
+/// Экран сеанса: значение `DISPLAY`, если оно задано и за ним есть сервер.
+pub fn session_display() -> Option<String> {
+    display_env().filter(|d| display_alive(d))
+}
+
+/// Нужен ли Конфигуратору экран и чем его дать: `None` — экран уже есть либо
+/// обернуть нечем; путь к `xvfb-run` — если нужен и он найден. Чистая
+/// функция, окружение и `PATH` ей называет вызывающий (`display_wrapper`).
+///
+/// Зачем вообще: на Linux выгрузка и загрузка идут через vanessa-runner, а он
+/// поднимает Конфигуратор — оконную программу. Без экрана он не стартует, и
+/// `1c-connect export` из командной строки падал с «Unable to initialize GTK+
+/// or connect to the windowing system. Is DISPLAY set properly?», код 255
+/// (замер 2026-10-20 в контейнере). Экран даёт коннектор сам — тем же
+/// способом, каким стенд уже обходит эту беду для своего `vrunner-mcp`
+/// (`config/1c/stand.sh`, `xvfb-run -a`). Только на Linux: на Windows
+/// Конфигуратор рисует в сеансе пользователя, а на macOS платформы нет вовсе.
+pub fn display_prefix(has_display: bool, xvfb: Option<&Path>) -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") || has_display {
+        return None;
+    }
+    xvfb.map(Path::to_path_buf)
+}
+
+/// `display_prefix` на этой машине: сам спрашивает `DISPLAY` и `PATH`.
+pub fn display_wrapper() -> Option<PathBuf> {
+    display_prefix(session_display().is_some(), find_xvfb_run().as_deref())
+}
+
+/// Текст отказа до запуска Конфигуратора: экрана нет и дать его нечем.
+/// Чистая функция — состояние машины ей называет вызывающий.
+pub fn no_screen(has_display: bool, xvfb: Option<&Path>) -> Option<String> {
+    (cfg!(target_os = "linux") && !has_display && xvfb.is_none())
+        .then(|| format!("нет экрана для Конфигуратора: DISPLAY не задан (или за ним нет X-сервера), xvfb-run не найден — {SCREEN_HINT}"))
+}
+
+/// Отказ от имени коннектора вместо сырого «Unable to initialize GTK+…» через
+/// минуту ожидания: подсказка про `xvfb` живёт не только в `check`, куда после
+/// непонятного падения `export` человек не пойдёт.
+pub fn screen_check() -> Result<(), String> {
+    match no_screen(session_display().is_some(), find_xvfb_run().as_deref()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Чем лечить отсутствие экрана. Один текст на отказ до запуска и на факт
+/// проверки. Пакета два: `xvfb-run` без `xauth` отвечает «xauth: command not
+/// found» — в образе проекта и в CI `xauth` стоит отдельной строкой рядом.
+pub const SCREEN_HINT: &str = "поставьте оба пакета: apt install xvfb xauth (без xauth сам xvfb-run отвечает «xauth: command not found»)";
+
+/// Переписать команду в `xvfb-run -a <программа> <аргументы>`. Отдельно от
+/// `with_display`, чтобы порядок аргументов проверялся тестом на любой машине,
+/// а не только там, где `xvfb-run` есть.
+///
+/// `xvfb-run` потоки не сливает — проверено в образе 2026-10-20
+/// (`xvfb-run -a sh -c "echo OUT; echo ERR >&2" 2>/dev/null` печатает только
+/// `OUT`): stdout ребёнка остаётся каналом JSON-RPC, stderr — журналом, и
+/// протокол с агентом обёртка не рвёт.
+fn wrap_in_display(cmd: std::process::Command, xvfb: &Path) -> std::process::Command {
+    let mut c = std::process::Command::new(xvfb);
+    c.arg("-a").arg(cmd.get_program()).args(cmd.get_args());
+    if let Some(d) = cmd.get_current_dir() {
+        c.current_dir(d);
+    }
+    // Перенос окружения: `get_envs` отдаёт и снятые переменные (`None`).
+    // Потоки (stdin/stdout/stderr) из `Command` не вычитываются вовсе — их
+    // вызывающие ставят уже после этой обёртки (`local::call`, `bridge`).
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
+    c
+}
+
+/// Дать Конфигуратору экран, если его нет: `xvfb-run -a <программа> …`.
+/// Экран — забота коннектора, а не вызывающего (см. `display_prefix`).
+pub fn with_display(cmd: std::process::Command) -> std::process::Command {
+    match display_wrapper() {
+        Some(x) => wrap_in_display(cmd, &x),
+        None => cmd,
+    }
+}
+
+/// То же для `docker::exec`, который берёт программу и аргументы строками, а
+/// не `Command`: отдаёт пару «программа, аргументы» уже с обёрткой. Обёртку
+/// называет вызывающий (`display_wrapper()`), а не функция — так порядок
+/// аргументов проверяется тестом на любой машине.
+fn display_argv(program: &str, args: &[&str], xvfb: Option<&Path>) -> (String, Vec<String>) {
+    let tail = args.iter().map(|s| s.to_string());
+    match xvfb {
+        Some(x) => (x.to_string_lossy().into_owned(), ["-a".to_string(), program.to_string()].into_iter().chain(tail).collect()),
+        None => (program.to_string(), tail.collect()),
+    }
+}
+
 /// Жёсткая ссылка на файл под новым именем; если том не позволяет ссылки
 /// (съёмный диск, другой раздел), копирует файл — не проваливает всю раскладку
 /// теневого каталога из-за одного файла. Старую ссылку/копию сперва убираем,
@@ -495,7 +628,14 @@ pub fn ib_switch(base_path: &str) -> String {
 
 /// Версия расширения, которую отдаёт публикация; пусто — не отвечает.
 pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<String> {
-    let c = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(60)).build().ok()?;
+    extension_version_in(base_url, user, password, std::time::Duration::from_secs(60))
+}
+
+/// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
+/// мгновенно), а вердикт готовности — коротко, чтобы уложиться в бюджет
+/// (`verify::Limits`).
+pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
+    let c = reqwest::blocking::Client::builder().timeout(timeout).build().ok()?;
     let r = c.get(format!("{base_url}/version")).basic_auth(user, Some(password)).send().ok()?;
     if !r.status().is_success() {
         return None;
@@ -723,16 +863,30 @@ impl Op<Ctx> for Extension {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        // План печатает то, что действительно будет запущено, обёртку включая:
+        // из этих строк собирается ручной путь в инструкции администратора, и
+        // команда без `xvfb-run` в ней не заработала бы.
+        let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
         vec![Action::new(format!(
-            "mcp-1c --install {} --db-user {} --db-password … (вызовет конфигуратор, минута-две)",
+            "{prefix}mcp-1c --install {} --db-user {} --db-password … (вызовет конфигуратор, минута-две)",
             ctx.cfg.host.base_path, ctx.cfg.host.db_user
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         ctx.progress(Phase::Install);
+        // Предполёт: `mcp-1c --install` поднимает Конфигуратор, и если экрана
+        // нет и дать его нечем — отказ словами и сразу, а не сырой GTK-текст
+        // через минуту ожидания.
+        if !ctx.dry_run {
+            screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
         let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
-        let o = docker::exec(ctx, &exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password])?;
+        // Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на
+        // Linux без `DISPLAY` он не стартует.
+        let (prog, args) =
+            display_argv(&exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password], display_wrapper().as_deref());
+        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
         anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
@@ -750,20 +904,26 @@ impl Op<Ctx> for Extension {
         Ok(())
     }
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
+        let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
         Some(vec![
-            Action::new(format!("1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)", ib_switch(&ctx.cfg.host.base_path))),
+            Action::new(format!("{prefix}1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)", ib_switch(&ctx.cfg.host.base_path))),
             Action::new(format!("удалить {}", ctx.kit.state_path("known_hosts").display())),
         ])
     }
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
         ctx.progress(Phase::Uninstall);
+        if !ctx.dry_run {
+            screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
         let Some(v8) = find_1cv8() else { anyhow::bail!("1cv8.exe не найден") };
         let h = &ctx.cfg.host;
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);
         let p = format!("/P{}", h.db_password);
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
-        let o = docker::exec(ctx, &v8.to_string_lossy(), &args)?;
+        // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
+        let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
+        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
@@ -1164,6 +1324,119 @@ mod tests {
                 assert!(!p.starts_with(&kit.root), "{}", p.display());
                 assert!(p.starts_with(tools_dir()), "{}", p.display());
             }
+        }
+    }
+
+    /// Живой отказ, ради которого вся эта обвязка: в контейнере (замер
+    /// 2026-10-20) `1c-connect export` без `DISPLAY` падал с «Unable to
+    /// initialize GTK+ or connect to the windowing system» и кодом 255 —
+    /// vrunner поднимает Конфигуратор, а тот оконный. Экран уже есть —
+    /// обёртка не нужна, иначе она отрезала бы человека от своего же экрана.
+    #[test]
+    fn display_prefix_is_none_when_display_is_set() {
+        let x = PathBuf::from("/usr/bin/xvfb-run");
+        assert_eq!(display_prefix(true, Some(&x)), None);
+        assert_eq!(display_prefix(true, None), None);
+    }
+
+    #[test]
+    fn display_prefix_names_xvfb_when_display_is_missing() {
+        let x = PathBuf::from("/usr/bin/xvfb-run");
+        if cfg!(target_os = "linux") {
+            assert_eq!(display_prefix(false, Some(&x)), Some(x));
+        }
+        // Оборачивать нечем — зовём напрямую: пусть падает со своим текстом,
+        // а `screen_check` до запуска скажет, что поставить.
+        assert_eq!(display_prefix(false, None), None);
+    }
+
+    /// На Windows Конфигуратор рисует в сеансе пользователя, никакого xvfb
+    /// там нет: ни одна новая ветка не должна срабатывать.
+    #[test]
+    #[cfg(windows)]
+    fn display_prefix_is_none_on_windows() {
+        assert_eq!(display_prefix(false, Some(Path::new(r"C:\tools\xvfb-run"))), None);
+        assert!(find_xvfb_run().is_none(), "xvfb на Windows не ищем вовсе");
+        assert!(display_wrapper().is_none(), "обёртки на Windows быть не должно");
+        assert!(no_screen(false, None).is_none(), "и отказа «нет экрана» на Windows быть не должно");
+    }
+
+    /// Мёртвый `DISPLAY` — тот самый случай, что раньше проходил зелёным:
+    /// переменная задана (`su -`, юнит init, проброшенное окружение), а
+    /// X-сервера за ней нет, и человек получал сырой отказ GTK+.
+    #[test]
+    fn a_local_display_is_alive_only_with_its_socket() {
+        // :999 не бывает ни на одной машине — сокета /tmp/.X11-unix/X999 нет
+        assert!(!display_alive(":999"));
+        assert!(!display_alive(":999.0"));
+        // нечисловые и сетевые адреса дёшево не проверить — верим им
+        assert!(display_alive("host:0"));
+        assert!(display_alive("localhost:10.0"));
+        assert!(display_alive(":pw"));
+        // а живой местный дисплей — ровно тот, у которого сокет есть
+        let live = Path::new("/tmp/.X11-unix").exists() && Path::new("/tmp/.X11-unix/X0").exists();
+        assert_eq!(display_alive(":0"), live);
+    }
+
+    #[test]
+    fn no_screen_speaks_only_when_there_is_nothing_to_wrap_with() {
+        let x = PathBuf::from("/usr/bin/xvfb-run");
+        assert_eq!(no_screen(true, None), None, "экран сеанса есть — молчим");
+        assert_eq!(no_screen(false, Some(&x)), None, "обернём сами — молчим");
+        let said = no_screen(false, None);
+        if cfg!(target_os = "linux") {
+            let said = said.expect("на Linux без экрана и без xvfb-run отказ обязателен");
+            assert!(said.contains("xvfb") && said.contains("xauth"), "{said}");
+        } else {
+            assert_eq!(said, None);
+        }
+    }
+
+    /// Второе, руками собранное место с тем же порядком — и единственное, где
+    /// программа и аргументы разъезжаются по разным значениям (`docker::exec`
+    /// берёт их строками, а не `Command`).
+    #[test]
+    fn display_argv_puts_xvfb_first_and_leaves_the_rest_in_order() {
+        let args = ["DESIGNER", "/F/home/dev3/base", "/DeleteCfg"];
+        let (prog, got) = display_argv("/opt/1cv8/1cv8", &args, Some(Path::new("/usr/bin/xvfb-run")));
+        assert_eq!(prog, "/usr/bin/xvfb-run");
+        assert_eq!(got, ["-a", "/opt/1cv8/1cv8", "DESIGNER", "/F/home/dev3/base", "/DeleteCfg"]);
+        // Обёртки нет — команда уходит как была, ни программа, ни аргументы
+        // не трогаются.
+        let (prog, got) = display_argv("/opt/1cv8/1cv8", &args, None);
+        assert_eq!(prog, "/opt/1cv8/1cv8");
+        assert_eq!(got, args);
+    }
+
+    #[test]
+    fn with_display_keeps_program_and_args_in_order() {
+        let mut c = std::process::Command::new("oscript");
+        c.args(["mcp.os", "--once"]);
+        c.env("VRUNNER_DBUSER", "Администратор");
+        c.current_dir("/home/dev3/project");
+        let w = wrap_in_display(c, Path::new("/usr/bin/xvfb-run"));
+        assert_eq!(w.get_program(), "/usr/bin/xvfb-run");
+        let args: Vec<String> = w.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-a", "oscript", "mcp.os", "--once"]);
+        // Каталог и окружение переживают обёртку: без них vrunner не найдёт
+        // ни проект, ни базу.
+        assert_eq!(w.get_current_dir(), Some(Path::new("/home/dev3/project")));
+        let envs: Vec<(String, Option<String>)> =
+            w.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+        assert!(envs.contains(&("VRUNNER_DBUSER".to_string(), Some("Администратор".to_string()))), "{envs:?}");
+
+        // Проводка самого `with_display`, по результату, а не по тому же
+        // решению, которое на него влияло: экран есть (или оборачивать
+        // нечем) — команда уходит как была; иначе она обёрнута.
+        let mut c = std::process::Command::new("oscript");
+        c.arg("mcp.os");
+        let w = with_display(c);
+        let args: Vec<String> = w.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        if w.get_program().to_string_lossy().ends_with("xvfb-run") {
+            assert_eq!(args, ["-a", "oscript", "mcp.os"]);
+        } else {
+            assert_eq!(w.get_program(), "oscript");
+            assert_eq!(args, ["mcp.os"]);
         }
     }
 }

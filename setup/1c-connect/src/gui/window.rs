@@ -4,9 +4,11 @@
 //! фокуса раньше, чем клик по трею успевает его поднять заново).
 
 use super::panel::Panel;
-use super::{note_line, Kind, Line, Tab, Ui};
+use super::{note_file, note_line, run_readiness, Kind, Line, Tab, Ui};
+use crate::cfg::Cfg;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -162,6 +164,122 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn move_to(_window: &Window, _origin: Point<Pixels>) {}
 
+/// Скруглённый прямоугольник `w`×`h` радиусом `r`, разложенный на
+/// прямоугольники для формы окна X11 (`SHAPE`): середина во всю ширину плюс
+/// по одной строке на каждый ряд обоих углов. Чистая — X11 тут нет, и в
+/// тестах считается сама по себе.
+///
+/// Зачем вообще: композитора в сеансе xrdp нет (замеры 2026-10-21), значит
+/// прозрачности в углах не взять ниоткуда — но расширение `SHAPE` есть, а оно
+/// режет окно на стороне сервера: углы перестают принадлежать окну, и сквозь
+/// них видно то, что под ними.
+///
+/// Отступ строки считается по дуге окружности радиуса `r` с центром в
+/// `(r, r)`: берётся центр пикселя (`-0.5`), поэтому ступеньки ложатся туда
+/// же, куда их рисует панель своим `rounded(r)`. Радиус больше половины
+/// меньшей стороны ужимается — иначе верх и низ наложились бы друг на друга.
+// Зовёт её только `shape_corners` на Linux, а считается и проверяется она
+// везде: правило формы одно, и ломаться оно должно на любой сборке.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rounded_region(w: u16, h: u16, r: u16) -> Vec<(i16, i16, u16, u16)> {
+    let r = r.min(w / 2).min(h / 2);
+    if r == 0 {
+        return vec![(0, 0, w, h)];
+    }
+    let mut out = Vec::with_capacity(2 * r as usize + 1);
+    // Середина — во всю ширину, от последней строки верхних углов до первой
+    // строки нижних. Ровно `2r` в высоту окно оставляет её пустой.
+    if h > 2 * r {
+        out.push((0, r as i16, w, h - 2 * r));
+    }
+    let rf = r as f64;
+    for y in 0..r {
+        let dy = rf - y as f64 - 0.5;
+        let inset = (rf - (rf * rf - dy * dy).sqrt()).round() as u16;
+        let span = w - 2 * inset;
+        if span == 0 {
+            continue;
+        }
+        out.push((inset as i16, y as i16, span, 1));
+        out.push((inset as i16, (h - 1 - y) as i16, span, 1));
+    }
+    out
+}
+
+/// Вырезать окну скруглённые углы формой X11. Идентификатор окна — от GPUI
+/// (как в `move_to`), соединение — своё короткоживущее (как в
+/// `x11_work_area`). Размер и радиус приходят уже в пикселях устройства —
+/// форма живёт в них, а `bounds()` у GPUI в логических; перевод и выбор
+/// размера — дело `reshape`.
+///
+/// Любой отказ проглатывается: окно обязано открыться и без формы, тогда у
+/// него просто прямые углы (так было до этой правки). Отказ при этом виден
+/// возвратом — `false`: дескриптора ещё нет, соединение не открылось, запрос
+/// не прошёл. По нему `reshape` и решает, запоминать ли размер.
+#[cfg(target_os = "linux")]
+fn shape_corners(window: &Window, w: u16, h: u16, r: u16) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
+    use x11rb::protocol::xproto::{ClipOrdering, Rectangle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return false };
+    let RawWindowHandle::Xcb(hw) = handle.as_raw() else { return false };
+    let Ok((conn, _)) = x11rb::connect(None) else { return false };
+    let rects: Vec<Rectangle> =
+        rounded_region(w, h, r).into_iter().map(|(x, y, width, height)| Rectangle { x, y, width, height }).collect();
+    // Одним выражением — по той же причине, что в `move_to`: расписка
+    // одалживает соединение.
+    conn.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, hw.window.get(), 0, 0, &rects)
+        .map(|cookie| cookie.check().is_ok())
+        .unwrap_or(false)
+}
+
+/// Не X11 — формы окна нет и резать нечем: `false`, то есть «не поставлена».
+/// На Windows углы даёт прозрачность, и это верно по существу, а не отговорка.
+#[cfg(not(target_os = "linux"))]
+fn shape_corners(_window: &Window, _w: u16, _h: u16, _r: u16) -> bool {
+    false
+}
+
+/// Размер (в пикселях устройства), под который форма уже **поставлена**:
+/// `w << 16 | h`, ноль — ни под какой. Запоминается только после успеха: иначе
+/// отказ (дескриптора ещё нет, соединение не открылось) запирал бы повтор
+/// навсегда — размер помечен, а формы нет.
+///
+/// Окно одно и живёт в главном потоке, так что счётчика хватает вместо поля в
+/// `Ui` (его модуль правит другой исполнитель).
+static SHAPED: AtomicU32 = AtomicU32::new(0);
+
+/// Пересчитать форму окна под размер `s`, если под него ещё не резали.
+///
+/// Размер передаётся, а не читается у окна, и это главное: `window.resize`
+/// на X11 отложенный — сразу после него `window.bounds()` отдаёт ещё старую
+/// высоту. Из-за этого форма и разъехалась с окном живьём (замер 2026-10-21:
+/// окно `380x434`, форма `380x420` — срезаны нижние 14 точек). Звать нужно с
+/// той высотой, которую только что попросили, а не с той, которую окно пока
+/// признаёт. По этой же причине здесь нет страховки «форма по нынешнему
+/// размеру каждый кадр»: она читала бы всё тот же отстающий `bounds()` и
+/// перерезала форму обратно на прежний размер. Окно нерастяжимое
+/// (`is_resizable: false`), а оба места, где размер меняется, зовут отсюда.
+///
+/// Радиуса нет (тема его не просит) или размер вырожден — резать нечего.
+fn reshape(window: &Window, s: Size<Pixels>) {
+    let Some(r) = super::panel::window_radius() else { return };
+    let k = window.scale_factor();
+    let (w, h) = ((s.width.as_f32() * k) as u16, (s.height.as_f32() * k) as u16);
+    // Любая нулевая сторона — пустая область и невидимое окно; такого
+    // «скругления» лучше не ставить вовсе.
+    if w == 0 || h == 0 {
+        return;
+    }
+    let key = (w as u32) << 16 | h as u32;
+    if SHAPED.load(Ordering::Relaxed) == key {
+        return;
+    }
+    if shape_corners(window, w, h, (r.as_f32() * k).round() as u16) {
+        SHAPED.store(key, Ordering::Relaxed);
+    }
+}
+
 /// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
 /// на пустоту (не выше рабочей области), запомнить высоту в `Ui` — следующий
 /// показ откроется сразу такой — и вернуть окно в угол у трея, потому что
@@ -173,6 +291,11 @@ pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: 
     cx.global_mut::<Ui>().height = Some(h);
     window.resize(s);
     move_to(window, flyout_origin(wa, s, GAP));
+    // Высота переменная — форму режем заново под каждый новый размер, иначе
+    // углы остались бы вырезанными по прежней высоте. Размер — тот, что
+    // только что попросили (`s`), а не тот, что окно пока признаёт: `resize`
+    // отложенный (см. `reshape`).
+    reshape(window, s);
 }
 
 /// `false` сразу после того, как окно спряталось по потере фокуса — в этот
@@ -185,9 +308,26 @@ pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Показ окна — событие пересчёта готовности (спека): человек открывает
+/// флайаут именно затем, чтобы увидеть, как дела, а вердикт бывает
+/// устаревшим. Файл параметров перечитывается здесь же и до постройки панели
+/// (та читает `ui.cfg` при создании): правку toml руками иначе никто не
+/// заметил бы до перезапуска. Файл не читается или сломан — остаёмся на
+/// прежних параметрах молча, о них человеку уже сказали при запуске.
+fn reread_and_recheck(cx: &mut App) {
+    let ui = cx.global_mut::<Ui>();
+    if let Ok(cfg) = Cfg::load(&ui.kit) {
+        // Не только в окно, но и в живой сеанс — иначе агент остался бы на
+        // старой базе (`gui::adopt_cfg`).
+        super::adopt_cfg(ui, cfg);
+    }
+    run_readiness(ui);
+}
+
 /// Показать флайаут: если уже открыт — поднять на передний план, иначе
 /// открыть новое окно у угла трея.
 pub fn show_window(cx: &mut App) {
+    reread_and_recheck(cx);
     if let Some(w) = cx.global::<Ui>().window {
         let _ = w.update(cx, |_, window, _| window.activate_window());
         return;
@@ -198,12 +338,12 @@ pub fn show_window(cx: &mut App) {
     let origin = flyout_origin(wa, s, GAP);
     // Диагностика наезда на панель задач (заказчик 2026-10-20): без этой
     // строки жалоба «флайаут торчит за панелью» решается только через
-    // скриншот + вопрос, какая рабочая область была в тот момент — с ней
-    // решается одним скриншотом журнала. Строка служебная (`Kind::Say`),
-    // человеку читать незачем.
-    note_line(
-        cx.global_mut::<Ui>(),
-        Line {
+    // скриншот + вопрос, какая рабочая область была в тот момент. Пишется
+    // только в файл журнала (`note_file`): в окне она у человека занимала
+    // половину списка на каждом открытии (заказчик 2026-10-21).
+    note_file(
+        &cx.global::<Ui>().kit,
+        &Line {
             kind: Kind::Say,
             text: format!(
                 "рабочая область и угол флайаута: {}x{}+{}+{} → {},{}",
@@ -233,15 +373,18 @@ pub fn show_window(cx: &mut App) {
         focus: true,
         show: true,
         window_decorations: Some(WindowDecorations::Client),
-        // Без этого окно непрозрачно, и свои скруглённые углы `Panel`
-        // (`rounded_lg` + `overflow_hidden` на непрозрачном `bg`, см.
-        // `panel.rs`) рисует поверх квадратной opaque-поверхности — на
-        // композитном рабочем столе (проверено живьём на XFCE/xfwm4) видны
-        // квадратные углы с бледной рамкой вместо скруглённых. Прозрачен
-        // только зазор по углам; тело панели остаётся непрозрачным — его
-        // красит сама панель. Композитинг недоступен — платформа тихо
-        // остаётся с `Opaque`, тогда углы квадратные, но не стеклянные.
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Прозрачность заводили только ради скруглённых углов: иначе панель
+        // рисовала их поверх квадратной opaque-поверхности. На Linux это так
+        // и не получилось (менеджера композитинга в сеансе xrdp нет ни на
+        // одном дисплее, замеры 2026-10-21) — и остаётся непрозрачным: без
+        // композитора прозрачность даёт только бледные пятна по углам. Углы
+        // там режет форма окна (`shape_corners`), ей прозрачность не нужна.
+        // На Windows прозрачность работает (снимок заказчика), не трогаем.
+        window_background: if cfg!(windows) {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
         icon,
         ..Default::default()
     };
@@ -254,7 +397,12 @@ pub fn show_window(cx: &mut App) {
             // подгонки высоты — тем же способом поправляем и первый кадр, не
             // трогая саму формулу (`flyout_origin`/`fit_height_for`).
             #[cfg(target_os = "linux")]
-            let _ = handle.update(cx, |_, window, _| move_to(window, origin));
+            let _ = handle.update(cx, |_, window, _| {
+                move_to(window, origin);
+                // Первый кадр тоже со скруглёнными углами: `fit_height`
+                // случится позже, а то и не случится вовсе.
+                reshape(window, s);
+            });
             let ui = cx.global_mut::<Ui>();
             ui.window = Some(handle);
             ui.panel = Some(panel);
@@ -274,6 +422,9 @@ pub fn forget_window(ui: &mut Ui) {
     ui.window = None;
     ui.panel = None;
     ui.hidden_at = Some(Instant::now());
+    // Следующий показ — уже другое окно X11, и форма ему нужна своя, даже
+    // если размер совпал с прежним.
+    SHAPED.store(0, Ordering::Relaxed);
 }
 
 pub fn hide_window(window: &mut Window, cx: &mut App) {
@@ -291,7 +442,7 @@ pub fn toggle_window(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_height_for, flyout_origin, forget_window, needs_fit, should_show, GAP, MIN_SIZE, SLACK};
+    use super::{fit_height_for, flyout_origin, forget_window, needs_fit, rounded_region, should_show, GAP, MIN_SIZE, SLACK};
     use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
@@ -390,6 +541,85 @@ mod tests {
         assert!(should_show(None, now));
         assert!(!should_show(Some(now - Duration::from_millis(100)), now));
         assert!(should_show(Some(now - Duration::from_millis(900)), now));
+    }
+
+    #[test]
+    fn a_zero_radius_is_one_rectangle() {
+        // Радиуса нет — форма совпадает с самим окном, ступенек строить не из
+        // чего. Это и есть правило: окно целиком, а не пустая область.
+        assert_eq!(rounded_region(380, 420, 0), vec![(0, 0, 380, 420)]);
+        // Вырожденный размер даёт область нулевой площади — и потому до
+        // X-сервера не доходит вовсе: такую форму `reshape` отсекает у себя,
+        // иначе окно стало бы невидимым. Здесь закреплено, что ничего
+        // рисуемого из нуля не берётся, а не что пустую форму ставить можно.
+        for (w, h) in [(0u16, 0u16), (0, 420), (380, 0)] {
+            assert!(
+                rounded_region(w, h, 8).iter().all(|(_, _, rw, rh)| *rw == 0 || *rh == 0),
+                "из размера {w}x{h} не может взяться рисуемая область"
+            );
+        }
+    }
+
+    #[test]
+    fn the_region_never_leaves_the_window() {
+        // Ни один прямоугольник не выходит за `w`×`h` — иначе X-сервер получил
+        // бы форму шире окна, и углы остались бы прямыми.
+        for (w, h, r) in [(380u16, 420u16, 8u16), (380, 420, 16), (41, 37, 7), (380, 17, 8)] {
+            for (x, y, rw, rh) in rounded_region(w, h, r) {
+                assert!(x >= 0 && y >= 0, "отрицательный угол {x},{y} при {w}x{h} r={r}");
+                assert!(x as u32 + rw as u32 <= w as u32, "вылез по ширине: {x}+{rw} > {w} при r={r}");
+                assert!(y as u32 + rh as u32 <= h as u32, "вылез по высоте: {y}+{rh} > {h} при r={r}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_corners_are_symmetric() {
+        // Пролёт i-й строки сверху и i-й снизу — одной ширины и с одного
+        // отступа: четыре угла срезаны одинаково.
+        let (w, h, r) = (380u16, 420u16, 8u16);
+        let rows = rounded_region(w, h, r);
+        for i in 0..r {
+            let top = rows.iter().find(|(_, y, _, _)| *y == i as i16).expect("строка сверху");
+            let bottom = rows.iter().find(|(_, y, _, _)| *y == (h - 1 - i) as i16).expect("строка снизу");
+            assert_eq!((top.0, top.2), (bottom.0, bottom.2), "строки {i} сверху и снизу разошлись");
+        }
+        // Угол действительно срезан: верхняя строка уже окна, а середина — во
+        // всю ширину.
+        let first = rows.iter().find(|(_, y, _, _)| *y == 0).expect("верхняя строка");
+        assert!(first.2 < w, "верхняя строка во всю ширину — угол не срезан");
+        assert!(rows.iter().any(|(x, y, rw, _)| *x == 0 && *y == r as i16 && *rw == w), "середина не во всю ширину");
+    }
+
+    #[test]
+    fn the_region_is_cut_to_the_size_it_is_given() {
+        // Дефект живой проверки 2026-10-21: окно было `380x434`, а форма —
+        // `380x420`, вырезанная по размеру до подгонки высоты; нижние 14
+        // точек оказались вне формы и не рисовались вовсе. Правило: габариты
+        // списка равны запрошенным до точки, и другая высота даёт другой
+        // список.
+        let bbox = |rows: &[(i16, i16, u16, u16)]| {
+            let w = rows.iter().map(|(x, _, w, _)| *x as u32 + *w as u32).max().unwrap_or(0);
+            let h = rows.iter().map(|(_, y, _, h)| *y as u32 + *h as u32).max().unwrap_or(0);
+            (w, h)
+        };
+        let grown = rounded_region(380, 434, 8);
+        let initial = rounded_region(380, 420, 8);
+        assert_eq!(bbox(&grown), (380, 434), "габариты формы разошлись с запрошенным размером");
+        assert_eq!(bbox(&initial), (380, 420));
+        assert_ne!(grown, initial, "форма обязана следовать за высотой, а не оставаться от прежней");
+    }
+
+    #[test]
+    fn a_radius_bigger_than_half_is_clamped() {
+        // Радиус больше половины меньшей стороны ужимается до неё: список не
+        // пустеет, по ширине ничего не уходит в минус.
+        let big = rounded_region(40, 30, 100);
+        assert!(!big.is_empty());
+        assert_eq!(big, rounded_region(40, 30, 15), "радиус должен ужаться до половины меньшей стороны");
+        for (x, _, rw, _) in &big {
+            assert!(*x as u32 + *rw as u32 <= 40);
+        }
     }
 
     #[test]

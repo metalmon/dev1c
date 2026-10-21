@@ -31,6 +31,10 @@ const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
 /// Значок меню «Ещё»: три линии (Lucide `menu`).
 const MENU_SVG: &[u8] = include_bytes!("../../icons/menu.svg");
 
+/// Значок кнопок выбора каталога: папка с уголком, в том же весе и тех же
+/// габаритах (4..20 по обеим осям), что `menu.svg` рядом.
+const FOLDER_SVG: &[u8] = include_bytes!("../../icons/folder.svg");
+
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
@@ -67,9 +71,11 @@ pub struct Panel {
     /// Пара (видимая область, содержимое), по которой подбирали высоту в
     /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
     /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
-    /// подвал, переносящийся на вторую строку после первого подбора, меняет
-    /// видимую область и без повторной подгонки окно прокручивалось бы на
-    /// высоту этой строки.
+    /// содержимое «Параметров» меняется под окном (режим прячет три поля,
+    /// диалог выбора каталога возвращает путь), и без повторной подгонки окно
+    /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: его
+    /// высота закреплена двумя строками (`FOOT_LINE`/`FOOT_LINES`) и от
+    /// длины текста не зависит.
     last_fit: Option<(Pixels, Pixels)>,
     /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
     /// не дублирует.
@@ -86,48 +92,128 @@ pub struct Card {
     pub cancel: bool,
 }
 
-/// Заголовок — по `cfg.host.mode`: в локальном режиме речь про MCP (слушатели
-/// держат порты сами, см. `session::start`), а не про связь со средой; отказ
-/// там же показывает саму причину (порт занят и т.п.), а не общее «не
-/// подключён». В туннельном режиме — как раньше.
+/// Порядок разрешения, когда состояний сразу несколько (спека, раздел
+/// «Зелёный значит „работает“»; сверху вниз, побеждает первое): идёт
+/// операция → отказ занять порт или поднять публикацию (`State::Failed`) →
+/// холодный замок (`gui::gate::cold_gate`) → вердикт ещё не посчитан →
+/// провалившийся факт → всё в порядке.
 ///
-/// `ready` — вердикт `verify::readiness`, посчитанный отдельно и не на
-/// главном потоке (`gui::run_readiness`): пока связь/MCP не «включены»,
-/// карточка его не смотрит вовсе — выключенный или подключающийся переключатель
-/// ничего не обещает агенту, смотреть там нечего. Зелёная «MCP включены»/
-/// «Подключён» становится жёлтой, только когда готовность реально
-/// провалилась (`Readiness::Warn`) — `Unknown` (поток ещё считает) и `Ok`
-/// показывают прежний зелёный текст, значение переключателя при этом не
-/// меняется: это по-прежнему «включить/выключить обслуживание вызовов».
-pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, now: Instant) -> Card {
+/// Два правила, из-за которых он такой:
+///
+/// * **зелёной точки до вердикта не бывает** — пока готовность считается,
+///   точка «занято», а не зелёная: раньше неизвестность показывалась
+///   зелёным, и человек видел обещание там, где ещё ничего не проверено;
+/// * **в заголовке — только состояние**. Строка одна и узкая (карточка
+///   230 точек), проза обрывается на полуслове — «не надо там прозу писать,
+///   она не лезет» (заказчик 2026-10-21). Причина едет в `reason` ниже: в
+///   подсказку переключателя, в левый слот подвала и в журнал.
+///
+/// При выключенном обслуживании горячие факты цвет не меняют: вердикт в это
+/// время не считается вовсе, и точка серая. Заголовок — по `cfg.host.mode`:
+/// в локальном режиме речь про MCP (слушатели держат порты сами, см.
+/// `session::start`), а не про связь со средой.
+///
+/// Готовность смотрит только локальный режим: в туннельном провал публикации
+/// уже становится красным `State::Failed` в `Ev::Publish`, второй жёлтый
+/// смысл ему не нужен — карточка там остаётся прежней.
+pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
         let title = format!("{} · {}", r.phase.title(), clock);
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
     let local = mode == "local";
-    // Текст «MCP включены, но …» — местная формулировка (заказчик и дефект
-    // целиком про локальный режим, см. журнал модуля); туннельный режим
-    // показывает прежнее «Подключён» — его собственный провал публикации уже
-    // становится `State::Failed` (красным) в `Ev::Publish`, второй жёлтый
-    // смысл ему не нужен.
-    if local {
-        if let (State::Up { .. }, Readiness::Warn(check)) = (link, ready) {
-            // Коротко: в карточке одна строка на 230 точек, и длинный заголовок
-            // обрезался на «но агент б…». Положение переключателя и так говорит,
-            // что MCP включены, поэтому заголовок отвечает на главный вопрос.
-            let title = format!("Агент базу не увидит: {}", gui::readiness_reason(check));
-            return Card { dot: Dot::Warn, title, cancel: false };
+    let off_title = || if local { "MCP выключены".to_string() } else { "Не подключён".to_string() };
+    let card = |dot, title: String| Card { dot, title, cancel: false };
+    // Отказ — выше замка: красное «не подключён» человек должен увидеть и
+    // тогда, когда заодно не хватает холодного условия.
+    if matches!(link, State::Failed(_)) {
+        return card(Dot::Down, "Не подключён".into());
+    }
+    if gate.is_some() {
+        return card(Dot::Off, off_title());
+    }
+    // Горячие факты — только у включённого обслуживания: инвариант
+    // «карточка = проверка» говорит про включённое.
+    if local && link.is_up() {
+        match ready {
+            Readiness::Unknown => return card(Dot::Busy, "Проверяю…".into()),
+            Readiness::Warn(_) => return card(Dot::Warn, "Не всё готово".into()),
+            Readiness::Ok => {}
         }
     }
     let (dot, title): (Dot, String) = match link {
-        State::Off => (Dot::Off, if local { "MCP выключены".into() } else { "Не подключён".into() }),
+        State::Off => (Dot::Off, off_title()),
         State::Connecting => (Dot::Busy, if local { "Включаю…".into() } else { "Подключаюсь…".into() }),
         State::Up { .. } => (Dot::Up, if local { "MCP включены".into() } else { "Подключён".into() }),
         State::Retrying(_) => (Dot::Busy, "Переподключаюсь".into()),
-        State::Failed(why) => (Dot::Down, if local { why.clone() } else { "Не подключён".into() }),
+        // Сюда не доходит — отказ разобран выше; арм остаётся ради полноты.
+        State::Failed(_) => (Dot::Down, "Не подключён".into()),
     };
-    Card { dot, title, cancel: false }
+    card(dot, title)
+}
+
+/// Причина того, что показывает `card`, — тем же порядком разрешения и теми
+/// же словами, что человек потом найдёт в журнале. В заголовок она не идёт
+/// (он узкий), а живёт в подсказке переключателя и в левом слоте подвала.
+/// `None` — объяснять нечего: всё в порядке, идёт операция или вердикт ещё
+/// считается.
+///
+/// `at` — час вердикта (`Ui::ready_at`): вердикт пересчитывается по событиям,
+/// а не на таймере, значит бывает устаревшим — среда могла подняться через
+/// минуту после отказа. Поэтому рядом с причиной подвал называет, на какой
+/// момент она верна (спека, «Чем за это платим»: «проверено в 15:54»), а
+/// «Проверить» остаётся способом спросить заново. Час приписывается только
+/// к причине вердикта: отказ занять порт и холодный замок — факты «прямо
+/// сейчас», им час ни к чему.
+pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, at: Option<&str>) -> Option<String> {
+    if let State::Failed(why) = link {
+        return Some(why.clone());
+    }
+    if let Some(why) = gate {
+        return Some(gate_text(why));
+    }
+    if mode == "local" && link.is_up() {
+        if let Readiness::Warn(check) = ready {
+            let why = format!("Не всё готово: {}", gui::readiness_reason(check));
+            return Some(match at {
+                Some(t) => format!("{why} · проверено в {t}"),
+                None => why,
+            });
+        }
+    }
+    None
+}
+
+/// Заперт ли переключатель. Две причины, и обе временные: идёт операция
+/// (дёргать туннель посреди git-обмена незачем) и холодный замок
+/// (`gui::gate::cold_gate` — включать нечего). Замок запирает только
+/// включение: выключить обслуживание можно всегда, иначе защёлкнувшийся под
+/// живым сеансом замок (правка toml руками) запер бы человека внутри.
+pub fn switch_locked(gate: Option<&str>, on: bool, has_progress: bool) -> bool {
+    has_progress || (gate.is_some() && !on)
+}
+
+/// Причина замка человеческими словами — одна формулировка на подсказку,
+/// подвал и журнал.
+fn gate_text(why: &str) -> String {
+    format!("Включать нечего: {why}")
+}
+
+/// Подсказка переключателя. Замок — первым, даже когда есть отказ связи:
+/// запирает переключатель именно он (`switch_locked`), и человек, прочитав
+/// про занятый порт, снял бы чужой процесс и остался с запертым
+/// переключателем без объяснения (находка ревью). Отказ и провал вердикта он
+/// прочтёт в подвале, где говорит `reason`. В заголовок карточки причина не
+/// идёт ни в каком виде («не надо там прозу писать, она не лезет», заказчик
+/// 2026-10-21). Сказать нечего — подсказка объясняет сам переключатель.
+pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>, mode: &str) -> String {
+    match (gate, reason) {
+        (Some(why), _) => gate_text(why),
+        (None, Some(why)) => why.to_string(),
+        (None, None) if mode == "local" => "Обслуживание вызовов агента (MCP)".into(),
+        (None, None) => "Туннель в среду разработки".into(),
+    }
 }
 
 /// Можно ли нажать «Сохранить»: поля отличаются от сохранённых, и прямо
@@ -161,15 +247,41 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
     Some(format!("Подождите: идёт {what}"))
 }
 
+/// Высота строки левого слота подвала при размере текста 13 и число строк,
+/// которые слот резервирует всегда — даже когда текст в одну. Две строки по
+/// 16 px — ровно высота кнопки рядом (`Button` размера Medium, `h_8` =
+/// 32 px), и подвал не растёт по тексту: подбор высоты окна
+/// (`window::needs_fit`) построен на неизменной высоте подвала, а растущая
+/// плашка заставляла окно подпрыгивать. Третья строка не переносится, а
+/// режется многоточием; полный текст — подсказкой по наведению.
+pub const FOOT_LINE: f32 = 16.;
+pub const FOOT_LINES: usize = 2;
+
 /// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
 /// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
-/// настоящее сообщение (итог сохранения, ошибка) важнее подсказки, почему
-/// «Сохранить» недоступна, а та — важнее пути комплекта, который слот
-/// показывает, когда сказать больше нечего. Обрезка в одну строку и
-/// подсказка по наведению — дело `render`, здесь только выбор источника.
-pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
+///
+/// 1. настоящее сообщение (итог сохранения, ошибка) — человек только что
+///    нажал и ждёт ответа;
+/// 2. причина текущего состояния (`reason`: отказ, замок, провал вердикта) —
+///    она про то, почему работа не идёт;
+/// 3. подсказка, почему «Сохранить» недоступна, — она про кнопку, и своя
+///    подсказка по наведению у кнопки есть и без слота;
+/// 4. путь комплекта — когда сказать больше нечего.
+///
+/// Пункты 2 и 3 стояли наоборот, и причина не показывалась почти никогда:
+/// «Параметры» — вкладка по умолчанию, поля на ней не тронуты, а `save_hint`
+/// на нетронутых полях всегда говорит «Нечего сохранять». Человек видел
+/// оранжевую точку, «Не всё готово» и «Нечего сохранять» рядом — и ничего
+/// о том, что именно не готово (находка S3 итогового ревью).
+///
+/// Раскладка по двум строкам, обрезка третьей и подсказка по наведению —
+/// дело `render`, здесь только выбор источника.
+pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
     if let Some(l) = status {
         return (l.text.clone(), matches!(l.kind, Kind::Fail));
+    }
+    if let Some(why) = reason {
+        return (why.to_string(), false);
     }
     if let Some(h) = hint {
         return (h.to_string(), false);
@@ -225,9 +337,9 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
     }
 }
 
-/// Параметры из полей. `dump`, `tools`, `mode`, `publication`, `http_port` и
-/// `base_url` пустые — их подставит `save_host` из текущих, в окне этих полей
-/// нет. Поля, которых режим не показывает, тоже пустые — набранное в них
+/// Параметры из полей. `dump`, `tools`, `mode`, `publication`, `http_port`,
+/// `gitea` и `base_url` пустые — их подставит `save_host` из текущих, в окне
+/// этих полей нет. Поля, которых режим не показывает, тоже пустые — набранное в них
 /// (если там что-то осталось от прежнего режима) в toml не попадёт;
 /// `Panel::save` сам переносит рабочее место, адрес среды и пароль рабочего
 /// места из текущих параметров, как `save_host` уже делает для
@@ -239,6 +351,7 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
     };
     Host {
         server: v("server", &f.server),
+        gitea: String::new(),
         password: v("password", &f.password),
         workstation: v("workstation", &f.workstation),
         base_path: v("base_path", &f.base_path),
@@ -254,6 +367,30 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
     }
 }
 
+/// Подхватывать ли перечитанный с диска файл в поля формы. `file` — что
+/// прочитано сейчас, `form` — что набрано в полях, `saved` — что форма
+/// считает сохранённым (точка отсчёта «изменилось ли»).
+///
+/// Два условия вместе: файл разошёлся с этой точкой отсчёта (значит его
+/// правили мимо окна), и поля с ней не разошлись (значит человек в них
+/// ничего не набрал). Правка человека свежее файла, поэтому поверх неё не
+/// лезем — лучше оставить две правды на экране, чем стереть набранное.
+///
+/// **Остаток, который таким и останется** (ревью N4). Пока человек набирает,
+/// файл в поля не попадает вовсе, и «Сохранить» запишет поверх ручной правки
+/// и те поля, которых человек не касался. Чинится это только пометкой
+/// «тронуто» у каждого поля по отдельности — своя точка отсчёта на поле
+/// вместо одной на форму. Такой механики тут нет и заводить её не стоит:
+/// окно прячется по потере фокуса (`observe_window_activation`), а новый
+/// показ строит `Panel` заново и читает файл сам (`Panel::new`), так что
+/// «человек набирает в полях, пока кто-то правит toml снаружи» требует
+/// открытого окна без фокуса — диалога поверх или правки с другой машины.
+/// Узкий случай не стоит второй системы учёта изменений, которая будет
+/// расходиться с первой.
+pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str) -> bool {
+    fields_differ(file, saved, mode) && !fields_differ(form, saved, mode)
+}
+
 /// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
 /// режим показывает: правка скрытого поля (адрес среды, пароль рабочего
 /// места, рабочее место в локальном режиме) не должна зажигать «Сохранить» —
@@ -262,6 +399,58 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
 /// пустыми/нулями), поэтому и так не входят в список.
 pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
     shown_fields(mode).iter().any(|f| field_value(a, f) != field_value(b, f))
+}
+
+/// Радиус скругления корня окна коннектора: пусто — углы прямые.
+///
+/// На Linux прозрачности в углах добиться не удалось: при `Transparent`
+/// менеджер композитинга оставлял углы квадратными, и под скруглённой рамкой
+/// панели виднелись квадратные пятна подложки (снимки из образа, заказчик
+/// 2026-10-20). Решение заказчика — отказаться от скруглений там вовсе, а не
+/// чинить прозрачность. На Windows скругление остаётся.
+///
+/// Радиус снимается только здесь, у корня панели: общую тему трогать нельзя,
+/// её носит и окно `dev1c-setup`.
+///
+/// 8 px — не в точности «как было». Прежний `rounded_lg()` это `rems(0.5)`,
+/// половина `rem_size` окна, а `rem_size` ставит `Root` из темы
+/// (`font.size` = 15), то есть угол рисовался радиусом 7,5 px. Теперь на
+/// Windows ровно 8 px — то самое число, которое спека называет радиусом окна
+/// (`radius.lg` темы), но заданное здесь прямо, а не посчитанное от размера
+/// шрифта. Глазом полпикселя не видно; сказано, чтобы следующий не искал
+/// разницу.
+///
+/// Сторожа у этого числа нет: корень окна никогда не читал `theme.radius_lg`,
+/// и тест в `common::gui` сторожит значение в теме, а не это. Источник правды
+/// — всё равно тема; честно взять его можно было бы только через
+/// `cx.theme().radius_lg`, то есть затащив `cx` в подпись или `serde_json`
+/// в зависимости ради полпикселя. Дубль оставлен сознательно — вызов один и
+/// место одно; поменяют радиус в теме — это место правится руками.
+///
+/// Бледная рамка по краю (`border_1`) остаётся при любых углах: на тёмных
+/// обоях она и отделяет окно от фона.
+///
+/// Радиус там, где его есть кому показать. На Windows это делает
+/// прозрачность окна, на Linux — форма окна X11 (`window::shape_corners`):
+/// панель рисует скругление, а `SHAPE` убирает из окна то, что осталось за
+/// дугой. На прочих системах (macOS) не делает ни то, ни другое — там
+/// нарисованная дуга легла бы бледным пятном поверх непрозрачного
+/// квадрата, и радиуса нет вовсе (находка ревью 2026-10-21). Не вышло с
+/// формой на Linux — скругление ляжет на прямой угол, как до правки; хуже,
+/// чем было, не станет.
+pub fn window_radius() -> Option<Pixels> {
+    (cfg!(windows) || cfg!(target_os = "linux")).then(|| px(8.))
+}
+
+/// Лицо кнопок выбора каталога: подпись и подсказка. Подписи нет — слово
+/// «Выбрать…» съедало половину строки пути (заказчик 2026-10-20), его место
+/// занял значок папки. Но без слова квадратную кнопку не опознать, поэтому оно
+/// остаётся подсказкой по наведению.
+///
+/// Решение «подпись или значок» живёт здесь, а не в сборке кнопки: иначе
+/// подпись можно вернуть, не тронув ни одного теста.
+fn pick_face() -> (Option<&'static str>, &'static str) {
+    (None, "Выбрать…")
 }
 
 fn field(ph: &str, val: &str, masked: bool, window: &mut Window, cx: &mut Context<Panel>) -> Entity<InputState> {
@@ -391,6 +580,72 @@ impl Panel {
         fields_differ(&host_of(&self.fields, &mode, cx), &self.original, &mode)
     }
 
+    /// Нужно ли подхватить перечитанные параметры в поля — и какие именно.
+    /// `None` — подхватывать нечего (или нельзя).
+    ///
+    /// Выбран первый из двух выходов, названных ревью: поля следуют за
+    /// перечитанным файлом. Второй («Сохранить» отказывается писать поверх
+    /// изменившегося файла) оставил бы человека в тупике — форма всё равно
+    /// показывала бы старое, и выйти из отказа было бы нечем.
+    ///
+    /// Правка человека в полях важнее файла: она свежее. Поэтому пока
+    /// «Сохранить» горит (поля разошлись с сохранённым), файл в поля не
+    /// лезет — это тот же выбор, что у `save_host`, который не трогает чужое
+    /// без спроса.
+    ///
+    /// **Почему это зовётся из `render`, а не из `adopt_cfg`** (ревью N3).
+    /// Естественнее было бы подхватывать там, где файл и перечитали
+    /// (`gui::adopt_cfg`, `window::show_window`), но правка полей — это
+    /// `InputState::set_value`, а ей нужны `Window` и `Context<Panel>`,
+    /// которых в том месте нет и которые туда не передать, не протащив окно
+    /// через `&mut App`-путь целиком. Отсюда и вид: решение — чистое
+    /// (`adopt_needed`, под тестом), а исполнение стоит там, где оба
+    /// контекста уже есть. Петли нет: подхват сдвигает `original`, и на
+    /// следующем кадре условие гаснет.
+    ///
+    /// Тестом этот вызов не закрыт: головного стенда GPUI в дереве нет, а
+    /// `render` без него не позвать. Это единственная непокрытая проводка в
+    /// задаче — сказано прямо, чтобы следующий не искал сторожа, которого
+    /// нет.
+    fn adopted_host(&self, cx: &App) -> Option<Host> {
+        let host = &cx.global::<Ui>().cfg.host;
+        let mode = host.mode.clone();
+        let form = host_of(&self.fields, &mode, cx);
+        adopt_needed(host, &form, &self.original, &mode).then(|| host.clone())
+    }
+
+    /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
+    /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
+    fn adopt_fields(&mut self, host: &Host, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = shown_fields(&host.mode);
+        for (name, state) in self.field_states() {
+            if !shown.contains(&name) {
+                continue;
+            }
+            let text = field_value(host, name).to_string();
+            if state.read(cx).value() != text.as_str() {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+            }
+        }
+        self.original = host.clone();
+    }
+
+    /// Поля формы вместе с их именами — тот же список имён, что у
+    /// `field_value`/`shown_fields`, чтобы обход полей не заводил третьего
+    /// мнения о составе формы.
+    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 7] {
+        let f = &self.fields;
+        [
+            ("server", &f.server),
+            ("password", &f.password),
+            ("workstation", &f.workstation),
+            ("base_path", &f.base_path),
+            ("db_user", &f.db_user),
+            ("db_password", &f.db_password),
+            ("project", &f.project),
+        ]
+    }
+
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
     /// Поля формы как `Host`: в локальном режиме скрытые поля переносятся из
     /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
@@ -417,10 +672,13 @@ impl Panel {
     fn write(&mut self, host: Host, cx: &mut Context<Self>) -> bool {
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
-        cx.global_mut::<Ui>().status = Some(match &r {
+        let line = match &r {
             Ok(_) => Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() },
             Err(e) => Line { kind: Kind::Fail, text: e.clone() },
-        });
+        };
+        // Через `set_status`: подсказка прошлого итога (путь отчёта проверки)
+        // не должна пережить его и повиснуть на этом.
+        gui::set_status(cx.global_mut::<Ui>(), line, None);
         if ok {
             self.original = host;
             // Каталог проекта мог смениться — вкладка «Проект» уже про другой.
@@ -506,6 +764,15 @@ impl Render for Panel {
         // строк и подстрока карточки — основной текст вполсилы.
         let caption = fg.opacity(0.75);
 
+        // Файл параметров мог смениться под открытым окном (человек правит
+        // toml руками — мы сами это предлагаем, и `window::show_window`
+        // перечитывает файл). Форма обязана показать прочитанное; иначе
+        // первое же «Сохранить» запишет прежние значения поверх правки
+        // (находка S12).
+        if let Some(host) = self.adopted_host(cx) {
+            self.adopt_fields(&host, window, cx);
+        }
+
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
         let ready = ui.ready.clone();
@@ -517,7 +784,12 @@ impl Render for Panel {
         // выставляют разное).
         let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
-        let c = card(ui.progress.as_ref(), &link, &mode, &ready, Instant::now());
+        let gate = ui.gate.clone();
+        let c = card(ui.progress.as_ref(), &link, &mode, &ready, gate.as_deref(), Instant::now());
+        // Причина — один расчёт на весь `render`: та же строка уходит и в
+        // подсказку переключателя, и в левый слот подвала (спека: «причина
+        // идёт туда, где для неё есть место»).
+        let why = reason(&link, &mode, &ready, gate.as_deref(), ui.ready_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
@@ -525,7 +797,13 @@ impl Render for Panel {
         let busy_now = busy.is_some();
         let dirty = self.is_dirty(cx);
         let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
-        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
+        // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
+        // порядок держит сама `foot_left_text`, здесь только источники.
+        let foot_left = foot_left_text(ui.status.as_ref(), why.as_deref(), hint.as_deref(), &ui.kit.root.display().to_string());
+        // Подсказка к итогу (путь отчёта проверки) — только пока слот занят
+        // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
+        // себя.
+        let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
         let shown = shown_fields(&mode);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -589,8 +867,8 @@ impl Render for Panel {
             .child(
                 Switch::new("link").focus_ring(false)
                     .checked(link.is_on())
-                    .disabled(has_progress)
-                    .tooltip(if mode == "local" { "Обслуживание вызовов агента (MCP)" } else { "Туннель в среду разработки" })
+                    .disabled(switch_locked(gate.as_deref(), link.is_on(), has_progress))
+                    .tooltip(switch_tooltip(gate.as_deref(), why.as_deref(), &mode))
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -632,10 +910,16 @@ impl Render for Panel {
                 cx.refresh_windows();
             }));
 
+        // Кнопка выбора — значок без подписи: такая кнопка сама становится
+        // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
+        // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
         let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
+            let (label, tooltip) = pick_face();
             Button::new(id)
                 .outline()
-                .label("Выбрать…")
+                .when_some(label, |b, l| b.label(l))
+                .icon(Icon::default().data(FOLDER_SVG))
+                .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
         let f = &self.fields;
@@ -930,7 +1214,11 @@ impl Render for Panel {
             .text_size(px(15.))
             .border_1()
             .border_color(window_border)
-            .rounded_lg()
+            // Скругление — только там, где его видно (`window_radius`): на
+            // Linux углы прямые, на Windows радиус задан числом вместо
+            // прежних `rems(0.5)` ≈ 7,5 px. `overflow_hidden` нужен и там —
+            // он обрезает содержимое по рамке окна.
+            .when_some(window_radius(), |d, r| d.rounded(r))
             .overflow_hidden()
             .p_4()
             .gap_3()
@@ -983,25 +1271,31 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     .pt_3()
-                    // Один текст, одна строка (заказчик 2026-10-20: перенос
-                    // на вторую строку и подпрыгивание высоты подвала от
-                    // длинного пути комплекта, кириллица в нём в том числе).
-                    // Лишнее режется многоточием, а не переносится; `min_w_0`
-                    // — иначе flex-ребёнок не уже своего текста, и обрезка на
+                    // Один текст, но место под две строки — всегда, даже
+                    // когда текст в одну (`FOOT_LINE`/`FOOT_LINES`): высота
+                    // подвала не зависит от длины текста, иначе окно
+                    // подпрыгивает на подборе. Третья строка режется
+                    // многоточием (`line_clamp`), а не переносится; `min_w_0`
+                    // — иначе flex-ребёнок не уже своего текста, и перенос на
                     // узком окне срабатывает только упёршись в кнопку.
-                    // Полный текст — подсказкой по наведению.
+                    // Полный текст — подсказкой по наведению, а после
+                    // проверки к нему прибавляется путь отчёта
+                    // (`Ui::status_tip`): в саму строку он не влезает.
                     .child({
-                        let text = foot_left.0.clone();
+                        let tip = match &foot_tip {
+                            Some(extra) => format!("{}\n{extra}", foot_left.0),
+                            None => foot_left.0.clone(),
+                        };
                         div()
                             .id("foot-left")
                             .flex_1()
                             .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
+                            .h(px(FOOT_LINE * FOOT_LINES as f32))
+                            .line_clamp(FOOT_LINES)
                             .text_size(px(13.))
+                            .line_height(px(FOOT_LINE))
                             .text_color(if foot_left.1 { danger } else { caption })
-                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                             .child(foot_left.0)
                     })
                     .child(foot_actions),
@@ -1011,13 +1305,161 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_save, card, fields_differ, foot_left_text, project_rows, save_hint, shown_fields, HINT_PROJECT};
+    use super::{
+        adopt_needed, can_save, card, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
+        switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
+    };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
     use crate::session::State;
     use common::check::Check;
     use common::Phase;
+    use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    /// Правило заказчика дословно: «Переключатель включения должен быть
+    /// недоступен, пока нет пользователя и пока не установлены MCP». До этой
+    /// задачи переключатель запирала одна-единственная причина — идущая
+    /// операция, и человек мог включить то, что заведомо не заработает.
+    #[test]
+    fn the_switch_is_locked_while_the_gate_holds() {
+        let why = Some("не задан пользователь базы");
+        assert!(switch_locked(why, false, false), "заперто — включать нельзя");
+        assert!(!switch_locked(why, true, false), "уже включено — выключить можно всегда");
+        assert!(!switch_locked(None, false, false), "условия в порядке — переключатель доступен");
+        // Прежняя причина никуда не делась: идёт операция.
+        assert!(switch_locked(None, false, true));
+        assert!(switch_locked(None, true, true));
+        // Причина живёт в подсказке, а не в заголовке карточки.
+        let text = reason(&State::Off, "local", &Readiness::Unknown, why, None);
+        assert_eq!(text.as_deref(), Some("Включать нечего: не задан пользователь базы"));
+        assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
+        assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
+        assert_eq!(switch_tooltip(None, None, "tunnel"), "Туннель в среду разработки");
+        let c = card(None, &State::Off, "local", &Readiness::Unknown, None, Instant::now());
+        assert_eq!(c.title, "MCP выключены", "причина в заголовок не идёт — она туда не влезает");
+    }
+
+    /// Подсказка запертого переключателя называет причину замка, а не отказ
+    /// связи: заперт он именно замком. Иначе человек снимает чужой процесс с
+    /// порта и остаётся с запертым переключателем без объяснения (находка
+    /// ревью задачи 24).
+    #[test]
+    fn the_locked_switch_names_the_gate_not_the_bind() {
+        let gate = "не задан пользователь базы";
+        let link = State::Failed("порт 7771 занят процессом 1234".into());
+        let why = reason(&link, "local", &Readiness::Ok, Some(gate), None);
+        // В подвале — отказ: он выше в порядке разрешения, и карточка красная.
+        assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
+        // А переключатель заперт замком — и говорит про замок.
+        assert!(switch_locked(Some(gate), link.is_on(), false));
+        assert_eq!(switch_tooltip(Some(gate), why.as_deref(), "local"), "Включать нечего: не задан пользователь базы");
+        // Замка нет — подсказка отдаёт то же, что подвал.
+        assert_eq!(switch_tooltip(None, why.as_deref(), "local"), "порт 7771 занят процессом 1234");
+    }
+
+    /// Зелёной точки до вердикта не бывает: пока готовность считается, точка
+    /// «занято», а заголовок честно говорит, чем окно занято. Раньше
+    /// неизвестность показывалась зелёным — это и есть главная смена смысла
+    /// (спека, «Зелёной точки до вердикта готовности не бывает»).
+    #[test]
+    fn unknown_is_never_green() {
+        let now = Instant::now();
+        let c = card(None, &State::Up { since: now }, "local", &Readiness::Unknown, None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Проверяю…"));
+    }
+
+    /// Холодный замок сильнее любого спокойного состояния связи: включать
+    /// нечего, и зелёного тут быть не может.
+    #[test]
+    fn the_gate_wins_over_an_idle_state() {
+        let now = Instant::now();
+        let gate = Some("не задан пользователь базы");
+        for link in [State::Off, State::Connecting, State::Up { since: now }] {
+            let c = card(None, &link, "local", &Readiness::Ok, gate, now);
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"), "{link:?}");
+        }
+        // В туннельном режиме тот же замок говорит прежним словом.
+        let c = card(None, &State::Off, "tunnel", &Readiness::Ok, gate, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
+    }
+
+    /// Идущая операция — первая строка порядка разрешения: она побеждает и
+    /// замок, и провалившийся вердикт.
+    #[test]
+    fn a_running_operation_wins_over_the_gate() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let r = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
+        let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let c = card(Some(&r), &State::Up { since: now }, "local", &Readiness::Warn(fail), Some("не задан пользователь базы"), now);
+        assert_eq!(c.dot, Dot::Busy);
+        assert_eq!(c.title, "Отправляю файлы · 0:00");
+    }
+
+    /// Отказ занять порт идёт сразу за операцией — выше замка: человек должен
+    /// видеть красное, а не серое «включать нечего».
+    #[test]
+    fn a_failed_bind_wins_over_the_gate() {
+        let now = Instant::now();
+        let link = State::Failed("порт 7771 занят процессом 1234".into());
+        let c = card(None, &link, "local", &Readiness::Ok, Some("не задан пользователь базы"), now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
+        // Сама причина не пропала — она в подсказке, подвале и журнале.
+        assert_eq!(reason(&link, "local", &Readiness::Ok, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
+    }
+
+    /// «Не надо там прозу писать, она не лезет» (заказчик 2026-10-21):
+    /// заголовок называет только состояние, и ни в одном состоянии в него не
+    /// попадает текст причины.
+    #[test]
+    fn the_title_never_carries_the_reason() {
+        let now = Instant::now();
+        let gate_why = "не задан пользователь базы";
+        let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
+        let bind = "порт 7771 занят процессом 1234";
+        for mode in ["local", "tunnel"] {
+            for link in [
+                State::Off,
+                State::Connecting,
+                State::Up { since: now },
+                State::Retrying("нет сети".into()),
+                State::Failed(bind.into()),
+            ] {
+                for ready in [Readiness::Unknown, Readiness::Ok, Readiness::Warn(fail.clone())] {
+                    for gate in [None, Some(gate_why)] {
+                        let title = card(None, &link, mode, &ready, gate, now).title;
+                        for prose in [gate_why, "занят процессом", "не разложен", "/home/dev3"] {
+                            assert!(!title.contains(prose), "{mode}/{link:?}/{ready:?}/{gate:?}: {title}");
+                        }
+                        // И заголовок всегда короткий: карточка — одна строка
+                        // на 230 точек.
+                        assert!(title.chars().count() <= 20, "длинный заголовок: {title}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// При выключенном обслуживании горячие факты цвет не меняют: вердикт в
+    /// это время не считается, и показывать его нечем (спека: «инвариант
+    /// „карточка = проверка“ говорит про включённое обслуживание»).
+    #[test]
+    fn off_ignores_hot_facts() {
+        let now = Instant::now();
+        let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
+        let c = card(None, &State::Off, "local", &Readiness::Warn(fail.clone()), None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
+        assert_eq!(reason(&State::Off, "local", &Readiness::Warn(fail), None, None), None);
+    }
+
+    #[test]
+    fn the_window_radius_is_there_only_where_someone_cuts_it() {
+        // Скругление показывает прозрачность (Windows) или форма окна X11
+        // (Linux). Где не делает ни то, ни другое, дуга легла бы бледным
+        // пятном поверх непрозрачного квадрата — там радиуса нет.
+        let expected = if cfg!(windows) || cfg!(target_os = "linux") { Some(px(8.)) } else { None };
+        assert_eq!(window_radius(), expected);
+    }
 
     #[test]
     fn the_card_follows_the_running_operation() {
@@ -1032,7 +1474,7 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
@@ -1044,7 +1486,7 @@ mod tests {
         // «Прервать» не показывается, в отличие от git-обмена выше.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
-        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!(c.dot, Dot::Busy);
         assert!(!c.cancel);
     }
@@ -1052,16 +1494,16 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
-        let c = card(None, &State::Off, "tunnel", &Readiness::Unknown, now);
+        let c = card(None, &State::Off, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
         assert!(!c.cancel);
-        let c = card(None, &State::Connecting, "tunnel", &Readiness::Unknown, now);
+        let c = card(None, &State::Connecting, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Readiness::Unknown, now);
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
-        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Readiness::Unknown, now);
+        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Readiness::Unknown, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
-        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Readiness::Unknown, now);
+        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Readiness::Unknown, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
     }
@@ -1069,13 +1511,14 @@ mod tests {
     #[test]
     fn card_titles_speak_about_mcp_not_the_tunnel() {
         let now = Instant::now();
-        assert_eq!(card(None, &State::Off, "local", &Readiness::Unknown, now).title, "MCP выключены");
-        assert_eq!(card(None, &State::Connecting, "local", &Readiness::Unknown, now).title, "Включаю…");
-        assert_eq!(card(None, &State::Up { since: now }, "local", &Readiness::Unknown, now).title, "MCP включены");
-        // Отказ — причина, не общее «не подключён»: порт занят независимо
-        // от переключателя, человеку нужно знать, чем именно.
-        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Readiness::Unknown, now);
-        assert_eq!(c.title, "порт 7771 занят процессом 1234");
+        assert_eq!(card(None, &State::Off, "local", &Readiness::Unknown, None, now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Connecting, "local", &Readiness::Unknown, None, now).title, "Включаю…");
+        assert_eq!(card(None, &State::Up { since: now }, "local", &Readiness::Ok, None, now).title, "MCP включены");
+        // Отказ называет состояние, а не причину: причина («порт 7771 занят
+        // процессом 1234») длиннее строки карточки и живёт в подсказке,
+        // подвале и журнале (заказчик 2026-10-21).
+        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Readiness::Unknown, None, now);
+        assert_eq!(c.title, "Не подключён");
         for mode in ["local", "tunnel"] {
             for link in [
                 State::Off,
@@ -1084,7 +1527,7 @@ mod tests {
                 State::Retrying("нет сети".into()),
                 State::Failed("порт занят".into()),
             ] {
-                let title = card(None, &link, mode, &Readiness::Unknown, now).title;
+                let title = card(None, &link, mode, &Readiness::Unknown, None, now).title;
                 assert!(!title.to_lowercase().contains("туннель"), "{mode}/{link:?}: {title}");
             }
         }
@@ -1092,31 +1535,31 @@ mod tests {
 
     /// Дефект (заказчик 2026-10-20, трижды в один день): зелёная карточка
     /// обещала «агент дойдёт до базы», хотя инструменты не разложены — первый
-    /// провалившийся факт готовности (`Readiness::Warn`) должен перекрасить
-    /// карточку в жёлтый и назвать причину, не трогая смысл самого
+    /// провалившийся факт готовности (`Readiness::Warn`) красит карточку
+    /// жёлтым. Заголовок при этом называет только состояние, а названная
+    /// причина едет в подсказку (`reason`), не трогая смысл самого
     /// переключателя (`Switch` в `render` не зависит от `ready`).
     #[test]
     fn a_failed_readiness_fact_turns_the_green_card_into_a_named_warning() {
         let now = Instant::now();
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
         let ready = Readiness::Warn(fail);
-        let c = card(None, &State::Up { since: now }, "local", &ready, now);
-        assert_eq!(c.dot, Dot::Warn);
-        assert!(c.title.starts_with("Агент базу не увидит:"), "{}", c.title);
-        assert!(c.title.contains("инструменты комплекта") && c.title.contains("1c-connect install"), "{}", c.title);
-        assert!(!c.title.contains("факт"), "{}", c.title);
+        let up = State::Up { since: now };
+        let c = card(None, &up, "local", &ready, None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Warn, "Не всё готово"));
+        let why = reason(&up, "local", &ready, None, None).unwrap();
+        assert!(why.starts_with("Не всё готово:"), "{why}");
+        assert!(why.contains("инструменты комплекта") && why.contains("1c-connect install"), "{why}");
+        assert!(!why.contains("факт"), "{why}");
     }
 
-    /// Неизвестно (поток ещё считает) или пройдено — карточка остаётся
-    /// зелёной, как раньше; «ещё не посчитано» не должно выглядеть как
-    /// провал.
+    /// Пройдено — карточка зелёная; «ещё не посчитано» зелёным уже не
+    /// бывает, его стережёт `unknown_is_never_green`.
     #[test]
-    fn unknown_or_passed_readiness_keeps_the_green_card() {
+    fn passed_readiness_keeps_the_green_card() {
         let now = Instant::now();
-        for ready in [Readiness::Unknown, Readiness::Ok] {
-            let c = card(None, &State::Up { since: now }, "local", &ready, now);
-            assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"), "{ready:?}");
-        }
+        let c = card(None, &State::Up { since: now }, "local", &Readiness::Ok, None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"));
     }
 
     /// Туннельный режим не говорит «MCP» и не смотрит готовность — его
@@ -1126,8 +1569,12 @@ mod tests {
     fn tunnel_mode_ignores_the_readiness_warning() {
         let now = Instant::now();
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
-        let c = card(None, &State::Up { since: now }, "tunnel", &Readiness::Warn(fail), now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
+        let up = State::Up { since: now };
+        for ready in [Readiness::Warn(fail), Readiness::Unknown] {
+            let c = card(None, &up, "tunnel", &ready, None, now);
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"), "{ready:?}");
+            assert_eq!(reason(&up, "tunnel", &ready, None, None), None, "{ready:?}");
+        }
     }
 
     #[test]
@@ -1141,6 +1588,30 @@ mod tests {
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
         assert!(fields_differ(&moved, &saved, "tunnel"));
+    }
+
+    /// Ручная правка toml не должна пропасть под открытым окном: файл
+    /// перечитывается на показе, и поля обязаны показать прочитанное — иначе
+    /// первое же «Сохранить» запишет прежние значения поверх правки
+    /// (находка S12). Но набранное человеком свежее файла и важнее его.
+    #[test]
+    fn a_hand_edited_file_reaches_the_form_unless_the_person_is_typing() {
+        let saved = Host { mode: "local".into(), db_user: "Администратор".into(), ..Host::default() };
+        let form = saved.clone();
+        // Файл правили руками — подхватываем.
+        let file = Host { db_user: "Иванов".into(), ..saved.clone() };
+        assert!(adopt_needed(&file, &form, &saved, "local"));
+        // Файл не менялся — подхватывать нечего.
+        assert!(!adopt_needed(&saved, &form, &saved, "local"));
+        // Человек набирает в полях — его правку не затираем, даже если файл
+        // тем временем сменился.
+        let typing = Host { db_user: "Петров".into(), ..saved.clone() };
+        assert!(!adopt_needed(&file, &typing, &saved, "local"));
+        // Поля, которых режим не показывает, подхват не будят: в локальном
+        // режиме адрес среды ни на что не влияет.
+        let hidden = Host { server: "10.0.0.5:3393".into(), ..saved.clone() };
+        assert!(!adopt_needed(&hidden, &form, &saved, "local"));
+        assert!(adopt_needed(&hidden, &form, &saved, "tunnel"));
     }
 
     #[test]
@@ -1233,14 +1704,75 @@ mod tests {
     fn the_footer_slot_picks_one_text_in_priority_order() {
         let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
         // Сказать нечего — путь комплекта, кнопка не красная.
-        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
+        assert_eq!(foot_left_text(None, None, None, path), (path.to_string(), false));
         // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
-        assert_eq!(foot_left_text(None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
+        assert_eq!(foot_left_text(None, None, Some("Нечего сохранять"), path), ("Нечего сохранять".to_string(), false));
         // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
         // что слот уже занят объяснением (заказчик 2026-10-20).
         let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
-        assert_eq!(foot_left_text(Some(&ok), Some("Нечего сохранять"), path), (ok.text.clone(), false));
+        assert_eq!(foot_left_text(Some(&ok), None, Some("Нечего сохранять"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        assert_eq!(foot_left_text(Some(&err), Some("Нечего сохранять"), path), (err.text.clone(), true));
+        assert_eq!(foot_left_text(Some(&err), None, Some("Нечего сохранять"), path), (err.text.clone(), true));
+    }
+
+    /// Причина важнее подсказки про сохранение: иначе её не видно почти
+    /// никогда — «Параметры» открыты по умолчанию, поля не тронуты, и слот
+    /// занят вечным «Нечего сохранять». Человек видел оранжевую точку и ни
+    /// слова о том, что не готово (находка S3 итогового ревью).
+    #[test]
+    fn the_reason_outranks_the_save_hint_in_the_footer() {
+        let path = "C:\\dev1c";
+        let why = "Не всё готово: проект: /home/dev3/project не разложен";
+        assert_eq!(foot_left_text(None, Some(why), Some("Нечего сохранять — поля ещё не менялись"), path), (why.to_string(), false));
+        // Но настоящий итог всё ещё сильнее причины: человек только что
+        // нажал и ждёт ответа именно на своё нажатие.
+        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
+        assert_eq!(foot_left_text(Some(&err), Some(why), None, path), (err.text.clone(), true));
+    }
+
+    /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки
+    /// рядом (`Button` Medium — `h_8`, 32 px). Поменяют межстрочный интервал
+    /// или число строк — равенство сломается здесь, а не на снимке из
+    /// образа, где высота окна начинает прыгать на подборе
+    /// (`window::needs_fit` построен на неизменной высоте подвала).
+    #[test]
+    fn the_footer_reserves_exactly_the_height_of_the_button() {
+        assert_eq!(FOOT_LINE * FOOT_LINES as f32, 32., "подвал разошёлся с высотой кнопки h_8");
+        assert_eq!(FOOT_LINES, 2, "две строки, не больше и не меньше");
+    }
+
+    /// Вердикт считается по событиям, а не на таймере, значит бывает
+    /// устаревшим — подвал называет, на какой момент причина верна (спека,
+    /// «Чем за это платим»). Час идёт только к причине вердикта: отказ занять
+    /// порт и холодный замок — факты «прямо сейчас».
+    #[test]
+    fn the_footer_names_the_time_of_the_verdict() {
+        let now = Instant::now();
+        let up = State::Up { since: now };
+        let ready = Readiness::Warn(Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"));
+        let why = reason(&up, "local", &ready, None, Some("15:54")).unwrap();
+        assert!(why.ends_with(" · проверено в 15:54"), "{why}");
+        assert!(why.starts_with("Не всё готово: "), "{why}");
+        // Вердикта нет (ещё не считали) — час не выдумывается.
+        assert!(!reason(&up, "local", &ready, None, None).unwrap().contains("проверено"));
+        // Отказ и замок час не получают: они про «прямо сейчас».
+        let bind = State::Failed("порт 7771 занят процессом 1234".into());
+        assert_eq!(reason(&bind, "local", &ready, None, Some("15:54")).as_deref(), Some("порт 7771 занят процессом 1234"));
+        let gate = reason(&State::Off, "local", &ready, Some("не задан пользователь базы"), Some("15:54")).unwrap();
+        assert_eq!(gate, "Включать нечего: не задан пользователь базы");
+    }
+
+    #[test]
+    fn the_picker_button_has_no_label_and_keeps_its_tooltip() {
+        // Оба конца правила за раз: подписи на кнопке нет — её место занял
+        // значок папки, а ширина ушла полю ввода (заказчик 2026-10-20: путь
+        // `/home/dev3/base` занимал половину поля); слово при этом не
+        // потерялось, оно стало подсказкой по наведению — иначе назначение
+        // квадратной кнопки не угадать. Кнопка берёт и подпись, и подсказку
+        // только отсюда, так что вернуть «Выбрать…» на кнопку, не уронив
+        // этот тест, не получится.
+        let (label, tooltip) = pick_face();
+        assert_eq!(label, None, "подпись вернулась на кнопку и снова съедает строку пути");
+        assert_eq!(tooltip, "Выбрать…");
     }
 }

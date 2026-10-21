@@ -11,6 +11,7 @@ pub mod gui;
 pub mod holder;
 pub mod job;
 pub mod jsonrpc;
+pub mod licence;
 pub mod listen;
 pub mod local;
 pub mod ops_host;

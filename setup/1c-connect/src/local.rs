@@ -39,6 +39,11 @@ fn line(v: Value) -> Vec<u8> {
 /// процесса без ответа или таймаут — ошибка; процесс всегда добивается.
 pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Duration, on_log: &dyn Fn(String)) -> Result<Reply, String> {
     use std::process::Stdio;
+    // Предполёт, один на все вызовы vrunner-mcp (export, import, проверка):
+    // он поднимает Конфигуратор, а тот без экрана не стартует. Если дать экран
+    // нечем, отказ приходит отсюда, словами и с лечением, — иначе человек ждёт
+    // минуту и получает сырое «Unable to initialize GTK+…» (замер 2026-10-20).
+    crate::ops_host::screen_check()?;
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {

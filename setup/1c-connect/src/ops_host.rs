@@ -86,11 +86,39 @@ pub fn derived_gitea(server: &str) -> Option<String> {
     (!host.is_empty() && port > 2).then(|| format!("http://{host}:{}", port - 2))
 }
 
+/// Адрес среды, который настройке **есть смысл** записать. Вывод верен
+/// только в туннельном режиме: там Gitea среды приезжает на машину
+/// проброшенным портом. В локальном режиме туннеля нет, пробрасывать некому,
+/// и выведенный адрес указывает в пустоту — записать его значило бы
+/// закрепить выдумку в файле, да ещё так, будто её задал человек (живой
+/// прогон в образе 2026-10-21: `install` записал мёртвый
+/// `http://127.0.0.1:3391`). Там поле остаётся пустым: в образе его пишет
+/// `seed` стенда, у человека — он сам, а проверка до тех пор честно говорит
+/// «адрес среды не задан».
+///
+/// Пустой `server` или оставленное умолчание образца — тоже нечего выводить:
+/// этот адрес никто не задавал.
+pub fn gitea_to_write(host: &crate::cfg::Host) -> Option<String> {
+    if host.mode != "tunnel" {
+        return None;
+    }
+    let server = host.server.trim();
+    if server.is_empty() || server == crate::cfg::Host::default().server {
+        return None;
+    }
+    derived_gitea(server)
+}
+
 /// Настройка дописывает в toml всё, что программа выводила сама: адрес среды,
 /// каталог выгрузки и порт своей публикации. После настройки файл параметров —
 /// полная картина того, чем программа пользуется (решение заказчика
 /// 2026-10-21). Пишется только пустое поле: написанное человеком (или `seed`
 /// стенда) не трогается.
+///
+/// Адрес среды — только там, где вывод имеет смысл (`gitea_to_write`):
+/// каталог выгрузки и порт публикации считаются от полей этой же машины и
+/// соврать не могут, а адрес смотрит наружу, и в локальном режиме выводить
+/// его не из чего.
 ///
 /// Правятся именно строки этих ключей в файле человека
 /// (`toml_render::set`) — его комментарии, порядок ключей и пропущенные
@@ -107,9 +135,11 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     }
     let mut fields: Vec<(&str, String)> = Vec::new();
     if cfg.gitea_url().is_none() {
-        // Выводить не из чего (`server` без порта) — поле остаётся пустым, и
-        // проверка скажет про поле, а не подставит выдуманный адрес.
-        if let Some(addr) = derived_gitea(&cfg.host.server) {
+        // Выводить не из чего (локальный режим, пустой или умолчательный
+        // `server`, `server` без порта) — поле остаётся пустым, и проверка
+        // скажет про поле, а не подставит выдуманный адрес. См.
+        // `gitea_to_write`.
+        if let Some(addr) = gitea_to_write(&cfg.host) {
             cfg.host.gitea = addr.clone();
             fields.push(("gitea", format!("{addr:?}")));
         }
@@ -1156,13 +1186,58 @@ mod tests {
     #[test]
     fn a_dry_run_derives_in_memory_and_writes_nothing() {
         let kit = TomlKit::new("dry");
-        let path = kit.put(crate::cfg::EXAMPLE);
-        let mut cfg: Cfg = toml::from_str(crate::cfg::EXAMPLE).unwrap();
+        let path = kit.put(MINE);
+        let mut cfg: Cfg = toml::from_str(MINE).unwrap();
 
         let wrote = write_derived_fields(&kit, &mut cfg, true).unwrap();
         assert_eq!(wrote.len(), 3, "{wrote:?}");
-        assert_eq!(cfg.gitea_url(), Some("http://192.168.1.10:3391"), "план считается по выведенному");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), crate::cfg::EXAMPLE, "сухой прогон файл не трогает");
+        assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"), "план считается по выведенному");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MINE, "сухой прогон файл не трогает");
+    }
+
+    /// Адрес среды выводится только там, где вывод верен. В локальном режиме
+    /// туннеля нет, и записанный адрес был бы выдумкой, закреплённой в файле
+    /// (живой прогон в образе 2026-10-21). Каталог выгрузки и порт публикации
+    /// пишутся в обоих режимах: они от полей этой же машины.
+    #[test]
+    fn a_local_workstation_gets_no_made_up_environment_address() {
+        let kit = TomlKit::new("local");
+        let text = format!("{MINE}mode = \"local\"\n");
+        let path = kit.put(&text);
+        let mut cfg: Cfg = toml::from_str(&text).unwrap();
+
+        let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
+        assert_eq!(cfg.gitea_url(), None, "в локальном режиме адрес не выдумывается");
+        assert!(wrote.iter().all(|w| !w.starts_with("gitea")), "{wrote:?}");
+        assert_eq!(wrote.len(), 2, "каталог выгрузки и порт публикации — пишутся: {wrote:?}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("gitea"), "{written}");
+        assert!(written.contains("http_port = 8082") && written.contains("dump = "), "{written}");
+
+        // Тот же файл в туннельном режиме — адрес записан.
+        let kit = TomlKit::new("tunnel");
+        let path = kit.put(MINE);
+        let mut cfg: Cfg = toml::from_str(MINE).unwrap();
+        assert_eq!(cfg.host.mode, "tunnel", "умолчание режима");
+        write_derived_fields(&kit, &mut cfg, false).unwrap();
+        assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("gitea = \"http://10.0.0.5:4401\""));
+    }
+
+    /// Нечего выводить — и в туннельном режиме: `server` пуст или держит
+    /// умолчание образца, которого никто не задавал.
+    #[test]
+    fn an_unset_server_derives_no_address_either() {
+        let tunnel = |server: &str| crate::cfg::Host { server: server.into(), mode: "tunnel".into(), ..Default::default() };
+        assert_eq!(gitea_to_write(&tunnel("10.0.0.5:4403")).as_deref(), Some("http://10.0.0.5:4401"));
+        assert_eq!(gitea_to_write(&tunnel("")), None);
+        assert_eq!(gitea_to_write(&tunnel("  ")), None);
+        assert_eq!(gitea_to_write(&tunnel(&crate::cfg::Host::default().server)), None, "умолчание образца никто не задавал");
+        assert_eq!(gitea_to_write(&tunnel("10.0.0.5")), None, "без порта выводить не из чего");
+        // Режим важнее всего остального.
+        let mut local = tunnel("10.0.0.5:4403");
+        local.mode = "local".into();
+        assert_eq!(gitea_to_write(&local), None);
     }
 
     /// Файла параметров нет — дописывать некуда: своего toml программа тут не

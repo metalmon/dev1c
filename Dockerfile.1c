@@ -215,6 +215,14 @@ RUN ln -s /opt/1cv8t /opt/1cv8 \
 # vrunner all read it from here. Empty means a base with no users at all.
 ARG DEMO_DB_USER=Администратор
 ENV DEMO_DB_USER=${DEMO_DB_USER}
+
+# DEMO_TITLE: what the base is called in the starter's list — the first words
+# about this stand a person reads. It belongs next to DEMO_DB_USER because
+# both describe the same demo base and both change with DEMO_TEMPLATE; it was
+# a string inside the seed before, and the list went on saying «Управление
+# нашей фирмой» for a base that had not been УНФ for a day.
+ARG DEMO_TITLE=Демонстрационное приложение (учебная)
+ENV DEMO_TITLE=${DEMO_TITLE}
 # apache2 там, где его найдёт рабочее место, а не только root. Пакет кладёт
 # бинарь в /usr/sbin, и /etc/profile отдаёт этот каталог только root: у dev<N>
 # путь /usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games. А 1c-connect

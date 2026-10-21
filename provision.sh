@@ -61,6 +61,30 @@ PORT_BASE=${DEV1C_PORT_BASE:-3390}
 # the model (its own container, outside this limit), the rest left to the host.
 # A smaller machine wants a smaller ceiling — this laptop runs 6g.
 MEMORY=${DEV1C_MEMORY:-8g}
+# Предел выше наличной памяти ничего не ограничивает: вместо отказа одному
+# процессу кончается память у всей машины Docker, и 1С при запуске говорит
+# «недостаточно памяти», не называя причины. Поэтому опускаем до 80% того,
+# что есть, оставляя ВМ её ядро, страничный кэш (под 1С он большой — база
+# читается файлами) и соседние контейнеры. Явно заданный DEV1C_MEMORY
+# уважаем, но предупреждаем.
+clamp_memory() {
+    have=$(docker info --format '{{.MemTotal}}' 2>/dev/null) || return 0
+    [ -n "$have" ] && [ "$have" -gt 0 ] 2>/dev/null || return 0
+    case "$MEMORY" in
+        *g) want=$(( ${MEMORY%g} * 1073741824 )) ;;
+        *m) want=$(( ${MEMORY%m} * 1048576 )) ;;
+        *)  return 0 ;;
+    esac
+    cap=$(( have * 80 / 100 ))
+    [ "$want" -le "$cap" ] && return 0
+    warn "предел памяти $MEMORY выше того, что есть у машины Docker ($(( have / 1073741824 )) ГиБ)"
+    if [ -n "${DEV1C_MEMORY:-}" ]; then
+        warn "DEV1C_MEMORY задан явно — оставляю как есть, но 1С может сказать «недостаточно памяти»"
+        return 0
+    fi
+    MEMORY="$(( cap / 1048576 ))m"
+    warn "опускаю до $MEMORY; поднять можно через DEV1C_MEMORY, если памяти добавится"
+}
 CONTAINER=$NAME
 VOL_PLATFORM=$NAME-platform
 VOL_DEMO=$NAME-demo
@@ -166,6 +190,7 @@ import)
     ;;
 run)
     shift
+    clamp_memory
     volumes
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     # shellcheck disable=SC2086

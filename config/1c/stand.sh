@@ -86,6 +86,9 @@ payload_present() { [ -x "/opt/1cv8t/x86_64/$PLATFORM_VERSION/1cv8t" ] && [ -f "
 # Empty on purpose means a base with no users at all (the image can be built
 # that way), so `-` and not `:-`: an empty DEMO_DB_USER must stay empty.
 DB_USER=${DEMO_DB_USER-Администратор}
+# Имя демо-базы в списке стартера; приезжает переменной образа вместе с
+# DEMO_DB_USER, умолчание — на случай запуска скрипта вне образа.
+DEMO_TITLE=${DEMO_TITLE:-Демонстрационное приложение (учебная)}
 IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
 IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
 LOG=/var/log/1c
@@ -185,9 +188,19 @@ ZEDDB
         # writes when the welcome wizard restarts the client.
         { printf '\357\273\277'
           printf '[%s]\r\nConnect=File="%s";\r\nID=%s\r\nOrderInList=1\r\nFolder=/\r\nOrderInTree=1\r\nAdditionalParameters=/AllowExecuteScheduledJobs -Off %s\r\n' \
-            "Управление нашей фирмой (учебная)" "$HOME/base" "$(id -un)-base" "$IB_N"
+            "$DEMO_TITLE" "$HOME/base" "$(id -un)-base" "$IB_N"
         } >"$v8i"
         log "1C: $v8i written" >&2
+    fi
+    # Прошлое имя в уже написанном списке. Файл пишется один раз, потому что
+    # база, добавленная человеком руками, должна в нём остаться, — значит
+    # смена демо-базы сама по себе список не трогает, и он ещё сутки звал
+    # конфигурацию по имени той, которой в стенде больше нет. Правим только
+    # строку заголовка нашей записи и только когда там стоит прошлое имя:
+    # всё остальное в файле мог поменять человек.
+    if [ -e "$v8i" ] && grep -aq '^\[Управление нашей фирмой (учебная)\]' "$v8i"; then
+        sed -i "s|^\[Управление нашей фирмой (учебная)\]|[$DEMO_TITLE]|" "$v8i"
+        log "1C: имя базы в $v8i обновлено на $DEMO_TITLE" >&2
     fi
     # the starter on the desktop, next to Zed and Gitea (same way as the base
     # image puts those there: a copy with the executable bit)

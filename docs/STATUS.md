@@ -429,7 +429,25 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    category B possible.
 7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
-8. **Platform help corpus — build it once, deliberately.** `bsl-analyzer` 0.3.2
+8. **MOSTLY CLOSED 2026-10-21 by the platform move — the corpus is accepted on
+   8.3.27.1508.** Measured on the raised stand by the onboarding session (as
+   `dev1`, on a fresh volume — no 8.5 corpus to delete): `syntax_help` now
+   returns real text, not just signatures. `СтрДлина` → «Получает количество
+   символов в строке» with a typed parameter and a «## Примеры» section;
+   `Сообщить` and `ЗначениеЗаполнено` likewise with descriptions and return
+   types. No `degraded`, no `bundled`, no `origin` in stderr on any of three
+   calls; the cache built itself (24 MB under
+   `/home/dev1/.cache/bsl-analyzer/platform-help`). Two naming corrections for
+   whoever repeats it: the command is `mcp serve --profile reference` (no
+   `--stdio` any more — stdio is the default), and `syntax_help` answers in
+   **Markdown**, so the description is read from the «## Описание» section, not
+   from `documentation.description` in `structuredContent`.
+   What remains of the original task: the corpus is still built per user and on
+   first use (a few minutes of stall for whoever asks first), and an
+   interrupted build can leave a `work/` directory behind — on a fresh volume
+   neither showed up, so this is now a nicety, not a defect. Original note kept
+   for context:
+   **Platform help corpus — build it once, deliberately.** `bsl-analyzer` 0.3.2
    builds it ITSELF on first use: it finds the platform in the volume, extracts
    `shcntx_ru.hbk`/`shlang_ru.hbk` and writes a snapshot under
    `~/.cache/bsl-analyzer/platform-help/auto/<hash>/` (24 MB corpus) — nothing in
@@ -671,6 +689,94 @@ settled it: don't compute what the program can say itself.
   `config/zed-settings.json` (its fallback VALUES are unchanged and still obey
   the new rule: 55296 + 8192 = 63488 against 65536), the spec section «Локальная
   модель», and the `fit_ctx` field label in the GUI.
+
+15. **`target_platform_version` per client project — the analyzer does NOT read
+    the platform version from the dumped code.** Checked in the analyzer's docs
+    (`docs/configuration/PROJECT_CONFIGURATION.md`): the version comes from
+    `target_platform_version` in the project's `bsl-analyzer.toml`, and if the
+    key is absent, from the built-in catalog — currently `8.3.27`. The
+    configuration's own `CompatibilityMode` is never consulted. Two details
+    worth keeping: the catalog is attested for the whole release line by the
+    first three components, so `8.3.27.1508` / `.1644` / `.2214` are one and the
+    same to it — which is exactly why the corpus was refused on 8.5 (a different
+    line, hence the overlay conflict) and accepted after the move; and on a
+    mismatched line it degrades safely rather than switching catalogs: a miss in
+    the platform catalog stops counting as proof of absence, `UnresolvedName`
+    and its kin go quiet, and the host logs an unsupported-target warning. So a
+    wrong value produces silence, not false «no such name».
+    **Decided by the customer 2026-10-21: the file must be WRITTEN, and written
+    automatically — the task goes to the connector (`1c-connect`).** My earlier
+    «not needed, the built-in default matches» holds only for the demo stand and
+    only while we stay on 8.3.27. Two things break it: we may move back to 8.5,
+    and — more importantly — developers will dump THEIR OWN configurations from
+    their machines through the connector, and we do not know those versions in
+    advance. On a different release line the analyzer degrades quietly:
+    `UnresolvedName` and its kin go silent, which is exactly the signal that
+    catches invented function names — measured as the top cause of failures
+    (46 of 75 runs did not compile; see `docs/model-settings-qwen36.md`).
+    Mechanics for whoever implements it: the file lives in the project root
+    (`~/project/bsl-analyzer.toml` — vrunner's working directory, where
+    `cf_decompile` puts sources) and is auto-discovered (priority:
+    `bsl-analyzer.toml`, then legacy `.bsl-analyzer.json`, then
+    `.bsl-language-server.json`; the CLI also takes `-c <path>`). One key is
+    enough: `target_platform_version = "8.3.21"` — three components are the
+    whole granularity the catalog has, the fourth is ignored. Two cautions: a
+    `bsl-analyzer.toml` that fails to parse does NOT fall back to JSON, so a
+    broken file is worse than none — write it only when the version is actually
+    known, and do not clobber a file the developer edited. The version itself
+    the connector already knows: it finds `1cv8` on the Windows machine to run
+    the designer (`find_1cv8`), and `mcp-1c` can report the live base's
+    platform and compatibility mode.
+    **The accepted line is readable at runtime — there is no list to maintain**
+    (answered to the connector session 2026-10-21, after it asked for one).
+    `~/.cache/bsl-analyzer/platform-help/auto/current` holds the hash of the
+    active snapshot, and that snapshot's `manifest.json` names the line:
+    `{"corpus_id": "installed-8.3.27.1508", "platform_version":
+    "8.3.27.1508"}`, with `source.json` naming the very hbk files it was built
+    from. On 8.5 the build fails and the bundled `8.3.27` stays in force, so
+    after the roll-back to 8.5.1.1150 the accepted line is 8.3.27, not 8.5.
+    **And the key's meaning is narrower than it looks:** it never adds correct
+    checking for another line — the catalog has no facts for it — it only
+    silences false positives. Hence: equal lines → the key is redundant; client
+    NEWER than the catalog (exactly the 8.5 case) → write it, or names added in
+    8.5 arrive as unresolved and the agent «fixes» correct code; client older →
+    do not bother, neither option catches the use of newer API.
+    **Verified on OUR 0.3.2, not from master docs (2026-10-21) — and it
+    overturned two of my own claims.** `check-config --config <file>` rejects
+    unknown fields with a parse error and lists the accepted ones: `source`,
+    `analysis`, `diagnostics`, `code_lens`, `formatting`,
+    `target_platform_version`, `platform_help`, `min_platform_version`,
+    `compatibility_mode`, `search`, `features`, `output`. So the key is at the
+    ROOT, a section is rejected, and a misplaced key fails loudly. The bundled
+    line of 0.3.2 is `8.3.27.2214` (it says so in its own degradation warning).
+    Claim overturned #1: «the key only silences false positives» holds for
+    `target_platform_version` ONLY. The other two add real checks:
+    `min_platform_version` (the minimum platform the code must compile on)
+    turns on `PlatformMemberNewerThanMinVersion` — silent until set, then it
+    reports every use of a platform member available only in a later version
+    (global function, type in `Новый`, a value's method, `Асинх`/`Ждать`);
+    `compatibility_mode` turns on `PlatformMemberHiddenByCompatibilityMode` —
+    the 30 globals a low mode hides (`СтрНайти`, `СтрРазделить`, bitwise, regex,
+    `КопииБазыДанных`) plus `Запрос.ТребуемаяАктуальностьДанных`.
+    Claim overturned #2: the configuration's own `<CompatibilityMode>` IS read —
+    priority is the setting, then `Configuration.xml` of the main configuration,
+    then «unknown». So `compatibility_mode` is normally NOT written; it is for
+    the case where the dump does not reflect the client's base (dump says
+    8.2.13, the client runs 8.3.15 → write the CLIENT's mode).
+    Hence what the connector writes: `min_platform_version` = the client's
+    platform whenever known (pure gain — no such check exists otherwise);
+    `target_platform_version` only when the client's line is newer than the
+    catalog's; `compatibility_mode` only on a dump/base mismatch.
+    **Follow-up worth its own task: a corpus for the CLIENT's line**, built from
+    their own `shcntx_ru.hbk` / `shlang_ru.hbk` — they sit next to the `1cv8`
+    the connector already locates with `find_1cv8`. That makes both the key and
+    the checks true instead of a compromise.
+    Original framing, kept because it is still the fallback for a hand-made
+    project: the action is for the pilot: when the agent
+    works on a CLIENT configuration pinned to an older compatibility mode, put
+    `bsl-analyzer.toml` with `target_platform_version` of that client's line in
+    the project root — otherwise the agent writes what 8.3.27 allows and the
+    client's configuration refuses it.
 
 ## Commands
 

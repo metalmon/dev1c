@@ -142,6 +142,13 @@ pub struct Ui {
     pub ready_gen: u64,
     /// Расчёт готовности идёт прямо сейчас — второй поток не заводится.
     pub ready_pending: bool,
+    /// Когда начался идущий расчёт. Нужен сторожу `readiness_lost`: поток
+    /// может не ответить никогда (бюджет проверяется **до** факта, а не
+    /// прерывает его, и `holder::of_port` поднимает `ss`/`netstat` вовсе без
+    /// срока), а залипшая защёлка `ready_pending` означала бы вердикт,
+    /// который больше не посчитается ни разу, и точку, которая никогда не
+    /// станет зелёной (находка S10).
+    pub ready_since: Option<Instant>,
     /// Пока поток считал, почва сдвинулась ещё раз: пересчитать один раз по
     /// его возвращении. Иначе цепочка «Сохранить → публикация → операция»
     /// поднимала бы три пробы подряд.
@@ -1163,7 +1170,16 @@ pub fn run_readiness(ui: &mut Ui) {
     // потока: он считается по диску и отвечает сразу, а переключатель обязан
     // слушаться его уже на ближайшей отрисовке.
     refresh_gate(ui);
-    let Some(gen) = start_readiness(ui) else { return };
+    // Выключено — считать нечего (спека: «при выключенном обслуживании
+    // горячие факты цвет не меняют, и вердикт в это время не считается»).
+    // Карточка его и не покажет, а набор стоит 20–40 с, пробы инструментов и
+    // поднятого на Linux виртуального экрана — всё ради ответа, который
+    // некому показать (находка S9). Включат — посчитается само: включение и
+    // есть одно из событий пересчёта.
+    if !serving(ui) {
+        return;
+    }
+    let Some(gen) = start_readiness(ui, Instant::now()) else { return };
     // Молча: `quiet_ctx`, а не `ctx_for` — ни строки в журнале, ни фазы в
     // карточке хода (`verify::readiness` фазу и не объявляет).
     let ctx = quiet_ctx(ui);
@@ -1206,15 +1222,40 @@ pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
     }
 }
 
+/// Сколько ждать поток готовности, прежде чем считать его потерянным. Бюджет
+/// набора — 20 с, и сторож нарочно взят много больше: он не инструмент
+/// точности, а предохранитель от залипшей защёлки. Пока он не сработал,
+/// второй поток не заводится, так что ошибиться в меньшую сторону хуже —
+/// это две пробы инструментов разом.
+const READINESS_LOST: Duration = Duration::from_secs(5 * 60);
+
+/// Потерян ли идущий расчёт: защёлка стоит дольше всякого разумного срока.
+/// `None` у начала — защёлку взвели где-то мимо `start_readiness`; считаем
+/// потерянным, иначе она осталась бы навсегда.
+fn readiness_lost(since: Option<Instant>, now: Instant) -> bool {
+    match since {
+        Some(t) => now.saturating_duration_since(t) > READINESS_LOST,
+        None => true,
+    }
+}
+
 /// Ядро `run_readiness` без потока: сброс устаревшего вердикта, поколение и
 /// отметка повтора. `None` — считать не надо: поток уже считает, пересчёт
 /// помечен и пойдёт один раз по его возвращении.
-fn start_readiness(ui: &mut Ui) -> Option<u64> {
+///
+/// Исключение — потерянный поток (`readiness_lost`): ответа от него нет и,
+/// похоже, не будет, а `ready_pending` без этого остаётся взведённым
+/// навсегда — вердикт не посчитается больше ни разу, и карточка застрянет на
+/// «Проверяю…» (находка S10). Тогда расчёт начинается заново, а ответ
+/// пропавшего потока, если он всё-таки придёт, отбросит поколение
+/// (`apply_ready`). Человеку об этом не говорим: он видит, что следующий
+/// пересчёт прошёл, и этого довольно.
+fn start_readiness(ui: &mut Ui, now: Instant) -> Option<u64> {
     // Старый вердикт не должен пережить смену почвы — сброс синхронный,
     // ещё до похода по сети (`drop_stale_readiness`, тестируется отдельно
     // от самого похода).
     drop_stale_readiness(ui);
-    if ui.ready_pending {
+    if ui.ready_pending && !readiness_lost(ui.ready_since, now) {
         ui.ready_again = true;
         return None;
     }
@@ -1223,6 +1264,7 @@ fn start_readiness(ui: &mut Ui) -> Option<u64> {
     // проход.
     ui.ready_again = false;
     ui.ready_pending = true;
+    ui.ready_since = Some(now);
     ui.ready_gen += 1;
     Some(ui.ready_gen)
 }
@@ -1238,6 +1280,7 @@ fn start_readiness(ui: &mut Ui) -> Option<u64> {
 /// тот расчёт, который её и прочтёт (`start_readiness`).
 fn apply_ready(ui: &mut Ui, gen: u64, first_fail: Option<Check>) -> bool {
     ui.ready_pending = false;
+    ui.ready_since = None;
     if gen != ui.ready_gen {
         return false;
     }
@@ -2054,6 +2097,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             ready_at: None,
             ready_gen: 0,
             ready_pending: false,
+            ready_since: None,
             ready_again: false,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
@@ -2174,6 +2218,7 @@ impl Ui {
             ready_at: None,
             ready_gen: 0,
             ready_pending: false,
+            ready_since: None,
             ready_again: false,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
@@ -2209,7 +2254,7 @@ mod tests {
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
-        publication_failure, save_needs_confirm, serving,
+        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, READINESS_LOST,
         stale_line, stale_text, start_readiness, took, tick_redraw, tray_tooltip, verdict_from_checks, Dot, Kind, Line, OpView,
         Readiness, Running, Tab, TrayState,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2280,9 +2325,9 @@ mod tests {
     #[test]
     fn a_stale_generation_answer_keeps_the_remembered_repeat() {
         let mut ui = Ui::for_test();
-        let first = start_readiness(&mut ui).expect("расчёт после операции пошёл");
+        let first = start_readiness(&mut ui, Instant::now()).expect("расчёт после операции пошёл");
         // «Сохранить» пока считают — повтор помечен, второго потока нет.
-        assert!(start_readiness(&mut ui).is_none());
+        assert!(start_readiness(&mut ui, Instant::now()).is_none());
         assert!(ui.ready_again);
         // «Проверить» нашла провал — вердикт жёлтый, поколение чужое.
         verdict_from_checks(&mut ui, &[Check::fail("проект", "не разложен", "1c-connect install")]);
@@ -2291,7 +2336,7 @@ mod tests {
         assert!(matches!(ui.ready, Readiness::Warn(_)), "свежий итог «Проверить» уцелел: {:?}", ui.ready);
         assert!(ui.ready_again, "обещанный повтор не съеден");
         // Исполняет и снимает отметку тот расчёт, который её читает.
-        assert!(start_readiness(&mut ui).is_some());
+        assert!(start_readiness(&mut ui, Instant::now()).is_some());
         assert!(!ui.ready_again);
     }
 
@@ -2319,10 +2364,10 @@ mod tests {
     #[test]
     fn a_second_recompute_waits_for_the_first() {
         let mut ui = Ui::for_test();
-        let gen = start_readiness(&mut ui).expect("первый расчёт идёт сам");
+        let gen = start_readiness(&mut ui, Instant::now()).expect("первый расчёт идёт сам");
         assert!(ui.ready_pending);
 
-        assert!(start_readiness(&mut ui).is_none(), "второго потока нет");
+        assert!(start_readiness(&mut ui, Instant::now()).is_none(), "второго потока нет");
         assert!(ui.ready_again, "повтор помечен");
         assert_eq!(ui.ready_gen, gen, "поколение не трогаем — считает всё тот же поток");
 
@@ -2330,7 +2375,7 @@ mod tests {
         assert!(apply_ready(&mut ui, gen, None), "по возврату — пересчитать");
         assert!(matches!(ui.ready, Readiness::Unknown), "{:?}", ui.ready);
         assert!(!ui.ready_pending && !ui.ready_again);
-        assert_eq!(start_readiness(&mut ui), Some(gen + 1));
+        assert_eq!(start_readiness(&mut ui, Instant::now()), Some(gen + 1));
     }
 
     /// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,
@@ -3043,6 +3088,57 @@ mod tests {
         let _ = ui.session.take().map(|s| s.stop());
     }
 
+    /// Спека: при выключенном обслуживании вердикт не считается — показывать
+    /// его негде, а набор стоит 20–40 с и поднимает пробу инструментов
+    /// (на Linux ещё и виртуальный экран). Замок при этом пересчитывается
+    /// всегда: он решает, доступен ли переключатель (находка S9).
+    #[test]
+    fn the_verdict_is_not_computed_while_serving_is_off() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(false, Ordering::Relaxed);
+        // «Уже считается», чтобы доказательство не подняло настоящий поток
+        // фактов: пересчёт тогда только пометит повтор — эта пометка и
+        // показывает, дошло ли до расчёта дело.
+        ui.ready_pending = true;
+        ui.ready_since = Some(Instant::now());
+        ui.ready_again = false;
+        ui.tray_shown = None;
+
+        run_readiness(&mut ui);
+        assert!(!ui.ready_again, "вердикт считается при выключенном обслуживании");
+        assert!(ui.tray_shown.is_some(), "замок обязан пересчитываться и доезжать до значка всегда");
+
+        // Включили — считается само, отдельного события не нужно.
+        ui.enabled.store(true, Ordering::Relaxed);
+        run_readiness(&mut ui);
+        assert!(ui.ready_again, "обслуживание включено, а пересчёт не пошёл");
+    }
+
+    /// Сторож зависшего расчёта (находка S10): бюджет проверяется до факта, а
+    /// не прерывает его, и поток может не ответить никогда. Залипшая защёлка
+    /// означала бы вердикт, который больше не посчитается ни разу, — точка
+    /// навсегда осталась бы «Проверяю…».
+    #[test]
+    fn a_lost_readiness_thread_does_not_latch_forever() {
+        // Якорь в будущем: на свежей машине `Instant::now() - 5 мин` паникует.
+        let now = Instant::now() + Duration::from_secs(3600);
+        assert!(!readiness_lost(Some(now), now));
+        assert!(!readiness_lost(Some(now), now + READINESS_LOST), "срок ещё не вышел");
+        assert!(readiness_lost(Some(now), now + READINESS_LOST + Duration::from_secs(1)));
+        assert!(readiness_lost(None, now), "защёлку взвели мимо `start_readiness` — ждать нечего");
+
+        // Проводка: пока поток жив, второго не заводим; потерянный — заводим.
+        let mut ui = Ui::for_test();
+        let gen = start_readiness(&mut ui, now).expect("первый расчёт идёт сам");
+        assert!(start_readiness(&mut ui, now + Duration::from_secs(30)).is_none(), "второй поток поверх живого");
+        assert_eq!(start_readiness(&mut ui, now + READINESS_LOST + Duration::from_secs(1)), Some(gen + 1));
+        // Ответ снимает и защёлку, и отметку времени — иначе следующий
+        // расчёт считал бы себя потерянным с рождения.
+        apply_ready(&mut ui, gen + 1, None);
+        assert!(!ui.ready_pending && ui.ready_since.is_none());
+    }
+
     /// «Обслуживаем» значит то, что читает мост, — флаг. Туннелю нужен ещё и
     /// сеанс, но сеанс сам по себе обслуживанием не является: с погашенным
     /// флагом поднятый туннель показывал зелёное «Подключён», пока агенту
@@ -3152,10 +3248,15 @@ mod tests {
         // оно ни было сегодня.
         let real = crate::licence::state_now();
         ui.licence = if real == crate::licence::State::Expired { crate::licence::State::Valid } else { crate::licence::State::Expired };
-        // Поток фактов в тесте нам не нужен: «уже считается» заставляет
-        // пересчёт только пометить повтор — эта пометка и есть доказательство,
-        // что `run_readiness` позвали.
+        // Обслуживание включено — иначе пересчёт и не начнётся (S9), и
+        // доказательство ниже ничего бы не доказало.
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        // Поток фактов в тесте нам не нужен: «уже считается» (и не потеряно,
+        // см. `readiness_lost`) заставляет пересчёт только пометить повтор —
+        // эта пометка и есть доказательство, что `run_readiness` позвали.
         ui.ready_pending = true;
+        ui.ready_since = Some(Instant::now());
         ui.ready_again = false;
         ui.tray_shown = None;
 

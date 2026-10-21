@@ -367,6 +367,18 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
     }
 }
 
+/// Подхватывать ли перечитанный с диска файл в поля формы. `file` — что
+/// прочитано сейчас, `form` — что набрано в полях, `saved` — что форма
+/// считает сохранённым (точка отсчёта «изменилось ли»).
+///
+/// Два условия вместе: файл разошёлся с этой точкой отсчёта (значит его
+/// правили мимо окна), и поля с ней не разошлись (значит человек в них
+/// ничего не набрал). Правка человека свежее файла, поэтому поверх неё не
+/// лезем — лучше оставить две правды на экране, чем стереть набранное.
+pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str) -> bool {
+    fields_differ(file, saved, mode) && !fields_differ(form, saved, mode)
+}
+
 /// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
 /// режим показывает: правка скрытого поля (адрес среды, пароль рабочего
 /// места, рабочее место в локальном режиме) не должна зажигать «Сохранить» —
@@ -556,6 +568,57 @@ impl Panel {
         fields_differ(&host_of(&self.fields, &mode, cx), &self.original, &mode)
     }
 
+    /// Нужно ли подхватить перечитанные параметры в поля — и какие именно.
+    /// `None` — подхватывать нечего (или нельзя).
+    ///
+    /// Выбран первый из двух выходов, названных ревью: поля следуют за
+    /// перечитанным файлом. Второй («Сохранить» отказывается писать поверх
+    /// изменившегося файла) оставил бы человека в тупике — форма всё равно
+    /// показывала бы старое, и выйти из отказа было бы нечем.
+    ///
+    /// Правка человека в полях важнее файла: она свежее. Поэтому пока
+    /// «Сохранить» горит (поля разошлись с сохранённым), файл в поля не
+    /// лезет — это тот же выбор, что у `save_host`, который не трогает чужое
+    /// без спроса.
+    fn adopted_host(&self, cx: &App) -> Option<Host> {
+        let host = &cx.global::<Ui>().cfg.host;
+        let mode = host.mode.clone();
+        let form = host_of(&self.fields, &mode, cx);
+        adopt_needed(host, &form, &self.original, &mode).then(|| host.clone())
+    }
+
+    /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
+    /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
+    fn adopt_fields(&mut self, host: &Host, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = shown_fields(&host.mode);
+        for (name, state) in self.field_states() {
+            if !shown.contains(&name) {
+                continue;
+            }
+            let text = field_value(host, name).to_string();
+            if state.read(cx).value() != text.as_str() {
+                state.update(cx, |s, cx| s.set_value(text, window, cx));
+            }
+        }
+        self.original = host.clone();
+    }
+
+    /// Поля формы вместе с их именами — тот же список имён, что у
+    /// `field_value`/`shown_fields`, чтобы обход полей не заводил третьего
+    /// мнения о составе формы.
+    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 7] {
+        let f = &self.fields;
+        [
+            ("server", &f.server),
+            ("password", &f.password),
+            ("workstation", &f.workstation),
+            ("base_path", &f.base_path),
+            ("db_user", &f.db_user),
+            ("db_password", &f.db_password),
+            ("project", &f.project),
+        ]
+    }
+
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
     /// Поля формы как `Host`: в локальном режиме скрытые поля переносятся из
     /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
@@ -673,6 +736,15 @@ impl Render for Panel {
         // добирал контраста для настоящего текста. Подписи, подробности
         // строк и подстрока карточки — основной текст вполсилы.
         let caption = fg.opacity(0.75);
+
+        // Файл параметров мог смениться под открытым окном (человек правит
+        // toml руками — мы сами это предлагаем, и `window::show_window`
+        // перечитывает файл). Форма обязана показать прочитанное; иначе
+        // первое же «Сохранить» запишет прежние значения поверх правки
+        // (находка S12).
+        if let Some(host) = self.adopted_host(cx) {
+            self.adopt_fields(&host, window, cx);
+        }
 
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
@@ -1207,7 +1279,7 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_save, card, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
+        adopt_needed, can_save, card, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
         switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
     };
     use crate::cfg::Host;
@@ -1489,6 +1561,30 @@ mod tests {
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
         assert!(fields_differ(&moved, &saved, "tunnel"));
+    }
+
+    /// Ручная правка toml не должна пропасть под открытым окном: файл
+    /// перечитывается на показе, и поля обязаны показать прочитанное — иначе
+    /// первое же «Сохранить» запишет прежние значения поверх правки
+    /// (находка S12). Но набранное человеком свежее файла и важнее его.
+    #[test]
+    fn a_hand_edited_file_reaches_the_form_unless_the_person_is_typing() {
+        let saved = Host { mode: "local".into(), db_user: "Администратор".into(), ..Host::default() };
+        let form = saved.clone();
+        // Файл правили руками — подхватываем.
+        let file = Host { db_user: "Иванов".into(), ..saved.clone() };
+        assert!(adopt_needed(&file, &form, &saved, "local"));
+        // Файл не менялся — подхватывать нечего.
+        assert!(!adopt_needed(&saved, &form, &saved, "local"));
+        // Человек набирает в полях — его правку не затираем, даже если файл
+        // тем временем сменился.
+        let typing = Host { db_user: "Петров".into(), ..saved.clone() };
+        assert!(!adopt_needed(&file, &typing, &saved, "local"));
+        // Поля, которых режим не показывает, подхват не будят: в локальном
+        // режиме адрес среды ни на что не влияет.
+        let hidden = Host { server: "10.0.0.5:3393".into(), ..saved.clone() };
+        assert!(!adopt_needed(&hidden, &form, &saved, "local"));
+        assert!(adopt_needed(&hidden, &form, &saved, "tunnel"));
     }
 
     #[test]

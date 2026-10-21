@@ -919,7 +919,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // целостного ревью) — до следующего вызова она обязана смотреть на
     // новую. `ensure_publication` сама решает «auto»/«webserver» и когда уже
     // «сделано» — здесь только зовём её, не повторяя эту логику.
-    if descriptor_changed {
+    if republish_after_save(descriptor_changed, ui.session.is_some()) {
         ensure_publication_now(ui);
     }
     if changed && ui.session.is_some() {
@@ -1096,6 +1096,21 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
 /// Ответ идёт `Ev::Publish`: журнал на отказе и карточка — в `handle`, не
 /// здесь, иначе карточка соврала бы, что всё в порядке, пока агент отвечает
 /// с ошибкой.
+/// Поднимать ли HTTP-сервис базы после записи параметров. Условий два, и
+/// второе появилось по замечанию заказчика 2026-10-21: «сохранил — в журнале
+/// сообщение об успешном поднятии http сервера, хотя я даже не пытался
+/// включить MCP».
+///
+/// Переменилась база — старый дескриптор указывает не туда, и сервис обязан
+/// посмотреть на новую, иначе агент отвечал бы из прежней базы. Но нужно это
+/// только тому, кто сейчас обслуживает: при выключенном переключателе мост
+/// отказывает ещё до публикации, и поднимать её — работа, которой никто не
+/// просил, да ещё и объявленная в журнале как успех. Включат MCP —
+/// `ensure_publication` сходит сама.
+pub fn republish_after_save(database_changed: bool, serving: bool) -> bool {
+    database_changed && serving
+}
+
 fn ensure_publication_now(ui: &mut Ui) {
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
@@ -2393,7 +2408,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
+        apply_ready, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
@@ -3251,6 +3266,18 @@ mod tests {
     /// (в каталоге теста не разложены ни инструменты, ни платформа), поэтому
     /// проверяется та же пара, что работает в окне: `cold_gate` на новых
     /// полях и `locks_gate` поверх неё.
+    /// Запись параметров не поднимает HTTP-сервис базы, пока никто не
+    /// обслуживает. Заказчик 2026-10-21: «сохранил — в журнале сообщение об
+    /// успешном поднятии http сервера, хотя я даже не пытался включить MCP».
+    /// Смена базы при выключенных MCP — не повод делать работу, которой не
+    /// просили, и тем более объявлять её успехом.
+    #[test]
+    fn saving_does_not_raise_the_publication_while_nobody_serves() {
+        assert!(!republish_after_save(true, false), "MCP выключены — публикацию не трогаем");
+        assert!(republish_after_save(true, true), "обслуживаем — сервис обязан смотреть на новую базу");
+        assert!(!republish_after_save(false, true), "база та же — поднимать нечего");
+    }
+
     #[test]
     fn saving_away_a_cold_condition_asks_first() {
         use crate::gui::gate::cold_gate;

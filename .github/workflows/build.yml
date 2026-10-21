@@ -299,15 +299,27 @@ jobs:
         # minutes and saves almost nothing. pack.sh then lays out the two kits
         # from the archive and the two installer binaries.
         run: |
-          # Both images in one archive: the environment and the model server
-          # for serve = "docker" (same llama.cpp build as the host row in pack.sh).
+          # The stand image is built here too: the kit without it would carry
+          # the model server and no 1C at all, which is what used to ship.
+          # The connector binary comes from this same run (artifact
+          # 1c-connect-linux, downloaded into artifacts/ above); without it
+          # Dockerfile.1c still builds, just without the connector's window.
+          mkdir -p artifacts
+          docker build -f Dockerfile.1c --build-context artifacts=artifacts \
+            -t oktaplus/dev1c-1c:latest .
+          # Two archives, by kinship. The stand is built FROM the environment:
+          # their shared layers lie in one file once. The model server shares
+          # nothing with them (another base image), so a common file saves no
+          # space and would make an onboarding fix drag a gigabyte along.
+          docker save oktaplus/dev1c:latest oktaplus/dev1c-1c:latest | gzip -1 > dev1c-image.tar.gz
           docker pull ghcr.io/metalmon/dev1c-llama:b11734
           docker tag ghcr.io/metalmon/dev1c-llama:b11734 oktaplus/dev1c-llama:latest
-          docker save oktaplus/dev1c:latest oktaplus/dev1c-llama:latest | gzip -1 > dev1c-image.tar.gz
-          ls -lh dev1c-image.tar.gz
+          docker save oktaplus/dev1c-llama:latest | gzip -1 > dev1c-llama-image.tar.gz
+          ls -lh dev1c-image.tar.gz dev1c-llama-image.tar.gz
           # The customer's server runs Docker 20.10.24, which refuses an
           # archive carrying an attestation manifest. Fail here, not there.
           sh scripts/check-image-archive.sh dev1c-image.tar.gz
+          sh scripts/check-image-archive.sh dev1c-llama-image.tar.gz
           docker image inspect oktaplus/dev1c:latest \
             --format 'image size: {{.Size}} bytes'
           cp dev1c-setup bins/
@@ -339,7 +351,7 @@ jobs:
         # The headless Ubuntu pilot: serve = "docker" only, so no llama row
         # and no nssm (--os linux in pack.sh); same image archive as above.
         run: |
-          ./pack.sh --os linux dev1c-image.tar.gz bins
+          LLAMA_IMAGE=dev1c-llama-image.tar.gz ./pack.sh --os linux dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit-linux
 
       - name: Install from the Linux kit, container form (two barriers, same binary)

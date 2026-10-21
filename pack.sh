@@ -285,6 +285,16 @@ if [ "$OS" = "linux" ]; then
     sh scripts/manual-path.sh "$KIT"
 fi
 
+# The model server travels in its own archive, and only in the Linux kit:
+# serve = "docker" there, while the Windows kit carries the llama.cpp row for
+# serve = "host" instead. Copied before the checksums below so that it lands
+# in checksums.txt like everything else. Spec: «Комплекты».
+if [ "$OS" = "linux" ] && [ -n "${LLAMA_IMAGE:-}" ]; then
+    [ -f "$LLAMA_IMAGE" ] || { echo "pack.sh: LLAMA_IMAGE=$LLAMA_IMAGE not found" >&2; exit 1; }
+    cp "$LLAMA_IMAGE" "$KIT/dev1c-llama-image.tar.gz"
+    echo "model server image: $(du -h "$KIT/dev1c-llama-image.tar.gz" | cut -f1)"
+fi
+
 # Checksums by the installer itself, so the customer verifies with the same
 # code. It has to be a build THIS machine can run: the Windows kit is packed
 # on Linux CI, where the kit's own dev1c-setup.exe exits 126 — that is what

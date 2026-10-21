@@ -428,6 +428,16 @@ jobs:
           fi
           echo "no keys in the image environment"
 
+      # Комплект разработчика 1С — отдельным артефактом. Он лежит и в
+      # dev1c-kit ниже, но тот везёт с собой архивы образов и весит больше
+      # трёх гигабайт: качать их ради двухсот мегабайт программы незачем, и
+      # такое скачивание уже дважды обрывалось на получасе.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 1c-connect-kit
+          path: dist/1c-connect/
+          retention-days: 14
+
       - uses: actions/upload-artifact@v4
         with:
           name: dev1c-kit

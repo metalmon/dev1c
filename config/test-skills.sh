@@ -78,7 +78,8 @@ if [ -f "$ZED_SETTINGS" ] && [ -f "$ZED_BIN" ]; then
                | tr -d ' ":' | sort -u); do
         case "$k" in
             custom|bsl|bsl-reference|1c|vrunner) continue ;;
-            its_help|cf_load|project_push|infobase_update|cache_show|cache_clear) continue ;;
+            its_help|cf_load|cf_decompile|project_pull|project_push) continue ;;
+            infobase_update|task_cancel|cache_show|cache_clear) continue ;;
         esac
         grep -aq "$k" "$ZED_BIN" || UNKNOWN="$UNKNOWN $k"
     done

@@ -727,8 +727,10 @@ mod tests {
         assert!(a.contains("-v dev1c-home:/home -v dev1c-gitea:/var/lib/gitea") && !a.contains("/opt/models"));
         assert!(a.contains("--gpus all"));
         assert!(a.contains("-e CUSTOM_API_URL=https://m"));
+        // Контейнер поднимается из образа СТЕНДА: в нём 1С, vrunner, коннектор
+        // и xauth. Пока здесь стояла среда, заказчик получал контейнер без 1С.
         assert!(!a.contains("LLAMA_ENABLED"));
-        assert!(a.ends_with("oktaplus/dev1c:latest"));
+        assert!(a.ends_with("oktaplus/dev1c-1c:latest"));
     }
 
     #[test]
@@ -783,10 +785,10 @@ mod tests {
     fn drift_names_what_differs() {
         let c = Cfg::default();
         let base: Vec<String> = vec![];
-        assert_eq!(drift_of(&c, "oktaplus/dev1c:latest", "3390", &base, None), None);
+        assert_eq!(drift_of(&c, "oktaplus/dev1c-1c:latest", "3390", &base, None), None);
         let d = drift_of(&c, "oktaplus/dev1c:old", "3390", &base, None).unwrap();
         assert!(d.0.contains("old") && d.1.contains("latest"));
-        let d = drift_of(&c, "oktaplus/dev1c:latest", "4000", &base, None).unwrap();
+        let d = drift_of(&c, "oktaplus/dev1c-1c:latest", "4000", &base, None).unwrap();
         assert!(d.0.contains("4000") && d.1.contains("3390"));
         let mut r = Cfg::default();
         r.model.serve = "remote".into();
@@ -799,10 +801,10 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
+        let d = drift_of(&r, "oktaplus/dev1c-1c:latest", "3390", &env, None).unwrap();
         assert!(d.0.contains("MODEL_NAME=Old") && d.1.contains("MODEL_NAME=Q"), "{d:?}");
         // A missing variable is named without its value, and the key never shows.
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &base, None).unwrap();
+        let d = drift_of(&r, "oktaplus/dev1c-1c:latest", "3390", &base, None).unwrap();
         assert_eq!(d, ("MODEL_PROVIDER не задан".into(), "MODEL_PROVIDER=custom".into()));
         // Ключ маскируется с обеих сторон; провайдер и адрес здесь совпадают
         // намеренно, иначе первым расхождением окажется не ключ.
@@ -810,7 +812,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let d = drift_of(&r, "oktaplus/dev1c:latest", "3390", &env, None).unwrap();
+        let d = drift_of(&r, "oktaplus/dev1c-1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
     }
 }

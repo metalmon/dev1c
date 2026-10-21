@@ -64,8 +64,15 @@ MEMORY=${DEV1C_MEMORY:-8g}
 CONTAINER=$NAME
 VOL_PLATFORM=$NAME-platform
 VOL_DEMO=$NAME-demo
-VOL_HOME=$NAME-home
-VOL_GITEA=$NAME-gitea
+# Тома рабочих мест и Gitea переопределяются по имени, а платформа с
+# демо-базой — нет. Причина в том, что эти два тома единственные, которые
+# может понадобиться завести заново, не тронув старые: база рабочего места,
+# собранная прошлой платформой, новой не открывается («требуется более новая
+# версия платформы»), а seed её не пересоздаёт — он создаёт базу только
+# когда её нет. Поднять стенд на свежих томах и оставить прошлые на диске
+# целыми — единственный путь, не требующий ничего удалять.
+VOL_HOME=${DEV1C_HOME_VOL:-$NAME-home}
+VOL_GITEA=${DEV1C_GITEA_VOL:-$NAME-gitea}
 # NOT under platform/: that directory is a build context, and 2.4 GB of payload
 # would be transferred to the daemon on every build of either target.
 TAR=dist/dev1c-1c-payload.tar.gz
@@ -151,8 +158,11 @@ import)
     docker image inspect "$IMAGE" >/dev/null 2>&1 || die "no $IMAGE: ./provision.sh build"
     volumes
     say "unpacking $src into $VOL_PLATFORM and $VOL_DEMO"
+    # Третий аргумент идёт насквозь: это --force, замена уже внесённых томов.
+    # Нужен при смене версии платформы — без него import молча ничего не
+    # делает и говорит об этом одной строкой, которую легко принять за успех.
     # shellcheck disable=SC2086
-    docker run --rm -i $MOUNTS "$IMAGE" 1c-stand import-payload < "$src"
+    docker run --rm -i $MOUNTS "$IMAGE" 1c-stand import-payload ${3:-} < "$src"
     ;;
 run)
     shift

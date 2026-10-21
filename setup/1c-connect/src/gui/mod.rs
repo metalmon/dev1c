@@ -806,6 +806,65 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
+/// Каталог выгрузки для записи — тот же приём, что у адреса публикации.
+/// `install` дописывает выведенный `<project>\src` в toml, и записанное
+/// умолчание обязано и дальше идти за каталогом проекта: иначе смена проекта
+/// оставила бы выгрузку в старом месте. Свой каталог (отличается от
+/// выведенного) смену `project` переживает. Пустое поле остаётся пустым: там
+/// умолчание и так считается при каждом чтении (`Cfg::dump_dir`).
+pub fn carried_dump(saved: &Host, new_project: &str) -> String {
+    if saved.dump == cfg::derived_dump(&saved.project) {
+        cfg::derived_dump(new_project)
+    } else {
+        saved.dump.clone()
+    }
+}
+
+/// Порт своей публикации для записи — тот же приём, что у каталога выгрузки:
+/// `install` дописывает выведенный `8080 + N` в toml, и записанное умолчание
+/// обязано и дальше идти за рабочим местом. Свой порт (отличается от
+/// выведенного) смену рабочего места переживает; незаданный остаётся
+/// незаданным.
+///
+/// Переезд не молчаливый: новый порт может оказаться занят — например, вторым
+/// коннектором другого рабочего места на этой же машине, — поэтому о нём (как
+/// и обо всём прочем, что едет за рабочим местом) `save_host` пишет строку в
+/// журнал (`moved_lines`); поднять HTTP-сервис на занятом порту всё равно не
+/// выйдет, и операция публикации скажет, кто его держит.
+pub fn carried_http_port(saved: &Host, new_workstation: &str) -> Option<u16> {
+    if saved.http_port == Some(cfg::derived_http_port(&saved.workstation)) {
+        Some(cfg::derived_http_port(new_workstation))
+    } else {
+        saved.http_port
+    }
+}
+
+/// Что переехало за переименованием — одной строкой на каждую причину.
+/// Правило одно на все переезды: о каждом говорим, ни об одном не молчим
+/// (находка ревью задачи 35 — прежде журнал называл только порт публикации,
+/// хотя за рабочим местом едут ещё ветка проекта, `origin` и порты, а за
+/// каталогом проекта — каталог выгрузки). `Warn`, а не `Ok`: новые порты
+/// может держать другой коннектор, а прежний каталог выгрузки остаётся
+/// лежать со старым содержимым.
+pub fn moved_lines(old: &Host, new: &Host) -> Vec<String> {
+    let mut v = Vec::new();
+    if old.workstation != new.workstation {
+        let p = Cfg { host: new.clone() }.ports();
+        let port = match (old.http_port, new.http_port) {
+            (Some(from), Some(to)) if from != to => format!(", порт публикации {from} → {to}"),
+            _ => String::new(),
+        };
+        v.push(format!(
+            "за рабочим местом {} → {} переехали: ветка проекта и origin, порты {}/{}/{}{port}",
+            old.workstation, new.workstation, p.mcp, p.vrunner, p.web
+        ));
+    }
+    if old.project != new.project && old.dump != new.dump {
+        v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.dump));
+    }
+    v
+}
+
 /// Поля, что решают, какую базу обслуживает публикация/MCP — путь, логин и
 /// пароль дескриптора `publication::vrd`. Единый список: `save_host` смотрит
 /// на него, не поднять ли публикацию заново, а подтверждение перед
@@ -818,16 +877,22 @@ fn database_changed(a: &Host, b: &Host) -> bool {
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
 /// режима публикации, её порта, адреса Gitea среды и адреса публикации в окне
 /// нет (правятся в toml): берём их из текущих параметров, иначе пустые
-/// значения из формы затёрли бы toml. Каталог проекта — из формы.
+/// значения из формы затёрли бы toml. Каталог проекта — из формы, и за ним
+/// едут умолчания: адрес публикации (`carried_base_url`), каталог выгрузки
+/// (`carried_dump`) и — за рабочим местом — порт публикации
+/// (`carried_http_port`). О каждом переезде — строка в журнал
+/// (`moved_lines`).
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
-    host.dump = ui.cfg.host.dump.clone();
+    host.dump = carried_dump(&ui.cfg.host, &host.project);
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
-    host.http_port = ui.cfg.host.http_port;
+    host.http_port = carried_http_port(&ui.cfg.host, &host.workstation);
     host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
+    // Переезды — не молчком, и все до одного: см. `moved_lines`.
+    let moved = moved_lines(&old_host, &host);
     let cfg = Cfg { host };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
@@ -845,6 +910,9 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // лишней строкой в журнал и лишним миганием портов.
     let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
     ui.cfg = cfg;
+    for text in moved {
+        note_line(ui, Line { kind: Kind::Warn, text });
+    }
     // Публикация не должна молчать про старую базу: иначе агент отвечает из
     // прежней, пока кто-нибудь не перезапустит HTTP-сервис руками (находка
     // целостного ревью) — до следующего вызова она обязана смотреть на
@@ -1690,6 +1758,16 @@ pub fn run_op(cx: &mut App, which: Which) {
     // Подсказка фазы сразу, а не через TOOLTIP_EVERY: иначе первые 60 с
     // новой операции висела бы подсказка от прежней (или «подключён»).
     ui.tooltip_at = Some(now);
+    // «Установить» — та же настройка, что `1c-connect install`: выводимые
+    // значения считаются здесь один раз и уезжают в toml, а дальше читаются
+    // только оттуда (спека, «программа не выдумывает адресов»).
+    if which == Which::Install {
+        match ops_host::write_derived_fields(&ui.kit, &mut ui.cfg, false) {
+            Ok(wrote) if !wrote.is_empty() => note_line(ui, Line { kind: Kind::Ok, text: format!("в {} записано: {}", cfg::FILE, wrote.join(", ")) }),
+            Ok(_) => {}
+            Err(e) => note_line(ui, Line { kind: Kind::Fail, text: format!("параметры не дописаны: {e:#}") }),
+        }
+    }
     sync_tray(ui, now);
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
@@ -1735,6 +1813,7 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::Ok => (true, String::new()),
                     Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
+                    Layout::NoGitea => (false, cfg::NO_GITEA.into()),
                     Layout::Drifted(d) => (false, d),
                 };
                 // Тот же инструмент, что зовёт агент, под тем же замком
@@ -2310,7 +2389,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, check_lines, check_status, confirm_gate_text,
+        apply_ready, autoconnect, autostart_enabled, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text, drop_stale_readiness,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, note_file, note_line, on_done,
         note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, save_host,
@@ -2708,6 +2787,102 @@ mod tests {
         assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost:8081/InfoBase/hs/mcp-1c");
         saved.base_url = String::new();
         assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost/Torg/hs/mcp-1c");
+    }
+
+    /// `install` записывает выведенный каталог выгрузки в toml — и записанное
+    /// умолчание обязано и дальше идти за каталогом проекта, иначе смена
+    /// проекта оставила бы выгрузку в старом месте. Свой каталог не трогаем.
+    #[test]
+    fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
+        let new = cfg::derived_dump("C:\\proj\\Torg");
+        let mut saved = Host { project: "C:\\proj\\Buh".into(), dump: cfg::derived_dump("C:\\proj\\Buh"), ..Host::default() };
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), new);
+        saved.dump = "D:\\dump".into();
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "D:\\dump");
+        // Пустое поле остаётся пустым: умолчание и так считается при чтении.
+        saved.dump = String::new();
+        assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
+    }
+
+    /// Та же ловушка у порта публикации: записанный `8080 + N` идёт за
+    /// рабочим местом, свой порт остаётся, незаданный — незаданным.
+    #[test]
+    fn carried_http_port_follows_the_workstation_unless_it_was_chosen_by_hand() {
+        let mut saved = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port("dev1")), ..Host::default() };
+        assert_eq!(carried_http_port(&saved, "dev2"), Some(8082));
+        saved.http_port = Some(9000);
+        assert_eq!(carried_http_port(&saved, "dev2"), Some(9000));
+        saved.http_port = None;
+        assert_eq!(carried_http_port(&saved, "dev2"), None);
+    }
+
+    /// Переезд порта не молчком: новый порт может быть занят, и человек
+    /// должен прочитать про переезд, а не искать, почему публикация упала.
+    #[test]
+    fn saving_a_new_workstation_moves_a_derived_port_and_says_so() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
+        let mut host = ui.cfg.host.clone();
+        host.workstation = "dev3".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.host.http_port, Some(8083));
+        assert_eq!(ui.cfg.base_url(), "http://localhost:8083/hs/mcp-1c");
+        assert!(ui.log.iter().any(|l| l.text.contains("порт публикации 8081 → 8083")), "{:?}", ui.log);
+    }
+
+    /// Та же ловушка на живом «Сохранить»: записанный выведенный каталог
+    /// выгрузки переезжает вместе с каталогом проекта.
+    #[test]
+    fn saving_a_new_project_moves_a_derived_dump_with_it() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.project = "C:\\proj\\Buh".into();
+        ui.cfg.host.dump = cfg::derived_dump("C:\\proj\\Buh");
+        let mut host = ui.cfg.host.clone();
+        host.project = "C:\\proj\\Torg".into();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.host.dump, cfg::derived_dump("C:\\proj\\Torg"));
+        let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+        assert!(text.contains(&format!("dump = {:?}", cfg::derived_dump("C:\\proj\\Torg"))), "{text}");
+        // И переезд назван, а не сделан молча.
+        assert!(ui.log.iter().any(|l| l.text.contains("переехал каталог выгрузки")), "{:?}", ui.log);
+    }
+
+    /// Правило одно на все переезды: о каждом — строка. За рабочим местом
+    /// едут ветка, origin, порты и порт публикации; за каталогом проекта —
+    /// каталог выгрузки; ничего не менялось — строк нет.
+    #[test]
+    fn every_move_gets_a_line_not_just_the_port() {
+        let old = Host {
+            workstation: "dev1".into(),
+            project: "C:\\proj\\Buh".into(),
+            dump: cfg::derived_dump("C:\\proj\\Buh"),
+            http_port: Some(cfg::derived_http_port("dev1")),
+            ..Host::default()
+        };
+        assert!(moved_lines(&old, &old).is_empty());
+
+        let mut new = old.clone();
+        new.workstation = "dev3".into();
+        new.http_port = carried_http_port(&old, "dev3");
+        let line = moved_lines(&old, &new).join("\n");
+        for part in ["dev1 → dev3", "ветка проекта и origin", "7773/7783/7793", "порт публикации 8081 → 8083"] {
+            assert!(line.contains(part), "{part} не назван: {line}");
+        }
+
+        let mut moved_project = old.clone();
+        moved_project.project = "C:\\proj\\Torg".into();
+        moved_project.dump = carried_dump(&old, "C:\\proj\\Torg");
+        let lines = moved_lines(&old, &moved_project);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(&cfg::derived_dump("C:\\proj\\Torg")), "{lines:?}");
+
+        // Свой каталог выгрузки не переезжает — и строки про него нет.
+        let mut own = old.clone();
+        own.dump = "D:\\dump".into();
+        let mut own_new = own.clone();
+        own_new.project = "C:\\proj\\Torg".into();
+        own_new.dump = carried_dump(&own, "C:\\proj\\Torg");
+        assert!(moved_lines(&own, &own_new).is_empty());
     }
 
     #[test]

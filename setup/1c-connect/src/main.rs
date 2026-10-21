@@ -179,6 +179,18 @@ fn run() -> Result<()> {
             println!("Установить: 1c-connect install. Подключиться: 1c-connect connect. Выгрузить из 1С: 1c-connect export.");
         }
         Cmd::Install => {
+            // Выводимые значения считаются один раз — здесь, при настройке, и
+            // уезжают в toml; дальше правда только в файле (спека, «программа
+            // не выдумывает адресов»). Дописываются до операций: их состояние
+            // считается уже по записанному — в сухом прогоне тоже, иначе план
+            // показывал бы «адрес среды не задан» там, где установка его сама
+            // и запишет (находка ревью задачи 35).
+            let mut ctx = ctx;
+            let wrote = ops_host::write_derived_fields(&ctx.kit, &mut ctx.cfg, ctx.dry_run)?;
+            if !wrote.is_empty() {
+                let what = if ctx.dry_run { "будет записано" } else { "записано" };
+                ctx.ok(format!("в {} {what}: {}", cfg::FILE, wrote.join(", ")));
+            }
             common::run::apply_all(&ctx, &ops, None, false)?;
             if !ctx.dry_run {
                 println!();

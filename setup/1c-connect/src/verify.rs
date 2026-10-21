@@ -84,11 +84,22 @@ pub fn licence_fact(state: &crate::licence::State) -> Check {
     }
 }
 
-pub fn gitea_fact(g: &Gitea) -> Check {
+/// Адрес среды пуст — факт называет поле, а не говорит «Gitea не отвечает»
+/// про адрес, которого человек никогда не задавал (поправка заказчика
+/// 2026-10-21: программа не выдумывает адресов). Факт только про пустое
+/// поле: когда адрес есть, отчёт показывает его сам — `gitea_fact` называет
+/// адрес в любом исходе.
+pub fn gitea_address_fact() -> Check {
+    Check::fail(GITEA, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX)
+}
+
+/// Адрес называется в каждом исходе: отчёт показывает, с чем программа
+/// работает, — иначе провал «не отвечает» не говорит, куда она стучалась.
+pub fn gitea_fact(g: &Gitea, url: &str) -> Check {
     match g {
-        Gitea::Down(e) => Check::fail(GITEA, format!("не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
-        Gitea::NoOrg => Check::fail(GITEA, "отвечает, но организации dev1c в среде нет", "образ среды старый — dev1c-setup install с новым комплектом"),
-        Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v}, организация dev1c есть")),
+        Gitea::Down(e) => Check::fail(GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
+        Gitea::NoOrg => Check::fail(GITEA, format!("{url} отвечает, но организации dev1c в среде нет"), "образ среды старый — dev1c-setup install с новым комплектом"),
+        Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v} на {url}, организация dev1c есть")),
     }
 }
 
@@ -485,6 +496,7 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
         Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
         Layout::BaseDir(f) => Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог"),
         Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
+        Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
     }
 }
 
@@ -592,7 +604,10 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net);
         unless_timed_out(publication_fact(&base_url, ver), asked.elapsed(), limits.net)
     }));
-    v.push(within(t0, budget, GITEA, || gitea_fact(&crate::ops_host::gitea_probe(&ctx.cfg.gitea_url()))));
+    v.push(within(t0, budget, GITEA, || match ctx.cfg.gitea_url() {
+        Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url), url),
+        None => gitea_address_fact(),
+    }));
     if local {
         v.push(open_session_fact());
     } else {
@@ -645,9 +660,10 @@ mod tests {
     fn test_ctx(mode: &str) -> Ctx {
         let mut cfg = crate::cfg::Cfg::default();
         cfg.host.mode = mode.to_string();
-        // 127.0.0.1:3 → gitea_url порт 1: закрыт локально, провал мгновенный,
-        // как в ops_host::gitea_probe_on_a_closed_port_is_down.
+        // Адрес среды задан полем и ведёт на закрытый локально порт: провал
+        // мгновенный, как в ops_host::gitea_probe_on_a_closed_port_is_down.
         cfg.host.server = "127.0.0.1:3".into();
+        cfg.host.gitea = "http://127.0.0.1:1".into();
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         Ctx {
             kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-missing-kit-{}", std::process::id()))),
@@ -838,14 +854,38 @@ mod tests {
         assert!(ok.detail.contains(&until), "{ok:?}");
     }
 
+    /// Пустое поле — провал про поле, а не «Gitea не отвечает» по
+    /// выдуманному адресу: человек не должен искать неисправность в среде,
+    /// которую он не настраивал.
     #[test]
-    fn gitea_fact_distinguishes_no_server_from_no_org() {
-        let down = gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()));
+    fn an_unset_environment_address_is_named_as_such() {
+        let c = gitea_address_fact();
+        assert!(!c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("адрес среды не задан") && c.detail.contains("gitea"), "{c:?}");
+        assert!(!c.detail.contains("не отвечает"), "{c:?}");
+        assert!(c.hint.contains("1c-connect install"), "{c:?}");
+        // И факт берётся именно по пустому полю, а не по счёту от server.
+        let mut ctx = test_ctx("local");
+        ctx.cfg.host.gitea = String::new();
+        let v = run(&ctx, None, PortUse::WeDont);
+        let g = v.iter().find(|c| c.what == GITEA).expect("факт Gitea");
+        assert!(g.detail.contains("адрес среды не задан"), "{g:?}");
+    }
+
+    /// И каждый исход называет адрес: отчёт показывает, с чем программа
+    /// работает, а провал — куда она стучалась.
+    #[test]
+    fn gitea_fact_distinguishes_no_server_from_no_org_and_names_the_address() {
+        let url = "http://localhost:3000";
+        let down = gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), url);
         assert!(!down.ok && down.hint.contains("dev1c-setup"), "{down:?}");
-        let noorg = gitea_fact(&crate::ops_host::Gitea::NoOrg);
+        let noorg = gitea_fact(&crate::ops_host::Gitea::NoOrg, url);
         assert!(!noorg.ok && noorg.detail.contains("организации dev1c"), "{}", noorg.detail);
-        let ok = gitea_fact(&crate::ops_host::Gitea::Ok("1.22".into()));
+        let ok = gitea_fact(&crate::ops_host::Gitea::Ok("1.22".into()), url);
         assert!(ok.ok && ok.detail.contains("1.22"));
+        for c in [&down, &noorg, &ok] {
+            assert!(c.detail.contains(url), "{c:?}");
+        }
     }
 
     /// «Конфигуратор запущен» — не поломка, а «сейчас занято человеком»:

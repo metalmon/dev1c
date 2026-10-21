@@ -94,8 +94,8 @@ CONNECT=/opt/1c-connect/1c-connect
 CONNECT_TOML=1c-connect.toml
 # The image's own Gitea, as it is reachable from inside the container. One
 # constant for the two users of it: the toml a workstation's connector reads
-# (host.gitea — without it the connector derives the address from the SSH port,
-# which in local mode leads nowhere) and `1c-stand project`, the agent's own
+# (host.gitea — the connector derives no address of its own: an empty field
+# means "not set" and its check says so) and `1c-stand project`, the agent's own
 # side of the circle. Checked live in the image: /api/v1/version answers here.
 GITEA_URL=http://localhost:3000
 # The shared kit built into the image (Dockerfile.1c). It is declared there

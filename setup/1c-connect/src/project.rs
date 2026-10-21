@@ -19,6 +19,9 @@ pub enum Layout {
     /// В каталоге лежит база, не проект.
     BaseDir(String),
     Drifted(String),
+    /// Адреса среды нет в toml — `origin` собирать не из чего, и выдумывать
+    /// его программа не станет (спека, «программа не выдумывает адресов»).
+    NoGitea,
     Ok,
 }
 
@@ -36,6 +39,12 @@ pub fn layout_state(p: &Project) -> Layout {
     }
     if !p.dir.join(".git").exists() {
         return Layout::Missing;
+    }
+    // После `.git`, а не до: у неразложенного каталога первопричина — что он
+    // не разложен, и подменять её адресом среды нельзя (находка ревью
+    // задачи 35). Совет в обоих случаях один — `install`.
+    if p.remote.is_empty() {
+        return Layout::NoGitea;
     }
     let branch = git(p, &["symbolic-ref", "--short", "HEAD"]).map(|o| o.text).unwrap_or_default();
     if branch != p.branch {
@@ -117,7 +126,10 @@ impl Project {
         // Linux (CI) has no separators as far as PathBuf is concerned.
         let name = cfg.host.project.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().filter(|n| !n.is_empty()).unwrap_or("project").to_string();
         let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
-        Project { dir, git, branch: cfg.host.workstation.clone(), remote: format!("{}/dev1c/{name}.git", cfg.gitea_url()), login: cfg.host.workstation.clone() }
+        // Адреса среды нет — `remote` пуст, а не собран из пустоты: читатели
+        // (`layout_state`, `ensure_origin`) говорят, чего не хватает.
+        let remote = cfg.gitea_url().map(|g| format!("{g}/dev1c/{name}.git")).unwrap_or_default();
+        Project { dir, git, branch: cfg.host.workstation.clone(), remote, login: cfg.host.workstation.clone() }
     }
 }
 
@@ -255,6 +267,11 @@ fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, 
 /// `origin` всегда равен настроенному адресу: каталог мог быть git-инициализирован
 /// руками или указывать на старую среду, а status/pull/push говорят про `origin`.
 fn ensure_origin(p: &Project) -> Result<(), String> {
+    // Один заслон на `init`, `pull` и `push`: пустой адрес не уезжает в
+    // `git remote set-url` и не превращается в «origin не отвечает».
+    if p.remote.is_empty() {
+        return Err(crate::cfg::no_gitea());
+    }
     match git(p, &["remote", "get-url", "origin"])? {
         Out { ok: true, text } if text.trim() == p.remote => Ok(()),
         Out { ok: true, .. } => must(p, &["remote", "set-url", "origin", p.remote.as_str()]).map(|_| ()),
@@ -502,6 +519,7 @@ mod tests {
         assert!(f.iter().any(|a| a == "credential.helper="));
         assert!(f.iter().any(|a| a == "gc.auto=0"), "no auto-gc from the bridge: a 90k-file commit must not repack");
         let mut cfg = Cfg::default();
+        cfg.host.gitea = "http://192.168.1.10:3391".into();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
         cfg.host.project = "/home/dev/proj/Бух/".into();
@@ -687,6 +705,30 @@ mod tests {
     /// Адрес среды задан полем — `origin` собирается от него. И у уже
     /// разложенного проекта расхождение адреса раскладка лечит, а не только
     /// называет: в локальном режиме прежний адрес указывает в пустоту.
+    /// Адреса среды нет — `origin` не собирается из пустоты: раскладка это
+    /// называет, а `pull`/`push`/`init` отказывают текстом про поле.
+    #[test]
+    fn without_a_gitea_address_no_origin_is_made_up() {
+        let cfg = Cfg::default();
+        assert_eq!(cfg.gitea_url(), None);
+        let (_t, mut p) = fixture();
+        p.remote = Project::from_cfg(&cfg, Path::new("/tools")).remote;
+        assert_eq!(p.remote, "");
+        assert!(matches!(layout_state(&p), Layout::NoGitea));
+        let e = init(&p, Path::new("nowhere"), &|_| {}).unwrap_err();
+        assert!(e.contains("адрес среды не задан") && e.contains("gitea"), "{e}");
+        // Все четыре входа в git за одним заслоном — `status` в том числе:
+        // через него идут вкладка «Проект» и инструмент агента.
+        assert!(push(&p, "проба", &NEVER).unwrap_err().contains("адрес среды не задан"));
+        assert!(pull(&p, &NEVER).unwrap_err().contains("адрес среды не задан"));
+        assert!(status(&p).unwrap_err().contains("адрес среды не задан"));
+        // А неразложенный каталог называет свою причину, а не адрес среды.
+        let t = tempdir::Dir::new();
+        p.dir = t.path().join("нет такого");
+        std::fs::create_dir_all(&p.dir).unwrap();
+        assert!(matches!(layout_state(&p), Layout::Missing));
+    }
+
     #[test]
     fn the_remote_follows_the_explicit_gitea() {
         let mut cfg = Cfg::default();

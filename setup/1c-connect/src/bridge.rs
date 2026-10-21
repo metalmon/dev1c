@@ -25,8 +25,10 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     let exe = kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" });
     let mut c = tokio::process::Command::new(exe);
     c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--password", &cfg.host.db_password, "--quiet"]);
-    if !cfg.host.dump.is_empty() {
-        c.args(["--dump", &cfg.host.dump]);
+    // Только свой каталог выгрузки, не записанное умолчание: см.
+    // `Cfg::dump_override`.
+    if let Some(dump) = cfg.dump_override() {
+        c.args(["--dump", dump]);
     }
     // cwd — состояние, не комплект: путь к программе выше абсолютный, от
     // текущего каталога ничего не ищется, а комплект в образе только для

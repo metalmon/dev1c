@@ -20,7 +20,7 @@ mcp() { # $1 = port, $2 = third request (JSON-RPC), $3 = pattern expected in the
 # The platform and the template base come in two volumes, not in the image.
 # Without them nothing below can pass, and the reason is one line, so say it
 # and stop rather than printing fifteen failures.
-V=${PLATFORM_VERSION:-8.5.1.1150}
+V=${PLATFORM_VERSION:-8.3.27.1508}
 if [ -x "/opt/1cv8t/x86_64/$V/1cv8t" ] && [ -f /opt/1c-demo/base/1Cv8.1CD ]; then
     say "ok   payload: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"
 else

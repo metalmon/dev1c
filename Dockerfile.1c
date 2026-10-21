@@ -58,7 +58,7 @@
 # =============================================================================
 
 ARG BASE=oktaplus/dev1c:latest
-ARG PLATFORM_VERSION=8.5.1.1150
+ARG PLATFORM_VERSION=8.3.27.1508
 
 # --- vanessa-runner library tree ---------------------------------------------
 # Resolved by opm inside the project's OneScript image, exactly as pack.sh does
@@ -251,25 +251,28 @@ RUN --mount=type=bind,from=platform,target=/platform \
 # config/1c/stand.sh). Built from a configuration template in the platform
 # context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt — otherwise
 # from an empty configuration: the stand still shows the tools.
-# The template in use is the training УНФ 3.0.13.251 WITHOUT data
-# (1cv8new.dt of its kit): the kit's demo base with data cannot be opened
-# under the training licence — its users have passwords, and the licence
-# allows only empty ones (the platform says so in a dialog and exits).
+# The template in use is «Демонстрационное приложение» 1.0.41.3 of Фирма «1С»,
+# the demo configuration of the training platform's own kit (1cv8.dt): 187
+# metadata objects — 20 catalogues, 6 documents, 9 reports — against the
+# thousands of УНФ, which is what makes the whole circle fit into a
+# demonstration. Its own infobase user «Администратор» comes with the
+# template and has an empty password, which the training licence requires;
+# measured on the built payload, three Designer runs on one base: with that
+# name rc=0, with a made-up name and with no /N at all «Пользователь ИБ не
+# идентифицирован». The last of those is the proof the base HAS users — a
+# userless base lets you in without a name — and it is also why the name
+# travels onward in DEMO_DB_USER: the publication, the starter's list and
+# vrunner all need it.
 #
-# unf-ready.dt is that empty base with the configuration's welcome wizard
-# already done, dumped with /DumpIB. The wizard («Добро пожаловать!», three
-# steps, a required name) cannot be skipped and cannot be undone — deleting
-# the infobase user it creates brings it straight back — and finishing it
-# creates that user, after which everything headless needs the name. Doing it
-# once here means the customer opens 1C and is simply in the program, and the
-# name is known to the publication, to the starter's list and to vrunner
-# (DEMO_DB_USER in `tools`). How the file is made: open a copy of the base
-# built from unf-empty.dt, walk the three steps giving that name and NO
-# password (the licence allows none), then /DumpIB.
+# This replaces the training УНФ, which needed a prepared unf-ready.dt
+# because its welcome wizard could neither be skipped nor undone and the
+# kit's demo base with data refused to open under the training licence.
+# «Демонстрационное приложение» needs none of that: no wizard, and the user
+# is already in the template.
 #
 # The mcp-1c extension goes in here; whether it applies is checked right away
 # through a throwaway Apache, and a 404 is a warning, not a failure.
-ARG DEMO_TEMPLATE=unf-ready.dt
+ARG DEMO_TEMPLATE=1cv8.dt
 RUN --mount=type=bind,from=platform,target=/platform \
     P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
     # every Designer run prints its own log, pass or fail: a silent chain is

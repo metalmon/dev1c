@@ -119,7 +119,11 @@ volumes() {
 
 case "${1:-}" in
 build)
-    [ -d platform ] || die "platform/ is missing: the 1C installer and the demo template live there"
+    # Каталог с дистрибутивом 1С и шаблоном базы. Отдельной переменной,
+    # потому что он весит полтора гигабайта и на рабочем диске места под
+    # него может не быть: заказчик просил собирать на C.
+    PLATFORM_DIR=${DEV1C_PLATFORM_DIR:-platform}
+    [ -d "$PLATFORM_DIR" ] || die "$PLATFORM_DIR не найден: там лежат установщик 1С и шаблон базы (DEV1C_PLATFORM_DIR меняет путь)"
     # Сперва базовый образ: стенд собирается FROM него, и правка в config/
     # иначе молча не доедет.
     ensure_base
@@ -130,7 +134,7 @@ build)
     say "the stand image (no platform, no demo base)"
     docker build -f Dockerfile.1c --build-context artifacts=artifacts -t "$IMAGE" .
     say "the payload image (platform + template base)"
-    docker build -f Dockerfile.1c --build-context platform=platform --target payload -t "$PAYLOAD_IMAGE" .
+    docker build -f Dockerfile.1c --build-context platform="$PLATFORM_DIR" --target payload -t "$PAYLOAD_IMAGE" .
     ;;
 export)
     out=${2:-$TAR}

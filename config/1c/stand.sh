@@ -67,7 +67,7 @@
 # only for the length of a request.
 set -eu
 
-PLATFORM_VERSION=${PLATFORM_VERSION:-8.5.1.1150}
+PLATFORM_VERSION=${PLATFORM_VERSION:-8.3.27.1508}
 V8=/opt/1cv8/x86_64/$PLATFORM_VERSION
 DEMO=/opt/1c-demo/base
 # The two trees the volumes carry, and the one test for "is the stand usable".

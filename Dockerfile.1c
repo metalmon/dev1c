@@ -58,7 +58,7 @@
 # =============================================================================
 
 ARG BASE=oktaplus/dev1c:latest
-ARG PLATFORM_VERSION=8.3.27.1508
+ARG PLATFORM_VERSION=8.5.1.1150
 
 # --- vanessa-runner library tree ---------------------------------------------
 # Resolved by opm inside the project's OneScript image, exactly as pack.sh does
@@ -221,8 +221,11 @@ ENV DEMO_DB_USER=${DEMO_DB_USER}
 # both describe the same demo base and both change with DEMO_TEMPLATE; it was
 # a string inside the seed before, and the list went on saying «Управление
 # нашей фирмой» for a base that had not been УНФ for a day.
-ARG DEMO_TITLE=Демонстрационное приложение (учебная)
-ENV DEMO_TITLE=${DEMO_TITLE}
+# Кавычки обязательны: ARG и ENV без них режут значение по первому пробелу,
+# и в образ приезжает одно слово. Поймано проверкой образа после сборки —
+# `docker run ... echo $DEMO_TITLE` напечатал «Демонстрационное».
+ARG DEMO_TITLE="Управление нашей фирмой (учебная)"
+ENV DEMO_TITLE="${DEMO_TITLE}"
 # apache2 там, где его найдёт рабочее место, а не только root. Пакет кладёт
 # бинарь в /usr/sbin, и /etc/profile отдаёт этот каталог только root: у dev<N>
 # путь /usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games. А 1c-connect
@@ -274,28 +277,27 @@ RUN --mount=type=bind,from=platform,target=/platform \
 # config/1c/stand.sh). Built from a configuration template in the platform
 # context when one is named — DEMO_TEMPLATE=<file>, a .cf or a .dt — otherwise
 # from an empty configuration: the stand still shows the tools.
-# The template in use is «Демонстрационное приложение» 1.0.41.3 of Фирма «1С»,
-# the demo configuration of the training platform's own kit (1cv8.dt): 187
-# metadata objects — 20 catalogues, 6 documents, 9 reports — against the
-# thousands of УНФ, which is what makes the whole circle fit into a
-# demonstration. Its own infobase user «Администратор» comes with the
-# template and has an empty password, which the training licence requires;
-# measured on the built payload, three Designer runs on one base: with that
-# name rc=0, with a made-up name and with no /N at all «Пользователь ИБ не
-# идентифицирован». The last of those is the proof the base HAS users — a
-# userless base lets you in without a name — and it is also why the name
-# travels onward in DEMO_DB_USER: the publication, the starter's list and
-# vrunner all need it.
+# The template in use is the training УНФ 3.0.13.251 — the kit's own demo base
+# WITH data (1Cv8.dt of smallBusiness_t_3_0_13_251), so the stand shows a
+# configuration a person recognises, filled with records rather than empty.
 #
-# This replaces the training УНФ, which needed a prepared unf-ready.dt
-# because its welcome wizard could neither be skipped nor undone and the
-# kit's demo base with data refused to open under the training licence.
-# «Демонстрационное приложение» needs none of that: no wizard, and the user
-# is already in the template.
+# This corrects what stood here before. The note used to say that base cannot
+# be opened under the training licence — that its users have passwords and the
+# licence allows only empty ones — and because of that the stand carried an
+# empty base with the welcome wizard walked by hand (unf-ready.dt). Measured
+# 2026-10-21 on 8.5.1.1150, it is false: the base opens with no wizard and no
+# password, and three Designer runs on it answer «Администратор» rc=0, a
+# made-up name and no /N at all «The infobase user is not authenticated». The
+# last run is the proof the base HAS users — a userless base lets you in
+# without a name — and the first is the proof that name needs no password.
+#
+# So neither unf-ready.dt nor any manual clicking is needed any more, and
+# DEMO_DB_USER carries that name onward: the publication, the starter's list
+# and vrunner all need it.
 #
 # The mcp-1c extension goes in here; whether it applies is checked right away
 # through a throwaway Apache, and a 404 is a warning, not a failure.
-ARG DEMO_TEMPLATE=1cv8.dt
+ARG DEMO_TEMPLATE=unf.dt
 RUN --mount=type=bind,from=platform,target=/platform \
     P=/opt/1cv8/x86_64/${PLATFORM_VERSION} && B=/opt/1c-demo/base && mkdir -p /opt/1c-demo \
     # every Designer run prints its own log, pass or fail: a silent chain is

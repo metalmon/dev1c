@@ -67,7 +67,7 @@
 # only for the length of a request.
 set -eu
 
-PLATFORM_VERSION=${PLATFORM_VERSION:-8.3.27.1508}
+PLATFORM_VERSION=${PLATFORM_VERSION:-8.5.1.1150}
 V8=/opt/1cv8/x86_64/$PLATFORM_VERSION
 DEMO=/opt/1c-demo/base
 # The two trees the volumes carry, and the one test for "is the stand usable".
@@ -198,8 +198,12 @@ ZEDDB
     # конфигурацию по имени той, которой в стенде больше нет. Правим только
     # строку заголовка нашей записи и только когда там стоит прошлое имя:
     # всё остальное в файле мог поменять человек.
-    if [ -e "$v8i" ] && grep -aq '^\[Управление нашей фирмой (учебная)\]' "$v8i"; then
-        sed -i "s|^\[Управление нашей фирмой (учебная)\]|[$DEMO_TITLE]|" "$v8i"
+    # Без якоря на начало строки: файл начинается с BOM (ef bb bf), и
+    # «^\[» по первой строке не совпадает никогда — на этом починка и
+    # промолчала в первый раз. Строка «[имя]» в v8i и так встречается
+    # только как заголовок записи.
+    if [ -e "$v8i" ] && grep -aq '\[Управление нашей фирмой (учебная)\]' "$v8i"; then
+        sed -i "s|\[Управление нашей фирмой (учебная)\]|[$DEMO_TITLE]|" "$v8i"
         log "1C: имя базы в $v8i обновлено на $DEMO_TITLE" >&2
     fi
     # the starter on the desktop, next to Zed and Gitea (same way as the base

@@ -83,6 +83,12 @@ pub struct Host {
     pub password: String,
     pub workstation: String,
     pub base_path: String,
+    /// Версия платформы 1С или её маска (`8.3`), которой работать. Пусто —
+    /// версию выбирает лестница `platform::resolve` (пин базы, общий пин,
+    /// самая новая). Названная, но не установленная версия — отказ со
+    /// словами, а не молчаливый откат на новейшую.
+    #[serde(default)]
+    pub platform: String,
     pub db_user: String,
     pub db_password: String,
     pub base_url: String,
@@ -120,6 +126,7 @@ impl Default for Host {
             password: "dev1".into(),
             workstation: "dev1".into(),
             base_path: "C:\\Bases\\Buh".into(),
+            platform: String::new(),
             db_user: "Администратор".into(),
             db_password: String::new(),
             base_url: "http://localhost/Buh/hs/mcp-1c".into(),
@@ -266,6 +273,7 @@ impl Cfg {
                 "password" => format!("{:?}", h.password),
                 "workstation" => format!("{:?}", h.workstation),
                 "base_path" => format!("{:?}", h.base_path),
+                "platform" => format!("{:?}", h.platform),
                 "db_user" => format!("{:?}", h.db_user),
                 "db_password" => format!("{:?}", h.db_password),
                 "base_url" => format!("{:?}", h.base_url),

@@ -16,6 +16,7 @@ pub mod licence;
 pub mod listen;
 pub mod local;
 pub mod ops_host;
+pub mod platform;
 pub mod project;
 pub mod publication;
 pub mod session;

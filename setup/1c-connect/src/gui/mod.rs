@@ -886,6 +886,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
     host.dump = carried_dump(&ui.cfg.host, &host.project);
+    host.platform = ui.cfg.host.platform.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
@@ -1115,12 +1116,15 @@ pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
     // висит на таймауте SMB, а считается это на главном потоке окна.
     let base = &cfg.host.base_path;
     let base_exists = gate::wants_directory(base) && std::path::Path::new(base).exists();
+    let platform = ops_host::platform_choice(cfg);
     gate::cold_gate(
         cfg,
         kit.state_path(cfg::FILE).exists(),
         base_exists,
         &tools,
-        ops_host::find_1cv8().as_deref(),
+        // Выбор платформы и причина отказа — одной лестницей (`platform_choice`):
+        // окно запирает переключатель тем же текстом, что показывает проверка.
+        platform.as_ref().map(|c| c.exe.as_path()).map_err(String::as_str),
         ops_host::mcp_exe(kit).exists(),
         // Срок спрашиваем у часов, а не у запомненного при запуске: окно может
         // простоять открытым через полночь срока (так же поступает `run_op`).
@@ -3255,8 +3259,8 @@ mod tests {
         let before = Cfg::default();
         let mut after = Cfg::default();
         after.host.db_user = String::new();
-        let gate_before = cold_gate(&before, true, true, &tools, Some(v8), true, &crate::licence::State::Valid);
-        let gate_after = cold_gate(&after, true, true, &tools, Some(v8), true, &crate::licence::State::Valid);
+        let gate_before = cold_gate(&before, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);
+        let gate_after = cold_gate(&after, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);
         assert_eq!(gate_before, None, "до правки включать было можно");
         let why = locks_gate(gate_before.as_deref(), gate_after.clone(), true).expect("вопрос обязателен");
         assert!(why.contains("пользователь базы"), "{why}");

@@ -41,8 +41,8 @@ pub(crate) fn platform_version_from_exe(exe: &Path) -> Option<String> {
 }
 
 /// Версия нашей платформы — через найденный `1cv8.exe`.
-fn our_platform_version() -> Option<String> {
-    platform_version_from_exe(&crate::ops_host::find_1cv8()?)
+fn our_platform_version(cfg: &crate::cfg::Cfg) -> Option<String> {
+    platform_version_from_exe(&crate::ops_host::find_1cv8(cfg)?)
 }
 
 /// Версия формата выгрузки, которую производит сборка платформы — короткая
@@ -241,13 +241,13 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
     let write_mark = || -> Result<(), String> {
         // Своей версии платформы или формата не нашли — отметку не пишем
         // молча; файлы уже выгружены и отправлены, это важнее отметки.
-        let Some(platform) = our_platform_version() else { return Ok(()) };
+        let Some(platform) = our_platform_version(&ctx.cfg) else { return Ok(()) };
         let Some(format) = dump_format(&p.dir) else { return Ok(()) };
         write_dump_mark(&p.dir, &platform, &format)
     };
     let mark_check = || -> Option<Mark> {
         let (tree_platform, tree_format) = dump_mark(&p.dir)?;
-        let our_platform = our_platform_version()?;
+        let our_platform = our_platform_version(&ctx.cfg)?;
         let our_fmt = format_for_platform(&our_platform)?;
         Some(match check_mark(Some(&tree_format), Some(our_fmt)) {
             Mark::Same => Mark::Same,

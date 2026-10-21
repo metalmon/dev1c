@@ -3,7 +3,7 @@
 //! среда (Gitea) → что мешает загрузке → туннель. Человек читает сверху
 //! вниз и останавливается на первом провале.
 
-use crate::ops_host::{find_1cv8, mcp_exe, tools_dir, tools_state, Ctx, Gitea};
+use crate::ops_host::{mcp_exe, tools_dir, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -138,6 +138,28 @@ pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: 
         lines.push("минимум задан вручную".into());
     }
     Check::pass(ANALYZER, lines.join(", "))
+}
+
+/// Какая платформа и **почему** она (`platform::Why`), а не только путь:
+/// выбор идёт по лестнице 1С, и человек должен видеть, что его решило —
+/// поле в toml, пин базы, общий пин или «не было выбора». Другие
+/// установленные версии называются тут же: иначе «самая новая» звучит как
+/// «единственная».
+///
+/// Отказ — это и пустая машина, и названный пин, которого на ней нет; текст
+/// приходит из `platform::resolve` и годится без переделки, потому что он
+/// же становится причиной холодного замка.
+pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &[String]) -> Check {
+    match choice {
+        Err(e) => Check::fail(PLATFORM, e.clone(), "установите нужную версию платформы 1С или исправьте platform в 1c-connect.toml"),
+        Ok(c) => {
+            let mut detail = format!("{} ({}) — {}", c.version, c.exe.display(), c.why);
+            if !others.is_empty() {
+                detail.push_str(&format!("; на машине есть ещё: {}", others.join(", ")));
+            }
+            Check::pass(PLATFORM, detail)
+        }
+    }
 }
 
 /// Адрес среды пуст — факт называет поле, а не говорит «Gitea не отвечает»
@@ -381,11 +403,11 @@ pub fn web_server_fact(apache: Option<&std::path::Path>, module: Option<&std::pa
 /// `cfg!(target_os = ...)` в теле `facts_for_readiness` компилировался бы и
 /// там тоже.
 #[cfg(target_os = "linux")]
-fn system_web_server_fact() -> Check {
+fn system_web_server_fact(cfg: &crate::cfg::Cfg) -> Check {
     let apache = crate::publication::apache2_on_path();
     // Модуль ищем ровно там же, где его берёт конфигурация публикации
     // (`Paths::of`): рядом с найденным 1cv8, второго способа не заводим.
-    let module = find_1cv8().and_then(|exe| crate::publication::module_in(exe.parent()?).ok());
+    let module = crate::ops_host::find_1cv8(cfg).and_then(|exe| crate::publication::module_in(exe.parent()?).ok());
     web_server_fact(apache.as_deref(), module.as_deref())
 }
 
@@ -602,13 +624,10 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     // Платформу ищем один раз на два факта: сканирование каталогов не нужно
     // повторять, а строки для анализатора без неё не считаются вовсе.
     let mut platform = None;
-    v.push(within(t0, budget, PLATFORM, || match find_1cv8() {
-        Some(p) => {
-            let found = Check::pass(PLATFORM, p.display().to_string());
-            platform = Some(p);
-            found
-        }
-        None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
+    v.push(within(t0, budget, PLATFORM, || {
+        let (choice, others) = crate::ops_host::platform_report(&ctx.cfg);
+        platform = choice.as_ref().ok().map(|c| c.exe.clone());
+        platform_fact(&choice, &others)
     }));
     v.push(within(t0, budget, ANALYZER, || {
         let ours = platform.as_deref().and_then(crate::flow::platform_version_from_exe).and_then(|v| crate::analyzer::machine_line(&v));
@@ -651,7 +670,7 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     // Поиск по `$PATH` и каталогу платформы — быстрый, но под бюджетом, как и
     // остальное: порядок фактов важнее экономии на одном `exists()`.
     #[cfg(target_os = "linux")]
-    v.push(within(t0, budget, SYSTEM_WEB, system_web_server_fact));
+    v.push(within(t0, budget, SYSTEM_WEB, || system_web_server_fact(&ctx.cfg)));
     let web = ctx.cfg.http_port();
     v.push(within(t0, budget, WEB, || {
         // Закрытый порт отказывает мгновенно, так что весь срок здесь — это

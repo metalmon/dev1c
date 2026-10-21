@@ -199,7 +199,7 @@ impl Paths {
                 kit.root.display()
             ));
         }
-        let exe = ops_host::find_1cv8().ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
+        let exe = ops_host::find_1cv8(cfg).ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
         let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
         let module = module_in(bin)?;
         Ok(paths_under(&tools, root, module, cfg.http_port()))

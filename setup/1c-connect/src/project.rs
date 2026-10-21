@@ -389,7 +389,12 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
     ensure_origin(p)?;
     // Only the roots that exist: a pathspec that matches nothing fails the
     // whole add, and before host.project (6B) some of them are not there yet.
-    let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json"].into_iter().filter(|r| p.dir.join(r).exists()).collect();
+    // `bsl-analyzer.toml` — в списке наравне со служебными файлами: он нужен
+    // не нам, а **второй стороне**. Корень проекта у агента становится
+    // пригодным для анализатора сам, с приходом ветки, без действий человека
+    // (требование заказчика 2026-10-21); не попади файл в коммит, он остался
+    // бы лежать на машине, где никакой анализатор его не читает.
+    let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json", crate::analyzer::FILE].into_iter().filter(|r| p.dir.join(r).exists()).collect();
     if roots.is_empty() {
         return Err(format!("в {} нет src — сначала cf_decompile", p.dir.display()));
     }
@@ -748,6 +753,21 @@ mod tests {
         init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
         assert_ne!(p.remote, old);
+    }
+
+    /// Файл анализатора уезжает вместе с выгрузкой: он нужен второй стороне,
+    /// и корень проекта у агента обязан быть пригодным сам, без его действий.
+    #[test]
+    fn the_analyzer_file_goes_into_the_commit() {
+        let (_t, p) = fixture();
+        let want = crate::analyzer::expected("8.5.1.1150", "8.3.27");
+        init(&p, Path::new("nowhere"), &want, &|_| {}).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::create_dir_all(p.dir.join("src")).unwrap();
+        std::fs::write(p.dir.join("src").join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").unwrap();
+        push(&p, "выгрузка", &AtomicBool::new(false)).unwrap_or_else(|e| panic!("{e}"));
+        let tracked = git(&p.dir, &["ls-files"]);
+        assert!(tracked.contains(crate::analyzer::FILE), "файл анализатора обязан быть в коммите:
+{tracked}");
     }
 
     /// Строка платформы для анализатора появляется при раскладке — и только

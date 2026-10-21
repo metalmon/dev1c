@@ -139,19 +139,22 @@
             "display_name": "CUSTOM_MODEL_PLACEHOLDER",
             // Context window and answer size are set separately, on purpose.
             //
-            // A server may report max_model_len as max_total_tokens — the SUM of
-            // input and output, not the input window. Zed asks for a fifth of
-            // the declared window as output, so max_tokens equal to that sum
-            // produced a request of sum + 20%: the server refused, the stream
+            // Zed treats max_tokens as the INPUT and asks for the answer on top
+            // of it (a fifth of the declared window when max_output_tokens is
+            // absent). Setting max_tokens to the server's total therefore
+            // produced a request of total + 20%: the server refused, the stream
             // broke in the middle of a tool call's arguments, and Zed reported
             // "tool input was not fully received". It looked like a broken
             // terminal on one specific command, while in fact everything broke
             // once the thread history grew.
             //
-            // Hence a margin: 55296 + 8192 = 63488 against a 65536 limit. The
-            // margin matters because Zed counts tokens approximately — the
-            // server's own error says "at least". 8192 output tokens is roughly
-            // 30 KB of text, plenty for an answer.
+            // Hence the rule the installer follows (llama::zed_numbers):
+            // max_tokens = the slot's context (what /props reports, which is
+            // slot_n_ctx — a slot's own share, not the pool) MINUS the answer
+            // (an eighth of it, within 8192…32768) MINUS a 4096 margin, because
+            // Zed counts tokens approximately and the server's own error says
+            // "at least". The fallbacks below follow the same rule against a
+            // 65536 window: 53248 + 8192 + 4096 = 65536 exactly.
             //
             // The numbers are filled in by the entrypoint: from the measurement
             // dev1c-setup made of the local model server (CUSTOM_MAX_TOKENS,

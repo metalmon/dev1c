@@ -429,6 +429,248 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    category B possible.
 7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
+8. **Platform help corpus — build it once, deliberately.** `bsl-analyzer` 0.3.2
+   builds it ITSELF on first use: it finds the platform in the volume, extracts
+   `shcntx_ru.hbk`/`shlang_ru.hbk` and writes a snapshot under
+   `~/.cache/bsl-analyzer/platform-help/auto/<hash>/` (24 MB corpus) — nothing in
+   the Dockerfile asks for it. Two costs: every workplace builds its own (three
+   users = three builds of several minutes each, first help lookup stalls), and
+   each build leaves ~251 MB of extraction leftovers in `platform-help/work/`
+   (directory named after the pid — nobody cleans it). Decide the deliberate
+   form: build at image build time and ship one read-only corpus for everyone,
+   or build once at first container start and share it; either way drop the
+   `work/` leftovers. Note `platform-help build --hbk-dir` exists only in the
+   analyzer's master docs; 0.3.2 has `platform-help package` (packaging for
+   publication) plus the automatic path.
+
+   **Measured 2026-10-21, and it is worse than «untidy»: the corpus built from
+   our 8.5 is REJECTED.** The analyzer says
+   `invalid help corpus: platform overlay: type property addition
+   ClientApplicationForm.WindowOpeningMode already exists in the extracted data`
+   for `/opt/1cv8/x86_64/8.5.1.1150`, falls back to `origin="bundled"` facts of
+   `platform_version 8.3.27.2214` and reports `platform help degraded …
+   descriptions are empty`. So the agent in Zed gets signatures only (enough to
+   stop it inventing `Стр()`/`Заменить()`, which is the failure class we
+   measured — see `docs/model-settings-qwen36.md`), from the WRONG platform
+   version, with no descriptions or examples. Fix direction: a newer analyzer
+   (master has the explicit `platform-help build --hbk-dir`) or report the
+   overlay conflict upstream to `defin85/bsl-analyzer`. Also unset in the image:
+   `EMBEDDING_URL` (no semantic `search_docs`), and the lexical index builds in
+   the background on first use. Caches as seen in the live container: dev1 24 MB
+   corpus + 251 MB of leftover extraction (an interrupted build — dev3 has 24 MB
+   and a clean `work/`), dev2 empty; `/home` as a whole is 27 GB, worth its own
+   look. ITS (`its_help`) is a separate matter:
+   it is not a disc and not a docker image but 1С:Напарник behind
+   `NAPARNIK_TOKEN`; the invented-API failures we measured are plain platform
+   syntax and are covered by the local corpus without it.
+9. **Move the stand to the training platform 8.3.27.1508 (decided by the
+   customer, 2026-10-21).** The reason is the market, not the analyzer: 8.5 is
+   barely used at client sites, and the pilot has to look like what they run.
+   The valid help corpus comes along for free — 8.3.27 is the same line as the
+   facts the analyzer ships, so the overlay conflict of task 8 disappears.
+   Distribution: <https://online.1c.ru/catalog/free/28765768/> (training
+   8.3.27.1508, Linux 64-bit and Windows; macOS is .1606).
+   The chain, in order:
+   1. download the Linux distribution for the image and the Windows one for the
+      machine with 1C;
+   2. **the configuration changes too — УНФ cannot come along.** Its kit
+      manifest (`platform/1cv8.mft`) says
+      `Name=УправлениеНебольшойФирмойУчебная`, `Version=3.0.13.251`,
+      **`AppVersion=8.5`**: a configuration made for 8.5 does not open under
+      8.3.27, and no re-dump helps. `online.1c.ru/catalog/free/learning.php`
+      pairs applied solutions with platforms, and for the 8.3 line it offers
+      only the platform plus **«Демонстрационная конфигурация 1С:Платформа 8.3»**
+      (`/catalog/free/33052010/`, a `1cv8.dt`, explicitly «не является
+      полнофункциональной конфигурацией»); УТ is not on offer at all, and the
+      other applied solution is from the ancient 8.3.13 kit. Decided
+      2026-10-21: take the demo configuration. Side win — our `unf-ready.dt` is
+      **1.1 GB** and the kit ships volume archives; the demo base is tens of MB.
+      Check on download: the minimum platform version it declares (the page does
+      not say) and whether its metadata is deep enough to demonstrate anything.
+      Then load it and walk the welcome wizard (if it has one) ON 8.3.27 and
+      `/DumpIB` the result — that is the one manual step. The skills
+      (`cf-edit`, `meta-edit`, `form-edit`, `skd-edit`, `query-opt`) are not
+      tied to УНФ; the onboarding scenario and the demo walkthrough may be, and
+      need checking;
+   3. rebuild the payload image (`PLATFORM_VERSION` in `Dockerfile.1c`, the
+      `setup-training-<version>-x86_64.run` name, the `/opt/1cv8` symlink);
+   4. check that `MCP_HTTPService.cfe` from the mcp-1c release loads into
+      8.3.27 — an extension saved in 8.5 would be refused, and without it the
+      agent has no live base at all;
+   5. re-check vrunner and the skills on 8.3.27.
+
+10. **Speculative decoding: measure it, and build the static ngram cache from
+    our own corpus.** `--spec-type` in b11734 takes a LIST of
+    `none | draft-simple | draft-eagle3 | draft-mtp | draft-dflash | draft-dspark
+    | ngram-simple | ngram-map-k | ngram-map-k4v | ngram-mod | ngram-cache`
+    (default `none`), so MTP needs no extra PR — unsloth's quants carry the MTP
+    tensors. It changes SPEED only: verification keeps the output identical to
+    the unspeculated model, so this is never a quality question.
+    The `ngram-*` variants need no weights and no files at all — the draft comes
+    from the context (`--spec-ngram-mod-n-min 48 / -n-max 64 / -n-match 24`;
+    `ngram-simple`: `-size-n 12 / -size-m 48 / -min-hits 1`). Code repeats
+    itself, and an agent that re-emits a module to change three lines is the
+    exact case lookup speculation was made for — likely a better bet on BSL than
+    MTP, whose heads were trained on the general distribution.
+    `ngram-cache` is the one variant with files: `-lcs/--lookup-cache-static`
+    (not updated by generation) and `-lcd/--lookup-cache-dynamic`. Nobody
+    publishes a static cache — **we can build ours** from real 1C code (the demo
+    configuration, BSP, the skills' examples) so the model has idiomatic BSL
+    n-grams from the first token. Cheap and entirely ours, unlike MTP.
+    Measure on the 5090: `none` / `draft-mtp` / `ngram-mod` /
+    `draft-mtp,ngram-mod`, one session and three, tokens per second plus the
+    acceptance counters the server already exposes (`--metrics` is in our
+    command line): `spec_decode_num_draft_tokens_total`,
+    `spec_decode_num_accepted_tokens_total`, per-draft-position acceptance, and
+    `n_busy_slots_per_decode`. Expect the gain to shrink with three busy slots:
+    speculation pays at low batch, and with the card saturated the drafts
+    compete for the same compute.
+11. **DONE 2026-10-21. The pool arithmetic is gone (see task 14).**
+    With separate per-slot caches the server is told the per-slot context
+    directly and `/props` reports a slot's own share — so `pool_for()`, its 6/5
+    factor, the round-up and the inverse `slot_window_in()` are deleted, not
+    rewritten, together with their tests. `--kv-unified-per-slot` stays relevant
+    only if we ever go back to a unified pool. Original note kept for context:
+    **`--kv-unified-per-slot N` may delete our pool arithmetic.** b11734 has
+    «context limit per parallel slot; when set without `-c/--ctx-size`, the
+    shared KV pool is sized to `n_parallel*N`» — which is exactly what
+    `llama::pool_for()` hand-rolls today (window + a fifth for the answer, times
+    the slots, with `slot_window_in()` as the inverse). Check whether the flag
+    means the same thing, and if it does, pass the per-slot window straight to
+    the server and drop the 6/5 factor, the round-up and the inverse along with
+    their tests. Verify against `/props`: the slot window the server reports
+    must still match the number we declare to the workplace.
+
+12. **DONE 2026-10-21, and the answer came out better than the plan.** The customer
+    put it plainly (2026-10-21): the sum should be the number you configure.
+    Today `fit_ctx` means the INPUT window and `zed_numbers` adds a fifth on top
+    (`max_tokens = window + window/5`), so 250 000 configured means 300 000
+    positions in the sequence — past the model's native 262 144 — and that is
+    the only reason YaRN ever came up. Make the knob the total instead: Zed gets
+    `max_tokens = <fit_ctx>`, `max_output = 32768` (Qwen's recommendation;
+    measured answers on category A were 300–900 tokens, a thirtyfold margin),
+    the input is the remainder, and the pool is `fit_ctx × slots`. At the native
+    ceiling that is total 262 144 → input 229 376, pool 786 432, no YaRN at all.
+    The 6/5 factor, its round-up and the inverse `slot_window_in` disappear
+    along with their tests — the same simplification task 11 wants. Keep what
+    the original comment was defending: Zed must not be handed a number that
+    makes it ask for more than the slot holds, which is exactly what naming the
+    total prevents.
+    Two rules the customer added (2026-10-21):
+    **the number fit actually allocated is the source of truth, not our
+    arithmetic.** `--fit-ctx` is a FLOOR («minimum ctx size that can be set by
+    --fit»), and the card may give more. So the config names the required
+    minimum total per slot, the server gets it (via `--kv-unified-per-slot`, or
+    multiplied by the slots), and then `/props` is read back: the real pool
+    divided by the slots is what Zed is told. Never declare a number we asked
+    for — only one the server confirmed.
+    **Round that division DOWN to a multiple of 8**, otherwise the declared
+    window exceeds the slot's actual share. Our numbers already satisfy it
+    (262 144, 229 376, 32 768), but in code it must be a rule, not a
+    coincidence; `-ub 512` is in our command line, so flooring to 256 costs
+    nothing and is safer at the edges — pick 8 or 256 deliberately. And clamp
+    the per-slot total to the native 262 144: above it YaRN comes back.
+    (Superseded framing: «replace answer = a fifth with a fixed 32768» —
+    same arithmetic, one concept fewer.) Not a bug — `pool_for()` is right that a slot may hold the window
+    AND the answer — but our own 1/5 rule is wasteful at a large window and it
+    is what pushes us past the model's native limit. Qwen3.6 is native 262144
+    per SEQUENCE (the unified pool may exceed that; a single sequence may not),
+    and Qwen recommends 32768 of output. Arithmetic: with 1/5 the honest window
+    is 218 453; with a fixed 32768 answer it is **229 376** (pool 3 × 262144 =
+    786 432), and YaRN is needed in neither case. Measured 2026-10-21: with
+    thinking off the model's answers on category A were 300–900 tokens, so
+    32768 carries a thirtyfold margin. Declaring 250 000 per slot would need
+    300 000 positions and therefore YaRN — and Qwen warn that its static scaling
+    can cost short-context quality. So: cap `max_output` at 32768 in
+    `llama::zed_numbers`, declare 229 376, drop the 6/5 factor (see task 11 —
+    `--kv-unified-per-slot` may take the per-slot number directly).
+13. **The bridge PRISM ↔ our harness (decided by the customer, 2026-10-21).**
+    Everything measured so far is PRISM's own four-line prompt and one request
+    per task: no skills, no mcp-1c, no agent loop, no chance for the model to
+    compile its own code. Our product is the opposite. The bridge: run PRISM's
+    tasks through our agent (`config/skills/*` plus mcp-1c, and for category B
+    the metadata tools), put the answer back into PRISM's experiment format and
+    score it with `prism score`. Two things it unlocks that nothing else can:
+    the measured contribution of the harness itself (the first cheap step is a
+    single fix round — hand the failing candidate its `oscript -check` output
+    and the failed tests, let it correct once, re-score), and the only honest
+    test of thinking in the agentic case, where Qwen trained `preserve_thinking`
+    and where our «thinking off» verdict does NOT apply: it was measured on
+    single-shot generation only.
+
+14. **Zed has a NATIVE `llama.cpp` provider — evaluate moving off
+    `openai_compatible`.** Settings shape: `api_url`, `auto_discover` (on by
+    default), `available_models` (`max_tokens`, `supports_tools`,
+    `supports_images`), a global `context_window` override, and
+    `LLAMACPP_API_KEY`; router mode refines discovery through `/models/sse`.
+    What it buys: a real provider instead of our invented «custom», the model
+    name and the tool/vision flags discovered rather than substituted by the
+    entrypoint.
+    **The trap, and why it is OUR doing:** «Zed uses the context length the
+    server reports (`/props`)» — and with `--kv-unified` `/props` reports the
+    whole POOL, so auto-discovery would declare three times a slot's window.
+    But that is a consequence of a flag we added ourselves, not of the
+    provider. **Decided 2026-10-21: drop `--kv-unified` and run separate
+    per-slot caches.** With every slot sized at the native ceiling the unified
+    pool buys nothing — a sequence cannot pass 262 144 in any cache mode, so an
+    uneven split upward is impossible, and the only use left (allocating a pool
+    smaller than the sum and hoping the three never max out at once) is a bet we
+    do not need: 3 × 262 144 = 786 432 tokens ≈ 7.5 GiB of KV at `q8_0`, and it
+    fits. Note the upstream default agrees — the flag's own description says
+    «default: enabled **if number of slots is auto**», and we pass `--parallel 3`
+    explicitly, so llama.cpp would have used separate caches on its own.
+    What the reversal pays for itself with: `/props` reports a slot's own share,
+    so Zed's auto-discovery becomes correct, and the pool arithmetic of tasks 11
+    and 12 (`pool_for`, the 6/5 factor, `slot_window_in`) disappears instead of
+    being rewritten. Verify tomorrow how `-c` divides among slots without the
+    unified flag (historically the total is split by `--parallel`; `/props`
+    will show it) — that is the only open question left here.
+    And the missing `max_output_tokens` is **not** a blocker: Zed sets the
+    output reserve itself — a fifth of the declared window (that observation is
+    where our own 1/5 came from, see the comment in `config/zed-settings.json`).
+    Under task 12's redefinition (`max_tokens` = the per-slot TOTAL) that
+    default is safe: Zed splits inside the declared number instead of adding on
+    top, so the sum never exceeds the slot. The only cost is proportion — 52 429
+    reserved for the answer instead of 32 768, i.e. 210k of input instead of
+    229k. So the native provider is viable; decide whether those ~19k of input
+    are worth keeping `openai_compatible` for.
+    And slot save/restore is not part of any provider contract — see the batch
+    section of `docs/model-settings-qwen36.md`: that needs our own caller.
+
+**What tasks 11 and 12 actually became (2026-10-21, `setup/dev1c-setup`, 99 tests
+green, `cargo test -p dev1c-setup --no-default-features`).** The customer's point
+settled it: don't compute what the program can say itself.
+
+- `/props` reports the SLOT's context (`slot_n_ctx`, verified in
+  `server-context.cpp:1355`), so `pool_for()`, its 6/5 factor, the round-up and
+  the inverse `slot_window_in()` are **deleted** along with their tests. Nothing
+  divides or multiplies the server's number any more.
+- `fit_ctx` stays the per-slot FLOOR; the server gets it multiplied by the slots
+  because that is its own unit (`-c` is the total and llama.cpp divides it back,
+  padding to a multiple of 256 — `llama-context.cpp:379`).
+- `zed_numbers` now follows the spec's rule, not the old code's: the workplace is
+  told the INPUT — `max_tokens = окно − ответ − запас`. The answer is
+  `answer_tokens()` = an eighth of the window within 8192…32768 (Qwen asks for
+  32768; measured answers with thinking off were 300–900 tokens), the margin is
+  4096 because Zed counts tokens approximately. The old code added a fifth ON
+  TOP of the window, which contradicted both the spec and the comment in
+  `zed-settings.json` that earned the margin.
+- The launch line lost `-b 2048`, `-ub 512`, `--ctx-checkpoints 32`,
+  `--top-k 40`, `--top-p 0.95`, `--jinja` (verbatim b11734 defaults),
+  `--kv-unified` (see task 14) and `--reasoning-budget 0` (replaced by
+  `--reasoning off`, which sets `enable_thinking=false` in the template kwargs
+  itself — `common/arg.cpp:3711`). It gained `--temp 0.6`, `--min-p 0.03`,
+  `--metrics`.
+- A bug the new arithmetic exposed: `fit_ctx` was validated at ≥ 16384, but a
+  16384 window leaves 4096 of input — below `MIN_BUDGET`. The floor is now
+  computed from the constants (`MIN_BUDGET + ANSWER_FLOOR + ZED_MARGIN` = 28672),
+  so a useless window is refused by the config instead of failing the install
+  after the server is already up.
+- Touched beyond the crate: `config/kit/УСТАНОВКА.md` (the manual formulas — a
+  test keeps the page and the code in agreement), the comment block in
+  `config/zed-settings.json` (its fallback VALUES are unchanged and still obey
+  the new rule: 55296 + 8192 = 63488 against 65536), the spec section «Локальная
+  модель», and the `fit_ctx` field label in the GUI.
 
 ## Commands
 

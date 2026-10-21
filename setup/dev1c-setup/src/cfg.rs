@@ -41,7 +41,9 @@ pub struct Model {
     pub memory: String,
     /// На сколько агентов делить окно. 1 — не делить (см. спеку: окно на три не делим).
     pub agents: u16,
-    /// Нижняя граница окна для --fit-ctx; меньше — установка проваливается.
+    /// Нижняя граница окна НА СЛОТ. Серверу уходит умноженная на слоты (его
+    /// единица измерения), окно выбирает `--fit`; дал меньше — установка
+    /// проваливается с обоими числами.
     pub fit_ctx: u32,
 }
 
@@ -83,13 +85,14 @@ pub struct Facts {
     /// Окно одного слота, объявленное рабочему месту.
     pub window: u32,
     pub max_tokens: u32,
-    /// Ответ агента: пятая часть окна (см. `llama::zed_numbers`).
+    /// Ответ агента: восьмая часть окна в границах 8192…32768
+    /// (`llama::answer_tokens`).
     pub max_output: u32,
 }
 
-/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ). Остался нижней
-/// границей ответа и слагаемым в проверке «три числа»: сам ответ теперь
-/// считается от окна слота (`llama::zed_numbers`).
+/// Ответ агента, токенов (≈30 КБ текста — хватает на ответ). Нижняя граница
+/// того, что уходит рабочему месту: сам ответ считается от окна слота
+/// (`llama::answer_tokens`), и его пол — это же число.
 pub const OUTPUT_TOKENS: u32 = 8192;
 
 impl Default for Cfg {
@@ -146,7 +149,21 @@ impl Cfg {
         let m = &self.model;
         anyhow::ensure!(matches!(m.serve.as_str(), "host" | "docker" | "remote"), "[model]: serve — host, docker или remote");
         anyhow::ensure!((1..=3).contains(&m.agents), "[model]: agents — от 1 до 3");
-        anyhow::ensure!(m.fit_ctx >= 16384, "[model]: fit_ctx — не меньше 16384");
+        // Окно обязано вмещать вход не меньше MIN_BUDGET, ответ и запас Zed:
+        // иначе параметр не отказал бы здесь, а провалил установку после
+        // замера, когда сервер уже поднят.
+        // На agents умножаем: zed_numbers делит окно слота ПЕРВЫМ, и при
+        // agents = 3 окно 28672 давало бы 9557 на агента — вход ушёл бы в
+        // ноль, и отказала бы установка после замера, а не этот параметр.
+        let floor = (crate::llama::MIN_BUDGET + crate::llama::ANSWER_FLOOR + crate::llama::ZED_MARGIN)
+            * m.agents.max(1) as u32;
+        anyhow::ensure!(
+            m.fit_ctx >= floor,
+            "[model]: fit_ctx — не меньше {floor} (вход {} + ответ {} + запас {}); при меньшем окне на 1С не хватит даже одного модуля",
+            crate::llama::MIN_BUDGET,
+            crate::llama::ANSWER_FLOOR,
+            crate::llama::ZED_MARGIN
+        );
         // Предел памяти, который администратор написал, а мы молча отбросили,
         // хуже отказа: "22" — это 22 байта, "22gb" не читается вовсе.
         if !m.memory.is_empty() {
@@ -357,15 +374,18 @@ mod tests {
         // До замера фактов нет: контейнеру нечего сказать про модель.
         let env = c.container_env(None);
         assert!(env.is_empty(), "{env:?}");
-        let f = Facts { token: "t".into(), window: 250_000, max_tokens: 300_000, max_output: 50_000 };
+        // Числа — ровно те, что даёт замер слота в 250k (см. llama::zed_numbers):
+        // вход это окно минус ответ минус запас, а не окно плюс ответ.
+        let z = crate::llama::zed_numbers(250_000, 1);
+        let f = Facts { token: "t".into(), window: z.window, max_tokens: z.max_tokens, max_output: z.max_output };
         let env = c.container_env(Some(&f));
         assert!(env.contains(&("CUSTOM_API_URL".into(), "http://host.docker.internal:1235/v1".into())));
         assert!(env.contains(&("CUSTOM_API_KEY".into(), "t".into())));
         assert!(env.contains(&("CUSTOM_MODEL".into(), "x".into())));
-        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), "300000".into())));
-        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "50000".into())));
+        assert!(env.contains(&("CUSTOM_MAX_TOKENS".into(), z.max_tokens.to_string())));
+        assert!(env.contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "31250".into())));
         // Крошечное окно не отдаёт Zed ответ в полтора абзаца.
-        let small = Facts { token: "t".into(), window: 20_000, max_tokens: 24_000, max_output: 4_000 };
+        let small = Facts { token: "t".into(), window: 20_000, max_tokens: 7_000, max_output: 4_000 };
         assert!(c.container_env(Some(&small)).contains(&("CUSTOM_MAX_OUTPUT_TOKENS".into(), "8192".into())));
     }
 
@@ -377,6 +397,20 @@ mod tests {
         c.model.agents = 1;
         c.model.fit_ctx = 1000;
         assert!(c.validate().unwrap_err().to_string().contains("fit_ctx"));
+        // 16384 раньше проходило, а теперь нет: вход при таком окне — 4096,
+        // то есть меньше того же MIN_BUDGET. Пусть отказывает конфиг, а не
+        // замер на поднятом сервере.
+        c.model.fit_ctx = 16384;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("28672"), "{e}");
+        c.model.fit_ctx = 28672;
+        assert!(c.validate().is_ok(), "{:?}", c.validate());
+        // Деление на агентов учитывается: то же окно на трёх агентов не годится.
+        c.model.agents = 3;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("86016"), "{e}");
+        c.model.fit_ctx = 86016;
+        assert!(c.validate().is_ok(), "{:?}", c.validate());
     }
 
     #[test]

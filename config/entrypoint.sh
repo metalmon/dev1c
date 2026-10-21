@@ -190,7 +190,7 @@ for cfg in /home/*/.config/zed/settings.json; do
     # or the defaults for a remote one. Always substituted, so the file is
     # valid JSON whatever the provider.
     sed -i \
-        -e "s|CUSTOM_MAX_TOKENS_PLACEHOLDER|${CUSTOM_MAX_TOKENS:-55296}|" \
+        -e "s|CUSTOM_MAX_TOKENS_PLACEHOLDER|${CUSTOM_MAX_TOKENS:-53248}|" \
         -e "s|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER|${CUSTOM_MAX_OUTPUT_TOKENS:-8192}|" \
         "$cfg"
 

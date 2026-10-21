@@ -677,7 +677,7 @@ impl Render for Panel {
                                 // спрашивают (так было и в прежнем окне).
                                 .when(local, |g| {
                                     g.child(input("Делить окно на агентов; 1 — не делить", &f.agents))
-                                        .child(input("Нижняя граница окна, токенов", &f.fit_ctx))
+                                        .child(input("Нижняя граница окна на слот, токенов", &f.fit_ctx))
                                 }),
                         ),
                         ),

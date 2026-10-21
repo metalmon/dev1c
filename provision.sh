@@ -216,9 +216,10 @@ kit)
     #
     #   ./provision.sh kit [каталог] [каталог с dev1c-setup]
     #
-    # Чего ждём до запуска: artifacts/1c-connect-linux и dev1c-setup из CI,
-    # дистрибутив 1С в $PLATFORM_DIR, модель в model/ комплекта или в
-    # MODEL_FILE.
+    # Что нужно до запуска: докер, дистрибутив 1С в $PLATFORM_DIR и модель
+    # (в model/ комплекта или в MODEL_FILE). Бинарники установщика и
+    # коннектора команда берёт из CI сама; RUN_ID задаёт конкретный прогон,
+    # DEV1C_FETCH=1 обновляет уже лежащие.
     #
     # Порядок важен: pack.sh стирает каталог комплекта целиком — так и надо,
     # иначе в нём копятся следы прошлых сборок. Поэтому всё готовится во
@@ -228,8 +229,31 @@ kit)
     bins=${3:-bins}
     llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:b11734}
     tmp=${TMPDIR:-/tmp}/dev1c-kit
-    [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup — возьмите артефакт dev1c-setup-linux из CI"
-    mkdir -p "$out" "$tmp"
+    mkdir -p "$out" "$tmp" "$bins" artifacts
+
+    # Бинарники берём из CI сами: иначе «воспроизводимо» выходит с
+    # оговоркой — два файла надо принести руками, и в новой сессии никто не
+    # знает откуда. Лежащие файлы не трогаем, чтобы можно было собрать
+    # комплект с бинарником из конкретного прогона или собранным локально;
+    # обновить принудительно — DEV1C_FETCH=1.
+    fetch() { # $1 — имя артефакта, $2 — куда, $3 — файл внутри
+        [ -n "${DEV1C_FETCH:-}" ] || [ ! -f "$2/$3" ] || return 0
+        command -v gh >/dev/null 2>&1 \
+            || die "нет $2/$3, и gh недоступен — положите артефакт $1 из CI вручную"
+        [ -n "${RUN_ID:-}" ] || RUN_ID=$(gh run list --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId')
+        [ -n "$RUN_ID" ] || die "не нашёл успешного прогона main — положите артефакт $1 вручную"
+        say "беру $1 из прогона $RUN_ID"
+        gh run download "$RUN_ID" -n "$1" -D "$2" >/dev/null \
+            || die "не скачался артефакт $1 из прогона $RUN_ID"
+    }
+    fetch dev1c-setup-linux "$bins" dev1c-setup
+    fetch 1c-connect-linux artifacts 1c-connect
+    # Артефакт кладёт файл под своим именем; образу он нужен как
+    # 1c-connect-linux (см. Dockerfile.1c).
+    [ ! -f artifacts/1c-connect ] || mv artifacts/1c-connect artifacts/1c-connect-linux
+    chmod +x "$bins/dev1c-setup" 2>/dev/null || true
+    [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup"
 
     "$0" build
 

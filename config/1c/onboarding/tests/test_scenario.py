@@ -25,7 +25,7 @@ class LoadTests(unittest.TestCase):
     def test_texts_are_verbatim(self):
         steps = load(SCENARIO)
         self.assertEqual(steps[1].title, 'Сначала знакомое')
-        self.assertIn('заведите один товар', steps[1].body)
+        self.assertIn('добавьте к ним один свой товар', steps[1].body)
 
     def _text(self, steps):
         # Все текстовые поля шага: заголовок, тело, кнопки и готовые

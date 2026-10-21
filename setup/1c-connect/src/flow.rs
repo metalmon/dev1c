@@ -33,11 +33,21 @@ pub struct Deps<'a> {
 /// В `.gitignore` проекта его не добавляют: он мал и нужен второй стороне.
 const DUMP_MARK_FILE: &str = ".dev1c-dump";
 
-/// Версия платформы из пути к `1cv8.exe`, который возвращает
-/// `ops_host::find_1cv8()`: имя каталога двумя уровнями выше исполняемого
-/// файла (`.../8.5.1.1150/bin/1cv8.exe` → `8.5.1.1150`).
+/// Версия платформы из пути к исполняемому файлу, который возвращает
+/// `ops_host::find_1cv8()`. Каталог версии лежит по-разному: на Windows
+/// файл в `bin` (`.../8.5.1.1150/bin/1cv8.exe`), на Linux — прямо в каталоге
+/// версии (`/opt/1cv8/x86_64/8.5.1.1150/1cv8`). Поэтому смотрим на имя
+/// родителя, а не отсчитываем уровни.
+///
+/// Жёсткие два уровня (как было) на Linux давали `x86_64` вместо версии, и
+/// это проходило молча: отметку выгрузки `.dev1c-dump` не писали вовсе
+/// (`format_for_platform("x86_64")` — `None`, а отказ там тихий), а строку
+/// платформы для анализатора не писали по той же причине. Найдено живым
+/// прогоном в образе 2026-10-21, тестами не ловилось.
 pub(crate) fn platform_version_from_exe(exe: &Path) -> Option<String> {
-    exe.parent()?.parent()?.file_name()?.to_str().map(str::to_string)
+    let dir = exe.parent()?;
+    let dir = if dir.file_name()?.eq_ignore_ascii_case("bin") { dir.parent()? } else { dir };
+    dir.file_name()?.to_str().map(str::to_string)
 }
 
 /// Версия нашей платформы — через найденный `1cv8.exe`.
@@ -529,6 +539,19 @@ mod tests {
         .unwrap();
         assert_eq!(dump_format(&dir).as_deref(), Some("2.21"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Каталог версии находится в обеих раскладках: `bin` на Windows и
+    /// файл прямо в каталоге версии на Linux. Жёсткие два уровня давали на
+    /// Linux `x86_64`, и отметка выгрузки не писалась молча (живой прогон
+    /// 2026-10-21).
+    #[test]
+    fn the_version_comes_from_either_layout() {
+        assert_eq!(platform_version_from_exe(Path::new("/opt/1cv8/x86_64/8.5.1.1150/1cv8")).as_deref(), Some("8.5.1.1150"));
+        assert_eq!(platform_version_from_exe(Path::new(r"C:\Program Files\1cv8\8.3.27.1508\bin\1cv8.exe")).as_deref(), Some("8.3.27.1508"));
+        // И версия должна быть пригодна таблице формата — иначе отметка
+        // выгрузки снова пропадёт без слова.
+        assert!(format_for_platform(&platform_version_from_exe(Path::new("/opt/1cv8t/x86_64/8.3.27.1508/1cv8t")).unwrap()).is_some());
     }
 
     #[test]

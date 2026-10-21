@@ -86,10 +86,29 @@ else
     cp "$BIN_DIR/dev1c-setup.exe" "$KIT/"
 fi
 chmod +x "$KIT/dev1c-setup" 2>/dev/null || true
+# Both the sample below and the checksums at the end are printed by the
+# installer itself — one source for the file and one code for the verification.
+# It has to be a build THIS machine can run: the Windows kit is packed on Linux
+# CI, where the kit's own dev1c-setup.exe exits 126, and the Linux kit is packed
+# on Windows during development, where its dev1c-setup is an ELF. Same program,
+# same version, built for another system; --kit points it at whichever kit is
+# being signed, and the list is sha256 over that kit's files either way.
+SETUP=
+for c in "$KIT/dev1c-setup" "$BIN_DIR/dev1c-setup" "$KIT/dev1c-setup.exe" "$BIN_DIR/dev1c-setup.exe"; do
+    [ -f "$c" ] || continue
+    chmod +x "$c" 2>/dev/null || true
+    # Запускаемость проверяем запуском, а не битом -x: на .exe под линуксом
+    # бит стоит, а запуск кончается кодом 126.
+    "$c" --version >/dev/null 2>&1 || continue
+    SETUP="$c"
+    break
+done
+[ -n "$SETUP" ] || { echo "pack.sh: no dev1c-setup this machine can run (looked in $KIT and $BIN_DIR) — the kit would ship without dev1c.toml and checksums" >&2; exit 1; }
+
 if [ "$OS" = "linux" ]; then
     # The program prints its own sample: one source for the comments and the
     # structure, so dev1c.toml and Cfg::default never drift apart.
-    "$KIT/dev1c-setup" example --serve docker >"$KIT/dev1c.toml"
+    "$SETUP" example --serve docker >"$KIT/dev1c.toml"
 else
     cp setup/dev1c-setup/dev1c.example.toml "$KIT/dev1c.toml"
 fi
@@ -314,23 +333,7 @@ if [ -n "${MODEL_DIR:-}" ]; then
     echo "model: $(du -sh "$KIT/model" | cut -f1)"
 fi
 
-# Checksums by the installer itself, so the customer verifies with the same
-# code. It has to be a build THIS machine can run: the Windows kit is packed
-# on Linux CI, where the kit's own dev1c-setup.exe exits 126 — that is what
-# broke the Pack step. Same program, same version, built for another system;
-# --kit points it at whichever kit is being signed, and the list is sha256
-# over that kit's files either way.
-SETUP=
-for c in "$KIT/dev1c-setup" "$BIN_DIR/dev1c-setup" "$KIT/dev1c-setup.exe" "$BIN_DIR/dev1c-setup.exe"; do
-    [ -f "$c" ] || continue
-    chmod +x "$c" 2>/dev/null || true
-    # Запускаемость проверяем запуском, а не битом -x: на .exe под линуксом
-    # бит стоит, а запуск кончается кодом 126.
-    "$c" --version >/dev/null 2>&1 || continue
-    SETUP="$c"
-    break
-done
-[ -n "$SETUP" ] || { echo "pack.sh: no dev1c-setup this machine can run (looked in $KIT and $BIN_DIR) — the kit would ship without checksums" >&2; exit 1; }
+# Суммы считает он же — заказчик проверяет комплект тем же кодом.
 "$SETUP" --kit "$KIT" checksums >/dev/null
 if [ "$OS" = "windows" ]; then
     "$SETUP" --kit "$CONNECT" checksums >/dev/null

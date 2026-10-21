@@ -249,6 +249,12 @@ kit)
             || die "не скачался артефакт $1 из прогона $RUN_ID"
     }
     fetch dev1c-setup-linux "$bins" dev1c-setup
+    # Машине сборки нужен бинарник, который на ней запускается: pack.sh
+    # печатает им образец dev1c.toml и подписывает комплект. В комплект он не
+    # попадает — pack.sh --os linux отказывается кладть туда .exe.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) fetch dev1c-setup-windows "$bins" dev1c-setup.exe ;;
+    esac
     fetch 1c-connect-linux artifacts 1c-connect
     # Артефакт кладёт файл под своим именем; образу он нужен как
     # 1c-connect-linux (см. Dockerfile.1c).
@@ -258,12 +264,19 @@ kit)
 
     "$0" build
 
+    # DEV1C_REUSE=1 — не делать заново то, что уже лежит в $tmp. Нужно, когда
+    # чинишь поздний шаг: архивы по четыре гигабайта пересобирать незачем. По
+    # умолчанию выключено — образы могли с тех пор пересобраться, а комплект
+    # с архивом от прошлых образов об этом не скажет.
+    have() { [ -n "${DEV1C_REUSE:-}" ] && [ -s "$1" ] && say "беру готовый $1"; }
+
     say "архив среды и стенда"
-    docker save "$BASE_IMAGE" "$IMAGE" | gzip -1 > "$tmp/dev1c-image.tar.gz"
-    sh scripts/check-image-archive.sh "$tmp/dev1c-image.tar.gz"
+    have "$tmp/dev1c-image.tar.gz" || {
+        docker save "$BASE_IMAGE" "$IMAGE" | gzip -1 > "$tmp/dev1c-image.tar.gz"
+        sh scripts/check-image-archive.sh "$tmp/dev1c-image.tar.gz"
+    }
 
     say "архив сервера модели"
-    docker pull "$llama"
     # В реестре он лежит индексом с манифестом подписей, и docker save
     # отдаёт по нему оглавление вместо слоёв, возвращая при этом ноль.
     # Пересобираем одной строкой FROM — получается одноплатформенный образ,
@@ -272,11 +285,14 @@ kit)
     # отдать докеру аргументом, а MSYS_NO_PATHCONV=1 выше (он нужен для путей
     # внутри контейнера) оставляет его unix-путём, которого докер на windows
     # не находит.
-    printf 'FROM %s\n' "$llama" | docker build --platform linux/amd64 -t "$LLAMA_IMAGE" -
-    docker save "$LLAMA_IMAGE" | gzip -1 > "$tmp/dev1c-llama-image.tar.gz"
-    sh scripts/check-image-archive.sh "$tmp/dev1c-llama-image.tar.gz"
+    have "$tmp/dev1c-llama-image.tar.gz" || {
+        docker pull "$llama"
+        printf 'FROM %s\n' "$llama" | docker build --platform linux/amd64 -t "$LLAMA_IMAGE" -
+        docker save "$LLAMA_IMAGE" | gzip -1 > "$tmp/dev1c-llama-image.tar.gz"
+        sh scripts/check-image-archive.sh "$tmp/dev1c-llama-image.tar.gz"
+    }
 
-    "$0" export "$tmp/dev1c-1c-payload.tar.gz"
+    have "$tmp/dev1c-1c-payload.tar.gz" || "$0" export "$tmp/dev1c-1c-payload.tar.gz"
 
     say "пакеты NVIDIA Container Toolkit"
     ver=$(sed -n 's/^NVIDIA_TOOLKIT_VERSION=//p' pack.sh)

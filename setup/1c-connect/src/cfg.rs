@@ -8,10 +8,21 @@ use serde::{Deserialize, Serialize};
 pub const EXAMPLE: &str = include_str!("../1c-connect.example.toml");
 pub const FILE: &str = "1c-connect.toml";
 
-/// Адреса среды в toml нет — и выдумывать его программа не станет. Один
-/// текст на всех читателей: раскладку проекта, операцию `host.project` и
-/// вкладку «Проект».
-pub const NO_GITEA: &str = "адрес среды не задан: задайте gitea в 1c-connect.toml или выполните 1c-connect install";
+/// Адреса среды в toml нет — и выдумывать его программа не станет. Одна
+/// формулировка на всех, кто про это говорит: факт «Gitea», факт «Каталог
+/// проекта», операция `host.project`, раскладка проекта и вкладка «Проект» —
+/// одна пустая строка в файле не должна называться разными словами (находка
+/// ревью задачи 35).
+pub const NO_GITEA: &str = "адрес среды не задан: поле gitea в 1c-connect.toml пусто";
+
+/// Как это исправить — тем же текстом у всех.
+pub const NO_GITEA_FIX: &str = "нажмите «Установить» в окне или выполните 1c-connect install; либо задайте gitea в 1c-connect.toml";
+
+/// Обе половины одной строкой: где отдельного места для подсказки нет
+/// (`OpState::Blocked`, отказ инструмента).
+pub fn no_gitea() -> String {
+    format!("{NO_GITEA} — {NO_GITEA_FIX}")
+}
 
 /// Инструменты vrunner, видимые агенту по умолчанию: выгрузка/загрузка,
 /// синтакс-контроль, тесты, фоновые задачи, кэш. Остальные 49 — по списку
@@ -188,6 +199,16 @@ impl Cfg {
     pub fn gitea_url(&self) -> Option<&str> {
         let explicit = self.host.gitea.trim().trim_end_matches('/');
         (!explicit.is_empty()).then_some(explicit)
+    }
+
+    /// Свой каталог выгрузки для `mcp-1c` — только когда человек выбрал его
+    /// сам: поле непусто и отличается от выведенного `<project>/src`.
+    /// Записанное настройкой умолчание ключ `--dump` не включает: иначе наша
+    /// запись молча сменила бы агенту корень поиска по коду на уже
+    /// настроенной машине, где поле было пустым (находка ревью задачи 35).
+    pub fn dump_override(&self) -> Option<&str> {
+        let d = self.host.dump.trim();
+        (!d.is_empty() && d != derived_dump(&self.host.project)).then_some(d)
     }
 
     /// Каталог выгрузки для поиска mcp-1c: `dump`, а пусто — `<project>/src`.
@@ -394,6 +415,22 @@ mod tests {
         let c: Cfg = toml::from_str(&filled).unwrap();
         assert_eq!(c.render(), filled);
         assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
+    }
+
+    /// Записанное настройкой умолчание ключ `--dump` у моста не включает:
+    /// наша запись не должна молча менять агенту корень поиска по коду.
+    #[test]
+    fn only_a_hand_picked_dump_counts_as_an_override() {
+        let mut c = sample();
+        c.host.project = "C:\\proj\\Buh".into();
+        assert_eq!(c.dump_override(), None, "пусто — умолчание");
+        c.host.dump = derived_dump(&c.host.project);
+        assert_eq!(c.dump_override(), None, "записанное умолчание — то же умолчание");
+        c.host.dump = "D:\\dump".into();
+        assert_eq!(c.dump_override(), Some("D:\\dump"));
+        // Переехал проект, а записанное умолчание — нет: тогда это свой каталог.
+        c.host.dump = derived_dump("C:\\proj\\Torg");
+        assert_eq!(c.dump_override(), Some(derived_dump("C:\\proj\\Torg").as_str()));
     }
 
     #[test]

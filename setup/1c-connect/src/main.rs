@@ -182,13 +182,14 @@ fn run() -> Result<()> {
             // Выводимые значения считаются один раз — здесь, при настройке, и
             // уезжают в toml; дальше правда только в файле (спека, «программа
             // не выдумывает адресов»). Дописываются до операций: их состояние
-            // считается уже по записанному.
+            // считается уже по записанному — в сухом прогоне тоже, иначе план
+            // показывал бы «адрес среды не задан» там, где установка его сама
+            // и запишет (находка ревью задачи 35).
             let mut ctx = ctx;
-            if !ctx.dry_run {
-                let wrote = ops_host::write_derived_fields(&ctx.kit, &mut ctx.cfg)?;
-                if !wrote.is_empty() {
-                    ctx.ok(format!("в {} записано: {}", cfg::FILE, wrote.join(", ")));
-                }
+            let wrote = ops_host::write_derived_fields(&ctx.kit, &mut ctx.cfg, ctx.dry_run)?;
+            if !wrote.is_empty() {
+                let what = if ctx.dry_run { "будет записано" } else { "записано" };
+                ctx.ok(format!("в {} {what}: {}", cfg::FILE, wrote.join(", ")));
             }
             common::run::apply_all(&ctx, &ops, None, false)?;
             if !ctx.dry_run {

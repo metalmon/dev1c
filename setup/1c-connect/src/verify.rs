@@ -90,7 +90,7 @@ pub fn licence_fact(state: &crate::licence::State) -> Check {
 /// поле: когда адрес есть, отчёт показывает его сам — `gitea_fact` называет
 /// адрес в любом исходе.
 pub fn gitea_address_fact() -> Check {
-    Check::fail(GITEA, "адрес среды не задан (поле gitea пусто)", "задайте адрес среды в 1c-connect.toml или выполните 1c-connect install")
+    Check::fail(GITEA, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX)
 }
 
 /// Адрес называется в каждом исходе: отчёт показывает, с чем программа
@@ -496,7 +496,7 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
         Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
         Layout::BaseDir(f) => Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог"),
         Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
-        Layout::NoGitea => Check::fail(PROJECT, "адрес среды не задан — origin собирать не из чего", "задайте адрес среды в 1c-connect.toml или выполните 1c-connect install"),
+        Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
     }
 }
 

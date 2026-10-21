@@ -37,11 +37,14 @@ pub fn layout_state(p: &Project) -> Layout {
     if let Some(f) = looks_like_a_base(&p.dir) {
         return Layout::BaseDir(f);
     }
-    if p.remote.is_empty() {
-        return Layout::NoGitea;
-    }
     if !p.dir.join(".git").exists() {
         return Layout::Missing;
+    }
+    // После `.git`, а не до: у неразложенного каталога первопричина — что он
+    // не разложен, и подменять её адресом среды нельзя (находка ревью
+    // задачи 35). Совет в обоих случаях один — `install`.
+    if p.remote.is_empty() {
+        return Layout::NoGitea;
     }
     let branch = git(p, &["symbolic-ref", "--short", "HEAD"]).map(|o| o.text).unwrap_or_default();
     if branch != p.branch {
@@ -267,7 +270,7 @@ fn ensure_origin(p: &Project) -> Result<(), String> {
     // Один заслон на `init`, `pull` и `push`: пустой адрес не уезжает в
     // `git remote set-url` и не превращается в «origin не отвечает».
     if p.remote.is_empty() {
-        return Err(crate::cfg::NO_GITEA.into());
+        return Err(crate::cfg::no_gitea());
     }
     match git(p, &["remote", "get-url", "origin"])? {
         Out { ok: true, text } if text.trim() == p.remote => Ok(()),
@@ -714,8 +717,16 @@ mod tests {
         assert!(matches!(layout_state(&p), Layout::NoGitea));
         let e = init(&p, Path::new("nowhere"), &|_| {}).unwrap_err();
         assert!(e.contains("адрес среды не задан") && e.contains("gitea"), "{e}");
+        // Все четыре входа в git за одним заслоном — `status` в том числе:
+        // через него идут вкладка «Проект» и инструмент агента.
         assert!(push(&p, "проба", &NEVER).unwrap_err().contains("адрес среды не задан"));
         assert!(pull(&p, &NEVER).unwrap_err().contains("адрес среды не задан"));
+        assert!(status(&p).unwrap_err().contains("адрес среды не задан"));
+        // А неразложенный каталог называет свою причину, а не адрес среды.
+        let t = tempdir::Dir::new();
+        p.dir = t.path().join("нет такого");
+        std::fs::create_dir_all(&p.dir).unwrap();
+        assert!(matches!(layout_state(&p), Layout::Missing));
     }
 
     #[test]

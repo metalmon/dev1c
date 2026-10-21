@@ -283,8 +283,13 @@ kit)
     mkdir -p "$tmp/nvidia"
     for pkg in nvidia-container-toolkit nvidia-container-toolkit-base libnvidia-container1 libnvidia-container-tools; do
         f="${pkg}_${ver}_amd64.deb"
-        [ -f "$tmp/nvidia/$f" ] || curl -fsSL -o "$tmp/nvidia/$f" \
-            "https://nvidia.github.io/libnvidia-container/stable/deb/amd64/$f"
+        # Пишем перенаправлением, а не curl -o: curl здесь windows-овский, а
+        # MSYS_NO_PATHCONV=1 выше оставляет путь unix-ом, и писать ему
+        # оказывается некуда. Через .part, чтобы оборванная закачка не сошла
+        # в следующий раз за готовый пакет.
+        [ -f "$tmp/nvidia/$f" ] || { curl -fsSL \
+            "https://nvidia.github.io/libnvidia-container/stable/deb/amd64/$f" \
+            > "$tmp/nvidia/$f.part" && mv "$tmp/nvidia/$f.part" "$tmp/nvidia/$f"; }
     done
 
     # Модель до раскладки лежит в стороне: pack.sh стирает каталог комплекта

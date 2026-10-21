@@ -223,8 +223,9 @@ kit)
     #
     # Порядок важен: pack.sh стирает каталог комплекта целиком — так и надо,
     # иначе в нём копятся следы прошлых сборок. Поэтому всё готовится во
-    # временном каталоге и вносится ПОСЛЕ раскладки, а модель отводится в
-    # сторону и возвращается: двадцать гигабайт, которых больше нигде нет.
+    # временном каталоге, а раскладывает pack.sh сам, последним шагом считая
+    # суммы. Модель на это время отводится в сторону: двадцать гигабайт,
+    # которых больше нигде нет.
     out=${2:-dist/dev1c-kit-linux}
     bins=${3:-bins}
     llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:b11734}
@@ -267,8 +268,11 @@ kit)
     # отдаёт по нему оглавление вместо слоёв, возвращая при этом ноль.
     # Пересобираем одной строкой FROM — получается одноплатформенный образ,
     # который сохраняется целиком.
-    printf 'FROM %s\n' "$llama" > "$tmp/Dockerfile.llama"
-    docker build --platform linux/amd64 -f "$tmp/Dockerfile.llama" -t "$LLAMA_IMAGE" "$tmp"
+    # Dockerfile подаётся на вход, а не файлом в каталоге: каталог пришлось бы
+    # отдать докеру аргументом, а MSYS_NO_PATHCONV=1 выше (он нужен для путей
+    # внутри контейнера) оставляет его unix-путём, которого докер на windows
+    # не находит.
+    printf 'FROM %s\n' "$llama" | docker build --platform linux/amd64 -t "$LLAMA_IMAGE" -
     docker save "$LLAMA_IMAGE" | gzip -1 > "$tmp/dev1c-llama-image.tar.gz"
     sh scripts/check-image-archive.sh "$tmp/dev1c-llama-image.tar.gz"
 
@@ -283,36 +287,32 @@ kit)
             "https://nvidia.github.io/libnvidia-container/stable/deb/amd64/$f"
     done
 
-    keep=
-    if [ -d "$out/model" ]; then
-        keep="$tmp/model-keep"
+    # Модель до раскладки лежит в стороне: pack.sh стирает каталог комплекта
+    # целиком. Он же её и внесёт — вместе с архивом платформы и до подсчёта
+    # сумм, иначе оба окажутся в комплекте без строки в checksums.txt.
+    keep="$tmp/model-keep"
+    if [ -n "${MODEL_FILE:-}" ]; then
+        rm -rf "$keep"
+        mkdir -p "$keep"
+        cp "$MODEL_FILE" "$keep/"
+    elif [ -d "$out/model" ]; then
         rm -rf "$keep"
         mv "$out/model" "$keep"
         say "модель отложена на время раскладки"
     fi
+    model=$(ls "$keep"/*.gguf 2>/dev/null | head -1 || true)
+    [ -n "$model" ] || die "нет модели: положите .gguf в $out/model или задайте MODEL_FILE"
 
     say "раскладка"
     NVIDIA_TOOLKIT_DIR="$tmp/nvidia" LLAMA_IMAGE="$tmp/dev1c-llama-image.tar.gz" \
+        PAYLOAD_ARCHIVE="$tmp/dev1c-1c-payload.tar.gz" MODEL_DIR="$keep" \
         OUT_DIR=$(dirname "$out") ./pack.sh --os linux "$tmp/dev1c-image.tar.gz" "$bins"
 
-    say "том платформы и демо-базы"
-    cp "$tmp/dev1c-1c-payload.tar.gz" "$out/"
-
-    [ -z "$keep" ] || mv "$keep" "$out/model"
-    if [ -n "${MODEL_FILE:-}" ]; then
-        say "модель"
-        mkdir -p "$out/model"
-        cp "$MODEL_FILE" "$out/model/"
-    fi
-    model=$(ls "$out"/model/*.gguf 2>/dev/null | head -1 || true)
-    [ -n "$model" ] || die "в $out/model нет .gguf — положите модель или задайте MODEL_FILE"
     # Путь к модели в параметрах: образец печатает его пустым, и заказчик на
     # пустом поле упирается в «модель не выбрана» при живой модели рядом.
+    # Правится после раскладки: dev1c.toml в суммы не входит — его правят по
+    # назначению (integrity::listed).
     sed -i "s|^file = \"\"|file = \"model/$(basename "$model")\"|" "$out/dev1c.toml"
-
-    say "контрольные суммы"
-    # Считает сам установщик: заказчик проверяет комплект тем же кодом.
-    "$out/dev1c-setup" --kit "$out" checksums
 
     say "готово: $out ($(du -sh "$out" | cut -f1))"
     ;;

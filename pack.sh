@@ -295,6 +295,25 @@ if [ "$OS" = "linux" ] && [ -n "${LLAMA_IMAGE:-}" ]; then
     echo "model server image: $(du -h "$KIT/dev1c-llama-image.tar.gz" | cut -f1)"
 fi
 
+# The 1C platform and the demo base: provision.sh makes the archive — it is
+# the only thing that knows about the 1C distribution — and hands it over
+# here. Before the checksums below, like everything else.
+if [ -n "${PAYLOAD_ARCHIVE:-}" ]; then
+    [ -f "$PAYLOAD_ARCHIVE" ] || { echo "pack.sh: PAYLOAD_ARCHIVE=$PAYLOAD_ARCHIVE not found" >&2; exit 1; }
+    cp "$PAYLOAD_ARCHIVE" "$KIT/dev1c-1c-payload.tar.gz"
+    echo "1C platform and demo base: $(du -h "$KIT/dev1c-1c-payload.tar.gz" | cut -f1)"
+fi
+
+# The model: the directory is MOVED in, not copied — twenty gigabytes have no
+# business travelling twice on the same disk. Also before the checksums: the
+# model is the one file whose truncation nobody notices until the server
+# refuses to start.
+if [ -n "${MODEL_DIR:-}" ]; then
+    [ -d "$MODEL_DIR" ] || { echo "pack.sh: MODEL_DIR=$MODEL_DIR not found" >&2; exit 1; }
+    mv "$MODEL_DIR" "$KIT/model"
+    echo "model: $(du -sh "$KIT/model" | cut -f1)"
+fi
+
 # Checksums by the installer itself, so the customer verifies with the same
 # code. It has to be a build THIS machine can run: the Windows kit is packed
 # on Linux CI, where the kit's own dev1c-setup.exe exits 126 — that is what

@@ -41,6 +41,17 @@ else
     say "FAIL onboarding: не все файлы на месте (/opt/onboarding или один из двух .desktop)"
     fail=1
 fi
+# apache2 путём рабочего места, а не root. 1c-connect зовёт его по имени из
+# $PATH, пакет кладёт в /usr/sbin, и /etc/profile отдаёт этот каталог только
+# root. Проверяем в вычищенном окружении: `runuser -u devN` без -l наследует
+# путь root, и проверка, сделанная через него, была бы зелёной на сломанном
+# стенде — именно так этот дефект сюда и дожил.
+if env -i PATH=/usr/local/bin:/usr/bin:/bin sh -c 'command -v apache2' >/dev/null 2>&1; then
+    say "ok   apache2 находится путём рабочего места"
+else
+    say "FAIL apache2 не найден путём рабочего места (/usr/local/bin:/usr/bin:/bin) — публикация базы не поднимется при входе по RDP"
+    fail=1
+fi
 LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 INFO='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_configuration_info","arguments":{}}}'
 for n in 1 2 3; do

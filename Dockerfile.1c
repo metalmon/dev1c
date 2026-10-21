@@ -91,6 +91,8 @@ ARG ADD_VERSION=6.8.0
 # in the payload stage — it would apt on its own, outside our control).
 # xvfb + xauth: the Configurator in batch mode still wants a display. apache2:
 # the HTTP service of the base for mcp-1c, published with webinstt at run time.
+# It is linked into /usr/local/bin further down — the package puts it in
+# /usr/sbin, which only root has on PATH, and 1c-connect calls it BY NAME.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libwebkit2gtk-4.1-0 libglu1-mesa xvfb xauth apache2 socat \
       `# libayatana-appindicator3: the tray icon of 1c-connect in local mode.` \
@@ -213,6 +215,19 @@ RUN ln -s /opt/1cv8t /opt/1cv8 \
 # vrunner all read it from here. Empty means a base with no users at all.
 ARG DEMO_DB_USER=Администратор
 ENV DEMO_DB_USER=${DEMO_DB_USER}
+# apache2 там, где его найдёт рабочее место, а не только root. Пакет кладёт
+# бинарь в /usr/sbin, и /etc/profile отдаёт этот каталог только root: у dev<N>
+# путь /usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games. А 1c-connect
+# зовёт apache2 по имени из $PATH (publication.rs), то есть при настоящем
+# входе публикация базы не поднялась бы вовсе. Ссылка, а не правка PATH:
+# /usr/local/bin есть во всех цепочках входа, которые тут участвуют, и от
+# того, какую выберет сессия xrdp, результат не зависит.
+# Проверка идёт тем же путём, каким apache2 ищет рабочее место: окружение
+# вычищено, путь ровно пользовательский. Проверка под root ничего бы не
+# доказала — ровно так этот дефект и дожил до стенда.
+RUN ln -sf /usr/sbin/apache2 /usr/local/bin/apache2 \
+    && env -i PATH=/usr/local/bin:/usr/bin:/bin sh -c 'command -v apache2'
+
 COPY config/1c/stand.sh /usr/local/bin/1c-stand
 RUN sed -i 's/\r$//' /usr/local/bin/1c-stand && chmod +x /usr/local/bin/1c-stand
 

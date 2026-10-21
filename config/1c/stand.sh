@@ -619,6 +619,21 @@ import-payload)
         log "the platform and the demo base are already here; --force to replace them"
         exit 0
     fi
+    # --force means replace, and tar alone does not: it unpacks over what is
+    # there and removes nothing. While the platform version stayed the same
+    # that was invisible — files were simply overwritten. Change the version
+    # and both directories live on in the volume, after which anything that
+    # finds the platform by itself and takes the newest by number (1c-connect
+    # does) picks the previous one, which the template base was not built
+    # with. So empty both trees first, contents only: the directories
+    # themselves are the volume mount points.
+    if [ "${2:-}" = "--force" ]; then
+        for d in $PAYLOAD_DIRS; do
+            [ -d "/$d" ] || continue
+            log "replacing /$d"
+            find "/$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+        done
+    fi
     tar -C / --numeric-owner -xzf -
     payload_present || { log "import-payload: the archive did not hold $PAYLOAD_DIRS"; exit 1; }
     log "payload in place: $(tr '\n' ' ' </opt/1c-demo/payload.conf 2>/dev/null)"

@@ -482,8 +482,19 @@ pub fn stop(p: &Paths) -> Result<(), String> {
 /// из недр `Command::spawn`.
 #[cfg(not(windows))]
 pub(crate) fn apache2_on_path() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join("apache2")).find(|p| p.exists())
+    // Не только `$PATH`: apache2 лежит в `/usr/sbin`, а у окна, запущенного
+    // рабочим столом, этого каталога в `$PATH` нет вовсе — сеанс xrdp даёт
+    // `/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games` (замер на
+    // стенде 2026-10-21). Человек при этом читал «установите пакет
+    // apache2», хотя пакет стоял: `/usr/sbin/apache2` был на месте, просто
+    // мы смотрели не туда. Системные каталоги службы проверяем сами —
+    // программа там и живёт, а `$PATH` у графического сеанса ей не указ.
+    let from_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|d| d.join("apache2"));
+    let system = ["/usr/sbin", "/usr/local/sbin", "/sbin"].into_iter().map(|d| Path::new(d).join("apache2"));
+    from_path.chain(system).find(|p| p.exists())
 }
 
 /// Текст отказа подъёма сервиса из вывода apache2: сам httpd говорит по-английски
@@ -518,7 +529,7 @@ fn start_failure_text(port: u16, apache_text: &str, holder: Option<&str>) -> Str
 /// Detached/WithCaller — чисто windows-овская, Job Object там не бывает.
 #[cfg(not(windows))]
 pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
-    apache2_on_path().ok_or_else(|| "apache2 не найден в $PATH — установите пакет apache2 (на образе он должен быть) или переключите publication на \"webserver\"".to_string())?;
+    apache2_on_path().ok_or_else(|| "apache2 не найден ни в $PATH, ни в /usr/sbin, /usr/local/sbin, /sbin — установите пакет apache2 или переключите publication на \"webserver\"".to_string())?;
     let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "start"])

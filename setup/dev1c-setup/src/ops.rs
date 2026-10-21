@@ -237,7 +237,13 @@ impl Op<Ctx> for Image {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let mut a = vec![Action::new(format!("{} load -i dev1c-image.tar.gz (несколько минут)", ctx.engine()))];
-        if ctx.cfg.form() == crate::cfg::Form::Docker && ctx.kit.path(LLAMA_ARCHIVE).exists() {
+        // Без проверки «файл на месте»: при serve = "docker" сервер модели
+        // нужен всегда, и команда обязана попасть в «Ручной путь». Инструкция
+        // собирается прогоном из временного каталога, где лежит только
+        // dev1c.toml, — проверка существования там не прошла бы, и команда
+        // тихо исчезла бы из инструкции заказчика. Наличие файла проверяют
+        // state и apply, им это к месту.
+        if ctx.cfg.form() == crate::cfg::Form::Docker {
             a.push(Action::new(format!("{} load -i {} (сервер модели)", ctx.engine(), LLAMA_ARCHIVE)));
         }
         a

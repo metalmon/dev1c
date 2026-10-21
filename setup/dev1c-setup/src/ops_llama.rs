@@ -395,7 +395,7 @@ impl Op<Ctx> for Container {
             return OpState::Blocked("модель не выбрана: [model] file — файл в комплекте".into());
         }
         if !docker::image_loaded(ctx, &ctx.cfg.llama_image()) {
-            return OpState::Blocked(format!("образ {} не загружен: он едет в том же архиве, что и образ среды", ctx.cfg.llama_image()));
+            return OpState::Blocked(format!("образ {} не загружен: он едет в dev1c-llama-image.tar.gz — выполните шаг «Образ среды»", ctx.cfg.llama_image()));
         }
         let name = ctx.cfg.llama_container();
         let container_state = docker::container_state(ctx, &name);

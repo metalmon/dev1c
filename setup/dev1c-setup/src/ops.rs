@@ -200,6 +200,10 @@ impl Op<Ctx> for Env {
     }
 }
 
+/// Архив сервера модели. Отдельный файл, а не часть архива среды: образы
+/// собраны от разных базовых, общих слоёв нет (спека, раздел «Комплекты»).
+const LLAMA_ARCHIVE: &str = "dev1c-llama-image.tar.gz";
+
 struct Image;
 impl Op<Ctx> for Image {
     fn id(&self) -> &'static str {
@@ -210,7 +214,16 @@ impl Op<Ctx> for Image {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let archive = ctx.kit.path("dev1c-image.tar.gz");
-        let loaded = docker::image_loaded(ctx, &ctx.cfg.image());
+        // Сервер модели едет ОТДЕЛЬНЫМ архивом: у него другой базовый образ,
+        // общих слоёв со средой нет, и в одном файле они не экономят ничего
+        // (спека, раздел «Комплекты»). Грузится он здесь же: отдельной
+        // операции для этого нет, а без него шаг llama.container молча
+        // пропускается — заказчик видит «образ не загружен», хотя архив
+        // лежит рядом.
+        let llama = ctx.kit.path(LLAMA_ARCHIVE);
+        let llama_needed = ctx.cfg.form() == crate::cfg::Form::Docker && llama.exists();
+        let llama_missing = llama_needed && !docker::image_loaded(ctx, &ctx.cfg.llama_image());
+        let loaded = docker::image_loaded(ctx, &ctx.cfg.image()) && !llama_missing;
         match (loaded, archive_stamp(&archive)) {
             // A new kit over an old environment: the archive is not the one
             // that was loaded last time, so it is loaded again.
@@ -223,7 +236,11 @@ impl Op<Ctx> for Image {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!("{} load -i dev1c-image.tar.gz (несколько минут)", ctx.engine()))]
+        let mut a = vec![Action::new(format!("{} load -i dev1c-image.tar.gz (несколько минут)", ctx.engine()))];
+        if ctx.cfg.form() == crate::cfg::Form::Docker && ctx.kit.path(LLAMA_ARCHIVE).exists() {
+            a.push(Action::new(format!("{} load -i {} (сервер модели)", ctx.engine(), LLAMA_ARCHIVE)));
+        }
+        a
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let archive = ctx.kit.path("dev1c-image.tar.gz");
@@ -233,6 +250,12 @@ impl Op<Ctx> for Image {
             ctx.kit.state_set("IMAGE_ARCHIVE", &stamp)?;
         }
         ctx.ok("образ загружен");
+        let llama = ctx.kit.path(LLAMA_ARCHIVE);
+        if ctx.cfg.form() == crate::cfg::Form::Docker && llama.exists() {
+            let o = docker::load_image(ctx, &llama.to_string_lossy())?;
+            anyhow::ensure!(o.ok(), "образ сервера модели не загрузился: {}", o.tail(3).join(" "));
+            ctx.ok("образ сервера модели загружен");
+        }
         Ok(())
     }
     fn revert(&self, ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
@@ -479,6 +502,20 @@ impl Op<Ctx> for Services {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
+        }
+        // Контейнера может не быть вовсе: шаг container пропускается, когда
+        // сервер модели не замерен, а этот шаг always_run и идёт всё равно.
+        // Без этой проверки он две минуты ждёт процессы в несуществующем
+        // контейнере и называет виновными службы — а смотреть надо выше по
+        // цепочке. Проверено на живой установке 22.10.2026.
+        let name = &ctx.cfg.server.name;
+        let alive = docker::ask(ctx, &["inspect", "-f", "{{.State.Running}}", name])
+            .map(|o| o.ok() && o.text.trim() == "true")
+            .unwrap_or(false);
+        if !alive {
+            anyhow::bail!(
+                "контейнера {name} нет или он не запущен — до служб дело не дошло; создаёт его шаг «Контейнер среды» (container)"
+            );
         }
         let want = ["gitea", "xrdp", "sshd"];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);

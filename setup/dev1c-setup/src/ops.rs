@@ -492,7 +492,30 @@ impl Op<Ctx> for Services {
     fn always_run(&self) -> bool {
         true
     }
-    fn state(&self, _ctx: &Ctx) -> OpState {
+    fn state(&self, ctx: &Ctx) -> OpState {
+        // Контейнера может не быть вовсе: шаг container пропускается, когда
+        // сервер модели не замерен. Без этой проверки шаг две минуты ждёт
+        // процессы в несуществующем контейнере и называет виновными службы,
+        // хотя смотреть надо выше по цепочке — проверено на живой установке
+        // 22.10.2026 у заказчика.
+        //
+        // Говорим это состоянием, а не исключением из apply: Blocked
+        // печатается как «пропущено» и установку не роняет — ровно так же
+        // ведут себя llama.container и container, пропустившиеся первыми.
+        //
+        // Сухой прогон — исключение: контейнера в нём нет никогда, а шаг
+        // обязан попасть в «Ручной путь» со своими командами.
+        if !ctx.dry_run {
+            let name = &ctx.cfg.server.name;
+            let alive = docker::ask(ctx, &["inspect", "-f", "{{.State.Running}}", name])
+                .map(|o| o.ok() && o.text.trim() == "true")
+                .unwrap_or(false);
+            if !alive {
+                return OpState::Blocked(format!(
+                    "контейнера {name} нет или он не запущен — создаёт его шаг «Контейнер среды» (container)"
+                ));
+            }
+        }
         OpState::Missing
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
@@ -502,20 +525,6 @@ impl Op<Ctx> for Services {
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
-        }
-        // Контейнера может не быть вовсе: шаг container пропускается, когда
-        // сервер модели не замерен, а этот шаг always_run и идёт всё равно.
-        // Без этой проверки он две минуты ждёт процессы в несуществующем
-        // контейнере и называет виновными службы — а смотреть надо выше по
-        // цепочке. Проверено на живой установке 22.10.2026.
-        let name = &ctx.cfg.server.name;
-        let alive = docker::ask(ctx, &["inspect", "-f", "{{.State.Running}}", name])
-            .map(|o| o.ok() && o.text.trim() == "true")
-            .unwrap_or(false);
-        if !alive {
-            anyhow::bail!(
-                "контейнера {name} нет или он не запущен — до служб дело не дошло; создаёт его шаг «Контейнер среды» (container)"
-            );
         }
         let want = ["gitea", "xrdp", "sshd"];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);

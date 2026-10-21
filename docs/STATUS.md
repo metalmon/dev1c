@@ -763,10 +763,40 @@ settled it: don't compute what the program can say itself.
     then «unknown». So `compatibility_mode` is normally NOT written; it is for
     the case where the dump does not reflect the client's base (dump says
     8.2.13, the client runs 8.3.15 → write the CLIENT's mode).
-    Hence what the connector writes: `min_platform_version` = the client's
-    platform whenever known (pure gain — no such check exists otherwise);
-    `target_platform_version` only when the client's line is newer than the
-    catalog's; `compatibility_mode` only on a dump/base mismatch.
+    **Corrected again by the connector session, with measurements (2026-10-21)
+    — and it was right.** `min_platform_version` = «the client's platform» is
+    worthless: the diagnostic fires on members NEWER than the minimum, and code
+    written on the developer's machine is limited to that machine's members
+    anyway, so a minimum equal to it is silence. The valuable value is the
+    PRODUCTION platform of the customer, and that is human knowledge, not a
+    fact of the environment — the connector cannot discover it from the dev
+    machine. So it writes the machine's version as a safe value (no false
+    alarms) with a comment saying what to change it to; optionally a field in
+    `1c-connect.toml` («целевая платформа заказчика», empty by default) would
+    let a human answer it once. `target_platform_version`: only when the
+    client's line is newer than the catalog's. `compatibility_mode`: not
+    written — see below.
+    **`[diagnostics]`, `[code_lens]`, `[formatting]`, `[search]`, `[features]`,
+    `[output]` are INERT in 0.3.2** (measured by the connector session: seven
+    forms — `enabled = false`, `disabled`/`exclude`/`only` lists,
+    `[diagnostics.rules]`, `[diagnostics.severity]`, per-rule parameters, both
+    legacy JSON formats — all «Configuration is valid» and all leaving the same
+    7 diagnostics, while `analyze --only-diagnostic LineLength` does filter).
+    So rule configuration lives on the launch side only, a typo in a rule name
+    is silent, and **a rule profile for the agent is not worth writing in this
+    release** — I was about to propose one to quiet the stylistic noise.
+    **What DOES work with no config file at all** (measured here): a dump with
+    `<CompatibilityMode>Version8_2_13</CompatibilityMode>` and a module calling
+    `СтрНайти`/`СтрРазделить` yields
+    `Major PlatformMemberHiddenByCompatibilityMode: 'СтрНайти' недоступен в
+    режиме совместимости 8.2.13: виден с режима 8.3.x`. The mode comes from the
+    dump, no settings involved — which confirms both «don't write
+    `compatibility_mode`» and the caveat I put in `config/agents-global.md`
+    (the agent gets a clear message instead of silence on an old mode).
+    `[source]` is unnecessary too (auto-discovery finds `src/Configuration.xml`,
+    `src/cfe/*`, `src/epf/*`, `src/erf/*`), and `[platform_help]` already
+    defaults to `auto` — so the client-corpus item below is about the 8.5
+    corpus BUILD defect, not about configuration.
     **Follow-up worth its own task: a corpus for the CLIENT's line**, built from
     their own `shcntx_ru.hbk` / `shlang_ru.hbk` — they sit next to the `1cv8`
     the connector already locates with `find_1cv8`. That makes both the key and

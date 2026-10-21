@@ -32,6 +32,36 @@ pub const DEFAULT_TOOLS: [&str; 12] = [
     "test_yaxunit", "task_status", "task_result", "task_cancel", "cache_show", "cache_clear",
 ];
 
+/// Инструменты, которые **меняют состояние**: базу, дерево проекта или
+/// среду. Список нужен не самому коннектору, а согласованию с профилями
+/// агента в Zed (`config/zed-settings.json`): на шаге «разбор» агент
+/// собирает факты и ничего не менять не обещает — он просто не должен иметь
+/// таких инструментов. У профилей `enable_all_context_servers: true`, то есть
+/// новый инструмент моста приходит агенту **включённым**, и забыть погасить
+/// его можно молча. Тест рядом с этим списком превращает «не забыть» в
+/// падение.
+///
+/// Чтение (`validate_syntax_check`, `task_status`, `task_result`,
+/// `cache_show`, `project_status`) сюда не входит: разбору оно и нужно.
+pub const CHANGES_STATE: [&str; 10] = [
+    // Перезаписывает `src/` — десятки тысяч файлов и минуты работы.
+    "cf_decompile",
+    // Грузит дерево в базу и обновляет её.
+    "cf_load",
+    "infobase_update",
+    // Прогон кода по базе: данные после тестов не те, что до.
+    "test_xunit",
+    "test_vanessa",
+    "test_yaxunit",
+    // Снимает уже идущую задачу — чужую работу.
+    "task_cancel",
+    // Удаляет кеш vanessa-runner.
+    "cache_clear",
+    // Пишет в дерево и в Gitea (`jsonrpc::OUR_TOOLS`).
+    "project_pull",
+    "project_push",
+];
+
 /// Адрес публикации по умолчанию: имя последней папки `base_path`. Поля в
 /// окне нет — адрес следует за каталогом базы, а правку в toml переносит
 /// `gui::carried_base_url`. Имя, которое `validate` не пропустит (пусто,
@@ -292,6 +322,108 @@ impl Cfg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Настройки Zed из образа — рядом, не копией: имена инструментов
+    /// согласованы между нашим списком и профилями агента, а разойтись им
+    /// нельзя молча (просьба соседней сессии 2026-10-21).
+    const ZED: &str = include_str!("../../../config/zed-settings.json");
+
+    /// Настройки Zed — не JSON, а **шаблон** JSON с комментариями: entrypoint
+    /// подставляет в него значения (`CUSTOM_MAX_TOKENS_PLACEHOLDER` стоит без
+    /// кавычек, то есть на месте числа). Чтобы прочитать его разбором, а не
+    /// глазами, приводим к JSON: срезаем `//` **вне строк** (в файле есть
+    /// адреса `http://localhost:3000`, и наивная резка сломала бы их) и
+    /// заменяем голые подстановки на 0 — нас интересуют профили, а не числа.
+    fn as_json(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for line in text.lines() {
+            let chars: Vec<char> = line.chars().collect();
+            let (mut in_string, mut escaped, mut i) = (false, false, 0);
+            while i < chars.len() {
+                let c = chars[i];
+                if escaped {
+                    escaped = false;
+                } else if in_string && c == '\\' {
+                    escaped = true;
+                } else if c == '\"' {
+                    in_string = !in_string;
+                } else if !in_string {
+                    if c == '/' && chars.get(i + 1) == Some(&'/') {
+                        break; // строка комментария — остаток не нужен
+                    }
+                    if c.is_ascii_uppercase() {
+                        let run: String = chars[i..].iter().take_while(|c| c.is_ascii_uppercase() || **c == '_' || c.is_ascii_digit()).collect();
+                        if run.ends_with("PLACEHOLDER") {
+                            out.push('0');
+                            i += run.chars().count();
+                            continue;
+                        }
+                    }
+                }
+                out.push(c);
+                i += 1;
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn zed_json() -> serde_json::Value {
+        serde_json::from_str(&as_json(ZED)).expect("config/zed-settings.json разбирается как JSON после снятия комментариев")
+    }
+
+    /// Инструменты сервера `vrunner`, перечисленные в профиле: имя → включён.
+    fn profile_tools(profile: &str) -> serde_json::Map<String, serde_json::Value> {
+        zed_json()["agent"]["profiles"][profile]["context_servers"]["vrunner"]["tools"]
+            .as_object()
+            .unwrap_or_else(|| panic!("в профиле {profile} нет инструментов сервера vrunner"))
+            .clone()
+    }
+
+    fn exposable() -> Vec<&'static str> {
+        DEFAULT_TOOLS.iter().copied().chain(crate::jsonrpc::OUR_TOOLS).collect()
+    }
+
+    /// Имя, которого мост не отдаёт, в профиле ничего не гасит — и молчит об
+    /// этом. Ловит переименование и удаление инструмента у нас.
+    #[test]
+    fn every_name_in_the_zed_profiles_is_a_tool_we_actually_expose() {
+        let known = exposable();
+        for profile in ["разбор", "работа"] {
+            for name in profile_tools(profile).keys() {
+                assert!(known.contains(&name.as_str()), "профиль «{profile}» гасит {name}, которого мост не отдаёт: ни в DEFAULT_TOOLS, ни в OUR_TOOLS");
+            }
+        }
+    }
+
+    /// Обратная сторона, и она важнее: у профилей
+    /// `enable_all_context_servers: true`, то есть новый инструмент приходит
+    /// агенту включённым. На шаге «разбор» меняющих состояние быть не должно.
+    #[test]
+    fn the_review_profile_mutes_every_tool_that_changes_state() {
+        let tools = profile_tools("разбор");
+        // Собираем все недостачи, а не первую: иначе правка файла идёт по
+        // одному падению за прогон.
+        let gaps: Vec<String> = CHANGES_STATE
+            .iter()
+            .filter_map(|name| match tools.get(*name) {
+                None => Some(format!("{name}: записи нет, значит инструмент включён")),
+                Some(serde_json::Value::Bool(false)) => None,
+                Some(v) => Some(format!("{name}: {v}, а нужно false")),
+            })
+            .collect();
+        assert!(gaps.is_empty(), "профиль «разбор» в config/zed-settings.json не гасит меняющие состояние:\n  {}", gaps.join("\n  "));
+    }
+
+    /// Сам список меняющих состояние не должен разойтись с тем, что мост
+    /// отдаёт: иначе он требовал бы гасить несуществующее.
+    #[test]
+    fn every_state_changing_tool_is_one_we_expose() {
+        let known = exposable();
+        for name in CHANGES_STATE {
+            assert!(known.contains(&name), "{name} в CHANGES_STATE, но мост его не отдаёт");
+        }
+    }
 
     fn sample() -> Cfg {
         toml::from_str(EXAMPLE).unwrap()

@@ -988,7 +988,7 @@ pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
 /// текст» отвечает он же, а не два одинаковых похода на диск подряд.
 /// Погасшее обслуживание важнее смены базы: оно оставляет агента без ответа
 /// вовсе.
-fn save_question(ui: &Ui, new_host: &Host) -> Option<(String, String)> {
+pub(crate) fn save_question(ui: &Ui, new_host: &Host) -> Option<(String, String)> {
     if let Some(why) = save_locks_gate(ui, new_host) {
         return Some(confirm_gate_text(&why));
     }

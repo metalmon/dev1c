@@ -1119,6 +1119,22 @@ impl Render for Panel {
                                 // Перезапуск сеанса и строка в журнал — внутри
                                 // `gui::save_host`, не здесь.
                                 let host = panel.host_from_fields(cx);
+                                // Вопроса нет — пишем **прямо здесь**, из
+                                // контекста самой панели. Раньше и этот случай
+                                // уходил в `confirm_database_change`, а тот звал
+                                // `proceed` синхронно, и запись шла через
+                                // `window.update` **внутри уже идущего**
+                                // обновления того же окна: повторный вход тихо
+                                // не делал ничего. Кнопка «не работала» при
+                                // выключённых MCP на любом поле, а при
+                                // включённых работала — там запись уезжала в
+                                // `cx.spawn`, то есть за пределы этого
+                                // обновления (заказчик 2026-10-21).
+                                if gui::save_question(cx.global::<Ui>(), &host).is_none() {
+                                    panel.write(host, cx);
+                                    cx.notify();
+                                    return;
+                                }
                                 let to_write = host.clone();
                                 gui::confirm_database_change(window, cx, &host, move |_window, cx| {
                                     let ui = cx.global::<Ui>();

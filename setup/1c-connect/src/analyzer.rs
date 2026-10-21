@@ -113,19 +113,40 @@ pub fn expected(client: &str, catalogue: &str) -> Vec<(&'static str, String)> {
 /// Что в файле стоит сейчас — только наши ключи, значениями как написано.
 /// Разбор один на всех: пишущий `ensure` и факт проверки смотрят одними
 /// глазами. Файла нет — пусто.
+///
+/// Читаем **только корень файла, до первого `[раздела]`**: ключ внутри
+/// раздела — не наш ключ, и анализатор его не видит (ревью задачи 36
+/// проверило живьём: `[diagnostics] min_platform_version = …` проходит как
+/// «Configuration is valid», потому что раздел глотает любые ключи). Читай
+/// мы его как корневой — `ensure` отказался бы писать настоящий, и проверка
+/// осталась бы выключенной молча.
 pub fn found(project: &Path) -> Vec<(&'static str, String)> {
     let Ok(text) = std::fs::read_to_string(project.join(FILE)) else {
         return Vec::new();
     };
+    let root: Vec<&str> = text.lines().map(str::trim).take_while(|t| !t.starts_with('[')).filter(|t| !t.starts_with('#')).collect();
     // Порядок — наш, а не файла: так списки `found` и `expected` сравнимы
     // целиком, а не по одному ключу.
     [MIN, TARGET]
         .into_iter()
         .filter_map(|key| {
-            let value = text.lines().map(str::trim).filter(|t| !t.starts_with('#')).filter_map(|t| t.split_once('=')).find(|(k, _)| k.trim() == key)?.1;
+            let value = root.iter().filter_map(|t| t.split_once('=')).find(|(k, _)| k.trim() == key)?.1;
+            // Хвостовой комментарий в значение не идёт: `min = "8.5.1" # версия
+            // заказчика` — верный toml, и прочитать его надо так же верно.
+            let value = value.split('#').next().unwrap_or(value);
             Some((key, value.trim().trim_matches(['"', '\'']).to_string()))
         })
         .collect()
+}
+
+/// Зачем ключ нужен — рядом с ним же: человек читает файл, а не спеку.
+/// У `min` объяснение длиннее, потому что это **ручка**: польза появляется,
+/// когда там стоит версия заказчика, а не этой машины.
+fn why(key: &str) -> &'static str {
+    match key {
+        MIN => "# min_platform_version — самая старая платформа, на которой код обязан\n# работать. Здесь версия этой машины: проверка включена, но молчит.\n# Поставьте версию заказчика, и bsl-analyzer начнёт называть\n# элементы платформы, которых у него нет.\n",
+        _ => "# target_platform_version — линия платформы этой машины: она новее\n# каталога анализатора, и без этой строки он считает имена нового\n# выпуска неизвестными.\n",
+    }
 }
 
 /// Кладёт недостающие ключи в `bsl-analyzer.toml` корня проекта и возвращает
@@ -142,17 +163,15 @@ pub fn ensure(project: &Path, want: &[(&'static str, String)]) -> Result<Vec<&'s
     if add.is_empty() {
         return Ok(Vec::new());
     }
-    let path = project.join(FILE);
-    let mut head = String::from(
-        "# Записал 1c-connect: версия платформы на этой машине.\n\
-         # min_platform_version — самая старая платформа, на которой код обязан\n\
-         # работать. Здесь стоит версия этой машины: так проверка включена, но\n\
-         # молчит. Поставьте версию заказчика, и bsl-analyzer начнёт называть\n\
-         # элементы платформы, которых у него нет.\n",
-    );
+    // Объяснение к каждому ключу своё, и дописывается только с ним: общая
+    // шапка «здесь версия этой машины» над чужой строкой человека была бы
+    // ложью о его значении, а при второй дописи — ещё и повтором.
+    let mut head = String::new();
     for (k, v) in &add {
+        head.push_str(why(k));
         head.push_str(&format!("{k} = {v:?}\n"));
     }
+    let path = project.join(FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => format!("{head}\n{t}"),
         Err(_) => head,
@@ -249,6 +268,49 @@ mod tests {
         // Корневой ключ — до первого раздела, иначе он попал бы в `[diagnostics]`.
         assert!(text.find(TARGET) < text.find("[diagnostics]"), "{text}");
         assert_eq!(found(d.path()), vec![(MIN, "8.3.21".to_string()), (TARGET, "8.5.1".to_string())]);
+    }
+
+    /// Ключ внутри чужого раздела — не наш ключ: анализатор его не видит
+    /// (раздел глотает любые ключи), и прочитать его как корневой значило бы
+    /// отказаться писать настоящий, оставив проверку выключенной молча.
+    #[test]
+    fn a_key_inside_a_section_is_not_ours() {
+        let d = Dir::new();
+        std::fs::write(d.path().join(FILE), "[diagnostics]
+min_platform_version = \"8.3.21\"
+").unwrap();
+        assert!(found(d.path()).is_empty());
+        assert_eq!(ensure(d.path(), &expected("8.3.27.1508", "8.3.27")), Ok(vec![MIN]));
+        assert_eq!(found(d.path()), vec![(MIN, "8.3.27".to_string())]);
+        // И наша строка легла до раздела, иначе её не увидел бы и анализатор.
+        let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
+        assert!(text.find(MIN) < text.find("[diagnostics]"), "{text}");
+    }
+
+    /// Хвостовой комментарий — верный toml, и в значение он не идёт: иначе
+    /// факт проверки краснел бы на правильном файле.
+    #[test]
+    fn a_trailing_comment_is_not_part_of_the_value() {
+        let d = Dir::new();
+        std::fs::write(d.path().join(FILE), "min_platform_version = \"8.3.21\" # версия заказчика
+").unwrap();
+        assert_eq!(found(d.path()), vec![(MIN, "8.3.21".to_string())]);
+    }
+
+    /// Дописывается только объяснение того ключа, который дописали: шапка
+    /// «здесь версия этой машины» над чужой строкой человека была бы ложью о
+    /// его значении.
+    #[test]
+    fn the_explanation_belongs_to_the_key_it_explains() {
+        let d = Dir::new();
+        std::fs::write(d.path().join(FILE), "min_platform_version = \"8.2.19\"
+").unwrap();
+        assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
+        let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
+        assert!(text.contains("# target_platform_version"), "{text}");
+        assert!(!text.contains("Здесь версия этой машины"), "объяснение про min поверх чужой строки — ложь:
+{text}");
+        assert_eq!(found(d.path()), vec![(MIN, "8.2.19".to_string()), (TARGET, "8.5.1".to_string())]);
     }
 
     /// Закомментированный ключ — не ключ: иначе пример в комментарии

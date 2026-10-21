@@ -86,29 +86,54 @@ pub fn licence_fact(state: &crate::licence::State) -> Check {
 }
 
 /// Строки платформы в `bsl-analyzer.toml` проекта (модуль `analyzer`). Факт
-/// нужен ровно потому, что поверх строки человека программа не пишет: иначе
-/// устаревшее значение жило бы молча, а оно опаснее отсутствия —
-/// `min_platform_version` от старой платформы начинает ругаться на верный
-/// код, а `target_platform_version` от чужой линии гасит проверку имён.
+/// нужен ровно потому, что поверх строки человека программа не пишет: без
+/// него чужая строка жила бы молча, а молчание тут и есть отказ — ради него
+/// файл и затевался.
+///
+/// Разошлось — провал ровно по одной строке, `target_platform_version`: она
+/// говорит анализатору, на какой линии платформы код, и строка не от этой
+/// машины гасит проверку имён. `min_platform_version` — **ручка человека**
+/// (её смысл — платформа заказчика, см. `analyzer::why`), и расхождением она
+/// быть не может: ругаться на правку, к которой сами же приглашаем
+/// комментарием в файле, значило бы держать проверку вечно жёлтой (находка
+/// ревью задачи 36).
 ///
 /// Чистая: `want` — что даёт эта машина (`analyzer::expected`), `have` — что
-/// стоит в файле (`analyzer::found`).
+/// стоит в корне файла (`analyzer::found`). Показываем то, что в файле, а не
+/// то, что мы бы написали: иначе зелёный факт называл бы строку, которой там
+/// нет.
 pub fn analyzer_fact(want: &[(&'static str, String)], have: &[(&'static str, String)]) -> Check {
-    let drift: Vec<String> = want
-        .iter()
-        .filter_map(|(k, v)| have.iter().find(|(got, _)| got == k).filter(|(_, got)| got != v).map(|(_, got)| format!("{k} = {got}, а платформа даёт {v}")))
-        .collect();
-    if !drift.is_empty() {
-        return Check::fail(ANALYZER, drift.join("; "), format!("исправьте строку в {} проекта или удалите её — 1c-connect install запишет свою", crate::analyzer::FILE));
+    use crate::analyzer::{FILE, MIN, TARGET};
+    let got = |key: &str| have.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+    // Линия этой машины известна из `want`: `min` там стоит всегда, когда
+    // платформа найдена.
+    let ours = want.iter().find(|(k, _)| *k == MIN).map(|(_, v)| v.clone());
+    if let (Some(ours), Some(target)) = (&ours, got(TARGET)) {
+        if &target != ours {
+            return Check::fail(
+                ANALYZER,
+                format!("{TARGET} = {target}, а платформа этой машины {ours}"),
+                format!("чужая строка гасит проверку имён — поправьте {FILE} в проекте или удалите строку, 1c-connect install запишет свою"),
+            );
+        }
     }
-    if want.is_empty() {
+    let missing: Vec<&str> = want.iter().map(|(k, _)| *k).filter(|k| got(k).is_none()).collect();
+    if !missing.is_empty() {
+        let where_ = if have.is_empty() { format!("{FILE} в проекте нет") } else { format!("в {FILE} нет строк") };
+        return Check::note(ANALYZER, format!("{where_}: {} — их запишет 1c-connect install", missing.join(", ")));
+    }
+    if have.is_empty() {
         return Check::note(ANALYZER, "версия платформы неизвестна — строку не пишем");
     }
-    let names: Vec<String> = want.iter().map(|(k, v)| format!("{k} = {v}")).collect();
-    if have.is_empty() {
-        return Check::note(ANALYZER, format!("{} в проекте нет — его запишет 1c-connect install: {}", crate::analyzer::FILE, names.join(", ")));
+    let mut shown: Vec<String> = have.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+    // Ручка переведена человеком — говорим об этом прямо: иначе читатель
+    // решит, что программа записала версию заказчика сама.
+    if let (Some(min), Some(ours)) = (got(MIN), &ours) {
+        if &min != ours {
+            shown.push(format!("платформа машины {ours} — минимум задан вручную"));
+        }
     }
-    Check::pass(ANALYZER, names.join(", "))
+    Check::pass(ANALYZER, shown.join(", "))
 }
 
 /// Адрес среды пуст — факт называет поле, а не говорит «Gitea не отвечает»
@@ -570,12 +595,19 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     let h = &ctx.cfg.host;
     v.push(within(t0, budget, DEADLINE, || licence_fact(&crate::licence::state_now())));
     v.push(within(t0, budget, PARAMS, || params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server)));
+    // Платформу ищем один раз на два факта: сканирование каталогов не нужно
+    // повторять, а строки для анализатора без неё не считаются вовсе.
+    let mut platform = None;
     v.push(within(t0, budget, PLATFORM, || match find_1cv8() {
-        Some(p) => Check::pass(PLATFORM, p.display().to_string()),
+        Some(p) => {
+            let found = Check::pass(PLATFORM, p.display().to_string());
+            platform = Some(p);
+            found
+        }
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
     }));
     v.push(within(t0, budget, ANALYZER, || {
-        let want = crate::ops_host::analyzer_lines();
+        let want = crate::ops_host::analyzer_lines_of(platform.as_deref());
         analyzer_fact(&want, &crate::analyzer::found(std::path::Path::new(&h.project)))
     }));
     if cfg!(target_os = "linux") {
@@ -935,6 +967,33 @@ mod tests {
         // (провал по платформе стоит выше и своим именем).
         let unknown = analyzer_fact(&[], &[]);
         assert!(unknown.ok && unknown.info && unknown.detail.contains("неизвестна"), "{unknown:?}");
+    }
+
+    /// Два исхода, которых прежний факт не различал (находки ревью задачи
+    /// 36): строка `target` в файле, которой мы бы не написали, — тихо
+    /// выключенная проверка имён, и потому провал; а `min`, переведённый
+    /// человеком на платформу заказчика, — не расхождение вовсе, иначе факт
+    /// ругался бы на правку, к которой сам же приглашает.
+    #[test]
+    fn the_fact_judges_what_is_in_the_file_not_what_we_would_write() {
+        use crate::analyzer::{MIN, TARGET};
+        // Платформа и каталог одной линии — `target` мы бы не писали; он в
+        // файле есть и от чужой линии: гасит проверку имён молча.
+        let want = crate::analyzer::expected("8.3.27.1508", "8.3.27");
+        assert!(!want.iter().any(|(k, _)| *k == TARGET), "в этом случае target не наш");
+        let c = analyzer_fact(&want, &[(MIN, "8.3.27".into()), (TARGET, "8.5.1".into())]);
+        assert!(!c.ok && c.detail.contains(TARGET) && c.detail.contains("8.5.1"), "{c:?}");
+        // Человек перевёл минимум на платформу заказчика — это ручка, а не
+        // расхождение; факт зелёный и говорит, что значение задано вручную.
+        let newer = crate::analyzer::expected("8.5.1.1150", "8.3.27");
+        let by_hand = analyzer_fact(&newer, &[(MIN, "8.2.19".into()), (TARGET, "8.5.1".into())]);
+        assert!(by_hand.ok && !by_hand.info, "{by_hand:?}");
+        assert!(by_hand.detail.contains("8.2.19") && by_hand.detail.contains("вручную"), "{by_hand:?}");
+        // Строка, которую человек удалил, не называется зелёным фактом как
+        // стоящая в файле: сведение называет именно её.
+        let gone = analyzer_fact(&newer, &[(MIN, "8.5.1".into())]);
+        assert!(gone.ok && gone.info, "{gone:?}");
+        assert!(gone.detail.contains(TARGET) && !gone.detail.contains(MIN), "{gone:?}");
     }
 
     /// Пустое поле — провал про поле, а не «Gitea не отвечает» по

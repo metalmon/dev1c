@@ -775,7 +775,13 @@ impl Op<Ctx> for Env {
 /// платформы, линия каталога — из кэша анализатора, а без кэша встроенная
 /// (`crate::analyzer`). Платформы нет — пусто, и файл не появляется.
 pub fn analyzer_lines() -> Vec<(&'static str, String)> {
-    let Some(version) = find_1cv8().and_then(|exe| exe.parent()?.parent()?.file_name()?.to_str().map(str::to_string)) else {
+    analyzer_lines_of(find_1cv8().as_deref())
+}
+
+/// То же, но по уже найденной платформе: проверка ищет её для своего факта и
+/// незачем сканировать каталоги второй раз (находка ревью задачи 36).
+pub fn analyzer_lines_of(exe: Option<&std::path::Path>) -> Vec<(&'static str, String)> {
+    let Some(version) = exe.and_then(crate::flow::platform_version_from_exe) else {
         return Vec::new();
     };
     let catalogue = crate::analyzer::cache_dir().map(|c| crate::analyzer::catalogue_line(&c)).unwrap_or_else(|| crate::analyzer::BUNDLED.to_string());

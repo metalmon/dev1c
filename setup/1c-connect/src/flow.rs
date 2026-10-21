@@ -36,7 +36,7 @@ const DUMP_MARK_FILE: &str = ".dev1c-dump";
 /// Версия платформы из пути к `1cv8.exe`, который возвращает
 /// `ops_host::find_1cv8()`: имя каталога двумя уровнями выше исполняемого
 /// файла (`.../8.5.1.1150/bin/1cv8.exe` → `8.5.1.1150`).
-fn platform_version_from_exe(exe: &Path) -> Option<String> {
+pub(crate) fn platform_version_from_exe(exe: &Path) -> Option<String> {
     exe.parent()?.parent()?.file_name()?.to_str().map(str::to_string)
 }
 

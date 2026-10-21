@@ -101,6 +101,11 @@ VOL_GITEA=${DEV1C_GITEA_VOL:-$NAME-gitea}
 # NOT under platform/: that directory is a build context, and 2.4 GB of payload
 # would be transferred to the daemon on every build of either target.
 TAR=dist/dev1c-1c-payload.tar.gz
+# Образы комплекта: среда, стенд поверх неё и сервер модели. Стенд собран
+# FROM среды — в одном архиве их общие слои лежат один раз; сервер модели от
+# другой базы, поэтому едет отдельным архивом (спека, раздел «Комплекты»).
+BASE_IMAGE=oktaplus/dev1c:latest
+LLAMA_IMAGE=oktaplus/dev1c-llama:latest
 MOUNTS="-v $VOL_PLATFORM:/opt/1cv8t -v $VOL_DEMO:/opt/1c-demo"
 
 say() { printf '[provision] %s\n' "$*"; }
@@ -205,6 +210,89 @@ run)
     say "$CONTAINER is up: RDP $PORT_BASE, Gitea $((PORT_BASE + 1)), SSH $((PORT_BASE + 3))"
     say "the check of a running stand: docker exec $CONTAINER test-stand"
     ;;
+kit)
+    # Комплект администратора под Linux целиком: образы, оба архива, том
+    # платформы, пакеты NVIDIA, раскладка, путь к модели и суммы.
+    #
+    #   ./provision.sh kit [каталог] [каталог с dev1c-setup]
+    #
+    # Чего ждём до запуска: artifacts/1c-connect-linux и dev1c-setup из CI,
+    # дистрибутив 1С в $PLATFORM_DIR, модель в model/ комплекта или в
+    # MODEL_FILE.
+    #
+    # Порядок важен: pack.sh стирает каталог комплекта целиком — так и надо,
+    # иначе в нём копятся следы прошлых сборок. Поэтому всё готовится во
+    # временном каталоге и вносится ПОСЛЕ раскладки, а модель отводится в
+    # сторону и возвращается: двадцать гигабайт, которых больше нигде нет.
+    out=${2:-dist/dev1c-kit-linux}
+    bins=${3:-bins}
+    llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:b11734}
+    tmp=${TMPDIR:-/tmp}/dev1c-kit
+    [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup — возьмите артефакт dev1c-setup-linux из CI"
+    mkdir -p "$out" "$tmp"
+
+    "$0" build
+
+    say "архив среды и стенда"
+    docker save "$BASE_IMAGE" "$IMAGE" | gzip -1 > "$tmp/dev1c-image.tar.gz"
+    sh scripts/check-image-archive.sh "$tmp/dev1c-image.tar.gz"
+
+    say "архив сервера модели"
+    docker pull "$llama"
+    # В реестре он лежит индексом с манифестом подписей, и docker save
+    # отдаёт по нему оглавление вместо слоёв, возвращая при этом ноль.
+    # Пересобираем одной строкой FROM — получается одноплатформенный образ,
+    # который сохраняется целиком.
+    printf 'FROM %s\n' "$llama" > "$tmp/Dockerfile.llama"
+    docker build --platform linux/amd64 -f "$tmp/Dockerfile.llama" -t "$LLAMA_IMAGE" "$tmp"
+    docker save "$LLAMA_IMAGE" | gzip -1 > "$tmp/dev1c-llama-image.tar.gz"
+    sh scripts/check-image-archive.sh "$tmp/dev1c-llama-image.tar.gz"
+
+    "$0" export "$tmp/dev1c-1c-payload.tar.gz"
+
+    say "пакеты NVIDIA Container Toolkit"
+    ver=$(sed -n 's/^NVIDIA_TOOLKIT_VERSION=//p' pack.sh)
+    mkdir -p "$tmp/nvidia"
+    for pkg in nvidia-container-toolkit nvidia-container-toolkit-base libnvidia-container1 libnvidia-container-tools; do
+        f="${pkg}_${ver}_amd64.deb"
+        [ -f "$tmp/nvidia/$f" ] || curl -fsSL -o "$tmp/nvidia/$f" \
+            "https://nvidia.github.io/libnvidia-container/stable/deb/amd64/$f"
+    done
+
+    keep=
+    if [ -d "$out/model" ]; then
+        keep="$tmp/model-keep"
+        rm -rf "$keep"
+        mv "$out/model" "$keep"
+        say "модель отложена на время раскладки"
+    fi
+
+    say "раскладка"
+    NVIDIA_TOOLKIT_DIR="$tmp/nvidia" LLAMA_IMAGE="$tmp/dev1c-llama-image.tar.gz" \
+        OUT_DIR=$(dirname "$out") ./pack.sh --os linux "$tmp/dev1c-image.tar.gz" "$bins"
+
+    say "том платформы и демо-базы"
+    cp "$tmp/dev1c-1c-payload.tar.gz" "$out/"
+
+    [ -z "$keep" ] || mv "$keep" "$out/model"
+    if [ -n "${MODEL_FILE:-}" ]; then
+        say "модель"
+        mkdir -p "$out/model"
+        cp "$MODEL_FILE" "$out/model/"
+    fi
+    model=$(ls "$out"/model/*.gguf 2>/dev/null | head -1 || true)
+    [ -n "$model" ] || die "в $out/model нет .gguf — положите модель или задайте MODEL_FILE"
+    # Путь к модели в параметрах: образец печатает его пустым, и заказчик на
+    # пустом поле упирается в «модель не выбрана» при живой модели рядом.
+    sed -i "s|^file = \"\"|file = \"model/$(basename "$model")\"|" "$out/dev1c.toml"
+
+    say "контрольные суммы"
+    # Считает сам установщик: заказчик проверяет комплект тем же кодом.
+    "$out/dev1c-setup" --kit "$out" checksums
+
+    say "готово: $out ($(du -sh "$out" | cut -f1))"
+    ;;
+
 status)
     for v in "$VOL_PLATFORM" "$VOL_DEMO" "$VOL_HOME" "$VOL_GITEA"; do
         docker volume inspect "$v" >/dev/null 2>&1 \
@@ -215,7 +303,7 @@ status)
         'cat /opt/1c-demo/payload.conf 2>/dev/null || echo "payload: the volumes are empty"'
     ;;
 *)
-    echo "usage: ./provision.sh build | export [file] | import [file] | run [docker args…] | status" >&2
+    echo "usage: ./provision.sh build | export [file] | import [file] | kit [dir] [bins] | run [docker args…] | status" >&2
     exit 2
     ;;
 esac

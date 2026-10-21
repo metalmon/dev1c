@@ -650,12 +650,35 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     if !c.host.db_password.is_empty() {
         c.host.db_password = "…".into();
     }
+    // В локальном режиме туннельных полей в toml рабочего места обычно нет
+    // вовсе, и при чтении на их место встаёт умолчание образца. Печатать его
+    // нельзя: так в отчёте стенда и появился `server = "192.168.1.10:3393"` —
+    // адрес, которого никто не задавал и которым никто не пользуется (находка
+    // соседней сессии 2026-10-21). Окно эти поля в локальном режиме тоже не
+    // показывает; отчёт держится того же правила.
+    if c.host.mode == "local" {
+        c.host.server.clear();
+        c.host.password.clear();
+    }
     toml::to_string(&c).unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_report_hides_tunnel_fields_in_local_mode() {
+        // Умолчание образца (`192.168.1.10:3393`) не должно попадать в отчёт
+        // локального рабочего места: этого адреса никто не задавал.
+        let mut cfg = crate::cfg::Cfg::default();
+        cfg.host.mode = "local".into();
+        let local = cfg_for_report(&cfg);
+        assert!(!local.contains("192.168.1.10"), "{local}");
+        cfg.host.mode = "tunnel".into();
+        let tunnel = cfg_for_report(&cfg);
+        assert!(tunnel.contains("192.168.1.10"), "в туннеле адрес среды нужен: {tunnel}");
+    }
 
     fn test_ctx(mode: &str) -> Ctx {
         let mut cfg = crate::cfg::Cfg::default();

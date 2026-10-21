@@ -155,6 +155,13 @@ fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 }
 
 /// cf_decompile в src, затем project_push.
+/// Строки хода работы не обещают времени. Прежние («минуты», «десятки тысяч
+/// файлов») писались по УНФ и стали неправдой на демонстрационной базе
+/// стенда: там 844 файла и секунды (замер 2026-10-21). Сколько займёт у
+/// человека, зависит от его конфигурации — от секунд на маленькой до минут
+/// на УНФ и дольше на ЕРП, — и назвать одно число нельзя. Сколько идёт на
+/// самом деле, человек видит секундомером в карточке окна, а после —
+/// строкой «Готово за …».
 pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<String, String> {
     let _g = lock()?;
     if d.dry_run {
@@ -162,7 +169,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         return Ok("план напечатан, на машине ничего не менялось".into());
     }
     (d.phase)(Phase::Decompile);
-    log("выгружаю конфигурацию из 1С в файлы проекта — минуты, Конфигуратор работает в фоне (cf_decompile → src)".into());
+    log("выгружаю конфигурацию из 1С в файлы проекта, Конфигуратор работает в фоне (cf_decompile → src)".into());
     let r = (d.call)("cf_decompile", json!({"OUT": "src", "background": false}))?;
     if r.is_error {
         return Err(format!("выгрузка не удалась: {}", r.text));
@@ -174,7 +181,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log(format!("не удалось записать отметку о платформе рядом с выгрузкой: {e}"));
     }
     (d.phase)(Phase::Push);
-    log("отправляю файлы агенту — первая выгрузка это десятки тысяч файлов, минуты (git add, commit, push в Gitea)".into());
+    log("отправляю файлы агенту (git add, commit, push в Gitea)".into());
     (d.push)(message)
 }
 
@@ -201,7 +208,7 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
         Some(Mark::Newer(msg)) => return Err(msg),
     }
     (d.phase)(Phase::Load);
-    log("загружаю конфигурацию в 1С из файлов проекта — минуты (cf_load ← src)".into());
+    log("загружаю конфигурацию в 1С из файлов проекта (cf_load ← src)".into());
     let r = (d.call)("cf_load", json!({"SRC": "src", "background": false, "increment": true}))?;
     if r.is_error {
         return Err(format!(
@@ -414,7 +421,14 @@ mod tests {
         let f = Fake::new(&[("разобрано", false)]);
         let log = RefCell::new(Vec::new());
         f.run(|d| export_with(d, "m", &|s| log.borrow_mut().push(s))).unwrap();
-        assert!(log.borrow().iter().any(|l| l.contains("git") && l.contains("минут")), "{:?}", log.borrow());
+        let log = log.borrow();
+        // Человек должен узнать про отправку до того, как она пойдёт: вторая
+        // половина выгрузки дольше первой и выглядит как зависание, если о
+        // ней не сказать.
+        assert!(log.iter().any(|l| l.contains("отправляю") && l.contains("git")), "{log:?}");
+        // И не обещать при этом времени: прежние «минуты» писались по УНФ, а
+        // на демонстрационной базе стенда это секунды (замер 2026-10-21).
+        assert!(!log.iter().any(|l| l.contains("минут")), "строки хода работы не обещают времени: {log:?}");
     }
 
     #[test]

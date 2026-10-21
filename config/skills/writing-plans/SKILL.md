@@ -190,3 +190,21 @@ them to review the plan and choose an execution method before implementation.
 
 **If Native chosen:**
 - **REQUIRED SUB-SKILL:** Use superpowers:executing-plans
+
+## Инструменты 1С на этом шаге
+
+«Файлы задачи» в 1С — это пути выгрузки, а не имена объектов. Называй их
+точно: `Documents/<Имя>/Ext/ObjectModule.bsl`,
+`CommonModules/<Имя>/Ext/Module.bsl`, `Forms/<Имя>/Ext/Form.xml`. Структуру
+смотри `rg` по `~/project` или `get_object_structure` и
+`get_form_structure` сервера `1c` — не по памяти.
+
+Метаданные и формы правятся скиллами комплекта (`meta-edit`, `meta-remove`,
+`form-add`, `form-edit`, `skd-edit`), а не «правкой XML руками»: в задаче
+называй скилл, а не формат.
+
+У каждой задачи своя проверка, и она должна быть выполнима здесь: алгоритм —
+`oscript -check` и `oscript`; модуль конфигурации — диагностики
+`bsl-analyzer`, затем `validate_syntax_check`; тесты — только тем
+фреймворком, который в базе проекта действительно стоит. Полный список — карта
+«Какой инструмент на каком шаге» в `~/.config/zed/AGENTS.md`.

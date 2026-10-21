@@ -2,23 +2,27 @@
 //! проекта. Спека, раздел «Строка платформы для анализатора: её пишет
 //! коннектор».
 //!
-//! Пишем два ключа, и они делают разное (замер соседней сессии на нашей
-//! 0.3.2, `check-config`):
+//! Ключ пишем один, и разобраться стоит с двумя — они делают разное
+//! (замеры на нашей 0.3.2 в живом контейнере):
 //!
-//! * `min_platform_version` — минимальная платформа, на которой код обязан
-//!   компилироваться. Пока ключа нет, диагностика
-//!   `PlatformMemberNewerThanMinVersion` **молчит полностью**; с ключом она
-//!   называет каждое использование элемента платформы, которого на этой
-//!   версии нет (замер 2026-10-21: `min = 8.3.1` на `Асинх`/`СтрРазделить`
-//!   даёт диагностику, `min = 8.3.27` и отсутствие ключа — тишину).
+//! * `min_platform_version` — **не пишем, и это решение заказчика
+//!   2026-10-21.** Ключ работает: пока его нет, диагностика
+//!   `PlatformMemberNewerThanMinVersion` молчит полностью, а с ним называет
+//!   использование элементов платформы новее минимума (замер 2026-10-21:
+//!   `min = 8.3.1` на `Асинх`/`СтрРазделить` даёт диагностику, `min =
+//!   8.3.27` — тишину). Но полезен он только когда там стоит **самая
+//!   старая платформа, на которой код обязан работать** — продуктивная
+//!   версия заказчика, а её на машине нет ни в каком виде.
 //!
-//!   Пишем версию этой машины, и это сознательно **безопасное, а не
-//!   полезное** значение: польза у ключа появляется, когда там стоит самая
-//!   старая платформа, на которой код обязан работать (платформа
-//!   заказчика), а её коннектор знать не может — это решение человека.
-//!   Наша версия ложных тревог не даёт (код, написанный на этой платформе,
-//!   её же элементами и ограничен), а ключ в файле делает ручку заметной:
-//!   комментарий рядом говорит, на что её менять.
+//!   Версия, которую находит `find_1cv8`, — это платформа машины, где
+//!   работает коннектор: в образе стенд, у разработчика самая новая из
+//!   установленных (их может быть несколько). Записать её как минимум
+//!   значило бы выдумать число и ошибиться в обе стороны: стенд новее
+//!   прода — анализатор промолчит про то, чего у заказчика нет (то самое
+//!   тихое выключение проверки, против которого вся задача); стенд
+//!   старее — заругается на верный код. Поэтому ключа нет вовсе, а в
+//!   файле рядом стоит закомментированный пример: ручка видна, числа мы
+//!   не сочиняем.
 //! * `target_platform_version` — наоборот, верных проверок не добавляет
 //!   (фактов для чужой линии в каталоге анализатора просто нет), он умеет
 //!   только **погасить ложные срабатывания**. Поэтому пишем ровно в одном
@@ -94,20 +98,25 @@ pub fn catalogue_line(cache: &Path) -> String {
     read().unwrap_or_else(|| BUNDLED.to_string())
 }
 
-/// Что должно стоять в файле при этой платформе и этом каталоге. Пусто —
-/// писать нечего: версия не разобралась (лживый toml хуже отсутствующего)
-/// или `target` не нужен, потому что клиент не новее каталога.
-pub fn expected(client: &str, catalogue: &str) -> Vec<(&'static str, String)> {
+/// Линия платформы этой машины — три компонента или `None`, если версия
+/// не разобралась.
+pub fn machine_line(client: &str) -> Option<String> {
     let l = line(client);
+    (!parts(&l).is_empty()).then_some(l)
+}
+
+/// Что должно стоять в файле при этой платформе и этом каталоге. Ключ
+/// один — `target_platform_version`, и только когда линия машины **новее**
+/// каталога анализатора: иначе он не нужен (равная линия) или бесполезен
+/// (старее — ложных «нет такого имени» не бывает). Пусто — файла не будет
+/// вовсе: лживый toml хуже отсутствующего.
+pub fn expected(client: &str, catalogue: &str) -> Vec<(&'static str, String)> {
+    let Some(l) = machine_line(client) else { return Vec::new() };
     let (ours, theirs) = (parts(&l), parts(catalogue));
-    if ours.is_empty() {
+    if theirs.is_empty() || ours <= theirs {
         return Vec::new();
     }
-    let mut v = vec![(MIN, l.clone())];
-    if !theirs.is_empty() && ours > theirs {
-        v.push((TARGET, l));
-    }
-    v
+    vec![(TARGET, l)]
 }
 
 /// Что в файле стоит сейчас — только наши ключи, значениями как написано.
@@ -140,13 +149,23 @@ pub fn found(project: &Path) -> Vec<(&'static str, String)> {
 }
 
 /// Зачем ключ нужен — рядом с ним же: человек читает файл, а не спеку.
-/// У `min` объяснение длиннее, потому что это **ручка**: польза появляется,
-/// когда там стоит версия заказчика, а не этой машины.
-fn why(key: &str) -> &'static str {
-    match key {
-        MIN => "# min_platform_version — самая старая платформа, на которой код обязан\n# работать. Здесь версия этой машины: проверка включена, но молчит.\n# Поставьте версию заказчика, и bsl-analyzer начнёт называть\n# элементы платформы, которых у него нет.\n",
-        _ => "# target_platform_version — линия платформы этой машины: она новее\n# каталога анализатора, и без этой строки он считает имена нового\n# выпуска неизвестными.\n",
-    }
+fn why(_key: &str) -> &'static str {
+    "# target_platform_version — линия платформы этой машины: она новее\n# каталога анализатора, и без этой строки он считает имена нового\n# выпуска неизвестными.\n"
+}
+
+/// Подсказка про ручку, которой программа не трогает. Идёт **только в новый
+/// файл** и **только закомментированной**: ключа нет — значит анализатор
+/// ведёт себя ровно так, как без файла, и никакого числа мы не выдумали. А
+/// ручка при этом видна тому, кто файл откроет.
+fn knob() -> String {
+    format!(
+        "\n# {MIN} — самая старая платформа, на которой код обязан работать\n\
+         # (продуктивная версия заказчика). Коннектор её не знает и не\n\
+         # подставляет: версия этой машины тут была бы выдумкой. Снимите\n\
+         # комментарий и впишите свою — тогда bsl-analyzer начнёт называть\n\
+         # элементы платформы, которых у заказчика нет.\n\
+         # {MIN} = \"8.3.21\"\n"
+    )
 }
 
 /// Кладёт недостающие ключи в `bsl-analyzer.toml` корня проекта и возвращает
@@ -174,7 +193,7 @@ pub fn ensure(project: &Path, want: &[(&'static str, String)]) -> Result<Vec<&'s
     let path = project.join(FILE);
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => format!("{head}\n{t}"),
-        Err(_) => head,
+        Err(_) => format!("{head}{}", knob()),
     };
     std::fs::write(&path, text).map_err(|e| format!("не удалось записать {}: {e}", path.display()))?;
     Ok(add.iter().map(|(k, _)| *k).collect())
@@ -183,34 +202,49 @@ pub fn ensure(project: &Path, want: &[(&'static str, String)]) -> Result<Vec<&'s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::tempdir::Dir;
 
+    /// Минимум коннектор не пишет вовсе — только подсказкой в комментарии:
+    /// версия этой машины (в образе — стенд, у разработчика — самая новая из
+    /// установленных) не имеет отношения к продуктивной версии заказчика, а
+    /// именно она и есть смысл ключа.
     #[test]
-    fn the_minimum_version_is_written_whenever_the_platform_is_known() {
-        // Клиент не новее каталога — `target` не нужен, но `min` нужен всегда.
-        assert_eq!(expected("8.3.21.1234", "8.3.27"), vec![(MIN, "8.3.21".to_string())]);
-        assert_eq!(expected("8.3.27.1508", "8.3.27"), vec![(MIN, "8.3.27".to_string())]);
+    fn the_minimum_is_never_written_only_hinted() {
+        assert_eq!(expected("8.3.21.1234", "8.3.27"), Vec::new());
+        assert_eq!(expected("8.3.27.1508", "8.3.27"), Vec::new());
+        let d = Dir::new();
+        assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
+        // Ключа нет — значит анализатор ведёт себя как без файла; а ручка видна.
+        assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);
+        let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
+        assert!(text.contains(&format!("# {MIN} = ")), "подсказка про ручку обязана быть:
+{text}");
+        assert!(!text.lines().any(|l| l.trim_start().starts_with(MIN)), "незакомментированного минимума быть не должно:
+{text}");
     }
 
     #[test]
-    fn a_newer_client_also_gets_the_target_line() {
-        assert_eq!(expected("8.5.1.1150", "8.3.27"), vec![(MIN, "8.5.1".to_string()), (TARGET, "8.5.1".to_string())]);
+    fn only_a_newer_machine_gets_the_target_line() {
+        assert_eq!(expected("8.5.1.1150", "8.3.27"), vec![(TARGET, "8.5.1".to_string())]);
+        // Равная линия — ключ не нужен; старее — бесполезен.
+        assert!(expected("8.3.27.1508", "8.3.27").is_empty());
+        assert!(expected("8.3.21.1234", "8.3.27").is_empty());
     }
 
     #[test]
     fn an_unparsable_version_writes_nothing() {
         assert!(expected("", "8.3.27").is_empty());
-        // Каталог не разобрался — `min` всё равно пишем, `target` без
-        // сравнения не выводится.
-        assert_eq!(expected("8.5.1.1150", "неизвестно"), vec![(MIN, "8.5.1".to_string())]);
+        assert_eq!(machine_line(""), None);
+        // Каталог не разобрался — сравнивать не с чем, и строки нет.
+        assert!(expected("8.5.1.1150", "неизвестно").is_empty());
+        assert_eq!(machine_line("8.5.1.1150").as_deref(), Some("8.5.1"));
     }
 
     #[test]
     fn versions_compare_as_numbers_not_text() {
-        assert!(expected("8.3.27.1508", "8.3.9").iter().any(|(k, _)| *k == TARGET));
-        assert!(!expected("8.3.9.1000", "8.3.27").iter().any(|(k, _)| *k == TARGET));
+        assert_eq!(expected("8.3.27.1508", "8.3.9"), vec![(TARGET, "8.3.27".to_string())]);
+        assert!(expected("8.3.9.1000", "8.3.27").is_empty());
     }
-
-    use crate::project::tempdir::Dir;
 
     fn cache_with(hash: &str, manifest: &str) -> Dir {
         let d = Dir::new();
@@ -237,10 +271,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_file_carries_both_lines() {
+    fn a_fresh_file_carries_the_target_line() {
         let d = Dir::new();
         let want = expected("8.5.1.1150", "8.3.27");
-        assert_eq!(ensure(d.path(), &want), Ok(vec![MIN, TARGET]));
+        assert_eq!(ensure(d.path(), &want), Ok(vec![TARGET]));
         assert_eq!(found(d.path()), want);
         // Повторный вызов файл не меняет.
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
@@ -251,7 +285,9 @@ mod tests {
     #[test]
     fn a_written_line_is_left_alone() {
         let d = Dir::new();
-        let mine = "# моё\nmin_platform_version = \"8.3.21\"\ntarget_platform_version = \"8.3.21\"\n";
+        let mine = "# моё
+target_platform_version = \"8.3.21\"
+";
         std::fs::write(d.path().join(FILE), mine).unwrap();
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(Vec::new()));
         assert_eq!(std::fs::read_to_string(d.path().join(FILE)).unwrap(), mine);
@@ -261,12 +297,18 @@ mod tests {
     #[test]
     fn an_existing_file_keeps_its_other_keys() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "# мой файл\nmin_platform_version = \"8.3.21\"\n\n[diagnostics]\nenabled = true\n").unwrap();
+        std::fs::write(d.path().join(FILE), "# мой файл
+min_platform_version = \"8.3.21\"
+
+[diagnostics]
+enabled = true
+").unwrap();
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
         assert!(text.contains("# мой файл") && text.contains("[diagnostics]"), "{text}");
         // Корневой ключ — до первого раздела, иначе он попал бы в `[diagnostics]`.
         assert!(text.find(TARGET) < text.find("[diagnostics]"), "{text}");
+        // Минимум человека цел и значением, и тем, что он остался его.
         assert_eq!(found(d.path()), vec![(MIN, "8.3.21".to_string()), (TARGET, "8.5.1".to_string())]);
     }
 
@@ -277,14 +319,14 @@ mod tests {
     fn a_key_inside_a_section_is_not_ours() {
         let d = Dir::new();
         std::fs::write(d.path().join(FILE), "[diagnostics]
-min_platform_version = \"8.3.21\"
+target_platform_version = \"8.3.21\"
 ").unwrap();
         assert!(found(d.path()).is_empty());
-        assert_eq!(ensure(d.path(), &expected("8.3.27.1508", "8.3.27")), Ok(vec![MIN]));
-        assert_eq!(found(d.path()), vec![(MIN, "8.3.27".to_string())]);
+        assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
+        assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);
         // И наша строка легла до раздела, иначе её не увидел бы и анализатор.
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
-        assert!(text.find(MIN) < text.find("[diagnostics]"), "{text}");
+        assert!(text.find(TARGET) < text.find("[diagnostics]"), "{text}");
     }
 
     /// Хвостовой комментарий — верный toml, и в значение он не идёт: иначе
@@ -297,9 +339,9 @@ min_platform_version = \"8.3.21\"
         assert_eq!(found(d.path()), vec![(MIN, "8.3.21".to_string())]);
     }
 
-    /// Дописывается только объяснение того ключа, который дописали: шапка
-    /// «здесь версия этой машины» над чужой строкой человека была бы ложью о
-    /// его значении.
+    /// Объяснение дописывается только к тому ключу, который дописали: своей
+    /// подсказки про минимум в чужом файле быть не должно — она говорит
+    /// «снимите комментарий и впишите свою», а строка там уже есть.
     #[test]
     fn the_explanation_belongs_to_the_key_it_explains() {
         let d = Dir::new();
@@ -307,20 +349,24 @@ min_platform_version = \"8.3.21\"
 ").unwrap();
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
-        assert!(text.contains("# target_platform_version"), "{text}");
-        assert!(!text.contains("Здесь версия этой машины"), "объяснение про min поверх чужой строки — ложь:
+        assert!(text.contains(why(TARGET)), "объяснение своего ключа обязано быть:
+{text}");
+        // Сверяемся с самим текстом подсказки, а не с её пересказом: иначе
+        // переформулировка выхолостила бы защиту (находка повторного ревью).
+        assert!(!text.contains(knob().trim()), "подсказка про ручку поверх чужой строки лишняя:
 {text}");
         assert_eq!(found(d.path()), vec![(MIN, "8.2.19".to_string()), (TARGET, "8.5.1".to_string())]);
     }
 
-    /// Закомментированный ключ — не ключ: иначе пример в комментарии
-    /// запретил бы запись.
+    /// Закомментированный ключ — не ключ: иначе наша же подсказка про
+    /// минимум запретила бы запись (и пример в комментарии — тоже).
     #[test]
     fn a_commented_key_is_not_a_key() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "# min_platform_version = \"8.3.21\"\n").unwrap();
+        std::fs::write(d.path().join(FILE), "# target_platform_version = \"8.3.21\"
+").unwrap();
         assert!(found(d.path()).is_empty());
-        assert_eq!(ensure(d.path(), &expected("8.3.27.1508", "8.3.27")), Ok(vec![MIN]));
-        assert_eq!(found(d.path()), vec![(MIN, "8.3.27".to_string())]);
+        assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
+        assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);
     }
 }

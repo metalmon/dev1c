@@ -90,26 +90,31 @@ pub fn licence_fact(state: &crate::licence::State) -> Check {
 /// него чужая строка жила бы молча, а молчание тут и есть отказ — ради него
 /// файл и затевался.
 ///
-/// Разошлось — провал ровно по одной строке, `target_platform_version`: она
-/// говорит анализатору, на какой линии платформы код, и строка не от этой
-/// машины гасит проверку имён. `min_platform_version` — **ручка человека**
-/// (её смысл — платформа заказчика, см. `analyzer::why`), и расхождением она
-/// быть не может: ругаться на правку, к которой сами же приглашаем
-/// комментарием в файле, значило бы держать проверку вечно жёлтой (находка
-/// ревью задачи 36).
+/// Провал — ровно по одной строке, `target_platform_version`: она говорит
+/// анализатору, на какой линии платформы код, и значение не от этой машины
+/// гасит проверку имён. `min_platform_version` коннектор не пишет вовсе
+/// (решение заказчика 2026-10-21: версия машины — не минимум заказчика), и
+/// расхождением она быть не может — только сведением: её поставил человек.
 ///
-/// Чистая: `want` — что даёт эта машина (`analyzer::expected`), `have` — что
-/// стоит в корне файла (`analyzer::found`). Показываем то, что в файле, а не
-/// то, что мы бы написали: иначе зелёный факт называл бы строку, которой там
-/// нет.
-pub fn analyzer_fact(want: &[(&'static str, String)], have: &[(&'static str, String)]) -> Check {
+/// Чистая. `ours` — линия платформы этой машины (`analyzer::machine_line`);
+/// `None` значит, что платформы нет и сверять нечем — тогда факт так и
+/// говорит, а не выдаёт непроверенное за проверенное (находка повторного
+/// ревью задачи 36). `want` — что эта машина записала бы
+/// (`analyzer::expected`), `have` — что стоит в корне файла
+/// (`analyzer::found`). Показываем то, что в файле, а не то, что мы бы
+/// написали: иначе зелёный факт называл бы строку, которой там нет.
+pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: &[(&'static str, String)]) -> Check {
     use crate::analyzer::{FILE, MIN, TARGET};
     let got = |key: &str| have.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
-    // Линия этой машины известна из `want`: `min` там стоит всегда, когда
-    // платформа найдена.
-    let ours = want.iter().find(|(k, _)| *k == MIN).map(|(_, v)| v.clone());
-    if let (Some(ours), Some(target)) = (&ours, got(TARGET)) {
-        if &target != ours {
+    let shown = || have.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join(", ");
+    let Some(ours) = ours else {
+        return match have.is_empty() {
+            true => Check::note(ANALYZER, "версия платформы неизвестна — строку не пишем"),
+            false => Check::note(ANALYZER, format!("платформу 1С не нашли — строки в {FILE} не сверяли: {}", shown())),
+        };
+    };
+    if let Some(target) = got(TARGET) {
+        if target != ours {
             return Check::fail(
                 ANALYZER,
                 format!("{TARGET} = {target}, а платформа этой машины {ours}"),
@@ -123,17 +128,16 @@ pub fn analyzer_fact(want: &[(&'static str, String)], have: &[(&'static str, Str
         return Check::note(ANALYZER, format!("{where_}: {} — их запишет 1c-connect install", missing.join(", ")));
     }
     if have.is_empty() {
-        return Check::note(ANALYZER, "версия платформы неизвестна — строку не пишем");
+        // Файла нет, и он не нужен: линия машины не новее каталога
+        // анализатора, а минимум — не наше дело.
+        return Check::note(ANALYZER, format!("платформа {ours} — строка анализатору не нужна"));
     }
-    let mut shown: Vec<String> = have.iter().map(|(k, v)| format!("{k} = {v}")).collect();
-    // Ручка переведена человеком — говорим об этом прямо: иначе читатель
-    // решит, что программа записала версию заказчика сама.
-    if let (Some(min), Some(ours)) = (got(MIN), &ours) {
-        if &min != ours {
-            shown.push(format!("платформа машины {ours} — минимум задан вручную"));
-        }
+    let mut lines = vec![shown()];
+    // Минимум в файле — всегда рука человека: программа его не пишет.
+    if got(MIN).is_some() {
+        lines.push("минимум задан вручную".into());
     }
-    Check::pass(ANALYZER, shown.join(", "))
+    Check::pass(ANALYZER, lines.join(", "))
 }
 
 /// Адрес среды пуст — факт называет поле, а не говорит «Gitea не отвечает»
@@ -607,8 +611,9 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         None => Check::fail(PLATFORM, "1cv8.exe не найден", "установите платформу 1С на эту машину"),
     }));
     v.push(within(t0, budget, ANALYZER, || {
+        let ours = platform.as_deref().and_then(crate::flow::platform_version_from_exe).and_then(|v| crate::analyzer::machine_line(&v));
         let want = crate::ops_host::analyzer_lines_of(platform.as_deref());
-        analyzer_fact(&want, &crate::analyzer::found(std::path::Path::new(&h.project)))
+        analyzer_fact(ours.as_deref(), &want, &crate::analyzer::found(std::path::Path::new(&h.project)))
     }));
     if cfg!(target_os = "linux") {
         v.push(within(t0, budget, DISPLAY, || {
@@ -944,56 +949,59 @@ mod tests {
         assert!(ok.detail.contains(&until), "{ok:?}");
     }
 
-    /// Устаревшая строка в файле опаснее её отсутствия: `min_platform_version`
-    /// от старой платформы начинает ругаться на верный код, а
-    /// `target_platform_version` от чужой линии гасит проверку имён. Поэтому
-    /// расхождение — провал со словами, а не тихая правка файла.
+    /// Чужая строка `target` опаснее её отсутствия: она гасит проверку имён
+    /// молча. Поэтому расхождение — провал со словами, а не тихая правка
+    /// файла.
     #[test]
     fn a_stale_analyzer_line_is_named_as_such() {
-        use crate::analyzer::{MIN, TARGET};
+        use crate::analyzer::TARGET;
         let want = crate::analyzer::expected("8.5.1.1150", "8.3.27");
-        let stale = vec![(MIN, "8.3.21".to_string()), (TARGET, "8.3.21".to_string())];
-        let c = analyzer_fact(&want, &stale);
+        let c = analyzer_fact(Some("8.5.1"), &want, &[(TARGET, "8.3.21".to_string())]);
         assert!(!c.ok, "{c:?}");
         assert!(c.detail.contains("8.3.21") && c.detail.contains("8.5.1"), "{c:?}");
         assert!(c.hint.contains(crate::analyzer::FILE), "{c:?}");
         // Совпало — зелено и названо значением, а не словом «ок».
-        let ok = analyzer_fact(&want, &want);
+        let ok = analyzer_fact(Some("8.5.1"), &want, &want);
         assert!(ok.ok && !ok.info && ok.detail.contains("8.5.1"), "{ok:?}");
         // Файла нет — сведение, а не провал: его запишет install.
-        let none = analyzer_fact(&want, &[]);
+        let none = analyzer_fact(Some("8.5.1"), &want, &[]);
         assert!(none.ok && none.info && none.detail.contains(crate::analyzer::FILE), "{none:?}");
-        // Платформы нет — писать нечего, и факт об этом так и говорит
-        // (провал по платформе стоит выше и своим именем).
-        let unknown = analyzer_fact(&[], &[]);
-        assert!(unknown.ok && unknown.info && unknown.detail.contains("неизвестна"), "{unknown:?}");
+        // Строка не нужна вовсе (линия машины не новее каталога) — тоже
+        // сведение, и оно называет платформу, а не молчит.
+        let not_needed = analyzer_fact(Some("8.3.27"), &[], &[]);
+        assert!(not_needed.ok && not_needed.info && not_needed.detail.contains("8.3.27"), "{not_needed:?}");
     }
 
-    /// Два исхода, которых прежний факт не различал (находки ревью задачи
-    /// 36): строка `target` в файле, которой мы бы не написали, — тихо
-    /// выключенная проверка имён, и потому провал; а `min`, переведённый
-    /// человеком на платформу заказчика, — не расхождение вовсе, иначе факт
-    /// ругался бы на правку, к которой сам же приглашает.
+    /// Исходы, которых прежний факт не различал (находки ревью задачи 36):
+    /// строка `target`, которой мы бы не написали, — тихо выключенная
+    /// проверка имён, и потому провал; `min`, поставленный человеком, — не
+    /// расхождение вовсе (коннектор его не пишет); а без найденной платформы
+    /// факт не утверждает, что сверил.
     #[test]
     fn the_fact_judges_what_is_in_the_file_not_what_we_would_write() {
         use crate::analyzer::{MIN, TARGET};
         // Платформа и каталог одной линии — `target` мы бы не писали; он в
         // файле есть и от чужой линии: гасит проверку имён молча.
         let want = crate::analyzer::expected("8.3.27.1508", "8.3.27");
-        assert!(!want.iter().any(|(k, _)| *k == TARGET), "в этом случае target не наш");
-        let c = analyzer_fact(&want, &[(MIN, "8.3.27".into()), (TARGET, "8.5.1".into())]);
+        assert!(want.is_empty(), "в этом случае строка не наша");
+        let c = analyzer_fact(Some("8.3.27"), &want, &[(TARGET, "8.5.1".into())]);
         assert!(!c.ok && c.detail.contains(TARGET) && c.detail.contains("8.5.1"), "{c:?}");
-        // Человек перевёл минимум на платформу заказчика — это ручка, а не
-        // расхождение; факт зелёный и говорит, что значение задано вручную.
+        // Минимум человека — ручка, а не расхождение: факт зелёный и
+        // говорит, что значение задано вручную.
         let newer = crate::analyzer::expected("8.5.1.1150", "8.3.27");
-        let by_hand = analyzer_fact(&newer, &[(MIN, "8.2.19".into()), (TARGET, "8.5.1".into())]);
+        let by_hand = analyzer_fact(Some("8.5.1"), &newer, &[(MIN, "8.2.19".into()), (TARGET, "8.5.1".into())]);
         assert!(by_hand.ok && !by_hand.info, "{by_hand:?}");
         assert!(by_hand.detail.contains("8.2.19") && by_hand.detail.contains("вручную"), "{by_hand:?}");
         // Строка, которую человек удалил, не называется зелёным фактом как
         // стоящая в файле: сведение называет именно её.
-        let gone = analyzer_fact(&newer, &[(MIN, "8.5.1".into())]);
+        let gone = analyzer_fact(Some("8.5.1"), &newer, &[(MIN, "8.5.1".into())]);
         assert!(gone.ok && gone.info, "{gone:?}");
         assert!(gone.detail.contains(TARGET) && !gone.detail.contains(MIN), "{gone:?}");
+        // Платформы нет — сверять нечем, и факт этого не скрывает.
+        let blind = analyzer_fact(None, &[], &[(TARGET, "8.5.1".into())]);
+        assert!(blind.ok && blind.info, "{blind:?}");
+        assert!(blind.detail.contains("не сверяли") && blind.detail.contains("8.5.1"), "{blind:?}");
+        assert!(analyzer_fact(None, &[], &[]).detail.contains("неизвестна"));
     }
 
     /// Пустое поле — провал про поле, а не «Gitea не отвечает» по

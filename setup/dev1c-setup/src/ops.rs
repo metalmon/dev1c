@@ -73,6 +73,13 @@ pub fn run_args(cfg: &Cfg, facts: Option<&crate::cfg::Facts>) -> Vec<String> {
         format!("{}:/home", cfg.volume("home")),
         s("-v"),
         format!("{}:/var/lib/gitea", cfg.volume("gitea")),
+        // Платформа 1С и демо-база приезжают томами, а не слоями образа:
+        // вместе они весят гигабайты и меняются своим чередом, отдельно от
+        // стенда (см. Dockerfile.1c и спеку, раздел «Комплекты»).
+        s("-v"),
+        format!("{}:/opt/1cv8t", cfg.volume("platform")),
+        s("-v"),
+        format!("{}:/opt/1c-demo", cfg.volume("demo")),
     ];
     if cfg.server.gpu {
         // Флаги GPU у движков разные.
@@ -270,10 +277,17 @@ impl Op<Ctx> for Image {
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
         if level >= CleanLevel::Data {
             let _ = docker::run(ctx, &["rmi", &ctx.cfg.image()]);
+            let _ = docker::run(ctx, &["rmi", &ctx.cfg.env_image()]);
         }
         Ok(())
     }
 }
+
+/// Тома стенда. Пять, а не три: platform и demo несут платформу 1С и
+/// демо-базу — без них контейнер поднимется, но 1С в нём не будет. Дома
+/// рабочих мест и Gitea создаются пустыми и наполняются при первом входе,
+/// а эти два вносятся из архива комплекта (операция payload ниже).
+const VOLUMES: [&str; 5] = ["home", "gitea", "models", "platform", "demo"];
 
 struct Volumes;
 impl Op<Ctx> for Volumes {
@@ -284,7 +298,7 @@ impl Op<Ctx> for Volumes {
         "Тома данных"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        let missing: Vec<String> = ["home", "gitea", "models"]
+        let missing: Vec<String> = VOLUMES
             .iter()
             .map(|s| ctx.cfg.volume(s))
             .filter(|v| !docker::volume_exists(ctx, v))
@@ -296,13 +310,13 @@ impl Op<Ctx> for Volumes {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        ["home", "gitea", "models"]
+        VOLUMES
             .iter()
             .map(|s| Action::new(format!("{} volume create {}", ctx.engine(), ctx.cfg.volume(s))))
             .collect()
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        for s in ["home", "gitea", "models"] {
+        for s in VOLUMES {
             let v = ctx.cfg.volume(s);
             // В режиме показа машину не спрашиваем: план описывает установку
             // на чистый сервер, а не на ту машину, где его печатают. Иначе
@@ -326,11 +340,91 @@ impl Op<Ctx> for Volumes {
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
         if level >= CleanLevel::Data {
-            for s in ["home", "gitea", "models"] {
+            for s in VOLUMES {
                 let _ = docker::run(ctx, &["volume", "rm", &ctx.cfg.volume(s)]);
             }
             ctx.ok("тома удалены");
         }
+        Ok(())
+    }
+}
+
+/// Архив платформы 1С и демо-базы: едет в комплекте, вносится в тома
+/// platform и demo. Без него контейнер стенда поднимется, но 1С в нём не
+/// будет — ни платформы, ни базы.
+const PAYLOAD_ARCHIVE: &str = "dev1c-1c-payload.tar.gz";
+
+struct Payload;
+impl Op<Ctx> for Payload {
+    fn id(&self) -> &'static str {
+        "payload"
+    }
+    fn title(&self) -> &'static str {
+        "Платформа 1С и демо-база"
+    }
+    fn state(&self, ctx: &Ctx) -> OpState {
+        let archive = ctx.kit.path(PAYLOAD_ARCHIVE);
+        if ctx.dry_run {
+            return OpState::Missing;
+        }
+        if !archive.exists() {
+            return OpState::Blocked(barrier::missing_file("архив платформы", &archive, &crate::ui::host_hint()));
+        }
+        // «Сделано» — это когда в томе лежит платформа, а не когда архив
+        // на месте. Проверяем делом: заглядываем в том одноразовым
+        // контейнером. Отметка в состоянии комплекта соврала бы после
+        // ручной чистки томов.
+        let probe = docker::ask(
+            ctx,
+            &[
+                "run", "--rm",
+                "-v", &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
+                "--entrypoint", "sh",
+                &ctx.cfg.image(),
+                "-c", "ls /opt/1cv8t/x86_64 2>/dev/null | head -1",
+            ],
+        );
+        match probe {
+            Ok(o) if o.ok() && !o.text.trim().is_empty() => OpState::Done(format!("платформа {}", o.text.trim())),
+            _ => OpState::Missing,
+        }
+    }
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        vec![Action::new(format!(
+            "{} run --rm -v {}:/opt/1cv8t -v {}:/opt/1c-demo -v <комплект>:/kit:ro {} sh -c '1c-stand import-payload --force < /kit/{}' (несколько минут)",
+            ctx.engine(),
+            ctx.cfg.volume("platform"),
+            ctx.cfg.volume("demo"),
+            ctx.cfg.image(),
+            PAYLOAD_ARCHIVE
+        ))]
+    }
+    fn apply(&self, ctx: &Ctx) -> Result<()> {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let kit = ctx.kit.root.to_string_lossy().to_string();
+        let o = docker::run(
+            ctx,
+            &[
+                "run", "--rm",
+                "-v", &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
+                "-v", &format!("{}:/opt/1c-demo", ctx.cfg.volume("demo")),
+                "-v", &format!("{kit}:/kit:ro"),
+                "--entrypoint", "sh",
+                &ctx.cfg.image(),
+                "-c", &format!("1c-stand import-payload --force < /kit/{PAYLOAD_ARCHIVE}"),
+            ],
+        )?;
+        anyhow::ensure!(o.ok(), "платформа не внесена: {}", o.tail(3).join(" "));
+        ctx.ok("платформа и демо-база в томах");
+        Ok(())
+    }
+    fn revert(&self, _ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
+        // Тома снимает операция volumes — отдельной уборки здесь не нужно.
+        None
+    }
+    fn revert_apply(&self, _ctx: &Ctx, _level: CleanLevel) -> Result<()> {
         Ok(())
     }
 }
@@ -604,7 +698,7 @@ pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
 }
 
 pub fn server(cfg: &Cfg) -> Vec<Box<dyn Op<Ctx>>> {
-    let mut v: Vec<Box<dyn Op<Ctx>>> = vec![Box::new(Env), Box::new(Image), Box::new(Volumes), Box::new(Model)];
+    let mut v: Vec<Box<dyn Op<Ctx>>> = vec![Box::new(Env), Box::new(Image), Box::new(Volumes), Box::new(Payload), Box::new(Model)];
     // Сервер модели — до контейнера среды: его числа уходят туда переменными.
     v.extend(crate::ops_llama::ops(cfg.form()));
     v.push(Box::new(Container));

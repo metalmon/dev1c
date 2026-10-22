@@ -290,6 +290,9 @@ jobs:
           docker exec dev1c /opt/bsl-analyzer/bsl-analyzer --version
           docker exec dev1c sh -c 'command -v nc'
           docker exec dev1c sh /usr/local/bin/test-entrypoint-ports
+          # Git из Zed ограничен двумя ядрами: вызовы из редактора не забирают
+          # всю машину, а git пользователя в терминале не тронут.
+          docker exec dev1c sh /usr/local/bin/test-git-cpuset
           docker exec dev1c tea --version | head -1
           docker exec dev1c sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
           docker exec dev1c test -s /home/dev1/.config/zed/AGENTS.md \

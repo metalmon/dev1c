@@ -236,8 +236,9 @@ kit)
     # знает откуда. Лежащие файлы не трогаем, чтобы можно было собрать
     # комплект с бинарником из конкретного прогона или собранным локально;
     # обновить принудительно — DEV1C_FETCH=1.
-    fetch() { # $1 — имя артефакта, $2 — куда, $3 — файл внутри
-        [ -n "${DEV1C_FETCH:-}" ] || [ ! -f "$2/$3" ] || return 0
+    fetch() { # $1 — артефакт, $2 — куда, $3 — файл внутри, $4 — под каким именем нужен
+        want=${4:-$3}
+        [ -n "${DEV1C_FETCH:-}" ] || [ ! -f "$2/$want" ] || return 0
         command -v gh >/dev/null 2>&1 \
             || die "нет $2/$3, и gh недоступен — положите артефакт $1 из CI вручную"
         [ -n "${RUN_ID:-}" ] || RUN_ID=$(gh run list --branch main --status success \
@@ -251,12 +252,25 @@ kit)
             RUN_SHA=$(gh run view "$RUN_ID" --json headSha --jq .headSha 2>/dev/null || echo '')
             head=$(git rev-parse HEAD 2>/dev/null || echo '')
             if [ -n "$RUN_SHA" ] && [ "$RUN_SHA" != "$head" ]; then
-                say "ВНИМАНИЕ: прогон $RUN_ID собран с $(echo "$RUN_SHA" | cut -c1-8), а здесь $(echo "$head" | cut -c1-8) — в комплект поедет программа другой сборки"
+                # Кричать стоит только о расхождении В ПРОГРАММЕ: коммит в
+                # документацию или в тестовый скрипт до бинарника не доходит,
+                # а предупреждение, которое кричит не по делу, перестают
+                # читать — и оно промолчит, когда расхождение настоящее.
+                if git diff --quiet "$RUN_SHA" HEAD -- setup 2>/dev/null; then
+                    say "прогон $RUN_ID собран с $(echo "$RUN_SHA" | cut -c1-8), здесь $(echo "$head" | cut -c1-8), но в setup/ разницы нет — бинарник подходит"
+                else
+                    say "ВНИМАНИЕ: прогон $RUN_ID собран с $(echo "$RUN_SHA" | cut -c1-8), а здесь $(echo "$head" | cut -c1-8), и setup/ с тех пор правили — в комплект поедет программа другой сборки"
+                fi
             fi
         fi
         say "беру $1 из прогона $RUN_ID"
+        # Распаковка поверх существующего файла у gh кончается отказом
+        # «The file exists», поэтому убираем оба имени — и то, что лежит в
+        # артефакте, и то, под которым файл нужен нам.
+        rm -f "$2/$3" "$2/$want"
         gh run download "$RUN_ID" -n "$1" -D "$2" >/dev/null \
             || die "не скачался артефакт $1 из прогона $RUN_ID"
+        [ "$3" = "$want" ] || mv "$2/$3" "$2/$want"
     }
     fetch dev1c-setup-linux "$bins" dev1c-setup
     # Машине сборки нужен бинарник, который на ней запускается: pack.sh
@@ -265,10 +279,11 @@ kit)
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) fetch dev1c-setup-windows "$bins" dev1c-setup.exe ;;
     esac
-    fetch 1c-connect-linux artifacts 1c-connect
-    # Артефакт кладёт файл под своим именем; образу он нужен как
-    # 1c-connect-linux (см. Dockerfile.1c).
-    [ ! -f artifacts/1c-connect ] || mv artifacts/1c-connect artifacts/1c-connect-linux
+    # Артефакт кладёт файл как 1c-connect, образу он нужен как
+    # 1c-connect-linux (см. Dockerfile.1c) — переименование делает fetch, и
+    # проверку «уже есть» он тоже делает по нужному нам имени, иначе файл
+    # качался бы каждый раз заново.
+    fetch 1c-connect-linux artifacts 1c-connect 1c-connect-linux
     chmod +x "$bins/dev1c-setup" 2>/dev/null || true
     [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup"
 

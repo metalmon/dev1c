@@ -38,6 +38,7 @@ pub fn desired_args(ctx: &Ctx) -> Vec<String> {
         host: &host,
         port: ctx.cfg.model.port,
         slot_floor: ctx.cfg.model.fit_ctx,
+        slots: ctx.cfg.model.slots,
         // Предел не узнан — кэш остаётся на полу: лучше потеря настройки, чем
         // число, выдуманное от неизвестной памяти.
         cache_ram: llama::cache_ram_from_limit(llama::limit_mb(ctx).unwrap_or(0)),
@@ -205,6 +206,7 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
         host: "0.0.0.0",
         port: 8080,
         slot_floor: cfg.model.fit_ctx,
+        slots: cfg.model.slots,
         cache_ram,
         token_file: None,
     }));

@@ -341,9 +341,10 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
             "model.file" => ctx.cfg.model.file = val.into(),
             "model.port" => ctx.cfg.model.port = val.parse().context("model.port — число")?,
             "model.agents" => ctx.cfg.model.agents = val.parse().context("model.agents — число")?,
+            "model.slots" => ctx.cfg.model.slots = val.parse().context("model.slots — число")?,
             "model.fit_ctx" => ctx.cfg.model.fit_ctx = val.parse().context("model.fit_ctx — число")?,
             other => anyhow::bail!(
-                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.serve, model.file, model.url, model.key, model.name, model.port, model.agents, model.fit_ctx"
+                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.serve, model.file, model.url, model.key, model.name, model.port, model.agents, model.slots, model.fit_ctx"
             ),
         }
     }

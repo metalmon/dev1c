@@ -41,8 +41,11 @@ pub struct Model {
     pub memory: String,
     /// На сколько агентов делить окно. 1 — не делить (см. спеку: окно на три не делим).
     pub agents: u16,
-    /// Нижняя граница окна НА СЛОТ. Серверу уходит умноженная на слоты (его
-    /// единица измерения), окно выбирает `--fit`; дал меньше — установка
+    /// Мест (слотов) у сервера модели: по одному на рабочее место. Меньше
+    /// трёх — когда карта не вмещает три окна рядом с весами.
+    pub slots: u16,
+    /// Окно НА СЛОТ. Серверу уходит умноженным на slots (его единица
+    /// измерения), и он делит обратно сам; дал меньше — установка
     /// проваливается с обоими числами.
     pub fit_ctx: u32,
 }
@@ -64,6 +67,7 @@ impl Default for Model {
             port: 1235,
             memory: String::new(),
             agents: 1,
+            slots: crate::llama::SLOTS,
             fit_ctx: 65536,
         }
     }
@@ -152,6 +156,9 @@ impl Cfg {
         let m = &self.model;
         anyhow::ensure!(matches!(m.serve.as_str(), "host" | "docker" | "remote"), "[model]: serve — host, docker или remote");
         anyhow::ensure!((1..=3).contains(&m.agents), "[model]: agents — от 1 до 3");
+        // Больше трёх мест бессмысленно: рабочих мест в стенде три, и
+        // лишний слот только отрезает окно у остальных.
+        anyhow::ensure!((1..=3).contains(&m.slots), "[model]: slots — от 1 до 3 (по одному на рабочее место)");
         // Окно обязано вмещать вход не меньше MIN_BUDGET и место под ответ:
         // иначе параметр не отказал бы здесь, а провалил установку после
         // замера, когда сервер уже поднят.
@@ -271,6 +278,7 @@ impl Cfg {
                 ("[model]", "port") => cfg.model.port.to_string(),
                 ("[model]", "memory") => format!("{:?}", cfg.model.memory),
                 ("[model]", "agents") => cfg.model.agents.to_string(),
+                ("[model]", "slots") => cfg.model.slots.to_string(),
                 ("[model]", "fit_ctx") => cfg.model.fit_ctx.to_string(),
                 _ => return None,
             })

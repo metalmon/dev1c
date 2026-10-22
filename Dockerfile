@@ -436,6 +436,18 @@ COPY config/keyboard-layout.xml /etc/skel/.config/xfce4/xfconf/xfce-perchannel-x
 # and this autostart entry runs after both. Its result is written to
 # /tmp/xkb-applied.log for diagnostics.
 COPY config/keyboard-autostart.desktop /etc/xdg/autostart/zz-keyboard.desktop
+# Раскладку задаёт один скрипт на оба случая: старт сеанса (автозапуск выше)
+# и переподключение по RDP. Второе — находка заказчика 2026-10-22: отключиться
+# от сеанса не выходя из него и подключиться снова означало остаться без
+# русской раскладки, потому что xrdp задаёт её по данным клиента при каждом
+# подключении, а наши us,ru применялись только однажды. `reconnectwm.sh` —
+# штатный крючок xrdp ровно для такого («write procedures here you want to
+# execute on reconnect»), в образе он пустой.
+COPY config/keyboard-layout.sh /usr/local/bin/dev1c-keyboard
+RUN sed -i "s/\r$//" /usr/local/bin/dev1c-keyboard \
+    && chmod +x /usr/local/bin/dev1c-keyboard \
+    && printf "#!/bin/sh\\n/usr/local/bin/dev1c-keyboard --after-reconnect &\\n" > /etc/xrdp/reconnectwm.sh \
+    && chmod +x /etc/xrdp/reconnectwm.sh
 # Screen blanking and the screensaver: over RDP they look like a frozen session
 COPY config/session-tweaks.desktop /etc/xdg/autostart/zz-session-tweaks.desktop
 

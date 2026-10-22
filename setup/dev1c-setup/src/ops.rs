@@ -490,7 +490,7 @@ impl Op<Ctx> for Model {
             return vec![];
         }
         vec![Action::new(format!(
-            "скопировать {} в том {} (файл большой, это долго)",
+            "копирую {} в том {}",
             ctx.cfg.model.file,
             ctx.cfg.volume("models")
         ))]

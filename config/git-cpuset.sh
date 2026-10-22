@@ -41,7 +41,10 @@ from_zed() {
 # Набор ядер для git: список CPU через запятую. Пустая строка — без
 # ограничения.
 git_cpus() {
-    if [ -n "${DEV1C_GIT_CPUS:-}" ]; then
+    # Задано (в том числе пустой строкой) — берём как есть, и пустая строка
+    # значит «без ограничения». Не задано — последние два CPU из маски.
+    if [ "${DEV1C_GIT_CPUS+set}" = set ]; then
+        [ -n "$DEV1C_GIT_CPUS" ] || return 0
         printf '%s' "$DEV1C_GIT_CPUS"
         return 0
     fi
@@ -84,6 +87,10 @@ git_cpus() {
 
 # Запуск git с ограничениями. Порядок обёрток не важен: каждая выставляет своё
 # свойство и exec-ает следующую.
+#
+# Каждая обёртка добавляется только если она есть и действительно работает:
+# ionice в контейнерах с cgroup v2 может не поставить idle-класс, и упавшая
+# обёртка не должна оставлять пользователя вовсе без git.
 run_git() {
     cpus=$1
     shift
@@ -92,10 +99,10 @@ run_git() {
         && taskset -c "$cpus" true >/dev/null 2>&1; then
         set -- taskset -c "$cpus" "$@"
     fi
-    if command -v ionice >/dev/null 2>&1; then
+    if command -v ionice >/dev/null 2>&1 && ionice -c 3 true >/dev/null 2>&1; then
         set -- ionice -c 3 "$@"
     fi
-    if command -v nice >/dev/null 2>&1; then
+    if command -v nice >/dev/null 2>&1 && nice -n 19 true >/dev/null 2>&1; then
         set -- nice -n 19 "$@"
     fi
     exec "$@"

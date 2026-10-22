@@ -389,21 +389,31 @@ impl Op<Ctx> for Payload {
             _ => OpState::Missing,
         }
     }
-    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!(
-            "{} run --rm -v {}:/opt/1cv8t -v {}:/opt/1c-demo -v <комплект>:/kit:ro {} sh -c '1c-stand import-payload --force < /kit/{}' (несколько минут)",
-            ctx.engine(),
-            ctx.cfg.volume("platform"),
-            ctx.cfg.volume("demo"),
-            ctx.cfg.image(),
-            PAYLOAD_ARCHIVE
-        ))]
+    fn plan(&self, _ctx: &Ctx) -> Vec<Action> {
+        // Словами — что произойдёт; саму команду печатает apply под показом,
+        // и в «Ручной путь» идёт она. Повторять её здесь значило бы
+        // обещать строку, которая может с той разойтись.
+        vec![Action::new("распаковать платформу 1С и демо-базу в тома (несколько минут)")]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        if ctx.dry_run {
-            return Ok(());
-        }
-        let kit = ctx.kit.root.to_string_lossy().to_string();
+        // Без выхода по dry_run: именно отсюда команда попадает в «Ручной
+        // путь» инструкции — common::docker под показом её печатает и не
+        // выполняет. Выйти здесь значит потерять шаг платформы в инструкции
+        // заказчика, и молча: plan() ниже описывает его прозой, и страница
+        // выглядит целой.
+        //
+        // Путь комплекта — абсолютный: при обычном запуске (`--kit .`) это
+        // «.», докер 20.10 у заказчика считает такое именем тома, а не
+        // путём. В показе печатаем "$PWD" — команду вставляют из каталога
+        // комплекта, а путь машины, собравшей страницу, был бы неверным.
+        let kit = if ctx.dry_run {
+            "\"$PWD\"".to_string()
+        } else {
+            std::path::absolute(&ctx.kit.root)
+                .unwrap_or_else(|_| ctx.kit.root.clone())
+                .to_string_lossy()
+                .to_string()
+        };
         let o = docker::run(
             ctx,
             &[

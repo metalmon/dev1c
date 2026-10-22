@@ -221,7 +221,16 @@ jobs:
         # model: the local file path is not exercised here (the model is served
         # elsewhere for now). The image is already loaded under its tag, so the
         # kit needs no archive.
+        #
+        # The container comes up from the STAND image, which carries 1C — and
+        # that image cannot be built here: the 1C distribution does not live in
+        # the repository. So the environment image answers to the stand's name
+        # for this step. What that leaves unchecked, plainly: 1C inside the
+        # container, the payload step and the demo base. The payload step does
+        # not pretend otherwise — with no archive in the kit it prints
+        # «пропущено» and the install goes on.
         run: |
+          docker tag oktaplus/dev1c:latest oktaplus/dev1c-1c:latest
           mkdir -p kit
           cat > kit/dev1c.toml <<'EOF'
           [server]

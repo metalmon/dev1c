@@ -243,6 +243,17 @@ kit)
         [ -n "${RUN_ID:-}" ] || RUN_ID=$(gh run list --branch main --status success \
             --limit 1 --json databaseId --jq '.[0].databaseId')
         [ -n "$RUN_ID" ] || die "не нашёл успешного прогона main — положите артефакт $1 вручную"
+        # Какой коммит собран — не праздный вопрос: «последний успешный» это
+        # не «сборка нынешнего main». Когда свежие прогоны падают, успешным
+        # оказывается старый, и комплект собирается из двух разных сборок
+        # программы. Так 22.10.2026 уехала страница без шага платформы.
+        if [ -z "${RUN_SHA:-}" ]; then
+            RUN_SHA=$(gh run view "$RUN_ID" --json headSha --jq .headSha 2>/dev/null || echo '')
+            head=$(git rev-parse HEAD 2>/dev/null || echo '')
+            if [ -n "$RUN_SHA" ] && [ "$RUN_SHA" != "$head" ]; then
+                say "ВНИМАНИЕ: прогон $RUN_ID собран с $(echo "$RUN_SHA" | cut -c1-8), а здесь $(echo "$head" | cut -c1-8) — в комплект поедет программа другой сборки"
+            fi
+        fi
         say "беру $1 из прогона $RUN_ID"
         gh run download "$RUN_ID" -n "$1" -D "$2" >/dev/null \
             || die "не скачался артефакт $1 из прогона $RUN_ID"

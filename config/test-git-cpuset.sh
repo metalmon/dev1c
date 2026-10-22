@@ -4,6 +4,9 @@
 #
 # Настоящий git в тесте подменяется скриптом, печатающим собственное
 # состояние: так видно и маска CPU, и приоритет процесса, и класс I/O.
+#
+# Проверяется и сама установка: `git` по имени обязан резолвиться в
+# /usr/local/bin/git — иначе Zed позовёт настоящий git мимо обёртки.
 set -eu
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -18,12 +21,21 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 # внешняя переменная не должна влиять на проверку.
 unset DEV1C_GIT_CPUS
 
-# Подмена настоящего git.
+# Подмена настоящего git: печатает своё состояние и аргументы, код возврата
+# берёт из DEV1C_FAKE_EXIT. Обёртка не должна терять ни аргументы, ни код.
 cat > "$tmp/fake-git" <<'EOF'
 #!/bin/sh
 echo "mask=$(awk '/^Cpus_allowed_list/{print $2; exit}' /proc/self/status)"
 echo "ni=$(ps -o ni= -p $$ | tr -d ' ')"
 echo "io=$(ionice -p $$ 2>/dev/null | awk '{print $1}')"
+printf 'args='
+sep=
+for a in "$@"; do
+    printf '%s%s' "$sep" "$a"
+    sep=,
+done
+printf '\n'
+exit "${DEV1C_FAKE_EXIT:-0}"
 EOF
 chmod +x "$tmp/fake-git"
 export DEV1C_GIT_REAL="$tmp/fake-git"
@@ -52,10 +64,22 @@ capture() {
 #
 # Именно sh, а не exec: exec заменяет образ процесса, и zed-editor
 # исчезает из цепочки предков (comm становится именем новой программы) —
-# обёртка тогда не видит Zed и ничего не ограничивает. С промежуточным sh
-# цепочка остаётся zed-editor → sh → обёртка, как в бою.
+# обёртка тогда не видит Zed и ничего не ограничивает.
 zed_git() {
     "$tmp/zed-editor" -c 'sh "$@"' sh "$WRAPPER" "$@"
+}
+
+# Обёртка — прямой ребёнок Zed, без единой промежуточной оболочки: так Zed
+# и запускает git. Реализация, которая смотрит только деда и пропускает
+# непосредственного родителя, обязана здесь упасть.
+zed_git_direct() {
+    "$tmp/zed-editor" -c '"$@"' sh "$WRAPPER" "$@"
+}
+
+# Вызов по имени, а не по пути: проверяется, что PATH приводит к обёртке.
+# Именно `git "$@"`, а не `sh git ...`: sh открыл бы файл с именем git.
+zed_git_path() {
+    "$tmp/zed-editor" -c 'git "$@"' sh "$@"
 }
 
 # Тот же вызов, но с двумя промежуточными оболочками:
@@ -141,12 +165,24 @@ not_zed() {
 full=$(awk '/^Cpus_allowed_list/{print $2; exit}' /proc/self/status)
 full_set=$(expand "$full" | sort | paste -sd, -)
 last_two=$(expand "$full" | tail -2 | sort | paste -sd, -)
+first_cpu=$(expand "$full" | head -1)
 
-# Класс I/O проверяем, только если ionice есть в системе: без него и
-# обёртка не может его выставить, и проверка была бы заведомо ложной.
+# Класс I/O проверяем, только если обёртка действительно может его
+# выставить: наличие ionice ничего не значит (в cgroup v2 `ionice -c 3`
+# часто не работает). Проба та же, что и в обёртке.
 have_ionice=0
-if command -v ionice >/dev/null 2>&1; then
+if command -v ionice >/dev/null 2>&1 && ionice -c 3 true >/dev/null 2>&1; then
     have_ionice=1
+fi
+
+# Отличимо ли сужение до двух последних ядер от полной маски: на
+# двухъядерном раннере они совпадают, и проверка default-cap ничего не
+# доказывает. Тогда честно пишем skip, а не делаем вид, что проверили.
+can_check_cap=1
+n_cpus=$(expand "$full" | wc -l | tr -d ' ')
+if [ "$n_cpus" -lt 3 ]; then
+    can_check_cap=0
+    echo "skip: ядер меньше трёх, default-cap неотличим от полной маски"
 fi
 
 # Ожидания для вызова из Zed: маска сужена до двух последних ядер, приоритет
@@ -156,15 +192,18 @@ expect_zed() {
     mask=$(field "$out" mask)
     ni=$(field "$out" ni)
     io=$(field "$out" io)
-    [ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
-        || fail "$what: маска не сужена до двух последних ядер: $mask вместо $last_two"
+    if [ "$can_check_cap" = 1 ]; then
+        [ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
+            || fail "$what: маска не сужена до двух последних ядер: $mask вместо $last_two"
+    fi
     [ "$ni" = "19" ] || fail "$what: приоритет не снижен: ni=$ni"
     [ "$have_ionice" = 1 ] || return 0
     [ "$io" = "idle" ] || fail "$what: I/O-класс не idle: $io"
 }
 
 # Ожидания для вызова не из Zed: маска полная, приоритет обычный, I/O — не
-# idle.
+# idle. На двухъядерном раннере маска полная и при сужении, поэтому тут
+# держат проверку приоритет и класс I/O.
 expect_not_zed() {
     what=$1
     mask=$(field "$out" mask)
@@ -176,36 +215,57 @@ expect_not_zed() {
     [ "$io" != "idle" ] || fail "$what: I/O-класс не должен быть idle"
 }
 
-# --- 1. Вызов не из Zed: ничего не меняется -----------------------------------
+# --- 1. Установка через PATH --------------------------------------------------
+# В бою обёртка работает только потому, что /usr/local/bin идёт в PATH
+# раньше /usr/bin. Если git по имени — не обёртка, Zed позовёт настоящий git.
+resolved=$(command -v git 2>/dev/null || true)
+if [ "$WRAPPER" != "/usr/local/bin/git" ]; then
+    echo "skip: обёртка проверяется из $WRAPPER, установку через PATH не проверить"
+elif [ "$resolved" != "/usr/local/bin/git" ]; then
+    fail "git по имени резолвится в ${resolved:-ничего}, а не в /usr/local/bin/git: обёртка не перекрывает настоящий git"
+else
+    capture zed_git_path version
+    expect_zed "git по имени из Zed"
+fi
+
+# --- 2. Вызов не из Zed: ничего не меняется -----------------------------------
 not_zed "$WRAPPER" version
 expect_not_zed "вне Zed"
 
-# --- 2. Вызов из Zed: маска сужена, приоритет низкий, I/O — idle --------------
+# --- 3. Обёртка — прямой ребёнок Zed ------------------------------------------
+capture zed_git_direct version
+expect_zed "прямой ребёнок Zed"
+
+# --- 4. Вызов из Zed: маска сужена, приоритет низкий, I/O — idle --------------
 capture zed_git version
 expect_zed "из Zed"
 
-# --- 3. То же через две промежуточные оболочки: обход цепочки предков --------
+# --- 5. То же через две промежуточные оболочки: обход цепочки предков --------
 capture zed_git_deep version
 expect_zed "из Zed через две оболочки"
 
-# --- 4. Явное переопределение набора ядер -------------------------------------
-DEV1C_GIT_CPUS=0
+# --- 6. Явное переопределение набора ядер -------------------------------------
+# Берём первый CPU текущей маски, а не литерал 0: на раннере с чужим cpuset
+# taskset -c 0 отказал бы, и проверка ничего бы не проверила.
+DEV1C_GIT_CPUS=$first_cpu
 export DEV1C_GIT_CPUS
 capture zed_git version
 mask=$(field "$out" mask)
-[ "$(expand "$mask" | paste -sd, -)" = "0" ] \
-    || fail "DEV1C_GIT_CPUS не применён: $mask"
+[ "$(expand "$mask" | paste -sd, -)" = "$first_cpu" ] \
+    || fail "DEV1C_GIT_CPUS=$first_cpu не применён: $mask"
 unset DEV1C_GIT_CPUS
 
-# --- 5. Пустой DEV1C_GIT_CPUS — ограничения нет вовсе ------------------------
+# --- 7. Пустой DEV1C_GIT_CPUS — ограничения по CPU нет ------------------------
 # Задано пустой строкой — значит ограничивать нечем: ни taskset, но
 # приоритет и класс I/O остаются.
 DEV1C_GIT_CPUS=
 export DEV1C_GIT_CPUS
 capture zed_git version
 mask=$(field "$out" mask)
-[ "$(expand "$mask" | sort | paste -sd, -)" = "$full_set" ] \
-    || fail "пустой DEV1C_GIT_CPUS должен снять ограничение по CPU: $mask вместо $full"
+if [ "$can_check_cap" = 1 ]; then
+    [ "$(expand "$mask" | sort | paste -sd, -)" = "$full_set" ] \
+        || fail "пустой DEV1C_GIT_CPUS должен снять ограничение по CPU: $mask вместо $full"
+fi
 ni=$(field "$out" ni)
 [ "$ni" = "19" ] || fail "пустой DEV1C_GIT_CPUS: приоритет не снижен: ni=$ni"
 io=$(field "$out" io)
@@ -214,43 +274,69 @@ if [ "$have_ionice" = 1 ]; then
 fi
 unset DEV1C_GIT_CPUS
 
-# --- 6. taskset отказал — git идёт без cap, но с остальными ограничениями ----
+# --- 8. taskset отказал — git идёт без cap, но с остальными ограничениями ----
 mkdir -p "$tmp/bin"
 printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/taskset"
 chmod +x "$tmp/bin/taskset"
 zed_git_broken
 mask=$(field "$out" mask)
-[ "$(expand "$mask" | sort | paste -sd, -)" = "$full_set" ] \
-    || fail "при отказе taskset маска должна остаться полной: $mask вместо $full"
+if [ "$can_check_cap" = 1 ]; then
+    [ "$(expand "$mask" | sort | paste -sd, -)" = "$full_set" ] \
+        || fail "при отказе taskset маска должна остаться полной: $mask вместо $full"
+fi
 ni=$(field "$out" ni)
 [ "$ni" = "19" ] || fail "при отказе taskset приоритет должен остаться низким: ni=$ni"
 rm -f "$tmp/bin/taskset"
 
-# --- 7. ionice отказал — git всё равно должен запуститься --------------------
+# --- 9. ionice отказал — git всё равно должен запуститься --------------------
 printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/ionice"
 chmod +x "$tmp/bin/ionice"
 zed_git_broken
 mask=$(field "$out" mask)
-[ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
-    || fail "при отказе ionice маска должна остаться суженной: $mask"
+if [ "$can_check_cap" = 1 ]; then
+    [ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
+        || fail "при отказе ionice маска должна остаться суженной: $mask"
+fi
 ni=$(field "$out" ni)
 [ "$ni" = "19" ] || fail "при отказе ionice приоритет должен остаться низким: ni=$ni"
 rm -f "$tmp/bin/ionice"
 
-# --- 8. nice отказал — git всё равно должен запуститься ----------------------
+# --- 10. nice отказал — git всё равно должен запуститься ---------------------
 printf '#!/bin/sh\nexit 1\n' > "$tmp/bin/nice"
 chmod +x "$tmp/bin/nice"
 zed_git_broken
 mask=$(field "$out" mask)
-[ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
-    || fail "при отказе nice маска должна остаться суженной: $mask"
+if [ "$can_check_cap" = 1 ]; then
+    [ "$(expand "$mask" | sort | paste -sd, -)" = "$last_two" ] \
+        || fail "при отказе nice маска должна остаться суженной: $mask"
+fi
 io=$(field "$out" io)
 if [ "$have_ionice" = 1 ]; then
     [ "$io" = "idle" ] || fail "при отказе nice I/O-класс должен остаться idle: $io"
 fi
 rm -f "$tmp/bin/nice"
 
-# --- 9. Настоящий git через обёртку работает ---------------------------------
+# --- 11. Аргументы и код возврата доходят без искажения ----------------------
+capture zed_git status --short -uno
+got=$(field "$out" args)
+[ "$got" = "status,--short,-uno" ] || fail "из Zed аргументы искажены: [$got]"
+not_zed "$WRAPPER" status --short -uno
+got=$(field "$out" args)
+[ "$got" = "status,--short,-uno" ] || fail "вне Zed аргументы искажены: [$got]"
+
+# Ненулевой код возврата git не должен подменяться кодом обёртки. Код 0 уже
+# проверен выше: capture() падает на любом ненулевом.
+DEV1C_FAKE_EXIT=3
+export DEV1C_FAKE_EXIT
+rc=0
+out=$(zed_git version 2>&1) || rc=$?
+[ "$rc" = 3 ] || fail "из Zed код возврата git не дошёл: $rc вместо 3"
+rc=0
+out=$("$WRAPPER" version 2>&1) || rc=$?
+[ "$rc" = 3 ] || fail "вне Zed код возврата git не дошёл: $rc вместо 3"
+unset DEV1C_FAKE_EXIT
+
+# --- 12. Настоящий git через обёртку работает --------------------------------
 unset DEV1C_GIT_REAL
 capture "$WRAPPER" --version
 case "$out" in

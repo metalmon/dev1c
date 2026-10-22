@@ -337,6 +337,8 @@ COPY config/gitea-start.sh      /usr/local/bin/gitea-start
 COPY config/normalize-skills.py /usr/local/bin/normalize-skills
 COPY config/test-skills.sh      /usr/local/bin/test-skills
 COPY config/test-entrypoint-ports.sh /usr/local/bin/test-entrypoint-ports
+COPY config/git-cpuset.sh      /usr/local/bin/git
+COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
 
 # These scripts are edited on Windows too, where editors save CRLF. In a shebang
 # that is fatal: the system looks for an interpreter named "/bin/sh" with a
@@ -360,6 +362,7 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/entrypoint /usr/local/bin/gitea-user-setup \
                 /usr/local/bin/gitea-start /usr/local/bin/normalize-skills \
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
+                /usr/local/bin/git /usr/local/bin/test-git-cpuset \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"
 

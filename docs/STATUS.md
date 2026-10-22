@@ -157,6 +157,21 @@ script days is obsolete; the scripts are gone.
   `ConfigDumpInfo.xml` present) and committed it on `dev1` with the CI-built
   `1c-connect.exe`.
 
+- **Git called by Zed is capped at two cores** (2026-10-22, this machine, container
+  `dev1c`): the image ships `/usr/local/bin/git`, a wrapper that walks the
+  ancestor chain in `/proc` and, for a caller under Zed, runs the real git under
+  `taskset` (the last two CPUs of the caller's own mask), `nice -n 19` and
+  `ionice -c 3`; every other caller — a terminal, a build — gets the real git
+  unchanged. Measured on the 1C export (67 k files under `src`), eight parallel
+  `git status --porcelain=v1 --untracked-files=all -- src`: 7.83 CPU cores
+  (wall 2.0 s, CPU 15.8 s) when called from a terminal, 2.19 CPU cores (wall
+  4.8 s, CPU 10.5 s) when called from a process that looks like Zed. The work
+  itself did not shrink — it now runs on two cores, so a single status call
+  takes longer instead of the machine being taken over. On a live Zed the git
+  process it spawns carries `Cpus_allowed_list: 6-7` and `ni=19`, while Zed
+  itself keeps the full mask and `ni=0`. The check lives in the image
+  (`/usr/local/bin/test-git-cpuset`) and runs in CI.
+
 ## Not verified
 
 - The push of that first export did not reach Gitea from this laptop: with
@@ -190,6 +205,18 @@ script days is obsolete; the scripts are gone.
 - **PRISM runs.** The benchmark is seeded into Gitea; nothing has been run yet.
 
 ## Known traps, each cost a build or an evening
+
+- `exec` in a shebang script replaces the process image: the PID stays, but the
+  process that ran the script is gone from `/proc`, so a child looking for its
+  caller in the ancestor chain sees nothing. A check that has to look like it
+  was started by Zed must keep the Zed-named process alive — run `sh "$@"`
+  instead of `exec "$@"`.
+- A container on WSL2 cannot get a GPU, whatever the flags say. The `dxg`
+  device has no graphics adapter for the `docker-desktop` distro
+  (`dxgkio_query_adapter_info: Ioctl failed: -22`), and an Xvfb screen has no
+  DRI2/DRI3 for the GL path either (`egl: failed to create dri2 screen`), so
+  the dzn driver fails with `ID3D12DeviceFactory:: CreateDevice failed`. The
+  same hardware works in the WSL distro itself with `GALLIUM_DRIVER=d3d12`.
 
 - `/home` is a volume: it hides what the image put there. An account added in a
   later image has no home until the entrypoint creates it, and a root-owned home

@@ -51,6 +51,14 @@ for u in dev1 dev2 dev3; do
     # starts and answers «indexing, try again» for what is not ready yet.
     # In local mode stand.sh makes it; in tunnel mode nobody did.
     mkdir -p "$home/project"
+    # Владелец каталога — каждый раз, и отдельно от проверки ниже. Она
+    # смотрит на САМ дом и пропускает починку, когда дом уже принадлежит
+    # пользователю (а он принадлежит: дома лежат в томе и переживают
+    # пересборку образа). Каталог же создаётся здесь, от root, и остаётся
+    # root-овским — коннектор работает от пользователя и получает «не
+    # создать /home/devN/project: Отказано в доступе». Содержимое не
+    # трогаем: chown на сам каталог идемпотентен и чинит уже сломанные дома.
+    chown "$u:$u" "$home/project"
     # Ownership is checked every time, not only on creation: root-owned files in
     # a user's home are exactly what breaks key-based login.
     [ "$(stat -c '%U' "$home")" = "$u" ] || chown -R "$u:$u" "$home"

@@ -366,6 +366,56 @@ EOF
             echo 'autoconnect=1' >> "$t/install.state"
             log "1c-connect: обслуживание вызовов включено для $(id -un) (autoconnect=1)" >&2
         fi
+        # Tools: here the shared kit IS what is laid out. ops_host compares
+        # the kit's tools.version (stamped at build time) with the state's
+        # (written when `host.tools` copies the tools onto a machine) — and
+        # without the second one the connector reports its tools missing and
+        # the window says the agent will not see the base. Links, not copies:
+        # /opt/dev1c-kit is one read-only copy for every account, and
+        # duplicating ~100 MB per login would buy nothing. The names are the
+        # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
+        # tools_dir().
+        #
+        # Стоит ДО `1c-connect install` ниже, и это не порядок ради порядка.
+        # Его шаг host.tools копирует те же vrunner/ и git/ по одному файлу
+        # и спотыкается о первый каталог внутри («the source path is neither
+        # a regular file nor a symlink to a regular file»: bin/oscript в
+        # комплекте — ссылка, а lib/ — каталог). После него в доме остаётся
+        # огрызок, и блок ниже уже не имеет права ставить ссылки. Разложив
+        # инструменты заранее, мы не даём install начать копирование вовсе.
+        if [ -f "$ONEC_CONNECT_KIT/tools.version" ]; then
+            # The links and the stamp go under one condition. If the tools
+            # are really laid out (the person ran `1c-connect install`, so the
+            # state holds copies, not links), touch neither: replacing just
+            # the stamp would tell ops_host::tools_state that what is laid out
+            # is exactly what the kit ships, and switch off Drifted — the very
+            # case the two stamps are compared for.
+            #
+            # Исключение — недоделанная раскладка: настоящая оставляет рядом
+            # tools.version, а каталог без него это след провалившейся копии.
+            # Без исключения дом, сломавшийся однажды, не чинится ни
+            # пересборкой образа, ни перезапуском: ссылок не будет никогда, а
+            # копия будет падать снова и снова.
+            ours=yes
+            if [ -f "$t/tools.version" ]; then
+                for d in vrunner git; do
+                    [ ! -e "$t/$d" ] || [ -L "$t/$d" ] || ours=no
+                done
+            else
+                for d in vrunner git; do
+                    if [ -e "$t/$d" ] && [ ! -L "$t/$d" ]; then
+                        rm -rf "$t/$d"
+                        log "инструменты: убрал недоделанную раскладку $d — рядом нет tools.version" >&2
+                    fi
+                done
+            fi
+            if [ "$ours" = yes ]; then
+                for d in vrunner git; do
+                    ln -sfn "$ONEC_CONNECT_KIT/$d" "$t/$d"
+                done
+                cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
+            fi
+        fi
         # Разложить проект рабочего места. Без этого ~/project остаётся
         # каталогом без .git: cf_decompile проходит (ему git не нужен), а
         # отправка падает на «не найден git репозиторий» — после минут
@@ -455,33 +505,6 @@ EOF
                 fi
                 ;;
             esac
-        fi
-        # Tools: here the shared kit IS what is laid out. ops_host compares
-        # the kit's tools.version (stamped at build time) with the state's
-        # (written when `host.tools` copies the tools onto a machine) — and
-        # without the second one the connector reports its tools missing and
-        # the window says the agent will not see the base. Links, not copies:
-        # /opt/dev1c-kit is one read-only copy for every account, and
-        # duplicating ~100 MB per login would buy nothing. The names are the
-        # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
-        # tools_dir().
-        if [ -f "$ONEC_CONNECT_KIT/tools.version" ]; then
-            # The links and the stamp go under one condition. If the tools
-            # are really laid out (the person ran `1c-connect install`, so the
-            # state holds copies, not links), touch neither: replacing just
-            # the stamp would tell ops_host::tools_state that what is laid out
-            # is exactly what the kit ships, and switch off Drifted — the very
-            # case the two stamps are compared for.
-            ours=yes
-            for d in vrunner git; do
-                [ ! -e "$t/$d" ] || [ -L "$t/$d" ] || ours=no
-            done
-            if [ "$ours" = yes ]; then
-                for d in vrunner git; do
-                    ln -sfn "$ONEC_CONNECT_KIT/$d" "$t/$d"
-                done
-                cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
-            fi
         fi
     fi
 }

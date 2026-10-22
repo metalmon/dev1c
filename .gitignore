@@ -27,6 +27,10 @@ setup/target/
 # The 1C training installer for Dockerfile.1c (download it from the 1C site)
 platform/
 
+# Бинарники установщика, которые команда kit забирает из CI (provision.sh):
+# сборка, а не исходник, и у каждой машины свои.
+bins/
+
 # CI artifacts for Dockerfile.1c (1c-connect-linux): their own small build
 # context, so a rebuild of the stand image does not drag the 1C installer
 artifacts/

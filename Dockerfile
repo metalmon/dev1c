@@ -82,6 +82,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xfce4 xfce4-terminal dbus-x11 xfce4-xkb-plugin \
       xrdp xorgxrdp \
       mesa-vulkan-drivers libvulkan1 \
+      `# vulkaninfo — штатная проверка «есть ли в контейнере видеокарта».` \
+      `#   Без неё про GPU можно узнать только по логу Zed, а это не проверка.` \
+      vulkan-tools \
       libfontconfig1 libasound2t64 libxkbcommon-x11-0 libgl1 \
       locales tzdata fonts-dejavu-core fonts-liberation2 \
       ca-certificates curl openssh-client \

@@ -25,7 +25,18 @@
 # Проверяется: sh config/git-hooks/tests/test-pre-push.sh
 set -u
 
-ANALYZER=${DEV1C_BSL_ANALYZER:-bsl-analyzer}
+# Анализатор ищем сперва там, где он правда стоит в образе: в PATH его нет,
+# Zed зовёт его абсолютным путём (`/opt/bsl-analyzer/bsl-analyzer`), и хук с
+# одним только `command -v bsl-analyzer` молча не делал бы ничего вовсе.
+# PATH остаётся запасным путём — для машины, где он поставлен иначе.
+ANALYZER=${DEV1C_BSL_ANALYZER:-}
+if [ -z "$ANALYZER" ]; then
+    if [ -x /opt/bsl-analyzer/bsl-analyzer ]; then
+        ANALYZER=/opt/bsl-analyzer/bsl-analyzer
+    else
+        ANALYZER=bsl-analyzer
+    fi
+fi
 BUDGET=${DEV1C_BSL_TIMEOUT:-120}
 ZERO=0000000000000000000000000000000000000000
 

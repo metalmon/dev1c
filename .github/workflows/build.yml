@@ -342,6 +342,45 @@ jobs:
             && docker exec dev1c sh -c 'curl -sf -u dev2:dev2 http://localhost:3000/api/v1/repos/dev1c/ci-probe >/dev/null' \
             && echo "ok: push-to-create in the organisation as dev2"
 
+      # The gate in front of Gitea, against the real analyzer. The unit checks
+      # of the hook (config/git-hooks/tests, job git-hooks) replace the
+      # analyzer with a stub, so they prove the hook's logic and nothing about
+      # the analyzer's contract: that `analyze -s … --format=jsonl` is the
+      # right call and that the code arrives in the output as the literal
+      # string ParseError. Both were taken from documents, and documents is
+      # exactly what the rules tell the agent not to trust.
+      #
+      # The first push creates the branch — the hook skips it by design
+      # (nothing to compare against), and that is the happy path a workstation
+      # starts from. The second push carries a module that does not parse and
+      # must be refused. The third carries the fix and must go through.
+      - name: The pre-push gate refuses a module that does not parse
+        run: |
+          docker exec -u dev1 dev1c sh -c 'time /opt/bsl-analyzer/bsl-analyzer --version' || true
+          docker exec -u dev1 dev1c sh -eu -c '
+            d=$(mktemp -d); cd "$d"
+            m=src/Catalogs/Товары/Ext/ObjectModule.bsl
+            mkdir -p "$(dirname "$m")"
+            git init -q -b dev1
+            git remote add origin http://localhost:3000/dev1c/hook-probe.git
+            printf "Процедура Ок() КонецПроцедуры\n" > "$m"
+            git add -A && git commit -qm base
+            git push -q -u origin dev1
+            echo "ok: ветка создана, первый push прошёл"
+            printf "Процедура Битая()\nЕсли Истина Тогда\n" > "$m"
+            git add -A && git commit -qm broken
+            start=$(date +%s)
+            if git push >push.log 2>&1; then
+              echo "FAIL: битый модуль уехал в Gitea"; cat push.log; exit 1
+            fi
+            echo "проверка заняла $(( $(date +%s) - start ))с"
+            grep -q ParseError push.log || { echo "FAIL: push отказал, но ParseError в отказе нет"; cat push.log; exit 1; }
+            echo "ok: битый модуль не уехал, в отказе ParseError"
+            printf "Процедура Ок() КонецПроцедуры\n" > "$m"
+            git add -A && git commit -qm fixed
+            git push -q && echo "ok: исправленный модуль уходит"
+          '
+
       - uses: actions/download-artifact@v4
         with:
           name: dev1c-setup-windows

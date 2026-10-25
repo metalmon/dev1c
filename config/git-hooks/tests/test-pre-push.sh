@@ -81,5 +81,18 @@ PATH="$T/bin-trap:$PATH" run_hook "$1" "$2" >"$T/d.out" 2>&1
 check "без .bsl в правке анализатор не зовётся" 0 $?
 grep -q 'ParseError' "$T/d.out" && { say "FAIL анализатор всё-таки позвали"; fails=$((fails + 1)); }
 
+# 5. Путь к анализатору можно задать переменной — так его задаёт образ, где
+# в PATH его нет вовсе (он в /opt/bsl-analyzer). Проверяем именно переменную:
+# абсолютный путь образа на этой машине не существует, а в образе его
+# проверяет test-stand и прогон хука в CI.
+set -- $(make_repo "$T/e" src/Catalogs/Товары/Ext/ObjectModule.bsl)
+cd "$T/e" || exit 1
+fake_analyzer "$T/bin-env" '{"code":"ParseError","message":"по переменной"}'
+# Переменную экспортируем в подоболочке, а не приставкой к вызову функции:
+# PATH здесь не урезаем совсем — без него в PATH не остаётся самого git, и
+# проверка прошла бы по чужой причине.
+(export DEV1C_BSL_ANALYZER="$T/bin-env/bsl-analyzer"; run_hook "$1" "$2") >"$T/e.out" 2>&1
+check "анализатор по DEV1C_BSL_ANALYZER" 1 $?
+
 [ "$fails" = 0 ] && say "все проверки пройдены" || say "провалено проверок: $fails"
 exit $([ "$fails" = 0 ] && echo 0 || echo 1)

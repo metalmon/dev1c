@@ -13,9 +13,41 @@
 use crate::cfg::{self, Cfg};
 use common::check::Check;
 use common::kit::Kit;
-use common::op::OpState;
+use common::op::{CleanLevel, OpState};
 use common::Event;
 use std::time::Duration;
+
+/// Что человек обязан узнать прежде, чем согласится. Снять контейнер —
+/// дело обратимое; удалить данные — нет, и беды там две разного рода:
+/// репозитории с проектами не восстановить ничем, а платформа, демо-база,
+/// модель и образ вернутся из архива комплекта. Пока этой строки не было,
+/// «удалить тома» стояло в списке рядом с «docker rm -f» и выглядело таким
+/// же пустяком.
+pub fn clean_note(level: CleanLevel) -> String {
+    match level {
+        // Переносы расставлены руками: это самые длинные строки программы, и
+        // читают их перед необратимым действием, а не по диагонали.
+        CleanLevel::Stack => "Данные остаются на месте: репозитории, проекты и настройки рабочих мест,\n\
+             платформа 1С, демо-база, файл модели.\n\
+             Поднять среду заново: dev1c-setup install"
+            .into(),
+        CleanLevel::Data => "Исчезнет безвозвратно: репозитории Gitea, проекты и настройки\n\
+             рабочих мест — больше их нет нигде.\n\
+             Вернётся из архива комплекта: платформа 1С, демо-база, файл модели\n\
+             и образ стенда. Поставить заново: dev1c-setup install"
+            .into(),
+    }
+}
+
+/// Чем кончается очистка. Своими словами, а не молчанием: до этой строки
+/// настоящая работа говорила МЕНЬШЕ сухого прогона — тот печатал «на машине
+/// ничего не менялось», а эта не печатала ничего.
+pub fn clean_done(level: CleanLevel) -> String {
+    match level {
+        CleanLevel::Stack => "Снято. Данные на месте — поднять среду заново: dev1c-setup install".into(),
+        CleanLevel::Data => "Удалено вместе с данными. Поставить заново из комплекта: dev1c-setup install".into(),
+    }
+}
 
 /// Сколько строк журнала держим в окне.
 pub const LOG_CAP: usize = 2000;
@@ -556,6 +588,18 @@ pub fn write_log_file(kit: &Kit, line: &Line) {
 
 #[cfg(test)]
 mod tests {
+    /// Главное в предупреждении — не перечень, а разделение: что вернётся из
+    /// комплекта, а что не вернётся ничем.
+    #[test]
+    fn the_clean_warning_separates_what_comes_back_from_what_does_not() {
+        let data = super::clean_note(common::op::CleanLevel::Data);
+        assert!(data.contains("безвозвратно") && data.contains("репозитории Gitea"), "{data}");
+        assert!(data.contains("платформа 1С") && data.contains("из архива комплекта"), "{data}");
+        let stack = super::clean_note(common::op::CleanLevel::Stack);
+        assert!(stack.contains("остаются на месте"), "{stack}");
+        assert!(!stack.contains("безвозвратно"), "снять контейнер — дело обратимое: {stack}");
+    }
+
     use super::*;
 
     fn kit_with(text: Option<&str>) -> Kit {

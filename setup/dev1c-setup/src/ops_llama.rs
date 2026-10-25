@@ -302,10 +302,12 @@ impl Op<Ctx> for Bin {
         Ok(())
     }
     fn revert(&self, _ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
-        (level == CleanLevel::Data).then(|| vec![Action::new(format!("удалить {}", llama::dir().display()))])
+        // `>=`, как у всех остальных шагов: сравнение на равенство здесь
+        // значило то же самое только потому, что уровней ровно два.
+        (level >= CleanLevel::Data).then(|| vec![Action::new(format!("удалить {}", llama::dir().display()))])
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
-        if level == CleanLevel::Data {
+        if level >= CleanLevel::Data {
             let _ = std::fs::remove_dir_all(llama::dir());
             ctx.ok("файлы сервера удалены");
         }

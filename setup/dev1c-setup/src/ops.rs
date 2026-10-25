@@ -338,11 +338,25 @@ impl Op<Ctx> for Volumes {
         Ok(())
     }
     fn revert(&self, ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
+        // Томов пять, а строка называла четыре вещи и ни одним словом —
+        // платформу с демо-базой. Человек читал «репозитории, проекты,
+        // настройки, модель», соглашался и терял платформу 1С, которая
+        // приезжает только с комплектом. Теперь три строки по родству:
+        // первая — то, чего не вернуть ничем.
         (level >= CleanLevel::Data).then(|| {
-            vec![Action::new(format!(
-                "удалить тома {}: репозитории, проекты, настройки, модель",
-                ctx.cfg.server.name
-            ))]
+            vec![
+                Action::new(format!(
+                    "удалить тома {} и {}: репозитории Gitea, проекты и настройки рабочих мест",
+                    ctx.cfg.volume("gitea"),
+                    ctx.cfg.volume("home")
+                )),
+                Action::new(format!(
+                    "удалить тома {} и {}: платформа 1С и демо-база (вернутся из архива комплекта)",
+                    ctx.cfg.volume("platform"),
+                    ctx.cfg.volume("demo")
+                )),
+                Action::new(format!("удалить том {}: файл модели", ctx.cfg.volume("models"))),
+            ]
         })
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
@@ -875,5 +889,36 @@ mod tests {
             .collect();
         let d = drift_of(&r, "oktaplus/dev1c-1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
+    }
+
+    /// Строка плана очистки называла четыре вещи из пяти томов и ни словом —
+    /// платформу 1С с демо-базой. Человек соглашался на «репозитории,
+    /// проекты, настройки, модель» и терял платформу, которая приезжает
+    /// только с комплектом. Пусть каждый том будет назван.
+    #[test]
+    fn the_clean_plan_names_every_volume_it_is_about_to_remove() {
+        let ctx = Ctx {
+            kit: Kit::at(std::env::temp_dir()),
+            cfg: Cfg::default(),
+            dry_run: true,
+            sink: std::sync::Arc::new(|_| {}),
+            prompt: Box::new(common::AlwaysDefault),
+        };
+        let plan = Volumes
+            .revert(&ctx, CleanLevel::Data)
+            .expect("на уровне данных тома удаляются")
+            .into_iter()
+            .map(|a| a.0)
+            .collect::<Vec<_>>()
+            .join("
+");
+        for s in VOLUMES {
+            let v = ctx.cfg.volume(s);
+            assert!(plan.contains(&v), "том {v} не назван в плане:
+{plan}");
+        }
+        assert!(plan.contains("платформа 1С"), "{plan}");
+        // Уровень «снять контейнер» томов не касается вовсе.
+        assert!(Volumes.revert(&ctx, CleanLevel::Stack).is_none());
     }
 }

@@ -323,24 +323,30 @@ fn run() -> Result<bool> {
         Cmd::Clean { stack, data } => {
             anyhow::ensure!(stack || data, "укажите уровень: --stack (снять контейнер) или --data (и удалить данные)");
             let level = if data { CleanLevel::Data } else { CleanLevel::Stack };
-            for (id, acts) in common::run::clean_plan(&ctx, &ops, level) {
-                println!("== {id}");
+            for (id, title, acts) in common::run::clean_plan(&ctx, &ops, level) {
+                println!("== {id} — {title}");
                 for a in acts {
                     println!("   · {a}");
                 }
             }
+            println!();
+            println!("{}", ui::clean_note(level));
             if ctx.dry_run {
+                println!();
                 println!("План напечатан, на машине ничего не менялось.");
                 return Ok(true);
             }
             if needs_typed_name_confirmation(data, cli.yes) {
+                println!();
                 let name = ctx.prompt.ask(
-                    "Удалить данные: репозитории, проекты, настройки. Введите имя контейнера для подтверждения",
+                    "Введите имя стенда (name в dev1c.toml), чтобы подтвердить удаление",
                     "",
                 );
                 anyhow::ensure!(name == ctx.cfg.server.name, "имя не совпало, ничего не удалено");
             }
             common::run::clean_apply(&ctx, &ops, level)?;
+            println!();
+            println!("{}", ui::clean_done(level));
         }
         Cmd::Verify => {
             let r = common::integrity::verify(&ctx.kit, |i, n, p| println!("  {i}/{n} {p}"))?;

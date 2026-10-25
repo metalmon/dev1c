@@ -72,10 +72,15 @@ pub fn status<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>]) -> Vec<(String, String
 
 /// Откат в обратном порядке. План печатается всегда; выполнение — после
 /// подтверждения, которое спрашивает вызывающий.
-pub fn clean_plan<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], level: CleanLevel) -> Vec<(String, Vec<String>)> {
+pub fn clean_plan<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], level: CleanLevel) -> Vec<(String, String, Vec<String>)> {
+    // Название шага, а не только идентификатор: «== container» человеку не
+    // говорит ничего, а решение он принимает по этому списку.
     ops.iter()
         .rev()
-        .filter_map(|o| o.revert(ctx, level).map(|acts| (o.id().to_string(), acts.into_iter().map(|a| a.0).collect())))
+        .filter_map(|o| {
+            o.revert(ctx, level)
+                .map(|acts| (o.id().to_string(), o.title().to_string(), acts.into_iter().map(|a| a.0).collect()))
+        })
         .collect()
 }
 

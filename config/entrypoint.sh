@@ -239,7 +239,13 @@ for cfg in /home/*/.config/zed/settings.json; do
     # valid JSON whatever the provider.
     sed -i \
         -e "s|CUSTOM_MAX_TOKENS_PLACEHOLDER|${CUSTOM_MAX_TOKENS:-53248}|" \
-        -e "s|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER|${CUSTOM_MAX_OUTPUT_TOKENS:-8192}|" \
+        `# 32768, а не 8192: модель размышляет, и размышления сидят в выходном` \
+        `# бюджете. Авторы PRISM поднимали свой предел 16384 -> 32768 -> 65536,` \
+        `# потому что на 32768 многословные размышляющие модели отдавали ПУСТОЙ` \
+        `# ответ даже на простых задачах. Это предел для провайдера custom,` \
+        `# то есть для стендов с чужой моделью: у штатного llama.cpp Zed берёт` \
+        `# окно с /props и делит сам.` \
+        -e "s|CUSTOM_MAX_OUTPUT_TOKENS_PLACEHOLDER|${CUSTOM_MAX_OUTPUT_TOKENS:-32768}|" \
         "$cfg"
 
     # Which of the two providers in the settings is the live one. dev1c-setup

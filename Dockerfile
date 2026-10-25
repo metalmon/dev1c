@@ -202,6 +202,38 @@ RUN sed -E 's|^Exec=zed|Exec=/usr/local/bin/launch-maximized zed|' \
     && ln -s /opt/zed.app/share/icons/hicolor/512x512/apps/zed.png \
              /usr/share/pixmaps/zed.png
 
+# --- pi: терминальный агент, второй способ работы ----------------------------
+# Версия пинится по той же причине, что у Zed: у pi нет системы разрешений
+# вовсе (режим YOLO — решение заказчика 25.10.2026), и менять поведение среды
+# от пересборки нельзя тем более.
+#
+# Берётся ГОТОВЫЙ бинарь релиза, а не сборка из исходников: релиз несёт
+# `pi-linux-x64.tar.gz` — самостоятельный исполняемый файл со своими
+# ресурсами, и он запускается в этом образе как есть (проверено 25.10.2026 на
+# debian:13-slim). Отдельная стадия с Node 22 поэтому не нужна, и Node в
+# образе по-прежнему нет — что и требовалось.
+#
+# Сумма сверяется обязательно: архив приходит по сети, и это единственное
+# место, где её можно проверить. Отдельной стадии нет, значит архив удаляется
+# тем же слоем, иначе он осядет в образе.
+#
+# `examples` выбрасываются (десять мегабайт, из них doom.wasm), а `docs`
+# остаются: pi в своих же сообщениях об ошибках ссылается на
+# /opt/pi/docs/providers.md.
+ARG PI_VERSION=1.4.0
+RUN cd /tmp \
+    && curl -fsSL -O "https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz" \
+    && curl -fsSL -O "https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/SHA256SUMS" \
+    && grep "pi-linux-x64.tar.gz" SHA256SUMS | sha256sum -c - \
+    && tar -xzf pi-linux-x64.tar.gz -C /opt \
+    && rm -rf pi-linux-x64.tar.gz SHA256SUMS /opt/pi/examples \
+    && chmod +x /opt/pi/pi \
+    && ln -s /opt/pi/pi /usr/local/bin/pi \
+    `# версию спрашиваем у самого бинаря: сломанный обязан уронить сборку,` \
+    `# а не доехать до заказчика. В отличие от Zed, pi от root для --version` \
+    `# запускается.` \
+    && pi --version | grep -qx "${PI_VERSION}"
+
 # --- 1C tooling: everything network-bound is frozen at build time -------------
 # In the customer's air-gapped network the extension can neither download itself
 # nor fetch the language server binary, so both downloads happen here, while
@@ -360,6 +392,9 @@ COPY config/test-entrypoint-ports.sh /usr/local/bin/test-entrypoint-ports
 COPY config/launch-maximized.sh /usr/local/bin/launch-maximized
 COPY config/git-cpuset.sh      /usr/local/bin/git
 COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
+COPY config/test-pi.sh         /usr/local/bin/test-pi
+COPY config/test-pi-stub.py    /usr/local/bin/test-pi-stub
+COPY config/test-pi-seed.sh    /usr/local/bin/test-pi-seed
 
 # These scripts are edited on Windows too, where editors save CRLF. In a shebang
 # that is fatal: the system looks for an interpreter named "/bin/sh" with a
@@ -384,7 +419,8 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/gitea-start /usr/local/bin/normalize-skills \
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
                 /usr/local/bin/git /usr/local/bin/test-git-cpuset \
-                /usr/local/bin/launch-maximized \
+                /usr/local/bin/launch-maximized /usr/local/bin/test-pi \
+                /usr/local/bin/test-pi-stub /usr/local/bin/test-pi-seed \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"
 
@@ -430,6 +466,20 @@ COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json
 # and how to run 1C code. Without them the model answers with guesses — it
 # declared OneScript impossible on Linux, confusing it with Windows Script Host.
 COPY config/agents-global.md /etc/skel/.config/zed/AGENTS.md
+
+# Настройки pi — второго способа работы, терминального. Инструкции те же, и
+# источник у них тот же файл: просто второе назначение, никакой машинерии для
+# «одного источника» не нужно. Скиллам не нужно и этого — pi сам читает
+# ~/.agents/skills, штатное место Agent Skills, куда они уже разложены ниже.
+# Пояснения к обоим файлам — в config/pi/README.md (JSON комментариев не
+# допускает).
+COPY config/agents-global.md  /etc/skel/.pi/agent/AGENTS.md
+COPY config/pi/mcp.json       /etc/skel/.pi/agent/mcp.json
+COPY config/pi/settings.json  /etc/skel/.pi/agent/settings.json
+# Провайдер модели: одномодельный llama.cpp. Родной провайдер pi умеет только
+# router-режим — почему так и что будет, когда патч войдёт в llama.cpp,
+# написано в самом файле.
+COPY config/pi/extensions/llama-single.js /etc/skel/.pi/agent/extensions/llama-single.js
 
 # --- Desktop environment ------------------------------------------------------
 # XFCE autostart brings up its own keyring daemon — with a locked collection.

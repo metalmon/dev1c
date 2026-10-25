@@ -609,6 +609,38 @@ mod tests {
         assert_eq!(Host::default().password, "dev1");
     }
 
+    /// Серверы MCP у pi и у Zed — одно и то же, иначе агенты разойдутся в
+    /// умениях и никто не поймёт, почему один знает про выгрузку, а другой
+    /// нет. Проверяется не только список имён: `command`, `args` и предел
+    /// времени — это и есть всё содержимое записи о сервере.
+    ///
+    /// Форма у pi своя (`mcpServers` вместо `context_servers`, нет поля
+    /// `source`), а `timeout` у обоих в секундах — значит числа переносятся
+    /// один в один.
+    #[test]
+    fn pi_declares_the_same_mcp_servers_as_zed() {
+        const PI: &str = include_str!("../../../config/pi/mcp.json");
+        let pi: serde_json::Value = serde_json::from_str(PI).expect("config/pi/mcp.json — обычный JSON, без комментариев");
+        let zed = zed_json();
+        let z = zed["context_servers"].as_object().expect("в настройках Zed есть context_servers");
+        let p = pi["mcpServers"].as_object().expect("в mcp.json есть mcpServers");
+
+        let mut zn: Vec<&str> = z.keys().map(String::as_str).collect();
+        let mut pn: Vec<&str> = p.keys().map(String::as_str).collect();
+        zn.sort();
+        pn.sort();
+        assert_eq!(zn, pn, "серверы MCP у pi и у Zed разошлись");
+
+        for name in zn {
+            for field in ["command", "args", "timeout"] {
+                assert_eq!(
+                    z[name][field], p[name][field],
+                    "сервер {name}: поле {field} у pi и у Zed разошлось"
+                );
+            }
+        }
+    }
+
     #[test]
     fn render_keeps_comments_and_round_trips() {
         let mut c = sample();

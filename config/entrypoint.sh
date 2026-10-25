@@ -130,6 +130,80 @@ SHIPPED_FILES="zed/settings.json zed/AGENTS.md zed/themes/1c.json
     xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
     xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
     gtk-3.0/settings.ini gtk-4.0/settings.ini"
+# Файлы pi (25.10.2026) лежат не под .config, а в ~/.pi/agent — у pi свой
+# каталог настроек, и переносить его мы не можем. Значит второй корень и второй
+# список, но раскладка одна и та же: отпечаток, .bak, отказ по символическим
+# ссылкам. Отдельная реализация тут была бы второй дырой в безопасности,
+# которую надо закрывать дважды.
+SHIPPED_PI_FILES="agent/AGENTS.md agent/mcp.json agent/settings.json
+    agent/extensions/llama-single.js"
+
+# Один файл из образа в дом. $1 — корень ($HOME-относительный: .config или
+# .pi), $2 — путь внутри корня, он же путь внутри /etc/skel/$1. Остальное
+# (home, stamps, owner_*) берётся из объемлющего цикла.
+#
+# Внутри нельзя `continue`: это функция, и пропуск файла — это `return`.
+seed_from_image() {
+    base=$1
+    f=$2
+    root="$home/$base"
+    src="/etc/skel/$base/$f"
+    dst="$root/$f"
+    # Имена отпечатков у .config прежние — иначе при первом запуске нового
+    # образа перераскладываются все файлы у всех. Файлы pi получают приставку.
+    case "$base" in
+        .config) stamp="$stamps/$(echo "$f" | tr / _)" ;;
+        *)       stamp="$stamps/${base#.}_$(echo "$f" | tr / _)" ;;
+    esac
+    [ -f "$src" ] || return 0
+    parent=$(dirname "$dst")
+    if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ] || [ -L "$parent" ]; then
+        log "skipping $dst: symlink"
+        return 0
+    fi
+    # the parent is created below if missing; an existing one must resolve
+    # inside the root (a link deeper in the path would lead root elsewhere)
+    root_real=$(realpath "$root")
+    if [ -e "$parent" ]; then
+        case "$(realpath "$parent")" in "$root_real"|"$root_real"/*) ;; *)
+            log "skipping $dst: parent resolves outside $root"; return 0 ;; esac
+    fi
+    shipped=$(md5sum "$src" | cut -d' ' -f1)
+    # The settings carry the model address and window substituted below;
+    # a substituted placeholder is gone for good, so when the model
+    # variables change the file has to come from the image again. The
+    # stamp therefore covers the image copy AND the model variables: the
+    # same image with a new model re-seeds settings.json (a hand edit in it
+    # is lost then — the .bak keeps it), the other files are untouched by this.
+    # У pi по тем же подстановкам приезжают порты серверов MCP в mcp.json —
+    # но они зависят только от имени пользователя, а не от переменных, так что
+    # соли им не нужно.
+    if [ "$f" = zed/settings.json ]; then
+        shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${MODEL_PROVIDER:-}" "${MODEL_NAME:-}" \
+            "${LLAMA_API_URL:-}" "${CUSTOM_API_URL:-}" | md5sum | cut -d' ' -f1)
+    fi
+    [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && return 0
+    # Владелец у .bak выставляется явно: `cp` от root делает файл root-овским,
+    # и сохранённая правка пользователя оказывалась в его доме чужой — удалить
+    # или открыть на запись он её не мог. Поймано проверкой test-pi-seed
+    # 25.10.2026; дефект был и у настроек Zed, а не только у файлов pi.
+    if [ -f "$dst" ]; then
+        cp --remove-destination "$dst" "$dst.bak"
+        chown "$owner_u:$owner_g" "$dst.bak"
+    fi
+    # install after rm: writing over a path replaces the file itself rather
+    # than following whatever it might point at
+    rm -f "$dst"
+    # the directories are the user's (their own themes go to zed/themes too)
+    [ -d "$parent" ] || install -d -o "$owner_u" -g "$owner_g" "$parent"
+    install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
+    tmp=$(mktemp "$stamps/.tmp.XXXXXX") || return 0
+    echo "$shipped" > "$tmp"
+    chown "$owner_u:$owner_g" "$tmp"
+    mv -f "$tmp" "$stamp"
+    log "$base/$f updated from the image in $home"
+}
+
 for home in /home/*; do
     cfg="$home/.config"
     [ -d "$cfg/zed" ] || continue
@@ -139,51 +213,24 @@ for home in /home/*; do
     fi
     owner_u=$(stat -c '%U' "$home")
     owner_g=$(stat -c '%G' "$home")
-    cfg_real=$(realpath "$cfg")
     stamps="$cfg/.from-image"
     [ -L "$stamps" ] && { log "skipping $home: $stamps is a symlink"; continue; }
     [ -d "$stamps" ] || install -d -o "$owner_u" -g "$owner_g" "$stamps"
     for f in $SHIPPED_FILES; do
-        src="/etc/skel/.config/$f"
-        dst="$cfg/$f"
-        stamp="$stamps/$(echo "$f" | tr / _)"
-        [ -f "$src" ] || continue
-        parent=$(dirname "$dst")
-        if [ -L "$dst" ] || [ -L "$dst.bak" ] || [ -L "$stamp" ] || [ -L "$parent" ]; then
-            log "skipping $dst: symlink"
-            continue
-        fi
-        # the parent is created below if missing; an existing one must resolve
-        # inside .config (a link deeper in the path would lead root elsewhere)
-        if [ -e "$parent" ]; then
-            case "$(realpath "$parent")" in "$cfg_real"|"$cfg_real"/*) ;; *)
-                log "skipping $dst: parent resolves outside $cfg"; continue ;; esac
-        fi
-        shipped=$(md5sum "$src" | cut -d' ' -f1)
-        # The settings carry the model address and window substituted below;
-        # a substituted placeholder is gone for good, so when the model
-        # variables change the file has to come from the image again. The
-        # stamp therefore covers the image copy AND the model variables: the
-        # same image with a new model re-seeds settings.json (a hand edit in it
-        # is lost then — the .bak keeps it), the other files are untouched by this.
-        if [ "$f" = zed/settings.json ]; then
-            shipped=$(printf '%s|%s|%s|%s|%s' "$shipped" "${MODEL_PROVIDER:-}" "${MODEL_NAME:-}" \
-                "${LLAMA_API_URL:-}" "${CUSTOM_API_URL:-}" | md5sum | cut -d' ' -f1)
-        fi
-        [ "$(cat "$stamp" 2>/dev/null)" = "$shipped" ] && continue
-        [ -f "$dst" ] && cp --remove-destination "$dst" "$dst.bak"
-        # install after rm: writing over a path replaces the file itself rather
-        # than following whatever it might point at
-        rm -f "$dst"
-        # the directories are the user's (their own themes go to zed/themes too)
-        [ -d "$parent" ] || install -d -o "$owner_u" -g "$owner_g" "$parent"
-        install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
-        tmp=$(mktemp "$stamps/.tmp.XXXXXX") || continue
-        echo "$shipped" > "$tmp"
-        chown "$owner_u:$owner_g" "$tmp"
-        mv -f "$tmp" "$stamp"
-        log "$f updated from the image in $home"
+        seed_from_image .config "$f"
     done
+    # Файлы pi. Отпечатки для них лежат в том же .config/.from-image: это
+    # единственный каталог отпечатков дома, и он уже проверен выше на ссылку.
+    # Сам ~/.pi у дома прежнего образа не существует — создаём и отдаём
+    # пользователю, иначе pi получит каталог, принадлежащий root.
+    if [ -L "$home/.pi" ]; then
+        log "skipping $home/.pi: symlink"
+    else
+        [ -d "$home/.pi" ] || install -d -o "$owner_u" -g "$owner_g" "$home/.pi"
+        for f in $SHIPPED_PI_FILES; do
+            seed_from_image .pi "$f"
+        done
+    fi
 done
 
 # --- Model server in Zed settings ---------------------------------------------
@@ -286,6 +333,40 @@ for cfg in /home/*/.config/zed/settings.json; do
         log "model: not configured — neither LLAMA_API_URL nor CUSTOM_API_URL is set ($cfg)"
     fi
 done
+
+# --- Порты туннеля в серверах MCP у pi ----------------------------------------
+# Те же подстановки и те же номера, что в настройках Zed выше: 1c-connect
+# выводит их из имени рабочего места, и обе стороны обходятся без параметра.
+# Адрес модели здесь не подставляется — его расширение берёт из окружения, а
+# переменные уходят в /etc/environment ниже.
+for cfg in /home/*/.pi/agent/mcp.json; do
+    [ -f "$cfg" ] || continue
+    if [ -L "$cfg" ]; then
+        log "skipping $cfg: symlink"
+        continue
+    fi
+    u=${cfg#/home/}; u=${u%%/*}
+    case "$u" in
+        dev[1-9])
+            n=${u#dev}
+            sed -i \
+                -e "s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|" \
+                -e "s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|" \
+                "$cfg"
+            ;;
+    esac
+done
+
+# Крючок для проверок: раскладка файлов из образа — единственная часть точки
+# входа, которую нужно прогонять по многу раз и на подготовленных домах
+# (дом прежнего образа, правленный человеком файл, символическая ссылка на
+# месте каталога). Службы для этого поднимать незачем. Тот же приём, что
+# DEV1C_GIT_TTY в обёртке git: крючок только для теста, в работе переменной
+# нет. Проверка — test-pi-seed.
+if [ -n "${DEV1C_SEED_ONLY:-}" ]; then
+    log "seed only: раскладка выполнена, службы не поднимаются"
+    exit 0
+fi
 
 # --- Gitea --------------------------------------------------------------------
 # A service rather than a session autostart: repositories must be reachable at

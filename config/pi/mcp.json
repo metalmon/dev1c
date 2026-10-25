@@ -1,0 +1,19 @@
+{
+  "_comment": "Те же три сервера, что в context_servers настроек Zed. Список держит тест pi_declares_the_same_mcp_servers_as_zed (setup/1c-connect/src/cfg.rs): он сверяет имена, command, args и timeout. Порты подставляет точка входа — те же подстановки, что в настройках Zed. Погашенных поимённо инструментов здесь нет: фильтра по инструментам в форме pi нет, и от тупиковых вызовов (its_help просит платный токен, search_web и fetch упираются в отсутствие интернета) держат те же правила агента, что у Zed.",
+  "mcpServers": {
+    "bsl-reference": {
+      "command": "/opt/bsl-analyzer/bsl-analyzer",
+      "args": ["mcp", "serve", "--profile", "reference"]
+    },
+    "1c": {
+      "command": "nc",
+      "args": ["-N", "localhost", "WORKSTATION_1C_PORT_PLACEHOLDER"],
+      "timeout": 300
+    },
+    "vrunner": {
+      "command": "nc",
+      "args": ["-N", "localhost", "WORKSTATION_VRUNNER_PORT_PLACEHOLDER"],
+      "timeout": 3600
+    }
+  }
+}

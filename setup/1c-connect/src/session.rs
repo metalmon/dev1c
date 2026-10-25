@@ -153,6 +153,40 @@ impl Session {
 /// Как `start_with_enabled`, но с MCP всегда включённым — для CLI
 /// (`main.rs`: `connect`/`serve`), у которого нет окна и некому держать
 /// переключатель дольше одного сеанса.
+/// Строка журнала про ушедшего ребёнка моста — или её отсутствие.
+///
+/// Три исхода, и путать их нельзя:
+///
+/// * ушёл сам и по-хорошему (код 0) — молчим, это конец разговора с агентом;
+/// * **сняли мы** (`by_us`: агент отключился, а ребёнок не ушёл за 5 с по
+///   закрытию входа) — это наша уборка, и говорим о ней как о своём действии,
+///   обычной строкой, а не предупреждением;
+/// * ушёл сам с ненулевым кодом — вот это и есть беда, и только тут Warn.
+///
+/// Пустого «после двоеточия ничего» не бывает: ребёнок, не сказавший ничего,
+/// так и называется словами. Живой случай 25.10 на стенде — «mcp-1c
+/// завершился с кодом -1: », где `-1` означал «снят сигналом», то есть нашу
+/// же уборку, а пустота после двоеточия — что процесс ничего не написал в
+/// stderr. Человек читал это как поломку (STATUS, пункт 25).
+///
+/// Чистая: решение о строке проверяется тестом без процессов и сокетов.
+pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> Option<Event> {
+    let said = tail.trim();
+    let because = if said.is_empty() { String::new() } else { format!(": {said}") };
+    if by_us {
+        // Код здесь не называем вовсе: `-1` у снятого сигналом процесса — это
+        // «кода нет», и показывать его человеку значит объяснять ему
+        // внутренности waitpid.
+        return Some(Event::Say(format!("{who} остановлен: агент отключился{because}")));
+    }
+    if code == 0 {
+        return None;
+    }
+    let what = if code < 0 { format!("{who} снят сигналом") } else { format!("{who} завершился с кодом {code}") };
+    let because = if said.is_empty() { " — на stderr он ничего не сказал".to_string() } else { because };
+    Some(Event::Warn(format!("{what}{because}")))
+}
+
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
     start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), on_state)
 }
@@ -279,9 +313,9 @@ impl Serve {
             let rules = bridge::Rules::for_vrunner(self.cfg.clone(), tools_dir, rebuild, Arc::new(bridge::configurator_count), self.enabled.clone());
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, err| {
-                if code != 0 {
-                    log_exit(Event::Warn(format!("vrunner-mcp завершился с кодом {code}: {err}")));
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
+                if let Some(e) = child_exit_line("vrunner-mcp", code, by_us, &err) {
+                    log_exit(e);
                 }
             })))
         } else if port == self.ports.mcp {
@@ -293,9 +327,9 @@ impl Serve {
             rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command(cfg, &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, err| {
-                if code != 0 {
-                    log_exit(Event::Warn(format!("mcp-1c завершился с кодом {code}: {err}")));
+            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
+                if let Some(e) = child_exit_line("mcp-1c", code, by_us, &err) {
+                    log_exit(e);
                 }
             })))
         } else if port == self.ports.web {
@@ -400,5 +434,43 @@ mod tests {
         assert_eq!(seen.first(), Some(&State::Connecting));
         assert!(matches!(seen.last(), Some(State::Failed(_))), "{seen:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Три исхода ребёнка моста, и ни одного пустого «после двоеточия».
+    /// Живой случай 25.10: в журнале стенда висело «mcp-1c завершился с кодом
+    /// -1: » — на деле наша же уборка после отключения агента.
+    #[test]
+    fn a_child_that_went_away_is_reported_by_what_actually_happened() {
+        // Сняли мы — это наше действие, а не поломка: обычная строка, и кода
+        // в ней нет вовсе.
+        let e = child_exit_line("mcp-1c", -1, true, "").expect("о своей уборке сказать стоит");
+        assert!(matches!(e, Event::Say(ref t) if t.contains("остановлен") && t.contains("агент отключился")), "{e:?}");
+        // Про код не говорим вовсе: у снятого сигналом его нет, а «-1» —
+        // наша внутренняя условность. (Искать «-1» в тексте нельзя: он есть в
+        // самом имени «mcp-1c» — на это и попался первый вариант теста.)
+        assert!(!format!("{e:?}").contains("код"), "код снятого сигналом процесса человеку ни о чём не говорит: {e:?}");
+
+        // Ушёл сам и по-хорошему — молчим.
+        assert!(child_exit_line("mcp-1c", 0, false, "").is_none());
+
+        // Ушёл сам с ошибкой и ничего не сказал — так и пишем словами, а не
+        // пустотой после двоеточия.
+        let e = child_exit_line("vrunner-mcp", 3, false, "  ").expect("ненулевой код — предупреждение");
+        match e {
+            Event::Warn(t) => {
+                assert!(t.contains("с кодом 3"), "{t}");
+                assert!(t.contains("ничего не сказал"), "{t}");
+                assert!(!t.trim_end().ends_with(':'), "строка не должна обрываться двоеточием: {t}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Сказал — причина едет как есть.
+        let e = child_exit_line("vrunner-mcp", 3, false, "платформа не найдена").unwrap();
+        assert!(matches!(e, Event::Warn(ref t) if t.contains("платформа не найдена")), "{e:?}");
+
+        // Снят сигналом НЕ нами — про код -1 тоже не говорим числом.
+        let e = child_exit_line("mcp-1c", -1, false, "").unwrap();
+        assert!(matches!(e, Event::Warn(ref t) if t.contains("снят сигналом")), "{e:?}");
     }
 }

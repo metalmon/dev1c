@@ -277,7 +277,18 @@ fn key(id: &Value) -> String {
 /// ушедший ребёнку, спокойно доигрывает со старыми параметрами. Без
 /// `rebuild` (`Rules::for_mcp` без доустройки) — один ребёнок на всю жизнь
 /// соединения, как и было.
-pub async fn pipe_jsonrpc<S>(stream: S, cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, String))
+/// `on_exit(code, by_us, tail)`: `code` — код выхода ребёнка (`-1`, если его
+/// сняли сигналом и кода нет вовсе), `by_us` — сняли его МЫ, потому что агент
+/// отключился, а ребёнок не ушёл за 5 с по закрытию входа, `tail` — последние
+/// строки его stderr (бывает пустым: ребёнок мог не сказать ничего).
+///
+/// Три величины, а не две, по живому случаю 25.10: в журнале стенда висело
+/// «mcp-1c завершился с кодом -1: » — двоеточие есть, причины нет. На деле это
+/// была наша же уборка: агент закрыл соединение, `grace_kill` закрыл ребёнку
+/// вход, тот за пять секунд не вышел, и мы сняли его сигналом. Код `-1` при
+/// этом означает «кода нет, снят сигналом» — то есть строка пугала человека
+/// нашим собственным штатным действием.
+pub async fn pipe_jsonrpc<S>(stream: S, cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, bool, String))
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -341,7 +352,7 @@ where
     // дело дойдёт до рестарта) — свежей сборкой по `rules.rebuild`.
     let mut next_cmd = Some(cmd);
 
-    let (code, tail) = 'connection: loop {
+    let (code, by_us, tail) = 'connection: loop {
         let (mut is_restart, mut cmd) = match next_cmd.take() {
             Some(c) => (false, c),
             None => match &rules.rebuild {
@@ -349,7 +360,7 @@ where
                 // Рестарт только и всегда гейтится наличием `rebuild` (см.
                 // ниже) — сюда попасть без него нельзя; но падать насмерть
                 // вместо непонятного паникующего unwrap лучше честной ошибкой.
-                None => break 'connection (-1, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
+                None => break 'connection (-1, false, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
             },
         };
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -370,7 +381,7 @@ where
                 Ok(c) => break c,
                 Err(e) => {
                     let Some(rebuild) = &rules.rebuild else {
-                        break 'connection (-1, format!("не удалось запустить: {e}"));
+                        break 'connection (-1, false, format!("не удалось запустить: {e}"));
                     };
                     let msg = e.to_string();
                     if last_logged_error.as_deref() != Some(msg.as_str()) {
@@ -392,7 +403,7 @@ where
                         }
                         tokio::select! {
                             n = sr.read(&mut buf) => match n {
-                                Ok(0) | Err(_) => break 'connection (-1, "агент отключился, пока ребёнок не запускался".to_string()),
+                                Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string()),
                                 Ok(n) => pending_frames.extend(f.push(&buf[..n])),
                             }
                         }
@@ -547,14 +558,17 @@ where
                 let _ = from_child.await;
                 let tail = err_tail.await.unwrap_or_default();
                 drop(job);
-                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), tail);
+                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), false, tail);
             }
             EpochEnd::AgentEof | EpochEnd::WriteFailed => {
+                // Уходит агент — уводим и ребёнка. Это наша уборка, и
+                // помечаем её как свою: иначе снятый нами процесс выглядит
+                // в журнале поломкой.
                 let status = grace_kill(stdin, child).await;
                 let _ = from_child.await;
                 let tail = err_tail.await.unwrap_or_default();
                 drop(job);
-                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), tail);
+                break (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), true, tail);
             }
             EpochEnd::Restart => {
                 let _ = grace_kill(stdin, child).await;
@@ -582,7 +596,7 @@ where
     }
     drop(out_tx);
     let _ = writer.await;
-    on_exit(code, common::docker::redact_text(&tail));
+    on_exit(code, by_us, common::docker::redact_text(&tail));
 }
 
 /// Одна строка от агента: кому она. `Err` — ребёнок закрыл stdin.
@@ -1135,7 +1149,7 @@ mod tests {
     async fn talk(child_env: (&str, &str), rules: Rules, send: &[&str]) -> (Vec<serde_json::Value>, String, i32) {
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(child_env), rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, child(child_env), rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1280,7 +1294,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1327,7 +1341,7 @@ mod tests {
             let rules = Rules::for_mcp(Arc::new(AtomicBool::new(on)));
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             let (tx, _rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, err| {
+            tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             }));
             let (r, mut w) = tokio::io::split(ours);
@@ -1365,7 +1379,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, log, move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, log, move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1393,7 +1407,7 @@ mod tests {
             child(("BRIDGE_SCRIPT", "1")),
             rules_with(&["cf_load"], 0, enabled.clone()),
             no_log(),
-            move |code, err| {
+            move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             },
         ));
@@ -1422,7 +1436,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd, rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, cmd, rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1461,7 +1475,7 @@ mod tests {
         let (replies, raw, _) = {
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(pipe_jsonrpc(theirs, cmd, rules(&["task_status"], 0), log, move |code, err| {
+            tokio::spawn(pipe_jsonrpc(theirs, cmd, rules(&["task_status"], 0), log, move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             }));
             let (r, mut w) = tokio::io::split(ours);
@@ -1566,7 +1580,7 @@ mod tests {
             child(("BRIDGE_DIE", "ошибка подключения: --db-password hunter2")),
             rules(&[], 0),
             no_log(),
-            move |code, err| {
+            move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             },
         ));
@@ -1603,7 +1617,7 @@ mod tests {
         let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1678,7 +1692,7 @@ mod tests {
         let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (mut r, mut w) = tokio::io::split(ours);
@@ -1728,7 +1742,7 @@ mod tests {
         let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (mut r, mut w) = tokio::io::split(ours);

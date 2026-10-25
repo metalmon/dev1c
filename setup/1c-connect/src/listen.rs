@@ -364,7 +364,7 @@ mod tests {
             let std_stream = stream.into_std().unwrap();
             let watcher = std_stream.try_clone().unwrap();
             let async_stream = TcpStream::from_std(std_stream).unwrap();
-            tokio::spawn(bridge::pipe_jsonrpc(async_stream, cmd, rules, log, move |code, err| {
+            tokio::spawn(bridge::pipe_jsonrpc(async_stream, cmd, rules, log, move |code, _by_us, err| {
                 let _ = exit_tx.send((code, err));
             }));
             watcher

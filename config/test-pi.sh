@@ -107,16 +107,24 @@ echo "== Модель =="
 PORT=${PI_TEST_PORT:-$((18000 + $(id -u) % 1000))}
 STUB=${PI_TEST_STUB:-/usr/local/bin/test-pi-stub}
 
-stub_start() { # $1 — форма ответа
-    python3 "$STUB" --port "$PORT" --shape "$1" --dump "$WORK"/pi-request.json &
+# $1 — форма ответа, дальше любые аргументы заглушки (--id, --key, --port=)
+stub_start() {
+    shape=$1
+    shift
+    port=$PORT
+    for a in "$@"; do [ "$a" = "${a#--port=}" ] || port=${a#--port=}; done
+    python3 "$STUB" --port "$port" --shape "$shape" --dump "$WORK"/pi-request.json "$@" &
     stub=$!
     i=0
     while [ "$i" -lt 100 ]; do
-        curl -sf "http://127.0.0.1:$PORT/props" >/dev/null 2>&1 && return 0
+        # Без -f: готовность — это «порт отвечает по HTTP», а заглушка с
+        # --key на запрос без ключа честно отвечает 401, и -f счёл бы это
+        # неготовностью.
+        curl -s -o /dev/null "http://127.0.0.1:$port/props" 2>/dev/null && return 0
         i=$((i + 1))
         sleep 0.1
     done
-    fail "заглушка сервера модели не поднялась на порту $PORT"
+    fail "заглушка сервера модели не поднялась на порту $port"
 }
 stub_stop() { kill "$stub" 2>/dev/null || true; wait "$stub" 2>/dev/null || true; stub=; }
 
@@ -173,9 +181,53 @@ stub_stop
 
 # 4. Сервера модели нет вовсе: pi обязан запуститься и сказать об этом, а не
 #    упасть. Порт тот же, но заглушки на нём уже нет.
-LLAMA_API_URL="http://127.0.0.1:$PORT" pi --offline --list-models >"$WORK"/pi-dead.txt 2>&1 || true
-grep -qiE "no models|модел" "$WORK"/pi-dead.txt \
-    || fail "без сервера модели pi молчит о причине: $(head -3 "$WORK"/pi-dead.txt)"
-ok "без сервера модели pi запускается и говорит, что модели нет"
+#
+#    Код возврата НЕ маскируется, и ищется строка, которую печатает САМ pi:
+#    собственное сообщение расширения («сервер модели … не ответил») совпало бы
+#    с мягким образцом, и проверка проходила бы, даже если pi после этого падает.
+LLAMA_API_URL="http://127.0.0.1:$PORT" pi --offline --list-models >"$WORK"/pi-dead.txt 2>&1 \
+    || fail "без сервера модели pi вышел с ошибкой: $(head -3 "$WORK"/pi-dead.txt)"
+grep -q "No models available" "$WORK"/pi-dead.txt \
+    || fail "без сервера модели pi не сказал своими словами, что моделей нет: $(head -3 "$WORK"/pi-dead.txt)"
+ok "без сервера модели pi запускается, выходит без ошибки и говорит, что модели нет"
+
+# 5. Адрес и ключ берутся ПАРОЙ. Вход: стенд удалённый (CUSTOM_*), а
+#    LLAMACPP_API_KEY остался в окружении от прежнего локального сервера.
+#    Возьмёт расширение ключ из другой пары — заглушка ответит 401, и модели не
+#    будет, хотя у Zed она есть.
+stub_start ok --key pravilnyi
+CUSTOM_API_URL="http://127.0.0.1:$PORT" CUSTOM_API_KEY=pravilnyi \
+    LLAMACPP_API_KEY=chuzhoi \
+    pi --offline --list-models >"$WORK"/pi-pair.txt 2>&1 || true
+grep -q "GLM-4.7-Flash-UD-Q4_K_XL" "$WORK"/pi-pair.txt \
+    || fail "адрес и ключ взяты из разных пар: $(head -3 "$WORK"/pi-pair.txt)"
+ok "адрес и ключ берутся парой"
+stub_stop
+
+# 6. Первый адрес не отвечает, второй отвечает — модель берётся со второго.
+#    Иначе у pi модели нет там, где у Zed она есть, и молча.
+stub_start ok
+LLAMA_API_URL="http://127.0.0.1:$((PORT + 1))" CUSTOM_API_URL="http://127.0.0.1:$PORT" \
+    pi --offline --list-models >"$WORK"/pi-fallback.txt 2>&1 || true
+grep -q "GLM-4.7-Flash-UD-Q4_K_XL" "$WORK"/pi-fallback.txt \
+    || fail "откат на второй адрес не работает: $(head -3 "$WORK"/pi-fallback.txt)"
+ok "мёртвый первый адрес — модель берётся со второго"
+stub_stop
+
+# 7. Какой провайдер живой, говорит MODEL_PROVIDER — та же переменная, по
+#    которой точка входа выбирает провайдера в настройках Zed. Две заглушки с
+#    разными именами моделей показывают, какую выбрало расширение.
+stub_start ok --id MODEL-LLAMA
+llama_stub=$stub
+stub_start ok --port="$((PORT + 2))" --id MODEL-CUSTOM
+MODEL_PROVIDER=custom \
+    LLAMA_API_URL="http://127.0.0.1:$PORT" \
+    CUSTOM_API_URL="http://127.0.0.1:$((PORT + 2))" \
+    pi --offline --list-models >"$WORK"/pi-provider.txt 2>&1 || true
+kill "$llama_stub" 2>/dev/null || true
+grep -q "MODEL-CUSTOM" "$WORK"/pi-provider.txt \
+    || fail "MODEL_PROVIDER=custom не выбрал адрес custom: $(grep -i MODEL- "$WORK"/pi-provider.txt | head -2)"
+ok "MODEL_PROVIDER выбирает, какой из двух адресов живой"
+stub_stop
 
 echo "pi: все проверки прошли"

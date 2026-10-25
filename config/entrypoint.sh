@@ -230,10 +230,18 @@ for home in /home/*; do
     # единственный каталог отпечатков дома, и он уже проверен выше на ссылку.
     # Сам ~/.pi у дома прежнего образа не существует — создаём и отдаём
     # пользователю, иначе pi получит каталог, принадлежащий root.
+    # Ссылка — отказ по тем же причинам, что у .config. Обычный файл на этом
+    # месте — тоже отказ, и это не теория: `rm -rf ~/.pi && touch ~/.pi`
+    # пользователю доступен, а точка входа работает с `set -eu` — падение здесь
+    # означает, что контейнер не доходит ни до Gitea, ни до xrdp, ни до sshd,
+    # то есть ОДИН пользователь не поднимает стенд НИКОМУ.
     if [ -L "$home/.pi" ]; then
         log "skipping $home/.pi: symlink"
+    elif [ -e "$home/.pi" ] && [ ! -d "$home/.pi" ]; then
+        log "skipping $home/.pi: not a directory"
+    elif [ ! -d "$home/.pi" ] && ! install -d -o "$owner_u" -g "$owner_g" "$home/.pi"; then
+        log "skipping $home/.pi: cannot create"
     else
-        [ -d "$home/.pi" ] || install -d -o "$owner_u" -g "$owner_g" "$home/.pi"
         for f in $SHIPPED_PI_FILES; do
             seed_from_image .pi "$f"
         done

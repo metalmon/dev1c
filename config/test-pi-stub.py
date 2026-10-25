@@ -15,6 +15,11 @@
 ``--shape no-meta`` убирает из ответа ``meta`` — это чужой шлюз, который
 окна не называет. Расширение обязано тогда не регистрировать модель вовсе:
 объявленное наугад окно означает тихо глупеющего агента.
+
+``--id`` задаёт имя модели: двумя заглушками с разными именами проверяется,
+какой из двух адресов расширение выбрало. ``--key`` требует именно этот ключ и
+отвечает 401 на любой другой — так видно, что адрес и ключ берутся парой, а не
+каждый сам по себе.
 """
 import argparse
 import json
@@ -38,6 +43,8 @@ CHAT_TEMPLATE = (
 class Handler(BaseHTTPRequestHandler):
     shape = "ok"
     dump = None
+    model = MODEL
+    key = None
 
     def log_message(self, *_):  # тишина: вывод проверки и так читают глазами
         pass
@@ -50,16 +57,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self):
+        if not self.key:
+            return True
+        if self.headers.get("Authorization") == f"Bearer {self.key}":
+            return True
+        self._json({"error": "unauthorized"}, 401)
+        return False
+
     def do_GET(self):
+        if not self._authorized():
+            return
         path = self.path.split("?")[0].rstrip("/")
         if path.endswith("/models") or path == "":
-            entry = {"id": MODEL, "object": "model", "owned_by": "llamacpp"}
+            entry = {"id": self.model, "object": "model", "owned_by": "llamacpp"}
             if self.shape != "no-meta":
                 entry["meta"] = {"n_ctx": N_CTX, "n_ctx_train": N_CTX_TRAIN}
             self._json({"object": "list", "data": [entry]})
         elif path.endswith("/props"):
             self._json({
-                "model_path": "/models/" + MODEL + ".gguf",
+                "model_path": "/models/" + self.model + ".gguf",
                 "total_slots": 3,
                 "chat_template": CHAT_TEMPLATE,
                 "default_generation_settings": {"n_ctx": N_CTX},
@@ -68,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._authorized():
+            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length)
         if self.dump:
@@ -85,7 +104,7 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = {
                     "id": "stub",
                     "object": "chat.completion.chunk",
-                    "model": MODEL,
+                    "model": self.model,
                     "choices": [{
                         "index": 0,
                         "delta": delta or {},
@@ -99,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({
             "id": "stub",
             "object": "chat.completion",
-            "model": MODEL,
+            "model": self.model,
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": ANSWER},
@@ -114,11 +133,15 @@ def main():
     p.add_argument("--port", type=int, default=18099)
     p.add_argument("--shape", choices=["ok", "no-meta"], default="ok")
     p.add_argument("--dump", help="куда сложить тело запроса к /v1/chat/completions")
+    p.add_argument("--id", default=MODEL, help="имя модели в ответе /models")
+    p.add_argument("--key", help="требовать именно этот ключ, иначе 401")
     a = p.parse_args()
     Handler.shape = a.shape
     Handler.dump = a.dump
+    Handler.model = a.id
+    Handler.key = a.key
     srv = HTTPServer(("127.0.0.1", a.port), Handler)
-    print(f"заглушка на {a.port}, форма {a.shape}", file=sys.stderr, flush=True)
+    print(f"заглушка на {a.port}, форма {a.shape}, модель {a.id}", file=sys.stderr, flush=True)
     srv.serve_forever()
 
 

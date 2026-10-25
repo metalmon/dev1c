@@ -21,14 +21,24 @@
 // (это полезно всем, и согласованность режимов авторы считают своей задачей),
 // расширение выбрасывается, остаётся родной провайдер.
 
-// Адрес и ключ — из окружения, которое точка входа кладёт в /etc/environment:
-// LLAMA_API_URL — наш сервер (контейнер рядом или служба на хосте),
-// CUSTOM_API_URL — «удалённый», то есть не нами поставленный. Для расширения
-// разницы нет: лишь бы это был llama.cpp, у него `/props` и `meta.n_ctx` есть
-// всегда. Имена переменных свои, а не LLAMA_BASE_URL/LLAMA_API_KEY: те читает
-// родной провайдер, и заводить их значило бы обещать router-режим.
-const URL_VARS = ["LLAMA_API_URL", "CUSTOM_API_URL"];
-const KEY_VARS = ["LLAMACPP_API_KEY", "CUSTOM_API_KEY"];
+// Откуда берутся адрес и ключ. Переменные кладёт в /etc/environment точка
+// входа, и ровно эти же читает редактор:
+//   llama.cpp — наш сервер (контейнер рядом или служба на хосте),
+//   custom    — «удалённый», то есть не нами поставленный.
+// Для расширения разницы нет: лишь бы это был llama.cpp, у него `/props` и
+// `meta.n_ctx` есть всегда.
+//
+// Имена переменных свои, а не LLAMA_BASE_URL/LLAMA_API_KEY: те читает родной
+// провайдер, и заводить их значило бы обещать router-режим.
+//
+// Адрес и ключ — ПАРА, и берутся они вместе. Порознь получалось так: стенд
+// удалённый (CUSTOM_*), а LLAMACPP_API_KEY остался в окружении от прежнего
+// локального сервера — и к адресу custom уезжал ключ llamacpp, сервер отвечал
+// 401, и у pi модели не было там, где у редактора она есть.
+const SOURCES = [
+    { provider: "llama.cpp", url: "LLAMA_API_URL", key: "LLAMACPP_API_KEY" },
+    { provider: "custom", url: "CUSTOM_API_URL", key: "CUSTOM_API_KEY" },
+];
 
 // Предел ответа. Окно у сервера общее на вход и выход, а это — сколько из него
 // разрешено занять ответу. 32768 — то же число, что у провайдера custom в
@@ -43,51 +53,59 @@ const ANSWER_LIMIT = 32768;
 // запуститься без модели, а не ждать.
 const TIMEOUT_MS = 5000;
 
-const firstSet = (names) => {
-    for (const n of names) {
-        const v = process.env[n];
-        if (v && v.trim()) return v.trim();
-    }
-    return "";
-};
+const env = (name) => (process.env[name] || "").trim();
 
 const getJson = async (url, headers) => {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
 };
 
-export default async function (pi) {
-    const raw = firstSet(URL_VARS);
-    // Адреса нет — провайдера нет, и это не ошибка: стенд без сервера модели
-    // штатен, pi на нём запускается и сам говорит, что моделей нет.
-    if (!raw) return;
+// Порядок проб. MODEL_PROVIDER — та же переменная, по которой точка входа
+// решает, какой провайдер живой в настройках Zed; названный ею пробуется
+// первым. Второй адрес при этом не выбрасывается: заданы оба, а первый молчит
+// — модель берётся со второго, иначе у pi её нет там, где у редактора есть.
+const candidates = () => {
+    const live = env("MODEL_PROVIDER");
+    const order = [...SOURCES].sort((a, b) => (b.provider === live) - (a.provider === live));
+    return order
+        .map((s) => ({ provider: s.provider, url: env(s.url), key: env(s.key) }))
+        .filter((c) => c.url);
+};
 
+// Один адрес: что сервер отдал, то и объявляем. Ничего не получилось —
+// возвращаем null и пробуем следующий.
+const ask = async (c) => {
     // Завершающий `/v1` снимается: родной клиент pi поступает так же, а в
     // dev1c.toml адрес встречается в обеих формах.
-    const base = raw.replace(/\/+$/, "").replace(/\/v1$/, "");
-    const key = firstSet(KEY_VARS);
-    const headers = key ? { Authorization: `Bearer ${key}` } : {};
+    const base = c.url.replace(/\/+$/, "").replace(/\/v1$/, "");
+    const headers = c.key ? { Authorization: `Bearer ${c.key}` } : {};
 
     let models;
     try {
         models = await getJson(`${base}/models`, headers);
     } catch (e) {
-        console.error(`llama-single: сервер модели ${base} не ответил (${e.message})`);
-        return;
+        // 401 здесь — почти всегда ключ не от этого адреса, и сказать это
+        // надо словами: иначе «модели нет» выглядит как погашенный сервер.
+        console.error(`llama-single: ${base} (${c.provider}) не ответил на /models: ${e.message}`);
+        return null;
     }
 
     const model = models?.data?.[0];
-    const window = model?.meta?.n_ctx;
+    if (!model?.id) {
+        console.error(`llama-single: ${base} (${c.provider}) отдал пустой список моделей`);
+        return null;
+    }
+    const window = model.meta?.n_ctx;
     // Нет `meta.n_ctx` — это не llama.cpp, а чужой шлюз. Модель не
-    // регистрируется вовсе: окно пришлось бы объявить наугад, а это ровно то,
-    // от чего мы уходим. Сказано вслух, а не обнаруживается в работе.
-    if (!model?.id || !Number.isInteger(window) || window <= 0) {
+    // регистрируется: окно пришлось бы объявить наугад, а это ровно то, от
+    // чего мы уходим. Сказано вслух, а не обнаруживается в работе.
+    if (!Number.isInteger(window) || window <= 0) {
         console.error(
-            `llama-single: ${base}/models не назвал окно в meta.n_ctx — ` +
-            "это не llama.cpp, и модели у pi не будет",
+            `llama-single: ${base} (${c.provider}) не назвал окно в meta.n_ctx — ` +
+            "это не llama.cpp, и модели у pi от него не будет",
         );
-        return;
+        return null;
     }
 
     // Размышления объявляются по шаблону чата: `enable_thinking` в нём значит,
@@ -99,16 +117,16 @@ export default async function (pi) {
         reasoning = typeof props?.chat_template === "string"
             && props.chat_template.includes("enable_thinking");
     } catch (e) {
-        console.error(`llama-single: ${base}/props не ответил (${e.message}), размышления не объявлены`);
+        console.error(`llama-single: ${base} не ответил на /props (${e.message}), размышления не объявлены`);
     }
 
-    pi.registerProvider("llamacpp", {
+    return {
         name: "llama.cpp",
         baseUrl: `${base}/v1`,
         // Ключа у нашего сервера обычно нет. Поле непустое потому, что
         // провайдер без ключа считается ненастроенным; сервер без --api-key
         // принимает любой.
-        apiKey: key || "llamacpp",
+        apiKey: c.key || "llamacpp",
         api: "openai-completions",
         models: [{
             type: "chat",
@@ -121,5 +139,17 @@ export default async function (pi) {
             contextWindow: window,
             maxTokens: Math.min(ANSWER_LIMIT, window),
         }],
-    });
+    };
+};
+
+export default async function (pi) {
+    // Ни одного адреса — провайдера нет, и это не ошибка: стенд без сервера
+    // модели штатен, pi на нём запускается и сам говорит, что моделей нет.
+    for (const c of candidates()) {
+        const config = await ask(c);
+        if (config) {
+            pi.registerProvider("llamacpp", config);
+            return;
+        }
+    }
 }

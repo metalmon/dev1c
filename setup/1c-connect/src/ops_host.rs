@@ -825,22 +825,36 @@ pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<S
     extension_version_in(base_url, user, password, std::time::Duration::from_secs(60))
 }
 
-/// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
-/// мгновенно), а сбор готовности — остатком общего срока набора
-/// (`verify::gather`, `verify::SET_DEADLINE`).
-pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
+/// Три исхода пробы расширения, которые факту (`verify::extension_fact`)
+/// обязательно различать: версия есть, расширения в базе нет (отдельно от
+/// версии — это не поломка публикации, а незаконченная установка), и база не
+/// достучалась вовсе (отдельно от «нет расширения» — тут причина на стороне
+/// сети или учётных данных, не базы).
+pub enum Reach {
+    Version(String),
+    Absent,
+    Unreachable(String),
+}
+
+/// То же, что `extension_version_in`, но без схлопывания исходов в
+/// `Option`: установка (`extension_version`/`extension_version_in`) не
+/// различает их и продолжает получать то же поведение через них, а новому
+/// факту (`verify::extension_fact`) нужен весь исход — отдельная функция, не
+/// `From` в обе стороны, чтобы разница была видна в сигнатуре, а не в
+/// докстроке.
+pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Reach {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return None;
+            return Reach::Unreachable(format!("{base_url}/version не ответил за отведённое время"));
         }
         match version_once(base_url, user, password, left) {
-            Probe::Version(v) => return Some(v),
-            // Окончательные ответы: расширения нет, или нас не пустили. Ждать
-            // тут нечего, и ждать нельзя — иначе обновление состояния на
-            // машине без расширения стояло бы весь срок.
-            Probe::Final => return None,
+            Probe::Version(v) => return Reach::Version(v),
+            Probe::Absent => return Reach::Absent,
+            // Окончательный отказ — сеть, таймаут, или база не пустила
+            // (401/403). Ждать тут нечего: висеть весь срок незачем.
+            Probe::Unreachable(why) => return Reach::Unreachable(why),
             // База отвечает, но пока не тем: платформа ещё открывает базу.
             // Первый ответ после подъёма публикации идёт 7,7 с (замер на
             // стенде 25.10) — за это время проба успевала получить отказ и
@@ -850,30 +864,50 @@ pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout:
     }
 }
 
+/// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
+/// мгновенно), а сбор готовности — остатком общего срока набора
+/// (`verify::gather`, `verify::SET_DEADLINE`). Обёртка над `extension_reach`
+/// ради старых вызывающих (установка, командная строка) — им достаточно
+/// версии или её отсутствия, разбирать `Reach` целиком незачем.
+pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
+    match extension_reach(base_url, user, password, timeout) {
+        Reach::Version(v) => Some(v),
+        Reach::Absent | Reach::Unreachable(_) => None,
+    }
+}
+
 /// Чем кончилась одна попытка спросить версию.
 enum Probe {
     Version(String),
-    /// Ответ окончательный: расширения в базе нет (404), не пустили (401/403)
-    /// или до базы не достучались вовсе.
-    Final,
+    /// Расширения в базе нет (404) — это не то же самое, что «не
+    /// достучались»: публикация отвечает, просто ставить ещё не кончили.
+    Absent,
+    /// Окончательный отказ: не пустили (401/403), сеть, или до базы не
+    /// достучались вовсе.
+    Unreachable(String),
     /// База отвечает, но ещё не готова — стоит спросить ещё раз.
     NotReady,
 }
 
 fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Probe {
-    let Ok(c) = reqwest::blocking::Client::builder().timeout(timeout).build() else { return Probe::Final };
+    let Ok(c) = reqwest::blocking::Client::builder().timeout(timeout).build() else {
+        return Probe::Unreachable("не удалось собрать HTTP-клиент".to_string());
+    };
     let Ok(r) = c.get(format!("{base_url}/version")).basic_auth(user, Some(password)).send() else {
         // Соединения нет вовсе — это забота факта публикации, не нашего
         // ожидания: висеть тут весь срок незачем.
-        return Probe::Final;
+        return Probe::Unreachable(format!("{base_url}/version не отвечает"));
     };
     let status = r.status();
     if status.is_server_error() {
         // 5xx от платформы, пока она открывает базу, — «ещё не готова».
         return Probe::NotReady;
     }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Probe::Absent;
+    }
     if !status.is_success() {
-        return Probe::Final;
+        return Probe::Unreachable(format!("{base_url}/version отказал: {status}"));
     }
     // reqwest's `json` feature is not enabled: parse the body ourselves.
     let Ok(text) = r.text() else { return Probe::NotReady };

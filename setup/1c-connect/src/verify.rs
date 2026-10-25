@@ -3,7 +3,7 @@
 //! среда (Gitea) → что мешает загрузке → туннель. Человек читает сверху
 //! вниз и останавливается на первом провале.
 
-use crate::ops_host::{mcp_exe, tools_state, Ctx, Gitea};
+use crate::ops_host::{mcp_exe, tools_state, Ctx, Gitea, Reach};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -25,7 +25,13 @@ const SYSTEM_WEB: &str = "веб-сервер в системе";
 // системе» (есть ли чем публиковать), и два похожих имени читались бы как
 // повтор. Подробность этого факта и так всегда про порт.
 const WEB: &str = "порт веб-сервера";
-const PUBLICATION: &str = "публикация и расширение";
+// Расщеплено (задача 3): прежний общий «публикация и расширение» отвечал за
+// два разных вопроса сразу и прятал, какой из них провалился. Теперь три
+// факта по очереди: отвечает ли публикация, стоит ли расширение, и не
+// разошёлся ли дескриптор публикации с текущим паролем базы.
+const PUBLICATION: &str = "публикация отвечает";
+const EXTENSION: &str = "расширение в базе";
+const DESCRIPTOR: &str = "дескриптор публикации";
 const GITEA: &str = "Gitea";
 const MEDIA: &str = "комплект на носителе";
 const CONFIGURATOR: &str = "Конфигуратор";
@@ -59,7 +65,7 @@ pub fn order(mode: &str) -> Vec<&'static str> {
     if cfg!(target_os = "linux") {
         v.push(SYSTEM_WEB);
     }
-    v.extend([WEB, PUBLICATION, GITEA]);
+    v.extend([WEB, PUBLICATION, EXTENSION, DESCRIPTOR, GITEA]);
     if mode == "local" {
         v.push(OPEN_SESSION);
         v.push(MEDIA);
@@ -229,7 +235,10 @@ pub fn configurator_fact(n: usize) -> Check {
 }
 
 /// Локальный режим: агент стучится в ту же базу, что человек в Конфигураторе.
-/// Отказ агенту при открытом сеансе человека — ожидаемо, не провал.
+/// Отказ агенту при открытом сеансе человека — ожидаемо, не провал. Занято —
+/// это исход сам по себе (`Outcome::Busy`), а не сведение внутри «хорошо»:
+/// точка на карточке обязана отличаться от настоящего прохода (задача 3,
+/// «Занятость — исход, а не помеха»).
 pub fn open_session_fact(sessions: usize) -> Check {
     if sessions == 0 {
         return Check::note(OPEN_SESSION, "открытых сеансов 1С на этой машине нет — база свободна для агента");
@@ -238,13 +247,28 @@ pub fn open_session_fact(sessions: usize) -> Check {
     // машине разработчика база боевая и сеансов там сколько угодно
     // (заказчик 25.10). Говорим то, что верно всюду: открытый сеанс МОЖЕТ
     // закрыть агенту дорогу, и две причины почему.
-    Check::note(
+    Check::busy(
         OPEN_SESSION,
         format!(
             "{} — агенту могут отказать: Конфигуратор держит базу монопольно, а учебная платформа ограничена одним сеансом",
             common::word::count(sessions as u64, "открыт сеанс 1С", "открыто сеанса 1С", "открыто сеансов 1С")
         ),
+        "это не поломка — закройте сеанс, если он ваш, или подождите, пока он закроется сам, и повторите",
     )
+}
+
+/// Единая формулировка занятости — на все факты, которым нужна причина, а не
+/// только счёт: наша собственная долгая операция (`doing`) важнее открытого
+/// сеанса 1С и проверяется первой — пока идёт, скажем, `cf_decompile`,
+/// сеансов может и не быть вовсе, а мьютекс проекта всё равно занят.
+pub fn busy_reason(sessions: usize, doing: &str) -> Option<String> {
+    if !doing.is_empty() {
+        return Some(format!("идёт {doing}"));
+    }
+    if sessions > 0 {
+        return Some("открыт сеанс 1С".to_string());
+    }
+    None
 }
 
 /// Занимает ли порты рабочего места тот, для кого считаются факты. Правило
@@ -459,22 +483,65 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
     }
 }
 
-/// Расширение отвечает по настроенному адресу настроенными учётными данными —
-/// `ver` уже посчитан (`extension_version`), здесь только оформление факта.
-pub fn publication_fact(base_url: &str, ver: Option<String>, sessions: usize) -> Check {
-    match ver {
-        Some(ver) => Check::pass(PUBLICATION, format!("{base_url} → расширение {ver}")),
-        // Совет по тому, что знаем. Открыт сеанс 1С — почти наверняка дело в
-        // нём: учебная платформа держит один, и HTTP-сервису базы в неё не
-        // попасть. Советовать тут установку значит посылать человека чинить
-        // то, что не сломано (заказчик 25.10: «пользователь занят открытой
-        // базой, а мы в журнале предлагаем что-то установить»).
-        None if sessions > 0 => Check::fail(
+/// Общий совет, когда публикация не отвечает и дело не в занятости: искать
+/// причину на холодную — установка не поднята, или расширение не опубликовано.
+const PUBLICATION_HINT: &str = "1c-connect install, затем публикация в Конфигураторе (см. install)";
+
+/// Отвечает ли публикация вообще (любым HTTP-ответом по `/version`) —
+/// отдельно от того, стоит ли в базе расширение (`extension_fact`): раньше
+/// один факт отвечал за оба вопроса и прятал, какой из них провалился.
+/// `responds` уже посчитан вызывающим (`gather`, через `ops_host::Reach`).
+///
+/// `busy` — единая причина занятости (`busy_reason`): открытый сеанс 1С или
+/// наша долгая операция почти наверняка и есть причина молчания, и посылать
+/// человека чинить то, что не сломано, нельзя (заказчик 25.10).
+pub fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<&str>) -> Check {
+    if responds {
+        return Check::pass(PUBLICATION, format!("{base_url}/version отвечает"));
+    }
+    if let Some(reason) = busy {
+        return Check::busy(
             PUBLICATION,
-            format!("{base_url}/version не отвечает, а на машине открыт сеанс 1С"),
+            format!("{base_url}/version не отвечает, а на машине {reason}"),
             "закройте Предприятие или Конфигуратор и повторите — открытый сеанс может держать базу",
-        ),
-        None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
+        );
+    }
+    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), PUBLICATION_HINT)
+}
+
+/// Расширение в базе — версия, отсутствие или недостижимость (`ops_host::Reach`,
+/// уже посчитан вызывающим). Занятость перекрывает любой исход: при `Some(_)`
+/// проба и не делалась (`gather` не ходит к занятой базе вовсе), и факт прямо
+/// об этом говорит, а не выдаёт недостающее знание за провал.
+pub fn extension_fact(reach: &Reach, busy: Option<&str>) -> Check {
+    if let Some(reason) = busy {
+        return Check::busy(
+            EXTENSION,
+            format!("не спрашивали: на машине {reason}"),
+            "это не поломка — закройте сеанс или подождите, пока он закроется сам, и повторите",
+        );
+    }
+    match reach {
+        Reach::Version(v) => Check::pass(EXTENSION, v.clone()),
+        Reach::Absent => Check::fail(EXTENSION, "расширения в базе нет", PUBLICATION_HINT),
+        Reach::Unreachable(why) => Check::fail(EXTENSION, why.clone(), PUBLICATION_HINT),
+    }
+}
+
+/// Дескриптор публикации (`default.vrd`) совпадает с тем, что коннектор
+/// написал бы сейчас (`publication::descriptor_matches`) — если пароль базы в
+/// настройках сменили, а публикацию не обновили, старый дескриптор молча
+/// пустит по старому паролю или не пустит вовсе. Чистая обёртка: сравнение
+/// уже посчитано вызывающим.
+pub fn descriptor_fact(matches: bool) -> Check {
+    if matches {
+        Check::pass(DESCRIPTOR, "совпадает с текущим паролем базы")
+    } else {
+        Check::fail(
+            DESCRIPTOR,
+            "дескриптор публикации разошёлся с текущим паролем базы",
+            "1c-connect install — перепишет default.vrd текущим паролем",
+        )
     }
 }
 
@@ -620,6 +687,16 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
     gather(ctx, tunnel_state, ports, std::time::Instant::now() + SET_DEADLINE)
 }
 
+/// Дескриптор публикации (`default.vrd`) — сравнение с диском (`Paths::of` +
+/// `publication::descriptor_matches`). Чистая функция от настроек и
+/// комплекта: сети не касается, только диск.
+fn base_descriptor_matches(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> bool {
+    match crate::publication::Paths::of(cfg, kit) {
+        Ok(p) => crate::publication::descriptor_matches(&p.pub_dir, cfg),
+        Err(_) => false,
+    }
+}
+
 /// Сам сбор фактов — один набор для «Проверить» и для вердикта готовности,
 /// один срок на весь набор (`deadline`). Ничего не печатает и не объявляет
 /// фазы. Дорогим фактам (публикация, Gitea, порт веб-сервера) передаётся не
@@ -697,16 +774,28 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
         web_fact(web, up, h.publication == "auto")
     });
     let base_url = ctx.cfg.base_url();
-    // Сколько сеансов 1С открыто прямо сейчас — считаем один раз на два
-    // факта: по нему же публикация выбирает, что советовать.
+    // Сколько сеансов 1С открыто прямо сейчас — считаем один раз на все
+    // факты базы: по нему же `busy_reason` решает, спрашивать ли базу вовсе.
     let sessions = crate::bridge::configurator_count();
-    v.push({
-        // Дорогой факт: срок — остаток общего (`extension_version_in` сама
-        // отдаёт `None`, если остатка уже нет).
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, left);
-        publication_fact(&base_url, ver, sessions)
-    });
+    // Единая причина занятости (задача 3): при ней дорогая проба базы не
+    // делается вовсе — расширение молчит по той же причине, что и
+    // публикация, и факт прямо об этом говорит, а не выдаёт недостающее
+    // знание за провал.
+    let busy = busy_reason(sessions, crate::project::doing());
+    let reach = match &busy {
+        Some(reason) => crate::ops_host::Reach::Unreachable(reason.clone()),
+        None => {
+            // Дорогой факт: срок — остаток общего (`extension_reach` сама
+            // отдаёт `Unreachable`, если остатка уже нет).
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left)
+        }
+    };
+    let responds = busy.is_none() && !matches!(reach, Reach::Unreachable(_));
+    v.push(publication_responds_fact(&base_url, responds, busy.as_deref()));
+    v.push(extension_fact(&reach, busy.as_deref()));
+    // Чтение файла, не сети: отдельного срока ей не нужно.
+    v.push(descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)));
     v.push(match ctx.cfg.gitea_url() {
         // Дорогой факт: срок — остаток общего.
         Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url, deadline.saturating_duration_since(std::time::Instant::now())), url),
@@ -730,14 +819,14 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             // В список идут только порты, занятые НЕ нами: порт свободный,
             // занятый этим же процессом (окно проверяет само себя) или такой,
             // про который держателя не выяснить, обвинять человека не даёт.
-            let busy: Vec<(u16, String)> = [p.mcp, p.vrunner]
+            let busy_ports: Vec<(u16, String)> = [p.mcp, p.vrunner]
                 .into_iter()
                 .filter_map(|port| {
                     let who = crate::holder::of_port(port)?;
                     (holder_pid(&who)? != me).then_some((port, who))
                 })
                 .collect();
-            workstation_ports_fact(p.mcp, p.vrunner, &busy, ports)
+            workstation_ports_fact(p.mcp, p.vrunner, &busy_ports, ports)
         });
     } else {
         v.push(tunnel_fact(tunnel_state));
@@ -788,7 +877,9 @@ mod tests {
             db_user_fact(""),
             web_server_fact(None, None),
             web_fact(1818, false, false),
-            publication_fact("http://x", None, 0),
+            publication_responds_fact("http://x", false, None),
+            extension_fact(&Reach::Absent, None),
+            descriptor_fact(false),
             gitea_address_fact(),
             gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
             tunnel_fact(None),
@@ -861,8 +952,8 @@ mod tests {
         // Order is the contract: a dead web port must not look like a tunnel fault.
         let names = order("tunnel");
         let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
-        assert!(at("порт веб-сервера") < at("публикация и расширение"));
-        assert!(at("публикация и расширение") < at("туннель"));
+        assert!(at(WEB) < at(PUBLICATION));
+        assert!(at(PUBLICATION) < at(TUNNEL));
     }
 
     #[test]
@@ -874,22 +965,24 @@ mod tests {
         let d = usize::from(cfg!(target_os = "linux"));
         let w = 2 * d;
         let tunnel = order("tunnel");
-        assert_eq!(tunnel.len(), 16 + w);
-        assert_eq!(tunnel[15 + w], "туннель");
+        // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на
+        // три факта (публикация, расширение, дескриптор).
+        assert_eq!(tunnel.len(), 18 + w);
+        assert_eq!(tunnel[17 + w], "туннель");
         // Платформа и строка платформы для анализатора — рядом: вторая без
         // первой не считается вовсе.
         assert_eq!(tunnel[2], "платформа 1С");
         assert_eq!(tunnel[3], "платформа для анализатора");
         assert_eq!(tunnel[6 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[12 + w], "Gitea");
+        assert_eq!(tunnel[14 + w], "Gitea");
         if d == 1 {
             assert_eq!(tunnel[4], "экран для конфигуратора");
             assert_eq!(tunnel[11], "веб-сервер в системе");
             assert_eq!(tunnel[12], "порт веб-сервера");
         }
         let local = order("local");
-        assert_eq!(local.len(), 16 + w);
-        assert_eq!(local[15 + w], "порты рабочего места");
+        assert_eq!(local.len(), 18 + w);
+        assert_eq!(local[17 + w], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -914,11 +1007,11 @@ mod tests {
         }
     }
 
-    /// Дорогие факты — те три, кому `gather` отдаёт остаток общего срока, а
-    /// не весь бюджет сразу (докстрока `gather`). Чистая функция, а не три
+    /// Дорогие факты — те, кому `gather` отдаёт остаток общего срока, а не
+    /// весь бюджет сразу (докстрока `gather`). Чистая функция, а не три
     /// отдельные проверки подстрок — честнее (находка ревью задачи 2, круг 2).
     fn is_expensive(name: &str) -> bool {
-        matches!(name, WEB | PUBLICATION | GITEA)
+        matches!(name, WEB | PUBLICATION | EXTENSION | DESCRIPTOR | GITEA)
     }
 
     /// Находка ревью, круг 2: ни один тест не доказывал, что короткий общий
@@ -934,13 +1027,11 @@ mod tests {
         let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
         assert_eq!(names, order("tunnel"), "короткий срок уронил факт(ы): {names:?}");
 
-        // Перед первым дорогим фактом в порядке — хотя бы один дешёвый, и
-        // сами дорогие идут в том же порядке, в котором друг за другом
-        // спрашивают остаток (`WEB`, затем `PUBLICATION`, затем `GITEA`).
+        // Перед первым дорогим фактом в порядке — хотя бы один дешёвый.
         let cheap_before_first_expensive = names.iter().take_while(|n| !is_expensive(n)).count();
         assert!(cheap_before_first_expensive > 0, "перед первым дорогим должны стоять дешёвые: {names:?}");
         let expensive: Vec<&str> = names.iter().copied().filter(|n| is_expensive(n)).collect();
-        assert_eq!(expensive, [WEB, PUBLICATION, GITEA], "{names:?}");
+        assert_eq!(expensive, [WEB, PUBLICATION, EXTENSION, DESCRIPTOR, GITEA], "{names:?}");
     }
 
     /// Штатное состояние рабочего места: трей держит оба порта, а человек
@@ -1056,19 +1147,55 @@ mod tests {
         assert!(open_session_fact(2).detail.contains("2 открыто сеанса"), "{:?}", open_session_fact(2));
     }
 
+    /// Задача 3: занятость — исход сам по себе (`Outcome::Busy`), а не
+    /// сведение внутри «хорошо». Точка на карточке обязана отличаться от
+    /// настоящего прохода.
+    #[test]
+    fn an_open_session_is_busy_not_broken() {
+        let c = open_session_fact(1);
+        assert_eq!(c.outcome(), Outcome::Busy);
+        assert!(c.detail.contains("открыт сеанс 1С"), "{c:?}");
+        assert!(!c.hint.is_empty(), "{c:?}");
+        assert_eq!(open_session_fact(0).outcome(), Outcome::Good);
+    }
+
+    /// Дорогая проба базы не делается вовсе, пока база занята: голос не
+    /// спрашивают дважды там, где сеанс всего один (учебная платформа).
+    #[test]
+    fn the_expensive_facts_are_not_asked_while_the_base_is_busy() {
+        let c = extension_fact(&Reach::Unreachable("база не ответила".into()), Some("открыт сеанс 1С"));
+        assert_eq!(c.outcome(), Outcome::Busy);
+        assert!(c.detail.contains("не спрашивали"), "{c:?}");
+        // Свободна — разбор по исходу: нет расширения значит плохо, версия — хорошо.
+        assert_eq!(extension_fact(&Reach::Absent, None).outcome(), Outcome::Bad);
+        assert_eq!(extension_fact(&Reach::Version("0.4.8".into()), None).outcome(), Outcome::Good);
+        // Публикация и расширение — два разных факта, и путать их нельзя.
+        assert_eq!(publication_responds_fact("http://x", false, None).outcome(), Outcome::Bad);
+        assert_eq!(descriptor_fact(false).outcome(), Outcome::Bad);
+        assert_eq!(descriptor_fact(true).outcome(), Outcome::Good);
+    }
+
+    #[test]
+    fn our_own_long_operation_is_busy_too() {
+        assert_eq!(busy_reason(0, "cf_decompile").as_deref(), Some("идёт cf_decompile"));
+        assert_eq!(busy_reason(1, "").as_deref(), Some("открыт сеанс 1С"));
+        assert_eq!(busy_reason(0, ""), None);
+    }
+
     /// Совет идёт по тому, что мы знаем. Открыт сеанс 1С — дело почти
     /// наверняка в нём, и посылать человека устанавливать расширение, когда
     /// он просто работает в базе, нельзя (заказчик 25.10).
     #[test]
     fn an_open_session_changes_the_advice_about_the_publication() {
-        let busy = publication_fact("http://x", None, 1);
-        assert!(!busy.ok, "{busy:?}");
+        let reason = busy_reason(1, "");
+        let busy = publication_responds_fact("http://x", false, reason.as_deref());
+        assert_eq!(busy.outcome(), Outcome::Busy, "{busy:?}");
         assert!(busy.detail.contains("открыт сеанс 1С"), "{busy:?}");
         assert!(busy.hint.contains("закройте"), "{busy:?}");
         assert!(!busy.hint.contains("install"), "установку тут советовать нечего: {busy:?}");
 
         // Сеансов нет — прежний совет про установку остаётся верным.
-        let free = publication_fact("http://x", None, 0);
+        let free = publication_responds_fact("http://x", false, None);
         assert!(free.hint.contains("install"), "{free:?}");
     }
 
@@ -1271,9 +1398,9 @@ mod tests {
         // системы и проверяется отдельно (`a_dead_port_is_advised_by_mode_and_system`).
         let down = web_fact(1818, false, false);
         assert!(!down.ok && down.hint.contains("опубликована база"), "{down:?}");
-        let ok = publication_fact("http://x", Some("1.2".into()), 0);
+        let ok = extension_fact(&Reach::Version("1.2".into()), None);
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
-        let fail = publication_fact("http://x", None, 0);
+        let fail = publication_responds_fact("http://x", false, None);
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 

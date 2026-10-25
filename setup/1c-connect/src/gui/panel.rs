@@ -139,13 +139,19 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
         match ready {
             Verdict::Checking => return card(Dot::Busy, "Проверяю…".into()),
             Verdict::NotReady(_) => return card(Dot::Warn, "Не всё готово".into()),
-            // `Busy` (занята открытым сеансом 1С и т.п.) карточку не красит —
-            // той же причиной, по которой занятые факты и раньше не считались
-            // провалом (`verdict_of`): это «сейчас занято человеком», а не
-            // «сломано». `Off` сюда не доходит вовсе — ветка под `link.is_up()`
-            // в локальном режиме и значит «обслуживание включено»; матч
+            // «Занято» — своё состояние из пяти, и зелёным оно не бывает
+            // (спека, цель 3; Critical 2 ревью задач 5+6). Прежде `Busy`
+            // проваливалось в общую ветку ниже и давало зелёную точку с
+            // «MCP включены»: человек с открытым «Предприятием» видел
+            // обещание там, где агенту в эту минуту откажут, — ровно то
+            // противоречие, на которое жаловался владелец. Точка жёлтая
+            // (`Dot::Busy`, та же, что у идущей операции: «подожди», а не
+            // «починяй»), а чем занято — говорит `reason` рядом.
+            Verdict::Busy(_) => return card(Dot::Busy, "Занято".into()),
+            // `Off` сюда не доходит вовсе — ветка под `link.is_up()` в
+            // локальном режиме и значит «обслуживание включено»; матч
             // исчерпывающий, чтобы новый исход вердикта не остался забытым.
-            Verdict::Ready | Verdict::Busy(_) | Verdict::Off => {}
+            Verdict::Ready | Verdict::Off => {}
         }
     }
     let (dot, title): (Dot, String) = match link {
@@ -165,7 +171,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
 /// `None` — объяснять нечего: всё в порядке, идёт операция или вердикт ещё
 /// считается.
 ///
-/// `at` — час вердикта (`Ui::ready_at`): вердикт пересчитывается по событиям,
+/// `at` — час, на который верен набор (`Ui::facts_at`): вердикт пересчитывается по событиям,
 /// а не на таймере, значит бывает устаревшим — среда могла подняться через
 /// минуту после отказа. Поэтому рядом с причиной подвал называет, на какой
 /// момент она верна (спека, «Чем за это платим»: «проверено в 15:54»), а
@@ -180,8 +186,16 @@ pub fn reason(link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, at:
         return Some(gate_text(why));
     }
     if mode == "local" && link.is_up() {
-        if let Verdict::NotReady(check) = ready {
-            let why = format!("Не всё готово: {}", gui::readiness_reason(check));
+        // Оба жёлтых вердикта называют причину словами факта, и это разные
+        // слова: «не всё готово» — починить, «занято» — подождать или
+        // закрыть базу (Critical 2: прежде `Busy` молчал, и жёлтая точка
+        // оставалась без объяснения).
+        let why = match ready {
+            Verdict::NotReady(check) => Some(format!("Не всё готово: {}", gui::readiness_reason(check))),
+            Verdict::Busy(check) => Some(format!("Занято: {}", gui::readiness_reason(check))),
+            _ => None,
+        };
+        if let Some(why) = why {
             return Some(match at {
                 Some(t) => format!("{why} · проверено в {t}"),
                 None => why,

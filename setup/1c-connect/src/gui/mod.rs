@@ -608,11 +608,23 @@ pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
 /// операции — просто про связь.
 /// Причина замка попадает в подсказку значка наравне с фазой операции; идущая
 /// операция побеждает — тот же порядок разрешения, что в карточке.
-pub fn tray_tooltip(progress: Option<&Running>, link: &State, gate: Option<&str>, now: Instant) -> String {
+///
+/// Жёлтый вердикт тоже называет причину (Critical 2 ревью задач 5+6): значок
+/// желтел на «занято» и оранжевел на «не всё готово», а подсказка при этом
+/// говорила «подключён» — человек видел цвет без объяснения. Порядок и условие
+/// те же, что у карточки (`panel::card`/`panel::reason`): вердикт показывается
+/// только в локальном режиме при поднятом обслуживании, иначе подсказка и
+/// карточка разошлись бы.
+pub fn tray_tooltip(progress: Option<&Running>, link: &State, mode: &str, verdict: &Verdict, gate: Option<&str>, now: Instant) -> String {
     if let (None, Some(why)) = (progress, gate) {
         // Та же формулировка, что у подсказки переключателя и подвала:
         // три поверхности говорили о замке тремя разными фразами.
         return format!("1c-connect: {}", crate::gui::panel::gate_text(why).to_lowercase());
+    }
+    if progress.is_none() && mode == "local" && link.is_up() {
+        if let Some(why) = warn_reason(verdict) {
+            return format!("1c-connect: {why}");
+        }
     }
     match progress {
         Some(r) => {
@@ -1544,7 +1556,7 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
         let now_reason = warn_reason(&ui.verdict);
         if let Some(why) = &now_reason {
             if Some(why) != was.as_ref() {
-                note_line(ui, Line { kind: Kind::Warn, text: format!("не всё готово: {why}") });
+                note_line(ui, Line { kind: Kind::Warn, text: why.clone() });
             }
         }
     }
@@ -1556,11 +1568,17 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
 }
 
 /// Причина жёлтого вердикта человеческими словами, `None` — вердикт не
-/// жёлтый. Одна формулировка на журнал и на подвал (`panel::reason` берёт
-/// ту же `readiness_reason`).
+/// жёлтый. Одна формулировка на журнал и на подсказку значка (`panel::reason`
+/// берёт ту же `readiness_reason`, только с большой буквы — он пишет в подвал).
+///
+/// Жёлтых вердиктов два, и начало строки у них разное (Critical 2 ревью задач
+/// 5+6): «не всё готово» значит починить, «занято» — подождать или закрыть
+/// базу. Прежде `Busy` не давал причины вовсе, и ни журнал, ни значок о нём не
+/// говорили.
 fn warn_reason(verdict: &Verdict) -> Option<String> {
     match verdict {
-        Verdict::NotReady(c) => Some(readiness_reason(c)),
+        Verdict::NotReady(c) => Some(format!("не всё готово: {}", readiness_reason(c))),
+        Verdict::Busy(c) => Some(format!("занято: {}", readiness_reason(c))),
         _ => None,
     }
 }
@@ -1651,7 +1669,7 @@ fn sync_tray(ui: &mut Ui, now: Instant) {
         state: tray_state_now(ui, now),
         on: ui.link.is_on(),
         locked: ui.gate.is_some(),
-        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now),
+        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.verdict, ui.gate.as_deref(), now),
     };
     if let Some(tray) = &ui.tray {
         tray.set_state(view.state, view.on, view.locked);
@@ -2128,7 +2146,7 @@ fn tick(cx: &mut App) {
         }
         let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
         if due {
-            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, ui.gate.as_deref(), now);
+            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.verdict, ui.gate.as_deref(), now);
             ui.tooltip_at = Some(now);
             if let Some(tray) = &ui.tray {
                 tray.set_tooltip(&text);
@@ -2595,8 +2613,8 @@ mod tests {
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
         exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
-        note_licence_change_ui, on_line, on_progress, op_refusal, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
-        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, READINESS_LOST,
+        note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
+        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
         Verdict, Running, Tab, TrayState, SLOW_HIDDEN, SLOW_OPEN,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
@@ -2973,16 +2991,61 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+        let ok = Verdict::Ready;
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, "local", &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
-        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
-        assert_eq!(tray_tooltip(None, &State::Up { since: now }, None, now), "1c-connect: подключён");
-        assert_eq!(tray_tooltip(None, &State::Off, None, now), "1c-connect: не подключён");
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, "local", &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
+        assert_eq!(tray_tooltip(None, &State::Up { since: now }, "local", &ok, None, now), "1c-connect: подключён");
+        assert_eq!(tray_tooltip(None, &State::Off, "local", &ok, None, now), "1c-connect: не подключён");
         // Причина замка — в подсказке значка; идущая операция её побеждает
         // (тот же порядок разрешения, что в карточке).
         let why = Some("не задан пользователь базы");
-        assert_eq!(tray_tooltip(None, &State::Off, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
-        assert_eq!(tray_tooltip(Some(&r), &State::Off, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+        assert_eq!(tray_tooltip(None, &State::Off, "local", &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
+        assert_eq!(tray_tooltip(Some(&r), &State::Off, "local", &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+    }
+
+    /// Critical 2 ревью задач 5+6 — «занято» горело ЗЕЛЁНЫМ. На стенде
+    /// человек с открытым «Предприятием» видел зелёную точку и «MCP
+    /// включены», хотя агенту в эту минуту откажут; владелец 25.10:
+    /// «не должно быть противоречий, когда MCP типа подключены, горит
+    /// зелёный, а в статусах что-то красным горит». Четыре поверхности —
+    /// карточка, подвал, подсказка значка и сам значок — обязаны сказать
+    /// «занято» словами факта, и ни одна из них не зелёная.
+    #[test]
+    fn a_busy_verdict_is_never_green_on_any_surface() {
+        let now = Instant::now();
+        let fact = Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте Предприятие");
+        let busy = Verdict::Busy(fact);
+        let up = State::Up { since: now };
+
+        // Карточка: точка не зелёная, заголовок — состояние, а не проза.
+        let c = panel::card(None, &up, "local", &busy, None, now);
+        assert_ne!(c.dot, Dot::Up, "«занято» показано зелёным: {:?}", c.title);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Занято"));
+        assert_ne!(c.title, "MCP включены");
+
+        // Подвал: причина — словами факта.
+        let why = panel::reason(&up, "local", &busy, None, Some("15:54")).expect("причина занятости названа");
+        assert!(why.starts_with("Занято:"), "{why}");
+        assert!(why.contains("в базе открыт сеанс") && why.contains("1 открыт сеанс 1С"), "{why}");
+        assert!(why.contains("закройте Предприятие"), "{why}");
+
+        // Подсказка значка — та же причина, теми же словами.
+        let tip = tray_tooltip(None, &up, "local", &busy, None, now);
+        assert!(tip.contains("занято") && tip.contains("в базе открыт сеанс"), "{tip}");
+        assert_ne!(tip, "1c-connect: подключён");
+
+        // Значок: жёлтый «занято», не зелёный.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.link = up;
+        ui.gate = None;
+        ui.verdict = busy;
+        assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
+
+        // И журнал про занятость говорит — своими словами, не «не всё готово».
+        let line = warn_reason(&ui.verdict).expect("журналу есть что сказать");
+        assert!(line.starts_with("занято:"), "{line}");
     }
 
     #[test]

@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn the_tray_follows_the_card_order() {
         use crate::gui::tray_state_now;
-        use crate::gui::Readiness;
+        use crate::gui::Verdict;
         use crate::session::State;
         use common::check::Check;
 
@@ -539,18 +539,18 @@ mod tests {
         // (ни инструментов, ни платформы) — а речь здесь про цвет значка при
         // открытом замке; запертый проверяется ниже отдельно.
         ui.gate = None;
-        let fail = Readiness::Warn(Check::fail("проект", "не разложен", "1c-connect install"));
+        let fail = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
 
-        ui.ready = Readiness::Ok;
+        ui.verdict = Verdict::Ready;
         assert_eq!(tray_state_now(&ui, now), TrayState::Up, "всё сошлось — зелёный");
         // Вердикт провален — своё состояние, и зелёным оно не бывает.
-        ui.ready = fail.clone();
+        ui.verdict = fail.clone();
         assert_eq!(tray_state_now(&ui, now), TrayState::Warn);
         // Вердикт ещё не посчитан — «занято», не зелёный.
-        ui.ready = Readiness::Unknown;
+        ui.verdict = Verdict::Checking;
         assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
         // Идёт операция — побеждает она, даже поверх провалившегося вердикта.
-        ui.ready = fail.clone();
+        ui.verdict = fail.clone();
         ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
         assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
         ui.progress = None;
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(tray_state_now(&ui, now), TrayState::Busy);
         ui.busy = None;
         // Замок и выключенное обслуживание — серый.
-        ui.ready = Readiness::Ok;
+        ui.verdict = Verdict::Ready;
         ui.gate = Some("не задан пользователь базы".into());
         assert_eq!(tray_state_now(&ui, now), TrayState::Off);
         ui.gate = None;

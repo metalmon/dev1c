@@ -10,7 +10,7 @@
 use crate::cfg::Host;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Readiness, Running, Ui, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Verdict, Running, Ui, Which};
 use crate::session::State;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -116,7 +116,7 @@ pub struct Card {
 /// Готовность смотрит только локальный режим: в туннельном провал публикации
 /// уже становится красным `State::Failed` в `Ev::Publish`, второй жёлтый
 /// смысл ему не нужен — карточка там остаётся прежней.
-pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, now: Instant) -> Card {
+pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
         let title = format!("{} · {}", r.phase.title(), clock);
@@ -137,9 +137,15 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readin
     // «карточка = проверка» говорит про включённое.
     if local && link.is_up() {
         match ready {
-            Readiness::Unknown => return card(Dot::Busy, "Проверяю…".into()),
-            Readiness::Warn(_) => return card(Dot::Warn, "Не всё готово".into()),
-            Readiness::Ok => {}
+            Verdict::Checking => return card(Dot::Busy, "Проверяю…".into()),
+            Verdict::NotReady(_) => return card(Dot::Warn, "Не всё готово".into()),
+            // `Busy` (занята открытым сеансом 1С и т.п.) карточку не красит —
+            // той же причиной, по которой занятые факты и раньше не считались
+            // провалом (`verdict_of`): это «сейчас занято человеком», а не
+            // «сломано». `Off` сюда не доходит вовсе — ветка под `link.is_up()`
+            // в локальном режиме и значит «обслуживание включено»; матч
+            // исчерпывающий, чтобы новый исход вердикта не остался забытым.
+            Verdict::Ready | Verdict::Busy(_) | Verdict::Off => {}
         }
     }
     let (dot, title): (Dot, String) = match link {
@@ -166,7 +172,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Readin
 /// «Проверить» остаётся способом спросить заново. Час приписывается только
 /// к причине вердикта: отказ занять порт и холодный замок — факты «прямо
 /// сейчас», им час ни к чему.
-pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, at: Option<&str>) -> Option<String> {
+pub fn reason(link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, at: Option<&str>) -> Option<String> {
     if let State::Failed(why) = link {
         return Some(why.clone());
     }
@@ -174,7 +180,7 @@ pub fn reason(link: &State, mode: &str, ready: &Readiness, gate: Option<&str>, a
         return Some(gate_text(why));
     }
     if mode == "local" && link.is_up() {
-        if let Readiness::Warn(check) = ready {
+        if let Verdict::NotReady(check) = ready {
             let why = format!("Не всё готово: {}", gui::readiness_reason(check));
             return Some(match at {
                 Some(t) => format!("{why} · проверено в {t}"),
@@ -853,7 +859,7 @@ impl Render for Panel {
 
         let ui = cx.global::<Ui>();
         let (tab, busy, link) = (ui.tab, ui.busy, ui.link.clone());
-        let ready = ui.ready.clone();
+        let ready = ui.verdict.clone();
         let (unread, failed) = (ui.unread, ui.failed_checks);
         let has_progress = ui.progress.is_some();
         // Какая операция идёт, если идёт — для текста под «Сохранить»
@@ -867,7 +873,7 @@ impl Render for Panel {
         // Причина — один расчёт на весь `render`: та же строка уходит и в
         // подсказку переключателя, и в левый слот подвала (спека: «причина
         // идёт туда, где для неё есть место»).
-        let why = reason(&link, &mode, &ready, gate.as_deref(), ui.ready_at.as_deref());
+        let why = reason(&link, &mode, &ready, gate.as_deref(), ui.facts_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
@@ -1419,7 +1425,7 @@ mod tests {
         switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
     };
     use crate::cfg::Host;
-    use crate::gui::{Dot, Kind, Line, ProjectView, Readiness, Running, Which};
+    use crate::gui::{Dot, Kind, Line, ProjectView, Verdict, Running, Which};
     use crate::session::State;
     use common::check::Check;
     use common::Phase;
@@ -1440,12 +1446,12 @@ mod tests {
         assert!(switch_locked(None, false, true));
         assert!(switch_locked(None, true, true));
         // Причина живёт в подсказке, а не в заголовке карточки.
-        let text = reason(&State::Off, "local", &Readiness::Unknown, why, None);
+        let text = reason(&State::Off, "local", &Verdict::Checking, why, None);
         assert_eq!(text.as_deref(), Some("Нельзя включить: не задан пользователь базы"));
         assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Нельзя включить: не задан пользователь базы");
         assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
         assert_eq!(switch_tooltip(None, None, "tunnel"), "Туннель в среду разработки");
-        let c = card(None, &State::Off, "local", &Readiness::Unknown, None, Instant::now());
+        let c = card(None, &State::Off, "local", &Verdict::Checking, None, Instant::now());
         assert_eq!(c.title, "MCP выключены", "причина в заголовок не идёт — она туда не влезает");
     }
 
@@ -1457,7 +1463,7 @@ mod tests {
     fn the_locked_switch_names_the_gate_not_the_bind() {
         let gate = "не задан пользователь базы";
         let link = State::Failed("порт 7771 занят процессом 1234".into());
-        let why = reason(&link, "local", &Readiness::Ok, Some(gate), None);
+        let why = reason(&link, "local", &Verdict::Ready, Some(gate), None);
         // В подвале — отказ: он выше в порядке разрешения, и карточка красная.
         assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
         // А переключатель заперт замком — и говорит про замок.
@@ -1474,7 +1480,7 @@ mod tests {
     #[test]
     fn unknown_is_never_green() {
         let now = Instant::now();
-        let c = card(None, &State::Up { since: now }, "local", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Up { since: now }, "local", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Проверяю…"));
     }
 
@@ -1485,11 +1491,11 @@ mod tests {
         let now = Instant::now();
         let gate = Some("не задан пользователь базы");
         for link in [State::Off, State::Connecting, State::Up { since: now }] {
-            let c = card(None, &link, "local", &Readiness::Ok, gate, now);
+            let c = card(None, &link, "local", &Verdict::Ready, gate, now);
             assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"), "{link:?}");
         }
         // В туннельном режиме тот же замок говорит прежним словом.
-        let c = card(None, &State::Off, "tunnel", &Readiness::Ok, gate, now);
+        let c = card(None, &State::Off, "tunnel", &Verdict::Ready, gate, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
     }
 
@@ -1500,7 +1506,7 @@ mod tests {
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
-        let c = card(Some(&r), &State::Up { since: now }, "local", &Readiness::Warn(fail), Some("не задан пользователь базы"), now);
+        let c = card(Some(&r), &State::Up { since: now }, "local", &Verdict::NotReady(fail), Some("не задан пользователь базы"), now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 0:00");
     }
@@ -1511,10 +1517,10 @@ mod tests {
     fn a_failed_bind_wins_over_the_gate() {
         let now = Instant::now();
         let link = State::Failed("порт 7771 занят процессом 1234".into());
-        let c = card(None, &link, "local", &Readiness::Ok, Some("не задан пользователь базы"), now);
+        let c = card(None, &link, "local", &Verdict::Ready, Some("не задан пользователь базы"), now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         // Сама причина не пропала — она в подсказке, подвале и журнале.
-        assert_eq!(reason(&link, "local", &Readiness::Ok, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
+        assert_eq!(reason(&link, "local", &Verdict::Ready, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
     }
 
     /// «Не надо там прозу писать, она не лезет» (заказчик 2026-10-21):
@@ -1534,7 +1540,7 @@ mod tests {
                 State::Retrying("нет сети".into()),
                 State::Failed(bind.into()),
             ] {
-                for ready in [Readiness::Unknown, Readiness::Ok, Readiness::Warn(fail.clone())] {
+                for ready in [Verdict::Checking, Verdict::Ready, Verdict::NotReady(fail.clone())] {
                     for gate in [None, Some(gate_why)] {
                         let title = card(None, &link, mode, &ready, gate, now).title;
                         for prose in [gate_why, "занят процессом", "не разложен", "/home/dev3"] {
@@ -1556,9 +1562,9 @@ mod tests {
     fn off_ignores_hot_facts() {
         let now = Instant::now();
         let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
-        let c = card(None, &State::Off, "local", &Readiness::Warn(fail.clone()), None, now);
+        let c = card(None, &State::Off, "local", &Verdict::NotReady(fail.clone()), None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
-        assert_eq!(reason(&State::Off, "local", &Readiness::Warn(fail), None, None), None);
+        assert_eq!(reason(&State::Off, "local", &Verdict::NotReady(fail), None, None), None);
     }
 
     #[test]
@@ -1583,7 +1589,7 @@ mod tests {
             seen: now,
             stale_noted: false,
         };
-        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, None, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Verdict::Checking, None, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
         assert!(c.cancel);
@@ -1598,7 +1604,7 @@ mod tests {
         // долгая операция была и самой безвыходной.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
-        let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, None, now);
+        let c = card(Some(&r), &State::Off, "tunnel", &Verdict::Checking, None, now);
         assert_eq!(c.dot, Dot::Busy);
         assert!(c.cancel);
     }
@@ -1606,16 +1612,16 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
-        let c = card(None, &State::Off, "tunnel", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Off, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
         assert!(!c.cancel);
-        let c = card(None, &State::Connecting, "tunnel", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Connecting, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
-        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
-        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
     }
@@ -1623,13 +1629,13 @@ mod tests {
     #[test]
     fn card_titles_speak_about_mcp_not_the_tunnel() {
         let now = Instant::now();
-        assert_eq!(card(None, &State::Off, "local", &Readiness::Unknown, None, now).title, "MCP выключены");
-        assert_eq!(card(None, &State::Connecting, "local", &Readiness::Unknown, None, now).title, "Включаю…");
-        assert_eq!(card(None, &State::Up { since: now }, "local", &Readiness::Ok, None, now).title, "MCP включены");
+        assert_eq!(card(None, &State::Off, "local", &Verdict::Checking, None, now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Connecting, "local", &Verdict::Checking, None, now).title, "Включаю…");
+        assert_eq!(card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now).title, "MCP включены");
         // Отказ называет состояние, а не причину: причина («порт 7771 занят
         // процессом 1234») длиннее строки карточки и живёт в подсказке,
         // подвале и журнале (заказчик 2026-10-21).
-        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Readiness::Unknown, None, now);
+        let c = card(None, &State::Failed("порт 7771 занят процессом 1234".into()), "local", &Verdict::Checking, None, now);
         assert_eq!(c.title, "Не подключён");
         for mode in ["local", "tunnel"] {
             for link in [
@@ -1639,7 +1645,7 @@ mod tests {
                 State::Retrying("нет сети".into()),
                 State::Failed("порт занят".into()),
             ] {
-                let title = card(None, &link, mode, &Readiness::Unknown, None, now).title;
+                let title = card(None, &link, mode, &Verdict::Checking, None, now).title;
                 assert!(!title.to_lowercase().contains("туннель"), "{mode}/{link:?}: {title}");
             }
         }
@@ -1647,7 +1653,7 @@ mod tests {
 
     /// Дефект (заказчик 2026-10-20, трижды в один день): зелёная карточка
     /// обещала «агент дойдёт до базы», хотя инструменты не разложены — первый
-    /// провалившийся факт готовности (`Readiness::Warn`) красит карточку
+    /// провалившийся факт готовности (`Verdict::NotReady`) красит карточку
     /// жёлтым. Заголовок при этом называет только состояние, а названная
     /// причина едет в подсказку (`reason`), не трогая смысл самого
     /// переключателя (`Switch` в `render` не зависит от `ready`).
@@ -1655,7 +1661,7 @@ mod tests {
     fn a_failed_readiness_fact_turns_the_green_card_into_a_named_warning() {
         let now = Instant::now();
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
-        let ready = Readiness::Warn(fail);
+        let ready = Verdict::NotReady(fail);
         let up = State::Up { since: now };
         let c = card(None, &up, "local", &ready, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Warn, "Не всё готово"));
@@ -1670,7 +1676,7 @@ mod tests {
     #[test]
     fn passed_readiness_keeps_the_green_card() {
         let now = Instant::now();
-        let c = card(None, &State::Up { since: now }, "local", &Readiness::Ok, None, now);
+        let c = card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"));
     }
 
@@ -1682,7 +1688,7 @@ mod tests {
         let now = Instant::now();
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
         let up = State::Up { since: now };
-        for ready in [Readiness::Warn(fail), Readiness::Unknown] {
+        for ready in [Verdict::NotReady(fail), Verdict::Checking] {
             let c = card(None, &up, "tunnel", &ready, None, now);
             assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"), "{ready:?}");
             assert_eq!(reason(&up, "tunnel", &ready, None, None), None, "{ready:?}");
@@ -1924,7 +1930,7 @@ mod tests {
     fn the_footer_names_the_time_of_the_verdict() {
         let now = Instant::now();
         let up = State::Up { since: now };
-        let ready = Readiness::Warn(Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"));
+        let ready = Verdict::NotReady(Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"));
         let why = reason(&up, "local", &ready, None, Some("15:54")).unwrap();
         assert!(why.ends_with(" · проверено в 15:54"), "{why}");
         assert!(why.starts_with("Не всё готово: "), "{why}");

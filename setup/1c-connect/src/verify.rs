@@ -609,14 +609,6 @@ fn descriptor_fact(d: Descriptor) -> Check {
     }
 }
 
-/// Первый не зелёный факт — он и есть причина жёлтого вердикта. Сведения
-/// («в базе открыт сеанс», «Конфигуратор запущен», «комплект на носителе»)
-/// пропускаются: они `ok` и говорят «сейчас занято человеком», а не
-/// «сломано».
-pub fn first_fail(checks: &[Check]) -> Option<Check> {
-    checks.iter().find(|c| !c.ok).cloned()
-}
-
 /// Что известно про раннер без единого нового процесса — другого способа
 /// узнать про него нет вовсе (спека: холодный старт, 28 с, запрещён как
 /// плата за факт; замер 21.10 в контейнере). Прежде факт «vrunner-mcp
@@ -762,8 +754,8 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
 /// файл нечестно; а без найденной платформы (`Paths::of` → `Err`, нет
 /// `bin/httpd`) и пути к публикации не найти. Раньше оба случая тихо отвечали
 /// «не совпал» — и на штатной ручной публикации факт DESCRIPTOR проваливался,
-/// вердикт шёл за ним (`first_fail`), а совет `1c-connect install` переписал бы
-/// чужой дескриптор (находка повторного ревью, Critical 1).
+/// вердикт шёл за ним, а совет `1c-connect install` переписал бы чужой
+/// дескриптор (находка повторного ревью, Critical 1).
 fn base_descriptor(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Descriptor {
     if cfg.host.publication == "webserver" {
         return Descriptor::NotOurs;
@@ -1438,7 +1430,7 @@ mod tests {
         // смотрим с его места вниз, выше него в наборе свои провалы
         // (параметры, платформа) и к этому правилу они отношения не имеют.
         let tail: Vec<Check> = checks.iter().skip_while(|c| c.what != DB_USER).cloned().collect();
-        assert_eq!(first_fail(&tail).unwrap().what, DB_USER, "{tail:?}");
+        assert_eq!(tail.iter().find(|c| !c.ok).unwrap().what, DB_USER, "{tail:?}");
     }
 
     #[test]
@@ -1486,9 +1478,9 @@ mod tests {
 
     /// Critical 1 (повторное ревью): дескриптор не судится там, где
     /// сравнивать не с чем. Режим `webserver` — дескриптор пишет человек, не
-    /// коннектор; факт обязан остаться сведением и не попадать в
-    /// `first_fail`, иначе вердикт шёл бы за чужим файлом и совет
-    /// `1c-connect install` переписал бы его.
+    /// коннектор; факт обязан остаться сведением и не становиться причиной
+    /// жёлтого вердикта (`gui::verdict_of`), иначе вердикт шёл бы за чужим
+    /// файлом и совет `1c-connect install` переписал бы его.
     ///
     /// Исход назван точно — `NotOurs`, а не «нечего сравнивать»: пока оба
     /// случая давали один `None`, тест проходил и после удаления самой ветки
@@ -1516,7 +1508,15 @@ mod tests {
         let d = checks.iter().find(|c| c.what == DESCRIPTOR).expect("факт дескриптора");
         assert!(d.ok && d.info, "{d:?}");
         assert!(!d.hint.contains("install"), "{d:?}");
-        assert_ne!(first_fail(&checks).map(|c| c.what), Some(DESCRIPTOR.to_string()), "{checks:?}");
+        // Вердикт теперь один на всех — `gui::verdict_of` (задача 5): дескриптор
+        // чужой публикации не должен стать причиной «не готово», даже когда
+        // вердикт жёлтый из-за чего-то другого (на машине теста нет ни
+        // платформы, ни инструментов).
+        #[cfg(feature = "gui")]
+        assert!(
+            !matches!(crate::gui::verdict_of(true, &checks), crate::gui::Verdict::NotReady(c) if c.what == DESCRIPTOR),
+            "{checks:?}"
+        );
     }
 
     /// Critical 2 (повторное ревью): «не пустили» (401/403) — не «не
@@ -1785,19 +1785,27 @@ mod tests {
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 
-    /// Вердикт считает первый не зелёный факт, а сведения пропускает: «в базе
-    /// открыт сеанс», «Конфигуратор запущен» и «комплект на носителе» говорят
-    /// «сейчас занято человеком», а не «сломано», и цвет точки не красят.
+    /// Вердикт (`gui::verdict_of`, задача 5) считает первый провалившийся
+    /// факт, а сведения пропускает: «в базе открыт сеанс», «Конфигуратор
+    /// запущен» и «комплект на носителе» говорят «сейчас занято человеком»,
+    /// а не «сломано», и цвет точки не красят. Раньше это проверял
+    /// `verify::first_fail` — задача 5 убрала его как отдельный источник
+    /// правды об итоге набора: вердикт один, и считает его только `gui`.
     #[test]
-    fn first_fail_skips_notes() {
+    #[cfg(feature = "gui")]
+    fn the_verdict_skips_notes() {
         let checks = vec![
             Check::pass(PLATFORM, "есть"),
             Check::note(OPEN_SESSION, "занято человеком"),
             Check::fail(PROJECT, "не разложен", "1c-connect install"),
             Check::fail(GITEA, "не отвечает", "dev1c-setup check"),
         ];
-        assert_eq!(first_fail(&checks).unwrap().what, PROJECT);
-        assert!(first_fail(&[Check::pass(PLATFORM, "есть"), configurator_fact(2), media_fact(Some("FAT32".into()), "E:\\")]).is_none());
+        match crate::gui::verdict_of(true, &checks) {
+            crate::gui::Verdict::NotReady(c) => assert_eq!(c.what, PROJECT),
+            other => panic!("{other:?}"),
+        }
+        let all_notes = [Check::pass(PLATFORM, "есть"), configurator_fact(2), media_fact(Some("FAT32".into()), "E:\\")];
+        assert!(matches!(crate::gui::verdict_of(true, &all_notes), crate::gui::Verdict::Ready));
     }
 
     /// Провал — только когда дать экран нечем. Экран сеанса или `xvfb-run` —

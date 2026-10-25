@@ -125,6 +125,18 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
         // для llama.cpp, у которого своё умолчание выше.
         "--temp", "0.7", "--top-p", "1.0", "--min-p", "0.01",
         "--metrics",
+        // Подробность журнала. Умолчание сервера — 3, и при нём он НЕ печатает
+        // размер KV-кэша вовсе: замер на 5090 (25.10.2026) дал одиннадцать
+        // строк в журнале и ни одной про память, а установка честно говорила
+        // «размер KV-кэша в журнале не нашёлся» — и молча теряла всё, что из
+        // него считается: байты на токен, сколько влезает в карту, сколько
+        // нужно подкачки.
+        //
+        // Ровно 4, не больше. Там же замерено: при 4 строка на месте и журнал
+        // 240 строк, при 6 — те же сведения и 16 879 строк, из них 16 008
+        // отладочных, причём `que` и `slot` растут с каждым запросом. Журнал
+        // службы живёт постоянно, и раздувать его ради одной строки нельзя.
+        "-lv", "4",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -245,21 +257,16 @@ pub fn per_agent(slot_window: u32, agents: u16) -> u32 {
 /// то есть вдвое больший размер KV на токен, провал проверки на здоровой
 /// карте и неверное число, записанное в состояние комплекта.
 pub fn kv_cache_mb_from_log(text: &str) -> Option<u32> {
-    let mut sum = 0.0;
-    for l in text.lines().rev() {
-        if !l.contains("KV buffer size") {
-            // Строка не из блока: если блок уже собран, он и есть последний.
-            if sum > 0.0 {
-                break;
-            }
-            continue;
-        }
-        if let Some(n) = l.rsplit('=').next().and_then(|t| t.split_whitespace().next()).and_then(|n| n.parse::<f64>().ok()) {
-            sum += n;
-        }
-    }
-    (sum > 0.0).then_some(sum as u32)
+    text.lines().rev().find_map(|l| {
+        let tail = l.split_once(KV_SIZE_LINE)?.1;
+        let mb: f64 = tail.split_whitespace().next()?.parse().ok()?;
+        (mb > 0.0).then_some(mb as u32)
+    })
 }
+
+/// Начало строки, в которой сервер называет размер кэша. Вынесено рядом с
+/// разбором: поменяется формат — поменяется здесь, и тест рядом это поймает.
+const KV_SIZE_LINE: &str = "llama_kv_cache: size =";
 
 
 pub struct Props {
@@ -861,6 +868,9 @@ mod tests {
         for d in ["-b", "-ub", "--top-k", "--ctx-checkpoints", "--jinja"] {
             assert!(!a.iter().any(|x| x == d), "{d} — умолчание b11734, в строке его быть не должно");
         }
+        // Без подробности сервер не печатает размер кэша, и вся арифметика
+        // по видеопамяти остаётся без входных данных.
+        assert_eq!(at("-lv").as_deref(), Some("4"));
         assert_eq!(at("--cache-ram").as_deref(), Some("4096"));
         assert_eq!(at("--api-key-file").as_deref(), Some("/k/dev1c-llama.token"));
         assert_eq!(at("--host").as_deref(), Some("127.0.0.1"));
@@ -979,16 +989,25 @@ mod tests {
 
     #[test]
     fn the_size_of_the_kv_cache_is_read_from_the_server_log() {
-        // Размера кэша нет ни в /props, ни в /metrics: llama.cpp называет его
-        // только в журнале, и по устройствам — значит складываем.
-        let block = "llama_kv_cache: CUDA0 KV buffer size =   320.00 MiB\nllama_kv_cache: CUDA1 KV buffer size =   320.00 MiB\n";
-        let log = format!("{block}llama_context: n_ctx = 65536\n");
-        assert_eq!(kv_cache_mb_from_log(&log), Some(640));
+        // Строка — из живого замера на 5090, сборка b11734, 25.10.2026.
+        // Прежний разбор искал «KV buffer size» и складывал устройства: такая
+        // строка в b11734 есть, но показывает 0.00 MiB — весь размер ушёл в
+        // «size =». Поэтому он возвращал None даже там, где строки были, и
+        // установка говорила «размер KV-кэша в журнале не нашёлся».
+        let zero = "llama_kv_cache:      CUDA0 KV buffer size =     0.00 MiB\n";
+        let real = "llama_kv_cache: size = 12535.09 MiB (152320 cells,  47 layers,  3/3 seqs), \
+K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
+        assert_eq!(kv_cache_mb_from_log(&format!("{zero}{real}")), Some(12535));
         assert_eq!(kv_cache_mb_from_log("llama_context: n_ctx = 65536"), None);
-        // Перезапуск: в хвосте журнала два блока, и считается последний, а не
-        // сумма — иначе кэш удваивается и здоровая карта «перестаёт вмещать».
-        let twice = format!("{log}srv    operator(): operator called, restarting\n{log}");
-        assert_eq!(kv_cache_mb_from_log(&twice), Some(640));
+        // Нулевая строка сама по себе — не ответ: именно на ней прежний разбор
+        // и спотыкался.
+        assert_eq!(kv_cache_mb_from_log(zero), None);
+        // При `--fit on` сервер примеряет несколько окон и печатает строку на
+        // каждую примерку. Принято последнее — его и берём, а не первое и не
+        // сумму: иначе кэш выйдет меньше (примерки идут по возрастанию) и
+        // «карта вмещает» окажется неправдой.
+        let fitting = "llama_kv_cache: size = 5393.25 MiB ( 65536 cells,  47 layers,  3/3 seqs)\n";
+        assert_eq!(kv_cache_mb_from_log(&format!("{fitting}{real}")), Some(12535));
         // Предел памяти движка приходит в байтах; ноль — предела нет.
         assert_eq!(parse_size_mb("22528m"), Some(22528));
         assert_eq!(parse_size_mb("22g"), Some(22528));

@@ -4,7 +4,7 @@ A ledger for picking the work up mid-stream: what is done, what is verified by
 running it rather than by reasoning, and what is next. Updated as things change;
 the design rationale lives in `docs/superpowers/specs/`.
 
-Last updated: 2026-10-15.
+Last updated: 2026-10-25.
 
 ## Where it runs
 
@@ -17,7 +17,8 @@ Last updated: 2026-10-15.
 | model server | `dev1c-setup` runs it: `serve = "host"` (default) — `llama-server` as a Windows service `dev1c-llama` via nssm in `C:\dev1c\llama` (Linux: systemd, `/opt/dev1c/llama`), `serve = "docker"` — container `<name>-llama` from `oktaplus/dev1c-llama` in the same kit tar, `serve = "remote"` — any OpenAI-compatible server. Zed reaches local forms as `http://host.docker.internal:<port>/v1` |
 | workstations | `dev1`, `dev2`, `dev3` — password equals login; tunnel ports 777N / 778N / 779N |
 | tunnel account | none: each workstation tunnels as itself (`dev1`/`dev1` …), sshd `Match User` gives it remote forwarding onto its own three ports only — no shell, no tty, no local forwards |
-| test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 |
+| stand platform | **8.5.1.1150 (training) with УНФ 3.0.13.251** — volumes `dev1c-platform` + `dev1c-demo`, 2.7 GB in the kit. The move to 8.3.27.1508 with the demo configuration was decided on 2026-10-21 and **rolled back**: we stay on 8.5 + УНФ (task 9 is cancelled, task 8 reopened because of it) |
+| test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 (the Windows machine with the Configurator — not the stand) |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
 | mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
 | installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary: window without arguments (GPUI (gpui-kit 0.7.3), `gui` feature on by default), CLI with arguments; `1c-connect` lives in the tray (release `1c-connect.exe` ≈ 23.9 MB) |
@@ -129,7 +130,9 @@ script days is obsolete; the scripts are gone.
   `cmd.exe` + `ping`). `pack.sh --llama none` end to end here: kit 232 MB,
   opm tree matches the manifest (996 files), `tools.version` written.
   `1c-connect install` copied the tools to `%LOCALAPPDATA%\dev1c` (`git
-  version 2.56.0.windows.2`), `check` fact 4 «инструменты комплекта» green,
+  version 2.56.0.windows.2` — **no longer what happens: since 2026-10-25 the
+  tools run from the kit and nothing is copied into the profile, kit ledger
+  item 15**), `check` fact 4 «инструменты комплекта» green,
   and `oscript.exe lib/vanessa-runner/src/mcp.os` from that copy answers
   `initialize` (AutumnMCP) and `tools/list` with 61 tools — 10 s to the first
   reply. After the final review's fix pass, CI run 38921692754 is green end
@@ -456,8 +459,17 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    category B possible.
 7. **PRISM** on real tasks (category A already runnable inside), then shorten
    skill descriptions (17 KB per request), then **ERP**.
-8. **MOSTLY CLOSED 2026-10-21 by the platform move — the corpus is accepted on
-   8.3.27.1508.** Measured on the raised stand by the onboarding session (as
+8. **REOPENED 2026-10-25: the stand stays on 8.5.1.1150, so the corpus is
+   rejected again.** The closure below was bought by the move to 8.3.27, and the
+   move is cancelled (task 9). On 8.5 the agent in Zed gets signatures only,
+   from the bundled `8.3.27.2214` facts, with no descriptions and no examples —
+   see the measurement two paragraphs down. The fix direction is unchanged and
+   now the only one left: a newer `bsl-analyzer` (master has the explicit
+   `platform-help build --hbk-dir`), or report the overlay conflict to
+   `defin85/bsl-analyzer`, or build the corpus from the client's own
+   `shcntx_ru.hbk`/`shlang_ru.hbk` (see task 15's follow-up).
+   **What the move proved, kept as evidence that the mechanism works** —
+   measured on the raised stand by the onboarding session (as
    `dev1`, on a fresh volume — no 8.5 corpus to delete): `syntax_help` now
    returns real text, not just signatures. `СтрДлина` → «Получает количество
    символов в строке» with a typed parameter and a «## Примеры» section;
@@ -508,8 +520,17 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    it is not a disc and not a docker image but 1С:Напарник behind
    `NAPARNIK_TOKEN`; the invented-API failures we measured are plain platform
    syntax and are covered by the local corpus without it.
-9. **Move the stand to the training platform 8.3.27.1508 (decided by the
-   customer, 2026-10-21).** The reason is the market, not the analyzer: 8.5 is
+9. **CANCELLED 2026-10-25 by the customer: the stand stays on 8.5.1.1150 with
+   УНФ 3.0.13.251.** The kit is built, handed over and green on 8.5; swapping
+   both the platform and the configuration now would throw away the demo base,
+   the onboarding scenario and the measured stand for a market argument that can
+   wait. The cost of staying is task 8 (no platform help corpus on 8.5) and
+   task 15's `target_platform_version` case — both are now open and priced
+   there, not here. Nothing below is to be acted on; it is kept because it is
+   the only written record of what the 8.3 line offers, for whenever the
+   question returns.
+   Original note: **move the stand to the training platform 8.3.27.1508 (decided
+   by the customer, 2026-10-21).** The reason is the market, not the analyzer: 8.5 is
    barely used at client sites, and the pilot has to look like what they run.
    The valid help corpus comes along for free — 8.3.27 is the same line as the
    facts the analyzer ships, so the overlay conflict of task 8 disappears.
@@ -734,7 +755,11 @@ settled it: don't compute what the program can say itself.
     **Decided by the customer 2026-10-21: the file must be WRITTEN, and written
     automatically — the task goes to the connector (`1c-connect`).** My earlier
     «not needed, the built-in default matches» holds only for the demo stand and
-    only while we stay on 8.3.27. Two things break it: we may move back to 8.5,
+    only while we stay on 8.3.27. Two things break it: the stand is back on
+    8.5.1.1150 since 2026-10-25 (task 9), so it is itself the mismatched case —
+    the accepted line is the bundled 8.3.27 while the platform is 8.5, i.e.
+    exactly «client newer than the catalog», the one case the key must be
+    written for;
     and — more importantly — developers will dump THEIR OWN configurations from
     their machines through the connector, and we do not know those versions in
     advance. On a different release line the analyzer degrades quietly:
@@ -857,7 +882,24 @@ settled it: don't compute what the program can say itself.
     отмена долгой операции 1С — это снятие дочернего процесса, а не
     прекращение ожидания: второе мы уже умеем и оно хуже, чем ничего, потому
     что выглядит как отмена.
-17. **Техдолг заказчика 2026-10-21: проверка состояния лжёт, пока идёт
+17. **ПОЧИНЕНО В КОДЕ 2026-10-25 (вместе с задачей 19 — починка одна), живьём
+    не проверено.** `verify::vrunner_fact` больше не поднимает второй раннер.
+    Появилось знание о своём: мост отмечает каждый кадр от ребёнка
+    (`bridge::note_runner_reply`/`runner_answered_ago`), мьютекс проекта
+    отвечает на вопрос «идёт ли наша долгая операция»
+    (`verify::busy_now`), и факт собирается по ним
+    (`verify::runner_fact`): занят → `note` «занят: идёт cf_decompile»,
+    отвечал → зелёный «последний ответ N назад», ни того ни другого →
+    `note` «не поднимался: стартует по первому вызову агента». Холодный
+    старт остался только там, где знания нет И проверку попросили явно:
+    `Limits::probe_vrunner` — `true` у `full` («Проверить», `1c-connect
+    check`), `false` у `quick` (расчёт готовности). Окно не правилось вовсе:
+    `note` — это `ok`, и вердикт зеленеет сам. Проверено: 285 тестов крейда
+    зелёные (`cargo test -p onec-connect --no-default-features`), из них пять
+    новых — на занятость, на живой ответ, на «не поднимался», на развилку и
+    на то, что готовность раннера не поднимает. Живьём на стенде не
+    проверялось. Исходная запись:
+    **Техдолг заказчика 2026-10-21: проверка состояния лжёт, пока идёт
     выгрузка.** Замечено живьём: во время `cf_decompile` достаточно скрыть и
     снова открыть окно — идёт расчёт готовности, и в журнал приходит
     «vrunner-mcp не отвечает», хотя он в этот момент как раз изо всех сил
@@ -903,7 +945,11 @@ settled it: don't compute what the program can say itself.
     верить ни документации, ни своим ожиданиям — только живой картинке со
     стенда. Скругление углов мы так и вырезали, поверив замеру, который
     ничего не доказывал.
-19. **Назначено заказчиком на воскресенье 2026-10-25 (вместе с долгами 16 и
+19. **ПОЧИНЕНО В КОДЕ 2026-10-25 — см. задачу 17, починка одна.** Живьём не
+    проверено: нужен стенд, где обычное включение окна показывает зелёный
+    вердикт, а не «не всё готово: vrunner-mcp не проверено за 15 с».
+    Исходная запись: **назначено заказчиком на воскресенье 2026-10-25 (вместе
+    с долгами 16 и
     17 — починка у них одна).** **Факт «vrunner-mcp отвечает» измеряет не
     то и не успевает никогда.** Замер в контейнере (dev1, 21.10): `oscript
     -version` — **1 с**, а запуск `mcp.os` (сервер vanessa-runner) до первого
@@ -957,6 +1003,34 @@ settled it: don't compute what the program can say itself.
     Почему это важнее, чем один красный тест: такой отказ выглядит как
     поломка свежей правки. Сегодня он стоил полного цикла проверки «моё ли
     это» — и ровно так же обманет следующего, кто будет править окно.
+21. **ПОЧИНЕНО В КОДЕ 2026-10-25, живьём не проверено. Проверка говорит «всё
+    ок», а вкладка «Проект» всё равно предлагает поставить расширение.**
+    Замечено заказчиком. Третий случай той же болезни, что долги 17 и 19:
+    окно и проверка расходятся, потому что знают об одном и том же из разных
+    мест и в разное время.
+    
+    Причина: `ui.ops` (по нему `gui::project_primary` выбирает главную
+    кнопку — «Установить» или «Выгрузить») читается только на запуске окна
+    (`refresh_ops` в `launch`), после операции (`Ev::Done`) и после
+    «Сохранить». Кнопка «Проверить» его не перечитывала, хотя спрашивает базу
+    заново и без ограничения по времени. Живой порядок событий: на запуске
+    HTTP-сервис базы ещё не поднят, расширение читается как «нет» → главной
+    остаётся «Установить»; человек жмёт «Проверить», получает 18 из 18
+    зелёными — и видит рядом активную кнопку «Установить» и предложение
+    поставить то, что уже стоит. Ни одна операция с тех пор не выполнялась,
+    значит состояние так и остаётся прочитанным минуту назад и неверным.
+    
+    Починка: обработчик `Ev::Checks` зовёт `refresh_ops` и `refresh_project`
+    — ровно то же, что уже делает `Ev::Done`. Проверка и есть тот момент,
+    когда мы узнали правду про публикацию и расширение, и перечитывать надо
+    в нём, а не ждать следующей операции. 134 теста окна зелёные.
+    
+    Что осталось неидеальным и почему так: пока перечитывание летит (у
+    запроса к базе срок до 60 с), надпись на кнопке ещё старая. Связывать её
+    с вердиктом готовности напрямую нельзя: при коротком бюджете расчёта факт
+    расширения может быть «не проверено» (`note`, то есть `ok`), и зелёный
+    вердикт тогда не означает «расширение стоит» — вышла бы такая же ложь, но
+    в обратную сторону.
 ## Commands
 
 ```sh

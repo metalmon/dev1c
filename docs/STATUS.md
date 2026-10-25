@@ -398,10 +398,13 @@ without the comments; the commented sample stays as `dev1c-setup example`.
    in debug builds (CI green for both stage commits, 99c3c77 and 4f08d07); the
    release exe from the CI kit not yet run by a person. Not tried:
    the tray menu by click, «Подключить» against a live environment from the
-   window (the CLI path is the same `session::start`). Left for later: the
-   tray menu does not grey out «Подключить» while connected (a second click
-   is a no-op); the window asks no questions (`AlwaysDefault`), so the
-   data-wiping clean is guarded only by the typed container name.
+   window (the CLI path is the same `session::start`). **Checked 2026-10-25 and
+   no longer true:** the tray item is one toggle whose label follows the state
+   («Включить MCP» / «Выключить MCP») and which is disabled exactly when the
+   cold gate locks the window's switch (`tray::set_state`, `toggle_enabled`) —
+   a second click cannot be a no-op. Still left for later: the window asks no
+   questions (`AlwaysDefault`), so the data-wiping clean is guarded only by the
+   typed container name.
 3. **Skills on top of `mcp-1c`:** `1c-help-mcp` and `bsp-patterns` now name
    the real tools; try them on real tasks once `1c-connect` is up.
 4. **The fork `metalmon/mcp-1c`:** merged with upstream v1.22.3 in branch

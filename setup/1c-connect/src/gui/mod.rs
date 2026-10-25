@@ -548,7 +548,9 @@ pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
 /// операция побеждает — тот же порядок разрешения, что в карточке.
 pub fn tray_tooltip(progress: Option<&Running>, link: &State, gate: Option<&str>, now: Instant) -> String {
     if let (None, Some(why)) = (progress, gate) {
-        return format!("1c-connect: включать нечего — {why}");
+        // Та же формулировка, что у подсказки переключателя и подвала:
+        // три поверхности говорили о замке тремя разными фразами.
+        return format!("1c-connect: {}", crate::gui::panel::gate_text(why).to_lowercase());
     }
     match progress {
         Some(r) => {
@@ -1713,7 +1715,7 @@ pub fn toggle_link(cx: &mut App) {
     // сеансом, например правкой toml руками).
     if !serving(cx.global::<Ui>()) {
         if let Some(why) = cx.global::<Ui>().gate.clone() {
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("включать нечего: {why}") });
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: crate::gui::panel::gate_text(&why) });
             cx.refresh_windows();
             return;
         }
@@ -2777,7 +2779,7 @@ mod tests {
         // Причина замка — в подсказке значка; идущая операция её побеждает
         // (тот же порядок разрешения, что в карточке).
         let why = Some("не задан пользователь базы");
-        assert_eq!(tray_tooltip(None, &State::Off, why, now), "1c-connect: включать нечего — не задан пользователь базы");
+        assert_eq!(tray_tooltip(None, &State::Off, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
         assert_eq!(tray_tooltip(Some(&r), &State::Off, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
     }
 

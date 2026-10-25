@@ -74,6 +74,11 @@ raw-window-handle = { version = "0.6", optional = true }
 # Ради HWND окна: GPUI реализует `HasWindowHandle`, но сам типаж наружу не
 # отдаёт. Новой сборки крейт не добавляет — он уже в зависимостях gpui.
 raw-window-handle = { version = "0.6", optional = true }
+# Список процессов платформы (`bridge::configurator_count`) без подпроцесса:
+# полный `tasklist` стоил 330–510 мс (замер ревью), а спрашивается это на
+# каждом такте. Крейт уже в `Cargo.lock` — скачивать нечего. Фича одна,
+# «system»: нужны процессы, не диски и не сеть.
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]

@@ -229,24 +229,29 @@ pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
 
 /// Сколько процессов платформы запущено на машине: Конфигураторы и толстые
 /// клиенты (`1cv8.exe`) и тонкие (`1cv8c.exe`) — файловую базу держит любой.
+///
+/// Список имён на Windows берёт `sysinfo`, а не `tasklist` (Important 4.5
+/// ревью задач 5+6): полный `tasklist` стоил 330–510 мс (замер ревью на
+/// машине владельца, медиана трёх прогонов), и это спрашивается на каждом
+/// такте. `sysinfo` читает те же имена ядром, без подпроцесса.
+///
+/// ponytail: 10–30 мс `sysinfo` — наш потолок; станут дороги — следующий шаг
+/// `CreateToolhelp32Snapshot` напрямую.
 pub fn configurator_count() -> usize {
     #[cfg(target_os = "linux")]
     {
         return linux_platform_count();
     }
-    #[cfg(not(target_os = "linux"))]
-    if !cfg!(windows) {
-        return 0;
-    }
-    #[allow(unreachable_code)]
-    let mut c = std::process::Command::new("tasklist");
-    c.args(["/NH", "/FO", "CSV"]);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
+        use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+        // Обновляем только список процессов: ни памяти, ни дисков, ни
+        // процессоров нам не нужно, а каждая лишняя группа — лишнее чтение.
+        let sys = System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+        return count_platform(sys.processes().values().map(|p| p.name().to_string_lossy()));
     }
-    c.output().map(|o| count_platform(&String::from_utf8_lossy(&o.stdout))).unwrap_or(0)
+    #[cfg(not(any(target_os = "linux", windows)))]
+    0
 }
 
 /// Сколько процессов платформы живёт на этой машине — по `/proc`, без
@@ -277,15 +282,19 @@ pub(crate) fn is_platform_process(name: &str) -> bool {
     matches!(name, "1cv8" | "1cv8c" | "1cv8t" | "1cv8ct")
 }
 
-/// Строки `tasklist /FO CSV`, начинающиеся с процесса платформы. Имена — те
-/// же, что и на Linux (`is_platform_process`): список платформенных процессов
-/// один на обе системы, и учебные двойники в нём есть.
+/// Сколько в списке имён процессов — платформенные. Правило отбора то же, что
+/// и на Linux (`is_platform_process`): список платформенных процессов один на
+/// обе системы, и учебные двойники в нём есть; `.exe` на Windows отбрасывается.
+/// Источник имён сменился с `tasklist /FO CSV` на `sysinfo`
+/// (`configurator_count`) — само правило нет.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
-fn count_platform(csv: &str) -> usize {
-    csv.lines()
-        .filter_map(|l| l.trim().strip_prefix('"'))
-        .filter_map(|l| l.split('"').next())
-        .filter(|name| is_platform_process(name.strip_suffix(".exe").unwrap_or(name)))
+fn count_platform<S: AsRef<str>>(names: impl IntoIterator<Item = S>) -> usize {
+    names
+        .into_iter()
+        .filter(|name| {
+            let name = name.as_ref();
+            is_platform_process(name.strip_suffix(".exe").unwrap_or(name))
+        })
         .count()
 }
 
@@ -1583,9 +1592,13 @@ mod tests {
 
     #[test]
     fn thin_client_counts_as_a_running_platform() {
-        let csv = "\"1cv8c.exe\",\"1234\",\"Console\",\"1\",\"100 K\"\n\"1cv8.exe\",\"77\",\"Console\",\"1\",\"1 K\"\n\"notepad.exe\",\"1\",\"Console\",\"1\",\"1 K\"\n";
-        assert_eq!(count_platform(csv), 2);
-        assert_eq!(count_platform("INFO: No tasks are running which match the specified criteria.\n"), 0);
+        // Имена — как их отдаёт `sysinfo` на Windows (Important 4.5: источник
+        // списка сменился, правило отбора прежнее); учебные двойники в счёте,
+        // посторонние процессы — нет.
+        assert_eq!(count_platform(["1cv8c.exe", "1cv8.exe", "notepad.exe"]), 2);
+        assert_eq!(count_platform(["1cv8t.exe", "1cv8ct.exe"]), 2);
+        assert_eq!(count_platform(["explorer.exe", "1cv8s.exe", "my1cv8.exe"]), 0);
+        assert_eq!(count_platform(std::iter::empty::<&str>()), 0);
     }
 
     #[tokio::test]

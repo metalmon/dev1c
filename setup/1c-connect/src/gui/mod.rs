@@ -179,7 +179,30 @@ pub struct Ui {
     /// Дешёвый набор прошлого такта (`verify::cheap`) — с ним сравнивает
     /// следующий такт (`needs_full_pass`), не изменился ли исход дешёвого
     /// факта (скажем, открыли/закрыли базу между тактами).
+    ///
+    /// Пишется только вместе с расчётом, который его прочёл (`on_cheap`,
+    /// Minor 11 ревью задач 5+6): запомнить изменение, по которому расчёт
+    /// только помечен повтором, значит потерять его между тактом и
+    /// применённым набором.
     pub prev_cheap: Vec<Check>,
+    /// Число открытых сеансов 1С с последнего опроса; `None` — не спрашивали
+    /// ни разу. Это то единственное, ради чего нужен секундный такт (спека,
+    /// цель 6: «человек закрыл Предприятие — через секунду-две позеленело»):
+    /// его смена и есть повод пойти за дорогими фактами.
+    pub sessions: Option<usize>,
+    /// Дешёвый такт считается прямо сейчас в своём потоке — второго не
+    /// заводим. На потоке окна такт не считает ничего (Important 4 ревью
+    /// задач 5+6): `verify::cheap` стоит 230–330 мс, а
+    /// `bridge::configurator_count` на Windows стоил до половины секунды, и
+    /// всё это шло на потоке окна ровно когда человек на него смотрит.
+    pub cheap_pending: bool,
+    /// Когда последний раз считался ВЕСЬ дешёвый набор (`verify::cheap`).
+    /// `None` — ни разу: первый же такт обязан посчитать его целиком.
+    pub cheap_at: Option<Instant>,
+    /// Когда такт последний раз перерисовывал окно в покое. Шаг такта при
+    /// открытом окне — секунда, а перерисовка от этого учащаться не должна:
+    /// в покое её ждёт только счётчик минут в карточке связи (`tick_redraw`).
+    pub redraw_at: Option<Instant>,
     /// Когда закончился последний полный (с дорогими фактами) расчёт.
     /// `None` — ни разу: такт обязан пойти за дорогими фактами на первом же
     /// такте, а не считать себя «только что посчитавшим».
@@ -460,6 +483,12 @@ pub enum Ev {
     /// расчёт в полёте, не два). `loud` — громкий показ (отчёт на диске,
     /// строки в журнал, вкладка «Журнал»): его просила кнопка, а не такт.
     Ready(u64, Vec<Check>, bool),
+    /// Итог дешёвого такта, посчитанный в своём потоке (`spawn_cheap`,
+    /// Important 4): число открытых сеансов 1С и — только на медленном такте
+    /// — весь дешёвый набор. `None` в любом из полей значит «не спрашивали»
+    /// (или поток упал с паникой): нуль сеансов — это ответ, а не его
+    /// отсутствие, и подменять им незнание нельзя.
+    Cheap { sessions: Option<usize>, facts: Option<Vec<Check>> },
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -2107,17 +2136,25 @@ fn on_done(ui: &mut Ui, err: Option<String>, cancelled: bool) -> Line {
     line
 }
 
-/// Перерисовать на тике: окно открыто — карточка связи считает минуты от
-/// `since.elapsed()` сама на каждой отрисовке и обязана не стоять на месте,
-/// даже в покое; окно спрятано — только когда есть, что показать (новые
-/// данные или операция на ходу).
-fn tick_redraw(window_open: bool, dirty: bool, running: bool) -> bool {
-    window_open || dirty || running
+/// Перерисовать на тике: есть что показать (новые данные или операция на
+/// ходу) — всегда; открытое окно в покое — не чаще `REDRAW_IDLE`.
+///
+/// Шаг такта при открытом окне стал секундой (Important 4), а перерисовка от
+/// этого учащаться не должна: в покое её ждёт один счётчик минут в карточке
+/// связи (он считает их сам от `since.elapsed()` на каждой отрисовке), и
+/// минуте довольно прежнего тридцатисекундного шага. Всё остальное приезжает
+/// своим событием, которое и зовёт `refresh_windows()` само.
+pub const REDRAW_IDLE: Duration = TICK_IDLE;
+
+fn tick_redraw(window_open: bool, dirty: bool, running: bool, since_redraw: Duration) -> bool {
+    dirty || running || (window_open && since_redraw >= REDRAW_IDLE)
 }
 
-/// Пока окно открыто, дешёвый такт идёт на обычном ритме приложения
-/// (`TICK_BUSY`/`TICK_IDLE`); скрытое окно — такт реже, он всё равно обязан
-/// идти, иначе набор «протухнет» тихо, пока никто не смотрит.
+/// Медленный такт: как часто идут весь дешёвый набор (`verify::cheap`) и —
+/// если он не изменился — дорогие факты. Открытое окно спрашивает чаще,
+/// скрытое реже, но идёт всё равно: иначе набор «протухнет» тихо, пока никто
+/// не смотрит. Секундный такт при открытом окне спрашивает ОДНО (число
+/// открытых сеансов 1С) — остальные дешёвые факты за секунду не меняются.
 pub const SLOW_OPEN: Duration = Duration::from_secs(30);
 pub const SLOW_HIDDEN: Duration = Duration::from_secs(120);
 
@@ -2140,28 +2177,94 @@ pub fn needs_full_pass(prev_cheap: &[Check], now_cheap: &[Check], since_full: Du
     since_full >= if window_open { SLOW_OPEN } else { SLOW_HIDDEN }
 }
 
-/// Дешёвая половина такта (задача 6): `verify::cheap` не ходит по сети, и
-/// его можно звать на каждом тике приложения — он и решает (`needs_full_pass`),
-/// пора ли идти за дорогими фактами. Ничего не считает при выключенном
-/// обслуживании (`serving`, та же причина, что у `run_readiness`) — дешёвые
-/// факты тогда некому показывать. Эскалацию к дорогому расчёту делает
-/// `run_readiness` — та же защёлка (`facts_pending`), что и у кнопки
-/// «Проверить» (задача 6, «Добавлено управляющим»): идущий расчёт такт не
-/// обгоняет, он только попросит добавку по его возвращении.
+/// Дешёвая половина такта (задача 6) — на потоке окна она НЕ СЧИТАЕТ НИЧЕГО
+/// (Important 4 ревью задач 5+6): здесь только решение по отметкам времени,
+/// пора ли, и заведённый поток. Замеры ревью на машине владельца: сам
+/// `verify::cheap` — 230–330 мс (два `netstat`/`tasklist` на порты, два
+/// `git.exe`, скан четырёх каталогов платформ, `exists()` по сетевой шаре —
+/// там десятки секунд таймаута SMB), плюс `bridge::configurator_count()` —
+/// до половины секунды. Итого такт был 0,6–0,8 с и пять подпроцессов на
+/// потоке окна, ровно когда человек смотрит на карточку хода.
+///
+/// Раз в секунду при открытом окне спрашивается ОДНО — число открытых
+/// сеансов 1С; это то, ради чего секундный такт и нужен (спека, цель 6:
+/// «человек закрыл Предприятие — через секунду-две позеленело»). Весь
+/// дешёвый набор — на медленном такте (`SLOW_OPEN`/`SLOW_HIDDEN`):
+/// остальные дешёвые факты за секунду не меняются.
+///
+/// Ничего не считает при выключенном обслуживании (`serving`, та же причина,
+/// что у `start_full_pass`) — дешёвые факты тогда некому показывать. Решение
+/// про дорогой расчёт принимает `on_cheap`, когда поток ответит.
 fn tick_facts(ui: &mut Ui, now: Instant, window_open: bool) {
+    if !serving(ui) || ui.cheap_pending {
+        return;
+    }
+    let since_cheap = ui.cheap_at.map(|t| now.saturating_duration_since(t)).unwrap_or(Duration::MAX);
+    let whole = since_cheap >= if window_open { SLOW_OPEN } else { SLOW_HIDDEN };
+    ui.cheap_pending = true;
+    spawn_cheap(ui, whole);
+}
+
+/// Поток дешёвого такта: число открытых сеансов 1С всегда, весь дешёвый набор
+/// (`verify::cheap`) — только когда просят (`whole`). Паника обязана
+/// договорить, иначе `cheap_pending` остался бы взведённым навсегда и такт
+/// замолчал бы до конца сеанса; на панике отдаём незнание, а не выдуманный
+/// нуль сеансов.
+fn spawn_cheap(ui: &Ui, whole: bool) {
+    let ctx = quiet_ctx(ui);
+    let mode = ui.cfg.host.mode.clone();
+    let link = ui.link.clone();
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        guarded(
+            &tx,
+            move || {
+                let sessions = crate::bridge::configurator_count();
+                let facts = whole.then(|| {
+                    let state = link.is_up().then(|| link.label(&mode));
+                    verify::cheap(&ctx, state.as_deref(), verify::PortUse::WeListen, sessions)
+                });
+                Ev::Cheap { sessions: Some(sessions), facts }
+            },
+            || Ev::Cheap { sessions: None, facts: None },
+        );
+    });
+}
+
+/// Ответ дешёвого такта: решить, пора ли за дорогими фактами. Поводов два —
+/// сменилось число открытых сеансов 1С (закрыли «Предприятие» — агенту
+/// открылась дорога, и держать это знание устаревшим до медленного такта
+/// незачем) и общее правило `needs_full_pass` по всему дешёвому набору.
+///
+/// Эскалация идёт через ту же защёлку (`facts_pending`), что и кнопка
+/// «Проверить»: идущий расчёт такт не обгоняет, он только попросит добавку по
+/// его возвращении. Замок при этом не трогается (`start_full_pass`,
+/// Critical 3).
+fn on_cheap(ui: &mut Ui, sessions: Option<usize>, facts: Option<Vec<Check>>, now: Instant, window_open: bool) {
+    ui.cheap_pending = false;
     if !serving(ui) {
         return;
     }
-    let ctx = quiet_ctx(ui);
-    let mode = ui.cfg.host.mode.clone();
-    let state = ui.link.is_up().then(|| ui.link.label(&mode));
-    let sessions = crate::bridge::configurator_count();
-    let now_cheap = verify::cheap(&ctx, state.as_deref(), verify::PortUse::WeListen, sessions);
+    // Первый ответ — ещё не смена: сравнивать не с чем.
+    let sessions_moved = match sessions {
+        Some(n) => ui.sessions.replace(n).is_some_and(|was| was != n),
+        None => false,
+    };
+    if facts.is_some() {
+        ui.cheap_at = Some(now);
+    }
     let since_full = ui.facts_full_at.map(|t| now.saturating_duration_since(t)).unwrap_or(Duration::MAX);
-    let go = needs_full_pass(&ui.prev_cheap, &now_cheap, since_full, window_open);
-    ui.prev_cheap = now_cheap;
-    if go {
-        run_readiness(ui);
+    let fresh = facts.as_deref().unwrap_or(&ui.prev_cheap);
+    let go = sessions_moved || needs_full_pass(&ui.prev_cheap, fresh, since_full, window_open);
+    let started = go && start_full_pass(ui);
+    // Запомнить прочитанное можно только вместе с расчётом, который его и
+    // прочёл (Minor 11): расчёт, которому досталась лишь отметка повтора,
+    // пойдёт по старой почве, и если забыть изменение здесь, повода пойти за
+    // дорогими фактами больше никто не вспомнит.
+    if let Some(f) = facts {
+        if started || !go {
+            ui.prev_cheap = f;
+        }
     }
 }
 
@@ -2171,13 +2274,15 @@ fn tick_facts(ui: &mut Ui, now: Instant, window_open: bool) {
 /// подсказку трея на фазу текущей операции, и — задача 6 — считает дешёвые
 /// факты и решает, не пора ли за дорогими (`tick_facts`).
 fn tick(cx: &mut App) {
+    let now = Instant::now();
     let ui = cx.global_mut::<Ui>();
-    let redraw = tick_redraw(ui.window.is_some(), ui.dirty, ui.progress.is_some());
+    let since_redraw = ui.redraw_at.map(|t| now.saturating_duration_since(t)).unwrap_or(Duration::MAX);
+    let redraw = tick_redraw(ui.window.is_some(), ui.dirty, ui.progress.is_some(), since_redraw);
     ui.dirty = false;
     if redraw {
+        ui.redraw_at = Some(now);
         cx.refresh_windows();
     }
-    let now = Instant::now();
     let ui = cx.global_mut::<Ui>();
     if ui.progress.is_some() {
         if let Some(line) = ui.progress.as_mut().and_then(|r| stale_line(r, now)) {
@@ -2379,6 +2484,11 @@ fn handle(ev: Ev, cx: &mut App) {
                 }
             }
         }
+        Ev::Cheap { sessions, facts } => {
+            let ui = cx.global_mut::<Ui>();
+            let window_open = ui.window.is_some();
+            on_cheap(ui, sessions, facts, Instant::now(), window_open);
+        }
     }
 }
 
@@ -2496,6 +2606,10 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             facts_again: false,
             check_requested: false,
             prev_cheap: Vec::new(),
+            sessions: None,
+            cheap_pending: false,
+            cheap_at: None,
+            redraw_at: None,
             facts_full_at: None,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
@@ -2528,13 +2642,17 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // операция, начавшаяся в окне простоя, молчала бы до следующего
         // тика (до 30 с) — именно первые полминуты, на которые смотрит
         // человек. Счётчик держит прежний ритм покоя (раз в `TICK_IDLE`).
+        // Открытое окно — тоже секундный ритм (Important 4, п. 4): спека
+        // обещает «секунда при открытом окне», а шаг в 30 с при `SLOW_OPEN`
+        // = 30 с давал полный расчёт раз в минуту. Перерисовка от этого не
+        // учащается — её держит `tick_redraw`/`REDRAW_IDLE`.
         cx.spawn(async move |cx| {
             let mut idle = Duration::ZERO;
             loop {
                 cx.background_executor().timer(TICK_BUSY).await;
                 let busy = cx.update(|cx| {
                     let ui = cx.global::<Ui>();
-                    ui.progress.is_some() || ui.busy.is_some()
+                    ui.progress.is_some() || ui.busy.is_some() || ui.window.is_some()
                 });
                 idle = if busy { Duration::ZERO } else { idle + TICK_BUSY };
                 if busy || idle >= TICK_IDLE {
@@ -2622,6 +2740,10 @@ impl Ui {
             facts_again: false,
             check_requested: false,
             prev_cheap: Vec::new(),
+            sessions: None,
+            cheap_pending: false,
+            cheap_at: None,
+            redraw_at: None,
             facts_full_at: None,
             licence: crate::licence::State::Valid,
             log: Vec::new(),
@@ -2656,11 +2778,11 @@ mod tests {
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
         exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
-        start_full_pass, Busy,
+        start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
         publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
-        Verdict, Running, Tab, TrayState, SLOW_HIDDEN, SLOW_OPEN,
+        Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
         Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
@@ -2921,6 +3043,87 @@ mod tests {
         assert!(needs_full_pass(&free, &free, Duration::from_secs(86_400), false));
     }
 
+    /// Important 4 ревью задач 5+6: на потоке окна такт НЕ СЧИТАЕТ НИЧЕГО —
+    /// он только решает по отметкам времени, пора ли, и заводит поток. Прежний
+    /// такт звал на потоке окна `verify::cheap` и `configurator_count`:
+    /// 0,6–0,8 с и пять подпроцессов, ровно когда человек смотрит на карточку.
+    #[test]
+    fn the_window_thread_tick_only_raises_the_latch() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        // Поток дешёвого такта «уже идёт»: второго не заводим — это же
+        // избавляет доказательство от настоящего похода за фактами.
+        ui.cheap_pending = true;
+        ui.sessions = Some(3);
+        ui.prev_cheap = vec![Check::pass("в базе открыт сеанс", "нет")];
+
+        tick_facts(&mut ui, Instant::now(), true);
+        assert_eq!(ui.sessions, Some(3), "такт посчитал сеансы на потоке окна");
+        assert_eq!(ui.prev_cheap.len(), 1, "такт посчитал дешёвый набор на потоке окна");
+        assert!(ui.cheap_at.is_none(), "такт отметил дешёвый набор, которого не считал");
+        assert!(!ui.facts_again && !ui.facts_pending, "такт сам полез за дорогими фактами");
+
+        // Выключено — не считается ничего, и поток не заводится (спека).
+        ui.cheap_pending = false;
+        ui.enabled.store(false, Ordering::Relaxed);
+        tick_facts(&mut ui, Instant::now(), true);
+        assert!(!ui.cheap_pending, "при выключенном обслуживании такт всё равно пошёл считать");
+    }
+
+    /// Important 8 ревью задач 5+6: проводка такта (Critical 1 и 3 живут
+    /// именно в ней) не была покрыта вовсе. Ответ дешёвого потока обязан
+    /// отпустить свою защёлку, не обогнать идущий расчёт, не позвать замок,
+    /// не терять изменение (Minor 11) и ничего не считать при выключенном
+    /// обслуживании.
+    #[test]
+    fn a_cheap_answer_asks_for_the_expensive_pass_without_overtaking_it() {
+        let free = vec![Check::pass("в базе открыт сеанс", "нет")];
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.gate = None;
+        // Полный расчёт уже идёт: эскалация обязана только попросить добавку.
+        ui.facts_pending = true;
+        ui.facts_since = Some(Instant::now());
+        ui.cheap_pending = true;
+
+        on_cheap(&mut ui, Some(0), Some(free.clone()), Instant::now(), true);
+        assert!(!ui.cheap_pending, "защёлка дешёвого такта не отпущена — такт замолчал бы навсегда");
+        assert!(ui.facts_again, "первый дешёвый набор не позвал дорогие факты");
+        assert!(ui.cheap_at.is_some(), "отметка дешёвого набора не поставлена");
+        assert!(ui.gate.is_none(), "такт позвал холодный замок (Critical 3)");
+        assert_eq!(ui.sessions, Some(0));
+        // Minor 11: расчёт получил только отметку повтора — прочитанное за ним
+        // не запоминаем, иначе изменение пропадёт между тактом и ответом.
+        assert!(ui.prev_cheap.is_empty(), "дешёвый набор запомнен расчётом, который его не читал");
+
+        // Сменилось число открытых сеансов — повод переспросить базу сам по
+        // себе, без всего дешёвого набора: ровно ради этого нужен секундный
+        // такт («закрыл Предприятие — через секунду-две позеленело»).
+        ui.facts_again = false;
+        on_cheap(&mut ui, Some(1), None, Instant::now(), true);
+        assert!(ui.facts_again, "открытое/закрытое «Предприятие» не позвало пересчёт");
+        assert_eq!(ui.sessions, Some(1));
+
+        // То же число, тот же дешёвый набор и свежая отметка полного расчёта —
+        // повода нет, и прочитанное запоминается (сравнивать следующий такт
+        // будет с ним).
+        ui.facts_again = false;
+        ui.facts_full_at = Some(Instant::now());
+        ui.prev_cheap = free.clone();
+        on_cheap(&mut ui, Some(1), Some(free.clone()), Instant::now(), true);
+        assert!(!ui.facts_again, "такт зовёт дорогие факты на каждом тике");
+        assert_eq!(ui.prev_cheap, free);
+
+        // Выключили — ответ потока защёлку отпускает и больше ничего.
+        ui.cheap_pending = true;
+        ui.enabled.store(false, Ordering::Relaxed);
+        on_cheap(&mut ui, Some(7), Some(Vec::new()), Instant::now(), true);
+        assert!(!ui.cheap_pending);
+        assert!(!ui.facts_again, "вердикт считается при выключенном обслуживании");
+        assert_eq!(ui.sessions, Some(1), "при выключенном обслуживании такт что-то запомнил");
+        assert_eq!(ui.prev_cheap, free);
+    }
+
     /// Дефект (заказчик 2026-10-20): карточка не должна повторять подсказку,
     /// уже вписанную в сам текст факта (TOOLS-Blocked несёт её внутри
     /// `detail`, см. `ops_host::tools_state`), и никогда не говорит
@@ -3176,12 +3379,16 @@ mod tests {
     fn tick_redraws_when_the_window_is_open_or_something_changed() {
         // Окно открыто и в покое — минуты в карточке связи всё равно не
         // должны стоять, та считает их сама от `since.elapsed()`.
-        assert!(tick_redraw(true, false, false));
+        assert!(tick_redraw(true, false, false, REDRAW_IDLE));
+        // Но не чаще прежнего шага такта (Important 4, п. 4): сам такт стал
+        // секундным, а перерисовка от этого учащаться не должна.
+        assert!(!tick_redraw(true, false, false, Duration::from_secs(1)));
         // Окно спрятано и тихо — перерисовывать нечего.
-        assert!(!tick_redraw(false, false, false));
-        // Спрятано, но пришли новые данные или идёт операция — всё равно да.
-        assert!(tick_redraw(false, true, false));
-        assert!(tick_redraw(false, false, true));
+        assert!(!tick_redraw(false, false, false, Duration::MAX));
+        // Спрятано, но пришли новые данные или идёт операция — всё равно да,
+        // и срок тут ни при чём.
+        assert!(tick_redraw(false, true, false, Duration::ZERO));
+        assert!(tick_redraw(false, false, true, Duration::ZERO));
     }
 
     #[test]

@@ -184,7 +184,18 @@ RUN curl -fsSL "https://zed.dev/api/releases/stable/${ZED_VERSION}/zed-linux-x86
     && test -x /opt/zed.app/bin/zed
 
 # Application menu entry plus icon (the tarball ships them, but outside XDG paths)
-RUN ln -s /opt/zed.app/share/applications/dev.zed.Zed.desktop /usr/share/applications/ \
+# Ярлык Zed — копия, а не ссылка на файл из его архива: в `Exec` подставлен
+# launch-maximized, иначе редактор открывается окном в четверть экрана. Сам
+# Zed распахнуться не умеет: настройки окна у него нет вовсе (есть
+# restore_on_startup, но он про содержимое, а не про окно). Подменяется одна
+# строка, все прочие поля (MimeType, Actions, значок) остаются авторскими — с
+# новой версией Zed приезжают его, а не наши. `grep` после `sed` на месте
+# потому, что переименуют `Exec` у себя — и ярлык молча перестанет
+# распахиваться; пусть лучше встанет сборка.
+RUN sed -E 's|^Exec=zed|Exec=/usr/local/bin/launch-maximized zed|' \
+        /opt/zed.app/share/applications/dev.zed.Zed.desktop \
+        >/usr/share/applications/dev.zed.Zed.desktop \
+    && grep -qx 'Exec=/usr/local/bin/launch-maximized zed %U' /usr/share/applications/dev.zed.Zed.desktop \
     && mkdir -p /usr/share/icons/hicolor/512x512/apps \
     && ln -s /opt/zed.app/share/icons/hicolor/512x512/apps/zed.png \
              /usr/share/icons/hicolor/512x512/apps/zed.png \
@@ -346,6 +357,7 @@ COPY config/gitea-start.sh      /usr/local/bin/gitea-start
 COPY config/normalize-skills.py /usr/local/bin/normalize-skills
 COPY config/test-skills.sh      /usr/local/bin/test-skills
 COPY config/test-entrypoint-ports.sh /usr/local/bin/test-entrypoint-ports
+COPY config/launch-maximized.sh /usr/local/bin/launch-maximized
 COPY config/git-cpuset.sh      /usr/local/bin/git
 COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
 
@@ -372,6 +384,7 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/gitea-start /usr/local/bin/normalize-skills \
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
                 /usr/local/bin/git /usr/local/bin/test-git-cpuset \
+                /usr/local/bin/launch-maximized \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"
 
@@ -595,7 +608,7 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
                   "/home/$u/.cache/bsl-analyzer" \
                   "/home/$u/proj" \
                   "/home/$u/examples"; \
-         cp /opt/zed.app/share/applications/dev.zed.Zed.desktop "/home/$u/Desktop/"; \
+         cp /usr/share/applications/dev.zed.Zed.desktop "/home/$u/Desktop/"; \
          cp /usr/share/applications/gitea.desktop "/home/$u/Desktop/"; \
          chmod +x "/home/$u/Desktop/dev.zed.Zed.desktop" "/home/$u/Desktop/gitea.desktop"; \
          chown -R "$u:$u" "/home/$u"; \

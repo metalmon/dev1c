@@ -1458,17 +1458,15 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dev1c-kit-ro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let kit = tmp.join("kit");
-        let home = tmp.join("home");
         std::fs::create_dir_all(kit.join("vrunner")).unwrap();
         std::fs::create_dir_all(kit.join("git")).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
         std::fs::write(kit.join(VERSION_FILE), "x\n").unwrap();
         let ro = std::fs::Permissions::from_mode(0o555);
         std::fs::set_permissions(kit.join("vrunner"), ro.clone()).unwrap();
         std::fs::set_permissions(kit.join("git"), ro.clone()).unwrap();
         std::fs::set_permissions(&kit, ro).unwrap();
 
-        let state = tools_state(&kit, &home);
+        let state = tools_state(&kit);
 
         let rw = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(&kit, rw.clone()).unwrap();
@@ -1476,9 +1474,12 @@ mod tests {
         std::fs::set_permissions(kit.join("git"), rw).unwrap();
         let _ = std::fs::remove_dir_all(&tmp);
 
-        // Nothing laid out in `home` yet — that is Missing, not a panic or
-        // an io error from a kit we could not write to.
-        assert!(matches!(state, OpState::Missing), "{state:?}");
+        // Комплект только для чтения — состояние считается, и это «сделано»
+        // с версией из отметки. С 25.10 инструменты из него и работают,
+        // никуда не раскладываясь, так что права на запись здесь не нужны
+        // вовсе: прежде тест ждал `Missing` («в профиле ничего не разложено»),
+        // а профиля больше нет.
+        assert!(matches!(state, OpState::Done(ref d) if d.contains('x')), "{state:?}");
     }
 
     /// Инструменты разрешаются ОТ КОМПЛЕКТА, а состояние — отдельный каталог

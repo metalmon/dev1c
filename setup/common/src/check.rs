@@ -8,19 +8,48 @@ pub struct Check {
     pub ok: bool,
     /// Информация, а не приговор: «туннель не поднят» — это не провал.
     pub info: bool,
+    /// Занято кем-то другим: не ошибка настройки, а чужая рука на базе прямо
+    /// сейчас. Ни пройденный, ни проваленный факт.
+    pub busy: bool,
     pub detail: String,
     pub hint: String,
 }
 
+/// Итог факта — выведен из его полей, а не хранится рядом: два источника
+/// правды об одном итоге — ровно та болезнь, против которой эта работа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Good,
+    Busy,
+    Bad,
+}
+
 impl Check {
     pub fn pass(what: &str, detail: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: true, info: false, detail: detail.into(), hint: String::new() }
+        Self { what: what.into(), ok: true, info: false, busy: false, detail: detail.into(), hint: String::new() }
     }
     pub fn fail(what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: false, info: false, detail: detail.into(), hint: hint.into() }
+        Self { what: what.into(), ok: false, info: false, busy: false, detail: detail.into(), hint: hint.into() }
     }
     pub fn note(what: &str, detail: impl Into<String>) -> Self {
-        Self { what: what.into(), ok: true, info: true, detail: detail.into(), hint: String::new() }
+        Self { what: what.into(), ok: true, info: true, busy: false, detail: detail.into(), hint: String::new() }
+    }
+    /// Занято: факт проверен, но решить его сейчас нельзя — кто-то другой
+    /// держит базу. `ok` и `info` оба `true`, чтобы `summary()` не считал его
+    /// ни пройденным (`ok && !info` ложно из-за `info`), ни проваленным
+    /// (`!ok` ложно) — без изменений в самой формуле.
+    pub fn busy(what: &str, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self { what: what.into(), ok: true, info: true, busy: true, detail: detail.into(), hint: hint.into() }
+    }
+
+    pub fn outcome(&self) -> Outcome {
+        if self.busy {
+            Outcome::Busy
+        } else if self.ok {
+            Outcome::Good
+        } else {
+            Outcome::Bad
+        }
     }
 }
 
@@ -37,7 +66,9 @@ pub fn summary(checks: &[Check]) -> (usize, usize) {
 /// Одна строка списка — одинаковая на экране и в отчёте. Раньше её рисовали
 /// два похожих цикла, и расходились бы они молча.
 fn line(i: usize, c: &Check) -> String {
-    let mark = if c.info {
+    let mark = if c.busy {
+        "busy"
+    } else if c.info {
         "info"
     } else if c.ok {
         " ok "
@@ -87,5 +118,22 @@ mod tests {
         assert!(text.contains(" 2. [info] туннель dev1: не поднят"), "{text}");
         assert!(text.contains("→ dev1c-setup status"));
         assert!(text.ends_with("Пройдено 1, провалено 1.\n"));
+    }
+
+    #[test]
+    fn a_busy_check_is_neither_passed_nor_failed() {
+        let checks = vec![
+            Check::pass("база", "C:\\Bases\\Buh"),
+            Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте Предприятие"),
+            Check::fail("RDP", "порт 3390 не отвечает", "dev1c-setup status"),
+        ];
+        assert_eq!(summary(&checks), (1, 1));
+        assert_eq!(checks[1].outcome(), Outcome::Busy);
+        assert_eq!(checks[0].outcome(), Outcome::Good);
+        assert_eq!(checks[2].outcome(), Outcome::Bad);
+        let text = render("1c-connect", "0.1.0", "", &checks);
+        assert!(text.contains("[busy] в базе открыт сеанс"), "{text}");
+        assert!(text.contains("→ закройте Предприятие"), "{text}");
+        assert!(text.ends_with("Пройдено 1, провалено 1.\n"), "{text}");
     }
 }

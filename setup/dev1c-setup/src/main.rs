@@ -310,6 +310,13 @@ fn run() -> Result<bool> {
             apply_changes(&mut ctx, &values)?;
             let ops = ops::server(&ctx.cfg);
             let touched = common::run::apply_all(&ctx, &ops, None, true)?;
+            // `change` правит параметры и применяет только расхождения —
+            // ставить то, чего нет, он не должен. Значит на ещё не
+            // установленной машине применять нечего, и об этом надо сказать:
+            // иначе человек решит, что команда сработала целиком.
+            if touched == 0 {
+                ctx.say("применять было нечего: параметр записан в dev1c.toml. Если стенд ещё не установлен — dev1c-setup install".to_string());
+            }
             // Служба пересоздана — числа окна могли измениться: замер заново,
             // иначе контейнер и Zed остаются с прежними.
             if touched > 0 && ctx.cfg.form() != cfg::Form::Remote && !ctx.dry_run {

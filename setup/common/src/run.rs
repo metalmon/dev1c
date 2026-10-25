@@ -20,7 +20,13 @@ pub fn apply_all<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], only: Option<&str>,
             continue;
         }
         let st = op.state(ctx);
-        if changes_only && !st.needs_work() {
+        // `changes_only` — это `change`: правка параметров. Применяется только
+        // РАСХОЖДЕНИЕ, но не отсутствие. Иначе `dev1c-setup change port=4000`
+        // на чистом сервере молча превращался в полную установку — с
+        // загрузкой образа и копированием модели, да ещё в обход сверки
+        // комплекта, которой защищён `install`. Человек правил параметр, а
+        // получал двадцать минут работы (находка ревью 26.10.2026).
+        if changes_only && !matches!(st, OpState::Drifted { .. }) {
             continue;
         }
         match &st {
@@ -153,6 +159,22 @@ mod tests {
             }),
             kit: Kit::at(std::env::temp_dir()),
         }
+    }
+
+    /// `change` правит параметры, а не ставит стенд. Операция, которой ещё
+    /// нет, им не выполняется: иначе `change port=4000` на чистом сервере
+    /// оборачивался полной установкой — и в обход сверки комплекта.
+    #[test]
+    fn change_applies_drift_but_never_installs_what_is_missing() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let c = ctx(false, log);
+        let ops: Vec<Box<dyn Op<T>>> = vec![Box::new(Flaky(Mutex::new(0)))];
+        // Операция в состоянии Missing: changes_only её не трогает.
+        assert_eq!(apply_all(&c, &ops, None, true).unwrap(), 0);
+        // А install (changes_only = false) — выполняет.
+        assert_eq!(apply_all(&c, &ops, None, false).unwrap(), 1);
+        // И после этого она Done: повторно никто её не трогает.
+        assert_eq!(apply_all(&c, &ops, None, true).unwrap(), 0);
     }
 
     #[test]

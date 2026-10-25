@@ -826,14 +826,63 @@ pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<S
 /// мгновенно), а вердикт готовности — коротко, чтобы уложиться в бюджет
 /// (`verify::Limits`).
 pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
-    let c = reqwest::blocking::Client::builder().timeout(timeout).build().ok()?;
-    let r = c.get(format!("{base_url}/version")).basic_auth(user, Some(password)).send().ok()?;
-    if !r.status().is_success() {
-        return None;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match version_once(base_url, user, password, left) {
+            Probe::Version(v) => return Some(v),
+            // Окончательные ответы: расширения нет, или нас не пустили. Ждать
+            // тут нечего, и ждать нельзя — иначе обновление состояния на
+            // машине без расширения стояло бы весь срок.
+            Probe::Final => return None,
+            // База отвечает, но пока не тем: платформа ещё открывает базу.
+            // Первый ответ после подъёма публикации идёт 7,7 с (замер на
+            // стенде 25.10) — за это время проба успевала получить отказ и
+            // объявить «расширение не установлено», хотя оно стоит.
+            Probe::NotReady => std::thread::sleep(std::time::Duration::from_millis(300)),
+        }
+    }
+}
+
+/// Чем кончилась одна попытка спросить версию.
+enum Probe {
+    Version(String),
+    /// Ответ окончательный: расширения в базе нет (404), не пустили (401/403)
+    /// или до базы не достучались вовсе.
+    Final,
+    /// База отвечает, но ещё не готова — стоит спросить ещё раз.
+    NotReady,
+}
+
+fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Probe {
+    let Ok(c) = reqwest::blocking::Client::builder().timeout(timeout).build() else { return Probe::Final };
+    let Ok(r) = c.get(format!("{base_url}/version")).basic_auth(user, Some(password)).send() else {
+        // Соединения нет вовсе — это забота факта публикации, не нашего
+        // ожидания: висеть тут весь срок незачем.
+        return Probe::Final;
+    };
+    let status = r.status();
+    if status.is_server_error() {
+        // 5xx от платформы, пока она открывает базу, — «ещё не готова».
+        return Probe::NotReady;
+    }
+    if !status.is_success() {
+        return Probe::Final;
     }
     // reqwest's `json` feature is not enabled: parse the body ourselves.
-    let v: serde_json::Value = serde_json::from_str(&r.text().ok()?).ok()?;
-    v.get("version").and_then(|s| s.as_str()).map(|s| s.to_string())
+    let Ok(text) = r.text() else { return Probe::NotReady };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        // 200, но не наш JSON: так отвечает страница платформы, пока сервис
+        // расширения ещё не поднялся внутри базы.
+        return Probe::NotReady;
+    };
+    match v.get("version").and_then(|x| x.as_str()) {
+        Some(v) => Probe::Version(v.to_string()),
+        None => Probe::NotReady,
+    }
 }
 
 struct Env;
@@ -1069,8 +1118,17 @@ impl Op<Ctx> for Extension {
         "Расширение mcp-1c в базе"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        match extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
+        let url = ctx.cfg.base_url();
+        match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
             Some(v) => OpState::Done(format!("расширение {v}, публикация отвечает")),
+            // «Не установлено» — утверждение о базе, и делать его можно
+            // только когда база отвечала. Публикация молчит — мы просто не
+            // спросили, и говорить надо это, а не «расширения нет»: заказчик
+            // 25.10 видел «MCP включены» рядом с «расширение не установлено»
+            // при живом расширении 0.4.8 (STATUS, пункт 26).
+            None if !crate::publication::service_responds(&url) => {
+                OpState::Blocked("публикация не отвечает — расширение не спросить".into())
+            }
             None => OpState::Missing,
         }
     }

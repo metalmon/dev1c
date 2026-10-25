@@ -343,8 +343,8 @@ pub fn base_fact(path: &str, exists: bool) -> Check {
 }
 
 /// Разложены ли инструменты комплекта (`vrunner/`, `git/`, `httpd/`) на
-/// машине. Та же функция считает этот факт в `run()` и в `readiness()` —
-/// второй, отдельно придуманный набор фактов не заводится.
+/// машине. Один и тот же вызов — что из `run()`, что из молчаливого расчёта
+/// готовности в окне: набор фактов (`gather`) один, второй не заводится.
 pub fn tools_fact(kit_root: &std::path::Path) -> Check {
     match tools_state(kit_root) {
         OpState::Done(d) => Check::pass(TOOLS, d),
@@ -413,8 +413,7 @@ pub fn web_server_fact(apache: Option<&std::path::Path>, module: Option<&std::pa
 
 /// Пути для `web_server_fact` на этой машине. Отдельной функцией и под
 /// `cfg`: `publication::apache2_on_path` существует только не на Windows, а
-/// `cfg!(target_os = ...)` в теле `facts_for_readiness` компилировался бы и
-/// там тоже.
+/// `cfg!(target_os = ...)` в теле `gather` компилировался бы и там тоже.
 #[cfg(target_os = "linux")]
 fn system_web_server_fact(cfg: &crate::cfg::Cfg) -> Check {
     let apache = crate::publication::apache2_on_path();
@@ -472,155 +471,12 @@ pub fn publication_fact(base_url: &str, ver: Option<String>, sessions: usize) ->
     }
 }
 
-/// Срок коннекта к порту веб-сервера — один на оба набора: он и так короче
-/// любого из них, и растягивать его незачем.
-const WEB_CONNECT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Сроки сбора фактов. «Проверить» и командная строка считают без
-/// ограничения по времени — человек ждёт ответа сознательно; готовность
-/// считается под рукой у него и молча, поэтому у неё свои короткие сроки и
-/// общий бюджет (спека, «у готовности свои сроки»).
-#[derive(Debug, Clone, Copy)]
-pub struct Limits {
-    /// Срок пробы инструментов (`vrunner-mcp` поднимает свой процесс, живой
-    /// замер — 8–11 с).
-    pub tools: std::time::Duration,
-    /// Срок одного сетевого запроса (версия расширения). Коннект к порту
-    /// веб-сервера и Gitea и так коротки (3 с и 5 с), их не растягиваем.
-    pub net: std::time::Duration,
-    /// Общий бюджет на весь набор; `None` — без бюджета.
-    pub budget: Option<std::time::Duration>,
-    /// Занимает ли порты рабочего места тот, кто просит факты — от этого
-    /// зависит факт портов (`workstation_ports_fact`). Второго похожего
-    /// параметра у набора фактов не завели: контекст вызывающего едет здесь.
-    pub ports: PortUse,
-    /// Можно ли поднимать раннер ради факта, когда о живом ничего не знаем.
-    /// Явная проверка — да: человек нажал кнопку и готов подождать. Расчёт
-    /// готовности — нет: его никто не просил, а холодный старт раннера (28 с)
-    /// всё равно не укладывается в бюджет (леджер комплекта, пункт 19).
-    pub probe_vrunner: bool,
-}
-
-impl Limits {
-    /// «Проверить» и `1c-connect check`: сроки прежние, бюджета нет. `ports`
-    /// у этих двоих разный — окно порты занимает, командная строка нет,
-    /// поэтому он параметром, а не зашит.
-    pub fn full(ports: PortUse) -> Self {
-        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None, ports, probe_vrunner: true }
-    }
-
-    /// Второй заход готовности: бюджета нет, сроки длинные, раннер по-прежнему
-    /// не поднимается. Нужен там, где быстрый расчёт не успел — см.
-    /// `readiness_patient`.
-    pub fn patient() -> Self {
-        Self {
-            tools: std::time::Duration::from_secs(60),
-            net: std::time::Duration::from_secs(60),
-            budget: None,
-            ports: PortUse::WeListen,
-            probe_vrunner: false,
-        }
-    }
-
-    /// Готовность: короткие сроки и общий бюджет в 20 с. Считает её только
-    /// окно, а оно порты занимает — выбора здесь нет.
-    pub fn quick() -> Self {
-        Self {
-            tools: std::time::Duration::from_secs(15),
-            net: std::time::Duration::from_secs(5),
-            budget: Some(std::time::Duration::from_secs(20)),
-            ports: PortUse::WeListen,
-            probe_vrunner: false,
-        }
-    }
-}
-
-/// «Не проверено за N с» — своё состояние факта, ни зелёное, ни приговор:
-/// `!ok` (точка не зелёная, и причину человек читает) вместе с `info` (это не
-/// поломка — советовать «переустановите» тут нечего, совет один: спросить
-/// заново). Так выглядит и сорванный срок самого факта, и вышедший общий
-/// бюджет: спека требует именно этого, а не выдуманного провала.
-pub fn not_checked(name: &str, waited: std::time::Duration) -> Check {
-    Check {
-        ok: false,
-        info: true,
-        ..Check::fail(
-            name,
-            format!("не проверено за {} с", waited.as_secs()),
-            "готовность считается коротко — нажмите «Проверить», она считает без ограничения по времени",
-        )
-    }
-}
-
-/// Факт под общим бюджетом: когда бюджет уже вышел, факт не считается вовсе —
-/// вместо выдуманного провала человек читает «не проверено».
-fn within(started: std::time::Instant, budget: Option<std::time::Duration>, name: &'static str, f: impl FnOnce() -> Check) -> Check {
-    match budget {
-        Some(b) if started.elapsed() >= b => not_checked(name, b),
-        _ => f(),
-    }
-}
-
-/// Неудача, на которую ушёл весь срок, — не отказ, а сорванный срок: отличить
-/// их внутри самого факта нечем (`extension_version` отдаёт `None` на любую
-/// беду, `local::call` — строку), а вот по времени ожидания видно. Проба
-/// инструментов отвечает 8–11 с при сроке 15, расширение — до 60 с при сроке
-/// 5: срок рвётся штатно, и приговор «переустановите расширение» на нём — та
-/// самая ложь карточки, против которой задача и делалась. Удачный факт сроком
-/// не портится, быстрый отказ остаётся отказом со своим советом.
-fn unless_timed_out(fact: Check, waited: std::time::Duration, limit: std::time::Duration) -> Check {
-    if !fact.ok && !fact.info && waited >= limit {
-        return not_checked(&fact.what, limit);
-    }
-    fact
-}
-
 /// Первый не зелёный факт — он и есть причина жёлтого вердикта. Сведения
 /// («в базе открыт сеанс», «Конфигуратор запущен», «комплект на носителе»)
 /// пропускаются: они `ok` и говорят «сейчас занято человеком», а не
-/// «сломано». «Не проверено» (`!ok` при `info`) пропускать нельзя — зелёной
-/// точке непосчитанный факт основанием не бывает.
+/// «сломано».
 pub fn first_fail(checks: &[Check]) -> Option<Check> {
     checks.iter().find(|c| !c.ok).cloned()
-}
-
-/// Тот же набор фактов, что печатает `run`, но молча: ни `Phase::Check`, ни
-/// одной строки в журнале окна (окно приняло бы фазу за начавшуюся операцию
-/// и заперло бы переключатель с «Сохранить»), и по коротким срокам
-/// `Limits::quick`. Карточка и «Проверить» обязаны считать одно и то же —
-/// второй, отдельно придуманный набор здесь не заводится.
-pub fn readiness(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
-    facts_for_readiness(ctx, tunnel_state, Limits::quick())
-}
-
-/// Тот же набор, но без бюджета и с длинными сроками — вторым заходом, когда быстрый
-/// чего-то не успел.
-///
-/// Зачем. Заказчик 25.10 на стенде: включил обслуживание, и окно сказало «не
-/// всё готово: публикация и расширение не проверено за 5 с — нажмите
-/// „Проверить“». Нажал — 18 из 18. Из журнала видно, почему так: прямо перед
-/// расчётом коннектор сам поднял публикацию («HTTP-сервис базы поднят на
-/// 127.0.0.1:8081»), а первый запрос к только что поднятому HTTP-сервису 1С
-/// идёт дольше пяти секунд — платформе надо открыть базу. На Windows
-/// публикация обычно уже тёплая, поэтому там «норм».
-///
-/// Чинить сроком быстрого расчёта нельзя (решение заказчика: базы у клиентов
-/// разные, затачиваться под одну нельзя), а оставлять как было — значит
-/// посылать человека нажимать кнопку, которая делает ровно то же, что мы
-/// умеем сделать сами. Поэтому второй заход: терпеливый, молчаливый и ровно
-/// один (`Ui::ready_patient`).
-///
-/// Раннер им всё равно не поднимается (`probe_vrunner: false`): 28 секунд
-/// холодного старта ради факта, ответ на который уже есть, — то, от чего
-/// ушли в пунктах 17 и 19 леджера.
-pub fn readiness_patient(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
-    facts_for_readiness(ctx, tunnel_state, Limits::patient())
-}
-
-/// Факт не сосчитан: не зелёный, но и не приговор (`verify::not_checked`).
-/// Ровно по нему окно решает, что знания нет и его стоит дособрать.
-pub fn is_unknown(c: &Check) -> bool {
-    !c.ok && c.info
 }
 
 /// Локальный `initialize` + безвредный инструмент: процесс поднимается из
@@ -662,8 +518,8 @@ fn ago(d: std::time::Duration) -> String {
 }
 
 /// Знание о раннере без единого нового процесса. `None` — не знаем ничего,
-/// решение (поднимать пробу или сказать «не поднимался») принимает вызывающий
-/// по своему `Limits::probe_vrunner`.
+/// и тогда вызывающий (`gather`) поднимает пробу сам — набор у всех один, и
+/// право не пробовать ради экономии чужого бюджета у него больше нет.
 pub fn runner_evidence() -> Option<RunnerState> {
     evidence_from(busy_now(), crate::bridge::runner_answered_ago())
 }
@@ -706,12 +562,11 @@ pub fn runner_fact(ev: &RunnerState) -> Check {
 fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path, timeout: std::time::Duration) -> Check {
     let t0 = std::time::Instant::now();
     let cmd = crate::bridge::vrunner_command(&ctx.cfg, tools).into_std();
-    let fact = match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &crate::project::NEVER, &|_| {}) {
+    match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &crate::project::NEVER, &|_| {}) {
         Ok(r) if !r.is_error => Check::pass(VRUNNER, format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
         Ok(r) => Check::fail(VRUNNER, format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
         Err(e) => Check::fail(VRUNNER, e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
-    };
-    unless_timed_out(fact, t0.elapsed(), timeout)
+    }
 }
 
 fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
@@ -743,121 +598,127 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
     }
 }
 
+/// Срок всего набора — один, на окно и на командную строку одинаково (спека:
+/// «набор один, срок один»). Раньше у готовности был отдельный короткий срок
+/// (бюджет 20 с, сеть 5 с) и терпеливый второй заход без срока вовсе, а
+/// «Проверить» — третий, свой; три пробы с разными сроками противоречили друг
+/// другу на одной и той же машине (заказчик 25.10: быстрый расчёт говорил
+/// «не готово», «Проверить» тут же — 18 из 18). 60 с хватает и на холодный
+/// старт раннера (28 с, замер 21.10), и на сетевые факты с запасом.
+pub const SET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Факты для режима `cfg.host.mode` (`"tunnel"` или, по умолчанию при любом
 /// другом значении, тот же `"tunnel"` — валидирован раньше, здесь не
 /// перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме:
 /// это состояние сессии, а не то, что можно вычислить здесь. `ports` —
-/// занимает ли порты тот, кто просит проверку: окно (`PortUse::WeListen`) и
-/// командная строка (`PortUse::WeDont`) зовут одну и ту же `run`, а порты
-/// занимает только окно.
+/// занимает ли порты тот, кто просит проверку (`workstation_ports_fact`):
+/// окно (`PortUse::WeListen`) и командная строка (`PortUse::WeDont`).
+///
+/// Печатает фазу и запирает кнопки — обёртка над `gather` с общим сроком
+/// (`SET_DEADLINE`). Молчаливый расчёт (окно, фоном) зовёт `gather`
+/// напрямую — ему фаза не нужна и не положена (см. `gui::run_readiness`).
 pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> {
     // Фаза — только здесь: по ней окно показывает карточку хода и запирает
     // кнопки. Сбор фактов её не объявляет, иначе молчаливый расчёт
     // готовности выглядел бы начавшейся операцией (спека).
     ctx.progress(Phase::Check);
-    facts_for_readiness(ctx, tunnel_state, Limits::full(ports))
+    gather(ctx, tunnel_state, ports, std::time::Instant::now() + SET_DEADLINE)
 }
 
-/// Сам сбор фактов — общий для «Проверить» и для вердикта готовности.
-/// Ничего не печатает и не объявляет фазы; всё, что может задержаться,
-/// считается под общим бюджетом (`within`) и со своим сроком (`Limits`).
-pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits) -> Vec<Check> {
-    let t0 = std::time::Instant::now();
-    let budget = limits.budget;
+/// Сам сбор фактов — один набор для «Проверить» и для вердикта готовности,
+/// один срок на весь набор (`deadline`). Ничего не печатает и не объявляет
+/// фазы. Дорогим фактам (публикация, Gitea, порт веб-сервера) передаётся не
+/// свой кусок бюджета, а то, что осталось от общего срока к их очереди —
+/// `deadline.saturating_duration_since(Instant::now())`: кто досталось рано,
+/// получает больше, и это честно, потому что порядок — тот же порядок, в
+/// котором человек читает карточку (см. `order`). Срыв срока здесь не
+/// отдельный исход: дорогой факт получает 0 (или около того) на остаток и
+/// отвечает как обычно — отказом, который и есть правда о сорванном сроке, а
+/// не выдуманное «не проверено».
+pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
-    v.push(within(t0, budget, DEADLINE, || licence_fact(&crate::licence::state_now())));
-    v.push(within(t0, budget, PARAMS, || params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server)));
+    v.push(licence_fact(&crate::licence::state_now()));
+    v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server));
     // Платформу ищем один раз на два факта: сканирование каталогов не нужно
     // повторять, а строки для анализатора без неё не считаются вовсе.
-    let mut platform = None;
-    v.push(within(t0, budget, PLATFORM, || {
-        let (choice, others) = crate::ops_host::platform_report(&ctx.cfg);
-        platform = choice.as_ref().ok().map(|c| c.exe.clone());
-        platform_fact(&choice, &others)
-    }));
-    v.push(within(t0, budget, ANALYZER, || {
+    let (choice, others) = crate::ops_host::platform_report(&ctx.cfg);
+    let platform = choice.as_ref().ok().map(|c| c.exe.clone());
+    v.push(platform_fact(&choice, &others));
+    v.push({
         let ours = platform.as_deref().and_then(crate::flow::platform_version_from_exe).and_then(|v| crate::analyzer::machine_line(&v));
         let want = crate::ops_host::analyzer_lines_of(platform.as_deref());
         analyzer_fact(ours.as_deref(), &want, &crate::analyzer::found(std::path::Path::new(&h.project)))
-    }));
+    });
     if cfg!(target_os = "linux") {
-        v.push(within(t0, budget, DISPLAY, || {
+        v.push({
             let d = crate::ops_host::display_env();
             let xvfb = crate::ops_host::find_xvfb_run();
             display_fact(d.as_deref(), d.as_deref().is_some_and(crate::ops_host::display_alive), xvfb.as_deref())
-        }));
+        });
     }
-    v.push(within(t0, budget, KIT, || {
+    v.push({
         let exe = mcp_exe(&ctx.kit);
         if exe.exists() {
             Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
         } else {
             Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
         }
-    }));
+    });
     let tools = ctx.kit.root.clone();
-    let tf = within(t0, budget, TOOLS, || tools_fact(&ctx.kit.root));
-    // Инструментов нет — пробу не поднимаем вовсе; но и «не проверено за N с»
-    // инструментов не значит «их нет», поэтому решение целиком под `within`.
+    let tf = tools_fact(&ctx.kit.root);
+    // Инструментов нет — пробу не поднимаем вовсе.
     let tools_ok = tf.ok;
     v.push(tf);
-    v.push(within(t0, budget, VRUNNER, || {
-        if !tools_ok {
-            return Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install");
-        }
-        // Сначала то, что знаем без нового процесса: занятость и живой
-        // раннер. Холодный старт — только когда не знаем ничего И нас
-        // попросили проверить явно («Проверить», `1c-connect check`): там
-        // нет ни бюджета, ни работающего сеанса, и 28 с ожидания — цена
-        // единственного доступного способа узнать.
+    v.push(if !tools_ok {
+        Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install")
+    } else {
         match runner_evidence() {
             Some(ev) => runner_fact(&ev),
-            None if limits.probe_vrunner => vrunner_fact(ctx, &tools, limits.tools),
-            None => runner_fact(&RunnerState::Idle),
+            // Сначала то, что знаем без нового процесса: занятость и живой
+            // раннер. Холодный старт (до 28 с) — только когда не знаем
+            // ничего вовсе; набор один, и срока на него хватает и тут
+            // (`SET_DEADLINE`), и дробить его на «можно пробовать»/«нельзя»
+            // больше незачем — это и была одна из трёх расходящихся проб.
+            None => vrunner_fact(ctx, &tools, SET_DEADLINE),
         }
-    }));
-    v.push(within(t0, budget, PROJECT, || project_fact(ctx, &tools)));
-    v.push(within(t0, budget, BASE, || base_fact(&h.base_path, base_exists_on_disk(&h.base_path))));
-    // Без сети и без сроков: это чистая функция от настроек, и считать её под
-    // бюджетом было бы враньём — «не проверено» тут не бывает.
+    });
+    v.push(project_fact(ctx, &tools));
+    v.push(base_fact(&h.base_path, base_exists_on_disk(&h.base_path)));
+    // Чистая функция от настроек, без сети и без срока.
     v.push(db_user_fact(&h.db_user));
-    // Поиск по `$PATH` и каталогу платформы — быстрый, но под бюджетом, как и
-    // остальное: порядок фактов важнее экономии на одном `exists()`.
     #[cfg(target_os = "linux")]
-    v.push(within(t0, budget, SYSTEM_WEB, || system_web_server_fact(&ctx.cfg)));
+    v.push(system_web_server_fact(&ctx.cfg));
     let web = ctx.cfg.http_port();
-    v.push(within(t0, budget, WEB, || {
-        // Закрытый порт отказывает мгновенно, так что весь срок здесь — это
-        // не «не отвечает», а «не дозвонились» (брандмауэр, мёртвый адрес):
-        // советовать «запустите Apache» на этом нельзя.
-        let asked = std::time::Instant::now();
-        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), WEB_CONNECT).is_ok();
-        // `auto` — публикацию поднимает сам коннектор, и совет при молчащем
-        // порту другой (`web_hint`).
-        unless_timed_out(web_fact(web, up, h.publication == "auto"), asked.elapsed(), WEB_CONNECT)
-    }));
+    v.push({
+        // Дорогой факт: срок — остаток общего. Закрытый порт отказывает
+        // мгновенно и остатка не ждёт; `auto` — публикацию поднимает сам
+        // коннектор, и совет при молчащем порту другой (`web_hint`).
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), left).is_ok();
+        web_fact(web, up, h.publication == "auto")
+    });
     let base_url = ctx.cfg.base_url();
     // Сколько сеансов 1С открыто прямо сейчас — считаем один раз на два
     // факта: по нему же публикация выбирает, что советовать.
     let sessions = crate::bridge::configurator_count();
-    v.push(within(t0, budget, PUBLICATION, || {
-        // Срок сетевого запроса отличается от отказа только временем:
-        // `extension_version_in` отдаёт `None` и на «не отвечает», и на
-        // «не успел» (см. `unless_timed_out`).
-        let asked = std::time::Instant::now();
-        let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net);
-        unless_timed_out(publication_fact(&base_url, ver, sessions), asked.elapsed(), limits.net)
-    }));
-    v.push(within(t0, budget, GITEA, || match ctx.cfg.gitea_url() {
-        Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url), url),
+    v.push({
+        // Дорогой факт: срок — остаток общего (`extension_version_in` сама
+        // отдаёт `None`, если остатка уже нет).
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, left);
+        publication_fact(&base_url, ver, sessions)
+    });
+    v.push(match ctx.cfg.gitea_url() {
+        // Дорогой факт: срок — остаток общего.
+        Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url, deadline.saturating_duration_since(std::time::Instant::now())), url),
         None => gitea_address_fact(),
-    }));
+    });
     if local {
         v.push(open_session_fact(sessions));
     } else {
-        v.push(within(t0, budget, CONFIGURATOR, || configurator_fact(sessions)));
+        v.push(configurator_fact(sessions));
     }
     let root = ctx.kit.root.display().to_string();
     // Носитель называем так, как его понимает человек: на Windows это буква
@@ -866,9 +727,7 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
     let media = if cfg!(windows) { root.get(..3).unwrap_or(&root) } else { root.as_str() };
     v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), media));
     if local {
-        // Держатель порта считается подпроцессом (`netstat`/`ss`) — под
-        // бюджетом, как и прочее небыстрое.
-        v.push(within(t0, budget, WORKSTATION_PORTS, || {
+        v.push({
             let p = ctx.cfg.ports();
             let me = std::process::id();
             // В список идут только порты, занятые НЕ нами: порт свободный,
@@ -881,8 +740,8 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
                     (holder_pid(&who)? != me).then_some((port, who))
                 })
                 .collect();
-            workstation_ports_fact(p.mcp, p.vrunner, &busy, limits.ports)
-        }));
+            workstation_ports_fact(p.mcp, p.vrunner, &busy, ports)
+        });
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
@@ -912,6 +771,67 @@ pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::check::Outcome;
+
+    /// Каждая чистая фактовая функция модуля (без `Ctx`, диска и сети) один
+    /// раз, с заведомо плохими или граничными аргументами. Одна коллекция на
+    /// два теста ниже: первый читает текст каждого факта, второй — только
+    /// его провалы.
+    fn all_facts_sample() -> Vec<Check> {
+        vec![
+            licence_fact(&crate::licence::State::Expired),
+            params_fact(false, "192.168.1.10:3393"),
+            platform_fact(&Err("нет платформы 1С".into()), &[]),
+            analyzer_fact(None, &[], &[]),
+            display_fact(None, false, None),
+            configurator_fact(1),
+            open_session_fact(1),
+            media_fact(Some("FAT32".into()), "E:\\"),
+            base_fact("C:\\нет-такого-каталога-для-теста-one-truth", false),
+            db_user_fact(""),
+            web_server_fact(None, None),
+            web_fact(1818, false, false),
+            publication_fact("http://x", None, 0),
+            gitea_address_fact(),
+            gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
+            tunnel_fact(None),
+            runner_fact(&RunnerState::Idle),
+            workstation_ports_fact(7773, 7783, &[(7783, "nginx (pid 500)".to_string())], PortUse::WeListen),
+        ]
+    }
+
+    /// Срок сбора один на весь набор (`gather`), и сорванный срок — то же, что
+    /// любая другая неудача: своего исхода «не проверено» больше нет ни у
+    /// одного факта.
+    fn every_fact_text() -> Vec<Check> {
+        all_facts_sample()
+    }
+
+    /// Только настоящие провалы — для проверки, что у каждого есть совет.
+    fn sample_bad_facts() -> Vec<Check> {
+        all_facts_sample().into_iter().filter(|c| c.outcome() == Outcome::Bad).collect()
+    }
+
+    #[test]
+    fn the_set_never_says_it_did_not_check() {
+        // Срок уже вышел («остаток» для дорогих фактов — 0), и ни один из
+        // них не откатывается к «не проверено»: такого исхода больше нет.
+        let ctx = test_ctx("tunnel");
+        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        assert!(!checks.is_empty());
+        assert!(!format!("{checks:?}").contains("не проверено"), "{checks:?}");
+        // И ни одна чистая фактовая функция модуля не говорит так сама по
+        // себе — тот же запрет и на уровне отдельного факта.
+        assert!(!format!("{:?}", every_fact_text()).contains("не проверено"));
+    }
+
+    #[test]
+    fn every_bad_fact_carries_a_hint() {
+        for c in sample_bad_facts() {
+            assert_eq!(c.outcome(), Outcome::Bad);
+            assert!(!c.hint.is_empty(), "{c:?}");
+        }
+    }
 
     #[test]
     fn the_report_hides_tunnel_fields_in_local_mode() {
@@ -1335,39 +1255,6 @@ mod tests {
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 
-    /// Главное правило спеки про сроки: факт, чей срок сорвался, —
-    /// «не проверено», а не приговор. Прежний тест на это место сверял имена
-    /// фактов `readiness` и `run`, но после правки оба зовут один и тот же
-    /// сбор — совпадение обеспечено конструкцией, а не проверкой (состав и
-    /// порядок всё равно сверяет `every_fact_has_a_name_in_order`), и именно
-    /// поэтому мимо прошёл живой случай: срок у пробы инструментов и у
-    /// расширения рвётся штатно, а человек читал «1c-connect install» и
-    /// «публикация в Конфигураторе» — лечение того, что цело.
-    #[test]
-    fn a_broken_deadline_is_not_checked_rather_than_a_failure() {
-        let net = std::time::Duration::from_secs(5);
-        let refusal = Check::fail(PUBLICATION, "http://x/version не отвечает", "1c-connect install, затем публикация в Конфигураторе");
-
-        // Отказ пришёл сразу — настоящий провал со своим советом.
-        let fast = unless_timed_out(refusal.clone(), std::time::Duration::from_millis(80), net);
-        assert!(!fast.ok && !fast.info, "{fast:?}");
-        assert!(fast.hint.contains("install"), "{fast:?}");
-
-        // На отказ ушёл весь срок — приговора нет, есть «не проверено».
-        let slow = unless_timed_out(refusal, net, net);
-        assert_eq!(slow.what, PUBLICATION);
-        assert!(!slow.ok && slow.info, "ни зелёный, ни провал: {slow:?}");
-        assert!(slow.detail.contains("не проверено за 5 с"), "{slow:?}");
-        assert!(!slow.hint.contains("install"), "чужого лечения в непроверенном факте быть не может: {slow:?}");
-        // Точка на таком факте не зелёная — он и есть причина.
-        assert_eq!(first_fail(&[slow]).unwrap().what, PUBLICATION);
-
-        // Удачный факт сроком не портится, сведение — тоже.
-        let took_long = std::time::Duration::from_secs(99);
-        assert!(unless_timed_out(Check::pass(VRUNNER, "AutumnMCP"), took_long, net).ok);
-        assert!(unless_timed_out(open_session_fact(0), took_long, net).info);
-    }
-
     /// Вердикт считает первый не зелёный факт, а сведения пропускает: «в базе
     /// открыт сеанс», «Конфигуратор запущен» и «комплект на носителе» говорят
     /// «сейчас занято человеком», а не «сломано», и цвет точки не красят.
@@ -1381,24 +1268,6 @@ mod tests {
         ];
         assert_eq!(first_fail(&checks).unwrap().what, PROJECT);
         assert!(first_fail(&[Check::pass(PLATFORM, "есть"), configurator_fact(2), media_fact(Some("FAT32".into()), "E:\\")]).is_none());
-    }
-
-    /// Факт, на который не хватило общего бюджета, — то же «не проверено», а
-    /// не выдуманный провал; бюджета нет (командная строка) — срок не
-    /// наступает никогда.
-    #[test]
-    fn a_fact_that_did_not_fit_the_budget_is_not_a_made_up_failure() {
-        let long_ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(30)).expect("часы без 30 с");
-        let c = within(long_ago, Some(std::time::Duration::from_secs(20)), GITEA, || unreachable!("бюджет вышел — факт не считают"));
-        assert_eq!(c.what, GITEA);
-        assert!(!c.ok && c.info, "{c:?}");
-        assert!(c.detail.contains("не проверено за 20 с"), "{c:?}");
-        assert_eq!(first_fail(&[c]).unwrap().what, GITEA, "непосчитанный факт зелёной точке основанием не бывает");
-        // Бюджет ещё есть — факт считается как обычно.
-        let ok = within(std::time::Instant::now(), Some(std::time::Duration::from_secs(20)), GITEA, || Check::pass(GITEA, "1.25"));
-        assert!(ok.ok, "{ok:?}");
-        // Без бюджета (`1c-connect check`) срок не наступает никогда.
-        assert!(within(long_ago, None, GITEA, || Check::pass(GITEA, "1.25")).ok);
     }
 
     /// Провал — только когда дать экран нечем. Экран сеанса или `xvfb-run` —
@@ -1497,15 +1366,6 @@ mod tests {
         let c = runner_fact(&RunnerState::Idle);
         assert!(c.ok && c.info, "до первого вызова агента раннера нет — это норма: {c:?}");
         assert!(c.detail.contains("не поднимался"), "{c:?}");
-    }
-
-    /// Готовность не поднимает раннер, явная проверка поднимает. Вся разница
-    /// между «обычным включением не всё готово» и «после Проверки всё ок»
-    /// держится на этом одном поле.
-    #[test]
-    fn readiness_never_raises_a_runner_and_an_explicit_check_may() {
-        assert!(!Limits::quick().probe_vrunner);
-        assert!(Limits::full(PortUse::WeDont).probe_vrunner);
     }
 
     #[test]

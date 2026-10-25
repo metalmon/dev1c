@@ -178,9 +178,12 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     Ok(fields.into_iter().map(|(key, value)| format!("{key} = {value}")).collect())
 }
 
-/// Gitea среды напрямую (без туннеля): версия и организация dev1c.
-pub fn gitea_probe(url: &str) -> Gitea {
-    let c = match reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
+/// Gitea среды напрямую (без туннеля): версия и организация dev1c. `timeout`
+/// — остаток общего срока сбора (`verify::gather`), а не свой: дорогой факт,
+/// как публикация и порт веб-сервера, доедает то, что осталось от набора, а
+/// не получает отдельный бюджет.
+pub fn gitea_probe(url: &str, timeout: std::time::Duration) -> Gitea {
+    let c = match reqwest::blocking::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(e) => return Gitea::Down(e.to_string()),
     };
@@ -823,8 +826,8 @@ pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<S
 }
 
 /// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
-/// мгновенно), а вердикт готовности — коротко, чтобы уложиться в бюджет
-/// (`verify::Limits`).
+/// мгновенно), а сбор готовности — остатком общего срока набора
+/// (`verify::gather`, `verify::SET_DEADLINE`).
 pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -1280,7 +1283,7 @@ mod tests {
 
     #[test]
     fn gitea_probe_on_a_closed_port_is_down() {
-        assert!(matches!(gitea_probe("http://127.0.0.1:1"), Gitea::Down(_)));
+        assert!(matches!(gitea_probe("http://127.0.0.1:1", std::time::Duration::from_secs(5)), Gitea::Down(_)));
     }
 
     #[test]

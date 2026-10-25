@@ -166,7 +166,8 @@ side, with fixed names and no discovery:
 mkdir platform                         # git- and docker-ignored
 # put setup-training-8.5.1.1150-x86_64.run there (from training_8_5_1_1150_LinuxRun.tar.gz),
 # unf-ready.dt and DoNotCopy.txt, the demo base of the stand (see below)
-mkdir artifacts                        # optional: 1c-connect-linux from CI
+mkdir artifacts                        # 1c-connect (the Linux binary, CI artifact 1c-connect-linux)
+                                       # missing -> the stand builds without the connector's window and says so
 ./provision.sh build                   # the stand image and the payload image
 ./provision.sh export                  # -> dist/dev1c-1c-payload.tar.gz, outside the build context
 ./provision.sh import                  # that tar -> the two volumes

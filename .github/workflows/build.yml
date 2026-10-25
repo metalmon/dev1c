@@ -327,6 +327,15 @@ jobs:
         with:
           name: 1c-connect-windows
           path: bins
+      # Окно коннектора для стенда. Этого шага здесь не было вовсе, и
+      # `mkdir -p artifacts` ниже создавал ПУСТОЙ каталог: Dockerfile.1c не
+      # находил файла и собирал образ без окна — молча, в каждом прогоне.
+      # Артефакт кладёт бинарник под его собственным именем `1c-connect`,
+      # ровно под тем, которое образ и ждёт.
+      - uses: actions/download-artifact@v4
+        with:
+          name: 1c-connect-linux
+          path: artifacts
 
       - name: Pack
         # gzip -1: the layers are already compressed, so a higher level costs
@@ -336,9 +345,10 @@ jobs:
           # The stand image is built here too: the kit without it would carry
           # the model server and no 1C at all, which is what used to ship.
           # The connector binary comes from this same run (artifact
-          # 1c-connect-linux, downloaded into artifacts/ above); without it
-          # Dockerfile.1c still builds, just without the connector's window.
-          mkdir -p artifacts
+          # 1c-connect-linux, downloaded into artifacts/ in the step above) —
+          # and Dockerfile.1c now FAILS if it is not there, instead of quietly
+          # building a stand without the connector's window.
+          ls -l artifacts/1c-connect
           docker build -f Dockerfile.1c --build-context artifacts=artifacts \
             -t oktaplus/dev1c-1c:latest .
           # Only the stand goes into the kit. Saving its base alongside it

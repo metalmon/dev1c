@@ -399,19 +399,33 @@ COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.deskto
 COPY config/1c/onboarding                   /opt/onboarding
 COPY config/1c/onboarding.desktop           /usr/share/applications/1c-onboarding.desktop
 COPY config/1c/onboarding-autostart.desktop /etc/xdg/autostart/zz-1c-onboarding.desktop
-# 1c-connect for Linux, built with its window by CI (artifact 1c-connect-linux).
-# Optional: put the file into `artifacts/` to have it in the image.
+# 1c-connect for Linux, built with its window by CI (artifact `1c-connect-linux`,
+# which carries the binary under its own name — `1c-connect`). ONE name on both
+# sides: nothing renames the file on the way any more.
 #
 # Its own build context, not `platform/`: this is the only thing the stand
 # image needs from outside the repository, and mounting `platform/` here would
 # push the 1C installer and the demo template — about 3.8 GB — to the daemon on
 # every rebuild of a 4 GB image whose whole point is being quick to rebuild.
+#
+# A missing file is now an ERROR, not a line in the log. Until 2026-10-25 this
+# block expected the name `1c-connect-linux` while the artifact carried
+# `1c-connect`, and the CI image job never downloaded that artifact at all — so
+# every kit shipped a stand WITHOUT the connector's window and said so only in
+# one line nobody reads. A build that deliberately goes without it has to say
+# so: `--build-arg CONNECT_OPTIONAL=1`.
+ARG CONNECT_OPTIONAL=0
 RUN --mount=type=bind,from=artifacts,target=/artifacts \
-    if [ -f /artifacts/1c-connect-linux ]; then \
-        install -D -m 0755 /artifacts/1c-connect-linux /opt/1c-connect/1c-connect \
+    if [ -f /artifacts/1c-connect ]; then \
+        install -D -m 0755 /artifacts/1c-connect /opt/1c-connect/1c-connect \
         && /opt/1c-connect/1c-connect --help >/dev/null \
         && echo "1c-connect: in the image"; \
-    else echo "1c-connect: not supplied, the stand works without the window"; fi
+    elif [ "$CONNECT_OPTIONAL" = 1 ]; then \
+        echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
+    else \
+        echo "1c-connect: нет файла artifacts/1c-connect — стенд собрался бы без окна коннектора." >&2; \
+        echo "Положите туда linux-сборку (артефакт CI 1c-connect-linux) или соберите с --build-arg CONNECT_OPTIONAL=1." >&2; \
+        exit 1; fi
 COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
 RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-*.desktop \

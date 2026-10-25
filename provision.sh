@@ -169,7 +169,17 @@ build)
     # context only when a stage mounts it: the stand image pulls 68 MB of
     # artifacts/ instead of 3.8 GB of platform/, which is minutes per rebuild.
     say "the stand image (no platform, no demo base)"
-    docker build -f Dockerfile.1c --build-context artifacts=artifacts -t "$IMAGE" .
+    # Образ отказывается собираться без окна коннектора — это и есть починка
+    # молчаливого отказа. Местная сборка «без окна» разрешена, но называет
+    # себя вслух: раньше её нельзя было отличить от сборки с окном.
+    if [ -f artifacts/1c-connect ]; then
+        connect_arg=
+    else
+        say "ВНИМАНИЕ: нет artifacts/1c-connect — собираю стенд БЕЗ окна коннектора (возьмите артефакт 1c-connect-linux из CI: ./provision.sh kit)"
+        connect_arg="--build-arg CONNECT_OPTIONAL=1"
+    fi
+    # shellcheck disable=SC2086 # пустая или одна строка аргумента, слова нужны
+    docker build -f Dockerfile.1c --build-context artifacts=artifacts $connect_arg -t "$IMAGE" .
     say "the payload image (platform + template base)"
     docker build -f Dockerfile.1c --build-context platform="$PLATFORM_DIR" --target payload -t "$PAYLOAD_IMAGE" .
     ;;
@@ -279,11 +289,12 @@ kit)
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) fetch dev1c-setup-windows "$bins" dev1c-setup.exe ;;
     esac
-    # Артефакт кладёт файл как 1c-connect, образу он нужен как
-    # 1c-connect-linux (см. Dockerfile.1c) — переименование делает fetch, и
-    # проверку «уже есть» он тоже делает по нужному нам имени, иначе файл
-    # качался бы каждый раз заново.
-    fetch 1c-connect-linux artifacts 1c-connect 1c-connect-linux
+    # Имя одно с обеих сторон: артефакт кладёт файл как 1c-connect, и
+    # Dockerfile.1c ждёт его под тем же именем — переименовывать нечего.
+    # Раньше здесь стояла заплатка «переименуй в 1c-connect-linux», и забыть
+    # её было нечем: образ собирался без окна коннектора и говорил об этом
+    # одной строкой в журнале сборки.
+    fetch 1c-connect-linux artifacts 1c-connect 1c-connect
     chmod +x "$bins/dev1c-setup" 2>/dev/null || true
     [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup"
 

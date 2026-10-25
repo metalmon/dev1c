@@ -119,10 +119,16 @@ done
 # pilot turns into an installation, and then this would become a real hole. So
 # the paths are refused when symlinked, a parent that resolves outside .config
 # is refused, and the writes do not follow links.
+# Панель в списке с 25.10.2026. Её тут не было, и правка панели в образе не
+# доходила ни до кого с уже созданным домом — а дома живут на томе и
+# переживают любое обновление. Тот же случай, что с темой и обоями, ради
+# которого список и появился: размер надписи раскладки поправлен в образе, а
+# на стенде остался бы прежним.
 SHIPPED_FILES="zed/settings.json zed/AGENTS.md zed/themes/1c.json
     xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
     xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
     xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
+    xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
     gtk-3.0/settings.ini gtk-4.0/settings.ini"
 for home in /home/*; do
     cfg="$home/.config"

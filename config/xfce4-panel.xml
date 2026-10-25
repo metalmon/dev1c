@@ -92,10 +92,26 @@
     <property name="plugin-10" type="string" value="systray">
       <property name="square-icons" type="bool" value="true"/>
     </property>
-    <!-- Индикатор раскладки: текстом (us/ru), флаг по RDP читается хуже -->
+    <!-- Индикатор раскладки: текстом (us/ru), флаг по RDP читается хуже.
+
+         display-scale — высота надписи в процентах от высоты панели: плагин
+         рисует текст сам, через cairo, и масштабирует его до
+         «размер панели × scale/100». Умолчание у него DISPLAY_SCALE_MAX, то
+         есть 100: при панели 42 пикселя надпись занимала всю высоту, рядом с
+         временем часов (Inter 14, около 20 пикселей) — вдвое крупнее всего
+         остального на панели.
+
+         50 от 42 даёт около 21 — ровно строка времени. Это единственное
+         число здесь: покажется мелким или крупным — менять его, шаг пять.
+
+         Шрифт подогнать нельзя: плагин зашил себе
+         «Courier New, Courier 10 Pitch, Monospace Bold» константой при
+         сборке, настройки для него нет. Поэтому раскладка остаётся
+         моноширинной рядом с Inter — как маленький значок, а не как текст. -->
     <property name="plugin-11" type="string" value="xkb">
       <property name="display-type" type="uint" value="1"/>
       <property name="group-policy" type="uint" value="0"/>
+      <property name="display-scale" type="uint" value="50"/>
     </property>
     <property name="plugin-12" type="string" value="clock">
       <property name="mode" type="uint" value="2"/>

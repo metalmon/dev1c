@@ -65,15 +65,18 @@ pub fn summary(checks: &[Check]) -> (usize, usize) {
 
 /// Одна строка списка — одинаковая на экране и в отчёте. Раньше её рисовали
 /// два похожих цикла, и расходились бы они молча.
+///
+/// Метка строится на `outcome()`, а не своей отдельной цепочкой `busy`/`info`/
+/// `ok`: было два похожих места, расходящихся молча (находка ревью задачи 2).
+/// `info` здесь — не свой исход, а уточнение внутри `Good` (сведение против
+/// настоящего прохода): `outcome()` сознательно не различает их — это одно и
+/// то же для вердикта (`summary`), разница только в тексте для человека.
 fn line(i: usize, c: &Check) -> String {
-    let mark = if c.busy {
-        "busy"
-    } else if c.info {
-        "info"
-    } else if c.ok {
-        " ok "
-    } else {
-        "FAIL"
+    let mark = match c.outcome() {
+        Outcome::Busy => "busy",
+        Outcome::Good if c.info => "info",
+        Outcome::Good => " ok ",
+        Outcome::Bad => "FAIL",
     };
     let mut s = format!("{:>2}. [{mark}] {}: {}\n", i + 1, c.what, c.detail);
     if !c.hint.is_empty() {

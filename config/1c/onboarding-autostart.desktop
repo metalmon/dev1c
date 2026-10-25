@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=dev1c-onboarding
-Comment=Шесть шагов поверх рабочего стола — при каждом входе в сессию (решение заказчика)
+Comment=Подсказки поверх рабочего стола — при каждом входе в сессию (решение заказчика); сколько шагов, знает scenario.toml
 Exec=/usr/local/bin/1c-stand onboarding --autostart
 Terminal=false
 X-GNOME-Autostart-enabled=true

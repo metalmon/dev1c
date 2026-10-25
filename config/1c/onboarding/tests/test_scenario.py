@@ -2,6 +2,7 @@
 import pathlib
 import unittest
 
+from placement import QUESTION_CHARS_PER_ROW
 from scenario import TARGET_KINDS, load
 
 _HERE = pathlib.Path(__file__).parent
@@ -113,6 +114,40 @@ class LoadTests(unittest.TestCase):
             'Покажи структуру документа «Заказ покупателя»',
             'Сколько справочников и документов в этой конфигурации',
         ))
+
+    def test_ready_made_texts_fit_their_row(self):
+        # Готовый текст рисуется ОДНОЙ строкой, без переноса
+        # (callout._draw_questions, в отличие от тела шага), поэтому
+        # лишнее не уедет вниз, а обрежется маской формы — тот самый
+        # дефект, который на теле первого шага нашли только глазами на
+        # стенде. Предел считает placement, здесь применяется к текстам.
+        for s in load(SCENARIO):
+            for text in s.questions:
+                self.assertLessEqual(
+                    len(text), QUESTION_CHARS_PER_ROW,
+                    'шаг %d: готовый текст длиннее строки, его обрежет '
+                    'форма выноски: %r' % (s.number, text))
+
+    def test_the_edit_asked_of_the_agent_names_the_property(self):
+        # Шаг 11 просит сменить синоним, а рядом в файле лежит имя
+        # объекта с тем же словом «Номенклатура»; его правка ломает
+        # загрузку конфигурации. Поэтому в готовом тексте названо само
+        # свойство — текст написан под слабую модель, и это требование,
+        # а не стиль.
+        step = next(s for s in load(SCENARIO) if s.number == 11)
+        self.assertEqual(len(step.questions), 1)
+        self.assertIn('Synonym', step.questions[0])
+
+    def test_the_circle_is_verified_by_asking_the_agent(self):
+        # Шаг 14 проверяет круг вопросом агенту, а не списком в 1С:
+        # подпись в списке берётся из синонима только при пустых
+        # «Представлении объекта» и «Представлении списка», и на УНФ это
+        # не проверено. Обещать то, чего не мерили, этот онбординг не
+        # должен — а ответ агента из базы мерен дважды.
+        step = next(s for s in load(SCENARIO) if s.number == 14)
+        self.assertEqual(step.target.kind, 'window')
+        self.assertEqual(len(step.questions), 1)
+        self.assertNotIn('в списке', step.body)
 
 
 class ActionTests(unittest.TestCase):

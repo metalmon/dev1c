@@ -438,5 +438,9 @@ RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/appl
            cat /tmp/agents-1c.md >> "$f" && grep -q 'демо-стенд' "$f" || exit 1; \
        done \
     && rm /tmp/agents-1c.md \
+    `# На это равенство опирается test-stand: он сверяет добавку и версию` \
+    `# платформы только по копии Zed, и этого хватает ровно потому, что` \
+    `# копии равны здесь. Снимете cmp — допишите в test-stand вторую` \
+    `# строку про ~/.pi/agent/AGENTS.md, иначе расхождение доедет до стенда.` \
     && cmp /etc/skel/.config/zed/AGENTS.md /etc/skel/.pi/agent/AGENTS.md
 CMD ["/usr/local/bin/1c-stand", "start"]

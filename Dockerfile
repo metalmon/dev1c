@@ -546,6 +546,13 @@ COPY config/gitea.desktop     /usr/share/applications/gitea.desktop
 # Адрес ярлык не знает — его берёт из переменных сессии сам скрипт.
 COPY config/model-chat.desktop /usr/share/applications/model-chat.desktop
 
+# Образцовый рабочий стол. Из него ярлыки попадают и в новый дом (он собран
+# из /etc/skel), и в УЖЕ созданный — их освежает точка входа. Раньше ярлыки
+# клались прямо в /home/$u при сборке, а /home — том: в существующем доме они
+# не появлялись никогда. Так пропал ярлык чата с моделью, и увидел это
+# заказчик, а не мы: на свежем томе он был.
+RUN mkdir -p /etc/skel/Desktop     && cp /usr/share/applications/dev.zed.Zed.desktop           /usr/share/applications/gitea.desktop           /usr/share/applications/model-chat.desktop /etc/skel/Desktop/     && chmod +x /etc/skel/Desktop/*.desktop
+
 # bash additions: history, prompt with the git branch, aliases
 COPY config/bashrc-extra.sh /etc/profile.d/zz-dev1c.sh
 RUN echo '. /etc/profile.d/zz-dev1c.sh' >> /etc/bash.bashrc
@@ -684,11 +691,8 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
                   "/home/$u/.cache/bsl-analyzer" \
                   "/home/$u/proj" \
                   "/home/$u/examples"; \
-         cp /usr/share/applications/dev.zed.Zed.desktop "/home/$u/Desktop/"; \
-         cp /usr/share/applications/gitea.desktop "/home/$u/Desktop/"; \
-         cp /usr/share/applications/model-chat.desktop "/home/$u/Desktop/"; \
-         chmod +x "/home/$u/Desktop/dev.zed.Zed.desktop" "/home/$u/Desktop/gitea.desktop" \
-                  "/home/$u/Desktop/model-chat.desktop"; \
+         cp /etc/skel/Desktop/*.desktop "/home/$u/Desktop/"; \
+         chmod +x "/home/$u/Desktop"/*.desktop; \
          chown -R "$u:$u" "/home/$u"; \
        done
 

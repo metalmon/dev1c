@@ -350,6 +350,14 @@ RUN --mount=type=bind,from=platform,target=/platform \
     && if [ -n "${DEMO_TEMPLATE}" ]; then \
          D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
            /ManageCfgSupport -disableSupport -force; \
+         `# Снятие с поддержки правит ОСНОВНУЮ конфигурацию. Без этого шага` \
+         `# она расходится с конфигурацией базы данных, и КАЖДЫЙ запуск 1С` \
+         `# встречает человека вопросом «Конфигурация базы данных не` \
+         `# соответствует сохранённой. Продолжить?». Ниже обновляется` \
+         `# расширение, а основная конфигурация оставалась необновлённой —` \
+         `# поймано на стенде 26.10.2026, увидел заказчик.` \
+         D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
+           /UpdateDBCfg; \
        fi \
     # two Designer runs: two -Extension keys in one command line are refused
     && D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \

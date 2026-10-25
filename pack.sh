@@ -336,6 +336,37 @@ if [ -n "${PAYLOAD_ARCHIVE:-}" ]; then
     echo "1C platform and demo base: $(du -h "$KIT/dev1c-1c-payload.tar.gz" | cut -f1)"
 fi
 
+# --- состав комплекта: ворота перед суммами ----------------------------------
+# Архивы выше копируются только если заданы переменные, а раньше тут не было
+# ни одной проверки «а заданы ли». Так комплект уезжал неполным МОЛЧА: CI
+# передаёт только LLAMA_IMAGE, значит серверный комплект собирался без
+# платформы 1С. Это тот же класс, что стоил комплекта 22.10.2026 (стенд без
+# окна коннектора): недостающую часть видно одной строкой в журнале сборки,
+# которую никто не читает.
+#
+# Поэтому состав сверяется с разделом «Комплекты» спецификации, и расхождение
+# — отказ, а не предупреждение. Нужен нарочно неполный комплект (проба,
+# отладка) — скажите это вслух: KIT_PARTIAL=1.
+if [ "$OS" = "linux" ]; then
+    missing=
+    for f in dev1c-setup УСТАНОВКА.md dev1c.toml              dev1c-image.tar.gz dev1c-llama-image.tar.gz dev1c-1c-payload.tar.gz; do
+        [ -s "$KIT/$f" ] || missing="$missing $f"
+    done
+    ls "$KIT"/model/*.gguf >/dev/null 2>&1 || missing="$missing model/*.gguf"
+    ls "$KIT"/nvidia-container-toolkit/*.deb >/dev/null 2>&1         || missing="$missing nvidia-container-toolkit/*.deb"
+    if [ -n "$missing" ]; then
+        if [ "${KIT_PARTIAL:-0}" = "1" ]; then
+            echo "pack.sh: ВНИМАНИЕ, комплект неполон (KIT_PARTIAL=1):$missing" >&2
+        else
+            echo "pack.sh: в комплекте нет обязательного:$missing" >&2
+            echo "  состав описан в docs/superpowers/specs/2026-10-16-setup-binaries-design.md, раздел «Комплекты»." >&2
+            echo "  Архивы приходят переменными: LLAMA_IMAGE (сервер модели), PAYLOAD_ARCHIVE (платформа 1С и демо-база)." >&2
+            echo "  Модель кладут в $KIT/model/ руками. Нарочно неполный комплект: KIT_PARTIAL=1." >&2
+            exit 1
+        fi
+    fi
+fi
+
 # Суммы считает он же — заказчик проверяет комплект тем же кодом.
 "$SETUP" --kit "$KIT" checksums >/dev/null
 if [ "$OS" = "windows" ]; then

@@ -430,6 +430,13 @@ COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
 RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-*.desktop \
     && chmod +x /usr/local/bin/test-stand \
-    && cat /tmp/agents-1c.md >> /etc/skel/.config/zed/AGENTS.md && rm /tmp/agents-1c.md \
-    && grep -q 'демо-стенд' /etc/skel/.config/zed/AGENTS.md
+    `# Оба читателя правил разом: панель Zed и pi в терминале. Файл один и` \
+    `# тот же, но назначений два — допишешь одному, и агенты разойдутся в` \
+    `# умениях молча. Поймано проверкой test-pi 25.10.2026: в образе с 1С у` \
+    `# pi не было правил про демо-стенд, платформу и стартер.` \
+    && for f in /etc/skel/.config/zed/AGENTS.md /etc/skel/.pi/agent/AGENTS.md; do \
+           cat /tmp/agents-1c.md >> "$f" && grep -q 'демо-стенд' "$f" || exit 1; \
+       done \
+    && rm /tmp/agents-1c.md \
+    && cmp /etc/skel/.config/zed/AGENTS.md /etc/skel/.pi/agent/AGENTS.md
 CMD ["/usr/local/bin/1c-stand", "start"]

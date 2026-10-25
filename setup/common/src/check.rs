@@ -2,7 +2,7 @@
 //! провале — что делать. Отчёт пишется в файл в комплекте: человек присылает
 //! файл, а не пересказ.
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Check {
     pub what: String,
     pub ok: bool,

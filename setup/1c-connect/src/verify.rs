@@ -688,8 +688,10 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
 }
 
 /// Дескриптор публикации (`default.vrd`) — сравнение с диском (`Paths::of` +
-/// `publication::descriptor_matches`). Чистая функция от настроек и
-/// комплекта: сети не касается, только диск.
+/// `publication::descriptor_matches`). Чтение файла, не сети, но входит в
+/// очередь группы «база» (решение владельца, см. `gather`): читать файл той
+/// же базы отдельным потоком от публикации и расширения незачем, а порядок
+/// внутри группы и так строгий.
 fn base_descriptor_matches(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> bool {
     match crate::publication::Paths::of(cfg, kit) {
         Ok(p) => crate::publication::descriptor_matches(&p.pub_dir, cfg),
@@ -697,21 +699,18 @@ fn base_descriptor_matches(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> boo
     }
 }
 
-/// Сам сбор фактов — один набор для «Проверить» и для вердикта готовности,
-/// один срок на весь набор (`deadline`). Ничего не печатает и не объявляет
-/// фазы. Дорогим фактам (публикация, Gitea, порт веб-сервера) передаётся не
-/// свой кусок бюджета, а то, что осталось от общего срока к их очереди —
-/// `deadline.saturating_duration_since(Instant::now())`: кто досталось рано,
-/// получает больше, и это честно, потому что порядок — тот же порядок, в
-/// котором человек читает карточку (см. `order`). Исключение — порт
-/// веб-сервера: его остаток берётся с потолком (`WEB_CONNECT`), иначе
-/// отфильтрованный порт (брандмауэр с DROP, висит молча до конца срока)
-/// съедал бы весь остаток и оставлял публикации с Gitea после себя ноль —
-/// это и есть тот самый выдуманный отказ, против которого вся правка.
-/// Срыв срока здесь не отдельный исход: дорогой факт получает 0 (или около
-/// того) на остаток и отвечает как обычно — отказом, который и есть правда о
-/// сорванном сроке, а не выдуманное «не проверено».
-pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
+/// Имена дорогих фактов — тех, что ходят по сети или к базе (`gather`
+/// считает их не один за одним, а тремя параллельными группами, см. её
+/// докстроку). Три имени — три группы: «база» отвечает за себя именем
+/// первого своего факта (`PUBLICATION`; расширение и дескриптор — там же, но
+/// в это перечисление не входят, им отдельных групп не положено), Gitea и
+/// порт веб-сервера — каждый своей.
+pub const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
+
+/// Всё, что не ходит по сети и не ждёт ответа базы, — один проход, без срока.
+/// Дорогие факты (`EXPENSIVE`, а также расширение и дескриптор из группы
+/// «база») добавляет `gather` отдельно, параллельными группами.
+pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
@@ -762,45 +761,10 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
     v.push(db_user_fact(&h.db_user));
     #[cfg(target_os = "linux")]
     v.push(system_web_server_fact(&ctx.cfg));
-    let web = ctx.cfg.http_port();
-    v.push({
-        // Дорогой факт, но не весь остаток — свой кусок, не больше
-        // `WEB_CONNECT` (см. её докстроку: почему остаток сюда отдавать
-        // целиком нельзя).
-        let left = deadline.saturating_duration_since(std::time::Instant::now()).min(WEB_CONNECT);
-        let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), left).is_ok();
-        // `auto` — публикацию поднимает сам коннектор, и совет при молчащем
-        // порту другой (`web_hint`).
-        web_fact(web, up, h.publication == "auto")
-    });
-    let base_url = ctx.cfg.base_url();
-    // Сколько сеансов 1С открыто прямо сейчас — считаем один раз на все
-    // факты базы: по нему же `busy_reason` решает, спрашивать ли базу вовсе.
+    // Сколько сеансов 1С открыто прямо сейчас — своя причина сведения тут, и
+    // (отдельным вызовом в `gather`) то же число решает, спрашивать ли
+    // занятую базу вовсе.
     let sessions = crate::bridge::configurator_count();
-    // Единая причина занятости (задача 3): при ней дорогая проба базы не
-    // делается вовсе — расширение молчит по той же причине, что и
-    // публикация, и факт прямо об этом говорит, а не выдаёт недостающее
-    // знание за провал.
-    let busy = busy_reason(sessions, crate::project::doing());
-    let reach = match &busy {
-        Some(reason) => crate::ops_host::Reach::Unreachable(reason.clone()),
-        None => {
-            // Дорогой факт: срок — остаток общего (`extension_reach` сама
-            // отдаёт `Unreachable`, если остатка уже нет).
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left)
-        }
-    };
-    let responds = busy.is_none() && !matches!(reach, Reach::Unreachable(_));
-    v.push(publication_responds_fact(&base_url, responds, busy.as_deref()));
-    v.push(extension_fact(&reach, busy.as_deref()));
-    // Чтение файла, не сети: отдельного срока ей не нужно.
-    v.push(descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)));
-    v.push(match ctx.cfg.gitea_url() {
-        // Дорогой факт: срок — остаток общего.
-        Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url, deadline.saturating_duration_since(std::time::Instant::now())), url),
-        None => gitea_address_fact(),
-    });
     if local {
         v.push(open_session_fact(sessions));
     } else {
@@ -832,6 +796,91 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
         v.push(tunnel_fact(tunnel_state));
     }
     v
+}
+
+/// Три дорогие группы — параллельно, каждая своим потоком. Общий код для
+/// настоящего сбора (`gather`) и для теста механики (`gather_expensive_for_test`),
+/// чтобы параллельность проверялась тем же кодом, который и считает факты, а
+/// не похожей копией.
+fn parallel_expensive<B, G, W>(base: B, gitea: G, web: W) -> ((Check, Check, Check), Check, Check)
+where
+    B: FnOnce() -> (Check, Check, Check) + Send,
+    G: FnOnce() -> Check + Send,
+    W: FnOnce() -> Check + Send,
+{
+    std::thread::scope(|s| {
+        let hb = s.spawn(base);
+        let hg = s.spawn(gitea);
+        let hw = s.spawn(web);
+        (hb.join().unwrap(), hg.join().unwrap(), hw.join().unwrap())
+    })
+}
+
+/// Сам сбор фактов — один набор для «Проверить» и для вердикта готовности,
+/// один срок на весь набор (`deadline`). Ничего не печатает и не объявляет
+/// фазы.
+///
+/// Дорогие факты считаются тремя параллельными группами (решение владельца
+/// 25.10, «Дорогие факты идут группами»), и каждой достаётся срок набора
+/// ЦЕЛИКОМ, а не остаток от соседа: прежняя схема (остаток по очереди)
+/// заставляла отфильтрованный порт или мёртвую Gitea съедать время соседей и
+/// превращала здоровую проверку в выдуманный отказ. Группы: «база»
+/// (публикация, расширение, дескриптор — внутри строго по очереди: у
+/// учебной платформы один сеанс, и два одновременных запроса подерутся за
+/// него), Gitea, и порт веб-сервера (TCP-коннект сеанса 1С не открывает,
+/// поэтому ему сосед не страшен и собственная очередь не нужна).
+///
+/// Порядок фактов в итоговом наборе — не порядок ответов, а фиксированные
+/// места по имени (`order`): два прогона с разными по времени ответами
+/// обязаны дать одинаково выглядящий отчёт.
+pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
+    let mode = ctx.cfg.host.mode.clone();
+    let h = &ctx.cfg.host;
+
+    // Единая причина занятости (`busy_reason`): при ней дорогая проба базы
+    // не делается вовсе (задача 3) — расширение и дескриптор молчат по той
+    // же причине, что и публикация.
+    let busy = busy_reason(crate::bridge::configurator_count(), crate::project::doing());
+    let base_url = ctx.cfg.base_url();
+    let gitea_url = ctx.cfg.gitea_url().map(str::to_string);
+    let web_port = ctx.cfg.http_port();
+    let own = h.publication == "auto";
+
+    let ((publication, extension, descriptor), gitea_check, web_check) = parallel_expensive(
+        || {
+            if let Some(reason) = &busy {
+                return (
+                    publication_responds_fact(&base_url, false, Some(reason)),
+                    extension_fact(&Reach::Unreachable(reason.clone()), Some(reason)),
+                    descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)),
+                );
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let reach = crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left);
+            let responds = !matches!(reach, Reach::Unreachable(_));
+            (
+                publication_responds_fact(&base_url, responds, None),
+                extension_fact(&reach, None),
+                descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)),
+            )
+        },
+        || match &gitea_url {
+            Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url, deadline.saturating_duration_since(std::time::Instant::now())), url),
+            None => gitea_address_fact(),
+        },
+        || {
+            // Не весь остаток — свой кусок, не больше `WEB_CONNECT` (см. её
+            // докстроку): отфильтрованный порт висит молча до конца срока, и
+            // отдавать ему весь срок целиком незачем даже в своей группе.
+            let left = deadline.saturating_duration_since(std::time::Instant::now()).min(WEB_CONNECT);
+            let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web_port).into(), left).is_ok();
+            web_fact(web_port, up, own)
+        },
+    );
+
+    let mut facts = cheap(ctx, tunnel_state, ports);
+    facts.extend([publication, extension, descriptor, gitea_check, web_check]);
+    order(&mode).into_iter().map(|name| facts.iter().find(|c| c.what == name).cloned().unwrap_or_else(|| panic!("нет факта «{name}» в наборе"))).collect()
 }
 
 /// Параметры для отчёта без паролей.
@@ -1010,16 +1059,14 @@ mod tests {
     /// Дорогие факты — те, кому `gather` отдаёт остаток общего срока, а не
     /// весь бюджет сразу (докстрока `gather`). Чистая функция, а не три
     /// отдельные проверки подстрок — честнее (находка ревью задачи 2, круг 2).
-    fn is_expensive(name: &str) -> bool {
-        matches!(name, WEB | PUBLICATION | EXTENSION | DESCRIPTOR | GITEA)
-    }
-
-    /// Находка ревью, круг 2: ни один тест не доказывал, что короткий общий
-    /// срок не роняет факты из списка (дорогой факт с нулевым остатком
-    /// обязан ответить настоящим провалом и остаться в наборе — «не
-    /// проверено» таким пропавшим фактом не прикрыть, его больше нет), и что
-    /// дешёвые факты в порядке всегда идут раньше дорогих — иначе дорогому
-    /// достаётся чужое время раньше, чем дешёвый успел посчитаться сам.
+    /// Находка ревью, круг 2 (и остаётся верной после задачи 4, где группы
+    /// стали параллельными): короткий общий срок не роняет факты из списка —
+    /// дорогой факт с нулевым остатком обязан ответить настоящим провалом и
+    /// остаться в наборе, «не проверено» таким пропавшим фактом не прикрыть,
+    /// его больше нет. Дешёвые факты в порядке идут раньше дорогих — это
+    /// теперь не следствие очереди за остатком (групп больше нет по
+    /// очереди), а фиксированное место в `order`, и набор всегда
+    /// раскладывается по нему, какой бы группе времени не хватило.
     #[test]
     fn a_short_deadline_drops_no_fact_and_counts_cheap_facts_first() {
         let ctx = test_ctx("tunnel");
@@ -1027,11 +1074,75 @@ mod tests {
         let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
         assert_eq!(names, order("tunnel"), "короткий срок уронил факт(ы): {names:?}");
 
-        // Перед первым дорогим фактом в порядке — хотя бы один дешёвый.
-        let cheap_before_first_expensive = names.iter().take_while(|n| !is_expensive(n)).count();
+        let cheap_before_first_expensive = names.iter().take_while(|n| !EXPENSIVE.contains(n)).count();
         assert!(cheap_before_first_expensive > 0, "перед первым дорогим должны стоять дешёвые: {names:?}");
-        let expensive: Vec<&str> = names.iter().copied().filter(|n| is_expensive(n)).collect();
-        assert_eq!(expensive, [WEB, PUBLICATION, EXTENSION, DESCRIPTOR, GITEA], "{names:?}");
+        let expensive: Vec<&str> = names.iter().copied().filter(|n| EXPENSIVE.contains(n)).collect();
+        assert_eq!(expensive, [WEB, PUBLICATION, GITEA], "{names:?}");
+    }
+
+    /// Тестовый крюк задачи 4: те же три параллельные группы, что в
+    /// `gather`, но с искусственной задержкой вместо настоящей пробы —
+    /// механика параллельности и раскладки по местам проверяется тем же
+    /// кодом (`parallel_expensive`), который и считает настоящие факты.
+    /// Возвращает только три «заглавных» факта групп (`EXPENSIVE`):
+    /// расширение и дескриптор — внутренности группы «база», здесь не нужны.
+    fn gather_expensive_for_test(delay: &[std::time::Duration; 3]) -> Vec<Check> {
+        let (base_delay, gitea_delay, web_delay) = (delay[0], delay[1], delay[2]);
+        let ((publication, _extension, _descriptor), gitea, web) = parallel_expensive(
+            || {
+                std::thread::sleep(base_delay);
+                (Check::pass(PUBLICATION, "test"), Check::pass(EXTENSION, "test"), Check::pass(DESCRIPTOR, "test"))
+            },
+            || {
+                std::thread::sleep(gitea_delay);
+                Check::pass(GITEA, "test")
+            },
+            || {
+                std::thread::sleep(web_delay);
+                Check::pass(WEB, "test")
+            },
+        );
+        vec![publication, gitea, web]
+    }
+
+    #[test]
+    fn a_hanging_group_does_not_eat_the_others() {
+        // Группы идут параллельно, поэтому повисшая не отнимает срока у соседей:
+        // набор стоит максимум из групп, а не их сумму. Именно на сумме ревью
+        // поймало выдуманные «не отвечает» с советом «1c-connect install».
+        let slow = std::time::Duration::from_millis(600);
+        let t0 = std::time::Instant::now();
+        let facts = gather_expensive_for_test(&[slow, slow, slow]);
+        assert_eq!(facts.len(), 3);
+        assert!(t0.elapsed() < slow * 2, "группы считались по очереди: {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn the_set_keeps_its_order_whatever_answers_first() {
+        // Ответы раскладываются по местам, а не по порядку прихода: отчёт
+        // заказчику обязан выглядеть одинаково от запуска к запуску.
+        let fast_then_slow = gather_expensive_for_test(&[std::time::Duration::from_millis(400), std::time::Duration::ZERO, std::time::Duration::ZERO]);
+        let names: Vec<&str> = fast_then_slow.iter().map(|c| c.what.as_str()).collect();
+        assert_eq!(names, vec![PUBLICATION, GITEA, WEB]);
+    }
+
+    /// `cheap()` сама по себе — какие имена она отдаёт, без дорогих фактов.
+    fn cheap_fact_names() -> Vec<String> {
+        let ctx = test_ctx("tunnel");
+        cheap(&ctx, None, PortUse::WeDont).into_iter().map(|c| c.what).collect()
+    }
+
+    #[test]
+    fn the_cheap_half_touches_no_network() {
+        let names = cheap_fact_names();
+        for n in EXPENSIVE {
+            assert!(!names.contains(&n.to_string()), "{n} не дешёвый");
+        }
+        // Дорогие идут после дешёвых и ровно один раз.
+        let all = order("tunnel");
+        for n in EXPENSIVE {
+            assert_eq!(all.iter().filter(|x| **x == n).count(), 1, "{n}");
+        }
     }
 
     /// Штатное состояние рабочего места: трей держит оба порта, а человек

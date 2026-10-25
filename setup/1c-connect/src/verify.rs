@@ -441,9 +441,16 @@ fn web_hint(own: bool, windows: bool) -> &'static str {
     }
 }
 
+/// Потолок срока коннекта к порту веб-сервера. Закрытый порт отказывает
+/// мгновенно, и для него потолок ничего не стоит; отфильтрованный
+/// (брандмауэр с DROP) висит молча до конца срока — отдать ему весь остаток
+/// общего бюджета значило бы оставить публикации и Gitea после него ровно
+/// нулевой остаток (находка ревью задачи 2, круг 2).
+const WEB_CONNECT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// HTTP-порт базы отвечает (обычный TCP-коннект, без логина) — `up` уже
-/// посчитан вызывающим (`run`/`readiness`), здесь только оформление факта.
-/// `own` — публикуем ли мы сами: от этого зависит совет (см. `web_hint`).
+/// посчитан вызывающим (`gather`), здесь только оформление факта. `own` —
+/// публикуем ли мы сами: от этого зависит совет (см. `web_hint`).
 pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
     if up {
         Check::pass(WEB, format!("порт {port} отвечает"))
@@ -619,10 +626,14 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
 /// свой кусок бюджета, а то, что осталось от общего срока к их очереди —
 /// `deadline.saturating_duration_since(Instant::now())`: кто досталось рано,
 /// получает больше, и это честно, потому что порядок — тот же порядок, в
-/// котором человек читает карточку (см. `order`). Срыв срока здесь не
-/// отдельный исход: дорогой факт получает 0 (или около того) на остаток и
-/// отвечает как обычно — отказом, который и есть правда о сорванном сроке, а
-/// не выдуманное «не проверено».
+/// котором человек читает карточку (см. `order`). Исключение — порт
+/// веб-сервера: его остаток берётся с потолком (`WEB_CONNECT`), иначе
+/// отфильтрованный порт (брандмауэр с DROP, висит молча до конца срока)
+/// съедал бы весь остаток и оставлял публикации с Gitea после себя ноль —
+/// это и есть тот самый выдуманный отказ, против которого вся правка.
+/// Срыв срока здесь не отдельный исход: дорогой факт получает 0 (или около
+/// того) на остаток и отвечает как обычно — отказом, который и есть правда о
+/// сорванном сроке, а не выдуманное «не проверено».
 pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
@@ -676,11 +687,13 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
     v.push(system_web_server_fact(&ctx.cfg));
     let web = ctx.cfg.http_port();
     v.push({
-        // Дорогой факт: срок — остаток общего. Закрытый порт отказывает
-        // мгновенно и остатка не ждёт; `auto` — публикацию поднимает сам
-        // коннектор, и совет при молчащем порту другой (`web_hint`).
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        // Дорогой факт, но не весь остаток — свой кусок, не больше
+        // `WEB_CONNECT` (см. её докстроку: почему остаток сюда отдавать
+        // целиком нельзя).
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).min(WEB_CONNECT);
         let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web).into(), left).is_ok();
+        // `auto` — публикацию поднимает сам коннектор, и совет при молчащем
+        // порту другой (`web_hint`).
         web_fact(web, up, h.publication == "auto")
     });
     let base_url = ctx.cfg.base_url();
@@ -903,6 +916,35 @@ mod tests {
             let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
             assert_eq!(names, order(mode), "mode {mode}");
         }
+    }
+
+    /// Дорогие факты — те три, кому `gather` отдаёт остаток общего срока, а
+    /// не весь бюджет сразу (докстрока `gather`). Чистая функция, а не три
+    /// отдельные проверки подстрок — честнее (находка ревью задачи 2, круг 2).
+    fn is_expensive(name: &str) -> bool {
+        matches!(name, WEB | PUBLICATION | GITEA)
+    }
+
+    /// Находка ревью, круг 2: ни один тест не доказывал, что короткий общий
+    /// срок не роняет факты из списка (дорогой факт с нулевым остатком
+    /// обязан ответить настоящим провалом и остаться в наборе — «не
+    /// проверено» таким пропавшим фактом не прикрыть, его больше нет), и что
+    /// дешёвые факты в порядке всегда идут раньше дорогих — иначе дорогому
+    /// достаётся чужое время раньше, чем дешёвый успел посчитаться сам.
+    #[test]
+    fn a_short_deadline_drops_no_fact_and_counts_cheap_facts_first() {
+        let ctx = test_ctx("tunnel");
+        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
+        assert_eq!(names, order("tunnel"), "короткий срок уронил факт(ы): {names:?}");
+
+        // Перед первым дорогим фактом в порядке — хотя бы один дешёвый, и
+        // сами дорогие идут в том же порядке, в котором друг за другом
+        // спрашивают остаток (`WEB`, затем `PUBLICATION`, затем `GITEA`).
+        let cheap_before_first_expensive = names.iter().take_while(|n| !is_expensive(n)).count();
+        assert!(cheap_before_first_expensive > 0, "перед первым дорогим должны стоять дешёвые: {names:?}");
+        let expensive: Vec<&str> = names.iter().copied().filter(|n| is_expensive(n)).collect();
+        assert_eq!(expensive, [WEB, PUBLICATION, GITEA], "{names:?}");
     }
 
     /// Штатное состояние рабочего места: трей держит оба порта, а человек

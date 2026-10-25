@@ -341,11 +341,18 @@ jobs:
           mkdir -p artifacts
           docker build -f Dockerfile.1c --build-context artifacts=artifacts \
             -t oktaplus/dev1c-1c:latest .
-          # Two archives, by kinship. The stand is built FROM the environment:
-          # their shared layers lie in one file once. The model server shares
-          # nothing with them (another base image), so a common file saves no
-          # space and would make an onboarding fix drag a gigabyte along.
-          docker save oktaplus/dev1c:latest oktaplus/dev1c-1c:latest | gzip -1 > dev1c-image.tar.gz
+          # Only the stand goes into the kit. Saving its base alongside it
+          # cost almost nothing in bytes — `docker save` writes shared layers
+          # once and the base is the stand's own ancestor — but it put a second
+          # image tag on the customer's machine that nothing ever used: the
+          # container comes up from the stand, the installer checks the stand,
+          # and nobody rebuilds anything there. The base is a build-time
+          # dependency of Dockerfile.1c (ARG BASE), not a deliverable.
+          #
+          # The model server keeps its own archive: another base image, no
+          # shared layers, so one file would save nothing and would make an
+          # onboarding fix drag a gigabyte along.
+          docker save oktaplus/dev1c-1c:latest | gzip -1 > dev1c-image.tar.gz
           docker pull ghcr.io/metalmon/dev1c-llama:b11734
           docker tag ghcr.io/metalmon/dev1c-llama:b11734 oktaplus/dev1c-llama:latest
           docker save oktaplus/dev1c-llama:latest | gzip -1 > dev1c-llama-image.tar.gz
@@ -354,7 +361,8 @@ jobs:
           # archive carrying an attestation manifest. Fail here, not there.
           sh scripts/check-image-archive.sh dev1c-image.tar.gz
           sh scripts/check-image-archive.sh dev1c-llama-image.tar.gz
-          docker image inspect oktaplus/dev1c:latest \
+          # The image that actually ships, i.e. the stand.
+          docker image inspect oktaplus/dev1c-1c:latest \
             --format 'image size: {{.Size}} bytes'
           cp dev1c-setup bins/
           # --llama windows adds the model server row (about 550 MB) and nssm.

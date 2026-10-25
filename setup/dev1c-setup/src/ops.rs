@@ -282,8 +282,9 @@ impl Op<Ctx> for Image {
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
         if level >= CleanLevel::Data {
+            // Один образ, один rmi: основы стенда в комплекте нет (см.
+            // Cfg::image), и снимать у заказчика нечего.
             let _ = docker::run(ctx, &["rmi", &ctx.cfg.image()]);
-            let _ = docker::run(ctx, &["rmi", &ctx.cfg.env_image()]);
         }
         Ok(())
     }

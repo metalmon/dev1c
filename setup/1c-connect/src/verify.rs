@@ -230,10 +230,16 @@ pub fn configurator_fact(n: usize) -> Check {
 
 /// Локальный режим: агент стучится в ту же базу, что человек в Конфигураторе.
 /// Отказ агенту при открытом сеансе человека — ожидаемо, не провал.
-pub fn open_session_fact() -> Check {
+pub fn open_session_fact(sessions: usize) -> Check {
+    if sessions == 0 {
+        return Check::note(OPEN_SESSION, "открытых сеансов 1С на этой машине нет — база свободна для агента");
+    }
     Check::note(
         OPEN_SESSION,
-        "если в базе открыт Конфигуратор или клиент 1С, агенту при обращении откажут — это ожидаемо, закройте сеанс, когда агенту нужен доступ",
+        format!(
+            "{} — пока он открыт, агенту при обращении к базе откажут: учебная платформа держит один сеанс",
+            common::word::count(sessions as u64, "открыт сеанс 1С", "открыто сеанса 1С", "открыто сеансов 1С")
+        ),
     )
 }
 
@@ -445,9 +451,19 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
 
 /// Расширение отвечает по настроенному адресу настроенными учётными данными —
 /// `ver` уже посчитан (`extension_version`), здесь только оформление факта.
-pub fn publication_fact(base_url: &str, ver: Option<String>) -> Check {
+pub fn publication_fact(base_url: &str, ver: Option<String>, sessions: usize) -> Check {
     match ver {
         Some(ver) => Check::pass(PUBLICATION, format!("{base_url} → расширение {ver}")),
+        // Совет по тому, что знаем. Открыт сеанс 1С — почти наверняка дело в
+        // нём: учебная платформа держит один, и HTTP-сервису базы в неё не
+        // попасть. Советовать тут установку значит посылать человека чинить
+        // то, что не сломано (заказчик 25.10: «пользователь занят открытой
+        // базой, а мы в журнале предлагаем что-то установить»).
+        None if sessions > 0 => Check::fail(
+            PUBLICATION,
+            format!("{base_url}/version не отвечает — база занята открытым сеансом 1С"),
+            "закройте Предприятие или Конфигуратор: учебная платформа держит один сеанс",
+        ),
         None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
     }
 }
@@ -819,22 +835,25 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
         unless_timed_out(web_fact(web, up, h.publication == "auto"), asked.elapsed(), WEB_CONNECT)
     }));
     let base_url = ctx.cfg.base_url();
+    // Сколько сеансов 1С открыто прямо сейчас — считаем один раз на два
+    // факта: по нему же публикация выбирает, что советовать.
+    let sessions = crate::bridge::configurator_count();
     v.push(within(t0, budget, PUBLICATION, || {
         // Срок сетевого запроса отличается от отказа только временем:
         // `extension_version_in` отдаёт `None` и на «не отвечает», и на
         // «не успел» (см. `unless_timed_out`).
         let asked = std::time::Instant::now();
         let ver = crate::ops_host::extension_version_in(&base_url, &h.db_user, &h.db_password, limits.net);
-        unless_timed_out(publication_fact(&base_url, ver), asked.elapsed(), limits.net)
+        unless_timed_out(publication_fact(&base_url, ver, sessions), asked.elapsed(), limits.net)
     }));
     v.push(within(t0, budget, GITEA, || match ctx.cfg.gitea_url() {
         Some(url) => gitea_fact(&crate::ops_host::gitea_probe(url), url),
         None => gitea_address_fact(),
     }));
     if local {
-        v.push(open_session_fact());
+        v.push(open_session_fact(sessions));
     } else {
-        v.push(within(t0, budget, CONFIGURATOR, || configurator_fact(crate::bridge::configurator_count())));
+        v.push(within(t0, budget, CONFIGURATOR, || configurator_fact(sessions)));
     }
     let root = ctx.kit.root.display().to_string();
     // Носитель называем так, как его понимает человек: на Windows это буква
@@ -1080,8 +1099,30 @@ mod tests {
 
     #[test]
     fn open_session_fact_is_always_information_not_a_failure() {
-        let c = open_session_fact();
-        assert!(c.ok && c.info && c.detail.contains("Конфигуратор"), "{c:?}");
+        // Факт теперь говорит, что видит, а не памятку: открытых сеансов нет
+        // — так и сказано; есть — назван их счёт и что из этого следует.
+        let none = open_session_fact(0);
+        assert!(none.ok && none.info && none.detail.contains("нет"), "{none:?}");
+        let c = open_session_fact(1);
+        assert!(c.ok && c.info, "{c:?}");
+        assert!(c.detail.contains("открыт сеанс 1С") && c.detail.contains("откажут"), "{c:?}");
+        assert!(open_session_fact(2).detail.contains("2 открыто сеанса"), "{:?}", open_session_fact(2));
+    }
+
+    /// Совет идёт по тому, что мы знаем. Открыт сеанс 1С — дело почти
+    /// наверняка в нём, и посылать человека устанавливать расширение, когда
+    /// он просто работает в базе, нельзя (заказчик 25.10).
+    #[test]
+    fn an_open_session_changes_the_advice_about_the_publication() {
+        let busy = publication_fact("http://x", None, 1);
+        assert!(!busy.ok, "{busy:?}");
+        assert!(busy.detail.contains("занята открытым сеансом"), "{busy:?}");
+        assert!(busy.hint.contains("закройте"), "{busy:?}");
+        assert!(!busy.hint.contains("install"), "установку тут советовать нечего: {busy:?}");
+
+        // Сеансов нет — прежний совет про установку остаётся верным.
+        let free = publication_fact("http://x", None, 0);
+        assert!(free.hint.contains("install"), "{free:?}");
     }
 
     /// Истёкший срок — провал: человек обязан увидеть красное и дату, до
@@ -1283,9 +1324,9 @@ mod tests {
         // системы и проверяется отдельно (`a_dead_port_is_advised_by_mode_and_system`).
         let down = web_fact(1818, false, false);
         assert!(!down.ok && down.hint.contains("опубликована база"), "{down:?}");
-        let ok = publication_fact("http://x", Some("1.2".into()));
+        let ok = publication_fact("http://x", Some("1.2".into()), 0);
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
-        let fail = publication_fact("http://x", None);
+        let fail = publication_fact("http://x", None, 0);
         assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
     }
 
@@ -1319,7 +1360,7 @@ mod tests {
         // Удачный факт сроком не портится, сведение — тоже.
         let took_long = std::time::Duration::from_secs(99);
         assert!(unless_timed_out(Check::pass(VRUNNER, "AutumnMCP"), took_long, net).ok);
-        assert!(unless_timed_out(open_session_fact(), took_long, net).info);
+        assert!(unless_timed_out(open_session_fact(0), took_long, net).info);
     }
 
     /// Вердикт считает первый не зелёный факт, а сведения пропускает: «в базе

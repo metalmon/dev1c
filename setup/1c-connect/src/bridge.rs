@@ -230,9 +230,15 @@ pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
 /// Сколько процессов платформы запущено на машине: Конфигураторы и толстые
 /// клиенты (`1cv8.exe`) и тонкие (`1cv8c.exe`) — файловую базу держит любой.
 pub fn configurator_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_platform_count();
+    }
+    #[cfg(not(target_os = "linux"))]
     if !cfg!(windows) {
         return 0;
     }
+    #[allow(unreachable_code)]
     let mut c = std::process::Command::new("tasklist");
     c.args(["/NH", "/FO", "CSV"]);
     #[cfg(windows)]
@@ -243,9 +249,44 @@ pub fn configurator_count() -> usize {
     c.output().map(|o| count_platform(&String::from_utf8_lossy(&o.stdout))).unwrap_or(0)
 }
 
-/// Строки `tasklist /FO CSV`, начинающиеся с процесса платформы.
+/// Сколько процессов платформы живёт на этой машине — по `/proc`, без
+/// внешних программ.
+///
+/// До 25.10.2026 счётчик на Linux всегда возвращал ноль, то есть на стенде мы
+/// не знали ничего. Из-за этого окно советовало «1c-connect install» человеку,
+/// у которого база просто открыта в Предприятии: учебная платформа держит
+/// один сеанс, HTTP-сервис в базу не попадает, и совет был не про ту беду
+/// (заказчик 25.10, STATUS пункт 27).
+///
+/// `comm` обрезан ядром до 15 символов — нашим именам хватает с запасом.
+#[cfg(target_os = "linux")]
+fn linux_platform_count() -> usize {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return 0 };
+    dir.filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().chars().all(|c| c.is_ascii_digit()))
+        .filter(|e| {
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            is_platform_process(comm.trim())
+        })
+        .count()
+}
+
+/// Имя процесса платформы: толстый клиент, тонкий и их учебные двойники.
+/// Чистая — тест подаёт имена строками.
+pub(crate) fn is_platform_process(name: &str) -> bool {
+    matches!(name, "1cv8" | "1cv8c" | "1cv8t" | "1cv8ct")
+}
+
+/// Строки `tasklist /FO CSV`, начинающиеся с процесса платформы. Имена — те
+/// же, что и на Linux (`is_platform_process`): список платформенных процессов
+/// один на обе системы, и учебные двойники в нём есть.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn count_platform(csv: &str) -> usize {
-    csv.lines().filter(|l| l.starts_with("\"1cv8.exe\"") || l.starts_with("\"1cv8c.exe\"")).count()
+    csv.lines()
+        .filter_map(|l| l.trim().strip_prefix('"'))
+        .filter_map(|l| l.split('"').next())
+        .filter(|name| is_platform_process(name.strip_suffix(".exe").unwrap_or(name)))
+        .count()
 }
 
 /// id → (id, список допущенных инструментов, действовавший на момент

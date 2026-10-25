@@ -433,6 +433,6 @@ mod tests {
         let kit = crate::ops_host::wire_state(Kit::at(std::path::Path::new("/opt/dev1c-kit")));
         let lock_on = lock_target(&kit);
         assert!(!lock_on.starts_with(&kit.root), "{}", lock_on.display());
-        assert!(lock_on.starts_with(crate::ops_host::tools_dir()), "{}", lock_on.display());
+        assert!(lock_on.starts_with(crate::ops_host::state_dir()), "{}", lock_on.display());
     }
 }

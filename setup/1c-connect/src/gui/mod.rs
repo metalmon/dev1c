@@ -589,11 +589,23 @@ fn stale_line(r: &mut Running, now: Instant) -> Option<Line> {
     }
 }
 
-/// Отменить можно только git-обмен (`Push`/`Pull`) — он единственный умеет
-/// слушать флаг (`flow::export`/`import`); `cf_decompile`/`cf_load` на
-/// стороне платформы не прерываются.
+/// Отменить можно обмен с git (`Push`/`Pull`) и работу платформы
+/// (`Decompile`/`Load`).
+///
+/// Прежде здесь стояли только `Push`/`Pull`, а про платформу было написано
+/// «не прерывается» — и это было правдой лишь в том смысле, что никто не
+/// пробовал: `local::call` слова `cancel` не знал вовсе, у него был один
+/// срок в 3600 с, по которому вызов перестают ждать, а Конфигуратор
+/// продолжает работать, держа базу и диск. Самые долгие операции (выгрузка
+/// УНФ — десятки минут и 90 тысяч файлов) отмены не имели, и человек,
+/// нажавший «Выгрузить» не на той базе, мог только снять процесс руками.
+/// Теперь `local::call` замечает флаг и, выходя, добивает весь куст через
+/// Job Object (`job.rs`), то есть вместе с `1cv8.exe`. STATUS, техдолг 16.
+///
+/// `Install`/`Uninstall` сюда не входят: это `mcp-1c --install`, другой путь
+/// и минуты, а не десятки минут. `Check` не отменяют — он короткий.
 pub fn can_cancel(phase: Phase) -> bool {
-    matches!(phase, Phase::Push | Phase::Pull)
+    matches!(phase, Phase::Push | Phase::Pull | Phase::Decompile | Phase::Load)
 }
 
 /// Кнопка «Отменить» карточки хода — поток сам решает, когда заметить флаг
@@ -1129,7 +1141,7 @@ fn ensure_publication_now(ui: &mut Ui) {
 /// что `launch` считает замок до того, как `Ui` вообще появился — начальное
 /// значение переключателя уже обязано его слушаться.
 pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
-    let tools = ops_host::tools_state(&kit.root, &ops_host::tools_dir());
+    let tools = ops_host::tools_state(&kit.root);
     // Существование спрашиваем только у файловой базы (`gate::wants_directory`,
     // правило самого факта «база»): `exists()` по недоступной сетевой шаре
     // висит на таймауте SMB, а считается это на главном потоке окна.
@@ -1825,13 +1837,15 @@ pub fn run_op(cx: &mut App, which: Which) {
 /// по диску и к git, на главном потоке подвесили бы окно.
 pub fn refresh_project(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
-    let (cfg, tx) = (ui.cfg.clone(), ui.tx.clone());
+    // Корень комплекта — он же каталог инструментов: git берётся оттуда, где
+    // лежит комплект, а не из профиля (леджер комплекта, пункт 15).
+    let (cfg, tx, kit_root) = (ui.cfg.clone(), ui.tx.clone(), ui.kit.root.clone());
     ui.pending += 1;
     std::thread::spawn(move || {
         guarded(
             &tx,
             || {
-                let p = Project::from_cfg(&cfg, &ops_host::tools_dir());
+                let p = Project::from_cfg(&cfg, &kit_root);
                 let (ok, why) = match project::layout_state(&p) {
                     Layout::Ok => (true, String::new()),
                     Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
@@ -2090,6 +2104,18 @@ fn handle(ev: Ev, cx: &mut App) {
             // иначе жёлтый («занят») может застрять до следующего перехода.
             sync_tray(ui, Instant::now());
             cx.refresh_windows();
+            // И состояние операций — тоже как у `Ev::Done`. Без этого
+            // проверка и вкладка «Проект» расходятся: `ui.ops` читается на
+            // запуске окна и после операций, а проверка спрашивает базу
+            // заново и без ограничения по времени. Живой случай: на запуске
+            // HTTP-сервис базы ещё не поднялся, расширение прочиталось как
+            // «нет», человек нажал «Проверить» и получил всё зелёным — а
+            // раздел расширения всё равно предлагал «Установить», и кнопка
+            // была активна. Проверка — это ровно тот момент, когда мы узнали
+            // правду про те же публикацию и расширение, так что перечитать
+            // надо здесь, а не ждать следующей операции.
+            refresh_ops(cx);
+            refresh_project(cx);
         }
         Ev::Ops(ops) => {
             let ui = cx.global_mut::<Ui>();
@@ -3050,11 +3076,18 @@ mod tests {
         assert_eq!(stale_line(&mut quiet, now), None);
     }
 
+    /// Отменяются и обмен с git, и работа платформы. Выгрузка и загрузка
+    /// добавлены 25.10: `local::call` научился замечать флаг и добивать куст
+    /// процессов через Job Object, а до того самые долгие операции отмены не
+    /// имели вовсе (STATUS, техдолг 16).
     #[test]
-    fn only_git_phases_can_be_cancelled() {
-        assert!(can_cancel(Phase::Push));
-        assert!(can_cancel(Phase::Pull));
-        for p in [Phase::Decompile, Phase::Load, Phase::Install, Phase::Uninstall, Phase::Check] {
+    fn git_and_platform_phases_can_be_cancelled() {
+        for p in [Phase::Push, Phase::Pull, Phase::Decompile, Phase::Load] {
+            assert!(can_cancel(p), "{p:?}");
+        }
+        // Установка расширения и проверка — минуты и секунды, не десятки
+        // минут: кнопку им не даём, чтобы она не обещала больше, чем нужно.
+        for p in [Phase::Install, Phase::Uninstall, Phase::Check] {
             assert!(!can_cancel(p), "{p:?}");
         }
     }

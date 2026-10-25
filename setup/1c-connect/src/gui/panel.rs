@@ -1303,17 +1303,32 @@ impl Render for Panel {
                             Some(extra) => format!("{}\n{extra}", foot_left.0),
                             None => foot_left.0.clone(),
                         };
-                        div()
+                        // Место под две строки держит внешний блок, а текст
+                        // внутри него стоит по центру по высоте: в одну
+                        // строку он прижимался к верху, и подвал читался
+                        // съехавшим относительно кнопки рядом. Двум строкам
+                        // `justify_center` ничего не меняет — они занимают
+                        // всю высоту.
+                        v_flex()
                             .id("foot-left")
                             .flex_1()
                             .min_w_0()
                             .h(px(FOOT_LINE * FOOT_LINES as f32))
-                            .line_clamp(FOOT_LINES)
-                            .text_size(px(13.))
-                            .line_height(px(FOOT_LINE))
-                            .text_color(if foot_left.1 { danger } else { caption })
+                            .justify_center()
                             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                            .child(foot_left.0)
+                            .child(
+                                div()
+                                    // Ширину берём у подвала целиком, а не
+                                    // по тексту: от неё зависят и перенос, и
+                                    // многоточие третьей строки.
+                                    .w_full()
+                                    .min_w_0()
+                                    .line_clamp(FOOT_LINES)
+                                    .text_size(px(13.))
+                                    .line_height(px(FOOT_LINE))
+                                    .text_color(if foot_left.1 { danger } else { caption })
+                                    .child(foot_left.0),
+                            )
                     })
                     .child(foot_actions),
             )
@@ -1498,14 +1513,17 @@ mod tests {
     }
 
     #[test]
-    fn the_card_hides_cancel_for_the_platform() {
-        // `cf_decompile`/`cf_load` на стороне платформы не прерываются —
-        // «Прервать» не показывается, в отличие от git-обмена выше.
+    fn the_card_offers_cancel_for_the_platform_too() {
+        // До 25.10 здесь проверялось обратное: «`cf_decompile`/`cf_load` на
+        // стороне платформы не прерываются». Теперь прерываются — `local::call`
+        // замечает флаг и, выходя, добивает весь куст процессов через Job
+        // Object, то есть вместе с `1cv8.exe` (STATUS, техдолг 16). Самая
+        // долгая операция была и самой безвыходной.
         let now = Instant::now() + Duration::from_secs(3600);
         let r = Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now, stale_noted: false };
         let c = card(Some(&r), &State::Off, "tunnel", &Readiness::Unknown, None, now);
         assert_eq!(c.dot, Dot::Busy);
-        assert!(!c.cancel);
+        assert!(c.cancel);
     }
 
     #[test]

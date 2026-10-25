@@ -184,8 +184,9 @@ cp setup/1c-connect/1c-connect.example.toml "$CONNECT/1c-connect.toml"
 # <bin>/../lib/add. opm resolves "what the hub has today", so the tree is
 # compared file by file with the committed manifest: two kits of the same
 # version cannot differ silently. MinGit: the workstations have no git, or an
-# ancient one. 1c-connect copies vrunner/ and git/ into %LOCALAPPDATA%\dev1c
-# at install (see host.tools).
+# ancient one. 1c-connect runs vrunner/ and git/ straight from the kit — it
+# copies nothing into the profile any more (kit ledger, item 15), so the kit
+# directory is where these stay for as long as the connector is used.
 ONESCRIPT_VERSION=2.2.0
 VRUNNER_VERSION=3.0.2
 ADD_VERSION=6.8.0
@@ -226,8 +227,8 @@ tools_row
 # the repository rather than downloaded (setup/1c-connect/vendor/httpd/README.md
 # — same reasoning as nssm.exe below: a few MB is cheap to carry, an Apache
 # Lounge URL is not a stable thing to depend on at build time). 1c-connect
-# copies it into %LOCALAPPDATA%\dev1c alongside vrunner/ and git/ (see
-# host.tools) to publish the active 1C database itself.
+# runs it from the kit, next to vrunner/ and git/, to publish the active 1C
+# database itself.
 httpd_row() {
     src="$DIR/setup/1c-connect/vendor/httpd"
     [ -d "$src" ] || { echo "setup/1c-connect/vendor/httpd is missing — the kit would ship with no web server; see setup/1c-connect/vendor/httpd/README.md" >&2; exit 1; }

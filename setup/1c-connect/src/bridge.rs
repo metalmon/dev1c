@@ -93,6 +93,38 @@ use tokio::sync::mpsc;
 /// сюда: иначе каждый из них зависел бы от того, заперт ли сейчас замок.
 pub const DISABLED_PREFIX: &str = "MCP выключены в 1c-connect";
 
+/// Когда свой раннер последний раз что-то сказал, в секундах эпохи (0 — ни
+/// разу за этот запуск программы).
+///
+/// Заведено для проверки состояния. Холодный старт `mcp.os` — 28 с (замер
+/// 21.10 в контейнере), а бюджет готовности 20 с, поэтому проба, поднимавшая
+/// ВТОРОЙ раннер, не успевала никогда: окно писало «vrunner-mcp не проверено»
+/// ровно в то время, когда свой раннер отвечал агенту мгновенно. А во время
+/// долгой операции второй процесс ещё и отвечал ошибкой, и человек читал
+/// приговор исправным инструментам (леджер комплекта, пункты 17 и 19).
+static RUNNER_REPLY: AtomicU64 = AtomicU64::new(0);
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Свой раннер подал голос. Зовётся на каждый кадр от ребёнка: любой кадр —
+/// доказательство, что процесс жив и говорит, а большего факту и не нужно.
+pub fn note_runner_reply() {
+    RUNNER_REPLY.store(epoch_secs(), Ordering::Relaxed);
+}
+
+/// Сколько назад свой раннер подавал голос; `None` — ни разу за этот запуск.
+pub fn runner_answered_ago() -> Option<std::time::Duration> {
+    match RUNNER_REPLY.load(Ordering::Relaxed) {
+        0 => None,
+        // Насыщение, а не вычитание со знаком: часы на машине могут
+        // перевести назад, и отрицательная давность здесь обернулась бы
+        // огромным числом вместо нуля.
+        t => Some(std::time::Duration::from_secs(epoch_secs().saturating_sub(t))),
+    }
+}
+
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
 pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
 
@@ -398,6 +430,10 @@ where
                         Ok(n) => n,
                     };
                     for fr in f.push(&buf[..n]) {
+                        // Раннер жив и говорит — это и есть тот факт, за
+                        // который проверка состояния раньше платила 28 с
+                        // холодного старта второго процесса.
+                        note_runner_reply();
                         warn_on_session_limit(&fr, &log);
                         if let Frame::Line(l) = &fr {
                             if let Some(id) = jsonrpc::is_response_with_id(l) {
@@ -942,7 +978,11 @@ mod tests {
             std::io::stderr().write_all(line.as_bytes()).unwrap();
             std::io::stderr().flush().unwrap();
         }
-        if std::env::var("BRIDGE_SCRIPT").is_ok() || std::env::var("BRIDGE_SCRIPT_NOISY").is_ok() || std::env::var("BRIDGE_SCRIPT_RECORD").is_ok() {
+        if std::env::var("BRIDGE_SCRIPT").is_ok()
+            || std::env::var("BRIDGE_SCRIPT_NOISY").is_ok()
+            || std::env::var("BRIDGE_SCRIPT_RECORD").is_ok()
+            || std::env::var("BRIDGE_SCRIPT_HANG").is_ok()
+        {
             use std::io::{BufRead, Write};
             let stdin = std::io::stdin();
             let mut out = std::io::stdout();
@@ -979,6 +1019,14 @@ mod tests {
                     Some("initialize") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"script","version":"0"}}}),
                     Some("tools/list") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}}),
                     Some("tools/call") => {
+                        // Взялся за долгую работу и не отвечает — так ведёт
+                        // себя `cf_decompile` на большой конфигурации. На
+                        // нём проверяется отмена в `local::call`: без неё
+                        // тест стоял бы весь срок вызова, то есть час.
+                        if std::env::var("BRIDGE_SCRIPT_HANG").is_ok() {
+                            std::thread::sleep(std::time::Duration::from_secs(600));
+                            continue;
+                        }
                         let mut text = format!("child ran {}", v["params"]["name"].as_str().unwrap_or(""));
                         if std::env::var("BRIDGE_SCRIPT_ARGS").is_ok() {
                             text = format!("{text} args={}", v["params"]["arguments"]);

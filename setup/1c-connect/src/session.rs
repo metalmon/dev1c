@@ -251,7 +251,9 @@ impl Serve {
     /// чтение того, что не должно меняться на ходу одного сеанса (порт
     /// веб-клиента): смена режима/портов и так перезапускает сеанс целиком.
     fn shared(cfg: Live, cfg_now: &Cfg, kit: &Kit, log: Sink, ports: Ports, enabled: Arc<AtomicBool>) -> Serve {
-        let tools_dir = crate::ops_host::tools_dir();
+        // Инструменты берутся из комплекта по месту: в профиль ничего не
+        // переносится (леджер комплекта, пункт 15).
+        let tools_dir = kit.root.clone();
         Serve { cfg, kit: kit.clone(), log, ports, web_port: cfg_now.web_port(), tools_dir, enabled }
     }
 

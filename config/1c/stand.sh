@@ -284,13 +284,14 @@ ZEDDB
         # to an advisory flock on the state directory itself: nothing creates
         # them any more, and a volume from those days still carries them.
         rm -f "$HOME/dev1c"/instance-*.lock "$HOME/dev1c"/instance-*.pid
-        # State: the toml, the tools version stamp, the window's journal and
-        # the publication all live here now (ops_host::tools_dir()), and the
-        # single-instance lock is an advisory flock on this very directory —
-        # never inside the shared kit, which is one read-only copy for every
-        # workstation. $XDG_DATA_HOME/dev1c mirrors tools_dir()'s own
-        # fallback to ~/.local/share/dev1c; an empty value falls back the
-        # same way the program does (ops_host::env_dir).
+        # State: the toml, the window's journal and the publication all live
+        # here (ops_host::state_dir()), and the single-instance lock is an
+        # advisory flock on this very directory — never inside the shared
+        # kit, which is one read-only copy for every workstation. The tools
+        # and their version stamp are NOT here: they stay in the kit and run
+        # from it (kit ledger, item 15). $XDG_DATA_HOME/dev1c mirrors
+        # state_dir()'s own fallback to ~/.local/share/dev1c; an empty value
+        # falls back the same way the program does (ops_host::env_dir).
         t="${XDG_DATA_HOME:-$HOME/.local/share}/dev1c"
         mkdir -p "$t"
         # A home is a volume and survives an image change, so carry over what
@@ -366,56 +367,18 @@ EOF
             echo 'autoconnect=1' >> "$t/install.state"
             log "1c-connect: обслуживание вызовов включено для $(id -un) (autoconnect=1)" >&2
         fi
-        # Tools: here the shared kit IS what is laid out. ops_host compares
-        # the kit's tools.version (stamped at build time) with the state's
-        # (written when `host.tools` copies the tools onto a machine) — and
-        # without the second one the connector reports its tools missing and
-        # the window says the agent will not see the base. Links, not copies:
-        # /opt/dev1c-kit is one read-only copy for every account, and
-        # duplicating ~100 MB per login would buy nothing. The names are the
-        # ones ops_host::{oscript_exe,vrunner_lib,git_exe} resolve under
-        # tools_dir().
+        # Инструментов здесь больше не раскладывают. Коннектор берёт
+        # vrunner/ и git/ прямо из общего комплекта (`$ONEC_CONNECT_KIT`), и
+        # ссылки в дом не нужны: 25.10.2026 из него убрали шаг, который
+        # копировал инструменты в профиль (леджер комплекта, пункт 15).
         #
-        # Стоит ДО `1c-connect install` ниже, и это не порядок ради порядка.
-        # Его шаг host.tools копирует те же vrunner/ и git/ по одному файлу
-        # и спотыкается о первый каталог внутри («the source path is neither
+        # Что здесь стояло: сорок строк ссылок и отметки версии — и всё ради
+        # того, чтобы `1c-connect install` не начал копирование. Оно
+        # спотыкалось о первый же каталог внутри («the source path is neither
         # a regular file nor a symlink to a regular file»: bin/oscript в
-        # комплекте — ссылка, а lib/ — каталог). После него в доме остаётся
-        # огрызок, и блок ниже уже не имеет права ставить ссылки. Разложив
-        # инструменты заранее, мы не даём install начать копирование вовсе.
-        if [ -f "$ONEC_CONNECT_KIT/tools.version" ]; then
-            # The links and the stamp go under one condition. If the tools
-            # are really laid out (the person ran `1c-connect install`, so the
-            # state holds copies, not links), touch neither: replacing just
-            # the stamp would tell ops_host::tools_state that what is laid out
-            # is exactly what the kit ships, and switch off Drifted — the very
-            # case the two stamps are compared for.
-            #
-            # Исключение — недоделанная раскладка: настоящая оставляет рядом
-            # tools.version, а каталог без него это след провалившейся копии.
-            # Без исключения дом, сломавшийся однажды, не чинится ни
-            # пересборкой образа, ни перезапуском: ссылок не будет никогда, а
-            # копия будет падать снова и снова.
-            ours=yes
-            if [ -f "$t/tools.version" ]; then
-                for d in vrunner git; do
-                    [ ! -e "$t/$d" ] || [ -L "$t/$d" ] || ours=no
-                done
-            else
-                for d in vrunner git; do
-                    if [ -e "$t/$d" ] && [ ! -L "$t/$d" ]; then
-                        rm -rf "$t/$d"
-                        log "инструменты: убрал недоделанную раскладку $d — рядом нет tools.version" >&2
-                    fi
-                done
-            fi
-            if [ "$ours" = yes ]; then
-                for d in vrunner git; do
-                    ln -sfn "$ONEC_CONNECT_KIT/$d" "$t/$d"
-                done
-                cp -f "$ONEC_CONNECT_KIT/tools.version" "$t/tools.version"
-            fi
-        fi
+        # комплекте — ссылка, lib/ — каталог), оставляло в доме огрызок, и
+        # дом, сломавшийся однажды, не чинился ни пересборкой образа, ни
+        # перезапуском. Подвижной части не стало вместе с её причиной.
         # Разложить проект рабочего места. Без этого ~/project остаётся
         # каталогом без .git: cf_decompile проходит (ему git не нужен), а
         # отправка падает на «не найден git репозиторий» — после минут

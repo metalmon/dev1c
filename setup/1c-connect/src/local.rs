@@ -34,10 +34,41 @@ fn line(v: Value) -> Vec<u8> {
     b
 }
 
+/// Сколько ждать между взглядами на флаг отмены. То же, что у git
+/// (`project::git_wait`): человек не отличит четверти секунды, а процессорного
+/// времени это не стоит ничего.
+const TICK: Duration = Duration::from_millis(250);
+
+/// Отмена долгой операции: тот же текст, что у git, — окно и журнал
+/// различают отмену от отказа по нему.
+pub const CANCELLED: &str = "прервано";
+
 /// Процесс на время одного вызова: `initialize` → `notifications/initialized`
 /// → `tools/call`. Строки `notifications/message` идут в `on_log`; выход
 /// процесса без ответа или таймаут — ошибка; процесс всегда добивается.
-pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Duration, on_log: &dyn Fn(String)) -> Result<Reply, String> {
+///
+/// `cancel` — честная отмена, а не прекращение ожидания. Срок (3600 с у
+/// круга выгрузки) раньше был здесь единственным выходом: по нему вызов
+/// перестают ждать, а Конфигуратор продолжает работать, держа базу и диск.
+/// Теперь флаг замечается каждые `TICK`, и выход отсюда добивает ВЕСЬ
+/// процессный куст — `child.kill()` ниже снимает `oscript`, а `drop(job)`
+/// закрывает Job Object (на Linux — `killpg`), в котором лежит и запущенный
+/// им `1cv8.exe`. Снятие дочернего процесса и есть отмена долгой операции
+/// 1С: без него «отменено» было бы надписью (STATUS, техдолг 16).
+pub fn call(
+    mut cmd: std::process::Command,
+    tool: &str,
+    args: Value,
+    timeout: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+    on_log: &dyn Fn(String),
+) -> Result<Reply, String> {
+    use std::sync::atomic::Ordering;
+    // До запуска: нажали «Отменить», пока очередь стояла на мьютексе
+    // проекта, — поднимать Конфигуратор уже незачем.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CANCELLED.into());
+    }
     use std::process::Stdio;
     // Предполёт, один на все вызовы vrunner-mcp (export, import, проверка):
     // он поднимает Конфигуратор, а тот без экрана не стартует. Если дать экран
@@ -97,9 +128,19 @@ pub fn call(mut cmd: std::process::Command, tool: &str, args: Value, timeout: Du
     let wait_for = |id: i64| -> Result<Value, String> {
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let l = match rx.recv_timeout(left) {
+            if left.is_zero() {
+                return Err(format!("vrunner-mcp не ответил за {} с", timeout.as_secs()));
+            }
+            // Ждём короткими отрезками, а не весь остаток срока: иначе флаг
+            // отмены замечался бы через час, то есть никогда.
+            let l = match rx.recv_timeout(left.min(TICK)) {
                 Ok(l) => l,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(format!("vrunner-mcp не ответил за {} с", timeout.as_secs())),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(CANCELLED.into());
+                    }
+                    continue;
+                }
                 Err(_) => return Err("vrunner-mcp завершился, не ответив".into()),
             };
             let Ok(v) = serde_json::from_slice::<Value>(&l) else { continue };
@@ -152,6 +193,8 @@ mod tests {
         assert!(parse_reply(&json!({"jsonrpc":"2.0","method":"notifications/message"})).is_none());
     }
 
+    use crate::project::NEVER;
+
     /// The test binary as a scripted server (see bridge.rs __echo_child):
     /// BRIDGE_SCRIPT answers initialize and tools/call ("child ran <name>").
     fn scripted(env: (&str, &str)) -> std::process::Command {
@@ -164,7 +207,7 @@ mod tests {
     #[test]
     fn a_local_call_initialises_calls_and_reaps_the_process() {
         let logged = std::cell::RefCell::new(Vec::new());
-        let r = call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({"background": false}), Duration::from_secs(30), &|s| logged.borrow_mut().push(s)).unwrap();
+        let r = call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({"background": false}), Duration::from_secs(30), &NEVER, &|s| logged.borrow_mut().push(s)).unwrap();
         assert_eq!(r.text, "child ran cf_decompile");
         assert!(!r.is_error);
     }
@@ -174,17 +217,50 @@ mod tests {
         // 200 KB on stderr before answering: more than any pipe buffer. The
         // call must still get its answer, and when the child dies the tail of
         // stderr is what the person sees.
-        let r = call(scripted(("BRIDGE_SCRIPT_NOISY", "1")), "task_status", json!({}), Duration::from_secs(60), &|_| {}).unwrap();
+        let r = call(scripted(("BRIDGE_SCRIPT_NOISY", "1")), "task_status", json!({}), Duration::from_secs(60), &NEVER, &|_| {}).unwrap();
         assert_eq!(r.text, "child ran task_status");
-        let e = call(scripted(("BRIDGE_DIE", "платформа не найдена")), "cf_load", json!({}), Duration::from_secs(30), &|_| {}).unwrap_err();
+        let e = call(scripted(("BRIDGE_DIE", "платформа не найдена")), "cf_load", json!({}), Duration::from_secs(30), &NEVER, &|_| {}).unwrap_err();
         assert!(e.contains("платформа не найдена"), "{e}");
     }
 
     #[test]
     fn a_process_that_dies_without_answering_is_an_error_not_a_hang() {
         let t0 = std::time::Instant::now();
-        let e = call(scripted(("BRIDGE_DIE_AFTER_READ", "1")), "cf_load", json!({}), Duration::from_secs(30), &|_| {}).unwrap_err();
+        let e = call(scripted(("BRIDGE_DIE_AFTER_READ", "1")), "cf_load", json!({}), Duration::from_secs(30), &NEVER, &|_| {}).unwrap_err();
         assert!(e.contains("завершился") || e.contains("не ответил"), "{e}");
         assert!(t0.elapsed() < Duration::from_secs(10));
+    }
+
+    /// Отмена долгой операции: ребёнок взялся за работу и молчит, срок — час,
+    /// флаг взводится через треть секунды. Вызов обязан вернуться сразу и
+    /// словом «прервано», а не ждать срок: именно в этом разница между
+    /// отменой и прекращением ожидания (STATUS, техдолг 16).
+    #[test]
+    fn a_cancelled_call_comes_back_at_once_instead_of_waiting_out_the_hour() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancel = AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        let e = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            call(scripted(("BRIDGE_SCRIPT_HANG", "1")), "cf_decompile", json!({}), Duration::from_secs(3600), &cancel, &|_| {}).unwrap_err()
+        });
+        assert_eq!(e, CANCELLED, "{e}");
+        assert!(t0.elapsed() < Duration::from_secs(30), "ждали {:?}", t0.elapsed());
+    }
+
+    /// Флаг взведён до начала — Конфигуратор не поднимается вовсе. Проверяем
+    /// по времени: запуск ребёнка и рукопожатие стоят секунды, отказ без них
+    /// мгновенен.
+    #[test]
+    fn a_call_cancelled_before_it_starts_raises_nothing() {
+        use std::sync::atomic::AtomicBool;
+        let cancel = AtomicBool::new(true);
+        let t0 = std::time::Instant::now();
+        let e = call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({}), Duration::from_secs(3600), &cancel, &|_| {}).unwrap_err();
+        assert_eq!(e, CANCELLED, "{e}");
+        assert!(t0.elapsed() < Duration::from_millis(500), "ждали {:?}", t0.elapsed());
     }
 }

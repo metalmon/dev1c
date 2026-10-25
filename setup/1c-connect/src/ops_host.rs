@@ -29,8 +29,19 @@ impl Runner for Ctx {
     }
 }
 
-/// Каталог инструментов на машине: с носителя комплекта (флешка, FAT32,
-/// Defender на каждый запуск) 48 МБ .NET не запускают.
+/// Каталог состояния на этой машине: файл параметров, журнал, отчёт
+/// проверки, `known_hosts`, замок единственного экземпляра, тень учебной
+/// платформы. Инструментов здесь больше нет.
+///
+/// До 25.10.2026 он звался `tools_dir`, и шаг `host.tools` молча копировал
+/// сюда `vrunner/`, `git/` и `httpd/` — около 100 МБ и тысячи файлов, среди
+/// них `git.exe` и `sh.exe`. Решение владельца: тихого копирования быть не
+/// должно, инструменты берутся из комплекта по месту. Довод весомее
+/// технического: неподписанная программа, которая сама расползается по
+/// профилю пользователя, — это почерк, по которому EDR и антивирусы ловят
+/// зловредов, и у заказчика с мониторингом это кончается карантином
+/// коннектора. Леджер комплекта, пункт 15.
+///
 /// Переменная среды как каталог: пустое значение — это не заданное.
 /// `XDG_DATA_HOME=""` иначе дало бы относительный `dev1c` рядом с текущим
 /// каталогом, и скрипт стенда (`${XDG_DATA_HOME:-$HOME/.local/share}`, где
@@ -39,7 +50,7 @@ fn env_dir(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
 }
 
-pub fn tools_dir() -> PathBuf {
+pub fn state_dir() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(env_dir("LOCALAPPDATA").unwrap_or_else(|| ".".into())).join("dev1c")
     } else {
@@ -217,29 +228,16 @@ pub fn media_kind(_path: &Path) -> Option<String> {
     None
 }
 
-pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<u64> {
-    std::fs::create_dir_all(to)?;
-    let mut n = 0;
-    for e in std::fs::read_dir(from)? {
-        let e = e?;
-        let dst = to.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            n += copy_tree(&e.path(), &dst)?;
-        } else {
-            std::fs::copy(e.path(), &dst)?;
-            n += 1;
-        }
-    }
-    Ok(n)
-}
+// `copy_tree` удалён 25.10.2026 вместе с копированием инструментов в профиль
+// (леджер комплекта, пункт 15). Чинить его умение обходить деревья
+// понадобится только если вместо «работы из комплекта» выберут форму
+// «нормальный установщик» — в нынешней форме копировать нечего.
 
-/// Имя файла с отметкой версии — одно и то же в обоих местах, но то, ЧТО по
-/// нему лежит, разное: `kit_root.join(VERSION_FILE)` — штамп КОМПЛЕКТА
-/// (что было собрано: Dockerfile.1c на Linux, `pack.sh` на Windows, пишут
-/// один раз и больше не трогают); `tools.join(VERSION_FILE)` — штамп
-/// СОСТОЯНИЯ (что фактически разложено на этой машине: пишет `host.tools`
-/// при раскладке, то есть `Tools::apply` ниже). `tools_state` — и есть
-/// сверка этих двух величин.
+/// Отметка версий инструментов — одна, в комплекте: что было собрано
+/// (`Dockerfile.1c` на Linux, `pack.sh` на Windows, пишут один раз и больше
+/// не трогают). Второго экземпляра в профиле пользователя больше нет вместе
+/// с самой копией инструментов, и сверять теперь нечего — версия всегда та,
+/// что лежит рядом с программой.
 const VERSION_FILE: &str = "tools.version";
 
 /// Каталоги, которых мост и `host.tools` ждут от комплекта: vrunner и git —
@@ -254,22 +252,35 @@ fn required_kit_dirs() -> &'static [&'static str] {
     if cfg!(windows) { &["vrunner", "git", "httpd"] } else { &["vrunner", "git"] }
 }
 
-/// Состояние по отметке версии: комплект пишет `tools.version` при сборке
-/// (штамп комплекта, не меняется), `host.tools` — свою копию в состоянии
-/// при раскладке (штамп состояния). Расхождение этих двух и есть `Drifted`.
-pub fn tools_state(kit_root: &Path, tools: &Path) -> OpState {
+/// Состояние: есть ли в комплекте то, чем работают, и запускается ли оно
+/// оттуда.
+///
+/// Двух отметок больше нет. Прежде их было две — штамп комплекта и штамп
+/// состояния, который писал `host.tools`, скопировав инструменты в профиль, —
+/// и их расхождение называлось `Drifted`. Копии не стало, значит и
+/// расхождению взяться негде: версия ровно та, что лежит в комплекте
+/// (леджер комплекта, пункт 15). Отметка комплекта осталась, но теперь это
+/// только слова для человека — «что у меня за версии», — а не величина для
+/// сверки.
+///
+/// Запускаемость здесь не проверяется: это запуск двух процессов, а
+/// состояние спрашивают и при каждом расчёте готовности. Её проверяет
+/// `apply` один раз, явно.
+pub fn tools_state(kit_root: &Path) -> OpState {
     let missing: Vec<&str> = required_kit_dirs().iter().copied().filter(|d| !kit_root.join(d).is_dir()).collect();
     if !missing.is_empty() {
         return OpState::Blocked(format!("в комплекте нет {} — скопируйте полный комплект заново", missing.iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ")));
     }
     let shipped = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
-    let laid_out = std::fs::read_to_string(tools.join(VERSION_FILE)).unwrap_or_default();
-    if laid_out.trim().is_empty() {
-        OpState::Missing
-    } else if laid_out.trim() == shipped.trim() {
-        OpState::Done(format!("{} в {}", shipped.trim(), tools.display()))
+    let shipped = shipped.trim();
+    if shipped.is_empty() {
+        // Каталоги на месте, а отметки нет: так выглядит комплект, собранный
+        // не нашим `pack.sh`, или распакованный наполовину. Работать с ним
+        // можно, но сказать об этом надо — иначе версии инструментов не
+        // назовёт никто.
+        OpState::Done(format!("из комплекта в {} (версии не указаны: нет {VERSION_FILE})", kit_root.display()))
     } else {
-        OpState::Drifted { from: laid_out.trim().to_string(), to: shipped.trim().to_string() }
+        OpState::Done(format!("{shipped} из комплекта в {}", kit_root.display()))
     }
 }
 
@@ -284,7 +295,7 @@ pub fn wire_state(kit: Kit) -> Kit {
     if cfg!(windows) {
         return kit;
     }
-    Kit::with_state(kit.root, tools_dir())
+    Kit::with_state(kit.root, state_dir())
 }
 
 /// Каталог состояния на запуске: его ждут замок единственного экземпляра
@@ -301,39 +312,67 @@ pub fn ensure_state(kit: &Kit) {
     }
 }
 
+/// Инструменты комплекта: ничего никуда не переносится, шаг только
+/// проверяет, что они запускаются ОТТУДА, ГДЕ ЛЕЖАТ, и — на Windows — даёт
+/// 1С увидеть учебную платформу под обычным именем.
+///
+/// Чем был до 25.10.2026: копировал `vrunner/`, `git/` и `httpd/` в профиль
+/// пользователя по одному файлу. Копирование и убрано — целиком, вместе с
+/// `copy_tree`. Три причины, и первая не техническая:
+///
+/// 1. решение владельца (леджер комплекта, пункт 15): неподписанная
+///    программа, которая молча расселяет сотню мегабайт и тысячи файлов — в
+///    том числе `git.exe` и `sh.exe` — по профилю, подставляет того, кто
+///    принёс её в контур заказчика. Карантин и разговор со службой
+///    безопасности дороже любой экономии на путях;
+/// 2. оно и не работало: шаг умел только обычный файл и ссылку на обычный
+///    файл, а в комплекте деревья (`vrunner/bin/oscript` — ссылка,
+///    `vrunner/lib/` — каталог, `git/` — тысячи файлов MinGit). На стенде
+///    это оставило в доме огрызок из одного файла;
+/// 3. в стенде раскладка инструментов — задача образа, и копирование там
+///    было лишним с самого начала.
 struct Tools;
 impl Op<Ctx> for Tools {
     fn id(&self) -> &'static str {
         "host.tools"
     }
     fn title(&self) -> &'static str {
-        "Инструменты комплекта на машине"
+        "Инструменты комплекта"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        tools_state(&ctx.kit.root, &tools_dir())
+        tools_state(&ctx.kit.root)
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let dirs = required_kit_dirs().iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ");
-        vec![Action::new(format!("скопировать {dirs} из {} в {} (≈ 100 МБ)", ctx.kit.root.display(), tools_dir().display()))]
+        let mut v = vec![Action::new(format!("проверить, что {dirs} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
+        if cfg!(windows) {
+            v.push(Action::new("зарегистрировать учебную платформу в 1С под обычным именем".to_string()));
+        }
+        v
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        let to = tools_dir();
+        // Инструменты берём там, где лежит комплект: `from` и есть его
+        // корень. Запуск обоих — единственная честная проверка того, что
+        // комплект годен на этой машине: каталоги могут быть на месте, а
+        // `oscript` не стартовать (нет .NET, носитель без права на запуск,
+        // антивирус).
+        let from = ctx.kit.root.clone();
         if ctx.dry_run {
             return Ok(());
         }
-        for d in required_kit_dirs() {
-            let _ = std::fs::remove_dir_all(to.join(d));
-            let n = copy_tree(&ctx.kit.root.join(d), &to.join(d)).with_context(|| format!("копирование {d} в {}", to.display()))?;
-            ctx.ok(format!("{d}: {n} файлов"));
-        }
-        let o = docker::probe(ctx, &oscript_exe(&to).to_string_lossy(), &["-version"])?;
-        anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", to.display(), o.tail(2).join(" "));
+        let o = docker::probe(ctx, &oscript_exe(&from).to_string_lossy(), &["-version"])?;
+        anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(format!("oscript {}", o.text.trim()));
-        let o = docker::probe(ctx, &git_exe(&to).to_string_lossy(), &["--version"])?;
-        anyhow::ensure!(o.ok(), "git не запускается из {}: {}", to.display(), o.tail(2).join(" "));
+        let o = docker::probe(ctx, &git_exe(&from).to_string_lossy(), &["--version"])?;
+        anyhow::ensure!(o.ok(), "git не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
-        std::fs::copy(ctx.kit.root.join(VERSION_FILE), to.join(VERSION_FILE)).context("отметка версии")?;
         if cfg!(windows) {
+            // Тень учебной платформы — не копия комплекта, а несколько
+            // жёстких ссылок на платформу, УЖЕ установленную на этой машине
+            // (`link_or_copy`), под именами коммерческой версии. Без неё 1С
+            // не предложит учебную платформу в списке версий. Живёт в
+            // состоянии: это наша выдумка, а не чьи-то файлы.
+            let to = state_dir();
             let exe = find_1cv8(&ctx.cfg);
             if let Some(platform) = exe.as_deref().and_then(|exe| exe.parent()).and_then(|bin| bin.parent()) {
                 match shadow_platform(platform, &to) {
@@ -349,22 +388,24 @@ impl Op<Ctx> for Tools {
         Ok(())
     }
     fn revert(&self, _ctx: &Ctx, level: CleanLevel) -> Option<Vec<Action>> {
-        // Поимённо, а не весь каталог: в состоянии рядом с инструментами
-        // теперь живут файл параметров, журнал, отчёт проверки и публикация —
-        // «очистка данных» уносила бы настройки человека, не сказав об этом.
-        let t = tools_dir();
-        let mut names: Vec<String> = required_kit_dirs().iter().map(|d| format!("удалить {}", t.join(d).display())).collect();
-        names.push(format!("удалить {}", t.join(VERSION_FILE).display()));
-        matches!(level, CleanLevel::Data).then(|| names.into_iter().map(Action::new).collect())
+        // Инструменты уносить не нужно: они не наши и лежат в комплекте —
+        // уборка его не касается, комплект человек удаляет сам, целиком.
+        // Остаётся только то, что сделали мы: тень учебной платформы. Файл
+        // параметров, журнал и отчёт проверки лежат рядом и не трогаются —
+        // «очистка данных» не должна уносить настройки человека молча.
+        if !cfg!(windows) {
+            return None;
+        }
+        let shadow = state_dir().join("platform");
+        matches!(level, CleanLevel::Data).then(|| vec![Action::new(format!("удалить {}", shadow.display()))])
     }
     fn revert_apply(&self, ctx: &Ctx, level: CleanLevel) -> Result<()> {
-        if matches!(level, CleanLevel::Data) {
-            let t = tools_dir();
-            for d in required_kit_dirs() {
-                let _ = std::fs::remove_dir_all(t.join(d));
+        if cfg!(windows) && matches!(level, CleanLevel::Data) {
+            let shadow = state_dir().join("platform");
+            if shadow.exists() {
+                let _ = std::fs::remove_dir_all(&shadow);
+                ctx.ok("тень учебной платформы удалена".to_string());
             }
-            let _ = std::fs::remove_file(t.join(VERSION_FILE));
-            ctx.ok("инструменты удалены с машины");
         }
         Ok(())
     }
@@ -856,7 +897,7 @@ impl Op<Ctx> for ProjectOp {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         use crate::project::Layout;
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
         match crate::project::layout_state(&p) {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
@@ -866,7 +907,7 @@ impl Op<Ctx> for ProjectOp {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
         let analyzer = analyzer_lines(&ctx.cfg);
         let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
         let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
@@ -876,8 +917,8 @@ impl Op<Ctx> for ProjectOp {
         if ctx.dry_run {
             return Ok(());
         }
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &tools_dir());
-        crate::project::init(&p, &tools_dir(), &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
+        crate::project::init(&p, &state_dir(), &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
     }
     // uninstall leaves the project alone: it is the person's work.
 }
@@ -1384,12 +1425,12 @@ mod tests {
     #[test]
     fn the_tools_stamp_lives_in_the_state_not_in_the_kit() {
         // The state-side stamp (`host.tools` writes it while laying tools
-        // out) must resolve under `tools_dir()`, never under the kit —
+        // out) must resolve under `state_dir()`, never under the kit —
         // `tools_state` reads it from `tools.join(VERSION_FILE)`, and
-        // nothing in this module ever joins VERSION_FILE onto `tools_dir()`
+        // nothing in this module ever joins VERSION_FILE onto `state_dir()`
         // under a path that also starts with a kit root.
         let kit_root = Path::new("/opt/dev1c-kit");
-        let state = tools_dir();
+        let state = state_dir();
         let laid_out_stamp = state.join(VERSION_FILE);
         assert!(!laid_out_stamp.starts_with(kit_root), "{}", laid_out_stamp.display());
         assert!(laid_out_stamp.starts_with(&state), "{}", laid_out_stamp.display());
@@ -1403,7 +1444,7 @@ mod tests {
         let kit = wire_state(Kit::at(Path::new("/opt/dev1c-kit")));
         let p = kit.state_path(crate::cfg::FILE);
         assert!(!p.starts_with(&kit.root), "{}", p.display());
-        assert!(p.starts_with(tools_dir()), "{}", p.display());
+        assert!(p.starts_with(state_dir()), "{}", p.display());
     }
 
     #[cfg(unix)]
@@ -1440,45 +1481,41 @@ mod tests {
         assert!(matches!(state, OpState::Missing), "{state:?}");
     }
 
+    /// Инструменты разрешаются ОТ КОМПЛЕКТА, а состояние — отдельный каталог
+    /// пользователя. До 25.10.2026 это было одно и то же место, и копия
+    /// инструментов жила в профиле (леджер комплекта, пункт 15).
     #[test]
-    fn tools_live_under_the_local_app_data_not_the_kit() {
-        let t = tools_dir();
+    fn tools_resolve_under_the_kit_and_state_lives_apart() {
+        let t = state_dir();
         assert!(t.ends_with("dev1c"), "{}", t.display());
-        assert!(oscript_exe(Path::new("T")).ends_with(if cfg!(windows) { "vrunner\\bin\\oscript.exe" } else { "vrunner/bin/oscript" }));
-        assert!(vrunner_lib(Path::new("T")).ends_with("lib"));
+        let kit = Path::new("K");
+        assert!(oscript_exe(kit).ends_with(if cfg!(windows) { r"vrunner\bin\oscript.exe" } else { "vrunner/bin/oscript" }));
+        assert!(vrunner_lib(kit).ends_with("lib"));
+        for p in [oscript_exe(kit), vrunner_lib(kit), git_exe(kit)] {
+            assert!(p.starts_with(kit), "{} должен лежать в комплекте", p.display());
+            assert!(!p.starts_with(&t), "{} уехал в профиль", p.display());
+        }
     }
 
+    /// Состояние считается по одному комплекту: ни профиля, ни второй
+    /// отметки в нём больше нет.
     #[test]
-    fn copy_tree_copies_nested_files_and_counts_them() {
-        let tmp = std::env::temp_dir().join(format!("dev1c-copy-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(tmp.join("src/a/b")).unwrap();
-        std::fs::write(tmp.join("src/a/b/f.txt"), "1").unwrap();
-        std::fs::write(tmp.join("src/g.txt"), "2").unwrap();
-        let n = copy_tree(&tmp.join("src"), &tmp.join("dst")).unwrap();
-        assert_eq!(n, 2);
-        assert_eq!(std::fs::read_to_string(tmp.join("dst/a/b/f.txt")).unwrap(), "1");
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn tools_op_state_follows_the_version_stamp() {
+    fn tools_state_is_read_from_the_kit_alone() {
         let tmp = std::env::temp_dir().join(format!("dev1c-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let kit = tmp.join("kit");
-        let home = tmp.join("home");
         std::fs::create_dir_all(kit.join("vrunner")).unwrap();
         std::fs::create_dir_all(kit.join("git")).unwrap();
         std::fs::create_dir_all(kit.join("httpd")).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(kit.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2\n").unwrap();
-        assert!(matches!(tools_state(&kit, &home), OpState::Missing));
-        std::fs::write(home.join("tools.version"), "старая\n").unwrap();
-        assert!(matches!(tools_state(&kit, &home), OpState::Drifted { .. }));
-        std::fs::write(home.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2\n").unwrap();
-        assert!(matches!(tools_state(&kit, &home), OpState::Done(d) if d.contains("3.0.2")));
+        // Каталоги есть, отметки нет: работать можно, но версий не назвать —
+        // и это сказано словами, а не молчанием.
+        assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("не указаны")));
+        std::fs::write(kit.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2
+").unwrap();
+        assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("3.0.2") && d.contains("из комплекта")));
+        // Нет каталога в самом комплекте — единственный оставшийся отказ.
         std::fs::remove_dir_all(kit.join("git")).unwrap();
-        assert!(matches!(tools_state(&kit, &home), OpState::Blocked(_)));
+        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("git/")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1676,7 +1713,7 @@ mod tests {
                 assert!(p.starts_with(&kit.root), "{}", p.display());
             } else {
                 assert!(!p.starts_with(&kit.root), "{}", p.display());
-                assert!(p.starts_with(tools_dir()), "{}", p.display());
+                assert!(p.starts_with(state_dir()), "{}", p.display());
             }
         }
     }

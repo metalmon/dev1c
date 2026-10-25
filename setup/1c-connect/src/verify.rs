@@ -3,7 +3,7 @@
 //! среда (Gitea) → что мешает загрузке → туннель. Человек читает сверху
 //! вниз и останавливается на первом провале.
 
-use crate::ops_host::{mcp_exe, tools_dir, tools_state, Ctx, Gitea};
+use crate::ops_host::{mcp_exe, tools_state, Ctx, Gitea};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -335,11 +335,14 @@ pub fn base_fact(path: &str, exists: bool) -> Check {
 /// Разложены ли инструменты комплекта (`vrunner/`, `git/`, `httpd/`) на
 /// машине. Та же функция считает этот факт в `run()` и в `readiness()` —
 /// второй, отдельно придуманный набор фактов не заводится.
-pub fn tools_fact(kit_root: &std::path::Path, tools: &std::path::Path) -> Check {
-    match tools_state(kit_root, tools) {
+pub fn tools_fact(kit_root: &std::path::Path) -> Check {
+    match tools_state(kit_root) {
         OpState::Done(d) => Check::pass(TOOLS, d),
-        OpState::Missing => Check::fail(TOOLS, format!("в {} ничего нет", tools.display()), "1c-connect install"),
-        OpState::Drifted { from, to } => Check::fail(TOOLS, format!("на машине {from}, в комплекте {to}"), "1c-connect install — обновит копию"),
+        // Копии на машине больше нет, значит нет и двух прежних исходов:
+        // `Missing` («в профиле ничего нет») и `Drifted` («на машине одна
+        // версия, в комплекте другая»). Остаётся одно — чего-то нет в самом
+        // комплекте, и лечится это только целым комплектом.
+        OpState::Missing | OpState::Drifted { .. } => Check::fail(TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
         OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
     }
 }
@@ -471,6 +474,11 @@ pub struct Limits {
     /// зависит факт портов (`workstation_ports_fact`). Второго похожего
     /// параметра у набора фактов не завели: контекст вызывающего едет здесь.
     pub ports: PortUse,
+    /// Можно ли поднимать раннер ради факта, когда о живом ничего не знаем.
+    /// Явная проверка — да: человек нажал кнопку и готов подождать. Расчёт
+    /// готовности — нет: его никто не просил, а холодный старт раннера (28 с)
+    /// всё равно не укладывается в бюджет (леджер комплекта, пункт 19).
+    pub probe_vrunner: bool,
 }
 
 impl Limits {
@@ -478,7 +486,7 @@ impl Limits {
     /// у этих двоих разный — окно порты занимает, командная строка нет,
     /// поэтому он параметром, а не зашит.
     pub fn full(ports: PortUse) -> Self {
-        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None, ports }
+        Self { tools: std::time::Duration::from_secs(60), net: std::time::Duration::from_secs(60), budget: None, ports, probe_vrunner: true }
     }
 
     /// Готовность: короткие сроки и общий бюджет в 20 с. Считает её только
@@ -489,6 +497,7 @@ impl Limits {
             net: std::time::Duration::from_secs(5),
             budget: Some(std::time::Duration::from_secs(20)),
             ports: PortUse::WeListen,
+            probe_vrunner: false,
         }
     }
 }
@@ -555,10 +564,86 @@ pub fn readiness(ctx: &Ctx, tunnel_state: Option<&str>) -> Vec<Check> {
 /// копии на машине с cwd = project; туннель не нужен. Инструмент нарочно
 /// без сеанса «Предприятия» (`cache_show`) — иначе пересчёт готовности
 /// отбирал бы единственный сеанс учебной платформы.
+/// Что известно про свой раннер, не поднимая второго.
+///
+/// Прежде факт «vrunner-mcp отвечает» всегда поднимал НОВЫЙ процесс и ждал его
+/// холодного старта — 28 с (замер 21.10 в контейнере; `oscript -version` при
+/// этом отвечает за 1 с, то есть дело в загрузке библиотеки, а не в размере
+/// базы: `cache_show` в базу не ходит вовсе). При бюджете готовности в 20 с он
+/// не успевал никогда, и окно при обычном включении писало «не всё готово», а
+/// во время своей же выгрузки второй процесс отвечал ошибкой — «vrunner-mcp не
+/// отвечает» про инструменты, которые в этот момент как раз работали.
+/// Леджер комплекта, пункты 17 и 19.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunnerState {
+    /// Мьютекс проекта занят: идёт наша же долгая операция. Это не поломка, а
+    /// «машина занята нами», и говорить об этом надо словами.
+    Busy(String),
+    /// Раннер подавал голос столько назад — значит он поднят и говорит.
+    Answered(std::time::Duration),
+    /// Ни разу за этот запуск, и пробу поднимать не велено.
+    Idle,
+}
+
+/// Давность словами. Секунды до минуты: «отвечал 0 мин назад» на свежем
+/// ответе выглядело бы подозрительно круглым.
+fn ago(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s < 60 {
+        format!("{s} с")
+    } else if s < 3600 {
+        format!("{} мин", s / 60)
+    } else {
+        format!("{} ч {:02} мин", s / 3600, (s % 3600) / 60)
+    }
+}
+
+/// Знание о раннере без единого нового процесса. `None` — не знаем ничего,
+/// решение (поднимать пробу или сказать «не поднимался») принимает вызывающий
+/// по своему `Limits::probe_vrunner`.
+pub fn runner_evidence() -> Option<RunnerState> {
+    evidence_from(busy_now(), crate::bridge::runner_answered_ago())
+}
+
+/// Идёт ли под мьютексом проекта наша долгая операция, и какая.
+fn busy_now() -> Option<String> {
+    match crate::project::LOCK.try_lock() {
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let what = crate::project::doing();
+            Some(if what.is_empty() { "другая операция".into() } else { what.to_string() })
+        }
+        _ => None,
+    }
+}
+
+/// Развилка сама по себе, без глобалов: порядок важен — пока идёт выгрузка,
+/// «отвечал минуту назад» было бы правдой, но не тем, что человеку нужно
+/// знать.
+fn evidence_from(busy: Option<String>, answered: Option<std::time::Duration>) -> Option<RunnerState> {
+    match (busy, answered) {
+        (Some(what), _) => Some(RunnerState::Busy(what)),
+        (None, Some(d)) => Some(RunnerState::Answered(d)),
+        (None, None) => None,
+    }
+}
+
+/// Факт по знанию о раннере. Чистая функция: вся её логика проверяется
+/// тестами без процессов, базы и сети.
+pub fn runner_fact(ev: &RunnerState) -> Check {
+    match ev {
+        RunnerState::Busy(what) => Check::note(VRUNNER, format!("занят: идёт {what}")),
+        RunnerState::Answered(d) => Check::pass(VRUNNER, format!("отвечает агенту, последний ответ {} назад", ago(*d))),
+        // Не зелёный и не приговор: раннера сейчас нет, но его отсутствие до
+        // первого вызова агента — норма, а не поломка. Поднимать его ради
+        // галочки значит платить полминуты на каждом открытии окна.
+        RunnerState::Idle => Check::note(VRUNNER, "не поднимался: стартует по первому вызову агента (около 30 с)"),
+    }
+}
+
 fn vrunner_fact(ctx: &Ctx, tools: &std::path::Path, timeout: std::time::Duration) -> Check {
     let t0 = std::time::Instant::now();
     let cmd = crate::bridge::vrunner_command(&ctx.cfg, tools).into_std();
-    let fact = match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &|_| {}) {
+    let fact = match crate::local::call(cmd, "cache_show", serde_json::json!({}), timeout, &crate::project::NEVER, &|_| {}) {
         Ok(r) if !r.is_error => Check::pass(VRUNNER, format!("AutumnMCP, {} с до ответа", t0.elapsed().as_secs())),
         Ok(r) => Check::fail(VRUNNER, format!("отвечает ошибкой: {}", r.text), "каталог проекта и инструменты: 1c-connect install"),
         Err(e) => Check::fail(VRUNNER, e, "1c-connect install (host.tools); журнал — setup.log в комплекте"),
@@ -649,17 +734,25 @@ pub fn facts_for_readiness(ctx: &Ctx, tunnel_state: Option<&str>, limits: Limits
             Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
         }
     }));
-    let tools = tools_dir();
-    let tf = within(t0, budget, TOOLS, || tools_fact(&ctx.kit.root, &tools));
+    let tools = ctx.kit.root.clone();
+    let tf = within(t0, budget, TOOLS, || tools_fact(&ctx.kit.root));
     // Инструментов нет — пробу не поднимаем вовсе; но и «не проверено за N с»
     // инструментов не значит «их нет», поэтому решение целиком под `within`.
     let tools_ok = tf.ok;
     v.push(tf);
     v.push(within(t0, budget, VRUNNER, || {
-        if tools_ok {
-            vrunner_fact(ctx, &tools, limits.tools)
-        } else {
-            Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install")
+        if !tools_ok {
+            return Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install");
+        }
+        // Сначала то, что знаем без нового процесса: занятость и живой
+        // раннер. Холодный старт — только когда не знаем ничего И нас
+        // попросили проверить явно («Проверить», `1c-connect check`): там
+        // нет ни бюджета, ни работающего сеанса, и 28 с ожидания — цена
+        // единственного доступного способа узнать.
+        match runner_evidence() {
+            Some(ev) => runner_fact(&ev),
+            None if limits.probe_vrunner => vrunner_fact(ctx, &tools, limits.tools),
+            None => runner_fact(&RunnerState::Idle),
         }
     }));
     v.push(within(t0, budget, PROJECT, || project_fact(ctx, &tools)));
@@ -1291,5 +1384,70 @@ mod tests {
         assert!(c.info && c.ok, "{c:?}");
         let c = tunnel_fact(Some("работает с 12:40"));
         assert!(!c.info && c.ok);
+    }
+
+    /// Самое важное из трёх: ни «занят», ни «не поднимался» не приговор.
+    /// Ровно здесь жил отказ, который заказчик видел живьём — красный факт
+    /// при исправной работе (леджер, пункты 17 и 19).
+    #[test]
+    fn a_busy_runner_is_a_note_not_a_verdict() {
+        let c = runner_fact(&RunnerState::Busy("project_push".into()));
+        assert!(c.ok && c.info, "занятость — это сведение, а не отказ: {c:?}");
+        assert!(c.detail.contains("занят") && c.detail.contains("project_push"), "{c:?}");
+    }
+
+    #[test]
+    fn a_runner_that_talks_is_green_and_says_how_long_ago() {
+        let c = runner_fact(&RunnerState::Answered(std::time::Duration::from_secs(90)));
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("1 мин"), "{c:?}");
+    }
+
+    #[test]
+    fn a_runner_nobody_called_yet_is_a_note() {
+        let c = runner_fact(&RunnerState::Idle);
+        assert!(c.ok && c.info, "до первого вызова агента раннера нет — это норма: {c:?}");
+        assert!(c.detail.contains("не поднимался"), "{c:?}");
+    }
+
+    /// Готовность не поднимает раннер, явная проверка поднимает. Вся разница
+    /// между «обычным включением не всё готово» и «после Проверки всё ок»
+    /// держится на этом одном поле.
+    #[test]
+    fn readiness_never_raises_a_runner_and_an_explicit_check_may() {
+        assert!(!Limits::quick().probe_vrunner);
+        assert!(Limits::full(PortUse::WeDont).probe_vrunner);
+    }
+
+    #[test]
+    fn ago_reads_as_seconds_minutes_and_hours() {
+        use std::time::Duration;
+        assert_eq!(ago(Duration::from_secs(5)), "5 с");
+        assert_eq!(ago(Duration::from_secs(600)), "10 мин");
+        assert_eq!(ago(Duration::from_secs(3 * 3600 + 300)), "3 ч 05 мин");
+    }
+
+    /// Пока идёт долгая операция, знание о раннере — «занят», и никакой
+    /// пробы: мьютекс проекта держит именно она.
+    #[test]
+    fn evidence_reports_busy_while_the_project_lock_is_held() {
+        let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let held = crate::project::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match runner_evidence() {
+            Some(RunnerState::Busy(_)) => {}
+            other => panic!("мьютекс проекта занят, а знание о раннере {other:?}"),
+        }
+        drop(held);
+    }
+
+    /// Развилка целиком, без глобалов: занятость старше живого ответа, а без
+    /// обоих знание пусто — решает вызывающий, не этот слой.
+    #[test]
+    fn evidence_prefers_busy_and_is_empty_without_both() {
+        use std::time::Duration;
+        let min = Duration::from_secs(60);
+        assert_eq!(evidence_from(Some("cf_decompile".into()), Some(min)), Some(RunnerState::Busy("cf_decompile".into())));
+        assert_eq!(evidence_from(None, Some(min)), Some(RunnerState::Answered(min)));
+        assert_eq!(evidence_from(None, None), None);
     }
 }

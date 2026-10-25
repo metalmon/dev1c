@@ -187,10 +187,10 @@ fn paths_under(tools: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths
 
 impl Paths {
     /// Пути публикации на этой машине: `ServerRoot` — свой httpd из комплекта
-    /// (`<tools>/httpd`, скопирован `host.tools`) на Windows, системный
-    /// apache2 в образе — то, что уже делает стенд.
+    /// (`<комплект>/httpd`, запускается оттуда, где лежит) на Windows,
+    /// системный apache2 в образе — то, что уже делает стенд.
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
-        let tools = ops_host::tools_dir();
+        let tools = kit.root.clone();
         let root = if cfg!(windows) { tools.join("httpd") } else { PathBuf::from("/etc/apache2") };
         if cfg!(windows) && !root.join("bin").join("httpd.exe").exists() {
             return Err(format!(

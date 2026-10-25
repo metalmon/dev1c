@@ -231,7 +231,7 @@ pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
 
 /// Настоящие части: процесс `vrunner-mcp` из инструментов на машине, git проекта.
 fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(String)) -> R) -> R {
-    let tools = crate::ops_host::tools_dir();
+    let tools = ctx.kit.root.clone();
     let p = crate::project::Project::from_cfg(&ctx.cfg, &tools);
     let log = |s: String| ctx.say(s);
     let cfg = ctx.cfg.clone();
@@ -243,7 +243,7 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
             }
         }
         let cmd = crate::bridge::vrunner_command(&cfg, &tools).into_std();
-        crate::local::call(cmd, tool, args, std::time::Duration::from_secs(3600), &log)
+        crate::local::call(cmd, tool, args, std::time::Duration::from_secs(3600), cancel, &log)
     };
     let push = |m: &str| crate::project::push(&p, m, cancel);
     let pull = || crate::project::pull(&p, cancel);
@@ -296,7 +296,7 @@ fn laid_out(ctx: &Ctx) -> Result<(), String> {
     if ctx.dry_run {
         return Ok(());
     }
-    let p = crate::project::Project::from_cfg(&ctx.cfg, &crate::ops_host::tools_dir());
+    let p = crate::project::Project::from_cfg(&ctx.cfg, &ctx.kit.root);
     if p.dir.join(".git").exists() {
         return Ok(());
     }

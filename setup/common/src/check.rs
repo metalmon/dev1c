@@ -24,21 +24,38 @@ impl Check {
     }
 }
 
-/// Сколько прошло и сколько провалено; информационные не считаются провалом.
+/// Сколько прошло и сколько провалено. Информационная строка — ни то, ни
+/// другое: «туннель поднят» ничего не проверяет, и записывать её в пройденные
+/// значит завышать итог. В отчёте заказчика так и выходило: «пройдено 17» при
+/// пятнадцати настоящих проверках и трёх строках про туннели.
 pub fn summary(checks: &[Check]) -> (usize, usize) {
+    let passed = checks.iter().filter(|c| c.ok && !c.info).count();
     let failed = checks.iter().filter(|c| !c.ok).count();
-    (checks.len() - failed, failed)
+    (passed, failed)
+}
+
+/// Одна строка списка — одинаковая на экране и в отчёте. Раньше её рисовали
+/// два похожих цикла, и расходились бы они молча.
+fn line(i: usize, c: &Check) -> String {
+    let mark = if c.info {
+        "info"
+    } else if c.ok {
+        " ok "
+    } else {
+        "FAIL"
+    };
+    let mut s = format!("{:>2}. [{mark}] {}: {}\n", i + 1, c.what, c.detail);
+    if !c.hint.is_empty() {
+        s.push_str(&format!("          → {}\n", c.hint));
+    }
+    s
 }
 
 /// Текст отчёта: нумерованный список от основания к вершине.
 pub fn render(program: &str, version: &str, cfg_text: &str, checks: &[Check]) -> String {
     let mut s = format!("{program} {version}\n\n{cfg_text}\n");
     for (i, c) in checks.iter().enumerate() {
-        let mark = if c.info { "info" } else if c.ok { " ok " } else { "FAIL" };
-        s.push_str(&format!("{:>2}. [{mark}] {}: {}\n", i + 1, c.what, c.detail));
-        if !c.hint.is_empty() {
-            s.push_str(&format!("          → {}\n", c.hint));
-        }
+        s.push_str(&line(i, c));
     }
     let (p, f) = summary(checks);
     s.push_str(&format!("\nПройдено {p}, провалено {f}.\n"));
@@ -48,11 +65,7 @@ pub fn render(program: &str, version: &str, cfg_text: &str, checks: &[Check]) ->
 /// Напечатать список в терминал, тем же языком, что в отчёте.
 pub fn print(checks: &[Check]) {
     for (i, c) in checks.iter().enumerate() {
-        let mark = if c.info { "info" } else if c.ok { " ok " } else { "FAIL" };
-        println!("{:>3}. [{mark}] {}: {}", i + 1, c.what, c.detail);
-        if !c.hint.is_empty() {
-            println!("           → {}", c.hint);
-        }
+        print!("{}", line(i, c));
     }
 }
 
@@ -67,10 +80,12 @@ mod tests {
             Check::note("туннель dev1", "не поднят"),
             Check::fail("RDP", "порт 3390 не отвечает", "dev1c-setup status"),
         ];
-        assert_eq!(summary(&checks), (2, 1));
+        // Информационная строка не пройденная и не проваленная: pass один,
+        // fail один, а note не попадает ни в одно число.
+        assert_eq!(summary(&checks), (1, 1));
         let text = render("dev1c-setup", "0.1.0", "", &checks);
         assert!(text.contains(" 2. [info] туннель dev1: не поднят"), "{text}");
         assert!(text.contains("→ dev1c-setup status"));
-        assert!(text.ends_with("Пройдено 2, провалено 1.\n"));
+        assert!(text.ends_with("Пройдено 1, провалено 1.\n"));
     }
 }

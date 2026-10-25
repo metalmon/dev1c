@@ -44,3 +44,35 @@ pub fn attach() {
 
 #[cfg(not(windows))]
 pub fn attach() {}
+
+/// Программу запустили двойным щелчком, а не из терминала: консоль наша, и мы
+/// в ней одни. Такое окно исчезает в тот же миг, когда программа кончилась, и
+/// прочитать хоть строку человек не успевает.
+///
+/// Из терминала в консоли минимум два процесса — оболочка и мы; в службе и по
+/// SSH консоли нет вовсе. Ни там, ни там ждать нечего.
+#[cfg(windows)]
+pub fn own_window() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut ids = [0u32; 2];
+    unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+pub fn own_window() -> bool {
+    false
+}
+
+/// Задержать окно консоли, если оно закроется вместе с программой. Зовётся
+/// последним делом в `main`, и при ошибке тоже: сообщение об ошибке — как раз
+/// то, что обиднее всего не успеть прочитать.
+pub fn hold_window() {
+    if !own_window() {
+        return;
+    }
+    println!();
+    println!("Окно закроется, когда вы нажмёте Enter.");
+    // Закрытый stdin вернёт ноль сразу: повиснуть здесь нельзя.
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}

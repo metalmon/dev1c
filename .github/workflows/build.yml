@@ -94,8 +94,12 @@ jobs:
       # where it runs in local mode with a tray icon in the XFCE panel. GPUI
       # and tray-icon need the libraries below; the panel speaks
       # StatusNotifier, which is libayatana-appindicator on the runtime side.
-      # dev1c-setup stays a CLI on Linux — its window (GPUI since 2026-10-19,
-      # Tauri before that) is never opened on a server.
+      # dev1c-setup is a CLI on both systems now: since 2026-10-25 its `gui`
+      # feature is off by default. A window-subsystem binary is not awaited by
+      # PowerShell — the prompt comes back at once, the install output lands on
+      # top of it and the exit code never reaches the caller. The window code
+      # stays behind the feature and is still compiled by the Test step below,
+      # so it cannot rot while it waits.
       - name: Libraries for the Linux window
         if: matrix.name == 'linux'
         run: |
@@ -107,9 +111,17 @@ jobs:
         # было вовсе. С тех пор у коннектора там и трей, и карточка, и форма
         # окна X11, и всё это на Linux не компилировалось в тестах ни разу:
         # проверяли Windows, а правили Linux. Библиотеки окна ставит шаг выше.
-        run: cargo test --workspace --manifest-path setup/Cargo.toml
+        #
+        # `dev1c-setup/gui` — явно: у самой программы окно выключено по
+        # умолчанию (см. её Cargo.toml), а компилировать его здесь всё равно
+        # надо, иначе отложенный код тихо развалится к тому дню, когда окно
+        # решат вернуть.
+        run: cargo test --workspace --features dev1c-setup/gui --manifest-path setup/Cargo.toml
       - name: Build
         run: |
+          # Без окна на обеих системах: в поставку идёт консольная
+          # программа. `--no-default-features` на Linux оставлен как есть —
+          # он теперь ничего не меняет, но и не мешает.
           cargo build --release --manifest-path setup/Cargo.toml -p dev1c-setup ${{ matrix.name == 'linux' && '--no-default-features' || '' }}
           cargo build --release --manifest-path setup/Cargo.toml -p onec-connect
       - uses: actions/upload-artifact@v4

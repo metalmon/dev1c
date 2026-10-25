@@ -37,12 +37,16 @@ pub fn settings_ok(settings: &str, provider: &str, model_name: &str) -> bool {
         && settings.contains(model_name)
 }
 
-fn tcp_open(port: u16) -> bool {
+/// Принимает ли порт соединение. Проба соединением, а не чтение журнала:
+/// закрытый порт — это ровно то, во что упрётся разработчик.
+pub fn tcp_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok()
 }
 
-fn ssh_banner(port: u16) -> Option<String> {
+/// Приветствие sshd с порта туннеля: по нему видно, что порт держит именно
+/// наш sshd, а не чужая программа, занявшая номер.
+pub fn ssh_banner(port: u16) -> Option<String> {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_secs(3)));
@@ -51,19 +55,72 @@ fn ssh_banner(port: u16) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..n]).trim().to_string())
 }
 
-/// Gitea поднимается не сразу после процесса: до полуминуты повторяем.
-fn http_status(url: &str) -> std::result::Result<u16, String> {
+/// Настоящая причина, а не «error sending request for url». reqwest держит
+/// отказ в соединении, сброс и недоступный прокси в источниках ошибки, и без
+/// них строка отчёта не говорит ничего — ровно это и было в отчёте заказчика.
+fn cause_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        let t = c.to_string();
+        if !s.contains(&t) {
+            s.push_str(": ");
+            s.push_str(&t);
+        }
+        src = c.source();
+    }
+    s
+}
+
+/// Один запрос, без ожидания: проверка — это снимок, а дожидаться служб
+/// обязан шаг установки («Службы внутри»). Пока ожидание сидело здесь,
+/// install всё равно спрашивал Gitea раньше, чем та начинала слушать, и
+/// проверка валилась на здоровом стенде.
+///
+/// `no_proxy` — не придирка: системный прокси на машине администратора
+/// перехватывает и 127.0.0.1, и тогда «Gitea не отвечает» сказано о вполне
+/// рабочем стенде.
+pub fn http_get(url: &str) -> std::result::Result<u16, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
+        .no_proxy()
         .build()
-        .map_err(|e| e.to_string())?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        match client.get(url).send() {
-            Ok(r) => return Ok(r.status().as_u16()),
-            Err(e) if std::time::Instant::now() > deadline => return Err(e.to_string()),
-            Err(_) => std::thread::sleep(Duration::from_secs(3)),
-        }
+        .map_err(|e| cause_chain(&e))?;
+    client.get(url).send().map(|r| r.status().as_u16()).map_err(|e| cause_chain(&e))
+}
+
+/// Что именно не так с репозиториями. Случая три, и ремонт у них разный:
+/// порт не принимает соединение (контейнера нет, Gitea не запущена),
+/// соединение есть, а ответа нет (это ответил движок контейнеров, Gitea
+/// внутри ещё не слушает), и ответ не тот (отвечает сама Gitea, и смотреть
+/// надо её журнал). Раньше все три печатались одним «повторите».
+pub fn gitea_fact(
+    url: &str,
+    port: u16,
+    port_open: bool,
+    answer: std::result::Result<u16, String>,
+    engine: &str,
+    name: &str,
+) -> Check {
+    if !port_open {
+        return Check::fail(
+            "Gitea",
+            format!("порт {port} не принимает соединение"),
+            format!("{engine} logs {name}: внутри контейнера Gitea должна слушать 3000"),
+        );
+    }
+    match answer {
+        Ok(code) if (200..400).contains(&code) => Check::pass("Gitea", format!("{url} отвечает {code}")),
+        Ok(code) => Check::fail(
+            "Gitea",
+            format!("{url} отвечает {code}"),
+            format!("это ответила сама Gitea — её журнал: {engine} exec {name} cat /var/lib/gitea/log/start.log"),
+        ),
+        Err(e) => Check::fail(
+            "Gitea",
+            format!("порт {port} открыт, а ответа нет: {e}"),
+            format!("так отвечает {engine}, пока Gitea внутри контейнера не слушает; дождаться её — дело install"),
+        ),
     }
 }
 
@@ -109,11 +166,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         )
     });
     let url = format!("http://127.0.0.1:{gitea}/");
-    v.push(match http_status(&url) {
-        Ok(code) if (200..400).contains(&code) => Check::pass("Gitea", format!("{url} отвечает {code}")),
-        Ok(code) => Check::fail("Gitea", format!("{url} отвечает {code}"), "Gitea поднимается до минуты; повторите"),
-        Err(e) => Check::fail("Gitea", format!("{url}: {e}"), "Gitea поднимается до минуты; повторите, затем логи контейнера"),
-    });
+    v.push(gitea_fact(&url, gitea, tcp_open(gitea), http_get(&url), &ctx.engine(), &name));
     v.push(match ssh_banner(ssh) {
         Some(b) if b.starts_with("SSH-2.0") => Check::pass("SSH для туннеля", format!("порт {ssh}: {b}")),
         Some(b) => Check::fail("SSH для туннеля", format!("порт {ssh} отвечает не SSH: {b}"), "порт занят другой программой?"),
@@ -144,7 +197,15 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     // бюджет агента в Zed и слоты.
     if ctx.cfg.form() != Form::Remote {
         v.push(match llama::gpu(ctx) {
-            Some(g) => Check::pass("видеокарта", format!("{}, {} МиБ, занято {} МиБ, драйвер {}", g.name, g.total_mb, g.used_mb, g.driver)),
+            // «Занято 7823 из 8192» без пояснения читается как беда, а это
+            // наши же веса модели: карта занята тем, для чего её и берут.
+            Some(g) => Check::pass(
+                "видеокарта",
+                format!(
+                    "{}, {} МиБ, занято {} МиБ вместе с весами модели, драйвер {}",
+                    g.name, g.total_mb, g.used_mb, g.driver
+                ),
+            ),
             None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
         });
         let token_file = llama::token_path(&ctx.kit, ctx.cfg.form());
@@ -216,19 +277,19 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     } else {
         Check::fail("порты рабочих мест в Zed", "порт 7771 не подставлен", "образ старее этой программы: обновите образ")
     });
-    for n in 1..=3u16 {
-        let port = 7770 + n;
-        let up = docker::ask(ctx, &["exec", &name, "nc", "-z", "localhost", &port.to_string()])
-            .map(|o| o.ok())
-            .unwrap_or(false);
-        v.push(if up {
-            Check::note(&format!("туннель dev{n}"), format!("поднят: порт {port} отвечает"))
-        } else {
-            Check::note(
-                &format!("туннель dev{n}"),
-                format!("не поднят — это нормально, если разработчик dev{n} сейчас не подключён"),
-            )
-        });
+    // Поднятый туннель — новость; не поднятый — обычное дело, разработчик
+    // просто не подключён. Три строки «это нормально, если…» занимали шестую
+    // часть отчёта и не сообщали ничего.
+    let up: Vec<String> = (1..=3u16)
+        .filter(|n| {
+            docker::ask(ctx, &["exec", &name, "nc", "-z", "localhost", &(7770 + n).to_string()])
+                .map(|o| o.ok())
+                .unwrap_or(false)
+        })
+        .map(|n| format!("dev{n}"))
+        .collect();
+    if !up.is_empty() {
+        v.push(Check::note("туннели рабочих мест", format!("подняты: {}", up.join(", "))));
     }
     v
 }
@@ -265,12 +326,18 @@ pub fn numbers_fact(slot_window: u32, agents: u16) -> Check {
     if per_agent >= need {
         Check::pass(
             "окно агента",
-            format!("слот {slot_window} на {a} агентов = {per_agent} ≥ {need} (вход {} и ответ {})", llama::MIN_BUDGET, llama::ANSWER_FLOOR),
+            format!(
+                "окно слота {slot_window}, агентов {a} — по {per_agent} токенов на каждого; нужно не меньше {need} (вход {}, ответ {})",
+                llama::MIN_BUDGET, llama::ANSWER_FLOOR
+            ),
         )
     } else {
         Check::fail(
             "окно агента",
-            format!("слот {slot_window} на {a} агентов даёт {per_agent}, а нужно {need} (вход {} и ответ {})", llama::MIN_BUDGET, llama::ANSWER_FLOOR),
+            format!(
+                "окно слота {slot_window}, агентов {a} — по {per_agent} токенов на каждого, а нужно не меньше {need} (вход {}, ответ {})",
+                llama::MIN_BUDGET, llama::ANSWER_FLOOR
+            ),
             "dev1c-setup install — пересчитает и пересоздаст контейнер; либо agents в dev1c.toml меньше",
         )
     }

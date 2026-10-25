@@ -97,11 +97,28 @@ enum Cmd {
 
 fn main() {
     common::console::attach();
-    if let Err(e) = run() {
-        eprintln!();
-        eprintln!("Остановлено: {e:#}");
-        std::process::exit(1);
-    }
+    let code = match run() {
+        Ok(true) => 0,
+        // Проверка не прошла — об этом уже сказано своими словами, и код
+        // возврата остаётся ненулевым. «Остановлено» здесь было бы неправдой:
+        // установка прошла целиком, среда поднята, не сошлись факты.
+        Ok(false) => 1,
+        Err(e) => {
+            eprintln!();
+            eprintln!("Остановлено: {e:#}");
+            1
+        }
+    };
+    common::console::hold_window();
+    std::process::exit(code);
+}
+
+/// «1 проверка не прошла», «2 проверки не прошли», «5 проверок не прошли».
+/// Глагол меняется вместе с числом, иначе итоговая строка — та самая
+/// небрежность, по которой судят обо всей программе.
+fn failed_checks_phrase(n: usize) -> String {
+    let verb = if n % 10 == 1 && n % 100 != 11 { "прошла" } else { "прошли" };
+    format!("{} не {verb}", common::word::count(n as u64, "проверка", "проверки", "проверок"))
 }
 
 /// Как отвечать на вопросы без терминала: безобидная работа идёт по
@@ -193,12 +210,13 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool, commands: bool) -> Result<Ctx> {
     Ok(Ctx { kit, cfg, dry_run, sink, prompt })
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<bool> {
     // Без аргументов — окно: так программу запускают двойным щелчком.
     // Сборка без окна показывает состояние — самое безобидное из возможного.
     #[cfg(feature = "gui")]
     if std::env::args().len() == 1 {
-        return gui::launch(Kit::discover("DEV1C_KIT")?);
+        gui::launch(Kit::discover("DEV1C_KIT")?)?;
+        return Ok(true);
     }
     let cli = Cli::parse();
     let kit = match &cli.kit {
@@ -213,7 +231,7 @@ fn run() -> Result<()> {
             }
             None => print!("{}", cfg::EXAMPLE),
         }
-        return Ok(());
+        return Ok(true);
     }
     // Нет терминала на stdin — вопрос о подтверждении завис бы навсегда.
     let has_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
@@ -254,10 +272,10 @@ fn run() -> Result<()> {
             }
             common::run::apply_all(&ctx, &ops, only.as_deref(), false)?;
             if ctx.dry_run || only.is_some() {
-                return Ok(());
+                return Ok(true);
             }
             println!();
-            check(&ctx)?;
+            let failed = check(&ctx)?;
             let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
             println!();
             // Адрес этой машины известен — печатаем его, а не «<адрес>»:
@@ -272,6 +290,16 @@ fn run() -> Result<()> {
             if addresses.len() > 1 {
                 println!("  Другие адреса   {}", addresses[1..].join(", "));
             }
+            // Адреса печатаются и при провале проверки: контейнер работает,
+            // и администратору нужно, что диктовать разработчикам. Раньше
+            // `check(&ctx)?` уходил с ошибкой до этих строк, и поднятая среда
+            // выглядела несостоявшейся — ни адресов, ни паролей, одно
+            // «Остановлено».
+            if failed > 0 {
+                println!();
+                println!("{} — разберите строки FAIL выше, отчёт лежит рядом.", failed_checks_phrase(failed));
+                return Ok(false);
+            }
         }
         Cmd::Change { values } => {
             apply_changes(&mut ctx, &values)?;
@@ -284,7 +312,14 @@ fn run() -> Result<()> {
                 common::run::apply_all(&ctx, &ops, None, true)?;
             }
         }
-        Cmd::Check => check(&ctx)?,
+        Cmd::Check => {
+            let failed = check(&ctx)?;
+            if failed > 0 {
+                println!();
+                println!("{} — разберите строки FAIL выше, отчёт лежит рядом.", failed_checks_phrase(failed));
+                return Ok(false);
+            }
+        }
         Cmd::Clean { stack, data } => {
             anyhow::ensure!(stack || data, "укажите уровень: --stack (снять контейнер) или --data (и удалить данные)");
             let level = if data { CleanLevel::Data } else { CleanLevel::Stack };
@@ -296,7 +331,7 @@ fn run() -> Result<()> {
             }
             if ctx.dry_run {
                 println!("План напечатан, на машине ничего не менялось.");
-                return Ok(());
+                return Ok(true);
             }
             if needs_typed_name_confirmation(data, cli.yes) {
                 let name = ctx.prompt.ask(
@@ -317,10 +352,13 @@ fn run() -> Result<()> {
         }
         Cmd::Checksums => {
             let n = common::integrity::write_list(&ctx.kit, |p| println!("  {p}"))?;
-            println!("Записано {n} сумм в checksums.txt");
+            println!(
+                "В checksums.txt записано {}.",
+                common::word::count(n as u64, "сумма", "суммы", "сумм")
+            );
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// `port=4000 memory=16g gpu=false` → в toml комплекта. Правится файл, не
@@ -340,11 +378,12 @@ fn apply_changes(ctx: &mut Ctx, values: &[String]) -> Result<()> {
             "model.name" => ctx.cfg.model.name = val.into(),
             "model.file" => ctx.cfg.model.file = val.into(),
             "model.port" => ctx.cfg.model.port = val.parse().context("model.port — число")?,
+            "model.memory" => ctx.cfg.model.memory = val.into(),
             "model.agents" => ctx.cfg.model.agents = val.parse().context("model.agents — число")?,
             "model.slots" => ctx.cfg.model.slots = val.parse().context("model.slots — число")?,
             "model.fit_ctx" => ctx.cfg.model.fit_ctx = val.parse().context("model.fit_ctx — число")?,
             other => anyhow::bail!(
-                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.serve, model.file, model.url, model.key, model.name, model.port, model.agents, model.slots, model.fit_ctx"
+                "неизвестный параметр {other}; есть: port, memory, gpu, engine, model.serve, model.file, model.url, model.key, model.name, model.port, model.memory, model.agents, model.slots, model.fit_ctx"
             ),
         }
     }
@@ -452,14 +491,31 @@ mod commands_tests {
     }
 }
 
-fn check(ctx: &Ctx) -> Result<()> {
+/// Сколько фактов не сошлось. Решение, что с этим делать, принимает
+/// вызывающий: у `install` после проверки есть что ещё сказать (адреса
+/// стенда), и уходить отсюда исключением значило бы их не напечатать.
+fn check(ctx: &Ctx) -> Result<usize> {
     println!("Проверка среды:");
     let checks = verify::run(ctx);
     common::check::print(&checks);
     let (p, f) = verify::summary(&checks);
     let path = verify::report(ctx, &checks)?;
     println!();
-    println!("Пройдено {p}, провалено {f}. Отчёт: {}", path.display());
-    anyhow::ensure!(f == 0, "проверка не пройдена");
-    Ok(())
+    println!("Проверок пройдено {p}, провалено {f}. Отчёт: {}", path.display());
+    Ok(f)
+}
+
+#[cfg(test)]
+mod phrase_tests {
+    use super::*;
+
+    #[test]
+    fn the_verb_agrees_with_the_number_of_failures() {
+        assert_eq!(failed_checks_phrase(1), "1 проверка не прошла");
+        assert_eq!(failed_checks_phrase(2), "2 проверки не прошли");
+        assert_eq!(failed_checks_phrase(5), "5 проверок не прошли");
+        // Одиннадцать — «проверок не прошли», несмотря на единицу в конце.
+        assert_eq!(failed_checks_phrase(11), "11 проверок не прошли");
+        assert_eq!(failed_checks_phrase(21), "21 проверка не прошла");
+    }
 }

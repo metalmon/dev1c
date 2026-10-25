@@ -5,11 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "Установка среды разработки 1С: один файл вместо скриптов"
 
-# Окно входит в сборку по умолчанию: двойной щелчок по файлу из комплекта
-# обязан его открыть. Linux-сборка в CI идёт без него (--no-default-features).
+# Окно выключено по умолчанию (решение заказчика 2026-10-25). Причина не в
+# самом окне: оконная сборка на Windows помечена windows_subsystem =
+# "windows", а такую программу PowerShell не ждёт — печатает приглашение
+# сразу, вывод установки лезет поверх него, и код возврата до скрипта не
+# доходит. Собранная без окна программа — обычная консольная: ждут, код
+# возврата отдаётся, вывод не перемешивается.
+#
+# Окно остаётся в коде за этим флагом: `--features gui`. Вернуть его в
+# поставку можно, когда двойной щелчок будет решаться не подсистемой
+# «windows», а прятанием своей консоли при запуске из проводника.
 [features]
-default = ["gui"]
-gui = ["common/gui", "dep:gpui-kit", "dep:futures", "dep:image", "dep:embed-resource"]
+default = []
+gui = ["common/gui", "dep:gpui-kit", "dep:futures", "dep:image"]
 
 [dependencies]
 common = { path = "../common" }
@@ -38,5 +46,6 @@ version = "0.12"
 default-features = false
 features = ["blocking", "rustls-tls-native-roots"]
 
+# Не optional и не за флагом `gui`: значок нужен и консольной сборке.
 [target.'cfg(windows)'.build-dependencies]
-embed-resource = { version = "3", optional = true }
+embed-resource = "3"

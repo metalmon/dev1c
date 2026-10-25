@@ -25,11 +25,11 @@ pub fn apply_all<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], only: Option<&str>,
         }
         match &st {
             OpState::Done(_) if only.is_none() && !op.always_run() => {
-                ctx.say(format!("  [ ok ] {:<12} уже сделано", op.id()));
+                ctx.say(format!("  [ ok ] {:<16} уже сделано", op.id()));
                 continue;
             }
             OpState::Blocked(why) => {
-                ctx.say(format!("  [ -- ] {:<12} пропущено: {why}", op.id()));
+                ctx.say(format!("  [ -- ] {:<16} пропущено: {why}", op.id()));
                 continue;
             }
             _ => {}
@@ -55,7 +55,9 @@ pub fn apply_all<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], only: Option<&str>,
     } else if touched == 0 {
         ctx.say("Менять нечего: всё уже так, как задано.");
     } else {
-        ctx.say("Готово.");
+        // Не «Готово.»: за шагами идёт проверка, и «Готово» рядом с
+        // провалившейся проверкой — противоречие в двух соседних строках.
+        ctx.say("Все шаги выполнены.");
     }
     Ok(touched)
 }

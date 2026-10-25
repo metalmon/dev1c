@@ -5,6 +5,11 @@
 //! Модуль собирается всегда, не только с флагом `gui`: GPUI на этой машине
 //! не собирают (правило «сборка в CI»), а тесты логики должны идти локально.
 
+// Часть модуля нужна только окну. Со сборкой без окна это десять
+// предупреждений «never used» о живом коде, и настоящее предупреждение
+// утонуло бы среди них. С `--features gui` проверка остаётся как была.
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
+
 use crate::cfg::{self, Cfg};
 use common::check::Check;
 use common::kit::Kit;
@@ -363,7 +368,10 @@ pub fn memory_value(field: &str) -> String {
 pub fn integrity_report(ok: usize, bad: &[String]) -> Result<String, String> {
     const SHOWN: usize = 20;
     if bad.is_empty() {
-        return Ok(format!("файлы комплекта: {ok} из {ok}, суммы совпали"));
+        return Ok(format!(
+            "комплект цел: {}, все суммы совпали",
+            common::word::count(ok as u64, "файл", "файла", "файлов")
+        ));
     }
     let mut names = bad.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; ");
     if bad.len() > SHOWN {

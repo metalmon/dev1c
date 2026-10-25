@@ -257,7 +257,12 @@ impl Op<Ctx> for Image {
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         let archive = ctx.kit.path("dev1c-image.tar.gz");
-        let o = docker::load_image(ctx, &archive.to_string_lossy())?;
+        // В показе — имя файла, а не путь: страницу «Ручной путь» собирают на
+        // машине сборки, и её путь в команде заказчику ни к чему. Команды
+        // вставляют из каталога комплекта, где архив лежит рядом. Тот же
+        // приём, что у шага платформы с "$PWD".
+        let shown = if ctx.dry_run { "dev1c-image.tar.gz".to_string() } else { archive.to_string_lossy().to_string() };
+        let o = docker::load_image(ctx, &shown)?;
         anyhow::ensure!(o.ok(), "образ не загрузился: {}", o.tail(3).join(" "));
         if let (false, Some(stamp)) = (ctx.dry_run, archive_stamp(&archive)) {
             ctx.kit.state_set("IMAGE_ARCHIVE", &stamp)?;
@@ -265,7 +270,8 @@ impl Op<Ctx> for Image {
         ctx.ok("образ загружен");
         let llama = ctx.kit.path(LLAMA_ARCHIVE);
         if ctx.cfg.form() == crate::cfg::Form::Docker && llama.exists() {
-            let o = docker::load_image(ctx, &llama.to_string_lossy())?;
+            let shown = if ctx.dry_run { LLAMA_ARCHIVE.to_string() } else { llama.to_string_lossy().to_string() };
+            let o = docker::load_image(ctx, &shown)?;
             anyhow::ensure!(o.ok(), "образ сервера модели не загрузился: {}", o.tail(3).join(" "));
             ctx.ok("образ сервера модели загружен");
         }
@@ -304,7 +310,7 @@ impl Op<Ctx> for Volumes {
             .filter(|v| !docker::volume_exists(ctx, v))
             .collect();
         if missing.is_empty() {
-            OpState::Done("home, gitea, models".into())
+            OpState::Done(VOLUMES.join(", "))
         } else {
             OpState::Missing
         }
@@ -489,8 +495,10 @@ impl Op<Ctx> for Model {
         if ctx.cfg.form() != crate::cfg::Form::Docker {
             return vec![];
         }
+        // Инфинитив, как у остальных строк плана: план обещает будущее, а
+        // «копирую» — первое лицо посреди списка «сделать то, сделать это».
         vec![Action::new(format!(
-            "копирую {} в том {}",
+            "скопировать {} в том {} (файл большой, это долго)",
             ctx.cfg.model.file,
             ctx.cfg.volume("models")
         ))]
@@ -504,11 +512,14 @@ impl Op<Ctx> for Model {
         // используется намеренно: на Windows антивирус рвёт чтение больших файлов.
         let src = ctx.kit.path(&ctx.cfg.model.file);
         let vol = format!("{}:/m", ctx.cfg.volume("models"));
-        let o = docker::run(ctx, &["create", "--name", "dev1c-model-copy", "-v", &vol, &ctx.cfg.image()])?;
+        // Имя с приставкой стенда, как у томов и контейнера модели: две среды
+        // на одной машине не отбирают друг у друга временный контейнер.
+        let tmp = format!("{}-model-copy", ctx.cfg.server.name);
+        let o = docker::run(ctx, &["create", "--name", &tmp, "-v", &vol, &ctx.cfg.image()])?;
         anyhow::ensure!(o.ok(), "не создать контейнер для копирования: {}", o.tail(2).join(" "));
-        let dst = "dev1c-model-copy:/m/".to_string();
+        let dst = format!("{tmp}:/m/");
         let o = docker::run(ctx, &["cp", &src.to_string_lossy(), &dst]);
-        let _ = docker::run(ctx, &["rm", "-f", "dev1c-model-copy"]);
+        let _ = docker::run(ctx, &["rm", "-f", &tmp]);
         let o = o?;
         anyhow::ensure!(o.ok(), "модель не скопировалась: {}", o.tail(2).join(" "));
         ctx.ok("модель в томе");
@@ -629,30 +640,62 @@ impl Op<Ctx> for Services {
         OpState::Missing
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let _ = ctx;
-        vec![Action::new("дождаться gitea, xrdp, sshd (до двух минут)")]
+        let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
+        vec![Action::new(format!(
+            "дождаться ответа: рабочие места {rdp}, репозитории {gitea}, туннель {ssh} (до трёх минут)"
+        ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
             return Ok(());
         }
-        let want = ["gitea", "xrdp", "sshd"];
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        // Ждём ОТВЕТА, а не появления процессов. `pgrep` говорил «работают»
+        // через секунду после запуска контейнера, а Gitea к этому времени
+        // ещё не слушала: миграции, три учётные записи, организация, сев
+        // репозиториев. Проверка сразу за этим шагом упиралась в молчащий
+        // порт и объявляла здоровый стенд сломанным — и так каждый раз,
+        // потому что install всегда пересоздаёт контейнер.
+        let name = ctx.cfg.server.name.clone();
+        let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
+        let url = format!("http://127.0.0.1:{gitea}/");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut announced = false;
         loop {
-            let mut missing = Vec::new();
-            for s in &want {
-                // pgrep -x: exact name, otherwise the probe matches itself.
-                let o = docker::ask(ctx, &["exec", &ctx.cfg.server.name, "pgrep", "-x", s])?;
-                if !o.ok() {
-                    missing.push(*s);
-                }
+            let mut waiting = Vec::new();
+            if !crate::verify::tcp_open(rdp) {
+                waiting.push("рабочие места (xrdp)");
             }
-            if missing.is_empty() {
-                ctx.ok(format!("работают: {}", want.join(", ")));
+            if !matches!(crate::verify::http_get(&url), Ok(200..=399)) {
+                waiting.push("репозитории (Gitea)");
+            }
+            if !crate::verify::ssh_banner(ssh).is_some_and(|b| b.starts_with("SSH-2.0")) {
+                waiting.push("туннель (sshd)");
+            }
+            if waiting.is_empty() {
+                ctx.ok("отвечают: рабочие места, репозитории, туннель");
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
-                anyhow::bail!("не поднялись: {} — смотрите {} logs {}", missing.join(", "), ctx.engine(), ctx.cfg.server.name);
+                // Кто не ответил — уже сказано; добавляем, живы ли процессы
+                // внутри: «процесс есть, а порт молчит» и «процесса нет»
+                // лечатся по-разному.
+                let dead: Vec<&str> = ["gitea", "xrdp", "sshd"]
+                    .into_iter()
+                    .filter(|s| docker::ask(ctx, &["exec", &name, "pgrep", "-x", s]).map(|o| !o.ok()).unwrap_or(true))
+                    .collect();
+                let inside = if dead.is_empty() {
+                    "процессы внутри контейнера живы, молчат порты".to_string()
+                } else {
+                    format!("внутри контейнера не запущены: {}", dead.join(", "))
+                };
+                anyhow::bail!("не ответили: {} — {inside}; журнал: {} logs {name}", waiting.join(", "), ctx.engine());
+            }
+            // Первое ожидание проговаривается: на первом запуске Gitea
+            // заводит учётные записи и сеет репозитории, и это десятки
+            // секунд полной тишины.
+            if !announced {
+                announced = true;
+                ctx.say(format!("   ждём ответа: {} — на первом запуске до минуты", waiting.join(", ")));
             }
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
@@ -669,11 +712,18 @@ impl Op<Ctx> for Services {
 pub fn kit_is_intact(ctx: &Ctx) -> Result<()> {
     // Первый файл — сразу: образ весит гигабайты, и десять молчащих файлов
     // подряд выглядят как зависшая установка.
-    let mut last = 0usize;
-    let report = match common::integrity::verify(&ctx.kit, |i, n, path| {
-        if i == 1 || i == n || i - last >= 10 {
-            last = i;
-            ctx.say(format!("файлы комплекта: {i}/{n} {path}"));
+    // Одна строка в начале вместо отсчёта по файлам. Молчать нельзя — архив
+    // образа весит гигабайты, и тишина выглядит зависанием, — но «файлы
+    // комплекта: 1/11 dev1c-1c-payload.tar.gz» это не сообщение человеку, а
+    // отладочная печать, да ещё и перед заголовком.
+    let mut announced = false;
+    let report = match common::integrity::verify(&ctx.kit, |_, n, _| {
+        if !announced {
+            announced = true;
+            ctx.say(format!(
+                "Сверяю {} комплекта с контрольными суммами — на большом архиве это займёт минуту.",
+                common::word::count(n as u64, "файл", "файла", "файлов")
+            ));
         }
     }) {
         Ok(r) => r,

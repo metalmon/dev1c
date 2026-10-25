@@ -1,6 +1,7 @@
-//! Окно: значок exe кладёт embed-resource. Сборка без окна
-//! (`--no-default-features`) и сборка не под Windows ничего не делают.
+//! Значок exe кладёт embed-resource. К окну это не привязано: в проводнике
+//! значок виден и у консольной программы, а безымянный серый лист рядом с
+//! инструкцией заказчика выглядит именно тем, чем кажется.
 fn main() {
-    #[cfg(all(windows, feature = "gui"))]
+    #[cfg(windows)]
     embed_resource::compile("icons/app.rc", embed_resource::NONE).manifest_optional().unwrap();
 }

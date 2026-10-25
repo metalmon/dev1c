@@ -110,9 +110,9 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<u32> {
     // запрошенное.
     anyhow::ensure!(
         window >= cfg.model.fit_ctx,
-        "сервер дал {window} токенов на слот при нижней границе fit_ctx = {} ({} слота): на этой карте модель с такими параметрами не помещается",
+        "сервер дал {window} токенов на слот при нижней границе fit_ctx = {} ({}): на этой карте модель с такими параметрами не помещается",
         cfg.model.fit_ctx,
-        slots
+        common::word::count(slots as u64, "слот", "слота", "слотов")
     );
     // Одно число вместо трёх: окно агента. Со штатным провайдером `llama.cpp`
     // Zed забирает окно с `/props` и сам делит его на вход и ответ, поэтому
@@ -121,8 +121,8 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<u32> {
     let per_agent = llama::per_agent(window, cfg.model.agents);
     anyhow::ensure!(
         per_agent >= llama::MIN_BUDGET + llama::ANSWER_FLOOR,
-        "окно {window} на {} агентов даёт {per_agent} токенов на агента — для кодинга на 1С нужно хотя бы {} (вход {} и ответ {})",
-        cfg.model.agents,
+        "окно {window} на {} даёт {per_agent} токенов каждому — для кодинга на 1С нужно хотя бы {} (вход {} и ответ {})",
+        common::word::count(cfg.model.agents as u64, "агента", "агента", "агентов"),
         llama::MIN_BUDGET + llama::ANSWER_FLOOR,
         llama::MIN_BUDGET,
         llama::ANSWER_FLOOR
@@ -134,7 +134,10 @@ pub fn verdict(cfg: &crate::cfg::Cfg, window: u32, slots: u16) -> Result<u32> {
 /// на одного агента. Чисел для Zed в строке больше нет: редактор забирает окно
 /// с `/props` сам, и объявлять ему нечего.
 fn answers_line(window: u32, slots: u16, model: &str, per_agent: u32) -> String {
-    format!("сервер отвечает: {model}, {slots} слота по {window} токенов; на агента {per_agent}")
+    format!(
+        "сервер отвечает: {model}, {} по {window} токенов; на агента {per_agent}",
+        common::word::count(slots as u64, "слот", "слота", "слотов")
+    )
 }
 
 /// Что остаётся в каталоге службы при раскладке из комплекта: файлы
@@ -358,7 +361,13 @@ impl Op<Ctx> for Service {
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![
             Action::new(format!("служба {} ({}): {}", llama::SERVICE, if cfg!(windows) { "nssm" } else { "systemd" }, ctx.cfg.model.file)),
-            Action::new(format!("три слота, общий кэш, окно подбирает сервер (не ниже {} на слот)", ctx.cfg.model.fit_ctx)),
+            // Число слотов настраивается, а строка говорила «три» всегда:
+            // при slots = 1 установщик обещал заказчику то, чего не делает.
+            Action::new(format!(
+                "{}, общий кэш, окно подбирает сервер (не ниже {} на слот)",
+                common::word::count(ctx.cfg.model.slots as u64, "слот", "слота", "слотов"),
+                ctx.cfg.model.fit_ctx
+            )),
             memory_action(ctx),
         ]
     }
@@ -428,9 +437,10 @@ impl Op<Ctx> for Container {
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         vec![
             Action::new(format!(
-                "{} run … {} (три слота, общий кэш, окно не ниже {} на слот)",
+                "{} run … {} ({}, общий кэш, окно не ниже {} на слот)",
                 ctx.engine(),
                 ctx.cfg.llama_image(),
+                common::word::count(ctx.cfg.model.slots as u64, "слот", "слота", "слотов"),
                 ctx.cfg.model.fit_ctx
             )),
             memory_action(ctx),
@@ -532,11 +542,14 @@ impl Op<Ctx> for Answers {
             let sessions = p.slots.max(1) * llama::WARM_PER_SLOT;
             let warm = llama::warm_sessions_mb(kv, per_agent, sessions);
             ctx.ok(format!(
-                "KV-кэш {mb} МиБ на {} токенов всех слотов — {kv} байт на токен; карта держит {fits} токенов на слот, {sessions} тёплых сеансов по {} — {warm} МиБ оперативной памяти и подкачки",
-                whole, per_agent
+                "KV-кэш {mb} МиБ на {} токенов всех слотов — {kv} байт на токен; карта держит {fits} токенов на слот, {} по {} — {warm} МиБ оперативной памяти и подкачки",
+                whole,
+                common::word::count(sessions as u64, "тёплый сеанс", "тёплых сеанса", "тёплых сеансов"),
+                per_agent
             ));
         } else {
-            ctx.warn("размер KV-кэша не прочитан из журнала сервера: проверки окна по видеопамяти и подкачке будут пропущены");
+            // Прошедшее время: проверки уже пропущены, а не «будут».
+            ctx.warn("размер KV-кэша в журнале сервера не нашёлся: проверки окна по видеопамяти и подкачке пропущены");
         }
         let prefill = llama::measure_prefill(&url, &token);
         match prefill {

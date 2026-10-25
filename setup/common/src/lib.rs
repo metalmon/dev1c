@@ -15,6 +15,7 @@ pub mod kit;
 pub mod op;
 pub mod run;
 pub mod toml_render;
+pub mod word;
 
 use std::sync::Arc;
 

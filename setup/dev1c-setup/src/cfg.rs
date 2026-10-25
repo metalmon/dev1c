@@ -472,19 +472,22 @@ mod tests {
         c.model.agents = 1;
         c.model.fit_ctx = 1000;
         assert!(c.validate().unwrap_err().to_string().contains("fit_ctx"));
-        // 16384 раньше проходило, а теперь нет: на ответ при таком окне не
-        // остаётся ничего. Пусть отказывает конфиг, а не замер на поднятом
+        // 24576 раньше проходило, а теперь нет: в такое окно не влезает даже
+        // старт агента (32 000 токенов правил, скиллов и схем инструментов —
+        // см. MIN_BUDGET). Пусть отказывает конфиг, а не замер на поднятом
         // сервере. Пол — вход плюс ответ, запаса Zed в нём больше нет.
-        c.model.fit_ctx = 16384;
-        let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("24576"), "{e}");
         c.model.fit_ctx = 24576;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("57344"), "{e}");
+        c.model.fit_ctx = 57344;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
         // Деление на агентов учитывается: то же окно на трёх агентов не годится.
         c.model.agents = 3;
         let e = c.validate().unwrap_err().to_string();
-        assert!(e.contains("73728"), "{e}");
-        c.model.fit_ctx = 73728;
+        assert!(e.contains("172032"), "{e}");
+        // Три агента на одном слоте требуют трёх стартов и трёх рабочих
+        // мест в окне — вот столько это и стоит.
+        c.model.fit_ctx = 172_032;
         assert!(c.validate().is_ok(), "{:?}", c.validate());
     }
 

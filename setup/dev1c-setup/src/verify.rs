@@ -436,13 +436,13 @@ mod tests {
     fn the_agent_window_must_hold_the_input_and_the_answer() {
         // Стенд: слот 250k. На одного агента хватает с запасом.
         assert!(numbers_fact(250_000, 1).ok);
-        // И на трёх: 83 333 больше 24 576.
+        // И на трёх: 83 333 больше 57 344.
         assert!(numbers_fact(250_000, 3).ok);
         // А вот слот, которого не хватает, обязан провалиться и назвать оба
         // числа: что вышло и что нужно.
         let c = numbers_fact(49_152, 3);
         assert!(!c.ok, "{c:?}");
-        assert!(c.detail.contains("16384") && c.detail.contains("24576"), "{c:?}");
+        assert!(c.detail.contains("16384") && c.detail.contains("57344"), "{c:?}");
     }
 
     #[test]

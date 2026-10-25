@@ -215,9 +215,6 @@ pub struct Ui {
     pub log: Vec<Line>,
     pub unread: usize,
     pub tab: Tab,
-    /// Сколько фактов провалила последняя проверка — бейдж на «Журнале».
-    /// Сами факты живут строками в журнале (`check_lines`), списка их нет.
-    pub failed_checks: usize,
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
     /// `None` — ещё не спрашивали.
     pub project: Option<ProjectView>,
@@ -404,7 +401,10 @@ pub enum Dot {
 /// вся перестройка (задача 5). Пересчитывается по событиям, что могли
 /// сдвинуть почву (включение MCP, «Сохранить», конец операции), и по такту
 /// (задача 6, `needs_full_pass`) — не только по ним одним, как было раньше.
-#[derive(Clone, Debug)]
+/// `PartialEq` — ради одного вопроса: сменился ли вердикт (`verdict_line`).
+/// Сравнивается он целиком, вместе с фактом-причиной: сменившаяся причина —
+/// такая же новость, как сменившееся состояние.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
     /// Обслуживание выключено — набор не считается вовсе (спека: «выключено
     /// — ничего не считаем»), и показывать нечего.
@@ -1616,7 +1616,7 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
     // факты, которые уже оплачены походом к базе, не за что — следующий
     // расчёт их только подтвердит.
     let again = std::mem::take(&mut ui.facts_again);
-    let was = warn_reason(&ui.verdict);
+    let was = ui.verdict.clone();
     if serving(ui) {
         ui.facts = facts;
     } else {
@@ -1626,15 +1626,13 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
     // Набор стал известен прямо сейчас — отсюда и час, который подвал
     // называет рядом с причиной.
     ui.facts_at = Some(clock());
-    // Причина жёлтого вердикта — строкой в журнал (спека называет три
-    // канала: подсказка, подвал и журнал; журнал молчал — находка S3).
-    // Только на смене причины: вердикт пересчитывается по каждому
-    // событию, и повторять одну и ту же строку значит засыпать журнал.
-    let now_reason = warn_reason(&ui.verdict);
-    if let Some(why) = &now_reason {
-        if Some(why) != was.as_ref() {
-            note_line(ui, Line { kind: Kind::Warn, text: why.clone() });
-        }
+    // Журнал — только на смене вердикта (решение 6 спеки): вердикт
+    // пересчитывается по каждому поводу и по такту, и повторять одну и ту же
+    // строку значит засыпать журнал. Зелёное тоже новость: прежде говорилось
+    // только о жёлтом, и человек, починивший проблему, не читал об этом
+    // ничего.
+    if let Some(line) = verdict_line(&was, &ui.verdict) {
+        note_line(ui, line);
     }
     // Значок считается по вердикту (`tray_state_now` → `panel::card`): без
     // этой строки карточка желтела, а значок оставался прежним — зелёным или
@@ -1657,6 +1655,50 @@ fn warn_reason(verdict: &Verdict) -> Option<String> {
         Verdict::Busy(c) => Some(format!("занято: {}", readiness_reason(c))),
         _ => None,
     }
+}
+
+/// Что сказать в журнал на пришедшем наборе (решение 6 спеки: «обычный расчёт
+/// молчит — строка идёт только когда вердикт СМЕНИЛСЯ»). Расчёт идёт по
+/// каждому поводу и по такту; говорить на каждом значило бы засыпать журнал
+/// одной и той же строкой, а читать его человек перестанет.
+///
+/// Молчим в трёх случаях, и каждый по своей причине:
+///
+/// * **«Проверяю» — не новость.** Это отсутствие ответа, а не ответ, и
+///   показывать его человеку нельзя (спека, цель 2).
+/// * **«Выключено» человек сделал сам** — переключателем, и строка о нём уже
+///   есть; второй раз пересказывать его же щелчок незачем.
+/// * **то же самое** — вердикт не сменился.
+///
+/// Слова жёлтых вердиктов берёт `warn_reason` — те же, что подвал и подсказка
+/// значка: один факт человек читает одинаково, где бы ни прочёл.
+pub fn verdict_line(was: &Verdict, now: &Verdict) -> Option<Line> {
+    if matches!(now, Verdict::Checking | Verdict::Off) || was == now {
+        return None;
+    }
+    // Осталось три: `Ready` (у него `warn_reason` молчит — сказать про него
+    // нечего, кроме того, что всё сошлось) и два жёлтых.
+    Some(match warn_reason(now) {
+        Some(text) => Line { kind: Kind::Warn, text },
+        None => Line { kind: Kind::Ok, text: VERDICT_READY.into() },
+    })
+}
+
+/// Строка журнала о зелёном вердикте. «Всё готово» — а не «готово»: рядом в
+/// журнале стоит «Готово за 2 мин» от конца операции, и два разных события
+/// одним словом читались бы как одно.
+pub const VERDICT_READY: &str = "всё готово: агент дойдёт до базы";
+
+/// Сколько в наборе плохих фактов — бейдж «Проблем: N» на вкладке «Журнал» и
+/// итог в подвале. Считается ТОЛЬКО исход «плохо» (решение владельца 25.10):
+/// занято — не провал ни в окне, ни в отчёте, человек, работающий в базе,
+/// получает 18 из 18 и строку «занято».
+///
+/// Бейдж берёт живой набор (`Ui::facts`), а не снимок последней проверки:
+/// снимок и был тем расхождением, ради которого всё затевалось — зелёная
+/// карточка при «Проблем: 2» рядом.
+pub fn problem_count(facts: &[Check]) -> usize {
+    facts.iter().filter(|c| c.outcome() == check::Outcome::Bad).count()
 }
 
 /// Перезапустить сеанс после удачной записи параметров (только туннельный
@@ -2431,11 +2473,10 @@ fn handle(ev: Ev, cx: &mut App) {
             if loud {
                 // Громкий показ — то, что раньше делал только `Ev::Checks`:
                 // отчёт на диске уже лежит (его написал `spawn_full_pass`),
-                // здесь — журнал, подвал и перечитывание операций/проекта.
+                // здесь — журнал, подвал и перечитывание проекта.
                 let ui = cx.global_mut::<Ui>();
-                let failed = ui.facts.iter().filter(|c| !c.ok).count();
+                let failed = problem_count(&ui.facts);
                 let lines = check_lines(&ui.facts);
-                ui.failed_checks = failed;
                 for line in lines {
                     note_line(ui, line);
                 }
@@ -2606,7 +2647,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
-            failed_checks: 0,
             project: None,
             progress: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2738,7 +2778,6 @@ impl Ui {
             log: Vec::new(),
             unread: 0,
             tab: Tab::default(),
-            failed_checks: 0,
             project: None,
             progress: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2768,10 +2807,10 @@ mod tests {
         exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
         start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
-        publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
-        stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line,
+        problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
+        stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
-        Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
+        Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
@@ -3384,6 +3423,78 @@ mod tests {
         // И журнал про занятость говорит — своими словами, не «не всё готово».
         let line = warn_reason(&ui.verdict).expect("журналу есть что сказать");
         assert!(line.starts_with("занято:"), "{line}");
+    }
+
+    /// Задача 8, решение 6 спеки: обычный расчёт молчит. Строка в журнал идёт
+    /// только на СМЕНЕ вердикта, и «Проверяю» новостью не бывает — это
+    /// отсутствие ответа, а не ответ.
+    #[test]
+    fn the_journal_speaks_only_when_the_verdict_changes() {
+        let bad = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
+        let busy = Verdict::Busy(Check::busy("расширение в базе", "сеансов больше не осталось", "закройте «Предприятие»"));
+        // То же самое — молчим, сколько бы расчётов ни пришло.
+        assert!(verdict_line(&Verdict::Ready, &Verdict::Ready).is_none());
+        assert!(verdict_line(&bad, &bad).is_none());
+        // «Проверяю» и «выключено» — не новость ни после чего.
+        assert!(verdict_line(&bad, &Verdict::Checking).is_none());
+        assert!(verdict_line(&Verdict::Ready, &Verdict::Off).is_none());
+        // Смена — строка, и словами самого факта.
+        let line = verdict_line(&Verdict::Ready, &bad).expect("смена вердикта — строка");
+        assert_eq!(line.kind, Kind::Warn);
+        assert!(line.text.contains("проект") && line.text.contains("1c-connect install"), "{line:?}");
+        // Жёлтое жёлтому не равно: «занято» говорит своими словами.
+        let line = verdict_line(&bad, &busy).expect("с поломки на занятость — новость");
+        assert!(line.text.starts_with("занято:"), "{line:?}");
+        // Зелёное — тоже новость: починивший проблему человек читает об этом.
+        let line = verdict_line(&bad, &Verdict::Ready).expect("починилось — новость");
+        assert_eq!((line.kind, line.text.as_str()), (Kind::Ok, VERDICT_READY));
+        // И сменившаяся ПРИЧИНА при том же состоянии — тоже смена.
+        let other = Verdict::NotReady(Check::fail("Gitea", "не отвечает", "dev1c-setup check"));
+        assert!(verdict_line(&bad, &other).is_some());
+
+        // Проводка: два одинаковых набора подряд — одна строка, не две.
+        // `mode = "local"` обязателен, иначе `serving` ложно (`Ui::for_test`
+        // туннельный), набор не применится и тест остался бы зелёным на
+        // сломанном коде.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(serving(&ui), "иначе тест проверяет не то");
+        let fact = || vec![Check::fail("проект", "не разложен", "1c-connect install")];
+        let gen = ui.facts_gen;
+        let before = ui.log.len();
+        apply_facts(&mut ui, gen, fact());
+        assert_eq!(ui.log.len(), before + 1, "о смене вердикта журнал не сказал");
+        apply_facts(&mut ui, gen, fact());
+        assert_eq!(ui.log.len(), before + 1, "тот же вердикт сказан дважды — журнал засыпан");
+    }
+
+    /// Задача 8: бейдж «Проблем: N» считает плохие факты ЖИВОГО набора.
+    /// Занято — не провал ни в окне, ни в отчёте (решение владельца 25.10):
+    /// человек, работающий в базе, получает 18 из 18 и строку «занято».
+    #[test]
+    fn the_badge_counts_only_bad_facts() {
+        let facts = vec![
+            Check::pass("база", "C:\\Bases\\Buh"),
+            Check::note("комплект на носителе", "FAT32"),
+            Check::busy("в базе открыт сеанс", "сеансов больше не осталось", "закройте «Предприятие»"),
+            Check::fail("проект", "не разложен", "1c-connect install"),
+        ];
+        assert_eq!(problem_count(&facts), 1);
+        // Пустой набор — не «ноль проблем доказано», но и показывать нечего:
+        // бейджа нет, а состояние говорит карточка («Проверяю…»).
+        assert_eq!(problem_count(&[]), 0);
+        // Набор живой: применился новый — изменилось и число, без всякого
+        // нажатия «Проверить».
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(serving(&ui), "иначе набор не применится и тест проверяет не то");
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, facts);
+        assert_eq!(problem_count(&ui.facts), 1);
+        apply_facts(&mut ui, gen, vec![Check::pass("проект", "в порядке")]);
+        assert_eq!(problem_count(&ui.facts), 0, "бейдж держится за снимок, а не за живой набор");
     }
 
     /// Minor 10 ревью круга 2: пока набора нет, значок жёлтый (`Dot::Busy` из

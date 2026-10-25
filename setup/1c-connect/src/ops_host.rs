@@ -1371,9 +1371,12 @@ mod tests {
         }
     }
 
-    /// «Расширения нет» рождается только из 404 — не из любого отказа.
+    /// 404 — и только он — значит «расширения в базе нет». Что другие
+    /// отказы сюда не попадают, держат соседние тесты: 401/403 —
+    /// `a_401_or_403_is_denied_not_unreachable`, мёртвый адрес —
+    /// `gitea_probe`/`extension_reach` по закрытому порту.
     #[test]
-    fn absent_comes_only_from_a_404() {
+    fn a_404_means_the_extension_is_absent() {
         let url = respond_once("404 Not Found");
         let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(5));
         assert!(matches!(reach, Reach::Absent), "{reach:?}");

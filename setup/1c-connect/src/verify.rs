@@ -270,7 +270,7 @@ pub fn open_session_fact(sessions: usize) -> Check {
 /// быть открыто вовсе. Решение известно ровно здесь, где различаются случаи:
 /// своя операция — ждать, открытый сеанс — закрыть. Факты берут подсказку
 /// отсюда и своих литералов не держат.
-pub fn busy_reason(sessions: usize, doing: &str) -> Option<(String, &'static str)> {
+fn busy_reason(sessions: usize, doing: &str) -> Option<(String, &'static str)> {
     if !doing.is_empty() {
         return Some((format!("идёт {doing}"), "дождитесь конца операции"));
     }
@@ -509,7 +509,7 @@ const PUBLICATION_HINT: &str = "1c-connect install, затем публикац�
 /// функция не держит свой литерал подсказки, иначе при занятости от нашей же
 /// операции он советовал бы закрыть сеанс, которого может не быть открыто
 /// вовсе.
-pub fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str, &str)>) -> Check {
+fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str, &str)>) -> Check {
     if responds {
         return Check::pass(PUBLICATION, format!("{base_url}/version отвечает"));
     }
@@ -536,7 +536,7 @@ pub fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&
 /// (Important 6): свой литерал подсказки («закройте сеанс…») раньше
 /// держался здесь и советовал закрыть то, чего может не быть открыто вовсе,
 /// пока занятость от нашей же долгой операции.
-pub fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Check {
+fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Check {
     if let Some((reason, hint)) = busy {
         return Check::busy(EXTENSION, format!("не спрашивали: на машине {reason}"), hint);
     }
@@ -553,25 +553,59 @@ pub fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Chec
     }
 }
 
+/// Отвечает ли публикация, судя по исходу пробы расширения. Отдельной
+/// функцией, а не строкой в `gather` (находка повторного ревью): тест
+/// пересчитывал это условие у себя — копией той самой строки, которую и
+/// должен был проверить, и остался бы зелёным, сломай её кто-нибудь в
+/// `gather`.
+///
+/// Отвечает всё, что пришло ответом: версия, честное «расширения нет» (404) и
+/// отказ в доступе (401/403 — база ответила, просто не пустила). Не отвечает
+/// ровно `Unreachable` — сеть, таймаут, до базы не достучались вовсе.
+fn responds(reach: &Reach) -> bool {
+    !matches!(reach, Reach::Unreachable(_))
+}
+
+/// Чем кончилось сравнение дескриптора публикации (`default.vrd`) с тем, что
+/// коннектор написал бы сейчас. Четыре исхода, а не `Option<bool>`: «не наш
+/// дескриптор» и «пути к публикации нет» — разные обстоятельства, и человеку
+/// их нельзя подавать одной строкой «либо то, либо это» (правило «молчать,
+/// когда сказать нечего»: сказать можно ровно то, что знаем). Они же
+/// различимы тестом, а `None` на оба случая — нет: тест ветки `"webserver"`
+/// проходил и после её удаления, потому что на машине без платформы `None`
+/// давал второй случай (находка повторного ревью).
+#[derive(Debug)]
+enum Descriptor {
+    Matches,
+    Differs,
+    /// Публикацию держит веб-сервер (`publication = "webserver"`):
+    /// `default.vrd` пишет человек, и судить чужой файл нечестно — тем более
+    /// советовать `install`, который его перепишет.
+    NotOurs,
+    /// Пути к публикации нет (`publication::Paths::of` → `Err`: платформа не
+    /// найдена, нет `bin/httpd.exe`). Причину несём с собой, но провалом не
+    /// объявляем: платформа — свой факт, и дублировать её красным здесь
+    /// незачем.
+    NoPath(String),
+}
+
 /// Дескриптор публикации (`default.vrd`) совпадает с тем, что коннектор
 /// написал бы сейчас (`publication::descriptor_matches`) — если пароль базы в
 /// настройках сменили, а публикацию не обновили, старый дескриптор молча
 /// пустит по старому паролю или не пустит вовсе. Чистая обёртка: сравнение
 /// уже посчитано вызывающим.
-pub fn descriptor_fact(matches: Option<bool>) -> Check {
-    match matches {
-        Some(true) => Check::pass(DESCRIPTOR, "совпадает с текущим паролем базы"),
-        Some(false) => Check::fail(
+fn descriptor_fact(d: Descriptor) -> Check {
+    match d {
+        Descriptor::Matches => Check::pass(DESCRIPTOR, "совпадает с текущим паролем базы"),
+        Descriptor::Differs => Check::fail(
             DESCRIPTOR,
             "дескриптор публикации разошёлся с текущим паролем базы",
             "1c-connect install — перепишет default.vrd текущим паролем",
         ),
-        // Сравнивать было не с чем — ни пройденный, ни проваленный исход
-        // (`Check::note`): веб-сервер держит публикацию сам (дескриптор
-        // пишет человек, не коннектор), либо платформа ещё не найдена и путь
-        // к публикации неизвестен. Один текст на оба случая, и оба он не
-        // искажает.
-        None => Check::note(DESCRIPTOR, "сравнивать не с чем — либо публикацию держит веб-сервер, либо путь к ней ещё не найден"),
+        // Ни пройденный, ни проваленный исход (`Check::note`): сравнивать
+        // было не с чем, и говорим ровно почему, а не «либо, либо».
+        Descriptor::NotOurs => Check::note(DESCRIPTOR, "публикацию держит веб-сервер — default.vrd пишет не коннектор"),
+        Descriptor::NoPath(why) => Check::note(DESCRIPTOR, format!("не с чем сравнивать: {why}")),
     }
 }
 
@@ -723,20 +757,21 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
 /// же базы отдельным потоком от публикации и расширения незачем, а порядок
 /// внутри группы и так строгий.
 ///
-/// `None` — сравнивать было не с чем, и это не провал: в режиме `"webserver"`
-/// `default.vrd` пишет человек, а не коннектор, и судить чужой файл нечестно;
-/// а без найденной платформы (`Paths::of` → `Err`, нет `bin/httpd`) и пути к
-/// публикации не найти. Раньше оба случая тихо отвечали `false` — и на
-/// штатной ручной публикации факт DESCRIPTOR проваливался, вердикт шёл за ним
-/// (`first_fail`), а совет `1c-connect install` переписал бы чужой дескриптор
-/// (находка повторного ревью, Critical 1).
-fn base_descriptor_matches(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Option<bool> {
+/// `NotOurs` и `NoPath` — сравнивать было не с чем, и это не провал: в режиме
+/// `"webserver"` `default.vrd` пишет человек, а не коннектор, и судить чужой
+/// файл нечестно; а без найденной платформы (`Paths::of` → `Err`, нет
+/// `bin/httpd`) и пути к публикации не найти. Раньше оба случая тихо отвечали
+/// «не совпал» — и на штатной ручной публикации факт DESCRIPTOR проваливался,
+/// вердикт шёл за ним (`first_fail`), а совет `1c-connect install` переписал бы
+/// чужой дескриптор (находка повторного ревью, Critical 1).
+fn base_descriptor(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Descriptor {
     if cfg.host.publication == "webserver" {
-        return None;
+        return Descriptor::NotOurs;
     }
     match crate::publication::Paths::of(cfg, kit) {
-        Ok(p) => Some(crate::publication::descriptor_matches(&p.pub_dir, cfg)),
-        Err(_) => None,
+        Ok(p) if crate::publication::descriptor_matches(&p.pub_dir, cfg) => Descriptor::Matches,
+        Ok(_) => Descriptor::Differs,
+        Err(why) => Descriptor::NoPath(why),
     }
 }
 
@@ -923,16 +958,15 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
                 return (
                     publication_responds_fact(&base_url, false, Some(pair)),
                     extension_fact(None, Some(pair)),
-                    descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)),
+                    descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
                 );
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             let reach = crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left);
-            let responds = !matches!(reach, Reach::Unreachable(_));
             (
-                publication_responds_fact(&base_url, responds, None),
+                publication_responds_fact(&base_url, responds(&reach), None),
                 extension_fact(Some(&reach), None),
-                descriptor_fact(base_descriptor_matches(&ctx.cfg, &ctx.kit)),
+                descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
             )
         },
         || match &gitea_url {
@@ -1024,7 +1058,7 @@ mod tests {
             web_fact(1818, false, false),
             publication_responds_fact("http://x", false, None),
             extension_fact(Some(&Reach::Absent), None),
-            descriptor_fact(Some(false)),
+            descriptor_fact(Descriptor::Differs),
             gitea_address_fact(),
             gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
             tunnel_fact(None),
@@ -1204,6 +1238,11 @@ mod tests {
         vec![publication, gitea, web]
     }
 
+    /// Держит `parallel_expensive` — механику, а не `gather` целиком: довести
+    /// проверку до настоящего сбора можно только настоящими сетевыми
+    /// повисаниями и минутой стенного времени, и цена там выше пользы. Что
+    /// именно этой механикой пользуется `gather`, держит ревью, не тест
+    /// (ruling управляющего, повторное ревью задач 3+4).
     #[test]
     fn a_hanging_group_does_not_eat_the_others() {
         // Группы идут параллельно, поэтому повисшая не отнимает срока у соседей:
@@ -1441,8 +1480,8 @@ mod tests {
         assert_eq!(extension_fact(Some(&Reach::Version("0.4.8".into())), None).outcome(), Outcome::Good);
         // Публикация и расширение — два разных факта, и путать их нельзя.
         assert_eq!(publication_responds_fact("http://x", false, None).outcome(), Outcome::Bad);
-        assert_eq!(descriptor_fact(Some(false)).outcome(), Outcome::Bad);
-        assert_eq!(descriptor_fact(Some(true)).outcome(), Outcome::Good);
+        assert_eq!(descriptor_fact(Descriptor::Differs).outcome(), Outcome::Bad);
+        assert_eq!(descriptor_fact(Descriptor::Matches).outcome(), Outcome::Good);
     }
 
     /// Critical 1 (повторное ревью): дескриптор не судится там, где
@@ -1450,16 +1489,26 @@ mod tests {
     /// коннектор; факт обязан остаться сведением и не попадать в
     /// `first_fail`, иначе вердикт шёл бы за чужим файлом и совет
     /// `1c-connect install` переписал бы его.
+    ///
+    /// Исход назван точно — `NotOurs`, а не «нечего сравнивать»: пока оба
+    /// случая давали один `None`, тест проходил и после удаления самой ветки
+    /// `"webserver"` (на машине без платформы `Paths::of` и так отвечает
+    /// ошибкой). Теперь ветку держит именно он.
     #[test]
     fn a_webserver_publication_leaves_the_descriptor_unjudged() {
         let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-webserver-kit-{}", std::process::id())));
         let mut cfg = crate::cfg::Cfg::default();
         cfg.host.publication = "webserver".into();
-        assert_eq!(base_descriptor_matches(&cfg, &kit), None);
+        assert!(matches!(base_descriptor(&cfg, &kit), Descriptor::NotOurs), "{:?}", base_descriptor(&cfg, &kit));
+        // Без режима веб-сервера тот же каталог даёт другой исход — значит
+        // ветку опознал режим, а не отсутствие платформы.
+        cfg.host.publication = "auto".into();
+        assert!(matches!(base_descriptor(&cfg, &kit), Descriptor::NoPath(_)), "{:?}", base_descriptor(&cfg, &kit));
 
-        let d = descriptor_fact(None);
+        let d = descriptor_fact(Descriptor::NotOurs);
         assert!(d.ok && d.info, "{d:?}");
         assert!(!d.hint.contains("install"), "{d:?}");
+        assert!(d.detail.contains("веб-сервер"), "{d:?}");
 
         let mut ctx = test_ctx("local");
         ctx.cfg.host.publication = "webserver".into();
@@ -1478,10 +1527,13 @@ mod tests {
     #[test]
     fn a_denied_base_passes_publication_and_fails_extension_with_a_password_hint() {
         let reach = Reach::Denied("http://x/version отказал: 401 Unauthorized".into());
-        let responds = !matches!(reach, Reach::Unreachable(_));
-        assert!(responds, "{reach:?}");
+        // Условие берём у `responds` — той самой функции, которой пользуется
+        // `gather`. Пересчитать его тут значило бы проверять свою же копию.
+        assert!(responds(&reach), "{reach:?}");
+        assert!(!responds(&Reach::Unreachable("нет сети".into())));
+        assert!(responds(&Reach::Absent) && responds(&Reach::Version("0.4.8".into())));
 
-        let publication = publication_responds_fact("http://x", responds, None);
+        let publication = publication_responds_fact("http://x", responds(&reach), None);
         assert!(publication.ok && !publication.info, "{publication:?}");
 
         let extension = extension_fact(Some(&reach), None);

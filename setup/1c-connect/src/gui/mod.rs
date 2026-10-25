@@ -1369,19 +1369,38 @@ fn serving(ui: &Ui) -> bool {
 pub fn run_readiness(ui: &mut Ui) {
     // Замок — по тем же событиям, что и набор (почва для них одна), но без
     // потока: он считается по диску и отвечает сразу, а переключатель обязан
-    // слушаться его уже на ближайшей отрисовке.
+    // слушаться его уже на ближайшей отрисовке. На такт этот вызов НЕ
+    // переезжает — см. `start_full_pass`.
     refresh_gate(ui);
-    // Выключено — считать нечего (спека: «при выключенном обслуживании
-    // горячие факты цвет не меняют, и вердикт в это время не считается»).
-    // Карточка его и не покажет, а набор стоит до минуты, пробы инструментов
-    // и поднятого на Linux виртуального экрана — всё ради ответа, который
-    // некому показать (находка S9). Включат — посчитается само: включение и
-    // есть одно из событий пересчёта.
+    start_full_pass(ui);
+}
+
+/// Тот же расчёт, но без холодного замка — путь такта (Critical 3 ревью
+/// задач 5+6; спека, «Решения, принятые мной», п. 5: «Холодный замок на
+/// секундный такт не переезжает»).
+///
+/// У замка есть побочное действие: защёлкнувшись, он гасит обслуживание и
+/// рвёт сеанс (`refresh_gate` → `douse_serving`). На такте он читает диск —
+/// `tools_state`, скан платформ, `exists()` по каталогу базы, — и уснувшая
+/// флешка с комплектом или отвалившаяся сетевая шара выключали коннектор под
+/// человеком, который ничего не делал. Замок остаётся на своих прежних
+/// событиях (включение, «Сохранить», конец операции, показ окна).
+///
+/// Выключено — считать нечего (спека: «при выключенном обслуживании не
+/// считается НИЧЕГО»). Карточка его и не покажет, а набор стоит до минуты,
+/// пробы инструментов и поднятого на Linux виртуального экрана — всё ради
+/// ответа, который некому показать (находка S9). Включат — посчитается само:
+/// включение и есть одно из событий пересчёта.
+///
+/// `true` — расчёт правда начался (а не был только помечен повтором): такт
+/// по этому решает, можно ли запомнить прочитанный дешёвый набор.
+fn start_full_pass(ui: &mut Ui) -> bool {
     if !serving(ui) {
-        return;
+        return false;
     }
-    let Some(gen) = start_facts(ui, Instant::now()) else { return };
+    let Some(gen) = start_facts(ui, Instant::now()) else { return false };
     spawn_full_pass(ui, gen, false);
+    true
 }
 
 /// Поток полного расчёта: один набор, один срок (`verify::SET_DEADLINE`) —
@@ -1509,9 +1528,12 @@ fn request_check(ui: &mut Ui, now: Instant) -> Option<u64> {
     start_facts(ui, now)
 }
 
-/// Ответ потока расчёта; `pending` снимается всегда — ответ пришёл, поток
-/// кончился. Возвращает `true`, когда набор надо посчитать заново — ровно
-/// один раз.
+/// Ответ потока расчёта; защёлка снимается, отметка полного расчёта ставится
+/// и «Проверяю…» гаснет на ЛЮБОМ пришедшем наборе от владельца защёлки
+/// (Critical 1 ревью задач 5+6). Возвращает `true`, когда набор надо
+/// посчитать заново — ровно один раз; сам пришедший набор при этом всё равно
+/// применяется, `again` значит «посчитай ещё раз после», а не «этот ответ не
+/// нужен».
 ///
 /// Чужое поколение значит, что набор моложе этого ответа. Тогда не трогаем
 /// ни вердикт, ни отметку повтора — съесть её здесь означало бы отбросить
@@ -1532,32 +1554,49 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
     if gen == ui.facts_run {
         ui.facts_pending = false;
         ui.facts_since = None;
+        // Отметка полного расчёта — на ЛЮБОЙ пришедший набор от владельца
+        // защёлки, ДО разбора повтора (Critical 1 ревью задач 5+6). Раньше
+        // она ставилась только в ветке «повтора не просили», и получалась
+        // живая блокировка: пока держится `ui.busy`/`ui.progress`, такт идёт
+        // раз в секунду, `since_full` всё ещё больше порога, значит каждый
+        // такт просит повтор — готовый набор выбрасывался, расчёт
+        // перезапускался, `last-check.txt` переписывался по кругу, а
+        // `gather` ходил к базе без паузы. Ровно анти-цель спеки.
+        ui.facts_full_at = Some(Instant::now());
+        // «Проверяю…» снимается тем же ответом: `ui.busy` висел до громкого
+        // показа, а до него дело не доходило — карточка стояла на «Проверяю…»
+        // вечно. Операцию (`Busy::Ext`/`Busy::Project`) ответ расчёта не
+        // трогает: её конец объявляет `Ev::Done`.
+        if ui.busy == Some(Busy::Check) {
+            ui.busy = None;
+        }
     }
     if gen != ui.facts_gen {
         return false;
     }
+    // Пришедший набор ПРИМЕНЯЕТСЯ всегда: `again` значит «посчитай ещё раз
+    // после», а не «этот ответ не нужен» (Critical 1). Выбрасывать свежие
+    // факты, которые уже оплачены походом к базе, не за что — следующий
+    // расчёт их только подтвердит.
     let again = std::mem::take(&mut ui.facts_again);
-    if !again {
-        let was = warn_reason(&ui.verdict);
-        if serving(ui) {
-            ui.facts = facts;
-        } else {
-            ui.facts = Vec::new();
-        }
-        ui.verdict = verdict_of(serving(ui), &ui.facts);
-        // Набор стал известен прямо сейчас — отсюда и час, который подвал
-        // называет рядом с причиной.
-        ui.facts_at = Some(clock());
-        ui.facts_full_at = Some(Instant::now());
-        // Причина жёлтого вердикта — строкой в журнал (спека называет три
-        // канала: подсказка, подвал и журнал; журнал молчал — находка S3).
-        // Только на смене причины: вердикт пересчитывается по каждому
-        // событию, и повторять одну и ту же строку значит засыпать журнал.
-        let now_reason = warn_reason(&ui.verdict);
-        if let Some(why) = &now_reason {
-            if Some(why) != was.as_ref() {
-                note_line(ui, Line { kind: Kind::Warn, text: why.clone() });
-            }
+    let was = warn_reason(&ui.verdict);
+    if serving(ui) {
+        ui.facts = facts;
+    } else {
+        ui.facts = Vec::new();
+    }
+    ui.verdict = verdict_of(serving(ui), &ui.facts);
+    // Набор стал известен прямо сейчас — отсюда и час, который подвал
+    // называет рядом с причиной.
+    ui.facts_at = Some(clock());
+    // Причина жёлтого вердикта — строкой в журнал (спека называет три
+    // канала: подсказка, подвал и журнал; журнал молчал — находка S3).
+    // Только на смене причины: вердикт пересчитывается по каждому
+    // событию, и повторять одну и ту же строку значит засыпать журнал.
+    let now_reason = warn_reason(&ui.verdict);
+    if let Some(why) = &now_reason {
+        if Some(why) != was.as_ref() {
+            note_line(ui, Line { kind: Kind::Warn, text: why.clone() });
         }
     }
     // Значок считается по вердикту (`tray_state_now` → `panel::card`): без
@@ -2289,7 +2328,11 @@ fn handle(ev: Ev, cx: &mut App) {
         },
         Ev::Ready(gen, facts, loud) => {
             let again = apply_facts(cx.global_mut::<Ui>(), gen, facts);
-            if !again && loud {
+            // Громкий показ — по тому, был ли громким сам расчёт, а не по
+            // `again` (Critical 1): набор применён в любом случае, и отчёт,
+            // который кнопка обещала, уже лежит на диске. Прежде повтор
+            // отменял и показ, и кнопка «Проверить» не договаривала.
+            if loud {
                 // Громкий показ — то, что раньше делал только `Ev::Checks`:
                 // отчёт на диске уже лежит (его написал `spawn_full_pass`),
                 // здесь — журнал, подвал и перечитывание операций/проекта.
@@ -2612,7 +2655,8 @@ mod tests {
     use super::{
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
-        exit_code_for, first_phase, flip_enabled_only, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
+        exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
+        start_full_pass, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
         publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
@@ -2671,14 +2715,94 @@ mod tests {
     /// Ответ, пришедший уже после того, как обслуживание выключили, не
     /// зеленит и не красит карточку своим содержимым: `apply_facts` смотрит
     /// `serving` на момент применения, а не на момент старта расчёта.
+    ///
+    /// `mode = "local"` — обязательно (Important 7 ревью задач 5+6): у
+    /// `Ui::for_test` режим туннельный и `link = State::Off`, поэтому
+    /// `serving()` там ложно независимо от `ui.enabled` — тест оставался
+    /// зелёным и без строки, которую он проверяет. Обратная половина внизу
+    /// это и сторожит: при поднятом флаге тот же набор применяется.
     #[test]
     fn a_set_that_arrives_after_the_switch_went_off_is_dropped() {
+        let fact = || vec![Check::fail("проект", "не разложен", "install")];
         let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
         ui.enabled.store(false, Ordering::Relaxed);
+        assert!(!serving(&ui), "выключено — иначе тест проверяет не то");
         let gen = ui.facts_gen;
-        apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "install")]);
+        apply_facts(&mut ui, gen, fact());
         assert!(matches!(ui.verdict, Verdict::Off), "{:?}", ui.verdict);
         assert!(ui.facts.is_empty());
+
+        // А при поднятом флаге тот же набор доезжает — значит отбросил его
+        // именно выключенный переключатель, а не что-то ещё.
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(serving(&ui));
+        apply_facts(&mut ui, gen, fact());
+        assert!(matches!(ui.verdict, Verdict::NotReady(_)), "{:?}", ui.verdict);
+        assert_eq!(ui.facts.len(), 1);
+    }
+
+    /// Critical 1 ревью задач 5+6 — живая блокировка: «Проверить» зависало
+    /// навсегда. Пока держится `ui.busy`, такт идёт раз в секунду и каждый
+    /// раз просит повтор; прежний код в этом случае выбрасывал готовый
+    /// набор, не ставил отметку полного расчёта и не снимал `ui.busy` — то
+    /// есть карточка стояла на «Проверяю…» вечно, а `gather` ходил к базе
+    /// без паузы.
+    #[test]
+    fn a_set_that_arrives_while_a_repeat_is_pending_is_applied_and_ends_the_chain() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.busy = Some(Busy::Check);
+        let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
+        // Такт при идущем расчёте: второго потока нет, просьба о повторе есть.
+        assert!(start_facts(&mut ui, Instant::now()).is_none());
+        assert!(ui.facts_again);
+
+        let again = apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "install")]);
+        assert!(again, "повтор обещан — он и будет, ровно один");
+        assert!(matches!(ui.verdict, Verdict::NotReady(_)), "готовый набор выброшен: {:?}", ui.verdict);
+        assert!(ui.facts_full_at.is_some(), "отметка полного расчёта не поставлена — такт просил бы повтор вечно");
+        assert_eq!(ui.busy, None, "«Проверяю…» не снято — карточка стоит на нём навсегда");
+
+        // Отметка свежая, и следующий такт на том же дешёвом наборе молчит —
+        // череда расчётов кончилась сама, без отдельного тормоза.
+        let since = Instant::now().saturating_duration_since(ui.facts_full_at.unwrap());
+        assert!(!needs_full_pass(&ui.prev_cheap, &ui.prev_cheap, since, true));
+        // Операцию ответ расчёта не трогает — её конец объявляет `Ev::Done`.
+        ui.busy = Some(Busy::Project);
+        let own = ui.facts_gen;
+        ui.facts_run = own;
+        apply_facts(&mut ui, own, Vec::new());
+        assert_eq!(ui.busy, Some(Busy::Project));
+    }
+
+    /// Critical 3 ревью задач 5+6: холодный замок на такт не переезжает
+    /// (спека, «Решения, принятые мной», п. 5). Защёлкнувшись, он гасит
+    /// обслуживание и рвёт сеанс — на секундном такте уснувшая флешка с
+    /// комплектом выключала коннектор под человеком. В каталоге теста замок
+    /// заперт (ни инструментов, ни платформы), поэтому `refresh_gate` на этом
+    /// пути сразу виден: `ui.gate` стал бы `Some`.
+    #[test]
+    fn the_tick_path_never_asks_the_cold_gate() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        assert!(gate_now(&ui.kit, &ui.cfg).is_some(), "в каталоге теста замок обязан быть заперт");
+        ui.gate = None;
+        // «Уже считается» — тем же приёмом, что `the_verdict_is_not_computed_while_serving_is_off`:
+        // доказательство не должно поднять настоящий поток фактов, а до
+        // расчёта дело дошло или нет — видно по просьбе о повторе.
+        ui.facts_pending = true;
+        ui.facts_since = Some(Instant::now());
+
+        assert!(!start_full_pass(&mut ui), "второго потока нет — защёлка занята");
+        assert!(ui.facts_again, "до расчёта дело не дошло — тест проверяет не то");
+        assert!(ui.gate.is_none(), "такт позвал замок — он может погасить обслуживание под человеком");
+        assert!(ui.enabled.load(Ordering::Relaxed), "и он его погасил");
+
+        // А путь событий (включение, «Сохранить», конец операции) замок
+        // по-прежнему считает — он остался на своих прежних поводах.
+        run_readiness(&mut ui);
+        assert!(ui.gate.is_some(), "замок пропал и с событий тоже");
     }
 
     /// Итог «Проверить» и есть вердикт (спека): полный набор в этот момент

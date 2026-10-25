@@ -187,9 +187,16 @@ seed_from_image() {
     # и сохранённая правка пользователя оказывалась в его доме чужой — удалить
     # или открыть на запись он её не мог. Поймано проверкой test-pi-seed
     # 25.10.2026; дефект был и у настроек Zed, а не только у файлов pi.
+    #
+    # `-P` и `-h` — против подмены между проверкой и использованием: выше
+    # доказано, что ни $dst, ни $dst.bak не ссылки, но дом принадлежит
+    # пользователю, и между той проверкой и этой строкой он может подставить
+    # ссылку. С `-P` копируется сама ссылка, а не то, куда она указывает; с
+    # `-h` владелец меняется у ссылки, а не у цели. На обычном файле — ровно
+    # то же поведение, что без флагов, так что цена нулевая.
     if [ -f "$dst" ]; then
-        cp --remove-destination "$dst" "$dst.bak"
-        chown "$owner_u:$owner_g" "$dst.bak"
+        cp -P --remove-destination "$dst" "$dst.bak"
+        chown -h "$owner_u:$owner_g" "$dst.bak"
     fi
     # install after rm: writing over a path replaces the file itself rather
     # than following whatever it might point at

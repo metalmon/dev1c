@@ -555,8 +555,8 @@ mod tests {
     /// при установке у заказчика.
     #[test]
     fn the_sample_carries_the_model_file_only_when_it_is_given() {
-        let kit = Cfg::example_for("docker", Some("model/GLM-4.7-Flash-Q4_K_M.gguf")).unwrap();
-        assert!(kit.contains("file = \"model/GLM-4.7-Flash-Q4_K_M.gguf\""), "{kit}");
+        let kit = Cfg::example_for("docker", Some("model/GLM-4.7-Flash-UD-Q4_K_XL.gguf")).unwrap();
+        assert!(kit.contains("file = \"model/GLM-4.7-Flash-UD-Q4_K_XL.gguf\""), "{kit}");
         // Не задано — как было: пусто, и установка скажет «модель не выбрана».
         assert!(Cfg::example_for("docker", None).unwrap().contains("file = \"\""));
         // Форма docker ждёт путь В КОМПЛЕКТЕ: полный путь — ошибка сборки.

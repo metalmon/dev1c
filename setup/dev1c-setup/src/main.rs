@@ -93,7 +93,7 @@ enum Cmd {
         #[arg(long)]
         serve: Option<String>,
         /// Файл модели в образце: для docker — путь относительно комплекта
-        /// (model/GLM-4.7-Flash-Q4_K_M.gguf), для host — полный путь. Без
+        /// (model/GLM-4.7-Flash-UD-Q4_K_XL.gguf), для host — полный путь. Без
         /// ключа параметр остаётся пустым.
         #[arg(long, requires = "serve")]
         model: Option<String>,

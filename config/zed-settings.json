@@ -71,9 +71,14 @@
   // таймауту initialize. reference — справочник платформы, проекта не требует.
   // Профиль workspace (--profile workspace -s <корень>) добавляет конфигуратор:
   // он зависит от конкретного проекта.
+  // Поля `source` у серверов здесь нет намеренно. Zed 1.25 его больше не
+  // читает: вид сервера он выводит сам из `command` (свой процесс) или `url`
+  // (по сети). Пока поле лежало в файле, редактор при каждом открытии
+  // настроек говорил, что формат устарел, и предлагал обновить — обновление и
+  // сводилось к удалению этих трёх строк (проверено на стенде 25.10.2026:
+  // ровно три строки, больше ничего).
   "context_servers": {
     "bsl-reference": {
-      "source": "custom",
       "command": "/opt/bsl-analyzer/bsl-analyzer",
       "args": ["mcp", "serve", "--profile", "reference"]
       // BSL_CACHE_DIR не задаём. Порядок у анализатора такой:
@@ -101,13 +106,11 @@
     // 60 с. У mcp-1c собственный предел запроса к 1С 300 с, у vrunner
     // выгрузка ЕРП идёт десятки минут.
     "1c": {
-      "source": "custom",
       "command": "nc",
       "args": ["-N", "localhost", "WORKSTATION_1C_PORT_PLACEHOLDER"],
       "timeout": 300
     },
     "vrunner": {
-      "source": "custom",
       "command": "nc",
       "args": ["-N", "localhost", "WORKSTATION_VRUNNER_PORT_PLACEHOLDER"],
       "timeout": 3600

@@ -801,18 +801,22 @@ pub fn note_file(kit: &Kit, line: &Line) {
 ///
 /// Выбирается по ФАКТУ набора (`verify::EXTENSION`), а не по состоянию
 /// операций (`run::status`, прежний `ui.ops`) — решение 2 спеки: ни одна
-/// поверхность не знает больше набора. Пустой набор значит «ещё не
-/// посчитали»: кнопка тогда «Установить», как и раньше.
+/// поверхность не знает больше набора.
+///
+/// `None` — факта расширения в наборе нет, то есть набора ещё нет вовсе
+/// («Проверяю», первый расчёт после входа). Главной кнопке тогда сказать
+/// нечего: «Установить» на пустом наборе — утверждение о том, чего мы не
+/// знаем (Minor 4 ревью задач 7+8), а вкладка и так показывает «Проверяю…».
+/// В наборе этот факт есть в обоих режимах (`verify::order`), так что его
+/// отсутствие и значит ровно «ещё не посчитали».
 ///
 /// Занятость расширению не приговор: база нам в эту минуту отказала, стоит
 /// расширение или нет — неизвестно, и советовать «Установить» человеку,
 /// который просто работает в базе, нельзя (STATUS 26). Поэтому «Установить»
 /// только у настоящего провала (`Outcome::Bad`).
-pub fn project_primary(facts: &[Check]) -> Which {
-    match facts.iter().find(|c| c.what == verify::EXTENSION) {
-        Some(c) if c.outcome() != check::Outcome::Bad => Which::Export,
-        _ => Which::Install,
-    }
+pub fn project_primary(facts: &[Check]) -> Option<Which> {
+    let c = facts.iter().find(|c| c.what == verify::EXTENSION)?;
+    Some(if c.outcome() == check::Outcome::Bad { Which::Install } else { Which::Export })
 }
 
 /// Факты проверки строками в журнал: отдельного списка на экране больше нет.
@@ -833,7 +837,12 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
             (false, _) => Kind::Fail,
         };
         out.push(Line { kind, text: format!("{}: {}", c.what, c.detail) });
-        if kind == Kind::Fail && !c.hint.is_empty() {
+        // Совет — у ЛЮБОГО факта, которому есть что добавить, а не только у
+        // провалившегося (Minor 2 ревью задач 7+8): у занятого факта
+        // («закройте «Предприятие»») он терялся, и человек читал в журнале
+        // проблему без выхода из неё. И не дважды: `hint_adds` — то же
+        // правило, по которому склеивает `fact_detail`.
+        if hint_adds(c) {
             out.push(Line { kind: Kind::Warn, text: c.hint.clone() });
         }
     }
@@ -885,11 +894,20 @@ pub fn readiness_reason(check: &Check) -> String {
 /// похожих склеивания `detail` с `hint` расходились бы молча, и человек
 /// читал бы один и тот же факт двумя разными способами.
 pub fn fact_detail(check: &Check) -> String {
-    if check.hint.is_empty() || check.detail.contains(check.hint.as_str()) {
-        check.detail.clone()
-    } else {
+    if hint_adds(check) {
         format!("{} — {}", check.detail, check.hint)
+    } else {
+        check.detail.clone()
     }
+}
+
+/// Говорит ли подсказка факта что-то, чего нет в самом `detail`. Одно правило
+/// на оба показа подсказки — строкой вкладки (`fact_detail`, через тире) и
+/// отдельной строкой журнала (`check_lines`, со своим значком): рендеры
+/// разные, а решение «есть ли что добавить» одно. Так у TOOLS-факта («в
+/// комплекте нет … — скопируйте заново») совет не показывается дважды.
+fn hint_adds(check: &Check) -> bool {
+    !check.hint.is_empty() && !check.detail.contains(check.hint.as_str())
 }
 
 /// Файл или каталог средствами системы: на Windows — `explorer`, иначе
@@ -1623,9 +1641,12 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
         ui.facts = Vec::new();
     }
     ui.verdict = verdict_of(serving(ui), &ui.facts);
-    // Набор стал известен прямо сейчас — отсюда и час, который подвал
-    // называет рядом с причиной.
-    ui.facts_at = Some(clock());
+    // Час — это момент, когда набор стал ПОЛНЫМ (решение 6 спеки), поэтому
+    // ставится он только вместе с настоящим набором. Уронённому набору
+    // (выключили обслуживание, пока расчёт шёл) час ни к чему: показывать
+    // «проверено в 15:54» там, где показывать нечего, — врать вдвойне
+    // (Minor 3 ревью задач 7+8).
+    ui.facts_at = (!ui.facts.is_empty()).then(clock);
     // Журнал — только на смене вердикта (решение 6 спеки): вердикт
     // пересчитывается по каждому поводу и по такту, и повторять одну и ту же
     // строку значит засыпать журнал. Зелёное тоже новость: прежде говорилось
@@ -1783,6 +1804,26 @@ fn tray_state_now(ui: &Ui, now: Instant) -> TrayState {
 /// проводку приходится сторожить сверкой чистых функций между собой. Три
 /// таких зелёных теста при сломанном поведении эта работа уже пережила.
 fn sync_tray(ui: &mut Ui, now: Instant) {
+    // «Выключено значит выключено» (спека, не-цель): выключили обслуживание —
+    // набора больше нет. Ронять его надо именно здесь, а не у каждого
+    // выключения по-своему: `apply_facts` — единственное место, где набор
+    // сбрасывался, а при выключенном обслуживании расчёт не идёт вовсе
+    // (`start_full_pass` выходит рано), и прежний набор оставался живым.
+    // Человек видел серую карточку «MCP выключены» рядом с красным бейджем
+    // «Проблем: 2» и вкладку «Проект» со старыми красными точками — ровно тот
+    // класс противоречий, против которого вся перестройка (Important 1 ревью
+    // задач 7+8).
+    //
+    // Воронка выбрана проверенная: через `sync_tray` проходят ВСЕ переходы,
+    // что меняют почву под значком, — и ручное выключение (`set_link`), и
+    // погашенное замком (`douse_serving`). Своей ветки на каждый путь это не
+    // требует, и забыть один из них нельзя.
+    if !serving(ui) {
+        ui.facts = Vec::new();
+        ui.verdict = Verdict::Off;
+        // Час без набора ни к чему: он — момент, когда набор стал полным.
+        ui.facts_at = None;
+    }
     let view = TrayView {
         state: tray_state_now(ui, now),
         on: ui.link.is_on(),
@@ -2804,7 +2845,7 @@ mod tests {
     use super::{
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
-        exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
+        douse_serving, exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
         start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
         problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
@@ -3225,16 +3266,16 @@ mod tests {
     #[test]
     fn the_project_button_installs_until_the_extension_is_up_then_exports() {
         let ext = |c: Check| project_primary(&[Check::pass("база", "есть"), c]);
-        // Набора ещё нет — ставить.
-        assert_eq!(project_primary(&[]), Which::Install);
-        // Факта расширения в наборе нет (режим без него) — тоже ставить.
-        assert_eq!(project_primary(&[Check::pass("база", "есть")]), Which::Install);
-        assert_eq!(ext(Check::fail(verify::EXTENSION, "расширения в базе нет", "install")), Which::Install);
+        // Набора ещё нет — кнопке сказать нечего: «Установить» было бы
+        // утверждением о том, чего мы не знаем (Minor 4).
+        assert_eq!(project_primary(&[]), None);
+        assert_eq!(project_primary(&[Check::pass("база", "есть")]), None, "факта расширения нет — утверждать нечего");
+        assert_eq!(ext(Check::fail(verify::EXTENSION, "расширения в базе нет", "install")), Some(Which::Install));
         // Расширение стоит — главная кнопка про обмен с git.
-        assert_eq!(ext(Check::pass(verify::EXTENSION, "0.4.8")), Which::Export);
+        assert_eq!(ext(Check::pass(verify::EXTENSION, "0.4.8")), Some(Which::Export));
         // Занято — не провал: советовать «Установить» человеку, который
         // просто работает в базе, нельзя (STATUS 26).
-        assert_eq!(ext(Check::busy(verify::EXTENSION, "сеансов больше не осталось", "закройте «Предприятие»")), Which::Export);
+        assert_eq!(ext(Check::busy(verify::EXTENSION, "сеансов больше не осталось", "закройте «Предприятие»")), Some(Which::Export));
     }
 
     #[test]
@@ -3423,6 +3464,102 @@ mod tests {
         // И журнал про занятость говорит — своими словами, не «не всё готово».
         let line = warn_reason(&ui.verdict).expect("журналу есть что сказать");
         assert!(line.starts_with("занято:"), "{line}");
+    }
+
+    /// Important 1 ревью задач 7+8: «выключено значит выключено». Набор
+    /// сбрасывался в одном месте — `apply_facts`, — а при выключенном
+    /// обслуживании расчёт не идёт вовсе, и прежний набор оставался живым:
+    /// серая карточка «MCP выключены» рядом с красным бейджем «Проблем: 1» и
+    /// вкладка «Проект» со старыми красными точками.
+    ///
+    /// Оба пути выключения, и оба кончаются `sync_tray`: ручное (щелчок —
+    /// `flip_enabled_only` + `set_link`, за которым она и стоит) и погашенное
+    /// замком (`douse_serving`).
+    #[test]
+    fn the_switch_going_off_drops_the_set() {
+        let bad = || vec![Check::fail("проект", "не разложен", "1c-connect install")];
+        // Пока обслуживаем — набор на месте: иначе этот тест был бы зелёным и
+        // на безусловном сбросе, то есть на сломанном коде.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(serving(&ui));
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, bad());
+        assert_eq!(ui.facts.len(), 1, "набор не применился — тест проверяет не то");
+        assert_eq!(problem_count(&ui.facts), 1);
+        sync_tray(&mut ui, Instant::now());
+        assert_eq!(problem_count(&ui.facts), 1, "набор уронили при живом обслуживании");
+        assert!(matches!(ui.verdict, Verdict::NotReady(_)), "{:?}", ui.verdict);
+
+        // Путь первый: щелчок по переключателю.
+        assert!(!flip_enabled_only(&mut ui), "щелчок выключил");
+        ui.link = local_display("local", false, ui.link.clone());
+        sync_tray(&mut ui, Instant::now());
+        assert!(!serving(&ui));
+        assert!(ui.facts.is_empty(), "бейдж и вкладка показывают набор выключенного обслуживания");
+        assert_eq!(problem_count(&ui.facts), 0);
+        assert_eq!(ui.verdict, Verdict::Off, "{:?}", ui.verdict);
+        assert!(ui.facts_at.is_none(), "«проверено в 15:54» при пустом наборе");
+
+        // Путь второй: замок защёлкнулся и погасил обслуживание сам.
+        ui.enabled.store(true, Ordering::Relaxed);
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, bad());
+        assert_eq!(ui.facts.len(), 1, "набор не вернулся — второй путь проверять нечем");
+        douse_serving(&mut ui);
+        assert!(!serving(&ui));
+        assert!(ui.facts.is_empty(), "замок погасил обслуживание, а набор остался на экране");
+        assert_eq!(ui.verdict, Verdict::Off, "{:?}", ui.verdict);
+    }
+
+    /// Minor 3 ревью задач 7+8: час «проверено в 15:54» — это момент, когда
+    /// набор стал ПОЛНЫМ. Уронённому набору час ни к чему: показывать его
+    /// там, где показывать нечего, — врать вдвойне.
+    #[test]
+    fn the_hour_belongs_to_a_full_set() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
+        assert!(ui.facts_at.is_some(), "набор полный, а часа нет");
+
+        // Пустой набор при живом обслуживании — часа ему не положено
+        // (`apply_facts`): час ставится только вместе с настоящим набором.
+        assert!(serving(&ui), "иначе час уронило бы выключение, а не эта ветка");
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, Vec::new());
+        assert!(ui.facts_at.is_none(), "час остался от набора, которого нет");
+
+        // И выключение (`sync_tray`) уносит час вместе с набором.
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
+        assert!(ui.facts_at.is_some());
+        ui.enabled.store(false, Ordering::Relaxed);
+        ui.link = local_display("local", false, ui.link.clone());
+        sync_tray(&mut ui, Instant::now());
+        assert!(ui.facts.is_empty());
+        assert!(ui.facts_at.is_none(), "«проверено в 15:54» при выключенном обслуживании");
+    }
+
+    /// Minor 2 ревью задач 7+8: совет в журнале — у любого факта, которому
+    /// есть что добавить, а не только у провалившегося. У занятого факта
+    /// («закройте «Предприятие»») он терялся, и человек читал проблему без
+    /// выхода из неё.
+    #[test]
+    fn the_log_keeps_the_hint_of_a_busy_fact_too() {
+        let lines = check_lines(&[
+            Check::busy("в базе открыт сеанс", "сеансов больше не осталось", "закройте «Предприятие»"),
+            // Совет уже вписан в сам `detail` — вторым разом не повторяем
+            // (то же правило, по которому склеивает `fact_detail`).
+            Check::fail("инструменты комплекта", "в комплекте нет vrunner — скопируйте заново", "скопируйте заново"),
+        ]);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[0], "в базе открыт сеанс: сеансов больше не осталось");
+        assert_eq!((lines[1].kind, texts[1]), (Kind::Warn, "закройте «Предприятие»"));
+        assert_eq!(texts[2], "инструменты комплекта: в комплекте нет vrunner — скопируйте заново");
     }
 
     /// Задача 8, решение 6 спеки: обычный расчёт молчит. Строка в журнал идёт

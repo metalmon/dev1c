@@ -343,6 +343,36 @@ pub fn fact_rows(facts: &[Check]) -> Vec<(Option<Dot>, String, String)> {
     facts.iter().map(|c| (Some(fact_dot(c)), c.what.clone(), gui::fact_detail(c))).collect()
 }
 
+/// Предмет вкладки «Проект»: проект, база, публикация, расширение, дескриптор,
+/// инструменты. По именам-константам `verify`, а не по текстам —
+/// переименованный факт ломает сборку, а не тихо исчезает со вкладки.
+const PROJECT_SUBJECT: [&str; 6] = [
+    crate::verify::PROJECT,
+    crate::verify::BASE,
+    crate::verify::PUBLICATION,
+    crate::verify::EXTENSION,
+    crate::verify::DESCRIPTOR,
+    crate::verify::TOOLS,
+];
+
+/// Что из набора идёт на вкладку «Проект». Два правила, и первое нерушимо:
+///
+/// 1. **все факты с незелёным исходом** — плохие и занятые, независимо от
+///    имени: поверхность не имеет права знать о проблемах меньше набора;
+/// 2. сверх них — только факты по предмету самой вкладки (`PROJECT_SUBJECT`).
+///
+/// Платформа, Gitea, носитель, порты и прочее общее в зелёном виде на вкладку
+/// не идут: их место в полном наборе после «Проверить». Решение владельца
+/// 26.10.2026 на моё же сомнение из отчёта по задачам 7+8: девятнадцать
+/// фактов под вкладкой «Проект» — хуже для человека, а четырнадцать зелёных
+/// строк говорят, когда сказать нечего (STATUS 21–27).
+///
+/// Отбор живёт ЗДЕСЬ, а не в `fact_rows`: та обязана отдавать ровно то, что
+/// ей передали — один набор, одни строки, без своего мнения.
+pub fn project_facts(facts: &[Check]) -> Vec<Check> {
+    facts.iter().filter(|c| c.outcome() != Outcome::Good || PROJECT_SUBJECT.contains(&c.what.as_str())).cloned().collect()
+}
+
 fn fact_dot(c: &Check) -> Dot {
     match c.outcome() {
         Outcome::Bad => Dot::Down,
@@ -1133,7 +1163,7 @@ impl Render for Panel {
             // сверху факты набора, ниже — каталог и состояние ветки.
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
-                let facts = fact_rows(&ui.facts);
+                let facts = fact_rows(&project_facts(&ui.facts));
                 let rows = project_rows(ui.project.as_ref());
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
@@ -1284,9 +1314,15 @@ impl Render for Panel {
             // работы заблокировано всё равно всё.
             gui::Tab::Project => {
                 let which = gui::project_primary(&cx.global::<Ui>().facts);
+                // Набора ещё нет — главной кнопке сказать нечего: «Установить»
+                // на пустом наборе было бы утверждением о том, чего мы не
+                // знаем (Minor 4). Кнопка заперта и говорит то же, что
+                // карточка, а всё четыре действия по-прежнему доступны в «…»:
+                // человек, который знает, чего хочет, не заперт.
                 let (label, hint) = match which {
-                    Which::Export => ("Выгрузить", "Выгрузить из 1С"),
-                    _ => ("Установить", "Установить расширение"),
+                    Some(Which::Export) => ("Выгрузить", "Выгрузить из 1С"),
+                    Some(_) => ("Установить", "Установить расширение"),
+                    None => ("Проверяю…", "Жду набор фактов — что нужнее, пока неизвестно"),
                 };
                 // В меню — всё, кроме того, что на главной кнопке.
                 let rest: Vec<(&'static str, Which)> = [
@@ -1296,7 +1332,7 @@ impl Render for Panel {
                     ("Снять расширение", Which::Uninstall),
                 ]
                 .into_iter()
-                .filter(|(_, w)| *w != which)
+                .filter(|(_, w)| Some(*w) != which)
                 .collect();
                 h_flex()
                     .gap_2()
@@ -1311,9 +1347,13 @@ impl Render for Panel {
                             .primary()
                             .label(label)
                             .tooltip(hint)
-                            .disabled(busy_now)
+                            .disabled(busy_now || which.is_none())
                             .loading(matches!(busy, Some(Busy::Ext) | Some(Busy::Project)))
-                            .on_click(move |_, _, cx| gui::run_op(cx, which)),
+                            .on_click(move |_, _, cx| {
+                                if let Some(w) = which {
+                                    gui::run_op(cx, w);
+                                }
+                            }),
                     )
                     .into_any_element()
             }
@@ -1466,10 +1506,11 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint, shown_fields,
         switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
     };
     use crate::cfg::Host;
+    use crate::verify;
     use crate::gui::{Dot, Kind, Line, ProjectView, Verdict, Running, Which};
     use crate::session::State;
     use common::check::Check;
@@ -1504,6 +1545,41 @@ mod tests {
         assert_eq!(rows[4].2, "не разложен — 1c-connect install");
         // Пройденному факту совет приписывать нечего.
         assert_eq!(rows[0].2, "127.0.0.1:8081/version отвечает");
+    }
+
+    /// Решение владельца 26.10.2026 на сомнение 2 отчёта по задачам 7+8:
+    /// девятнадцать фактов под вкладкой «Проект» — хуже для человека, а
+    /// четырнадцать зелёных строк говорят, когда сказать нечего. Правило:
+    /// все незелёные факты — независимо от имени, и сверх них только предмет
+    /// самой вкладки.
+    #[test]
+    fn the_project_tab_shows_every_problem_but_only_its_own_subject_in_green() {
+        // Имена не по предмету — литералами нарочно: правило не про эти
+        // четыре факта, а про ЛЮБОЕ имя вне `PROJECT_SUBJECT`, и подставлять
+        // сюда константы значило бы проверять совпадение списков, а не само
+        // правило. Имена предмета, наоборот, из `verify`: там это контракт.
+        let (outsider_green, outsider_grey) = ("платформа 1С", "комплект на носителе");
+        let (outsider_bad, outsider_busy) = ("Gitea", "в базе открыт сеанс");
+        let set = vec![
+            Check::pass(outsider_green, "8.3.25.1374"),
+            Check::pass(verify::EXTENSION, "0.4.8"),
+            Check::note(verify::DESCRIPTOR, "публикацию держит веб-сервер"),
+            Check::note(outsider_grey, "FAT32"),
+            Check::fail(outsider_bad, "не отвечает", "dev1c-setup check"),
+            Check::busy(outsider_busy, "сеансов больше не осталось", "закройте «Предприятие»"),
+        ];
+        let shown: Vec<String> = fact_rows(&project_facts(&set)).into_iter().map(|(_, title, _)| title).collect();
+        // Проблемы — все до одной, как бы факт ни звался: поверхность не
+        // имеет права знать о них меньше набора.
+        assert!(shown.iter().any(|t| t == outsider_bad), "красный факт не по предмету потерян: {shown:?}");
+        assert!(shown.iter().any(|t| t == outsider_busy), "занятый факт не по предмету потерян: {shown:?}");
+        // Зелёное и серое — только по предмету вкладки.
+        assert!(shown.iter().any(|t| t == verify::EXTENSION), "{shown:?}");
+        assert!(shown.iter().any(|t| t == verify::DESCRIPTOR), "{shown:?}");
+        assert!(!shown.iter().any(|t| t == outsider_green), "зелёная платформа говорит, когда сказать нечего: {shown:?}");
+        assert!(!shown.iter().any(|t| t == outsider_grey), "серый носитель не предмет «Проекта»: {shown:?}");
+        // Порядок — набора, а не отбора.
+        assert_eq!(shown, vec![verify::EXTENSION, verify::DESCRIPTOR, outsider_bad, outsider_busy]);
     }
 
     /// Правило заказчика дословно: «Переключатель включения должен быть

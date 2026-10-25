@@ -897,7 +897,7 @@ impl Op<Ctx> for ProjectOp {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         use crate::project::Layout;
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &ctx.kit.root);
         match crate::project::layout_state(&p) {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
@@ -907,7 +907,7 @@ impl Op<Ctx> for ProjectOp {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &ctx.kit.root);
         let analyzer = analyzer_lines(&ctx.cfg);
         let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
         let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
@@ -917,8 +917,8 @@ impl Op<Ctx> for ProjectOp {
         if ctx.dry_run {
             return Ok(());
         }
-        let p = crate::project::Project::from_cfg(&ctx.cfg, &state_dir());
-        crate::project::init(&p, &state_dir(), &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
+        let p = crate::project::Project::from_cfg(&ctx.cfg, &ctx.kit.root);
+        crate::project::init(&p, &ctx.kit.root, &analyzer_lines(&ctx.cfg), &|s| ctx.ok(s)).map_err(|e| anyhow::anyhow!("{e}"))
     }
     // uninstall leaves the project alone: it is the person's work.
 }

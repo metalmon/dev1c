@@ -170,39 +170,56 @@ pub(crate) fn module_in(bin: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("рядом с платформой в {} нет модуля веб-сервера 1С ({})", bin.display(), names.join("/")))
 }
 
-/// Пути, зависящие только от каталога состояния коннектора (`tools`) — не от
+/// Пути, зависящие только от каталога состояния коннектора (`state`) — не от
 /// настоящей платформы 1С: вынесены отдельно, чтобы тест считал их с
 /// временным каталогом, а не с настоящим `%LOCALAPPDATA%`/`$HOME`.
-fn paths_under(tools: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths {
+fn paths_under(state: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths {
     Paths {
         root,
-        pub_dir: tools.join("pub"),
-        conf: tools.join("httpd.conf"),
-        pid: tools.join("httpd.pid"),
-        log: tools.join("httpd.log"),
+        pub_dir: state.join("pub"),
+        conf: state.join("httpd.conf"),
+        pid: state.join("httpd.pid"),
+        log: state.join("httpd.log"),
         module,
         port,
     }
 }
 
+/// Две основы публикации, и путать их нельзя: откуда httpd ЗАПУСКАЕТСЯ и куда
+/// публикация ПИШЕТ.
+///
+/// Запускается — из комплекта (`<комплект>/httpd` на Windows, системный
+/// apache2 в образе): инструменты работают с места, в профиль не переносится
+/// ничего (леджер комплекта, пункт 15). Пишет — только в состояние
+/// пользователя, и это не вкусовщина: в `default.vrd` лежит строка
+/// подключения с логином и паролем базы (`vrd` выше, пишется «только
+/// владельцу»). В комплекте ему нельзя по двум причинам сразу — комплект
+/// переезжает на флешке и в общей папке, а в стенде он один на три рабочих
+/// места и только для чтения, так что запись туда либо не удастся, либо
+/// отдаст пароль одного человека всем трём.
+///
+/// Чистая функция ровно затем, чтобы это держал тест: `Paths::of` ниже
+/// проверить нечем — ему нужна настоящая платформа на диске.
+pub(crate) fn bases(kit_root: &Path, state: &Path) -> (PathBuf, PathBuf) {
+    let server = if cfg!(windows) { kit_root.join("httpd") } else { PathBuf::from("/etc/apache2") };
+    (server, state.to_path_buf())
+}
+
 impl Paths {
     /// Пути публикации на этой машине: `ServerRoot` — свой httpd из комплекта
     /// (`<комплект>/httpd`, запускается оттуда, где лежит) на Windows,
-    /// системный apache2 в образе — то, что уже делает стенд.
+    /// системный apache2 в образе — то, что уже делает стенд. Всё, что
+    /// публикация пишет, — в состоянии пользователя; почему именно так,
+    /// сказано у `bases`.
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
-        let tools = kit.root.clone();
-        let root = if cfg!(windows) { tools.join("httpd") } else { PathBuf::from("/etc/apache2") };
+        let (root, state) = bases(&kit.root, &ops_host::state_dir());
         if cfg!(windows) && !root.join("bin").join("httpd.exe").exists() {
-            return Err(format!(
-                "в {} нет httpd/bin/httpd.exe — выполните host.tools (комплект: {})",
-                tools.display(),
-                kit.root.display()
-            ));
+            return Err(format!("в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})", root.display(), kit.root.display()));
         }
         let exe = ops_host::find_1cv8(cfg).ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
         let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
         let module = module_in(bin)?;
-        Ok(paths_under(&tools, root, module, cfg.http_port()))
+        Ok(paths_under(&state, root, module, cfg.http_port()))
     }
 }
 
@@ -799,6 +816,31 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
             assert_eq!(httpd_conf(&sample_paths()).unwrap(), windows_httpd_conf(&sample_paths()));
         } else {
             assert_eq!(httpd_conf(&linux_sample_paths()).unwrap(), linux_httpd_conf(&linux_sample_paths()).unwrap());
+        }
+    }
+
+    /// Пароль базы не уезжает в комплект. `default.vrd` несёт строку
+    /// подключения с `Usr`/`Pwd`, а комплект переезжает на флешке и в общей
+    /// папке, в стенде же он один на три рабочих места и только для чтения.
+    /// Поэтому httpd запускается ИЗ комплекта, а пишет публикация только в
+    /// состояние — ровно это и держит тест. Живой случай: 25.10, уводя
+    /// инструменты в комплект, я увёл туда заодно и дескриптор с паролем.
+    #[test]
+    fn the_descriptor_with_the_password_never_lands_in_the_kit() {
+        let kit = Path::new("K:\\kit");
+        let state = Path::new("S:\\state");
+        let (server, writes) = bases(kit, state);
+        assert_eq!(writes, state, "писать публикация обязана в состояние");
+        let p = paths_under(&writes, server.clone(), PathBuf::from("P:\\wsap24t.dll"), 8083);
+        for path in [&p.pub_dir, &p.conf, &p.pid, &p.log] {
+            assert!(path.starts_with(state), "{} должен лежать в состоянии", path.display());
+            assert!(!path.starts_with(kit), "{} уехал в комплект", path.display());
+        }
+        // А вот сам httpd — из комплекта: его мы никуда не копируем.
+        if cfg!(windows) {
+            assert_eq!(server, kit.join("httpd"));
+        } else {
+            assert_eq!(server, PathBuf::from("/etc/apache2"));
         }
     }
 

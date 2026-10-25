@@ -885,10 +885,19 @@ pub enum Reach {
 /// Срок считается ПОСЛЕ ожидания голоса: иначе ждавший поток пришёл бы к базе
 /// с уже съеденным бюджетом и объявил «не ответила» о том, чего не успел
 /// спросить.
+///
+/// У одной попытки свой потолок (`ATTEMPT`, Minor 8 финального ревью ветки).
+/// Прежде `verify::gather` отдавал попытке весь остаток срока набора, и база,
+/// которая соединение принимает, а отвечать не отвечает, держала голос до
+/// минуты — а за голосом в это время стоит подъём публикации, которому нужно
+/// одно короткое «отвечает ли». Замеры говорят про 30 мс на здоровой базе и
+/// 7,7 с на просыпающейся (стенд 25.10), так что пятнадцати секунд на попытку
+/// хватает с запасом вдвое. Цикл при этом ждёт столько же, сколько и раньше:
+/// потолок режет ОДНУ попытку, а не весь срок.
 pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Reach {
     // Своей очереди дожидаемся ДО того, как завести часы (см. докстроку);
     // дальше голос берётся на каждую попытку заново.
-    let mut first = Some(BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut first = Some(base_voice());
     let deadline = std::time::Instant::now() + timeout;
     // Последняя узнанная причина, которую ожидание могло бы вылечить
     // (Important 5): пока срок не вышел — ждём, вышел — говорим её словами, а
@@ -905,9 +914,9 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
         // Голос — только на сам запрос: пауза между попытками его не держит.
         let held = match first.take() {
             Some(v) => v,
-            None => BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner()),
+            None => base_voice(),
         };
-        let probe = version_once(base_url, user, password, left);
+        let probe = version_once(base_url, user, password, left.min(ATTEMPT));
         drop(held);
         match probe {
             Probe::Version(v) => return Reach::Version(v),
@@ -947,8 +956,29 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
 /// Единственный голос к базе — см. `extension_reach`.
 static BASE_VOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Взять голос к базе на ОДИН запрос; держать, пока запрос идёт, и отпускать
+/// сразу после. Отравленный мьютекс базу не ломает — берём как есть.
+///
+/// Наружу (Important 2 финального ревью): к базе говорят два разных запроса —
+/// «какое расширение» (`extension_reach` → `version_once`) и «отвечает ли
+/// публикация» (`publication::service_responds`), — и второй ходил МИМО
+/// голоса. Окно приходит туда через `ensure_publication_now` одновременно с
+/// группой «база» в `verify::gather`, и учебная платформа с её единственным
+/// сеансом давала ложный отказ: человек видел «Занято», которого нет. Теперь
+/// голос берут оба, и утверждение докстроки `extension_reach` («все дороги
+/// идут сюда, забыть нельзя») стало правдой.
+pub fn base_voice() -> std::sync::MutexGuard<'static, ()> {
+    BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Пауза между попытками спросить версию у просыпающейся базы.
 const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Потолок ОДНОЙ попытки спросить базу — см. `extension_reach`. Молчащая база
+/// (соединение приняла, отвечать не отвечает) после него объявляется не
+/// отвечающей, и это честный ответ на 45 секунд раньше прежнего; голос к базе
+/// столько же и держится, а не до минуты.
+const ATTEMPT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
 /// мгновенно), а сбор готовности — остатком общего срока набора
@@ -1513,6 +1543,28 @@ mod tests {
             let reach = t.join().expect("поток пробы упал");
             assert!(matches!(reach, Reach::Version(_)), "{reach:?}");
         }
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1, "в базу говорили два голоса сразу");
+    }
+
+    /// Important 2 финального ревью ветки: к базе уходят ДВА разных запроса —
+    /// «какое расширение» (`extension_reach`) и «отвечает ли публикация»
+    /// (`publication::service_responds`), — и второй шёл мимо голоса. Окно
+    /// приходит туда через `ensure_publication_now` одновременно с группой
+    /// «база» в `verify::gather`, и учебная платформа давала ложный отказ по
+    /// числу сеансов: «Занято», которого нет.
+    ///
+    /// Проверяется тем же приёмом, что и первый: слушатель сам ничего не
+    /// сериализует и считает пик одновременности, а запросы идут разными
+    /// дорогами — по одной каждой.
+    #[test]
+    fn the_publication_probe_shares_the_same_single_voice() {
+        let (url, peak) = counting_server(2, std::time::Duration::from_millis(200));
+        let (u1, u2) = (url.clone(), url.clone());
+        let a = std::thread::spawn(move || extension_reach(&u1, "u", "p", std::time::Duration::from_secs(10)));
+        let b = std::thread::spawn(move || crate::publication::service_responds(&u2));
+        let reach = a.join().expect("поток пробы расширения упал");
+        assert!(matches!(reach, Reach::Version(_)), "{reach:?}");
+        assert!(b.join().expect("поток пробы публикации упал"), "публикация не ответила — тест проверяет не то");
         assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1, "в базу говорили два голоса сразу");
     }
 

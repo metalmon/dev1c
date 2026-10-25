@@ -148,11 +148,6 @@ pub struct Ui {
     /// хвостовое событие прежнего сеанса (`session_gen`): набор считается
     /// десяток секунд, и окно для гонки широкое.
     pub facts_gen: u64,
-    /// Поколение расчёта, который прямо сейчас держит защёлку
-    /// `facts_pending`. Не то же, что `facts_gen`: тот двигает и
-    /// «Проверить», ничего не запуская, — а защёлку обязан снимать
-    /// только свой поток (находка N1 повторного ревью).
-    pub facts_run: u64,
     /// Расчёт набора идёт прямо сейчас — второй поток не заводится ни по
     /// такту, ни по кнопке «Проверить» (задача 6: «один расчёт в полёте, не
     /// два») — обе защёлка общая.
@@ -494,6 +489,12 @@ pub const TOOLTIP_EVERY: Duration = Duration::from_secs(60);
 /// Текст в журнал, когда рабочий поток упал с паникой.
 pub const PANIC_TEXT: &str = "внутренняя ошибка: операция прервана";
 
+/// Что говорит «Проверить» при выключенном обслуживании — и когда её нажали
+/// выключенной, и когда выключили, пока расчёт шёл (Important 3 финального
+/// ревью). Одна формулировка на оба случая: человек читает про своё
+/// состояние, а не «Проверка пройдена» при выключенном коннекторе.
+pub const CHECK_OFF: &str = "MCP выключены — проверять нечего: включите обслуживание";
+
 /// Рабочий поток обязан договорить: паника в теле всё равно шлёт конец
 /// работы (иначе кнопки навсегда остались бы в «идёт работа») и строку об
 /// этом в журнал.
@@ -631,15 +632,15 @@ pub fn progress_text(r: &Running, now: Instant) -> (String, String) {
 /// желтел на «занято» и оранжевел на «не всё готово», а подсказка при этом
 /// говорила «подключён» — человек видел цвет без объяснения. Порядок и условие
 /// те же, что у карточки (`panel::card`/`panel::reason`): вердикт показывается
-/// только в локальном режиме при поднятом обслуживании, иначе подсказка и
-/// карточка разошлись бы.
-pub fn tray_tooltip(progress: Option<&Running>, link: &State, mode: &str, verdict: &Verdict, gate: Option<&str>, now: Instant) -> String {
+/// при поднятом обслуживании, в ОБОИХ режимах (Critical 1 финального ревью —
+/// исключения по режиму нет), иначе подсказка и карточка разошлись бы.
+pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict, gate: Option<&str>, now: Instant) -> String {
     if let (None, Some(why)) = (progress, gate) {
         // Та же формулировка, что у подсказки переключателя и подвала:
         // три поверхности говорили о замке тремя разными фразами.
         return format!("1c-connect: {}", crate::gui::panel::gate_text(why).to_lowercase());
     }
-    if progress.is_none() && mode == "local" && link.is_up() {
+    if progress.is_none() && link.is_up() {
         if let Some(why) = warn_reason(verdict) {
             return format!("1c-connect: {why}");
         }
@@ -803,12 +804,14 @@ pub fn note_file(kit: &Kit, line: &Line) {
 /// операций (`run::status`, прежний `ui.ops`) — решение 2 спеки: ни одна
 /// поверхность не знает больше набора.
 ///
-/// `None` — факта расширения в наборе нет, то есть набора ещё нет вовсе
-/// («Проверяю», первый расчёт после входа). Главной кнопке тогда сказать
-/// нечего: «Установить» на пустом наборе — утверждение о том, чего мы не
-/// знаем (Minor 4 ревью задач 7+8), а вкладка и так показывает «Проверяю…».
+/// `None` — факта расширения в наборе нет, то есть набора нет вовсе: его либо
+/// ещё не посчитали («Проверяю», первый расчёт после входа), либо уронило
+/// выключение (`sync_tray`). Главной кнопке тогда сказать нечего:
+/// «Установить» на пустом наборе — утверждение о том, чего мы не знаем
+/// (Minor 4 ревью задач 7+8). Что показать вместо — решает сама вкладка, и
+/// по вердикту: «Выключено» или «Проверяю…» (Minor 4 финального ревью).
 /// В наборе этот факт есть в обоих режимах (`verify::order`), так что его
-/// отсутствие и значит ровно «ещё не посчитали».
+/// отсутствие и значит ровно «набора нет».
 ///
 /// Занятость расширению не приговор: база нам в эту минуту отказала, стоит
 /// расширение или нет — неизвестно, и советовать «Установить» человеку,
@@ -860,6 +863,23 @@ pub fn check_status(failed: usize) -> Line {
     } else {
         Line { kind: Kind::Ok, text: "Проверка пройдена".into() }
     }
+}
+
+/// Что громкий показ скажет в подвал и последней строкой раздела журнала:
+/// итог набора — или, если набора нет, что проверять нечего.
+///
+/// Пустой набор у громкого расчёта значит одно: обслуживание выключили, пока
+/// расчёт шёл, и `apply_facts` набор уронил (Important 1 прошлого круга).
+/// Отчёт на диске при этом есть — его написал поток, пока обслуживание было
+/// живо, — но говорить по нему «Проверка пройдена» нельзя: в отчёте могут быть
+/// провалы, а коннектор выключен (Important 3 финального ревью). Решение здесь,
+/// в чистой функции, а не в ветке обработчика: ту не проверить тестом, а
+/// соврать она может на любой из дорог.
+pub fn loud_status(facts: &[Check]) -> Line {
+    if facts.is_empty() {
+        return Line { kind: Kind::Warn, text: CHECK_OFF.into() };
+    }
+    check_status(problem_count(facts))
 }
 
 /// Итог последнего действия в подвал — вместе с подсказкой к нему. Одной
@@ -1561,7 +1581,6 @@ fn start_facts(ui: &mut Ui, now: Instant) -> Option<u64> {
     ui.facts_pending = true;
     ui.facts_since = Some(now);
     ui.facts_gen += 1;
-    ui.facts_run = ui.facts_gen;
     Some(ui.facts_gen)
 }
 
@@ -1594,13 +1613,22 @@ fn request_check(ui: &mut Ui, now: Instant) -> Option<u64> {
 /// сам по себе — поверхности не должны показывать устаревшие факты
 /// выключенной базы).
 fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
-    // Защёлку снимает только тот расчёт, который её держит (`facts_run`), —
-    // его ответ и значит «поток кончился». Раньше её снимал любой ответ, и
+    // Чужое поколение — ответ отставшего потока: ни защёлки, ни набора он не
+    // трогает. Защёлку снимает только тот расчёт, который её держит, — его
+    // ответ и значит «поток кончился». Раньше её снимал любой ответ, и
     // опоздавший ответ потерянного потока отпирал защёлку живого: следующее
-    // событие поднимало вторую пробу инструментов поверх первой (находка
-    // N1). Ответ не-владельца защёлку не трогает вовсе; если владелец не
-    // ответит никогда, её подберёт сторож `readiness_lost`.
-    if gen == ui.facts_run {
+    // событие поднимало вторую пробу инструментов поверх первой (находка N1).
+    // Если владелец не ответит никогда, защёлку подберёт сторож
+    // `readiness_lost`.
+    //
+    // Поле `facts_run` (прежнее «поколение владельца защёлки») убрано как
+    // мёртвое (Minor 5 финального ревью): оно писалось ровно там же и ровно
+    // тем же, чем `facts_gen` (`start_facts`), так что развилка между ними
+    // была недостижима, а состояние, которое проверял тест, — невозможно.
+    if gen != ui.facts_gen {
+        return false;
+    }
+    {
         ui.facts_pending = false;
         ui.facts_since = None;
         // Отметка полного расчёта — на ЛЮБОЙ пришедший набор от владельца
@@ -1625,9 +1653,6 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
         if ui.busy == Some(Busy::Check) && !ui.check_requested {
             ui.busy = None;
         }
-    }
-    if gen != ui.facts_gen {
-        return false;
     }
     // Пришедший набор ПРИМЕНЯЕТСЯ всегда: `again` значит «посчитай ещё раз
     // после», а не «этот ответ не нужен» (Critical 1). Выбрасывать свежие
@@ -1828,7 +1853,7 @@ fn sync_tray(ui: &mut Ui, now: Instant) {
         state: tray_state_now(ui, now),
         on: ui.link.is_on(),
         locked: ui.gate.is_some(),
-        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.verdict, ui.gate.as_deref(), now),
+        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.verdict, ui.gate.as_deref(), now),
     };
     if let Some(tray) = &ui.tray {
         tray.set_state(view.state, view.on, view.locked);
@@ -2135,7 +2160,22 @@ pub fn refresh_project(cx: &mut App) {
 /// громкий показ результату, который применится первым (`check_requested`).
 /// «Проверяю…»/занятость кнопка показывает сразу (`ui.busy`), не дожидаясь,
 /// чей это будет расчёт.
+///
+/// Выключено — считать нечего, и сторож тот же, что у такта (`start_full_pass`,
+/// Important 3 финального ревью). Без него нажатие заводило полный набор при
+/// выключенном обслуживании, `apply_facts` его потом ронял, и громкий показ
+/// печатал ноль строк фактов и «Проверка пройдена» — на выключенном
+/// коннекторе, при отчёте с провалами на диске. Молча не отказываем: кнопка
+/// говорит, почему проверять нечего.
 pub fn run_check(cx: &mut App) {
+    if !serving(cx.global::<Ui>()) {
+        let ui = cx.global_mut::<Ui>();
+        ui.tab = Tab::Log;
+        ui.unread = 0;
+        note_line(ui, Line { kind: Kind::Warn, text: CHECK_OFF.into() });
+        cx.refresh_windows();
+        return;
+    }
     let ui = cx.global_mut::<Ui>();
     ui.busy = Some(Busy::Check);
     note_line(ui, head_line("Проверка"));
@@ -2371,7 +2411,7 @@ fn tick(cx: &mut App) {
         }
         let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
         if due {
-            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.verdict, ui.gate.as_deref(), now);
+            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.verdict, ui.gate.as_deref(), now);
             ui.tooltip_at = Some(now);
             if let Some(tray) = &ui.tray {
                 tray.set_tooltip(&text);
@@ -2516,21 +2556,30 @@ fn handle(ev: Ev, cx: &mut App) {
                 // отчёт на диске уже лежит (его написал `spawn_full_pass`),
                 // здесь — журнал, подвал и перечитывание проекта.
                 let ui = cx.global_mut::<Ui>();
-                let failed = problem_count(&ui.facts);
-                let lines = check_lines(&ui.facts);
-                for line in lines {
-                    note_line(ui, line);
+                // Итог спрашиваем у `loud_status`: набор мог быть уронен
+                // выключением, пока расчёт шёл, и тогда «Проверка пройдена»
+                // была бы прямой ложью (Important 3 финального ревью).
+                let status = loud_status(&ui.facts);
+                if ui.facts.is_empty() {
+                    // Показывать нечего, и отчёт называть незачем. Кнопку всё
+                    // равно отпускаем — иначе «Проверяю…» навсегда.
+                    note_line(ui, status.clone());
+                    set_status(ui, status, None);
+                } else {
+                    let lines = check_lines(&ui.facts);
+                    for line in lines {
+                        note_line(ui, line);
+                    }
+                    // Пункта меню «Открыть отчёт» больше нет (заказчик
+                    // 2026-10-20: два пункта делали одно и то же) — файл
+                    // называет строка журнала и подсказка подвала, но не сам
+                    // итог рядом с кнопкой: туда путь не влезал (заказчик
+                    // 2026-10-21).
+                    let report = ui.kit.state_path("last-check.txt").display().to_string();
+                    note_line(ui, status.clone());
+                    note_line(ui, report_line(&report));
+                    set_status(ui, status, Some(report_line(&report).text));
                 }
-                // Пункта меню «Открыть отчёт» больше нет (заказчик
-                // 2026-10-20: два пункта делали одно и то же) — файл
-                // называет строка журнала и подсказка подвала, но не сам
-                // итог рядом с кнопкой: туда путь не влезал (заказчик
-                // 2026-10-21).
-                let report = ui.kit.state_path("last-check.txt").display().to_string();
-                let status = check_status(failed);
-                note_line(ui, status.clone());
-                note_line(ui, report_line(&report));
-                set_status(ui, status, Some(report_line(&report).text));
                 ui.busy = None;
                 ui.check_requested = false;
                 // Трей (S1): проверка — другое место, где `busy` возвращается
@@ -2547,14 +2596,17 @@ fn handle(ev: Ev, cx: &mut App) {
             }
             cx.refresh_windows();
             if again {
-                let ui = cx.global_mut::<Ui>();
-                // Громкость переживает отброшенный ответ: кнопку, нажатую
+                // Через `start_full_pass`, а не своей парой
+                // `start_facts`+`spawn_full_pass` (Important 3 финального
+                // ревью): у неё сторож `serving`, и без него обещанный повтор
+                // считал ПОСЛЕ выключения — целый набор с походом в базу, на
+                // диск, до минуты, да ещё и с отчётом, если громкий. Своя
+                // пара отличалась от неё только тем, что брала громкость
+                // отдельной строкой, а она берёт ту же `check_requested`
+                // (громкость переживает отброшенный ответ: кнопку, нажатую
                 // пока считал такт, обслужит тот расчёт, который наконец
-                // применится, а не обязательно этот самый.
-                let loud_retry = ui.check_requested;
-                if let Some(gen) = start_facts(ui, Instant::now()) {
-                    spawn_full_pass(ui, gen, loud_retry);
-                }
+                // применится, а не обязательно этот самый).
+                start_full_pass(cx.global_mut::<Ui>());
             }
         }
         Ev::Cheap { sessions, facts } => {
@@ -2673,7 +2725,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             verdict: Verdict::Checking,
             facts_at: None,
             facts_gen: 0,
-            facts_run: 0,
             facts_pending: false,
             facts_since: None,
             facts_again: false,
@@ -2804,7 +2855,6 @@ impl Ui {
             verdict: Verdict::Checking,
             facts_at: None,
             facts_gen: 0,
-            facts_run: 0,
             facts_pending: false,
             facts_since: None,
             facts_again: false,
@@ -2848,7 +2898,7 @@ mod tests {
         douse_serving, exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
         start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
-        problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
+        loud_status, problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, CHECK_OFF, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
         Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
@@ -2958,7 +3008,6 @@ mod tests {
         // Операцию ответ расчёта не трогает — её конец объявляет `Ev::Done`.
         ui.busy = Some(Busy::Project);
         let own = ui.facts_gen;
-        ui.facts_run = own;
         apply_facts(&mut ui, own, Vec::new());
         assert_eq!(ui.busy, Some(Busy::Project));
     }
@@ -3037,12 +3086,11 @@ mod tests {
         assert!(matches!(ui.verdict, Verdict::NotReady(_)), "{:?}", ui.verdict);
 
         // Ответ первого поколения приходит позже — вердикт он не трогает.
-        // И защёлку тоже: её держит другой, идущий прямо сейчас расчёт
-        // (`facts_run`), а снять её чужим ответом значило бы пустить вторую
-        // пробу инструментов поверх живой (находка N1 повторного ревью).
+        // И защёлку тоже: её держит другой, идущий прямо сейчас расчёт, а
+        // снять её чужим ответом значило бы пустить вторую пробу инструментов
+        // поверх живой (находка N1 повторного ревью).
         ui.facts_pending = true;
         ui.facts_since = Some(Instant::now());
-        ui.facts_run = 2;
         assert!(!apply_facts(&mut ui, 1, Vec::new()));
         assert!(matches!(ui.verdict, Verdict::NotReady(_)), "{:?}", ui.verdict);
         assert!(ui.facts_pending, "чужой ответ снял защёлку с живого расчёта");
@@ -3404,16 +3452,16 @@ mod tests {
             stale_noted: false,
         };
         let ok = Verdict::Ready;
-        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, "local", &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+        assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
         let fresh = Running { started: now, seen: now, ..r };
-        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, "local", &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
-        assert_eq!(tray_tooltip(None, &State::Up { since: now }, "local", &ok, None, now), "1c-connect: подключён");
-        assert_eq!(tray_tooltip(None, &State::Off, "local", &ok, None, now), "1c-connect: не подключён");
+        assert_eq!(tray_tooltip(Some(&fresh), &State::Off, &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
+        assert_eq!(tray_tooltip(None, &State::Up { since: now }, &ok, None, now), "1c-connect: подключён");
+        assert_eq!(tray_tooltip(None, &State::Off, &ok, None, now), "1c-connect: не подключён");
         // Причина замка — в подсказке значка; идущая операция её побеждает
         // (тот же порядок разрешения, что в карточке).
         let why = Some("не задан пользователь базы");
-        assert_eq!(tray_tooltip(None, &State::Off, "local", &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
-        assert_eq!(tray_tooltip(Some(&r), &State::Off, "local", &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+        assert_eq!(tray_tooltip(None, &State::Off, &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
+        assert_eq!(tray_tooltip(Some(&r), &State::Off, &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
     }
 
     /// Critical 2 ревью задач 5+6 — «занято» горело ЗЕЛЁНЫМ. На стенде
@@ -3443,13 +3491,13 @@ mod tests {
         assert_ne!(c.title, "MCP включены");
 
         // Подвал: причина — словами факта.
-        let why = panel::reason(&up, "local", &busy, None, Some("15:54")).expect("причина занятости названа");
+        let why = panel::reason(&up, &busy, None, Some("15:54")).expect("причина занятости названа");
         assert!(why.starts_with("Занято:"), "{why}");
         assert!(why.contains("расширение в базе") && why.contains(cause.what), "{why}");
         assert!(why.contains(cause.fix), "{why}");
 
         // Подсказка значка — та же причина, теми же словами.
-        let tip = tray_tooltip(None, &up, "local", &busy, None, now);
+        let tip = tray_tooltip(None, &up, &busy, None, now);
         assert!(tip.contains("занято") && tip.contains(cause.what), "{tip}");
         assert_ne!(tip, "1c-connect: подключён");
 
@@ -3511,6 +3559,55 @@ mod tests {
         assert!(!serving(&ui));
         assert!(ui.facts.is_empty(), "замок погасил обслуживание, а набор остался на экране");
         assert_eq!(ui.verdict, Verdict::Off, "{:?}", ui.verdict);
+    }
+
+    /// Important 3 финального ревью ветки: «выключено» протекало двумя
+    /// дорогами, и обе кончались полным набором ПОСЛЕ выключения — поход в
+    /// базу, диск, до минуты, плюс `last-check.txt`, если расчёт громкий.
+    ///
+    /// Сторож один и тот же (`start_full_pass`), и теперь обе дороги идут
+    /// через него.
+    #[test]
+    fn nothing_is_computed_after_the_switch_went_off() {
+        // Дорога первая: обещанный повтор в `Ev::Ready`. Повтор просят, пока
+        // обслуживание живо; выключают до того, как ответ пришёл.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.enabled.store(true, Ordering::Relaxed);
+        let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
+        assert!(start_facts(&mut ui, Instant::now()).is_none(), "второго потока нет — только просьба о повторе");
+        assert!(ui.facts_again);
+        ui.enabled.store(false, Ordering::Relaxed);
+        let again = apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "install")]);
+        assert!(again, "повтор был обещан — решает о нём не этот тест");
+        // Ровно то, что делает `Ev::Ready` на `again`.
+        assert!(!start_full_pass(&mut ui), "набор считается после выключения");
+        assert!(!ui.facts_pending, "защёлка взведена — значит поток ушёл в базу");
+
+        // А при живом обслуживании тот же вызов расчёт заводит — значит
+        // отказал именно сторож, а не что-то ещё.
+        ui.enabled.store(true, Ordering::Relaxed);
+        assert!(start_full_pass(&mut ui), "сторож держит и включённое обслуживание");
+        assert!(ui.facts_pending);
+    }
+
+    /// Дорога вторая того же Important 3: громкий показ. Нажатие «Проверить»
+    /// заводило расчёт и при выключенном обслуживании, `apply_facts` набор
+    /// потом ронял, и подвал говорил **«Проверка пройдена»** — на выключенном
+    /// коннекторе, при отчёте с провалами на диске. Сторож в `run_check`
+    /// (`serving`) эту дорогу закрывает, но сама ложь убита здесь, в чистом
+    /// решении: без набора говорить «пройдена» нечем.
+    #[test]
+    fn a_loud_show_never_says_passed_without_a_set() {
+        // Набора нет — показывать нечего, и это не «пройдена».
+        let line = loud_status(&[]);
+        assert_eq!((line.kind, line.text.as_str()), (Kind::Warn, CHECK_OFF));
+        assert_ne!(line.text, check_status(0).text, "пустой набор объявлен пройденной проверкой");
+        // Набор есть — прежний итог, числами.
+        assert_eq!(loud_status(&[Check::pass("база", "есть")]).text, "Проверка пройдена");
+        assert_eq!(loud_status(&[Check::fail("проект", "не разложен", "install")]).text, "Проблем: 1");
+        // Занято — не провал и в итоге тоже (решение владельца 25.10).
+        assert_eq!(loud_status(&[Check::busy("в базе открыт сеанс", "сеансов не осталось", "закройте")]).text, "Проверка пройдена");
     }
 
     /// Minor 3 ревью задач 7+8: час «проверено в 15:54» — это момент, когда
@@ -3642,12 +3739,19 @@ mod tests {
     fn the_tray_says_it_is_checking_while_there_is_no_set_yet() {
         let now = Instant::now();
         let up = State::Up { since: now };
-        assert_eq!(tray_tooltip(None, &up, "local", &Verdict::Checking, None, now), "1c-connect: проверяю");
+        assert_eq!(tray_tooltip(None, &up, &Verdict::Checking, None, now), "1c-connect: проверяю");
         assert_eq!(panel::card(None, &up, "local", &Verdict::Checking, None, now).dot, Dot::Busy, "значок и подсказка обязаны говорить одно");
         // Посчитано и всё сошлось — прежняя подсказка про связь.
-        assert_eq!(tray_tooltip(None, &up, "local", &Verdict::Ready, None, now), "1c-connect: подключён");
-        // В туннельном режиме вердикт карточка не показывает — и подсказка тоже.
-        assert_eq!(tray_tooltip(None, &up, "tunnel", &Verdict::Checking, None, now), "1c-connect: подключён");
+        assert_eq!(tray_tooltip(None, &up, &Verdict::Ready, None, now), "1c-connect: подключён");
+        // Режима подсказка не спрашивает вовсе (Critical 1 финального ревью):
+        // прежде здесь стояло «в туннельном режиме вердикт не показываем», и
+        // это закрепляло дефект — значок желтел по вердикту, а подсказка
+        // говорила «подключён». Один вердикт — одни слова на всех
+        // поверхностях и в обоих режимах.
+        let bad = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
+        let tip = tray_tooltip(None, &up, &bad, None, now);
+        assert!(tip.contains("не всё готово") && tip.contains("проект"), "{tip}");
+        assert_eq!(tip, format!("1c-connect: {}", warn_reason(&bad).unwrap()), "значок и подвал говорят разными словами");
     }
 
     /// Important 4 ревью круга 2: отчёт и строки в журнал без нажатия кнопки.

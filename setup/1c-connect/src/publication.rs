@@ -78,8 +78,17 @@ pub fn descriptor_matches(pub_dir: &Path, cfg: &Cfg) -> bool {
 /// вернёт ошибку). Не доказательство владения портом абсолютно во всех
 /// случаях (можно представить чужой HTTP-сервер на том же порту), но вместе с
 /// `descriptor_matches` — наша конфигурация плюс наш порт — этого достаточно.
+///
+/// **Голос к базе берётся и здесь** (`ops_host::base_voice`, Important 2
+/// финального ревью ветки): это второй из двух запросов, что правда уходят в
+/// базу, и он шёл мимо голоса. Окно приходит сюда через
+/// `ensure_publication_now` одновременно с группой «база» в `verify::gather` —
+/// учебная платформа с единственным сеансом давала на это ложный отказ по
+/// числу сеансов, и человек видел «Занято», которого нет. Голос — на сам
+/// запрос (клиент собирается до того, как его брать), как в `extension_reach`.
 pub fn service_responds(base_url: &str) -> bool {
     let Ok(c) = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(3)).build() else { return false };
+    let _voice = crate::ops_host::base_voice();
     c.get(format!("{base_url}/version")).send().is_ok()
 }
 

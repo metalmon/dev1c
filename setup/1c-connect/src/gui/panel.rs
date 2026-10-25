@@ -114,9 +114,20 @@ pub struct Card {
 /// в локальном режиме речь про MCP (слушатели держат порты сами, см.
 /// `session::start`), а не про связь со средой.
 ///
-/// Готовность смотрит только локальный режим: в туннельном провал публикации
-/// уже становится красным `State::Failed` в `Ev::Publish`, второй жёлтый
-/// смысл ему не нужен — карточка там остаётся прежней.
+/// **Исключения по режиму нет** (Critical 1 финального ревью ветки). Прежде
+/// вердикт читался только в локальном режиме — наследство от `Readiness`, —
+/// а бейдж «Проблем: N» и вкладка «Проект» показывают живой набор в любом, и
+/// факты в туннельном режиме считаются точно так же. Выходило зелёное
+/// «Подключён» рядом с «Проблем: 2» и красными точками на вкладке: ровно та
+/// жалоба владельца, из которой выросла вся эта работа, да ещё и в режиме,
+/// который стоит умолчанием в `1c-connect.example.toml`. Спека исключений не
+/// знает: «карточка переключателя, карточки вкладки „Проект“, подвал и значок
+/// в трее берут готовый набор и вердикт».
+///
+/// Состояние туннеля при этом не теряется: «Подключён»/«Не подключён» — слова
+/// про связь, и зелёный вердикт по-прежнему показывается ими (ветка `Ready`
+/// проваливается в разбор `link` ниже), а сам туннель остаётся фактом в
+/// наборе (`verify::tunnel_fact`).
 pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
@@ -135,8 +146,10 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
         return card(Dot::Off, off_title());
     }
     // Горячие факты — только у включённого обслуживания: инвариант
-    // «карточка = проверка» говорит про включённое.
-    if local && link.is_up() {
+    // «карточка = проверка» говорит про включённое. В локальном режиме
+    // `link` — показанное состояние переключателя (`local_display`), в
+    // туннельном — настоящий сеанс; «поднято» и там и там значит «считаем».
+    if link.is_up() {
         match ready {
             Verdict::Checking => return card(Dot::Busy, "Проверяю…".into()),
             Verdict::NotReady(_) => return card(Dot::Warn, "Не всё готово".into()),
@@ -149,9 +162,11 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
             // (`Dot::Busy`, та же, что у идущей операции: «подожди», а не
             // «починяй»), а чем занято — говорит `reason` рядом.
             Verdict::Busy(_) => return card(Dot::Busy, "Занято".into()),
-            // `Off` сюда не доходит вовсе — ветка под `link.is_up()` в
-            // локальном режиме и значит «обслуживание включено»; матч
-            // исчерпывающий, чтобы новый исход вердикта не остался забытым.
+            // `Ready` и `Off` уходят в разбор `link` ниже: зелёное называется
+            // словами про связь («MCP включены»/«Подключён»), а `Off` сюда
+            // доходить и не должен — ветка под `link.is_up()` значит
+            // «обслуживание включено». Матч исчерпывающий, чтобы новый исход
+            // вердикта не остался забытым.
             Verdict::Ready | Verdict::Off => {}
         }
     }
@@ -179,14 +194,17 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
 /// «Проверить» остаётся способом спросить заново. Час приписывается только
 /// к причине вердикта: отказ занять порт и холодный замок — факты «прямо
 /// сейчас», им час ни к чему.
-pub fn reason(link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, at: Option<&str>) -> Option<String> {
+///
+/// Режима не спрашивает вовсе (Critical 1 финального ревью): причина у
+/// вердикта одна на оба режима, см. `card`.
+pub fn reason(link: &State, ready: &Verdict, gate: Option<&str>, at: Option<&str>) -> Option<String> {
     if let State::Failed(why) = link {
         return Some(why.clone());
     }
     if let Some(why) = gate {
         return Some(gate_text(why));
     }
-    if mode == "local" && link.is_up() {
+    if link.is_up() {
         // Оба жёлтых вердикта называют причину словами факта, и это разные
         // слова: «не всё готово» — починить, «занято» — подождать или
         // закрыть базу (Critical 2: прежде `Busy` молчал, и жёлтая точка
@@ -957,7 +975,7 @@ impl Render for Panel {
         // Причина — один расчёт на весь `render`: та же строка уходит и в
         // подсказку переключателя, и в левый слот подвала (спека: «причина
         // идёт туда, где для неё есть место»).
-        let why = reason(&link, &mode, &ready, gate.as_deref(), ui.facts_at.as_deref());
+        let why = reason(&link, &ready, gate.as_deref(), ui.facts_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
@@ -1316,13 +1334,17 @@ impl Render for Panel {
                 let which = gui::project_primary(&cx.global::<Ui>().facts);
                 // Набора ещё нет — главной кнопке сказать нечего: «Установить»
                 // на пустом наборе было бы утверждением о том, чего мы не
-                // знаем (Minor 4). Кнопка заперта и говорит то же, что
-                // карточка, а всё четыре действия по-прежнему доступны в «…»:
-                // человек, который знает, чего хочет, не заперт.
-                let (label, hint) = match which {
-                    Some(Which::Export) => ("Выгрузить", "Выгрузить из 1С"),
-                    Some(_) => ("Установить", "Установить расширение"),
-                    None => ("Проверяю…", "Жду набор фактов — что нужнее, пока неизвестно"),
+                // знаем (Minor 4 ревью задач 7+8). Кнопка заперта и говорит
+                // то же, что карточка рядом, — а причин у пустого набора две,
+                // и это разные слова (Minor 4 финального ревью: «Проверяю…»
+                // рядом с «MCP выключены» — две надписи об одном, и обе не о
+                // том). Все четыре действия по-прежнему в меню «…»: человек,
+                // который знает, чего хочет, не заперт.
+                let (label, hint) = match (which, &ready) {
+                    (Some(Which::Export), _) => ("Выгрузить", "Выгрузить из 1С"),
+                    (Some(_), _) => ("Установить", "Установить расширение"),
+                    (None, Verdict::Off) => ("Выключено", "Включите MCP — тогда станет видно, что уже сделано"),
+                    (None, _) => ("Проверяю…", "Жду набор фактов — что нужнее, пока неизвестно"),
                 };
                 // В меню — всё, кроме того, что на главной кнопке.
                 let rest: Vec<(&'static str, Which)> = [
@@ -1596,7 +1618,7 @@ mod tests {
         assert!(switch_locked(None, false, true));
         assert!(switch_locked(None, true, true));
         // Причина живёт в подсказке, а не в заголовке карточки.
-        let text = reason(&State::Off, "local", &Verdict::Checking, why, None);
+        let text = reason(&State::Off, &Verdict::Checking, why, None);
         assert_eq!(text.as_deref(), Some("Нельзя включить: не задан пользователь базы"));
         assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Нельзя включить: не задан пользователь базы");
         assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
@@ -1613,7 +1635,7 @@ mod tests {
     fn the_locked_switch_names_the_gate_not_the_bind() {
         let gate = "не задан пользователь базы";
         let link = State::Failed("порт 7771 занят процессом 1234".into());
-        let why = reason(&link, "local", &Verdict::Ready, Some(gate), None);
+        let why = reason(&link, &Verdict::Ready, Some(gate), None);
         // В подвале — отказ: он выше в порядке разрешения, и карточка красная.
         assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
         // А переключатель заперт замком — и говорит про замок.
@@ -1670,7 +1692,7 @@ mod tests {
         let c = card(None, &link, "local", &Verdict::Ready, Some("не задан пользователь базы"), now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         // Сама причина не пропала — она в подсказке, подвале и журнале.
-        assert_eq!(reason(&link, "local", &Verdict::Ready, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
+        assert_eq!(reason(&link, &Verdict::Ready, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
     }
 
     /// «Не надо там прозу писать, она не лезет» (заказчик 2026-10-21):
@@ -1714,7 +1736,7 @@ mod tests {
         let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
         let c = card(None, &State::Off, "local", &Verdict::NotReady(fail.clone()), None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
-        assert_eq!(reason(&State::Off, "local", &Verdict::NotReady(fail), None, None), None);
+        assert_eq!(reason(&State::Off, &Verdict::NotReady(fail), None, None), None);
     }
 
     #[test]
@@ -1767,7 +1789,10 @@ mod tests {
         assert!(!c.cancel);
         let c = card(None, &State::Connecting, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
-        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Verdict::Checking, None, now);
+        // Поднятая связь называется связью, когда вердикту сказать нечего,
+        // кроме «всё сошлось»: `Checking` при поднятом сеансе — это уже своё
+        // состояние карточки, и в туннельном режиме тоже (Critical 1).
+        let c = card(None, &State::Up { since: Instant::now() }, "tunnel", &Verdict::Ready, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"));
         let c = card(None, &State::Retrying("нет сети".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Переподключаюсь"));
@@ -1815,7 +1840,7 @@ mod tests {
         let up = State::Up { since: now };
         let c = card(None, &up, "local", &ready, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Warn, "Не всё готово"));
-        let why = reason(&up, "local", &ready, None, None).unwrap();
+        let why = reason(&up, &ready, None, None).unwrap();
         assert!(why.starts_with("Не всё готово:"), "{why}");
         assert!(why.contains("инструменты комплекта") && why.contains("1c-connect install"), "{why}");
         assert!(!why.contains("факт"), "{why}");
@@ -1830,19 +1855,41 @@ mod tests {
         assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"));
     }
 
-    /// Туннельный режим не говорит «MCP» и не смотрит готовность — его
-    /// собственный провал публикации уже красный (`State::Failed`) отдельным
-    /// путём (`Ev::Publish` в `gui::mod`).
+    /// Critical 1 финального ревью ветки: исключения по режиму нет. Прежний
+    /// тест на этом месте закреплял дефект — «туннельный режим готовность не
+    /// смотрит», — и получалось зелёное «Подключён» рядом с живым бейджем
+    /// «Проблем: 2» и красными точками на вкладке «Проект» (и бейдж, и
+    /// вкладка читают набор в любом режиме). Спека исключений не знает, а
+    /// `tunnel` — умолчание `1c-connect.example.toml`, то есть обычное
+    /// Windows-рабочее место.
     #[test]
-    fn tunnel_mode_ignores_the_readiness_warning() {
+    fn the_tunnel_mode_shows_the_verdict_like_any_other() {
         let now = Instant::now();
         let fail = Check::fail("инструменты комплекта", "в C:\\dev1c ничего нет", "1c-connect install");
+        let busy = Check::busy("расширение в базе", "сеансов больше не осталось", "закройте «Предприятие»");
         let up = State::Up { since: now };
-        for ready in [Verdict::NotReady(fail), Verdict::Checking] {
-            let c = card(None, &up, "tunnel", &ready, None, now);
-            assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Подключён"), "{ready:?}");
-            assert_eq!(reason(&up, "tunnel", &ready, None, None), None, "{ready:?}");
-        }
+
+        // Провал — оранжевая точка и причина словами факта, как в локальном.
+        let c = card(None, &up, "tunnel", &Verdict::NotReady(fail.clone()), None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Warn, "Не всё готово"));
+        assert_ne!(c.dot, Dot::Up, "зелёная точка при провале — то самое противоречие");
+        let why = reason(&up, &Verdict::NotReady(fail), None, Some("15:54")).expect("причина названа и в туннеле");
+        assert!(why.starts_with("Не всё готово:") && why.contains("1c-connect install"), "{why}");
+
+        // Занято — жёлтое с причиной, тоже без оглядки на режим.
+        let c = card(None, &up, "tunnel", &Verdict::Busy(busy.clone()), None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Занято"));
+        assert!(reason(&up, &Verdict::Busy(busy), None, None).is_some_and(|w| w.starts_with("Занято:")));
+
+        // Набора ещё нет — «Проверяю…», а не обещание зелёным.
+        let c = card(None, &up, "tunnel", &Verdict::Checking, None, now);
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Проверяю…"));
+
+        // А состояние туннеля не потеряно: зелёный вердикт называется словами
+        // про связь, и они разные в разных режимах.
+        assert_eq!(card(None, &up, "tunnel", &Verdict::Ready, None, now).title, "Подключён");
+        assert_eq!(card(None, &up, "local", &Verdict::Ready, None, now).title, "MCP включены");
+        assert_eq!(reason(&up, &Verdict::Ready, None, Some("15:54")), None, "о зелёном объяснять нечего");
     }
 
     #[test]
@@ -2081,15 +2128,15 @@ mod tests {
         let now = Instant::now();
         let up = State::Up { since: now };
         let ready = Verdict::NotReady(Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install"));
-        let why = reason(&up, "local", &ready, None, Some("15:54")).unwrap();
+        let why = reason(&up, &ready, None, Some("15:54")).unwrap();
         assert!(why.ends_with(" · проверено в 15:54"), "{why}");
         assert!(why.starts_with("Не всё готово: "), "{why}");
         // Вердикта нет (ещё не считали) — час не выдумывается.
-        assert!(!reason(&up, "local", &ready, None, None).unwrap().contains("проверено"));
+        assert!(!reason(&up, &ready, None, None).unwrap().contains("проверено"));
         // Отказ и замок час не получают: они про «прямо сейчас».
         let bind = State::Failed("порт 7771 занят процессом 1234".into());
-        assert_eq!(reason(&bind, "local", &ready, None, Some("15:54")).as_deref(), Some("порт 7771 занят процессом 1234"));
-        let gate = reason(&State::Off, "local", &ready, Some("не задан пользователь базы"), Some("15:54")).unwrap();
+        assert_eq!(reason(&bind, &ready, None, Some("15:54")).as_deref(), Some("порт 7771 занят процессом 1234"));
+        let gate = reason(&State::Off, &ready, Some("не задан пользователь базы"), Some("15:54")).unwrap();
         assert_eq!(gate, "Нельзя включить: не задан пользователь базы");
     }
 

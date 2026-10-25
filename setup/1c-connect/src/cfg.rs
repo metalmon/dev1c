@@ -632,7 +632,9 @@ mod tests {
         assert_eq!(zn, pn, "серверы MCP у pi и у Zed разошлись");
 
         for name in zn {
-            for field in ["command", "args", "timeout"] {
+            // `env` сверяется тоже, хотя сейчас его нет ни у кого:
+            // появится он сперва у Zed, и расхождение прошло бы молча.
+            for field in ["command", "args", "timeout", "env"] {
                 assert_eq!(
                     z[name][field], p[name][field],
                     "сервер {name}: поле {field} у pi и у Zed разошлось"

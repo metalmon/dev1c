@@ -31,7 +31,10 @@ trap cleanup EXIT INT TERM
 # чего сама не делала. Поймано 25.10.2026 прогоном от второго пользователя.
 WORK=$(mktemp -d)
 
-PI_VERSION_WANT=${PI_VERSION_WANT:-1.4.0}
+# Какую версию ждём — написано в образе той же сборкой, что её поставила
+# (ARG PI_VERSION). Своего числа здесь нет: разошлось бы с Dockerfile.
+PI_VERSION_WANT=${PI_VERSION_WANT:-$(cat /opt/pi/.version 2>/dev/null)}
+[ -n "$PI_VERSION_WANT" ] || fail "в образе нет /opt/pi/.version — нечем сверить версию"
 
 echo "== Бинарь =="
 

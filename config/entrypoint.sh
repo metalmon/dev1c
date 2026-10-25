@@ -209,7 +209,11 @@ seed_from_image() {
     # и записью любой промежуточный каталог можно подменить ссылкой. Здесь root
     # пишет только в каталог отпечатков (он проверен выше) и ставит готовый
     # файл на место. Замечание разбора безопасности 25.10.2026.
-    use=$src
+    # Подстановка идёт ПОТОКОМ прямо в install, без временного файла. Временный
+    # файл пришлось бы класть в каталог, который принадлежит пользователю, а он
+    # может подменить его ссылкой между созданием и записью — и root напишет
+    # туда, куда ссылка ведёт. Замечание разбора безопасности 25.10.2026.
+    sub=
     if [ "$base/$f" = ".pi/agent/mcp.json" ]; then
         # Номера те же, что у Zed: dev1 -> 7771/7781, dev2 -> 7772/7782,
         # dev3 -> 7773/7783. Любой другой дом (учётка туннеля, будущий
@@ -219,13 +223,15 @@ seed_from_image() {
         case "$u" in
             dev[1-9])
                 n=${u#dev}
-                use=$(mktemp "$stamps/.sub.XXXXXX") || return 0
-                sed -e "s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|"                     -e "s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|"                     "$src" > "$use"
+                sub="s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|;s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|"
                 ;;
         esac
     fi
-    install -o "$owner_u" -g "$owner_g" -m 0644 "$use" "$dst"
-    [ "$use" = "$src" ] || rm -f "$use"
+    if [ -n "$sub" ]; then
+        sed -e "$sub" "$src" | install -o "$owner_u" -g "$owner_g" -m 0644 /dev/stdin "$dst"
+    else
+        install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
+    fi
     tmp=$(mktemp "$stamps/.tmp.XXXXXX") || return 0
     echo "$shipped" > "$tmp"
     chown "$owner_u:$owner_g" "$tmp"
@@ -311,6 +317,13 @@ for cfg in /home/*/.config/zed/settings.json; do
     # входа и до сих пор с подстановками, — отпечаток у них не менялся, и
     # раскладка их не тронет.
     h=${cfg%/.config/zed/settings.json}
+    # Сами звенья — ссылками быть не должны, как и в цикле раскладки: realpath
+    # ниже разрешил бы ссылку и сверил уже разрешённое с разрешённым, то есть
+    # пропустил бы её.
+    if [ -L "$h/.config" ] || [ -L "$h/.config/zed" ]; then
+        log "skipping $cfg: .config или .config/zed — ссылка"
+        continue
+    fi
     case "$(realpath "${cfg%/settings.json}" 2>/dev/null)" in
         "$(realpath "$h/.config" 2>/dev/null)"/zed) ;;
         *) log "skipping $cfg: путь ведёт за пределы .config этого дома"; continue ;;

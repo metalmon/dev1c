@@ -170,9 +170,18 @@ RUN sed -i 's/^# *ru_RU.UTF-8/ru_RU.UTF-8/' /etc/locale.gen \
 # almost never change — hence they sit above all our own files.
 # =============================================================================
 
-RUN curl -fsSL https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz \
+# Версия пинится (25.10.2026). «stable/latest» однажды привёз 1.25 с
+# песочницей агента на bubblewrap — и git у агента стал только на чтение.
+# Поведение среды изменилось само, в середине пилота, от пересборки образа.
+# Обновление Zed теперь отдельное решение с проверкой, а не побочный эффект
+# очередной сборки.
+ARG ZED_VERSION=1.25.2
+RUN curl -fsSL "https://zed.dev/api/releases/stable/${ZED_VERSION}/zed-linux-x86_64.tar.gz" \
       | tar -xz -C /opt \
-    && ln -s /opt/zed.app/bin/zed /usr/local/bin/zed
+    && ln -s /opt/zed.app/bin/zed /usr/local/bin/zed \
+    `# zed --version здесь не зовём: сборка идёт от root, а Zed от root` \
+    `# отказывается запускаться вовсе` \
+    && test -x /opt/zed.app/bin/zed
 
 # Application menu entry plus icon (the tarball ships them, but outside XDG paths)
 RUN ln -s /opt/zed.app/share/applications/dev.zed.Zed.desktop /usr/share/applications/ \

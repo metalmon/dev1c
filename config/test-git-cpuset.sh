@@ -40,6 +40,11 @@ EOF
 chmod +x "$tmp/fake-git"
 export DEV1C_GIT_REAL="$tmp/fake-git"
 
+# Zed запускает git без терминала, и проверки ниже воспроизводят именно это.
+# Без явного значения результат зависел бы от того, откуда запущена сама
+# проверка: из терминала (stdin — tty) или из сборки.
+export DEV1C_GIT_TTY=0
+
 # Процесс, который для обёртки выглядит как Zed: comm в /proc берётся из
 # имени исполняемого файла.
 cp /bin/sh "$tmp/zed-editor"
@@ -344,4 +349,22 @@ case "$out" in
     *) fail "настоящий git не отвечает через обёртку: $out" ;;
 esac
 
-echo "ok: git из Zed ограничен двумя ядрами, вне Zed не тронут"
+# --- 13. Человек в терминале Zed не ограничивается ---------------------------
+# Предок тот же Zed — отличает только терминал на stdin. Пока этой проверки
+# не было, ручной `git status` на выгрузке шёл на двух ядрах с nice 19.
+export DEV1C_GIT_REAL="$tmp/fake-git"
+DEV1C_GIT_TTY=1
+export DEV1C_GIT_TTY
+capture zed_git version
+mask=$(field "$out" mask)
+ni=$(field "$out" ni)
+full=$(awk '/^Cpus_allowed_list/{print $2; exit}' /proc/self/status)
+[ "$(expand "$mask" | wc -l)" = "$(expand "$full" | wc -l)" ] \
+    || fail "git человека ограничен по ядрам: $mask вместо $full"
+[ "$ni" = "$(ps -o ni= -p $$ | tr -d ' ')" ] \
+    || fail "git человека получил другой приоритет: $ni"
+DEV1C_GIT_TTY=0
+export DEV1C_GIT_TTY
+unset DEV1C_GIT_REAL
+
+echo "ok: git из Zed ограничен двумя ядрами, в терминале человека и вне Zed не тронут"

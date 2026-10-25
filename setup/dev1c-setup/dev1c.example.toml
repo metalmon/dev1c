@@ -28,7 +28,7 @@ engine = "docker"
 #   "remote" — чужой OpenAI-совместимый сервер: url, key, name ниже.
 serve = "host"
 # host: полный путь к .gguf на этой машине — в одинарных кавычках, чтобы не
-# удваивать косые: file = 'C:\models\Qwen3.5-4B.Q4_K_M.gguf'
+# удваивать косые: file = 'C:\models\GLM-4.7-Flash-Q4_K_M.gguf'
 # docker: путь к файлу относительно комплекта. Пусто — модель ещё не выбрана.
 file = ""
 # remote: адрес с путём, но без завершающего /chat/completions — его добавляет редактор.

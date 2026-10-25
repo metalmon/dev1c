@@ -37,7 +37,14 @@
 #
 # `platform/` holds setup-training-<version>-x86_64.run, unpacked from the
 # tar.gz of the 1C download page, and the demo template; `artifacts/` holds
-# what CI built. Both are separate build contexts so the main context never
+# what CI built.
+#
+# Дистрибутив платформы в git не хранится и в слои образа не попадает: он
+# чужой, и права его распространять у нас нет. Его кладут руками на машине
+# сборки — что именно и откуда, написано в `platform/ПРОЧТИ.md` (единственный
+# файл того каталога, который в git есть). Нужен он ТОЛЬКО цели `payload`;
+# цель по умолчанию `stand` платформы не содержит вовсе — она приезжает
+# томом, поэтому стенд собирается и проверяется без неё, и CI так и делает. Both are separate build contexts so the main context never
 # carries them (see .dockerignore too), and they are separate from each other
 # so each target transfers only what it uses. The base image tag is an
 # argument: --build-arg BASE=oktaplus/dev1c:<tag>.

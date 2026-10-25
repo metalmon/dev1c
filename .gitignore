@@ -25,7 +25,11 @@ nvidia-container-toolkit/
 setup/target/
 
 # The 1C training installer for Dockerfile.1c (download it from the 1C site)
-platform/
+# Дистрибутив платформы 1С: чужой, распространять не вправе. Исключается
+# содержимое, а не сам каталог, — иначе исключение ниже не сработает: git не
+# заглядывает внутрь игнорируемого каталога.
+platform/*
+!platform/ПРОЧТИ.md
 
 # Бинарники установщика, которые команда kit забирает из CI (provision.sh):
 # сборка, а не исходник, и у каждой машины свои.

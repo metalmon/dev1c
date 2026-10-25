@@ -320,23 +320,77 @@ fn repo_name(p: &Project) -> String {
 
 const CANNOT_REACH_THE_BASE: &str = "эти правки в базу загрузить нельзя, пока они не отправлены";
 
-pub fn status(p: &Project) -> Result<String, String> {
+/// Состояние проекта разобранным, а не текстом.
+///
+/// Заведено 25.10.2026, потому что окно показывало ТЕКСТОВЫЙ ОТЧЁТ ДЛЯ
+/// ТЕРМИНАЛА, разбитый по строкам: семь одинаковых карточек с серой точкой у
+/// каждой, и среди них «ветка dev1» и «ветка рабочего места: dev1» — для
+/// человека одно слово дважды. Заказчик: «не очень понятно, что там пишется и
+/// для чего». Текст остался для агента и командной строки
+/// (`status_text`), а окно теперь само решает, что показать и чем это
+/// сгруппировать.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Facts {
+    /// Куда смотрит HEAD прямо сейчас.
+    pub branch: String,
+    /// `dev1c/<имя>` — как репозиторий зовётся в Gitea.
+    pub repo: String,
+    /// Ветка рабочего места из настроек: в неё пойдёт отправка. С `branch`
+    /// совпадает почти всегда, и расхождение — единственная причина, по
+    /// которой их стоит показывать обе.
+    pub want_branch: String,
+    /// Последний коммит одной строкой; пусто — коммитов ещё нет.
+    pub last: String,
+    /// Неотправленных коммитов: число, либо `все` — ветки на сервере ещё нет.
+    pub ahead: String,
+    /// Сколько файлов изменено и не закоммичено.
+    pub changed: usize,
+    /// `ConfigDumpInfo.xml` на месте: без него первая загрузка будет полной.
+    pub index: bool,
+}
+
+impl Facts {
+    /// Ждёт ли что-нибудь отправки.
+    pub fn unsent(&self) -> bool {
+        self.ahead != "0" || self.changed > 0
+    }
+}
+
+pub fn facts(p: &Project) -> Result<Facts, String> {
     ensure_origin(p)?;
     let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
-    let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_else(|_| "нет".into());
+    let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_default();
     let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
-    let index = if p.dir.join("src").join("ConfigDumpInfo.xml").exists() { "есть" } else { "нет — первая загрузка будет полной" };
+    Ok(Facts {
+        branch,
+        repo: repo_name(p),
+        want_branch: p.branch.clone(),
+        last,
+        ahead,
+        changed,
+        index: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
+    })
+}
+
+/// Тот же отчёт текстом — для агента (`project_status`) и командной строки.
+/// Формат не менялся: на него смотрят и правила агента, и привычка человека.
+pub fn status_text(f: &Facts) -> String {
+    let index = if f.index { "есть" } else { "нет — первая загрузка будет полной" };
+    let last = if f.last.is_empty() { "нет" } else { &f.last };
     let mut out = format!(
-        "ветка {branch}\nрепозиторий: {}\nветка рабочего места: {}\nпоследний коммит: {last}\nнеотправленных коммитов: {ahead}\nизменено: {changed}\nConfigDumpInfo.xml: {index}",
-        repo_name(p),
-        p.branch
+        "ветка {}\nрепозиторий: {}\nветка рабочего места: {}\nпоследний коммит: {last}\nнеотправленных коммитов: {}\nизменено: {}\nConfigDumpInfo.xml: {index}",
+        f.branch, f.repo, f.want_branch, f.ahead, f.changed
     );
-    if ahead != "0" || changed > 0 {
+    if f.unsent() {
         out.push('\n');
         out.push_str(CANNOT_REACH_THE_BASE);
     }
-    Ok(out)
+    out
+}
+
+pub fn status(p: &Project) -> Result<String, String> {
+    Ok(status_text(&facts(p)?))
 }
 
 /// Пауза перед повтором `pull`: короткая, но настоящая — ровно то время,
@@ -451,6 +505,26 @@ const DOING_NAMES: [&str; 4] = ["", "project_status", "project_pull", "project_p
 /// Что сейчас идёт под мьютексом (пусто — ничего).
 pub fn doing() -> &'static str {
     DOING_NAMES[DOING.load(std::sync::atomic::Ordering::Relaxed)]
+}
+
+/// Состояние проекта для окна: те же факты и под тем же замком, что отдаёт
+/// агенту `project_status`. Под замком — чтобы во время выгрузки вкладка
+/// говорила «занято», а не читала полузаписанный индекс; `Err` здесь и есть
+/// эта строка, окно показывает её как есть.
+pub fn facts_locked(p: &Project) -> Result<Facts, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let _guard = match LOCK.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let what = doing();
+            return Err(format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }));
+        }
+    };
+    DOING.store(1, Relaxed);
+    let r = facts(p);
+    DOING.store(0, Relaxed);
+    r
 }
 
 /// Вызов инструмента моста: `(текст, isError)`. Занято — ответ, не очередь.

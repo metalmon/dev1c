@@ -313,17 +313,79 @@ const PROJECT_EMPTY: &str = "Читаю состояние проекта…";
 /// Строки вкладки «Проект»: кружок, заголовок, подробность. Чистая — вид
 /// только раскладывает её по слоям. Кружка нет (`None`) у подсказки: она
 /// не факт о проекте, а объяснение, и рисуется мелким текстом.
+/// Три карточки вместо семи полей, и ни одной, которой нечего сказать.
+///
+/// Было: текстовый отчёт `project_status` разбивался по строкам, и каждая
+/// строка становилась карточкой с серой точкой — «ветка dev1»,
+/// «репозиторий», «ветка рабочего места», «последний коммит»,
+/// «неотправленных коммитов», «изменено», «ConfigDumpInfo.xml». Семь
+/// одинаковых плашек, в которых «ветка» стояла дважды (куда смотрит HEAD и
+/// какая задана в параметрах), а точки не значили ничего. Заказчик
+/// 25.10.2026: «не очень понятно, что там пишется и для чего; возможно,
+/// часть таких параметров надо одной карточкой».
+///
+/// Стало — по вопросам, на которые человек сюда и приходит:
+/// 1. где мой проект (путь, ветка, репозиторий) — одной карточкой;
+/// 2. есть ли что отправлять (и сколько) — точка говорит состояние, а не
+///    украшает строку;
+/// 3. что было отправлено последним — только если коммиты уже есть.
+///
+/// Остальное молчит, пока не станет важным: совпадающие ветки не
+/// показываются двумя строками, а `ConfigDumpInfo.xml` упоминается, только
+/// когда его нет.
 pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String)> {
     let Some(v) = v else { return vec![(None, PROJECT_EMPTY.into(), String::new())] };
     if !v.ok {
         return vec![(Some(Dot::Busy), v.dir.clone(), v.why.clone()), (None, HINT_PROJECT.into(), String::new())];
     }
-    let mut rows = vec![(Some(Dot::Up), v.dir.clone(), format!("ветка {}", v.branch))];
-    rows.extend(v.lines.iter().map(|l| match l.split_once(": ") {
-        Some((title, detail)) => (Some(Dot::Off), title.to_string(), detail.to_string()),
-        None => (Some(Dot::Off), l.clone(), String::new()),
-    }));
+    let Some(f) = v.facts.as_ref() else {
+        return vec![(Some(Dot::Busy), v.dir.clone(), v.why.clone())];
+    };
+    // 1. Проект: где он, на какой ветке и в какой репозиторий едет.
+    let mut rows = vec![(Some(Dot::Up), v.dir.clone(), format!("ветка {} · {}", f.branch, f.repo))];
+    // Ветка в параметрах разошлась с тем, где человек стоит, — это и есть
+    // единственный повод показать обе: отправка пойдёт не туда, куда он
+    // смотрит.
+    if f.branch != f.want_branch {
+        rows.push((Some(Dot::Warn), "Ветка разошлась с параметрами".into(), format!("в параметрах {}, отправка пойдёт туда", f.want_branch)));
+    }
+    // 2. Есть ли что отправлять. Точка здесь — настоящее состояние.
+    rows.push(unsent_row(f));
+    // 3. Последняя отправка — только когда есть что показывать.
+    if !f.last.is_empty() {
+        rows.push((Some(Dot::Off), "Последний коммит".into(), f.last.clone()));
+    }
+    // Индекс выгрузки — только когда его нет: это предупреждение о том, что
+    // следующая загрузка пойдёт долго, а не факт на каждый день.
+    if !f.index {
+        rows.push((Some(Dot::Warn), "Первая загрузка будет полной".into(), "в выгрузке нет ConfigDumpInfo.xml".into()));
+    }
     rows
+}
+
+/// Карточка «есть ли что отправлять». Числа со склонением (`common::word`):
+/// «1 коммит», «3 коммита», «5 коммитов» — иначе отчёт выглядит машинным.
+fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
+    if !f.unsent() {
+        return (Some(Dot::Up), "Всё отправлено".into(), String::new());
+    }
+    let mut parts = Vec::new();
+    match f.ahead.as_str() {
+        // Ветки на сервере ещё нет: считать нечего, и «все коммиты» честнее
+        // любого числа.
+        "все" => parts.push("ветка ещё не отправлялась".to_string()),
+        n => {
+            if let Ok(k) = n.parse::<u64>() {
+                if k > 0 {
+                    parts.push(common::word::count(k, "коммит", "коммита", "коммитов"));
+                }
+            }
+        }
+    }
+    if f.changed > 0 {
+        parts.push(format!("{} не закоммичено", common::word::count(f.changed as u64, "файл", "файла", "файлов")));
+    }
+    (Some(Dot::Warn), "Не отправлено".into(), parts.join(", "))
 }
 
 /// Поля вкладки «Параметры», которые режим реально показывает. В локальном
@@ -1691,35 +1753,94 @@ mod tests {
         assert!(fields_differ(&moved, &saved, "local"));
     }
 
+    fn facts(ahead: &str, changed: usize) -> crate::project::Facts {
+        crate::project::Facts {
+            branch: "dev1".into(),
+            repo: "dev1c/Buh".into(),
+            want_branch: "dev1".into(),
+            last: "a1b2c3 выгрузка (2 часа назад)".into(),
+            ahead: ahead.into(),
+            changed,
+            index: true,
+        }
+    }
+
+    fn view(f: Option<crate::project::Facts>) -> ProjectView {
+        ProjectView { dir: "C:\\proj\\Buh".into(), branch: "dev1".into(), facts: f, ok: true, why: String::new() }
+    }
+
     #[test]
-    fn project_rows_explain_a_missing_layout_and_list_status_lines() {
+    fn project_rows_explain_a_missing_layout() {
         let none = project_rows(None);
         assert_eq!(none.len(), 1);
         assert_eq!(none[0], (None, "Читаю состояние проекта…".into(), String::new()), "пока не ответили — говорим о своём состоянии, а не читаем лекцию");
 
-        let bad = ProjectView {
-            dir: "C:\\proj\\Buh".into(),
-            branch: "dev1".into(),
-            lines: Vec::new(),
-            ok: false,
-            why: "каталог проекта ещё не разложен".into(),
-        };
+        let bad = ProjectView { ok: false, why: "каталог проекта ещё не разложен".into(), ..view(None) };
         let rows = project_rows(Some(&bad));
         assert_eq!(rows[0], (Some(Dot::Busy), "C:\\proj\\Buh".into(), "каталог проекта ещё не разложен".into()));
         // Подсказка — без кружка: вид рисует её мелким текстом.
         assert_eq!(rows[1], (None, HINT_PROJECT.into(), String::new()));
+    }
 
-        let good = ProjectView {
-            lines: vec!["ветка: dev1".into(), "изменено: 2 файла".into()],
-            ok: true,
-            why: String::new(),
-            ..bad
-        };
-        let rows = project_rows(Some(&good));
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0], (Some(Dot::Up), "C:\\proj\\Buh".into(), "ветка dev1".into()));
-        assert_eq!(rows[1], (Some(Dot::Off), "ветка".into(), "dev1".into()));
-        assert_eq!(rows[2], (Some(Dot::Off), "изменено".into(), "2 файла".into()));
+    /// Чистый проект: две карточки, и ни одной лишней. Ни про совпадающие
+    /// ветки, ни про `ConfigDumpInfo.xml` на месте человеку читать нечего.
+    #[test]
+    fn a_clean_project_is_two_cards() {
+        let rows = project_rows(Some(&view(Some(facts("0", 0)))));
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0], (Some(Dot::Up), "C:\\proj\\Buh".into(), "ветка dev1 · dev1c/Buh".into()));
+        assert_eq!(rows[1], (Some(Dot::Up), "Всё отправлено".into(), String::new()));
+        assert_eq!(rows[2], (Some(Dot::Off), "Последний коммит".into(), "a1b2c3 выгрузка (2 часа назад)".into()));
+    }
+
+    /// Неотправленное считается словами с правильным склонением, а точка
+    /// говорит состояние, а не украшает строку.
+    #[test]
+    fn unsent_work_is_counted_in_words() {
+        let rows = project_rows(Some(&view(Some(facts("3", 5)))));
+        assert_eq!(rows[1], (Some(Dot::Warn), "Не отправлено".into(), "3 коммита, 5 файлов не закоммичено".into()));
+        let rows = project_rows(Some(&view(Some(facts("1", 0)))));
+        assert_eq!(rows[1].2, "1 коммит");
+        let rows = project_rows(Some(&view(Some(facts("0", 1)))));
+        assert_eq!(rows[1].2, "1 файл не закоммичено");
+        // Ветки на сервере ещё нет — считать нечего.
+        let rows = project_rows(Some(&view(Some(facts("все", 0)))));
+        assert_eq!(rows[1].2, "ветка ещё не отправлялась");
+    }
+
+    /// Две ветки показываются ровно тогда, когда они разные: в этом и был
+    /// абсурд прежней вкладки — «ветка dev1» и «ветка рабочего места dev1»
+    /// двумя одинаковыми карточками.
+    #[test]
+    fn the_two_branches_are_shown_only_when_they_differ() {
+        let same = project_rows(Some(&view(Some(facts("0", 0)))));
+        assert!(!same.iter().any(|r| r.1.contains("разошлась")), "{same:?}");
+
+        let drifted = crate::project::Facts { branch: "dev2".into(), ..facts("0", 0) };
+        let rows = project_rows(Some(&view(Some(drifted))));
+        let warn = rows.iter().find(|r| r.1.contains("разошлась")).expect("расхождение обязано быть видно");
+        assert_eq!(warn.0, Some(Dot::Warn));
+        assert!(warn.2.contains("dev1"), "{warn:?}");
+    }
+
+    /// Индекс выгрузки — только когда его нет: это предупреждение о долгой
+    /// первой загрузке, а не факт на каждый день.
+    #[test]
+    fn the_dump_index_is_mentioned_only_when_it_is_missing() {
+        let with = project_rows(Some(&view(Some(facts("0", 0)))));
+        assert!(!with.iter().any(|r| r.2.contains("ConfigDumpInfo")), "{with:?}");
+        let without = crate::project::Facts { index: false, ..facts("0", 0) };
+        let rows = project_rows(Some(&view(Some(without))));
+        assert!(rows.last().unwrap().1.contains("Первая загрузка"), "{rows:?}");
+    }
+
+    /// Коммитов ещё нет — карточки «Последний коммит» нет вовсе, а не
+    /// карточка со словом «нет».
+    #[test]
+    fn a_project_without_commits_shows_no_last_commit_card() {
+        let fresh = crate::project::Facts { last: String::new(), ..facts("все", 0) };
+        let rows = project_rows(Some(&view(Some(fresh))));
+        assert!(!rows.iter().any(|r| r.1.contains("Последний")), "{rows:?}");
     }
 
     #[test]

@@ -328,7 +328,9 @@ pub fn first_phase(which: Which) -> Phase {
 pub struct ProjectView {
     pub dir: String,
     pub branch: String,
-    pub lines: Vec<String>,
+    /// Разобранное состояние git; `None` — раскладки нет, замок занят или
+    /// git ответил ошибкой: причина тогда в `why`.
+    pub facts: Option<project::Facts>,
     pub ok: bool,
     pub why: String,
 }
@@ -1855,18 +1857,19 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::NoGitea => (false, cfg::NO_GITEA.into()),
                     Layout::Drifted(d) => (false, d),
                 };
-                // Тот же инструмент, что зовёт агент, под тем же замком
-                // проекта: во время выгрузки вкладка говорит «занято», а не
-                // читает полузаписанный индекс (правка 6B на main).
-                let lines = if ok {
-                    let (text, _) = project::call(&p, "project_status", &serde_json::Value::Null);
-                    text.lines().map(str::to_string).collect()
-                } else {
-                    Vec::new()
+                // Те же факты и под тем же замком, что отдаёт агенту
+                // `project_status`: во время выгрузки вкладка говорит
+                // «занято», а не читает полузаписанный индекс (правка 6B на
+                // main). Отказ замка или git — в `why`, и тогда вкладка
+                // показывает причину вместо состояния.
+                let (facts, ok, why) = match ok.then(|| project::facts_locked(&p)) {
+                    Some(Ok(f)) => (Some(f), true, why),
+                    Some(Err(e)) => (None, false, e),
+                    None => (None, ok, why),
                 };
-                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, lines, ok, why })
+                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, facts, ok, why })
             },
-            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), lines: Vec::new(), ok: false, why: PANIC_TEXT.into() }),
+            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), facts: None, ok: false, why: PANIC_TEXT.into() }),
         );
     });
 }

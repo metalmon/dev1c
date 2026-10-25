@@ -548,6 +548,13 @@ fn start_failure_text(port: u16, apache_text: &str, holder: Option<&str>) -> Str
 pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
     apache2_on_path().ok_or_else(|| "apache2 не найден ни в $PATH, ни в /usr/sbin, /usr/local/sbin, /sbin — установите пакет apache2 или переключите publication на \"webserver\"".to_string())?;
     let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
+    // Дать прежнему серверу отпустить порт. Без этой паузы `-k start` видит
+    // ещё живой pid, печатает «httpd (pid N) already running», ВЫХОДИТ С
+    // НУЛЁМ — и ничего не запускает; через секунду прежний дожил своё, и на
+    // порту пусто. Ровно это заказчик и поймал 25.10, переключив
+    // обслуживание дважды подряд: в журнале «HTTP-сервис базы поднят», а
+    // порт мёртвый.
+    wait_until(STOP_WAIT, || !port_listens(p.port));
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "start"])
         .output()
@@ -558,7 +565,51 @@ pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
         let apache_text = format!("apache2 -k start: {detail}");
         return Err(start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref()));
     }
+    // Код возврата доказательством не считаем — он нулевой и у «already
+    // running», и у запуска, который упадёт секундой позже (битый модуль,
+    // занятый порт: apache к этому времени уже ушёл в фон). Доказательство
+    // одно — на порту отвечают.
+    if !wait_until(START_WAIT, || port_listens(p.port)) {
+        let tail = error_log_tail(&p.log, 5);
+        let said = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let detail = if tail.is_empty() { said } else { format!("{said} {tail}").trim().to_string() };
+        let apache_text = format!("apache2 -k start отработал, но на 127.0.0.1:{} никто не отвечает: {detail}", p.port);
+        return Err(start_failure_text(p.port, &apache_text, holder::of_port(p.port).as_deref()));
+    }
     Ok(())
+}
+
+/// Сколько ждать, пока прежний сервер отпустит порт, и сколько — пока новый
+/// на нём отзовётся. Секунды, а не доли: apache уходит и приходит не мгновенно,
+/// а человек всё равно смотрит на «включаю MCP».
+#[cfg(not(windows))]
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(not(windows))]
+const START_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Слушает ли кто-нибудь порт на loopback. Вопрос именно «слушает», а не
+/// «отвечает ли 1С»: сервер поднимается раньше, чем платформа открывает базу
+/// (первый ответ по HTTP на стенде — 7,7 с, замер 25.10), и ждать базу здесь
+/// значило бы держать человека ради того, что проверит факт готовности.
+#[cfg(not(windows))]
+fn port_listens(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), std::time::Duration::from_millis(300)).is_ok()
+}
+
+/// Ждать выполнения условия до срока, опрашивая его каждые 200 мс. `true` —
+/// дождались. Чистая по отношению к условию: тест подаёт своё.
+#[cfg(not(windows))]
+fn wait_until(limit: std::time::Duration, mut ready: impl FnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + limit;
+    loop {
+        if ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Гасит сервис через собственный pid-файл httpd (`-k stop`). Успешный код
@@ -825,6 +876,26 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     /// Поэтому httpd запускается ИЗ комплекта, а пишет публикация только в
     /// состояние — ровно это и держит тест. Живой случай: 25.10, уводя
     /// инструменты в комплект, я увёл туда заодно и дескриптор с паролем.
+    /// Ожидание условия — единственная часть подъёма, которую можно
+    /// проверить без apache: дождались, не дождались, и условие спрашивают
+    /// повторно, а не один раз.
+    #[cfg(not(windows))]
+    #[test]
+    fn waiting_returns_as_soon_as_the_condition_holds_and_gives_up_on_time() {
+        use std::time::{Duration, Instant};
+        let mut calls = 0;
+        assert!(super::wait_until(Duration::from_secs(1), || {
+            calls += 1;
+            calls >= 2
+        }));
+        assert_eq!(calls, 2, "условие обязано спрашиваться заново, а не один раз");
+
+        let t0 = Instant::now();
+        assert!(!super::wait_until(Duration::from_millis(400), || false));
+        assert!(t0.elapsed() >= Duration::from_millis(400), "срок не выдержан");
+        assert!(t0.elapsed() < Duration::from_secs(3), "ждали дольше срока: {:?}", t0.elapsed());
+    }
+
     #[test]
     fn the_descriptor_with_the_password_never_lands_in_the_kit() {
         let kit = Path::new("K:\\kit");

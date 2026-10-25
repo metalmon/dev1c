@@ -142,6 +142,38 @@ grep -q "skipping $HOME_DIR/.pi: symlink" "$LOG" \
 [ -z "$(ls -A "$WORK/elsewhere")" ] || fail "по ссылке что-то записано: $(ls -A "$WORK/elsewhere")"
 ok "ссылка пропущена, по ней ничего не записано"
 
+echo "== На месте файла — каталог, на месте каталога — файл =="
+
+# Два пути, которыми пользователь валит точку входа целиком, и оба достижимы
+# простыми командами в своём доме:
+#   mkdir ~/.pi/agent/mcp.json          — `rm -f` по каталогу отказывает;
+#   touch ~/.pi/agent/extensions        — `install -d` по файлу отказывает.
+# `set -eu` превращает отказ в выход из скрипта, и контейнер не доходит ни до
+# Gitea, ни до xrdp, ни до sshd: ОДИН пользователь не поднимает стенд НИКОМУ.
+# Срабатывает только когда отпечаток разошёлся — то есть ровно при обновлении
+# образа, когда раскладка и должна работать.
+rm -rf "$HOME_DIR/.pi"
+rm -f "$STAMPS"/pi_*
+seed
+rm -f "$HOME_DIR/.pi/agent/mcp.json"
+mkdir -p "$HOME_DIR/.pi/agent/mcp.json"
+rm -rf "$HOME_DIR/.pi/agent/extensions"
+: > "$HOME_DIR/.pi/agent/extensions"
+chown -R "$U:$U" "$HOME_DIR/.pi"
+rm -f "$STAMPS"/pi_*
+
+seed
+[ -d "$HOME_DIR/.pi/agent/mcp.json" ] || fail "каталог на месте файла подменён"
+[ -f "$HOME_DIR/.pi/agent/extensions" ] || fail "файл на месте каталога подменён"
+grep -q "skipping $HOME_DIR/.pi/agent/mcp.json" "$LOG"     || fail "про каталог на месте файла не сказано: $(grep -i skipping "$LOG" | head -3)"
+grep -q "skipping $HOME_DIR/.pi/agent/extensions" "$LOG"     || fail "про файл на месте каталога не сказано: $(grep -i skipping "$LOG" | head -3)"
+ok "каталог на месте файла и файл на месте каталога пропущены, точка входа дошла до конца"
+
+# Дом в порядок, иначе следующие сценарии начнут с мусора.
+rm -rf "$HOME_DIR/.pi"
+rm -f "$STAMPS"/pi_*
+seed
+
 echo "== Промежуточный каталог — ссылка наружу =="
 
 # Дома живут на томе, и в них остаётся всё, что положил предыдущий гость.

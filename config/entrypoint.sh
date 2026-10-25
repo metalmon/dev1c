@@ -161,6 +161,21 @@ seed_from_image() {
         log "skipping $dst: symlink"
         return 0
     fi
+    # На месте файла — каталог, на месте каталога — файл. Оба достижимы
+    # простыми командами в своём доме (`mkdir ~/.pi/agent/mcp.json`,
+    # `touch ~/.config/zed/themes`), и оба валят точку входа: `rm -f` по
+    # каталогу и `install -d` по файлу отказывают, а с `set -eu` отказ значит
+    # выход — контейнер не доходит ни до Gitea, ни до xrdp, ни до sshd, то
+    # есть ОДИН пользователь не поднимает стенд НИКОМУ. Срабатывало только
+    # когда отпечаток разошёлся, то есть ровно при обновлении образа.
+    if [ -e "$dst" ] && [ ! -f "$dst" ]; then
+        log "skipping $dst: не обычный файл"
+        return 0
+    fi
+    if [ -e "$parent" ] && [ ! -d "$parent" ]; then
+        log "skipping $parent: не каталог"
+        return 0
+    fi
     # the parent is created below if missing; an existing one must resolve
     # inside the root (a link deeper in the path would lead root elsewhere)
     root_real=$(realpath "$root")

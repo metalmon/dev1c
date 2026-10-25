@@ -109,6 +109,21 @@ for c in "$KIT/dev1c-setup" "$BIN_DIR/dev1c-setup" "$KIT/dev1c-setup.exe" "$BIN_
 done
 [ -n "$SETUP" ] || { echo "pack.sh: no dev1c-setup this machine can run (looked in $KIT and $BIN_DIR) — the kit would ship without dev1c.toml and checksums" >&2; exit 1; }
 
+# Путь комплекта для ВЫБРАННОГО бинарника. Под Windows запускаемым оказывается
+# dev1c-setup.exe, а путей вида /c/dev1c-kit-linux он не понимает: Git Bash их
+# обычно переводит сам, но provision.sh выставляет MSYS_NO_PATHCONV=1 (без него
+# докер получает /opt/1cv8t переписанным) — и перевод выключается заодно и для
+# нашего бинарника. Кончалось это «Остановлено: не прочитать /c/dev1c-kit-linux
+# (os error 3)» на последнем шаге, когда комплект уже собран (26.10.2026).
+# Поэтому переводим сами, здесь, один раз — вызовам не надо знать, чей бинарник
+# им попался. Относительные пути (manual-path.sh даёт `--kit .`) не трогаем.
+kitpath() {
+    case "$SETUP" in
+    *.exe) command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || echo "$1" ;;
+    *) echo "$1" ;;
+    esac
+}
+
 if [ "$OS" = "linux" ]; then
     # The program prints its own sample: one source for the comments and the
     # structure, so dev1c.toml and Cfg::default never drift apart.
@@ -368,9 +383,9 @@ if [ "$OS" = "linux" ]; then
 fi
 
 # Суммы считает он же — заказчик проверяет комплект тем же кодом.
-"$SETUP" --kit "$KIT" checksums >/dev/null
+"$SETUP" --kit "$(kitpath "$KIT")" checksums >/dev/null
 if [ "$OS" = "windows" ]; then
-    "$SETUP" --kit "$CONNECT" checksums >/dev/null
+    "$SETUP" --kit "$(kitpath "$CONNECT")" checksums >/dev/null
 fi
 
 echo "Kits ready in $OUT:"

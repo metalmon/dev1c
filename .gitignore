@@ -45,3 +45,6 @@ artifacts/
 # Python bytecode of the onboarding overlay
 __pycache__/
 *.pyc
+
+# Пути конкретной машины для provision.sh: у каждой свои, в гите им не место.
+provision.local

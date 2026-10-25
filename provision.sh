@@ -39,6 +39,27 @@ set -eu
 # slash where a PATH lookup will do.
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
+# Машинные пути — в provision.local рядом со скриптом (в гит не идёт, см.
+# .gitignore). На одной машине дистрибутив 1С лежит на C:, на другой в
+# platform/; временный каталог под трёхгигабайтные архивы нужен там, где есть
+# место. Задавать это переменными в каждой команде — ровно та потеря
+# воспроизводимости, от которой мы и ушли к скрипту: забыл одну переменную —
+# собрался другой комплект, и выяснится это у заказчика. Файл обычный sh:
+#
+#   export DEV1C_PLATFORM_DIR=/c/dev1c-platform
+#   export TMPDIR=/c/dev1c-build
+#
+# shellcheck source=/dev/null
+[ ! -f "$(dirname "$0")/provision.local" ] || . "$(dirname "$0")/provision.local"
+
+# Путь машины в том виде, в котором его поймёт docker.exe. MSYS_NO_PATHCONV
+# выше выключает перевод аргументов заодно и здесь, поэтому на
+# `--build-context platform=/c/dev1c-platform` докер отвечает «The system
+# cannot find the path specified» — каталог при этом на месте (26.10.2026).
+# Переводим ровно там, где путь ЭТОЙ машины уходит докеру; относительные пути
+# cygpath оставляет как есть, а на линуксе его нет и перевод не нужен.
+winpath() { command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || echo "$1"; }
+
 IMAGE=oktaplus/dev1c-1c:latest
 PAYLOAD_IMAGE=oktaplus/dev1c-1c-payload:latest
 # The stand image is built FROM this one (Dockerfile.1c: ARG BASE), and this
@@ -156,11 +177,23 @@ volumes() {
 
 case "${1:-}" in
 build)
+    # ./provision.sh build [all|stand|payload]
+    #
+    # Цели разведены потому, что живут они в разном ритме: payload
+    # пересобирают раз в релиз 1С, а стенд — по многу раз в день. Требовать
+    # дистрибутив 1С ради стенда значило бы запретить сборку на машине, где
+    # дистрибутива нет и не должно быть (см. platform/ПРОЧТИ.md); а собирать
+    # руками вместо скрипта — терять воспроизводимость, чем мы уже заплатили.
+    what=${2:-all}
+    case "$what" in all|stand|payload) ;; *) die "build [all|stand|payload], а не $what" ;; esac
+
     # Каталог с дистрибутивом 1С и шаблоном базы. Отдельной переменной,
     # потому что он весит полтора гигабайта и на рабочем диске места под
     # него может не быть: заказчик просил собирать на C.
     PLATFORM_DIR=${DEV1C_PLATFORM_DIR:-platform}
-    [ -d "$PLATFORM_DIR" ] || die "$PLATFORM_DIR не найден: там лежат установщик 1С и шаблон базы (DEV1C_PLATFORM_DIR меняет путь)"
+    if [ "$what" != stand ]; then
+        ls "$PLATFORM_DIR"/setup-training-*.run >/dev/null 2>&1             || die "$PLATFORM_DIR: нет дистрибутива 1С (setup-training-*.run) — он нужен цели payload; стенд собирается без него: ./provision.sh build stand"
+    fi
     # Сперва базовый образ: стенд собирается FROM него, и правка в config/
     # иначе молча не доедет.
     ensure_base
@@ -178,10 +211,14 @@ build)
         say "ВНИМАНИЕ: нет artifacts/1c-connect — собираю стенд БЕЗ окна коннектора (возьмите артефакт 1c-connect-linux из CI: ./provision.sh kit)"
         connect_arg="--build-arg CONNECT_OPTIONAL=1"
     fi
-    # shellcheck disable=SC2086 # пустая или одна строка аргумента, слова нужны
-    docker build -f Dockerfile.1c --build-context artifacts=artifacts $connect_arg -t "$IMAGE" .
-    say "the payload image (platform + template base)"
-    docker build -f Dockerfile.1c --build-context platform="$PLATFORM_DIR" --target payload -t "$PAYLOAD_IMAGE" .
+    if [ "$what" != payload ]; then
+        # shellcheck disable=SC2086 # пустая или одна строка аргумента, слова нужны
+        docker build -f Dockerfile.1c --build-context artifacts=artifacts $connect_arg -t "$IMAGE" .
+    fi
+    if [ "$what" != stand ]; then
+        say "the payload image (platform + template base)"
+        docker build -f Dockerfile.1c --build-context platform="$(winpath "$PLATFORM_DIR")" --target payload -t "$PAYLOAD_IMAGE" .
+    fi
     ;;
 export)
     out=${2:-$TAR}
@@ -302,7 +339,14 @@ kit)
     chmod +x "$bins/dev1c-setup" 2>/dev/null || true
     [ -f "$bins/dev1c-setup" ] || die "нет $bins/dev1c-setup"
 
-    "$0" build
+    # Через sh, а не как команду: скрипт запускают и `sh provision.sh`, и
+    # тогда `"$0" build` упирается в «command not found» — бит исполнения на
+    # нём не обязателен.
+    #
+    # Цель — только стенд. Payload комплекту нужен архивом, а не образом: он
+    # либо уже лежит в рабочем каталоге, либо собирается ниже отдельным
+    # `export`. Просить ради комплекта дистрибутив 1С незачем.
+    sh "$0" build stand
 
     # DEV1C_REUSE=1 — не делать заново то, что уже лежит в $tmp. Нужно, когда
     # чинишь поздний шаг: архивы по четыре гигабайта пересобирать незачем. По
@@ -332,7 +376,7 @@ kit)
         sh scripts/check-image-archive.sh "$tmp/dev1c-llama-image.tar.gz"
     }
 
-    have "$tmp/dev1c-1c-payload.tar.gz" || "$0" export "$tmp/dev1c-1c-payload.tar.gz"
+    have "$tmp/dev1c-1c-payload.tar.gz" || sh "$0" export "$tmp/dev1c-1c-payload.tar.gz"
 
     say "пакеты NVIDIA Container Toolkit"
     ver=$(sed -n 's/^NVIDIA_TOOLKIT_VERSION=//p' pack.sh)

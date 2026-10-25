@@ -101,6 +101,14 @@ impl Default for Cfg {
 
 pub const FILE: &str = "dev1c.toml";
 
+/// Полный ли путь — на любой из двух систем: комплект пишется на Windows,
+/// а читается и там, и на Linux. Правило одно у проверки параметров и у
+/// сборки образца, поэтому живёт в одном месте, а не в замыкании внутри
+/// validate.
+fn absolute(p: &str) -> bool {
+    p.starts_with('/') || p.starts_with('\\') || p.get(1..3).is_some_and(|s| s == ":\\" || s == ":/")
+}
+
 impl Cfg {
     /// Читает `dev1c.toml` из комплекта. Нет файла — значения по умолчанию,
     /// и `status` скажет об этом.
@@ -191,8 +199,6 @@ impl Cfg {
             m.file.is_empty() || m.url.is_empty(),
             "[model]: задано и file, и url — оставьте одно: файл (serve = \"host\" или \"docker\") или удалённый сервер (serve = \"remote\")"
         );
-        // Is the path absolute on either OS? The kit is written on Windows and read on Linux too.
-        let absolute = |p: &str| p.starts_with('/') || p.starts_with('\\') || p.get(1..3).is_some_and(|s| s == ":\\" || s == ":/");
         match self.form() {
             Form::Remote => {
                 anyhow::ensure!(!m.url.is_empty(), "[model]: для serve = \"remote\" нужен url");
@@ -288,9 +294,39 @@ impl Cfg {
 
     /// Образец с одной подставленной формой обслуживания: умалчивание
     /// (`Cfg::default()`) не трогаем — только то, что нужно показать.
-    pub fn example_for(serve: &str) -> String {
+    ///
+    /// `model` — файл модели, если он на эту сборку комплекта известен. Имя
+    /// модели нарочно не зашито в программу: модель пилота меняется чаще, чем
+    /// установщик, и зашитое имя пришлось бы править кодом и пересобирать.
+    /// Задаётся снаружи — `example --model`, а в сборке комплекта
+    /// DEV1C_MODEL_FILE (см. pack.sh). Не задано — `file` остаётся пустым, и
+    /// установка говорит «модель не выбрана», как и прежде.
+    ///
+    /// Путь проверяется здесь же: для `docker` он обязан быть относительным
+    /// (файл лежит в комплекте), для `host` — полным. Иначе ошибка вышла бы у
+    /// заказчика при установке, а не у нас при сборке.
+    pub fn example_for(serve: &str, model: Option<&str>) -> Result<String> {
         let mut cfg = Cfg::default();
         cfg.model.serve = serve.into();
+        if let Some(m) = model {
+            // Проверяем ровно заданное. Весь файл проверять нельзя: образец
+            // нарочно неполон — у формы remote в нём пустые url и name, их
+            // заполняет администратор, и validate() на образце упал бы.
+            match cfg.form() {
+                Form::Docker => anyhow::ensure!(
+                    !absolute(m),
+                    "--model при serve = \"docker\" — путь относительно комплекта (model/<файл>.gguf), а не полный: {m}"
+                ),
+                Form::Host => anyhow::ensure!(
+                    absolute(m),
+                    "--model при serve = \"host\" — полный путь к .gguf на этой машине, а не относительный: {m}"
+                ),
+                Form::Remote => anyhow::bail!(
+                    "--model с serve = \"remote\" не нужен: у удалённого сервера нет файла, есть url и name"
+                ),
+            }
+            cfg.model.file = m.into();
+        }
         // При serve = "docker" сервер модели живёт на этой же машине и просит
         // памяти больше, чем среда: раздел стенда из спеки — 8 ГБ среде,
         // остальное (на 32 ГБ это 22 ГБ) контейнеру модели. Умолчание 24g
@@ -299,7 +335,7 @@ impl Cfg {
         if cfg.form() == Form::Docker {
             cfg.server.memory = "8g".into();
         }
-        Cfg::render(&cfg)
+        Ok(Cfg::render(&cfg))
     }
 
     pub fn volume(&self, suffix: &str) -> String {
@@ -511,21 +547,39 @@ mod tests {
         assert_eq!(back, c);
     }
 
+    /// Файл модели в образце — снаружи, а не зашитый: имя модели пилота
+    /// меняется чаще установщика. Путь проверяется при сборке комплекта, а не
+    /// при установке у заказчика.
+    #[test]
+    fn the_sample_carries_the_model_file_only_when_it_is_given() {
+        let kit = Cfg::example_for("docker", Some("model/GLM-4.7-Flash-Q4_K_M.gguf")).unwrap();
+        assert!(kit.contains("file = \"model/GLM-4.7-Flash-Q4_K_M.gguf\""), "{kit}");
+        // Не задано — как было: пусто, и установка скажет «модель не выбрана».
+        assert!(Cfg::example_for("docker", None).unwrap().contains("file = \"\""));
+        // Форма docker ждёт путь В КОМПЛЕКТЕ: полный путь — ошибка сборки.
+        assert!(Cfg::example_for("docker", Some("/srv/models/x.gguf")).is_err());
+        // Форма host — наоборот, полный путь на той машине.
+        assert!(Cfg::example_for("host", Some("model/x.gguf")).is_err());
+        assert!(Cfg::example_for("host", Some("/srv/models/x.gguf")).unwrap().contains("/srv/models/x.gguf"));
+        // Удалённому серверу файл не нужен вовсе.
+        assert!(Cfg::example_for("remote", Some("/srv/models/x.gguf")).is_err());
+    }
+
     #[test]
     fn the_sample_can_be_printed_for_any_form() {
         // Форма docker делит память по спеке стенда: среде 8 ГБ, остальное
         // модели. Остальные формы отдают память среде, как и раньше.
-        assert!(Cfg::example_for("docker").contains("memory = \"8g\""));
-        assert!(Cfg::example_for("host").contains("memory = \"24g\""));
+        assert!(Cfg::example_for("docker", None).unwrap().contains("memory = \"8g\""));
+        assert!(Cfg::example_for("host", None).unwrap().contains("memory = \"24g\""));
         // Форма host не подменяет ничего — значит это сам dev1c.example.toml,
         // байт в байт. Держалось это только косвенно (через «memory = 24g» и
         // равенство EXAMPLE == Cfg::default() в тестах выше), а правка
         // example_for могла незаметно развести образец комплекта с файлом.
-        assert_eq!(Cfg::example_for("host"), EXAMPLE, "образец для host — это и есть dev1c.example.toml");
-        assert_ne!(Cfg::example_for("docker"), EXAMPLE, "форма docker обязана подменить память контейнера среды");
+        assert_eq!(Cfg::example_for("host", None).unwrap(), EXAMPLE, "образец для host — это и есть dev1c.example.toml");
+        assert_ne!(Cfg::example_for("docker", None).unwrap(), EXAMPLE, "форма docker обязана подменить память контейнера среды");
         assert_eq!(Cfg::default().server.memory, "24g", "умолчание не тронуто");
         for form in ["host", "docker", "remote"] {
-            let text = Cfg::example_for(form);
+            let text = Cfg::example_for(form, None).unwrap();
             assert!(text.contains(&format!("serve = \"{form}\"")));
             // Комментарии образца на месте: файл остаётся человеческим.
             assert!(text.contains('#'));

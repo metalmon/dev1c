@@ -92,6 +92,11 @@ enum Cmd {
         /// Форма обслуживания модели для образца: host, docker или remote.
         #[arg(long)]
         serve: Option<String>,
+        /// Файл модели в образце: для docker — путь относительно комплекта
+        /// (model/GLM-4.7-Flash-Q4_K_M.gguf), для host — полный путь. Без
+        /// ключа параметр остаётся пустым.
+        #[arg(long, requires = "serve")]
+        model: Option<String>,
     },
 }
 
@@ -223,11 +228,11 @@ fn run() -> Result<bool> {
         Some(p) => Kit::at(p),
         None => Kit::discover("DEV1C_KIT")?,
     };
-    if let Some(Cmd::Example { serve }) = &cli.cmd {
+    if let Some(Cmd::Example { serve, model }) = &cli.cmd {
         match serve {
             Some(s) => {
                 anyhow::ensure!(matches!(s.as_str(), "host" | "docker" | "remote"), "--serve: host, docker или remote");
-                print!("{}", cfg::Cfg::example_for(s));
+                print!("{}", cfg::Cfg::example_for(s, model.as_deref())?);
             }
             None => print!("{}", cfg::EXAMPLE),
         }

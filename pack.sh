@@ -112,7 +112,15 @@ done
 if [ "$OS" = "linux" ]; then
     # The program prints its own sample: one source for the comments and the
     # structure, so dev1c.toml and Cfg::default never drift apart.
-    "$SETUP" example --serve docker >"$KIT/dev1c.toml"
+    # Файл модели приходит снаружи, переменной: модель пилота меняется чаще
+    # установщика, и зашитое в программу имя пришлось бы править кодом и
+    # пересобирать бинарь. Не задана — параметр уезжает пустым, и установка
+    # честно скажет «модель не выбрана», как и раньше.
+    if [ -n "${DEV1C_MODEL_FILE:-}" ]; then
+        "$SETUP" example --serve docker --model "$DEV1C_MODEL_FILE" >"$KIT/dev1c.toml"
+    else
+        "$SETUP" example --serve docker >"$KIT/dev1c.toml"
+    fi
 else
     cp setup/dev1c-setup/dev1c.example.toml "$KIT/dev1c.toml"
 fi

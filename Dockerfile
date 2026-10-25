@@ -213,20 +213,25 @@ RUN sed -E 's|^Exec=zed|Exec=/usr/local/bin/launch-maximized zed|' \
 # debian:13-slim). Отдельная стадия с Node 22 поэтому не нужна, и Node в
 # образе по-прежнему нет — что и требовалось.
 #
-# Сумма сверяется обязательно: архив приходит по сети, и это единственное
-# место, где её можно проверить. Отдельной стадии нет, значит архив удаляется
-# тем же слоем, иначе он осядет в образе.
+# Сумма прибита здесь, а не берётся из SHA256SUMS релиза: файл сумм лежит на
+# том же сервере, что архив, и подтверждает только то, что архив доехал без
+# порчи — подменят релиз, подменят и сумму. Прибитая сумма сверена руками
+# 25.10.2026 на скачанном архиве. Меняется версия — меняется и сумма, обе
+# строки правятся вместе, иначе сборка встанет (и это правильно).
+#
+# Отдельной стадии нет, значит архив удаляется тем же слоем, иначе он осядет
+# в образе.
 #
 # `examples` выбрасываются (десять мегабайт, из них doom.wasm), а `docs`
 # остаются: pi в своих же сообщениях об ошибках ссылается на
 # /opt/pi/docs/providers.md.
 ARG PI_VERSION=1.4.0
+ARG PI_SHA256=f2e4e4329603223d03260cdb8bd5033dbdc1f73ba58ab8939db2e56546e115d2
 RUN cd /tmp \
     && curl -fsSL -O "https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz" \
-    && curl -fsSL -O "https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/SHA256SUMS" \
-    && grep "pi-linux-x64.tar.gz" SHA256SUMS | sha256sum -c - \
+    && echo "${PI_SHA256}  pi-linux-x64.tar.gz" | sha256sum -c - \
     && tar -xzf pi-linux-x64.tar.gz -C /opt \
-    && rm -rf pi-linux-x64.tar.gz SHA256SUMS /opt/pi/examples \
+    && rm -rf pi-linux-x64.tar.gz /opt/pi/examples \
     && chmod +x /opt/pi/pi \
     && ln -s /opt/pi/pi /usr/local/bin/pi \
     `# версию спрашиваем у самого бинаря: сломанный обязан уронить сборку,` \

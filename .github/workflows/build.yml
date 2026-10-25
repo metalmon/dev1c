@@ -305,6 +305,13 @@ jobs:
           # Git из Zed ограничен двумя ядрами: вызовы из редактора не забирают
           # всю машину, а git пользователя в терминале не тронут.
           docker exec dev1c sh /usr/local/bin/test-git-cpuset
+          # Агент pi: бинарь, настройки из образа, серверы MCP и модель через
+          # заглушку сервера. От пользователя, а не от root: pi от root не
+          # запускается, как и Zed.
+          docker exec -u dev1 dev1c sh /usr/local/bin/test-pi
+          # Раскладка файлов pi по уже созданным домам — от root: проверка
+          # переставляет каталоги в доме dev3 и заново зовёт точку входа.
+          docker exec dev1c sh /usr/local/bin/test-pi-seed
           docker exec dev1c tea --version | head -1
           docker exec dev1c sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
           docker exec dev1c test -s /home/dev1/.config/zed/AGENTS.md \

@@ -237,7 +237,11 @@ kit)
     # считая суммы — по всему, что в комплекте, включая модель.
     out=${2:-dist/dev1c-kit-linux}
     bins=${3:-bins}
-    llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:b11734}
+    # Тег читается из Dockerfile.llama, а не держится здесь копией: один
+    # источник на все три места (там, в CI и тут).
+    llama_ver=$(sed -n 's/^ARG LLAMA_VERSION=//p' Dockerfile.llama)
+    [ -n "$llama_ver" ] || die "Dockerfile.llama больше не объявляет LLAMA_VERSION"
+    llama=${LLAMA_REF:-ghcr.io/metalmon/dev1c-llama:$llama_ver}
     tmp=${TMPDIR:-/tmp}/dev1c-kit
     mkdir -p "$out" "$tmp" "$bins" artifacts
 

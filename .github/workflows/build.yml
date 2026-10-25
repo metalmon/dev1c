@@ -21,6 +21,12 @@ on:
     branches: [main]
     paths:
       - Dockerfile
+      # Образ, который уезжает заказчику, собирается ИМЕННО из Dockerfile.1c,
+      # а раскладывает комплект pack.sh со скриптами из scripts/. Их тут не
+      # было: правка любого из трёх не запускала сборку, и уезжало старое.
+      - Dockerfile.1c
+      - pack.sh
+      - scripts/**
       - config/**
       - .dockerignore
       - .github/workflows/build.yml
@@ -425,8 +431,15 @@ jobs:
           # shared layers, so one file would save nothing and would make an
           # onboarding fix drag a gigabyte along.
           docker save oktaplus/dev1c-1c:latest | gzip -1 > dev1c-image.tar.gz
-          docker pull ghcr.io/metalmon/dev1c-llama:b11734
-          docker tag ghcr.io/metalmon/dev1c-llama:b11734 oktaplus/dev1c-llama:latest
+          # Тег сервера модели назван один раз — в Dockerfile.llama, где он
+          # и собирается. Прибитый здесь жил своей жизнью: поднимут версию
+          # там, llama.yml соберёт и запушит новое, а комплект повезёт старое,
+          # и без единой ошибки. Тот же приём, что с NVIDIA_TOOLKIT_VERSION.
+          llama_ver=$(sed -n 's/^ARG LLAMA_VERSION=//p' Dockerfile.llama)
+          [ -n "$llama_ver" ] || { echo "Dockerfile.llama больше не объявляет LLAMA_VERSION" >&2; exit 1; }
+          echo "сервер модели: $llama_ver (из Dockerfile.llama)"
+          docker pull "ghcr.io/metalmon/dev1c-llama:$llama_ver"
+          docker tag "ghcr.io/metalmon/dev1c-llama:$llama_ver" oktaplus/dev1c-llama:latest
           docker save oktaplus/dev1c-llama:latest | gzip -1 > dev1c-llama-image.tar.gz
           ls -lh dev1c-image.tar.gz dev1c-llama-image.tar.gz
           # The customer's server runs Docker 20.10.24, which refuses an

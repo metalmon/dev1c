@@ -748,8 +748,10 @@ pub fn check_lines(checks: &[Check]) -> Vec<Line> {
         let kind = match (c.ok, c.info) {
             (true, false) => Kind::Ok,
             (true, true) => Kind::Say,
-            (false, true) => Kind::Warn,
-            _ => Kind::Fail,
+            // `!ok` — всегда провал: «не проверено» (`!ok && info`) больше
+            // не существует ни у одного факта (ушло вместе с `Limits`/
+            // `not_checked` в задаче 2), отдельной ветки под него не держим.
+            (false, _) => Kind::Fail,
         };
         out.push(Line { kind, text: format!("{}: {}", c.what, c.detail) });
         if kind == Kind::Fail && !c.hint.is_empty() {

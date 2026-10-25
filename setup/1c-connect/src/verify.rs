@@ -771,9 +771,9 @@ mod tests {
     use common::check::Outcome;
 
     /// Каждая чистая фактовая функция модуля (без `Ctx`, диска и сети) один
-    /// раз, с заведомо плохими или граничными аргументами. Одна коллекция на
-    /// два теста ниже: первый читает текст каждого факта, второй — только
-    /// его провалы.
+    /// раз, с заведомо плохими или граничными аргументами. Общая выборка для
+    /// теста на «не проверено» (читает текст каждого факта) и для
+    /// `sample_bad_facts` (оставляет только провалы).
     fn all_facts_sample() -> Vec<Check> {
         vec![
             licence_fact(&crate::licence::State::Expired),
@@ -797,13 +797,6 @@ mod tests {
         ]
     }
 
-    /// Срок сбора один на весь набор (`gather`), и сорванный срок — то же, что
-    /// любая другая неудача: своего исхода «не проверено» больше нет ни у
-    /// одного факта.
-    fn every_fact_text() -> Vec<Check> {
-        all_facts_sample()
-    }
-
     /// Только настоящие провалы — для проверки, что у каждого есть совет.
     fn sample_bad_facts() -> Vec<Check> {
         all_facts_sample().into_iter().filter(|c| c.outcome() == Outcome::Bad).collect()
@@ -819,14 +812,17 @@ mod tests {
         assert!(!format!("{checks:?}").contains("не проверено"), "{checks:?}");
         // И ни одна чистая фактовая функция модуля не говорит так сама по
         // себе — тот же запрет и на уровне отдельного факта.
-        assert!(!format!("{:?}", every_fact_text()).contains("не проверено"));
+        assert!(!format!("{:?}", all_facts_sample()).contains("не проверено"));
     }
 
     #[test]
     fn every_bad_fact_carries_a_hint() {
-        for c in sample_bad_facts() {
-            assert_eq!(c.outcome(), Outcome::Bad);
-            assert!(!c.hint.is_empty(), "{c:?}");
+        let bad = sample_bad_facts();
+        // Пустая выборка прошла бы циклом ниже вхолостую и ничего не
+        // доказала бы — выборка обязана быть непустой сама по себе.
+        assert!(!bad.is_empty(), "в выборке не нашлось ни одного провала");
+        for c in bad {
+            assert!(!c.hint.is_empty(), "провал без совета, что делать: {c:?}");
         }
     }
 

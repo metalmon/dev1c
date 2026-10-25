@@ -49,9 +49,11 @@ seed() { DEV1C_SEED_ONLY=1 /usr/local/bin/entrypoint > "$LOG" 2>&1 || fail "то
 # models-store.json. В сборке дом пустой; запущенная на живом стенде она без
 # предупреждения стёрла бы историю работы. Поэтому: своё — сносим, чужое — нет.
 if [ -d "$HOME_DIR/.pi" ]; then
-    own="agent AGENTS.md mcp.json settings.json settings.json.bak extensions"
+    own="agent AGENTS.md mcp.json settings.json extensions"
     for e in $(ls -A "$HOME_DIR/.pi" 2>/dev/null) $(ls -A "$HOME_DIR/.pi/agent" 2>/dev/null); do
-        case " $own " in *" $e "*) ;; *)
+        # `.bak` бывает у любого нашего файла — это и есть след раскладки, а
+        # не чужое добро: сравниваем имя без него.
+        case " $own " in *" ${e%.bak} "*) ;; *)
             fail "в доме $U есть своё ($e) — проверка снесла бы это; задайте DEV1C_SEED_USER на пустой дом" ;;
         esac
     done

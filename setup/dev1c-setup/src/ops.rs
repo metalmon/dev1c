@@ -555,9 +555,7 @@ impl Op<Ctx> for Container {
         // Локальная модель без замера: контейнер, собранный сейчас, вышел бы
         // без адреса модели и молча потерял бы агента.
         if ctx.cfg.form() != crate::cfg::Form::Remote && crate::llama::facts_load(ctx).is_none() {
-            // Чисел нет по двум разным причинам, и нечитаемый токен —
-            // не «ещё не замерен»: его называет facts_missing.
-            return OpState::Blocked(crate::llama::facts_missing(crate::llama::unreadable_token(ctx)));
+            return OpState::Blocked(crate::llama::facts_missing());
         }
         if let Some(st) = state_before_drift(&docker::container_state(ctx, name)) {
             return st;
@@ -812,14 +810,14 @@ mod tests {
     fn a_change_of_the_measured_numbers_is_a_drift_of_the_container() {
         let mut c = Cfg::default();
         c.model.file = "/m/x.gguf".into();
-        let f = Facts { token: "t".into(), window: 250_000 };
+        let f = Facts { window: 250_000 };
         let env: Vec<String> = c.container_env(Some(&f)).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
         assert!(drift_of(&c, &c.image(), "3390", &env, Some(&f)).is_none());
-        // Числа окна в переменных больше не ездят, а токен — ездит: смена
-        // ключа после перезамера обязана остаться расхождением.
-        let f2 = Facts { token: "other".into(), ..f.clone() };
-        let (from, to) = drift_of(&c, &c.image(), "3390", &env, Some(&f2)).unwrap();
-        assert!(from.contains("LLAMACPP_API_KEY") && to.contains("LLAMACPP_API_KEY"), "{from} -> {to}");
+        // Числа окна в переменных не ездят, и ключа больше нет тоже
+        // (решение 26.10.2026): перезамер сам по себе расхождением не
+        // становится — окно редактор берёт у сервера.
+        let f2 = Facts { window: f.window + 1000 };
+        assert!(drift_of(&c, &c.image(), "3390", &env, Some(&f2)).is_none());
     }
 
     #[test]

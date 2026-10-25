@@ -30,7 +30,6 @@ pub fn local_url(ctx: &Ctx) -> String {
 /// Командная строка, какой она должна быть сейчас (служба хоста).
 pub fn desired_args(ctx: &Ctx) -> Vec<String> {
     let host = llama::bind_host(ctx);
-    let token = llama::token_path(&ctx.kit, ctx.cfg.form()).to_string_lossy().to_string();
     let alias = ctx.cfg.model_alias();
     llama::serve_args(&llama::ServeInput {
         model: &ctx.cfg.model.file,
@@ -42,7 +41,6 @@ pub fn desired_args(ctx: &Ctx) -> Vec<String> {
         // Предел не узнан — кэш остаётся на полу: лучше потеря настройки, чем
         // число, выдуманное от неизвестной памяти.
         cache_ram: llama::cache_ram_from_limit(llama::limit_mb(ctx).unwrap_or(0)),
-        token_file: Some(&token),
     })
 }
 
@@ -165,7 +163,7 @@ pub fn keep_in_service_dir(name: &str, kit_files: &[String]) -> bool {
 /// `limit_mb` = None — машина не ответила, сколько у неё памяти: пределов не
 /// ставим вовсе. Пол в этом месте выглядел бы как решение, а на деле это
 /// 4 ГБ работающему серверу и пересоздание контейнера на пустом месте.
-pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str, limit_mb: Option<u32>) -> Vec<String> {
+pub fn llama_run_args(cfg: &crate::cfg::Cfg, publish_host: &str, limit_mb: Option<u32>) -> Vec<String> {
     let base = cfg.model.file.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
     let model = format!("/opt/models/{base}");
     let alias = cfg.model_alias();
@@ -196,8 +194,6 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
             &format!("{publish_host}:{}:8080", cfg.ports()[2]),
             "-v",
             &format!("{}:/opt/models", cfg.volume("models")),
-            "--env-file",
-            env_file,
             &cfg.llama_image(),
         ]
         .iter()
@@ -211,25 +207,8 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, env_file: &str, publish_host: &str,
         slot_floor: cfg.model.fit_ctx,
         slots: cfg.model.slots,
         cache_ram,
-        token_file: None,
     }));
     a
-}
-
-/// Два файла с токеном, которые установка пишет сама (`llama::ensure_token` +
-/// `llama::write_env_file`), — командами оболочки: токен в своём файле (его
-/// читает `check`) и тот же токен переменной LLAMA_API_KEY для контейнера.
-/// Ручной путь без них не доходит до конца: сервер отвечает 401, и `check`
-/// проваливает четыре факта на здоровой машине. Печатаются они здесь, вместе
-/// с остальными командами, а не рядом со страницей руками — иначе разошлись
-/// бы с кодом при первой же правке имён файлов.
-pub fn token_commands(ctx: &Ctx) -> Vec<String> {
-    let token = llama::token_path(&ctx.kit, ctx.cfg.form()).to_string_lossy().to_string();
-    let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
-    vec![
-        format!("sh -c 'tr -dc a-f0-9 </dev/urandom | head -c 32 > {token} && chmod 600 {token}'"),
-        format!("sh -c 'printf \"LLAMA_API_KEY=%s\\n\" \"$(cat {token})\" > {env} && chmod 600 {env}'"),
-    ]
 }
 
 struct Bin;
@@ -374,7 +353,6 @@ impl Op<Ctx> for Service {
         ]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        let _ = llama::ensure_token(ctx)?;
         if llama::installed(ctx).present {
             llama::service_remove(ctx)?;
         }
@@ -449,20 +427,9 @@ impl Op<Ctx> for Container {
         ]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        // В режиме показа команда только печатается: токен, файл переменных и
-        // запомненные параметры тогда не нужны — и не должны появляться в
-        // комплекте от одной печати плана (`install --dry-run --commands`).
-        // Но ручному пути они нужны, и там это шаг, а не файл: печатаем его
-        // командами (`token_commands`) на том же месте, где установка пишет
-        // файлы сама — перед запуском контейнера.
-        if ctx.dry_run {
-            for c in token_commands(ctx) {
-                ctx.emit(common::Event::Command(c));
-            }
-        } else {
-            let token = llama::ensure_token(ctx)?;
-            llama::write_env_file(&ctx.kit, &token)?;
-        }
+        // Ключа у сервера нет (решение 26.10.2026), поэтому здесь не
+        // появляется ни токена, ни файла переменных — ни в установке, ни в
+        // ручном пути. Раньше это были два шага перед запуском контейнера.
         let _ = docker::run(ctx, &["rm", "-f", &ctx.cfg.llama_container()]);
         let args = self.wanted(ctx);
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -487,8 +454,7 @@ impl Op<Ctx> for Container {
 
 impl Container {
     fn wanted(&self, ctx: &Ctx) -> Vec<String> {
-            let env = llama::env_path(&ctx.kit).to_string_lossy().to_string();
-        llama_run_args(&ctx.cfg, &env, &llama::bind_host(ctx), llama::limit_mb(ctx))
+        llama_run_args(&ctx.cfg, &llama::bind_host(ctx), llama::limit_mb(ctx))
     }
 }
 
@@ -526,10 +492,9 @@ impl Op<Ctx> for Answers {
         if ctx.dry_run {
             return Ok(());
         }
-        let token = llama::ensure_token(ctx)?;
         let url = local_url(ctx);
-        llama::wait_health(&url, &token, 300).map_err(|e| anyhow::anyhow!("{e:#} — смотрите {}", llama::log_file().display()))?;
-        let p = llama::props(&url, &token).ok_or_else(|| anyhow::anyhow!("сервер не отдал /props"))?;
+        llama::wait_health(&url, "", 300).map_err(|e| anyhow::anyhow!("{e:#} — смотрите {}", llama::log_file().display()))?;
+        let p = llama::props(&url, "").ok_or_else(|| anyhow::anyhow!("сервер не отдал /props"))?;
         let per_agent = verdict(&ctx.cfg, p.window, p.slots)?;
         ctx.ok(answers_line(p.window, p.slots, &p.model, per_agent));
         // Размер KV на токен — число этой модели, а не таблицы: дальше он
@@ -553,12 +518,12 @@ impl Op<Ctx> for Answers {
             // Прошедшее время: проверки уже пропущены, а не «будут».
             ctx.warn("размер KV-кэша в журнале сервера не нашёлся: проверки окна по видеопамяти и подкачке пропущены");
         }
-        let prefill = llama::measure_prefill(&url, &token);
+        let prefill = llama::measure_prefill(&url, "");
         match prefill {
             Some(s) => ctx.ok(format!("скорость разбора {s:.0} токенов в секунду")),
             None => ctx.warn("скорость разбора замерить не вышло (ответ без timings)"),
         }
-        llama::facts_save(ctx, &Facts { token, window: p.window }, prefill)?;
+        llama::facts_save(ctx, &Facts { window: p.window }, prefill)?;
         if let Some(g) = llama::gpu(ctx) {
             if g.total_mb > 0 && g.used_mb * 100 / g.total_mb > 95 {
                 ctx.warn(format!("карта занята на {} из {} МиБ: соседняя нагрузка будет вытеснять модель", g.used_mb, g.total_mb));
@@ -585,15 +550,17 @@ mod tests {
         let mut c = Cfg::default();
         c.model.serve = "docker".into();
         c.model.file = "models/x.gguf".into();
-        let a = llama_run_args(&c, "/k/llama.env", "127.0.0.1", Some(22528)).join(" ");
-        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all --memory 22528m --memory-swap 45056m --memory-reservation 11264m -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models --env-file /k/llama.env oktaplus/dev1c-llama:latest -m /opt/models/x.gguf"), "{a}");
+        let a = llama_run_args(&c, "127.0.0.1", Some(22528)).join(" ");
+        assert!(a.starts_with("run -d --name dev1c-llama --restart unless-stopped --gpus all --memory 22528m --memory-swap 45056m --memory-reservation 11264m -p 127.0.0.1:3392:8080 -v dev1c-models:/opt/models oktaplus/dev1c-llama:latest -m /opt/models/x.gguf"), "{a}");
+        // Файла переменных нет: ключа у сервера не бывает (решение 26.10.2026).
+        assert!(!a.contains("--env-file"), "{a}");
         // Кэш подсказок — половина предела контейнера, с потолком 8 ГиБ. При
         // 22528 МиБ это ровно 8192, то есть умолчание сервера, и флага в
         // строке быть не должно (решение 2026-10-21).
         assert!(!a.contains("--cache-ram"), "{a}");
         // Машина не ответила, сколько у неё памяти: пределов нет вовсе —
         // пол выглядел бы как решение и пересоздавал бы живой контейнер.
-        let none = llama_run_args(&c, "/k/llama.env", "127.0.0.1", None).join(" ");
+        let none = llama_run_args(&c, "127.0.0.1", None).join(" ");
         assert!(!none.contains("--memory"), "{none}");
         assert!(none.contains("--cache-ram 1024"), "{none}");
         // The image now has an ENTRYPOINT; a bare "llama-server" after the image
@@ -703,24 +670,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_manual_path_gets_the_token_step_with_the_same_key_in_both_files() {
-        // Ручной путь собирается из печатаемых команд, и токен в нём — шаг, а
-        // не файл из комплекта: один и тот же ключ в dev1c-llama.token (его
-        // читает check) и в llama.env (его получает контейнер).
-        let mut c = Cfg::default();
-        c.model.serve = "docker".into();
-        let dir = std::env::temp_dir().join(format!("dev1c-token-cmds-{}", std::process::id()));
-        let ctx = Ctx { kit: common::kit::Kit::at(&dir), cfg: c, dry_run: true, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
-        let cmds = token_commands(&ctx);
-        assert_eq!(cmds.len(), 2, "{cmds:?}");
-        let token = llama::token_path(&ctx.kit, Form::Docker).to_string_lossy().to_string();
-        assert!(cmds[0].contains(&token) && cmds[0].contains("chmod 600"), "{:?}", cmds[0]);
-        // Второй файл берёт ключ из первого, а не придумывает свой.
-        assert!(cmds[1].contains(&format!("cat {token}")), "{:?}", cmds[1]);
-        assert!(cmds[1].contains("LLAMA_API_KEY=%s") && cmds[1].contains("llama.env"), "{:?}", cmds[1]);
-    }
-
+    
     #[test]
     fn the_measurement_line_names_the_slot_window_and_the_agent_share() {
         // Чисел для Zed в строке больше нет — объявлять их некому; но доля

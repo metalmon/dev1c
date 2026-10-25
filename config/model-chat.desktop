@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Чат с моделью
+GenericName=Веб-интерфейс llama.cpp
+Comment=Поговорить с моделью стенда без агента и без кода: проба формулировок, перевод, разбор текста
+# Адрес подставляет не ярлык, а сам скрипт: он берёт его из переменных сессии
+# (LLAMA_API_URL / CUSTOM_API_URL), которые кладёт точка входа. Порт у каждой
+# установки свой, зашивать его сюда нельзя.
+Exec=/usr/local/bin/model-chat
+Icon=firefox-esr
+Terminal=false
+Categories=Network;Chat;Development;
+Keywords=модель;чат;llama;llm;нейросеть;

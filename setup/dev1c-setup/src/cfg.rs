@@ -86,7 +86,6 @@ pub enum Form {
 /// нечего сказать про локальную модель.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Facts {
-    pub token: String,
     /// Окно одного слота, как его сообщил сервер. Чисел для Zed здесь больше
     /// нет: штатный провайдер `llama.cpp` забирает окно с `/props` сам
     /// (решение владельца 2026-10-21).
@@ -242,8 +241,12 @@ impl Cfg {
     /// `openai_compatible.custom` — у него `/props` нет, окно объявляется
     /// умолчаниями entrypoint.
     ///
-    /// Имя переменной ключа диктует Zed: он ищет `<ПРОВАЙДЕР>_API_KEY`, то
-    /// есть `LLAMACPP_API_KEY` у штатного и `CUSTOM_API_KEY` у совместимого.
+    /// Ключа у НАШЕГО сервера нет вовсе (решение 26.10.2026): порт он
+    /// публикует на мосту, то есть снаружи машины недоступен, а закрывал
+    /// только тех, кто уже на ней. Взамен ключ отнимал веб-чат llama.cpp —
+    /// его интерфейс посылать ключ не умеет, и каждый запрос получал 401.
+    /// У чужого сервера (`serve = "remote"`) ключ остаётся: он не наш, и
+    /// имя переменной там диктует Zed — `CUSTOM_API_KEY`.
     pub fn container_env(&self, facts: Option<&Facts>) -> Vec<(String, String)> {
         let m = &self.model;
         let mut env = Vec::new();
@@ -257,10 +260,12 @@ impl Cfg {
                 env.push(("MODEL_NAME".into(), m.name.clone()));
             }
             Form::Host | Form::Docker => {
-                let Some(f) = facts else { return env };
+                // Факты нужны самим по себе: без замера контейнер не
+                // собирают. Из них в окружение сегодня не уходит ничего —
+                // окно редактор берёт у сервера сам.
+                let Some(_) = facts else { return env };
                 env.push(("MODEL_PROVIDER".into(), "llama.cpp".into()));
                 env.push(("LLAMA_API_URL".into(), self.model_root()));
-                env.push(("LLAMACPP_API_KEY".into(), f.token.clone()));
                 env.push(("MODEL_NAME".into(), self.model_alias()));
             }
         }
@@ -451,11 +456,14 @@ mod tests {
         // Локальный сервер — штатный провайдер Zed: адрес КОРНЕМ, без /v1,
         // ключ переменной, имя которой диктует Zed, и ни одного числа окна —
         // его провайдер забирает с /props сам.
-        let f = Facts { token: "t".into(), window: 250_000 };
+        let f = Facts { window: 250_000 };
         let env = c.container_env(Some(&f));
         assert!(env.contains(&("MODEL_PROVIDER".into(), "llama.cpp".into())), "{env:?}");
         assert!(env.contains(&("LLAMA_API_URL".into(), "http://host.docker.internal:1235".into())), "{env:?}");
-        assert!(env.contains(&("LLAMACPP_API_KEY".into(), "t".into())), "{env:?}");
+        // Ключа у нашего сервера нет вовсе (решение 26.10.2026): он
+        // закрывал только тех, кто уже на сервере, а взамен отнимал
+        // веб-чат llama.cpp — его интерфейс ключ посылать не умеет.
+        assert!(!env.iter().any(|(k, _)| k == "LLAMACPP_API_KEY"), "{env:?}");
         assert!(env.contains(&("MODEL_NAME".into(), "x".into())), "{env:?}");
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(

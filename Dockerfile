@@ -402,6 +402,7 @@ COPY config/launch-maximized.sh /usr/local/bin/launch-maximized
 COPY config/git-cpuset.sh      /usr/local/bin/git
 COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
 COPY config/test-pi.sh         /usr/local/bin/test-pi
+COPY config/model-chat.sh      /usr/local/bin/model-chat
 COPY config/test-pi-stub.py    /usr/local/bin/test-pi-stub
 COPY config/test-pi-seed.sh    /usr/local/bin/test-pi-seed
 
@@ -429,6 +430,7 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
                 /usr/local/bin/git /usr/local/bin/test-git-cpuset \
                 /usr/local/bin/launch-maximized /usr/local/bin/test-pi \
+                /usr/local/bin/model-chat \
                 /usr/local/bin/test-pi-stub /usr/local/bin/test-pi-seed \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"
@@ -538,6 +540,11 @@ COPY config/thunar-bookmarks /etc/skel/.config/gtk-3.0/bookmarks
 # Gitea launcher and the credentials banner template
 COPY config/gitea-banner.tmpl /opt/gitea/banner.tmpl
 COPY config/gitea.desktop     /usr/share/applications/gitea.desktop
+# Веб-чат с моделью: второй способ поговорить с ней, без агента и без кода —
+# проба формулировок, перевод, разбор текста. Работает он потому, что ключа у
+# нашего сервера нет: послать ключ встроенный интерфейс llama.cpp не умеет.
+# Адрес ярлык не знает — его берёт из переменных сессии сам скрипт.
+COPY config/model-chat.desktop /usr/share/applications/model-chat.desktop
 
 # bash additions: history, prompt with the git branch, aliases
 COPY config/bashrc-extra.sh /etc/profile.d/zz-dev1c.sh
@@ -679,7 +686,9 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
                   "/home/$u/examples"; \
          cp /usr/share/applications/dev.zed.Zed.desktop "/home/$u/Desktop/"; \
          cp /usr/share/applications/gitea.desktop "/home/$u/Desktop/"; \
-         chmod +x "/home/$u/Desktop/dev.zed.Zed.desktop" "/home/$u/Desktop/gitea.desktop"; \
+         cp /usr/share/applications/model-chat.desktop "/home/$u/Desktop/"; \
+         chmod +x "/home/$u/Desktop/dev.zed.Zed.desktop" "/home/$u/Desktop/gitea.desktop" \
+                  "/home/$u/Desktop/model-chat.desktop"; \
          chown -R "$u:$u" "/home/$u"; \
        done
 

@@ -31,9 +31,18 @@ ZERO=0000000000000000000000000000000000000000
 
 command -v "$ANALYZER" >/dev/null 2>&1 || exit 0
 
+#   Всё рабочее — внутри приватного каталога mktemp, и ничего рядом с ним:
+#   имена `$tmp.out`, `$tmp.pairs` предсказуемы по имени самого каталога,
+#   а `/tmp` в образе делят три учётные записи рабочих мест. Отдельный
+#   подкаталог `src` даёт анализатору каталог ровно с модулями, без наших
+#   служебных файлов.
 tmp=$(mktemp -d) || exit 0
-trap 'rm -rf "$tmp" "$tmp.out" "$tmp.err"' EXIT
-pairs=$tmp.pairs
+trap 'rm -rf "$tmp"' EXIT
+work=$tmp/src
+pairs=$tmp/pairs
+out=$tmp/out
+err=$tmp/err
+mkdir -p "$work" || exit 0
 : > "$pairs"
 
 # `-c core.quotepath=false` своим ключом, а не надеждой на конфиг машины: с
@@ -68,18 +77,18 @@ done
 # файла, которое человек видит в проекте.
 while IFS="$(printf '\t')" read -r sha path; do
     [ -n "${path:-}" ] || continue
-    mkdir -p "$tmp/$(dirname "$path")"
-    git_q show "$sha:$path" > "$tmp/$path" 2>/dev/null || true
+    mkdir -p "$work/$(dirname "$path")"
+    git_q show "$sha:$path" > "$work/$path" 2>/dev/null || true
 done < "$pairs"
 
-n=$(find "$tmp" -name '*.bsl' | wc -l | tr -d ' ')
+n=$(find "$work" -name '*.bsl' | wc -l | tr -d ' ')
 [ "$n" -gt 0 ] || exit 0
 
 if command -v timeout >/dev/null 2>&1; then
-    timeout "$BUDGET" "$ANALYZER" analyze -s "$tmp" --format=jsonl > "$tmp.out" 2>"$tmp.err"
+    timeout "$BUDGET" "$ANALYZER" analyze -s "$work" --format=jsonl > "$out" 2>"$err"
     rc=$?
 else
-    "$ANALYZER" analyze -s "$tmp" --format=jsonl > "$tmp.out" 2>"$tmp.err"
+    "$ANALYZER" analyze -s "$work" --format=jsonl > "$out" 2>"$err"
     rc=$?
 fi
 if [ "$rc" = 124 ]; then
@@ -87,7 +96,7 @@ if [ "$rc" = 124 ]; then
     exit 0
 fi
 
-bad=$(grep ParseError "$tmp.out" 2>/dev/null || true)
+bad=$(grep ParseError "$out" 2>/dev/null || true)
 if [ -n "$bad" ]; then
     echo "pre-push: этот код не разбирается, в репозиторий он не уйдёт." >&2
     printf '%s\n' "$bad" | head -20 >&2

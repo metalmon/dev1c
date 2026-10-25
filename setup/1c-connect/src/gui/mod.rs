@@ -654,6 +654,14 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, mode: &str, verdic
         if let Some(why) = warn_reason(verdict) {
             return format!("1c-connect: {why}");
         }
+        // Набора ещё нет — так и говорим (Minor 10 ревью круга 2; спека: «значок
+        // в трее жёлтый, подсказка „проверяю“»). Значок в это время жёлтый
+        // (`Dot::Busy` из `panel::card`), а подсказка отдавала «подключён» —
+        // та же ложь, что была в Critical 2, только в трее: зелёное слово под
+        // жёлтым значком.
+        if matches!(verdict, Verdict::Checking) {
+            return "1c-connect: проверяю".to_string();
+        }
     }
     match progress {
         Some(r) => {
@@ -1231,39 +1239,15 @@ pub fn republish_after_save(database_changed: bool, serving: bool) -> bool {
     database_changed && serving
 }
 
-/// Голос к базе один, и этот мьютекс — всё, что это обеспечивает (Important 6
-/// ревью задач 5+6). К базе ходят два потока окна: расчёт набора
-/// (`spawn_full_pass` → `verify::gather`, группа «база») и подъём публикации
-/// (`ensure_publication_now` → `ops_host::ensure_publication`, внутри
-/// `extension_version`). Защёлка `facts_pending` разводит только расчёты между
-/// собой, а эти двое про неё не знали и могли подраться за единственный сеанс
-/// учебной платформы — спека прямо называет это новым видом вранья: «два
-/// одновременных запроса подерутся за него, и здоровая база выдаст ложный
-/// отказ».
-///
-/// Пришедший вторым ждёт первого. Оба потока фоновые, ждать им не больно, и
-/// ждать — честнее, чем получить выдуманный отказ.
-///
-/// ponytail: один мьютекс на оба голоса. Станет заметно ожидание (набор стоит
-/// до `verify::SET_DEADLINE`) — делить по ресурсу, то есть брать его только на
-/// группу «база», а не на весь набор.
-static BASE_VOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Взять единственный голос к базе. Отравленный мьютекс (паника внутри
-/// чужого похода) базу не ломает — берём как есть, тем же приёмом, что
-/// `project::call`.
-fn base_voice() -> std::sync::MutexGuard<'static, ()> {
-    BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
+/// Подъём публикации в своём потоке. Голос к базе он берёт не здесь, а внутри
+/// `ops_host::extension_reach` — в единственном месте, которое правда говорит
+/// с базой (Important 2 ревью круга 2): мьютекс вокруг потока можно отменить,
+/// убрав одну строку, а дорогу к базе мимо `extension_reach` не проложить.
 fn ensure_publication_now(ui: &mut Ui) {
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
     std::thread::spawn(move || {
-        let r = {
-            let _voice = base_voice();
-            ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"))
-        };
+        let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
         let _ = tx.unbounded_send(Ev::Publish(r));
     });
 }
@@ -1449,6 +1433,14 @@ pub fn run_readiness(ui: &mut Ui) {
 /// ответа, который некому показать (находка S9). Включат — посчитается само:
 /// включение и есть одно из событий пересчёта.
 ///
+/// Громкость берётся у `check_requested`, а не задаётся тихой наглухо
+/// (Important 4 ревью круга 2). Иначе потерянный громкий поток
+/// (`readiness_lost`) заменялся ТИХИМ, его ответ гасил «Проверяю…», а отметку
+/// кнопки не снимал — и следующий чужой повтор, по какому угодно поводу,
+/// становился громким: отчёт `last-check.txt` и десяток строк в журнал без
+/// того, чтобы человек нажимал кнопку. Громкость принадлежит нажатию, и
+/// спрашивать её надо там, где расчёт заводится, — здесь.
+///
 /// `true` — расчёт правда начался (а не был только помечен повтором): такт
 /// по этому решает, можно ли запомнить прочитанный дешёвый набор.
 fn start_full_pass(ui: &mut Ui) -> bool {
@@ -1456,7 +1448,7 @@ fn start_full_pass(ui: &mut Ui) -> bool {
         return false;
     }
     let Some(gen) = start_facts(ui, Instant::now()) else { return false };
-    spawn_full_pass(ui, gen, false);
+    spawn_full_pass(ui, gen, ui.check_requested);
     true
 }
 
@@ -1489,9 +1481,6 @@ fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
             &tx,
             move || {
                 let state = link.is_up().then(|| link.label(&mode));
-                // Голос к базе один (Important 6): подъём публикации ходит в
-                // ту же базу своим потоком и про защёлку расчётов не знает.
-                let _voice = base_voice();
                 let facts = if loud {
                     verify::run(&ctx, state.as_deref(), verify::PortUse::WeListen)
                 } else {
@@ -1627,7 +1616,13 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
         // показа, а до него дело не доходило — карточка стояла на «Проверяю…»
         // вечно. Операцию (`Busy::Ext`/`Busy::Project`) ответ расчёта не
         // трогает: её конец объявляет `Ev::Done`.
-        if ui.busy == Some(Busy::Check) {
+        //
+        // `!check_requested` (Important 4 ревью круга 2): пока нажатие ждёт
+        // своего громкого показа, «Проверяю…» гаснуть не должно — иначе
+        // карточка мигает, возвращается к вердикту и через проход снова
+        // уходит в «Проверяю…». Живой блокировки это не возвращает: цикл
+        // рвёт отметка `facts_full_at` выше, а она безусловна.
+        if ui.busy == Some(Busy::Check) && !ui.check_requested {
             ui.busy = None;
         }
     }
@@ -2271,6 +2266,13 @@ fn spawn_cheap(ui: &Ui, whole: bool) {
 /// «Проверить»: идущий расчёт такт не обгоняет, он только попросит добавку по
 /// его возвращении. Замок при этом не трогается (`start_full_pass`,
 /// Critical 3).
+///
+/// ponytail: `prev_cheap` не обновляется из набора, посчитанного «по поводу»
+/// (`run_readiness` из события) — `gather` считает дешёвую половину внутри
+/// себя, а наружу её не отдаёт, так что следующий медленный такт посчитает её
+/// ещё раз. Лишние 230–330 мс раз в полминуты в фоновом потоке дешевле, чем
+/// тащить дешёвую половину из `gather` наружу отдельным возвратом. Станет
+/// дорого — отдавать её вместе с набором и класть сюда.
 fn on_cheap(ui: &mut Ui, sessions: Option<usize>, facts: Option<Vec<Check>>, now: Instant, window_open: bool) {
     ui.cheap_pending = false;
     if !serving(ui) {
@@ -2809,7 +2811,7 @@ mod tests {
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
         exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
-        start_full_pass, tick_facts, on_cheap, base_voice, Busy,
+        start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
         publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
@@ -2941,14 +2943,16 @@ mod tests {
         ui.cfg.host.mode = "local".into();
         assert!(gate_now(&ui.kit, &ui.cfg).is_some(), "в каталоге теста замок обязан быть заперт");
         ui.gate = None;
-        // «Уже считается» — тем же приёмом, что `the_verdict_is_not_computed_while_serving_is_off`:
-        // доказательство не должно поднять настоящий поток фактов, а до
-        // расчёта дело дошло или нет — видно по просьбе о повторе.
-        ui.facts_pending = true;
-        ui.facts_since = Some(Instant::now());
 
-        assert!(!start_full_pass(&mut ui), "второго потока нет — защёлка занята");
-        assert!(ui.facts_again, "до расчёта дело не дошло — тест проверяет не то");
+        // Защёлка СВОБОДНА, и расчёт правда заводится (Important 3 ревью
+        // круга 2): прежняя версия входила с занятой защёлкой и выходила на
+        // раннем возврате, так что `refresh_gate`, поставленный после
+        // проверки защёлки, тест прошёл бы. Поток расчёта до `Ui` не
+        // дотягивается — он шлёт `Ev`, — так что смотреть после возврата
+        // можно без гонки.
+        assert!(!ui.facts_pending, "защёлка должна быть свободна — иначе тест идёт по раннему возврату");
+        assert!(start_full_pass(&mut ui), "расчёт по такту не начался — тест проверяет не то");
+        assert!(ui.facts_pending, "защёлка не взведена");
         assert!(ui.gate.is_none(), "такт позвал замок — он может погасить обслуживание под человеком");
         assert!(ui.enabled.load(Ordering::Relaxed), "и он его погасил");
 
@@ -3074,34 +3078,6 @@ mod tests {
         assert!(needs_full_pass(&free, &free, Duration::from_secs(86_400), false));
     }
 
-    /// Important 6 ревью задач 5+6: двух голосов к базе одновременно быть не
-    /// может. Защёлка `facts_pending` разводила только расчёты между собой, а
-    /// подъём публикации (`ensure_publication_now`) ходит в ту же базу своим
-    /// потоком и про неё не знал — спека: «два одновременных запроса
-    /// подерутся за единственный сеанс, и здоровая база выдаст ложный отказ».
-    #[test]
-    fn only_one_voice_talks_to_the_base_at_a_time() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
-        static INSIDE: AtomicUsize = AtomicUsize::new(0);
-        static TWO_AT_ONCE: AtomicBool = AtomicBool::new(false);
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                std::thread::spawn(|| {
-                    let _voice = base_voice();
-                    if INSIDE.fetch_add(1, Ordering::SeqCst) > 0 {
-                        TWO_AT_ONCE.store(true, Ordering::SeqCst);
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                    INSIDE.fetch_sub(1, Ordering::SeqCst);
-                })
-            })
-            .collect();
-        for t in threads {
-            t.join().expect("поток голоса упал");
-        }
-        assert!(!TWO_AT_ONCE.load(Ordering::SeqCst), "в базу говорили два голоса сразу");
-    }
-
     /// Important 4 ревью задач 5+6: на потоке окна такт НЕ СЧИТАЕТ НИЧЕГО —
     /// он только решает по отметкам времени, пора ли, и заводит поток. Прежний
     /// такт звал на потоке окна `verify::cheap` и `configurator_count`:
@@ -3110,17 +3086,27 @@ mod tests {
     fn the_window_thread_tick_only_raises_the_latch() {
         let mut ui = Ui::for_test();
         ui.cfg.host.mode = "local".into();
-        // Поток дешёвого такта «уже идёт»: второго не заводим — это же
-        // избавляет доказательство от настоящего похода за фактами.
-        ui.cheap_pending = true;
         ui.sessions = Some(3);
         ui.prev_cheap = vec![Check::pass("в базе открыт сеанс", "нет")];
 
+        // Защёлка СВОБОДНА, и такт правда доходит до конца (Important 3 ревью
+        // круга 2): прежняя версия входила с `cheap_pending = true` и выходила
+        // на собственном страже, так что все четыре `assert` были истинны
+        // тривиально — верни `verify::cheap` на поток окна после стража, и
+        // тест бы не заметил. Поток `spawn_cheap` до `Ui` не дотягивается, он
+        // шлёт `Ev`, поэтому смотреть сразу после возврата можно без гонки.
+        assert!(!ui.cheap_pending, "защёлка должна быть свободна — иначе тест идёт по раннему возврату");
         tick_facts(&mut ui, Instant::now(), true);
+        assert!(ui.cheap_pending, "такт не завёл потока — тест проверяет не то");
         assert_eq!(ui.sessions, Some(3), "такт посчитал сеансы на потоке окна");
         assert_eq!(ui.prev_cheap.len(), 1, "такт посчитал дешёвый набор на потоке окна");
         assert!(ui.cheap_at.is_none(), "такт отметил дешёвый набор, которого не считал");
         assert!(!ui.facts_again && !ui.facts_pending, "такт сам полез за дорогими фактами");
+
+        // Пока поток не ответил, второго такт не заводит.
+        let before = ui.facts_gen;
+        tick_facts(&mut ui, Instant::now(), true);
+        assert_eq!(ui.facts_gen, before);
 
         // Выключено — не считается ничего, и поток не заводится (спека).
         ui.cheap_pending = false;
@@ -3400,7 +3386,13 @@ mod tests {
     #[test]
     fn a_busy_verdict_is_never_green_on_any_surface() {
         let now = Instant::now();
-        let fact = Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте Предприятие");
+        // Пара, которую код правда рождает (Minor 9 ревью круга 2): отказ
+        // базы по числу сеансов, словами и советом самой платформы. Прежде
+        // тест лепил факт «в базе открыт сеанс» с советом «закройте
+        // Предприятие» — такой пары `verify` уже не отдаёт, открытый сеанс
+        // стал сведением.
+        let cause = crate::onec_error::explain("Превышено количество сеансов").expect("ограничение узнаётся");
+        let fact = Check::busy("расширение в базе", cause.what, cause.fix);
         let busy = Verdict::Busy(fact);
         let up = State::Up { since: now };
 
@@ -3413,12 +3405,12 @@ mod tests {
         // Подвал: причина — словами факта.
         let why = panel::reason(&up, "local", &busy, None, Some("15:54")).expect("причина занятости названа");
         assert!(why.starts_with("Занято:"), "{why}");
-        assert!(why.contains("в базе открыт сеанс") && why.contains("1 открыт сеанс 1С"), "{why}");
-        assert!(why.contains("закройте Предприятие"), "{why}");
+        assert!(why.contains("расширение в базе") && why.contains(cause.what), "{why}");
+        assert!(why.contains(cause.fix), "{why}");
 
         // Подсказка значка — та же причина, теми же словами.
         let tip = tray_tooltip(None, &up, "local", &busy, None, now);
-        assert!(tip.contains("занято") && tip.contains("в базе открыт сеанс"), "{tip}");
+        assert!(tip.contains("занято") && tip.contains(cause.what), "{tip}");
         assert_ne!(tip, "1c-connect: подключён");
 
         // Значок: жёлтый «занято», не зелёный.
@@ -3432,6 +3424,77 @@ mod tests {
         // И журнал про занятость говорит — своими словами, не «не всё готово».
         let line = warn_reason(&ui.verdict).expect("журналу есть что сказать");
         assert!(line.starts_with("занято:"), "{line}");
+    }
+
+    /// Minor 10 ревью круга 2: пока набора нет, значок жёлтый (`Dot::Busy` из
+    /// `panel::card`), а подсказка отдавала «подключён» — зелёное слово под
+    /// жёлтым значком, та же ложь, что была в Critical 2, только в трее.
+    /// Спека: «значок в трее жёлтый, подсказка „проверяю“».
+    #[test]
+    fn the_tray_says_it_is_checking_while_there_is_no_set_yet() {
+        let now = Instant::now();
+        let up = State::Up { since: now };
+        assert_eq!(tray_tooltip(None, &up, "local", &Verdict::Checking, None, now), "1c-connect: проверяю");
+        assert_eq!(panel::card(None, &up, "local", &Verdict::Checking, None, now).dot, Dot::Busy, "значок и подсказка обязаны говорить одно");
+        // Посчитано и всё сошлось — прежняя подсказка про связь.
+        assert_eq!(tray_tooltip(None, &up, "local", &Verdict::Ready, None, now), "1c-connect: подключён");
+        // В туннельном режиме вердикт карточка не показывает — и подсказка тоже.
+        assert_eq!(tray_tooltip(None, &up, "tunnel", &Verdict::Checking, None, now), "1c-connect: подключён");
+    }
+
+    /// Important 4 ревью круга 2: отчёт и строки в журнал без нажатия кнопки.
+    /// Громкость принадлежит нажатию (`check_requested`), и `start_full_pass`
+    /// обязан её спрашивать: иначе потерянный громкий поток заменялся тихим,
+    /// тот гасил «Проверяю…», отметку кнопки не снимал, и следующий повтор по
+    /// любому поводу становился громким — `last-check.txt` и десяток строк
+    /// журнала человеку, который ничего не нажимал.
+    ///
+    /// Тот же флаг держит «Проверяю…»: пока нажатие ждёт громкого показа,
+    /// карточка не мигает.
+    #[test]
+    fn loudness_belongs_to_the_press_and_the_card_does_not_blink() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        ui.busy = Some(Busy::Check);
+        ui.check_requested = true;
+        let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
+
+        // Тихий ответ пришёл, а кнопке ещё должен громкий показ — «Проверяю…»
+        // не гаснет, и отметка кнопки цела.
+        apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
+        assert_eq!(ui.busy, Some(Busy::Check), "карточка мигнула: «Проверяю…» сняли до отчёта");
+        assert!(ui.check_requested, "отметка кнопки съедена, и отчёт достанется чужому повтору");
+        // Но отметка полного расчёта безусловна — цикл рвёт именно она.
+        assert!(ui.facts_full_at.is_some(), "живая блокировка вернулась");
+
+        // Расчёт, который заводится, пока нажатие не обслужено, — ГРОМКИЙ:
+        // отчёт получит он, а не случайный следующий. Громкость видна по
+        // `Ev::Ready`, который присылает поток; громкий путь шлёт по дороге
+        // ещё и фазу со строками, поэтому ждём именно набор.
+        fn loudness_of_the_pass(rx: &mut futures::channel::mpsc::UnboundedReceiver<super::Ev>) -> bool {
+            loop {
+                match futures::executor::block_on(futures::StreamExt::next(rx)).expect("расчёт не ответил") {
+                    super::Ev::Ready(_, _, loud) => return loud,
+                    _ => continue,
+                }
+            }
+        }
+
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        ui.tx = tx;
+        assert!(start_full_pass(&mut ui), "повтор не начался");
+        assert!(loudness_of_the_pass(&mut rx), "кнопка нажата, а расчёт пошёл тихим — отчёта человек не увидит");
+        assert!(ui.kit.state_path("last-check.txt").exists(), "громкий расчёт отчёта не написал");
+
+        // А без нажатия — тихий, и отчёта нет: такт человеку журнал не сыплет.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        ui.tx = tx;
+        assert!(!ui.check_requested);
+        assert!(start_full_pass(&mut ui), "расчёт по такту не начался");
+        assert!(!loudness_of_the_pass(&mut rx), "тихий расчёт попросил громкий показ");
+        assert!(!ui.kit.state_path("last-check.txt").exists(), "отчёт написан без нажатия кнопки");
     }
 
     #[test]

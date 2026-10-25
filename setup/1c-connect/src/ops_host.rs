@@ -858,12 +858,39 @@ pub enum Reach {
 /// факту (`verify::extension_fact`) нужен весь исход — отдельная функция, не
 /// `From` в обе стороны, чтобы разница была видна в сигнатуре, а не в
 /// докстроке.
+///
+/// **Голос к базе один, и берётся он здесь** — в единственном месте, которое
+/// правда с ней говорит (Important 2 ревью круга 2). Все дороги идут сюда:
+/// набор фактов (`verify::gather`) и подъём публикации (`ensure_publication` →
+/// `extension_version` → `extension_version_in`), так что забыть взять голос
+/// нельзя по устройству. Прежде мьютекс стоял в окне вокруг обоих потоков, и
+/// достаточно было убрать одну строку, чтобы правило отменилось молча.
+///
+/// Зачем: у учебной платформы один сеанс, и два одновременных запроса
+/// подерутся за него — здоровая база выдаст ложный отказ (спека, «Почему к
+/// базе нельзя в два голоса»). Пришедший вторым ждёт первого; оба потока
+/// фоновые, и ждать честнее, чем получить выдуманный отказ. Потолок ожидания —
+/// время ОДНОЙ пробы (30 мс на здоровой базе, 7,7 с на просыпающейся), а не
+/// весь набор с его дешёвой половиной, Gitea и записью отчёта. Отравленный
+/// мьютекс базу не ломает — берём как есть, тем же приёмом, что
+/// `project::call`. Командной строке он безвреден: там один поток.
+///
+/// Срок считается ПОСЛЕ ожидания: иначе ждавший поток пришёл бы к базе с уже
+/// съеденным бюджетом и объявил «не ответила» о том, чего не успел спросить.
 pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Reach {
+    let _voice = BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = std::time::Instant::now() + timeout;
+    // Последняя узнанная причина, которую ожидание могло бы вылечить
+    // (Important 5): пока срок не вышел — ждём, вышел — говорим её словами, а
+    // не «не ответил за отведённое время».
+    let mut curable: Option<&'static crate::onec_error::Cause> = None;
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
-            return Reach::Unreachable(format!("{base_url}/version не ответил за отведённое время"));
+            return match curable {
+                Some(cause) => Reach::Refused(cause),
+                None => Reach::Unreachable(format!("{base_url}/version не ответил за отведённое время")),
+            };
         }
         match version_once(base_url, user, password, left) {
             Probe::Version(v) => return Reach::Version(v),
@@ -871,9 +898,23 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
             // Не пустили (401/403) — окончательный отказ, но другой: база
             // ответила, значит отвечает. Ждать тут нечего — повторять незачем.
             Probe::Denied(why) => return Reach::Denied(why),
-            // Платформа отказала и назвала причину — это ответ, а не его
-            // отсутствие: повторять нечего.
-            Probe::Refused(cause) => return Reach::Refused(cause),
+            // Решение по Important 5 ревью круга 2: окончательными считаем
+            // ровно те узнанные причины, которых ожидание не лечит, и сегодня
+            // такая одна — ограничение по числу сеансов. Лишний сеанс сам не
+            // закроется, ждать его бессмысленно, а сказать человеку надо
+            // сразу.
+            Probe::Refused(cause) if crate::onec_error::is_busy(cause) => return Reach::Refused(cause),
+            // Прочие узнанные причины ожидание вылечить МОЖЕТ: просыпающаяся
+            // база успевает сказать и «информационная база заблокирована»
+            // (идёт обновление), и «не найден ключ защиты» (служба лицензий
+            // ещё не поднялась). Объявить их окончательным красным — завести
+            // новое враньё того же рода, против которого всё затевалось.
+            // Поэтому ждём, как ждали бы неузнанное 5xx, но причину помним:
+            // кончится срок — человек прочтёт её слова, а не «не отвечает».
+            Probe::Refused(cause) => {
+                curable = Some(cause);
+                std::thread::sleep(RETRY_PAUSE);
+            }
             // Окончательный отказ — сеть, таймаут. Ждать тут нечего: висеть
             // весь срок незачем.
             Probe::Unreachable(why) => return Reach::Unreachable(why),
@@ -881,10 +922,16 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
             // Первый ответ после подъёма публикации идёт 7,7 с (замер на
             // стенде 25.10) — за это время проба успевала получить отказ и
             // объявить «расширение не установлено», хотя оно стоит.
-            Probe::NotReady => std::thread::sleep(std::time::Duration::from_millis(300)),
+            Probe::NotReady => std::thread::sleep(RETRY_PAUSE),
         }
     }
 }
+
+/// Единственный голос к базе — см. `extension_reach`.
+static BASE_VOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Пауза между попытками спросить версию у просыпающейся базы.
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// То же, но со своим сроком: установка ждёт долго (сервис 1С поднимается не
 /// мгновенно), а сбор готовности — остатком общего срока набора
@@ -1388,6 +1435,99 @@ mod tests {
     /// Один ответ с заданным статусом и пустым JSON в теле.
     fn respond_once(status_line: &str) -> String {
         respond_each(&[(status_line, "{}")])
+    }
+
+    /// Слушатель, который обслуживает каждое соединение СВОИМ потоком, держит
+    /// его `hold` и считает, сколько запросов было в базе разом. Отдаёт адрес
+    /// и этот пик: один — голос к базе правда один, два — правило нарушено.
+    /// Сам слушатель ничего не сериализует, иначе тест доказывал бы своё же
+    /// устройство.
+    fn counting_server(replies: usize, hold: std::time::Duration) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (peak, live) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (p, l) = (peak.clone(), live.clone());
+        std::thread::spawn(move || {
+            let mut served = Vec::new();
+            for _ in 0..replies {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let (p, l) = (p.clone(), l.clone());
+                served.push(std::thread::spawn(move || {
+                    let now = l.fetch_add(1, SeqCst) + 1;
+                    p.fetch_max(now, SeqCst);
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf);
+                    std::thread::sleep(hold);
+                    let body = "{\"version\":\"0.4.8\"}";
+                    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(resp.as_bytes());
+                    l.fetch_sub(1, SeqCst);
+                }));
+            }
+            for h in served {
+                let _ = h.join();
+            }
+        });
+        (format!("http://{addr}"), peak)
+    }
+
+    /// Important 2 ревью круга 2: у учебной платформы один сеанс, и два
+    /// одновременных запроса подерутся за него — здоровая база выдаст ложный
+    /// отказ (спека, «Почему к базе нельзя в два голоса»). Голос берётся
+    /// внутри `extension_reach`, и проверяется он тем кодом, который правило
+    /// и соблюдает: два потока, слушатель считает одновременные запросы.
+    ///
+    /// Прежний тест этого круга был тавтологией — восемь потоков проверяли,
+    /// что мьютекс это мьютекс, и оставались зелёными, убери хоть один
+    /// `base_voice()` из окна.
+    #[test]
+    fn two_callers_never_ask_the_base_at_the_same_time() {
+        let (url, peak) = counting_server(2, std::time::Duration::from_millis(200));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let url = url.clone();
+                std::thread::spawn(move || extension_reach(&url, "u", "p", std::time::Duration::from_secs(10)))
+            })
+            .collect();
+        for t in threads {
+            let reach = t.join().expect("поток пробы упал");
+            assert!(matches!(reach, Reach::Version(_)), "{reach:?}");
+        }
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 1, "в базу говорили два голоса сразу");
+    }
+
+    /// Important 5 ревью круга 2: ожидание обрывается только на причинах,
+    /// которых оно не лечит. «Информационная база заблокирована» — именно
+    /// то, что говорит просыпающаяся база, пока идёт обновление: объявить
+    /// это окончательным красным значило бы завести новое враньё.
+    #[test]
+    fn a_refusal_that_waiting_can_cure_is_retried() {
+        let url = respond_each(&[
+            ("500 Internal Server Error", "Информационная база заблокирована: выполняется обновление"),
+            ("200 OK", "{\"version\":\"0.4.8\"}"),
+        ]);
+        let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(10));
+        match reach {
+            Reach::Version(v) => assert_eq!(v, "0.4.8"),
+            other => panic!("ожидание оборвано на причине, которую оно лечит: {other:?}"),
+        }
+    }
+
+    /// А если та же причина держится до конца срока — человек читает её
+    /// слова, а не «не ответил за отведённое время»: иначе правка Important 5
+    /// отняла бы то, что дала правка круга 1.
+    #[test]
+    fn a_curable_refusal_that_never_clears_is_named_not_silent() {
+        let blocked = ("500 Internal Server Error", "Информационная база заблокирована: выполняется обновление");
+        let url = respond_each(&[blocked; 6]);
+        let reach = extension_reach(&url, "u", "p", std::time::Duration::from_millis(500));
+        match reach {
+            Reach::Refused(c) => assert!(c.what.contains("заблокирована"), "{c:?}"),
+            other => panic!("причина потеряна: {other:?}"),
+        }
     }
 
     /// Решение владельца 26.10: занятость базы устанавливает САМА БАЗА своим

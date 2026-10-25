@@ -163,6 +163,69 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
 #[cfg(not(any(windows, target_os = "linux")))]
 fn move_to(_window: &Window, _origin: Point<Pixels>) {}
 
+/// Имя окну и просьба убрать его из панели задач и переключателя окон.
+///
+/// Две недоделки в одной картинке (заказчик 2026-10-21: окно висит в панели
+/// задач и зовётся «безымянное окно»), и чинятся они вместе.
+///
+/// **Имени не было вовсе.** Своей рамки мы не рисуем (`titlebar: None`,
+/// `window_decorations: Client`), и вместе с рамкой пропал заголовок:
+/// `WM_NAME`/`_NET_WM_NAME` окну никто не задаёт, а менеджер подставляет своё
+/// «безымянное окно». Задаём свойства сами — решение про рамку при этом не
+/// трогается: заголовок окна это свойство, а не полоска сверху.
+///
+/// **Его там и быть не должно.** `WindowKind::Dialog` выбран ровно затем,
+/// чтобы менеджер прятал окно из панели и Alt-Tab по типу
+/// (`_NET_WM_WINDOW_TYPE_DIALOG`), но XFCE в образе показывает его всё
+/// равно. На одном типе окна полагаться нельзя — просим явно
+/// `_NET_WM_STATE_SKIP_TASKBAR` и `_NET_WM_STATE_SKIP_PAGER`.
+///
+/// Почему состояние меняется сообщением, а не записью свойства: окно к этому
+/// времени уже отображено, а у отображённого окна `_NET_WM_STATE` принадлежит
+/// менеджеру — по EWMH его просят `ClientMessage`'ом в корень. Имя — обычная
+/// запись, и в обеих формах: `WM_NAME` (старые панели) и `_NET_WM_NAME`
+/// (UTF-8, его читают современные).
+///
+/// Соединение короткоживущее и только на эти запросы — как в `move_to` и
+/// `x11_work_area`. Молча: окно без имени в панели задач неприятно, но
+/// работать не мешает, и срывать показ из-за него нельзя.
+#[cfg(target_os = "linux")]
+fn name_and_hide_from_taskbar(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask, PropMode};
+    // `change_property8` живёт в своём трейте-обёртке, а не в том же, что
+    // `intern_atom`/`send_event`: без этой строки Linux-сборка не найдёт
+    // метод (на Windows этот код не компилируется вовсе, и промах вылез бы
+    // только в CI — проверено по исходникам x11rb 0.13.2).
+    use x11rb::wrapper::ConnectionExt as _;
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::Xcb(h) = handle.as_raw() else { return };
+    let win = h.window.get();
+    let Ok((conn, screen_num)) = x11rb::connect(None) else { return };
+    let Some(root) = conn.setup().roots.get(screen_num).map(|s| s.root) else { return };
+    let atom = |name: &[u8]| conn.intern_atom(false, name).ok().and_then(|c| c.reply().ok()).map(|r| r.atom);
+    // Имя окна в панели задач. Внутри функции, а не константой модуля: на
+    // Windows её некому прочитать, и сборка справедливо ругалась бы на
+    // мёртвый код.
+    const WM_TITLE: &[u8] = b"1c-connect";
+
+    let _ = conn.change_property8(PropMode::REPLACE, win, AtomEnum::WM_NAME, AtomEnum::STRING, WM_TITLE).map(|c| c.check());
+    if let (Some(net_name), Some(utf8)) = (atom(b"_NET_WM_NAME"), atom(b"UTF8_STRING")) {
+        let _ = conn.change_property8(PropMode::REPLACE, win, net_name, utf8, WM_TITLE).map(|c| c.check());
+    }
+    if let (Some(state), Some(no_taskbar), Some(no_pager)) = (atom(b"_NET_WM_STATE"), atom(b"_NET_WM_STATE_SKIP_TASKBAR"), atom(b"_NET_WM_STATE_SKIP_PAGER")) {
+        // Порядок полей по EWMH: действие (1 — добавить), два свойства,
+        // источник (1 — просит приложение), ноль в запас.
+        let ev = ClientMessageEvent::new(32, win, state, [1, no_taskbar, no_pager, 1, 0]);
+        let _ = conn.send_event(false, root, EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT, ev).map(|c| c.check());
+    }
+    let _ = conn.flush();
+}
+
+// Заглушки для не-Linux нет намеренно: зовут функцию из блока под
+// `#[cfg(target_os = "linux")]`, и пустышка на Windows была бы мёртвым кодом.
+
 
 /// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
 /// на пустоту (не выше рабочей области), запомнить высоту в `Ui` — следующий
@@ -278,6 +341,10 @@ pub fn show_window(cx: &mut App) {
             #[cfg(target_os = "linux")]
             let _ = handle.update(cx, |_, window, _| {
                 move_to(window, origin);
+                // Имя и «не показывай меня в панели задач» — здесь же, по
+                // тому же отображённому окну: раньше оно висело в панели
+                // безымянным (заказчик 2026-10-21).
+                name_and_hide_from_taskbar(window);
                 // Первый кадр тоже со скруглёнными углами: `fit_height`
                 // случится позже, а то и не случится вовсе.
             });

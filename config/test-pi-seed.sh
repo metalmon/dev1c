@@ -210,6 +210,25 @@ if [ -d "/home/$NEIGH/.config/zed" ]; then
     ok "ссылка на дом соседа отвергнута, чужие настройки не тронуты"
 fi
 
+echo "== На месте ~/Desktop обычный файл =="
+
+# `touch ~/Desktop` достижим пользователю, а раскладка ярлыков делала там
+# install -d. С `set -eu` это значит выход из точки входа: один пользователь
+# не поднимает стенд НИКОМУ.
+rm -rf "$HOME_DIR/Desktop"
+: > "$HOME_DIR/Desktop"
+chown "$U:$U" "$HOME_DIR/Desktop"
+seed
+grep -q "skipping $HOME_DIR/Desktop" "$LOG"     || fail "про файл на месте ~/Desktop не сказано: $(grep -i desktop "$LOG" | head -2)"
+[ -f "$HOME_DIR/Desktop" ] || fail "файл на месте ~/Desktop подменён каталогом"
+ok "обычный файл на месте ~/Desktop пропущен, точка входа дошла до конца"
+
+# Дом в порядок: каталог и ярлыки из образа.
+rm -f "$HOME_DIR/Desktop"
+seed
+ls "$HOME_DIR/Desktop"/*.desktop >/dev/null 2>&1 || fail "ярлыки в дом не вернулись"
+ok "ярлыки разложены из образа"
+
 echo "== Исчезнувшая переменная уходит из сессий =="
 
 # /etc/environment раньше только дописывался: переменная, исчезнувшая из

@@ -312,15 +312,32 @@ for home in /home/*; do
     # Правило простое и то же, что у стартера для 1С-ярлыка: отличается от
     # образцового — обновляем. Чужие ярлыки (человек положил свой) не трогаем:
     # идём по списку образца, а не по содержимому дома.
-    if [ -d /etc/skel/Desktop ] && [ ! -L "$home/Desktop" ]; then
-        [ -d "$home/Desktop" ] || install -d -o "$owner_u" -g "$owner_g" "$home/Desktop"
+    # Отказы здесь не должны ронять точку входа: `set -eu` превратил бы
+    # `touch ~/Desktop` у одного пользователя в «стенд не поднялся ни у кого».
+    # Те же три отказа, что у ~/.pi, и установка каждого ярлыка — со своим
+    # «не вышло».
+    if [ ! -d /etc/skel/Desktop ]; then
+        :
+    elif [ -L "$home/Desktop" ]; then
+        log "skipping $home/Desktop: symlink"
+    elif [ -e "$home/Desktop" ] && [ ! -d "$home/Desktop" ]; then
+        log "skipping $home/Desktop: не каталог"
+    elif [ ! -d "$home/Desktop" ] && ! install -d -o "$owner_u" -g "$owner_g" "$home/Desktop"; then
+        log "skipping $home/Desktop: не создать"
+    else
         for src in /etc/skel/Desktop/*.desktop; do
             [ -f "$src" ] || continue
             dst="$home/Desktop/$(basename "$src")"
-            [ -L "$dst" ] && { log "skipping $dst: symlink"; continue; }
+            if [ -L "$dst" ] || { [ -e "$dst" ] && [ ! -f "$dst" ]; }; then
+                log "skipping $dst: не обычный файл"
+                continue
+            fi
             cmp -s "$src" "$dst" && continue
-            install -o "$owner_u" -g "$owner_g" -m 0755 "$src" "$dst"
-            log "ярлык $(basename "$src") обновлён из образа в $home"
+            if install -o "$owner_u" -g "$owner_g" -m 0755 "$src" "$dst"; then
+                log "ярлык $(basename "$src") обновлён из образа в $home"
+            else
+                log "ярлык $(basename "$src") положить не вышло ($home)"
+            fi
         done
     fi
 

@@ -629,8 +629,18 @@ RUN test-skills
 # autocrlf=input — 1C dumps often arrive from Windows; the repository keeps LF.
 # One file instead of a pile of commands: visible as a whole and easy to edit.
 COPY config/gitconfig /etc/gitconfig
-RUN git lfs install --system \
-    && git config --system --get user.name
+# The hooks live in the image, at an absolute path, and are turned on by the
+# system config (core.hooksPath in config/gitconfig). Not in the project
+# repository on purpose: a hooks directory inside the tree, with a relative
+# hooksPath, would travel with the clone to the developer's machine — and the
+# BSL analyzer the hook calls is here, not there.
+# chmod explicitly: the build context comes from Windows, where the execute
+# bit does not survive, and a hook without it is skipped silently.
+COPY config/git-hooks /opt/git-hooks
+RUN chmod +x /opt/git-hooks/pre-push \
+    && git lfs install --system \
+    && git config --system --get user.name \
+    && test "$(git config --system --get core.hooksPath)" = /opt/git-hooks
 
 # --- Users --------------------------------------------------------------------
 # Three workstations in one image. More is deliberately not offered: the server

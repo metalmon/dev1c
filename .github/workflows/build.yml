@@ -27,6 +27,22 @@ on:
       - setup/**
 
 jobs:
+  git-hooks:
+    # The pre-push hook of the image: it refuses code that does not parse, and
+    # it must not get in the way of anything else. Needs nothing but git and a
+    # shell — the BSL analyzer is replaced by a stub in PATH, because what is
+    # under test is the hook, not the analyzer.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test
+        run: sh config/git-hooks/tests/test-pre-push.sh
+
   onboarding:
     # The onboarding overlay's own tests. They do not need the 1C image —
     # the overlay is plain Python over GTK3 — so they run here on a bare

@@ -203,7 +203,29 @@ seed_from_image() {
     rm -f "$dst"
     # the directories are the user's (their own themes go to zed/themes too)
     [ -d "$parent" ] || install -d -o "$owner_u" -g "$owner_g" "$parent"
-    install -o "$owner_u" -g "$owner_g" -m 0644 "$src" "$dst"
+    # Порты туннеля подставляются ДО установки, в своём временном файле, а не
+    # `sed -i` по готовому файлу в доме. Разница в том, кто и куда пишет: sed
+    # от root идёт по пути, который принадлежит пользователю, и между проверкой
+    # и записью любой промежуточный каталог можно подменить ссылкой. Здесь root
+    # пишет только в каталог отпечатков (он проверен выше) и ставит готовый
+    # файл на место. Замечание разбора безопасности 25.10.2026.
+    use=$src
+    if [ "$base/$f" = ".pi/agent/mcp.json" ]; then
+        # Номера те же, что у Zed: dev1 -> 7771/7781, dev2 -> 7772/7782,
+        # dev3 -> 7773/7783. Любой другой дом (учётка туннеля, будущий
+        # пользователь) остаётся с подстановкой: nc со словом вместо порта
+        # падает громко, а не занимает чужой туннель.
+        u=${home#/home/}
+        case "$u" in
+            dev[1-9])
+                n=${u#dev}
+                use=$(mktemp "$stamps/.sub.XXXXXX") || return 0
+                sed -e "s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|"                     -e "s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|"                     "$src" > "$use"
+                ;;
+        esac
+    fi
+    install -o "$owner_u" -g "$owner_g" -m 0644 "$use" "$dst"
+    [ "$use" = "$src" ] || rm -f "$use"
     tmp=$(mktemp "$stamps/.tmp.XXXXXX") || return 0
     echo "$shipped" > "$tmp"
     chown "$owner_u:$owner_g" "$tmp"
@@ -278,6 +300,21 @@ for cfg in /home/*/.config/zed/settings.json; do
         log "skipping $cfg: symlink"
         continue
     fi
+    # Промежуточные каталоги — тоже. Подменив ~/.config/zed ссылкой на дом
+    # соседа, рабочее место заставило бы root переписать ЧУЖИЕ настройки:
+    # `sed -i` идёт по ссылке и кладёт результат там, куда она ведёт. Наружу
+    # при этом ничего не утекает, но испортить соседа — достаточная причина.
+    # Замечание соседней сессии 25.10.2026.
+    #
+    # Подстановку не переносим в seed_from_image, как сделано для mcp.json:
+    # этот цикл чинит и те дома, где settings.json разложен прежней точкой
+    # входа и до сих пор с подстановками, — отпечаток у них не менялся, и
+    # раскладка их не тронет.
+    h=${cfg%/.config/zed/settings.json}
+    case "$(realpath "${cfg%/settings.json}" 2>/dev/null)" in
+        "$(realpath "$h/.config" 2>/dev/null)"/zed) ;;
+        *) log "skipping $cfg: путь ведёт за пределы .config этого дома"; continue ;;
+    esac
 
     # Workstation ports for the tunnel from the machine with 1C: dev1 -> 7771
     # (mcp-1c) and 7781 (vrunner-mcp), dev2 -> 7772/7782, dev3 -> 7773/7783.
@@ -328,8 +365,19 @@ for cfg in /home/*/.config/zed/settings.json; do
     # both providers, and a placeholder left in the idle branch harms nobody —
     # it is never read — while a missing substitution in the live one shows up
     # as "the agent does not answer" with no reason given.
+    # Адрес нашего сервера кладётся БЕЗ завершающего /v1: путь Zed дописывает
+    # сам, и с /v1 выходит /v1/v1/models — на него llama.cpp отвечает 404, а в
+    # панели агента это выглядит как «моделей нет», без единой строки о
+    # причине. dev1c-setup эту форму и кладёт (model_root), но переменную
+    # можно задать и руками, поэтому срезаем здесь. Пойман 25.10.2026 ровно
+    # так: вручную поднятый стенд, pi отвечает, панель молчит.
+    #
+    # CUSTOM_API_URL не трогаем: там провайдер openai_compatible, и у него
+    # адрес как раз с /v1.
     if [ -n "${LLAMA_API_URL:-}" ]; then
-        sed -i -e "s|LLAMA_API_URL_PLACEHOLDER|$LLAMA_API_URL|" "$cfg"
+        llama_url=${LLAMA_API_URL%/}
+        llama_url=${llama_url%/v1}
+        sed -i -e "s|LLAMA_API_URL_PLACEHOLDER|$llama_url|" "$cfg"
     fi
     if [ -n "${CUSTOM_API_URL:-}" ]; then
         sed -i -e "s|CUSTOM_API_URL_PLACEHOLDER|$CUSTOM_API_URL|" "$cfg"
@@ -347,29 +395,6 @@ for cfg in /home/*/.config/zed/settings.json; do
     else
         log "model: not configured — neither LLAMA_API_URL nor CUSTOM_API_URL is set ($cfg)"
     fi
-done
-
-# --- Порты туннеля в серверах MCP у pi ----------------------------------------
-# Те же подстановки и те же номера, что в настройках Zed выше: 1c-connect
-# выводит их из имени рабочего места, и обе стороны обходятся без параметра.
-# Адрес модели здесь не подставляется — его расширение берёт из окружения, а
-# переменные уходят в /etc/environment ниже.
-for cfg in /home/*/.pi/agent/mcp.json; do
-    [ -f "$cfg" ] || continue
-    if [ -L "$cfg" ]; then
-        log "skipping $cfg: symlink"
-        continue
-    fi
-    u=${cfg#/home/}; u=${u%%/*}
-    case "$u" in
-        dev[1-9])
-            n=${u#dev}
-            sed -i \
-                -e "s|WORKSTATION_1C_PORT_PLACEHOLDER|$((7770 + n))|" \
-                -e "s|WORKSTATION_VRUNNER_PORT_PLACEHOLDER|$((7780 + n))|" \
-                "$cfg"
-            ;;
-    esac
 done
 
 # Крючок для проверок: раскладка файлов из образа — единственная часть точки

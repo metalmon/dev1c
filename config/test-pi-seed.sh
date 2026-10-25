@@ -142,9 +142,68 @@ grep -q "skipping $HOME_DIR/.pi: symlink" "$LOG" \
 [ -z "$(ls -A "$WORK/elsewhere")" ] || fail "по ссылке что-то записано: $(ls -A "$WORK/elsewhere")"
 ok "ссылка пропущена, по ней ничего не записано"
 
+echo "== Промежуточный каталог — ссылка наружу =="
+
+# Дома живут на томе, и в них остаётся всё, что положил предыдущий гость.
+# Проверка на ссылку стоит на последнем звене пути; промежуточное звено
+# закрывает другое правило — родитель обязан разрешаться ВНУТРИ корня
+# (realpath). Проверяется именно оно: подменим ~/.pi/agent ссылкой наружу.
+rm -rf "$HOME_DIR/.pi"
+install -d -o "$U" -g "$U" "$HOME_DIR/.pi"
+mkdir -p "$WORK/outside"
+ln -s "$WORK/outside" "$HOME_DIR/.pi/agent"
+chown -h "$U:$U" "$HOME_DIR/.pi/agent"
+
+seed
+[ -z "$(ls -A "$WORK/outside")" ]     || fail "по ссылке наружу записано: $(ls -A "$WORK/outside")"
+grep -q "skipping $HOME_DIR/.pi/agent" "$LOG"     || fail "точка входа молча прошла мимо ссылки: $(grep -i "\.pi" "$LOG" | head -3)"
+ok "промежуточный каталог-ссылка наружу отвергнут, по нему ничего не записано"
+
+echo "== ~/.config/zed подменён ссылкой на дом соседа =="
+
+# Та же защита для цикла подстановки в настройках Zed: подменив промежуточный
+# каталог ссылкой, рабочее место заставило бы root переписать чужие настройки.
+NEIGH=${DEV1C_SEED_NEIGHBOUR:-dev2}
+if [ -d "/home/$NEIGH/.config/zed" ]; then
+    before=$(md5sum "/home/$NEIGH/.config/zed/settings.json" | cut -d" " -f1)
+    mv "$HOME_DIR/.config/zed" "$HOME_DIR/.config/zed.real"
+    ln -s "/home/$NEIGH/.config/zed" "$HOME_DIR/.config/zed"
+    chown -h "$U:$U" "$HOME_DIR/.config/zed"
+
+    seed
+    after=$(md5sum "/home/$NEIGH/.config/zed/settings.json" | cut -d" " -f1)
+    rm -f "$HOME_DIR/.config/zed"
+    mv "$HOME_DIR/.config/zed.real" "$HOME_DIR/.config/zed"
+    [ "$before" = "$after" ] || fail "настройки соседа $NEIGH переписаны через ссылку"
+    ok "ссылка на дом соседа отвергнута, чужие настройки не тронуты"
+fi
+
+echo "== Адрес модели задан с завершающим /v1 =="
+
+# Zed дописывает путь сам: с /v1 в адресе выходит /v1/v1/models, llama.cpp
+# отвечает 404, и панель агента показывает «моделей нет» без единой строки о
+# причине. dev1c-setup кладёт адрес без /v1, но переменную задают и руками —
+# точка входа обязана срезать. Поймано 25.10.2026 на живом стенде: pi отвечал,
+# панель молчала.
+ZED=$HOME_DIR/.config/zed/settings.json
+saved_url=${LLAMA_API_URL:-}
+LLAMA_API_URL="http://proba-model:8099/v1"; export LLAMA_API_URL
+rm -f "$STAMPS/zed_settings.json"
+seed
+grep -q '"api_url": "http://proba-model:8099"' "$ZED"     || fail "завершающий /v1 не срезан: $(grep -o '"api_url": "[^"]*"' "$ZED" | head -1)"
+ok "завершающий /v1 срезан, Zed получает адрес в своей форме"
+
+# Дом возвращается к настоящему адресу.
+if [ -n "$saved_url" ]; then LLAMA_API_URL=$saved_url; export LLAMA_API_URL; else unset LLAMA_API_URL; fi
+rm -f "$STAMPS/zed_settings.json"
+seed
+
 # Дом возвращается в рабочее состояние: следом в этом же контейнере может
-# идти проверка test-pi, и она запускает pi от пользователя.
-rm -f "$HOME_DIR/.pi"
+# идти проверка test-pi, и она запускает pi от пользователя. `rm -rf`, а не
+# `rm -f`: после сценария со ссылкой на месте ~/.pi остаётся НАСТОЯЩИЙ каталог
+# с битой ссылкой внутри, и `rm -f` его не берёт — следующий прогон тогда
+# видит в доме «чужое» и отказывается работать.
+rm -rf "$HOME_DIR/.pi"
 rm -f "$STAMPS"/pi_*
 seed
 [ -s "$HOME_DIR/.pi/agent/mcp.json" ] || fail "дом не восстановлен после проверки"

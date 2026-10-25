@@ -1,6 +1,7 @@
 {
   "$schema": "https://pi.dev/schemas/settings.schema.json",
   "theme": "system",
+  "hideThinkingBlock": true,
   "enableInstallTelemetry": false,
   "extensions": ["-builtin:llama.cpp"]
 }

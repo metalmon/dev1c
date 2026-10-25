@@ -2057,7 +2057,24 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global_mut::<Ui>();
             let line = on_done(ui, err, cancelled);
             note_line(ui, line.clone());
-            set_status(ui, line.clone(), None);
+            // Отказ платформы — словами: что это было и что делать. Строкой
+            // НИЖЕ сырого текста, как подсказка провалившегося факта
+            // (`check_lines`): сам текст 1С человек видит по-прежнему, а
+            // понимает с первой строки. Главное, зачем заведено, — отличить
+            // «упёрлись в ограничение по числу сеансов» от поломки
+            // (`onec_error`, решение заказчика 25.10.2026).
+            let cause = matches!(line.kind, Kind::Fail).then(|| crate::onec_error::explain(&line.text)).flatten();
+            if let Some(c) = cause {
+                note_line(ui, Line { kind: Kind::Warn, text: crate::onec_error::hint_line(c) });
+            }
+            // В подвал — короткая причина, а не сырой текст: в двух строках
+            // подвала отказ платформы всё равно обрезается многоточием, и
+            // человек читает его начало вместо смысла.
+            let status = match cause {
+                Some(c) => Line { kind: Kind::Fail, text: c.what.to_string() },
+                None => line.clone(),
+            };
+            set_status(ui, status, None);
             // Подсказка без операции: `on_done` уже опустил `progress`/`busy`.
             // `tooltip_at` тоже назад в `None` — следующая операция не должна
             // наследовать свежий штамп и ждать до TOOLTIP_EVERY своей подсказки.
@@ -2067,12 +2084,13 @@ fn handle(ev: Ev, cx: &mut App) {
             let hidden = ui.window.is_none();
             cx.refresh_windows();
             if hidden {
-                cx.show_system_notification(SystemNotification {
-                    tag: "op".into(),
-                    title: "1c-connect".into(),
-                    body: line.text.clone().into(),
-                    actions: vec![],
-                });
+                // Во всплывающем окне ОС места ещё меньше, чем в подвале:
+                // туда тем более короткая причина, а не текст платформы.
+                let body = match cause {
+                    Some(c) => c.what.to_string(),
+                    None => line.text.clone(),
+                };
+                cx.show_system_notification(SystemNotification { tag: "op".into(), title: "1c-connect".into(), body: body.into(), actions: vec![] });
             }
             refresh_ops(cx);
             refresh_project(cx);

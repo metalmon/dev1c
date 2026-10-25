@@ -100,8 +100,16 @@ fn main() {
         common::console::attach();
     }
     if let Err(e) = run() {
+        let text = format!("{e:#}");
         eprintln!();
-        eprintln!("Остановлено: {e:#}");
+        eprintln!("Остановлено: {text}");
+        // Узнанный отказ платформы — строкой ниже, тем же текстом, что окно
+        // пишет в журнал: в терминале человек так же не должен отличать
+        // ограничение по числу сеансов от поломки по виду сырого сообщения
+        // (`onec_error`).
+        if let Some(c) = one_c_connect::onec_error::explain(&text) {
+            eprintln!("{}", one_c_connect::onec_error::hint_line(c));
+        }
         std::process::exit(1);
     }
 }

@@ -15,6 +15,7 @@ pub mod jsonrpc;
 pub mod licence;
 pub mod listen;
 pub mod local;
+pub mod onec_error;
 pub mod ops_host;
 pub mod platform;
 pub mod project;

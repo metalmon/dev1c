@@ -839,6 +839,17 @@ pub enum Reach {
     /// повторять попытку тут незачем — ждать нечего (`extension_reach`).
     Denied(String),
     Unreachable(String),
+    /// Платформа ответила отказом своим текстом, и мы его узнали
+    /// (`onec_error::explain`): причина и совет — её, не наши. Занято это или
+    /// поломка, решает `onec_error::is_busy` — исход факта считается в одном
+    /// месте (`verify::extension_fact`), а не размножается по армам.
+    ///
+    /// Главный случай — ограничение по числу сеансов: платформа отдаёт его
+    /// 5xx с текстом в теле, и до правки 26.10 он доживал до конца срока и
+    /// превращался в «база не ответила за отведённое время» — настоящая
+    /// причина до человека не доходила вовсе. Повторять тут нечего: это
+    /// окончательный ответ, а не «ещё не готова».
+    Refused(&'static crate::onec_error::Cause),
 }
 
 /// То же, что `extension_version_in`, но без схлопывания исходов в
@@ -860,6 +871,9 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
             // Не пустили (401/403) — окончательный отказ, но другой: база
             // ответила, значит отвечает. Ждать тут нечего — повторять незачем.
             Probe::Denied(why) => return Reach::Denied(why),
+            // Платформа отказала и назвала причину — это ответ, а не его
+            // отсутствие: повторять нечего.
+            Probe::Refused(cause) => return Reach::Refused(cause),
             // Окончательный отказ — сеть, таймаут. Ждать тут нечего: висеть
             // весь срок незачем.
             Probe::Unreachable(why) => return Reach::Unreachable(why),
@@ -880,7 +894,7 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
 pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
     match extension_reach(base_url, user, password, timeout) {
         Reach::Version(v) => Some(v),
-        Reach::Absent | Reach::Denied(_) | Reach::Unreachable(_) => None,
+        Reach::Absent | Reach::Denied(_) | Reach::Unreachable(_) | Reach::Refused(_) => None,
     }
 }
 
@@ -895,6 +909,9 @@ enum Probe {
     /// «сменили пароль базы» от настоящего «не достучались» (находка
     /// повторного ревью, Critical 2).
     Denied(String),
+    /// Платформа отказала своим текстом, и мы его узнали — см.
+    /// `Reach::Refused`. Повторять нечего.
+    Refused(&'static crate::onec_error::Cause),
     /// Окончательный отказ: сеть, таймаут, или до базы не достучались вовсе.
     Unreachable(String),
     /// База отвечает, но ещё не готова — стоит спросить ещё раз.
@@ -912,8 +929,19 @@ fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::
     };
     let status = r.status();
     if status.is_server_error() {
-        // 5xx от платформы, пока она открывает базу, — «ещё не готова».
-        return Probe::NotReady;
+        // 5xx — либо платформа ещё открывает базу, либо она отказала своим
+        // текстом в теле. Отказ по числу сеансов приходит именно так, и до
+        // правки 26.10 мы его не читали вовсе: проба ждала до конца срока и
+        // объявляла «база не ответила за отведённое время», а человек видел
+        // «база не отвечает» вместо «закройте лишний сеанс». Узнанную причину
+        // (`onec_error::explain`) отдаём как ответ — повторять нечего;
+        // неузнанную по-прежнему считаем «ещё не готова»: первый ответ
+        // просыпающейся базы идёт 7,7 с (замер на стенде 25.10).
+        let body = r.text().unwrap_or_default();
+        return match crate::onec_error::explain(&body) {
+            Some(cause) => Probe::Refused(cause),
+            None => Probe::NotReady,
+        };
     }
     if status == reqwest::StatusCode::NOT_FOUND {
         return Probe::Absent;
@@ -1335,25 +1363,62 @@ mod tests {
         assert!(matches!(gitea_probe("http://127.0.0.1:1", std::time::Duration::from_secs(5)), Gitea::Down(_)));
     }
 
-    /// Один настоящий HTTP-ответ с заданным статусом, без стороннего
-    /// крейта: слушатель отвечает ровно раз и останавливается сам. Для
-    /// проверки, что `version_once`/`extension_reach` отличают «не пустили»
-    /// (401/403) от других исходов — поведение решает статус, не текст тела.
-    fn respond_once(status_line: &str) -> String {
+    /// Настоящие HTTP-ответы без стороннего крейта: слушатель отдаёт `replies`
+    /// по одному на соединение, в порядке списка, и останавливается сам.
+    /// Нескольких ответов хватает, чтобы проверить и повтор пробы: исход
+    /// решает не только статус, но и текст тела — отказ платформы приходит
+    /// 5xx с текстом (решение владельца 26.10).
+    fn respond_each(replies: &[(&str, &str)]) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let status_line = status_line.to_string();
+        let replies: Vec<(String, String)> = replies.iter().map(|(s, b)| (s.to_string(), b.to_string())).collect();
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
+            for (status_line, body) in replies {
+                let Ok((mut stream, _)) = listener.accept() else { return };
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf);
-                let body = "{}";
                 let resp = format!("HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 let _ = stream.write_all(resp.as_bytes());
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Один ответ с заданным статусом и пустым JSON в теле.
+    fn respond_once(status_line: &str) -> String {
+        respond_each(&[(status_line, "{}")])
+    }
+
+    /// Решение владельца 26.10: занятость базы устанавливает САМА БАЗА своим
+    /// отказом. Отказ по числу сеансов приходит 5xx с текстом в теле; до
+    /// правки тело не читалось вовсе, проба ждала до конца срока и объявляла
+    /// «не ответил за отведённое время» — человек видел «база не отвечает»
+    /// вместо «закройте лишний сеанс».
+    #[test]
+    fn a_5xx_that_names_a_session_limit_is_an_answer_not_a_wait() {
+        let url = respond_each(&[("500 Internal Server Error", "Ошибка: Превышено количество сеансов")]);
+        let t0 = std::time::Instant::now();
+        let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(10));
+        match reach {
+            Reach::Refused(c) => assert!(crate::onec_error::is_busy(c), "{c:?}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "проба ждала, хотя ответ был окончательный");
+    }
+
+    /// А неузнанное 5xx — по-прежнему «ещё не готова»: проба спит и
+    /// спрашивает заново. Первый ответ просыпающейся базы идёт 7,7 с (замер на
+    /// стенде 25.10), и за это время она успевает ответить 5xx своей
+    /// страницей.
+    #[test]
+    fn an_unrecognised_5xx_is_still_retried() {
+        let url = respond_each(&[("503 Service Unavailable", "<html>please stand by</html>"), ("200 OK", "{\"version\":\"0.4.8\"}")]);
+        let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(10));
+        match reach {
+            Reach::Version(v) => assert_eq!(v, "0.4.8"),
+            other => panic!("повтора не было: {other:?}"),
+        }
     }
 
     /// Critical 2 (повторное ревью): отказ 401/403 — «не пустили», а не «не

@@ -830,9 +830,14 @@ pub fn extension_version(base_url: &str, user: &str, password: &str) -> Option<S
 /// версии — это не поломка публикации, а незаконченная установка), и база не
 /// достучалась вовсе (отдельно от «нет расширения» — тут причина на стороне
 /// сети или учётных данных, не базы).
+#[derive(Debug)]
 pub enum Reach {
     Version(String),
     Absent,
+    /// Отказ (401/403) — база ответила, просто не пустила: это не то же
+    /// самое, что `Unreachable` (сеть/таймаут/до базы не достучались), и
+    /// повторять попытку тут незачем — ждать нечего (`extension_reach`).
+    Denied(String),
     Unreachable(String),
 }
 
@@ -852,8 +857,11 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
         match version_once(base_url, user, password, left) {
             Probe::Version(v) => return Reach::Version(v),
             Probe::Absent => return Reach::Absent,
-            // Окончательный отказ — сеть, таймаут, или база не пустила
-            // (401/403). Ждать тут нечего: висеть весь срок незачем.
+            // Не пустили (401/403) — окончательный отказ, но другой: база
+            // ответила, значит отвечает. Ждать тут нечего — повторять незачем.
+            Probe::Denied(why) => return Reach::Denied(why),
+            // Окончательный отказ — сеть, таймаут. Ждать тут нечего: висеть
+            // весь срок незачем.
             Probe::Unreachable(why) => return Reach::Unreachable(why),
             // База отвечает, но пока не тем: платформа ещё открывает базу.
             // Первый ответ после подъёма публикации идёт 7,7 с (замер на
@@ -872,7 +880,7 @@ pub fn extension_reach(base_url: &str, user: &str, password: &str, timeout: std:
 pub fn extension_version_in(base_url: &str, user: &str, password: &str, timeout: std::time::Duration) -> Option<String> {
     match extension_reach(base_url, user, password, timeout) {
         Reach::Version(v) => Some(v),
-        Reach::Absent | Reach::Unreachable(_) => None,
+        Reach::Absent | Reach::Denied(_) | Reach::Unreachable(_) => None,
     }
 }
 
@@ -882,8 +890,12 @@ enum Probe {
     /// Расширения в базе нет (404) — это не то же самое, что «не
     /// достучались»: публикация отвечает, просто ставить ещё не кончили.
     Absent,
-    /// Окончательный отказ: не пустили (401/403), сеть, или до базы не
-    /// достучались вовсе.
+    /// Не пустили (401/403) — база отвечает, просто отказала в доступе. Было
+    /// частью `Unreachable`; отдельная арма нужна, чтобы факт мог отличить
+    /// «сменили пароль базы» от настоящего «не достучались» (находка
+    /// повторного ревью, Critical 2).
+    Denied(String),
+    /// Окончательный отказ: сеть, таймаут, или до базы не достучались вовсе.
     Unreachable(String),
     /// База отвечает, но ещё не готова — стоит спросить ещё раз.
     NotReady,
@@ -905,6 +917,9 @@ fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::
     }
     if status == reqwest::StatusCode::NOT_FOUND {
         return Probe::Absent;
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Probe::Denied(format!("{base_url}/version отказал: {status}"));
     }
     if !status.is_success() {
         return Probe::Unreachable(format!("{base_url}/version отказал: {status}"));
@@ -1318,6 +1333,50 @@ mod tests {
     #[test]
     fn gitea_probe_on_a_closed_port_is_down() {
         assert!(matches!(gitea_probe("http://127.0.0.1:1", std::time::Duration::from_secs(5)), Gitea::Down(_)));
+    }
+
+    /// Один настоящий HTTP-ответ с заданным статусом, без стороннего
+    /// крейта: слушатель отвечает ровно раз и останавливается сам. Для
+    /// проверки, что `version_once`/`extension_reach` отличают «не пустили»
+    /// (401/403) от других исходов — поведение решает статус, не текст тела.
+    fn respond_once(status_line: &str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let status_line = status_line.to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let body = "{}";
+                let resp = format!("HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Critical 2 (повторное ревью): отказ 401/403 — «не пустили», а не «не
+    /// отвечает». Прежде оба статуса попадали в `Unreachable` вместе с
+    /// настоящими сетевыми провалами, и факт публикации гас советом
+    /// «1c-connect install» ровно на сценарии «сменили пароль базы».
+    #[test]
+    fn a_401_or_403_is_denied_not_unreachable() {
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            // Слушатель отвечает ровно раз — по одному на каждый вызов,
+            // иначе второй коннект застал бы его уже закрытым.
+            let reach = extension_reach(&respond_once(status), "u", "p", std::time::Duration::from_secs(5));
+            assert!(matches!(reach, Reach::Denied(_)), "{status}: {reach:?}");
+            assert_eq!(extension_version_in(&respond_once(status), "u", "p", std::time::Duration::from_secs(5)), None, "{status}");
+        }
+    }
+
+    /// «Расширения нет» рождается только из 404 — не из любого отказа.
+    #[test]
+    fn absent_comes_only_from_a_404() {
+        let url = respond_once("404 Not Found");
+        let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(5));
+        assert!(matches!(reach, Reach::Absent), "{reach:?}");
     }
 
     #[test]

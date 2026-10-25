@@ -86,9 +86,24 @@ payload_present() { [ -x "/opt/1cv8t/x86_64/$PLATFORM_VERSION/1cv8t" ] && [ -f "
 # Empty on purpose means a base with no users at all (the image can be built
 # that way), so `-` and not `:-`: an empty DEMO_DB_USER must stay empty.
 DB_USER=${DEMO_DB_USER-Администратор}
-# Имя демо-базы в списке стартера; приезжает переменной образа вместе с
-# DEMO_DB_USER, умолчание — на случай запуска скрипта вне образа.
-DEMO_TITLE=${DEMO_TITLE:-Демонстрационное приложение (учебная)}
+# Имя демо-базы в списке стартера. Приезжает переменной образа (ENV в
+# Dockerfile.1c) вместе с DEMO_DB_USER, в сессии — через /etc/environment
+# (entrypoint).
+#
+# Литерального умолчания здесь больше нет. Прежнее — «Демонстрационное
+# приложение (учебная)» — осталось от переезда на демо-конфигурацию, а
+# переменная до сессии RDP не доезжала: каждый запуск 1С с рабочего стола
+# брал это умолчание и ПЕРЕИМЕНОВЫВАЛ запись обратно, хотя стенд вернулся на
+# УНФ. Имя конфигурации скрипту знать неоткуда, поэтому без переменной он
+# больше не притворяется, что знает: новой записи даётся нейтральное имя
+# (платформа учебная при любой конфигурации), а существующая НЕ переписывается
+# — это решает $DEMO_TITLE_KNOWN ниже.
+if [ -n "${DEMO_TITLE:-}" ]; then
+    DEMO_TITLE_KNOWN=1
+else
+    DEMO_TITLE_KNOWN=0
+    DEMO_TITLE="Учебная база"
+fi
 IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
 IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
 LOG=/var/log/1c
@@ -219,7 +234,7 @@ ZEDDB
     # его собственным GUID — и починка по ID находит запись ровно у того
     # рабочего места, чей список ни разу не открывали. Проверено: у dev3
     # сработала, у dev1 и dev2 молча нет. Путь стартер не трогает.
-    if [ -e "$v8i" ] && ! grep -aq "^\[$DEMO_TITLE\]" "$v8i"; then
+    if [ "$DEMO_TITLE_KNOWN" = 1 ] && [ -e "$v8i" ] && ! grep -aq "^\[$DEMO_TITLE\]" "$v8i"; then
         n=$(grep -aFn "Connect=File=\"$HOME/base\";" "$v8i" | head -1 | cut -d: -f1)
         if [ -n "$n" ]; then
             h=$(head -n "$n" "$v8i" | grep -an '\[.*\]' | tail -1 | cut -d: -f1)

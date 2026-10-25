@@ -16,11 +16,21 @@ log() { echo "[entrypoint] $*"; }
 # by PAM, which builds the environment anew from /etc/environment. Without this
 # the model key is visible in `docker exec` but not to Zed — exactly the case of
 # "everything is passed, nothing works".
+#
+# То же относится к ENV образа, а не только к -e: DEMO_TITLE и DEMO_DB_USER
+# стоят в Dockerfile.1c, но в сессию RDP не попадали — и `1c-stand`, запущенный
+# из сессии (а это каждый запуск 1С с рабочего стола), откатывался на свои
+# умолчания. Имя базы в списке стартера переписывалось обратно на
+# «Демонстрационное приложение», хотя стенд давно вернулся на УНФ.
+#
+# Значение с пробелами можно писать без кавычек: pam_env берёт строку до
+# конца. Проверено в образе — «Управление нашей фирмой (учебная)» доходит до
+# сессии целиком и в кавычках, и без них.
 for var in MODEL_PROVIDER MODEL_NAME CUSTOM_MODEL \
            LLAMA_API_URL LLAMACPP_API_KEY \
            CUSTOM_API_KEY CUSTOM_API_URL \
            ANTHROPIC_API_KEY OPENAI_API_KEY \
-           HTTP_PROXY HTTPS_PROXY NO_PROXY
+           HTTP_PROXY HTTPS_PROXY NO_PROXY            DEMO_TITLE DEMO_DB_USER
 do
     eval "value=\${$var:-}"
     [ -n "$value" ] || continue

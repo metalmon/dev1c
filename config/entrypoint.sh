@@ -327,6 +327,14 @@ for home in /home/*; do
             name=$(basename "$src")
             dst="$skills/$name"
             stamp="$stamps/skill_$name"
+            # Ссылки — отказ, как и в раскладке файлов. Висячая ссылка на
+            # месте скилла опаснее прочего: `[ -e ]` на ней ложно, и `cp -a`
+            # пошёл бы по ней, создав файл от root там, куда она ведёт.
+            # Отпечаток тем же правилом: `>` по ссылке пишет в её цель.
+            if [ -L "$dst" ] || [ -L "$stamp" ]; then
+                log "skill $name: ссылка на месте скилла или отпечатка — пропускаю ($home)"
+                continue
+            fi
             now=$(dir_sum "$src")
             if [ ! -e "$dst" ]; then
                 cp -a "$src" "$dst" && chown -R "$owner_u:$owner_g" "$dst"

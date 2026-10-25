@@ -234,10 +234,14 @@ pub fn open_session_fact(sessions: usize) -> Check {
     if sessions == 0 {
         return Check::note(OPEN_SESSION, "открытых сеансов 1С на этой машине нет — база свободна для агента");
     }
+    // Про «один сеанс» не утверждаем: это правда учебной платформы, а на
+    // машине разработчика база боевая и сеансов там сколько угодно
+    // (заказчик 25.10). Говорим то, что верно всюду: открытый сеанс МОЖЕТ
+    // закрыть агенту дорогу, и две причины почему.
     Check::note(
         OPEN_SESSION,
         format!(
-            "{} — пока он открыт, агенту при обращении к базе откажут: учебная платформа держит один сеанс",
+            "{} — агенту могут отказать: Конфигуратор держит базу монопольно, а учебная платформа ограничена одним сеансом",
             common::word::count(sessions as u64, "открыт сеанс 1С", "открыто сеанса 1С", "открыто сеансов 1С")
         ),
     )
@@ -461,8 +465,8 @@ pub fn publication_fact(base_url: &str, ver: Option<String>, sessions: usize) ->
         // базой, а мы в журнале предлагаем что-то установить»).
         None if sessions > 0 => Check::fail(
             PUBLICATION,
-            format!("{base_url}/version не отвечает — база занята открытым сеансом 1С"),
-            "закройте Предприятие или Конфигуратор: учебная платформа держит один сеанс",
+            format!("{base_url}/version не отвечает, а на машине открыт сеанс 1С"),
+            "закройте Предприятие или Конфигуратор и повторите — открытый сеанс может держать базу",
         ),
         None => Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), "1c-connect install, затем публикация в Конфигураторе (см. install)"),
     }
@@ -1105,7 +1109,8 @@ mod tests {
         assert!(none.ok && none.info && none.detail.contains("нет"), "{none:?}");
         let c = open_session_fact(1);
         assert!(c.ok && c.info, "{c:?}");
-        assert!(c.detail.contains("открыт сеанс 1С") && c.detail.contains("откажут"), "{c:?}");
+        assert!(c.detail.contains("открыт сеанс 1С") && c.detail.contains("могут отказать"), "{c:?}");
+        assert!(!c.detail.starts_with("учебная"), "про учебную платформу как про данность говорить нельзя: {c:?}");
         assert!(open_session_fact(2).detail.contains("2 открыто сеанса"), "{:?}", open_session_fact(2));
     }
 
@@ -1116,7 +1121,7 @@ mod tests {
     fn an_open_session_changes_the_advice_about_the_publication() {
         let busy = publication_fact("http://x", None, 1);
         assert!(!busy.ok, "{busy:?}");
-        assert!(busy.detail.contains("занята открытым сеансом"), "{busy:?}");
+        assert!(busy.detail.contains("открыт сеанс 1С"), "{busy:?}");
         assert!(busy.hint.contains("закройте"), "{busy:?}");
         assert!(!busy.hint.contains("install"), "установку тут советовать нечего: {busy:?}");
 

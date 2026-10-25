@@ -12,6 +12,7 @@ use crate::gui::theme;
 use crate::gui::window::hide_window;
 use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Verdict, Running, Ui, Which};
 use crate::session::State;
+use common::check::{Check, Outcome};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
@@ -317,6 +318,39 @@ pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<
         return (h.to_string(), false);
     }
     (kit_path.to_string(), false)
+}
+
+/// Строки вкладки «Проект» по набору фактов — тому самому, из которого
+/// выведен вердикт карточки и который печатает «Проверить». Один факт — одна
+/// строка, и ни одной своей: ни отбора, ни добавок, ни пересказа. Прежде
+/// вкладка спрашивала `run::status` сама, своими пробами и в свои секунды, —
+/// отсюда и бралось «расширение не установлено» при живом расширении 0.4.8
+/// рядом с зелёной карточкой (спека, «Зачем»).
+///
+/// Цвет точки — по исходу факта (`Check::outcome`), и это единственное, что
+/// строка о факте решает:
+///
+/// * провал — красная: это то, что человек чинит;
+/// * занято — жёлтая: подождать или закрыть базу, чинить нечего;
+/// * сведение (`Check::note`) — серая: факту сказать нечего (чужой дескриптор
+///   публикации, комплект на носителе, открытый сеанс 1С), и зелёным оно не
+///   бывает — зелёное значит «проверено и сошлось»;
+/// * пройденный — зелёная.
+///
+/// `Option<Dot>` в кортеже — ради общей раскладки с `project_rows` (там
+/// `None` у подсказки, которая не факт); у факта точка есть всегда.
+pub fn fact_rows(facts: &[Check]) -> Vec<(Option<Dot>, String, String)> {
+    facts.iter().map(|c| (Some(fact_dot(c)), c.what.clone(), gui::fact_detail(c))).collect()
+}
+
+fn fact_dot(c: &Check) -> Dot {
+    match c.outcome() {
+        Outcome::Bad => Dot::Down,
+        Outcome::Busy => Dot::Busy,
+        // `info` — сведение внутри `Good`: ни пройденный, ни проваленный.
+        Outcome::Good if c.info => Dot::Off,
+        Outcome::Good => Dot::Up,
+    }
 }
 
 /// Подсказка под каталогом проекта, когда раскладки ещё нет.
@@ -782,7 +816,9 @@ impl Panel {
             // Каталог проекта мог смениться — вкладка «Проект» уже про другой.
             gui::refresh_project(cx);
         }
-        gui::refresh_ops(cx);
+        // Факты за `Сохранить` не перечитываются здесь: `gui::save_host` уже
+        // попросил пересчёт набора (`run_readiness`), и вкладка «Проект»
+        // показывает его же.
         ok
     }
 
@@ -1090,11 +1126,10 @@ impl Render for Panel {
                 })
                 .into_any_element(),
             // «Проект» = прежние «Расширение» и «Проект» одной лентой:
-            // сверху операции на машине, ниже — каталог и состояние ветки.
+            // сверху факты набора, ниже — каталог и состояние ветки.
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
-                let ops = ui.ops.clone();
-                let cfg = ui.cfg.clone();
+                let facts = fact_rows(&ui.facts);
                 let rows = project_rows(ui.project.as_ref());
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
@@ -1110,20 +1145,12 @@ impl Render for Panel {
                     "project",
                     &self.project_scroll,
                     v_flex()
-                        // 12 px между операциями и строками проекта: это два
-                        // списка, а не один.
+                        // 12 px между фактами набора и строками проекта: это
+                        // два списка, а не один.
                         .gap_3()
-                        .child(v_flex().gap_2().children(ops.iter().map(|o| {
-                            // Строка публикации — словами разработчика 1С
-                            // (адрес, не дескрипторы/httpd.conf): та же
-                            // карточка `fact`, только заголовок и подробность
-                            // берутся у `gui::publication_detail`, а не у
-                            // технического текста операции.
-                            if o.id == "host.publication" {
-                                fact(o.dot, gui::PUBLICATION_TITLE.into(), gui::publication_detail(&cfg))
-                            } else {
-                                fact(o.dot, o.title.clone(), o.detail.clone())
-                            }
+                        .child(v_flex().gap_2().children(facts.into_iter().map(|(d, title, detail)| match d {
+                            Some(d) => fact(d, title, detail),
+                            None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
                         })))
                         .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
                             // Подсказка — не факт о проекте: мелкий текст без кружка.
@@ -1252,7 +1279,7 @@ impl Render for Panel {
             // `Busy::Project` не различают, что именно идёт: на время
             // работы заблокировано всё равно всё.
             gui::Tab::Project => {
-                let which = gui::project_primary(&cx.global::<Ui>().ops);
+                let which = gui::project_primary(&cx.global::<Ui>().facts);
                 let (label, hint) = match which {
                     Which::Export => ("Выгрузить", "Выгрузить из 1С"),
                     _ => ("Установить", "Установить расширение"),
@@ -1435,7 +1462,7 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_rows, reason, save_hint, shown_fields,
         switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
     };
     use crate::cfg::Host;
@@ -1445,6 +1472,35 @@ mod tests {
     use common::Phase;
     use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    /// Задача 7: вкладка показывает тот же набор и ничего своего — ни отбора,
+    /// ни добавок, ни пересказа. Один факт — одна строка, в порядке набора.
+    #[test]
+    fn the_tab_shows_the_same_facts_and_nothing_of_its_own() {
+        let facts = vec![
+            Check::pass("публикация отвечает", "127.0.0.1:8081/version отвечает"),
+            Check::pass("расширение в базе", "0.4.8"),
+            Check::note("дескриптор публикации", "публикацию держит веб-сервер"),
+            Check::busy("в базе открыт сеанс", "сеансов больше не осталось", "закройте «Предприятие»"),
+            Check::fail("проект", "не разложен", "1c-connect install"),
+        ];
+        let rows = fact_rows(&facts);
+        // Ровно столько строк, сколько фактов: лишней своей строки у вкладки
+        // нет, и ни один факт она не прячет.
+        assert_eq!(rows.len(), facts.len());
+        for (row, fact) in rows.iter().zip(&facts) {
+            assert_eq!(row.1, fact.what, "заголовок строки — имя факта");
+        }
+        // Цвет точки — по исходу факта, и это всё, что строка решает.
+        let dots: Vec<Option<Dot>> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(dots, vec![Some(Dot::Up), Some(Dot::Up), Some(Dot::Off), Some(Dot::Busy), Some(Dot::Down)]);
+        // Подробность — то же, что говорит причина вердикта: совет
+        // провалившегося факта идёт в ту же строку, а не теряется.
+        assert_eq!(rows[1].2, "0.4.8");
+        assert_eq!(rows[4].2, "не разложен — 1c-connect install");
+        // Пройденному факту совет приписывать нечего.
+        assert_eq!(rows[0].2, "127.0.0.1:8081/version отвечает");
+    }
 
     /// Правило заказчика дословно: «Переключатель включения должен быть
     /// недоступен, пока нет пользователя и пока не установлены MCP». До этой

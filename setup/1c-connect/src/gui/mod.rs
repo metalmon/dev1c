@@ -11,7 +11,7 @@ use crate::session::{self, Session, State};
 use crate::verify;
 use common::check::{self, Check};
 use common::kit::{write_text, Kit};
-use common::op::{CleanLevel, OpState};
+use common::op::CleanLevel;
 use common::{run, AlwaysDefault, Event, Phase, Progress, Runner, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
@@ -218,7 +218,6 @@ pub struct Ui {
     /// Сколько фактов провалила последняя проверка — бейдж на «Журнале».
     /// Сами факты живут строками в журнале (`check_lines`), списка их нет.
     pub failed_checks: usize,
-    pub ops: Vec<OpView>,
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
     /// `None` — ещё не спрашивали.
     pub project: Option<ProjectView>,
@@ -232,8 +231,8 @@ pub struct Ui {
     /// Пришли новые фаза/заметка после последней перерисовки карточки хода.
     pub dirty: bool,
     pub busy: Option<Busy>,
-    /// Число живых потоков `refresh_ops`/`refresh_project` — растёт в момент
-    /// `thread::spawn`, падает (насыщенно) в `Ev::Ops`/`Ev::Project`. Входит
+    /// Число живых потоков `refresh_project` — растёт в момент
+    /// `thread::spawn`, падает (насыщенно) в `Ev::Project`. Входит
     /// в `working()`: полоса хода в разделителе над подвалом.
     pub pending: usize,
     pub status: Option<Line>,
@@ -269,8 +268,8 @@ impl Global for Ui {}
 
 impl Ui {
     /// Что-то идёт: операция/проверка (`busy`), подключение туннеля, или
-    /// фоновое обновление состояния (`pending` — `refresh_ops`/`refresh_project`
-    /// ещё не ответили). Полоса хода в разделителе над подвалом читает это.
+    /// фоновое обновление состояния (`pending` — `refresh_project`
+    /// ещё не ответил). Полоса хода в разделителе над подвалом читает это.
     pub fn working(&self) -> bool {
         self.busy.is_some() || matches!(self.link, State::Connecting) || self.pending > 0
     }
@@ -451,14 +450,6 @@ pub fn verdict_of(serving: bool, facts: &[Check]) -> Verdict {
     Verdict::Ready
 }
 
-#[derive(Clone, Debug)]
-pub struct OpView {
-    pub id: String,
-    pub title: String,
-    pub dot: Dot,
-    pub detail: String,
-}
-
 pub enum Ev {
     Tray(tray_icon::TrayIconEvent),
     Menu(tray_icon::menu::MenuEvent),
@@ -470,8 +461,6 @@ pub enum Ev {
     /// строки хватает, её шлёт `line_of`).
     Progress(Progress),
     Done { err: Option<String>, cancelled: bool },
-    /// Состояние операций, перечитанное в своём потоке (`refresh_ops`).
-    Ops(Vec<OpView>),
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`).
     Project(ProjectView),
     /// Ответ `ensure_publication`, поднятой в своём потоке: проба (до 3 с),
@@ -806,40 +795,22 @@ pub fn note_file(kit: &Kit, line: &Line) {
     write_log_file(kit, line);
 }
 
-/// Карточка операции из состояния `apply_all`/`status`.
-pub fn op_view(id: String, title: String, st: OpState) -> OpView {
-    let (dot, detail) = match st {
-        OpState::Done(d) => (Dot::Up, d),
-        OpState::Missing => (Dot::Off, "не установлено".into()),
-        OpState::Drifted { from, to } => (Dot::Busy, format!("было: {from} → станет: {to}")),
-        OpState::Blocked(why) => (Dot::Down, why),
-    };
-    OpView { id, title, dot, detail }
-}
-
-/// Заголовок строки `host.publication` в «Проекте»: слова 1С-разработчика
-/// вместо «публикация»/реверс-прокси — база отвечает по HTTP, вот и всё.
-pub const PUBLICATION_TITLE: &str = "HTTP-сервис базы";
-
-/// Подробность той же строки: адрес, на который смотреть браузером
-/// (`auto` — свой httpd на 127.0.0.1:<порт>, как в `ops_host::Publication`),
-/// либо прямое указание, что публикацию настроил человек (`webserver`).
-/// Дескрипторы, httpd.conf и прочее — в журнал (`ops_host`/`publication`),
-/// не в эту строку: окно не должно объяснять реверс-прокси.
-pub fn publication_detail(cfg: &Cfg) -> String {
-    if cfg.host.publication == "webserver" {
-        "публикация настроена вручную".into()
-    } else {
-        format!("база отвечает по HTTP: 127.0.0.1:{}", cfg.http_port())
-    }
-}
-
 /// Главное действие вкладки «Проект»: пока расширение не стоит — «Установить»,
 /// дальше человеку нужен обмен с git, и главной становится «Выгрузить».
 /// Остальное — в меню «…».
-pub fn project_primary(ops: &[OpView]) -> Which {
-    match ops.iter().find(|o| o.id == "host.extension") {
-        Some(o) if o.dot == Dot::Up => Which::Export,
+///
+/// Выбирается по ФАКТУ набора (`verify::EXTENSION`), а не по состоянию
+/// операций (`run::status`, прежний `ui.ops`) — решение 2 спеки: ни одна
+/// поверхность не знает больше набора. Пустой набор значит «ещё не
+/// посчитали»: кнопка тогда «Установить», как и раньше.
+///
+/// Занятость расширению не приговор: база нам в эту минуту отказала, стоит
+/// расширение или нет — неизвестно, и советовать «Установить» человеку,
+/// который просто работает в базе, нельзя (STATUS 26). Поэтому «Установить»
+/// только у настоящего провала (`Outcome::Bad`).
+pub fn project_primary(facts: &[Check]) -> Which {
+    match facts.iter().find(|c| c.what == verify::EXTENSION) {
+        Some(c) if c.outcome() != check::Outcome::Bad => Which::Export,
         _ => Which::Install,
     }
 }
@@ -903,10 +874,21 @@ pub fn report_line(report: &str) -> Line {
 /// TOOLS-факта «в комплекте нет … — скопируйте заново»), иначе человек видел
 /// бы один совет дважды.
 pub fn readiness_reason(check: &Check) -> String {
+    format!("{}: {}", check.what, fact_detail(check))
+}
+
+/// Подробность факта без его имени: что не так и что сделать, одной строкой.
+/// Подсказка не дублируется, когда она уже вписана в само `detail`.
+///
+/// Одно место на причину вердикта (`readiness_reason` — подвал, подсказка
+/// значка, журнал) и на строку вкладки «Проект» (`panel::fact_rows`): два
+/// похожих склеивания `detail` с `hint` расходились бы молча, и человек
+/// читал бы один и тот же факт двумя разными способами.
+pub fn fact_detail(check: &Check) -> String {
     if check.hint.is_empty() || check.detail.contains(check.hint.as_str()) {
-        format!("{}: {}", check.what, check.detail)
+        check.detail.clone()
     } else {
-        format!("{}: {} — {}", check.what, check.detail, check.hint)
+        format!("{} — {}", check.detail, check.hint)
     }
 }
 
@@ -2083,23 +2065,6 @@ pub fn run_check(cx: &mut App) {
     }
 }
 
-/// Перечитать состояние операций на машине (без изменений) в `ui.ops`.
-/// В своём потоке: `run::status` ходит по сети (у `ops_host` запрос с
-/// минутным сроком) и на главном потоке подвесил бы окно.
-pub fn refresh_ops(cx: &mut App) {
-    let ui = cx.global_mut::<Ui>();
-    let ctx = ctx_for(ui);
-    let tx = ui.tx.clone();
-    ui.pending += 1;
-    std::thread::spawn(move || {
-        guarded(
-            &tx,
-            || Ev::Ops(run::status(&ctx, &ops_host::host()).into_iter().map(|(id, title, st)| op_view(id, title, st)).collect()),
-            || Ev::Ops(Vec::new()),
-        );
-    });
-}
-
 /// Выход: ждём, пока сеанс действительно опустится (поток собственного
 /// рантайма сеанса), и только потом закрываем приложение — иначе туннель
 /// обрывается не чисто. Ждём не дольше `STOP_WAIT`: застрявший `stop` не
@@ -2410,17 +2375,10 @@ fn handle(ev: Ev, cx: &mut App) {
                 };
                 cx.show_system_notification(SystemNotification { tag: "op".into(), title: "1c-connect".into(), body: body.into(), actions: vec![] });
             }
-            refresh_ops(cx);
             refresh_project(cx);
             // Почва могла сдвинуться («Установить» в т.ч.) — вердикт
             // «дойдёт ли агент до базы» устарел, пересчитываем.
             run_readiness(cx.global_mut::<Ui>());
-        }
-        Ev::Ops(ops) => {
-            let ui = cx.global_mut::<Ui>();
-            ui.ops = ops;
-            ui.pending = ui.pending.saturating_sub(1);
-            cx.refresh_windows();
         }
         Ev::Project(v) => {
             let ui = cx.global_mut::<Ui>();
@@ -2498,11 +2456,11 @@ fn handle(ev: Ev, cx: &mut App) {
                 // `Ev::Done` — иначе жёлтый («занят») может застрять до
                 // следующего перехода.
                 sync_tray(ui, Instant::now());
-                // И состояние операций — тоже как у `Ev::Done`. Без этого
-                // проверка и вкладка «Проект» расходятся: `ui.ops` читается
-                // на запуске окна и после операций, а проверка спрашивает
-                // базу заново и без ограничения по времени.
-                refresh_ops(cx);
+                // Каталог проекта — тоже как у `Ev::Done`: он не факт набора,
+                // а подробность рядом с ним (`ProjectView`), и своего повода
+                // перечитаться у него нет. Состояние операций больше не
+                // перечитывается вовсе: вкладка «Проект» показывает тот же
+                // набор, что и проверка, и расходиться им теперь нечем.
                 refresh_project(cx);
             }
             cx.refresh_windows();
@@ -2649,7 +2607,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             unread: 0,
             tab: Tab::default(),
             failed_checks: 0,
-            ops: Vec::new(),
             project: None,
             progress: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2712,7 +2669,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             cx.update(|_| tray::pump());
         })
         .detach();
-        refresh_ops(cx);
         // Про срок — до подъёма сеанса: первое, что человек читает в журнале.
         note_licence_change(cx);
         // В локальном режиме слушатели держат порты весь срок жизни
@@ -2783,7 +2739,6 @@ impl Ui {
             unread: 0,
             tab: Tab::default(),
             failed_checks: 0,
-            ops: Vec::new(),
             project: None,
             progress: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2812,24 +2767,21 @@ mod tests {
         confirm_text,
         exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
         start_full_pass, tick_facts, on_cheap, Busy,
-        note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
+        note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
         publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
-        stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
+        stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line,
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
-        Ui, Which, LOG_CAP, LOG_FILE, PUBLICATION_TITLE, TRAY_PNG,
+        Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG,
     };
     use crate::cfg::{self, Cfg, Host};
     use crate::session::{self, State};
+    use crate::verify;
     use common::check::Check;
     use common::op::OpState;
     use common::{Event, Phase, Progress};
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    fn op(id: &str, dot: Dot) -> OpView {
-        OpView { id: id.into(), title: id.into(), dot, detail: String::new() }
-    }
 
     #[test]
     fn a_fresh_ui_has_not_run_the_readiness_check_yet() {
@@ -3227,15 +3179,23 @@ mod tests {
         }
     }
 
+    /// Решение 2 спеки: главная кнопка вкладки «Проект» выбирается по ФАКТУ
+    /// расширения из набора, а не по состоянию операций (`run::status`), и
+    /// имя факта берётся у того же `verify::EXTENSION`, что печатает отчёт —
+    /// своего, второго имени у окна нет.
     #[test]
     fn the_project_button_installs_until_the_extension_is_up_then_exports() {
-        // Ответа от `refresh_ops` ещё нет — ставить.
+        let ext = |c: Check| project_primary(&[Check::pass("база", "есть"), c]);
+        // Набора ещё нет — ставить.
         assert_eq!(project_primary(&[]), Which::Install);
-        assert_eq!(project_primary(&[op("host.tools", Dot::Up)]), Which::Install);
-        assert_eq!(project_primary(&[op("host.extension", Dot::Off)]), Which::Install);
-        assert_eq!(project_primary(&[op("host.extension", Dot::Down)]), Which::Install);
+        // Факта расширения в наборе нет (режим без него) — тоже ставить.
+        assert_eq!(project_primary(&[Check::pass("база", "есть")]), Which::Install);
+        assert_eq!(ext(Check::fail(verify::EXTENSION, "расширения в базе нет", "install")), Which::Install);
         // Расширение стоит — главная кнопка про обмен с git.
-        assert_eq!(project_primary(&[op("host.tools", Dot::Off), op("host.extension", Dot::Up)]), Which::Export);
+        assert_eq!(ext(Check::pass(verify::EXTENSION, "0.4.8")), Which::Export);
+        // Занято — не провал: советовать «Установить» человеку, который
+        // просто работает в базе, нельзя (STATUS 26).
+        assert_eq!(ext(Check::busy(verify::EXTENSION, "сеансов больше не осталось", "закройте «Предприятие»")), Which::Export);
     }
 
     #[test]
@@ -3975,21 +3935,6 @@ mod tests {
         assert_eq!(ui.session_gen, gen_before);
         assert_eq!(ui.log.len(), log_before);
         let _ = ui.session.take().unwrap().stop();
-    }
-
-    #[test]
-    fn project_tab_shows_the_publication_row() {
-        // Заголовок и адрес понятны 1С-разработчику независимо от режима
-        // подключения («local»/«tunnel») — публикация не про туннель.
-        assert_eq!(PUBLICATION_TITLE, "HTTP-сервис базы");
-        for mode in ["local", "tunnel"] {
-            let mut cfg = Cfg { host: Host { mode: mode.into(), publication: "auto".into(), ..Host::default() } };
-            let want = format!("127.0.0.1:{}", cfg.http_port());
-            let detail = publication_detail(&cfg);
-            assert!(detail.contains(&want), "{mode}: {detail:?}");
-            cfg.host.publication = "webserver".into();
-            assert_eq!(publication_detail(&cfg), "публикация настроена вручную");
-        }
     }
 
     #[test]

@@ -1231,11 +1231,39 @@ pub fn republish_after_save(database_changed: bool, serving: bool) -> bool {
     database_changed && serving
 }
 
+/// Голос к базе один, и этот мьютекс — всё, что это обеспечивает (Important 6
+/// ревью задач 5+6). К базе ходят два потока окна: расчёт набора
+/// (`spawn_full_pass` → `verify::gather`, группа «база») и подъём публикации
+/// (`ensure_publication_now` → `ops_host::ensure_publication`, внутри
+/// `extension_version`). Защёлка `facts_pending` разводит только расчёты между
+/// собой, а эти двое про неё не знали и могли подраться за единственный сеанс
+/// учебной платформы — спека прямо называет это новым видом вранья: «два
+/// одновременных запроса подерутся за него, и здоровая база выдаст ложный
+/// отказ».
+///
+/// Пришедший вторым ждёт первого. Оба потока фоновые, ждать им не больно, и
+/// ждать — честнее, чем получить выдуманный отказ.
+///
+/// ponytail: один мьютекс на оба голоса. Станет заметно ожидание (набор стоит
+/// до `verify::SET_DEADLINE`) — делить по ресурсу, то есть брать его только на
+/// группу «база», а не на весь набор.
+static BASE_VOICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Взять единственный голос к базе. Отравленный мьютекс (паника внутри
+/// чужого похода) базу не ломает — берём как есть, тем же приёмом, что
+/// `project::call`.
+fn base_voice() -> std::sync::MutexGuard<'static, ()> {
+    BASE_VOICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn ensure_publication_now(ui: &mut Ui) {
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
     std::thread::spawn(move || {
-        let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
+        let r = {
+            let _voice = base_voice();
+            ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"))
+        };
         let _ = tx.unbounded_send(Ev::Publish(r));
     });
 }
@@ -1461,6 +1489,9 @@ fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
             &tx,
             move || {
                 let state = link.is_up().then(|| link.label(&mode));
+                // Голос к базе один (Important 6): подъём публикации ходит в
+                // ту же базу своим потоком и про защёлку расчётов не знает.
+                let _voice = base_voice();
                 let facts = if loud {
                     verify::run(&ctx, state.as_deref(), verify::PortUse::WeListen)
                 } else {
@@ -2778,7 +2809,7 @@ mod tests {
         apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
         exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
-        start_full_pass, tick_facts, on_cheap, Busy,
+        start_full_pass, tick_facts, on_cheap, base_voice, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, publication_detail, readiness_reason, refresh_gate, report_line, request_check, save_host,
         publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, READINESS_LOST,
         stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_of, Dot, Kind, Line, OpView,
@@ -3041,6 +3072,34 @@ mod tests {
         assert!(needs_full_pass(&free, &free, SLOW_HIDDEN, false));
         // Окно было скрыто сутки — набор не «протухает»: считаем сразу.
         assert!(needs_full_pass(&free, &free, Duration::from_secs(86_400), false));
+    }
+
+    /// Important 6 ревью задач 5+6: двух голосов к базе одновременно быть не
+    /// может. Защёлка `facts_pending` разводила только расчёты между собой, а
+    /// подъём публикации (`ensure_publication_now`) ходит в ту же базу своим
+    /// потоком и про неё не знал — спека: «два одновременных запроса
+    /// подерутся за единственный сеанс, и здоровая база выдаст ложный отказ».
+    #[test]
+    fn only_one_voice_talks_to_the_base_at_a_time() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        static INSIDE: AtomicUsize = AtomicUsize::new(0);
+        static TWO_AT_ONCE: AtomicBool = AtomicBool::new(false);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let _voice = base_voice();
+                    if INSIDE.fetch_add(1, Ordering::SeqCst) > 0 {
+                        TWO_AT_ONCE.store(true, Ordering::SeqCst);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                    INSIDE.fetch_sub(1, Ordering::SeqCst);
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("поток голоса упал");
+        }
+        assert!(!TWO_AT_ONCE.load(Ordering::SeqCst), "в базу говорили два голоса сразу");
     }
 
     /// Important 4 ревью задач 5+6: на потоке окна такт НЕ СЧИТАЕТ НИЧЕГО —

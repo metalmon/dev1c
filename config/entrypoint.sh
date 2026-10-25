@@ -33,8 +33,14 @@ for var in MODEL_PROVIDER MODEL_NAME CUSTOM_MODEL \
            HTTP_PROXY HTTPS_PROXY NO_PROXY            DEMO_TITLE DEMO_DB_USER
 do
     eval "value=\${$var:-}"
-    [ -n "$value" ] || continue
+    # Строка стирается ВСЕГДА, а пишется только если значение есть. Раньше
+    # стирали лишь перед записью, и переменная, исчезнувшая из конфигурации
+    # запуска, оставалась в /etc/environment навсегда — то есть во всех
+    # сессиях RDP. Живой случай: стенд переставили с локальной модели на
+    # удалённую, а мёртвый LLAMA_API_URL остался, и его читали и редактор, и
+    # pi. Находка ревью 26.10.2026.
     sed -i "/^$var=/d" /etc/environment 2>/dev/null || true
+    [ -n "$value" ] || continue
     echo "$var=$value" >> /etc/environment
 done
 
@@ -137,6 +143,13 @@ SHIPPED_FILES="zed/settings.json zed/AGENTS.md zed/themes/1c.json
 # которую надо закрывать дважды.
 SHIPPED_PI_FILES="agent/AGENTS.md agent/mcp.json agent/settings.json
     agent/extensions/llama-single.js"
+
+# Отпечаток каталога: имена и содержимое, без дат и прав. Нужен скиллам —
+# они приезжают деревом, а не файлом, и «изменилось ли» по дате не определить:
+# `cp -a` переносит время, а правка агента его меняет.
+dir_sum() {
+    find "$1" -type f -exec md5sum {} + 2>/dev/null         | sed "s| $1/| |" | sort | md5sum | cut -d" " -f1
+}
 
 # Один файл из образа в дом. $1 — корень ($HOME-относительный: .config или
 # .pi), $2 — путь внутри корня, он же путь внутри /etc/skel/$1. Остальное
@@ -287,6 +300,48 @@ for home in /home/*; do
     else
         for f in $SHIPPED_PI_FILES; do
             seed_from_image .pi "$f"
+        done
+    fi
+
+    # --- Скиллы ---------------------------------------------------------
+    # Скиллы — это и есть знание агента, и до сих пор они доезжали только в
+    # НОВЫЙ дом: дома живут на томе, и стенд, обновлённый на свежий образ,
+    # навсегда оставался со старым набором. Обе проверки при этом зелёные —
+    # test-skills смотрит /etc/skel при сборке, test-pi сверяет скиллы из
+    # ДОМА с запросом к модели.
+    #
+    # Затирать нельзя: правила агента прямо говорят, что ~/.agents/skills его
+    # — «правь готовые и заводи новые». Поэтому правило такое же, как у
+    # настроек, только без .bak (копия дерева бессмысленна):
+    #   нет в доме        → кладём;
+    #   есть и НЕ тронут  → заменяем новым из образа;
+    #   есть и правлен    → оставляем как есть и говорим об этом в журнале.
+    # «Не тронут» значит «совпадает с тем, что образ давал в прошлый раз»:
+    # отпечаток берётся с содержимого, а не с даты.
+    skel_skills=/etc/skel/.agents/skills
+    skills="$home/.agents/skills"
+    if [ -d "$skel_skills" ] && [ ! -L "$home/.agents" ] && [ ! -L "$skills" ]; then
+        [ -d "$skills" ] || install -d -o "$owner_u" -g "$owner_g" "$skills"
+        for src in "$skel_skills"/*; do
+            [ -d "$src" ] || continue
+            name=$(basename "$src")
+            dst="$skills/$name"
+            stamp="$stamps/skill_$name"
+            now=$(dir_sum "$src")
+            if [ ! -e "$dst" ]; then
+                cp -a "$src" "$dst" && chown -R "$owner_u:$owner_g" "$dst"
+                echo "$now" > "$stamp" && chown "$owner_u:$owner_g" "$stamp"
+                log "skill $name: новый, положен в $home"
+            elif [ "$now" = "$(cat "$stamp" 2>/dev/null)" ]; then
+                : # образ не менялся — делать нечего
+            elif [ "$(dir_sum "$dst")" = "$(cat "$stamp" 2>/dev/null)" ]; then
+                rm -rf "$dst"
+                cp -a "$src" "$dst" && chown -R "$owner_u:$owner_g" "$dst"
+                echo "$now" > "$stamp" && chown "$owner_u:$owner_g" "$stamp"
+                log "skill $name: обновлён из образа в $home"
+            else
+                log "skill $name: правлен на месте, из образа не обновляю ($home)"
+            fi
         done
     fi
 done

@@ -428,7 +428,14 @@ RUN --mount=type=bind,from=artifacts,target=/artifacts \
         && /opt/1c-connect/1c-connect --help >/dev/null \
         && echo "1c-connect: in the image"; \
     elif [ "$CONNECT_OPTIONAL" = 1 ]; then \
-        echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
+        `# Раз коннектора нет — убираем и его автозапуск: иначе сессия каждый` \
+        `# раз пытается поднять то, чего в образе не существует, и человек` \
+        `# видит молчаливый отказ вместо отсутствия значка. И оставляем метку:` \
+        `# по ней видно, что стенд собран без окна, — а не угадывается по` \
+        `# отсутствию файла.` \
+        rm -f /etc/xdg/autostart/zz-1c-connect.desktop \
+        && echo "собран без окна коннектора (CONNECT_OPTIONAL=1)" > /opt/1c-connect.absent \
+        && echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
     else \
         echo "1c-connect: нет файла artifacts/1c-connect — стенд собрался бы без окна коннектора." >&2; \
         echo "Положите туда linux-сборку (артефакт CI 1c-connect-linux) или соберите с --build-arg CONNECT_OPTIONAL=1." >&2; \

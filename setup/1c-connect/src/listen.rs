@@ -17,12 +17,17 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 /// Текст отказа бинда: при `AddrInUse` называет держателя порта, если его
-/// видно (`holder::of_port`); иначе — как раньше, голое «занято».
+/// видно (`holder::of_port`), и признаёт незнание, когда не видно.
+///
+/// «Занят ДРУГИМ процессом» мы не говорим (находка владельца 26.10): про
+/// невидимого держателя мы не знаем ни того, что он чужой, ни того, что он
+/// ещё жив — им мог быть и наш же прежний процесс, уже успевший закрыться.
+/// Правило ветки: говорить ровно то, что знаем.
 fn busy_port_text(port: u16, e: &std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::AddrInUse {
         match holder::of_port(port) {
             Some(who) => format!("порт {port} занят процессом {who}"),
-            None => format!("порт {port} уже занят другим процессом"),
+            None => format!("порт {port} занят, кем — не видно"),
         }
     } else {
         format!("порт {port}: {e}")
@@ -234,6 +239,32 @@ mod tests {
         let retry = std::net::TcpListener::bind(("127.0.0.1", mcp_port));
         assert!(retry.is_ok(), "первый слушатель должен был освободиться");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Текст занятого порта говорит ровно то, что известно. Про невидимого
+    /// держателя неизвестно ничего — ни что он чужой, ни что он ещё жив
+    /// (находка владельца 26.10: «уже занят другим процессом» про давно
+    /// свободный порт, который держал наш же прежний процесс).
+    #[test]
+    fn a_busy_port_claims_nothing_about_a_holder_it_cannot_see() {
+        let in_use = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+
+        // Держателя видно — это наш собственный слушатель, и он назван.
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let text = busy_port_text(port, &in_use);
+        assert!(text.starts_with(&format!("порт {port} занят процессом ")) && text.contains("pid "), "{text}");
+        drop(held);
+
+        // Держателя не видно — ни слова о том, чей он и жив ли.
+        let free = ephemeral_port();
+        let text = busy_port_text(free, &in_use);
+        assert_eq!(text, format!("порт {free} занят, кем — не видно"));
+        assert!(!text.contains("другим процессом"), "{text}");
+
+        // Не «занято» — причина как есть, без догадок о держателе.
+        let text = busy_port_text(free, &std::io::Error::other("нет прав"));
+        assert_eq!(text, format!("порт {free}: нет прав"));
     }
 
     #[tokio::test]

@@ -1638,6 +1638,20 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
     {
         ui.facts_pending = false;
         ui.facts_since = None;
+        // Пришёл новый набор — прошлый итог операции больше не хозяин
+        // подвала. «Готово за 19 с» занимает верхний слот
+        // (`panel::foot_left_text`, пункт 1: «человек только что нажал и
+        // ждёт ответа») и прежде не снималось НИКЕМ до конца жизни окна: в
+        // покое человек читал про операцию, которой не запускал, а причина,
+        // по которой работа не идёт, молчала под ней (находка владельца
+        // 26.10). Своё «только что» у итога есть — от нажатия до первого же
+        // нового измерения; дальше подвал обязан говорить о состоянии, а
+        // прошедшее событие остаётся в журнале.
+        //
+        // Громкий показ («Проверить») ставит свой итог сам и уже после этого
+        // (`Ev::Ready`, ветка `loud`) — его этот сброс не трогает.
+        ui.status = None;
+        ui.status_tip = None;
         // Отметка полного расчёта — на ЛЮБОЙ пришедший набор от владельца
         // защёлки, ДО разбора повтора (Critical 1 ревью задач 5+6). Раньше
         // она ставилась только в ветке «повтора не просили», и получалась
@@ -2961,7 +2975,7 @@ mod tests {
         start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
         loud_status, problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, CHECK_OFF, READINESS_LOST,
-        stale_line, stale_text, start_facts, start_session, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
+        set_status, stale_line, stale_text, start_facts, start_session, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
         Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
     };
@@ -3010,6 +3024,26 @@ mod tests {
         assert!(matches!(ui.verdict, Verdict::Ready));
         start_facts(&mut ui, Instant::now());
         assert!(matches!(ui.verdict, Verdict::Ready), "{:?}", ui.verdict);
+    }
+
+    /// Итог прошлой операции не держит подвал вечно: пришёл новый набор —
+    /// подвал говорит о состоянии, а «Готово за 19 с» остаётся в журнале.
+    /// Прежде этот слот не снимался никем, и в покое человек читал про
+    /// операцию, которой не запускал (находка владельца 26.10).
+    #[test]
+    fn a_new_set_takes_the_finished_operation_out_of_the_footer() {
+        let mut ui = Ui::for_test();
+        let gen = ui.facts_gen;
+        set_status(&mut ui, Line { kind: Kind::Ok, text: "Готово за 19 с".into() }, Some("отчёт: C:\\kit\\last-check.txt".into()));
+        apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
+        assert_eq!(ui.status, None, "итог операции не должен закрывать собой причину");
+        assert_eq!(ui.status_tip, None, "подсказка слота уходит вместе с ним");
+
+        // Чужое поколение — ответ отставшего потока: он не трогает ни набор,
+        // ни подвал.
+        set_status(&mut ui, Line { kind: Kind::Ok, text: "Готово за 19 с".into() }, None);
+        apply_facts(&mut ui, gen + 7, vec![Check::pass("база", "есть")]);
+        assert!(ui.status.is_some(), "опоздавший ответ подвал не трогает");
     }
 
     /// Ответ, пришедший уже после того, как обслуживание выключили, не

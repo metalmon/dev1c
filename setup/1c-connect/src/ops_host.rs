@@ -1203,6 +1203,29 @@ pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
     raise_publication(ctx, crate::publication::Lifetime::WithCaller)
 }
 
+/// Погасить СВОЙ HTTP-сервис — путь выхода окна (`gui::quit`). Та же
+/// остановка, что у уборки (`Publication::revert_apply` → `publication::stop`);
+/// отдельная функция здесь ровно затем, чтобы её было откуда позвать.
+///
+/// `false` — гасить было нечего: публикация не наша (`"webserver"`). Чужой
+/// веб-сервер мы не поднимаем и не гасим никогда — ни при выходе, ни при
+/// уборке.
+///
+/// Зачем это на выходе: наш httpd живёт в каталоге комплекта
+/// (`ServerRoot = <комплект>/httpd`) и переживал коннектор — человек закрывал
+/// окно, считал, что всё кончилось, а веб-сервер держал папку до перезагрузки
+/// машины (находка владельца 26.10: `httpd.exe`, чьего родителя-коннектора в
+/// системе уже нет, не давал удалить комплект). Сироту разбирает сам httpd по
+/// своему pid-файлу (`-k stop`): мёртвый или переиспользованный pid — его
+/// забота, и своей догадки о живости процесса здесь нет.
+pub fn stop_own_publication(ctx: &Ctx) -> Result<bool> {
+    if ctx.cfg.host.publication == "webserver" {
+        return Ok(false);
+    }
+    Publication.revert_apply(ctx, CleanLevel::Stack)?;
+    Ok(true)
+}
+
 /// Поднимает HTTP-сервис базы: своим httpd под пользователем (`"auto"`) или
 /// только проверяет уже существующую публикацию (`"webserver"`). Зовётся до
 /// `host.extension` — иначе расширение ставить некуда.
@@ -1450,6 +1473,22 @@ mod tests {
         cfg.host.publication = "auto".into();
         let ctx = publication_ctx(cfg, true);
         assert!(ensure_publication(&ctx).is_ok());
+    }
+
+    /// Выход окна гасит СВОЙ httpd и никогда — чужой веб-сервер. Своего в
+    /// тесте нет (ни платформы, ни конфига в `Kit::at(".")`), поэтому режим
+    /// `auto` проверяется по тому, что остановка пошла в дело: `Ok(false)`
+    /// значит «не наша публикация», и в этом режиме его быть не может ни при
+    /// каком устройстве машины.
+    #[test]
+    fn leaving_stops_our_own_httpd_and_never_someone_elses() {
+        let mut cfg = Cfg::default();
+        cfg.host.publication = "webserver".into();
+        assert_eq!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "чужой веб-сервер не наш — не трогаем");
+
+        let mut cfg = Cfg::default();
+        cfg.host.publication = "auto".into();
+        assert_ne!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "свой httpd выход обязан погасить");
     }
 
     #[test]

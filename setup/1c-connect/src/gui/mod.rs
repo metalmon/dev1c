@@ -369,6 +369,12 @@ pub fn first_phase(which: Which) -> Phase {
 pub struct ProjectView {
     pub dir: String,
     pub branch: String,
+    /// Занят мьютекс проекта (идёт наша выгрузка или загрузка) — это
+    /// единственная причина молчания вкладки, которой НЕТ в наборе фактов:
+    /// раскладку (`Layout`) набор называет сам, своими словами и со своим
+    /// советом, и повторять его карточкой незачем (находка владельца 26.10:
+    /// «про проект и ветку два раза зачем-то пишем»).
+    pub busy: bool,
     /// Разобранное состояние git; `None` — раскладки нет, замок занят или
     /// git ответил ошибкой: причина тогда в `why`.
     pub facts: Option<project::Facts>,
@@ -2176,14 +2182,14 @@ pub fn refresh_project(cx: &mut App) {
                 // «занято», а не читает полузаписанный индекс (правка 6B на
                 // main). Отказ замка или git — в `why`, и тогда вкладка
                 // показывает причину вместо состояния.
-                let (facts, ok, why) = match ok.then(|| project::facts_locked(&p)) {
-                    Some(Ok(f)) => (Some(f), true, why),
-                    Some(Err(e)) => (None, false, e),
-                    None => (None, ok, why),
+                let (facts, ok, why, busy) = match ok.then(|| project::facts_locked(&p)) {
+                    Some(Ok(f)) => (Some(f), true, why, false),
+                    Some(Err(e)) => (None, false, e, true),
+                    None => (None, ok, why, false),
                 };
-                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, facts, ok, why })
+                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, facts, ok, why, busy })
             },
-            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), facts: None, ok: false, why: PANIC_TEXT.into() }),
+            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), facts: None, ok: false, why: PANIC_TEXT.into(), busy: false }),
         );
     });
 }
@@ -2240,6 +2246,22 @@ pub fn quit(cx: &mut App) {
             let _ = done.send(());
         });
         let _ = stopped.recv_timeout(STOP_WAIT);
+    }
+    // Свой httpd — тоже наш, и выход обязан забрать его с собой: он живёт в
+    // каталоге комплекта и переживал коннектор, не давая удалить папку
+    // (находка владельца 26.10). Чужой веб-сервер (`publication =
+    // "webserver"`) не трогаем — за него отвечает человек.
+    //
+    // Итог — строкой в файл журнала, а не в окно: окна к этому моменту уже
+    // нет, читать её человек будет потом, разбираясь, куда делся сервер.
+    let ui = cx.global::<Ui>();
+    let line = match ops_host::stop_own_publication(&quiet_ctx(ui)) {
+        Ok(true) => Some(Line { kind: Kind::Ok, text: "HTTP-сервис базы остановлен при выходе".into() }),
+        Ok(false) => None,
+        Err(e) => Some(Line { kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}") }),
+    };
+    if let Some(line) = &line {
+        note_file(&ui.kit, line);
     }
     cx.quit();
 }

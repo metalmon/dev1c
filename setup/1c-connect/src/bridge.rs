@@ -252,7 +252,7 @@ pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
 pub fn configurator_count() -> usize {
     #[cfg(target_os = "linux")]
     {
-        return linux_platform_count();
+        linux_platform_count()
     }
     #[cfg(windows)]
     {

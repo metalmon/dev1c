@@ -1479,6 +1479,39 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Тот же слушатель, но считающий ОБРАЩЕНИЯ — и не умолкающий, когда
+    /// расписанные ответы кончились: лишнее обращение он принимает, молча
+    /// считает и закрывает. Этим он и отличается от `respond_each`, который
+    /// после последнего ответа уходит и дальше отказывает в соединении, —
+    /// иначе повтор пробы нечем было бы увидеть.
+    ///
+    /// Нужен там, где смысл проверки — «проба не ушла в цикл ожидания».
+    /// Абсолютный порог времени (`elapsed() < 5 c`) проверял скорость
+    /// машины, а не поведение пробы, и краснел на windows-раннере CI
+    /// (26.10) при верной классификации.
+    fn respond_each_counted(replies: &[(&str, &str)]) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let replies: Vec<(String, String)> = replies.iter().map(|(s, b)| (s.to_string(), b.to_string())).collect();
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        std::thread::spawn(move || {
+            let mut left = replies.into_iter();
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                counter.fetch_add(1, SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let Some((status_line, body)) = left.next() else { continue };
+                let resp = format!("HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://{addr}"), asked)
+    }
+
     /// Один ответ с заданным статусом и пустым JSON в теле.
     fn respond_once(status_line: &str) -> String {
         respond_each(&[(status_line, "{}")])
@@ -1606,14 +1639,17 @@ mod tests {
     /// вместо «закройте лишний сеанс».
     #[test]
     fn a_5xx_that_names_a_session_limit_is_an_answer_not_a_wait() {
-        let url = respond_each(&[("500 Internal Server Error", "Ошибка: Превышено количество сеансов")]);
-        let t0 = std::time::Instant::now();
+        let (url, asked) = respond_each_counted(&[("500 Internal Server Error", "Ошибка: Превышено количество сеансов")]);
         let reach = extension_reach(&url, "u", "p", std::time::Duration::from_secs(10));
         match reach {
             Reach::Refused(c) => assert!(crate::onec_error::is_busy(c), "{c:?}"),
             other => panic!("{other:?}"),
         }
-        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "проба ждала, хотя ответ был окончательный");
+        // Смысл, а не секундомер: окончательный ответ — это ОДНО обращение к
+        // базе. Прежний порог `elapsed() < 5 c` мерил скорость машины и
+        // краснел на windows-раннере CI при верной классификации; проба к
+        // этой строке уже вернулась, так что счётчику больше не вырасти.
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1, "проба ушла в цикл ожидания, хотя ответ был окончательный");
     }
 
     /// А неузнанное 5xx — по-прежнему «ещё не готова»: проба спит и

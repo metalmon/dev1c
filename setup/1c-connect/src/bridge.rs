@@ -163,6 +163,11 @@ pub fn disabled_text(reason: Option<&str>) -> String {
     }
 }
 
+/// Пересборка команды запуска агента по текущим параметрам. Тип назван,
+/// потому что дословно повторялся в трёх местах (`Rules`, `Rules::new`,
+/// `session.rs`) и читался хуже, чем называется.
+pub type Rebuild = Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>;
+
 /// Правила моста на одно соединение. Строка подключения, её пользователь и
 /// каталог проекта здесь не лежат готовыми — они читаются из `live` на
 /// каждый вызов (см. `handle_request`), а не однократно при подключении:
@@ -175,7 +180,7 @@ pub struct Rules {
     /// (один ребёнок на всю жизнь соединения, как было раньше): так у
     /// вызывающих, которым смена параметров на ходу не нужна (`listen.rs`,
     /// тесты), — ничего не меняется.
-    pub rebuild: Option<Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>>,
+    pub rebuild: Option<Rebuild>,
     /// Каталог инструментов на машине — только для своих инструментов
     /// (`project::Project::from_cfg`).
     pub tools_dir: std::path::PathBuf,
@@ -197,7 +202,7 @@ impl Rules {
     pub fn for_vrunner(
         live: Live,
         tools_dir: std::path::PathBuf,
-        rebuild: Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>,
+        rebuild: Rebuild,
         configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
         enabled: Arc<AtomicBool>,
     ) -> Rules {
@@ -248,7 +253,7 @@ pub fn configurator_count() -> usize {
         // Обновляем только список процессов: ни памяти, ни дисков, ни
         // процессоров нам не нужно, а каждая лишняя группа — лишнее чтение.
         let sys = System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-        return count_platform(sys.processes().values().map(|p| p.name().to_string_lossy()));
+        count_platform(sys.processes().values().map(|p| p.name().to_string_lossy()))
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     0
@@ -650,6 +655,12 @@ where
 }
 
 /// Одна строка от агента: кому она. `Err` — ребёнок закрыл stdin.
+///
+/// Десять доводов — нарочно: это десять разных одолженных соседей одного
+/// вызова (`&mut stdin` среди них), и у функции единственный вызывающий.
+/// Собрать их в структуру значит завести тип с временем жизни и `&mut`
+/// внутри — читателю от этого не легче, а место ошибки прибавится.
+#[allow(clippy::too_many_arguments)]
 async fn handle_request(
     fr: Frame,
     rules: &Arc<Rules>,
@@ -1166,7 +1177,7 @@ mod tests {
 
     /// Строка-ответ с этим `id` уже встретилась среди накопленных строк.
     fn has_reply(text: &str, id: i64) -> bool {
-        text.lines().any(|l| serde_json::from_str::<Value>(l).ok().map_or(false, |v| v["id"] == id))
+        text.lines().any(|l| serde_json::from_str::<Value>(l).ok().is_some_and(|v| v["id"] == id))
     }
 
     /// Читать из `r` в `got`, пока `pred` по накопленному тексту не станет

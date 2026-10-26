@@ -1298,7 +1298,7 @@ mod tests {
                 std::thread::sleep(web_delay);
                 Check::pass(WEB, "test")
             },
-            || Vec::new(),
+            Vec::new,
         );
         vec![publication, gitea, web]
     }

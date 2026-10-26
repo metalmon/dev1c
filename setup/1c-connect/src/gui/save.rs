@@ -284,7 +284,7 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
     );
     cx.spawn(async move |cx| {
         let yes = matches!(rx.await, Ok(0));
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             cx.global_mut::<Ui>().dialog_open = false;
             if !yes {
                 return;

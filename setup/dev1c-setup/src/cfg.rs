@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// ниже держит его и структуру в согласии.
 pub const EXAMPLE: &str = include_str!("../dev1c.example.toml");
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
     pub server: Server,
@@ -90,12 +90,6 @@ pub struct Facts {
     /// нет: штатный провайдер `llama.cpp` забирает окно с `/props` сам
     /// (решение владельца 2026-10-21).
     pub window: u32,
-}
-
-impl Default for Cfg {
-    fn default() -> Self {
-        Self { server: Server::default(), model: Model::default() }
-    }
 }
 
 pub const FILE: &str = "dev1c.toml";

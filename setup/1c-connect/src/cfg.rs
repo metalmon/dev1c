@@ -118,7 +118,7 @@ pub fn derived_dump(project: &str) -> String {
     format!("{}{}src", project.trim_end_matches(['\\', '/']), std::path::MAIN_SEPARATOR)
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
     pub host: Host,
@@ -219,12 +219,6 @@ pub fn filled_for_test() -> Cfg {
     c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
     c.host.project = "C:\\proj\\Buh".into();
     c
-}
-
-impl Default for Cfg {
-    fn default() -> Self {
-        Self { host: Host::default() }
-    }
 }
 
 pub struct Ports {

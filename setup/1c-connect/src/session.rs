@@ -330,7 +330,7 @@ impl Serve {
             let (_, cfg0) = self.cfg.get();
             let tools_dir = self.tools_dir.clone();
             let cmd0 = bridge::vrunner_command(&cfg0, &tools_dir);
-            let rebuild: Arc<dyn Fn(&Cfg) -> tokio::process::Command + Send + Sync> = {
+            let rebuild: crate::bridge::Rebuild = {
                 let tools_dir = tools_dir.clone();
                 Arc::new(move |cfg: &Cfg| bridge::vrunner_command(cfg, &tools_dir))
             };

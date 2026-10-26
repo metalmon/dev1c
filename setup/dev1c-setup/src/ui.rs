@@ -748,7 +748,7 @@ mod tests {
             op("image", OpState::Missing),
         ];
         let c = status_line(&ops, "dev1c");
-        assert_eq!(c.primary.map(|(w, l)| (w, l)), Some((Which::Install, "Доустановить")));
+        assert_eq!(c.primary, Some((Which::Install, "Доустановить")));
         assert_eq!(c.sub, "model: модель не выбрана");
     }
 

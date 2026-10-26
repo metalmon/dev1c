@@ -264,6 +264,12 @@ pub fn httpd_conf(p: &Paths) -> Result<String, String> {
 }
 
 fn windows_httpd_conf(p: &Paths) -> String {
+    // Явно, а не положившись на скомпилированное умолчание mod_mime —
+    // ровно так, как бежал спайк 2026-10-20. Строкой, не `.join()`: эта
+    // функция всегда пишет путь по-Windows, даже когда тестовый бинарник
+    // собран на Linux (CI может собирать и там) — `.join()` добавил бы
+    // '/' вместо '\' на не-Windows таргете и разошёлся бы с эталоном.
+    let mime_types = format!("{}\\conf\\mime.types", p.root.display());
     format!(
         "ServerRoot \"{root}\"\n\
 ServerName localhost\n\
@@ -292,12 +298,6 @@ DocumentRoot \"{pub_dir}\"\n\
         pid = p.pid.display(),
         log = p.log.display(),
         module = p.module.display(),
-        // Явно, а не положившись на скомпилированное умолчание mod_mime —
-        // ровно так, как бежал спайк 2026-10-20. Строкой, не `.join()`: эта
-        // функция всегда пишет путь по-Windows, даже когда тестовый бинарник
-        // собран на Linux (CI может собирать и там) — `.join()` добавил бы
-        // '/' вместо '\' на не-Windows таргете и разошёлся бы с эталоном.
-        mime_types = format!("{}\\conf\\mime.types", p.root.display()),
         pub_dir = p.pub_dir.display(),
     )
 }

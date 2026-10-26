@@ -769,13 +769,13 @@ fn read_1cestart_cfg(cfg_path: &Path) -> Result<String, String> {
     if bytes.is_empty() {
         return Ok(String::new());
     }
-    if bytes.len() < 2 || &bytes[0..2] != &UTF16_BOM {
+    if bytes.len() < 2 || bytes[0..2] != UTF16_BOM {
         return Err(format!("{} не похож на список версий 1С (ожидался BOM UTF-16LE)", cfg_path.display()));
     }
     if (bytes.len() - 2) % 2 != 0 {
         return Err(format!("{} повреждён (нечётное число байт)", cfg_path.display()));
     }
-    let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     Ok(String::from_utf16_lossy(&units))
 }
 

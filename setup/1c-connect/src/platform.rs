@@ -251,7 +251,7 @@ fn starter_dirs() -> Vec<PathBuf> {
 fn read_1c_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() >= 2 && bytes[0..2] == [0xFF, 0xFE] {
-        let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         return Some(String::from_utf16_lossy(&units));
     }
     Some(String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}').to_string())

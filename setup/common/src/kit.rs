@@ -86,7 +86,7 @@ impl Kit {
         let text = std::fs::read_to_string(self.state_file()).ok()?;
         text.lines()
             .filter_map(|l| l.strip_prefix(&format!("{key}=")))
-            .last()
+            .next_back()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
     }

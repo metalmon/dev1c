@@ -885,7 +885,7 @@ impl Panel {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
         cx.spawn(async move |_, cx| {
             let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next());
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 cx.global_mut::<Ui>().dialog_open = false;
                 let ui = cx.global::<Ui>();
                 let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };

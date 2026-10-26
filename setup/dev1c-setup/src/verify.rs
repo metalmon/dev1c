@@ -358,7 +358,7 @@ pub fn swap_fact(swap_total_mb: u64, limit_mb: u32) -> Check {
     if swap_total_mb >= limit_mb as u64 {
         return Check::pass("файл подкачки", format!("{swap_total_mb} МиБ при пределе контейнера модели {limit_mb} МиБ"));
     }
-    let gb = (limit_mb as u64 + 1023) / 1024;
+    let gb = (limit_mb as u64).div_ceil(1024);
     Check::note(
         "файл подкачки",
         format!(

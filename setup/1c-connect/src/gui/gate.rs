@@ -236,7 +236,8 @@ mod tests {
     /// локальном режиме этих полей в окне нет, и замок их не спрашивает.
     #[test]
     fn the_tunnel_asks_for_the_environment_and_the_local_mode_does_not() {
-        let cases: [(fn(&mut Cfg), &str); 3] = [
+        type Case = (fn(&mut Cfg), &'static str);
+        let cases: [Case; 3] = [
             (|c: &mut Cfg| c.host.server = String::new(), "адрес среды"),
             (|c: &mut Cfg| c.host.password = String::new(), "пароль"),
             (|c: &mut Cfg| c.host.workstation = String::new(), "рабочего места"),

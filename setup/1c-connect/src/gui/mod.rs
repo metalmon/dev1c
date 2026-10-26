@@ -1293,7 +1293,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
                 idle = if busy { Duration::ZERO } else { idle + TICK_BUSY };
                 if busy || idle >= TICK_IDLE {
                     idle = Duration::ZERO;
-                    cx.update(|cx| tick(cx));
+                    cx.update(tick);
                 }
             }
         })
@@ -1301,7 +1301,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(ev) = rx.next().await {
-                let _ = cx.update(|cx| handle(ev, cx));
+                cx.update(|cx| handle(ev, cx));
             }
         })
         .detach();

@@ -331,7 +331,7 @@ pub fn rewrite_list_reply(line: &[u8], allowed: &[String]) -> Option<(Value, Vec
     let id = v.get("id")?.clone();
     let last_page = v.pointer("/result/nextCursor").is_none();
     let tools = v.pointer_mut("/result/tools")?.as_array_mut()?;
-    tools.retain(|t| t.get("name").and_then(Value::as_str).map_or(false, |n| allowed.iter().any(|a| a == n)));
+    tools.retain(|t| t.get("name").and_then(Value::as_str).is_some_and(|n| allowed.iter().any(|a| a == n)));
     if last_page {
         tools.extend(our_tools());
     }

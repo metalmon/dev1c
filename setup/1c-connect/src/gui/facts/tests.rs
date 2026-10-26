@@ -17,9 +17,9 @@ fn the_verdict_reads_the_set_in_one_order() {
     let good = Check::pass("база", "есть");
     let busy = Check::busy("в базе открыт сеанс", "1 открыт сеанс 1С", "закройте Предприятие");
     let bad = Check::fail("проект", "не разложен", "1c-connect install");
-    assert!(matches!(verdict_of(false, &[good.clone()]), Verdict::Off), "выключено — ничего не считаем");
+    assert!(matches!(verdict_of(false, std::slice::from_ref(&good)), Verdict::Off), "выключено — ничего не считаем");
     assert!(matches!(verdict_of(true, &[]), Verdict::Checking));
-    assert!(matches!(verdict_of(true, &[good.clone()]), Verdict::Ready));
+    assert!(matches!(verdict_of(true, std::slice::from_ref(&good)), Verdict::Ready));
     assert!(matches!(verdict_of(true, &[busy.clone(), good]), Verdict::Busy(_)));
     // Поломка важнее занятости: её человек должен увидеть и при открытой базе.
     assert!(matches!(verdict_of(true, &[busy, bad]), Verdict::NotReady(_)));

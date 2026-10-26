@@ -960,7 +960,6 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
     fn facts_round_trip_through_the_kit_state_and_the_token_is_random_hex() {
         let dir = std::env::temp_dir().join(format!("dev1c-llama-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let dir_for_test = dir.clone();
         let kit = common::kit::Kit::at(&dir);
         let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
         assert!(ctx.kit.state_get("llama.window").is_none());

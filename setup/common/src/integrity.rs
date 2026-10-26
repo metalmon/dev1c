@@ -57,11 +57,11 @@ fn listed(rel: &str) -> bool {
         || rel == "llama.env")
 }
 
-fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for e in std::fs::read_dir(dir).with_context(|| format!("не прочитать {}", dir.display()))? {
         let p = e?.path();
         if p.is_dir() {
-            walk(&p, root, out)?;
+            walk(&p, out)?;
         } else {
             out.push(p);
         }
@@ -76,7 +76,7 @@ fn rel(root: &Path, p: &Path) -> String {
 /// Собрать список сумм (при сборке поставки). Возвращает число файлов.
 pub fn write_list(kit: &Kit, mut progress: impl FnMut(&str)) -> Result<usize> {
     let mut files = Vec::new();
-    walk(&kit.root, &kit.root, &mut files)?;
+    walk(&kit.root, &mut files)?;
     files.sort();
     let mut lines = Vec::new();
     for p in files {

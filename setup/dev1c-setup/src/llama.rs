@@ -344,7 +344,7 @@ pub fn parse_nvidia_smi(csv: &str) -> Option<Gpu> {
 
 use crate::cfg::Form;
 use crate::ops::Ctx;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use common::docker;
 use common::Runner;
 use std::path::PathBuf;
@@ -428,21 +428,6 @@ pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
         let o = docker::exec(ctx, "chmod", &["755", &path])?;
         anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
     }
-    Ok(())
-}
-
-/// Файл с секретом: создаётся сразу с закрытыми правами, не после записи.
-fn write_secret(path: &std::path::Path, text: &str) -> Result<()> {
-    use std::io::Write;
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
-    let mut f = o.open(path).with_context(|| format!("не создать {}", path.display()))?;
-    f.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -888,7 +873,15 @@ mod tests {
         let page = include_str!("../../../config/kit/УСТАНОВКА.md");
         assert!(page.contains("окно агента = n_ctx ÷ agents"), "в странице нет деления на agents");
         assert!(page.contains("MODEL_PROVIDER=llama.cpp"), "страница не называет штатный провайдер");
-        assert!(page.contains("LLAMACPP_API_KEY"), "страница не называет переменную ключа, которую диктует Zed");
+        // Ключа у нашего сервера нет с 26.10.2026, и страница не смеет его
+        // обещать: вставивший такую строку получит переменную с пустым
+        // значением и будет искать ключ, которого не существует. У ЧУЖОГО
+        // сервера ключ бывает — его переменная на странице остаётся.
+        assert!(
+            !page.contains("LLAMACPP_API_KEY"),
+            "страница обещает ключ нашему серверу модели, а его нет"
+        );
+        assert!(page.contains("CUSTOM_API_KEY"), "страница не называет ключ для чужого сервера");
         assert!(
             !page.contains("max_tokens  = окно агента"),
             "на странице осталась формула max_tokens: её считает теперь сам Zed"
@@ -979,9 +972,6 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         if let Some(got) = facts_load(&ctx) {
             assert_eq!(got.window, 250_000);
         }
-        let secret = dir_for_test.join("s.token");
-        write_secret(&secret, "x").unwrap();
-        assert!(write_secret(&secret, "y").is_err(), "существующий файл секрета не перевыписывается");
         let t1 = random_hex();
         let t2 = random_hex();
         assert_eq!(t1.len(), 32);
@@ -990,20 +980,6 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
     }
 
     
-    #[test]
-    fn the_secret_is_written_closed_to_its_owner() {
-        let dir = std::env::temp_dir().join(format!("dev1c-llama-secret-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("s.token");
-        write_secret(&f, "x").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&f).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "секрет не закрыт: {mode:o}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn nvidia_smi_csv_is_parsed_and_absence_is_none() {

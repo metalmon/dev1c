@@ -1,10 +1,4 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!-- Логотип llama.cpp: media/llama1-icon-transparent.svg из репозитория
-     ggml-org/llama.cpp (лицензия MIT), взят как есть. Своё не рисуем: ярлык
-     ведёт в веб-интерфейс именно llama.cpp, и человек должен узнавать его по
-     той же картинке, что видит в самом интерфейсе. Раньше тут стояла иконка
-     firefox-esr — она говорила про браузер, а не про модель, и два ярлыка на
-     рабочем столе различались только подписью. -->
 <svg
    id="Layer_1"
    version="1.1"
@@ -17,6 +11,12 @@
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
    xmlns="http://www.w3.org/2000/svg"
    xmlns:svg="http://www.w3.org/2000/svg">
+  <!-- Логотип llama.cpp: media/llama1-icon-transparent.svg из репозитория
+       ggml-org/llama.cpp (лицензия MIT), взят как есть. Своё не рисуем: ярлык
+       ведёт в веб-интерфейс именно llama.cpp, и человек должен узнавать его по
+       той же картинке, что видит в самом интерфейсе. Раньше тут стояла иконка
+       firefox-esr — она говорила про браузер, а не про модель, и два ярлыка на
+       рабочем столе различались только подписью. -->
   <sodipodi:namedview
      id="namedview7"
      pagecolor="#505050"

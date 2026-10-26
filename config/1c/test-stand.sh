@@ -41,6 +41,21 @@ else
     say "FAIL onboarding: не все файлы на месте (/opt/onboarding или один из двух .desktop)"
     fail=1
 fi
+# Иконка ярлыка «Чат с моделью» должна РИСОВАТЬСЯ, а не просто лежать. На
+# `test -f` это не ловится: gdk-pixbuf опознаёт SVG по началу файла, и
+# комментарий, отодвинувший тег <svg> вниз, оставил валидный XML, который
+# загрузчик не берёт. На столе это пустой квадрат без единой жалобы в журнале
+# (26.10.2026, заказчик прислал снимок).
+if python3 -c '
+import gi; gi.require_version("GdkPixbuf","2.0")
+from gi.repository import GdkPixbuf
+GdkPixbuf.Pixbuf.new_from_file_at_size("/usr/share/icons/hicolor/scalable/apps/llama-cpp.svg",48,48)
+' >$T/icon.out 2>&1; then
+    say "ok   иконка чата с моделью рисуется"
+else
+    say "FAIL иконка /usr/share/icons/hicolor/scalable/apps/llama-cpp.svg не рисуется: $(tr -d '\n' <$T/icon.out | tail -c 120)"
+    fail=1
+fi
 # Коннектор: три пункта запуска согласованы с тем, есть ли он в образе.
 # Автозапуск поднимает значок при входе в сессию, а ярлык и пункт меню нужны,
 # когда из значка вышли. Сборка без окна (CONNECT_OPTIONAL=1) убирает все три —

@@ -1,0 +1,75 @@
+Copyright (c) 2026 OktaPlus. All rights reserved.
+
+SOURCE-AVAILABLE LICENCE
+
+This repository is published so that it can be read, reviewed and audited.
+It is not open source, and publication here grants no licence to use the
+software.
+
+1. What you may do without asking us
+
+   a. Read, browse and search the source code, the documentation and the
+      build history.
+   b. Quote it, in whole or in part, for review, research, teaching,
+      journalism, security analysis or comparison, with attribution to
+      OktaPlus and a link to this repository.
+   c. Keep a copy for any of the above.
+
+2. What requires our written permission
+
+   Everything else. In particular: running the software, building it,
+   installing it, deploying it, using it to deliver a service, copying it
+   beyond clause 1(c), modifying it, distributing it, sublicensing it,
+   selling it, or making a derivative work of it.
+
+   Permission is granted through a separate written agreement with OktaPlus.
+   To ask for one, open an issue on the repository this notice came with, or
+   use whatever contact OktaPlus has given you.
+
+3. Contributions
+
+   If you send us a change (a pull request, a patch, a suggestion in an
+   issue), you confirm that it is yours to give and that we may use it under
+   this licence and under any other terms we later choose for this software.
+   You keep the copyright in what you wrote.
+
+4. Trade marks
+
+   The names OktaPlus and dev1c, and the OktaPlus logos and branding assets
+   in this repository, are not licensed by clause 1. 1C, 1C:Enterprise and
+   related marks belong to their owners and are used here only to say what
+   this software works with.
+
+5. Third-party components
+
+   The software is built with and ships alongside components under their own
+   licences — the base image, the Rust crates in Cargo.lock, the Zed
+   extensions, bsl-analyzer, Gitea, llama.cpp and others. This licence
+   covers only what OktaPlus wrote. Each component keeps its own terms, and
+   nothing here overrides them.
+
+   The 1C:Enterprise platform is not distributed with this software at all.
+   Obtaining it, and holding the licence for it, is the user's own matter
+   and is governed by 1C's terms.
+
+6. No warranty
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+   NO EVENT SHALL OKTAPLUS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+7. Changes
+
+   OktaPlus may publish this software under different terms in the future,
+   including an open-source licence. A change applies from the commit that
+   makes it; it does not retroactively narrow what clause 1 allowed for
+   earlier commits.
+
+---
+
+This notice was drafted by the authors, not by a lawyer. If you intend to
+rely on it — as a user, a customer or a contributor — have it reviewed, and
+ask us rather than guessing.

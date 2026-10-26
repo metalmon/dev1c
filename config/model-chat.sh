@@ -15,7 +15,20 @@ url=${LLAMA_API_URL:-${CUSTOM_API_URL:-}}
 url=${url%/}
 url=${url%/v1}
 
-say() { command -v zenity >/dev/null 2>&1 && zenity --info --no-wrap --text="$1" 2>/dev/null || echo "$1" >&2; }
+# Сказать человеку, а не в журнал. Ярлык запускается без терминала: всё, что
+# уходит в stderr, не видит НИКТО — заказчик нажал на значок и получил тишину
+# (26.10.2026). Поэтому сначала диалог, и только если графики нет вовсе —
+# stderr. xmessage стоит вторым: он из x11-utils, который в образе есть и без
+# нас, и спасает, если zenity почему-то не поставился.
+say() {
+    if command -v zenity >/dev/null 2>&1 && zenity --info --no-wrap --title='Чат с моделью' --text="$1" 2>/dev/null; then
+        return 0
+    fi
+    if [ -n "${DISPLAY:-}" ] && command -v xmessage >/dev/null 2>&1; then
+        printf '%b\n' "$1" | xmessage -center -file - >/dev/null 2>&1 && return 0
+    fi
+    printf '%b\n' "$1" >&2
+}
 
 if [ -z "$url" ]; then
     say "Сервер модели не настроен: ни LLAMA_API_URL, ни CUSTOM_API_URL.\nБез него чат открывать нечему."

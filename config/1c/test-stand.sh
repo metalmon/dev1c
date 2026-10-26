@@ -125,6 +125,16 @@ for n in 1 2 3; do
     # container, or a stand that has not been told to run start), and stop
     # only what we started here — a connector the stand itself is running
     # stays untouched.
+    # За этим рабочим местом сидит человек — не отбираем. Коннектор держит
+    # рабочее место в одни руки, и проверка, поднявшая свой, отвечала
+    # человеку «рабочее место занято: закройте коннектор перед повторным
+    # запуском» в момент его входа по RDP. Заказчик 26.10.2026: «коннектор
+    # куда-то пропал, не запускается». Проверяем то, что работает, а своего
+    # не поднимаем.
+    if pgrep -u "$u" -x xfdesktop >/dev/null 2>&1 && ! nc -z -w1 localhost $((7770 + n)) 2>/dev/null; then
+        say "WARN $u: за рабочим местом сеанс человека, а коннектор не запущен — проверки MCP и публикации пропущены, чтобы не отбирать место"
+        continue
+    fi
     serve_pid=
     if ! nc -z -w1 localhost $((7770 + n)) 2>/dev/null; then
         runuser -u "$u" -- env HOME="/home/$u" "/home/$u/dev1c/1c-connect" serve \

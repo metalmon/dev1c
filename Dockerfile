@@ -96,6 +96,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       `#   since 1803, and running it is ordinary use of the system.` \
       openssh-server \
       x11-utils \
+      `# zenity: единственный способ сказать что-то человеку, нажавшему ЯРЛЫК.` \
+      `#   У ярлыка нет терминала, и всё, что уходит в stderr, не видит никто:` \
+      `#   «Чат с моделью» без настроенного сервера модели просто молчал, и` \
+      `#   заказчик решил, что ярлык сломан (26.10.2026). Шесть пакетов на одно` \
+      `#   окно — дорого, но тишина в ответ на нажатие дороже.` \
+      zenity \
       firefox-esr firefox-esr-l10n-ru \
 \
       arc-theme papirus-icon-theme \

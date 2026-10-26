@@ -295,7 +295,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             stop_session(cx);
             let ui = cx.global::<Ui>();
             if raise_session_after_mode_change(&ui.cfg.host.mode, ui.gate.as_deref()) {
-                if let Err(e) = start_session(cx) {
+                if let Err(e) = start_session(cx.global_mut::<Ui>()) {
                     note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 }
             }

@@ -126,6 +126,29 @@ impl Session {
         }
     }
 
+    /// Кончился ли сеанс сам — не ожидая его. Спрашивают перед повторной
+    /// попыткой: в `Option` лежит и живой сеанс, и тот, чей поток уже ушёл
+    /// (отказ bind на старте — `listen::run` возвращает `Err` сразу), а
+    /// поднимать новый поверх первого нельзя и нужно поверх второго. Решает
+    /// по самому сеансу (`done`), а не по запомненному где-то тексту отказа:
+    /// отказ — следствие конца, а не его причина.
+    ///
+    /// Итог кончившегося сеанса здесь теряется, и это нарочно: о причине уже
+    /// сказано состоянием (`State::Failed` через `on_state`), а второй раз её
+    /// некому слушать — `stop` после этого отвечает `Ok`.
+    pub fn finished(&mut self) -> bool {
+        match self.done.as_mut() {
+            Some(rx) => match rx.try_recv() {
+                Err(oneshot::error::TryRecvError::Empty) => false,
+                _ => {
+                    self.done = None;
+                    true
+                }
+            },
+            None => true,
+        }
+    }
+
     /// Дождаться, пока сеанс закончится сам (ошибка, которую не чинят
     /// повтором). Отмена ожидания сеанс не трогает.
     pub async fn wait(&mut self) -> anyhow::Result<()> {
@@ -433,6 +456,47 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.first(), Some(&State::Connecting));
         assert!(matches!(seen.last(), Some(State::Failed(_))), "{seen:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `finished` отвечает по самому сеансу и не ждёт его: это условие
+    /// повторной попытки после отказа bind (`gui::needs_session`) — в
+    /// `Option` лежит и живой сеанс, и тот, чей поток уже ушёл, и путать их
+    /// нельзя ни в ту, ни в другую сторону.
+    #[test]
+    fn finished_tells_a_live_session_from_one_that_ended_by_itself() {
+        let dir = std::env::temp_dir().join(format!("onec-session-finished-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Живой: на том конце слушает немой сокет — рукопожатие не кончается
+        // ни успехом, ни отказом, пока слушатель жив.
+        let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = Cfg::default();
+        cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
+        let mut live = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
+        assert!(!live.finished(), "сеанс только что заведён и никуда не ушёл");
+        // Не `stop`: рукопожатие ждёт до 15 с, а тесту ждать нечего — роняем
+        // значение (тот же сигнал, но без ожидания) и отпускаем слушателя.
+        drop(live);
+        drop(quiet);
+
+        // Кончившийся сам: звонить некуда, первая попытка терминальная.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let mut cfg = Cfg::default();
+        cfg.host.server = format!("127.0.0.1:{port}");
+        let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
+        let ended = (0..200).any(|_| {
+            if dead.finished() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            false
+        });
+        assert!(ended, "сеанс, которому некуда звонить, кончается сам");
+        assert!(dead.finished(), "второй вопрос — тот же ответ");
+        assert!(dead.stop().is_ok(), "остановить кончившийся сеанс не беда");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

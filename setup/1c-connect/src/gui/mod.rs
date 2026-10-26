@@ -105,10 +105,11 @@ pub struct Ui {
     pub session_gen: u64,
     pub link: State,
     /// Настоящий отказ bind локального слушателя («порт занят» и т.п.),
-    /// независимый от переключателя: слушатели в локальном режиме не
-    /// поднимаются заново ни «включить», ни «выключить» (см. `launch`), так
-    /// что ни один клик его не чинит — только заводится (`Ev::Link` с
-    /// `Failed`) и снимается (`Ev::Link` с `Up`) настоящим сеансом. Без
+    /// независимый от переключателя: «выключить» его не чинит — порт занят
+    /// при любом положении флага. Заводится (`Ev::Link` с `Failed`) и
+    /// снимается (`Ev::Link` с `Up`) настоящим сеансом, а новая попытка
+    /// (`start_session`) стирает его вперёд: сеанс, которому он принадлежал,
+    /// кончился, и держатель порта мог уже уйти. Без
     /// отдельного поля `toggle_link` стирал бы `Failed` в `Off`/`Up` первым
     /// же щелчком, и второй клик уже не видел бы отказа (находка повторного
     /// ревью: прежний `keep_failure_on_enable` ловил лишь один клик).
@@ -1903,18 +1904,42 @@ pub fn autoconnect(kit: &Kit) -> bool {
     kit.state_get("autoconnect").as_deref() == Some("1")
 }
 
+/// Нужен ли новый сеанс. Живой второго поверх себя не хочет — в том числе в
+/// окно между `session::start_with_enabled` и первым `Connecting`, когда
+/// `link` ещё `Off`. А кончившийся сам (`Session::finished`: отказ bind на
+/// старте локального транспорта, упавший туннель) — хочет: иначе «включить»
+/// молча ничего не делает, и человек заперт в красном до перезапуска
+/// процесса (находка владельца 26.10 на стенде).
+///
+/// Показанный отказ считается концом наравне с `done`: поток успевает
+/// сказать `Failed` раньше, чем уронит рантайм и отдаст `done`
+/// (см. `session::start_with_enabled`), и щелчок, попавший в это окно, не
+/// должен проваливаться молча. Сохранённый текст (`Ui::bind_failed`) тут не
+/// при чём вовсе — отказ следствие, а не причина.
+fn needs_session(ui: &mut Ui) -> bool {
+    if matches!(ui.link, State::Failed(_)) {
+        return true;
+    }
+    match ui.session.as_mut() {
+        Some(s) => s.finished(),
+        None => true,
+    }
+}
+
 /// Тексты ошибок — дословно из сегодняшнего `gui.rs::start_session`.
-pub fn start_session(cx: &mut App) -> Result<(), String> {
-    let ui = cx.global_mut::<Ui>();
+pub fn start_session(ui: &mut Ui) -> Result<(), String> {
     let params = ui.kit.state_path(cfg::FILE);
     if !params.exists() {
         return Err(format!("нет файла параметров {} — заполните поля и нажмите «Сохранить»", params.display()));
     }
-    // Сеанс уже есть и не сдался (`Failed`) — второй поверх него не нужен,
-    // в том числе в окно между `session::start_with_enabled` и первым `Connecting`.
-    if ui.session.is_some() && !matches!(ui.link, State::Failed(_)) {
+    if !needs_session(ui) {
         return Ok(());
     }
+    // Прежний отказ bind больше не наш: сеанс, которому он принадлежал,
+    // кончился, и новый ещё ничего о портах не сказал. Скажет сам —
+    // `Ev::Link` заведёт новый текст (держатель мог смениться) или снимет
+    // его совсем, поднявшись.
+    ui.bind_failed = None;
     // Новый сеанс — новое поколение: хвост от прежнего (если он всё ещё
     // договаривает) будет отбрасываться в `handle` по несовпадению.
     ui.session_gen += 1;
@@ -1924,7 +1949,7 @@ pub fn start_session(cx: &mut App) -> Result<(), String> {
     let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
-    cx.global_mut::<Ui>().session = Some(session);
+    ui.session = Some(session);
     Ok(())
 }
 
@@ -1968,11 +1993,15 @@ fn local_display(mode: &str, enabled: bool, l: State) -> State {
     }
 }
 
-/// Отображение настоящего отказа bind (`ui.bind_failed`) — независимо от
-/// того, включили или выключили переключатель: слушатели в локальном режиме
-/// не поднимаются заново ни тем, ни другим кликом (см. `launch`), так что
-/// «включить» после провала ничего не чинит, и карточка обязана продолжать
-/// говорить правду, а не «MCP включены». Решает по сохранённому отказу, а не
+/// Отображение настоящего отказа bind (`ui.bind_failed`) при СНЯТОМ флаге:
+/// порт занят независимо от переключателя, и «выключить» его не чинит —
+/// карточка обязана продолжать говорить правду, а не «MCP выключены», будто
+/// всё дело во флаге.
+///
+/// «Включить» сюда больше не заходит: он пробует поднять сеанс заново
+/// (`start_session` в `toggle_link`), и прежний отказ снимает он же.
+///
+/// Решает по сохранённому отказу, а не
 /// по текущему показанному состоянию — иначе один клик «выключить» стирал
 /// бы его раньше, чем следующий клик «включить» успел бы его увидеть
 /// (находка повторного ревью: прежний `keep_failure_on_enable` ловил лишь
@@ -2003,20 +2032,31 @@ pub fn toggle_link(cx: &mut App) {
         // не читающий вердикт, пока `link` не станет `Up`. К этому моменту
         // `run_readiness` (ниже/в `Ev::Publish`) уже в полёте и заменит его
         // настоящим ответом; задержка — тот же компромисс, что и у такта.
-        if let Some(l) = bind_failure_display(&ui.bind_failed) {
+        if !on {
+            // Отказ bind виден и при снятом флаге: порт занят независимо от
+            // переключателя, и «выключить» его не чинит.
+            let l = bind_failure_display(&ui.bind_failed).unwrap_or(State::Off);
             set_link(cx, l);
             return;
         }
-        if on {
-            // «Включаю…», пока публикация (проба до 3 с, ожидание httpd)
-            // идёт в своём потоке — иначе карточка сказала бы «MCP включены»
-            // раньше, чем проба успела ответить (находка повторного ревью:
-            // карточка оставалась зелёной даже после отказа публикации).
-            set_link(cx, State::Connecting);
-            ensure_publication_now(cx.global_mut::<Ui>());
-        } else {
-            set_link(cx, State::Off);
+        // «Включить» значит «работай»: живой сеанс `start_session` не трогает
+        // (слушатели держат порты весь срок процесса — см. `launch`), а
+        // кончившийся поднимает заново — именно это человек и имеет в виду,
+        // щёлкая переключателем после «порт занят»: держатель мог уже уйти
+        // (находка владельца 26.10 — прежде здесь был тупик до перезапуска
+        // процесса).
+        if let Err(e) = start_session(cx.global_mut::<Ui>()) {
+            window::show_window(cx);
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+            return;
         }
+        // «Включаю…», пока публикация (проба до 3 с, ожидание httpd)
+        // идёт в своём потоке — иначе карточка сказала бы «MCP включены»
+        // раньше, чем проба успела ответить (находка повторного ревью:
+        // карточка оставалась зелёной даже после отказа публикации).
+        set_link(cx, State::Connecting);
+        ensure_publication_now(cx.global_mut::<Ui>());
         return;
     }
     let on = cx.global::<Ui>().link.is_on();
@@ -2032,7 +2072,7 @@ pub fn toggle_link(cx: &mut App) {
         stop_session(cx);
         return;
     }
-    match start_session(cx) {
+    match start_session(cx.global_mut::<Ui>()) {
         Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
         Err(e) => {
             window::show_window(cx);
@@ -2814,7 +2854,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
         }
         if local_mode || serve_on_start {
-            match start_session(cx) {
+            match start_session(cx.global_mut::<Ui>()) {
                 Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
                 Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
             }
@@ -2899,7 +2939,7 @@ mod tests {
         start_full_pass, tick_facts, on_cheap, Busy,
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
         loud_status, problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, CHECK_OFF, READINESS_LOST,
-        stale_line, stale_text, start_facts, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
+        stale_line, stale_text, start_facts, start_session, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
         Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
     };
@@ -2907,6 +2947,7 @@ mod tests {
     use crate::session::{self, State};
     use crate::verify;
     use common::check::Check;
+    use common::kit::write_text;
     use common::op::OpState;
     use common::{Event, Phase, Progress};
     use std::sync::atomic::Ordering;
@@ -4194,6 +4235,108 @@ mod tests {
         let mut cfg = ui.cfg.clone();
         cfg.host.server = format!("127.0.0.1:{port}");
         session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {})
+    }
+
+    /// Сеанс, который УЖЕ кончился сам: туннель в никуда (первая попытка
+    /// терминальная), и ждём, пока поток уйдёт. Ровно то, что остаётся в
+    /// `Ui` после отказа bind: `session` не пусто, а работать нечему.
+    /// Режим — туннельный независимо от `ui.cfg`: локальный сеанс занял бы
+    /// настоящие порты и остался бы жив, а тесту нужен мёртвый.
+    fn ended_session(ui: &Ui) -> crate::session::Session {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let mut cfg = ui.cfg.clone();
+        cfg.host.mode = "tunnel".into();
+        cfg.host.server = format!("127.0.0.1:{port}");
+        let mut s = session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {});
+        for _ in 0..200 {
+            if s.finished() {
+                return s;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("сеанс, которому некуда звонить, обязан кончиться сам");
+    }
+
+    /// Живой сеанс: на том конце слушает немой сокет — рукопожатие не
+    /// кончается ни успехом, ни отказом, пока слушатель жив. Слушатель
+    /// возвращается наружу: уронить его значит отпустить и сеанс.
+    fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
+        let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = ui.cfg.clone();
+        cfg.host.mode = "tunnel".into();
+        cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
+        (session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {}), quiet)
+    }
+
+    fn with_params_file(ui: &Ui) {
+        write_text(&ui.kit.state_path(cfg::FILE), &ui.cfg.render()).unwrap();
+    }
+
+    /// Critical задачи 9: включение после отказа bind обязано пробовать
+    /// поднять сеанс ЗАНОВО. Прежде «включить» упиралось в сохранённый отказ
+    /// и выходило молча, а слушатели поднимаются один раз на старте процесса —
+    /// человек оставался в красном до перезапуска окна (журнал владельца
+    /// 26.10: десяток «порт 7771 уже занят» на давно свободном порту).
+    #[test]
+    fn enabling_after_a_bind_failure_starts_a_fresh_session() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        with_params_file(&ui);
+        ui.session = Some(ended_session(&ui));
+        let why = "порт 7771 занят, кем — не видно".to_string();
+        ui.link = State::Failed(why.clone());
+        ui.bind_failed = Some(why);
+        let gen_before = ui.session_gen;
+
+        start_session(&mut ui).expect("файл параметров на месте");
+
+        assert_eq!(ui.session_gen, gen_before + 1, "после отказа включение заводит новый сеанс, а не выходит молча");
+        assert_eq!(ui.bind_failed, None, "прежний отказ принадлежал кончившемуся сеансу — новый скажет о портах сам");
+        let _ = ui.session.take().unwrap().stop();
+
+        // И тот же ответ, когда показанное состояние об отказе не говорит:
+        // решает сам сеанс (`Session::finished`), а не запомненный текст и не
+        // карточка. Отказ — следствие конца сеанса, а не его причина, и
+        // спрашивать надо о конце.
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        with_params_file(&ui);
+        ui.session = Some(ended_session(&ui));
+        ui.link = State::Off;
+        let gen_before = ui.session_gen;
+
+        start_session(&mut ui).expect("файл параметров на месте");
+
+        assert_eq!(ui.session_gen, gen_before + 1, "кончившийся сеанс поднимается заново и без показанного отказа");
+        let _ = ui.session.take().unwrap().stop();
+    }
+
+    /// Обратная сторона: живой сеанс вторым поверх себя не поднимается —
+    /// слушатели в локальном режиме держат порты весь срок процесса, и
+    /// щелчок переключателем их не рвёт (Zed не переподключается сам).
+    /// А показанный `Failed` — тот же конец сеанса, только увиденный раньше,
+    /// чем поток отдал `done`: щелчок, попавший в это окно, тоже не должен
+    /// проваливаться молча.
+    #[test]
+    fn a_live_session_is_not_restarted_but_a_shown_failure_is_reason_enough() {
+        let mut ui = Ui::for_test();
+        ui.cfg.host.mode = "local".into();
+        with_params_file(&ui);
+        let (session, quiet) = live_session(&ui);
+        ui.session = Some(session);
+        let gen_before = ui.session_gen;
+
+        start_session(&mut ui).expect("файл параметров на месте");
+        assert_eq!(ui.session_gen, gen_before, "второй сеанс поверх живого не нужен");
+
+        ui.link = State::Failed("порт 7771 занят".into());
+        start_session(&mut ui).expect("файл параметров на месте");
+        assert_eq!(ui.session_gen, gen_before + 1, "показанный отказ — повод попробовать заново");
+
+        let _ = ui.session.take().unwrap().stop();
+        drop(quiet);
     }
 
     #[test]

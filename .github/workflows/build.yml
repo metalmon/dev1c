@@ -28,10 +28,14 @@ on:
 
 jobs:
   onboarding:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.binaries_only) }}
     # The onboarding overlay's own tests. They do not need the 1C image —
     # the overlay is plain Python over GTK3 — so they run here on a bare
     # runner in about a minute, while the image itself cannot be built in
     # CI at all (the 1C distribution is not in the repository).
+    #
+    # «Только бинари» гасит и этот набор: флаг обещает собрать бинари и ничего
+    # больше, а Python-наложение к ним отношения не имеет.
     #
     # Worth its own job: on 2026-10-20 three defects a person saw on the
     # stand in a row (a stub of an arrow, an arrow running back under its

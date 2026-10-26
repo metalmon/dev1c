@@ -21,6 +21,12 @@ path = "src/main.rs"
 # (`--no-default-features`) там остаётся только CLI для живого теста туннеля.
 [features]
 default = ["gui"]
+# Срок действия сторожит работу только в сборке с этой фичей. По умолчанию
+# она выключена: проекта в коммерции ещё нет, настоящей лицензии тоже, а
+# заглушка, которая останавливает работу всегда, останавливала бы её и у тех,
+# кому продавать пока нечего. Коммерческая сборка — `--features licence`;
+# тогда появляется и первый факт набора «срок действия» (`verify::order`).
+licence = []
 gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk", "dep:x11rb"]
 
 [dependencies]

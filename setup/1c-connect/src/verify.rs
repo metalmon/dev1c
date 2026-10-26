@@ -52,8 +52,15 @@ const OPEN_SESSION: &str = "сеансы 1С на машине";
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
 /// готовность канала к агенту (`туннель`/`порты рабочего места`).
 pub fn order(mode: &str) -> Vec<&'static str> {
+    let mut v = Vec::new();
     // Срок — раньше всего остального: когда он вышел, ниже смотреть нечего.
-    let mut v = vec![DEADLINE, PARAMS, PLATFORM, ANALYZER];
+    // Факт есть только в сборке с фичей `licence`: без неё срок никто не
+    // сторожит, и обещать в отчёте дату, за которой никто не следит, значило
+    // бы врать человеку (см. `crate::licence`).
+    if cfg!(feature = "licence") {
+        v.push(DEADLINE);
+    }
+    v.extend([PARAMS, PLATFORM, ANALYZER]);
     // Экран — сразу за платформой: без него Конфигуратор не стартует вовсе,
     // и провалится всё, что ниже (vrunner, загрузка, расширение). Факт
     // только на Linux: на Windows экран у Конфигуратора есть по устройству
@@ -874,6 +881,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
+    #[cfg(feature = "licence")]
     v.push(licence_fact(&crate::licence::state_now()));
     v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.server));
     // Платформу ищем один раз на два факта: сканирование каталогов не нужно
@@ -1228,25 +1236,29 @@ mod tests {
         // экрана, `w` — то, что стоит после обоих.
         let d = usize::from(cfg!(target_os = "linux"));
         let w = 2 * d;
+        // «Срок действия» — тоже свой факт, и он есть только в сборке с
+        // фичей `licence` (см. `order`). Он первый в наборе, поэтому сдвигает
+        // всё остальное целиком.
+        let l = usize::from(cfg!(feature = "licence"));
         let tunnel = order("tunnel");
         // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на
         // три факта (публикация, расширение, дескриптор).
-        assert_eq!(tunnel.len(), 18 + w);
-        assert_eq!(tunnel[17 + w], "туннель");
+        assert_eq!(tunnel.len(), 17 + w + l);
+        assert_eq!(tunnel[16 + w + l], "туннель");
         // Платформа и строка платформы для анализатора — рядом: вторая без
         // первой не считается вовсе.
-        assert_eq!(tunnel[2], "платформа 1С");
-        assert_eq!(tunnel[3], "платформа для анализатора");
-        assert_eq!(tunnel[6 + d], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[14 + w], "Gitea");
+        assert_eq!(tunnel[1 + l], "платформа 1С");
+        assert_eq!(tunnel[2 + l], "платформа для анализатора");
+        assert_eq!(tunnel[5 + d + l], "vrunner-mcp отвечает");
+        assert_eq!(tunnel[13 + w + l], "Gitea");
         if d == 1 {
-            assert_eq!(tunnel[4], "экран для конфигуратора");
-            assert_eq!(tunnel[11], "веб-сервер в системе");
-            assert_eq!(tunnel[12], "порт веб-сервера");
+            assert_eq!(tunnel[3 + l], "экран для конфигуратора");
+            assert_eq!(tunnel[10 + l], "веб-сервер в системе");
+            assert_eq!(tunnel[11 + l], "порт веб-сервера");
         }
         let local = order("local");
-        assert_eq!(local.len(), 18 + w);
-        assert_eq!(local[17 + w], "порты рабочего места");
+        assert_eq!(local.len(), 17 + w + l);
+        assert_eq!(local[16 + w + l], "порты рабочего места");
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -1903,8 +1915,10 @@ mod tests {
 
     #[test]
     fn a_missing_parameters_file_fails_first_and_says_what_to_do() {
-        // Первый факт набора — «срок действия» (см. `order`), параметры за ним.
-        assert_eq!(order("tunnel")[1], "параметры");
+        // Параметры — первый факт набора, который что-то говорит о машине.
+        // В сборке с фичей `licence` перед ними стоит «срок действия» (см.
+        // `order`), без неё они первые вовсе.
+        assert_eq!(order("tunnel")[usize::from(cfg!(feature = "licence"))], "параметры");
         let c = params_fact(false, "192.168.1.10:3393");
         assert!(!c.ok && c.hint.contains("example"), "{c:?}");
         // Адрес образца больше не повод для красного: в проде он может совпасть.

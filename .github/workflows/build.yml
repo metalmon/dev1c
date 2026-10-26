@@ -146,6 +146,12 @@ jobs:
         run: |
           cargo fmt --all --check --manifest-path setup/Cargo.toml
           cargo clippy --workspace --all-targets --features dev1c-setup/gui --manifest-path setup/Cargo.toml -- -D warnings
+          # Вторая конфигурация коннектора — со сроком действия
+          # (`--features licence`, по умолчанию выключен). Только `check`, а не
+          # второй проход clippy: фича добавляет четыре строки, и ловить в них
+          # замечания стиля не стоит удвоения времени шага, а вот развалившуюся
+          # сборку поймать надо — её иначе не собирает ни один шаг.
+          cargo check -p onec-connect --all-targets --features licence --manifest-path setup/Cargo.toml
       - name: Test
         # С окном на обеих системах. До 2026-10-21 на Linux тесты шли
         # `--no-default-features` — наследство времён, когда окна на Linux не

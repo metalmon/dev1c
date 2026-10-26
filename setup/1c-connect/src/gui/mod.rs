@@ -2020,11 +2020,13 @@ fn flip_enabled_only(ui: &mut Ui) -> bool {
     on
 }
 
-/// В локальном режиме слушатели поднимаются при старте и остаются поднятыми
-/// независимо от переключателя — настоящее состояние сеанса почти всегда
-/// `Up`/`Connecting`. Экран обязан при этом показывать «MCP выключены», пока
-/// флаг снят: подменяем `Connecting`/`Up` на `Off`. Отказ (`Failed`) виден
-/// всегда — порт занят независимо от переключателя.
+/// Экран показывает «MCP выключены», пока снят флаг обслуживания, даже если
+/// сеанс ещё договаривает своё в потоке: подменяем `Connecting`/`Up` на
+/// `Off`. Отказ (`Failed`) виден всегда — о нём человек обязан узнать.
+///
+/// С 26.10 выключение в локальном режиме ОТПУСКАЕТ слушатели (выключено
+/// значит выключено), так что расхождение показанного с настоящим здесь
+/// короткое — только пока останавливается поток сеанса.
 fn local_display(mode: &str, enabled: bool, l: State) -> State {
     if mode == "local" && !enabled {
         match l {
@@ -2034,23 +2036,6 @@ fn local_display(mode: &str, enabled: bool, l: State) -> State {
     } else {
         l
     }
-}
-
-/// Отображение настоящего отказа bind (`ui.bind_failed`) при СНЯТОМ флаге:
-/// порт занят независимо от переключателя, и «выключить» его не чинит —
-/// карточка обязана продолжать говорить правду, а не «MCP выключены», будто
-/// всё дело во флаге.
-///
-/// «Включить» сюда больше не заходит: он пробует поднять сеанс заново
-/// (`start_session` в `toggle_link`), и прежний отказ снимает он же.
-///
-/// Решает по сохранённому отказу, а не
-/// по текущему показанному состоянию — иначе один клик «выключить» стирал
-/// бы его раньше, чем следующий клик «включить» успел бы его увидеть
-/// (находка повторного ревью: прежний `keep_failure_on_enable` ловил лишь
-/// один клик).
-fn bind_failure_display(bind_failed: &Option<String>) -> Option<State> {
-    bind_failed.clone().map(State::Failed)
 }
 
 pub fn toggle_link(cx: &mut App) {
@@ -2076,10 +2061,25 @@ pub fn toggle_link(cx: &mut App) {
         // `run_readiness` (ниже/в `Ev::Publish`) уже в полёте и заменит его
         // настоящим ответом; задержка — тот же компромисс, что и у такта.
         if !on {
-            // Отказ bind виден и при снятом флаге: порт занят независимо от
-            // переключателя, и «выключить» его не чинит.
-            let l = bind_failure_display(&ui.bind_failed).unwrap_or(State::Off);
-            set_link(cx, l);
+            // **Выключено значит выключено** (спека, «Не цели»): выключенный
+            // коннектор НЕ держит порты рабочего места. Прежде слушатели
+            // оставались поднятыми весь срок процесса, и человек, выключив
+            // MCP здесь, не мог включить их на другой машине с тем же именем
+            // рабочего места — порты были заняты выключенным коннектором, и
+            // отпускал их только выход из программы. Владелец 26.10: «это
+            // значит выключено, а не что всё равно держит порты».
+            //
+            // Цена, принятая сознательно: `nc` агента в Zed умирает вместе
+            // со слушателем, и после обратного включения MCP-серверы там
+            // придётся поднять заново. Пока обслуживание выключено, они всё
+            // равно получали только отказы — держать ради них занятый порт
+            // чужого рабочего места не за что.
+            stop_session(cx);
+            let ui = cx.global_mut::<Ui>();
+            // Прежний отказ bind больше не наш: порты мы отпустили, и
+            // следующее включение пробует занять их заново.
+            ui.bind_failed = None;
+            set_link(cx, State::Off);
             return;
         }
         // «Включить» значит «работай»: живой сеанс `start_session` не трогает
@@ -2781,7 +2781,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // (слушатели должны жить, пока жив процесс — см. `launch` ниже), а эта
     // галочка решает только начальное значение переключателя «MCP».
     let autoconnect_on = autoconnect(&kit);
-    let local_mode = cfg.host.mode == "local";
     // Замок считается до первого окна: «включать MCP при запуске» его не
     // обходит (спека, «Автозапуск не обходит замок»), поэтому начальное
     // значение флага обслуживания уже обязано его слушаться.
@@ -2921,17 +2920,18 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         .detach();
         // Про срок — до подъёма сеанса: первое, что человек читает в журнале.
         note_licence_change(cx);
-        // В локальном режиме слушатели держат порты весь срок жизни
-        // процесса (Zed не переподключается сам — см. заголовок модуля),
-        // поэтому сеанс поднимается здесь безусловно; «подключаться при
-        // запуске» в этом режиме уже отдано начальному значению `enabled`
-        // чуть выше. В туннельном режиме — как раньше, по той же галочке.
+        // Сеанс поднимается только при включённом обслуживании — и в
+        // локальном режиме тоже. Прежде локальный поднимался безусловно
+        // («слушатели держат порты весь срок процесса»), и выключенный
+        // коннектор занимал порты рабочего места, не обслуживая никого:
+        // забрать их на другой машине было нельзя, пока он не закрыт
+        // (находка владельца 26.10). Выключено значит выключено.
         // Замок при запуске — строкой в журнал: человек видит серую точку и
         // запертый переключатель, и обязан прочитать, почему.
         if let Some(why) = &gate {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
         }
-        if local_mode || serve_on_start {
+        if serve_on_start {
             match start_session(cx.global_mut::<Ui>()) {
                 Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),
                 Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
@@ -3016,7 +3016,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, bind_failure_display, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
+        apply_facts, autoconnect, autostart_enabled, republish_after_save, badge, can_cancel, carried_base_url, carried_dump, carried_http_port, check_lines, moved_lines, check_status, confirm_gate_text,
         confirm_text,
         douse_serving, exit_code_for, first_phase, flip_enabled_only, gate_now, is_stale, licence_line, line_of, link_is_current, link_line, local_display, locks_gate, needs_full_pass, note_file, note_line, on_done,
         start_full_pass, tick_facts, on_cheap, Busy,
@@ -4132,17 +4132,6 @@ mod tests {
         assert!(!text.contains("s:1") && !text.contains("dev2"), "{text}");
     }
 
-    #[test]
-    fn a_bind_failure_stays_visible_regardless_of_the_switch() {
-        // Отказ («порт занят») переживает любое число щелчков: карточка не
-        // должна соврать «MCP включены», когда ничего не слушает. Решает по
-        // сохранённому `bind_failed`, а не по текущему показанному
-        // состоянию — повторная находка ревью: прежний
-        // `keep_failure_on_enable` ловил лишь один клик «включить», а
-        // «выключить» перед ним стирал отказ в `Off`.
-        assert_eq!(bind_failure_display(&Some("порт занят".into())), Some(State::Failed("порт занят".into())));
-        assert_eq!(bind_failure_display(&None), None);
-    }
 
     #[test]
     fn a_panicking_worker_still_reports_the_end_of_the_work() {
@@ -4447,7 +4436,7 @@ mod tests {
     }
 
     #[test]
-    fn in_local_mode_the_switch_only_flips_the_flag() {
+    fn flip_enabled_only_touches_the_flag_and_nothing_else() {
         let mut ui = Ui::for_test();
         ui.cfg.host.mode = "local".into();
         ui.session = Some(doomed_session(&ui));
@@ -4457,8 +4446,10 @@ mod tests {
         assert!(!ui.enabled.load(Ordering::Relaxed));
         assert!(flip_enabled_only(&mut ui));
         assert!(ui.enabled.load(Ordering::Relaxed));
-        // Локальный режим: слушатели живут своей жизнью, переключатель их не
-        // трогает — поколение сеанса ровно то же, что и до двух щелчков.
+        // `flip_enabled_only` — только флаг: сеанс она не трогает, поколение
+        // то же. Отпускание слушателей при выключении живёт в `toggle_link`
+        // (с 26.10: выключено значит выключено), и ему нужен `&mut App` —
+        // харнесса для него нет, держится ревью.
         assert_eq!(ui.session_gen, gen_before);
         let _ = ui.session.take().unwrap().stop();
     }

@@ -29,6 +29,8 @@ Enable the formatting gate once, and a bad format can never reach a push:
 git config core.hooksPath .githooks
 ```
 
+The compiler version is pinned in [`rust-toolchain.toml`](rust-toolchain.toml), and rustup installs it for you on the first `cargo` call in this tree — you do not have to match it by hand, and you should not override it. The pin exists because the lint step denies warnings: without it a Rust released overnight fails a push that was clean the day before, and on 26.10.2026 two jobs of one CI run genuinely built with different compilers. Raising the version is its own commit, with the clippy and test runs above done inside it.
+
 Rough costs, measured on a 16 GB workstation with a warm cache: `cargo check` 7–12 s, the whole test suite about six minutes, of which 210 s is `onec-connect`'s own 485 tests. A cold first build of the GPUI dependency tree is longer — allow a quarter of an hour and let it run in the foreground.
 
 One module's tests can be run alone, which is the point of how the window is split:

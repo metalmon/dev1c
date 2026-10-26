@@ -32,6 +32,18 @@ layout="$home/.config/xfce4/desktop/icons.screen0.yaml"
 [ -f "$layout" ] || exit 0
 [ -d "$home/Desktop" ] || exit 0
 
+# Точка входа работает под root, а дом правит сам пользователь: любой из
+# промежуточных каталогов может оказаться ссылкой наружу, и тогда запись
+# root'ом ушла бы в чужой файл. Проверки одного `-L` на сам файл мало —
+# подменяют каталог выше. Поэтому разрешаем путь, только если он разворачивается
+# ВНУТРЬ того же дома; та же защита стоит у ~/.pi и ~/.config/zed.
+home_real=$(realpath -q "$home") || exit 0
+for d in "$home/.config" "$home/.config/xfce4" "$home/.config/xfce4/desktop" "$home/Desktop"; do
+    [ ! -L "$d" ] || exit 0
+    real=$(realpath -q "$d") || exit 0
+    case "$real/" in "$home_real"/*) ;; *) exit 0 ;; esac
+done
+
 # Какие ярлыки на столе ещё не упомянуты в раскладке.
 missing=
 for f in "$home"/Desktop/*.desktop; do

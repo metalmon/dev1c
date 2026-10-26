@@ -268,6 +268,20 @@ seed
 [ "$sum" = "$(md5sum "$L" | cut -d" " -f1)" ] || fail "повторный прогон переписал раскладку"
 ok "повторный прогон раскладку не трогает"
 
+# Промежуточный каталог — ссылка наружу. Дом правит пользователь, точка входа
+# работает под root: подменил каталог выше файла — и запись ушла бы в чужое.
+OUT=$(mktemp -d)
+cp "$L" "$OUT/icons.screen0.yaml"
+before=$(md5sum "$OUT/icons.screen0.yaml" | cut -d" " -f1)
+rm -rf "$HOME_DIR/.config/xfce4"
+ln -s "$OUT" "$HOME_DIR/.config/xfce4"
+seed
+[ "$before" = "$(md5sum "$OUT/icons.screen0.yaml" | cut -d" " -f1)" ] \
+    || fail "по ссылке наружу раскладка переписана root'ом"
+rm -f "$HOME_DIR/.config/xfce4"
+rm -rf "$OUT"
+ok "каталог-ссылка наружу отвергнут, чужой файл не тронут"
+
 echo "== Исчезнувшая переменная уходит из сессий =="
 
 # /etc/environment раньше только дописывался: переменная, исчезнувшая из

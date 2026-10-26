@@ -235,6 +235,20 @@ pub struct Ui {
     /// снимается только вместе со `status` (`set_status`), иначе подсказка
     /// пережила бы итог, к которому её написали.
     pub status_tip: Option<String>,
+    /// Когда итог положили в подвал. Снимается он не первым же пришедшим
+    /// набором фактов (так было до находки ревью 26.10: человек нажимал
+    /// «Установить», получал отказ — и подвал гас раньше, чем он дочитал,
+    /// потому что следом шёл пересчёт «почва могла сдвинуться»), а по
+    /// собственному сроку `STATUS_LINGER`.
+    pub status_at: Option<Instant>,
+    /// Подняли ли МЫ публикацию в этом запуске. Выход гасит свой httpd
+    /// только тогда: `httpd.pid` и `httpd.conf` лежат в состоянии
+    /// ПОЛЬЗОВАТЕЛЯ ОС, один на всех, а замок единственного экземпляра
+    /// заведён на пользователя ПЛЮС имя рабочего места — то есть два
+    /// коннектора одного человека с разными именами живут одновременно и
+    /// делят один pid-файл. Без этого флага выход одного гасил бы httpd
+    /// соседа (находка ревью 26.10). Чего не подняли — того не трогаем.
+    pub raised_publication: bool,
     pub tray: Option<tray::Tray>,
     /// Что значок показывает прямо сейчас — последнее, что ему отдала
     /// `sync_tray`. Нужно не значку (он помнит сам), а тесту: без этого
@@ -894,6 +908,7 @@ pub fn loud_status(facts: &[Check]) -> Line {
 pub fn set_status(ui: &mut Ui, line: Line, tip: Option<String>) {
     ui.status = Some(line);
     ui.status_tip = tip;
+    ui.status_at = Some(Instant::now());
 }
 
 /// Где лежит отчёт проверки — строкой журнала и подсказкой подвала. «В
@@ -1650,8 +1665,16 @@ fn apply_facts(ui: &mut Ui, gen: u64, facts: Vec<Check>) -> bool {
         //
         // Громкий показ («Проверить») ставит свой итог сам и уже после этого
         // (`Ev::Ready`, ветка `loud`) — его этот сброс не трогает.
-        ui.status = None;
-        ui.status_tip = None;
+        // Итог прошлой операции снимаем только когда он своё отстоял
+        // (`STATUS_LINGER`): иначе пересчёт, идущий сразу за операцией,
+        // стирает её отказ раньше, чем человек успел прочитать (находка
+        // ревью 26.10). Отсчёт — от `set_status`, а не от прихода набора.
+        let stale = ui.status_at.is_none_or(|at| at.elapsed() >= STATUS_LINGER);
+        if stale {
+            ui.status = None;
+            ui.status_tip = None;
+            ui.status_at = None;
+        }
         // Отметка полного расчёта — на ЛЮБОЙ пришедший набор от владельца
         // защёлки, ДО разбора повтора (Critical 1 ревью задач 5+6). Раньше
         // она ставилась только в ветке «повтора не просили», и получалась
@@ -2269,10 +2292,15 @@ pub fn quit(cx: &mut App) {
     // Итог — строкой в файл журнала, а не в окно: окна к этому моменту уже
     // нет, читать её человек будет потом, разбираясь, куда делся сервер.
     let ui = cx.global::<Ui>();
-    let line = match ops_host::stop_own_publication(&quiet_ctx(ui)) {
-        Ok(true) => Some(Line { kind: Kind::Ok, text: "HTTP-сервис базы остановлен при выходе".into() }),
-        Ok(false) => None,
-        Err(e) => Some(Line { kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}") }),
+    // Гасим ТОЛЬКО то, что подняли сами в этом запуске (`raised_publication`):
+    // `httpd.pid` один на пользователя ОС, а коннекторов у него может быть
+    // несколько — по одному на имя рабочего места. Чужой httpd (соседнего
+    // рабочего места или режима `webserver`) не наш, и остановка его была бы
+    // хуже утечки, которую мы чиним.
+    let line = match ui.raised_publication.then(|| ops_host::stop_own_publication(&quiet_ctx(ui))) {
+        Some(Ok(true)) => Some(Line { kind: Kind::Ok, text: "HTTP-сервис базы остановлен при выходе".into() }),
+        Some(Ok(false)) | None => None,
+        Some(Err(e)) => Some(Line { kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}") }),
     };
     if let Some(line) = &line {
         note_file(&ui.kit, line);
@@ -2346,6 +2374,14 @@ fn tick_redraw(window_open: bool, dirty: bool, running: bool, since_redraw: Dura
 /// не смотрит. Секундный такт при открытом окне спрашивает ОДНО (число
 /// открытых сеансов 1С) — остальные дешёвые факты за секунду не меняются.
 pub const SLOW_OPEN: Duration = Duration::from_secs(30);
+
+/// Сколько итог операции держит верхний слот подвала, прежде чем уступить
+/// его состоянию. Полминуты — потому что столько же живёт набор фактов
+/// (`SLOW_OPEN`): к следующему пересчёту итог уже прочитан, а если человек
+/// отошёл — в журнале он остался. Меньше нельзя: пересчёт идёт сразу за
+/// операцией («почва могла сдвинуться»), и отказ гас бы через секунду после
+/// показа.
+pub const STATUS_LINGER: Duration = Duration::from_secs(30);
 pub const SLOW_HIDDEN: Duration = Duration::from_secs(120);
 
 /// Пора ли идти за дорогими (сетевыми) фактами заново — задача 6. Дешёвый
@@ -2587,6 +2623,7 @@ fn handle(ev: Ev, cx: &mut App) {
         }
         Ev::Publish(r) => match r {
             Ok(()) => {
+                cx.global_mut::<Ui>().raised_publication = true;
                 let ui = cx.global::<Ui>();
                 let local = ui.cfg.host.mode == "local";
                 let enabled = ui.enabled.load(Ordering::Relaxed);
@@ -2822,6 +2859,8 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             busy: None,
             pending: 0,
             status: None,
+            status_at: None,
+            raised_publication: false,
             status_tip: None,
             tray: Some(tray),
             tray_shown: None,
@@ -2952,6 +2991,8 @@ impl Ui {
             busy: None,
             pending: 0,
             status: None,
+            status_at: None,
+            raised_publication: false,
             status_tip: None,
             tray: None,
             tray_shown: None,
@@ -2976,7 +3017,7 @@ mod tests {
         note_licence_change_ui, on_line, on_progress, op_refusal, panel, progress_text, project_primary, readiness_reason, refresh_gate, report_line, request_check, save_host,
         loud_status, problem_count, publication_failure, readiness_lost, run_readiness, save_needs_confirm, serving, sync_tray, tray_state_now, warn_reason, CHECK_OFF, READINESS_LOST,
         set_status, stale_line, stale_text, start_facts, start_session, took, tick_redraw, tray_tooltip, verdict_line, verdict_of, Dot, Kind, Line,
-        Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN,
+        Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN, STATUS_LINGER,
         Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
     };
     use crate::cfg::{self, Cfg, Host};
@@ -3031,19 +3072,23 @@ mod tests {
     /// Прежде этот слот не снимался никем, и в покое человек читал про
     /// операцию, которой не запускал (находка владельца 26.10).
     #[test]
-    fn a_new_set_takes_the_finished_operation_out_of_the_footer() {
+    fn an_operation_result_outlives_the_next_set_but_not_for_long() {
         let mut ui = Ui::for_test();
         let gen = ui.facts_gen;
-        set_status(&mut ui, Line { kind: Kind::Ok, text: "Готово за 19 с".into() }, Some("отчёт: C:\\kit\\last-check.txt".into()));
-        apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
-        assert_eq!(ui.status, None, "итог операции не должен закрывать собой причину");
-        assert_eq!(ui.status_tip, None, "подсказка слота уходит вместе с ним");
 
-        // Чужое поколение — ответ отставшего потока: он не трогает ни набор,
-        // ни подвал.
-        set_status(&mut ui, Line { kind: Kind::Ok, text: "Готово за 19 с".into() }, None);
-        apply_facts(&mut ui, gen + 7, vec![Check::pass("база", "есть")]);
-        assert!(ui.status.is_some(), "опоздавший ответ подвал не трогает");
+        // Свежий итог пересчёт не стирает: за операцией сразу идёт расчёт
+        // («почва могла сдвинуться»), и отказ гас бы раньше, чем прочитан.
+        set_status(&mut ui, Line { kind: Kind::Fail, text: "это ограничение по числу сеансов".into() }, None);
+        apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
+        assert!(ui.status.is_some(), "свежий отказ операции не должен гаснуть на первом же наборе");
+
+        // Отстоявший своё — уступает слот состоянию.
+        ui.status_at = Some(Instant::now() - STATUS_LINGER);
+        let gen = ui.facts_gen;
+        apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
+        assert_eq!(ui.status, None, "итог отстоял своё и больше не закрывает причину");
+        assert_eq!(ui.status_tip, None, "подсказка слота уходит вместе с ним");
+        assert_eq!(ui.status_at, None);
     }
 
     /// Ответ, пришедший уже после того, как обслуживание выключили, не

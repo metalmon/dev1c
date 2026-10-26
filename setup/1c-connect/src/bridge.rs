@@ -848,7 +848,7 @@ fn expects_reply(line: &[u8]) -> bool {
 /// без пары (ребёнок и сам может прислать лишнее), не должен навечно
 /// заблокировать рестарт.
 fn dec_in_flight(in_flight: &AtomicU64) {
-    let _ = in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+    let _ = in_flight.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
 }
 
 /// Метод строки от агента, если это JSON-объект с понятным `method`: грубое

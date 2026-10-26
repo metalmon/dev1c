@@ -24,6 +24,7 @@ impl Out {
 
 /// Запуск без своего окна консоли: без этого Windows рисует чёрное окно на
 /// каждый вызов из оконной программы.
+#[cfg_attr(not(windows), allow(unused_mut))]
 pub fn quiet(mut cmd: Command) -> Command {
     #[cfg(windows)]
     {

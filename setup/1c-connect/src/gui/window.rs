@@ -147,7 +147,6 @@ fn move_to(window: &Window, origin: Point<Pixels>) {
 #[cfg(target_os = "linux")]
 fn move_to(window: &Window, origin: Point<Pixels>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt};
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
     let RawWindowHandle::Xcb(h) = handle.as_raw() else { return };

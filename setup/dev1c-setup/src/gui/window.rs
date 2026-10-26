@@ -149,6 +149,7 @@ fn ask_interrupt() -> bool {
 
 /// Сказать и выйти: окна нет, значит ни журнала, ни кнопки «закрыть» —
 /// процесс обязан закончиться, а не висеть невидимым.
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn say_and_quit(text: &str, cx: &mut App) {
     #[cfg(windows)]
     {

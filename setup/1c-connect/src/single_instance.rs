@@ -115,8 +115,10 @@ pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Opt
     Ok(Some(Guard(h)))
 }
 
+/// Замок живёт, пока жив дескриптор: файл здесь держат, а не читают —
+/// `flock` снимается закрытием. Поэтому поле и не читается никем.
 #[cfg(not(windows))]
-pub struct Guard(std::fs::File);
+pub struct Guard(#[allow(dead_code)] std::fs::File);
 
 /// Оборачивает отказ открыть замок в читаемую причину: что делалось (брали
 /// замок единственного экземпляра), по какому пути, и голый текст системной

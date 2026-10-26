@@ -318,13 +318,23 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
         return Check::pass(WORKSTATION_PORTS, format!("{mcp} и {vrunner}: свободны либо заняты этим же процессом"));
     }
     match ports {
-        // Текст прежний слово в слово: тому, кто сам собирался занять эти
-        // порты, занятый порт и правда мешает — он их не получит.
-        PortUse::WeListen => Check::fail(
-            WORKSTATION_PORTS,
-            format!("порт(ы) {} заняты другим процессом", busy.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(", ")),
-            "похоже, на этой машине уже открыт второй 1c-connect — закройте его и проверьте снова",
-        ),
+        // Тому, кто сам собирался занять эти порты, занятый порт и правда
+        // мешает — он их не получит. Держателя называем и здесь (в список
+        // попадают только опознанные — см. `cheap`): «занято другим
+        // процессом» без имени человеку ничего не даёт, а совет без имени —
+        // тем более. Совет живёт в `hint`, как у прочих фактов, а не в
+        // заголовке карточки («не надо там прозу писать, она не лезет»), и
+        // кончается «включите снова»: включение в локальном режиме пробует
+        // поднять слушатели заново (`gui::toggle_link`) — совет исполним.
+        PortUse::WeListen => {
+            let mut who: Vec<&str> = busy.iter().map(|(_, w)| w.as_str()).collect();
+            who.dedup();
+            Check::fail(
+                WORKSTATION_PORTS,
+                format!("порт(ы) {} заняты: {}", busy.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(", "), who.join(", ")),
+                format!("закройте {} и включите MCP снова", who.join(" и ")),
+            )
+        }
         // Держателя называем по имени: оно уже добыто, а человеку полезно
         // видеть, кто держит порт, даже когда это ничему не мешает.
         PortUse::WeDont => Check::note(
@@ -1392,14 +1402,22 @@ mod tests {
     }
 
     /// Тому, кто сам собирается занять порты (окно, `connect`, `serve`),
-    /// занятый порт мешает по-настоящему — прежний провал прежним текстом.
+    /// занятый порт мешает по-настоящему — провал. И держателя он называет,
+    /// и говорит, что с этим делать: закрыть именно его и включить снова
+    /// (находка владельца 26.10 — человек читал «занято» и не знал, чем
+    /// занято и что предпринять).
     #[test]
-    fn a_busy_port_still_fails_whoever_needs_to_listen() {
+    fn a_busy_port_fails_whoever_needs_to_listen_and_says_what_to_do() {
         let busy = [(7783, "nginx (pid 500)".to_string())];
         let c = workstation_ports_fact(7773, 7783, &busy, PortUse::WeListen);
         assert!(!c.ok && !c.info, "{c:?}");
-        assert!(c.detail.contains("порт(ы) 7783 заняты другим процессом"), "{c:?}");
-        assert!(c.hint.contains("второй 1c-connect"), "{c:?}");
+        assert!(c.detail.contains("7783") && c.detail.contains("nginx (pid 500)"), "держателя надо назвать: {c:?}");
+        assert_eq!(c.hint, "закройте nginx (pid 500) и включите MCP снова", "{c:?}");
+
+        // Один держатель на оба порта — в совете он один раз, а не дважды.
+        let both = [(7773, "1c-connect (pid 812)".to_string()), (7783, "1c-connect (pid 812)".to_string())];
+        let c = workstation_ports_fact(7773, 7783, &both, PortUse::WeListen);
+        assert_eq!(c.hint, "закройте 1c-connect (pid 812) и включите MCP снова", "{c:?}");
     }
 
     /// Свободные порты зелены в обоих случаях — правило о занятых, а не о

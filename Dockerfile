@@ -96,6 +96,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       `#   since 1803, and running it is ordinary use of the system.` \
       openssh-server \
       x11-utils \
+      `# zenity: единственный способ сказать что-то человеку, нажавшему ЯРЛЫК.` \
+      `#   У ярлыка нет терминала, и всё, что уходит в stderr, не видит никто:` \
+      `#   «Чат с моделью» без настроенного сервера модели просто молчал, и` \
+      `#   заказчик решил, что ярлык сломан (26.10.2026). Шесть пакетов на одно` \
+      `#   окно — дорого, но тишина в ответ на нажатие дороже.` \
+      zenity \
       firefox-esr firefox-esr-l10n-ru \
 \
       arc-theme papirus-icon-theme \
@@ -403,6 +409,7 @@ COPY config/git-cpuset.sh      /usr/local/bin/git
 COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
 COPY config/test-pi.sh         /usr/local/bin/test-pi
 COPY config/model-chat.sh      /usr/local/bin/model-chat
+COPY config/desktop-layout.sh  /usr/local/bin/desktop-layout
 COPY config/test-pi-stub.py    /usr/local/bin/test-pi-stub
 COPY config/test-pi-seed.sh    /usr/local/bin/test-pi-seed
 
@@ -430,7 +437,7 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
                 /usr/local/bin/git /usr/local/bin/test-git-cpuset \
                 /usr/local/bin/launch-maximized /usr/local/bin/test-pi \
-                /usr/local/bin/model-chat \
+                /usr/local/bin/model-chat /usr/local/bin/desktop-layout \
                 /usr/local/bin/test-pi-stub /usr/local/bin/test-pi-seed \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"

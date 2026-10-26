@@ -229,6 +229,117 @@ seed
 ls "$HOME_DIR/Desktop"/*.desktop >/dev/null 2>&1 || fail "ярлыки в дом не вернулись"
 ok "ярлыки разложены из образа"
 
+echo "== В свежем доме порядок значков задаёт образ =="
+
+# Без этого порядок выбирал xfdesktop, и на чистом доме коннектор вставал
+# ПЕРВЫМ — выше Gitea и Zed (замерено запуском xfdesktop на Xvfb 26.10.2026).
+# Стол, который показывают заказчику, не может зависеть от того, как
+# отсортировалось.
+rm -rf "$HOME_DIR/.config/xfce4"
+seed
+F="$HOME_DIR/.config/xfce4/desktop/icons.screen0.yaml"
+[ -f "$F" ] || fail "раскладка в свежем доме не создана"
+row_of() { grep -A1 "\"$HOME_DIR/Desktop/$1\":" "$F" | sed -n 's/.*row: *//p'; }
+[ "$(row_of 1c-start.desktop)" = 1 ]    || fail "1С не на первой строке: $(row_of 1c-start.desktop)"
+[ "$(row_of gitea.desktop)" = 2 ]       || fail "Gitea не на второй: $(row_of gitea.desktop)"
+[ "$(row_of model-chat.desktop)" = 4 ]  || fail "«Чат с моделью» не на четвёртой: $(row_of model-chat.desktop)"
+[ "$(row_of 1c-connect.desktop)" = 5 ]  || fail "коннектор не на пятой: $(row_of 1c-connect.desktop)"
+# Писать обязан сам владелец, а не root: иначе предсказуемое имя временного
+# файла в каталоге пользователя — это подъём прав (ревью 26.10.2026).
+[ "$(stat -c %U "$F")" = "$U" ] || fail "раскладка принадлежит $(stat -c %U "$F"), а не $U — значит писал root"
+ok "порядок задан образом: 1С, Gitea, Zed, чат, коннектор; файл принадлежит $U"
+
+echo "== Раскладку из одних наших значков выравниваем по образу =="
+
+# Дома живут в томе и переживают смену образа. Раскладка, где НЕТ ни одного
+# значка, положенного человеком, написана не им, а xfdesktop — порядок в ней
+# случаен, и стенд, поднятый до появления ярлыка чата, навсегда остался бы с
+# ним посередине.
+cat > "$F" <<YAML
+configs:
+- level: 0
+  icons:
+    "$HOME_DIR":
+      row: 0
+      col: 0
+    "$HOME_DIR/Desktop/1c-start.desktop":
+      row: 1
+      col: 0
+    "$HOME_DIR/Desktop/model-chat.desktop":
+      row: 2
+      col: 0
+    "$HOME_DIR/Desktop/gitea.desktop":
+      row: 3
+      col: 0
+YAML
+chown "$U:$U" "$F"
+seed
+[ "$(row_of model-chat.desktop)" = 4 ] || fail "«Чат с моделью» не выровнен вниз: $(row_of model-chat.desktop)"
+[ "$(row_of gitea.desktop)" = 2 ]      || fail "Gitea не выровнена: $(row_of gitea.desktop)"
+ok "раскладка без чужих значков выровнена по образу"
+
+echo "== Новый значок встаёт НИЖЕ старых =="
+
+# xfdesktop кладёт появившийся ярлык в первое свободное место сверху, и старые
+# значки переезжают. Онборд наводит стрелку по координатам из этого файла, а
+# пишется он не сразу — съехавший значок означает стрелку на соседа. Старые
+# записи обязаны остаться на своих строках, новые — уйти вниз.
+#
+# Значок, положенный человеком, здесь обязателен: он и делает раскладку
+# чужой. Без него она состоит из одних наших, и проверялась бы не эта ветка,
+# а выравнивание выше.
+L=$F
+: > "$HOME_DIR/Desktop/моё.desktop"
+chown "$U:$U" "$HOME_DIR/Desktop/моё.desktop"
+cat > "$L" <<YAML
+configs:
+- level: 0
+  icons:
+    "$HOME_DIR":
+      row: 0
+      col: 0
+    "$HOME_DIR/Desktop/gitea.desktop":
+      row: 2
+      col: 0
+    "$HOME_DIR/Desktop/1c-start.desktop":
+      row: 1
+      col: 0
+    "$HOME_DIR/Desktop/моё.desktop":
+      row: 7
+      col: 0
+YAML
+chown "$U:$U" "$L"
+seed
+grep -q "\"$HOME_DIR/Desktop/gitea.desktop\":" "$L" || fail "запись Gitea пропала из раскладки"
+gitea_row=$(grep -A1 "\"$HOME_DIR/Desktop/gitea.desktop\":" "$L" | sed -n 's/.*row: *//p')
+[ "$gitea_row" = 2 ] || fail "Gitea переехала с 2-й строки на $gitea_row — старые значки двигать нельзя"
+chat_row=$(grep -A1 "\"$HOME_DIR/Desktop/model-chat.desktop\":" "$L" | sed -n 's/.*row: *//p')
+[ -n "$chat_row" ] || fail "нового значка нет в раскладке: $(cat "$L")"
+[ "$chat_row" -gt 7 ] || fail "«Чат с моделью» встал на строку $chat_row — не ниже занятых"
+[ "$(row_of моё.desktop)" = 7 ] || fail "значок человека переехал с 7-й строки на $(row_of моё.desktop)"
+ok "новые значки дописаны вниз ($chat_row), значок человека остался на месте"
+
+# Второй проход ничего не меняет: иначе каждая перезагрузка стенда плодила бы
+# дубли и уводила значки всё ниже.
+sum=$(md5sum "$L" | cut -d" " -f1)
+seed
+[ "$sum" = "$(md5sum "$L" | cut -d" " -f1)" ] || fail "повторный прогон переписал раскладку"
+ok "повторный прогон раскладку не трогает"
+
+# Промежуточный каталог — ссылка наружу. Дом правит пользователь, точка входа
+# работает под root: подменил каталог выше файла — и запись ушла бы в чужое.
+OUT=$(mktemp -d)
+cp "$L" "$OUT/icons.screen0.yaml"
+before=$(md5sum "$OUT/icons.screen0.yaml" | cut -d" " -f1)
+rm -rf "$HOME_DIR/.config/xfce4"
+ln -s "$OUT" "$HOME_DIR/.config/xfce4"
+seed
+[ "$before" = "$(md5sum "$OUT/icons.screen0.yaml" | cut -d" " -f1)" ] \
+    || fail "по ссылке наружу раскладка переписана root'ом"
+rm -f "$HOME_DIR/.config/xfce4"
+rm -rf "$OUT"
+ok "каталог-ссылка наружу отвергнут, чужой файл не тронут"
+
 echo "== Исчезнувшая переменная уходит из сессий =="
 
 # /etc/environment раньше только дописывался: переменная, исчезнувшая из

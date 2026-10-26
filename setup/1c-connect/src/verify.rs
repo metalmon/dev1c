@@ -46,7 +46,7 @@ const CONFIGURATOR: &str = "Конфигуратор";
 const TUNNEL: &str = "туннель";
 const WORKSTATION_PORTS: &str = "порты рабочего места";
 const DEADLINE: &str = "срок действия";
-const OPEN_SESSION: &str = "в базе открыт сеанс";
+const OPEN_SESSION: &str = "сеансы 1С на машине";
 
 /// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
@@ -500,6 +500,14 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
 /// причину на холодную — установка не поднята, или расширение не опубликовано.
 const PUBLICATION_HINT: &str = "1c-connect install, затем публикация в Конфигураторе (см. install)";
 
+/// Совет, когда до базы не достучались ВОВСЕ. `PUBLICATION_HINT` тут не
+/// годится: ставить нечего — публикация либо не поднята, либо не отвечает, и
+/// `install` человеку, у которого просто выключено обслуживание, перепишет
+/// рабочую публикацию ни за что. Тот же совет, что у факта порта
+/// (`web_hint`): поднимает публикацию сам коннектор. Про установку
+/// расширения говорим только когда база ОТВЕТИЛА, что его нет.
+const UNREACHED_HINT: &str = "публикацию поднимает сам коннектор — включите обслуживание MCP; если оно включено, причину смотрите в журнале";
+
 /// Отвечает ли публикация вообще (любым HTTP-ответом по `/version`) —
 /// отдельно от того, стоит ли в базе расширение (`extension_fact`): раньше
 /// один факт отвечал за оба вопроса и прятал, какой из них провалился.
@@ -526,7 +534,7 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
         // случае честно говорит «не спрашивали», и здесь то же самое.
         return Check::busy(PUBLICATION, format!("{base_url}/version не спрашивали: на машине {reason}"), hint);
     }
-    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), PUBLICATION_HINT)
+    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), UNREACHED_HINT)
 }
 
 /// Расширение в базе — версия, отсутствие или недостижимость (`ops_host::Reach`,
@@ -563,7 +571,7 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Check {
         // ответом, а не мы догадкой по списку процессов).
         Some(Reach::Refused(c)) if crate::onec_error::is_busy(c) => Check::busy(EXTENSION, c.what, c.fix),
         Some(Reach::Refused(c)) => Check::fail(EXTENSION, c.what, c.fix),
-        Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), PUBLICATION_HINT),
+        Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), UNREACHED_HINT),
         // Нет и пробы, и занятости — вызывающий обязан передать одно из двух.
         None => unreachable!("reach отсутствует только вместе с busy, а она уже обработана выше"),
     }
@@ -1199,9 +1207,9 @@ mod tests {
     fn facts_follow_the_mode() {
         let tunnel = order("tunnel");
         assert!(tunnel.contains(&"туннель") && tunnel.contains(&"Конфигуратор"));
-        assert!(!tunnel.contains(&"порты рабочего места") && !tunnel.contains(&"в базе открыт сеанс"));
+        assert!(!tunnel.contains(&"порты рабочего места") && !tunnel.contains(&OPEN_SESSION));
         let local = order("local");
-        assert!(local.contains(&"порты рабочего места") && local.contains(&"в базе открыт сеанс"));
+        assert!(local.contains(&"порты рабочего места") && local.contains(&OPEN_SESSION));
         assert!(!local.contains(&"туннель") && !local.contains(&"Конфигуратор"));
     }
 
@@ -1639,9 +1647,11 @@ mod tests {
         assert!(busy.detail.contains("идёт cf_decompile"), "{busy:?}");
         assert!(!busy.hint.contains("install"), "установку тут советовать нечего: {busy:?}");
 
-        // Ничего нашего не идёт — прежний совет про установку остаётся верным.
+        // Ничего нашего не идёт — но и до базы не достучались, так что
+        // советовать установку нечего: публикацию поднимает сам коннектор.
         let free = publication_responds_fact("http://x", false, None);
-        assert!(free.hint.contains("install"), "{free:?}");
+        assert!(!free.hint.contains("install"), "{free:?}");
+        assert!(free.hint.contains("обслуживание"), "{free:?}");
     }
 
     /// Истёкший срок — провал: человек обязан увидеть красное и дату, до
@@ -1845,8 +1855,12 @@ mod tests {
         assert!(!down.ok && down.hint.contains("опубликована база"), "{down:?}");
         let ok = extension_fact(Some(&Reach::Version("1.2".into())), None);
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
+        // До базы не достучались — совет про обслуживание, не про установку.
         let fail = publication_responds_fact("http://x", false, None);
-        assert!(!fail.ok && fail.hint.contains("install"), "{fail:?}");
+        assert!(!fail.ok && fail.hint.contains("обслуживание") && !fail.hint.contains("install"), "{fail:?}");
+        // А вот когда база ОТВЕТИЛА, что расширения нет, установка и есть ответ.
+        let absent = extension_fact(Some(&Reach::Absent), None);
+        assert!(!absent.ok && absent.hint.contains("install"), "{absent:?}");
     }
 
     /// Вердикт (`gui::verdict_of`, задача 5) считает первый провалившийся

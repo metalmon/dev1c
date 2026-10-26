@@ -1421,7 +1421,7 @@ mod tests {
     fn publication_in_webserver_mode_is_missing_when_nothing_answers() {
         // Режим "webserver": состояние — тот же факт, что у host.extension,
         // никакого своего httpd тут нет и подниматься нечему.
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
         cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
@@ -1449,7 +1449,7 @@ mod tests {
         // ушла бы в "auto" и либо провалилась на Paths::of (платформа не
         // найдена), либо не выдала бы предупреждение «не отвечает», которое
         // выдаёт только настоящая проверка webserver-режима.
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
         cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
         let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1469,7 +1469,7 @@ mod tests {
     fn ensure_publication_is_a_dry_run_noop() {
         // --dry-run у serve: ensure_publication ничего не должна менять на
         // машине — ни писать файлы, ни поднимать httpd.
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         let ctx = publication_ctx(cfg, true);
         assert!(ensure_publication(&ctx).is_ok());
@@ -1482,11 +1482,11 @@ mod tests {
     /// каком устройстве машины.
     #[test]
     fn leaving_stops_our_own_httpd_and_never_someone_elses() {
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
         assert_eq!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "чужой веб-сервер не наш — не трогаем");
 
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         assert_ne!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "свой httpd выход обязан погасить");
     }
@@ -1870,9 +1870,9 @@ mod tests {
     #[test]
     fn without_a_parameters_file_nothing_is_derived() {
         let kit = TomlKit::new("nofile");
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty());
-        assert_eq!(cfg, Cfg::default());
+        assert_eq!(cfg, crate::cfg::filled_for_test());
         assert!(!kit.state_path(crate::cfg::FILE).exists());
     }
 

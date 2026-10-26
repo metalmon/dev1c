@@ -1144,7 +1144,7 @@ mod tests {
     fn the_report_hides_tunnel_fields_in_local_mode() {
         // Умолчание образца (`192.168.1.10:3393`) не должно попадать в отчёт
         // локального рабочего места: этого адреса никто не задавал.
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.mode = "local".into();
         let local = cfg_for_report(&cfg);
         assert!(!local.contains("192.168.1.10"), "{local}");
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     fn test_ctx(mode: &str) -> Ctx {
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.mode = mode.to_string();
         // Адрес среды задан полем и ведёт на закрытый локально порт: провал
         // мгновенный, как в ops_host::gitea_probe_on_a_closed_port_is_down.
@@ -1435,7 +1435,7 @@ mod tests {
     /// должны назвать именно вычисленный порт/адрес, а не хранимый.
     #[test]
     fn web_and_publication_facts_use_the_computed_address_in_auto_mode() {
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = "127.0.0.1:3".into();
         cfg.host.publication = "auto".into();
         cfg.host.http_port = Some(18080);
@@ -1548,7 +1548,7 @@ mod tests {
     #[test]
     fn a_webserver_publication_leaves_the_descriptor_unjudged() {
         let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-webserver-kit-{}", std::process::id())));
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
         assert!(matches!(base_descriptor(&cfg, &kit), Descriptor::NotOurs), "{:?}", base_descriptor(&cfg, &kit));
         // Без режима веб-сервера тот же каталог даёт другой исход — значит

@@ -257,7 +257,7 @@ pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
 /// прежних параметрах молча, о них человеку уже сказали при запуске.
 fn reread_and_recheck(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
-    if let Ok(cfg) = Cfg::load(&ui.kit) {
+    if let Ok(cfg) = Cfg::load_unchecked(&ui.kit) {
         // Не только в окно, но и в живой сеанс — иначе агент остался бы на
         // старой базе (`gui::adopt_cfg`).
         super::adopt_cfg(ui, cfg);

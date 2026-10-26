@@ -2760,7 +2760,10 @@ fn exit_code_for<T, E>(tray: &Result<T, E>) -> Option<i32> {
 }
 
 pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
-    let cfg = Cfg::load(&kit)?;
+    // Окно открывается и на незаполненном файле: в нём человек поля и
+    // заполняет. Чего не хватает — скажет набор фактов своими словами, а не
+    // отказ при запуске (решение владельца 26.10).
+    let cfg = Cfg::load_unchecked(&kit)?;
     // Тот же единственный владелец рабочего места, что у `connect`/`serve` —
     // см. `crate::single_instance`. Вторая копия окна (двойной щелчок или
     // автозапуск при живом трее) на Windows тихо поднимает окно первой и
@@ -2951,7 +2954,10 @@ impl Ui {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tx, _rx) = futures::channel::mpsc::unbounded();
-        let (kit, cfg) = (Kit::at(dir), Cfg::default());
+        // Заполненный набор, а не умолчания: с 26.10 умолчания пусты («не
+        // задано» программа не выдумывает), а окну в тестах нужны рабочие
+        // параметры — иначе `save_host` отказывает на незаполненном поле.
+        let (kit, cfg) = (Kit::at(dir), crate::cfg::filled_for_test());
         // Замок считается, как в `launch`, а не заводится пустым: в каталоге
         // теста нет ни файла параметров, ни разложенных инструментов, и
         // фикстура с `None` обещала бы «включать можно» там, где нельзя — на
@@ -3020,7 +3026,7 @@ mod tests {
         Verdict, Running, Tab, TrayState, REDRAW_IDLE, SLOW_HIDDEN, SLOW_OPEN, STATUS_LINGER,
         Ui, Which, LOG_CAP, LOG_FILE, TRAY_PNG, VERDICT_READY,
     };
-    use crate::cfg::{self, Cfg, Host};
+    use crate::cfg::{self, Host};
     use crate::session::{self, State};
     use crate::verify;
     use common::check::Check;
@@ -4581,8 +4587,8 @@ mod tests {
         use crate::gui::gate::cold_gate;
         let v8 = std::path::Path::new("1cv8.exe");
         let tools = OpState::Done("vrunner 3.0.2".into());
-        let before = Cfg::default();
-        let mut after = Cfg::default();
+        let before = crate::cfg::filled_for_test();
+        let mut after = crate::cfg::filled_for_test();
         after.host.db_user = String::new();
         let gate_before = cold_gate(&before, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);
         let gate_after = cold_gate(&after, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);

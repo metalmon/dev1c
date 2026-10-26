@@ -621,7 +621,7 @@ mod tests {
         assert!(f.iter().any(|a| a == "http.extraHeader=Authorization: Basic ZGV2MjpkZXYy"));
         assert!(f.iter().any(|a| a == "credential.helper="));
         assert!(f.iter().any(|a| a == "gc.auto=0"), "no auto-gc from the bridge: a 90k-file commit must not repack");
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.gitea = "http://192.168.1.10:3391".into();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
@@ -812,7 +812,7 @@ mod tests {
     /// называет, а `pull`/`push`/`init` отказывают текстом про поле.
     #[test]
     fn without_a_gitea_address_no_origin_is_made_up() {
-        let cfg = Cfg::default();
+        let cfg = crate::cfg::filled_for_test();
         assert_eq!(cfg.gitea_url(), None);
         let (_t, mut p) = fixture();
         p.remote = Project::from_cfg(&cfg, Path::new("/tools")).remote;
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn the_remote_follows_the_explicit_gitea() {
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.gitea = "http://localhost:3000".into();
         assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://localhost:3000/dev1c/Buh.git");
         let (_t, mut p) = fixture();

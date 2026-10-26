@@ -642,7 +642,7 @@ mod tests {
     use super::*;
 
     fn cfg_for_test() -> Cfg {
-        let mut c = Cfg::default();
+        let mut c = crate::cfg::filled_for_test();
         c.host.base_path = "C:\\Bases\\УНФ".into();
         c.host.db_user = "Администратор".into();
         c.host.db_password = "секрет".into();

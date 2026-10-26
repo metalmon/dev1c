@@ -269,7 +269,7 @@ mod tests {
     }
 
     fn cfg_with(platform: &str, base: &str) -> Cfg {
-        let mut c = Cfg::default();
+        let mut c = crate::cfg::filled_for_test();
         c.host.platform = platform.into();
         c.host.base_path = base.into();
         c

@@ -133,29 +133,29 @@ mod tests {
 
     #[test]
     fn everything_in_place_opens_the_switch() {
-        assert_eq!(open(&Cfg::default()), None);
-        let mut local = Cfg::default();
+        assert_eq!(open(&crate::cfg::filled_for_test()), None);
+        let mut local = crate::cfg::filled_for_test();
         local.host.mode = "local".into();
         assert_eq!(open(&local), None);
     }
 
     #[test]
     fn an_expired_deadline_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Expired).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Expired).unwrap();
         assert!(why.contains("срок действия") && why.contains(&licence::until_text()), "{why}");
         // Предупреждение заранее — не замок: работа идёт.
-        assert_eq!(cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Soon { days: 3 }), None);
+        assert_eq!(cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Soon { days: 3 }), None);
     }
 
     #[test]
     fn a_missing_params_file_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
         assert!(why.contains("параметров"), "{why}");
     }
 
     #[test]
     fn an_empty_db_user_holds_the_switch() {
-        let mut c = Cfg::default();
+        let mut c = crate::cfg::filled_for_test();
         c.host.db_user = "   ".into();
         let why = open(&c).unwrap();
         assert!(why.contains("пользователь базы"), "{why}");
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn a_file_base_without_its_directory_holds_the_switch() {
-        let c = Cfg::default();
+        let c = crate::cfg::filled_for_test();
         let why = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
         assert!(why.contains(&c.host.base_path), "{why}");
     }
@@ -172,7 +172,7 @@ mod tests {
     fn a_server_base_does_not_hold_the_switch() {
         // `сервер\база` на диске не лежит — его существование не проверяется
         // вовсе, иначе переключатель был бы заперт навсегда.
-        let mut c = Cfg::default();
+        let mut c = crate::cfg::filled_for_test();
         c.host.base_path = "srv-1c\\buh".into();
         assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
         // Сетевой путь — предупреждение проверки, но не замок.
@@ -183,7 +183,7 @@ mod tests {
     /// Пустое поле объясняется словами, а не пустой строкой в середине фразы.
     #[test]
     fn an_empty_base_says_so_instead_of_naming_an_empty_directory() {
-        let mut c = Cfg::default();
+        let mut c = crate::cfg::filled_for_test();
         c.host.base_path = "  ".into();
         assert_eq!(open(&c).as_deref(), Some("не указана база"));
     }
@@ -205,17 +205,17 @@ mod tests {
 
     #[test]
     fn a_missing_platform_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), Err("платформа 1С не найдена"), true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Err("платформа 1С не найдена"), true, &licence::State::Valid).unwrap();
         assert!(why.contains("платформа"), "{why}");
         // Причина приходит из лестницы как есть: невыполнимый пин запирает
         // переключатель своими словами, а не общим «не найдена».
-        let pin = cold_gate(&Cfg::default(), true, true, &done(), Err("версия 8.2.19 (поле platform в 1c-connect.toml) на машине не установлена; установлено: 8.3.27.1508"), true, &licence::State::Valid).unwrap();
+        let pin = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Err("версия 8.2.19 (поле platform в 1c-connect.toml) на машине не установлена; установлено: 8.3.27.1508"), true, &licence::State::Valid).unwrap();
         assert!(pin.contains("8.2.19") && pin.contains("не установлена"), "{pin}");
     }
 
     #[test]
     fn a_kit_without_mcp_holds_the_switch() {
-        let why = cold_gate(&Cfg::default(), true, true, &done(), Ok(Path::new("1cv8.exe")), false, &licence::State::Valid).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), false, &licence::State::Valid).unwrap();
         assert!(why.contains("mcp-1c"), "{why}");
     }
 
@@ -227,7 +227,7 @@ mod tests {
         // а не на перечне известных исходов: это его работа, а не догадка о
         // том, какие состояния бывают.
         for st in [OpState::Missing, OpState::Drifted { from: "3.0.1".into(), to: "3.0.2".into() }, OpState::Blocked("нет vrunner/".into())] {
-            let why = cold_gate(&Cfg::default(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+            let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
             assert!(why.contains("инструмент") && why.contains("комплект"), "{st:?}: {why}");
         }
     }
@@ -242,11 +242,11 @@ mod tests {
             (|c: &mut Cfg| c.host.workstation = String::new(), "рабочего места"),
         ];
         for (field, mark) in cases {
-            let mut tunnel = Cfg::default();
+            let mut tunnel = crate::cfg::filled_for_test();
             field(&mut tunnel);
             let why = open(&tunnel).unwrap_or_else(|| panic!("туннель без «{mark}» обязан запереть переключатель"));
             assert!(why.contains(mark), "{why}");
-            let mut local = Cfg::default();
+            let mut local = crate::cfg::filled_for_test();
             local.host.mode = "local".into();
             field(&mut local);
             assert_eq!(open(&local), None, "в локальном режиме поля «{mark}» в окне нет");

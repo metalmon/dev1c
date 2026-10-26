@@ -411,10 +411,10 @@ mod tests {
     /// `set` ни звал параллельный поток.
     #[test]
     fn live_cfg_never_hands_out_a_mix_of_two_configurations() {
-        let mut a = Cfg::default();
+        let mut a = crate::cfg::filled_for_test();
         a.host.base_path = "C:\\Bases\\A".into();
         a.host.db_user = "UserA".into();
-        let mut b = Cfg::default();
+        let mut b = crate::cfg::filled_for_test();
         b.host.base_path = "C:\\Bases\\B".into();
         b.host.db_user = "UserB".into();
         let live = Live::new(a.clone());
@@ -443,7 +443,7 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         drop(l);
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = format!("127.0.0.1:{port}");
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -472,7 +472,7 @@ mod tests {
         // Живой: на том конце слушает немой сокет — рукопожатие не кончается
         // ни успехом, ни отказом, пока слушатель жив.
         let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
         let mut live = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
         assert!(!live.finished(), "сеанс только что заведён и никуда не ушёл");
@@ -485,7 +485,7 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         drop(l);
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = format!("127.0.0.1:{port}");
         let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
         let ended = (0..200).any(|_| {

@@ -1135,7 +1135,7 @@ mod tests {
     /// git-репозиторий — хватает для путей, где `project_status` обязан
     /// просто ответить ошибкой быстро, без настоящего git).
     fn test_cfg(allowed: &[&str]) -> Cfg {
-        let mut cfg = Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.tools = allowed.iter().map(|s| s.to_string()).collect();
         cfg.host.project = std::env::temp_dir().to_string_lossy().into_owned();
         cfg
@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn connection_env_is_passed_verbatim() {
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.base_path = "C:\\Bases\\Бух".into();
         cfg.host.db_password = "па\"роль".into();
         cfg.host.project = "C:\\proj\\Бух".into();
@@ -1258,7 +1258,7 @@ mod tests {
 
     #[test]
     fn connection_args_carry_the_base_and_its_user() {
-        let mut cfg = crate::cfg::Cfg::default();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.base_path = "C:\\Bases\\Бух".into();
         cfg.host.db_user = "mcp".into();
         cfg.host.db_password = "p w".into();

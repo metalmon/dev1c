@@ -151,23 +151,47 @@ where
 impl Default for Host {
     fn default() -> Self {
         Self {
-            server: "192.168.1.10:3393".into(),
+            // Пусто — значит не задано, и программа этого не выдумывает.
+            // Выдуманные умолчания («192.168.1.10:3393», «C:\Bases\Buh»)
+            // человек на стенде правил как чужие данные вместо того, чтобы
+            // заполнять пустые поля; окно показывает на их месте те же строки
+            // серым (`panel::field`), а чего не хватает — говорит набор фактов
+            // (решение владельца 26.10).
+            server: String::new(),
             gitea: String::new(),
-            password: "dev1".into(),
-            workstation: "dev1".into(),
-            base_path: "C:\\Bases\\Buh".into(),
+            password: String::new(),
+            workstation: String::new(),
+            base_path: String::new(),
             platform: String::new(),
-            db_user: "Администратор".into(),
+            db_user: String::new(),
             db_password: String::new(),
-            base_url: "http://localhost/Buh/hs/mcp-1c".into(),
+            base_url: String::new(),
             dump: String::new(),
-            project: "C:\\proj\\Buh".into(),
+            project: String::new(),
             tools: DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect(),
             mode: "tunnel".into(),
             publication: "auto".into(),
             http_port: None,
         }
     }
+}
+
+/// Заполненный набор параметров для тестов: то, что раньше стояло в
+/// образце, а теперь живёт подсказками полей окна. Умолчания с 26.10 пусты
+/// («не задано» программа не выдумывает), поэтому всему, чему для работы
+/// нужны настоящие значения — проверке заполненности, холодному замку,
+/// сохранению, мосту, — нужен именно такой набор, а не `Cfg::default()`.
+#[cfg(test)]
+pub fn filled_for_test() -> Cfg {
+    let mut c = Cfg::default();
+    c.host.server = "192.168.1.10:3393".into();
+    c.host.password = "dev1".into();
+    c.host.workstation = "dev1".into();
+    c.host.base_path = "C:\\Bases\\Buh".into();
+    c.host.db_user = "Администратор".into();
+    c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
+    c.host.project = "C:\\proj\\Buh".into();
+    c
 }
 
 impl Default for Cfg {
@@ -195,6 +219,27 @@ impl Cfg {
         let cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// То же, но БЕЗ проверки заполненности (`validate`) — для окна.
+    ///
+    /// Окно обязано открыться на незаполненном файле: в нём человек поля и
+    /// заполняет. Пока `load` валидировал всё и для окна тоже, комплект
+    /// приходилось отдавать с выдуманными значениями («192.168.1.10:3393»,
+    /// «C:\Bases\Buh»), иначе программа не стартовала вовсе — и человек
+    /// правил чужие выдумки вместо пустых полей с подсказками (решение
+    /// владельца 26.10).
+    ///
+    /// Сломанный toml (не разбирается) остаётся отказом и здесь: это не «не
+    /// заполнено», а «не прочитать». Чего не хватает в разобранном файле —
+    /// говорит набор фактов, у него на это есть свои слова и свои советы.
+    pub fn load_unchecked(kit: &Kit) -> Result<Cfg> {
+        let p = kit.state_path(crate::cfg::FILE);
+        if !p.exists() {
+            return Ok(Cfg::default());
+        }
+        let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
+        toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))
     }
 
     pub fn number(&self) -> Option<u16> {
@@ -429,6 +474,31 @@ mod tests {
         toml::from_str(EXAMPLE).unwrap()
     }
 
+    fn filled() -> Cfg {
+        crate::cfg::filled_for_test()
+    }
+
+    fn _unused_filled() -> Cfg {
+        let mut c = sample();
+        c.host.server = "192.168.1.10:3393".into();
+        c.host.password = "dev1".into();
+        c.host.workstation = "dev1".into();
+        c.host.base_path = "C:\\Bases\\Buh".into();
+        c.host.db_user = "Администратор".into();
+        c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
+        c.host.project = "C:\\proj\\Buh".into();
+        c
+    }
+
+    /// Незаполненный образец проверку НЕ проходит — и это правильно: окно на
+    /// нём открывается (`Cfg::load_unchecked`), а разовые команды требуют
+    /// заполненного файла, как и раньше.
+    #[test]
+    fn the_empty_sample_is_not_yet_a_valid_config() {
+        assert!(sample().validate().is_err());
+        filled().validate().unwrap();
+    }
+
     #[test]
     fn example_parses_and_equals_defaults() {
         assert_eq!(sample(), Cfg::default());
@@ -440,9 +510,12 @@ mod tests {
         assert_eq!(without.host.mode, "tunnel");
         let local: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "mode = \"local\"")).unwrap();
         assert_eq!(local.host.mode, "local");
-        local.validate().unwrap();
         assert!(local.render().contains("mode = \"local\""));
-        let mut odd = Cfg::default();
+        // Проверку заполненности гоняем на заполненном: образец пуст нарочно.
+        let mut filled_local = filled();
+        filled_local.host.mode = "local".into();
+        filled_local.validate().unwrap();
+        let mut odd = crate::cfg::filled_for_test();
         odd.host.mode = "remote".into();
         assert!(odd.validate().unwrap_err().to_string().contains("mode"));
     }
@@ -463,7 +536,7 @@ mod tests {
         // "auto" действующий адрес (Cfg::base_url()) считается от http_port()
         // и у него другой порт, чем у хранимого поля (там по умолчанию 80) —
         // веб-канал туннеля форвардил не туда.
-        let mut c = sample();
+        let mut c = filled();
         assert_eq!(c.host.publication, "auto");
         assert_eq!(c.web_port(), 8081); // http_port() для dev1, не 80 из host.base_url
         c.host.publication = "webserver".into();
@@ -476,11 +549,14 @@ mod tests {
 
     #[test]
     fn auto_computes_the_base_url() {
-        let mut c = sample();
+        let mut c = filled();
         assert_eq!(c.host.publication, "auto");
         c.host.workstation = "dev2".into();
         assert_eq!(c.base_url(), "http://localhost:8082/hs/mcp-1c");
-        assert_eq!(c.host.base_url, Host::default().base_url);
+        // Хранимое поле вычисленный адрес не трогает (а умолчание его и не
+        // содержит: образец пуст).
+        assert_eq!(c.host.base_url, "http://localhost/Buh/hs/mcp-1c");
+        assert!(Host::default().base_url.is_empty());
     }
 
     #[test]
@@ -499,7 +575,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_an_unknown_publication() {
-        let mut c = sample();
+        let mut c = filled();
         c.host.publication = "iis".into();
         assert!(c.validate().unwrap_err().to_string().contains("publication"));
     }
@@ -517,7 +593,7 @@ mod tests {
     /// Что написано в поле, то и адрес среды: счёта от порта SSH тут нет.
     #[test]
     fn a_written_gitea_is_returned_as_is() {
-        let mut c = sample();
+        let mut c = filled();
         c.host.gitea = "http://localhost:3000".into();
         assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
         c.host.server = "10.0.0.5:4403".into();
@@ -538,8 +614,8 @@ mod tests {
         let without: Cfg = toml::from_str(&EXAMPLE.replace("gitea = \"\"", "")).unwrap();
         assert!(without.host.gitea.is_empty());
         assert_eq!(without.gitea_url(), None);
-        assert_eq!(sample().gitea_url(), None);
-        let mut c = sample();
+        assert_eq!(filled().gitea_url(), None);
+        let mut c = filled();
         c.host.gitea = "   ".into();
         assert_eq!(c.gitea_url(), None);
         assert!(c.validate().is_ok());
@@ -586,7 +662,7 @@ mod tests {
 
     #[test]
     fn project_must_be_a_full_path_without_quotes_or_percent() {
-        let mut c = sample();
+        let mut c = filled();
         c.host.project = "proj".into();
         assert!(c.validate().unwrap_err().to_string().contains("project"));
         c.host.project = "C:\\proj\\\"x\"".into();
@@ -604,9 +680,12 @@ mod tests {
         assert!(c.host.tools.contains(&"cf_load".to_string()) && !c.host.tools.contains(&"xunit".to_string()));
     }
 
+    /// Пароль рабочего места больше НЕ подставляется умолчанием: в пилоте он
+    /// равен логину, но выдумывать его за человека нельзя — поле пустое, а в
+    /// окне на его месте подсказка (решение владельца 26.10).
     #[test]
-    fn password_is_the_workstation_login_by_default() {
-        assert_eq!(Host::default().password, "dev1");
+    fn the_workstation_password_is_not_guessed_for_the_person() {
+        assert!(Host::default().password.is_empty());
     }
 
     /// Серверы MCP у pi и у Zed — одно и то же, иначе агенты разойдутся в

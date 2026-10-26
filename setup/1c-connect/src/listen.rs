@@ -218,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn both_listeners_come_up_and_a_connection_reaches_the_bridge() {
-        let cfg = crate::cfg::Cfg::default();
+        let cfg = crate::cfg::filled_for_test();
         let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
         let (bridge_log, bridge_seen) = recording_sink();
@@ -293,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_busy_port_fails_the_whole_session_and_frees_the_first_listener() {
-        let cfg = crate::cfg::Cfg::default();
+        let cfg = crate::cfg::filled_for_test();
         let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
@@ -340,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_closes_accepted_connections() {
-        let cfg = crate::cfg::Cfg::default();
+        let cfg = crate::cfg::filled_for_test();
         let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
@@ -378,7 +378,7 @@ mod tests {
     /// человеку пришлось бы руками поднимать оба порта заново.
     #[tokio::test]
     async fn a_broken_kit_answers_every_request_with_a_refusal_and_keeps_the_connection_open() {
-        let cfg = crate::cfg::Cfg::default();
+        let cfg = crate::cfg::filled_for_test();
         let (mcp_port, vrunner_port) = ephemeral_ports();
         let (kit, dir) = fake_kit();
         let serve_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };

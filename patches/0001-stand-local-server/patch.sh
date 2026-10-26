@@ -94,8 +94,12 @@ for u in $users; do
     else
         echo "$u: дописываю server = \"$ADDR\" (копия: $toml.before-$ID)"
         as_user "$u" "cp -p '$toml' '$toml.before-$ID' && sed -i '/^mode = /a server = \"$ADDR\"' '$toml'"
-        as_user "$u" "grep -q '^$ID\$' '$dir/patches.applied' 2>/dev/null || echo '$ID' >> '$dir/patches.applied'"
     fi
+
+    # Отметка — про то, что заплата приложена, а не про то, что ей нашлась
+    # работа: поле могли дописать и руками до неё, и тогда молчаливый пропуск
+    # оставил бы стенд без записи о том, что здесь уже побывали.
+    as_user "$u" "grep -q '^$ID\$' '$dir/patches.applied' 2>/dev/null || echo '$ID' >> '$dir/patches.applied'"
 
     echo "$u: установка расширения (конфигуратор, минута-две)"
     # `\$HOME` оставлено нераскрытым нарочно: раскрыть его должен шелл рабочего

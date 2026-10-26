@@ -243,6 +243,12 @@ Building needs about 4 GB of RAM and 10 GB of disk; the build context is 2.4 MB
 and everything else is downloaded. No GPU required — the CUDA runtime is only
 unpacked as files.
 
+Formatting and lints are gated, not advisory: before the tests CI runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, on Windows and on Linux both, so the `#[cfg(windows)]` and `#[cfg(unix)]` halves are each looked at. The formatting half also runs locally before every push, in a second, once the repository's own hook is enabled:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## What is inside
 
 **Workstation**

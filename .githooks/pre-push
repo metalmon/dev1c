@@ -1,0 +1,33 @@
+#!/bin/sh
+# Формат Rust в ЭТОМ репозитории — перед пушем и за секунды:
+# `cargo fmt --all --check` не собирает код, а только разбирает его, так что
+# гейт не заставляет ждать.
+#
+# Не путать с `config/git-hooks/pre-push`: тот живёт в образе стенда, ставится
+# системным `core.hooksPath` на `/opt/git-hooks` и запирает модули 1С, которые
+# не разбираются, перед Gitea. Он про чужой код внутри стенда, этот — про наш.
+#
+# Clippy сюда нарочно НЕ взят: ему нужна сборка, и на остывшем кэше это
+# минуты на каждый пуш. Его гоняет CI (build.yml, шаг «Clippy») — и на
+# Windows, и на Linux, чтобы просмотренными оказались оба `cfg`-ветвления.
+#
+# Хук живёт в репозитории, а не в `.git/hooks`, и включается один раз:
+#     git config core.hooksPath .githooks
+set -e
+
+cd "$(git rev-parse --show-toplevel)/setup"
+
+# Нет cargo — пропускаем, как это делает и хук образа в спорных случаях: без
+# него на машине всё равно нечего собирать, и запирать из-за этого правку в
+# документах незачем. Остальное поймает шаг «Lint» в CI.
+command -v cargo >/dev/null 2>&1 || exit 0
+
+if ! out=$(cargo fmt --all --check 2>&1); then
+	echo "pre-push: формат разошёлся с rustfmt.toml." >&2
+	echo >&2
+	printf '%s\n' "$out" >&2
+	echo >&2
+	echo "Поправить:         cargo fmt --all --manifest-path setup/Cargo.toml" >&2
+	echo "Протолкнуть как есть: git push --no-verify" >&2
+	exit 1
+fi

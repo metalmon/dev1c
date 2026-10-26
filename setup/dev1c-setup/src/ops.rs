@@ -296,6 +296,19 @@ impl Op<Ctx> for Image {
 /// а эти два вносятся из архива комплекта (операция payload ниже).
 const VOLUMES: [&str; 5] = ["home", "gitea", "models", "platform", "demo"];
 
+/// Тома, нужные ПРИ ЭТОЙ форме обслуживания модели. `models` держит файл
+/// модели для контейнерного сервера; при удалённой модели файла нет и не
+/// будет, а пустой том всё равно создавался — и потом попадался человеку в
+/// `clean` среди того, что надо удалить. При `host` модель лежит файлом на
+/// машине, в том её тоже никто не кладёт.
+fn volumes_for(cfg: &Cfg) -> Vec<&'static str> {
+    VOLUMES
+        .iter()
+        .copied()
+        .filter(|v| *v != "models" || matches!(cfg.form(), crate::cfg::Form::Docker))
+        .collect()
+}
+
 struct Volumes;
 impl Op<Ctx> for Volumes {
     fn id(&self) -> &'static str {
@@ -305,25 +318,26 @@ impl Op<Ctx> for Volumes {
         "Тома данных"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        let missing: Vec<String> = VOLUMES
+        let want = volumes_for(&ctx.cfg);
+        let missing: Vec<String> = want
             .iter()
             .map(|s| ctx.cfg.volume(s))
             .filter(|v| !docker::volume_exists(ctx, v))
             .collect();
         if missing.is_empty() {
-            OpState::Done(VOLUMES.join(", "))
+            OpState::Done(want.join(", "))
         } else {
             OpState::Missing
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        VOLUMES
+        volumes_for(&ctx.cfg)
             .iter()
             .map(|s| Action::new(format!("{} volume create {}", ctx.engine(), ctx.cfg.volume(s))))
             .collect()
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        for s in VOLUMES {
+        for s in volumes_for(&ctx.cfg) {
             let v = ctx.cfg.volume(s);
             // В режиме показа машину не спрашиваем: план описывает установку
             // на чистый сервер, а не на ту машину, где его печатают. Иначе
@@ -893,6 +907,24 @@ mod tests {
     /// платформу 1С с демо-базой. Человек соглашался на «репозитории,
     /// проекты, настройки, модель» и терял платформу, которая приезжает
     /// только с комплектом. Пусть каждый том будет назван.
+    /// Том под файл модели нужен только контейнерной форме. При удалённой
+    /// модели файла нет и не будет, а пустой том создавался — и попадался
+    /// человеку в `clean` среди того, что надо удалить (26.10.2026).
+    #[test]
+    fn the_models_volume_belongs_to_the_container_form_only() {
+        let mut c = Cfg::default();
+        c.model.serve = "docker".into();
+        assert!(volumes_for(&c).contains(&"models"), "контейнерной форме том модели нужен");
+        c.model.serve = "remote".into();
+        assert!(!volumes_for(&c).contains(&"models"), "при удалённой модели том не нужен");
+        c.model.serve = "host".into();
+        assert!(!volumes_for(&c).contains(&"models"), "при модели файлом на машине том не нужен");
+        // Остальные четыре нужны всегда — иначе стенду негде жить.
+        for v in ["home", "gitea", "platform", "demo"] {
+            assert!(volumes_for(&c).contains(&v), "том {v} нужен всегда");
+        }
+    }
+
     #[test]
     fn the_clean_plan_names_every_volume_it_is_about_to_remove() {
         let ctx = Ctx {

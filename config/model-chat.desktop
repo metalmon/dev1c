@@ -7,7 +7,7 @@ Comment=Поговорить с моделью стенда без агента 
 # (LLAMA_API_URL / CUSTOM_API_URL), которые кладёт точка входа. Порт у каждой
 # установки свой, зашивать его сюда нельзя.
 Exec=/usr/local/bin/model-chat
-Icon=firefox-esr
+Icon=llama-cpp
 Terminal=false
-Categories=Network;Chat;Development;
+Categories=Network;Chat;
 Keywords=модель;чат;llama;llm;нейросеть;

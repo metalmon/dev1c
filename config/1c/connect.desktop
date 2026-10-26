@@ -1,0 +1,17 @@
+# Видимый ярлык и пункт меню для коннектора. Автозапуск у него свой
+# (connect-autostart.desktop, NoDisplay=true) — тот поднимает значок при входе
+# в сессию, а этот нужен, когда из значка вышли: без ярлыка поднять его заново
+# можно было только командой в терминале, про которую человек не знает.
+# Команда та же, что у автозапуска, — `1c-stand connect`, чтобы путь к
+# бинарнику оставался в одном месте.
+[Desktop Entry]
+Type=Application
+Name=Коннектор 1С
+GenericName=Значок в трее
+Comment=Поднять значок в трее заново, если из него вышли: проект в git, проверки, журнал
+Exec=/usr/local/bin/1c-stand connect
+Icon=applications-development
+Terminal=false
+Categories=Development;
+Keywords=коннектор;трей;git;проверки;1с;
+StartupNotify=false

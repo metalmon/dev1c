@@ -41,6 +41,27 @@ else
     say "FAIL onboarding: не все файлы на месте (/opt/onboarding или один из двух .desktop)"
     fail=1
 fi
+# Коннектор: три пункта запуска согласованы с тем, есть ли он в образе.
+# Автозапуск поднимает значок при входе в сессию, а ярлык и пункт меню нужны,
+# когда из значка вышли. Сборка без окна (CONNECT_OPTIONAL=1) убирает все три —
+# ярлык, который ничего не делает, хуже отсутствующего.
+if [ -f /opt/1c-connect.absent ]; then
+    if [ ! -e /usr/share/applications/1c-connect.desktop ] \
+        && [ ! -e /etc/skel/Desktop/1c-connect.desktop ] \
+        && [ ! -e /etc/xdg/autostart/zz-1c-connect.desktop ]; then
+        say "ok   коннектор: собран без окна, пунктов запуска нет — $(cat /opt/1c-connect.absent)"
+    else
+        say "FAIL коннектор: образ без окна, а пункты запуска остались — клик в пустоту"; fail=1
+    fi
+elif [ -x /opt/1c-connect/1c-connect ] \
+    && [ -f /usr/share/applications/1c-connect.desktop ] \
+    && [ -f /etc/skel/Desktop/1c-connect.desktop ] \
+    && [ -f /etc/xdg/autostart/zz-1c-connect.desktop ]; then
+    say "ok   коннектор: бинарник, ярлык, пункт меню и автозапуск на месте"
+else
+    say "FAIL коннектор: нет чего-то из четырёх — бинарник /opt/1c-connect/1c-connect, ярлык в /etc/skel/Desktop, пункт меню, автозапуск"
+    fail=1
+fi
 # Правила агента: добавка стенда дописана к общим (Dockerfile.1c, cat >>), и
 # версия платформы в ней — та, что правда стоит в образе. Строка «8.3.27»
 # пережила в них смену платформы и обещала агенту не то, что он найдёт

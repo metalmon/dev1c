@@ -229,6 +229,45 @@ seed
 ls "$HOME_DIR/Desktop"/*.desktop >/dev/null 2>&1 || fail "ярлыки в дом не вернулись"
 ok "ярлыки разложены из образа"
 
+echo "== Новый значок встаёт НИЖЕ старых =="
+
+# xfdesktop кладёт появившийся ярлык в первое свободное место сверху, и старые
+# значки переезжают. Онборд наводит стрелку по координатам из этого файла, а
+# пишется он не сразу — съехавший значок означает стрелку на соседа. Старые
+# записи обязаны остаться на своих строках, новые — уйти вниз.
+L="$HOME_DIR/.config/xfce4/desktop/icons.screen0.yaml"
+install -d -o "$U" -g "$U" "$(dirname "$L")"
+cat > "$L" <<YAML
+configs:
+- level: 0
+  icons:
+    "$HOME_DIR":
+      row: 0
+      col: 0
+    "$HOME_DIR/Desktop/gitea.desktop":
+      row: 2
+      col: 0
+    "$HOME_DIR/Desktop/1c-start.desktop":
+      row: 1
+      col: 0
+YAML
+chown "$U:$U" "$L"
+seed
+grep -q "\"$HOME_DIR/Desktop/gitea.desktop\":" "$L" || fail "запись Gitea пропала из раскладки"
+gitea_row=$(grep -A1 "\"$HOME_DIR/Desktop/gitea.desktop\":" "$L" | sed -n 's/.*row: *//p')
+[ "$gitea_row" = 2 ] || fail "Gitea переехала с 2-й строки на $gitea_row — старые значки двигать нельзя"
+chat_row=$(grep -A1 "\"$HOME_DIR/Desktop/model-chat.desktop\":" "$L" | sed -n 's/.*row: *//p')
+[ -n "$chat_row" ] || fail "нового значка нет в раскладке: $(cat "$L")"
+[ "$chat_row" -gt 2 ] || fail "«Чат с моделью» встал на строку $chat_row — выше занятых"
+ok "новые значки дописаны вниз ($chat_row), старые остались на месте"
+
+# Второй проход ничего не меняет: иначе каждая перезагрузка стенда плодила бы
+# дубли и уводила значки всё ниже.
+sum=$(md5sum "$L" | cut -d" " -f1)
+seed
+[ "$sum" = "$(md5sum "$L" | cut -d" " -f1)" ] || fail "повторный прогон переписал раскладку"
+ok "повторный прогон раскладку не трогает"
+
 echo "== Исчезнувшая переменная уходит из сессий =="
 
 # /etc/environment раньше только дописывался: переменная, исчезнувшая из

@@ -40,6 +40,40 @@ const MAX_ACCEPT_ERRORS: u32 = 20;
 /// Пауза между попытками `accept()` после ошибки — не даёт циклу сжечь ядро,
 /// пока ошибка не ушла сама (например, кто-то другой освободил дескрипторы).
 const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(200);
+/// Занять порт на петле ОБОИМИ семействами адресов.
+///
+/// Зачем не один `127.0.0.1`: пока мы занимали только IPv4, `::1` оставался
+/// свободен — и тот же логический порт спокойно забирал кто-то другой. На
+/// стенде 26.10 это был проброс SSH с машины человека: `sshd` сдаётся только
+/// если не смог НИ ОДНО семейство, занял `::1`, доложил «проброс поднят», и
+/// готовый текст «рабочее место занято» (`tunnel::workstation_busy_text`) не
+/// сработал ни разу. К какой базе попадёт агент, решал после этого порядок в
+/// резолвере: `localhost` — это и `127.0.0.1`, и `::1`.
+///
+/// IPv4 обязателен. IPv6 — по возможности: на машине без него `bind` отвечает
+/// отказом, и это не беда, занимать нечего. Но `AddrInUse` на `::1` — это
+/// ровно тот случай, ради которого всё и делается: порт занят кем-то ещё, и
+/// молчать нельзя.
+async fn bind_loopback(port: u16) -> anyhow::Result<(TcpListener, Option<TcpListener>)> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.map_err(|e| anyhow::anyhow!(busy_port_text(port, &e)))?;
+    let v6 = match TcpListener::bind((Ipv6Addr::LOCALHOST, port)).await {
+        Ok(l) => Some(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(anyhow::anyhow!(busy_port_text(port, &e))),
+        Err(_) => None,
+    };
+    Ok((v4, v6))
+}
+
+/// `accept()` того слушателя, которого может и не быть: без IPv6 ветка
+/// `select!` обязана просто никогда не срабатывать, а не падать.
+async fn accept_maybe(l: &Option<TcpListener>) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+    match l {
+        Some(l) => l.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 
 /// Поднимает слушатели mcp и vrunner на петле (веб-порт в локальном режиме
 /// не слушается) и раздаёт принятые соединения `serve`. Ошибка второго бинда
@@ -49,12 +83,13 @@ const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(200);
 /// `shutdown` общего сокета доходит до моста, что бы тот сейчас ни делал, и
 /// расходится по обеим его копиям дескриптора.
 pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut stop: watch::Receiver<bool>) -> anyhow::Result<()> {
-    let mcp_listener = TcpListener::bind(("127.0.0.1", ports.mcp)).await.map_err(|e| anyhow::anyhow!(busy_port_text(ports.mcp, &e)))?;
-    let vrunner_listener = match TcpListener::bind(("127.0.0.1", ports.vrunner)).await {
+    let (mcp_listener, mcp6) = bind_loopback(ports.mcp).await?;
+    let (vrunner_listener, vrunner6) = match bind_loopback(ports.vrunner).await {
         Ok(l) => l,
         Err(e) => {
             drop(mcp_listener);
-            return Err(anyhow::anyhow!(busy_port_text(ports.vrunner, &e)));
+            drop(mcp6);
+            return Err(e);
         }
     };
     on_event(Event::Ok(format!("MCP включены: порты {} и {}", ports.mcp, ports.vrunner)));
@@ -71,6 +106,12 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
                 handle_accept(r, &serve, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
             }
             r = vrunner_listener.accept() => {
+                handle_accept(r, &serve, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
+            }
+            r = accept_maybe(&mcp6) => {
+                handle_accept(r, &serve, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
+            }
+            r = accept_maybe(&vrunner6) => {
                 handle_accept(r, &serve, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
             }
             _ = stop.changed() => {
@@ -219,6 +260,36 @@ mod tests {
         assert!(task.await.unwrap().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Порт, занятый кем-то на `::1`, — занятый порт, даже если IPv4
+    /// свободен. Пока мы брали одно семейство, проброс SSH с другой машины
+    /// забирал второе, `sshd` докладывал успех, и человек не узнавал ничего:
+    /// оба коннектора горели зелёным, а к какой базе попадёт агент, решал
+    /// порядок в резолвере (находка владельца 26.10).
+    ///
+    /// На машине без IPv6 занимать нечего — там тест просто нечего проверять,
+    /// и это НЕ отказ: `bind_loopback` в таком случае работает на одном IPv4.
+    #[tokio::test]
+    async fn a_port_held_on_ipv6_only_is_still_busy() {
+        let Ok(held) = std::net::TcpListener::bind(("::1", 0)) else { return };
+        let port = held.local_addr().unwrap().port();
+        let e = bind_loopback(port).await.unwrap_err().to_string();
+        assert!(e.contains(&port.to_string()) && e.contains("занят"), "{e}");
+        drop(held);
+        let (v4, v6) = bind_loopback(port).await.expect("освободившийся порт берём сами");
+        assert_eq!(v4.local_addr().unwrap().port(), port);
+        assert!(v6.is_some(), "второе семейство тоже наше");
+    }
+
+    /// Отключённый IPv6 — не отказ: занимать нечего, работаем на IPv4. Падать
+    /// мы обязаны только на `AddrInUse`, то есть когда порт правда занят.
+    #[tokio::test]
+    async fn no_ipv6_on_the_machine_is_not_a_failure() {
+        let port = ephemeral_port();
+        let (v4, _v6) = bind_loopback(port).await.expect("IPv4 свободен — этого достаточно");
+        assert_eq!(v4.local_addr().unwrap().port(), port);
+    }
+
 
     #[tokio::test]
     async fn a_busy_port_fails_the_whole_session_and_frees_the_first_listener() {

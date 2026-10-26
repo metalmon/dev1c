@@ -811,9 +811,13 @@ fn add_installed_location(cfg_path: &Path, location: &Path) -> Result<(), String
     write_1cestart_cfg(cfg_path, &out)
 }
 
-/// Ключ подключения конфигуратора: /F для файловой базы, /S для сервер\база.
+/// Ключ подключения конфигуратора: `/F` для файловой базы, `/S` для
+/// клиент-серверной. Правило общее с дескриптором публикации
+/// (`cfg::is_server_base`) — прежде здесь жила его копия, и она считала
+/// клиент-серверным сетевой путь (`\\сервер\шара\база`): буквы диска в нём
+/// нет, а обратные слэши есть.
 pub fn ib_switch(base_path: &str) -> String {
-    if base_path.contains('\\') && !base_path.contains(':') {
+    if crate::cfg::is_server_base(base_path) {
         format!("/S{base_path}")
     } else {
         format!("/F{base_path}")

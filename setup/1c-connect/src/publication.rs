@@ -42,6 +42,23 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
+/// Строка подключения к базе внутри дескриптора: файловая — `File="путь"`,
+/// клиент-серверная — `Srvr="сервер";Ref="база"` (`cfg::is_server_base`).
+///
+/// Прежде писалась ТОЛЬКО файловая форма, и клиент-серверной базе доставался
+/// `File="сервер\база"`, которого платформа не открывает: человек заполнял
+/// поле, параметры его принимали (`validate` такую базу пропускает, а
+/// существование каталога для неё намеренно не проверяется), и публикация
+/// молча не работала (находка владельца 26.10).
+fn ib_connection(cfg: &Cfg) -> String {
+    let base = &cfg.host.base_path;
+    if crate::cfg::is_server_base(base) {
+        let (srvr, rf) = base.split_once('\\').unwrap_or((base.as_str(), ""));
+        return format!("Srvr=&quot;{}&quot;;Ref=&quot;{}&quot;;", xml_escape(srvr), xml_escape(rf));
+    }
+    format!("File=&quot;{}&quot;;", xml_escape(base))
+}
+
 /// Текст `default.vrd`: публикация в корень своего порта (`base="/"`, у
 /// каждого рабочего места свой порт — корень свободен), с паролем базы
 /// внутри. Этот текст никогда не печатается в журнал — только пишется в файл.
@@ -49,14 +66,14 @@ pub fn vrd(cfg: &Cfg) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <point xmlns=\"http://v8.1c.ru/8.2/virtual-resource-system\"\n\
-\t\tbase=\"/\" ib=\"File=&quot;{base}&quot;;Usr=&quot;{user}&quot;;Pwd=&quot;{password}&quot;;\"\n\
+\t\tbase=\"/\" ib=\"{ib}Usr=&quot;{user}&quot;;Pwd=&quot;{password}&quot;;\"\n\
 \t\tenable=\"true\">\n\
 \t<httpServices publishByDefault=\"true\" publishExtensionsByDefault=\"true\">\n\
 \t\t<service name=\"MCPService\" rootUrl=\"{root}\" enable=\"true\"\n\
 \t\t\t\treuseSessions=\"dontuse\" sessionMaxAge=\"1\" poolSize=\"1\" poolTimeout=\"1\"/>\n\
 \t</httpServices>\n\
 </point>\n",
-        base = xml_escape(&cfg.host.base_path),
+        ib = ib_connection(cfg),
         user = xml_escape(&cfg.host.db_user),
         password = xml_escape(&cfg.host.db_password),
         root = SERVICE_ROOT_URL,
@@ -647,6 +664,27 @@ mod tests {
         c.host.db_user = "Администратор".into();
         c.host.db_password = "секрет".into();
         c
+    }
+
+    /// Клиент-серверная база публикуется строкой `Srvr`/`Ref`, а не
+    /// `File`: `File="сервер\база"` платформа не открывает, и публикация
+    /// молча не работала (находка владельца 26.10). Файловая и сетевая —
+    /// как были.
+    #[test]
+    fn a_client_server_base_is_published_by_srvr_and_ref() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.base_path = r"srv-1c\unf".into();
+        let text = vrd(&c);
+        assert!(text.contains("Srvr=&quot;srv-1c&quot;;Ref=&quot;unf&quot;;"), "{text}");
+        assert!(!text.contains("File="), "{text}");
+
+        // Файловая — прежняя форма.
+        c.host.base_path = r"C:\Bases\Buh".into();
+        assert!(vrd(&c).contains(r"File=&quot;C:\Bases\Buh&quot;;"), "{}", vrd(&c));
+
+        // Сетевой путь — тоже файловая, хоть и без буквы диска.
+        c.host.base_path = r"\\nas\share\Buh".into();
+        assert!(vrd(&c).contains(r"File=&quot;\\nas\share\Buh&quot;;"), "{}", vrd(&c));
     }
 
     #[test]

@@ -401,9 +401,6 @@ fn fact_dot(c: &Check) -> Dot {
     }
 }
 
-/// Подсказка под каталогом проекта, когда раскладки ещё нет.
-pub const HINT_PROJECT: &str = "Параметры → Проект, затем «Установить»";
-
 /// Вкладка «Проект», пока `refresh_project` не ответил. Состояние строго
 /// временное — ответ приходит всегда, даже когда поток упал (`guarded`
 /// отдаёт `Ev::Project` с причиной), — поэтому здесь говорим, что
@@ -437,14 +434,23 @@ const PROJECT_EMPTY: &str = "Читаю состояние проекта…";
 /// когда его нет.
 pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String)> {
     let Some(v) = v else { return vec![(None, PROJECT_EMPTY.into(), String::new())] };
-    if !v.ok {
-        return vec![(Some(Dot::Busy), v.dir.clone(), v.why.clone()), (None, HINT_PROJECT.into(), String::new())];
-    }
     let Some(f) = v.facts.as_ref() else {
-        return vec![(Some(Dot::Busy), v.dir.clone(), v.why.clone())];
+        // Неразобранная раскладка — дело набора, а не вкладки: факт «проект»
+        // уже стоит выше, своими словами и СО СВОИМ советом. Карточка
+        // повторяла его чужим заголовком (каталогом, с которым всё в
+        // порядке), жёлтой точкой «подожди» там, где ждать нечего, и общим
+        // советом «Параметры → Проект», который при пустом адресе среды
+        // отправлял человека не на ту страницу (находка владельца 26.10).
+        // Молчим: сказать сверх набора нечего.
+        //
+        // Занятость — единственное исключение: мьютекс проекта держит наша
+        // же выгрузка, и в наборе этого нет.
+        return if v.busy { vec![(Some(Dot::Busy), "Проект занят".into(), v.why.clone())] } else { Vec::new() };
     };
-    // 1. Проект: где он, на какой ветке и в какой репозиторий едет.
-    let mut rows = vec![(Some(Dot::Up), v.dir.clone(), format!("ветка {} · {}", f.branch, f.repo))];
+    // 1. Репозиторий — куда поедет отправка. Каталог и ветку здесь не
+    //    повторяем: их уже сказал факт «проект» из набора, и две карточки
+    //    подряд с одним и тем же текстом человек читает как ошибку.
+    let mut rows = vec![(Some(Dot::Up), "репозиторий".into(), f.repo.clone())];
     // Ветка в параметрах разошлась с тем, где человек стоит, — это и есть
     // единственный повод показать обе: отправка пойдёт не туда, куда он
     // смотрит.
@@ -1529,7 +1535,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint, shown_fields,
-        switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES, HINT_PROJECT,
+        switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::verify;
@@ -1969,7 +1975,7 @@ mod tests {
     }
 
     fn view(f: Option<crate::project::Facts>) -> ProjectView {
-        ProjectView { dir: "C:\\proj\\Buh".into(), branch: "dev1".into(), facts: f, ok: true, why: String::new() }
+        ProjectView { dir: "C:\\proj\\Buh".into(), branch: "dev1".into(), facts: f, ok: true, why: String::new(), busy: false }
     }
 
     #[test]
@@ -1978,11 +1984,15 @@ mod tests {
         assert_eq!(none.len(), 1);
         assert_eq!(none[0], (None, "Читаю состояние проекта…".into(), String::new()), "пока не ответили — говорим о своём состоянии, а не читаем лекцию");
 
+        // Раскладки нет — вкладка МОЛЧИТ: причину и совет уже несёт факт
+        // «проект» из набора, и повторять его своим заголовком (каталогом,
+        // с которым всё в порядке) и своим советом нельзя.
         let bad = ProjectView { ok: false, why: "каталог проекта ещё не разложен".into(), ..view(None) };
-        let rows = project_rows(Some(&bad));
-        assert_eq!(rows[0], (Some(Dot::Busy), "C:\\proj\\Buh".into(), "каталог проекта ещё не разложен".into()));
-        // Подсказка — без кружка: вид рисует её мелким текстом.
-        assert_eq!(rows[1], (None, HINT_PROJECT.into(), String::new()));
+        assert!(project_rows(Some(&bad)).is_empty(), "{:?}", project_rows(Some(&bad)));
+
+        // Занятость — единственное, чего в наборе нет: её говорим.
+        let busy = ProjectView { ok: false, busy: true, why: "идёт выгрузка".into(), ..view(None) };
+        assert_eq!(project_rows(Some(&busy)), vec![(Some(Dot::Busy), "Проект занят".into(), "идёт выгрузка".into())]);
     }
 
     /// Чистый проект: две карточки, и ни одной лишней. Ни про совпадающие
@@ -1991,7 +2001,10 @@ mod tests {
     fn a_clean_project_is_two_cards() {
         let rows = project_rows(Some(&view(Some(facts("0", 0)))));
         assert_eq!(rows.len(), 3, "{rows:?}");
-        assert_eq!(rows[0], (Some(Dot::Up), "C:\\proj\\Buh".into(), "ветка dev1 · dev1c/Buh".into()));
+        // Каталог и ветку здесь не повторяем — их сказал факт «проект» из
+        // набора; вкладка добавляет только то, чего в наборе нет.
+        assert_eq!(rows[0], (Some(Dot::Up), "репозиторий".into(), "dev1c/Buh".into()));
+        assert!(!rows.iter().any(|r| r.1.contains("proj") || r.2.contains("ветка dev1")), "повтор каталога или ветки: {rows:?}");
         assert_eq!(rows[1], (Some(Dot::Up), "Всё отправлено".into(), String::new()));
         assert_eq!(rows[2], (Some(Dot::Off), "Последний коммит".into(), "a1b2c3 выгрузка (2 часа назад)".into()));
     }
@@ -2044,11 +2057,6 @@ mod tests {
         let fresh = crate::project::Facts { last: String::new(), ..facts("все", 0) };
         let rows = project_rows(Some(&view(Some(fresh))));
         assert!(!rows.iter().any(|r| r.1.contains("Последний")), "{rows:?}");
-    }
-
-    #[test]
-    fn the_hint_no_longer_points_at_a_tab_that_is_gone() {
-        assert!(!HINT_PROJECT.contains("Расширение"), "{HINT_PROJECT}");
     }
 
     #[test]

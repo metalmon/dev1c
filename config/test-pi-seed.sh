@@ -249,14 +249,48 @@ row_of() { grep -A1 "\"$HOME_DIR/Desktop/$1\":" "$F" | sed -n 's/.*row: *//p'; }
 [ "$(stat -c %U "$F")" = "$U" ] || fail "раскладка принадлежит $(stat -c %U "$F"), а не $U — значит писал root"
 ok "порядок задан образом: 1С, Gitea, Zed, чат, коннектор; файл принадлежит $U"
 
+echo "== Раскладку из одних наших значков выравниваем по образу =="
+
+# Дома живут в томе и переживают смену образа. Раскладка, где НЕТ ни одного
+# значка, положенного человеком, написана не им, а xfdesktop — порядок в ней
+# случаен, и стенд, поднятый до появления ярлыка чата, навсегда остался бы с
+# ним посередине.
+cat > "$F" <<YAML
+configs:
+- level: 0
+  icons:
+    "$HOME_DIR":
+      row: 0
+      col: 0
+    "$HOME_DIR/Desktop/1c-start.desktop":
+      row: 1
+      col: 0
+    "$HOME_DIR/Desktop/model-chat.desktop":
+      row: 2
+      col: 0
+    "$HOME_DIR/Desktop/gitea.desktop":
+      row: 3
+      col: 0
+YAML
+chown "$U:$U" "$F"
+seed
+[ "$(row_of model-chat.desktop)" = 4 ] || fail "«Чат с моделью» не выровнен вниз: $(row_of model-chat.desktop)"
+[ "$(row_of gitea.desktop)" = 2 ]      || fail "Gitea не выровнена: $(row_of gitea.desktop)"
+ok "раскладка без чужих значков выровнена по образу"
+
 echo "== Новый значок встаёт НИЖЕ старых =="
 
 # xfdesktop кладёт появившийся ярлык в первое свободное место сверху, и старые
 # значки переезжают. Онборд наводит стрелку по координатам из этого файла, а
 # пишется он не сразу — съехавший значок означает стрелку на соседа. Старые
 # записи обязаны остаться на своих строках, новые — уйти вниз.
-L="$HOME_DIR/.config/xfce4/desktop/icons.screen0.yaml"
-install -d -o "$U" -g "$U" "$(dirname "$L")"
+#
+# Значок, положенный человеком, здесь обязателен: он и делает раскладку
+# чужой. Без него она состоит из одних наших, и проверялась бы не эта ветка,
+# а выравнивание выше.
+L=$F
+: > "$HOME_DIR/Desktop/моё.desktop"
+chown "$U:$U" "$HOME_DIR/Desktop/моё.desktop"
 cat > "$L" <<YAML
 configs:
 - level: 0
@@ -270,6 +304,9 @@ configs:
     "$HOME_DIR/Desktop/1c-start.desktop":
       row: 1
       col: 0
+    "$HOME_DIR/Desktop/моё.desktop":
+      row: 7
+      col: 0
 YAML
 chown "$U:$U" "$L"
 seed
@@ -278,8 +315,9 @@ gitea_row=$(grep -A1 "\"$HOME_DIR/Desktop/gitea.desktop\":" "$L" | sed -n 's/.*r
 [ "$gitea_row" = 2 ] || fail "Gitea переехала с 2-й строки на $gitea_row — старые значки двигать нельзя"
 chat_row=$(grep -A1 "\"$HOME_DIR/Desktop/model-chat.desktop\":" "$L" | sed -n 's/.*row: *//p')
 [ -n "$chat_row" ] || fail "нового значка нет в раскладке: $(cat "$L")"
-[ "$chat_row" -gt 2 ] || fail "«Чат с моделью» встал на строку $chat_row — выше занятых"
-ok "новые значки дописаны вниз ($chat_row), старые остались на месте"
+[ "$chat_row" -gt 7 ] || fail "«Чат с моделью» встал на строку $chat_row — не ниже занятых"
+[ "$(row_of моё.desktop)" = 7 ] || fail "значок человека переехал с 7-й строки на $(row_of моё.desktop)"
+ok "новые значки дописаны вниз ($chat_row), значок человека остался на месте"
 
 # Второй проход ничего не меняет: иначе каждая перезагрузка стенда плодила бы
 # дубли и уводила значки всё ниже.

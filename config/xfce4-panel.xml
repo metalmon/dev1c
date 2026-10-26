@@ -120,11 +120,23 @@
       <property name="group-policy" type="uint" value="0"/>
       <property name="display-scale" type="uint" value="70"/>
     </property>
+    <!-- Часы в режиме ЖК (mode=4: аналоговые 0, двоичные 1, цифровые 2,
+         словами 3, ЖК 4) — семисегментные цифры, как на электронных часах.
+         Решение заказчика 26.10.2026.
+
+         ЖК рисует цифры сам и шрифт не берёт: digital-time-font и
+         digital-layout в этом режиме не читаются, поэтому их здесь нет —
+         оставленные, они выглядели бы настройкой, которая ничего не меняет.
+
+         24 часа и без мигания разделителя: стенд показывают на видео, и
+         мигающее двоеточие на записи превращается в мусор между кадрами.
+         Секунды не показываем — лишнее движение в углу экрана. -->
     <property name="plugin-12" type="string" value="clock">
-      <property name="mode" type="uint" value="2"/>
-      <property name="digital-layout" type="uint" value="3"/>
-      <property name="digital-time-font" type="string" value="Inter 14"/>
-      <property name="digital-date-font" type="string" value="Inter 10"/>
+      <property name="mode" type="uint" value="4"/>
+      <property name="show-military" type="bool" value="true"/>
+      <property name="show-meridiem" type="bool" value="false"/>
+      <property name="show-seconds" type="bool" value="false"/>
+      <property name="flash-separators" type="bool" value="false"/>
     </property>
     <!-- Кнопки выхода. В контейнере нет systemd-logind, поэтому выключение,
          перезагрузка, спящий и ждущий режимы не работают: они либо молча ничего

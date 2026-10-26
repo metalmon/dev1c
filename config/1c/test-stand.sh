@@ -41,6 +41,29 @@ else
     say "FAIL onboarding: не все файлы на месте (/opt/onboarding или один из двух .desktop)"
     fail=1
 fi
+# Правила агента: добавка стенда дописана к общим (Dockerfile.1c, cat >>), и
+# версия платформы в ней — та, что правда стоит в образе. Строка «8.3.27»
+# пережила в них смену платформы и обещала агенту не то, что он найдёт
+# (поймано 25.10.2026). Сверка дешевле, чем доверие к прозе.
+# Ворота перед Gitea: хук на месте, исполняемый и включён системным
+# конфигом. Без бита исполнения git пропускает хук молча, а бит не
+# переживает сборочный контекст с Windows — поэтому проверяется именно он,
+# а не только наличие файла.
+H=$(git config --system --get core.hooksPath 2>/dev/null)
+if [ "$H" = /opt/git-hooks ] && [ -x /opt/git-hooks/pre-push ]; then
+    say "ok   git-хуки: pre-push на месте и включён ($H)"
+else
+    say "FAIL git-хуки: hooksPath='$H', pre-push $([ -x /opt/git-hooks/pre-push ] && echo есть || echo 'не исполняемый или отсутствует')"
+    fail=1
+fi
+A=/etc/skel/.config/zed/AGENTS.md
+if ! grep -q 'демо-стенд' $A 2>/dev/null; then
+    say "FAIL правила агента: в $A нет добавки стенда (config/1c/agents-1c.md)"; fail=1
+elif grep -q "$V" $A; then
+    say "ok   правила агента: добавка стенда на месте, платформа $V названа верно"
+else
+    say "FAIL правила агента: платформа в $A ($(grep -o '8\.[0-9][0-9.]*' $A | sort -u | tr '\n' ' ')) не та, что в образе ($V)"; fail=1
+fi
 # apache2 путём рабочего места, а не root. 1c-connect зовёт его по имени из
 # $PATH, пакет кладёт в /usr/sbin, и /etc/profile отдаёт этот каталог только
 # root. Проверяем в вычищенном окружении: `runuser -u devN` без -l наследует

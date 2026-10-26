@@ -208,15 +208,12 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             ),
             None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
         });
-        let token_file = llama::token_path(&ctx.kit, ctx.cfg.form());
-        let token = llama::read_token(&ctx.kit, ctx.cfg.form());
-        // Токен не прочитан, а файл на месте — это права, а не сервер.
-        let unreadable = token.is_none() && token_file.exists();
         let url = crate::ops_llama::local_url(ctx);
-        let props = llama::props(&url, &token.unwrap_or_default());
+        // Ключа у нашего сервера нет (решение 26.10.2026): спрашиваем без него.
+        let props = llama::props(&url, "");
         v.push(match &props {
             Some(p) => Check::pass("сервер модели", format!("{}: окно {} токенов, слотов {}, модель {}", ctx.cfg.model_url(), p.window, p.slots, p.model)),
-            None => no_props_fact(&url, unreadable.then(|| token_file.display().to_string())),
+            None => no_props_fact(&url),
         });
         if let Some(p) = props {
             v.push(numbers_fact(p.window, ctx.cfg.model.agents));
@@ -294,20 +291,15 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     v
 }
 
-/// Сервер модели не ответил — и надо назвать настоящую причину. Пустой токен
-/// при существующем файле токена значит, что его не дали прочитать: установка
-/// под `sudo` пишет `dev1c-llama.token` как `root:root 0600`, а `check` тем же
-/// администратором, но без `sudo`, видит пустой ключ, получает от сервера 401
-/// — и обвинял бы в этом совершенно здоровый сервер.
-pub fn no_props_fact(url: &str, unreadable_token: Option<String>) -> Check {
-    match unreadable_token {
-        Some(f) => Check::fail(
-            "сервер модели",
-            format!("токен {f} есть, но не читается: без него серверу нечем ответить (401), и о самом сервере это не говорит ничего"),
-            "install и check выполняет один пользователь: ставили под sudo — и проверяйте `sudo dev1c-setup check`, либо отдайте файл токена тому, кто проверяет",
-        ),
-        None => Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера"),
-    }
+/// Сервер модели не ответил. Причина у этого одна: его нет или он не поднялся
+/// — ключа у нашего сервера больше не бывает (решение 26.10.2026), а значит и
+/// 401 от нечитаемого токена, который прежде выдавали за молчащий сервер.
+pub fn no_props_fact(url: &str) -> Check {
+    Check::fail(
+        "сервер модели",
+        format!("{url} не отвечает"),
+        "dev1c-setup install; журнал службы — llama.log в каталоге сервера",
+    )
 }
 
 /// Хватает ли окна агенту. Раньше здесь сходились три числа — вход, ответ и
@@ -411,17 +403,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unreadable_token_is_named_instead_of_blaming_the_server() {
-        // Установка под sudo, check без него: токен есть, но не читается.
-        // Виноваты права, а не сервер, и «install» тут ничего не исправит.
-        let c = no_props_fact("http://172.17.0.1:3392", Some("/srv/dev1c-kit/dev1c-llama.token".into()));
-        assert!(!c.ok);
-        assert!(c.detail.contains("dev1c-llama.token") && c.detail.contains("не читается"), "{c:?}");
-        assert!(c.hint.contains("sudo"), "{c:?}");
-        assert!(!c.detail.contains("не отвечает"), "здоровый сервер не виноват: {c:?}");
-        // Токена нет вовсе — это по-прежнему «сервер не отвечает».
-        let c = no_props_fact("http://172.17.0.1:3392", None);
+    fn a_silent_server_is_named_a_silent_server() {
+        // Ключа у нашего сервера нет (решение 26.10.2026), значит и 401 от
+        // нечитаемого токена больше не бывает: причина у молчания одна.
+        let c = no_props_fact("http://172.17.0.1:3392");
         assert!(!c.ok && c.detail.contains("не отвечает") && c.hint.contains("install"), "{c:?}");
+        assert!(!c.detail.contains("токен"), "токена больше нет: {c:?}");
     }
 
     #[test]

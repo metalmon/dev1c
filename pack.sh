@@ -109,6 +109,21 @@ for c in "$KIT/dev1c-setup" "$BIN_DIR/dev1c-setup" "$KIT/dev1c-setup.exe" "$BIN_
 done
 [ -n "$SETUP" ] || { echo "pack.sh: no dev1c-setup this machine can run (looked in $KIT and $BIN_DIR) — the kit would ship without dev1c.toml and checksums" >&2; exit 1; }
 
+# Путь комплекта для ВЫБРАННОГО бинарника. Под Windows запускаемым оказывается
+# dev1c-setup.exe, а путей вида /c/dev1c-kit-linux он не понимает: Git Bash их
+# обычно переводит сам, но provision.sh выставляет MSYS_NO_PATHCONV=1 (без него
+# докер получает /opt/1cv8t переписанным) — и перевод выключается заодно и для
+# нашего бинарника. Кончалось это «Остановлено: не прочитать /c/dev1c-kit-linux
+# (os error 3)» на последнем шаге, когда комплект уже собран (26.10.2026).
+# Поэтому переводим сами, здесь, один раз — вызовам не надо знать, чей бинарник
+# им попался. Относительные пути (manual-path.sh даёт `--kit .`) не трогаем.
+kitpath() {
+    case "$SETUP" in
+    *.exe) command -v cygpath >/dev/null 2>&1 && cygpath -w "$1" || echo "$1" ;;
+    *) echo "$1" ;;
+    esac
+}
+
 if [ "$OS" = "linux" ]; then
     # The program prints its own sample: one source for the comments and the
     # structure, so dev1c.toml and Cfg::default never drift apart.
@@ -116,6 +131,21 @@ if [ "$OS" = "linux" ]; then
     # установщика, и зашитое в программу имя пришлось бы править кодом и
     # пересобирать бинарь. Не задана — параметр уезжает пустым, и установка
     # честно скажет «модель не выбрана», как и раньше.
+    # Не задана — берём ту, что уже лежит в комплекте. Без этого комплект
+    # уезжал с моделью на 17 ГБ внутри и с пустым [model] file, а установщик
+    # на нём останавливал четыре шага разом: «модель не выбрана» (поймано
+    # планом установки 26.10.2026). Переменная остаётся сильнее файла: ею
+    # задают модель, которой в комплекте ещё нет. Несколько файлов — не
+    # угадываем, а говорим словами: выбор чужой.
+    if [ -z "${DEV1C_MODEL_FILE:-}" ]; then
+        n=$(ls -1 "$KIT/model"/*.gguf 2>/dev/null | wc -l)
+        case "$n" in
+        0) ;;
+        1) DEV1C_MODEL_FILE="model/$(basename "$(ls -1 "$KIT/model"/*.gguf)")"
+           echo "pack.sh: модель комплекта — $DEV1C_MODEL_FILE" ;;
+        *) echo "pack.sh: в $KIT/model/ файлов .gguf $n — какой из них ставить, задайте DEV1C_MODEL_FILE" >&2; exit 1 ;;
+        esac
+    fi
     if [ -n "${DEV1C_MODEL_FILE:-}" ]; then
         "$SETUP" example --serve docker --model "$DEV1C_MODEL_FILE" >"$KIT/dev1c.toml"
     else
@@ -336,10 +366,41 @@ if [ -n "${PAYLOAD_ARCHIVE:-}" ]; then
     echo "1C platform and demo base: $(du -h "$KIT/dev1c-1c-payload.tar.gz" | cut -f1)"
 fi
 
+# --- состав комплекта: ворота перед суммами ----------------------------------
+# Архивы выше копируются только если заданы переменные, а раньше тут не было
+# ни одной проверки «а заданы ли». Так комплект уезжал неполным МОЛЧА: CI
+# передаёт только LLAMA_IMAGE, значит серверный комплект собирался без
+# платформы 1С. Это тот же класс, что стоил комплекта 22.10.2026 (стенд без
+# окна коннектора): недостающую часть видно одной строкой в журнале сборки,
+# которую никто не читает.
+#
+# Поэтому состав сверяется с разделом «Комплекты» спецификации, и расхождение
+# — отказ, а не предупреждение. Нужен нарочно неполный комплект (проба,
+# отладка) — скажите это вслух: KIT_PARTIAL=1.
+if [ "$OS" = "linux" ]; then
+    missing=
+    for f in dev1c-setup УСТАНОВКА.md dev1c.toml              dev1c-image.tar.gz dev1c-llama-image.tar.gz dev1c-1c-payload.tar.gz; do
+        [ -s "$KIT/$f" ] || missing="$missing $f"
+    done
+    ls "$KIT"/model/*.gguf >/dev/null 2>&1 || missing="$missing model/*.gguf"
+    ls "$KIT"/nvidia-container-toolkit/*.deb >/dev/null 2>&1         || missing="$missing nvidia-container-toolkit/*.deb"
+    if [ -n "$missing" ]; then
+        if [ "${KIT_PARTIAL:-0}" = "1" ]; then
+            echo "pack.sh: ВНИМАНИЕ, комплект неполон (KIT_PARTIAL=1):$missing" >&2
+        else
+            echo "pack.sh: в комплекте нет обязательного:$missing" >&2
+            echo "  состав описан в docs/superpowers/specs/2026-10-16-setup-binaries-design.md, раздел «Комплекты»." >&2
+            echo "  Архивы приходят переменными: LLAMA_IMAGE (сервер модели), PAYLOAD_ARCHIVE (платформа 1С и демо-база)." >&2
+            echo "  Модель кладут в $KIT/model/ руками. Нарочно неполный комплект: KIT_PARTIAL=1." >&2
+            exit 1
+        fi
+    fi
+fi
+
 # Суммы считает он же — заказчик проверяет комплект тем же кодом.
-"$SETUP" --kit "$KIT" checksums >/dev/null
+"$SETUP" --kit "$(kitpath "$KIT")" checksums >/dev/null
 if [ "$OS" = "windows" ]; then
-    "$SETUP" --kit "$CONNECT" checksums >/dev/null
+    "$SETUP" --kit "$(kitpath "$CONNECT")" checksums >/dev/null
 fi
 
 echo "Kits ready in $OUT:"

@@ -21,12 +21,34 @@ on:
     branches: [main]
     paths:
       - Dockerfile
+      # Образ, который уезжает заказчику, собирается ИМЕННО из Dockerfile.1c,
+      # а раскладывает комплект pack.sh со скриптами из scripts/. Их тут не
+      # было: правка любого из трёх не запускала сборку, и уезжало старое.
+      - Dockerfile.1c
+      - pack.sh
+      - scripts/**
       - config/**
       - .dockerignore
       - .github/workflows/build.yml
       - setup/**
 
 jobs:
+  git-hooks:
+    # The pre-push hook of the image: it refuses code that does not parse, and
+    # it must not get in the way of anything else. Needs nothing but git and a
+    # shell — the BSL analyzer is replaced by a stub in PATH, because what is
+    # under test is the hook, not the analyzer.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test
+        run: sh config/git-hooks/tests/test-pre-push.sh
+
   onboarding:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.binaries_only) }}
     # The onboarding overlay's own tests. They do not need the 1C image —
@@ -309,6 +331,13 @@ jobs:
           # Git из Zed ограничен двумя ядрами: вызовы из редактора не забирают
           # всю машину, а git пользователя в терминале не тронут.
           docker exec dev1c sh /usr/local/bin/test-git-cpuset
+          # Агент pi: бинарь, настройки из образа, серверы MCP и модель через
+          # заглушку сервера. От пользователя, а не от root: pi от root не
+          # запускается, как и Zed.
+          docker exec -u dev1 dev1c sh /usr/local/bin/test-pi
+          # Раскладка файлов pi по уже созданным домам — от root: проверка
+          # переставляет каталоги в доме dev3 и заново зовёт точку входа.
+          docker exec dev1c sh /usr/local/bin/test-pi-seed
           docker exec dev1c tea --version | head -1
           docker exec dev1c sh -c 'ls /home/dev1/.agents/skills | wc -l | xargs echo "skills:"'
           docker exec dev1c test -s /home/dev1/.config/zed/AGENTS.md \
@@ -322,6 +351,45 @@ jobs:
           docker exec -u dev2 dev1c sh -c 'cd "$(mktemp -d)" && git init -q -b dev2 && echo x > f && git add f && git commit -qm x && git push -q http://localhost:3000/dev1c/ci-probe.git dev2' \
             && docker exec dev1c sh -c 'curl -sf -u dev2:dev2 http://localhost:3000/api/v1/repos/dev1c/ci-probe >/dev/null' \
             && echo "ok: push-to-create in the organisation as dev2"
+
+      # The gate in front of Gitea, against the real analyzer. The unit checks
+      # of the hook (config/git-hooks/tests, job git-hooks) replace the
+      # analyzer with a stub, so they prove the hook's logic and nothing about
+      # the analyzer's contract: that `analyze -s … --format=jsonl` is the
+      # right call and that the code arrives in the output as the literal
+      # string ParseError. Both were taken from documents, and documents is
+      # exactly what the rules tell the agent not to trust.
+      #
+      # The first push creates the branch — the hook skips it by design
+      # (nothing to compare against), and that is the happy path a workstation
+      # starts from. The second push carries a module that does not parse and
+      # must be refused. The third carries the fix and must go through.
+      - name: The pre-push gate refuses a module that does not parse
+        run: |
+          docker exec -u dev1 dev1c sh -c 'time /opt/bsl-analyzer/bsl-analyzer --version' || true
+          docker exec -u dev1 dev1c sh -eu -c '
+            d=$(mktemp -d); cd "$d"
+            m=src/Catalogs/Товары/Ext/ObjectModule.bsl
+            mkdir -p "$(dirname "$m")"
+            git init -q -b dev1
+            git remote add origin http://localhost:3000/dev1c/hook-probe.git
+            printf "Процедура Ок() КонецПроцедуры\n" > "$m"
+            git add -A && git commit -qm base
+            git push -q -u origin dev1
+            echo "ok: ветка создана, первый push прошёл"
+            printf "Процедура Битая()\nЕсли Истина Тогда\n" > "$m"
+            git add -A && git commit -qm broken
+            start=$(date +%s)
+            if git push >push.log 2>&1; then
+              echo "FAIL: битый модуль уехал в Gitea"; cat push.log; exit 1
+            fi
+            echo "проверка заняла $(( $(date +%s) - start ))с"
+            grep -q ParseError push.log || { echo "FAIL: push отказал, но ParseError в отказе нет"; cat push.log; exit 1; }
+            echo "ok: битый модуль не уехал, в отказе ParseError"
+            printf "Процедура Ок() КонецПроцедуры\n" > "$m"
+            git add -A && git commit -qm fixed
+            git push -q && echo "ok: исправленный модуль уходит"
+          '
 
       - uses: actions/download-artifact@v4
         with:
@@ -367,8 +435,15 @@ jobs:
           # shared layers, so one file would save nothing and would make an
           # onboarding fix drag a gigabyte along.
           docker save oktaplus/dev1c-1c:latest | gzip -1 > dev1c-image.tar.gz
-          docker pull ghcr.io/metalmon/dev1c-llama:b11734
-          docker tag ghcr.io/metalmon/dev1c-llama:b11734 oktaplus/dev1c-llama:latest
+          # Тег сервера модели назван один раз — в Dockerfile.llama, где он
+          # и собирается. Прибитый здесь жил своей жизнью: поднимут версию
+          # там, llama.yml соберёт и запушит новое, а комплект повезёт старое,
+          # и без единой ошибки. Тот же приём, что с NVIDIA_TOOLKIT_VERSION.
+          llama_ver=$(sed -n 's/^ARG LLAMA_VERSION=//p' Dockerfile.llama)
+          [ -n "$llama_ver" ] || { echo "Dockerfile.llama больше не объявляет LLAMA_VERSION" >&2; exit 1; }
+          echo "сервер модели: $llama_ver (из Dockerfile.llama)"
+          docker pull "ghcr.io/metalmon/dev1c-llama:$llama_ver"
+          docker tag "ghcr.io/metalmon/dev1c-llama:$llama_ver" oktaplus/dev1c-llama:latest
           docker save oktaplus/dev1c-llama:latest | gzip -1 > dev1c-llama-image.tar.gz
           ls -lh dev1c-image.tar.gz dev1c-llama-image.tar.gz
           # The customer's server runs Docker 20.10.24, which refuses an
@@ -406,8 +481,19 @@ jobs:
       - name: Pack the Linux kit
         # The headless Ubuntu pilot: serve = "docker" only, so no llama row
         # and no nssm (--os linux in pack.sh); same image archive as above.
+        #
+        # KIT_PARTIAL=1 — потому что этот комплект НЕПОЛОН по построению и
+        # заказчику не едет. В нём нет платформы 1С и демо-базы
+        # (dev1c-1c-payload.tar.gz): их делает provision.sh из дистрибутива
+        # 1С, а дистрибутива в CI нет и не будет. Полный комплект собирается
+        # на машине сборки, там pack.sh получает PAYLOAD_ARCHIVE и ворота
+        # состава проходит честно.
+        #
+        # Раньше тут не было ни переменной, ни слова: комплект уезжал без
+        # платформы МОЛЧА. Теперь неполнота названа — и в журнале сборки, и
+        # здесь.
         run: |
-          LLAMA_IMAGE=dev1c-llama-image.tar.gz ./pack.sh --os linux dev1c-image.tar.gz bins
+          KIT_PARTIAL=1 LLAMA_IMAGE=dev1c-llama-image.tar.gz ./pack.sh --os linux dev1c-image.tar.gz bins
           ls -la dist/dev1c-kit-linux
 
       - name: Install from the Linux kit, container form (two barriers, same binary)

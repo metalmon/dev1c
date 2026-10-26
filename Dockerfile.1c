@@ -37,7 +37,14 @@
 #
 # `platform/` holds setup-training-<version>-x86_64.run, unpacked from the
 # tar.gz of the 1C download page, and the demo template; `artifacts/` holds
-# what CI built. Both are separate build contexts so the main context never
+# what CI built.
+#
+# Дистрибутив платформы в git не хранится и в слои образа не попадает: он
+# чужой, и права его распространять у нас нет. Его кладут руками на машине
+# сборки — что именно и откуда, написано в `platform/ПРОЧТИ.md` (единственный
+# файл того каталога, который в git есть). Нужен он ТОЛЬКО цели `payload`;
+# цель по умолчанию `stand` платформы не содержит вовсе — она приезжает
+# томом, поэтому стенд собирается и проверяется без неё, и CI так и делает. Both are separate build contexts so the main context never
 # carries them (see .dockerignore too), and they are separate from each other
 # so each target transfers only what it uses. The base image tag is an
 # argument: --build-arg BASE=oktaplus/dev1c:<tag>.
@@ -343,6 +350,14 @@ RUN --mount=type=bind,from=platform,target=/platform \
     && if [ -n "${DEMO_TEMPLATE}" ]; then \
          D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
            /ManageCfgSupport -disableSupport -force; \
+         `# Снятие с поддержки правит ОСНОВНУЮ конфигурацию. Без этого шага` \
+         `# она расходится с конфигурацией базы данных, и КАЖДЫЙ запуск 1С` \
+         `# встречает человека вопросом «Конфигурация базы данных не` \
+         `# соответствует сохранённой. Продолжить?». Ниже обновляется` \
+         `# расширение, а основная конфигурация оставалась необновлённой —` \
+         `# поймано на стенде 26.10.2026, увидел заказчик.` \
+         D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
+           /UpdateDBCfg; \
        fi \
     # two Designer runs: two -Extension keys in one command line are refused
     && D DESIGNER /F "$B" $N /DisableStartupDialogs /DisableStartupMessages \
@@ -421,7 +436,14 @@ RUN --mount=type=bind,from=artifacts,target=/artifacts \
         && /opt/1c-connect/1c-connect --help >/dev/null \
         && echo "1c-connect: in the image"; \
     elif [ "$CONNECT_OPTIONAL" = 1 ]; then \
-        echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
+        `# Раз коннектора нет — убираем и его автозапуск: иначе сессия каждый` \
+        `# раз пытается поднять то, чего в образе не существует, и человек` \
+        `# видит молчаливый отказ вместо отсутствия значка. И оставляем метку:` \
+        `# по ней видно, что стенд собран без окна, — а не угадывается по` \
+        `# отсутствию файла.` \
+        rm -f /etc/xdg/autostart/zz-1c-connect.desktop \
+        && echo "собран без окна коннектора (CONNECT_OPTIONAL=1)" > /opt/1c-connect.absent \
+        && echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
     else \
         echo "1c-connect: нет файла artifacts/1c-connect — стенд собрался бы без окна коннектора." >&2; \
         echo "Положите туда linux-сборку (артефакт CI 1c-connect-linux) или соберите с --build-arg CONNECT_OPTIONAL=1." >&2; \
@@ -430,6 +452,17 @@ COPY config/1c/test-stand.sh /usr/local/bin/test-stand
 COPY config/1c/agents-1c.md /tmp/agents-1c.md
 RUN sed -i 's/\r$//' /usr/local/bin/test-stand /tmp/agents-1c.md /usr/share/applications/1c-*.desktop \
     && chmod +x /usr/local/bin/test-stand \
-    && cat /tmp/agents-1c.md >> /etc/skel/.config/zed/AGENTS.md && rm /tmp/agents-1c.md \
-    && grep -q 'демо-стенд' /etc/skel/.config/zed/AGENTS.md
+    `# Оба читателя правил разом: панель Zed и pi в терминале. Файл один и` \
+    `# тот же, но назначений два — допишешь одному, и агенты разойдутся в` \
+    `# умениях молча. Поймано проверкой test-pi 25.10.2026: в образе с 1С у` \
+    `# pi не было правил про демо-стенд, платформу и стартер.` \
+    && for f in /etc/skel/.config/zed/AGENTS.md /etc/skel/.pi/agent/AGENTS.md; do \
+           cat /tmp/agents-1c.md >> "$f" && grep -q 'демо-стенд' "$f" || exit 1; \
+       done \
+    && rm /tmp/agents-1c.md \
+    `# На это равенство опирается test-stand: он сверяет добавку и версию` \
+    `# платформы только по копии Zed, и этого хватает ровно потому, что` \
+    `# копии равны здесь. Снимете cmp — допишите в test-stand вторую` \
+    `# строку про ~/.pi/agent/AGENTS.md, иначе расхождение доедет до стенда.` \
+    && cmp /etc/skel/.config/zed/AGENTS.md /etc/skel/.pi/agent/AGENTS.md
 CMD ["/usr/local/bin/1c-stand", "start"]

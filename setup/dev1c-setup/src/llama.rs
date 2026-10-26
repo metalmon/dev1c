@@ -72,9 +72,6 @@ pub struct ServeInput<'a> {
     /// с моделью. Приходит из параметров комплекта.
     pub slots: u16,
     pub cache_ram: u32,
-    /// Токен путём к файлу (служба хоста); контейнер получает его
-    /// переменной LLAMA_API_KEY через --env-file, и в строке его нет.
-    pub token_file: Option<&'a str>,
 }
 
 /// Командная строка по спеке (раздел «Локальная модель», пересмотр 2026-10-22).
@@ -172,10 +169,6 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
     if i.cache_ram != CACHE_RAM_DEFAULT {
         a.push("--cache-ram".into());
         a.push(cache_ram);
-    }
-    if let Some(f) = i.token_file {
-        a.push("--api-key-file".into());
-        a.push(f.into());
     }
     a
 }
@@ -353,7 +346,6 @@ use crate::cfg::Form;
 use crate::ops::Ctx;
 use anyhow::{Context, Result};
 use common::docker;
-use common::kit::Kit;
 use common::Runner;
 use std::path::PathBuf;
 
@@ -377,30 +369,6 @@ pub fn log_file() -> PathBuf {
 }
 
 /// Где лежит токен сервера. Форма host — в закрытом каталоге службы (его
-/// открывает только root/SYSTEM, потому что от его имени выполняется
-/// подложенный `llama-server`). Форма docker не трогает `/opt`: секрет
-/// нужен только установщику и контейнеру, не службе, и лежит в комплекте —
-/// у того, кто ставит, на него и так есть права.
-pub fn token_path(kit: &Kit, form: Form) -> PathBuf {
-    if form == Form::Docker {
-        kit.path("dev1c-llama.token")
-    } else {
-        dir().join("dev1c-llama.token")
-    }
-}
-
-/// Файл переменных для контейнера модели (LLAMA_API_KEY=…): только форма
-/// docker его использует, и лежит он рядом с токеном — в комплекте.
-pub fn env_path(kit: &Kit) -> PathBuf {
-    kit.path("llama.env")
-}
-
-/// Записать файл переменных контейнера заново (токен мог смениться).
-pub fn write_env_file(kit: &Kit, token: &str) -> Result<()> {
-    let f = env_path(kit);
-    let _ = std::fs::remove_file(&f);
-    write_secret(&f, &format!("LLAMA_API_KEY={token}\n"))
-}
 /// Ряд бинарников под эту ОС в комплекте.
 pub fn kit_bin(ctx: &Ctx) -> Option<PathBuf> {
     let p = ctx.kit.path(if cfg!(windows) { "llama/bin/windows-x64-cuda13" } else { "llama/bin/linux-x64-cuda13" });
@@ -501,32 +469,6 @@ fn os_random(buf: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-/// Токен, если он уже выписан. Живёт только в своём файле.
-pub fn read_token(kit: &Kit, form: Form) -> Option<String> {
-    let t = std::fs::read_to_string(token_path(kit, form)).ok()?;
-    let t = t.trim().to_string();
-    (!t.is_empty()).then_some(t)
-}
-
-/// Токен сервера: файл в закрытом каталоге службы (Linux: 0600, права
-/// наследуются от каталога — SYSTEM и администраторы) для формы host, и в
-/// комплекте для формы docker (её каталог не закрываем — см. `token_path`).
-/// Каталог host закрывается заново и до чтения существующего файла: так
-/// старый токен тоже оказывается под замком.
-pub fn ensure_token(ctx: &Ctx) -> Result<String> {
-    let form = ctx.cfg.form();
-    if form != Form::Docker {
-        ensure_dir(ctx)?;
-    }
-    if let Some(t) = read_token(&ctx.kit, form) {
-        return Ok(t);
-    }
-    let f = token_path(&ctx.kit, form);
-    anyhow::ensure!(!f.exists(), "{} есть, но не читается: проверьте права на каталог", f.display());
-    let token = random_hex();
-    write_secret(&f, &token)?;
-    Ok(token)
-}
 
 pub fn gpu(ctx: &Ctx) -> Option<Gpu> {
     let o = docker::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
@@ -818,31 +760,17 @@ pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Res
 
 pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
     Some(crate::cfg::Facts {
-        token: read_token(&ctx.kit, ctx.cfg.form())?,
         window: ctx.kit.state_get("llama.window")?.parse().ok()?,
     })
 }
 
-/// Токен есть, но прочитать его не дали: `facts_load` без токена возвращает
-/// None, а причина у этого None своя. Установка под `sudo` пишет
-/// `dev1c-llama.token` как `root:root 0600`, и тот же администратор без
-/// `sudo` чисел уже не увидит.
-pub fn unreadable_token(ctx: &Ctx) -> Option<String> {
-    let f = token_path(&ctx.kit, ctx.cfg.form());
-    (read_token(&ctx.kit, ctx.cfg.form()).is_none() && f.exists()).then(|| f.display().to_string())
-}
 
 /// Чем объяснить отсутствие чисел замера. Нечитаемый токен обязан быть
 /// назван именно так, а не выдан за незамеренный сервер: слова те же, что у
 /// факта `check` (`verify::no_props_fact`) — две команды об одной причине не
 /// вправе говорить разное.
-pub fn facts_missing(unreadable_token: Option<String>) -> String {
-    match unreadable_token {
-        Some(f) => format!(
-            "токен {f} есть, но не читается: без него нет и чисел замера, и о самом сервере это не говорит ничего. install и status выполняет один пользователь: ставили под sudo — смотрите `sudo dev1c-setup status`, либо отдайте файл токена тому, кто смотрит"
-        ),
-        None => "сервер модели ещё не замерен (шаг llama.answers); без его чисел контейнер собирать нельзя".into(),
-    }
+pub fn facts_missing() -> String {
+    "сервер модели ещё не замерен (шаг llama.answers); без его чисел контейнер собирать нельзя".into()
 }
 
 /// Байт KV на токен, посчитанный замером: число модели, а не таблицы.
@@ -854,13 +782,13 @@ pub fn kv_per_token(ctx: &Ctx) -> Option<u32> {
 mod tests {
     use super::*;
 
-    fn input<'a>(token_file: Option<&'a str>) -> ServeInput<'a> {
-        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, slot_floor: 65536, slots: SLOTS, cache_ram: 4096, token_file }
+    fn input<'a>() -> ServeInput<'a> {
+        ServeInput { model: "/m/x.gguf", alias: "x", host: "127.0.0.1", port: 1235, slot_floor: 65536, slots: SLOTS, cache_ram: 4096 }
     }
 
     #[test]
-    fn the_weights_go_to_the_card_and_the_token_goes_by_path() {
-        let a = serve_args(&input(Some("/k/dev1c-llama.token")));
+    fn the_weights_go_to_the_card_and_no_key_is_asked_for() {
+        let a = serve_args(&input());
         let at = |k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
         // Окно НЕ задаём: его подбирает сервер под карту. Задали бы — подбор
         // его не тронул бы, и на другой карте сервер не влез.
@@ -899,18 +827,14 @@ mod tests {
         // по видеопамяти остаётся без входных данных.
         assert_eq!(at("-lv").as_deref(), Some("4"));
         assert_eq!(at("--cache-ram").as_deref(), Some("4096"));
-        assert_eq!(at("--api-key-file").as_deref(), Some("/k/dev1c-llama.token"));
         assert_eq!(at("--host").as_deref(), Some("127.0.0.1"));
         assert_eq!(at("--alias").as_deref(), Some("x"));
-        assert!(!a.iter().any(|x| x == "--api-key"), "значение токена в строке недопустимо");
+        // Ключа у нашего сервера нет вовсе: ни пути к файлу, ни значения.
+        assert!(!a.iter().any(|x| x == "--api-key-file"), "{a:?}");
+        assert!(!a.iter().any(|x| x == "--api-key"), "{a:?}");
     }
 
-    #[test]
-    fn without_a_token_file_nothing_about_the_token_is_in_the_line() {
-        let a = serve_args(&input(None));
-        assert!(!a.iter().any(|x| x == "--api-key-file"));
-    }
-
+    
     #[test]
     fn the_window_that_fits_comes_from_the_model_not_from_a_table() {
         // Сервер сообщил: окно 65 536 токенов заняло 640 МиБ кэша →
@@ -955,19 +879,7 @@ mod tests {
         assert!(per_agent(81_919, 1) < MIN_BUDGET + ANSWER_FLOOR);
     }
 
-    #[test]
-    fn an_unreadable_token_is_not_an_unmeasured_server() {
-        // status брал «сервер модели ещё не замерен» на оба случая, и установка
-        // под sudo с проверкой без него обвиняла совершенно здоровый сервер.
-        let c = facts_missing(Some("/srv/dev1c-kit/dev1c-llama.token".into()));
-        assert!(c.contains("dev1c-llama.token") && c.contains("не читается"), "{c}");
-        assert!(c.contains("sudo"), "{c}");
-        assert!(!c.contains("не замерен"), "замер тут не виноват: {c}");
-        // Токена нет вовсе — это по-прежнему незамеренный сервер.
-        let c = facts_missing(None);
-        assert!(c.contains("не замерен") && c.contains("llama.answers"), "{c}");
-    }
-
+    
     #[test]
     fn the_administrators_page_divides_the_slot_by_agents_before_the_answer() {
         // Страница заказчика считает то же, что программа, и ломается именно
@@ -1059,7 +971,7 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         let kit = common::kit::Kit::at(&dir);
         let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
         assert!(ctx.kit.state_get("llama.window").is_none());
-        let f = crate::cfg::Facts { token: "abc".into(), window: 250_000 };
+        let f = crate::cfg::Facts { window: 250_000 };
         facts_save(&ctx, &f, Some(2600.0)).unwrap();
         // Токен в состоянии комплекта не хранится: он только в своём файле.
         assert!(ctx.kit.state_get("llama.token").is_none());
@@ -1077,14 +989,7 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_container_form_keeps_its_secret_in_the_kit() {
-        let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("dev1c-llama-token-path-{}", std::process::id())));
-        assert_eq!(token_path(&kit, Form::Docker), kit.path("dev1c-llama.token"));
-        assert_ne!(token_path(&kit, Form::Host), token_path(&kit, Form::Docker));
-        assert_eq!(env_path(&kit), kit.path("llama.env"));
-    }
-
+    
     #[test]
     fn the_secret_is_written_closed_to_its_owner() {
         let dir = std::env::temp_dir().join(format!("dev1c-llama-secret-{}", std::process::id()));

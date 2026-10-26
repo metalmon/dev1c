@@ -1,0 +1,117 @@
+#!/bin/sh
+# Ворота перед Gitea: модуль, который не разбирается, в репозиторий не уходит.
+#
+# Зачем хук, а не правило в промпте: правило «позови diagnostics» агент может
+# забыть, а правка из его ветки едет в базу через `project_pull` и `cf_load`,
+# и там её уже никто не проверяет. Хук срабатывает независимо от того, что
+# агент помнит.
+#
+# Живёт в образе и включается системным конфигом (`core.hooksPath` в
+# `config/gitconfig`). **В репозиторий проекта его класть нельзя**: каталог
+# хуков в дереве вместе с относительным `hooksPath` доехал бы с клоном до
+# машины разработчика, а там анализатора нет вовсе — он стоит в образе.
+#
+# Запирает только `ParseError`, то есть код, который не разбирается. Это
+# сознательно: разбор одного файла не зависит от остальной конфигурации,
+# поэтому ложных срабатываний тут не бывает. Смысловые диагностики
+# (неизвестный символ и прочие) без индекса всей выгрузки дали бы ложь на
+# каждом вызове чужой процедуры — их хук не смотрит.
+#
+# Пропускает во всех спорных случаях: нет анализатора, нет модулей в правке,
+# не удалось понять, что отправляют, анализатор не успел за отведённое время.
+# Гейт от забывчивости, а не от человека: `git push --no-verify` работает
+# всегда.
+#
+# Проверяется: sh config/git-hooks/tests/test-pre-push.sh
+set -u
+
+# Анализатор ищем сперва там, где он правда стоит в образе: в PATH его нет,
+# Zed зовёт его абсолютным путём (`/opt/bsl-analyzer/bsl-analyzer`), и хук с
+# одним только `command -v bsl-analyzer` молча не делал бы ничего вовсе.
+# PATH остаётся запасным путём — для машины, где он поставлен иначе.
+ANALYZER=${DEV1C_BSL_ANALYZER:-}
+if [ -z "$ANALYZER" ]; then
+    if [ -x /opt/bsl-analyzer/bsl-analyzer ]; then
+        ANALYZER=/opt/bsl-analyzer/bsl-analyzer
+    else
+        ANALYZER=bsl-analyzer
+    fi
+fi
+BUDGET=${DEV1C_BSL_TIMEOUT:-120}
+ZERO=0000000000000000000000000000000000000000
+
+command -v "$ANALYZER" >/dev/null 2>&1 || exit 0
+
+#   Всё рабочее — внутри приватного каталога mktemp, и ничего рядом с ним:
+#   имена `$tmp.out`, `$tmp.pairs` предсказуемы по имени самого каталога,
+#   а `/tmp` в образе делят три учётные записи рабочих мест. Отдельный
+#   подкаталог `src` даёт анализатору каталог ровно с модулями, без наших
+#   служебных файлов.
+tmp=$(mktemp -d) || exit 0
+trap 'rm -rf "$tmp"' EXIT
+work=$tmp/src
+pairs=$tmp/pairs
+out=$tmp/out
+err=$tmp/err
+mkdir -p "$work" || exit 0
+: > "$pairs"
+
+# `-c core.quotepath=false` своим ключом, а не надеждой на конфиг машины: с
+# кавычками имена файлов выгрузки (они кириллические) приходят как
+# «\320\242...», и `git show` по такому имени ничего не находит — проверка
+# молча считала бы, что менять нечего.
+git_q() { git -c core.quotepath=false "$@"; }
+
+# Пары «коммит<таб>файл». Файл берём из отправляемого коммита, а не из
+# рабочего каталога: в каталоге может лежать ещё не закоммиченная правка, а
+# отправляется именно коммит.
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "$ZERO" ] && continue  # удаление ветки
+    if [ "$remote_sha" = "$ZERO" ]; then
+        base=$(git rev-parse --verify -q origin/main || git rev-parse --verify -q origin/HEAD || true)
+        if [ -z "$base" ]; then
+            echo "pre-push: ветка новая и сравнить не с чем — проверку модулей пропускаю" >&2
+            continue
+        fi
+    else
+        base=$remote_sha
+    fi
+    git_q diff --name-only --diff-filter=ACMR "$base..$local_sha" -- '*.bsl' 2>/dev/null \
+        | while IFS= read -r path; do
+            [ -n "$path" ] && printf '%s\t%s\n' "$local_sha" "$path" >> "$pairs"
+        done
+done
+
+[ -s "$pairs" ] || exit 0
+
+# Копия с сохранением пути: в отчёте анализатора тогда стоит то же имя
+# файла, которое человек видит в проекте.
+while IFS="$(printf '\t')" read -r sha path; do
+    [ -n "${path:-}" ] || continue
+    mkdir -p "$work/$(dirname "$path")"
+    git_q show "$sha:$path" > "$work/$path" 2>/dev/null || true
+done < "$pairs"
+
+n=$(find "$work" -name '*.bsl' | wc -l | tr -d ' ')
+[ "$n" -gt 0 ] || exit 0
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout "$BUDGET" "$ANALYZER" analyze -s "$work" --format=jsonl > "$out" 2>"$err"
+    rc=$?
+else
+    "$ANALYZER" analyze -s "$work" --format=jsonl > "$out" 2>"$err"
+    rc=$?
+fi
+if [ "$rc" = 124 ]; then
+    echo "pre-push: анализатор не успел за ${BUDGET}с, проверку пропускаю (срок меняет DEV1C_BSL_TIMEOUT)" >&2
+    exit 0
+fi
+
+bad=$(grep ParseError "$out" 2>/dev/null || true)
+if [ -n "$bad" ]; then
+    echo "pre-push: этот код не разбирается, в репозиторий он не уйдёт." >&2
+    printf '%s\n' "$bad" | head -20 >&2
+    echo "Проверено модулей: $n. Поправьте и повторите; если отправлять надо всё равно — git push --no-verify." >&2
+    exit 1
+fi
+exit 0

@@ -202,6 +202,47 @@ RUN sed -E 's|^Exec=zed|Exec=/usr/local/bin/launch-maximized zed|' \
     && ln -s /opt/zed.app/share/icons/hicolor/512x512/apps/zed.png \
              /usr/share/pixmaps/zed.png
 
+# --- pi: терминальный агент, второй способ работы ----------------------------
+# Версия пинится по той же причине, что у Zed: у pi нет системы разрешений
+# вовсе (режим YOLO — решение заказчика 25.10.2026), и менять поведение среды
+# от пересборки нельзя тем более.
+#
+# Берётся ГОТОВЫЙ бинарь релиза, а не сборка из исходников: релиз несёт
+# `pi-linux-x64.tar.gz` — самостоятельный исполняемый файл со своими
+# ресурсами, и он запускается в этом образе как есть (проверено 25.10.2026 на
+# debian:13-slim). Отдельная стадия с Node 22 поэтому не нужна, и Node в
+# образе по-прежнему нет — что и требовалось.
+#
+# Сумма прибита здесь, а не берётся из SHA256SUMS релиза: файл сумм лежит на
+# том же сервере, что архив, и подтверждает только то, что архив доехал без
+# порчи — подменят релиз, подменят и сумму. Прибитая сумма сверена руками
+# 25.10.2026 на скачанном архиве. Меняется версия — меняется и сумма, обе
+# строки правятся вместе, иначе сборка встанет (и это правильно).
+#
+# Отдельной стадии нет, значит архив удаляется тем же слоем, иначе он осядет
+# в образе.
+#
+# `examples` выбрасываются (десять мегабайт, из них doom.wasm), а `docs`
+# остаются: pi в своих же сообщениях об ошибках ссылается на
+# /opt/pi/docs/providers.md.
+ARG PI_VERSION=1.4.0
+ARG PI_SHA256=f2e4e4329603223d03260cdb8bd5033dbdc1f73ba58ab8939db2e56546e115d2
+RUN cd /tmp \
+    && curl -fsSL -O "https://github.com/earendil-works/pi/releases/download/v${PI_VERSION}/pi-linux-x64.tar.gz" \
+    && echo "${PI_SHA256}  pi-linux-x64.tar.gz" | sha256sum -c - \
+    && tar -xzf pi-linux-x64.tar.gz -C /opt \
+    && rm -rf pi-linux-x64.tar.gz /opt/pi/examples \
+    && chmod +x /opt/pi/pi \
+    && ln -s /opt/pi/pi /usr/local/bin/pi \
+    `# версия названа ровно один раз — этим ARG. Проверка в образе читает` \
+    `# её отсюда, а не держит своё число: три места для одного числа` \
+    `# однажды разойдутся.` \
+    && echo "${PI_VERSION}" > /opt/pi/.version \
+    `# версию спрашиваем у самого бинаря: сломанный обязан уронить сборку,` \
+    `# а не доехать до заказчика. В отличие от Zed, pi от root для --version` \
+    `# запускается.` \
+    && pi --version | grep -qx "${PI_VERSION}"
+
 # --- 1C tooling: everything network-bound is frozen at build time -------------
 # In the customer's air-gapped network the extension can neither download itself
 # nor fetch the language server binary, so both downloads happen here, while
@@ -360,6 +401,10 @@ COPY config/test-entrypoint-ports.sh /usr/local/bin/test-entrypoint-ports
 COPY config/launch-maximized.sh /usr/local/bin/launch-maximized
 COPY config/git-cpuset.sh      /usr/local/bin/git
 COPY config/test-git-cpuset.sh /usr/local/bin/test-git-cpuset
+COPY config/test-pi.sh         /usr/local/bin/test-pi
+COPY config/model-chat.sh      /usr/local/bin/model-chat
+COPY config/test-pi-stub.py    /usr/local/bin/test-pi-stub
+COPY config/test-pi-seed.sh    /usr/local/bin/test-pi-seed
 
 # These scripts are edited on Windows too, where editors save CRLF. In a shebang
 # that is fatal: the system looks for an interpreter named "/bin/sh" with a
@@ -384,7 +429,9 @@ RUN find /usr/local/bin -maxdepth 1 -type f -exec grep -Iq . {} \; -exec sed -i 
                 /usr/local/bin/gitea-start /usr/local/bin/normalize-skills \
                 /usr/local/bin/test-skills /usr/local/bin/test-entrypoint-ports \
                 /usr/local/bin/git /usr/local/bin/test-git-cpuset \
-                /usr/local/bin/launch-maximized \
+                /usr/local/bin/launch-maximized /usr/local/bin/test-pi \
+                /usr/local/bin/model-chat \
+                /usr/local/bin/test-pi-stub /usr/local/bin/test-pi-seed \
     && test -s /usr/share/backgrounds/dev1c.jpg \
     && echo "scripts normalised"
 
@@ -430,6 +477,20 @@ COPY config/zed-theme-1c.json /etc/skel/.config/zed/themes/1c.json
 # and how to run 1C code. Without them the model answers with guesses — it
 # declared OneScript impossible on Linux, confusing it with Windows Script Host.
 COPY config/agents-global.md /etc/skel/.config/zed/AGENTS.md
+
+# Настройки pi — второго способа работы, терминального. Инструкции те же, и
+# источник у них тот же файл: просто второе назначение, никакой машинерии для
+# «одного источника» не нужно. Скиллам не нужно и этого — pi сам читает
+# ~/.agents/skills, штатное место Agent Skills, куда они уже разложены ниже.
+# Пояснения к обоим файлам — в config/pi/README.md (JSON комментариев не
+# допускает).
+COPY config/agents-global.md  /etc/skel/.pi/agent/AGENTS.md
+COPY config/pi/mcp.json       /etc/skel/.pi/agent/mcp.json
+COPY config/pi/settings.json  /etc/skel/.pi/agent/settings.json
+# Провайдер модели: одномодельный llama.cpp. Родной провайдер pi умеет только
+# router-режим — почему так и что будет, когда патч войдёт в llama.cpp,
+# написано в самом файле.
+COPY config/pi/extensions/llama-single.js /etc/skel/.pi/agent/extensions/llama-single.js
 
 # --- Desktop environment ------------------------------------------------------
 # XFCE autostart brings up its own keyring daemon — with a locked collection.
@@ -479,6 +540,18 @@ COPY config/thunar-bookmarks /etc/skel/.config/gtk-3.0/bookmarks
 # Gitea launcher and the credentials banner template
 COPY config/gitea-banner.tmpl /opt/gitea/banner.tmpl
 COPY config/gitea.desktop     /usr/share/applications/gitea.desktop
+# Веб-чат с моделью: второй способ поговорить с ней, без агента и без кода —
+# проба формулировок, перевод, разбор текста. Работает он потому, что ключа у
+# нашего сервера нет: послать ключ встроенный интерфейс llama.cpp не умеет.
+# Адрес ярлык не знает — его берёт из переменных сессии сам скрипт.
+COPY config/model-chat.desktop /usr/share/applications/model-chat.desktop
+
+# Образцовый рабочий стол. Из него ярлыки попадают и в новый дом (он собран
+# из /etc/skel), и в УЖЕ созданный — их освежает точка входа. Раньше ярлыки
+# клались прямо в /home/$u при сборке, а /home — том: в существующем доме они
+# не появлялись никогда. Так пропал ярлык чата с моделью, и увидел это
+# заказчик, а не мы: на свежем томе он был.
+RUN mkdir -p /etc/skel/Desktop     && cp /usr/share/applications/dev.zed.Zed.desktop           /usr/share/applications/gitea.desktop           /usr/share/applications/model-chat.desktop /etc/skel/Desktop/     && chmod +x /etc/skel/Desktop/*.desktop
 
 # bash additions: history, prompt with the git branch, aliases
 COPY config/bashrc-extra.sh /etc/profile.d/zz-dev1c.sh
@@ -574,8 +647,18 @@ RUN test-skills
 # autocrlf=input — 1C dumps often arrive from Windows; the repository keeps LF.
 # One file instead of a pile of commands: visible as a whole and easy to edit.
 COPY config/gitconfig /etc/gitconfig
-RUN git lfs install --system \
-    && git config --system --get user.name
+# The hooks live in the image, at an absolute path, and are turned on by the
+# system config (core.hooksPath in config/gitconfig). Not in the project
+# repository on purpose: a hooks directory inside the tree, with a relative
+# hooksPath, would travel with the clone to the developer's machine — and the
+# BSL analyzer the hook calls is here, not there.
+# chmod explicitly: the build context comes from Windows, where the execute
+# bit does not survive, and a hook without it is skipped silently.
+COPY config/git-hooks /opt/git-hooks
+RUN chmod +x /opt/git-hooks/pre-push \
+    && git lfs install --system \
+    && git config --system --get user.name \
+    && test "$(git config --system --get core.hooksPath)" = /opt/git-hooks
 
 # --- Users --------------------------------------------------------------------
 # Three workstations in one image. More is deliberately not offered: the server
@@ -608,9 +691,8 @@ RUN echo 'dev1 ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev \
                   "/home/$u/.cache/bsl-analyzer" \
                   "/home/$u/proj" \
                   "/home/$u/examples"; \
-         cp /usr/share/applications/dev.zed.Zed.desktop "/home/$u/Desktop/"; \
-         cp /usr/share/applications/gitea.desktop "/home/$u/Desktop/"; \
-         chmod +x "/home/$u/Desktop/dev.zed.Zed.desktop" "/home/$u/Desktop/gitea.desktop"; \
+         cp /etc/skel/Desktop/*.desktop "/home/$u/Desktop/"; \
+         chmod +x "/home/$u/Desktop"/*.desktop; \
          chown -R "$u:$u" "/home/$u"; \
        done
 
@@ -681,7 +763,42 @@ RUN sed -i \
       -e 's|^ls_logo_height=.*|ls_logo_height=60|' \
       -e 's|^ls_logo_y_pos=.*|ls_logo_y_pos=28|' \
       -e 's|^#ls_title=.*|ls_title=OktaPlus — среда разработки 1С|' \
-      /etc/xrdp/xrdp.ini
+      `# autorun=Xorg — какой сеанс запускать, без вопроса. Даёт две вещи:` \
+      `#   1) клиент, передавший логин и пароль (в mstsc это «Пользователь» в` \
+      `#      параметрах подключения плюс «Разрешить сохранение учётных` \
+      `#      данных»), входит СРАЗУ — окно стенда не появляется вовсе, а` \
+      `#      пароль человек набирает в окне Windows, где раскладка` \
+      `#      переключается;` \
+      `#   2) в окне стенда пропадает список «Сессия». Секций в xrdp.ini три` \
+      `#      (Xorg, Xvnc, neutrinordp-any), работает у нас только первая, и` \
+      `#      выбор чужой строки кончается отказом без внятной причины.` \
+      -e 's|^autorun=.*|autorun=Xorg|' \
+      /etc/xrdp/xrdp.ini \
+    && grep -qx 'autorun=Xorg' /etc/xrdp/xrdp.ini
+
+# Окно входа и раскладка клавиатуры.
+#
+# Это окно рисует сам xrdp, а не X-сервер: ни XKB, ни индикатора, ни
+# переключателя в нём нет. Скан-коды переводятся по файлу km-<раскладка>.ini,
+# где раскладка — та, что клиент сообщил В МОМЕНТ подключения. Переключили
+# раскладку в Windows при открытом окне — на нашей стороне не изменилось
+# ничего: xrdp держит тот файл, который загрузил. С русской раскладкой каждая
+# клавиша давала кириллицу, а логин `dev1` набрать было нечем (находка
+# заказчика 25.10.2026).
+#
+# Поэтому под русским именем лежит американская раскладка: логины и пароли у
+# нас латиницей всегда, и кириллица окну входа не нужна вовсе. Понадобится
+# закрыть ещё чью-то нелатинскую раскладку — здесь же, тем же `cp`.
+#
+# Сеанса это не касается: раскладку сеанса задаём мы сами
+# (`setxkbmap -layout us,ru`, см. keyboard-layout.sh), и от данных клиента она
+# не зависит. km-файлы остаются только окну входа.
+#
+# `cmp` после `cp` на месте потому, что молчаливый откат здесь не виден:
+# окно просто снова начнёт давать кириллицу, и это обнаружит заказчик, а не мы.
+RUN cp /etc/xrdp/km-00000409.ini /etc/xrdp/km-00000419.ini \
+    && cmp /etc/xrdp/km-00000409.ini /etc/xrdp/km-00000419.ini \
+    && echo "login keymap: ru -> us"
 
 EXPOSE 3389
 # sshd runs alongside xrdp: the machine with 1C connects to it and forwards its

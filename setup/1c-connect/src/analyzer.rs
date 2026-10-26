@@ -217,10 +217,16 @@ mod tests {
         // Ключа нет — значит анализатор ведёт себя как без файла; а ручка видна.
         assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
-        assert!(text.contains(&format!("# {MIN} = ")), "подсказка про ручку обязана быть:
-{text}");
-        assert!(!text.lines().any(|l| l.trim_start().starts_with(MIN)), "незакомментированного минимума быть не должно:
-{text}");
+        assert!(
+            text.contains(&format!("# {MIN} = ")),
+            "подсказка про ручку обязана быть:
+{text}"
+        );
+        assert!(
+            !text.lines().any(|l| l.trim_start().starts_with(MIN)),
+            "незакомментированного минимума быть не должно:
+{text}"
+        );
     }
 
     #[test]
@@ -297,12 +303,16 @@ target_platform_version = \"8.3.21\"
     #[test]
     fn an_existing_file_keeps_its_other_keys() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "# мой файл
+        std::fs::write(
+            d.path().join(FILE),
+            "# мой файл
 min_platform_version = \"8.3.21\"
 
 [diagnostics]
 enabled = true
-").unwrap();
+",
+        )
+        .unwrap();
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
         assert!(text.contains("# мой файл") && text.contains("[diagnostics]"), "{text}");
@@ -318,9 +328,13 @@ enabled = true
     #[test]
     fn a_key_inside_a_section_is_not_ours() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "[diagnostics]
+        std::fs::write(
+            d.path().join(FILE),
+            "[diagnostics]
 target_platform_version = \"8.3.21\"
-").unwrap();
+",
+        )
+        .unwrap();
         assert!(found(d.path()).is_empty());
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);
@@ -334,8 +348,12 @@ target_platform_version = \"8.3.21\"
     #[test]
     fn a_trailing_comment_is_not_part_of_the_value() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "min_platform_version = \"8.3.21\" # версия заказчика
-").unwrap();
+        std::fs::write(
+            d.path().join(FILE),
+            "min_platform_version = \"8.3.21\" # версия заказчика
+",
+        )
+        .unwrap();
         assert_eq!(found(d.path()), vec![(MIN, "8.3.21".to_string())]);
     }
 
@@ -345,16 +363,26 @@ target_platform_version = \"8.3.21\"
     #[test]
     fn the_explanation_belongs_to_the_key_it_explains() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "min_platform_version = \"8.2.19\"
-").unwrap();
+        std::fs::write(
+            d.path().join(FILE),
+            "min_platform_version = \"8.2.19\"
+",
+        )
+        .unwrap();
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         let text = std::fs::read_to_string(d.path().join(FILE)).unwrap();
-        assert!(text.contains(why(TARGET)), "объяснение своего ключа обязано быть:
-{text}");
+        assert!(
+            text.contains(why(TARGET)),
+            "объяснение своего ключа обязано быть:
+{text}"
+        );
         // Сверяемся с самим текстом подсказки, а не с её пересказом: иначе
         // переформулировка выхолостила бы защиту (находка повторного ревью).
-        assert!(!text.contains(knob().trim()), "подсказка про ручку поверх чужой строки лишняя:
-{text}");
+        assert!(
+            !text.contains(knob().trim()),
+            "подсказка про ручку поверх чужой строки лишняя:
+{text}"
+        );
         assert_eq!(found(d.path()), vec![(MIN, "8.2.19".to_string()), (TARGET, "8.5.1".to_string())]);
     }
 
@@ -363,8 +391,12 @@ target_platform_version = \"8.3.21\"
     #[test]
     fn a_commented_key_is_not_a_key() {
         let d = Dir::new();
-        std::fs::write(d.path().join(FILE), "# target_platform_version = \"8.3.21\"
-").unwrap();
+        std::fs::write(
+            d.path().join(FILE),
+            "# target_platform_version = \"8.3.21\"
+",
+        )
+        .unwrap();
         assert!(found(d.path()).is_empty());
         assert_eq!(ensure(d.path(), &expected("8.5.1.1150", "8.3.27")), Ok(vec![TARGET]));
         assert_eq!(found(d.path()), vec![(TARGET, "8.5.1".to_string())]);

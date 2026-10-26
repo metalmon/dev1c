@@ -123,7 +123,9 @@ pub fn call(
             }
         }
     });
-    let send = |stdin: &mut std::process::ChildStdin, v: Value| stdin.write_all(&line(v)).and_then(|_| stdin.flush()).map_err(|e| format!("vrunner-mcp закрыл вход: {e}"));
+    let send = |stdin: &mut std::process::ChildStdin, v: Value| {
+        stdin.write_all(&line(v)).and_then(|_| stdin.flush()).map_err(|e| format!("vrunner-mcp закрыл вход: {e}"))
+    };
     let deadline = std::time::Instant::now() + timeout;
     let wait_for = |id: i64| -> Result<Value, String> {
         loop {
@@ -207,7 +209,11 @@ mod tests {
     #[test]
     fn a_local_call_initialises_calls_and_reaps_the_process() {
         let logged = std::cell::RefCell::new(Vec::new());
-        let r = call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({"background": false}), Duration::from_secs(30), &NEVER, &|s| logged.borrow_mut().push(s)).unwrap();
+        let r =
+            call(scripted(("BRIDGE_SCRIPT", "1")), "cf_decompile", json!({"background": false}), Duration::from_secs(30), &NEVER, &|s| {
+                logged.borrow_mut().push(s)
+            })
+            .unwrap();
         assert_eq!(r.text, "child ran cf_decompile");
         assert!(!r.is_error);
     }
@@ -219,7 +225,8 @@ mod tests {
         // stderr is what the person sees.
         let r = call(scripted(("BRIDGE_SCRIPT_NOISY", "1")), "task_status", json!({}), Duration::from_secs(60), &NEVER, &|_| {}).unwrap();
         assert_eq!(r.text, "child ran task_status");
-        let e = call(scripted(("BRIDGE_DIE", "платформа не найдена")), "cf_load", json!({}), Duration::from_secs(30), &NEVER, &|_| {}).unwrap_err();
+        let e = call(scripted(("BRIDGE_DIE", "платформа не найдена")), "cf_load", json!({}), Duration::from_secs(30), &NEVER, &|_| {})
+            .unwrap_err();
         assert!(e.contains("платформа не найдена"), "{e}");
     }
 

@@ -100,13 +100,34 @@ pub enum Route {
     Drop,
     /// Запрос, который мост не пропускает: ответ — ошибка JSON-RPC с этим
     /// кодом и текстом (`id` null — разобрать не удалось).
-    Reject { id: Value, code: i64, why: String },
+    Reject {
+        id: Value,
+        code: i64,
+        why: String,
+    },
     Forward(Vec<u8>),
-    ListRequest { id: Value, line: Vec<u8> },
-    OurCall { id: Value, tool: String, args: Value },
-    Disabled { id: Value, tool: String },
-    PlatformCall { id: Value, tool: String, line: Vec<u8> },
-    Cancel { id: Value, line: Vec<u8> },
+    ListRequest {
+        id: Value,
+        line: Vec<u8>,
+    },
+    OurCall {
+        id: Value,
+        tool: String,
+        args: Value,
+    },
+    Disabled {
+        id: Value,
+        tool: String,
+    },
+    PlatformCall {
+        id: Value,
+        tool: String,
+        line: Vec<u8>,
+    },
+    Cancel {
+        id: Value,
+        line: Vec<u8>,
+    },
 }
 
 fn parse(line: &[u8]) -> Option<Value> {
@@ -176,19 +197,24 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
     const PARAMS: i64 = -32602;
     let Some(v) = parse(line) else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
     let Some(obj) = v.as_object() else { return Route::Reject { id: Value::Null, code: PARSE, why: "не JSON-объект".into() } };
-    let Ok(id_field) = key_ci(obj, "id") else { return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() } };
+    let Ok(id_field) = key_ci(obj, "id") else {
+        return Route::Reject { id: Value::Null, code: PARSE, why: "id задан дважды".into() };
+    };
     // Присутствие ключа `id`, а не только его значение: уведомление вообще
     // не несёт этого ключа, и ответ `"id":null` превратил бы его для
     // ребёнка в запрос, которого тот не посылал.
     let has_id = id_field.is_some();
     let id = id_field.cloned().unwrap_or(Value::Null);
     // Уведомление (без id) ответа не ждёт: неизвестное — молча мимо.
-    let reject = |code: i64, why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), code, why: why.to_string() } };
+    let reject =
+        |code: i64, why: &str| if id.is_null() { Route::Drop } else { Route::Reject { id: id.clone(), code, why: why.to_string() } };
     let method = match key_ci(obj, "method") {
         Ok(Some(Value::String(m))) => m.to_ascii_lowercase(),
         _ => return reject(METHOD, "нет метода"),
     };
-    let Some(method) = METHODS.iter().find(|m| m.eq_ignore_ascii_case(&method)) else { return reject(METHOD, "нет такого метода") };
+    let Some(method) = METHODS.iter().find(|m| m.eq_ignore_ascii_case(&method)) else {
+        return reject(METHOD, "нет такого метода");
+    };
     let params = match key_ci(obj, "params") {
         Ok(p) => p.cloned().unwrap_or(json!({})),
         Err(()) => return reject(PARAMS, "params задан дважды"),
@@ -210,7 +236,9 @@ pub fn route_request_with(line: &[u8], allowed: &[String], defaults: &Value) -> 
         "tools/list" => Route::ListRequest { id: id.clone(), line: rebuilt(params) },
         "tools/call" => {
             let Some(p) = params.as_object() else { return reject(PARAMS, "params — не объект") };
-            let (Ok(name), Ok(args)) = (key_ci(p, "name"), key_ci(p, "arguments")) else { return reject(PARAMS, "name или arguments заданы дважды") };
+            let (Ok(name), Ok(args)) = (key_ci(p, "name"), key_ci(p, "arguments")) else {
+                return reject(PARAMS, "name или arguments заданы дважды");
+            };
             let Some(tool) = name.and_then(Value::as_str) else { return reject(PARAMS, "tools/call без name") };
             let tool = tool.to_string();
             let args = args.cloned().unwrap_or(json!({}));
@@ -455,7 +483,8 @@ mod tests {
 
     #[test]
     fn allowed_call_goes_to_the_child_as_is() {
-        let r = route_request(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","arguments":{}}}"#, &allowed());
+        let r =
+            route_request(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_status","arguments":{}}}"#, &allowed());
         assert!(matches!(r, Route::Forward(_)));
     }
 
@@ -467,13 +496,19 @@ mod tests {
 
     #[test]
     fn disabled_tool_is_answered_by_the_bridge() {
-        let r = route_request(br#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"infobase_delete","arguments":{}}}"#, &allowed());
+        let r = route_request(
+            br#"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"infobase_delete","arguments":{}}}"#,
+            &allowed(),
+        );
         assert!(matches!(r, Route::Disabled { id, tool } if id == json!("a") && tool == "infobase_delete"));
     }
 
     #[test]
     fn our_tool_is_ours_even_when_not_in_the_list() {
-        let r = route_request(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_push","arguments":{"message":"m"}}}"#, &allowed());
+        let r = route_request(
+            br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_push","arguments":{"message":"m"}}}"#,
+            &allowed(),
+        );
         assert!(matches!(r, Route::OurCall { id, tool, args } if id == json!(2) && tool == "project_push" && args["message"] == "m"));
     }
 
@@ -537,7 +572,10 @@ mod tests {
         // or one half of the bridge sees a tools/call the other half misses.
         let no_id = br#"{"jsonrpc":"2.0","Method":"tools/call","params":{"name":"cf_load"}}"#;
         assert!(is_tools_call_without_id(no_id), "a differently-cased method must still read as tools/call");
-        assert!(matches!(route_request(no_id, &["cf_load".to_string()]), Route::PlatformCall { .. }), "route_request_with already finds it via key_ci");
+        assert!(
+            matches!(route_request(no_id, &["cf_load".to_string()]), Route::PlatformCall { .. }),
+            "route_request_with already finds it via key_ci"
+        );
 
         let odd_id = br#"{"method":"tools/call","ID":5,"params":{"name":"cf_load"}}"#;
         assert!(!is_tools_call_without_id(odd_id), "an id spelled ID is still an id");
@@ -552,8 +590,12 @@ mod tests {
 
     #[test]
     fn mcp_gate_while_off_refuses_a_tools_call_that_has_an_id() {
-        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#), McpOffGate::Refuse(id) if id == json!(7)));
-        assert!(matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), McpOffGate::Refuse(id) if id == json!("a")));
+        assert!(
+            matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x"}}"#), McpOffGate::Refuse(id) if id == json!(7))
+        );
+        assert!(
+            matches!(mcp_gate_while_off(br#"{"jsonrpc":"2.0","id":"a","method":"Tools/Call"}"#), McpOffGate::Refuse(id) if id == json!("a"))
+        );
     }
 
     #[test]
@@ -653,7 +695,9 @@ mod tests {
             _ => panic!("platform call"),
         }
         // Our own tools and other methods are untouched.
-        assert!(matches!(route_request_with(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_status"}}"#, &allowed(), &defaults), Route::OurCall { args, .. } if args.get("db-pwd").is_none()));
+        assert!(
+            matches!(route_request_with(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_status"}}"#, &allowed(), &defaults), Route::OurCall { args, .. } if args.get("db-pwd").is_none())
+        );
     }
 
     #[test]
@@ -720,4 +764,3 @@ mod tests {
         assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 3);
     }
 }
-

@@ -239,8 +239,11 @@ pub fn base_label(path: &str) -> &str {
 /// Текст диалога подтверждения: два предложения (что сейчас, что станет
 /// после, и сам вопрос) и деталь с обоими полными путями.
 pub fn confirm_text(old_path: &str, new_path: &str) -> (String, String) {
-    let message =
-        format!("Агент сейчас работает с базой «{}», после сохранения перейдёт на «{}». Сохранить?", base_label(old_path), base_label(new_path));
+    let message = format!(
+        "Агент сейчас работает с базой «{}», после сохранения перейдёт на «{}». Сохранить?",
+        base_label(old_path),
+        base_label(new_path)
+    );
     (message, format!("{old_path} → {new_path}"))
 }
 

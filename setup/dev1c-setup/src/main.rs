@@ -315,7 +315,9 @@ fn run() -> Result<bool> {
             // установленной машине применять нечего, и об этом надо сказать:
             // иначе человек решит, что команда сработала целиком.
             if touched == 0 {
-                ctx.say("применять было нечего: параметр записан в dev1c.toml. Если стенд ещё не установлен — dev1c-setup install".to_string());
+                ctx.say(
+                    "применять было нечего: параметр записан в dev1c.toml. Если стенд ещё не установлен — dev1c-setup install".to_string(),
+                );
             }
             // Служба пересоздана — числа окна могли измениться: замер заново,
             // иначе контейнер и Zed остаются с прежними.
@@ -350,10 +352,7 @@ fn run() -> Result<bool> {
             }
             if needs_typed_name_confirmation(data, cli.yes) {
                 println!();
-                let name = ctx.prompt.ask(
-                    "Введите имя стенда (name в dev1c.toml), чтобы подтвердить удаление",
-                    "",
-                );
+                let name = ctx.prompt.ask("Введите имя стенда (name в dev1c.toml), чтобы подтвердить удаление", "");
                 anyhow::ensure!(name == ctx.cfg.server.name, "имя не совпало, ничего не удалено");
             }
             common::run::clean_apply(&ctx, &ops, level)?;
@@ -370,10 +369,7 @@ fn run() -> Result<bool> {
         }
         Cmd::Checksums => {
             let n = common::integrity::write_list(&ctx.kit, |p| println!("  {p}"))?;
-            println!(
-                "В checksums.txt записано {}.",
-                common::word::count(n as u64, "сумма", "суммы", "сумм")
-            );
+            println!("В checksums.txt записано {}.", common::word::count(n as u64, "сумма", "суммы", "сумм"));
         }
     }
     Ok(true)

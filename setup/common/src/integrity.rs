@@ -94,11 +94,8 @@ pub fn write_list(kit: &Kit, mut progress: impl FnMut(&str)) -> Result<usize> {
 /// Сверить комплект со списком.
 pub fn verify(kit: &Kit, mut progress: impl FnMut(usize, usize, &str)) -> Result<Report> {
     let text = std::fs::read_to_string(kit.path(LIST)).context("в комплекте нет checksums.txt")?;
-    let items: Vec<(String, String)> = text
-        .lines()
-        .filter_map(|l| l.split_once("  "))
-        .map(|(h, p)| (h.to_string(), p.to_string()))
-        .collect();
+    let items: Vec<(String, String)> =
+        text.lines().filter_map(|l| l.split_once("  ")).map(|(h, p)| (h.to_string(), p.to_string())).collect();
     let mut report = Report::default();
     for (i, (hash, path)) in items.iter().enumerate() {
         progress(i + 1, items.len(), path);

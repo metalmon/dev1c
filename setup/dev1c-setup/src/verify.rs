@@ -81,11 +81,7 @@ fn cause_chain(e: &(dyn std::error::Error + 'static)) -> String {
 /// перехватывает и 127.0.0.1, и тогда «Gitea не отвечает» сказано о вполне
 /// рабочем стенде.
 pub fn http_get(url: &str) -> std::result::Result<u16, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .no_proxy()
-        .build()
-        .map_err(|e| cause_chain(&e))?;
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).no_proxy().build().map_err(|e| cause_chain(&e))?;
     client.get(url).send().map(|r| r.status().as_u16()).map_err(|e| cause_chain(&e))
 }
 
@@ -94,14 +90,7 @@ pub fn http_get(url: &str) -> std::result::Result<u16, String> {
 /// соединение есть, а ответа нет (это ответил движок контейнеров, Gitea
 /// внутри ещё не слушает), и ответ не тот (отвечает сама Gitea, и смотреть
 /// надо её журнал). Раньше все три печатались одним «повторите».
-pub fn gitea_fact(
-    url: &str,
-    port: u16,
-    port_open: bool,
-    answer: std::result::Result<u16, String>,
-    engine: &str,
-    name: &str,
-) -> Check {
+pub fn gitea_fact(url: &str, port: u16, port_open: bool, answer: std::result::Result<u16, String>, engine: &str, name: &str) -> Check {
     if !port_open {
         return Check::fail(
             "Gitea",
@@ -190,9 +179,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     } else {
         Check::fail("nc в образе", "нет", "образ собран без netcat-openbsd: это другой образ")
     });
-    let settings = docker::ask(ctx, &["exec", &name, "cat", "/home/dev1/.config/zed/settings.json"])
-        .map(|o| o.text)
-        .unwrap_or_default();
+    let settings = docker::ask(ctx, &["exec", &name, "cat", "/home/dev1/.config/zed/settings.json"]).map(|o| o.text).unwrap_or_default();
     // Локальный сервер модели: карта, ответ сервера, и сходятся ли его окно,
     // бюджет агента в Zed и слоты.
     if ctx.cfg.form() != Form::Remote {
@@ -201,10 +188,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
             // наши же веса модели: карта занята тем, для чего её и берут.
             Some(g) => Check::pass(
                 "видеокарта",
-                format!(
-                    "{}, {} МиБ, занято {} МиБ вместе с весами модели, драйвер {}",
-                    g.name, g.total_mb, g.used_mb, g.driver
-                ),
+                format!("{}, {} МиБ, занято {} МиБ вместе с весами модели, драйвер {}", g.name, g.total_mb, g.used_mb, g.driver),
             ),
             None => Check::fail("видеокарта", "nvidia-smi не отвечает", "драйвер NVIDIA на этой машине"),
         });
@@ -212,7 +196,10 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         // Ключа у нашего сервера нет (решение 26.10.2026): спрашиваем без него.
         let props = llama::props(&url, "");
         v.push(match &props {
-            Some(p) => Check::pass("сервер модели", format!("{}: окно {} токенов, слотов {}, модель {}", ctx.cfg.model_url(), p.window, p.slots, p.model)),
+            Some(p) => Check::pass(
+                "сервер модели",
+                format!("{}: окно {} токенов, слотов {}, модель {}", ctx.cfg.model_url(), p.window, p.slots, p.model),
+            ),
             None => no_props_fact(&url),
         });
         if let Some(p) = props {
@@ -250,25 +237,20 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
         _ => "llama.cpp",
     };
     let want_model = ctx.cfg.model_alias();
-    v.push(
-        if settings_ok(&settings, want_provider, &want_model) {
-            Check::pass(
-                "модель в настройках Zed",
-                format!(
-                    "провайдер {want_provider}{}",
-                    if want_model.is_empty() { String::new() } else { format!(", модель {want_model}") }
-                ),
-            )
-        } else if settings.is_empty() {
-            Check::fail("модель в настройках Zed", "настроек dev1 ещё нет", "entrypoint раскладывает их при старте; повторите через минуту")
-        } else {
-            Check::fail(
-                "модель в настройках Zed",
-                "провайдер или модель не подставлены",
-                "dev1c-setup change — пересоздаст контейнер с текущим dev1c.toml",
-            )
-        },
-    );
+    v.push(if settings_ok(&settings, want_provider, &want_model) {
+        Check::pass(
+            "модель в настройках Zed",
+            format!("провайдер {want_provider}{}", if want_model.is_empty() { String::new() } else { format!(", модель {want_model}") }),
+        )
+    } else if settings.is_empty() {
+        Check::fail("модель в настройках Zed", "настроек dev1 ещё нет", "entrypoint раскладывает их при старте; повторите через минуту")
+    } else {
+        Check::fail(
+            "модель в настройках Zed",
+            "провайдер или модель не подставлены",
+            "dev1c-setup change — пересоздаст контейнер с текущим dev1c.toml",
+        )
+    });
     v.push(if settings.contains("\"7771\"") {
         Check::pass("порты рабочих мест в Zed", "dev1 → 7771/7781")
     } else {
@@ -278,11 +260,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
     // просто не подключён. Три строки «это нормально, если…» занимали шестую
     // часть отчёта и не сообщали ничего.
     let up: Vec<String> = (1..=3u16)
-        .filter(|n| {
-            docker::ask(ctx, &["exec", &name, "nc", "-z", "localhost", &(7770 + n).to_string()])
-                .map(|o| o.ok())
-                .unwrap_or(false)
-        })
+        .filter(|n| docker::ask(ctx, &["exec", &name, "nc", "-z", "localhost", &(7770 + n).to_string()]).map(|o| o.ok()).unwrap_or(false))
         .map(|n| format!("dev{n}"))
         .collect();
     if !up.is_empty() {
@@ -295,11 +273,7 @@ pub fn run(ctx: &Ctx) -> Vec<Check> {
 /// — ключа у нашего сервера больше не бывает (решение 26.10.2026), а значит и
 /// 401 от нечитаемого токена, который прежде выдавали за молчащий сервер.
 pub fn no_props_fact(url: &str) -> Check {
-    Check::fail(
-        "сервер модели",
-        format!("{url} не отвечает"),
-        "dev1c-setup install; журнал службы — llama.log в каталоге сервера",
-    )
+    Check::fail("сервер модели", format!("{url} не отвечает"), "dev1c-setup install; журнал службы — llama.log в каталоге сервера")
 }
 
 /// Хватает ли окна агенту. Раньше здесь сходились три числа — вход, ответ и
@@ -320,7 +294,8 @@ pub fn numbers_fact(slot_window: u32, agents: u16) -> Check {
             "окно агента",
             format!(
                 "окно слота {slot_window}, агентов {a} — по {per_agent} токенов на каждого; нужно не меньше {need} (вход {}, ответ {})",
-                llama::MIN_BUDGET, llama::ANSWER_FLOOR
+                llama::MIN_BUDGET,
+                llama::ANSWER_FLOOR
             ),
         )
     } else {
@@ -328,7 +303,8 @@ pub fn numbers_fact(slot_window: u32, agents: u16) -> Check {
             "окно агента",
             format!(
                 "окно слота {slot_window}, агентов {a} — по {per_agent} токенов на каждого, а нужно не меньше {need} (вход {}, ответ {})",
-                llama::MIN_BUDGET, llama::ANSWER_FLOOR
+                llama::MIN_BUDGET,
+                llama::ANSWER_FLOOR
             ),
             "dev1c-setup install — пересчитает и пересоздаст контейнер; либо agents в dev1c.toml меньше",
         )
@@ -385,9 +361,6 @@ pub fn model_window_fact(measured: u32, available: u32, fit_ctx: u32) -> Check {
         )
     }
 }
-
-
-
 
 /// Записать отчёт в комплект и вернуть путь.
 pub fn report(ctx: &Ctx, checks: &[Check]) -> Result<PathBuf> {
@@ -458,7 +431,8 @@ mod tests {
     #[test]
     fn settings_pass_only_with_the_live_provider_filled_in() {
         // Модель не настроена: заготовки на месте, и это провалившийся факт.
-        let unset = r#""provider": "MODEL_PROVIDER_PLACEHOLDER", "api_url": "LLAMA_API_URL_PLACEHOLDER", "model": "MODEL_NAME_PLACEHOLDER""#;
+        let unset =
+            r#""provider": "MODEL_PROVIDER_PLACEHOLDER", "api_url": "LLAMA_API_URL_PLACEHOLDER", "model": "MODEL_NAME_PLACEHOLDER""#;
         assert!(!settings_ok(unset, "llama.cpp", "x"));
         // Наш сервер: штатный провайдер, адрес подставлен.
         let local = r#""provider": "llama.cpp", "api_url": "http://host.docker.internal:1235", "model": "Q""#;

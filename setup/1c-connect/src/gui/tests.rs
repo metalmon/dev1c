@@ -2,10 +2,10 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
-use core::prelude::v1::test;
 use crate::session::State;
 use common::check::Check;
 use common::Phase;
+use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

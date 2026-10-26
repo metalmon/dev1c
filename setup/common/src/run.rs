@@ -70,10 +70,7 @@ pub fn apply_all<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], only: Option<&str>,
 
 /// Состояние каждой операции, без изменений.
 pub fn status<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>]) -> Vec<(String, String, OpState)> {
-    ops.iter()
-        .filter(|o| !o.always_run())
-        .map(|o| (o.id().to_string(), o.title().to_string(), o.state(ctx)))
-        .collect()
+    ops.iter().filter(|o| !o.always_run()).map(|o| (o.id().to_string(), o.title().to_string(), o.state(ctx))).collect()
 }
 
 /// Откат в обратном порядке. План печатается всегда; выполнение — после
@@ -84,8 +81,7 @@ pub fn clean_plan<X: Runner>(ctx: &X, ops: &[Box<dyn Op<X>>], level: CleanLevel)
     ops.iter()
         .rev()
         .filter_map(|o| {
-            o.revert(ctx, level)
-                .map(|acts| (o.id().to_string(), o.title().to_string(), acts.into_iter().map(|a| a.0).collect()))
+            o.revert(ctx, level).map(|acts| (o.id().to_string(), o.title().to_string(), acts.into_iter().map(|a| a.0).collect()))
         })
         .collect()
 }

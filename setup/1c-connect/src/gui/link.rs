@@ -15,7 +15,11 @@ use super::*;
 pub fn link_line(l: &State, host: &Host, mode: &str) -> Option<Line> {
     match l {
         State::Connecting => {
-            let text = if mode == "local" { "включаю MCP".to_string() } else { format!("подключаюсь к {} как {}", host.server, host.workstation) };
+            let text = if mode == "local" {
+                "включаю MCP".to_string()
+            } else {
+                format!("подключаюсь к {} как {}", host.server, host.workstation)
+            };
             Some(Line { kind: Kind::Say, text })
         }
         State::Failed(why) => Some(Line { kind: Kind::Fail, text: why.clone() }),

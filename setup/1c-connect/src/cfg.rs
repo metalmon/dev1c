@@ -28,8 +28,18 @@ pub fn no_gitea() -> String {
 /// синтакс-контроль, тесты, фоновые задачи, кэш. Остальные 49 — по списку
 /// в toml.
 pub const DEFAULT_TOOLS: [&str; 12] = [
-    "cf_decompile", "cf_load", "infobase_update", "validate_syntax_check", "test_xunit", "test_vanessa",
-    "test_yaxunit", "task_status", "task_result", "task_cancel", "cache_show", "cache_clear",
+    "cf_decompile",
+    "cf_load",
+    "infobase_update",
+    "validate_syntax_check",
+    "test_xunit",
+    "test_vanessa",
+    "test_yaxunit",
+    "task_status",
+    "task_result",
+    "task_cancel",
+    "cache_show",
+    "cache_clear",
 ];
 
 /// Инструменты, которые **меняют состояние**: базу, дерево проекта или
@@ -275,7 +285,10 @@ impl Cfg {
             g.is_empty() || g.starts_with("http://") || g.starts_with("https://"),
             "[host]: gitea — полный адрес Gitea среды, например http://localhost:3000 (пусто — адрес не задан, его пишет 1c-connect install)"
         );
-        anyhow::ensure!(matches!(self.host.mode.as_str(), "tunnel" | "local"), "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)");
+        anyhow::ensure!(
+            matches!(self.host.mode.as_str(), "tunnel" | "local"),
+            "[host]: mode — \"tunnel\" (туннель в среду) или \"local\" (база внутри образа)"
+        );
         anyhow::ensure!(
             matches!(self.host.publication.as_str(), "auto" | "webserver"),
             "[host]: publication — \"auto\" (публикует сама программа) или \"webserver\" (уже опубликовано на Apache/IIS)"
@@ -302,7 +315,10 @@ impl Cfg {
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
         let p = &self.host.project;
         let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
-        anyhow::ensure!(full && !p.contains('"') && !p.contains('%'), "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh");
+        anyhow::ensure!(
+            full && !p.contains('"') && !p.contains('%'),
+            "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
+        );
         Ok(())
     }
 
@@ -433,7 +449,8 @@ mod tests {
                         break; // строка комментария — остаток не нужен
                     }
                     if c.is_ascii_uppercase() {
-                        let run: String = chars[i..].iter().take_while(|c| c.is_ascii_uppercase() || **c == '_' || c.is_ascii_digit()).collect();
+                        let run: String =
+                            chars[i..].iter().take_while(|c| c.is_ascii_uppercase() || **c == '_' || c.is_ascii_digit()).collect();
                         if run.ends_with("PLACEHOLDER") {
                             out.push('0');
                             i += run.chars().count();
@@ -472,7 +489,10 @@ mod tests {
         let known = exposable();
         for profile in ["разбор", "работа"] {
             for name in profile_tools(profile).keys() {
-                assert!(known.contains(&name.as_str()), "профиль «{profile}» гасит {name}, которого мост не отдаёт: ни в DEFAULT_TOOLS, ни в OUR_TOOLS");
+                assert!(
+                    known.contains(&name.as_str()),
+                    "профиль «{profile}» гасит {name}, которого мост не отдаёт: ни в DEFAULT_TOOLS, ни в OUR_TOOLS"
+                );
             }
         }
     }
@@ -784,10 +804,7 @@ mod tests {
             // `env` сверяется тоже, хотя сейчас его нет ни у кого:
             // появится он сперва у Zed, и расхождение прошло бы молча.
             for field in ["command", "args", "timeout", "env"] {
-                assert_eq!(
-                    z[name][field], p[name][field],
-                    "сервер {name}: поле {field} у pi и у Zed разошлось"
-                );
+                assert_eq!(z[name][field], p[name][field], "сервер {name}: поле {field} у pi и у Zed разошлось");
             }
         }
     }

@@ -22,7 +22,10 @@ pub struct Incoming {
 #[derive(Debug)]
 pub enum TunnelError {
     Auth,
-    HostKeyChanged { old: String, new: String },
+    HostKeyChanged {
+        old: String,
+        new: String,
+    },
     Forward(u16),
     Net(String),
     /// Something on this machine: the kit's known_hosts unreadable, a
@@ -120,7 +123,9 @@ pub fn decide_key(known: std::io::Result<String>, server: &str, line: &str) -> K
     match known {
         Ok(text) => match text.lines().find(|l| l.starts_with(&format!("{server} "))) {
             Some(k) if k.trim() == line.trim() => KeyDecision::Accept,
-            Some(k) => KeyDecision::Changed { old: k.split_whitespace().nth(2).unwrap_or("?").chars().take(16).collect::<String>() + "…" },
+            Some(k) => {
+                KeyDecision::Changed { old: k.split_whitespace().nth(2).unwrap_or("?").chars().take(16).collect::<String>() + "…" }
+            }
             None => KeyDecision::Remember,
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => KeyDecision::Remember,
@@ -152,7 +157,11 @@ fn workstation_busy_text(workstation: &str) -> String {
 /// подряд, терминальный текст — иначе `None` (повторить как раньше).
 fn forward_refusal_step(workstation: &str, refusals_so_far: u32) -> (u32, Option<String>) {
     let n = refusals_so_far + 1;
-    if n >= MAX_FORWARD_REFUSALS { (n, Some(workstation_busy_text(workstation))) } else { (n, None) }
+    if n >= MAX_FORWARD_REFUSALS {
+        (n, Some(workstation_busy_text(workstation)))
+    } else {
+        (n, None)
+    }
 }
 
 /// What a person has to fix is never retried: a refused password, a changed
@@ -186,7 +195,15 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(());
         }
-        match Tunnel::connect(&cfg.host.server, &cfg.host.workstation, &cfg.host.password, &known_hosts, &[ports.mcp, ports.vrunner, ports.web]).await {
+        match Tunnel::connect(
+            &cfg.host.server,
+            &cfg.host.workstation,
+            &cfg.host.password,
+            &known_hosts,
+            &[ports.mcp, ports.vrunner, ports.web],
+        )
+        .await
+        {
             Ok(mut t) => {
                 attempt = 0;
                 forward_refusals = 0;
@@ -270,7 +287,9 @@ mod loop_tests {
         assert!(!is_terminal(&fwd, true));
         assert!(!is_terminal(&net, true));
         // Never retried: a refused password, a changed key, a local fault.
-        for e in [TunnelError::Auth, TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() }, TunnelError::Local("known_hosts".into())] {
+        for e in
+            [TunnelError::Auth, TunnelError::HostKeyChanged { old: "a".into(), new: "b".into() }, TunnelError::Local("known_hosts".into())]
+        {
             assert!(is_terminal(&e, false) && is_terminal(&e, true), "{e}");
         }
     }
@@ -326,7 +345,10 @@ mod key_tests {
     fn unreadable_known_hosts_never_opens_the_door() {
         let line = "s:1 ssh-ed25519 AAAA";
         assert_eq!(decide_key(Err(std::io::Error::from(std::io::ErrorKind::NotFound)), "s:1", line), KeyDecision::Remember);
-        assert!(matches!(decide_key(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), "s:1", line), KeyDecision::Unreadable(_)));
+        assert!(matches!(
+            decide_key(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)), "s:1", line),
+            KeyDecision::Unreadable(_)
+        ));
         assert_eq!(decide_key(Ok("s:1 ssh-ed25519 AAAA\n".into()), "s:1", line), KeyDecision::Accept);
         assert_eq!(decide_key(Ok("other:1 ssh-ed25519 AAAA\n".into()), "s:1", line), KeyDecision::Remember);
         assert!(matches!(decide_key(Ok("s:1 ssh-ed25519 BBBB\n".into()), "s:1", line), KeyDecision::Changed { .. }));

@@ -240,9 +240,14 @@ impl Paths {
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
         let (root, state) = bases(&kit.root, &ops_host::state_dir());
         if cfg!(windows) && !root.join("bin").join("httpd.exe").exists() {
-            return Err(format!("в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})", root.display(), kit.root.display()));
+            return Err(format!(
+                "в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})",
+                root.display(),
+                kit.root.display()
+            ));
         }
-        let exe = ops_host::find_1cv8(cfg).ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
+        let exe = ops_host::find_1cv8(cfg)
+            .ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
         let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
         let module = module_in(bin)?;
         Ok(paths_under(&state, root, module, cfg.http_port()))
@@ -314,7 +319,11 @@ fn linux_httpd_conf(p: &Paths) -> Result<String, String> {
     // `Path::parent()` у однокомпонентного относительного пути отдаёт
     // `Some("")`, не `None` — пустой `DefaultRuntimeDir` молча прошёл бы мимо
     // `.unwrap_or_default()`. Проверяем явно и отказываем читаемой строкой.
-    let tools = p.pid.parent().filter(|d| !d.as_os_str().is_empty()).ok_or_else(|| format!("у {} нет каталога — не могу вычислить DefaultRuntimeDir", p.pid.display()))?;
+    let tools = p
+        .pid
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| format!("у {} нет каталога — не могу вычислить DefaultRuntimeDir", p.pid.display()))?;
     Ok(format!(
         "ServerRoot \"{root}\"\n\
 ServerName localhost\n\
@@ -360,7 +369,11 @@ fn httpd_binary(p: &Paths) -> PathBuf {
 
 /// Грубая проверка «порт свободен»: TCP-соединение на петлю не прошло.
 fn port_is_free(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(&std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)), std::time::Duration::from_millis(200)).is_err()
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+        std::time::Duration::from_millis(200),
+    )
+    .is_err()
 }
 
 /// Грубая проверка «на петле кто-то слушает» — не доказательство, что это
@@ -532,10 +545,8 @@ pub(crate) fn apache2_on_path() -> Option<PathBuf> {
     // apache2», хотя пакет стоял: `/usr/sbin/apache2` был на месте, просто
     // мы смотрели не туда. Системные каталоги службы проверяем сами —
     // программа там и живёт, а `$PATH` у графического сеанса ей не указ.
-    let from_path = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .map(|d| d.join("apache2"));
+    let from_path =
+        std::env::var_os("PATH").into_iter().flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>()).map(|d| d.join("apache2"));
     let system = ["/usr/sbin", "/usr/local/sbin", "/sbin"].into_iter().map(|d| Path::new(d).join("apache2"));
     from_path.chain(system).find(|p| p.exists())
 }
@@ -715,7 +726,14 @@ mod tests {
         let start = text.find("<service").expect("в дескрипторе есть <service");
         let end = start + text[start..].find("/>").expect("элемент <service> закрыт");
         let service_tag = &text[start..end];
-        for needle in ["rootUrl=\"mcp-1c\"", "enable=\"true\"", "reuseSessions=\"dontuse\"", "sessionMaxAge=\"1\"", "poolSize=\"1\"", "poolTimeout=\"1\""] {
+        for needle in [
+            "rootUrl=\"mcp-1c\"",
+            "enable=\"true\"",
+            "reuseSessions=\"dontuse\"",
+            "sessionMaxAge=\"1\"",
+            "poolSize=\"1\"",
+            "poolTimeout=\"1\"",
+        ] {
             assert!(service_tag.contains(needle), "в <service> нет {needle:?}:\n{service_tag}");
         }
     }

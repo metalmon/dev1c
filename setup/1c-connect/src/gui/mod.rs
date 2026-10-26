@@ -392,7 +392,10 @@ pub enum Ev {
     /// Фаза/заметка долгой операции — для карточки хода (журналу своей
     /// строки хватает, её шлёт `line_of`).
     Progress(Progress),
-    Done { err: Option<String>, cancelled: bool },
+    Done {
+        err: Option<String>,
+        cancelled: bool,
+    },
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`).
     Project(ProjectView),
     /// Ответ `ensure_publication`, поднятой в своём потоке: проба (до 3 с),
@@ -409,7 +412,10 @@ pub enum Ev {
     /// — весь дешёвый набор. `None` в любом из полей значит «не спрашивали»
     /// (или поток упал с паникой): нуль сеансов — это ответ, а не его
     /// отсутствие, и подменять им незнание нельзя.
-    Cheap { sessions: Option<usize>, facts: Option<Vec<Check>> },
+    Cheap {
+        sessions: Option<usize>,
+        facts: Option<Vec<Check>>,
+    },
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -672,7 +678,9 @@ pub fn run_op(cx: &mut App, which: Which) {
     // только оттуда (спека, «программа не выдумывает адресов»).
     if which == Which::Install {
         match ops_host::write_derived_fields(&ui.kit, &mut ui.cfg, false) {
-            Ok(wrote) if !wrote.is_empty() => note_line(ui, Line { kind: Kind::Ok, text: format!("в {} записано: {}", cfg::FILE, wrote.join(", ")) }),
+            Ok(wrote) if !wrote.is_empty() => {
+                note_line(ui, Line { kind: Kind::Ok, text: format!("в {} записано: {}", cfg::FILE, wrote.join(", ")) })
+            }
             Ok(_) => {}
             Err(e) => note_line(ui, Line { kind: Kind::Fail, text: format!("параметры не дописаны: {e:#}") }),
         }
@@ -739,7 +747,16 @@ pub fn refresh_project(cx: &mut App) {
                 };
                 Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, facts, ok, why, busy })
             },
-            || Ev::Project(ProjectView { dir: String::new(), branch: String::new(), facts: None, ok: false, why: PANIC_TEXT.into(), busy: false }),
+            || {
+                Ev::Project(ProjectView {
+                    dir: String::new(),
+                    branch: String::new(),
+                    facts: None,
+                    ok: false,
+                    why: PANIC_TEXT.into(),
+                    busy: false,
+                })
+            },
         );
     });
 }
@@ -813,7 +830,9 @@ pub fn quit(cx: &mut App) {
     let line = match ui.raised_publication.then(|| ops_host::stop_own_publication(&quiet_ctx(ui))) {
         Some(Ok(true)) => Some(Line { kind: Kind::Ok, text: "HTTP-сервис базы остановлен при выходе".into() }),
         Some(Ok(false)) | None => None,
-        Some(Err(e)) => Some(Line { kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}") }),
+        Some(Err(e)) => Some(Line {
+            kind: Kind::Warn, text: format!("HTTP-сервис базы не остановлен при выходе: {e:#}")
+        }),
     };
     if let Some(line) = &line {
         note_file(&ui.kit, line);
@@ -1005,7 +1024,12 @@ fn handle(ev: Ev, cx: &mut App) {
                     Some(c) => c.what.to_string(),
                     None => line.text.clone(),
                 };
-                cx.show_system_notification(SystemNotification { tag: "op".into(), title: "1c-connect".into(), body: body.into(), actions: vec![] });
+                cx.show_system_notification(SystemNotification {
+                    tag: "op".into(),
+                    title: "1c-connect".into(),
+                    body: body.into(),
+                    actions: vec![],
+                });
             }
             refresh_project(cx);
             // Почва могла сдвинуться («Установить» в т.ч.) — вердикт

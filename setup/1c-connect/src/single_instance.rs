@@ -103,7 +103,10 @@ pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Opt
         // голый `Permission denied (os error N)` без единого слова о том, что
         // вообще делалось, ничего человеку не говорит.
         let e = std::io::Error::last_os_error();
-        return Err(std::io::Error::new(e.kind(), format!("не удалось взять замок единственного экземпляра (системный мьютекс {name}): {e}")));
+        return Err(std::io::Error::new(
+            e.kind(),
+            format!("не удалось взять замок единственного экземпляра (системный мьютекс {name}): {e}"),
+        ));
     }
     // `GetLastError` — первым же следующим вызовом, до любого другого Win32
     // API: иначе он рассказал бы не про `CreateMutexW`.
@@ -237,7 +240,9 @@ fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bo
 #[cfg(windows)]
 fn process_image(pid: u32) -> Option<std::path::PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     // SAFETY: обычный вызов kernel32, pid — число из файла (может называть
     // не существующий или чужой процесс — на этот случай и есть проверка
     // `is_null`), прав запрошено по минимуму.

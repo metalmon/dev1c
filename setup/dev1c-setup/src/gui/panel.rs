@@ -10,10 +10,10 @@ use crate::gui::{self, Ui};
 use crate::ui::{Busy, Dot, Kind, Line, Tab, Which};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::searchable_list::SearchableVec;
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, IndexPath, Sizable, Theme, TitleBar};
 use gpui_kit::prelude::*;
@@ -31,11 +31,8 @@ fn icon() -> Arc<Image> {
 
 /// Варианты списков: значение в `dev1c.toml` и подпись в окне.
 const ENGINES: [(&str, &str); 2] = [("docker", "docker"), ("podman", "podman")];
-const SERVES: [(&str, &str); 3] = [
-    ("host", "Служба на этой машине (видеокарта, nssm)"),
-    ("docker", "Контейнер рядом со средой"),
-    ("remote", "Удалённый сервер"),
-];
+const SERVES: [(&str, &str); 3] =
+    [("host", "Служба на этой машине (видеокарта, nssm)"), ("docker", "Контейнер рядом со средой"), ("remote", "Удалённый сервер")];
 
 /// Поля вкладки «Параметры». Числа — тот же ввод, что текст: `validate`
 /// скажет словами, если вписали не то.
@@ -249,7 +246,7 @@ impl Panel {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
         cx.spawn(async move |_, cx| {
             let picked = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next());
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 cx.global_mut::<Ui>().dialog_open = false;
                 let ui = cx.global::<Ui>();
                 let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
@@ -328,11 +325,7 @@ impl Panel {
             .size_full()
             .relative()
             .child(div().id(format!("{id}-area")).size_full().overflow_y_scroll().track_scroll(handle).pr_2().child(content))
-            .child(
-                div().absolute().inset_0().child(
-                    Scrollbar::vertical(handle).id(format!("{id}-scrollbar")).viewport_from_layout(),
-                ),
-            )
+            .child(div().absolute().inset_0().child(Scrollbar::vertical(handle).id(format!("{id}-scrollbar")).viewport_from_layout()))
     }
 }
 
@@ -356,8 +349,8 @@ impl Render for Panel {
         let name = ui.cfg.server.name.clone();
         let card_now = crate::ui::status_line(&ops, &name);
         // Плашка: сначала непрочитанные параметры, потом заблокированная операция.
-        let notice = crate::ui::cfg_notice(ui.kit.path(crate::cfg::FILE).exists(), ui.cfg_error.as_deref())
-            .or_else(|| crate::ui::notice(&ops));
+        let notice =
+            crate::ui::cfg_notice(ui.kit.path(crate::cfg::FILE).exists(), ui.cfg_error.as_deref()).or_else(|| crate::ui::notice(&ops));
         // Несохранённые правки и непрочитанный файл главную кнопку не
         // пускают: установка идёт по файлу, и молча применить не то — обман.
         let dirty = self.is_dirty(cx);
@@ -454,22 +447,26 @@ impl Render for Panel {
         let body: AnyElement = match tab {
             Tab::Ops => {
                 let rows = ops.clone();
-                Self::body_card(layer, border, Self::scrolled(
-                    "ops",
-                    &self.body_scroll,
-                    v_flex().children(rows.into_iter().enumerate().map(|(ix, o)| {
-                        Self::list_row("ops", ix, row_border, ground)
-                            .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(o.dot, &theme)))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    .child(div().child(o.title))
-                                    .child(div().text_size(px(12.)).text_color(caption).child(o.detail)),
-                            )
-                    })),
-                ))
+                Self::body_card(
+                    layer,
+                    border,
+                    Self::scrolled(
+                        "ops",
+                        &self.body_scroll,
+                        v_flex().children(rows.into_iter().enumerate().map(|(ix, o)| {
+                            Self::list_row("ops", ix, row_border, ground)
+                                .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(o.dot, &theme)))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_0p5()
+                                        .child(div().child(o.title))
+                                        .child(div().text_size(px(12.)).text_color(caption).child(o.detail)),
+                                )
+                        })),
+                    ),
+                )
                 .into_any_element()
             }
             Tab::Log => {
@@ -478,40 +475,48 @@ impl Render for Panel {
                     self.log_len = lines.len();
                     self.log_scroll.scroll_to_bottom();
                 }
-                Self::body_card(layer, border, Self::scrolled(
-                    "log",
-                    &self.log_scroll,
-                    v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
-                        if l.kind == Kind::Head {
-                            // Заголовок раздела: операция слева полужирным,
-                            // время справа мелким приглушённым.
-                            let (title, time) = l.text.rsplit_once(" · ").map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((l.text.clone(), String::new()));
-                            h_flex()
-                                .mt_2()
-                                .items_baseline()
-                                .justify_between()
-                                .gap_2()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
-                                .child(div().text_size(px(12.)).text_color(caption).child(time))
-                                .into_any_element()
-                        } else {
-                            // Цвет — только у значка: строки, окрашенные целиком,
-                            // сливаются в пёстрый лист.
-                            let mark_color = match l.kind {
-                                Kind::Ok => success,
-                                Kind::Warn => warning,
-                                Kind::Fail => danger,
-                                Kind::Say | Kind::Head => caption,
-                            };
-                            let text_color = if l.kind == Kind::Say { caption } else { fg };
-                            h_flex()
-                                .items_start()
-                                .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
-                                .child(div().flex_1().min_w_0().text_color(text_color).child(l.text))
-                                .into_any_element()
-                        }
-                    })),
-                ))
+                Self::body_card(
+                    layer,
+                    border,
+                    Self::scrolled(
+                        "log",
+                        &self.log_scroll,
+                        v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
+                            if l.kind == Kind::Head {
+                                // Заголовок раздела: операция слева полужирным,
+                                // время справа мелким приглушённым.
+                                let (title, time) = l
+                                    .text
+                                    .rsplit_once(" · ")
+                                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                                    .unwrap_or((l.text.clone(), String::new()));
+                                h_flex()
+                                    .mt_2()
+                                    .items_baseline()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
+                                    .child(div().text_size(px(12.)).text_color(caption).child(time))
+                                    .into_any_element()
+                            } else {
+                                // Цвет — только у значка: строки, окрашенные целиком,
+                                // сливаются в пёстрый лист.
+                                let mark_color = match l.kind {
+                                    Kind::Ok => success,
+                                    Kind::Warn => warning,
+                                    Kind::Fail => danger,
+                                    Kind::Say | Kind::Head => caption,
+                                };
+                                let text_color = if l.kind == Kind::Say { caption } else { fg };
+                                h_flex()
+                                    .items_start()
+                                    .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
+                                    .child(div().flex_1().min_w_0().text_color(text_color).child(l.text))
+                                    .into_any_element()
+                            }
+                        })),
+                    ),
+                )
                 .into_any_element()
             }
             Tab::Access => {
@@ -519,34 +524,38 @@ impl Render for Panel {
                 let host = ui.addresses.first().cloned().unwrap_or_else(|| crate::ui::ADDRESS_UNKNOWN.to_string());
                 let others = ui.addresses.iter().skip(1).cloned().collect::<Vec<_>>();
                 let rows = crate::ui::access_rows(&ui.cfg, ui.facts, &host);
-                Self::body_card(layer, border, Self::scrolled(
-                    "access",
-                    &self.body_scroll,
-                    v_flex()
-                        .when(!others.is_empty(), |v| {
-                            v.child(
-                                div()
-                                    .pb_2()
-                                    .text_size(px(12.))
-                                    .text_color(caption)
-                                    .child(format!("другие адреса этой машины: {}", others.join(", "))),
-                            )
-                        })
-                        .children(rows.into_iter().enumerate().map(|(ix, r)| {
-                        Self::list_row("access", ix, row_border, ground)
-                            .child(div().w(px(150.)).flex_shrink_0().text_color(caption).child(r.what))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    // Значение — моноширинным: это то, что
-                                    // человек перепечатывает или копирует.
-                                    .child(div().font_family("ui-monospace").child(r.value))
-                                    .child(div().text_size(px(12.)).text_color(caption).child(r.detail)),
-                            )
-                    })),
-                ))
+                Self::body_card(
+                    layer,
+                    border,
+                    Self::scrolled(
+                        "access",
+                        &self.body_scroll,
+                        v_flex()
+                            .when(!others.is_empty(), |v| {
+                                v.child(
+                                    div()
+                                        .pb_2()
+                                        .text_size(px(12.))
+                                        .text_color(caption)
+                                        .child(format!("другие адреса этой машины: {}", others.join(", "))),
+                                )
+                            })
+                            .children(rows.into_iter().enumerate().map(|(ix, r)| {
+                                Self::list_row("access", ix, row_border, ground)
+                                    .child(div().w(px(150.)).flex_shrink_0().text_color(caption).child(r.what))
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_0p5()
+                                            // Значение — моноширинным: это то, что
+                                            // человек перепечатывает или копирует.
+                                            .child(div().font_family("ui-monospace").child(r.value))
+                                            .child(div().text_size(px(12.)).text_color(caption).child(r.detail)),
+                                    )
+                            })),
+                    ),
+                )
                 .into_any_element()
             }
             Tab::Check => {
@@ -556,37 +565,41 @@ impl Render for Panel {
                         .into_any_element()
                 } else {
                     let (passed, failed) = common::check::summary(&checks);
-                    Self::body_card(layer, border, Self::scrolled(
-                        "check",
-                        &self.body_scroll,
-                        v_flex()
-                            .gap_2()
-                            .py_1()
-                            .child(
-                                div()
-                                    .text_color(if failed == 0 { success } else { danger })
-                                    .child(format!("прошло {passed}, провалено {failed}")),
-                            )
-                            .children(checks.into_iter().enumerate().map(|(ix, c)| {
-                                let dot = match (c.ok, c.info) {
-                                    (true, false) => Dot::Up,
-                                    (true, true) => Dot::Off,
-                                    _ => Dot::Down,
-                                };
-                                Self::list_row("check", ix, row_border, ground)
-                                    .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(dot, &theme)))
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_0p5()
-                                            .child(div().child(format!("{}: {}", c.what, c.detail)))
-                                            .when(!c.ok && !c.hint.is_empty(), |v| {
-                                                v.child(div().text_size(px(12.)).text_color(warning).child(c.hint.clone()))
-                                            }),
-                                    )
-                            })),
-                    ))
+                    Self::body_card(
+                        layer,
+                        border,
+                        Self::scrolled(
+                            "check",
+                            &self.body_scroll,
+                            v_flex()
+                                .gap_2()
+                                .py_1()
+                                .child(
+                                    div()
+                                        .text_color(if failed == 0 { success } else { danger })
+                                        .child(format!("прошло {passed}, провалено {failed}")),
+                                )
+                                .children(checks.into_iter().enumerate().map(|(ix, c)| {
+                                    let dot = match (c.ok, c.info) {
+                                        (true, false) => Dot::Up,
+                                        (true, true) => Dot::Off,
+                                        _ => Dot::Down,
+                                    };
+                                    Self::list_row("check", ix, row_border, ground)
+                                        .child(div().size_2p5().mt(px(6.)).flex_shrink_0().rounded_full().bg(Self::dot(dot, &theme)))
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_0p5()
+                                                .child(div().child(format!("{}: {}", c.what, c.detail)))
+                                                .when(!c.ok && !c.hint.is_empty(), |v| {
+                                                    v.child(div().text_size(px(12.)).text_color(warning).child(c.hint.clone()))
+                                                }),
+                                        )
+                                })),
+                        ),
+                    )
                     .into_any_element()
                 }
             }
@@ -597,9 +610,7 @@ impl Render for Panel {
                 let local = serve != "remote";
                 // Подпись Caption приглушённым, поле, подсказка — как в
                 // прежнем окне и как в `1c-connect`.
-                let labelled = |label: &'static str, body: AnyElement| {
-                    v_flex().w_full().gap_1().child(div().child(label)).child(body)
-                };
+                let labelled = |label: &'static str, body: AnyElement| v_flex().w_full().gap_1().child(div().child(label)).child(body);
                 let input = |label: &'static str, state: &Entity<InputState>| {
                     labelled(label, Self::input(state, accent, stroke, window, cx).into_any_element())
                 };
@@ -624,62 +635,80 @@ impl Render for Panel {
                             move |b, window, cx| m(&b, window, cx)
                         })
                         .child(
-                    // Две группы рядом, каждая своей карточкой: границы
-                    // карточек делят колонки и показывают, где группа
-                    // кончается (решение заказчика 2026-10-19).
-                    h_flex()
-                        .items_start()
-                        .gap_4()
-                        .py_1()
-                        .child(
-                            group("Контейнер")
-                                .flex_1()
-                                .min_w_0()
-                                .child(input("Имя контейнера и приставка его томов", &f.name))
-                                .child(input("Первый порт: RDP, дальше Gitea, модель, SSH", &f.port))
-                                .child(input("Предел памяти контейнера, ГБ", &f.memory))
-                                .child(labelled("Движок контейнеров", div().w_full().child(Select::new(&f.engine)).into_any_element()))
+                            // Две группы рядом, каждая своей карточкой: границы
+                            // карточек делят колонки и показывают, где группа
+                            // кончается (решение заказчика 2026-10-19).
+                            h_flex()
+                                .items_start()
+                                .gap_4()
+                                .py_1()
                                 .child(
-                                    h_flex().items_center().gap_2().child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(
-                                        |panel, checked: &bool, _, cx| {
-                                            panel.fields.gpu = *checked;
-                                            cx.refresh_windows();
-                                        },
-                                    )))
-                                    .child(div().child("Отдать контейнеру GPU")),
+                                    group("Контейнер")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(input("Имя контейнера и приставка его томов", &f.name))
+                                        .child(input("Первый порт: RDP, дальше Gitea, модель, SSH", &f.port))
+                                        .child(input("Предел памяти контейнера, ГБ", &f.memory))
+                                        .child(labelled(
+                                            "Движок контейнеров",
+                                            div().w_full().child(Select::new(&f.engine)).into_any_element(),
+                                        ))
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(Switch::new("gpu").focus_ring(false).checked(f.gpu).on_change(cx.listener(
+                                                    |panel, checked: &bool, _, cx| {
+                                                        panel.fields.gpu = *checked;
+                                                        cx.refresh_windows();
+                                                    },
+                                                )))
+                                                .child(div().child("Отдать контейнеру GPU")),
+                                        ),
+                                )
+                                .child(
+                                    group("Модель для агентов")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(labelled(
+                                            "Где работает сервер модели",
+                                            div().w_full().child(Select::new(&f.serve)).into_any_element(),
+                                        ))
+                                        .when(local, |g| {
+                                            g.child(labelled(
+                                                "Файл модели (.gguf)",
+                                                h_flex()
+                                                    .gap_2()
+                                                    .child(div().flex_1().min_w_0().child(Self::input(&f.file, accent, stroke, window, cx)))
+                                                    .child(
+                                                        Button::new("pick-file")
+                                                            .label("Выбрать…")
+                                                            .on_click(cx.listener(|panel: &mut Self, _, _, cx| panel.pick_file(cx))),
+                                                    )
+                                                    .into_any_element(),
+                                            ))
+                                        })
+                                        .when(!local, |g| {
+                                            g.child(input("Адрес сервера, без завершающего /chat/completions", &f.url))
+                                                .child(input("Ключ доступа", &f.key))
+                                        })
+                                        .child(input(
+                                            if local {
+                                                "Имя модели; пусто — имя файла"
+                                            } else {
+                                                "Имя модели, как его называет сервер"
+                                            },
+                                            &f.model_name,
+                                        ))
+                                        .when(serve == "host", |g| g.child(input("Порт службы модели на этой машине", &f.model_port)))
+                                        // Делёж окна и его нижняя граница — про свой
+                                        // сервер: у чужого ни того, ни другого не
+                                        // спрашивают (так было и в прежнем окне).
+                                        .when(local, |g| {
+                                            g.child(input("Делить окно на агентов; 1 — не делить", &f.agents))
+                                                .child(input("Нижняя граница окна на слот, токенов", &f.fit_ctx))
+                                        }),
                                 ),
-                        )
-                        .child(
-                            group("Модель для агентов")
-                                .flex_1()
-                                .min_w_0()
-                                .child(labelled("Где работает сервер модели", div().w_full().child(Select::new(&f.serve)).into_any_element()))
-                                .when(local, |g| {
-                                    g.child(labelled(
-                                        "Файл модели (.gguf)",
-                                        h_flex()
-                                            .gap_2()
-                                            .child(div().flex_1().min_w_0().child(Self::input(&f.file, accent, stroke, window, cx)))
-                                            .child(Button::new("pick-file").label("Выбрать…").on_click(cx.listener(
-                                                |panel: &mut Self, _, _, cx| panel.pick_file(cx),
-                                            )))
-                                            .into_any_element(),
-                                    ))
-                                })
-                                .when(!local, |g| {
-                                    g.child(input("Адрес сервера, без завершающего /chat/completions", &f.url))
-                                        .child(input("Ключ доступа", &f.key))
-                                })
-                                .child(input(if local { "Имя модели; пусто — имя файла" } else { "Имя модели, как его называет сервер" }, &f.model_name))
-                                .when(serve == "host", |g| g.child(input("Порт службы модели на этой машине", &f.model_port)))
-                                // Делёж окна и его нижняя граница — про свой
-                                // сервер: у чужого ни того, ни другого не
-                                // спрашивают (так было и в прежнем окне).
-                                .when(local, |g| {
-                                    g.child(input("Делить окно на агентов; 1 — не делить", &f.agents))
-                                        .child(input("Нижняя граница окна на слот, токенов", &f.fit_ctx))
-                                }),
-                        ),
                         ),
                 )
                 .into_any_element()
@@ -713,12 +742,12 @@ impl Render for Panel {
                             .on_click(|_, _, cx| gui::run_op(cx, Which::CleanStack)),
                     )
                     .when(!confirming, |row| {
-                        row.child(Button::new("ask-clean-data").danger().label("Удалить данные…").disabled(busy_now).on_click(
-                            cx.listener(|panel, _, _, cx| {
+                        row.child(Button::new("ask-clean-data").danger().label("Удалить данные…").disabled(busy_now).on_click(cx.listener(
+                            |panel, _, _, cx| {
                                 panel.confirming = true;
                                 cx.refresh_windows();
-                            }),
-                        ))
+                            },
+                        )))
                     })
                     .when(confirming, |row| {
                         // Удаление данных подтверждается именем контейнера:
@@ -732,7 +761,10 @@ impl Render for Panel {
                                         panel.confirming = false;
                                         gui::run_op(cx, Which::CleanData);
                                     } else {
-                                        gui::note_line(cx.global_mut::<Ui>(), Line::fail(format!("для удаления данных впишите имя контейнера: {name}")));
+                                        gui::note_line(
+                                            cx.global_mut::<Ui>(),
+                                            Line::fail(format!("для удаления данных впишите имя контейнера: {name}")),
+                                        );
                                     }
                                     cx.refresh_windows();
                                 },
@@ -765,27 +797,19 @@ impl Render for Panel {
 
         // Раскладка слоями, как в прежнем окне: белая шапка с карточкой
         // состояния, серое основание, белая панель вкладки со своим подвалом.
-        let head = v_flex()
-            .bg(layer)
-            .border_b_1()
-            .border_color(border)
-            .px_6()
-            .pt_4()
-            .pb(px(14.))
-            .gap_3()
-            .child(status);
+        let head = v_flex().bg(layer).border_b_1().border_color(border).px_6().pt_4().pb(px(14.)).gap_3().child(status);
 
         let progress = if working {
-                // Работа: дорожка акцентом темы, бегунок по кругу.
-                div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
-                    div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(accent).with_animation(
-                        "progress-thumb",
-                        Animation::new(Duration::from_millis(1200)).repeat(),
-                        |d, t| d.left(relative(-0.25 + 1.25 * t)),
-                    ),
-                )
-            } else {
-                // Покой: линия 1 px в полосе той же высоты — подвал не прыгает.
+            // Работа: дорожка акцентом темы, бегунок по кругу.
+            div().w_full().h(px(2.)).relative().bg(border.opacity(0.6)).child(
+                div().absolute().top_0().h(px(2.)).w(relative(0.25)).rounded_full().bg(accent).with_animation(
+                    "progress-thumb",
+                    Animation::new(Duration::from_millis(1200)).repeat(),
+                    |d, t| d.left(relative(-0.25 + 1.25 * t)),
+                ),
+            )
+        } else {
+            // Покой: линия 1 px в полосе той же высоты — подвал не прыгает.
             div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
         };
 

@@ -129,22 +129,46 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
     let slots = i.slots.to_string();
     let cache_ram = i.cache_ram.to_string();
     let mut a: Vec<String> = [
-        "-m", i.model, "--alias", i.alias, "--host", i.host, "--port", &port,
+        "-m",
+        i.model,
+        "--alias",
+        i.alias,
+        "--host",
+        i.host,
+        "--port",
+        &port,
         // Веса на карту все до одного: это решение, а не подбор — заданный
         // `-ngl` он не трогает («n_gpu_layers already set by user»). Кэш едет
         // туда же по остаточному: в llama.cpp он живёт там, где лежит его
         // слой, так что «половина кэша на карте» означала бы половину весов
         // на процессоре. Окно не задаём — его подбирает сервер под карту, не
         // ниже `--fit-ctx`.
-        "--parallel", &slots, "-ngl", "999", "--fit", "on", "--fit-ctx", &fit_ctx,
-        "--flash-attn", "on", "-ctk", "q8_0", "-ctv", "q8_0",
+        "--parallel",
+        &slots,
+        "-ngl",
+        "999",
+        "--fit",
+        "on",
+        "--fit-ctx",
+        &fit_ctx,
+        "--flash-attn",
+        "on",
+        "-ctk",
+        "q8_0",
+        "-ctv",
+        "q8_0",
         // Сэмплинг от издателя модели, линия «вызов инструментов»: это наш
         // случай, агент работает инструментами, а не пишет прозу. Для общих
         // задач он советует temp 1.0 и top-p 0.95, но нам нужнее
         // воспроизводимость. `--top-p` передаём, потому что 1.0 отличается от
         // умолчания сборки (0.95); `--min-p` 0.01 — его же оговорка именно
         // для llama.cpp, у которого своё умолчание выше.
-        "--temp", "0.7", "--top-p", "1.0", "--min-p", "0.01",
+        "--temp",
+        "0.7",
+        "--top-p",
+        "1.0",
+        "--min-p",
+        "0.01",
         "--metrics",
         // Подробность журнала. Умолчание сервера — 3, и при нём он НЕ печатает
         // размер KV-кэша вовсе: замер на 5090 (25.10.2026) дал одиннадцать
@@ -157,7 +181,8 @@ pub fn serve_args(i: &ServeInput) -> Vec<String> {
         // 240 строк, при 6 — те же сведения и 16 879 строк, из них 16 008
         // отладочных, причём `que` и `slot` растут с каждым запросом. Журнал
         // службы живёт постоянно, и раздувать его ради одной строки нельзя.
-        "-lv", "4",
+        "-lv",
+        "4",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -284,7 +309,6 @@ pub fn kv_cache_mb_from_log(text: &str) -> Option<u32> {
 /// Начало строки, в которой сервер называет размер кэша. Вынесено рядом с
 /// разбором: поменяется формат — поменяется здесь, и тест рядом это поймает.
 const KV_SIZE_LINE: &str = "llama_kv_cache: size =";
-
 
 pub struct Props {
     pub window: u32,
@@ -415,7 +439,8 @@ pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
             // файлам напрямую, на файл не действуют, и он остаётся без единой
             // записи — недоступен даже администратору (проверено: nssm.exe не
             // запускался, токен не читался). Детям — /reset: они наследуют.
-            let o = docker::exec(ctx, "icacls", &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"])?;
+            let o =
+                docker::exec(ctx, "icacls", &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"])?;
             anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
             let children = format!("{path}\\*");
             let o = docker::exec(ctx, "icacls", &[&children, "/reset", "/T", "/Q"])?;
@@ -454,9 +479,9 @@ fn os_random(buf: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-
 pub fn gpu(ctx: &Ctx) -> Option<Gpu> {
-    let o = docker::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
+    let o =
+        docker::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
     if !o.ok() {
         return None;
     }
@@ -618,7 +643,8 @@ pub fn installed(ctx: &Ctx) -> Installed {
         }
     } else {
         let present = docker::probe(ctx, "systemctl", &["cat", SERVICE]).map(|o| o.ok()).unwrap_or(false);
-        let running = present && docker::probe(ctx, "systemctl", &["is-active", SERVICE]).map(|o| o.text.trim() == "active").unwrap_or(false);
+        let running =
+            present && docker::probe(ctx, "systemctl", &["is-active", SERVICE]).map(|o| o.text.trim() == "active").unwrap_or(false);
         Installed { present, running }
     }
 }
@@ -724,8 +750,13 @@ pub fn props(url: &str, token: &str) -> Option<Props> {
 /// Один длинный запрос с меткой в начале (иначе сервер отдаст скорость кэша,
 /// а не модели) и запретом кэша подсказок.
 pub fn measure_prefill(url: &str, token: &str) -> Option<f64> {
-    let filler = format!("{} {}", random_hex(), "Регламент перевозки опасных грузов определяет порядок погрузки, крепления и сопровождения. ".repeat(110));
-    let body = serde_json::json!({ "messages": [{"role": "user", "content": filler}], "max_tokens": 1, "stream": false, "cache_prompt": false });
+    let filler = format!(
+        "{} {}",
+        random_hex(),
+        "Регламент перевозки опасных грузов определяет порядок погрузки, крепления и сопровождения. ".repeat(110)
+    );
+    let body =
+        serde_json::json!({ "messages": [{"role": "user", "content": filler}], "max_tokens": 1, "stream": false, "cache_prompt": false });
     let r = client(600)
         .post(format!("{url}/v1/chat/completions"))
         .bearer_auth(token)
@@ -744,11 +775,8 @@ pub fn facts_save(ctx: &Ctx, f: &crate::cfg::Facts, prefill: Option<f64>) -> Res
 }
 
 pub fn facts_load(ctx: &Ctx) -> Option<crate::cfg::Facts> {
-    Some(crate::cfg::Facts {
-        window: ctx.kit.state_get("llama.window")?.parse().ok()?,
-    })
+    Some(crate::cfg::Facts { window: ctx.kit.state_get("llama.window")?.parse().ok()? })
 }
-
 
 /// Чем объяснить отсутствие чисел замера. Нечитаемый токен обязан быть
 /// назван именно так, а не выдан за незамеренный сервер: слова те же, что у
@@ -819,7 +847,6 @@ mod tests {
         assert!(!a.iter().any(|x| x == "--api-key"), "{a:?}");
     }
 
-    
     #[test]
     fn the_window_that_fits_comes_from_the_model_not_from_a_table() {
         // Сервер сообщил: окно 65 536 токенов заняло 640 МиБ кэша →
@@ -864,7 +891,6 @@ mod tests {
         assert!(per_agent(81_919, 1) < MIN_BUDGET + ANSWER_FLOOR);
     }
 
-    
     #[test]
     fn the_administrators_page_divides_the_slot_by_agents_before_the_answer() {
         // Страница заказчика считает то же, что программа, и ломается именно
@@ -877,15 +903,9 @@ mod tests {
         // обещать: вставивший такую строку получит переменную с пустым
         // значением и будет искать ключ, которого не существует. У ЧУЖОГО
         // сервера ключ бывает — его переменная на странице остаётся.
-        assert!(
-            !page.contains("LLAMACPP_API_KEY"),
-            "страница обещает ключ нашему серверу модели, а его нет"
-        );
+        assert!(!page.contains("LLAMACPP_API_KEY"), "страница обещает ключ нашему серверу модели, а его нет");
         assert!(page.contains("CUSTOM_API_KEY"), "страница не называет ключ для чужого сервера");
-        assert!(
-            !page.contains("max_tokens  = окно агента"),
-            "на странице осталась формула max_tokens: её считает теперь сам Zed"
-        );
+        assert!(!page.contains("max_tokens  = окно агента"), "на странице осталась формула max_tokens: её считает теперь сам Zed");
         assert!(
             page.contains(&(MIN_BUDGET + ANSWER_FLOOR).to_string()),
             "страница не называет нижнюю границу окна агента ({})",
@@ -946,7 +966,6 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         assert_eq!(parse_size_mb(""), None);
     }
 
-
     #[test]
     fn props_and_timings_are_read_from_the_server_json() {
         let p = parse_props(r#"{"default_generation_settings":{"n_ctx":131072},"total_slots":3,"model_path":"/m/x.gguf"}"#).unwrap();
@@ -961,7 +980,13 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         let dir = std::env::temp_dir().join(format!("dev1c-llama-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let kit = common::kit::Kit::at(&dir);
-        let ctx = crate::ops::Ctx { kit, cfg: crate::cfg::Cfg::default(), dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
+        let ctx = crate::ops::Ctx {
+            kit,
+            cfg: crate::cfg::Cfg::default(),
+            dry_run: false,
+            sink: std::sync::Arc::new(|_| {}),
+            prompt: Box::new(common::AlwaysDefault),
+        };
         assert!(ctx.kit.state_get("llama.window").is_none());
         let f = crate::cfg::Facts { window: 250_000 };
         facts_save(&ctx, &f, Some(2600.0)).unwrap();
@@ -977,8 +1002,6 @@ K (q8_0): 12535.09 MiB, V (q8_0):    0.00 MiB\n";
         assert!(t1.chars().all(|c| c.is_ascii_hexdigit()) && t1 != t2);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    
 
     #[test]
     fn nvidia_smi_csv_is_parsed_and_absence_is_none() {

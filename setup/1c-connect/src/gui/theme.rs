@@ -82,9 +82,7 @@ pub fn apply_menu_theme(mode: MenuMode) {
         }
         // Как `MAKEINTRESOURCE`: номер ординала лежит в младшем слове
         // «указателя» на имя.
-        let (Some(set), Some(flush)) =
-            (GetProcAddress(lib, 135 as *const u8), GetProcAddress(lib, 136 as *const u8))
-        else {
+        let (Some(set), Some(flush)) = (GetProcAddress(lib, 135 as *const u8), GetProcAddress(lib, 136 as *const u8)) else {
             return;
         };
         let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(set);

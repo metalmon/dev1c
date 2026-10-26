@@ -4,8 +4,8 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, start_session, stop_session, theme,
-    toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, start_session, stop_session,
+    theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
@@ -32,8 +32,11 @@ pub struct Tray {
 }
 
 /// Выбор темы → id пункта меню и наоборот.
-const THEMES: [(theme::Choice, &str, &str); 3] =
-    [(theme::Choice::System, "theme:system", "Системная"), (theme::Choice::Light, "theme:light", "Светлая"), (theme::Choice::Dark, "theme:dark", "Тёмная")];
+const THEMES: [(theme::Choice, &str, &str); 3] = [
+    (theme::Choice::System, "theme:system", "Системная"),
+    (theme::Choice::Light, "theme:light", "Светлая"),
+    (theme::Choice::Dark, "theme:dark", "Тёмная"),
+];
 
 /// Режим работы (`cfg.host.mode`, "tunnel"/"local") → id пункта меню и его
 /// подпись. Поля в окне нет — режим пишет только этот пункт (см.
@@ -420,7 +423,8 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui, MODES,
+        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui,
+        MODES,
     };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};

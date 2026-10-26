@@ -215,7 +215,14 @@ impl Rules {
     /// подставляет свои `live`/`rebuild` в уже созданное значение, поля для
     /// этого публичные.
     pub fn for_mcp(enabled: Arc<AtomicBool>) -> Rules {
-        Rules { live: Live::new(crate::cfg::Cfg::default()), rebuild: None, tools_dir: std::path::PathBuf::new(), configurator_running: Arc::new(|| 0), enabled, inject: false }
+        Rules {
+            live: Live::new(crate::cfg::Cfg::default()),
+            rebuild: None,
+            tools_dir: std::path::PathBuf::new(),
+            configurator_running: Arc::new(|| 0),
+            enabled,
+            inject: false,
+        }
     }
 }
 
@@ -486,7 +493,8 @@ where
         // Ребёнок → агент: своя пара задач на каждого ребёнка (стдин/стдаут
         // предыдущего уже не существуют), но пишут в тот же `out_tx`.
         let from_child = {
-            let (out, pending, log, in_flight, inject, swallow) = (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
+            let (out, pending, log, in_flight, inject, swallow) =
+                (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
             tokio::spawn(async move {
                 let mut f = Framer::new();
                 let mut buf = vec![0u8; 64 * 1024];
@@ -578,7 +586,10 @@ where
                     }
                 }
                 let fr = pending_frames.pop_front().unwrap();
-                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight, &handshake).await.is_err() {
+                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight, &handshake)
+                    .await
+                    .is_err()
+                {
                     break EpochEnd::WriteFailed;
                 }
                 continue;
@@ -775,7 +786,11 @@ async fn handle_request(
             forward_counted(stdin, &line, in_flight, reply_expected).await
         }
         Route::Disabled { id, tool } => {
-            let text = if off { refusal_text() } else { format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)") };
+            let text = if off {
+                refusal_text()
+            } else {
+                format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)")
+            };
             let _ = out.send(jsonrpc::text_reply(&id, &text, true)).await;
             Ok(())
         }
@@ -841,7 +856,12 @@ async fn forward(stdin: &mut tokio::process::ChildStdin, line: &[u8]) -> Result<
 /// Как `forward`, но считает «отправлено ребёнку — ждёт ответа» (см.
 /// `in_flight` в `pipe_jsonrpc`): пока счётчик не ноль, менять ребёнка под
 /// разговором нельзя, только когда он сам опустеет на следующем запросе.
-async fn forward_counted(stdin: &mut tokio::process::ChildStdin, line: &[u8], in_flight: &AtomicU64, reply_expected: bool) -> Result<(), ()> {
+async fn forward_counted(
+    stdin: &mut tokio::process::ChildStdin,
+    line: &[u8],
+    in_flight: &AtomicU64,
+    reply_expected: bool,
+) -> Result<(), ()> {
     if reply_expected {
         in_flight.fetch_add(1, Ordering::Relaxed);
     }
@@ -1091,8 +1111,12 @@ mod tests {
                     out.flush().unwrap();
                 }
                 let reply = match v["method"].as_str() {
-                    Some("initialize") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"script","version":"0"}}}),
-                    Some("tools/list") => serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}}),
+                    Some("initialize") => {
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"script","version":"0"}}})
+                    }
+                    Some("tools/list") => {
+                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}})
+                    }
                     Some("tools/call") => {
                         // Взялся за долгую работу и не отвечает — так ведёт
                         // себя `cf_decompile` на большой конфигурации. На
@@ -1185,7 +1209,12 @@ mod tests {
     /// нагрузкой (полный прогон тестов) спавн и обмен с ребёнком иногда
     /// занимают дольше любой разумной константы — тест должен ждать
     /// условие, а не угадывать время.
-    async fn read_until(r: &mut (impl AsyncRead + Unpin), got: &mut Vec<u8>, pred: impl Fn(&str) -> bool, budget: std::time::Duration) -> bool {
+    async fn read_until(
+        r: &mut (impl AsyncRead + Unpin),
+        got: &mut Vec<u8>,
+        pred: impl Fn(&str) -> bool,
+        budget: std::time::Duration,
+    ) -> bool {
         let deadline = std::time::Instant::now() + budget;
         let mut buf = [0u8; 4096];
         loop {
@@ -1283,7 +1312,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_is_filtered_and_extended_through_the_bridge() {
-        let (replies, raw, _) = talk(("BRIDGE_SCRIPT", "1"), rules(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]).await;
+        let (replies, raw, _) =
+            talk(("BRIDGE_SCRIPT", "1"), rules(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]).await;
         assert_eq!(replies.len(), 1, "{raw}");
         let names: Vec<&str> = replies[0]["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["cf_load", "project_status", "project_pull", "project_push"]);
@@ -1291,7 +1321,12 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_tool_never_reaches_the_child() {
-        let (replies, raw, _) = talk(("BRIDGE_SCRIPT", "1"), rules(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"infobase_delete","arguments":{}}}"#]).await;
+        let (replies, raw, _) = talk(
+            ("BRIDGE_SCRIPT", "1"),
+            rules(&["cf_load"], 0),
+            &[r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"infobase_delete","arguments":{}}}"#],
+        )
+        .await;
         assert_eq!(replies.len(), 1, "{raw}");
         assert_eq!(replies[0]["result"]["isError"], true);
         assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap().contains("1c-connect.toml"));
@@ -1386,7 +1421,8 @@ mod tests {
         // Отбой всегда, независимо от переключателя (решение заказчика).
         let call = r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         for on in [false, true] {
-            let (replies, raw, _) = talk(("BRIDGE_SCRIPT_RECORD", "1"), rules_with(&["cf_load"], 0, Arc::new(AtomicBool::new(on))), &[call]).await;
+            let (replies, raw, _) =
+                talk(("BRIDGE_SCRIPT_RECORD", "1"), rules_with(&["cf_load"], 0, Arc::new(AtomicBool::new(on))), &[call]).await;
             assert!(replies.is_empty(), "вызову без id отвечать нечем (переключатель {on}): {raw}");
             assert!(!raw.contains("cf_load"), "ребёнок не должен был увидеть вызов (переключатель {on}): {raw}");
         }
@@ -1614,7 +1650,8 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_and_junk_agent_lines_get_an_error_reply() {
-        let big = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"pad\":\"{}\"}}", "x".repeat(crate::jsonrpc::LINE_LIMIT + 1));
+        let big =
+            format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"pad\":\"{}\"}}", "x".repeat(crate::jsonrpc::LINE_LIMIT + 1));
         let (replies, raw, _) = talk(("BRIDGE_SCRIPT", "1"), rules(&[], 0), &[&big, "junk"]).await;
         assert!(!raw.contains("child ran"), "{}", &raw[..raw.len().min(200)]);
         let errors: Vec<_> = replies.iter().filter(|r| r["error"]["code"] == -32700).collect();
@@ -1624,7 +1661,8 @@ mod tests {
 
     #[tokio::test]
     async fn child_death_still_answers_pending_list_with_our_tools() {
-        let (replies, raw, code) = talk(("BRIDGE_DIE_AFTER_READ", "1"), rules(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#]).await;
+        let (replies, raw, code) =
+            talk(("BRIDGE_DIE_AFTER_READ", "1"), rules(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#]).await;
         assert_eq!(code, 0);
         assert_eq!(replies.len(), 1, "{raw}");
         assert_eq!(replies[0]["id"], 7);
@@ -1679,7 +1717,13 @@ mod tests {
             c
         };
         let cmd0 = make_cmd(&cfg_a);
-        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
@@ -1720,7 +1764,10 @@ mod tests {
     /// укладывается в фиксированную паузу — прежние `sleep(300 мс)`/
     /// `sleep(500 мс)` и давали мигающий тест. Срок большой: падать по нему
     /// тест будет только на настоящей поломке.
-    async fn wait_line(lines: &mut tokio::io::Lines<tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>>, ok: impl Fn(&str) -> bool) -> String {
+    async fn wait_line(
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<impl tokio::io::AsyncRead + Unpin>>,
+        ok: impl Fn(&str) -> bool,
+    ) -> String {
         loop {
             let line = tokio::time::timeout(std::time::Duration::from_secs(20), lines.next_line())
                 .await
@@ -1754,7 +1801,13 @@ mod tests {
             c
         };
         let cmd0 = make_cmd(&cfg_a);
-        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
@@ -1804,7 +1857,13 @@ mod tests {
         let live = Live::new(cfg_a.clone());
         let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT_RECORD", "1"));
         let cmd0 = make_cmd(&cfg_a);
-        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
@@ -1846,7 +1905,11 @@ mod tests {
 
         let got = String::from_utf8_lossy(&got).into_owned();
         let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        assert_eq!(replies.iter().filter(|r| r["id"] == 1).count(), 1, "ровно один ответ на initialize, без дубля от нового ребёнка: {got}");
+        assert_eq!(
+            replies.iter().filter(|r| r["id"] == 1).count(),
+            1,
+            "ровно один ответ на initialize, без дубля от нового ребёнка: {got}"
+        );
         assert_eq!(replies.iter().filter(|r| r["id"] == 2).count(), 1, "ровно один ответ на tools/call: {got}");
         assert_eq!(replies.iter().find(|r| r["id"] == 2).unwrap()["result"]["content"][0]["text"], "child ran cf_load", "{got}");
         // "GOT ..." печатается на каждую строку, которую ребёнок прочитал

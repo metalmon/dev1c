@@ -672,7 +672,11 @@ pub fn on_cheap(ui: &mut Ui, sessions: Option<usize>, facts: Option<Vec<Check>>,
 /// (находка владельца 26.10: «журнал врёт — сперва отказ, потом сразу всё
 /// готово»).
 pub fn ports_use(ui: &Ui) -> verify::PortUse {
-    if ui.bind_failed.is_some() { verify::PortUse::WeFailed } else { verify::PortUse::WeListen }
+    if ui.bind_failed.is_some() {
+        verify::PortUse::WeFailed
+    } else {
+        verify::PortUse::WeListen
+    }
 }
 
 #[cfg(test)]

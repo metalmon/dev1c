@@ -248,7 +248,11 @@ fn parse_tasklist_name(csv: &str) -> Option<String> {
         return None;
     }
     let name = line.split(',').next()?.trim_matches('"');
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(test)]

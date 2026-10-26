@@ -213,7 +213,9 @@ fn name_and_hide_from_taskbar(window: &Window) {
     if let (Some(net_name), Some(utf8)) = (atom(b"_NET_WM_NAME"), atom(b"UTF8_STRING")) {
         let _ = conn.change_property8(PropMode::REPLACE, win, net_name, utf8, WM_TITLE).map(|c| c.check());
     }
-    if let (Some(state), Some(no_taskbar), Some(no_pager)) = (atom(b"_NET_WM_STATE"), atom(b"_NET_WM_STATE_SKIP_TASKBAR"), atom(b"_NET_WM_STATE_SKIP_PAGER")) {
+    if let (Some(state), Some(no_taskbar), Some(no_pager)) =
+        (atom(b"_NET_WM_STATE"), atom(b"_NET_WM_STATE_SKIP_TASKBAR"), atom(b"_NET_WM_STATE_SKIP_PAGER"))
+    {
         // Порядок полей по EWMH: действие (1 — добавить), два свойства,
         // источник (1 — просит приложение), ноль в запас.
         let ev = ClientMessageEvent::new(32, win, state, [1, no_taskbar, no_pager, 1, 0]);
@@ -224,7 +226,6 @@ fn name_and_hide_from_taskbar(window: &Window) {
 
 // Заглушки для не-Linux нет намеренно: зовут функцию из блока под
 // `#[cfg(target_os = "linux")]`, и пустышка на Windows была бы мёртвым кодом.
-
 
 /// Подогнать высоту окна под содержимое: вырасти на переполнение или ужаться
 /// на пустоту (не выше рабочей области), запомнить высоту в `Ui` — следующий
@@ -321,11 +322,7 @@ pub fn show_window(cx: &mut App) {
         // композитора прозрачность даёт только бледные пятна по углам. Углы
         // там скруглений нет вовсе: без композитора они не получаются.
         // На Windows прозрачность работает (снимок заказчика), не трогаем.
-        window_background: if cfg!(windows) {
-            WindowBackgroundAppearance::Transparent
-        } else {
-            WindowBackgroundAppearance::Opaque
-        },
+        window_background: if cfg!(windows) { WindowBackgroundAppearance::Transparent } else { WindowBackgroundAppearance::Opaque },
         icon,
         ..Default::default()
     };

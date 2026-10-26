@@ -176,10 +176,7 @@ fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool)
     if ctx.dry_run() && !read_only {
         return Ok(Out { code: 0, text: String::new() });
     }
-    let output = quiet(Command::new(program))
-        .args(args)
-        .output()
-        .with_context(|| format!("не удалось запустить {program}"))?;
+    let output = quiet(Command::new(program)).args(args).output().with_context(|| format!("не удалось запустить {program}"))?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     ctx.emit(Event::Output { command: shown, text: redact_text(&text) });
@@ -201,10 +198,7 @@ pub fn available<X: Runner>(ctx: &X) -> bool {
 }
 
 pub fn version<X: Runner>(ctx: &X) -> Option<String> {
-    ask(ctx, &["version", "--format", "{{.Server.Version}}"])
-        .ok()
-        .filter(|o| o.ok())
-        .map(|o| o.text.trim().to_string())
+    ask(ctx, &["version", "--format", "{{.Server.Version}}"]).ok().filter(|o| o.ok()).map(|o| o.text.trim().to_string())
 }
 
 pub fn image_loaded<X: Runner>(ctx: &X, name: &str) -> bool {
@@ -212,9 +206,7 @@ pub fn image_loaded<X: Runner>(ctx: &X, name: &str) -> bool {
 }
 
 pub fn volume_exists<X: Runner>(ctx: &X, name: &str) -> bool {
-    ask(ctx, &["volume", "ls", "--format", "{{.Name}}"])
-        .map(|o| o.text.lines().any(|l| l.trim() == name))
-        .unwrap_or(false)
+    ask(ctx, &["volume", "ls", "--format", "{{.Name}}"]).map(|o| o.text.lines().any(|l| l.trim() == name)).unwrap_or(false)
 }
 
 /// Состояние контейнера по имени (`running`, `exited`…); пусто, если его нет.
@@ -226,9 +218,7 @@ pub fn container_state<X: Runner>(ctx: &X, name: &str) -> String {
 
 /// Одно поле `docker inspect` по шаблону Go; пусто, если объекта нет.
 pub fn inspect<X: Runner>(ctx: &X, name: &str, format: &str) -> String {
-    ask(ctx, &["inspect", "-f", format, name])
-        .map(|o| if o.ok() { o.text.trim().to_string() } else { String::new() })
-        .unwrap_or_default()
+    ask(ctx, &["inspect", "-f", format, name]).map(|o| if o.ok() { o.text.trim().to_string() } else { String::new() }).unwrap_or_default()
 }
 
 pub fn load_image<X: Runner>(ctx: &X, archive: &str) -> Result<Out> {
@@ -261,10 +251,15 @@ mod tests {
         assert_eq!(redact_text("API_KEY=abc"), "API_KEY=…");
         // mcp-1c --install echoes its argv in an error: the password after
         // --db-password is blotted the same way as after --db-pwd.
-        assert_eq!(redact_text("mcp-1c --install C:\\b --db-user mcp --db-password hunter2 failed"), "mcp-1c --install C:\\b --db-user mcp --db-password … failed");
+        assert_eq!(
+            redact_text("mcp-1c --install C:\\b --db-user mcp --db-password hunter2 failed"),
+            "mcp-1c --install C:\\b --db-user mcp --db-password … failed"
+        );
         // docker inspect prints env as indented JSON strings: still blotted.
-        let r = redact_text("            \"CUSTOM_API_KEY=f5b8bc7e\",
-            \"PATH=/bin\",");
+        let r = redact_text(
+            "            \"CUSTOM_API_KEY=f5b8bc7e\",
+            \"PATH=/bin\",",
+        );
         assert!(!r.contains("f5b8bc7e") && r.contains("PATH=/bin"), "{r}");
         // A secret before the first '=' on a KEY line is not printed either.
         let r = redact_text("Authorization: Basic ZGV2 API_KEY=abc");
@@ -318,7 +313,6 @@ mod tests {
         assert!(r.contains("CUSTOM_API_KEY=…") && r.contains("LLAMA_API_KEY=…"), "{r}");
         assert!(!r.contains("f5b8bc7e") && !r.contains("abc"));
     }
-
 
     #[test]
     fn secrets_are_masked_before_anything_is_logged() {

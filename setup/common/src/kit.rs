@@ -60,8 +60,10 @@ impl Kit {
     pub fn journal(&self, e: &crate::Event) -> bool {
         let line = match e {
             crate::Event::Command(c) => format!("$ {c}"),
-            crate::Event::Output { command, text } => format!("# {command}
-{text}"),
+            crate::Event::Output { command, text } => format!(
+                "# {command}
+{text}"
+            ),
             _ => return false,
         };
         let path = self.cmd_log();
@@ -84,11 +86,7 @@ impl Kit {
     /// Запомненное между прогонами, чтобы повторный запуск не спрашивал заново.
     pub fn state_get(&self, key: &str) -> Option<String> {
         let text = std::fs::read_to_string(self.state_file()).ok()?;
-        text.lines()
-            .filter_map(|l| l.strip_prefix(&format!("{key}=")))
-            .next_back()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
+        text.lines().filter_map(|l| l.strip_prefix(&format!("{key}="))).next_back().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
     }
 
     pub fn state_set(&self, key: &str, value: &str) -> Result<()> {

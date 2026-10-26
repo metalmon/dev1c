@@ -516,9 +516,7 @@ mod tests {
 
     #[test]
     fn older_files_load_with_a_warning() {
-        let Mark::Older(msg) = check_mark(Some("2.20"), Some("2.21")) else {
-            panic!("ожидали Mark::Older")
-        };
+        let Mark::Older(msg) = check_mark(Some("2.20"), Some("2.21")) else { panic!("ожидали Mark::Older") };
         assert!(msg.contains("2.20") && msg.contains("2.21") && msg.contains("не примет"), "{msg}");
     }
 
@@ -526,9 +524,7 @@ mod tests {
     fn newer_files_are_refused() {
         // Это тот же отказ, что платформа даёт текстом «Неизвестная версия
         // формата 2.21», но мы ловим его до запуска конфигуратора.
-        let Mark::Newer(msg) = check_mark(Some("2.21"), Some("2.20")) else {
-            panic!("ожидали Mark::Newer")
-        };
+        let Mark::Newer(msg) = check_mark(Some("2.21"), Some("2.20")) else { panic!("ожидали Mark::Newer") };
         assert!(msg.contains("2.21") && msg.contains("2.20") && msg.contains("нельзя"), "{msg}");
     }
 

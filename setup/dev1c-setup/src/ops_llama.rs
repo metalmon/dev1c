@@ -90,8 +90,7 @@ fn significant(line: &str, drop_memory: bool) -> String {
 pub fn args_drift(want: &[String], baked: &str) -> Option<(String, String)> {
     let w = want.join(" ");
     let limit_unknown = !want.iter().any(|a| a == "--memory");
-    (significant(&w, limit_unknown) != significant(baked, limit_unknown))
-        .then(|| (format!("служба: {baked}"), format!("служба: {w}")))
+    (significant(&w, limit_unknown) != significant(baked, limit_unknown)).then(|| (format!("служба: {baked}"), format!("служба: {w}")))
 }
 
 /// Что из окна сервера следует для Zed. `window` — контекст ОДНОГО слота, как
@@ -168,19 +167,10 @@ pub fn llama_run_args(cfg: &crate::cfg::Cfg, publish_host: &str, limit_mb: Optio
     let model = format!("/opt/models/{base}");
     let alias = cfg.model_alias();
     let cache_ram = llama::cache_ram_from_limit(limit_mb.unwrap_or(0));
-    let mut a: Vec<String> = [
-        "run",
-        "-d",
-        "--name",
-        &cfg.llama_container(),
-        "--restart",
-        "unless-stopped",
-        "--gpus",
-        "all",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut a: Vec<String> = ["run", "-d", "--name", &cfg.llama_container(), "--restart", "unless-stopped", "--gpus", "all"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     if let Some(l) = limit_mb {
         a.extend(
             ["--memory", &format!("{l}m"), "--memory-swap", &format!("{}m", l as u64 * 2), "--memory-reservation", &format!("{}m", l / 2)]
@@ -228,7 +218,9 @@ impl Op<Ctx> for Bin {
         }
         // Сверяем сборку: иначе ряд из комплекта никогда не доедет до машины,
         // на которой сервер уже лежит.
-        let ver = |p: &std::path::Path| docker::probe(ctx, &p.to_string_lossy(), &["--version"]).map(|o| o.text.trim().to_string()).unwrap_or_default();
+        let ver = |p: &std::path::Path| {
+            docker::probe(ctx, &p.to_string_lossy(), &["--version"]).map(|o| o.text.trim().to_string()).unwrap_or_default()
+        };
         let have = ver(&llama::server_exe());
         let want = ver(&src.join(llama::server_exe().file_name().unwrap_or_default()));
         if !want.is_empty() && have != want {
@@ -308,7 +300,10 @@ impl Op<Ctx> for Service {
             return OpState::Blocked("модель не выбрана: [model] file — путь к .gguf на этой машине".into());
         }
         if !llama::is_admin(ctx) {
-            return OpState::Blocked("нужны права администратора: служба и её каталог регистрируются от имени системы — запустите программу от администратора".into());
+            return OpState::Blocked(
+                "нужны права администратора: служба и её каталог регистрируются от имени системы — запустите программу от администратора"
+                    .into(),
+            );
         }
         if !std::path::Path::new(&m.file).exists() {
             return OpState::Blocked(format!("нет файла модели {}", m.file));
@@ -386,7 +381,10 @@ impl Op<Ctx> for Container {
             return OpState::Blocked("модель не выбрана: [model] file — файл в комплекте".into());
         }
         if !docker::image_loaded(ctx, &ctx.cfg.llama_image()) {
-            return OpState::Blocked(format!("образ {} не загружен: он едет в dev1c-llama-image.tar.gz — выполните шаг «Образ среды»", ctx.cfg.llama_image()));
+            return OpState::Blocked(format!(
+                "образ {} не загружен: он едет в dev1c-llama-image.tar.gz — выполните шаг «Образ среды»",
+                ctx.cfg.llama_image()
+            ));
         }
         let name = ctx.cfg.llama_container();
         let container_state = docker::container_state(ctx, &name);
@@ -401,7 +399,10 @@ impl Op<Ctx> for Container {
         // перед тем, как контейнер собираются создавать, а не как пульс на
         // каждый status.
         let container_ok = driver_ok
-            && (running || docker::ask(ctx, &["run", "--rm", "--gpus", "all", &ctx.cfg.llama_image(), "--version"]).map(|o| o.ok()).unwrap_or(false));
+            && (running
+                || docker::ask(ctx, &["run", "--rm", "--gpus", "all", &ctx.cfg.llama_image(), "--version"])
+                    .map(|o| o.ok())
+                    .unwrap_or(false));
         if let Some(msg) = barrier::gpu_in_container(driver_ok, container_ok, ctx.kit.path("nvidia-container-toolkit").is_dir()) {
             return OpState::Blocked(msg);
         }
@@ -601,11 +602,24 @@ mod tests {
         let unknown: Vec<String> = ["run", "-m", "x", "--cache-ram", "1024", "--port", "1"].iter().map(|s| s.to_string()).collect();
         assert!(args_drift(&unknown, baked_limited).is_none(), "неизвестный предел — не расхождение");
         // А настоящая смена предела расхождением остаётся.
-        let changed: Vec<String> =
-            ["run", "--memory", "6144m", "--memory-swap", "12288m", "--memory-reservation", "3072m", "-m", "x", "--cache-ram", "3072", "--port", "1"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let changed: Vec<String> = [
+            "run",
+            "--memory",
+            "6144m",
+            "--memory-swap",
+            "12288m",
+            "--memory-reservation",
+            "3072m",
+            "-m",
+            "x",
+            "--cache-ram",
+            "3072",
+            "--port",
+            "1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let (from, to) = args_drift(&changed, baked_limited).unwrap();
         assert!(from.contains("22528m") && to.contains("6144m"), "{from} → {to}");
         // И контейнер, у которого предела ещё нет, его получает.
@@ -619,7 +633,13 @@ mod tests {
         let c = Cfg::default();
         let dir = std::env::temp_dir().join(format!("dev1c-answers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ctx = Ctx { kit: common::kit::Kit::at(&dir), cfg: c, dry_run: false, sink: std::sync::Arc::new(|_| {}), prompt: Box::new(common::AlwaysDefault) };
+        let ctx = Ctx {
+            kit: common::kit::Kit::at(&dir),
+            cfg: c,
+            dry_run: false,
+            sink: std::sync::Arc::new(|_| {}),
+            prompt: Box::new(common::AlwaysDefault),
+        };
         let st = Answers.state(&ctx);
         assert!(matches!(st, OpState::Blocked(ref w) if w.contains("модель")), "{st:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -670,7 +690,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn the_measurement_line_names_the_slot_window_and_the_agent_share() {
         // Чисел для Zed в строке больше нет — объявлять их некому; но доля

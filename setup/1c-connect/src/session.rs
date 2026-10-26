@@ -84,8 +84,20 @@ impl State {
     pub fn label(&self, mode: &str) -> String {
         let local = mode == "local";
         match self {
-            State::Off => if local { "MCP выключены".into() } else { "не подключён".into() },
-            State::Connecting => if local { "включаю…".into() } else { "подключаюсь…".into() },
+            State::Off => {
+                if local {
+                    "MCP выключены".into()
+                } else {
+                    "не подключён".into()
+                }
+            }
+            State::Connecting => {
+                if local {
+                    "включаю…".into()
+                } else {
+                    "подключаюсь…".into()
+                }
+            }
             State::Up { since } => {
                 let m = since.elapsed().as_secs() / 60;
                 let verb = if local { "MCP включены" } else { "подключён" };
@@ -96,7 +108,13 @@ impl State {
                 }
             }
             State::Retrying(why) => format!("переподключаюсь: {why}"),
-            State::Failed(why) => if local { why.clone() } else { format!("не подключён: {why}") },
+            State::Failed(why) => {
+                if local {
+                    why.clone()
+                } else {
+                    format!("не подключён: {why}")
+                }
+            }
         }
     }
 }
@@ -206,7 +224,8 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
     if code == 0 {
         return None;
     }
-    let what = if code < 0 { format!("{who} снят сигналом") } else { format!("{who} завершился с кодом {code}") };
+    let what =
+        if code < 0 { format!("{who} снят сигналом") } else { format!("{who} завершился с кодом {code}") };
     let because = if said.is_empty() { " — на stderr он ничего не сказал".to_string() } else { because };
     Some(Event::Warn(format!("{what}{because}")))
 }
@@ -224,7 +243,13 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// `tunnel` держит SSH с переподключением, `local` слушает оба порта на
 /// петле сам (база внутри образа — переподключаться там не от чего,
 /// `Retrying` в этом режиме не бывает).
-pub fn start_with_enabled(cfg: Cfg, kit: Kit, log: Sink, enabled: Arc<AtomicBool>, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
+pub fn start_with_enabled(
+    cfg: Cfg,
+    kit: Kit,
+    log: Sink,
+    enabled: Arc<AtomicBool>,
+    on_state: impl Fn(State) + Send + Sync + 'static,
+) -> Session {
     let (stop_tx, stop_rx) = watch::channel(false);
     let (done_tx, done_rx) = oneshot::channel();
     // Общая ячейка параметров: заведена здесь (не внутри `Serve::new`), чтобы
@@ -334,7 +359,13 @@ impl Serve {
                 let tools_dir = tools_dir.clone();
                 Arc::new(move |cfg: &Cfg| bridge::vrunner_command(cfg, &tools_dir))
             };
-            let rules = bridge::Rules::for_vrunner(self.cfg.clone(), tools_dir, rebuild, Arc::new(bridge::configurator_count), self.enabled.clone());
+            let rules = bridge::Rules::for_vrunner(
+                self.cfg.clone(),
+                tools_dir,
+                rebuild,
+                Arc::new(bridge::configurator_count),
+                self.enabled.clone(),
+            );
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
             Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {

@@ -131,7 +131,15 @@ impl Project {
         let dir = PathBuf::from(&cfg.host.project);
         // The last path segment by either separator: a Windows path read on
         // Linux (CI) has no separators as far as PathBuf is concerned.
-        let name = cfg.host.project.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().filter(|n| !n.is_empty()).unwrap_or("project").to_string();
+        let name = cfg
+            .host
+            .project
+            .trim_end_matches(['\\', '/'])
+            .rsplit(['\\', '/'])
+            .next()
+            .filter(|n| !n.is_empty())
+            .unwrap_or("project")
+            .to_string();
         let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
         // Адреса среды нет — `remote` пуст, а не собран из пустоты: читатели
         // (`layout_state`, `ensure_origin`) говорят, чего не хватает.
@@ -196,7 +204,8 @@ fn git_cmd(p: &Project, args: &[&str]) -> Command {
 }
 
 fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
-    let o = git_cmd(p, args).output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
+    let o =
+        git_cmd(p, args).output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
     let mut text = String::from_utf8_lossy(&o.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&o.stderr));
     Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
@@ -282,7 +291,10 @@ fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, 
 /// 1c-connect install (host.project)», — а операция сообщала о внутренностях
 /// git вместо причины.
 pub fn not_laid_out(dir: &std::path::Path) -> String {
-    format!("{} не разложен: нет git-репозитория — нажмите «Установить» в окне или выполните 1c-connect install (host.project)", dir.display())
+    format!(
+        "{} не разложен: нет git-репозитория — нажмите «Установить» в окне или выполните 1c-connect install (host.project)",
+        dir.display()
+    )
 }
 
 fn ensure_origin(p: &Project) -> Result<(), String> {
@@ -360,7 +372,8 @@ pub fn facts(p: &Project) -> Result<Facts, String> {
     ensure_origin(p)?;
     let branch = must(p, &["symbolic-ref", "--short", "HEAD"]).unwrap_or_else(|_| "(нет коммитов)".into());
     let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_default();
-    let ahead = git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
+    let ahead =
+        git(p, &["rev-list", "--count", &format!("origin/{}..HEAD", p.branch)]).map(|o| if o.ok { o.text } else { "все".into() })?;
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
     Ok(Facts {
         branch,
@@ -465,7 +478,10 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
     // пригодным для анализатора сам, с приходом ветки, без действий человека
     // (требование заказчика 2026-10-21); не попади файл в коммит, он остался
     // бы лежать на машине, где никакой анализатор его не читает.
-    let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json", crate::analyzer::FILE].into_iter().filter(|r| p.dir.join(r).exists()).collect();
+    let roots: Vec<&str> = ["src", ".gitattributes", ".gitignore", "autumn-properties.json", crate::analyzer::FILE]
+        .into_iter()
+        .filter(|r| p.dir.join(r).exists())
+        .collect();
     if roots.is_empty() {
         return Err(format!("в {} нет src — сначала cf_decompile", p.dir.display()));
     }
@@ -610,7 +626,13 @@ mod tests {
         std::fs::write(dir.join(".gitattributes"), "* -text\n").unwrap();
         std::fs::write(dir.join(".gitignore"), "build/\n*.log\n").unwrap();
         std::fs::write(dir.join("autumn-properties.json"), "{}").unwrap();
-        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev2".into(), remote: origin.to_string_lossy().into(), login: "dev2".into() };
+        let p = Project {
+            dir: dir.clone(),
+            git: system_git(),
+            branch: "dev2".into(),
+            remote: origin.to_string_lossy().into(),
+            login: "dev2".into(),
+        };
         (tmp, p)
     }
 
@@ -640,7 +662,8 @@ mod tests {
         assert_eq!(args[..flags.len()], flags[..]);
         assert_eq!(c.get_current_dir(), Some(p.dir.as_path()));
         assert!(
-            c.get_envs().any(|(k, v)| k.to_string_lossy().into_owned() == "GIT_TERMINAL_PROMPT" && v.map(|v| v.to_string_lossy().into_owned()) == Some("0".into())),
+            c.get_envs().any(|(k, v)| k.to_string_lossy().into_owned() == "GIT_TERMINAL_PROMPT"
+                && v.map(|v| v.to_string_lossy().into_owned()) == Some("0".into())),
             "{:?}",
             c.get_envs().collect::<Vec<_>>()
         );
@@ -856,7 +879,13 @@ mod tests {
         let t = tempdir::Dir::new();
         let dir = t.path().join("project");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev1".into(), remote: "http://localhost:3000/dev1c/project.git".into(), login: "dev1".into() };
+        let p = Project {
+            dir: dir.clone(),
+            git: system_git(),
+            branch: "dev1".into(),
+            remote: "http://localhost:3000/dev1c/project.git".into(),
+            login: "dev1".into(),
+        };
         let e = push(&p, "выгрузка", &AtomicBool::new(false)).unwrap_err();
         assert!(e.contains("не разложен") && e.contains("install"), "{e}");
         assert!(!e.contains("GIT_DISCOVERY"), "сырой git наружу не идёт: {e}");
@@ -874,8 +903,11 @@ mod tests {
         std::fs::write(p.dir.join("src").join("ConfigDumpInfo.xml"), "<ConfigDumpInfo/>").unwrap();
         push(&p, "выгрузка", &AtomicBool::new(false)).unwrap_or_else(|e| panic!("{e}"));
         let tracked = git(&p.dir, &["ls-files"]);
-        assert!(tracked.contains(crate::analyzer::FILE), "файл анализатора обязан быть в коммите:
-{tracked}");
+        assert!(
+            tracked.contains(crate::analyzer::FILE),
+            "файл анализатора обязан быть в коммите:
+{tracked}"
+        );
     }
 
     /// Строка платформы для анализатора появляется при раскладке — и только
@@ -896,7 +928,13 @@ mod tests {
         let origin = t.path().join("o.git");
         git(t.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
         let dir = t.path().join("Проект Бух");
-        let p = Project { dir: dir.clone(), git: system_git(), branch: "dev3".into(), remote: origin.to_string_lossy().into(), login: "dev3".into() };
+        let p = Project {
+            dir: dir.clone(),
+            git: system_git(),
+            branch: "dev3".into(),
+            remote: origin.to_string_lossy().into(),
+            login: "dev3".into(),
+        };
         assert!(matches!(layout_state(&p), Layout::Missing));
         let lines = std::cell::RefCell::new(Vec::new());
         init(&p, Path::new("nowhere"), &[], &|s| lines.borrow_mut().push(s)).unwrap_or_else(|e| panic!("{e}"));

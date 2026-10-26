@@ -10,7 +10,7 @@
 use crate::cfg::Host;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Verdict, Running, Ui, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
 use crate::session::State;
 use common::check::{Check, Outcome};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -455,7 +455,11 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     // единственный повод показать обе: отправка пойдёт не туда, куда он
     // смотрит.
     if f.branch != f.want_branch {
-        rows.push((Some(Dot::Warn), "Ветка разошлась с параметрами".into(), format!("в параметрах {}, отправка пойдёт туда", f.want_branch)));
+        rows.push((
+            Some(Dot::Warn),
+            "Ветка разошлась с параметрами".into(),
+            format!("в параметрах {}, отправка пойдёт туда", f.want_branch),
+        ));
     }
     // 2. Есть ли что отправлять. Точка здесь — настоящее состояние.
     rows.push(unsent_row(f));
@@ -532,7 +536,11 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
 pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
     let shown = shown_fields(mode);
     let v = |name: &str, e: &Entity<InputState>| {
-        if shown.contains(&name) { e.read(cx).value().to_string() } else { String::new() }
+        if shown.contains(&name) {
+            e.read(cx).value().to_string()
+        } else {
+            String::new()
+        }
     };
     Host {
         server: v("server", &f.server),
@@ -911,9 +919,7 @@ impl Panel {
         div()
             .relative()
             .child(Input::new(state).focus_bordered(false))
-            .when(focused, |d| {
-                d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent))
-            })
+            .when(focused, |d| d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent)))
     }
 
     fn row(label: &str, caption: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
@@ -1047,17 +1053,10 @@ impl Render for Panel {
             })
             // «Прервать» — перед переключателем, только пока можно отменить
             // (git-обмен; cf_decompile/cf_load не прерываются).
-            .when(c.cancel, |d| {
-                d.child(
-                    Button::new("cancel")
-                        .ghost()
-                        .small()
-                        .label("Прервать")
-                        .on_click(|_, _, cx| gui::cancel_op(cx)),
-                )
-            })
+            .when(c.cancel, |d| d.child(Button::new("cancel").ghost().small().label("Прервать").on_click(|_, _, cx| gui::cancel_op(cx))))
             .child(
-                Switch::new("link").focus_ring(false)
+                Switch::new("link")
+                    .focus_ring(false)
                     .checked(link.is_on())
                     .disabled(switch_locked(gate.as_deref(), link.is_on(), has_progress))
                     .tooltip(switch_tooltip(gate.as_deref(), why.as_deref(), &mode))
@@ -1152,16 +1151,13 @@ impl Render for Panel {
                         );
                     }
                     col.child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_size(px(13.)).text_color(caption).child("База"))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                    .child(pick("pick-base", f.base_path.clone(), cx)),
-                            ),
+                        v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("База")).child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
+                                .child(pick("pick-base", f.base_path.clone(), cx)),
+                        ),
                     )
                     .child(
                         h_flex()
@@ -1170,16 +1166,13 @@ impl Render for Panel {
                             .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
                     )
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                    .child(pick("pick-project", f.project.clone(), cx)),
-                            ),
+                        v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта")).child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                .child(pick("pick-project", f.project.clone(), cx)),
+                        ),
                     )
                 })
                 .into_any_element(),
@@ -1234,7 +1227,11 @@ impl Render for Panel {
                             // Заголовок раздела: «{операция} · {HH:MM}» из `head_line`;
                             // на экране операция слева полужирным, время справа
                             // мелким приглушённым (заказчик 2026-10-18).
-                            let (title, time) = l.text.rsplit_once(" · ").map(|(t, c)| (t.to_string(), c.to_string())).unwrap_or((l.text.clone(), String::new()));
+                            let (title, time) = l
+                                .text
+                                .rsplit_once(" · ")
+                                .map(|(t, c)| (t.to_string(), c.to_string()))
+                                .unwrap_or((l.text.clone(), String::new()));
                             h_flex()
                                 .mt_2()
                                 .items_baseline()
@@ -1534,13 +1531,13 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint, shown_fields,
-        switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint,
+        shown_fields, switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
-    use crate::verify;
-    use crate::gui::{Dot, Kind, Line, ProjectView, Verdict, Running, Which};
+    use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
+    use crate::verify;
     use common::check::Check;
     use common::Phase;
     use gpui_kit::px;
@@ -1698,7 +1695,10 @@ mod tests {
         let c = card(None, &link, "local", &Verdict::Ready, Some("не задан пользователь базы"), now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         // Сама причина не пропала — она в подсказке, подвале и журнале.
-        assert_eq!(reason(&link, &Verdict::Ready, Some("не задан пользователь базы"), None).as_deref(), Some("порт 7771 занят процессом 1234"));
+        assert_eq!(
+            reason(&link, &Verdict::Ready, Some("не задан пользователь базы"), None).as_deref(),
+            Some("порт 7771 занят процессом 1234")
+        );
     }
 
     /// «Не надо там прозу писать, она не лезет» (заказчик 2026-10-21):
@@ -1711,13 +1711,9 @@ mod tests {
         let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
         let bind = "порт 7771 занят процессом 1234";
         for mode in ["local", "tunnel"] {
-            for link in [
-                State::Off,
-                State::Connecting,
-                State::Up { since: now },
-                State::Retrying("нет сети".into()),
-                State::Failed(bind.into()),
-            ] {
+            for link in
+                [State::Off, State::Connecting, State::Up { since: now }, State::Retrying("нет сети".into()), State::Failed(bind.into())]
+            {
                 for ready in [Verdict::Checking, Verdict::Ready, Verdict::NotReady(fail.clone())] {
                     for gate in [None, Some(gate_why)] {
                         let title = card(None, &link, mode, &ready, gate, now).title;
@@ -1760,13 +1756,7 @@ mod tests {
         // `gui::mod` tests: a fresh CI runner can have under 65s of
         // uptime, and `Instant::now() - Duration::from_secs(65)` panics.
         let now = Instant::now() + Duration::from_secs(3600);
-        let r = Running {
-            which: Which::Export,
-            started: now - Duration::from_secs(65),
-            phase: Phase::Push,
-            seen: now,
-            stale_noted: false,
-        };
+        let r = Running { which: Which::Export, started: now - Duration::from_secs(65), phase: Phase::Push, seen: now, stale_noted: false };
         let c = card(Some(&r), &State::Off, "tunnel", &Verdict::Checking, None, now);
         assert_eq!(c.dot, Dot::Busy);
         assert_eq!(c.title, "Отправляю файлы · 1:05");
@@ -1948,12 +1938,7 @@ mod tests {
         let saved = Host { mode: "local".into(), ..Host::default() };
         // Адрес среды, пароль рабочего места и само рабочее место правятся,
         // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
-        let edited = Host {
-            server: "10.0.0.5:3393".into(),
-            password: "другой".into(),
-            workstation: "dev2".into(),
-            ..saved.clone()
-        };
+        let edited = Host { server: "10.0.0.5:3393".into(), password: "другой".into(), workstation: "dev2".into(), ..saved.clone() };
         assert!(!fields_differ(&edited, &saved, "local"));
         // А то же самое в туннельном режиме — заметная правка.
         assert!(fields_differ(&edited, &saved, "tunnel"));
@@ -1982,7 +1967,11 @@ mod tests {
     fn project_rows_explain_a_missing_layout() {
         let none = project_rows(None);
         assert_eq!(none.len(), 1);
-        assert_eq!(none[0], (None, "Читаю состояние проекта…".into(), String::new()), "пока не ответили — говорим о своём состоянии, а не читаем лекцию");
+        assert_eq!(
+            none[0],
+            (None, "Читаю состояние проекта…".into(), String::new()),
+            "пока не ответили — говорим о своём состоянии, а не читаем лекцию"
+        );
 
         // Раскладки нет — вкладка МОЛЧИТ: причину и совет уже несёт факт
         // «проект» из набора, и повторять его своим заголовком (каталогом,

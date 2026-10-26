@@ -152,9 +152,7 @@ fn short_id(id: &str) -> String {
 /// минут» не говорят ни того, ни другого, а на чужой машине ещё и врут.
 /// Файла нет (инструкция собирается во временном каталоге) — скобок нет.
 fn size_hint(p: &std::path::Path) -> String {
-    std::fs::metadata(p)
-        .map(|m| format!(" ({:.1} ГБ)", m.len() as f64 / 1_073_741_824.0))
-        .unwrap_or_default()
+    std::fs::metadata(p).map(|m| format!(" ({:.1} ГБ)", m.len() as f64 / 1_073_741_824.0)).unwrap_or_default()
 }
 
 /// Отпечаток архива образа в комплекте: размер и время правки. Хватает, чтобы
@@ -188,11 +186,7 @@ impl Op<Ctx> for Env {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(format!(
-            "проверить движок, файл параметров и порты {}–{}",
-            ctx.cfg.ports()[0],
-            ctx.cfg.ports()[3]
-        ))]
+        vec![Action::new(format!("проверить движок, файл параметров и порты {}–{}", ctx.cfg.ports()[0], ctx.cfg.ports()[3]))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         match docker::version(ctx) {
@@ -244,20 +238,18 @@ impl Op<Ctx> for Image {
         match (loaded, archive_stamp(&archive)) {
             // A new kit over an old environment: the archive is not the one
             // that was loaded last time, so it is loaded again.
-            (true, Some(stamp)) if ctx.kit.state_get("IMAGE_ARCHIVE").is_some_and(|s| s != stamp) => {
-                OpState::Drifted { from: "образ из прежнего комплекта".into(), to: "образ из этого комплекта".into() }
-            }
+            (true, Some(stamp)) if ctx.kit.state_get("IMAGE_ARCHIVE").is_some_and(|s| s != stamp) => OpState::Drifted {
+                from: "образ из прежнего комплекта".into(),
+                to: "образ из этого комплекта".into(),
+            },
             (true, _) => OpState::Done(ctx.cfg.image()),
             (false, None) => OpState::Blocked(barrier::missing_file("архив образа", &archive, &crate::ui::host_hint())),
             (false, Some(_)) => OpState::Missing,
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let mut a = vec![Action::new(format!(
-            "{} load -i dev1c-image.tar.gz{}",
-            ctx.engine(),
-            size_hint(&ctx.kit.path("dev1c-image.tar.gz"))
-        ))];
+        let mut a =
+            vec![Action::new(format!("{} load -i dev1c-image.tar.gz{}", ctx.engine(), size_hint(&ctx.kit.path("dev1c-image.tar.gz"))))];
         // Без проверки «файл на месте»: при serve = "docker" сервер модели
         // нужен всегда, и команда обязана попасть в «Ручной путь». Инструкция
         // собирается прогоном из временного каталога, где лежит только
@@ -316,11 +308,7 @@ const VOLUMES: [&str; 5] = ["home", "gitea", "models", "platform", "demo"];
 /// `clean` среди того, что надо удалить. При `host` модель лежит файлом на
 /// машине, в том её тоже никто не кладёт.
 fn volumes_for(cfg: &Cfg) -> Vec<&'static str> {
-    VOLUMES
-        .iter()
-        .copied()
-        .filter(|v| *v != "models" || matches!(cfg.form(), crate::cfg::Form::Docker))
-        .collect()
+    VOLUMES.iter().copied().filter(|v| *v != "models" || matches!(cfg.form(), crate::cfg::Form::Docker)).collect()
 }
 
 struct Volumes;
@@ -333,11 +321,7 @@ impl Op<Ctx> for Volumes {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let want = volumes_for(&ctx.cfg);
-        let missing: Vec<String> = want
-            .iter()
-            .map(|s| ctx.cfg.volume(s))
-            .filter(|v| !docker::volume_exists(ctx, v))
-            .collect();
+        let missing: Vec<String> = want.iter().map(|s| ctx.cfg.volume(s)).filter(|v| !docker::volume_exists(ctx, v)).collect();
         if missing.is_empty() {
             OpState::Done(want.join(", "))
         } else {
@@ -345,10 +329,7 @@ impl Op<Ctx> for Volumes {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        volumes_for(&ctx.cfg)
-            .iter()
-            .map(|s| Action::new(format!("{} volume create {}", ctx.engine(), ctx.cfg.volume(s))))
-            .collect()
+        volumes_for(&ctx.cfg).iter().map(|s| Action::new(format!("{} volume create {}", ctx.engine(), ctx.cfg.volume(s)))).collect()
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         for s in volumes_for(&ctx.cfg) {
@@ -426,11 +407,15 @@ impl Op<Ctx> for Payload {
         let probe = docker::ask(
             ctx,
             &[
-                "run", "--rm",
-                "-v", &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
-                "--entrypoint", "sh",
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
+                "--entrypoint",
+                "sh",
                 &ctx.cfg.image(),
-                "-c", "ls /opt/1cv8t/x86_64 2>/dev/null | head -1",
+                "-c",
+                "ls /opt/1cv8t/x86_64 2>/dev/null | head -1",
             ],
         );
         match probe {
@@ -442,10 +427,7 @@ impl Op<Ctx> for Payload {
         // Словами — что произойдёт; саму команду печатает apply под показом,
         // и в «Ручной путь» идёт она. Повторять её здесь значило бы
         // обещать строку, которая может с той разойтись.
-        vec![Action::new(format!(
-            "распаковать платформу 1С и демо-базу в тома из архива{}",
-            size_hint(&ctx.kit.path(PAYLOAD_ARCHIVE))
-        ))]
+        vec![Action::new(format!("распаковать платформу 1С и демо-базу в тома из архива{}", size_hint(&ctx.kit.path(PAYLOAD_ARCHIVE))))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         // Без выхода по dry_run: именно отсюда команда попадает в «Ручной
@@ -461,21 +443,24 @@ impl Op<Ctx> for Payload {
         let kit = if ctx.dry_run {
             "\"$PWD\"".to_string()
         } else {
-            std::path::absolute(&ctx.kit.root)
-                .unwrap_or_else(|_| ctx.kit.root.clone())
-                .to_string_lossy()
-                .to_string()
+            std::path::absolute(&ctx.kit.root).unwrap_or_else(|_| ctx.kit.root.clone()).to_string_lossy().to_string()
         };
         let o = docker::run(
             ctx,
             &[
-                "run", "--rm",
-                "-v", &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
-                "-v", &format!("{}:/opt/1c-demo", ctx.cfg.volume("demo")),
-                "-v", &format!("{kit}:/kit:ro"),
-                "--entrypoint", "sh",
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}:/opt/1cv8t", ctx.cfg.volume("platform")),
+                "-v",
+                &format!("{}:/opt/1c-demo", ctx.cfg.volume("demo")),
+                "-v",
+                &format!("{kit}:/kit:ro"),
+                "--entrypoint",
+                "sh",
                 &ctx.cfg.image(),
-                "-c", &format!("1c-stand import-payload --force < /kit/{PAYLOAD_ARCHIVE}"),
+                "-c",
+                &format!("1c-stand import-payload --force < /kit/{PAYLOAD_ARCHIVE}"),
             ],
         )?;
         anyhow::ensure!(o.ok(), "платформа не внесена: {}", o.tail(3).join(" "));
@@ -525,13 +510,8 @@ impl Op<Ctx> for Model {
         if !docker::volume_exists(ctx, &ctx.cfg.volume("models")) {
             return OpState::Missing;
         }
-        let o = docker::sh_in_volume_ro(
-            ctx,
-            &ctx.cfg.image(),
-            &ctx.cfg.volume("models"),
-            "/m",
-            &format!("stat -c %s /m/{base} 2>/dev/null"),
-        );
+        let o =
+            docker::sh_in_volume_ro(ctx, &ctx.cfg.image(), &ctx.cfg.volume("models"), "/m", &format!("stat -c %s /m/{base} 2>/dev/null"));
         match o {
             Ok(o) if o.ok() && o.text.trim() == meta.len().to_string() => OpState::Done(base),
             _ => OpState::Missing,
@@ -547,11 +527,7 @@ impl Op<Ctx> for Model {
         // поймёт, сколько ждать и хватит ли места. «Файл большой» он и так
         // видит — он его и принёс.
         let size = size_hint(&ctx.kit.path(&ctx.cfg.model.file));
-        vec![Action::new(format!(
-            "скопировать {}{size} в том {}",
-            ctx.cfg.model.file,
-            ctx.cfg.volume("models")
-        ))]
+        vec![Action::new(format!("скопировать {}{size} в том {}", ctx.cfg.model.file, ctx.cfg.volume("models")))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.cfg.form() != crate::cfg::Form::Docker {
@@ -597,18 +573,15 @@ impl Op<Ctx> for Container {
         }
         let image = docker::inspect(ctx, name, "{{.Config.Image}}");
         let port = docker::inspect(ctx, name, "{{(index (index .HostConfig.PortBindings \"3389/tcp\") 0).HostPort}}");
-        let env: Vec<String> = docker::inspect(ctx, name, "{{range .Config.Env}}{{println .}}{{end}}")
-            .lines()
-            .map(|s| s.to_string())
-            .collect();
+        let env: Vec<String> =
+            docker::inspect(ctx, name, "{{range .Config.Env}}{{println .}}{{end}}").lines().map(|s| s.to_string()).collect();
         let facts = crate::llama::facts_load(ctx);
         if let Some((from, to)) = drift_of(&ctx.cfg, &image, &port, &env, facts.as_ref()) {
             return OpState::Drifted { from, to };
         }
         let have_id = docker::inspect(ctx, name, "{{.Image}}");
-        let want_id = docker::ask(ctx, &["images", "-q", "--no-trunc", &ctx.cfg.image()])
-            .map(|o| o.text.trim().to_string())
-            .unwrap_or_default();
+        let want_id =
+            docker::ask(ctx, &["images", "-q", "--no-trunc", &ctx.cfg.image()]).map(|o| o.text.trim().to_string()).unwrap_or_default();
         match image_drift(&have_id, &want_id) {
             Some((from, to)) => OpState::Drifted { from, to },
             None => OpState::Done(format!("работает, порты {}–{}", ctx.cfg.ports()[0], ctx.cfg.ports()[3])),
@@ -689,9 +662,7 @@ impl Op<Ctx> for Services {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let [rdp, gitea, _model, ssh] = ctx.cfg.ports();
-        vec![Action::new(format!(
-            "дождаться ответа: рабочие места {rdp}, репозитории {gitea}, туннель {ssh} (до трёх минут)"
-        ))]
+        vec![Action::new(format!("дождаться ответа: рабочие места {rdp}, репозитории {gitea}, туннель {ssh} (до трёх минут)"))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
@@ -916,10 +887,8 @@ mod tests {
         assert_eq!(d, ("MODEL_PROVIDER не задан".into(), "MODEL_PROVIDER=custom".into()));
         // Ключ маскируется с обеих сторон; провайдер и адрес здесь совпадают
         // намеренно, иначе первым расхождением окажется не ключ.
-        let env: Vec<String> = ["MODEL_PROVIDER=custom", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let env: Vec<String> =
+            ["MODEL_PROVIDER=custom", "CUSTOM_API_URL=https://m", "CUSTOM_API_KEY=other"].iter().map(|s| s.to_string()).collect();
         let d = drift_of(&r, "oktaplus/dev1c-1c:latest", "3390", &env, None).unwrap();
         assert_eq!(d, ("CUSTOM_API_KEY=…".to_string(), "CUSTOM_API_KEY=…".to_string()));
     }
@@ -961,12 +930,17 @@ mod tests {
             .into_iter()
             .map(|a| a.0)
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         for s in VOLUMES {
             let v = ctx.cfg.volume(s);
-            assert!(plan.contains(&v), "том {v} не назван в плане:
-{plan}");
+            assert!(
+                plan.contains(&v),
+                "том {v} не назван в плане:
+{plan}"
+            );
         }
         assert!(plan.contains("платформа 1С"), "{plan}");
         // Уровень «снять контейнер» томов не касается вовсе.

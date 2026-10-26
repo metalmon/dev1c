@@ -216,14 +216,23 @@ pub fn resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Resul
 pub fn pins_on_disk(cfg: &Cfg) -> Pins {
     let v8i = starter_dirs().into_iter().map(|d| d.join("ibases.v8i")).find_map(|p| read_1c_text(&p));
     let base = v8i.as_deref().and_then(|text| base_pin(text, &cfg.host.base_path));
-    let default = starter_dirs().into_iter().map(|d| d.join(starter_cfg_name())).filter_map(|p| read_1c_text(&p)).flat_map(|t| default_versions(&t)).collect();
+    let default = starter_dirs()
+        .into_iter()
+        .map(|d| d.join(starter_cfg_name()))
+        .filter_map(|p| read_1c_text(&p))
+        .flat_map(|t| default_versions(&t))
+        .collect();
     Pins { base, default }
 }
 
 /// Имя файла настроек лаунчера: на Windows инструменты 1С пишут его с
 /// заглавными буквами, на Linux — строчными.
 fn starter_cfg_name() -> &'static str {
-    if cfg!(windows) { "1CEStart.cfg" } else { "1cestart.cfg" }
+    if cfg!(windows) {
+        "1CEStart.cfg"
+    } else {
+        "1cestart.cfg"
+    }
 }
 
 /// Каталоги лаунчера в порядке старшинства: пользовательский раньше общего.
@@ -262,10 +271,14 @@ mod tests {
     use super::*;
 
     fn installed() -> Vec<(String, PathBuf)> {
-        [("8.3.21.1484", "/opt/1cv8/x86_64/8.3.21.1484/1cv8"), ("8.3.27.1508", "/opt/1cv8/x86_64/8.3.27.1508/1cv8"), ("8.5.1.1150", "/opt/1cv8/x86_64/8.5.1.1150/1cv8")]
-            .into_iter()
-            .map(|(v, p)| (v.to_string(), PathBuf::from(p)))
-            .collect()
+        [
+            ("8.3.21.1484", "/opt/1cv8/x86_64/8.3.21.1484/1cv8"),
+            ("8.3.27.1508", "/opt/1cv8/x86_64/8.3.27.1508/1cv8"),
+            ("8.5.1.1150", "/opt/1cv8/x86_64/8.5.1.1150/1cv8"),
+        ]
+        .into_iter()
+        .map(|(v, p)| (v.to_string(), PathBuf::from(p)))
+        .collect()
     }
 
     fn cfg_with(platform: &str, base: &str) -> Cfg {
@@ -382,7 +395,10 @@ mod tests {
 
     #[test]
     fn default_version_reads_the_mask_form() {
-        assert_eq!(default_versions(CFG), vec![("8.3".to_string(), "8.3.21.1484".to_string()), ("8.5".to_string(), "8.5.1.1150".to_string())]);
+        assert_eq!(
+            default_versions(CFG),
+            vec![("8.3".to_string(), "8.3.21.1484".to_string()), ("8.5".to_string(), "8.5.1.1150".to_string())]
+        );
         assert!(default_versions("LANGUAGES=ru\r\n").is_empty());
     }
 

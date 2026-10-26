@@ -3,11 +3,11 @@
 
 use crate::cfg::Cfg;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
 use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
 use common::{Phase, Prompt, Runner, Sink};
+use std::path::{Path, PathBuf};
 
 pub struct Ctx {
     pub kit: Kit,
@@ -215,7 +215,16 @@ pub fn media_kind(path: &Path) -> Option<String> {
             return Some("съёмный носитель".into());
         }
         let mut fs = [0u16; 64];
-        let ok = GetVolumeInformationW(root.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), fs.as_mut_ptr(), fs.len() as u32);
+        let ok = GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            fs.as_mut_ptr(),
+            fs.len() as u32,
+        );
         if ok != 0 {
             let name = String::from_utf16_lossy(&fs).trim_end_matches('\0').to_string();
             if name.starts_with("FAT") || name == "exFAT" {
@@ -252,7 +261,11 @@ const VERSION_FILE: &str = "tools.version";
 /// (`mcp_exe`, `oscript_exe`, `vrunner_lib`, `git_exe`) описывают имена
 /// внутри неё, но не то, какие каталоги обязаны быть.
 fn required_kit_dirs() -> &'static [&'static str] {
-    if cfg!(windows) { &["vrunner", "git", "httpd"] } else { &["vrunner", "git"] }
+    if cfg!(windows) {
+        &["vrunner", "git", "httpd"]
+    } else {
+        &["vrunner", "git"]
+    }
 }
 
 /// Состояние: есть ли в комплекте то, чем работают, и запускается ли оно
@@ -272,7 +285,10 @@ fn required_kit_dirs() -> &'static [&'static str] {
 pub fn tools_state(kit_root: &Path) -> OpState {
     let missing: Vec<&str> = required_kit_dirs().iter().copied().filter(|d| !kit_root.join(d).is_dir()).collect();
     if !missing.is_empty() {
-        return OpState::Blocked(format!("в комплекте нет {} — скопируйте полный комплект заново", missing.iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ")));
+        return OpState::Blocked(format!(
+            "в комплекте нет {} — скопируйте полный комплект заново",
+            missing.iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ")
+        ));
     }
     let shipped = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
     let shipped = shipped.trim();
@@ -347,7 +363,8 @@ impl Op<Ctx> for Tools {
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         let dirs = required_kit_dirs().iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ");
-        let mut v = vec![Action::new(format!("проверить, что {dirs} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
+        let mut v =
+            vec![Action::new(format!("проверить, что {dirs} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
         if cfg!(windows) {
             v.push(Action::new("зарегистрировать учебную платформу в 1С под обычным именем".to_string()));
         }
@@ -424,13 +441,21 @@ const ONEC_PLATFORM: &str = "ONEC_PLATFORM";
 
 /// Имена исполняемого файла платформы: обычная и учебная версия (у учебной — суффикс `t`).
 fn platform_exe_names() -> [&'static str; 2] {
-    if cfg!(windows) { ["1cv8.exe", "1cv8t.exe"] } else { ["1cv8", "1cv8t"] }
+    if cfg!(windows) {
+        ["1cv8.exe", "1cv8t.exe"]
+    } else {
+        ["1cv8", "1cv8t"]
+    }
 }
 
 /// Подкаталог версии, где лежит исполняемый файл: на Windows — `bin`, на Linux
 /// файл лежит прямо в каталоге версии.
 fn version_exe_dir(version_dir: &Path) -> PathBuf {
-    if cfg!(windows) { version_dir.join("bin") } else { version_dir.to_path_buf() }
+    if cfg!(windows) {
+        version_dir.join("bin")
+    } else {
+        version_dir.to_path_buf()
+    }
 }
 
 /// Версия как число по компонентам: текстовое сравнение "8.3.9.1" ставит выше "8.3.27.1786".
@@ -469,7 +494,9 @@ fn scan_root(root: &Path, found: &mut Vec<(String, PathBuf)>) {
 fn scan_1cv8() -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     if cfg!(windows) {
-        for base in ["C:\\Program Files\\1cv8", "C:\\Program Files (x86)\\1cv8", "C:\\Program Files\\1cv8t", "C:\\Program Files (x86)\\1cv8t"] {
+        for base in
+            ["C:\\Program Files\\1cv8", "C:\\Program Files (x86)\\1cv8", "C:\\Program Files\\1cv8t", "C:\\Program Files (x86)\\1cv8t"]
+        {
             scan_root(Path::new(base), &mut found);
         }
     } else {
@@ -1110,7 +1137,8 @@ pub fn analyzer_lines_of(exe: Option<&std::path::Path>) -> Vec<(&'static str, St
     let Some(version) = exe.and_then(crate::flow::platform_version_from_exe) else {
         return Vec::new();
     };
-    let catalogue = crate::analyzer::cache_dir().map(|c| crate::analyzer::catalogue_line(&c)).unwrap_or_else(|| crate::analyzer::BUNDLED.to_string());
+    let catalogue =
+        crate::analyzer::cache_dir().map(|c| crate::analyzer::catalogue_line(&c)).unwrap_or_else(|| crate::analyzer::BUNDLED.to_string());
     crate::analyzer::expected(&version, &catalogue)
 }
 
@@ -1138,7 +1166,12 @@ impl Op<Ctx> for ProjectOp {
         let analyzer = analyzer_lines(&ctx.cfg);
         let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
         let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
-        vec![Action::new(format!("{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json{bsl}", p.dir.display(), p.branch, p.remote))]
+        vec![Action::new(format!(
+            "{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json{bsl}",
+            p.dir.display(),
+            p.branch,
+            p.remote
+        ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
@@ -1264,13 +1297,18 @@ impl Op<Ctx> for Publication {
         let matches = crate::publication::descriptor_matches(&p.pub_dir, &ctx.cfg);
         match (responds, matches) {
             (true, true) => OpState::Done(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port)),
-            (true, false) => OpState::Drifted { from: "старый дескриптор на диске".into(), to: "текущие параметры базы".into() },
+            (true, false) => OpState::Drifted {
+                from: "старый дескриптор на диске".into(), to: "текущие параметры базы".into()
+            },
             (false, _) => OpState::Missing,
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         if ctx.cfg.host.publication == "webserver" {
-            return vec![Action::new(format!("публикация на вашем веб-сервере ({}) — ничего не делаем, кроме проверки", ctx.cfg.base_url()))];
+            return vec![Action::new(format!(
+                "публикация на вашем веб-сервере ({}) — ничего не делаем, кроме проверки",
+                ctx.cfg.base_url()
+            ))];
         }
         vec![Action::new(format!("записать default.vrd и httpd.conf, поднять httpd на 127.0.0.1:{}", ctx.cfg.http_port()))]
     }
@@ -1355,8 +1393,11 @@ impl Op<Ctx> for Extension {
         let h = &ctx.cfg.host;
         // Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на
         // Linux без `DISPLAY` он не стартует.
-        let (prog, args) =
-            display_argv(&exe.to_string_lossy(), &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password], display_wrapper().as_deref());
+        let (prog, args) = display_argv(
+            &exe.to_string_lossy(),
+            &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password],
+            display_wrapper().as_deref(),
+        );
         let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
@@ -1377,7 +1418,10 @@ impl Op<Ctx> for Extension {
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
         let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
         Some(vec![
-            Action::new(format!("{prefix}1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)", ib_switch(&ctx.cfg.host.base_path))),
+            Action::new(format!(
+                "{prefix}1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)",
+                ib_switch(&ctx.cfg.host.base_path)
+            )),
             Action::new(format!("удалить {}", ctx.kit.state_path("known_hosts").display())),
         ])
     }
@@ -2021,8 +2065,12 @@ mod tests {
         // Каталоги есть, отметки нет: работать можно, но версий не назвать —
         // и это сказано словами, а не молчанием.
         assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("не указаны")));
-        std::fs::write(kit.join("tools.version"), "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2
-").unwrap();
+        std::fs::write(
+            kit.join("tools.version"),
+            "OneScript 2.2.0; vanessa-runner 3.0.2; MinGit 2.56.0.2
+",
+        )
+        .unwrap();
         assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("3.0.2") && d.contains("из комплекта")));
         // Нет каталога в самом комплекте — единственный оставшийся отказ.
         std::fs::remove_dir_all(kit.join("git")).unwrap();
@@ -2133,8 +2181,11 @@ mod tests {
         shadow_platform(&platform, &to).unwrap();
         let shadow_dir = shadow_platform(&platform, &to).unwrap();
 
-        let names: std::collections::BTreeSet<String> =
-            std::fs::read_dir(shadow_dir.join("bin")).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let names: std::collections::BTreeSet<String> = std::fs::read_dir(shadow_dir.join("bin"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
         let expect: std::collections::BTreeSet<String> =
             ["1cv8.exe", "1cv8c.exe", "1cv8t.exe", "1cv8ct.exe"].iter().map(|s| s.to_string()).collect();
         assert_eq!(names, expect);

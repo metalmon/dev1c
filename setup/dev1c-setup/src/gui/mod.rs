@@ -166,9 +166,9 @@ pub fn run_op(cx: &mut App, which: Which) {
                     Which::CleanData => common::run::clean_apply(&ctx, &list, CleanLevel::Data),
                     // Установка начинается сверкой комплекта и кончается
                     // проверкой: обещаниям тут не место.
-                    Which::Install | Which::Check => ops::kit_is_intact(&ctx)
-                        .and_then(|_| common::run::apply_all(&ctx, &list, None, false))
-                        .and_then(|_| checked(&ctx)),
+                    Which::Install | Which::Check => {
+                        ops::kit_is_intact(&ctx).and_then(|_| common::run::apply_all(&ctx, &list, None, false)).and_then(|_| checked(&ctx))
+                    }
                 };
                 Ev::Done(r.err().map(|e| format!("{e:#}")))
             },
@@ -213,10 +213,11 @@ pub fn run_check(cx: &mut App) {
         let send = |ev| {
             let _ = tx.unbounded_send(ev);
         };
-        // `&send`: один и тот же отправитель нужен и обёртке, и телу —
-        // ссылка на замыкание тоже `Fn`.
+        // Один и тот же отправитель достаётся и обёртке, и телу ниже: `send`
+        // держит `tx` по ссылке, поэтому само замыкание `Copy` — копии хватает
+        // обоим, и заимствовать его незачем.
         ui::guarded(
-            &send,
+            send,
             Ev::Line,
             || {
                 let checks = verify::run(&ctx);
@@ -270,7 +271,9 @@ fn handle(ev: Ev, cx: &mut App) {
                 note_line(ui, line);
             }
             let text = match elapsed {
-                Some(since) => format!("Проверка: {} из {} — за {}", checks.len() - ui.failed_checks, checks.len(), ui::took(since.elapsed())),
+                Some(since) => {
+                    format!("Проверка: {} из {} — за {}", checks.len() - ui.failed_checks, checks.len(), ui::took(since.elapsed()))
+                }
                 None => format!("Проверка: {} из {}", checks.len() - ui.failed_checks, checks.len()),
             };
             let line = if ui.failed_checks == 0 { Line::ok(text) } else { Line::fail(text) };
@@ -331,7 +334,7 @@ pub fn launch(kit: Kit) -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             use futures::StreamExt;
             while let Some(ev) = rx.next().await {
-                let _ = cx.update(|cx| handle(ev, cx));
+                cx.update(|cx| handle(ev, cx));
             }
         })
         .detach();

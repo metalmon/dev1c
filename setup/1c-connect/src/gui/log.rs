@@ -76,9 +76,10 @@ pub fn licence_line(state: crate::licence::State) -> Option<Line> {
     use crate::licence::State;
     match state {
         State::Expired => op_refusal(state),
-        State::Soon { days } => {
-            Some(Line { kind: Kind::Warn, text: format!("срок действия 1c-connect — до {}, осталось дней: {days}", crate::licence::until_text()) })
-        }
+        State::Soon { days } => Some(Line {
+            kind: Kind::Warn,
+            text: format!("срок действия 1c-connect — до {}, осталось дней: {days}", crate::licence::until_text()),
+        }),
         State::Valid => None,
     }
 }

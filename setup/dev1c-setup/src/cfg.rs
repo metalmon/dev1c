@@ -199,15 +199,24 @@ impl Cfg {
                 // key may be empty: a server inside the network often has none.
             }
             Form::Host => {
-                anyhow::ensure!(m.url.is_empty(), "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url");
+                anyhow::ensure!(
+                    m.url.is_empty(),
+                    "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url"
+                );
                 anyhow::ensure!(
                     m.file.is_empty() || absolute(&m.file),
                     "[model]: при serve = \"host\" file — полный путь к .gguf на этой машине; для файла в комплекте выберите serve = \"docker\""
                 );
             }
             Form::Docker => {
-                anyhow::ensure!(m.url.is_empty(), "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url");
-                anyhow::ensure!(m.file.is_empty() || !absolute(&m.file), "[model]: при serve = \"docker\" file — путь относительно комплекта");
+                anyhow::ensure!(
+                    m.url.is_empty(),
+                    "[model]: url задан, а serve не \"remote\" — выберите одно: serve = \"remote\" или пустой url"
+                );
+                anyhow::ensure!(
+                    m.file.is_empty() || !absolute(&m.file),
+                    "[model]: при serve = \"docker\" file — путь относительно комплекта"
+                );
             }
         }
         anyhow::ensure!(
@@ -320,9 +329,7 @@ impl Cfg {
                     absolute(m),
                     "--model при serve = \"host\" — полный путь к .gguf на этой машине, а не относительный: {m}"
                 ),
-                Form::Remote => anyhow::bail!(
-                    "--model с serve = \"remote\" не нужен: у удалённого сервера нет файла, есть url и name"
-                ),
+                Form::Remote => anyhow::bail!("--model с serve = \"remote\" не нужен: у удалённого сервера нет файла, есть url и name"),
             }
             cfg.model.file = m.into();
         }
@@ -460,10 +467,7 @@ mod tests {
         assert!(!env.iter().any(|(k, _)| k == "LLAMACPP_API_KEY"), "{env:?}");
         assert!(env.contains(&("MODEL_NAME".into(), "x".into())), "{env:?}");
         let names: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(
-            !names.iter().any(|k| k.starts_with("CUSTOM_MAX")),
-            "числа окна в переменных больше не передаются: {names:?}"
-        );
+        assert!(!names.iter().any(|k| k.starts_with("CUSTOM_MAX")), "числа окна в переменных больше не передаются: {names:?}");
     }
 
     #[test]

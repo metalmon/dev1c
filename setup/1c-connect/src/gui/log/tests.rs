@@ -2,8 +2,8 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
-use core::prelude::v1::test;
 use common::{Event, Phase, Progress};
+use core::prelude::v1::test;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -88,7 +88,13 @@ fn progress_text_shows_title_and_elapsed() {
     // an hour of uptime, and `Instant::now() - Duration::from_secs(3725)`
     // panics (underflow) once the subtracted duration outruns it.
     let now = Instant::now() + Duration::from_secs(3600);
-    let at = |secs| Running { which: Which::Export, started: now - Duration::from_secs(secs), phase: Phase::Decompile, seen: now, stale_noted: false };
+    let at = |secs| Running {
+        which: Which::Export,
+        started: now - Duration::from_secs(secs),
+        phase: Phase::Decompile,
+        seen: now,
+        stale_noted: false,
+    };
     let (title, clock) = progress_text(&at(725), now);
     assert_eq!(title, "Выгружаю конфигурацию из 1С");
     assert_eq!(clock, "12:05");
@@ -102,9 +108,11 @@ fn stale_after_five_quiet_minutes() {
     // Same underflow risk as above: anchor `now` well past any real
     // clock value before subtracting minutes from it.
     let now = Instant::now() + Duration::from_secs(3600);
-    let fresh = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(299), stale_noted: false };
+    let fresh =
+        Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(299), stale_noted: false };
     assert!(!is_stale(&fresh, now));
-    let quiet = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
+    let quiet =
+        Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
     assert!(is_stale(&quiet, now));
     assert_eq!(stale_text(&quiet, now), "нет новостей 5 мин");
 }
@@ -116,7 +124,8 @@ fn stale_line_fires_once_per_operation() {
     let now = Instant::now() + Duration::from_secs(3600);
     let mut fresh = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false };
     assert_eq!(stale_line(&mut fresh, now), None);
-    let mut quiet = Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
+    let mut quiet =
+        Running { which: Which::Export, started: now, phase: Phase::Push, seen: now - Duration::from_secs(301), stale_noted: false };
     assert_eq!(stale_line(&mut quiet, now), Some(Line { kind: Kind::Warn, text: "нет новостей 5 мин".into() }));
     assert!(quiet.stale_noted);
     // Второй вызов на том же застое — ничего не шлёт.
@@ -133,7 +142,13 @@ fn a_progress_event_moves_phase_and_seen() {
     // Anchored, so the `- 10s` below can't underflow a short-lived
     // runner's clock either.
     let now = Instant::now() + Duration::from_secs(3600);
-    ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now - Duration::from_secs(10), stale_noted: false });
+    ui.progress = Some(Running {
+        which: Which::Export,
+        started: now,
+        phase: Phase::Decompile,
+        seen: now - Duration::from_secs(10),
+        stale_noted: false,
+    });
     on_progress(&mut ui, Progress { phase: Phase::Push, done: None, total: None, note: "x".into() }, now);
     let r = ui.progress.as_ref().unwrap();
     assert_eq!(r.phase, Phase::Push);
@@ -149,7 +164,13 @@ fn a_line_during_an_operation_reaches_the_journal_and_moves_seen() {
     // `1c-connect.log`) stayed empty for the whole operation.
     let mut ui = Ui::for_test();
     let now = Instant::now() + Duration::from_secs(3600);
-    ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Decompile, seen: now - Duration::from_secs(10), stale_noted: false });
+    ui.progress = Some(Running {
+        which: Which::Export,
+        started: now,
+        phase: Phase::Decompile,
+        seen: now - Duration::from_secs(10),
+        stale_noted: false,
+    });
     let line = Line { kind: Kind::Say, text: "cf_decompile → src (минуты…)".into() };
     on_line(&mut ui, line.clone(), now);
     assert_eq!(ui.log.last(), Some(&line));

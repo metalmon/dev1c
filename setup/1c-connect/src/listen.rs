@@ -74,7 +74,6 @@ async fn accept_maybe(l: &Option<TcpListener>) -> std::io::Result<(TcpStream, st
     }
 }
 
-
 /// Поднимает слушатели mcp и vrunner на петле (веб-порт в локальном режиме
 /// не слушается) и раздаёт принятые соединения `serve`. Ошибка второго бинда
 /// закрывает первый слушатель и возвращается `Err` с номером занятого порта.
@@ -289,7 +288,6 @@ mod tests {
         let (v4, _v6) = bind_loopback(port).await.expect("IPv4 свободен — этого достаточно");
         assert_eq!(v4.local_addr().unwrap().port(), port);
     }
-
 
     #[tokio::test]
     async fn a_busy_port_fails_the_whole_session_and_frees_the_first_listener() {

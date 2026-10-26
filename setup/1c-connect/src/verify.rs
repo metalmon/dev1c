@@ -132,7 +132,9 @@ pub fn analyzer_fact(ours: Option<&str>, want: &[(&'static str, String)], have: 
             return Check::fail(
                 ANALYZER,
                 format!("{TARGET} = {target}, а платформа этой машины {ours}"),
-                format!("чужая строка гасит проверку имён — поправьте {FILE} в проекте или удалите строку, 1c-connect install запишет свою"),
+                format!(
+                    "чужая строка гасит проверку имён — поправьте {FILE} в проекте или удалите строку, 1c-connect install запишет свою"
+                ),
             );
         }
     }
@@ -189,8 +191,14 @@ pub fn gitea_address_fact() -> Check {
 /// работает, — иначе провал «не отвечает» не говорит, куда она стучалась.
 pub fn gitea_fact(g: &Gitea, url: &str) -> Check {
     match g {
-        Gitea::Down(e) => Check::fail(GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере"),
-        Gitea::NoOrg => Check::fail(GITEA, format!("{url} отвечает, но организации dev1c в среде нет"), "образ среды старый — dev1c-setup install с новым комплектом"),
+        Gitea::Down(e) => {
+            Check::fail(GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере")
+        }
+        Gitea::NoOrg => Check::fail(
+            GITEA,
+            format!("{url} отвечает, но организации dev1c в среде нет"),
+            "образ среды старый — dev1c-setup install с новым комплектом",
+        ),
         Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v} на {url}, организация dev1c есть")),
     }
 }
@@ -326,7 +334,11 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
     // даже тогда, когда порты выглядят свободными: не слушаем мы — значит
     // агент до нас не дойдёт.
     if matches!(ports, PortUse::WeFailed) {
-        let who = if busy.is_empty() { String::new() } else { format!(": {}", busy.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", ")) };
+        let who = if busy.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", busy.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", "))
+        };
         return Check::fail(
             WORKSTATION_PORTS,
             format!("{mcp} и {vrunner}: занять не вышло{who} — агент до нас не дойдёт"),
@@ -358,7 +370,10 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
         // видеть, кто держит порт, даже когда это ничему не мешает.
         PortUse::WeDont => Check::note(
             WORKSTATION_PORTS,
-            format!("{} — порты разовой команде не нужны", busy.iter().map(|(p, who)| format!("{p} держит {who}")).collect::<Vec<_>>().join(", ")),
+            format!(
+                "{} — порты разовой команде не нужны",
+                busy.iter().map(|(p, who)| format!("{p} держит {who}")).collect::<Vec<_>>().join(", ")
+            ),
         ),
         // Разобран выше, до проверки пустого списка.
         PortUse::WeFailed => unreachable!("провал захвата отвечает раньше"),
@@ -529,7 +544,8 @@ const PUBLICATION_HINT: &str = "1c-connect install, затем публикац�
 /// рабочую публикацию ни за что. Тот же совет, что у факта порта
 /// (`web_hint`): поднимает публикацию сам коннектор. Про установку
 /// расширения говорим только когда база ОТВЕТИЛА, что его нет.
-const UNREACHED_HINT: &str = "публикацию поднимает сам коннектор — включите обслуживание MCP; если оно включено, причину смотрите в журнале";
+const UNREACHED_HINT: &str =
+    "публикацию поднимает сам коннектор — включите обслуживание MCP; если оно включено, причину смотрите в журнале";
 
 /// Отвечает ли публикация вообще (любым HTTP-ответом по `/version`) —
 /// отдельно от того, стоит ли в базе расширение (`extension_fact`): раньше
@@ -586,7 +602,9 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Check {
         // Не пустили (401/403) — база отвечает, просто отказала в доступе.
         // Совет не про установку расширения, а про пароль: ровно сценарий
         // «сменили пароль базы, публикацию не обновили».
-        Some(Reach::Denied(why)) => Check::fail(EXTENSION, why.clone(), "база не пустила — проверьте db_password в параметрах и обновите публикацию"),
+        Some(Reach::Denied(why)) => {
+            Check::fail(EXTENSION, why.clone(), "база не пустила — проверьте db_password в параметрах и обновите публикацию")
+        }
         // База ответила отказом и назвала причину сама (`onec_error`). Занято
         // это или сломано — решает она же: ограничение по числу сеансов это
         // «подожди», всё прочее «починяй». Слова и совет — её, не наши
@@ -741,7 +759,9 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     match crate::project::layout_state(&p) {
         Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), p.branch)),
         Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
-        Layout::BaseDir(f) => Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог"),
+        Layout::BaseDir(f) => {
+            Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог")
+        }
         Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — поправит ветку, origin и файлы"),
         Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
     }
@@ -1464,7 +1484,6 @@ mod tests {
         let who = [(7771u16, "1c-connect (pid 812)".to_string())];
         assert!(workstation_ports_fact(7771, 7781, &who, PortUse::WeFailed).detail.contains("pid 812"));
     }
-
 
     /// В режиме `auto` адрес, который реально слушает мост, — `Cfg::base_url()`
     /// (считает от `http_port`), а не хранимое поле `[host] base_url`: они

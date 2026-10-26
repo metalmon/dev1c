@@ -244,7 +244,12 @@ pub fn status_line(ops: &[OpView], name: &str) -> Card {
         (Dot::Busy, "Среда установлена не полностью", format!("сделано {done} из {}", ops.len()), finish("Доустановить"))
     } else if drift {
         let detail = container.map(|o| o.detail.clone()).unwrap_or_default();
-        (Dot::Busy, "Среда работает, параметры разошлись", format!("контейнер {name} · {detail}"), Some((Which::Change, "Применить изменения")))
+        (
+            Dot::Busy,
+            "Среда работает, параметры разошлись",
+            format!("контейнер {name} · {detail}"),
+            Some((Which::Change, "Применить изменения")),
+        )
     } else if let Some(b) = blocked {
         let primary = if todo > 0 { finish("Доустановить") } else { None };
         (Dot::Busy, "Среда работает, не всё настроено", format!("{}: {}", b.title, b.detail), primary)
@@ -350,7 +355,12 @@ pub fn order_addresses(found: &[String]) -> Vec<String> {
     let tier = |a: &String| {
         if a.starts_with("192.168.") || a.starts_with("10.") {
             0
-        } else if a.strip_prefix("172.").and_then(|r| r.split('.').next()).and_then(|o| o.parse::<u8>().ok()).is_some_and(|o| (16..=31).contains(&o)) {
+        } else if a
+            .strip_prefix("172.")
+            .and_then(|r| r.split('.').next())
+            .and_then(|o| o.parse::<u8>().ok())
+            .is_some_and(|o| (16..=31).contains(&o))
+        {
             1
         } else {
             2
@@ -400,19 +410,13 @@ pub fn memory_value(field: &str) -> String {
 pub fn integrity_report(ok: usize, bad: &[String]) -> Result<String, String> {
     const SHOWN: usize = 20;
     if bad.is_empty() {
-        return Ok(format!(
-            "комплект цел: {}, все суммы совпали",
-            common::word::count(ok as u64, "файл", "файла", "файлов")
-        ));
+        return Ok(format!("комплект цел: {}, все суммы совпали", common::word::count(ok as u64, "файл", "файла", "файлов")));
     }
     let mut names = bad.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; ");
     if bad.len() > SHOWN {
         names.push_str(&format!("; и ещё {}", bad.len() - SHOWN));
     }
-    Err(format!(
-        "комплект скопирован не полностью или испорчен — возьмите его заново. Совпало {ok}, не совпало {}: {names}",
-        bad.len()
-    ))
+    Err(format!("комплект скопирован не полностью или испорчен — возьмите его заново. Совпало {ok}, не совпало {}: {names}", bad.len()))
 }
 
 /// Можно ли ещё подбирать высоту окна. Человек потянул окно за край —
@@ -426,13 +430,9 @@ pub fn should_fit(fitted: Option<f32>, current: f32) -> bool {
 }
 
 /// Высота окна под содержимое вкладки: переполнение растит окно, пустота
-/// ужимает. `None` — разница меньше пикселя, трогать окно незачем.
-pub fn fit_height(current: f32, content: f32, viewport: f32, work_h: f32, margin: f32, slack: f32) -> Option<f32> {
-    fit_height_at(current, content, viewport, work_h, 0.0, margin, slack)
-}
-
-/// То же, но с оглядкой на то, где у окна верх: вниз оно расти может только
-/// до нижней границы рабочей области, иначе подвал уедет под панель задач.
+/// ужимает. `None` — разница меньше пикселя, трогать окно незачем. `top` —
+/// где у окна верх: вниз оно расти может только до нижней границы рабочей
+/// области, иначе подвал уедет под панель задач.
 pub fn fit_height_at(current: f32, content: f32, viewport: f32, work_h: f32, top: f32, margin: f32, slack: f32) -> Option<f32> {
     let room = (work_h - top - margin).max(MIN_WINDOW_H);
     let want = (current + (content - viewport) + slack).min(room).max(MIN_WINDOW_H);
@@ -646,10 +646,8 @@ mod tests {
 
     #[test]
     fn the_notice_carries_the_text_of_the_first_blocked_operation() {
-        let ops = vec![
-            op("env", OpState::Done("docker 27".into())),
-            op("model", OpState::Blocked("модель не выбрана: [model] file".into())),
-        ];
+        let ops =
+            vec![op("env", OpState::Done("docker 27".into())), op("model", OpState::Blocked("модель не выбрана: [model] file".into()))];
         assert!(notice(&ops).unwrap().starts_with("модель не выбрана: [model] file"));
         assert!(notice(&[op("env", OpState::Missing)]).is_none());
     }
@@ -704,12 +702,7 @@ mod tests {
     #[test]
     fn a_panicking_worker_still_reports_the_end_of_work_and_a_line() {
         let sent = std::sync::Mutex::new(Vec::<String>::new());
-        guarded(
-            |e: String| sent.lock().unwrap().push(e),
-            |l: Line| l.text,
-            || panic!("boom"),
-            || "done".to_string(),
-        );
+        guarded(|e: String| sent.lock().unwrap().push(e), |l: Line| l.text, || panic!("boom"), || "done".to_string());
         assert_eq!(*sent.lock().unwrap(), vec![PANIC_TEXT.to_string(), "done".to_string()]);
     }
 
@@ -871,15 +864,15 @@ mod tests {
     #[test]
     fn fitting_follows_the_content_and_respects_the_screen() {
         // Содержимое выше видимой области — окно растёт на разницу с запасом.
-        assert_eq!(fit_height(800., 700., 600., 1000., 24., 8.), Some(908.));
+        assert_eq!(fit_height_at(800., 700., 600., 1000., 0., 24., 8.), Some(908.));
         // Пустота под содержимым — ужимается.
-        assert_eq!(fit_height(900., 500., 700., 1000., 24., 8.), Some(708.));
+        assert_eq!(fit_height_at(900., 500., 700., 1000., 0., 24., 8.), Some(708.));
         // Подогнали — и на следующем кадре видимая область уже выросла на ту
         // же разницу: второй подгонки не происходит, окно стоит.
-        assert_eq!(fit_height(800., 600., 600., 1000., 24., 8.), Some(808.));
-        assert_eq!(fit_height(808., 600., 608., 1000., 24., 8.), None);
+        assert_eq!(fit_height_at(800., 600., 600., 1000., 0., 24., 8.), Some(808.));
+        assert_eq!(fit_height_at(808., 600., 608., 1000., 0., 24., 8.), None);
         // Расти некуда: окно уже упирается в низ рабочей области.
-        assert_eq!(fit_height(800., 2000., 600., 1000., 24., 8.), Some(976.));
+        assert_eq!(fit_height_at(800., 2000., 600., 1000., 0., 24., 8.), Some(976.));
         // И с учётом того, где у окна верх: ниже рабочей области не вылезаем.
         assert_eq!(fit_height_at(800., 2000., 600., 1000., 300., 24., 8.), Some(676.));
     }

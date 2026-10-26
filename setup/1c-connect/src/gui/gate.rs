@@ -141,15 +141,28 @@ mod tests {
 
     #[test]
     fn an_expired_deadline_holds_the_switch() {
-        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Expired).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Expired)
+            .unwrap();
         assert!(why.contains("срок действия") && why.contains(&licence::until_text()), "{why}");
         // Предупреждение заранее — не замок: работа идёт.
-        assert_eq!(cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Soon { days: 3 }), None);
+        assert_eq!(
+            cold_gate(
+                &crate::cfg::filled_for_test(),
+                true,
+                true,
+                &done(),
+                Ok(Path::new("1cv8.exe")),
+                true,
+                &licence::State::Soon { days: 3 }
+            ),
+            None
+        );
     }
 
     #[test]
     fn a_missing_params_file_holds_the_switch() {
-        let why = cold_gate(&crate::cfg::filled_for_test(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
+            .unwrap();
         assert!(why.contains("параметров"), "{why}");
     }
 
@@ -205,17 +218,29 @@ mod tests {
 
     #[test]
     fn a_missing_platform_holds_the_switch() {
-        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Err("платформа 1С не найдена"), true, &licence::State::Valid).unwrap();
+        let why =
+            cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Err("платформа 1С не найдена"), true, &licence::State::Valid)
+                .unwrap();
         assert!(why.contains("платформа"), "{why}");
         // Причина приходит из лестницы как есть: невыполнимый пин запирает
         // переключатель своими словами, а не общим «не найдена».
-        let pin = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Err("версия 8.2.19 (поле platform в 1c-connect.toml) на машине не установлена; установлено: 8.3.27.1508"), true, &licence::State::Valid).unwrap();
+        let pin = cold_gate(
+            &crate::cfg::filled_for_test(),
+            true,
+            true,
+            &done(),
+            Err("версия 8.2.19 (поле platform в 1c-connect.toml) на машине не установлена; установлено: 8.3.27.1508"),
+            true,
+            &licence::State::Valid,
+        )
+        .unwrap();
         assert!(pin.contains("8.2.19") && pin.contains("не установлена"), "{pin}");
     }
 
     #[test]
     fn a_kit_without_mcp_holds_the_switch() {
-        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), false, &licence::State::Valid).unwrap();
+        let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), false, &licence::State::Valid)
+            .unwrap();
         assert!(why.contains("mcp-1c"), "{why}");
     }
 
@@ -226,8 +251,10 @@ mod tests {
         // комплекта, пункт 15). Но замок обязан запираться на ЛЮБОМ не-`Done`,
         // а не на перечне известных исходов: это его работа, а не догадка о
         // том, какие состояния бывают.
-        for st in [OpState::Missing, OpState::Drifted { from: "3.0.1".into(), to: "3.0.2".into() }, OpState::Blocked("нет vrunner/".into())] {
-            let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
+        for st in [OpState::Missing, OpState::Drifted { from: "3.0.1".into(), to: "3.0.2".into() }, OpState::Blocked("нет vrunner/".into())]
+        {
+            let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
+                .unwrap();
             assert!(why.contains("инструмент") && why.contains("комплект"), "{st:?}: {why}");
         }
     }

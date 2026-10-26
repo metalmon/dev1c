@@ -279,7 +279,19 @@ impl Cfg {
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
-        anyhow::ensure!(self.host.server.contains(':'), "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393");
+        // Адрес среды спрашиваем только там, где по нему ходят. В локальном
+        // режиме базы лежат рядом, туннеля нет, и поле не заполняет никто —
+        // ни стенд, ни программа (`a_local_workstation_gets_no_made_up_environment_address`).
+        // Пока умолчанием служил образец «192.168.1.10:3393», проверка его и
+        // пропускала; 26.10 умолчания опустели (`adce1c6`) — и с этого дня на
+        // стенде этим отказом обрывалась ЛЮБАЯ установка, включая ту, что
+        // стенд делает сам при первом старте. Рабочее место оставалось без
+        // проекта, публикации и расширения в базе, то есть агент в редакторе
+        // оставался без инструментов 1С (живой стенд, 27.10.2026).
+        anyhow::ensure!(
+            self.host.mode == "local" || self.host.server.contains(':'),
+            "[host]: server — адрес и порт через двоеточие, например 192.168.1.10:3393"
+        );
         let g = self.host.gitea.trim();
         anyhow::ensure!(
             g.is_empty() || g.starts_with("http://") || g.starts_with("https://"),
@@ -605,6 +617,22 @@ mod tests {
         let mut odd = crate::cfg::filled_for_test();
         odd.host.mode = "remote".into();
         assert!(odd.validate().unwrap_err().to_string().contains("mode"));
+    }
+
+    /// Стенд всегда локальный, и поля `server` в его файле нет — так его
+    /// пишет сам стенд. Безусловная проверка этого поля обрывала там любую
+    /// установку, начиная с той, что стенд делает сам при первом старте
+    /// (живой стенд, 27.10.2026).
+    #[test]
+    fn a_local_workstation_needs_no_environment_address() {
+        let mut local = filled();
+        local.host.mode = "local".into();
+        local.host.server = String::new();
+        local.validate().unwrap();
+
+        let mut tunnel = filled();
+        tunnel.host.server = String::new();
+        assert!(tunnel.validate().unwrap_err().to_string().contains("server"));
     }
 
     #[test]

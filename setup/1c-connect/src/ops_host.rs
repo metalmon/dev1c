@@ -1090,6 +1090,21 @@ fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::
     }
 }
 
+/// Строка про среду для шага `host.env` — и единственное место, где решается,
+/// спрашивать ли адрес вообще. В локальном режиме среды нет: база лежит рядом,
+/// туннеля нет, поле никем не заполняется, и проверять там нечего. Та же
+/// развилка стоит в `Cfg::validate`, и обе выросли из одного дня: пока у поля
+/// было умолчание-образец, безусловная проверка его пропускала, а с пустыми
+/// умолчаниями (26.10, `adce1c6`) она стала обрывать на стенде любую установку.
+fn env_line(mode: &str, server: &str) -> Result<String> {
+    if mode == "local" {
+        return Ok("среда: база рядом, адрес не нужен".into());
+    }
+    let addr: std::result::Result<Vec<_>, _> = std::net::ToSocketAddrs::to_socket_addrs(server).map(|a| a.collect());
+    anyhow::ensure!(addr.is_ok(), "адрес среды {server} не разбирается — проверьте server в 1c-connect.toml");
+    Ok(format!("среда: {server}"))
+}
+
 struct Env;
 impl Op<Ctx> for Env {
     fn id(&self) -> &'static str {
@@ -1117,9 +1132,7 @@ impl Op<Ctx> for Env {
         let o = docker::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
         anyhow::ensure!(o.ok(), "mcp-1c не запускается: {}", o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
-        let addr: Result<Vec<_>, _> = std::net::ToSocketAddrs::to_socket_addrs(&ctx.cfg.host.server.as_str()).map(|a| a.collect());
-        anyhow::ensure!(addr.is_ok(), "адрес среды {} не разбирается — проверьте server в 1c-connect.toml", ctx.cfg.host.server);
-        ctx.ok(format!("среда: {}", ctx.cfg.host.server));
+        ctx.ok(env_line(&ctx.cfg.host.mode, &ctx.cfg.host.server)?);
         Ok(())
     }
 }
@@ -1866,6 +1879,17 @@ mod tests {
         assert_eq!(wrote.len(), 3, "{wrote:?}");
         assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"), "план считается по выведенному");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), MINE, "сухой прогон файл не трогает");
+    }
+
+    /// Выводить адрес перестали 21.10, а спрашивать его продолжали — и на
+    /// стенде, где режим локальный всегда, установка обрывалась на первом же
+    /// шаге: ни проекта, ни публикации, ни расширения в базе (живой стенд,
+    /// 27.10.2026; заплата `patches/0001-stand-local-server/`).
+    #[test]
+    fn a_local_stand_is_not_asked_for_an_environment_address() {
+        assert!(env_line("local", "").unwrap().contains("рядом"));
+        assert!(env_line("tunnel", "").is_err(), "в туннеле адрес обязателен");
+        assert_eq!(env_line("tunnel", "192.168.1.10:3393").unwrap(), "среда: 192.168.1.10:3393");
     }
 
     /// Адрес среды выводится только там, где вывод верен. В локальном режиме

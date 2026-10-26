@@ -1518,15 +1518,17 @@ fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
     let mode = ui.cfg.host.mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
+    // Считаем на потоке окна: `Ui` в поток не уходит.
+    let ports = ports_use(ui);
     std::thread::spawn(move || {
         guarded(
             &tx,
             move || {
                 let state = link.is_up().then(|| link.label(&mode));
                 let facts = if loud {
-                    verify::run(&ctx, state.as_deref(), verify::PortUse::WeListen)
+                    verify::run(&ctx, state.as_deref(), ports)
                 } else {
-                    verify::gather(&ctx, state.as_deref(), verify::PortUse::WeListen, Instant::now() + verify::SET_DEADLINE)
+                    verify::gather(&ctx, state.as_deref(), ports, Instant::now() + verify::SET_DEADLINE)
                 };
                 if loud {
                     let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &facts);
@@ -2441,6 +2443,8 @@ fn spawn_cheap(ui: &Ui, whole: bool) {
     let mode = ui.cfg.host.mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
+    // Считаем на потоке окна: `Ui` в поток не уходит.
+    let ports = ports_use(ui);
     std::thread::spawn(move || {
         guarded(
             &tx,
@@ -2448,7 +2452,7 @@ fn spawn_cheap(ui: &Ui, whole: bool) {
                 let sessions = crate::bridge::configurator_count();
                 let facts = whole.then(|| {
                     let state = link.is_up().then(|| link.label(&mode));
-                    verify::cheap(&ctx, state.as_deref(), verify::PortUse::WeListen, sessions)
+                    verify::cheap(&ctx, state.as_deref(), ports, sessions)
                 });
                 Ev::Cheap { sessions: Some(sessions), facts }
             },
@@ -2499,6 +2503,17 @@ fn on_cheap(ui: &mut Ui, sessions: Option<usize>, facts: Option<Vec<Check>>, now
             ui.prev_cheap = f;
         }
     }
+}
+
+/// Как мы относимся к портам рабочего места прямо сейчас: занимаем их
+/// (`WeListen`) или пытались и не смогли (`WeFailed`, `Ui::bind_failed`).
+/// Второе — знание о себе, и в набор фактов оно обязано попасть: держателя
+/// может быть не видно вовсе, и тогда без этого признака набор отвечает
+/// «порты свободны», вердикт — «всё готово», а карточка рядом красная
+/// (находка владельца 26.10: «журнал врёт — сперва отказ, потом сразу всё
+/// готово»).
+fn ports_use(ui: &Ui) -> verify::PortUse {
+    if ui.bind_failed.is_some() { verify::PortUse::WeFailed } else { verify::PortUse::WeListen }
 }
 
 /// Единый тик приложения (`launch` зовёт его раз в `TICK_BUSY`/`TICK_IDLE`):

@@ -407,6 +407,13 @@ COPY config/1c/enterprise.desktop   /usr/share/applications/1c-enterprise.deskto
 # `1c-stand connect` says so in the log and exits, which is better than an
 # autostart entry that appears and disappears between image versions.
 COPY config/1c/connect-autostart.desktop /etc/xdg/autostart/zz-1c-connect.desktop
+# И видимый ярлык на рабочий стол — на случай, когда из значка вышли. Автозапуск
+# поднимает его только при входе в сессию, а второй раз человеку нужна команда
+# `1c-stand connect`, про которую он знать не обязан. Файл один, назначений два:
+# пункт меню и образцовый рабочий стол (/etc/skel/Desktop раздаётся и в уже
+# созданные дома — это делает точка входа, /home у нас том).
+COPY config/1c/connect.desktop /usr/share/applications/1c-connect.desktop
+RUN install -D -m 0755 /usr/share/applications/1c-connect.desktop /etc/skel/Desktop/1c-connect.desktop
 # dev1c-onboarding: семь шагов поверх рабочего стола, см. config/1c/
 # onboarding/. Тот же приём, что у 1c-connect выше — пункт меню и автозапуск
 # зовут одну и ту же команду, «1c-stand onboarding», а не python3 напрямую,
@@ -442,6 +449,8 @@ RUN --mount=type=bind,from=artifacts,target=/artifacts \
         `# по ней видно, что стенд собран без окна, — а не угадывается по` \
         `# отсутствию файла.` \
         rm -f /etc/xdg/autostart/zz-1c-connect.desktop \
+               /usr/share/applications/1c-connect.desktop \
+               /etc/skel/Desktop/1c-connect.desktop \
         && echo "собран без окна коннектора (CONNECT_OPTIONAL=1)" > /opt/1c-connect.absent \
         && echo "1c-connect: not supplied (CONNECT_OPTIONAL=1), the stand works without the window"; \
     else \

@@ -545,6 +545,14 @@ COPY config/gitea.desktop     /usr/share/applications/gitea.desktop
 # нашего сервера нет: послать ключ встроенный интерфейс llama.cpp не умеет.
 # Адрес ярлык не знает — его берёт из переменных сессии сам скрипт.
 COPY config/model-chat.desktop /usr/share/applications/model-chat.desktop
+# Иконка ярлыка — логотип самой llama.cpp (см. config/llama.svg). Ставим в
+# hicolor, а не в Papirus: тема обновляется с пакетом и чужой файл в ней
+# пропадёт, а hicolor для этого и существует. Кэш темы обновляем сразу —
+# иначе иконка не находится до первого запуска gtk-update-icon-cache
+# кем-нибудь ещё, и человек видит пустой квадрат.
+COPY config/llama.svg /usr/share/icons/hicolor/scalable/apps/llama-cpp.svg
+RUN gtk-update-icon-cache -q -f /usr/share/icons/hicolor \
+    && test -f /usr/share/icons/hicolor/scalable/apps/llama-cpp.svg
 
 # Образцовый рабочий стол. Из него ярлыки попадают и в новый дом (он собран
 # из /etc/skel), и в УЖЕ созданный — их освежает точка входа. Раньше ярлыки

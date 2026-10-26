@@ -82,10 +82,21 @@ pub fn derived_base_url(base_path: &str) -> String {
 /// базах не знал вовсе и писал им `File="сервер\база"` — платформа такую
 /// публикацию не открывает (находка владельца 26.10).
 ///
-/// Сетевой путь — ФАЙЛОВАЯ база, хоть и без буквы диска: прежняя копия
-/// правила этого не различала и отдавала ему `/S`.
+/// Различаем по тому, что стоит ДО первого обратного слэша: буква диска
+/// (`C:`) — файловая база, что угодно другое — имя сервера. Двоеточие само
+/// по себе признаком быть не может: `сервер:1541\база` — законная форма с
+/// портом кластера, и прежняя копия правила относила её к файловым.
+///
+/// Сетевой путь — ФАЙЛОВАЯ база, хоть и без буквы диска: та же копия этого
+/// не различала и отдавала ему `/S`.
 pub fn is_server_base(base_path: &str) -> bool {
-    !base_path.starts_with("\\\\") && base_path.contains('\\') && !base_path.contains(':')
+    if base_path.starts_with("\\\\") {
+        return false;
+    }
+    let Some((head, _)) = base_path.split_once('\\') else { return false };
+    // Буква диска: ровно `X:` перед первым слэшем.
+    let drive = head.len() == 2 && head.ends_with(':') && head.starts_with(|c: char| c.is_ascii_alphabetic());
+    !drive && !head.is_empty()
 }
 
 /// Номер рабочего места: `dev1`, `dev2` или `dev3`. От него считаются порты.
@@ -544,6 +555,21 @@ mod tests {
     fn the_empty_sample_is_not_yet_a_valid_config() {
         assert!(sample().validate().is_err());
         filled().validate().unwrap();
+    }
+
+    /// Клиент-серверная база против файловой и сетевой. Решает то, что
+    /// стоит до первого слэша: буква диска — файловая, имя сервера (хоть с
+    /// портом кластера) — клиент-серверная. Прежняя копия правила смотрела
+    /// на двоеточие где угодно и относила `сервер:1541\база` к файловым, а
+    /// сетевой путь — к клиент-серверным.
+    #[test]
+    fn a_server_base_is_told_from_a_file_one_by_what_stands_before_the_slash() {
+        assert!(is_server_base(r"srv-1c\unf"));
+        assert!(is_server_base(r"srv-1c:1541\unf"), "порт кластера — всё ещё клиент-серверная");
+        assert!(!is_server_base(r"C:\Bases\Buh"));
+        assert!(!is_server_base(r"\nas\share\Buh"), "сетевой путь — файловая база");
+        assert!(!is_server_base("/home/dev1/base"), "linux-путь без обратных слэшей");
+        assert!(!is_server_base(""));
     }
 
     #[test]

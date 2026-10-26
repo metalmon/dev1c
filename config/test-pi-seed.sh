@@ -244,7 +244,10 @@ row_of() { grep -A1 "\"$HOME_DIR/Desktop/$1\":" "$F" | sed -n 's/.*row: *//p'; }
 [ "$(row_of gitea.desktop)" = 2 ]       || fail "Gitea не на второй: $(row_of gitea.desktop)"
 [ "$(row_of model-chat.desktop)" = 4 ]  || fail "«Чат с моделью» не на четвёртой: $(row_of model-chat.desktop)"
 [ "$(row_of 1c-connect.desktop)" = 5 ]  || fail "коннектор не на пятой: $(row_of 1c-connect.desktop)"
-ok "порядок задан образом: 1С, Gitea, Zed, чат, коннектор"
+# Писать обязан сам владелец, а не root: иначе предсказуемое имя временного
+# файла в каталоге пользователя — это подъём прав (ревью 26.10.2026).
+[ "$(stat -c %U "$F")" = "$U" ] || fail "раскладка принадлежит $(stat -c %U "$F"), а не $U — значит писал root"
+ok "порядок задан образом: 1С, Gitea, Zed, чат, коннектор; файл принадлежит $U"
 
 echo "== Новый значок встаёт НИЖЕ старых =="
 

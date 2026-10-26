@@ -36,6 +36,20 @@ owner_g=${3:?группа}
 
 layout="$home/.config/xfce4/desktop/icons.screen0.yaml"
 
+# Пишем не root'ом, а САМИМ владельцем дома: тогда права проверяет ядро, а не
+# наши проверки. Иначе предсказуемое имя временного файла в каталоге, который
+# правит пользователь, — это подъём прав: подложил на его место ссылку на
+# чужой файл, и root записал через неё (нашло ревью 26.10.2026). Имя временного
+# файла всё равно случайное, а `mv -T` не идёт по ссылке — переименование
+# заменяет саму ссылку, в отличие от `cp` и `install`.
+write_as_owner() { # $1 — куда; содержимое на stdin
+    runuser -u "$owner_u" -- sh -c '
+        d=${1%/*}
+        t=$(mktemp "$d/.layout.XXXXXX") || exit 1
+        if cat > "$t" && chmod 0644 "$t"; then mv -T "$t" "$1"; else rm -f "$t"; exit 1; fi
+    ' _ "$1"
+}
+
 # Только обычный файл: симлинк наружу и каталог на этом месте — не наше дело.
 [ ! -L "$layout" ] || exit 0
 [ -d "$home/Desktop" ] || exit 0
@@ -58,7 +72,7 @@ done
 # первом входе, СОХРАНИВ наши строки (проверено на Xvfb). Значок дома —
 # нулевая строка, как его кладёт сам xfdesktop.
 if [ ! -f "$layout" ]; then
-    install -d -o "$owner_u" -g "$owner_g" "$home/.config/xfce4/desktop" || exit 0
+    runuser -u "$owner_u" -- mkdir -p "$home/.config/xfce4/desktop" || exit 0
     { printf '%s\n' 'configs:' '- level: 0' '  monitors:' '  - id: "dev1c-default"' \
         '    display_name: "dev1c"' '    geometry:' '      x: 0' '      y: 0' \
         '      width: 1920' '      height: 1080' '  icons:'
@@ -68,9 +82,7 @@ if [ ! -f "$layout" ]; then
           n=$((n + 1))
           printf '    "%s/Desktop/%s":\n      row: %d\n      col: 0\n' "$home" "$name" "$n"
       done
-    } > "$layout.new" || exit 0
-    chown "$owner_u:$owner_g" "$layout.new" 2>/dev/null
-    mv "$layout.new" "$layout" \
+    } | write_as_owner "$layout" \
         && echo "раскладка стола задана образом: $ORDER ($home)"
     exit 0
 fi
@@ -137,6 +149,6 @@ END { flush() }
 [ -s "$tmp" ] || { rm -f "$tmp"; exit 0; }
 [ "$(wc -c <"$tmp")" -ge "$(wc -c <"$layout")" ] || { rm -f "$tmp"; exit 0; }
 
-install -o "$owner_u" -g "$owner_g" -m 0644 "$tmp" "$layout" \
+write_as_owner "$layout" < "$tmp" \
     && echo "раскладка стола: $(echo "$missing" | grep -c . ) новых значка(ов) дописаны вниз ($home)"
 rm -f "$tmp"

@@ -229,6 +229,23 @@ seed
 ls "$HOME_DIR/Desktop"/*.desktop >/dev/null 2>&1 || fail "ярлыки в дом не вернулись"
 ok "ярлыки разложены из образа"
 
+echo "== В свежем доме порядок значков задаёт образ =="
+
+# Без этого порядок выбирал xfdesktop, и на чистом доме коннектор вставал
+# ПЕРВЫМ — выше Gitea и Zed (замерено запуском xfdesktop на Xvfb 26.10.2026).
+# Стол, который показывают заказчику, не может зависеть от того, как
+# отсортировалось.
+rm -rf "$HOME_DIR/.config/xfce4"
+seed
+F="$HOME_DIR/.config/xfce4/desktop/icons.screen0.yaml"
+[ -f "$F" ] || fail "раскладка в свежем доме не создана"
+row_of() { grep -A1 "\"$HOME_DIR/Desktop/$1\":" "$F" | sed -n 's/.*row: *//p'; }
+[ "$(row_of 1c-start.desktop)" = 1 ]    || fail "1С не на первой строке: $(row_of 1c-start.desktop)"
+[ "$(row_of gitea.desktop)" = 2 ]       || fail "Gitea не на второй: $(row_of gitea.desktop)"
+[ "$(row_of model-chat.desktop)" = 4 ]  || fail "«Чат с моделью» не на четвёртой: $(row_of model-chat.desktop)"
+[ "$(row_of 1c-connect.desktop)" = 5 ]  || fail "коннектор не на пятой: $(row_of 1c-connect.desktop)"
+ok "порядок задан образом: 1С, Gitea, Zed, чат, коннектор"
+
 echo "== Новый значок встаёт НИЖЕ старых =="
 
 # xfdesktop кладёт появившийся ярлык в первое свободное место сверху, и старые

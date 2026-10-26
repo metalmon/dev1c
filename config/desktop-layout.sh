@@ -16,9 +16,18 @@
 # занятой строки. Чужие записи не трогаем вовсе — ни порядок, ни координаты;
 # человек, разложивший стол по-своему, своей раскладки не теряет.
 #
-# Свежий дом не трогаем: там раскладки ещё нет, все значки новые и двигаться
-# нечему — xfdesktop разложит их сам, и файл, который он напишет, будет
-# согласован с тем, что видно на экране.
+# В свежем доме раскладку задаём САМИ, порядком ниже. Оставлять это xfdesktop
+# нельзя: он сортирует по-своему, и на чистом доме коннектор вставал ПЕРВЫМ,
+# выше Gitea и Zed (замерено 26.10.2026 запуском xfdesktop на Xvfb). Порядок
+# на столе — часть стенда, который показывают заказчику, а не случайность
+# сортировки. То, что заранее написанный файл xfdesktop уважает, проверено
+# там же: он сохранил заданные строки, хотя идентификатор монитора был чужой.
+#
+# Строки закреплены за ИМЕНАМИ, а не за тем, что уже лежит на столе: ярлык
+# 1С появляется позже остальных (его кладёт `1c-stand seed` при первом входе),
+# и без брони он уехал бы в конец. Запись о файле, которого ещё нет, xfdesktop
+# игнорирует — на этом же держится его собственная уборка устаревших записей.
+ORDER='1c-start.desktop gitea.desktop dev.zed.Zed.desktop model-chat.desktop 1c-connect.desktop'
 set -u
 
 home=${1:?дом}
@@ -29,7 +38,6 @@ layout="$home/.config/xfce4/desktop/icons.screen0.yaml"
 
 # Только обычный файл: симлинк наружу и каталог на этом месте — не наше дело.
 [ ! -L "$layout" ] || exit 0
-[ -f "$layout" ] || exit 0
 [ -d "$home/Desktop" ] || exit 0
 
 # Точка входа работает под root, а дом правит сам пользователь: любой из
@@ -40,9 +48,32 @@ layout="$home/.config/xfce4/desktop/icons.screen0.yaml"
 home_real=$(realpath -q "$home") || exit 0
 for d in "$home/.config" "$home/.config/xfce4" "$home/.config/xfce4/desktop" "$home/Desktop"; do
     [ ! -L "$d" ] || exit 0
+    [ -e "$d" ] || continue
     real=$(realpath -q "$d") || exit 0
     case "$real/" in "$home_real"/*) ;; *) exit 0 ;; esac
 done
+
+# Раскладки ещё нет — пишем свою, с закреплёнными строками. Геометрия и
+# идентификатор монитора здесь условные: xfdesktop перепишет их своими при
+# первом входе, СОХРАНИВ наши строки (проверено на Xvfb). Значок дома —
+# нулевая строка, как его кладёт сам xfdesktop.
+if [ ! -f "$layout" ]; then
+    install -d -o "$owner_u" -g "$owner_g" "$home/.config/xfce4/desktop" || exit 0
+    { printf '%s\n' 'configs:' '- level: 0' '  monitors:' '  - id: "dev1c-default"' \
+        '    display_name: "dev1c"' '    geometry:' '      x: 0' '      y: 0' \
+        '      width: 1920' '      height: 1080' '  icons:'
+      printf '    "%s":\n      row: 0\n      col: 0\n' "$home"
+      n=0
+      for name in $ORDER; do
+          n=$((n + 1))
+          printf '    "%s/Desktop/%s":\n      row: %d\n      col: 0\n' "$home" "$name" "$n"
+      done
+    } > "$layout.new" || exit 0
+    chown "$owner_u:$owner_g" "$layout.new" 2>/dev/null
+    mv "$layout.new" "$layout" \
+        && echo "раскладка стола задана образом: $ORDER ($home)"
+    exit 0
+fi
 
 # Какие ярлыки на столе ещё не упомянуты в раскладке.
 missing=

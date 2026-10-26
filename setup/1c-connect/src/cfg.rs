@@ -259,16 +259,25 @@ impl Cfg {
             matches!(self.host.publication.as_str(), "auto" | "webserver"),
             "[host]: publication — \"auto\" (публикует сама программа) или \"webserver\" (уже опубликовано на Apache/IIS)"
         );
+        // Пустой `base_url` — не ошибка, а «не задан»: поля для него в окне
+        // нет вовсе, умолчание выводится из каталога базы
+        // (`derived_base_url`), и требовать его руками значило бы заставлять
+        // человека вписывать в toml то, что программа считает сама. Пустым
+        // он и приходит в комплекте (решение владельца 26.10). Написанный —
+        // проверяем как раньше: он берётся из `host.base_url` в режиме
+        // `webserver`, и опечатка в нём стоит человеку часа.
         let u = &self.host.base_url;
-        anyhow::ensure!(
-            u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
-            "[host]: base_url — адрес публикации на ЭТОЙ машине, начинается с http://localhost"
-        );
-        anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: base_url должен заканчиваться на /hs/mcp-1c");
-        anyhow::ensure!(
-            u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
-            "[host]: base_url — только латиница, цифры и -._~:/ (путь публикации без пробелов и спецсимволов)"
-        );
+        if !u.is_empty() {
+            anyhow::ensure!(
+                u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
+                "[host]: base_url — адрес публикации на ЭТОЙ машине, начинается с http://localhost"
+            );
+            anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: base_url должен заканчиваться на /hs/mcp-1c");
+            anyhow::ensure!(
+                u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
+                "[host]: base_url — только латиница, цифры и -._~:/ (путь публикации без пробелов и спецсимволов)"
+            );
+        }
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
         let p = &self.host.project;
         let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
@@ -331,6 +340,12 @@ impl Cfg {
     pub fn base_url(&self) -> String {
         if self.host.publication == "auto" {
             format!("http://localhost:{}/hs/mcp-1c", self.http_port())
+        } else if self.host.base_url.is_empty() {
+            // Поля для адреса в окне нет: пустое значит «считай сам от
+            // каталога базы» (`derived_base_url`), как и сказано в toml. В
+            // комплекте оно приходит пустым, и отдавать наружу пустую
+            // строку, на которую потом пойдёт проба, нельзя.
+            derived_base_url(&self.host.base_path)
         } else {
             self.host.base_url.clone()
         }
@@ -490,6 +505,22 @@ mod tests {
         c
     }
 
+    /// Пустой `base_url` — «не задан», а не ошибка: поля в окне для него нет,
+    /// значение выводится от каталога базы. Комплект приходит с пустым, и
+    /// `check` на нём не должен отказывать словами про адрес публикации
+    /// (находка владельца 26.10 на пустом комплекте).
+    #[test]
+    fn an_empty_base_url_is_derived_not_rejected() {
+        let mut c = filled();
+        c.host.base_url = String::new();
+        c.validate().unwrap();
+        c.host.publication = "webserver".into();
+        assert_eq!(c.base_url(), "http://localhost/Buh/hs/mcp-1c");
+        // Написанный — проверяется как раньше.
+        c.host.base_url = "ftp://localhost/x".into();
+        assert!(c.validate().unwrap_err().to_string().contains("base_url"));
+    }
+
     /// Незаполненный образец проверку НЕ проходит — и это правильно: окно на
     /// нём открывается (`Cfg::load_unchecked`), а разовые команды требуют
     /// заполненного файла, как и раньше.
@@ -561,7 +592,10 @@ mod tests {
 
     #[test]
     fn webserver_keeps_the_field() {
-        let mut c = sample();
+        // Написанный адрес отдаётся как есть; пустой выводится от каталога
+        // базы (`an_empty_base_url_is_derived_not_rejected`), поэтому берём
+        // заполненный набор.
+        let mut c = filled();
         c.host.publication = "webserver".into();
         assert_eq!(c.base_url(), c.host.base_url);
     }

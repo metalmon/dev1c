@@ -344,14 +344,6 @@ pub fn workstation_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], po
     }
 }
 
-/// pid из `holder::of_port` (строка вида `"имя (pid N)"`), не разбирая вывод
-/// `ss`/`netstat` заново. Нужен ровно для одного — отсеять свой же процесс
-/// (окно проверяет само себя): это сравнение с `std::process::id()`, без
-/// чтения чужих процессов и без всякой зависимости от прав.
-fn holder_pid(desc: &str) -> Option<u32> {
-    desc.rsplit("pid ").next()?.trim_end_matches(')').parse().ok()
-}
-
 pub fn media_fact(kind: Option<String>, root: &str) -> Check {
     match kind {
         Some(k) => Check::note(MEDIA, format!("{root}: {k} — инструменты работают из %LOCALAPPDATA%, комплект можно вынуть после install")),
@@ -911,12 +903,17 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
             // В список идут только порты, занятые НЕ нами: порт свободный,
             // занятый этим же процессом (окно проверяет само себя) или такой,
             // про который держателя не выяснить, обвинять человека не даёт.
+            //
+            // Держателей спрашиваем ВСЕХ (`others_of_port`), а не первого:
+            // один порт слушают по IPv4 и по IPv6 разные процессы, и пока
+            // брали первого, чужой прятался за нами же. Живой случай 26.10:
+            // два рабочих места с именем `dev1` — коннектор в контейнере на
+            // `127.0.0.1` и проброс SSH с машины человека на `::1` — оба
+            // показали зелёное, а к какой базе попадёт агент, решал порядок
+            // в резолвере.
             let busy_ports: Vec<(u16, String)> = [p.mcp, p.vrunner]
                 .into_iter()
-                .filter_map(|port| {
-                    let who = crate::holder::of_port(port)?;
-                    (holder_pid(&who)? != me).then_some((port, who))
-                })
+                .flat_map(|port| crate::holder::others_of_port(port, me).into_iter().map(move |who| (port, who)))
                 .collect();
             workstation_ports_fact(p.mcp, p.vrunner, &busy_ports, ports)
         });
@@ -1430,11 +1427,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn holder_pid_reads_the_trailing_pid_or_nothing() {
-        assert_eq!(holder_pid("1c-connect (pid 812)"), Some(812));
-        assert_eq!(holder_pid("junk"), None);
-    }
 
     /// В режиме `auto` адрес, который реально слушает мост, — `Cfg::base_url()`
     /// (считает от `http_port`), а не хранимое поле `[host] base_url`: они

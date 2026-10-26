@@ -78,6 +78,98 @@ pub fn parse_proc_net_tcp(out: &str, port: u16) -> Option<u64> {
     })
 }
 
+/// Все inode слушателей этого порта в одной таблице `/proc/net/tcp`(6), а не
+/// первый попавшийся: один порт слушают и по IPv4, и по IPv6 РАЗНЫЕ процессы
+/// (живой случай 26.10 на стенде — наш коннектор на `127.0.0.1`, проброс SSH
+/// соседа на `::1`), и «первый» скрывал чужого за нами же.
+pub fn parse_proc_net_tcp_all(out: &str, port: u16) -> Vec<u64> {
+    out.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 10 || !f[0].ends_with(':') || f[3] != "0A" {
+                return None;
+            }
+            let (_, hexport) = f[1].split_once(':')?;
+            if u16::from_str_radix(hexport, 16).ok()? != port {
+                return None;
+            }
+            f[9].parse::<u64>().ok()
+        })
+        .collect()
+}
+
+/// Все pid, слушающие порт по данным `netstat -ano`, обе семьи адресов.
+pub fn parse_netstat_all(out: &str, port: u16) -> Vec<u32> {
+    let port_s = port.to_string();
+    let mut pids: Vec<u32> = Vec::new();
+    for l in out.lines() {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 5 || f[0] != "TCP" || f[3] != "LISTENING" {
+            continue;
+        }
+        let Some((_, p)) = f[1].rsplit_once(':') else { continue };
+        if p != port_s {
+            continue;
+        }
+        let Ok(pid) = f[4].parse::<u32>() else { continue };
+        if !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Держатели порта, КРОМЕ нас самих (`me`) — по одному описанию на процесс.
+///
+/// Зачем не `of_port`: тот отдаёт первого, и когда первым оказываемся мы
+/// (наш слушатель на `127.0.0.1`), чужой на `::1` исчезает из виду вовсе.
+/// Так на стенде 26.10 два рабочих места с одним именем `dev1` — коннектор
+/// в контейнере и проброс SSH с машины человека — разошлись по семействам
+/// адресов и оба показали зелёное: `sshd` сдаётся только если не смог НИ
+/// ОДНО семейство, а `::1` был свободен. К какой базе попадёт агент, решал
+/// после этого порядок в резолвере, а не настройка.
+pub fn others_of_port(port: u16, me: u32) -> Vec<String> {
+    let pids: Vec<u32> = if cfg!(windows) {
+        let mut c = Command::new("netstat");
+        c.args(["-ano", "-p", "TCP"]);
+        no_window(&mut c);
+        match c.output() {
+            Ok(out) => parse_netstat_all(&String::from_utf8_lossy(&out.stdout), port),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        let tcp = std::fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+        let tcp6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
+        let mut inodes = parse_proc_net_tcp_all(&tcp, port);
+        inodes.extend(parse_proc_net_tcp_all(&tcp6, port));
+        let mut pids: Vec<u32> = inodes.into_iter().filter_map(pid_owning_inode).collect();
+        pids.dedup();
+        pids
+    };
+    pids.into_iter()
+        .filter(|pid| *pid != me)
+        .map(|pid| {
+            let name = name_of_pid(pid);
+            format!("{} (pid {pid})", name.unwrap_or_else(|| "?".to_string()))
+        })
+        .collect()
+}
+
+/// Имя процесса по pid: на Windows — через `tasklist` с фильтром по pid, на
+/// остальных — `/proc/<pid>/comm`. Своей таблицы имён не держим: оба пути уже
+/// есть, здесь только выбор по системе.
+fn name_of_pid(pid: u32) -> Option<String> {
+    if cfg!(windows) {
+        let mut t = Command::new("tasklist");
+        t.args(["/NH", "/FO", "CSV", "/FI", &format!("PID eq {pid}")]);
+        no_window(&mut t);
+        let out = t.output().ok()?;
+        parse_tasklist_name(&String::from_utf8_lossy(&out.stdout))
+    } else {
+        proc_comm(pid)
+    }
+}
+
 /// Какой pid держит сокет с этим inode: сканирует `/proc/<pid>/fd/*` в
 /// поисках символьной ссылки `socket:[<inode>]`. Процесс мог исчезнуть между
 /// `read_dir` и чтением, или быть недоступен для чтения (чужой) — такие
@@ -173,6 +265,42 @@ mod tests {
    0: 0100007F:1E63 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0
    1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 22222 1 0000000000000000 100 0 0 10 0
 ";
+    /// Тот же порт 7779 в таблице IPv6 — другой процесс, другой inode.
+    /// Живой случай 26.10: наш коннектор на `127.0.0.1`, проброс SSH соседа
+    /// на `::1`.
+    const PROC_TCP6: &str = "  sl  local_address                         rem_address                        st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+   0: 00000000000000000000000001000000:1E63 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 54321 1 0000000000000000 100 0 0 10 0
+";
+
+    /// Один порт слушают ДВА процесса — по одному на семейство адресов, — и
+    /// оба обязаны попасть в список. Пока брали первого (`of_port`), чужой
+    /// прятался за нами же: на стенде два рабочих места с именем `dev1`
+    /// разошлись по IPv4 и IPv6 и оба показали зелёное, а к какой базе
+    /// попадёт агент, решал порядок в резолвере.
+    #[test]
+    fn both_address_families_are_counted_not_just_the_first() {
+        assert_eq!(parse_proc_net_tcp_all(PROC_TCP, 7779), vec![12345]);
+        assert_eq!(parse_proc_net_tcp_all(PROC_TCP6, 7779), vec![54321]);
+        // Вместе — два держателя, а не один.
+        let mut both = parse_proc_net_tcp_all(PROC_TCP, 7779);
+        both.extend(parse_proc_net_tcp_all(PROC_TCP6, 7779));
+        assert_eq!(both, vec![12345, 54321], "чужой слушатель на другом семействе не должен теряться");
+        // Не LISTEN по-прежнему не считается ни в одной таблице.
+        assert!(parse_proc_net_tcp_all(PROC_TCP_NOT_LISTENING, 7779).is_empty());
+    }
+
+    /// То же правило на Windows: `netstat -ano` печатает обе семьи
+    /// отдельными строками, и обе идут в список.
+    #[test]
+    fn netstat_lists_every_holder_of_the_port() {
+        let out = "  TCP    127.0.0.1:7771         0.0.0.0:0              LISTENING       812
+  TCP    [::1]:7771             [::]:0                 LISTENING       4242
+  TCP    127.0.0.1:7772         0.0.0.0:0              LISTENING       999
+";
+        assert_eq!(parse_netstat_all(out, 7771), vec![812, 4242]);
+        assert_eq!(parse_netstat_all(out, 7772), vec![999]);
+    }
+
     // Тот же порт 7779, но ESTABLISHED (st 06), не LISTEN — не должен считаться.
     const PROC_TCP_NOT_LISTENING: &str = "\
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode

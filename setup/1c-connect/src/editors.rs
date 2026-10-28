@@ -1,7 +1,8 @@
-//! Запись коннектора в настройки редактора на машине человека: сегодня
-//! только Zed (pi — задача 5). Правка текстовая, по границам наших двух
-//! записей `context_servers` — файл человека несёт комментарии, и разобрать
-//! документ целиком и напечатать заново нельзя.
+//! Запись коннектора в настройки редактора на машине человека: у Zed правка
+//! текстовая, по границам наших двух записей `context_servers` — его файл
+//! несёт комментарии, и разобрать документ целиком и напечатать заново
+//! нельзя. У pi (`merge_pi`) комментариев в `mcp.json` не бывает, терять
+//! нечего — там честный разбор `serde_json` целиком и печать заново.
 
 use std::path::{Path, PathBuf};
 
@@ -528,6 +529,74 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     Ok(format!("{bom}{edited}"))
 }
 
+/// Путь к `mcp.json` pi на этой машине: `~/.pi/agent/mcp.json`, на Windows —
+/// под `%USERPROFILE%` (путь задан самим pi, не нами — спека «MCP в
+/// редакторе»). `None` — переменной окружения, по которой путь строится, нет.
+pub fn pi_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".pi").join("agent").join("mcp.json"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".pi").join("agent").join("mcp.json"))
+    }
+}
+
+/// Запись в `mcpServers` вышла бы нашей по тому же правилу, что у Zed: имя
+/// файла в `command` совпадает с именем файла нашего исполняемого.
+fn pi_entry_is_ours(entry: &serde_json::Value, exe: &Path) -> bool {
+    let Some(want) = exe.file_name().map(|n| n.to_string_lossy().to_string()) else { return false };
+    let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) else { return false };
+    Path::new(cmd).file_name().map(|n| n.to_string_lossy().to_string()).as_deref() == Some(want.as_str())
+}
+
+/// Значение одной нашей записи `mcpServers` для pi — те же поля, что у Zed
+/// (`command`, `args`, `timeout`), без `enabled`: этого ключа в формате pi
+/// нет (спека «MCP в редакторе», пример `config/pi/mcp.json`).
+fn pi_entry(e: &Entry, exe: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "command": exe.display().to_string(),
+        "args": ["mcp", e.name],
+        "timeout": e.timeout,
+    })
+}
+
+/// Вписывает наши две записи `mcpServers` в `mcp.json` pi (`text`), не трогая
+/// ничего чужого. В отличие от `merge_zed`, здесь честный разбор целиком
+/// через `serde_json` и печать заново, а не текстовая хирургия по границам:
+/// `mcp.json` комментариев не допускает, терять нечего (решение владельца
+/// №1). Чужие ключи верхнего уровня и внутри `mcpServers` сохраняются все,
+/// но порядок ключей не обещан — `preserve_order` не включаем, цена фичи
+/// ради вида файла не та (решение владельца №2). Правило чужой записи то
+/// же, что у Zed: имя совпало, а команда чужая — отказ со списком имён, без
+/// правки файла (решение владельца №3).
+pub fn merge_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
+    let mut top: serde_json::Value = if text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(text).map_err(|e| vec![format!("mcp.json не разбирается как JSON: {e}")])?
+    };
+    let Some(obj) = top.as_object_mut() else {
+        return Err(vec!["верхний уровень mcp.json — не объект".to_string()]);
+    };
+    let servers_slot = obj.entry("mcpServers").or_insert_with(|| serde_json::json!({}));
+    let Some(servers) = servers_slot.as_object_mut() else {
+        return Err(vec!["mcpServers в mcp.json — не объект".to_string()]);
+    };
+
+    let occupied: Vec<String> =
+        OURS.iter().filter(|e| servers.get(e.name).is_some_and(|f| !pi_entry_is_ours(f, exe))).map(|e| e.name.to_string()).collect();
+    if !occupied.is_empty() {
+        return Err(occupied);
+    }
+    for e in OURS.iter() {
+        servers.insert(e.name.to_string(), pi_entry(e, exe));
+    }
+
+    Ok(serde_json::to_string_pretty(&top).expect("serde_json::Value всегда сериализуется") + "\n")
+}
+
 /// `"1c"`/`"vrunner"`, выставленные `merge_zed`, несут явный `"enabled":
 /// true` (решение владельца №1) — здесь мы этот ключ заменяем, а не
 /// вставляем: правка только своих двух записей, всё остальное в файле не
@@ -577,6 +646,30 @@ pub fn set_enabled_zed(text: &str, on: bool, exe: Option<&Path>) -> String {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn pi_gets_the_same_two_servers_under_its_own_key() {
+        let out = merge_pi("", Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcpServers"]["1c"]["args"], serde_json::json!(["mcp", "1c"]));
+        assert_eq!(v["mcpServers"]["vrunner"]["timeout"], 3600);
+    }
+
+    #[test]
+    fn pi_keeps_foreign_servers_and_foreign_keys() {
+        let before = r#"{"_comment":"мой файл","mcpServers":{"bsl-reference":{"command":"/opt/bsl-analyzer"}}}"#;
+        let out = merge_pi(before, Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["_comment"], "мой файл");
+        assert!(v["mcpServers"]["bsl-reference"].is_object());
+        assert!(v["mcpServers"]["1c"].is_object());
+    }
+
+    #[test]
+    fn a_foreign_pi_entry_with_our_name_is_reported() {
+        let before = r#"{"mcpServers":{"vrunner":{"command":"nc","args":["-N","localhost","7781"]}}}"#;
+        assert_eq!(merge_pi(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["vrunner".to_string()]);
+    }
 
     #[test]
     fn an_absent_zed_file_is_created_with_only_our_entries() {

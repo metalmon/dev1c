@@ -153,15 +153,12 @@ pub fn check_mark(tree_format: Option<&str>, ours: Option<&str>) -> Mark {
     }
 }
 
-fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
-    match crate::project::LOCK.try_lock() {
-        Ok(g) => Ok(g),
-        Err(std::sync::TryLockError::Poisoned(p)) => Ok(p.into_inner()),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            let what = crate::project::doing();
-            Err(format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }))
-        }
-    }
+/// Та же точка входа, что у агента и окна (`project::hold`) — без неё
+/// `export_with`/`import_with`, самые длинные операции, не видели бы
+/// межпроцессную часть замка вовсе, и своя формулировка отказа задвоила бы
+/// ту, что уже в `project.rs`.
+fn lock(what: &str) -> Result<crate::project::Hold, String> {
+    crate::project::hold(what)
 }
 
 /// cf_decompile в src, затем project_push.
@@ -173,7 +170,7 @@ fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 /// самом деле, человек видит секундомером в карточке окна, а после —
 /// строкой «Готово за …».
 pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<String, String> {
-    let _g = lock()?;
+    let _g = lock("project_push")?;
     if d.dry_run {
         log("план: cf_decompile → src, затем git add/commit/push ветки рабочего места (project_push)".into());
         return Ok("план напечатан, на машине ничего не менялось".into());
@@ -197,7 +194,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
 
 /// project_pull, затем cf_load инкрементом.
 pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
-    let _g = lock()?;
+    let _g = lock("project_pull")?;
     if d.dry_run {
         log("план: project_pull (git pull --rebase), затем cf_load --increment из src".into());
         return Ok("план напечатан, на машине ничего не менялось".into());

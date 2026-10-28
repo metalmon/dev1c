@@ -1191,6 +1191,10 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // выходит; замок держим до конца `run()` ниже — переменная остаётся на
     // стеке этой функции, пока приложение не закроется.
     let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation)?;
+    // Межпроцессная часть замка проекта (`project::hold`) — та же, что у
+    // `connect`/`serve`: без неё второй долгоживущий процесс замка вовсе не
+    // увидит.
+    project::set_lock_target(kit.state());
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
     let log_path = kit.state_path(LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {

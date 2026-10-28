@@ -276,6 +276,10 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // У рабочего места один владелец (спека): вторая копия не борется за
     // порты и мьютекс проекта с этой — см. `single_instance`.
     let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
+    // Межпроцессная часть замка проекта (`project::hold`): без этого вызова
+    // файл не заводится, и второй долгоживущий процесс (другой редактор,
+    // будущая подкоманда `mcp`) замка вовсе не увидит.
+    project::set_lock_target(ctx.kit.state());
     let ports = ctx.cfg.ports();
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
@@ -319,6 +323,8 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // Тот же единственный владелец рабочего места, что у `connect` — см.
     // `single_instance`.
     let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
+    // Та же проводка замка проекта, что у `connect` — см. комментарий там.
+    project::set_lock_target(ctx.kit.state());
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом

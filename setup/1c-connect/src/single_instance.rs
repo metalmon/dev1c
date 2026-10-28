@@ -149,13 +149,12 @@ pub(crate) fn file_lock(path: &std::path::Path) -> std::io::Result<Option<Guard>
 #[cfg(not(windows))]
 pub struct Guard(#[allow(dead_code)] std::fs::File);
 
-/// Оборачивает отказ открыть замок в читаемую причину: что делалось (брали
-/// замок единственного экземпляра), по какому пути, и голый текст системной
-/// ошибки в хвосте — для диагностики, не для первого взгляда. Открываем
-/// только на чтение (ниже), так что отказ — это не нехватка прав на запись
-/// (их и не нужно), а отсутствие самого каталога состояния: его создаёт
-/// `ops_host::ensure_state` при запуске, и если не удалось даже это, человеку
-/// надо видеть путь.
+/// Оборачивает отказ открыть замок в читаемую причину: по какому пути, и
+/// голый текст системной ошибки в хвосте — для диагностики, не для первого
+/// взгляда. Общая для обоих вызовов `open` ниже: `try_acquire` открывает
+/// существующий каталог состояния только на чтение (прав на запись там и не
+/// нужно, отказ обычно значит, что `ops_host::ensure_state` не создал сам
+/// каталог), а `file_lock` создаёт свой файл и пишет в него.
 #[cfg(not(windows))]
 fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
     std::io::Error::new(e.kind(), format!("не удалось взять замок: {} — файл не открылся: {e}", path.display()))
@@ -206,7 +205,8 @@ pub fn try_acquire(_key: &str, lock_on: &std::path::Path) -> std::io::Result<Opt
 /// нет, его первым создаёт первый же процесс, который взял замок.
 #[cfg(not(windows))]
 pub(crate) fn file_lock(path: &std::path::Path) -> std::io::Result<Option<Guard>> {
-    let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path).map_err(|e| lock_error(path, e))?;
+    let file =
+        std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path).map_err(|e| lock_error(path, e))?;
     acquire_flock(file)
 }
 

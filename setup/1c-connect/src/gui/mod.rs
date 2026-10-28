@@ -761,6 +761,48 @@ pub fn refresh_project(cx: &mut App) {
     });
 }
 
+/// Жмём «Настроить» у одного редактора (задача 6): читаем путь к своему
+/// исполняемому и к настройкам редактора, просим `editors::setup` вписать
+/// наши две записи, и итог — строкой в журнал и в подвал, тем же путём, что
+/// и у любой другой кнопки окна (`note_line`/`set_status`). Раздел «Редакторы»
+/// сам перечитывает файл при следующей отрисовке (`editors::look` в
+/// `render` — он не кеширует состояние), поэтому здесь нет отдельного шага
+/// «обновить карточку»: писать некуда, кроме диска, а диск у раздела и так
+/// единственный источник правды.
+///
+/// `zed` различает, какой путь и какой `merge` брать — `editors::zed_path`/
+/// `merge_zed` или `editors::pi_path`/`merge_pi`; само чтение/запись и приём
+/// отказа у обоих одинаковы, поэтому один параметр, а не две функции.
+pub fn setup_editor(cx: &mut App, zed: bool) {
+    let name = if zed { "Zed" } else { "pi" };
+    let line = match (std::env::current_exe(), if zed { crate::editors::zed_path() } else { crate::editors::pi_path() }) {
+        (Ok(exe), Some(path)) => {
+            type Merge = fn(&str, &std::path::Path) -> Result<String, Vec<String>>;
+            let merge: Merge = if zed { crate::editors::merge_zed } else { crate::editors::merge_pi };
+            match crate::editors::setup(&path, &exe, merge) {
+                Ok(_) if zed => Line { kind: Kind::Ok, text: format!("{name}: записано, сервер поднят сам") },
+                Ok(_) => Line {
+                    kind: Kind::Ok, text: format!("{name}: записано — наберите /reload в открытой сессии")
+                },
+                Err(names) => Line {
+                    kind: Kind::Fail,
+                    text: format!("{name}: запись {} занята чужой командой — не меняем", names.join(", ")),
+                },
+            }
+        }
+        (Err(e), _) => Line {
+            kind: Kind::Fail, text: format!("{name}: не узнать путь к своему исполняемому файлу: {e}")
+        },
+        (_, None) => Line {
+            kind: Kind::Fail, text: format!("{name}: не узнать путь к его настройкам на этой машине")
+        },
+    };
+    let ui = cx.global_mut::<Ui>();
+    note_line(ui, line.clone());
+    set_status(ui, line, None);
+    cx.refresh_windows();
+}
+
 /// Полный набор от основания к вершине, громко: отчёт пишется в
 /// `last-check.txt` тем же текстом, что печатает командная строка, и
 /// журналу/вкладке «Журнал» достаётся итог (см. `Ev::Ready` в `handle`).

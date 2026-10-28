@@ -8,6 +8,7 @@
 //! глобала `Ui` в `render`. Изменили `Ui` — `cx.refresh_windows()`.
 
 use crate::cfg::Host;
+use crate::editors;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
 use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
@@ -362,6 +363,59 @@ pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<
 /// `None` у подсказки, которая не факт); у факта точка есть всегда.
 pub fn fact_rows(facts: &[Check]) -> Vec<(Option<Dot>, String, String)> {
     facts.iter().map(|c| (Some(fact_dot(c)), c.what.clone(), gui::fact_detail(c))).collect()
+}
+
+/// Точка строки раздела «Редакторы» по `editors::Found` — своё маленькое
+/// соответствие, не `fact_dot`: здесь нет провала (`Outcome::Bad`), занятая
+/// чужой записью — это не поломка, а описание (`Dot::Warn`, как «не всё
+/// готово»), а не найденный редактор и настроенный нами — оба «сказать
+/// нечего/сказать всё хорошо» своими цветами (`Dot::Off`/`Dot::Up`).
+fn found_dot(f: &editors::Found) -> Dot {
+    match f {
+        editors::Found::Missing | editors::Found::Absent => Dot::Off,
+        editors::Found::Ours => Dot::Up,
+        editors::Found::Foreign(_) => Dot::Warn,
+    }
+}
+
+/// Слова по состоянию — буквально решение владельца (спека, «Как это
+/// выглядит у человека»): не найден, настроен, записи нет, занято чужим
+/// (имена через запятую, когда их несколько). `reload` — только у pi: он
+/// `mcp.json` на ходу не перечитывает (спека, факты про pi), и ряд обязан
+/// сказать об этом словом `/reload`, а не оставить человека гадать, почему
+/// открытая сессия не увидела правку. Напоминание идёт только при `Ours`:
+/// до настройки (`Absent`) перечитывать ещё нечего, а там, где кнопка заперта
+/// (`Missing`/`Foreign`), ему не к чему относиться.
+fn found_text(f: &editors::Found, reload: bool) -> String {
+    let text = match f {
+        editors::Found::Missing => "не найден на этой машине".to_string(),
+        editors::Found::Absent => "найден, серверы не настроены".to_string(),
+        editors::Found::Ours => "настроен".to_string(),
+        editors::Found::Foreign(names) => format!("запись {} занята чужой командой — не меняем", names.join(", ")),
+    };
+    if reload && matches!(f, editors::Found::Ours) {
+        format!("{text} · правка на ходу — наберите /reload в открытой сессии")
+    } else {
+        text
+    }
+}
+
+/// Строки раздела «Редакторы»: Zed и pi, в этом порядке — порядок, которым их
+/// называет спека («Как это выглядит у человека»). Один редактор — одна
+/// строка, кружок и слова по `Found`; кнопка «Настроить» рисуется рядом в
+/// `render`, здесь только то, что раздел говорит.
+pub fn editor_rows(zed: &editors::Found, pi: &editors::Found) -> Vec<(Option<Dot>, String, String)> {
+    vec![(Some(found_dot(zed)), "Zed".to_string(), found_text(zed, false)), (Some(found_dot(pi)), "pi".to_string(), found_text(pi, true))]
+}
+
+/// Заперта ли кнопка «Настроить» у одного редактора: нажатие либо ничего не
+/// даст (редактор не найден — некого настраивать), либо навредило бы (хоть
+/// одна наша запись занята чужой командой — трогать её нельзя никогда,
+/// решение владельца №3). Найден без записей (`Absent`) и уже настроен нами
+/// (`Ours`) — кнопка открыта: во втором случае она переписывает на свежих
+/// параметрах (новый путь исполняемого после переустановки и т.п.).
+pub fn setup_locked(f: &editors::Found) -> bool {
+    matches!(f, editors::Found::Missing | editors::Found::Foreign(_))
 }
 
 /// Предмет вкладки «Проект»: проект, база, публикация, расширение, дескриптор,
@@ -1305,6 +1359,20 @@ impl Render for Panel {
                 let ui = cx.global::<Ui>();
                 let facts = fact_rows(&project_facts(&ui.facts));
                 let rows = project_rows(ui.project.as_ref());
+                // Читается с диска прямо тут: два маленьких JSON-файла, и
+                // раздел «Редакторы» ничего своего не хранит в `Ui` — тем же
+                // путём, что `look` читает их и в подкоманде `mcp` (задача 6,
+                // решение владельца №2: раздел говорит о файле, а не о
+                // намерении). Кэш здесь завёл бы второй источник правды, а
+                // кнопка «Настроить» и так перечитывает его же после записи.
+                let exe = std::env::current_exe().ok();
+                let found = |path: Option<std::path::PathBuf>| match &exe {
+                    Some(exe) => editors::look(path.as_deref(), exe),
+                    None => editors::Found::Missing,
+                };
+                let (zed_found, pi_found) = (found(editors::zed_path()), found(editors::pi_path()));
+                let editor_list = editor_rows(&zed_found, &pi_found);
+                let locked = [setup_locked(&zed_found), setup_locked(&pi_found)];
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
                     row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
@@ -1315,12 +1383,38 @@ impl Render for Panel {
                             .child(div().text_size(px(13.)).text_color(caption).child(detail)),
                     )
                 };
+                // Как `fact`, но с кнопкой «Настроить» на конце строки — своя
+                // на каждый редактор, заперта там, где нажатие либо ничего не
+                // даст, либо навредит (`setup_locked`). Подсказка кнопки — те
+                // же слова, что в строке: кнопка гаснет не молча (заказчик
+                // 2026-10-20 про другую кнопку — то же правило здесь).
+                let editor_fact = |i: usize, d: Dot, title: String, detail: String| {
+                    let id = if i == 0 { "setup-zed" } else { "setup-pi" };
+                    row()
+                        .child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_size(px(14.)).child(title))
+                                .child(div().text_size(px(13.)).text_color(caption).child(detail.clone())),
+                        )
+                        .child(
+                            Button::new(id)
+                                .outline()
+                                .small()
+                                .label("Настроить")
+                                .disabled(locked[i])
+                                .tooltip(detail)
+                                .on_click(move |_, _, cx| gui::setup_editor(cx, i == 0)),
+                        )
+                };
                 Self::scrolled(
                     "project",
                     &self.project_scroll,
                     v_flex()
-                        // 12 px между фактами набора и строками проекта: это
-                        // два списка, а не один.
+                        // 12 px между фактами набора, строками проекта и
+                        // редакторами: три разных списка, а не один.
                         .gap_3()
                         .child(v_flex().gap_2().children(facts.into_iter().map(|(d, title, detail)| match d {
                             Some(d) => fact(d, title, detail),
@@ -1332,7 +1426,13 @@ impl Render for Panel {
                                 Some(d) => fact(d, title, detail),
                                 None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
                             }
-                        }))),
+                        })))
+                        .child(v_flex().gap_2().child(div().text_size(px(13.)).text_color(caption).child("Редакторы")).children(
+                            editor_list.into_iter().enumerate().map(|(i, (d, title, detail))| match d {
+                                Some(d) => editor_fact(i, d, title, detail),
+                                None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
+                            }),
+                        )),
                 )
                 .into_any_element()
             }
@@ -1654,11 +1754,12 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts, project_menu,
-        project_rows, reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, ProjectMenu,
-        FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, editor_rows, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts,
+        project_menu, project_rows, reason, save_hint, setup_locked, shown_base_url, shown_fields, switch_locked, switch_tooltip,
+        window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
+    use crate::editors::Found;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
     use crate::verify;
@@ -1694,6 +1795,46 @@ mod tests {
         assert_eq!(rows[4].2, "не разложен — 1c-connect install");
         // Пройденному факту совет приписывать нечего.
         assert_eq!(rows[0].2, "127.0.0.1:8081/version отвечает");
+    }
+
+    /// Задача 6 (редакторы): слова строки — буквально то, что сказано спекой
+    /// («Как это выглядит у человека»), а не пересказ своими словами.
+    #[test]
+    fn each_editor_says_what_is_true_about_it() {
+        assert_eq!(editor_rows(&Found::Missing, &Found::Ours)[0].2, "не найден на этой машине");
+        assert_eq!(editor_rows(&Found::Absent, &Found::Ours)[0].2, "найден, серверы не настроены");
+        assert_eq!(editor_rows(&Found::Ours, &Found::Ours)[0].2, "настроен");
+        assert_eq!(editor_rows(&Found::Foreign(vec!["1c".into()]), &Found::Ours)[0].2, "запись 1c занята чужой командой — не меняем");
+    }
+
+    #[test]
+    fn the_button_is_locked_where_pressing_it_would_do_nothing_or_harm() {
+        assert!(setup_locked(&Found::Missing));
+        assert!(setup_locked(&Found::Foreign(vec!["1c".into()])));
+        assert!(!setup_locked(&Found::Absent));
+        assert!(!setup_locked(&Found::Ours));
+    }
+
+    #[test]
+    fn pi_says_that_a_running_session_needs_reload() {
+        let rows = editor_rows(&Found::Missing, &Found::Ours);
+        assert!(rows[1].2.contains("/reload"), "{:?}", rows[1]);
+    }
+
+    /// Zed не несёт напоминания про `/reload` — он сам перечитывает файл на
+    /// ходу (спека, факты про Zed: `watch_settings_files`), и слово про
+    /// другой редактор на его строке было бы неправдой.
+    #[test]
+    fn zed_does_not_mention_reload() {
+        let rows = editor_rows(&Found::Ours, &Found::Ours);
+        assert!(!rows[0].2.contains("/reload"), "{:?}", rows[0]);
+    }
+
+    /// Несколько занятых имён разом — оба названы, не только первое.
+    #[test]
+    fn several_foreign_names_are_all_named() {
+        let text = editor_rows(&Found::Foreign(vec!["1c".into(), "vrunner".into()]), &Found::Absent)[0].2.clone();
+        assert!(text.contains("1c") && text.contains("vrunner"), "{text}");
     }
 
     /// Решение владельца 26.10.2026 на сомнение 2 отчёта по задачам 7+8:

@@ -655,6 +655,104 @@ pub fn set_enabled_zed(text: &str, on: bool, exe: Option<&Path>) -> String {
     format!("{bom}{}", apply_edits(body, edits))
 }
 
+/// Опознанное состояние файла настроек одного редактора — то, что раздел
+/// «Редакторы» в окне говорит человеку (спека, «Как это выглядит у
+/// человека»): не найден, найден без наших записей, настроен нами, или
+/// хотя бы одна наша запись занята чужой командой (имена — словами).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    Missing,
+    Absent,
+    Ours,
+    Foreign(Vec<String>),
+}
+
+/// Опознание по уже прочитанному пути: `path` — `None`, когда путь к файлу
+/// определить не вышло (переменной окружения нет — `zed_path`/`pi_path`), или
+/// сам файл прочитать не вышло (его нет на диске — редактор ни разу не
+/// трогал эти настройки): оба случая говорят человеку одно и то же — «не
+/// найден на этой машине», разбирать их дальше незачем.
+///
+/// Генерична по обоим редакторам сразу: ищет контейнер записей по любому из
+/// двух имён ключа — `context_servers` у Zed, `mcpServers` у pi; тот
+/// редактор, которого это не касается, такого ключа и не заводит.
+/// Комментарии и висящая запятая (Zed, JSONC) снимает `as_json` — на честном
+/// JSON pi для неё нечего снимать, и вызов безвреден.
+pub fn look(path: Option<&Path>, exe: &Path) -> Found {
+    let Some(path) = path else { return Found::Missing };
+    let Ok(text) = std::fs::read_to_string(path) else { return Found::Missing };
+    let (_, body) = split_bom(&text);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&as_json(body)) else { return Found::Absent };
+    let Some(obj) = parsed.as_object() else { return Found::Absent };
+    let Some(servers) = obj.get("context_servers").or_else(|| obj.get("mcpServers")).and_then(|v| v.as_object()) else {
+        return Found::Absent;
+    };
+    let mut foreign = Vec::new();
+    let mut ours = false;
+    for e in OURS.iter() {
+        match servers.get(e.name) {
+            Some(entry) if pi_entry_is_ours(entry, exe) => ours = true,
+            Some(_) => foreign.push(e.name.to_string()),
+            None => {}
+        }
+    }
+    if !foreign.is_empty() {
+        return Found::Foreign(foreign);
+    }
+    if ours {
+        Found::Ours
+    } else {
+        Found::Absent
+    }
+}
+
+/// Путь рядом с файлом настроек, с добавленным хвостом — не заменяющим
+/// расширение (`settings.json` → `settings.json.bak`, а не `settings.bak`).
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Жмём «Настроить»: читаем файл редактора (нет на диске — пустой текст,
+/// это всё ещё создание свежего файла, как `merge_zed`/`merge_pi` и так
+/// понимают), просим `merge` вписать наши две записи, и, если он согласился
+/// (не занял чужого), пишем результат через временный файл рядом и
+/// `rename` — тот же приём, которым раскладка настроек в образе кладёт свои
+/// файлы (`config/entrypoint.sh`), и он здесь нужен ровно потому, что файл
+/// чужой: один прерванный процесс записи не должен оставить человека с
+/// половиной JSON. `.bak` исходника берём только на первой правке — был он
+/// или нет, повторную правку уже снятой копией не перетираем (решение
+/// владельца №1).
+///
+/// `Err` — ничего не пишем, причина отказа такая же, какую отдал `merge`
+/// (имена занятых чужими записями, либо одна причина, почему файл не
+/// разобрать). `Ok` несёт не «получилось», раз `merge` не вернул `Err`, а то,
+/// что `look` увидел на диске ПОСЛЕ записи — раздел говорит о файле, а не о
+/// нашем намерении (решение владельца №2).
+pub fn setup(path: &Path, exe: &Path, merge: impl Fn(&str, &Path) -> Result<String, Vec<String>>) -> Result<Found, Vec<String>> {
+    let existed = path.exists();
+    let text = if existed {
+        std::fs::read_to_string(path).map_err(|e| vec![format!("не прочитать {}: {e}", path.display())])?
+    } else {
+        String::new()
+    };
+    let merged = merge(&text, exe)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| vec![format!("не создать каталог {}: {e}", parent.display())])?;
+    }
+    if existed {
+        let bak = sibling_path(path, ".bak");
+        if !bak.exists() {
+            std::fs::copy(path, &bak).map_err(|e| vec![format!("не сохранить резервную копию {}: {e}", bak.display())])?;
+        }
+    }
+    let tmp = sibling_path(path, ".tmp");
+    std::fs::write(&tmp, &merged).map_err(|e| vec![format!("не записать {}: {e}", tmp.display())])?;
+    std::fs::rename(&tmp, path).map_err(|e| vec![format!("не переименовать {} в {}: {e}", tmp.display(), path.display())])?;
+    Ok(look(Some(path), exe))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,5 +1058,94 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
         assert_eq!(v["context_servers"]["1c"]["timeout"], 300);
         assert!(v["context_servers"]["legacy"].is_null(), "закомментированное имя не должно всплыть: {out}");
+    }
+
+    use crate::project::tempdir::Dir;
+
+    #[test]
+    fn look_with_no_path_is_missing() {
+        assert_eq!(look(None, Path::new("/opt/1c-connect")), Found::Missing);
+    }
+
+    #[test]
+    fn look_of_a_file_that_is_not_on_disk_is_missing() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Missing);
+    }
+
+    #[test]
+    fn look_of_a_file_without_our_key_is_absent() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        std::fs::write(&p, "{\"theme\": \"One\"}").unwrap();
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Absent);
+    }
+
+    #[test]
+    fn look_finds_our_own_zed_entries() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        std::fs::write(&p, merge_zed("", exe).unwrap()).unwrap();
+        assert_eq!(look(Some(&p), exe), Found::Ours);
+    }
+
+    #[test]
+    fn look_finds_our_own_pi_entries() {
+        let d = Dir::new();
+        let p = d.path().join("mcp.json");
+        let exe = Path::new("/opt/1c-connect");
+        std::fs::write(&p, merge_pi("", exe).unwrap()).unwrap();
+        assert_eq!(look(Some(&p), exe), Found::Ours);
+    }
+
+    #[test]
+    fn look_reports_a_foreign_record_by_name() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        std::fs::write(&p, "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}").unwrap();
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Foreign(vec!["1c".to_string()]));
+    }
+
+    #[test]
+    fn setup_writes_a_fresh_file_with_no_backup() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
+        assert!(p.exists());
+        assert!(!sibling_path(&p, ".bak").exists(), "файла раньше не было — нечего резервировать");
+        assert!(look(Some(&p), exe) == Found::Ours);
+    }
+
+    /// Первая правка снимает `.bak` с исходным текстом; вторая правку того же
+    /// файла копию не перетирает (решение владельца №1).
+    #[test]
+    fn setup_backs_up_only_on_the_first_edit() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        let original = "{\n  \"theme\": \"One\"\n}\n";
+        std::fs::write(&p, original).unwrap();
+        setup(&p, exe, merge_zed).unwrap();
+        let bak = sibling_path(&p, ".bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original);
+        // Вторая правка — другим путём к исполняемому, бэкап не трогаем.
+        setup(&p, Path::new("/new/1c-connect"), merge_zed).unwrap();
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original, "вторая правка не должна перетирать резервную копию");
+    }
+
+    /// Занятая чужой записью `1c` — отказ, и файл на диске не меняется вовсе.
+    #[test]
+    fn setup_refuses_and_leaves_a_foreign_record_untouched() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
+        std::fs::write(&p, before).unwrap();
+        assert_eq!(setup(&p, exe, merge_zed).unwrap_err(), vec!["1c".to_string()]);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+        assert!(!sibling_path(&p, ".bak").exists());
     }
 }

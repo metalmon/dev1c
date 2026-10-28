@@ -545,6 +545,12 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
 /// причину на холодную — установка не поднята, или расширение не опубликовано.
 const PUBLICATION_HINT: &str = "1c-connect install, затем публикация в Конфигураторе (см. install)";
 
+/// Совет, когда базу публикует чужой веб-сервер, а его адреса мы не знаем.
+/// Чинится одним полем в окне, и ни к базе, ни к расширению отношения не
+/// имеет — поэтому совет свой, а не `PUBLICATION_HINT`.
+const PUBLICATION_ADDRESS_HINT: &str =
+    "«Параметры» → «Адрес публикации»: впишите адрес, каким открываете базу в браузере, и нажмите «Сохранить»";
+
 /// Совет, когда до базы не достучались ВОВСЕ. `PUBLICATION_HINT` тут не
 /// годится: ставить нечего — публикация либо не поднята, либо не отвечает, и
 /// `install` человеку, у которого просто выключено обслуживание, перепишет
@@ -579,6 +585,12 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
         // утверждало бы то, что не проверялось. `extension_fact` в этом
         // случае честно говорит «не спрашивали», и здесь то же самое.
         return Check::busy(PUBLICATION, format!("{base_url}/version не спрашивали: на машине {reason}"), hint);
+    }
+    // Пустой адрес — не «не отвечает», а «не задан»: стучать было некуда, и
+    // пробы не было. Это состояние чинится одним полем в окне, и назвать его
+    // надо так, чтобы человек пошёл туда, а не искать упавший веб-сервер.
+    if base_url.trim().is_empty() {
+        return Check::fail(PUBLICATION, "адрес публикации не задан".to_string(), PUBLICATION_ADDRESS_HINT);
     }
     Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), UNREACHED_HINT)
 }
@@ -643,8 +655,11 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
         Some(Reach::Refused(c)) if crate::onec_error::is_busy(c) => Check::busy(EXTENSION, c.what, c.fix),
         Some(Reach::Refused(c)) => Check::fail(EXTENSION, c.what, c.fix),
         Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), UNREACHED_HINT),
-        // Нет и пробы, и занятости — вызывающий обязан передать одно из двух.
-        None => unreachable!("reach отсутствует только вместе с busy, а она уже обработана выше"),
+        // Пробы не было и не могло быть: адрес чужой публикации не задан,
+        // стучать некуда. Говорим это, а не «расширения в базе нет» — база
+        // тут ни при чём, и чинится это полем в окне (`gather` сюда и
+        // приходит, не сходив к базе).
+        None => Check::fail(EXTENSION, "не спрашивали: адрес публикации не задан", PUBLICATION_ADDRESS_HINT),
     }
 }
 
@@ -1074,6 +1089,17 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
                 return (
                     publication_responds_fact(&base_url, false, Some(pair)),
                     extension_fact(None, Some(pair), &h.publication),
+                    descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
+                );
+            }
+            // Адрес чужой публикации не задан — идти некуда, и проба не
+            // делается вовсе: иначе факты сказали бы «не отвечает» про
+            // адрес, которого нет, и человек пошёл бы чинить веб-сервер
+            // вместо того, чтобы вписать строку в окне.
+            if ctx.cfg.publication_address_missing() {
+                return (
+                    publication_responds_fact(&base_url, false, None),
+                    extension_fact(None, None, &h.publication),
                     descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
                 );
             }
@@ -1611,6 +1637,20 @@ mod tests {
     /// Дорогая проба базы не делается вовсе, пока держится НАША долгая
     /// операция: ответ известен заранее, а мьютекс проекта наш собственный —
     /// это знание достоверно, в отличие от догадки по списку процессов.
+    #[test]
+    fn an_unset_publication_address_is_said_not_knocked_on() {
+        // Без адреса стучать некуда, и «не отвечает» утверждало бы то, чего
+        // не проверяли. Человек должен прочитать, что адрес не задан, — это
+        // ровно то, что чинится одним полем на «Параметрах».
+        let c = publication_responds_fact("", false, None);
+        assert!(!c.ok);
+        assert!(c.detail.contains("адрес публикации не задан"), "{c:?}");
+        assert!(c.hint.contains("Параметр"), "{c:?}");
+        // С адресом — прежний текст про ответ.
+        let known = publication_responds_fact("http://localhost/Buh/hs/mcp-1c", false, None);
+        assert!(known.detail.contains("не отвечает"), "{known:?}");
+    }
+
     #[test]
     fn a_404_in_a_foreign_publication_points_at_the_checkbox() {
         // Чужая публикация со снятой галочкой «Публиковать HTTP-сервисы

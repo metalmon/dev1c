@@ -352,9 +352,9 @@ impl Cfg {
         if !u.is_empty() {
             anyhow::ensure!(
                 u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
-                "[host]: base_url — адрес публикации на ЭТОЙ машине, начинается с http://localhost"
+                "[host]: адрес публикации — база на ЭТОЙ машине, адрес начинается с http://localhost (поле base_url)"
             );
-            anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: base_url должен заканчиваться на /hs/mcp-1c");
+            anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)");
             anyhow::ensure!(
                 u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
                 "[host]: адрес публикации — только латиница, цифры и -._~:/ (путь без пробелов и спецсимволов)"
@@ -929,7 +929,9 @@ mod tests {
         for typed in ["http://192.168.1.10/Buh", "http://localhost/Бух", "http://localhost/My Base"] {
             c.host.base_url = full_base_url(typed);
             let e = c.validate().unwrap_err().to_string();
-            assert!(e.contains("адрес публикации"), "{typed}: {e}");
+            // Ведёт то, что человек видел в окне, — «адрес публикации»;
+            // имя поля в toml стоит после, для того, кто правит файл.
+            assert!(e.starts_with("[host]: адрес публикации"), "{typed}: {e}");
         }
     }
 

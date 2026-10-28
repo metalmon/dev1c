@@ -3,6 +3,7 @@
 //! Мьютекс проекта: второй вызов получает «занято», не очередь.
 
 use crate::cfg::Cfg;
+use crate::single_instance;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -505,7 +506,10 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
 /// Флаг отмены для CLI и моста: его никто не взводит — окно (Task 4) заведёт свой.
 pub static NEVER: AtomicBool = AtomicBool::new(false);
 
-/// Один проект — один процесс за раз.
+/// Один проект — один процесс за раз. Межпроцессная часть этого же обещания
+/// — `LOCK_TARGET`/`hold` ниже: сам `LOCK` видит только потоки одного
+/// процесса, а у рабочего места их скоро станет несколько (окно, `serve`,
+/// `connect`, подкоманда `mcp`).
 pub static LOCK: Mutex<()> = Mutex::new(());
 
 /// Тестовый серилизатор: cargo гоняет тесты в одном бинарнике параллельно,
@@ -523,47 +527,103 @@ pub fn doing() -> &'static str {
     DOING_NAMES[DOING.load(std::sync::atomic::Ordering::Relaxed)]
 }
 
+/// Готовая строка отказа — одна формулировка на все пути: мьютекс в памяти,
+/// файл на диске, агент моста.
+fn busy(what: &str) -> String {
+    format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what })
+}
+
+/// Каталог, в котором `hold` держит файл замка (`<dir>/project.lock`).
+/// Выставляется один раз при старте долгоживущего процесса — окна, `serve`,
+/// `connect`, будущей подкоманды `mcp`. Разовые команды (`status`, `example`,
+/// `check`) её не зовут: они и так serialised через `LOCK` в своём же
+/// процессе, а межпроцессный замок им не нужен (спека, «программа не
+/// задерживает обычную работу человека»).
+static LOCK_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn set_lock_target(dir: &Path) {
+    *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir.to_path_buf());
+}
+
+/// Замок проекта, пережививший второй процесс: обёртка над тем же приёмом,
+/// что `single_instance` (именованный мьютекс на Windows, `flock` на Linux),
+/// вынесенным туда, чтобы его звали оба замка. Файл — свой
+/// (`<state>/project.lock`), не каталог состояния: тот уже держит замок
+/// рабочего места, и окно заперло бы само себя.
+pub type FileLock = single_instance::Guard;
+
+/// `None` — файл уже занят другим процессом.
+pub fn file_lock(path: &Path) -> std::io::Result<Option<FileLock>> {
+    single_instance::file_lock(path)
+}
+
+/// Взятый замок проекта: мьютекс в памяти и, если задана цель, файл на
+/// диске. Держите до конца операции — ранний `drop` снимает оба раньше
+/// срока.
+pub struct Hold {
+    #[allow(dead_code)]
+    mem: std::sync::MutexGuard<'static, ()>,
+    #[allow(dead_code)]
+    file: Option<FileLock>,
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        DOING.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Берёт замок проекта: сперва мьютекс в памяти — быстрый путь и он же
+/// ловит соседний поток этого же процесса раньше, чем дело дойдёт до файла;
+/// затем, если `set_lock_target` звали, файл на диске — межпроцессная часть.
+/// Без цели (разовые команды) замок остаётся в памяти, как и был до этой
+/// задачи.
+pub fn hold(what: &str) -> Result<Hold, String> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mem = match LOCK.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(busy(doing())),
+    };
+    let target = LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let file = match target {
+        None => None,
+        Some(dir) => match file_lock(&dir.join("project.lock")) {
+            Ok(Some(g)) => Some(g),
+            // Другой процесс держит файл — чей именно, отсюда не видно
+            // (`doing()` знает только про этот процесс), поэтому «другая
+            // операция»: готовая, не выдуманная вторая формулировка.
+            Ok(None) => return Err(busy(doing())),
+            Err(e) => return Err(e.to_string()),
+        },
+    };
+    DOING.store(DOING_NAMES.iter().position(|n| *n == what).unwrap_or(1), Relaxed);
+    Ok(Hold { mem, file })
+}
+
 /// Состояние проекта для окна: те же факты и под тем же замком, что отдаёт
 /// агенту `project_status`. Под замком — чтобы во время выгрузки вкладка
 /// говорила «занято», а не читала полузаписанный индекс; `Err` здесь и есть
 /// эта строка, окно показывает её как есть.
 pub fn facts_locked(p: &Project) -> Result<Facts, String> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let _guard = match LOCK.try_lock() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            let what = doing();
-            return Err(format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }));
-        }
-    };
-    DOING.store(1, Relaxed);
-    let r = facts(p);
-    DOING.store(0, Relaxed);
-    r
+    let _h = hold("project_status")?;
+    facts(p)
 }
 
 /// Вызов инструмента моста: `(текст, isError)`. Занято — ответ, не очередь.
 pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
-    use std::sync::atomic::Ordering::Relaxed;
     // A panic inside a tool poisons the mutex; the project is not broken by
-    // that, so a poisoned lock is simply taken.
-    let _guard = match LOCK.try_lock() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            let what = doing();
-            return (format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what }), true);
-        }
+    // that, so a poisoned lock is simply taken (see `hold`).
+    let _h = match hold(tool) {
+        Ok(h) => h,
+        Err(e) => return (e, true),
     };
-    DOING.store(DOING_NAMES.iter().position(|n| *n == tool).unwrap_or(1), Relaxed);
     let r = match tool {
         "project_status" => status(p),
         "project_pull" => pull(p, &NEVER),
         "project_push" => push(p, args.get("message").and_then(Value::as_str).unwrap_or(""), &NEVER),
         other => Err(format!("нет инструмента {other}")),
     };
-    DOING.store(0, Relaxed);
     match r {
         Ok(t) => (t, false),
         Err(t) => (t, true),
@@ -1038,5 +1098,36 @@ mod tests {
         drop(guard);
         let (text, err) = call(&p, "project_status", &Value::Null);
         assert!(!err, "{text}");
+    }
+
+    #[test]
+    fn a_second_process_is_refused_not_queued() {
+        // Два захвата по одному пути — то же, что два процесса: flock держится
+        // за открытый дескриптор, именованный мьютекс — за объект ядра.
+        let d = tempdir::Dir::new();
+        let first = file_lock(&d.path().join("project.lock")).unwrap().unwrap();
+        assert!(file_lock(&d.path().join("project.lock")).unwrap().is_none());
+        drop(first);
+        assert!(file_lock(&d.path().join("project.lock")).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_busy_lock_names_what_is_running() {
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let d = tempdir::Dir::new();
+        set_lock_target(d.path());
+        let g = hold("project_push").unwrap();
+        assert_eq!(hold("project_status").err(), Some("занято: идёт project_push".to_string()));
+        drop(g);
+        // Цель — глобал на процесс: следующий тест её не должен застать —
+        // ставит её только сам (`without_a_target_the_lock_is_in_memory_only`).
+        *LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    #[test]
+    fn without_a_target_the_lock_is_in_memory_only() {
+        // Разовые команды (`status`, `example`) цели не ставят: отказа быть не должно.
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = hold("project_status").unwrap();
     }
 }

@@ -53,12 +53,16 @@ fn current_user() -> String {
     found.unwrap_or_else(|_| "?".into())
 }
 
+/// Без символов, опасных для имени мьютекса или файла (пробелы, кириллица,
+/// `\`/`/`) — они гасятся в `_`. Общая для `guard_key` (пользователь и
+/// рабочее место) и для ключа файлового замка проекта (сам путь).
+fn clean(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+}
+
 /// Ключ замка: пользователь и рабочее место, без символов, опасных для имени
 /// мьютекса или файла (пробелы, кириллица, `\`/`/`) — они гасятся в `_`.
 pub fn guard_key(user: &str, workstation: &str) -> String {
-    fn clean(s: &str) -> String {
-        s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
-    }
     format!("{}-{}", clean(user), clean(workstation))
 }
 
@@ -81,18 +85,17 @@ unsafe impl Send for Guard {}
 #[cfg(windows)]
 unsafe impl Sync for Guard {}
 
-/// Взять замок по ключу или увидеть, что он уже занят. `lock_on` — файл,
-/// который держит замок на Linux (`Kit::state_path`); на Windows не
-/// используется (там замок не файловый, а именованный мьютекс), но остаётся
-/// параметром, чтобы вызывающему было не важно, какая платформа.
+/// Общая часть приёма замка на Windows: `CreateMutexW` по готовому имени.
+/// Вынесена, чтобы её звали оба замка, различающиеся только тем, как
+/// построено имя — `try_acquire` (ключ рабочего места) и `project::file_lock`
+/// (ключ — сам путь, через `pub(crate) fn file_lock` ниже).
 #[cfg(windows)]
-pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Option<Guard>> {
+fn acquire_mutex(name: &str) -> std::io::Result<Option<Guard>> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows_sys::Win32::System::Threading::CreateMutexW;
-    let name = format!("1c-connect-instance-{key}");
-    let wide: Vec<u16> = OsStr::new(&name).encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(std::iter::once(0)).collect();
     // SAFETY: обычный вызов kernel32 с нуль-терминированной строкой, живущей
     // на стеке этого вызова; без атрибутов безопасности — именованный объект
     // по умолчанию виден только в сессии вызывающего, что уже отделяет
@@ -103,10 +106,7 @@ pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Opt
         // голый `Permission denied (os error N)` без единого слова о том, что
         // вообще делалось, ничего человеку не говорит.
         let e = std::io::Error::last_os_error();
-        return Err(std::io::Error::new(
-            e.kind(),
-            format!("не удалось взять замок единственного экземпляра (системный мьютекс {name}): {e}"),
-        ));
+        return Err(std::io::Error::new(e.kind(), format!("не удалось взять замок (системный мьютекс {name}): {e}")));
     }
     // `GetLastError` — первым же следующим вызовом, до любого другого Win32
     // API: иначе он рассказал бы не про `CreateMutexW`.
@@ -116,6 +116,32 @@ pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Opt
         return Ok(None);
     }
     Ok(Some(Guard(h)))
+}
+
+/// Взять замок по ключу или увидеть, что он уже занят. `lock_on` — файл,
+/// который держит замок на Linux (`Kit::state_path`); на Windows не
+/// используется (там замок не файловый, а именованный мьютекс), но остаётся
+/// параметром, чтобы вызывающему было не важно, какая платформа.
+#[cfg(windows)]
+pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Option<Guard>> {
+    acquire_mutex(&format!("1c-connect-instance-{key}"))
+}
+
+/// Замок проекта (`project::file_lock`) на Windows: тот же приём, что у
+/// замка рабочего места — именованный мьютекс, живущий, пока жив процесс,
+/// независимо от того, как он кончился. Ключ строится из пути, а не из
+/// пользователя и рабочего места: файл замка и так свой на каждое рабочее
+/// место (`<state>/project.lock`), второй ключ не добавил бы ничего, а
+/// собственный префикс (`1c-connect-file-`, в отличие от
+/// `1c-connect-instance-` у замка рабочего места) не даёт случайно столкнуться
+/// именам из двух разных целей.
+/// ponytail: ключ — путь, прогнанный через `clean`, без канонизации; два
+/// разных пути, отличающихся только заменяемыми символами, теоретически
+/// могли бы совпасть. Другого пути к файлу замка, кроме как из
+/// `set_lock_target`, у программы нет, так что потолок не достигается.
+#[cfg(windows)]
+pub(crate) fn file_lock(path: &std::path::Path) -> std::io::Result<Option<Guard>> {
+    acquire_mutex(&format!("1c-connect-file-{}", clean(&path.display().to_string())))
 }
 
 /// Замок живёт, пока жив дескриптор: файл здесь держат, а не читают —
@@ -132,7 +158,28 @@ pub struct Guard(#[allow(dead_code)] std::fs::File);
 /// надо видеть путь.
 #[cfg(not(windows))]
 fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
-    std::io::Error::new(e.kind(), format!("не удалось взять замок единственного экземпляра: {} — файл не открылся: {e}", path.display()))
+    std::io::Error::new(e.kind(), format!("не удалось взять замок: {} — файл не открылся: {e}", path.display()))
+}
+
+/// Общая часть приёма замка на Linux: советный `flock` на уже открытом
+/// дескрипторе. Вынесена, чтобы её звали оба замка — `try_acquire` (открывает
+/// только на чтение то, что не пишет сам) и `project::file_lock` (создаёт
+/// свой файл, если его ещё нет, — см. ниже).
+#[cfg(not(windows))]
+fn acquire_flock(file: std::fs::File) -> std::io::Result<Option<Guard>> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: обычный вызов libc на дескрипторе только что открытого файла;
+    // LOCK_NB не блокирует поток — занято, значит просто отказ, а не ожидание.
+    let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if r == 0 {
+        return Ok(Some(Guard(file)));
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(None)
+    } else {
+        Err(err)
+    }
 }
 
 /// Советный `flock` на том, что мы никогда не пишем — каталоге состояния
@@ -147,20 +194,20 @@ fn lock_error(path: &std::path::Path, e: std::io::Error) -> std::io::Error {
 /// тем же `OpenOptions`, что файл: `flock` всё равно, что за дескриптором.
 #[cfg(not(windows))]
 pub fn try_acquire(_key: &str, lock_on: &std::path::Path) -> std::io::Result<Option<Guard>> {
-    use std::os::unix::io::AsRawFd;
     let file = std::fs::OpenOptions::new().read(true).open(lock_on).map_err(|e| lock_error(lock_on, e))?;
-    // SAFETY: обычный вызов libc на дескрипторе только что открытого файла;
-    // LOCK_NB не блокирует поток — занято, значит просто отказ, а не ожидание.
-    let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if r == 0 {
-        return Ok(Some(Guard(file)));
-    }
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        Ok(None)
-    } else {
-        Err(err)
-    }
+    acquire_flock(file)
+}
+
+/// Замок проекта (`project::file_lock`) на Linux: `flock` на файле
+/// `<state>/project.lock` — своём, не на каталоге состояния, который уже
+/// держит замок рабочего места (занять его второй раз значило бы запереть
+/// само окно). В отличие от `try_acquire` файл создаём, если его ещё нет:
+/// каталог состояния гарантирован `ops_host::ensure_state`, а этот файл —
+/// нет, его первым создаёт первый же процесс, который взял замок.
+#[cfg(not(windows))]
+pub(crate) fn file_lock(path: &std::path::Path) -> std::io::Result<Option<Guard>> {
+    let file = std::fs::OpenOptions::new().create(true).read(true).write(true).open(path).map_err(|e| lock_error(path, e))?;
+    acquire_flock(file)
 }
 
 /// Найти окно уже идущей копии и поднять его на передний план — без единого

@@ -4,6 +4,8 @@
 //! человек не вводил заново (`carried_*`), и предупреждения о смене базы.
 
 use super::*;
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::WindowExt as _;
 
 /// Адрес публикации для записи: умолчание идёт за каталогом базы, правка в
 /// toml переживает его смену.
@@ -12,6 +14,24 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
         cfg::derived_base_url(new_base_path)
     } else {
         saved.base_url.clone()
+    }
+}
+
+/// Адрес публикации для записи. Две формы, и они не смешиваются:
+///
+/// * «уже опубликована» — адрес знает только человек, и пишется ровно то,
+///   что он вписал, приведённое к полному (`cfg::full_base_url`). Пустое
+///   остаётся пустым: это «не задан», и его видит замок окна, а не выдумка
+///   про Apache на 80;
+/// * «публикует коннектор» — поля в окне нет, адрес считается от своего
+///   порта, а хранимое умолчание по-прежнему едет за каталогом базы
+///   (`carried_base_url`). Своё значение переживает и это: переключение
+///   туда-обратно не стирает вписанный когда-то чужой адрес.
+pub fn base_url_to_write(saved: &Host, from_form: &str, publication: &str, new_base_path: &str) -> String {
+    if publication == "webserver" {
+        cfg::full_base_url(from_form)
+    } else {
+        carried_base_url(saved, new_base_path)
     }
 }
 
@@ -83,9 +103,34 @@ pub fn database_changed(a: &Host, b: &Host) -> bool {
     a.base_path != b.base_path || a.db_user != b.db_user || a.db_password != b.db_password
 }
 
+/// Записать параметры, не проверяя файл целиком. Только для ключей, которые
+/// пишет меню значка (`publication`): их значение берётся из списка в две
+/// строки, а всё остальное остаётся ровно таким, каким его прочли с диска —
+/// годный файл годным и остаётся, негодный ровно так же негоден, как был.
+/// Чужих правок это не теряет: форма сюда ничего не приносит.
+///
+/// Зачем нужен отдельный путь. На свежем комплекте поля ещё пусты, и
+/// `save_host` на них отказывает — а переключатель в меню это **намерение
+/// человека, а не действие над базой**: публикацию мы при нём не поднимаем, и
+/// связь выключена. Держать такое намерение в памяти нельзя: окно читает файл
+/// при каждом показе (`window::reread_and_recheck`), и первое же открытие
+/// окна стёрло бы его — ровно это и случилось у владельца 28.10, когда поле
+/// «Адрес публикации» не появилось после переключения.
+///
+/// Всё, что `save_host` делает сверх записи (переезды, переподъём публикации,
+/// перезапуск сеанса), здесь не нужно: ни один из этих ключей не меняет ни
+/// базу, ни порты, а публикацию переключение разбирает само
+/// (`tray::apply_publication`).
+pub fn save_tray_key(ui: &mut Ui, host: Host) -> Result<(), String> {
+    let cfg = Cfg { host };
+    write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    ui.cfg = cfg;
+    Ok(())
+}
+
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
-/// режима публикации, её порта, адреса Gitea среды и адреса публикации в окне
-/// нет (правятся в toml): берём их из текущих параметров, иначе пустые
+/// режима публикации (его пишет подменю трея), её порта и адреса Gitea среды
+/// в окне нет: берём их из текущих параметров, иначе пустые
 /// значения из формы затёрли бы toml. Каталог проекта — из формы, и за ним
 /// едут умолчания: адрес публикации (`carried_base_url`), каталог выгрузки
 /// (`carried_dump`) и — за рабочим местом — порт публикации
@@ -100,7 +145,8 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
     host.http_port = carried_http_port(&ui.cfg.host, &host.workstation);
-    host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
+    let typed = host.base_url.clone();
+    host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
     // Переезды — не молчком, и все до одного: см. `moved_lines`.
     let moved = moved_lines(&old_host, &host);
     let cfg = Cfg { host };
@@ -118,7 +164,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // здесь — смена режима в трее поднимает его сама, отдельным путём
     // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
     // лишней строкой в журнал и лишним миганием портов.
-    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
+    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode, &cfg.host.publication);
     ui.cfg = cfg;
     for text in moved {
         note_line(ui, Line { kind: Kind::Warn, text });
@@ -270,6 +316,24 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         proceed(window, cx);
         return;
     };
+    ask_yes_no(window, cx, &message, &detail, "Да, сохранить", "Нет, не сохранять", false, proceed);
+}
+
+/// Спросить человека «да или нет» платформенным диалогом и сделать `proceed`
+/// только на «да». Общая обвязка для всех таких вопросов: один открытый
+/// диалог на окно (`dialog_open`), ответ приходит в своей задаче — главный
+/// поток ничего не ждёт, — и молчаливых выходов отсюда нет: человек нажал и
+/// обязан узнать, почему ничего не случилось.
+pub fn ask_yes_no(
+    window: &mut Window,
+    cx: &mut App,
+    message: &str,
+    detail: &str,
+    yes: &'static str,
+    no: &'static str,
+    destructive: bool,
+    proceed: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
     if cx.global::<Ui>().dialog_open {
         // Молчать нельзя: человек нажал кнопку и обязан узнать, почему ничего
         // не произошло. Молчаливый выход отсюда и был вторым тупиком той же
@@ -278,28 +342,38 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         return;
     }
     cx.global_mut::<Ui>().dialog_open = true;
-    let rx = window.prompt(
-        PromptLevel::Warning,
-        &message,
-        Some(&detail),
-        &[PromptButton::ok("Да, сохранить"), PromptButton::cancel("Нет, не сохранять")],
-        cx,
-    );
-    cx.spawn(async move |cx| {
-        let yes = matches!(rx.await, Ok(0));
-        cx.update(|cx| {
-            cx.global_mut::<Ui>().dialog_open = false;
-            if !yes {
-                return;
-            }
-            let Some(w) = cx.global::<Ui>().window else { return };
-            let _ = w.update(cx, |_, window, cx| {
-                window.activate_window();
-                proceed(window, cx);
-            });
-        });
-    })
-    .detach();
+    // Диалог свой, а не платформенный (`Window::prompt`): тот приходит в теме
+    // системы и с заголовком «Warning», поверх тёмного окна — чужая дверь в
+    // своём доме (замечание владельца 28.10). Свой рисуется той же темой, что
+    // и окно, и не отнимает у него фокус — значит и прятаться окну не от чего.
+    let (message, detail) = (message.to_string(), detail.to_string());
+    // `open_alert_dialog` берёт `Fn`, а согласие даётся один раз: продолжение
+    // кладётся в ячейку и забирается первым же «да».
+    let once = std::rc::Rc::new(std::cell::RefCell::new(Some(proceed)));
+    let danger = destructive;
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let once = once.clone();
+        alert
+            .confirm()
+            .title(message.clone())
+            .description(detail.clone())
+            .ok_text(yes)
+            .cancel_text(no)
+            // Красная кнопка там, где действие отнимает сделанное: то же
+            // правило, что развело пункты меню по разрядам.
+            .ok_variant(if danger { ButtonVariant::Danger } else { ButtonVariant::Primary })
+            .on_ok(move |_, window, cx| {
+                cx.global_mut::<Ui>().dialog_open = false;
+                if let Some(proceed) = once.borrow_mut().take() {
+                    proceed(window, cx);
+                }
+                true
+            })
+            .on_cancel(move |_, _, cx| {
+                cx.global_mut::<Ui>().dialog_open = false;
+                true
+            })
+    });
 }
 
 /// Поднять/проверить HTTP-сервис на уже записанных `ui.cfg`: после смены

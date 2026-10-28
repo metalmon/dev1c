@@ -72,14 +72,59 @@ pub const CHANGES_STATE: [&str; 10] = [
     "project_push",
 ];
 
-/// Адрес публикации по умолчанию: имя последней папки `base_path`. Поля в
-/// окне нет — адрес следует за каталогом базы, а правку в toml переносит
-/// `gui::carried_base_url`. Имя, которое `validate` не пропустит (пусто,
-/// «C:», кириллица), заменяется на `Buh` из образца.
+/// Путь HTTP-сервиса нашего расширения внутри публикации. Одно место на всех,
+/// кто его дописывает или ищет: выведенный адрес, приведение введённого
+/// человеком и свой адрес в режиме `auto`.
+pub const SERVICE_PATH: &str = "/hs/mcp-1c";
+
+/// Адрес публикации по умолчанию: имя последней папки `base_path`. Это наша
+/// догадка, а не ответ человека: в режиме «публикует коннектор» адрес
+/// считается сам, а в режиме «публикует платформа 1С» его вписывают в окне
+/// (`panel::shown_base_url` показывает эту догадку пустым полем, а
+/// переключение режима её снимает — `is_derived_address`). Имя, которое
+/// `validate` не пропустит (пусто, «C:», кириллица), заменяется на `Buh`.
 pub fn derived_base_url(base_path: &str) -> String {
     let name = base_path.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("");
     let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c));
-    format!("http://localhost/{}/hs/mcp-1c", if ok { name } else { "Buh" })
+    format!("http://localhost/{}{SERVICE_PATH}", if ok { name } else { "Buh" })
+}
+
+/// Наша ли это догадка, а не адрес человека. Спрашивается ровно в одном
+/// месте и ровно в один момент — когда человек переключает публикацию на
+/// «уже опубликована» (`gui::tray::apply_publication`): в обычном режиме
+/// `carried_base_url` держит в toml выведенный от каталога базы адрес, и
+/// принять его за ответ человека нельзя — в этом режиме он ничего не
+/// вписывал.
+///
+/// Сравнением строк это решается только здесь. Дальше — никогда: человек, у
+/// которого база и правда опубликована как `http://localhost/<папка>`,
+/// вписывает ровно такую строку, и выбрасывать её как «догадку» значило бы
+/// ломать самый частый случай.
+pub fn is_derived_address(host: &Host) -> bool {
+    host.base_url.trim() == derived_base_url(&host.base_path)
+}
+
+/// Полный адрес HTTP-сервиса из того, что человек вписал в окне. Свою
+/// публикацию он знает как `http://localhost/Buh` — именно её он открывает в
+/// браузере, — а `/hs/mcp-1c` это имя нашего сервиса в расширении, и слышать
+/// про него человек не должен (решение владельца 26.10). Схему дописываем,
+/// хвостовой слэш снимаем, хвост сервиса добавляем, если его ещё нет.
+///
+/// Пустое остаётся пустым: «адрес не задан» — состояние, которое видит замок
+/// (`gui::gate::cold_gate`), а не ошибка ввода и не повод что-то выдумать.
+pub fn full_base_url(typed: &str) -> String {
+    let t = typed.trim().trim_end_matches('/');
+    if t.is_empty() {
+        return String::new();
+    }
+    let with_scheme = if t.contains("://") { t.to_string() } else { format!("http://{t}") };
+    // Именно в конце, а не где-нибудь: `/hs/mcp-1c` посреди пути — это часть
+    // имени публикации, а не наш сервис, и хвост ему всё равно нужен.
+    if with_scheme.ends_with(SERVICE_PATH) {
+        with_scheme
+    } else {
+        format!("{with_scheme}{SERVICE_PATH}")
+    }
 }
 
 /// Клиент-серверная ли база: `сервер\база` против файловой — `C:\Bases\Buh`
@@ -316,12 +361,12 @@ impl Cfg {
         if !u.is_empty() {
             anyhow::ensure!(
                 u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
-                "[host]: base_url — адрес публикации на ЭТОЙ машине, начинается с http://localhost"
+                "[host]: адрес публикации — база на ЭТОЙ машине, адрес начинается с http://localhost (поле base_url)"
             );
-            anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: base_url должен заканчиваться на /hs/mcp-1c");
+            anyhow::ensure!(u.contains(SERVICE_PATH), "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)");
             anyhow::ensure!(
                 u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
-                "[host]: base_url — только латиница, цифры и -._~:/ (путь публикации без пробелов и спецсимволов)"
+                "[host]: адрес публикации — только латиница, цифры и -._~:/ (путь без пробелов и спецсимволов)"
             );
         }
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
@@ -388,16 +433,30 @@ impl Cfg {
     /// в `webserver` отдаёт хранимое поле `base_url` как есть.
     pub fn base_url(&self) -> String {
         if self.host.publication == "auto" {
-            format!("http://localhost:{}/hs/mcp-1c", self.http_port())
-        } else if self.host.base_url.is_empty() {
-            // Поля для адреса в окне нет: пустое значит «считай сам от
-            // каталога базы» (`derived_base_url`), как и сказано в toml. В
-            // комплекте оно приходит пустым, и отдавать наружу пустую
-            // строку, на которую потом пойдёт проба, нельзя.
-            derived_base_url(&self.host.base_path)
+            format!("http://localhost:{}{SERVICE_PATH}", self.http_port())
+        } else if self.publication_address_missing() {
+            String::new()
         } else {
+            // Поле для адреса в окне теперь есть («Параметры», видно только в
+            // этом режиме), и пустое значит «не задан». Выведенная догадка
+            // `http://localhost/<папка базы>/hs/mcp-1c` отсюда убрана: она
+            // отправляла бы пробу, проверку и третий канал туннеля на чужой
+            // Apache по выдуманному адресу — и человек читал бы отказ про
+            // адрес, которого сам не писал.
             self.host.base_url.clone()
         }
+    }
+
+    /// Адрес чужой публикации не задан — работать не по чему. В режиме `auto`
+    /// адрес считается сам, и «не задан» там не бывает.
+    ///
+    /// Пусто — значит не задан, и только пусто: что в поле написано, то и
+    /// адрес. Выведенная догадка сюда не попадает — её снимает переключение
+    /// режима (`is_derived_address`, `gui::tray::apply_publication`), а
+    /// судить уже записанное по виду строки нельзя: `http://localhost/Buh`
+    /// это и наша догадка, и законный адрес человека.
+    pub fn publication_address_missing(&self) -> bool {
+        self.host.publication != "auto" && self.host.base_url.trim().is_empty()
     }
 
     pub fn render(&self) -> String {
@@ -558,17 +617,20 @@ mod tests {
         c
     }
 
-    /// Пустой `base_url` — «не задан», а не ошибка: поля в окне для него нет,
-    /// значение выводится от каталога базы. Комплект приходит с пустым, и
-    /// `check` на нём не должен отказывать словами про адрес публикации
-    /// (находка владельца 26.10 на пустом комплекте).
+    /// Пустой `base_url` — «не задан», а не ошибка ввода: комплект приходит с
+    /// пустым, и `check` на нём не отказывает словами про адрес публикации
+    /// (находка владельца 26.10 на пустом комплекте). Но и выводить адрес от
+    /// каталога базы мы больше не вправе: выдуманный `http://localhost/<папка
+    /// базы>/hs/mcp-1c` увёл бы пробу, проверку и туннель на чужой веб-сервер
+    /// (замысел 2026-10-26). «Не задан» — состояние, и его видит замок окна.
     #[test]
-    fn an_empty_base_url_is_derived_not_rejected() {
+    fn an_empty_base_url_is_not_set_and_not_invented() {
         let mut c = filled();
         c.host.base_url = String::new();
         c.validate().unwrap();
         c.host.publication = "webserver".into();
-        assert_eq!(c.base_url(), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(c.base_url(), "");
+        assert!(c.publication_address_missing());
         // Написанный — проверяется как раньше.
         c.host.base_url = "ftp://localhost/x".into();
         assert!(c.validate().unwrap_err().to_string().contains("base_url"));
@@ -676,11 +738,14 @@ mod tests {
 
     #[test]
     fn webserver_keeps_the_field() {
-        // Написанный адрес отдаётся как есть; пустой выводится от каталога
-        // базы (`an_empty_base_url_is_derived_not_rejected`), поэтому берём
-        // заполненный набор.
+        // Написанный адрес отдаётся как есть. Адрес набора совпадает с
+        // выведенным от каталога базы, а это «не задан»
+        // (`a_derived_guess_in_the_toml_counts_as_no_address_at_all`),
+        // поэтому вписываем свой — тест про чужую публикацию, а не про
+        // нашу догадку.
         let mut c = filled();
         c.host.publication = "webserver".into();
+        c.host.base_url = "http://localhost/UNF/hs/mcp-1c".into();
         assert_eq!(c.base_url(), c.host.base_url);
     }
 
@@ -845,5 +910,79 @@ mod tests {
         let t = c.render();
         assert!(t.contains("workstation = \"dev2\"") && t.contains("# Ваш логин в среде"));
         assert_eq!(toml::from_str::<Cfg>(&t).unwrap(), c);
+    }
+
+    #[test]
+    fn a_typed_address_is_completed_to_the_service_url() {
+        assert_eq!(full_base_url("http://localhost/Buh"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(full_base_url("localhost/Buh"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(full_base_url("http://localhost/Buh/"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(full_base_url("http://localhost:8081/Buh"), "http://localhost:8081/Buh/hs/mcp-1c");
+        assert_eq!(full_base_url("http://localhost/Buh/hs/mcp-1c"), "http://localhost/Buh/hs/mcp-1c");
+        assert_eq!(full_base_url("  "), "");
+    }
+
+    #[test]
+    fn a_completed_address_passes_validate() {
+        let mut c = filled();
+        c.host.publication = "webserver".into();
+        c.host.base_url = full_base_url("http://localhost/Buh");
+        assert!(c.validate().is_ok(), "{:?}", c.validate().unwrap_err());
+    }
+
+    #[test]
+    fn an_address_we_cannot_fix_is_refused_in_words_about_the_publication() {
+        let mut c = filled();
+        c.host.publication = "webserver".into();
+        // Чужая машина, пробел, кириллица в пути — приведение их не спасает.
+        for typed in ["http://192.168.1.10/Buh", "http://localhost/Бух", "http://localhost/My Base"] {
+            c.host.base_url = full_base_url(typed);
+            let e = c.validate().unwrap_err().to_string();
+            // Ведёт то, что человек видел в окне, — «адрес публикации»;
+            // имя поля в toml стоит после, для того, кто правит файл.
+            assert!(e.starts_with("[host]: адрес публикации"), "{typed}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_guess_is_told_from_an_answer_only_at_the_moment_of_switching() {
+        // Машина, где когда-то нажали «Сохранить» в обычном режиме, несёт в
+        // toml выведенную догадку (`carried_base_url`), и принять её за
+        // ответ человека нельзя — в том режиме он ничего не вписывал.
+        let mut c = filled();
+        c.host.base_path = "C:\\Bases\\Buh".into();
+        c.host.base_url = derived_base_url(&c.host.base_path);
+        assert!(is_derived_address(&c.host));
+        // А вот та же строка, вписанная руками в режиме «уже опубликована»,
+        // — законный адрес, и выбрасывать его нельзя: именно так выглядит
+        // самый частый случай (публикация названа по имени базы, порт 80).
+        // Поэтому дальше судят только по пустоте.
+        c.host.publication = "webserver".into();
+        assert!(!c.publication_address_missing());
+        assert_eq!(c.base_url(), derived_base_url(&c.host.base_path));
+        c.host.base_url = String::new();
+        assert!(c.publication_address_missing());
+        assert_eq!(c.base_url(), "");
+    }
+
+    #[test]
+    fn webserver_without_an_address_does_not_invent_one() {
+        let mut c = filled();
+        c.host.publication = "webserver".into();
+        c.host.base_url = String::new();
+        assert_eq!(c.base_url(), "");
+        assert!(c.publication_address_missing());
+        // Порт туннеля на незаданном адресе — всё ещё 80, а не паника.
+        assert_eq!(c.web_port(), 80);
+    }
+
+    #[test]
+    fn auto_mode_still_counts_its_own_address() {
+        let mut c = filled();
+        c.host.workstation = "dev1".into();
+        c.host.publication = "auto".into();
+        c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
+        assert_eq!(c.base_url(), "http://localhost:8081/hs/mcp-1c");
+        assert!(!c.publication_address_missing());
     }
 }

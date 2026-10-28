@@ -1276,6 +1276,34 @@ pub fn stop_own_publication(ctx: &Ctx) -> Result<bool> {
     Ok(true)
 }
 
+/// Уход из своей публикации в чужую: погасить свой httpd и забрать свой
+/// дескриптор. `false` — уходить было не из чего (режим уже `webserver`).
+///
+/// **Зовётся, пока в параметрах ещё стоит `auto`.** Записав режим первым, мы
+/// попали бы в ранний выход `stop_own_publication`/`revert_apply` — и свой
+/// httpd остался бы жить ровно в тот момент, когда человек попросил его
+/// убрать.
+///
+/// Дескриптор убирается здесь, а не в `revert_apply`: уборка (`uninstall`)
+/// гасит сервис, но каталог состояния разбирает сама, своим уровнем, и
+/// смешивать «ухожу в чужую публикацию» с «сношу установку» незачем.
+pub fn leave_own_publication(ctx: &Ctx) -> Result<bool> {
+    if ctx.cfg.host.publication == "webserver" {
+        return Ok(false);
+    }
+    // Своей публикации на этой машине быть не может — нет модуля платформы
+    // для Apache (базу публикует IIS), не найдена платформа или неполон
+    // комплект. Убирать нечего, и **отказом это быть не должно**: иначе
+    // заказчик, ради которого режим и сделан, в него не переключится вовсе.
+    let Ok(p) = crate::publication::Paths::of(&ctx.cfg, &ctx.kit) else {
+        return Ok(false);
+    };
+    Publication.revert_apply(ctx, CleanLevel::Stack)?;
+    crate::publication::remove_descriptor(&p.pub_dir).context("дескриптор публикации не удалён")?;
+    ctx.ok("дескриптор нашей публикации убран: базу публикует веб-сервер");
+    Ok(true)
+}
+
 /// Поднимает HTTP-сервис базы: своим httpd под пользователем (`"auto"`) или
 /// только проверяет уже существующую публикацию (`"webserver"`). Зовётся до
 /// `host.extension` — иначе расширение ставить некуда.
@@ -1496,6 +1524,18 @@ mod tests {
     fn publication_ctx(cfg: Cfg, dry_run: bool) -> Ctx {
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         Ctx { kit: Kit::at("."), cfg, dry_run, sink, prompt: Box::new(common::AlwaysDefault) }
+    }
+
+    #[test]
+    fn leaving_our_own_publication_never_blocks_the_switch_when_we_have_none() {
+        // Машина, где своего веб-сервера и быть не может: нет модуля
+        // платформы для Apache (базу публикует IIS) или комплект неполон.
+        // Убирать нечего — и переключение на «уже опубликована» это рушить
+        // не должно, иначе ровно тот заказчик, ради которого режим и сделан,
+        // в него не попадёт.
+        let ctx = publication_ctx(crate::cfg::filled_for_test(), false);
+        assert!(crate::publication::Paths::of(&ctx.cfg, &ctx.kit).is_err(), "тест опирается на то, что своей публикации тут нет");
+        assert!(leave_own_publication(&ctx).is_ok());
     }
 
     #[test]

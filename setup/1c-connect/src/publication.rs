@@ -80,6 +80,18 @@ pub fn vrd(cfg: &Cfg) -> String {
     )
 }
 
+/// Убрать свой дескриптор. Зовётся при уходе в чужую публикацию: `stop`
+/// гасит только процесс, а `default.vrd` с логином и паролем базы остаётся
+/// лежать — на машине, где базу публикует кто-то другой, это вторая дверь в
+/// неё, о которой администратор не знает. Отсутствие файла — успех: уходить
+/// уже не из чего.
+pub fn remove_descriptor(pub_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(pub_dir.join("default.vrd")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Дескриптор на диске — ровно то, что `vrd(cfg)` написал бы сейчас. Иначе
 /// пароль/пользователь/база поменялись (человек нажал «Сохранить»), а
 /// HTTP-сервис всё ещё держит старый текст — `state()` обязан увидеть это как
@@ -696,6 +708,19 @@ mod tests {
         // Сетевой путь — тоже файловая, хоть и без буквы диска.
         c.host.base_path = r"\\nas\share\Buh".into();
         assert!(vrd(&c).contains(r"File=&quot;\\nas\share\Buh&quot;;"), "{}", vrd(&c));
+    }
+
+    #[test]
+    fn leaving_our_own_publication_takes_the_descriptor_with_it() {
+        // Дескриптор несёт логин и пароль базы. Уходя в чужую публикацию, мы
+        // обязаны забрать его с собой: оставленный файл — вторая дверь в
+        // базу на машине, где её уже публикует кто-то другой.
+        let dir = crate::project::tempdir::Dir::new();
+        std::fs::write(dir.path().join("default.vrd"), "<point/>").unwrap();
+        remove_descriptor(dir.path()).unwrap();
+        assert!(!dir.path().join("default.vrd").exists());
+        // Второй раз — не ошибка: уходить уже не из чего.
+        remove_descriptor(dir.path()).unwrap();
     }
 
     #[test]

@@ -1276,6 +1276,27 @@ pub fn stop_own_publication(ctx: &Ctx) -> Result<bool> {
     Ok(true)
 }
 
+/// Уход из своей публикации в чужую: погасить свой httpd и забрать свой
+/// дескриптор. `false` — уходить было не из чего (режим уже `webserver`).
+///
+/// **Зовётся, пока в параметрах ещё стоит `auto`.** Записав режим первым, мы
+/// попали бы в ранний выход `stop_own_publication`/`revert_apply` — и свой
+/// httpd остался бы жить ровно в тот момент, когда человек попросил его
+/// убрать.
+///
+/// Дескриптор убирается здесь, а не в `revert_apply`: уборка (`uninstall`)
+/// гасит сервис, но каталог состояния разбирает сама, своим уровнем, и
+/// смешивать «ухожу в чужую публикацию» с «сношу установку» незачем.
+pub fn leave_own_publication(ctx: &Ctx) -> Result<bool> {
+    if !stop_own_publication(ctx)? {
+        return Ok(false);
+    }
+    let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
+    crate::publication::remove_descriptor(&p.pub_dir).context("дескриптор публикации не удалён")?;
+    ctx.ok("дескриптор нашей публикации убран: базу публикует веб-сервер");
+    Ok(true)
+}
+
 /// Поднимает HTTP-сервис базы: своим httpd под пользователем (`"auto"`) или
 /// только проверяет уже существующую публикацию (`"webserver"`). Зовётся до
 /// `host.extension` — иначе расширение ставить некуда.

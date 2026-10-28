@@ -20,8 +20,9 @@ const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
 const AUTOSTART_TEXT: &str = "Запускать при входе";
 
 /// Трей: значок, пункт-переключатель (меняет надпись), подменю «Режим
-/// работы» (отмечен ровно один), три пункта темы (отмечен ровно один) и два
-/// пункта-галочки — автозапуск и автоподключение.
+/// работы» и «Публикация базы» (в каждом отмечен ровно один), три пункта
+/// темы (отмечен ровно один) и два пункта-галочки — автозапуск и
+/// автоподключение.
 pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
@@ -50,7 +51,18 @@ const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через т
 /// публикации спрашивается отдельным полем «Параметров», видимым только во
 /// втором положении (`panel::shown_fields`).
 const PUBLICATIONS: [(&str, &str, &str); 2] =
-    [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Уже опубликована")];
+    [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Публикует платформа 1С")];
+
+/// Заголовок подменю. Назван отдельно, потому что без слова «базы» пункты
+/// под ним говорят о механике, а не о деле: «публикация» сама по себе не
+/// отвечает, что публикуется (замечание владельца 28.10).
+///
+/// Обе строки под ним отвечают на один вопрос — кто делает публикацию:
+/// коннектор своим httpd, или платформа 1С, когда человек уже опубликовал
+/// базу диалогом Конфигуратора. Прежние «Уже опубликована» и «на
+/// веб-сервере» называли состояние и механику, а не того, кто это сделал
+/// (решение владельца 28.10).
+const PUBLICATION_SUBMENU: &str = "Публикация базы";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
@@ -63,7 +75,7 @@ pub enum MenuAction {
     Check,
     /// Выбор пункта подменю «Режим работы» — несёт "tunnel" или "local".
     Mode(&'static str),
-    /// Выбор пункта подменю «Публикация» — несёт "auto" или "webserver".
+    /// Выбор пункта подменю «Публикация базы» — несёт "auto" или "webserver".
     Publication(&'static str),
     Theme(theme::Choice),
     Autostart,
@@ -172,7 +184,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     // сохранённую сразу после `build` (`Tray::set_publication`).
     let publication_items = PUBLICATIONS.map(|(p, id, text)| CheckMenuItem::with_id(id, text, true, p == "auto", None));
     let publication_refs: Vec<&dyn IsMenuItem> = publication_items.iter().map(|i| i as &dyn IsMenuItem).collect();
-    let publication_submenu = Submenu::with_items("Публикация", true, &publication_refs)?;
+    let publication_submenu = Submenu::with_items(PUBLICATION_SUBMENU, true, &publication_refs)?;
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
@@ -546,7 +558,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui,
-        MODES, PUBLICATIONS,
+        MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
@@ -572,10 +584,12 @@ mod tests {
         assert_eq!(menu_action("publication:auto"), Some(MenuAction::Publication("auto")));
         assert_eq!(menu_action("publication:webserver"), Some(MenuAction::Publication("webserver")));
         assert_eq!(menu_action("publication:iis"), None);
-        // Значения toml не меняются, меняются подписи.
+        // Значения toml не меняются, меняются подписи. Подпись называет
+        // дело, а не механику: что публикуется (база) и кто это делает.
         let labels: Vec<&str> = PUBLICATIONS.iter().map(|(_, _, text)| *text).collect();
-        assert_eq!(labels, vec!["Публикует коннектор", "Уже опубликована"]);
+        assert_eq!(labels, vec!["Публикует коннектор", "Публикует платформа 1С"]);
         assert_eq!(PUBLICATIONS.map(|(v, ..)| v), ["auto", "webserver"]);
+        assert_eq!(PUBLICATION_SUBMENU, "Публикация базы");
     }
 
     #[test]

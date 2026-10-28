@@ -72,14 +72,21 @@ pub const CHANGES_STATE: [&str; 10] = [
     "project_push",
 ];
 
-/// Адрес публикации по умолчанию: имя последней папки `base_path`. Поля в
-/// окне нет — адрес следует за каталогом базы, а правку в toml переносит
-/// `gui::carried_base_url`. Имя, которое `validate` не пропустит (пусто,
-/// «C:», кириллица), заменяется на `Buh` из образца.
+/// Путь HTTP-сервиса нашего расширения внутри публикации. Одно место на всех,
+/// кто его дописывает или ищет: выведенный адрес, приведение введённого
+/// человеком и свой адрес в режиме `auto`.
+pub const SERVICE_PATH: &str = "/hs/mcp-1c";
+
+/// Адрес публикации по умолчанию: имя последней папки `base_path`. Это наша
+/// догадка, а не ответ человека: в режиме «публикует коннектор» адрес
+/// считается сам, а в режиме «публикует платформа 1С» его вписывают в окне
+/// (`panel::shown_base_url` показывает эту догадку пустым полем, а
+/// переключение режима её снимает — `is_derived_address`). Имя, которое
+/// `validate` не пропустит (пусто, «C:», кириллица), заменяется на `Buh`.
 pub fn derived_base_url(base_path: &str) -> String {
     let name = base_path.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("");
     let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c));
-    format!("http://localhost/{}/hs/mcp-1c", if ok { name } else { "Buh" })
+    format!("http://localhost/{}{SERVICE_PATH}", if ok { name } else { "Buh" })
 }
 
 /// Наша ли это догадка, а не адрес человека. Спрашивается ровно в одном
@@ -111,10 +118,12 @@ pub fn full_base_url(typed: &str) -> String {
         return String::new();
     }
     let with_scheme = if t.contains("://") { t.to_string() } else { format!("http://{t}") };
-    if with_scheme.contains("/hs/mcp-1c") {
+    // Именно в конце, а не где-нибудь: `/hs/mcp-1c` посреди пути — это часть
+    // имени публикации, а не наш сервис, и хвост ему всё равно нужен.
+    if with_scheme.ends_with(SERVICE_PATH) {
         with_scheme
     } else {
-        format!("{with_scheme}/hs/mcp-1c")
+        format!("{with_scheme}{SERVICE_PATH}")
     }
 }
 
@@ -354,7 +363,7 @@ impl Cfg {
                 u.starts_with("http://localhost") || u.starts_with("http://127.0.0.1"),
                 "[host]: адрес публикации — база на ЭТОЙ машине, адрес начинается с http://localhost (поле base_url)"
             );
-            anyhow::ensure!(u.contains("/hs/mcp-1c"), "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)");
+            anyhow::ensure!(u.contains(SERVICE_PATH), "[host]: адрес публикации должен заканчиваться на /hs/mcp-1c (поле base_url)");
             anyhow::ensure!(
                 u.chars().all(|c| c.is_ascii_alphanumeric() || "-._~:/".contains(c)),
                 "[host]: адрес публикации — только латиница, цифры и -._~:/ (путь без пробелов и спецсимволов)"
@@ -424,7 +433,7 @@ impl Cfg {
     /// в `webserver` отдаёт хранимое поле `base_url` как есть.
     pub fn base_url(&self) -> String {
         if self.host.publication == "auto" {
-            format!("http://localhost:{}/hs/mcp-1c", self.http_port())
+            format!("http://localhost:{}{SERVICE_PATH}", self.http_port())
         } else if self.publication_address_missing() {
             String::new()
         } else {

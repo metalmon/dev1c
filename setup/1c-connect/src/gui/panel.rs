@@ -531,6 +531,14 @@ pub fn op_question(which: gui::Which) -> Option<(&'static str, &'static str)> {
             "Снять расширение mcp-1c из базы?",
             "Агент перестанет видеть базу: её HTTP-сервис больше не ответит. Данные базы это не трогает, расширение можно поставить заново.",
         )),
+        // Загрузка перезаписывает конфигурацию базы тем, что лежит в проекте:
+        // правки, сделанные в Конфигураторе и не выгруженные, пропадут. Цена
+        // ошибки тут не меньше, чем у снятия расширения (решение владельца
+        // 28.10), и спросить дешевле, чем восстанавливать.
+        gui::Which::Import => Some((
+            "Загрузить конфигурацию из проекта в базу?",
+            "Конфигурация базы будет заменена тем, что лежит в проекте. Правки, сделанные в Конфигураторе и не выгруженные в проект, пропадут.",
+        )),
         _ => None,
     }
 }
@@ -583,7 +591,10 @@ fn run_project_op(window: &mut Window, cx: &mut App, which: gui::Which) {
     match op_question(which) {
         None => gui::run_op(cx, which),
         Some((message, detail)) => {
-            gui::ask_yes_no(window, cx, message, detail, "Да, снять", "Отмена", move |_window, cx| gui::run_op(cx, which));
+            // Кнопка согласия называет само действие, а не «Да»: человек
+            // читает её последней и должен узнать в ней то, что просил.
+            let yes = if which == gui::Which::Uninstall { "Да, снять" } else { "Да, загрузить" };
+            gui::ask_yes_no(window, cx, message, detail, yes, "Отмена", true, move |_window, cx| gui::run_op(cx, which));
         }
     }
 }
@@ -1643,8 +1654,9 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_menu, project_rows,
-        reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts, project_menu,
+        project_rows, reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, ProjectMenu,
+        FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
@@ -2043,6 +2055,22 @@ mod tests {
         assert_eq!(shown_fields("tunnel", "auto").len(), 7);
         // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
         assert_eq!(shown_fields("bogus", "auto"), shown_fields("tunnel", "auto"));
+    }
+
+    #[test]
+    fn what_takes_away_what_was_done_asks_first() {
+        // Два действия портят уже сделанное: снятие расширения и загрузка
+        // конфигурации поверх базы. Оба обязаны спросить, и вопрос обязан
+        // называть цену, а не «вы уверены?».
+        let (m, d) = op_question(crate::gui::Which::Uninstall).unwrap();
+        assert!(m.contains("Снять расширение"), "{m}");
+        assert!(d.contains("Данные базы это не трогает"), "{d}");
+        let (m, d) = op_question(crate::gui::Which::Import).unwrap();
+        assert!(m.contains("Загрузить"), "{m}");
+        assert!(d.contains("пропадут"), "{d}");
+        // Выгрузка из 1С ничего не отнимает: она пишет в проект, а не в базу.
+        assert_eq!(op_question(crate::gui::Which::Export), None);
+        assert_eq!(op_question(crate::gui::Which::Install), None);
     }
 
     #[test]

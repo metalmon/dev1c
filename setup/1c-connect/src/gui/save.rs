@@ -4,6 +4,8 @@
 //! человек не вводил заново (`carried_*`), и предупреждения о смене базы.
 
 use super::*;
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::WindowExt as _;
 
 /// Адрес публикации для записи: умолчание идёт за каталогом базы, правка в
 /// toml переживает его смену.
@@ -314,7 +316,7 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         proceed(window, cx);
         return;
     };
-    ask_yes_no(window, cx, &message, &detail, "Да, сохранить", "Нет, не сохранять", proceed);
+    ask_yes_no(window, cx, &message, &detail, "Да, сохранить", "Нет, не сохранять", false, proceed);
 }
 
 /// Спросить человека «да или нет» платформенным диалогом и сделать `proceed`
@@ -329,6 +331,7 @@ pub fn ask_yes_no(
     detail: &str,
     yes: &'static str,
     no: &'static str,
+    destructive: bool,
     proceed: impl FnOnce(&mut Window, &mut App) + 'static,
 ) {
     if cx.global::<Ui>().dialog_open {
@@ -339,22 +342,38 @@ pub fn ask_yes_no(
         return;
     }
     cx.global_mut::<Ui>().dialog_open = true;
-    let rx = window.prompt(PromptLevel::Warning, message, Some(detail), &[PromptButton::ok(yes), PromptButton::cancel(no)], cx);
-    cx.spawn(async move |cx| {
-        let yes = matches!(rx.await, Ok(0));
-        cx.update(|cx| {
-            cx.global_mut::<Ui>().dialog_open = false;
-            if !yes {
-                return;
-            }
-            let Some(w) = cx.global::<Ui>().window else { return };
-            let _ = w.update(cx, |_, window, cx| {
-                window.activate_window();
-                proceed(window, cx);
-            });
-        });
-    })
-    .detach();
+    // Диалог свой, а не платформенный (`Window::prompt`): тот приходит в теме
+    // системы и с заголовком «Warning», поверх тёмного окна — чужая дверь в
+    // своём доме (замечание владельца 28.10). Свой рисуется той же темой, что
+    // и окно, и не отнимает у него фокус — значит и прятаться окну не от чего.
+    let (message, detail) = (message.to_string(), detail.to_string());
+    // `open_alert_dialog` берёт `Fn`, а согласие даётся один раз: продолжение
+    // кладётся в ячейку и забирается первым же «да».
+    let once = std::rc::Rc::new(std::cell::RefCell::new(Some(proceed)));
+    let danger = destructive;
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let once = once.clone();
+        alert
+            .confirm()
+            .title(message.clone())
+            .description(detail.clone())
+            .ok_text(yes)
+            .cancel_text(no)
+            // Красная кнопка там, где действие отнимает сделанное: то же
+            // правило, что развело пункты меню по разрядам.
+            .ok_variant(if danger { ButtonVariant::Danger } else { ButtonVariant::Primary })
+            .on_ok(move |_, window, cx| {
+                cx.global_mut::<Ui>().dialog_open = false;
+                if let Some(proceed) = once.borrow_mut().take() {
+                    proceed(window, cx);
+                }
+                true
+            })
+            .on_cancel(move |_, _, cx| {
+                cx.global_mut::<Ui>().dialog_open = false;
+                true
+            })
+    });
 }
 
 /// Поднять/проверить HTTP-сервис на уже записанных `ui.cfg`: после смены

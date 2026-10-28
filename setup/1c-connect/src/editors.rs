@@ -37,8 +37,10 @@ pub fn zed_path() -> Option<PathBuf> {
     }
 }
 
-/// Снимает комментарии `//` и `/* ... */` **вне строк**, чтобы JSONC можно
-/// было разобрать как обычный JSON. Боевой код, не помощник тестов: `merge_zed`
+/// Снимает комментарии `//` и `/* ... */`, затем висящую запятую перед `}`
+/// или `]` — то, что `serde_json` (строгий JSON) не разбирает, а Zed
+/// разбирает: его парсер настроек — JSONC, комментарии и висящая запятая
+/// там свои, а не наша придумка. Боевой код, не помощник тестов: `merge_zed`
 /// проверяет на нём и вход, и результат (`serde_json::from_str(&as_json(..))`)
 /// — не разобрался вход, значит файл человека нам не по зубам, не разобрался
 /// результат — значит где-то ошибся наш сканер границ; в обоих случаях
@@ -46,12 +48,22 @@ pub fn zed_path() -> Option<PathBuf> {
 /// `cfg.rs` (`zed_json`) — там она жила копией до этой задачи, теперь общее
 /// место одно.
 ///
+/// Сама хирургическая правка текста этой функции не видит вовсе: висящая
+/// запятая человека остаётся в файле как есть, здесь только на минуту
+/// снимается то, что мешало бы `serde_json` сказать «цел» или «не цел».
+pub(crate) fn as_json(text: &str) -> String {
+    strip_trailing_commas(&strip_comments(text))
+}
+
+/// Снимает комментарии `//` и `/* ... */` **вне строк**, чтобы JSONC можно
+/// было разобрать как обычный JSON.
+///
 /// Байтовый скан, а не посимвольный: ASCII-пунктуация (`"`, `/`, `*`, `\`),
 /// по которой идёт разбор, никогда не совпадает с продолжающим байтом
 /// многобайтовой UTF-8 последовательности (кириллица и прочее — не ASCII,
 /// то есть ≥ 0x80), поэтому резать строку по этим байтовым смещениям
 /// безопасно: срез никогда не придётся на середину символа.
-pub(crate) fn as_json(text: &str) -> String {
+fn strip_comments(text: &str) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let (mut in_string, mut escaped) = (false, false);
@@ -97,6 +109,67 @@ pub(crate) fn as_json(text: &str) -> String {
     }
     out.push_str(&text[seg_start..]);
     out
+}
+
+/// Снимает запятую, за которой (через пробелы — комментариев тут уже нет,
+/// их снял `strip_comments` раньше) идёт `}` или `]`, И перед которой (тем
+/// же способом) стоит конец настоящего значения — закрывающая скобка,
+/// кавычка или буква/цифра (хвост числа, `true`/`false`/`null`). Это и
+/// отличает настоящую висящую запятую JSONC от голого мусора вроде `{,}`
+/// или `{"a":,}`, у которого перед запятой нет значения вовсе — такой
+/// мусор должен остаться отказом, а не превратиться в пустой объект.
+fn strip_trailing_commas(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b[i] == b'\\' {
+                escaped = true;
+            } else if b[i] == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b[i] == b',' && is_a_real_trailing_comma(b, i) {
+            out.push_str(&text[seg_start..i]);
+            seg_start = i + 1;
+        }
+        i += 1;
+    }
+    out.push_str(&text[seg_start..]);
+    out
+}
+
+/// Проверка для `strip_trailing_commas`: запятая в `i` — настоящая висящая,
+/// а не мусор, если после неё (через пробелы) `}`/`]`, а перед ней (тем же
+/// способом) — конец значения.
+fn is_a_real_trailing_comma(b: &[u8], i: usize) -> bool {
+    let mut after = i + 1;
+    while after < b.len() && b[after].is_ascii_whitespace() {
+        after += 1;
+    }
+    if !matches!(b.get(after), Some(&b'}') | Some(&b']')) {
+        return false;
+    }
+    let mut before = i;
+    while before > 0 && b[before - 1].is_ascii_whitespace() {
+        before -= 1;
+    }
+    before > 0 && {
+        let c = b[before - 1];
+        matches!(c, b'}' | b']' | b'"') || c.is_ascii_alphanumeric()
+    }
 }
 
 /// Экранирует `\` и `"` для JSON-строки — путь к программе кладём в
@@ -625,14 +698,36 @@ mod tests {
         assert!(merge_zed(before, Path::new("/opt/1c-connect")).is_err());
     }
 
-    /// Висящая запятая делает весь файл невалидным строгим JSON (не
-    /// JSON5) — наш сканер не должен ни зациклиться, ни запаниковать, ни
-    /// тихо всё испортить; честный отказ — безопасный исход (цена ошибки
-    /// здесь выше цены лишней строгости).
+    /// Висящая запятая в объекте — то, что Zed (его разбор — JSONC) читает
+    /// как обычный файл. Отказ здесь был бы «программа не умеет» при
+    /// исправно работающем редакторе, поэтому `as_json` её терпит на
+    /// проверке — а сама правка текста её не трогает: запятая человека
+    /// остаётся на месте, мы её не «исправляем».
     #[test]
-    fn a_dangling_comma_is_a_clean_refusal_not_a_panic() {
-        let before = "{\"context_servers\":{\"other\":{\"command\":\"x\"},}}";
-        assert!(merge_zed(before, Path::new("/opt/1c-connect")).is_err());
+    fn a_dangling_comma_in_an_object_is_tolerated_like_zed_tolerates_it() {
+        let before = "{\n  // старый сервер\n  \"context_servers\": {\"other\": {\"command\": \"x\"},}\n}\n";
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("// старый сервер"), "{out}");
+        assert!(out.contains("\"other\": {\"command\": \"x\"},"), "запятую человека не трогаем: {out}");
+        assert!(out.contains("\"1c\""), "{out}");
+    }
+
+    /// То же для массива — `args` человека с висящей запятой переживает
+    /// правку нетронутым.
+    #[test]
+    fn a_dangling_comma_in_an_array_is_tolerated_like_zed_tolerates_it() {
+        let before = "{\"context_servers\":{\"other\":{\"command\":\"x\",\"args\":[\"a\",\"b\",]}}}";
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("[\"a\",\"b\",]"), "запятую в массиве не трогаем: {out}");
+        assert!(out.contains("\"1c\""), "{out}");
+    }
+
+    /// Обратная сторона: терпимость к висящей запятой не должна проглотить
+    /// настоящий мусор, где перед запятой нет значения вовсе.
+    #[test]
+    fn a_comma_with_no_preceding_value_stays_a_refusal() {
+        assert!(merge_zed("{\"a\":,}", Path::new("/opt/1c-connect")).is_err());
+        assert!(merge_zed("{,}", Path::new("/opt/1c-connect")).is_err());
     }
 
     /// Фигурные скобки и кавычки внутри строковых значений не должны

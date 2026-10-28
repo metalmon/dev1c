@@ -688,10 +688,16 @@ pub fn look(path: Option<&Path>, exe: &Path) -> Found {
         return Found::Absent;
     };
     let mut foreign = Vec::new();
-    let mut ours = false;
+    // Important 2 ревью задачи 6: «настроен» — только когда на месте ВСЕ
+    // наши записи, а не хоть одна. Половина (`1c` есть, `vrunner` нет) — это
+    // всё ещё «серверы не настроены»: раздел обязан говорить о файле, а не
+    // хвалить его за часть работы, которую сделает только следующее нажатие
+    // «Настроить» (оно же допишет недостающую запись, `merge_zed`/`merge_pi`
+    // это уже умеют).
+    let mut ours_count = 0usize;
     for e in OURS.iter() {
         match servers.get(e.name) {
-            Some(entry) if pi_entry_is_ours(entry, exe) => ours = true,
+            Some(entry) if pi_entry_is_ours(entry, exe) => ours_count += 1,
             Some(_) => foreign.push(e.name.to_string()),
             None => {}
         }
@@ -699,7 +705,7 @@ pub fn look(path: Option<&Path>, exe: &Path) -> Found {
     if !foreign.is_empty() {
         return Found::Foreign(foreign);
     }
-    if ours {
+    if ours_count == OURS.len() {
         Found::Ours
     } else {
         Found::Absent
@@ -738,19 +744,67 @@ pub fn setup(path: &Path, exe: &Path, merge: impl Fn(&str, &Path) -> Result<Stri
         String::new()
     };
     let merged = merge(&text, exe)?;
-    if let Some(parent) = path.parent() {
+    // Important 3 ревью задачи 6: `path` может быть символьной ссылкой —
+    // человек держит настройки в репозитории dotfiles, обычное дело. `rename`
+    // прямо на такой путь заменил бы саму ссылку обычным файлом: настоящий
+    // файл остался бы нетронутым и отвязанным, данные целы, а связь потеряна
+    // без единого слова об этом. Канонизируем, чтобы писать СКВОЗЬ ссылку, в
+    // настоящий файл; не вышло (файла ещё нет — свежее создание, либо путь
+    // не существует вовсе) — пишем по тому пути, что дали, как и раньше.
+    let target = if existed { std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) } else { path.to_path_buf() };
+    if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| vec![format!("не создать каталог {}: {e}", parent.display())])?;
     }
     if existed {
-        let bak = sibling_path(path, ".bak");
+        let bak = sibling_path(&target, ".bak");
         if !bak.exists() {
-            std::fs::copy(path, &bak).map_err(|e| vec![format!("не сохранить резервную копию {}: {e}", bak.display())])?;
+            std::fs::copy(&target, &bak).map_err(|e| vec![format!("не сохранить резервную копию {}: {e}", bak.display())])?;
         }
     }
-    let tmp = sibling_path(path, ".tmp");
-    std::fs::write(&tmp, &merged).map_err(|e| vec![format!("не записать {}: {e}", tmp.display())])?;
-    std::fs::rename(&tmp, path).map_err(|e| vec![format!("не переименовать {} в {}: {e}", tmp.display(), path.display())])?;
+    let tmp = sibling_path(&target, ".tmp");
+    if let Err(e) = write_and_rename(&tmp, &target, &merged) {
+        // Minor 6 ревью задачи 6: осиротевший `.tmp` не должен остаться на
+        // диске после отказа — ни от самой записи, ни от переименования.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(look(Some(path), exe))
+}
+
+/// Пишет во временный файл и переименовывает его в целевой — вынесено одним
+/// местом, чтобы `setup` убирал осиротевший `.tmp` на любой из двух ошибок
+/// одной веткой, не повторяя чистку дважды.
+///
+/// ponytail: `File::sync_all` перед `rename` не зовём — пропавшее питание
+/// между записью и переименованием оставило бы пустой временный файл, а
+/// `rename` его не тронул бы вовсе (целевой файл и `.bak` целы); обратный
+/// порядок (питание пропало между `rename` и возвратом) `.bak` всё равно
+/// спасает. Потолок этого — пустой или укороченный `.tmp`, который никогда
+/// не становится целевым файлом: поднять до `sync_all`, если это окажется
+/// недостаточным (найдутся файловые системы, где незавершённая `rename`
+/// видна снаружи раньше `fsync`).
+fn write_and_rename(tmp: &Path, target: &Path, text: &str) -> Result<(), Vec<String>> {
+    std::fs::write(tmp, text).map_err(|e| vec![format!("не записать {}: {e}", tmp.display())])?;
+    std::fs::rename(tmp, target).map_err(|e| vec![format!("не переименовать {} в {}: {e}", tmp.display(), target.display())])
+}
+
+/// Слова для отказа `setup`: список занятых имён — старой фразой со всеми
+/// именами через запятую; любая другая причина (битый JSON, BOM у pi, отказ
+/// ввода-вывода) — как она есть, без подмены чужой причины своей догадкой
+/// (Important 1 ревью задачи 6: причина — она одна, и это причина
+/// `merge`/`setup`, а не придуманные нами слова про занятую запись).
+///
+/// Различать два случая по форме, а не заводить отдельный вариант ошибки:
+/// список занятых имён — это и только это подмножество `OURS` целиком
+/// (`merge_zed`/`merge_pi` никогда не возвращают вперемешку имя и прозу), всё
+/// прочее — одна строка прозы.
+pub fn refusal_text(reasons: &[String]) -> String {
+    let occupied = !reasons.is_empty() && reasons.iter().all(|r| OURS.iter().any(|e| e.name == r));
+    if occupied {
+        format!("запись {} занята чужой командой — не меняем", reasons.join(", "))
+    } else {
+        reasons.join("; ")
+    }
 }
 
 #[cfg(test)]
@@ -1147,5 +1201,91 @@ mod tests {
         assert_eq!(setup(&p, exe, merge_zed).unwrap_err(), vec!["1c".to_string()]);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
         assert!(!sibling_path(&p, ".bak").exists());
+    }
+
+    /// Important 2 ревью задачи 6: половина наших записей на месте (`1c`
+    /// есть и наша, `vrunner` отсутствует вовсе) — это ещё не «настроен»,
+    /// а «серверы не настроены»: хвалить файл за часть работы раздел не
+    /// должен, и кнопка «Настроить» обязана остаться открытой, чтобы
+    /// дописать недостающую запись.
+    #[test]
+    fn look_requires_every_one_of_our_entries_not_just_one() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        std::fs::write(&p, format!(r#"{{"context_servers":{{"1c":{{"command":"{}"}}}}}}"#, exe.display())).unwrap();
+        assert_eq!(look(Some(&p), exe), Found::Absent);
+    }
+
+    /// Important 4 ревью задачи 6: ревьюер подменил перечит на диске
+    /// константой `Ok(Found::Ours)` — ни один тест тогда не упал. Этот тест
+    /// обязан упасть на такой подмене: `merge`, который вернул `Ok`, пишет
+    /// текст, где одна из двух записей — ЧУЖАЯ (`vrunner`: команда `nc`);
+    /// если бы `setup` отвечал «получилось» по самому факту `Ok`, не читая
+    /// диск заново, здесь был бы `Found::Ours`. Настоящий перечит обязан
+    /// увидеть чужую команду и вернуть `Foreign`.
+    #[test]
+    fn setup_returns_what_look_actually_sees_not_an_assumed_success() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        let suspicious_merge = |_: &str, _: &Path| -> Result<String, Vec<String>> {
+            Ok(r#"{"context_servers":{"1c":{"command":"/opt/1c-connect"},"vrunner":{"command":"nc"}}}"#.to_string())
+        };
+        let got = setup(&p, exe, suspicious_merge).unwrap();
+        assert_eq!(got, Found::Foreign(vec!["vrunner".to_string()]));
+        // И независимый перечит того же файла видит то же самое: одна правда.
+        assert_eq!(look(Some(&p), exe), got);
+    }
+
+    /// Та же мысль с другой стороны: файл, который мы записали, подменили на
+    /// диске МИМО нас (другой процесс, человек) — следующий перечит обязан
+    /// говорить о том, что лежит на диске сейчас, а не о том, что мы когда-то
+    /// туда положили.
+    #[test]
+    fn look_reflects_the_disk_even_after_an_outside_edit_past_our_own_write() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
+        std::fs::write(&p, r#"{"context_servers":{"1c":{"command":"nc"}}}"#).unwrap();
+        assert_eq!(look(Some(&p), exe), Found::Foreign(vec!["1c".to_string()]));
+    }
+
+    /// Important 1 ревью задачи 6: причина прозой (битый JSON) идёт в текст
+    /// как есть, а не тонет в «занята чужой командой» — чужая фраза про
+    /// отказ, которого не было.
+    #[test]
+    fn refusal_text_passes_a_single_prose_reason_through_unchanged() {
+        let reasons = merge_zed("это не json", Path::new("/opt/1c-connect")).unwrap_err();
+        let text = refusal_text(&reasons);
+        assert!(text.contains("не разбирается как JSON"), "{text}");
+        assert!(!text.contains("занята чужой командой"), "{text}");
+    }
+
+    /// Список занятых имён — старая фраза, со всеми именами через запятую.
+    #[test]
+    fn refusal_text_names_occupied_entries_with_the_old_phrase() {
+        let reasons = vec!["1c".to_string(), "vrunner".to_string()];
+        assert_eq!(refusal_text(&reasons), "запись 1c, vrunner занята чужой командой — не меняем");
+    }
+
+    /// Important 3 ревью задачи 6: символьную ссылку в тесте на этой машине
+    /// создать нельзя (обычной учётке Windows прав не дают — тот же потолок,
+    /// что у `the_same_tree_seen_through_a_symlink_appears_once` в
+    /// `ops_host.rs`). Доказываем механизм канонизации, а не весь сценарий
+    /// целиком: два разных написания одного файла (с `.` посередине пути)
+    /// дают один канонический путь, и `.bak`/содержимое обязаны оказаться
+    /// при НАСТОЯЩЕМ файле, а не при написании-с-точкой.
+    #[test]
+    fn setup_canonicalizes_an_existing_path_before_writing() {
+        let d = Dir::new();
+        let real = d.path().join("settings.json");
+        std::fs::write(&real, "{}").unwrap();
+        let dirty = d.path().join(".").join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(setup(&dirty, exe, merge_zed).unwrap(), Found::Ours);
+        assert_eq!(look(Some(&real), exe), Found::Ours);
+        assert!(sibling_path(&real, ".bak").exists(), "резервная копия обязана лежать при настоящем файле");
     }
 }

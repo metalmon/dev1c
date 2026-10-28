@@ -784,10 +784,12 @@ pub fn setup_editor(cx: &mut App, zed: bool) {
                 Ok(_) => Line {
                     kind: Kind::Ok, text: format!("{name}: записано — наберите /reload в открытой сессии")
                 },
-                Err(names) => Line {
-                    kind: Kind::Fail,
-                    text: format!("{name}: запись {} занята чужой командой — не меняем", names.join(", ")),
-                },
+                // Important 1 ревью задачи 6: причина отказа — та, что отдал
+                // `merge`/`setup` (`editors::refusal_text`), не наша
+                // одна-на-всё фраза про занятую запись. Битый JSON, BOM у
+                // pi, отказ ввода-вывода — прозу показываем как есть; «занято»
+                // остаётся только там, где реально заняты наши имена.
+                Err(reasons) => Line { kind: Kind::Fail, text: format!("{name}: {}", crate::editors::refusal_text(&reasons)) },
             }
         }
         (Err(e), _) => Line {

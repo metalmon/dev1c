@@ -1359,20 +1359,36 @@ impl Render for Panel {
                 let ui = cx.global::<Ui>();
                 let facts = fact_rows(&project_facts(&ui.facts));
                 let rows = project_rows(ui.project.as_ref());
-                // Читается с диска прямо тут: два маленьких JSON-файла, и
-                // раздел «Редакторы» ничего своего не хранит в `Ui` — тем же
-                // путём, что `look` читает их и в подкоманде `mcp` (задача 6,
-                // решение владельца №2: раздел говорит о файле, а не о
-                // намерении). Кэш здесь завёл бы второй источник правды, а
-                // кнопка «Настроить» и так перечитывает его же после записи.
+                // ponytail: читается с диска прямо тут, блокирующе, на
+                // каждую отрисовку вкладки «Проект» — два маленьких JSON-
+                // файла, и раздел «Редакторы» ничего своего не хранит в `Ui`
+                // (решение владельца №2: раздел говорит о файле, а не о
+                // намерении; кэш завёл бы второй источник правды, а кнопка
+                // «Настроить» и так перечитывает его же после записи).
+                // Потолок: лишний файловый I/O на поток окна при каждом
+                // кадре вкладки — приемлемо, пока файлы маленькие и локальные
+                // (миллисекунды); поднять до фонового потока с кэшем в `Ui`,
+                // как `refresh_project`, если это станет заметно на глаз.
                 let exe = std::env::current_exe().ok();
                 let found = |path: Option<std::path::PathBuf>| match &exe {
                     Some(exe) => editors::look(path.as_deref(), exe),
                     None => editors::Found::Missing,
                 };
                 let (zed_found, pi_found) = (found(editors::zed_path()), found(editors::pi_path()));
-                let editor_list = editor_rows(&zed_found, &pi_found);
+                let mut editor_list = editor_rows(&zed_found, &pi_found);
                 let locked = [setup_locked(&zed_found), setup_locked(&pi_found)];
+                if exe.is_none() {
+                    // Minor 8 ревью задачи 6: `Found::Missing` здесь не о
+                    // редакторе — мы не узнали СВОЙ путь, и слова
+                    // `editor_rows` («не найден на этой машине») были бы
+                    // неправдой про Zed/pi, о которых мы ничего не выяснили.
+                    // Подмена — только в отрисовке: `editor_rows`/`found_text`
+                    // остаются чистой функцией от `Found`, не от прав доступа
+                    // к собственному процессу.
+                    for row in editor_list.iter_mut() {
+                        row.2 = "не могу определить свой путь — проверка редакторов недоступна".to_string();
+                    }
+                }
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
                     row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
@@ -1835,6 +1851,18 @@ mod tests {
     fn several_foreign_names_are_all_named() {
         let text = editor_rows(&Found::Foreign(vec!["1c".into(), "vrunner".into()]), &Found::Absent)[0].2.clone();
         assert!(text.contains("1c") && text.contains("vrunner"), "{text}");
+    }
+
+    /// Important 5 ревью задачи 6: `render` вяжет кнопки с редакторами по
+    /// индексу (`locked[i]`, `on_click(.., i == 0)`), а не по имени — этот
+    /// тест закрепляет единственный факт, от которого вязка жива: индекс 0 —
+    /// всегда Zed, индекс 1 — всегда pi. Переставят строки в `editor_rows` —
+    /// тест упадёт раньше, чем молча запрётся чужая кнопка.
+    #[test]
+    fn editor_rows_keeps_zed_at_index_0_and_pi_at_index_1() {
+        let rows = editor_rows(&Found::Ours, &Found::Ours);
+        assert_eq!(rows[0].1, "Zed");
+        assert_eq!(rows[1].1, "pi");
     }
 
     /// Решение владельца 26.10.2026 на сомнение 2 отчёта по задачам 7+8:

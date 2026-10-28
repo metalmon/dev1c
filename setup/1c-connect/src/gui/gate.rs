@@ -85,6 +85,13 @@ pub fn cold_gate(
     if !crate::verify::db_user_is_set(&h.db_user) {
         return Some("не задан пользователь базы".into());
     }
+    // Чужая публикация: адрес её знает только человек, и без него включать
+    // нечего — стучать не по чему. Подходит под определение из шапки файла
+    // дословно: смертельно для работы и видно без сети. В режиме `auto`
+    // адрес считается сам, и этого условия там не бывает.
+    if cfg.publication_address_missing() {
+        return Some("не задан адрес публикации — впишите его и нажмите «Сохранить»".into());
+    }
     // Данные для подключения к среде есть только у туннеля: в локальном режиме
     // этих трёх полей в окне нет вовсе (`panel::shown_fields`), и запирать ими
     // переключатель значило бы спрашивать человека о том, чего ему не
@@ -164,6 +171,20 @@ mod tests {
         let why = cold_gate(&crate::cfg::filled_for_test(), false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
             .unwrap();
         assert!(why.contains("параметров"), "{why}");
+    }
+
+    #[test]
+    fn webserver_without_an_address_locks_the_switch() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.publication = "webserver".into();
+        c.host.base_url = String::new();
+        assert_eq!(open(&c).as_deref(), Some("не задан адрес публикации — впишите его и нажмите «Сохранить»"));
+        c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
+        assert_eq!(open(&c), None);
+        // В обычном режиме адрес считается сам — замку там не за что цепляться.
+        c.host.publication = "auto".into();
+        c.host.base_url = String::new();
+        assert_eq!(open(&c), None);
     }
 
     #[test]

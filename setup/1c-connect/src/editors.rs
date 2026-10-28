@@ -37,40 +37,65 @@ pub fn zed_path() -> Option<PathBuf> {
     }
 }
 
-/// Снимает комментарии `//` **вне строк**, чтобы JSONC можно было разобрать
-/// как обычный JSON. Сама правка (`merge_zed`/`set_enabled_zed`) её не
-/// зовёт — она ищет границы записи напрямую в исходном тексте, пропуская
-/// комментарии на лету (`skip_ws_and_comments`), чтобы не потерять их при
-/// сборке результата. Эта функция нужна тестам: и здесь (проверить, что
-/// получилось, разобрав как JSON), и в `cfg.rs` (`zed_json`) — там она жила
-/// копией до этой задачи, теперь общее место одно.
+/// Снимает комментарии `//` и `/* ... */` **вне строк**, чтобы JSONC можно
+/// было разобрать как обычный JSON. Боевой код, не помощник тестов: `merge_zed`
+/// проверяет на нём и вход, и результат (`serde_json::from_str(&as_json(..))`)
+/// — не разобрался вход, значит файл человека нам не по зубам, не разобрался
+/// результат — значит где-то ошибся наш сканер границ; в обоих случаях
+/// правильный ответ — отказ, а не тихая порча файла. Используется и в
+/// `cfg.rs` (`zed_json`) — там она жила копией до этой задачи, теперь общее
+/// место одно.
 ///
-/// ponytail: сегодня оба вызова — из тестов (`#[cfg(test)]`), и в обычной
-/// сборке функция простаивает; `pub(crate) fn`, а не `#[cfg(test)]`, — по
-/// решению задачи (эта правка — боевой код модуля, не только для тестов),
-/// поэтому гасим предупреждение, а не прячем функцию за test-гейтом.
-#[allow(dead_code)]
+/// Байтовый скан, а не посимвольный: ASCII-пунктуация (`"`, `/`, `*`, `\`),
+/// по которой идёт разбор, никогда не совпадает с продолжающим байтом
+/// многобайтовой UTF-8 последовательности (кириллица и прочее — не ASCII,
+/// то есть ≥ 0x80), поэтому резать строку по этим байтовым смещениям
+/// безопасно: срез никогда не придётся на середину символа.
 pub(crate) fn as_json(text: &str) -> String {
+    let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let chars: Vec<char> = line.chars().collect();
-        let (mut in_string, mut escaped, mut i) = (false, false, 0);
-        while i < chars.len() {
-            let c = chars[i];
+    let (mut in_string, mut escaped) = (false, false);
+    let mut seg_start = 0usize; // начало копируемого "как есть" куска
+    let mut i = 0usize;
+    while i < b.len() {
+        if in_string {
             if escaped {
                 escaped = false;
-            } else if in_string && c == '\\' {
+            } else if b[i] == b'\\' {
                 escaped = true;
-            } else if c == '\"' {
-                in_string = !in_string;
-            } else if !in_string && c == '/' && chars.get(i + 1) == Some(&'/') {
-                break; // строка комментария — остаток не нужен
+            } else if b[i] == b'"' {
+                in_string = false;
             }
-            out.push(c);
             i += 1;
+            continue;
         }
-        out.push('\n');
+        if b[i] == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            out.push_str(&text[seg_start..i]);
+            i += 2;
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            seg_start = i; // сам перевод строки (если есть) достанется следующему куску
+            continue;
+        }
+        if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            out.push_str(&text[seg_start..i]);
+            i += 2;
+            while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(b.len()); // за `*/`, или до конца, если комментарий не закрыт
+            seg_start = i;
+            continue;
+        }
+        i += 1;
     }
+    out.push_str(&text[seg_start..]);
     out
 }
 
@@ -129,8 +154,7 @@ fn context_servers_value(exe: &Path, nl: &str) -> String {
     format!("{{{nl}{body}{nl}  }}")
 }
 
-/// Файл с нуля — абсента `settings.json` ещё не было, значит и чужого в нём
-/// нет.
+/// Файл с нуля — `settings.json` раньше не было, значит и чужого в нём нет.
 fn fresh_document(exe: &Path, nl: &str) -> String {
     format!("{{{nl}  \"context_servers\": {}{nl}}}{nl}", context_servers_value(exe, nl))
 }
@@ -167,15 +191,15 @@ fn apply_edits(body: &str, mut edits: Vec<Edit>) -> String {
     out
 }
 
-/// Пропускает пробелы и строчные комментарии `//`, возвращая индекс первого
-/// значимого байта. Скобки/кавычки в комментариях этим и не видны счёту
-/// глубины ниже — ради этого функция и существует отдельно от `as_json`:
-/// там снятые комментарии печатаются заново, здесь нужны только смещения в
-/// исходном тексте.
+/// Пропускает пробелы и комментарии (`//` и `/* ... */`), возвращая индекс
+/// первого значимого байта. Скобки/кавычки внутри комментария этим и не
+/// видны счёту глубины ниже — без этого закомментированный человеком старый
+/// `"context_servers": {...}` читался бы как настоящий ключ, и наши записи
+/// легли бы внутрь чужого комментария (а не рядом с ним).
 fn skip_ws_and_comments(t: &str, mut i: usize) -> usize {
     let b = t.as_bytes();
     loop {
-        while i < b.len() && (b[i] as char).is_whitespace() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
             i += 1;
         }
         if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'/' {
@@ -183,6 +207,14 @@ fn skip_ws_and_comments(t: &str, mut i: usize) -> usize {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
+            continue;
+        }
+        if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
+            i += 2;
+            while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(b.len());
             continue;
         }
         break;
@@ -229,6 +261,13 @@ fn skip_bracket(t: &str, open: usize) -> usize {
                     i += 1;
                 }
             }
+            Some(&c) if c == b'/' && b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            }
             Some(&c) if c == openc => {
                 depth += 1;
                 i += 1;
@@ -258,12 +297,12 @@ fn skip_value(t: &str, start: usize) -> usize {
         _ => {
             let mut j = i;
             while j < b.len() && !matches!(b[j], b',' | b'}' | b']') && b[j] != b'\n' {
-                if b[j] == b'/' && b.get(j + 1) == Some(&b'/') {
+                if b[j] == b'/' && matches!(b.get(j + 1), Some(&b'/') | Some(&b'*')) {
                     break;
                 }
                 j += 1;
             }
-            while j > i && (b[j - 1] as char).is_whitespace() {
+            while j > i && b[j - 1].is_ascii_whitespace() {
                 j -= 1;
             }
             j
@@ -335,59 +374,102 @@ fn is_ours(body: &str, field: &Field, exe: &Path) -> bool {
 
 /// Вписывает наши две записи `context_servers` в текст `settings.json` Zed
 /// (`text`), не трогая ничего чужого. `exe` — путь к программе, который
-/// ляжет в `command`. `Err` — список имён, занятых чужими записями с нашим
-/// именем: ни одна правка в этом случае не применяется (решение владельца,
-/// «чужую запись не правим и не перезаписываем никогда»).
+/// ляжет в `command`. `Err` — список причин словами: либо имена, занятых
+/// чужими записями с нашим именем (решение владельца, «чужую запись не
+/// правим и не перезаписываем никогда»), либо одна причина, почему файл не
+/// разобрать. Пустой (или только из пробелов) вход — это всё ещё создание
+/// свежего файла; всё прочее, что не разобралось как JSON-объект, —
+/// отказ, а не попытка угадать и затереть то, что человек не поймёт как наш
+/// формат (Critical 1 ревью задачи).
 pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     let (bom, body) = split_bom(text);
     let nl = if body.contains("\r\n") { "\r\n" } else { "\n" };
     if body.trim().is_empty() {
         return Ok(format!("{bom}{}", fresh_document(exe, nl)));
     }
+    // Разбор целиком, а не только по скобкам: битый JSON (незакрытый объект,
+    // голый токен, файл из одних комментариев) обязан быть отказом здесь, а
+    // не наполовину написанным файлом (Critical 2 ревью задачи).
+    let parsed: serde_json::Value = serde_json::from_str(&as_json(body))
+        .map_err(|e| vec![format!("settings.json не разбирается как JSON (после снятия комментариев): {e}")])?;
+    if !parsed.is_object() {
+        return Err(vec!["верхний уровень settings.json — не объект".to_string()]);
+    }
     let top_open = skip_ws_and_comments(body, 0);
     if body.as_bytes().get(top_open) != Some(&b'{') {
-        // Не похоже на объект — не наш случай (битый файл), но и падать
-        // незачем: заводим с нуля, как если бы файла не было вовсе.
-        return Ok(format!("{bom}{}", fresh_document(exe, nl)));
+        // Разобралось как объект, но границу не нашли — наш сканер и
+        // serde_json разошлись; не должно происходить, но отказ дешевле
+        // паники или порчи файла.
+        return Err(vec!["не нашли границу верхнего объекта settings.json".to_string()]);
     }
     let (top_fields, _) = parse_fields(body, top_open);
     let cs = top_fields.iter().find(|f| f.key == "context_servers");
 
     let mut edits = Vec::new();
-    if let Some(cs_field) = cs.filter(|f| body.as_bytes().get(f.value_start) == Some(&b'{')) {
-        let (cs_fields, _) = parse_fields(body, cs_field.value_start);
-        let mut occupied = Vec::new();
-        let mut missing = Vec::new();
-        for e in OURS.iter() {
-            match cs_fields.iter().find(|f| f.key == e.name) {
-                Some(f) if is_ours(body, f, exe) => edits.push(Edit { start: f.key_start, end: f.value_end, text: entry_json(e, exe, nl) }),
-                Some(_) => occupied.push(e.name.to_string()),
-                None => missing.push(e),
+    match cs {
+        Some(cs_field) => {
+            if body.as_bytes().get(cs_field.value_start) != Some(&b'{') {
+                // Человек положил в context_servers не объект (строку,
+                // массив) — вписать рядом свой второй ключ с тем же именем
+                // значило бы молча проиграть чужому (в JSON побеждает
+                // последний одноимённый ключ), поэтому отказ (Important 2
+                // ревью задачи).
+                return Err(vec!["context_servers в settings.json — не объект".to_string()]);
+            }
+            let (cs_fields, _) = parse_fields(body, cs_field.value_start);
+            let mut occupied = Vec::new();
+            let mut missing = Vec::new();
+            for e in OURS.iter() {
+                match cs_fields.iter().find(|f| f.key == e.name) {
+                    Some(f) if is_ours(body, f, exe) => {
+                        edits.push(Edit { start: f.key_start, end: f.value_end, text: entry_json(e, exe, nl) })
+                    }
+                    Some(_) => occupied.push(e.name.to_string()),
+                    None => missing.push(e),
+                }
+            }
+            if !occupied.is_empty() {
+                return Err(occupied);
+            }
+            if !missing.is_empty() {
+                let has_other = !cs_fields.is_empty();
+                let block = missing.iter().map(|e| entry_json(e, exe, nl)).collect::<Vec<_>>().join(&format!(",{nl}    "));
+                let text = format!("{nl}    {block}{}", if has_other { "," } else { "" });
+                edits.push(Edit { start: cs_field.value_start + 1, end: cs_field.value_start + 1, text });
             }
         }
-        if !occupied.is_empty() {
-            return Err(occupied);
+        None => {
+            let has_other = !top_fields.is_empty();
+            let text = format!("{nl}  \"context_servers\": {}{}", context_servers_value(exe, nl), if has_other { "," } else { "" });
+            edits.push(Edit { start: top_open + 1, end: top_open + 1, text });
         }
-        if !missing.is_empty() {
-            let has_other = !cs_fields.is_empty();
-            let block = missing.iter().map(|e| entry_json(e, exe, nl)).collect::<Vec<_>>().join(&format!(",{nl}    "));
-            let text = format!("{nl}    {block}{}", if has_other { "," } else { "" });
-            edits.push(Edit { start: cs_field.value_start + 1, end: cs_field.value_start + 1, text });
-        }
-    } else {
-        let has_other = !top_fields.is_empty();
-        let text = format!("{nl}  \"context_servers\": {}{}", context_servers_value(exe, nl), if has_other { "," } else { "" });
-        edits.push(Edit { start: top_open + 1, end: top_open + 1, text });
     }
 
-    Ok(format!("{bom}{}", apply_edits(body, edits)))
+    let edited = apply_edits(body, edits);
+    // Страховка от собственной ошибки сканера: правка обязана остаться
+    // валидным JSON, иначе Zed отвергнет файл целиком, а мы отрапортуем
+    // успех (Critical 2 ревью задачи).
+    if serde_json::from_str::<serde_json::Value>(&as_json(&edited)).is_err() {
+        return Err(vec!["правка дала невалидный JSON — отказ, файл не менялся".to_string()]);
+    }
+    Ok(format!("{bom}{edited}"))
 }
 
 /// `"1c"`/`"vrunner"`, выставленные `merge_zed`, несут явный `"enabled":
 /// true` (решение владельца №1) — здесь мы этот ключ заменяем, а не
 /// вставляем: правка только своих двух записей, всё остальное в файле не
 /// задето.
-pub fn set_enabled_zed(text: &str, on: bool) -> String {
+///
+/// `exe` различает два случая, а не два отдельных имени функции:
+/// `Some(exe)` — машина человека, и трогаем только записи, чей `command`
+/// действительно указывает на этот исполняемый (та же проверка, что в
+/// `merge_zed`) — иначе чужая запись с нашим именем (например, `nc` на
+/// порту `1c`) гасилась бы вместе с нашей (Important 1 ревью задачи).
+/// `None` — контейнер: там имя `1c`/`vrunner` наше по построению (эту
+/// запись туда положила наша же правка по SSH, задача 7), а `command` —
+/// `nc` на проброшенный порт, и сверять его с путём к `1c-connect` незачем
+/// и нечем.
+pub fn set_enabled_zed(text: &str, on: bool, exe: Option<&Path>) -> String {
     let (bom, body) = split_bom(text);
     let top_open = skip_ws_and_comments(body, 0);
     if body.as_bytes().get(top_open) != Some(&b'{') {
@@ -404,6 +486,11 @@ pub fn set_enabled_zed(text: &str, on: bool) -> String {
         let Some(f) = cs_fields.iter().find(|f| f.key == e.name) else { continue };
         if body.as_bytes().get(f.value_start) != Some(&b'{') {
             continue;
+        }
+        if let Some(exe) = exe {
+            if !is_ours(body, f, exe) {
+                continue;
+            }
         }
         let (inner, _) = parse_fields(body, f.value_start);
         if let Some(en) = inner.iter().find(|x| x.key == "enabled") {
@@ -457,20 +544,153 @@ mod tests {
         assert_eq!(v["context_servers"]["1c"]["command"], r"C:\Users\Иван Петров\1c-connect.exe");
     }
 
+    /// Переводы строк — только `\r\n`, ни одного одиночного `\n`: слабая
+    /// проверка `out.contains("\r\n")` проходит и за счёт нетронутых строк,
+    /// если наша вставка потеряла перевод строки где-то в своём тексте,
+    /// этого бы не заметили (находка ревью задачи).
+    fn only_crlf_newlines(s: &str) -> bool {
+        let b = s.as_bytes();
+        (0..b.len()).filter(|&i| b[i] == b'\n').all(|i| i > 0 && b[i - 1] == b'\r')
+    }
+
     #[test]
     fn line_endings_and_bom_survive_the_merge() {
         let before = "\u{feff}{\r\n  \"theme\": \"One\"\r\n}\r\n";
         let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
-        assert!(out.starts_with('\u{feff}') && out.contains("\r\n") && !out.contains("\n\n"), "{out:?}");
+        assert!(out.starts_with('\u{feff}') && out.contains("\r\n") && only_crlf_newlines(&out), "{out:?}");
     }
 
     #[test]
     fn enabled_flips_without_touching_anything_else() {
         let on = merge_zed("", Path::new("/opt/1c-connect")).unwrap();
-        let off = set_enabled_zed(&on, false);
+        let off = set_enabled_zed(&on, false, Some(Path::new("/opt/1c-connect")));
         let v: serde_json::Value = serde_json::from_str(&as_json(&off)).unwrap();
         assert_eq!(v["context_servers"]["1c"]["enabled"], false);
         assert_eq!(v["context_servers"]["vrunner"]["enabled"], false);
-        assert_eq!(set_enabled_zed(&off, true), on);
+        assert_eq!(set_enabled_zed(&off, true, Some(Path::new("/opt/1c-connect"))), on);
+    }
+
+    /// Important 1 ревью задачи: чужая запись с нашим именем (`nc` на
+    /// порту, человек прописал руками) не гасится вместе с нашей, когда мы
+    /// знаем, кто мы (`Some(exe)` — машина человека).
+    #[test]
+    fn set_enabled_zed_with_exe_skips_a_foreign_record_with_our_name() {
+        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\",\"args\":[\"-N\",\"localhost\",\"7771\"],\"enabled\":true}}}";
+        let out = set_enabled_zed(before, false, Some(Path::new("/opt/1c-connect")));
+        assert_eq!(out, before, "чужая запись с нашим именем не должна меняться");
+    }
+
+    /// Контейнерный случай (задача 7): `exe` неизвестен или не к месту,
+    /// имени доверяем по построению — запись `1c`/`vrunner` туда положила
+    /// только наша же правка.
+    #[test]
+    fn set_enabled_zed_without_exe_trusts_the_name_container_case() {
+        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\",\"args\":[\"-N\",\"localhost\",\"7771\"],\"enabled\":true},\"vrunner\":{\"command\":\"nc\",\"enabled\":true}}}";
+        let out = set_enabled_zed(before, false, None);
+        let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
+        assert_eq!(v["context_servers"]["1c"]["enabled"], false);
+        assert_eq!(v["context_servers"]["vrunner"]["enabled"], false);
+    }
+
+    /// Critical 1 ревью задачи: текст, который не разбирается как JSON
+    /// вовсе, — отказ, а не наш файл вместо содержимого человека.
+    #[test]
+    fn garbage_that_is_not_json_is_a_refusal_not_a_silent_overwrite() {
+        assert!(merge_zed("это вообще не json", Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Файл из одних комментариев после их снятия — пустой текст, а не
+    /// пустой ВХОД: в JSON это тоже не разбирается, и это тоже отказ, а не
+    /// «файла как бы не было».
+    #[test]
+    fn a_comments_only_file_is_a_refusal() {
+        assert!(merge_zed("// только комментарии\n", Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Critical 2 ревью задачи: объект начат, но не закрыт и несёт голый
+    /// токен — Zed отверг бы такой файл целиком, и мы обязаны отказом, а не
+    /// наполовину написанным (и при этом как бы успешным) результатом.
+    #[test]
+    fn an_unparseable_object_is_a_refusal_not_a_half_written_file() {
+        let before = "{\n  \"theme\": \"One\",\n  oops\n";
+        assert!(merge_zed(before, Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Important 2 ревью задачи: `context_servers` — строка, не объект.
+    /// Вписать рядом свой второй ключ с тем же именем значило бы молча
+    /// проиграть чужому (в JSON побеждает последний одноимённый ключ).
+    #[test]
+    fn context_servers_that_is_not_an_object_is_a_refusal() {
+        let before = "{\"context_servers\": \"выключено руками\"}";
+        assert!(merge_zed(before, Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Висящая запятая делает весь файл невалидным строгим JSON (не
+    /// JSON5) — наш сканер не должен ни зациклиться, ни запаниковать, ни
+    /// тихо всё испортить; честный отказ — безопасный исход (цена ошибки
+    /// здесь выше цены лишней строгости).
+    #[test]
+    fn a_dangling_comma_is_a_clean_refusal_not_a_panic() {
+        let before = "{\"context_servers\":{\"other\":{\"command\":\"x\"},}}";
+        assert!(merge_zed(before, Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Фигурные скобки и кавычки внутри строковых значений не должны
+    /// сбивать счёт глубины у `skip_bracket`/`parse_fields` — иначе границу
+    /// чужой записи (а за ней и свою, следом) нашли бы не там.
+    #[test]
+    fn braces_and_quotes_inside_string_values_do_not_confuse_the_scanner() {
+        let before = r#"{"context_servers":{"weird":{"command":"/opt/{a}\"b\"","args":[]}}}"#;
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("weird"), "{out}");
+        assert!(out.contains("\"1c\""), "{out}");
+    }
+
+    /// Экранированная обратная косая перед закрывающей кавычкой: два
+    /// символа `\\` в JSON-тексте — это один настоящий `\`, и кавычка
+    /// сразу после него закрывает строку, а не экранируется ей. Собьётся
+    /// счёт — `merge_zed` вернёт `Err` (результат не разберётся как JSON),
+    /// а не тихо сдвинутые границы.
+    #[test]
+    fn an_escaped_backslash_before_a_closing_quote_does_not_desync_the_scanner() {
+        let before = r#"{"context_servers":{"other":{"command":"C:\\","args":[]}}}"#;
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("other") && out.contains("\"1c\""), "{out}");
+    }
+
+    /// Critical 3 ревью задачи: блочный комментарий ПЕРЕД `context_servers`
+    /// — текст комментария переживает правку, запись садится в настоящий
+    /// (не закомментированный) объект.
+    #[test]
+    fn a_block_comment_before_context_servers_survives_the_merge() {
+        let before = "{\n  /* старый конфиг */\n  \"context_servers\": {}\n}\n";
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("/* старый конфиг */"), "{out}");
+        assert!(out.contains("\"1c\""), "{out}");
+    }
+
+    /// Блочный комментарий ПОСЛЕ `context_servers`, перед закрывающей
+    /// скобкой объекта — не мешает найти границу последнего поля.
+    #[test]
+    fn a_block_comment_after_context_servers_survives_the_merge() {
+        let before = "{\n  \"context_servers\": {}\n  /* хвост */\n}\n";
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("/* хвост */"), "{out}");
+        assert!(out.contains("\"1c\""), "{out}");
+    }
+
+    /// Самый опасный случай Critical 3: `context_servers` настоящего нет,
+    /// есть только закомментированный блок с таким же текстом — человек так
+    /// отключил старый конфиг. Наш ключ не должен слиться с чужим, и
+    /// закомментированное имя `legacy` не должно всплыть как настоящая
+    /// запись.
+    #[test]
+    fn a_fully_commented_out_context_servers_block_does_not_fool_the_scanner() {
+        let before = "{\n  \"theme\": \"One\"\n  /* \"context_servers\": { \"legacy\": {\"command\": \"x\"} } */\n}\n";
+        let out = merge_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("/* \"context_servers\""), "комментарий должен выжить: {out}");
+        let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
+        assert_eq!(v["context_servers"]["1c"]["timeout"], 300);
+        assert!(v["context_servers"]["legacy"].is_null(), "закомментированное имя не должно всплыть: {out}");
     }
 }

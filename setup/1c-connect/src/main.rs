@@ -269,7 +269,7 @@ struct OffOnExit<'a>(&'a Kit);
 
 impl Drop for OffOnExit<'_> {
     fn drop(&mut self) {
-        allow::write(self.0, false);
+        let _ = allow::write(self.0, false);
     }
 }
 
@@ -293,7 +293,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // «у рабочего места один владелец»), и признак разрешения на диске
     // обязан сказать «on» здесь же, иначе подкоманда `mcp` отказывала бы в
     // каждом вызове при исправно работающей связи.
-    allow::write(&ctx.kit, true);
+    let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
     let ports = ctx.cfg.ports();
     println!(
@@ -343,7 +343,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // На стенде связь держит именно `serve` (сам он и есть «окно» этого
     // рабочего места) — тот же признак разрешения, что пишет `connect`, см.
     // комментарий там.
-    allow::write(&ctx.kit, true);
+    let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как

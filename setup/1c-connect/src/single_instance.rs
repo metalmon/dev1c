@@ -118,13 +118,42 @@ fn acquire_mutex(name: &str) -> std::io::Result<Option<Guard>> {
     Ok(Some(Guard(h)))
 }
 
+/// Имя системного мьютекса замка рабочего места — единственное место, где оно строится; `try_acquire` и `is_held` обязаны звать именно эту функцию, а не собирать свою строку (находка ревью задачи 2: вторая формулировка имени смотрела бы не на тот объект, что держит замок).
+#[cfg(windows)]
+fn instance_mutex_name(key: &str) -> String {
+    format!("1c-connect-instance-{key}")
+}
+
 /// Взять замок по ключу или увидеть, что он уже занят. `lock_on` — файл,
 /// который держит замок на Linux (`Kit::state_path`); на Windows не
 /// используется (там замок не файловый, а именованный мьютекс), но остаётся
 /// параметром, чтобы вызывающему было не важно, какая платформа.
 #[cfg(windows)]
 pub fn try_acquire(key: &str, _lock_on: &std::path::Path) -> std::io::Result<Option<Guard>> {
-    acquire_mutex(&format!("1c-connect-instance-{key}"))
+    acquire_mutex(&instance_mutex_name(key))
+}
+
+/// Живость владельца рабочего места БЕЗ попытки занять замок: `OpenMutexW` по тому же имени, что строит `instance_mutex_name` — дескриптор открылся, значит объект жив и держит его чей-то процесс (закрываем тотчас, нам нужен только факт), `ERROR_FILE_NOT_FOUND` — владельца нет. В отличие от `try_acquire`/`CreateMutexW` здесь нет стороны «занял — замок мой»: `is_held` ничем не владеет, и поэтому два читателя (`allow::watch` и прямой `allow::read`, или два процесса подкоманды `mcp`) не заверяют живость друг друга, застав один тик другого (находка ревью задачи 2: раньше проверка сама звала `try_acquire`, и та доля секунды, что один проверяющий держал замок, была для соседнего проверяющего «занято — значит жив», хотя настоящий владелец уже мёртв).
+#[cfg(windows)]
+pub fn is_held(key: &str, _lock_on: &std::path::Path) -> std::io::Result<bool> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND};
+    use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name = instance_mutex_name(key);
+    let wide: Vec<u16> = OsStr::new(&name).encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: обычный вызов kernel32 с нуль-терминированной строкой, живущей на стеке этого вызова; `OpenMutexW` не создаёт объект и не берёт владение им — только открывает дескриптор на уже существующий, если такой есть.
+    let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, wide.as_ptr()) };
+    if h.is_null() {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+            return Ok(false);
+        }
+        return Err(std::io::Error::new(e.kind(), format!("не удалось проверить замок (системный мьютекс {name}): {e}")));
+    }
+    // SAFETY: `h` — дескриптор, который только что отдал `OpenMutexW`.
+    unsafe { CloseHandle(h) };
+    Ok(true)
 }
 
 /// Замок проекта (`project::file_lock`) на Windows: тот же приём, что у
@@ -195,6 +224,49 @@ fn acquire_flock(file: std::fs::File) -> std::io::Result<Option<Guard>> {
 pub fn try_acquire(_key: &str, lock_on: &std::path::Path) -> std::io::Result<Option<Guard>> {
     let file = std::fs::OpenOptions::new().read(true).open(lock_on).map_err(|e| lock_error(lock_on, e))?;
     acquire_flock(file)
+}
+
+/// Живость владельца БЕЗ попытки занять замок: `/proc/locks` по устройству и inode `lock_on` — тем же приёмом, что `holder.rs` берёт держателя порта в образе среды, где нет ни `ss`, ни `netstat`. В отличие от `try_acquire` здесь не открывается даже совместный `flock` на основном пути — чтение `/proc/locks` не трогает замок вовсе, и два читателя (`allow::watch` и прямой `allow::read`, два процесса подкоманды `mcp`) не видят тика друг друга как «владелец жив» (находка ревью задачи 2: раньше проверка сама звала `try_acquire`, и доля секунды, что один проверяющий держал `flock`, была для соседнего проверяющего «занято — значит жив»).
+#[cfg(not(windows))]
+pub fn is_held(_key: &str, lock_on: &std::path::Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(lock_on).map_err(|e| lock_error(lock_on, e))?;
+    if let Ok(locks) = std::fs::read_to_string("/proc/locks") {
+        return Ok(parse_proc_locks(&locks, meta.dev(), meta.ino()));
+    }
+    // ponytail: без `/proc/locks` (не Linux, песочница без `/proc`) резерв — разделяемый `flock`: не конфликтует с другим читателем вроде нас самих, но конфликтует с `LOCK_EX` владельца. Потолок — своё окно между этой попыткой и самым стартом владельца (до его собственного `flock`), в которое проверка отдаст «свободно» при уже бегущем, но не успевшем взять замок процессе; решает его только настоящий `/proc/locks`.
+    let file = std::fs::OpenOptions::new().read(true).open(lock_on).map_err(|e| lock_error(lock_on, e))?;
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: `fd` — дескриптор только что открытого файла; `LOCK_NB` не блокирует поток.
+    let r = unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) };
+    if r == 0 {
+        // SAFETY: тот же дескриптор — снимаем свою же пробную отметку.
+        unsafe { libc::flock(fd, libc::LOCK_UN) };
+        Ok(false)
+    } else {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(true)
+        } else {
+            Err(err)
+        }
+    }
+}
+
+/// Строка `/proc/locks` вида `1: FLOCK ADVISORY WRITE 2206 08:01:7092817 0 EOF` — `true`, если устройство и inode совпадают с тем, что держит `try_acquire` (тот берёт только `LOCK_EX`, значит режим в строке всегда `WRITE`): `major:minor` ядро печатает раздельно, `libc::makedev` складывает их в то же число, которым `MetadataExt::dev` называет устройство — собирать формулу самим незачем.
+#[cfg(not(windows))]
+pub fn parse_proc_locks(out: &str, dev: u64, ino: u64) -> bool {
+    out.lines().any(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() < 6 || f[1] != "FLOCK" || f[3] != "WRITE" {
+            return false;
+        }
+        let mut id = f[5].split(':');
+        let (Some(maj), Some(min), Some(inode)) = (id.next(), id.next(), id.next()) else { return false };
+        let (Ok(maj), Ok(min), Ok(inode)) = (maj.parse::<u32>(), min.parse::<u32>(), inode.parse::<u64>()) else { return false };
+        libc::makedev(maj, min) as u64 == dev && inode == ino
+    })
 }
 
 /// Замок проекта (`project::file_lock`) на Linux: `flock` на файле
@@ -419,6 +491,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Та самая проверка, которую раньше делали через `try_acquire`
+    /// (находка ревью задачи 2) — `is_held` обязана видеть владельца и его
+    /// уход, но без собственного захвата: держатель остаётся держателем всё
+    /// время теста, `is_held` не отнимает замок.
+    #[test]
+    fn is_held_sees_the_owner_without_taking_the_lock() {
+        let dir = existing_dir("is-held");
+        let key = unique("is-held");
+        assert!(!is_held(&key, &dir).unwrap(), "никто не держал — владельца нет");
+        let guard = try_acquire(&key, &dir).unwrap().expect("каталог свободен");
+        assert!(is_held(&key, &dir).unwrap(), "владелец держит — is_held обязана увидеть это без захвата");
+        // Замок остался у `guard`: если бы `is_held` сама его забирала, второй
+        // `try_acquire` здесь бы это обнаружил. Проверяем ровно то, от чего
+        // предостерегало ревью, — что `is_held` ничего не трогает.
+        assert!(try_acquire(&key, &dir).unwrap().is_none(), "is_held не должна была отнять замок у guard");
+        drop(guard);
+        assert!(!is_held(&key, &dir).unwrap(), "владелец ушёл — is_held обязана это увидеть");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_permission_failure_names_the_path() {
@@ -439,6 +531,22 @@ mod tests {
         }
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// Пример строки взят из замечания ревью буквально. Чужое устройство,
+    /// чужой inode, режим `READ` (разделяемый, не наш `LOCK_EX`) — ничего из
+    /// этого не должно совпасть.
+    #[cfg(unix)]
+    #[test]
+    fn parse_proc_locks_matches_device_and_inode_not_just_presence() {
+        let line = "1: FLOCK ADVISORY WRITE 2206 08:01:7092817 0 EOF\n";
+        // 08:01 — major 8, minor 1.
+        let dev = libc::makedev(8, 1) as u64;
+        assert!(parse_proc_locks(line, dev, 7092817), "устройство и inode совпадают — держат");
+        assert!(!parse_proc_locks(line, dev, 999), "другой inode на том же устройстве — не держат");
+        assert!(!parse_proc_locks(line, libc::makedev(8, 2) as u64, 7092817), "другое устройство — не держат");
+        assert!(!parse_proc_locks("1: FLOCK ADVISORY READ 2206 08:01:7092817 0 EOF\n", dev, 7092817), "READ — не наш LOCK_EX");
+        assert!(!parse_proc_locks("", dev, 7092817));
     }
 
     // Два рабочих места не конфликтуют. Проверяется на обеих ОС, но разным:

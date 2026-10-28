@@ -26,6 +26,7 @@ pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
     modes: [CheckMenuItem; 2],
+    publications: [CheckMenuItem; 2],
     themes: [CheckMenuItem; 3],
     autostart: CheckMenuItem,
     autoconnect: CheckMenuItem,
@@ -43,6 +44,14 @@ const THEMES: [(theme::Choice, &str, &str); 3] = [
 /// `gui::save_host`).
 const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через туннель"), ("local", "mode:local", "Локально")];
 
+/// Кто публикует базу (`cfg.host.publication`, "auto"/"webserver") → id
+/// пункта меню и его подпись. Значения в toml прежние, подписи — человеческие:
+/// человек читает название, а не имя режима. Поля в окне нет; адрес чужой
+/// публикации спрашивается отдельным полем «Параметров», видимым только во
+/// втором положении (`panel::shown_fields`).
+const PUBLICATIONS: [(&str, &str, &str); 2] =
+    [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Уже опубликована")];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
     /// Показать окно. Пункт есть только на Linux: там значок не сообщает о
@@ -54,6 +63,8 @@ pub enum MenuAction {
     Check,
     /// Выбор пункта подменю «Режим работы» — несёт "tunnel" или "local".
     Mode(&'static str),
+    /// Выбор пункта подменю «Публикация» — несёт "auto" или "webserver".
+    Publication(&'static str),
     Theme(theme::Choice),
     Autostart,
     Autoconnect,
@@ -71,6 +82,11 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     for (mode, mode_id, _) in MODES {
         if id == mode_id {
             return Some(MenuAction::Mode(mode));
+        }
+    }
+    for (publication, publication_id, _) in PUBLICATIONS {
+        if id == publication_id {
+            return Some(MenuAction::Publication(publication));
         }
     }
     match id {
@@ -151,6 +167,12 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let mode_items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "tunnel", None));
     let mode_refs: Vec<&dyn IsMenuItem> = mode_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let mode_submenu = Submenu::with_items("Режим работы", true, &mode_refs)?;
+    // Та же оговорка про начальную отметку, что и у режима работы: здесь
+    // умолчание «публикует коннектор», а `launch` поправляет её на
+    // сохранённую сразу после `build` (`Tray::set_publication`).
+    let publication_items = PUBLICATIONS.map(|(p, id, text)| CheckMenuItem::with_id(id, text, true, p == "auto", None));
+    let publication_refs: Vec<&dyn IsMenuItem> = publication_items.iter().map(|i| i as &dyn IsMenuItem).collect();
+    let publication_submenu = Submenu::with_items("Публикация", true, &publication_refs)?;
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
@@ -166,6 +188,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &check,
         &PredefinedMenuItem::separator(),
         &mode_submenu,
+        &publication_submenu,
         &themes_submenu,
         &autostart,
         &autoconnect,
@@ -189,7 +212,8 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
     let modes = [mode_items[0].clone(), mode_items[1].clone()];
-    Ok(Tray { icon: tray, toggle, modes, themes, autostart, autoconnect })
+    let publications = [publication_items[0].clone(), publication_items[1].clone()];
+    Ok(Tray { icon: tray, toggle, modes, publications, themes, autostart, autoconnect })
 }
 
 impl Tray {
@@ -225,6 +249,15 @@ impl Tray {
     pub fn set_mode(&self, mode: &str) {
         for (item, (m, ..)) in self.modes.iter().zip(MODES) {
             item.set_checked(m == mode);
+        }
+    }
+
+    /// Отмечает ровно один пункт подменю «Публикация» — тот же приём, что у
+    /// режима работы: нативный пункт отмечает себя сам по щелчку, и вернуть
+    /// отметку на действующее значение обязаны мы.
+    pub fn set_publication(&self, publication: &str) {
+        for (item, (p, ..)) in self.publications.iter().zip(PUBLICATIONS) {
+            item.set_checked(p == publication);
         }
     }
 }
@@ -315,6 +348,42 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
     cx.refresh_windows();
 }
 
+/// Записать, кто публикует базу, и поднять сеанс заново — та же форма, что у
+/// `apply_mode`, и по той же причине: `save_host` берёт режим публикации из
+/// текущих параметров, поэтому правится он здесь, после согласия человека.
+///
+/// Свой httpd и свой дескриптор к этому моменту уже убраны
+/// (`ops_host::leave_own_publication` в обработчике): уборка идёт ДО записи,
+/// иначе она увидела бы в параметрах «публикует веб-сервер» и вышла бы, не
+/// тронув ничего.
+fn apply_publication(cx: &mut App, publication: &'static str) {
+    cx.global_mut::<Ui>().cfg.host.publication = publication.into();
+    let host = cx.global::<Ui>().cfg.host.clone();
+    match save_host(cx.global_mut::<Ui>(), host) {
+        Ok(()) => {
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_publication(publication);
+            }
+            stop_session(cx);
+            let ui = cx.global::<Ui>();
+            if raise_session_after_mode_change(&ui.cfg.host.mode, ui.gate.as_deref()) {
+                if let Err(e) = start_session(cx.global_mut::<Ui>()) {
+                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                }
+            }
+            let mut label = publication;
+            for (p, _, text) in PUBLICATIONS {
+                if p == publication {
+                    label = text;
+                }
+            }
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("публикация: {}", label.to_lowercase()) });
+        }
+        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+    }
+    cx.refresh_windows();
+}
+
 /// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
 /// только по правому, сюда не попадает.
 pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
@@ -385,6 +454,46 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 confirm_database_change(window, cx, &host, move |_window, cx| apply_mode(cx, mode));
             });
         }
+        MenuAction::Publication(publication) => {
+            // Форма та же, что у «Режима работы» выше, и по тем же причинам:
+            // под идущей операцией не переключаем, а отметку, которую пункт
+            // поставил себе сам, возвращаем на действующее значение.
+            let ui = cx.global::<Ui>();
+            let current = ui.cfg.host.publication.clone();
+            if mode_change_blocked(ui) || publication == current {
+                if let Some(tray) = &ui.tray {
+                    tray.set_publication(&current);
+                }
+                return;
+            }
+            if let Some(tray) = &ui.tray {
+                tray.set_publication(&current);
+            }
+            // Уходя в чужую публикацию, забираем своё: гасим свой httpd и
+            // убираем свой дескриптор с логином и паролем базы. Делается это
+            // ДО записи режима — после неё уборка увидела бы «публикует
+            // веб-сервер» и не тронула бы ничего (`leave_own_publication`).
+            if publication == "webserver" {
+                let ctx = super::ctx_for(cx.global::<Ui>());
+                if let Err(e) = crate::ops_host::leave_own_publication(&ctx) {
+                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("{e:#}") });
+                    return;
+                }
+                cx.global_mut::<Ui>().raised_publication = false;
+            }
+            let mut host = cx.global::<Ui>().cfg.host.clone();
+            host.publication = publication.into();
+            let ui = cx.global::<Ui>();
+            if !save_needs_confirm(ui, &host) || ui.window.is_none() {
+                apply_publication(cx, publication);
+                return;
+            }
+            window::show_window(cx);
+            let Some(w) = cx.global::<Ui>().window else { return };
+            let _ = w.update(cx, |_, window, cx| {
+                confirm_database_change(window, cx, &host, move |_window, cx| apply_publication(cx, publication));
+            });
+        }
         MenuAction::Theme(c) => {
             let kit = cx.global::<Ui>().kit.clone();
             if let Err(e) = c.store(&kit) {
@@ -424,7 +533,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui,
-        MODES,
+        MODES, PUBLICATIONS,
     };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
@@ -443,6 +552,17 @@ mod tests {
         assert_eq!(menu_action("mode:tunnel"), Some(MenuAction::Mode("tunnel")));
         assert_eq!(menu_action("mode:local"), Some(MenuAction::Mode("local")));
         assert_eq!(menu_action("nope"), None);
+    }
+
+    #[test]
+    fn the_publication_submenu_speaks_in_human_words() {
+        assert_eq!(menu_action("publication:auto"), Some(MenuAction::Publication("auto")));
+        assert_eq!(menu_action("publication:webserver"), Some(MenuAction::Publication("webserver")));
+        assert_eq!(menu_action("publication:iis"), None);
+        // Значения toml не меняются, меняются подписи.
+        let labels: Vec<&str> = PUBLICATIONS.iter().map(|(_, _, text)| *text).collect();
+        assert_eq!(labels, vec!["Публикует коннектор", "Уже опубликована"]);
+        assert_eq!(PUBLICATIONS.map(|(v, ..)| v), ["auto", "webserver"]);
     }
 
     #[test]

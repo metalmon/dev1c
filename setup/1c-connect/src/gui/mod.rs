@@ -1248,6 +1248,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // поправляется на настоящий, тем же методом, что потом зовёт смена
         // режима в трее (`tray::on_menu`).
         tray.set_mode(&cfg.host.mode);
+        tray.set_publication(&cfg.host.publication);
         cx.set_global(Ui {
             kit,
             cfg,

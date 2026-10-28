@@ -183,8 +183,8 @@ pub fn restart_session(ui: &mut Ui, base_path: String) {
         });
     }
     let ctx = ctx_for(ui);
-    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
-    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
+    let (cfg, kit, tx, enabled, editor_mcp) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone(), ui.editor_mcp.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, editor_mcp, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     ui.session = Some(session);
@@ -267,8 +267,8 @@ pub fn start_session(ui: &mut Ui) -> Result<(), String> {
     ui.session_gen += 1;
     let gen = ui.session_gen;
     let ctx = ctx_for(ui);
-    let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
-    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, move |l| {
+    let (cfg, kit, tx, enabled, editor_mcp) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone(), ui.editor_mcp.clone());
+    let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, editor_mcp, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     ui.session = Some(session);

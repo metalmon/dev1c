@@ -16,7 +16,7 @@ use common::{run, AlwaysDefault, Event, Phase, Progress, Runner, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub mod autostart;
@@ -135,6 +135,13 @@ pub struct Ui {
     /// поднятыми; в туннельном — как раньше, переключатель поднимает и
     /// опускает сеанс целиком.
     pub enabled: Arc<AtomicBool>,
+    /// Последнее увиденное по SSH состояние записей `1c`/`vrunner` в
+    /// настройках Zed в контейнере (решение владельца 29.10) — заводится
+    /// один раз в `launch`, тем же правилом, что `enabled`, и читает его
+    /// расчёт готовности (`verify::cheap`) своим тактом, независимо от
+    /// того, идёт сеанс прямо сейчас или нет. В локальном режиме не
+    /// используется — там факт читает `editors::look` прямо с диска.
+    pub editor_mcp: session::EditorMcpSeen,
     /// Холодный замок (`gate::cold_gate`): `None` — включать можно,
     /// `Some(причина)` — включать нечего. Считается не на каждую отрисовку, а
     /// по тем же событиям, что и вердикт готовности (`refresh_gate` в
@@ -1303,6 +1310,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(serve_on_start)),
+            editor_mcp: Arc::new(Mutex::new(None)),
             gate: gate.clone(),
             facts: Vec::new(),
             verdict: Verdict::Checking,
@@ -1439,6 +1447,7 @@ impl Ui {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
+            editor_mcp: Arc::new(Mutex::new(None)),
             gate,
             facts: Vec::new(),
             verdict: Verdict::Checking,
@@ -1491,7 +1500,7 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
     drop(l);
     let mut cfg = ui.cfg.clone();
     cfg.host.server = format!("127.0.0.1:{port}");
-    session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {})
+    session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {})
 }
 
 /// Сеанс, который УЖЕ кончился сам: туннель в никуда (первая попытка
@@ -1507,7 +1516,7 @@ fn ended_session(ui: &Ui) -> crate::session::Session {
     let mut cfg = ui.cfg.clone();
     cfg.host.mode = "tunnel".into();
     cfg.host.server = format!("127.0.0.1:{port}");
-    let mut s = session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {});
+    let mut s = session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {});
     for _ in 0..200 {
         if s.finished() {
             return s;
@@ -1526,7 +1535,7 @@ fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
     let mut cfg = ui.cfg.clone();
     cfg.host.mode = "tunnel".into();
     cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
-    (session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), |_| {}), quiet)
+    (session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {}), quiet)
 }
 
 #[cfg(test)]

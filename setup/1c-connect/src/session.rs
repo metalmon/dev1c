@@ -3,7 +3,7 @@
 //! зовут `start`, держат `Session` и в конце — `stop`.
 
 use crate::cfg::{Cfg, Ports};
-use crate::{bridge, tunnel};
+use crate::{bridge, editors, tunnel};
 use common::kit::Kit;
 use common::{Event, Sink};
 use std::sync::atomic::AtomicBool;
@@ -203,6 +203,74 @@ impl Session {
     }
 }
 
+/// Контейнерный случай задачи 7: выключили связь в окне — туннель ложится,
+/// порт рабочего места перестаёт слушать, `nc` на стороне Zed выходит, и Zed
+/// показывает упавший сервер MCP, который сам уже никогда не поднимет
+/// (спека «MCP в редакторе», «Факты…»). Вместо этого — правим `"enabled"` в
+/// `settings.json` Zed внутри контейнера по тому же SSH, что держит туннель:
+/// `false` при выключении, `true` при включении, и Zed гасит/поднимает
+/// серверы сам, человек видит «выключен» вместо «упал».
+///
+/// Вся логика здесь — читаем файл (`exec` — первый вызов), правим его
+/// `editors::set_enabled_zed` (`exe: None` — имя `1c`/`vrunner` в контейнере
+/// наше по построению, положила его только наша же правка), пишем обратно
+/// (`exec` — второй вызов). Канал подставляется параметром, поэтому
+/// проверяется без настоящего SSH. Своего скрипта в образе не заводим и
+/// `sed` не посылаем: правка живёт в одном месте.
+///
+/// ponytail: правка без блокировки чужого файла — человек, правящий
+/// `settings.json` в Zed ровно в этот момент, потеряет свою правку. Цена
+/// read-modify-write без замка на чужой файл; поднять до блокировки, если
+/// это окажется больше, чем теоретической неприятностью.
+///
+/// `Ok` несёт не только успех, но и то, что увидело чтение (`editors::
+/// found_by_name` по тексту, который всё равно пришлось прочитать ради
+/// правки) — решение владельца 29.10: это и материал для факта набора
+/// готовности (`verify::editor_mcp_fact`), и второго похода по SSH ради
+/// одного факта быть не должно.
+pub fn flip_with(exec: &dyn Fn(&str) -> Result<String, String>, on: bool) -> Result<editors::Found, String> {
+    const PATH: &str = "~/.config/zed/settings.json";
+    let text = exec(&format!("cat {PATH}"))?;
+    let found = editors::found_by_name(&text);
+    let edited = editors::set_enabled_zed(&text, on, None);
+    // Содержимое — после первого перевода строки, байтами на stdin команды
+    // `cat > …`, а не подстановкой в саму команду (решение владельца №2):
+    // `Tunnel::exec` делит по первому `\n` и шлёт хвост отдельным кадром.
+    exec(&format!("cat > {PATH}\n{edited}"))?;
+    Ok(found)
+}
+
+/// Последнее увиденное по SSH состояние записей `1c`/`vrunner` в настройках
+/// Zed в контейнере — материал факта набора готовности (`verify::
+/// editor_mcp_fact`). Живёт дольше одного сеанса (у окна, рядом с
+/// `enabled`), потому что расчёт готовности идёт своим тактом, независимо
+/// от того, подключается туннель прямо сейчас или нет. `None` — ещё не
+/// читали (до первого удачного подключения).
+pub type EditorMcpSeen = Arc<Mutex<Option<editors::Found>>>;
+
+/// Обёртка `flip_with`, подставляющая настоящий канал — `Tunnel::exec` по
+/// уже поднятому туннелю. `Tunnel::exec` асинхронный, а канал `flip_with`
+/// ждёт обычный (синхронный) — `block_in_place` уводит текущую задачу
+/// туннеля на отдельный поток рантайма ровно на время этих двух команд, не
+/// блокируя остальных (рантайм здесь многопоточный — `tunnel::run` зовётся
+/// из потока, поднявшего его `Runtime::new()`, см. `start_with_enabled`).
+///
+/// Ошибка здесь — предупреждение в журнал вызывающего, а не отказ
+/// подключения (решение владельца №3): правка настроек редактора не связь
+/// с базой, и человек, увидевший «упал» вместо «выключен», всё равно
+/// сможет работать. Ошибка стирает и прежнее `seen` на `None`: раз читать
+/// не вышло СЕЙЧАС, выдавать за свежую правду старое значение — врать о
+/// том, что мы знаем прямо сейчас (решение владельца 29.10, третье
+/// состояние факта — «не смог проверить», а не старая оценка).
+pub fn flip_remote_servers(t: &tunnel::Tunnel, on: bool, seen: &EditorMcpSeen) -> Result<(), String> {
+    let r = tokio::task::block_in_place(|| {
+        let exec = |cmd: &str| -> Result<String, String> { tokio::runtime::Handle::current().block_on(t.exec(cmd)) };
+        flip_with(&exec, on)
+    });
+    *seen.lock().unwrap() = r.as_ref().ok().cloned();
+    r.map(|_| ())
+}
+
 /// Как `start_with_enabled`, но с MCP всегда включённым — для CLI
 /// (`main.rs`: `connect`/`serve`), у которого нет окна и некому держать
 /// переключатель дольше одного сеанса.
@@ -243,7 +311,7 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
 }
 
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
-    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), on_state)
+    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Arc::new(Mutex::new(None)), on_state)
 }
 
 /// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
@@ -254,12 +322,16 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// создаётся заново на каждый перезапуск. Транспорт — по `cfg.host.mode`:
 /// `tunnel` держит SSH с переподключением, `local` слушает оба порта на
 /// петле сам (база внутри образа — переподключаться там не от чего,
-/// `Retrying` в этом режиме не бывает).
+/// `Retrying` в этом режиме не бывает). `editor_mcp` — та же ячейка, тем же
+/// правилом: заводит и держит окно, сюда только передаётся, и расчёт
+/// готовности (`verify.rs`) читает её независимо от того, идёт сеанс прямо
+/// сейчас или нет (решение владельца 29.10).
 pub fn start_with_enabled(
     cfg: Cfg,
     kit: Kit,
     log: Sink,
     enabled: Arc<AtomicBool>,
+    editor_mcp: EditorMcpSeen,
     on_state: impl Fn(State) + Send + Sync + 'static,
 ) -> Session {
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -296,7 +368,7 @@ pub fn start_with_enabled(
                 let on_incoming = move |inc: tunnel::Incoming| {
                     dispatch.dispatch(inc.port, inc.channel.into_stream());
                 };
-                tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx).await
+                tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx, editor_mcp.clone()).await
             };
             on_state(State::ended(&r));
             r
@@ -423,7 +495,56 @@ impl Serve {
 mod tests {
     use super::*;
     use crate::ops_host::{port_of, McpServer};
+    use std::path::Path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Канал подменён: проверяем, что мы читаем файл, правим своей же
+    /// функцией и пишем обратно — ни одного `sed` со стороны (задача 7).
+    #[test]
+    fn flipping_the_remote_file_reads_modifies_writes() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let exec = |cmd: &str| -> Result<String, String> {
+            seen.lock().unwrap().push(cmd.to_string());
+            Ok(crate::editors::merge_zed("", Path::new("/opt/1c-connect")).unwrap())
+        };
+        // Решение владельца 29.10: то же чтение, что правит `enabled`, несёт
+        // и материал факта набора готовности — обе наши записи на месте.
+        assert_eq!(flip_with(&exec, false).unwrap(), crate::editors::Found::Ours);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].contains("cat") && seen[0].contains(".config/zed/settings.json"), "{:?}", seen[0]);
+        assert!(seen[1].contains("\"enabled\": false"), "{:?}", seen[1]);
+    }
+
+    /// Файла нет (или `cat` отказал) — отказ `flip_with`, но сеанс от этого
+    /// не падает: ошибка уходит в журнал предупреждением (`flip_remote_servers`
+    /// зовущим кодом, см. `tunnel::run`), а не отказом подключения.
+    #[test]
+    fn a_missing_remote_file_is_not_an_error_for_the_session() {
+        let exec = |_: &str| -> Result<String, String> { Err("No such file".into()) };
+        assert!(flip_with(&exec, true).is_err());
+    }
+
+    /// Старый образ без наших записей — факт обязан увидеть именно это, а
+    /// не молча считать «настроено» (решение владельца 29.10).
+    #[test]
+    fn flip_with_reports_missing_records_too() {
+        let exec = |_: &str| -> Result<String, String> { Ok("{}".to_string()) };
+        assert_eq!(flip_with(&exec, true).unwrap(), crate::editors::Found::Absent);
+    }
+
+    /// `flip_remote_servers` стирает прежнее `seen` на `None` при отказе, а
+    /// не оставляет старую оценку — «не смог проверить», а не «опять как в
+    /// прошлый раз» (решение владельца 29.10): проверяем сам перенос через
+    /// `flip_with`, которую `flip_remote_servers` зовёт тем же каналом.
+    #[test]
+    fn a_stale_seen_value_is_not_kept_on_a_fresh_failure() {
+        let seen = Mutex::new(Some(crate::editors::Found::Ours));
+        let exec = |_: &str| -> Result<String, String> { Err("связь оборвалась".into()) };
+        let r = flip_with(&exec, true);
+        *seen.lock().unwrap() = r.as_ref().ok().cloned();
+        assert!(r.is_err());
+        assert_eq!(*seen.lock().unwrap(), None, "старое «настроено» не должно переживать отказ чтения");
+    }
 
     /// Набор, который `Serve::new` принимает без лишних вопросов: сервер
     /// файловой базы на выдуманном рабочем месте `dev1` — те же значения, что

@@ -3,6 +3,7 @@
 //! и дескриптор публикации → среда (Gitea) → что мешает загрузке → туннель.
 //! Человек читает сверху вниз и останавливается на первом провале.
 
+use crate::editors;
 use crate::ops_host::{mcp_exe, tools_state, Ctx, Gitea, Reach};
 use common::check::Check;
 use common::op::OpState;
@@ -47,6 +48,12 @@ const TUNNEL: &str = "туннель";
 const WORKSTATION_PORTS: &str = "порты рабочего места";
 const DEADLINE: &str = "срок действия";
 const OPEN_SESSION: &str = "сеансы 1С на машине";
+/// Решение владельца 29.10: пустые записи `context_servers`/`mcpServers`
+/// у редактора — зелёный статус при том, что агенту нечем работать с 1С, и
+/// это ложь по правилу «зелёный значит работает». Факт горячий (`gate.rs`,
+/// «горячее против холодного») — красит точку жёлтым и называет причину,
+/// но переключатель не запирает: `cold_gate` его не видит вовсе.
+const EDITOR_MCP: &str = "записи MCP у редактора";
 
 /// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
@@ -90,6 +97,10 @@ pub fn order(mode: &str) -> Vec<&'static str> {
         v.push(MEDIA);
         v.push(TUNNEL);
     }
+    // Последний страж набора в обоих режимах: канал к агенту готов
+    // (TUNNEL/WORKSTATION_PORTS), но инструментов 1С у него может и не
+    // быть — если записей MCP у редактора нет (решение владельца 29.10).
+    v.push(EDITOR_MCP);
     v
 }
 
@@ -829,6 +840,41 @@ pub fn tunnel_fact(state: Option<&str>) -> Check {
     }
 }
 
+/// Факт набора готовности (решение владельца 29.10): пустые записи MCP у
+/// редактора — не строка в журнале, а провал, который красит точку жёлтым
+/// («Не всё готово», `gui::facts::Verdict::NotReady`), иначе статус
+/// зелёный при том, что к нам никто не придёт — туннель поднят, мост
+/// отвечает, а у агента нет ни одного инструмента 1С.
+///
+/// `found` приходит уже посчитанным: в контейнере — из последнего чтения
+/// по SSH, которое всё равно случилось ради правки `enabled`
+/// (`session::flip_with`/`flip_remote_servers`, второго похода по SSH ради
+/// одного факта быть не должно); на машине человека — свежим чтением с
+/// диска через `editors::look` (там же читается и раздел «Редакторы»).
+///
+/// Три состояния, чтобы факт не врал в обе стороны: `Some(Found::Ours)` —
+/// обе записи на месте, зелёный; `Some(Found::Missing | Found::Absent)` —
+/// записей нет, жёлтый, «обновите образ» (контейнер) или «нажмите
+/// «Настроить»» (машина человека — тот же совет, что раздел «Редакторы»);
+/// `Some(Found::Foreign(names))` — запись занята чужой командой, жёлтый с
+/// именами; `None` — прочитать не удалось (каналa нет, файла нет, отказ
+/// чтения) — жёлтый с причиной «не смог проверить», а не «нет записей»: о
+/// том, чего мы не знаем, факт говорит именно так.
+pub fn editor_mcp_fact(found: Option<&editors::Found>) -> Check {
+    match found {
+        Some(editors::Found::Ours) => Check::pass(EDITOR_MCP, "записи 1c и vrunner на месте"),
+        Some(editors::Found::Missing | editors::Found::Absent) => {
+            Check::fail(EDITOR_MCP, "записей MCP у редактора нет", "обновите образ либо нажмите «Настроить» в разделе «Редакторы»")
+        }
+        Some(editors::Found::Foreign(names)) => Check::fail(
+            EDITOR_MCP,
+            format!("запись {} занята чужой командой", names.join(", ")),
+            "раздел «Редакторы» — там же, что и у остальных записей",
+        ),
+        None => Check::fail(EDITOR_MCP, "не смог проверить записи MCP у редактора", ""),
+    }
+}
+
 /// Срок всего набора — один, на окно и на командную строку одинаково (спека:
 /// «набор один, срок один»). Раньше у готовности был отдельный короткий срок
 /// (бюджет 20 с, сеть 5 с) и терпеливый второй заход без срока вовсе, а
@@ -842,19 +888,22 @@ pub const SET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60)
 /// Факты для режима `cfg.host.mode` (`"tunnel"` или, по умолчанию при любом
 /// другом значении, тот же `"tunnel"` — валидирован раньше, здесь не
 /// перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме:
-/// это состояние сессии, а не то, что можно вычислить здесь. `ports` —
+/// это состояние сессии, а не то, что можно вычислить здесь. `editor_mcp` —
+/// последнее увиденное по SSH состояние записей MCP у редактора в
+/// контейнере (`session::EditorMcpSeen`, задача 7); в локальном режиме не
+/// используется — там `editor_mcp_fact` читает диск сама. `ports` —
 /// занимает ли порты тот, кто просит проверку (`workstation_ports_fact`):
 /// окно (`PortUse::WeListen`) и командная строка (`PortUse::WeDont`).
 ///
 /// Печатает фазу и запирает кнопки — обёртка над `gather` с общим сроком
 /// (`SET_DEADLINE`). Молчаливый расчёт (окно, фоном) зовёт `gather`
 /// напрямую — ему фаза не нужна и не положена (см. `gui::run_readiness`).
-pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> {
+pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors::Found>, ports: PortUse) -> Vec<Check> {
     // Фаза — только здесь: по ней окно показывает карточку хода и запирает
     // кнопки. Сбор фактов её не объявляет, иначе молчаливый расчёт
     // готовности выглядел бы начавшейся операцией (спека).
     ctx.progress(Phase::Check);
-    gather(ctx, tunnel_state, ports, std::time::Instant::now() + SET_DEADLINE)
+    gather(ctx, tunnel_state, editor_mcp, ports, std::time::Instant::now() + SET_DEADLINE)
 }
 
 /// Дескриптор публикации (`default.vrd`) — сравнение с диском (`Paths::of` +
@@ -915,7 +964,7 @@ const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
 /// повторного ревью (Important 4) `gather` и `cheap` звали его оба по
 /// отдельности, рискуя получить два разных числа между вызовами и
 /// противоречащий набор.
-pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: usize) -> Vec<Check> {
+pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors::Found>, ports: PortUse, sessions: usize) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
@@ -1007,6 +1056,18 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
+    // Последний страж: канал к агенту может быть готов (факт выше), а
+    // инструментов 1С у него не быть — если записей MCP у редактора нет
+    // (решение владельца 29.10). В контейнере — то, что уже увидело
+    // чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH
+    // быть не должно); на машине человека читаем диск здесь же, тем же
+    // `editors::look`, что раздел «Редакторы».
+    v.push(if local {
+        let found = std::env::current_exe().ok().map(|exe| editors::look(editors::zed_path().as_deref(), &exe));
+        editor_mcp_fact(found.as_ref())
+    } else {
+        editor_mcp_fact(editor_mcp)
+    });
     v
 }
 
@@ -1061,7 +1122,13 @@ where
 /// Порядок фактов в итоговом наборе — не порядок ответов, а фиксированные
 /// места по имени (`order`): два прогона с разными по времени ответами
 /// обязаны дать одинаково выглядящий отчёт.
-pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
+pub fn gather(
+    ctx: &Ctx,
+    tunnel_state: Option<&str>,
+    editor_mcp: Option<&editors::Found>,
+    ports: PortUse,
+    deadline: std::time::Instant,
+) -> Vec<Check> {
     let mode = ctx.cfg.host.mode.clone();
     let h = &ctx.cfg.host;
 
@@ -1123,7 +1190,7 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web_port).into(), left).is_ok();
             web_fact(web_port, up, own)
         },
-        || cheap(ctx, tunnel_state, ports, sessions),
+        || cheap(ctx, tunnel_state, editor_mcp, ports, sessions),
     );
 
     facts.extend([publication, extension, descriptor, gitea_check, web_check]);
@@ -1219,7 +1286,7 @@ mod tests {
         // Срок уже вышел («остаток» для дорогих фактов — 0), и ни один из
         // них не откатывается к «не проверено»: такого исхода больше нет.
         let ctx = test_ctx("tunnel");
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, None, None, PortUse::WeDont, std::time::Instant::now());
         assert!(!checks.is_empty());
         assert!(!format!("{checks:?}").contains("не проверено"), "{checks:?}");
         // И ни одна чистая фактовая функция модуля не говорит так сама по
@@ -1291,9 +1358,12 @@ mod tests {
         let l = usize::from(cfg!(feature = "licence"));
         let tunnel = order("tunnel");
         // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на
-        // три факта (публикация, расширение, дескриптор).
-        assert_eq!(tunnel.len(), 17 + w + l);
+        // три факта (публикация, расширение, дескриптор). +1 ещё: задача 7
+        // (решение владельца 29.10) добавила «записи MCP у редактора»
+        // последним стражем набора, после туннеля/портов рабочего места.
+        assert_eq!(tunnel.len(), 18 + w + l);
         assert_eq!(tunnel[16 + w + l], "туннель");
+        assert_eq!(tunnel[17 + w + l], EDITOR_MCP);
         // Платформа и строка платформы для анализатора — рядом: вторая без
         // первой не считается вовсе.
         assert_eq!(tunnel[1 + l], "платформа 1С");
@@ -1306,8 +1376,9 @@ mod tests {
             assert_eq!(tunnel[11 + l], "порт веб-сервера");
         }
         let local = order("local");
-        assert_eq!(local.len(), 17 + w + l);
+        assert_eq!(local.len(), 18 + w + l);
         assert_eq!(local[16 + w + l], "порты рабочего места");
+        assert_eq!(local[17 + w + l], EDITOR_MCP);
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -1326,7 +1397,7 @@ mod tests {
     fn every_fact_has_a_name_in_order() {
         for mode in ["tunnel", "local"] {
             let ctx = test_ctx(mode);
-            let checks = run(&ctx, Some("работает с 12:40"), PortUse::WeDont);
+            let checks = run(&ctx, Some("работает с 12:40"), None, PortUse::WeDont);
             let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
             assert_eq!(names, order(mode), "mode {mode}");
         }
@@ -1348,7 +1419,7 @@ mod tests {
     #[test]
     fn a_short_deadline_drops_no_fact_and_places_cheap_facts_first_in_order() {
         let ctx = test_ctx("tunnel");
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, None, None, PortUse::WeDont, std::time::Instant::now());
         let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
         assert_eq!(names, order("tunnel"), "короткий срок уронил факт(ы): {names:?}");
 
@@ -1451,7 +1522,7 @@ mod tests {
     /// `cheap()` сама по себе — какие имена она отдаёт, без дорогих фактов.
     fn cheap_fact_names() -> Vec<String> {
         let ctx = test_ctx("tunnel");
-        cheap(&ctx, None, PortUse::WeDont, 0).into_iter().map(|c| c.what).collect()
+        cheap(&ctx, None, None, PortUse::WeDont, 0).into_iter().map(|c| c.what).collect()
     }
 
     /// Important 4 (повторное ревью): `cheap` берёт число сеансов у
@@ -1461,11 +1532,11 @@ mod tests {
     #[test]
     fn cheap_uses_the_session_count_it_is_given_not_its_own() {
         let ctx = test_ctx("local");
-        let busy = cheap(&ctx, None, PortUse::WeDont, 3);
+        let busy = cheap(&ctx, None, None, PortUse::WeDont, 3);
         let open = busy.iter().find(|c| c.what == OPEN_SESSION).expect("факт открытых сеансов");
         assert!(open.detail.contains("3 открыто сеанса"), "{open:?}");
 
-        let free = cheap(&ctx, None, PortUse::WeDont, 0);
+        let free = cheap(&ctx, None, None, PortUse::WeDont, 0);
         let open = free.iter().find(|c| c.what == OPEN_SESSION).expect("факт открытых сеансов");
         assert!(open.ok && !open.busy && open.detail.contains("нет"), "{open:?}");
     }
@@ -1566,7 +1637,7 @@ mod tests {
             sink,
             prompt: Box::new(common::AlwaysDefault),
         };
-        let checks = run(&ctx, None, PortUse::WeDont);
+        let checks = run(&ctx, None, None, PortUse::WeDont);
 
         let web = checks.iter().find(|c| c.what == WEB).unwrap();
         assert!(web.detail.contains("18080") && !web.detail.contains("9999"), "{web:?}");
@@ -1598,7 +1669,7 @@ mod tests {
 
         let mut ctx = test_ctx("local");
         ctx.cfg.host.db_user = String::new();
-        let checks = run(&ctx, None, PortUse::WeDont);
+        let checks = run(&ctx, None, None, PortUse::WeDont);
         // Причина — пустой пользователь, а не «публикация не отвечает»:
         // смотрим с его места вниз, выше него в наборе свои провалы
         // (параметры, платформа) и к этому правилу они отношения не имеют.
@@ -1729,7 +1800,7 @@ mod tests {
 
         let mut ctx = test_ctx("local");
         ctx.cfg.host.publication = "webserver".into();
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, None, None, PortUse::WeDont, std::time::Instant::now());
         let d = checks.iter().find(|c| c.what == DESCRIPTOR).expect("факт дескриптора");
         assert!(d.ok && d.info, "{d:?}");
         assert!(!d.hint.contains("install"), "{d:?}");
@@ -1918,7 +1989,7 @@ mod tests {
         // И факт берётся именно по пустому полю, а не по счёту от server.
         let mut ctx = test_ctx("local");
         ctx.cfg.host.gitea = String::new();
-        let v = run(&ctx, None, PortUse::WeDont);
+        let v = run(&ctx, None, None, PortUse::WeDont);
         let g = v.iter().find(|c| c.what == GITEA).expect("факт Gitea");
         assert!(g.detail.contains("адрес среды не задан"), "{g:?}");
     }
@@ -2136,6 +2207,48 @@ mod tests {
         assert!(c.info && c.ok, "{c:?}");
         let c = tunnel_fact(Some("работает с 12:40"));
         assert!(!c.info && c.ok);
+    }
+
+    /// Решение владельца 29.10: три состояния, и факт не врёт в обе
+    /// стороны. `Ours` — зелёный; `Missing`/`Absent`/`Foreign` — провал
+    /// (горячий, красит точку жёлтым, но это и есть `Check::fail`:
+    /// `ok == false`); `None` — тоже провал, но причина другая — «не смог
+    /// проверить», а не «нет записей».
+    #[test]
+    fn editor_mcp_fact_has_three_distinct_outcomes() {
+        let ok = editor_mcp_fact(Some(&editors::Found::Ours));
+        assert!(ok.ok && !ok.info, "{ok:?}");
+
+        let missing = editor_mcp_fact(Some(&editors::Found::Missing));
+        assert!(!missing.ok, "{missing:?}");
+        assert!(missing.detail.contains("нет"), "{missing:?}");
+
+        let absent = editor_mcp_fact(Some(&editors::Found::Absent));
+        assert!(!absent.ok, "{absent:?}");
+        assert_eq!(absent.detail, missing.detail, "Missing и Absent говорят человеку одно и то же");
+
+        let foreign = editor_mcp_fact(Some(&editors::Found::Foreign(vec!["1c".to_string()])));
+        assert!(!foreign.ok && foreign.detail.contains("1c") && foreign.detail.contains("чужой"), "{foreign:?}");
+
+        let unknown = editor_mcp_fact(None);
+        assert!(!unknown.ok, "{unknown:?}");
+        assert!(unknown.detail.contains("не смог проверить"), "{unknown:?}");
+        // «Не смог проверить» — не то же самое, что «нет записей»: причины
+        // не должны совпасть, иначе человек не отличит старый образ от
+        // оборвавшегося чтения.
+        assert_ne!(unknown.detail, missing.detail);
+    }
+
+    /// Место в наборе — сразу после последнего стража канала (решение
+    /// владельца 29.10, «после TUNNEL» / «рядом с WORKSTATION_PORTS»).
+    #[test]
+    fn editor_mcp_is_the_very_last_fact_in_both_modes() {
+        let tunnel = order("tunnel");
+        assert_eq!(tunnel.last(), Some(&EDITOR_MCP));
+        assert_eq!(tunnel[tunnel.len() - 2], TUNNEL);
+        let local = order("local");
+        assert_eq!(local.last(), Some(&EDITOR_MCP));
+        assert_eq!(local[local.len() - 2], WORKSTATION_PORTS);
     }
 
     /// Самое важное из трёх: ни «занят», ни «не поднимался» не приговор.

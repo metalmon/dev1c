@@ -712,6 +712,31 @@ pub fn look(path: Option<&Path>, exe: &Path) -> Found {
     }
 }
 
+/// Факт набора готовности в контейнере (задача 7, решение владельца
+/// 29.10): те же записи `context_servers`, что `look` ищет на машине
+/// человека, но опознаются по имени, а не по `command` — там команда `nc`
+/// на проброшенный порт, а не наш исполняемый, и это не чужая рука: имя
+/// `1c`/`vrunner` в контейнере наше по построению (та же посылка, что у
+/// `set_enabled_zed(text, on, None)`). Переиспользует текст, который уже
+/// прочитан ради правки `enabled` (`session::flip_with`) — второго похода
+/// по SSH ради одного этого факта быть не должно.
+///
+/// Только `Ours`/`Absent`: в контейнере «чужой» записи с нашим именем не
+/// бывает по построению, и различать `Missing` (файла вовсе нет) от
+/// `Absent` (файл есть, записей нет) здесь незачем — обеим одна и та же
+/// причина у человека: «обновите образ».
+pub fn found_by_name(text: &str) -> Found {
+    let (_, body) = split_bom(text);
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&as_json(body)) else { return Found::Absent };
+    let Some(obj) = parsed.as_object() else { return Found::Absent };
+    let Some(servers) = obj.get("context_servers").and_then(|v| v.as_object()) else { return Found::Absent };
+    if OURS.iter().all(|e| servers.contains_key(e.name)) {
+        Found::Ours
+    } else {
+        Found::Absent
+    }
+}
+
 /// Путь рядом с файлом настроек, с добавленным хвостом — не заменяющим
 /// расширение (`settings.json` → `settings.json.bak`, а не `settings.bak`).
 fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
@@ -1287,5 +1312,29 @@ mod tests {
         assert_eq!(setup(&dirty, exe, merge_zed).unwrap(), Found::Ours);
         assert_eq!(look(Some(&real), exe), Found::Ours);
         assert!(sibling_path(&real, ".bak").exists(), "резервная копия обязана лежать при настоящем файле");
+    }
+
+    /// Задача 7: обе записи на месте — по имени, хотя `command` там `nc`,
+    /// а не наш исполняемый (контейнерный случай, имя наше по построению).
+    #[test]
+    fn found_by_name_sees_our_entries_by_name_even_with_a_foreign_command() {
+        let text = r#"{"context_servers":{"1c":{"command":"nc","enabled":true},"vrunner":{"command":"nc","enabled":true}}}"#;
+        assert_eq!(found_by_name(text), Found::Ours);
+    }
+
+    /// Хотя бы одной записи нет — «отсутствует», а не «наполовину настроено».
+    #[test]
+    fn found_by_name_is_absent_when_one_of_our_names_is_missing() {
+        let text = r#"{"context_servers":{"1c":{"command":"nc"}}}"#;
+        assert_eq!(found_by_name(text), Found::Absent);
+    }
+
+    /// Нет ключа, нет файла по смыслу (пустой текст), мусор — всё то же
+    /// «отсутствует»: различать причины здесь незачем, совет человеку один.
+    #[test]
+    fn found_by_name_is_absent_on_garbage_or_empty_text() {
+        assert_eq!(found_by_name(""), Found::Absent);
+        assert_eq!(found_by_name("это не json"), Found::Absent);
+        assert_eq!(found_by_name(r#"{"theme":"One Dark"}"#), Found::Absent);
     }
 }

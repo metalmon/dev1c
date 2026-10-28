@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use russh::client::{self, ChannelOpenHandle, Handle, Handler, Msg};
 use russh::keys::{HashAlg, PublicKeyOrCertificate};
-use russh::Channel;
+use russh::{Channel, ChannelMsg};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -185,6 +185,7 @@ pub async fn run(
     on_event: impl Fn(common::Event),
     serve: impl Fn(Incoming) + Send + Sync + 'static,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    editor_mcp: crate::session::EditorMcpSeen,
 ) -> Result<()> {
     let serve = Arc::new(serve);
     let ports = cfg.ports();
@@ -212,6 +213,14 @@ pub async fn run(
                     "туннель поднят: {} → порты {} (mcp-1c), {} (vrunner) и {} (веб-клиент)",
                     cfg.host.server, ports.mcp, ports.vrunner, ports.web
                 )));
+                // Контейнерный случай задачи 7: проброс встал — значит
+                // обслуживание включили, и серверы MCP у Zed в контейнере
+                // должны подняться сам (`"enabled": true`), а не ждать, пока
+                // человек их перезапустит руками. Ошибка правки — только
+                // предупреждение: связь важнее настройки редактора.
+                if let Err(e) = crate::session::flip_remote_servers(&t, true, &editor_mcp) {
+                    on_event(common::Event::Warn(format!("серверы MCP у Zed в среде не включены: {e}")));
+                }
                 loop {
                     tokio::select! {
                         inc = t.incoming.recv() => match inc {
@@ -219,6 +228,14 @@ pub async fn run(
                             None => break, // the session is gone
                         },
                         _ = stop.changed() => {
+                            // Та же правка в обратную сторону, и раньше
+                            // отключения: иначе Zed увидит пропавший `nc`
+                            // раньше, чем успеет погасить сервер сам
+                            // (спека, «Факты…» — Zed не поднимает упавший
+                            // сервер обратно).
+                            if let Err(e) = crate::session::flip_remote_servers(&t, false, &editor_mcp) {
+                                on_event(common::Event::Warn(format!("серверы MCP у Zed в среде не выключены: {e}")));
+                            }
                             let _ = t.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
                             return Ok(());
                         }
@@ -401,5 +418,43 @@ impl Tunnel {
     /// the meantime finds its port still taken.
     pub async fn close(self) {
         let _ = self.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
+    }
+
+    /// Выполняет одну команду на сервере — второй канал рядом с уже
+    /// поднятыми пробросами портов (задача 7: правка настроек Zed в
+    /// контейнере по SSH). `cmd` — либо просто команда, либо команда и то,
+    /// что подать ей на stdin, через ПЕРВЫЙ перевод строки: до него уходит
+    /// сама команда exec-запроса, всё после — байтами в канал отдельным
+    /// кадром, а не подстановкой в командную строку (решение владельца №2:
+    /// содержимое чужого файла никогда не подставляется в команду — в нём
+    /// бывают любые кавычки, обратные косые и переводы строк, и любая
+    /// интерполяция — дыра и порча разом). `Ok` — то, что команда написала в
+    /// stdout; `Err` — отказ связи или ненулевой код выхода, одной строкой.
+    pub async fn exec(&self, cmd: &str) -> Result<String, String> {
+        let (head, body) = match cmd.split_once('\n') {
+            Some((h, b)) => (h, Some(b)),
+            None => (cmd, None),
+        };
+        let mut channel = self.handle.channel_open_session().await.map_err(|e| e.to_string())?;
+        channel.exec(true, head).await.map_err(|e| e.to_string())?;
+        if let Some(body) = body {
+            channel.data_bytes(body.as_bytes().to_vec()).await.map_err(|e| e.to_string())?;
+            channel.eof().await.map_err(|e| e.to_string())?;
+        }
+        let mut out = Vec::new();
+        let mut status = None;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => out.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => break,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        match status {
+            Some(0) | None => Ok(String::from_utf8_lossy(&out).into_owned()),
+            Some(code) => Err(format!("команда на сервере вышла с кодом {code}: {head}")),
+        }
     }
 }

@@ -270,7 +270,11 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     // Командная строка (`check`, и `install` сразу за установкой) портов
     // рабочего места не занимает: занятый порт для неё — сведение, а не
     // провал (спека, «порты важны там, где мы их занимаем»).
-    let checks = verify::run(ctx, tunnel_state, verify::PortUse::WeDont);
+    // Командная строка не держит сеанса между вызовами — ничего из того,
+    // что увидело бы SSH-чтение ради правки `enabled`, здесь нет; в
+    // контейнерном режиме факт о записях MCP у редактора честно скажет
+    // «не смог проверить» (в локальном — читает диск сам).
+    let checks = verify::run(ctx, tunnel_state, None, verify::PortUse::WeDont);
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
     let path = ctx.kit.state_path("last-check.txt");

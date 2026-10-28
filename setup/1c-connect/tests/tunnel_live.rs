@@ -47,7 +47,8 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     cfg.host.password = if std::env::var("DEV1C_DOCKER").is_ok() { "dev2".into() } else { password };
     let (tx, rx) = tokio::sync::watch::channel(false);
     let kh = dir.join("known_hosts");
-    let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx).await });
+    let editor_mcp = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx, editor_mcp).await });
     if std::env::var("DEV1C_DOCKER").is_ok() {
         // The real proof: from inside the container the workstation port
         // answers. Connect + auth + forward take a few seconds on a slow

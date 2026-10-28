@@ -355,7 +355,25 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             }
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
         }
-        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+        Err(why) => {
+            // Та же развязка, что у публикации, и по той же причине: выбор
+            // режима — намерение человека, а не действие над базой, и на
+            // свежем комплекте с пустыми полями он обязан сработать. Память
+            // тут не годится: окно перечитывает файл на каждом показе.
+            let mut host = cx.global::<Ui>().cfg.host.clone();
+            host.mode = mode.into();
+            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), host) {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                return;
+            }
+            let label = MODES.iter().find(|(m, ..)| *m == mode).map(|(_, _, t)| *t).unwrap_or(mode);
+            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_mode(mode);
+            }
+            cx.global_mut::<Ui>().tab = Tab::Params;
+            window::show_window(cx);
+        }
     }
     cx.refresh_windows();
 }
@@ -370,10 +388,9 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
 /// Поэтому `Warn`, а не `Fail`: сделано не всё, но сделано. И сказано, что
 /// осталось, — иначе человек узнает о потере режима только после
 /// перезапуска.
-fn unsaved_switch_line(label: &str, why: String) -> Line {
+fn unsaved_switch_line(what: &str, label: &str, why: String) -> Line {
     Line {
-        kind: Kind::Warn,
-        text: format!("публикация базы: {label}. Параметры заполнены не до конца — допишите их и нажмите «Сохранить»: {why}"),
+        kind: Kind::Warn, text: format!("{what}: {label}. Параметры заполнены не до конца — допишите их и нажмите «Сохранить»: {why}")
     }
 }
 
@@ -447,7 +464,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
                 return;
             }
             let label = PUBLICATIONS.iter().find(|(p, ..)| *p == publication).map(|(_, _, t)| *t).unwrap_or(publication);
-            note_line(cx.global_mut::<Ui>(), unsaved_switch_line(label, why));
+            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("публикация базы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_publication(publication);
             }
@@ -630,12 +647,15 @@ mod tests {
         // параметрах он применяется, а человек читает, что осталось сделать
         // (находка владельца 28.10: «ничего не происходит» на комплекте, где
         // поля ещё не заполнены).
-        let l = unsaved_switch_line("Публикует платформа 1С", "[host]: workstation — dev1, dev2 или dev3".into());
+        let l = unsaved_switch_line("публикация базы", "Публикует платформа 1С", "[host]: workstation — dev1, dev2 или dev3".into());
         assert_eq!(l.kind, Kind::Warn);
         assert_eq!(
             l.text,
             "публикация базы: Публикует платформа 1С. Параметры заполнены не до конца — допишите их и нажмите «Сохранить»: [host]: workstation — dev1, dev2 или dev3"
         );
+        // Та же строка служит и режиму работы: дыра у них общая.
+        let m = unsaved_switch_line("режим работы", "Локально", "[host]: base_path — путь к базе".into());
+        assert!(m.text.starts_with("режим работы: Локально. Параметры заполнены не до конца"), "{}", m.text);
     }
 
     #[test]

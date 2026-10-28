@@ -502,13 +502,14 @@ mod tests {
 
     /// Настройки Zed — не JSON, а **шаблон** JSON с комментариями: entrypoint
     /// подставляет в него значения (`CUSTOM_MAX_TOKENS_PLACEHOLDER` стоит без
-    /// кавычек, то есть на месте числа). Чтобы прочитать его разбором, а не
-    /// глазами, приводим к JSON: срезаем `//` **вне строк** (в файле есть
-    /// адреса `http://localhost:3000`, и наивная резка сломала бы их) и
-    /// заменяем голые подстановки на 0 — нас интересуют профили, а не числа.
+    /// кавычек, то есть на месте числа). Снятие комментариев (`//` вне строк)
+    /// живёт в `editors::as_json` — этим же приёмом правка настроек человека
+    /// ищет границы своей записи, второй копии тут не нужно. Голые
+    /// подстановки `..._PLACEHOLDER` эта функция не трогает, их заменяем сами.
     fn as_json(text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        for line in text.lines() {
+        let stripped = crate::editors::as_json(text);
+        let mut out = String::with_capacity(stripped.len());
+        for line in stripped.lines() {
             let chars: Vec<char> = line.chars().collect();
             let (mut in_string, mut escaped, mut i) = (false, false, 0);
             while i < chars.len() {
@@ -519,18 +520,18 @@ mod tests {
                     escaped = true;
                 } else if c == '\"' {
                     in_string = !in_string;
-                } else if !in_string {
-                    if c == '/' && chars.get(i + 1) == Some(&'/') {
-                        break; // строка комментария — остаток не нужен
-                    }
-                    if c.is_ascii_uppercase() {
-                        let run: String =
-                            chars[i..].iter().take_while(|c| c.is_ascii_uppercase() || **c == '_' || c.is_ascii_digit()).collect();
-                        if run.ends_with("PLACEHOLDER") {
-                            out.push('0');
-                            i += run.chars().count();
-                            continue;
-                        }
+                } else if !in_string && c.is_ascii_uppercase() {
+                    // Голая (без кавычек) подстановка — только такая стоит
+                    // на месте числа (`CUSTOM_MAX_TOKENS_PLACEHOLDER`).
+                    // Внутри строки тот же текст — адрес или порт как
+                    // строка, и его трогать незачем: там и сравнивает
+                    // `pi_declares_the_same_mcp_servers_as_zed` as-is.
+                    let run: String =
+                        chars[i..].iter().take_while(|c| c.is_ascii_uppercase() || **c == '_' || c.is_ascii_digit()).collect();
+                    if run.ends_with("PLACEHOLDER") {
+                        out.push('0');
+                        i += run.chars().count();
+                        continue;
                     }
                 }
                 out.push(c);

@@ -599,13 +599,36 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
 /// (Important 6): свой литерал подсказки («закройте сеанс…») раньше
 /// держался здесь и советовал закрыть то, чего может не быть открыто вовсе,
 /// пока занятость от нашей же долгой операции.
-fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>) -> Check {
+fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication: &str) -> Check {
     if let Some((reason, hint)) = busy {
         return Check::busy(EXTENSION, format!("не спрашивали: на машине {reason}"), hint);
     }
+    let foreign = publication == "webserver";
     match reach {
         Some(Reach::Version(v)) => Check::pass(EXTENSION, v.clone()),
+        // 404 значит разное у своей публикации и у чужой. Своя публикует наш
+        // сервис явно (`publication::vrd`), и 404 там — расширения в базе
+        // правда нет. Чужая публикует сервисы расширений одной общей
+        // галочкой, снятой по умолчанию (замер 27.10 на диалоге 8.5): там
+        // 404 отдаёт **установленное** расширение, и посылать человека
+        // ставить его заново — посылать чинить то, что не сломано.
+        Some(Reach::Absent) if foreign => Check::fail(
+            EXTENSION,
+            "расширение в базе есть, но его HTTP-сервис не опубликован",
+            "Конфигуратор → Публикация на веб-сервере → вкладка «HTTP-сервисы» → галочка «Публиковать HTTP-сервисы расширений по умолчанию». Перезапускать веб-сервер не нужно",
+        ),
         Some(Reach::Absent) => Check::fail(EXTENSION, "расширения в базе нет", PUBLICATION_HINT),
+        // Занятость в чужой публикации — ожидаемое состояние, а не поломка:
+        // сеанс держит пул её веб-сервера, а сеансовыми настройками нашего
+        // сервиса оттуда не управляет никто (у сервисов расширений нет своей
+        // строки ни в дескрипторе, ни в диалоге). Поэтому к совету платформы
+        // добавляем их родной способ — перезапуск платформы. Сами не
+        // перезапускаем ничего: ни их веб-сервер, ни платформу.
+        Some(Reach::Refused(c)) if foreign && crate::onec_error::is_busy(c) => Check::busy(
+            EXTENSION,
+            c.what,
+            format!("база занята сеансом агента — это ожидаемо, когда публикует ваш веб-сервер: {}, либо перезапуск платформы", c.fix),
+        ),
         // Не пустили (401/403) — база отвечает, просто отказала в доступе.
         // Совет не про установку расширения, а про пароль: ровно сценарий
         // «сменили пароль базы, публикацию не обновили».
@@ -1050,7 +1073,7 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
                 let pair = (reason.as_str(), *hint);
                 return (
                     publication_responds_fact(&base_url, false, Some(pair)),
-                    extension_fact(None, Some(pair)),
+                    extension_fact(None, Some(pair), &h.publication),
                     descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
                 );
             }
@@ -1058,7 +1081,7 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             let reach = crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left);
             (
                 publication_responds_fact(&base_url, responds(&reach), None),
-                extension_fact(Some(&reach), None),
+                extension_fact(Some(&reach), None, &h.publication),
                 descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
             )
         },
@@ -1150,7 +1173,7 @@ mod tests {
             web_server_fact(None, None),
             web_fact(1818, false, false),
             publication_responds_fact("http://x", false, None),
-            extension_fact(Some(&Reach::Absent), None),
+            extension_fact(Some(&Reach::Absent), None, "auto"),
             descriptor_fact(Descriptor::Differs),
             gitea_address_fact(),
             gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
@@ -1589,15 +1612,49 @@ mod tests {
     /// операция: ответ известен заранее, а мьютекс проекта наш собственный —
     /// это знание достоверно, в отличие от догадки по списку процессов.
     #[test]
+    fn a_404_in_a_foreign_publication_points_at_the_checkbox() {
+        // Чужая публикация со снятой галочкой «Публиковать HTTP-сервисы
+        // расширений по умолчанию» отдаёт 404 на правильно установленном
+        // расширении. Прежний текст отправлял человека ставить расширение
+        // заново — то есть чинить то, что не сломано.
+        let c = extension_fact(Some(&Reach::Absent), None, "webserver");
+        assert!(!c.ok);
+        assert!(c.detail.contains("не опубликован"), "{c:?}");
+        assert!(c.hint.contains("HTTP-сервисы расширений"), "{c:?}");
+    }
+
+    #[test]
+    fn a_404_in_our_own_publication_still_means_the_extension_is_missing() {
+        let c = extension_fact(Some(&Reach::Absent), None, "auto");
+        assert_eq!(c.detail, "расширения в базе нет");
+    }
+
+    #[test]
+    fn a_busy_base_in_a_foreign_publication_names_their_own_remedy() {
+        static CAUSE: crate::onec_error::Cause =
+            crate::onec_error::Cause { what: crate::onec_error::SESSION_LIMIT, fix: "закройте лишние сеансы 1С" };
+        let cause = &CAUSE;
+        // В чужой публикации сеанс держит пул её веб-сервера, и управлять им
+        // нам нечем: человек должен прочитать, что это ожидаемо, и чем это
+        // лечится у них.
+        let c = extension_fact(Some(&Reach::Refused(cause)), None, "webserver");
+        assert_eq!(c.outcome(), Outcome::Busy);
+        assert!(c.hint.contains("перезапуск платформы"), "{c:?}");
+        // В своей публикации совет платформы остаётся как есть.
+        let own = extension_fact(Some(&Reach::Refused(cause)), None, "auto");
+        assert_eq!(own.hint, "закройте лишние сеансы 1С");
+    }
+
+    #[test]
     fn the_expensive_facts_are_not_asked_while_our_own_operation_holds() {
         // Занятость честно приходит без пробы вовсе (`None`), не с
         // поддельным `Reach::Unreachable` (Minor 11).
-        let c = extension_fact(None, Some(("идёт cf_decompile", "дождитесь конца операции")));
+        let c = extension_fact(None, Some(("идёт cf_decompile", "дождитесь конца операции")), "auto");
         assert_eq!(c.outcome(), Outcome::Busy);
         assert!(c.detail.contains("не спрашивали"), "{c:?}");
         // Свободна — разбор по исходу: нет расширения значит плохо, версия — хорошо.
-        assert_eq!(extension_fact(Some(&Reach::Absent), None).outcome(), Outcome::Bad);
-        assert_eq!(extension_fact(Some(&Reach::Version("0.4.8".into())), None).outcome(), Outcome::Good);
+        assert_eq!(extension_fact(Some(&Reach::Absent), None, "auto").outcome(), Outcome::Bad);
+        assert_eq!(extension_fact(Some(&Reach::Version("0.4.8".into())), None, "auto").outcome(), Outcome::Good);
         // Публикация и расширение — два разных факта, и путать их нельзя.
         assert_eq!(publication_responds_fact("http://x", false, None).outcome(), Outcome::Bad);
         assert_eq!(descriptor_fact(Descriptor::Differs).outcome(), Outcome::Bad);
@@ -1663,7 +1720,7 @@ mod tests {
         let publication = publication_responds_fact("http://x", responds(&reach), None);
         assert!(publication.ok && !publication.info, "{publication:?}");
 
-        let extension = extension_fact(Some(&reach), None);
+        let extension = extension_fact(Some(&reach), None, "auto");
         assert!(!extension.ok && !extension.info, "{extension:?}");
         assert!(extension.hint.contains("db_password"), "{extension:?}");
         assert!(!extension.hint.contains("install"), "совет про установку тут неверен: {extension:?}");
@@ -1694,7 +1751,7 @@ mod tests {
         let reach = Reach::Refused(cause);
 
         // Расширение — занято, словами и советом самой платформы.
-        let c = extension_fact(Some(&reach), None);
+        let c = extension_fact(Some(&reach), None, "auto");
         assert_eq!(c.outcome(), Outcome::Busy, "{c:?}");
         assert!(c.detail.contains("ограничение по числу сеансов"), "{c:?}");
         assert!(c.hint.contains("закройте лишние сеансы"), "{c:?}");
@@ -1709,7 +1766,7 @@ mod tests {
         // «не отвечает» с советом про установку.
         let other = crate::onec_error::explain("Пользователь ИБ не идентифицирован").unwrap();
         assert!(!crate::onec_error::is_busy(other));
-        let bad = extension_fact(Some(&Reach::Refused(other)), None);
+        let bad = extension_fact(Some(&Reach::Refused(other)), None, "auto");
         assert_eq!(bad.outcome(), Outcome::Bad, "{bad:?}");
         assert!(bad.detail.contains("не приняла пользователя"), "{bad:?}");
         assert!(!bad.hint.contains("install"), "совет про установку тут неверен: {bad:?}");
@@ -1934,13 +1991,13 @@ mod tests {
         // системы и проверяется отдельно (`a_dead_port_is_advised_by_mode_and_system`).
         let down = web_fact(1818, false, false);
         assert!(!down.ok && down.hint.contains("опубликована база"), "{down:?}");
-        let ok = extension_fact(Some(&Reach::Version("1.2".into())), None);
+        let ok = extension_fact(Some(&Reach::Version("1.2".into())), None, "auto");
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
         // До базы не достучались — совет про обслуживание, не про установку.
         let fail = publication_responds_fact("http://x", false, None);
         assert!(!fail.ok && fail.hint.contains("обслуживание") && !fail.hint.contains("install"), "{fail:?}");
         // А вот когда база ОТВЕТИЛА, что расширения нет, установка и есть ответ.
-        let absent = extension_fact(Some(&Reach::Absent), None);
+        let absent = extension_fact(Some(&Reach::Absent), None, "auto");
         assert!(!absent.ok && absent.hint.contains("install"), "{absent:?}");
     }
 

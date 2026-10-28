@@ -4,8 +4,8 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, start_session, stop_session,
-    theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, save_tray_key, start_session,
+    stop_session, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
@@ -373,7 +373,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
 fn unsaved_switch_line(label: &str, why: String) -> Line {
     Line {
         kind: Kind::Warn,
-        text: format!("публикация базы: {label}. В файл не записано — заполните параметры и нажмите «Сохранить»: {why}"),
+        text: format!("публикация базы: {label}. Параметры заполнены не до конца — допишите их и нажмите «Сохранить»: {why}"),
     }
 }
 
@@ -430,19 +430,24 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
             }
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("публикация: {}", label.to_lowercase()) });
         }
-        Err(e) => {
-            // Записать не вышло — параметры ещё не заполнены. Режим всё
-            // равно применён: он уже лежит в `ui.cfg.host.publication`, а
-            // `save_host` до присвоения `ui.cfg` не дошёл. Галочку ставим на
-            // новое значение — она показывает то, что есть на самом деле.
-            let mut label = publication;
-            for (p, _, text) in PUBLICATIONS {
-                if p == publication {
-                    label = text;
-                }
+        Err(why) => {
+            // Проверка всего файла не прошла — на свежем комплекте поля ещё
+            // пусты. Для переключателя это не повод не сработать: он не
+            // действие над базой, а намерение человека. Пишем один ключ
+            // (`save_tray_key`), остальное в файле остаётся как было.
+            //
+            // Именно в файл, а не в память: окно перечитывает файл на каждом
+            // показе, и намерение, оставленное в памяти, стирается первым же
+            // открытием окна — поле «Адрес публикации» тогда не появляется
+            // вовсе (находка владельца 28.10).
+            let mut host = cx.global::<Ui>().cfg.host.clone();
+            host.publication = publication.into();
+            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), host) {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                return;
             }
-            let line = unsaved_switch_line(&label.to_lowercase(), e);
-            note_line(cx.global_mut::<Ui>(), line);
+            let label = PUBLICATIONS.iter().find(|(p, ..)| *p == publication).map(|(_, _, t)| *t).unwrap_or(publication);
+            note_line(cx.global_mut::<Ui>(), unsaved_switch_line(label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_publication(publication);
             }
@@ -625,11 +630,11 @@ mod tests {
         // параметрах он применяется, а человек читает, что осталось сделать
         // (находка владельца 28.10: «ничего не происходит» на комплекте, где
         // поля ещё не заполнены).
-        let l = unsaved_switch_line("публикует платформа 1С", "[host]: workstation — dev1, dev2 или dev3".into());
+        let l = unsaved_switch_line("Публикует платформа 1С", "[host]: workstation — dev1, dev2 или dev3".into());
         assert_eq!(l.kind, Kind::Warn);
         assert_eq!(
             l.text,
-            "публикация базы: публикует платформа 1С. В файл не записано — заполните параметры и нажмите «Сохранить»: [host]: workstation — dev1, dev2 или dev3"
+            "публикация базы: Публикует платформа 1С. Параметры заполнены не до конца — допишите их и нажмите «Сохранить»: [host]: workstation — dev1, dev2 или dev3"
         );
     }
 

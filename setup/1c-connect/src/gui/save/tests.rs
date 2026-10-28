@@ -390,3 +390,20 @@ fn in_auto_mode_the_address_still_follows_the_base_folder() {
     };
     assert_eq!(base_url_to_write(&saved, "", "auto", "C:\\Bases\\UNF"), cfg::derived_base_url("C:\\Bases\\UNF"));
 }
+
+#[test]
+fn a_tray_key_is_written_even_when_the_rest_is_not_filled_in() {
+    // Свежий комплект: поля пусты, и `save_host` на них отказывает. Но
+    // переключатель в меню значка — намерение человека, а не действие над
+    // базой, и оно обязано пережить открытие окна: окно читает файл при
+    // каждом показе, так что «в памяти» такое намерение не живёт вовсе.
+    let mut ui = Ui::for_test();
+    ui.cfg.host = Host::default();
+    let mut host = ui.cfg.host.clone();
+    host.publication = "webserver".into();
+    assert!(Cfg { host: host.clone() }.validate().is_err(), "набор нарочно негодный");
+    save_tray_key(&mut ui, host).unwrap();
+    assert_eq!(ui.cfg.host.publication, "webserver");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("publication = \"webserver\""), "{text}");
+}

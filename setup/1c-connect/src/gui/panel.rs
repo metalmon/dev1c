@@ -517,6 +517,77 @@ pub fn shown_fields(mode: &str, publication: &str) -> &'static [&'static str] {
     }
 }
 
+/// Вопрос перед действием, которое отнимает уже сделанное. `None` — спрашивать
+/// не о чем, делаем сразу.
+///
+/// Снятие расширения зовёт Конфигуратор и удаляет `MCP_HTTPService` из базы;
+/// данные базы это не трогает, а вот агент после него базу не видит, пока
+/// расширение не поставят заново. В командной строке такой вопрос давно есть
+/// (`main.rs`, `1c-connect uninstall`), а в окне пункт стоял вплотную к
+/// «Установить расширение» и срабатывал молча (замечание владельца 28.10).
+pub fn op_question(which: gui::Which) -> Option<(&'static str, &'static str)> {
+    match which {
+        gui::Which::Uninstall => Some((
+            "Снять расширение mcp-1c из базы?",
+            "Агент перестанет видеть базу: её HTTP-сервис больше не ответит. Данные базы это не трогает, расширение можно поставить заново.",
+        )),
+        _ => None,
+    }
+}
+
+/// Пункт меню «…» на «Проекте» — действие или черта между группами.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ProjectMenu {
+    Item(&'static str, gui::Which),
+    /// Черта. Не украшение: четыре действия тут из трёх разных разрядов, и
+    /// соседние строки «Установить расширение» и «Снять расширение» человек
+    /// читает глазами, а жмёт мышью (замечание владельца 28.10).
+    Sep,
+}
+
+/// Разложить действия «Проекта» по смыслу: сперва данные (выгрузить и
+/// загрузить — обмен между базой и проектом), затем расширение, и отдельной
+/// группой то, что отнимает уже сделанное.
+///
+/// То, что стоит на главной кнопке, из меню убирается: дважды одно и то же
+/// рядом — повод ошибиться, а не удобство. Черта между группами при этом не
+/// должна остаться висеть первой или последней, и две подряд не допускаются:
+/// поэтому список собирается, а не пишется руками.
+pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
+    let groups: [&[(&'static str, gui::Which)]; 3] = [
+        &[("Выгрузить из 1С", gui::Which::Export), ("Загрузить в 1С", gui::Which::Import)],
+        &[("Установить расширение", gui::Which::Install)],
+        &[("Снять расширение", gui::Which::Uninstall)],
+    ];
+    let mut out: Vec<ProjectMenu> = Vec::new();
+    for group in groups {
+        let mut any = false;
+        for (label, w) in group.iter().copied() {
+            if Some(w) == primary {
+                continue;
+            }
+            if !any && !out.is_empty() {
+                out.push(ProjectMenu::Sep);
+            }
+            out.push(ProjectMenu::Item(label, w));
+            any = true;
+        }
+    }
+    out
+}
+
+/// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
+/// (`op_question`). Вопрос — тот же платформенный диалог, что и при смене
+/// базы; отказ не делает ничего и ничего не говорит сверх самого диалога.
+fn run_project_op(window: &mut Window, cx: &mut App, which: gui::Which) {
+    match op_question(which) {
+        None => gui::run_op(cx, which),
+        Some((message, detail)) => {
+            gui::ask_yes_no(window, cx, message, detail, "Да, снять", "Отмена", move |_window, cx| gui::run_op(cx, which));
+        }
+    }
+}
+
 /// Режим работы и режим публикации из текущих параметров: пара, от которой
 /// зависит, какие поля показаны (`shown_fields`). Оба правятся только из
 /// меню трея, поля в окне у них нет.
@@ -1390,21 +1461,21 @@ impl Render for Panel {
                     (None, Verdict::Off) => ("Выключено", "Включите MCP — тогда станет видно, что уже сделано"),
                     (None, _) => ("Проверяю…", "Жду набор фактов — что нужнее, пока неизвестно"),
                 };
-                // В меню — всё, кроме того, что на главной кнопке.
-                let rest: Vec<(&'static str, Which)> = [
-                    ("Выгрузить из 1С", Which::Export),
-                    ("Загрузить в 1С", Which::Import),
-                    ("Установить расширение", Which::Install),
-                    ("Снять расширение", Which::Uninstall),
-                ]
-                .into_iter()
-                .filter(|(_, w)| Some(*w) != which)
-                .collect();
+                // В меню — всё, кроме того, что на главной кнопке, и
+                // разложенное по разрядам (`project_menu`).
+                let rest = project_menu(which);
                 h_flex()
                     .gap_2()
                     .child(more("more-project").dropdown_menu(move |mut menu, _, _| {
-                        for (label, w) in rest.iter().copied() {
-                            menu = menu.item(PopupMenuItem::new(label).disabled(busy_now).on_click(move |_, _, cx| gui::run_op(cx, w)));
+                        for entry in rest.iter().copied() {
+                            menu = match entry {
+                                ProjectMenu::Sep => menu.separator(),
+                                ProjectMenu::Item(label, w) => menu.item(
+                                    PopupMenuItem::new(label)
+                                        .disabled(busy_now)
+                                        .on_click(move |_, window, cx| run_project_op(window, cx, w)),
+                                ),
+                            };
                         }
                         menu
                     }))
@@ -1572,8 +1643,8 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint,
-        shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_menu, project_rows,
+        reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
@@ -1972,6 +2043,38 @@ mod tests {
         assert_eq!(shown_fields("tunnel", "auto").len(), 7);
         // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
         assert_eq!(shown_fields("bogus", "auto"), shown_fields("tunnel", "auto"));
+    }
+
+    #[test]
+    fn the_project_menu_keeps_three_kinds_of_action_apart() {
+        use ProjectMenu::{Item, Sep};
+        // «Выгрузить» на главной кнопке — в меню его нет, а черта не висит
+        // первой: группа данных не опустела, в ней осталась загрузка.
+        assert_eq!(
+            project_menu(Some(crate::gui::Which::Export)),
+            vec![
+                Item("Загрузить в 1С", crate::gui::Which::Import),
+                Sep,
+                Item("Установить расширение", crate::gui::Which::Install),
+                Sep,
+                Item("Снять расширение", crate::gui::Which::Uninstall),
+            ]
+        );
+        // Главной кнопки нет вовсе — в меню все четыре, в трёх группах.
+        assert_eq!(project_menu(None).len(), 6);
+        // Группа опустела целиком — лишней черты от неё не остаётся.
+        let m = project_menu(Some(crate::gui::Which::Install));
+        assert_eq!(
+            m,
+            vec![
+                Item("Выгрузить из 1С", crate::gui::Which::Export),
+                Item("Загрузить в 1С", crate::gui::Which::Import),
+                Sep,
+                Item("Снять расширение", crate::gui::Which::Uninstall),
+            ]
+        );
+        // Снятие — всегда последнее и всегда за чертой.
+        assert_eq!(m.last(), Some(&Item("Снять расширение", crate::gui::Which::Uninstall)));
     }
 
     #[test]

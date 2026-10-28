@@ -314,6 +314,23 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         proceed(window, cx);
         return;
     };
+    ask_yes_no(window, cx, &message, &detail, "Да, сохранить", "Нет, не сохранять", proceed);
+}
+
+/// Спросить человека «да или нет» платформенным диалогом и сделать `proceed`
+/// только на «да». Общая обвязка для всех таких вопросов: один открытый
+/// диалог на окно (`dialog_open`), ответ приходит в своей задаче — главный
+/// поток ничего не ждёт, — и молчаливых выходов отсюда нет: человек нажал и
+/// обязан узнать, почему ничего не случилось.
+pub fn ask_yes_no(
+    window: &mut Window,
+    cx: &mut App,
+    message: &str,
+    detail: &str,
+    yes: &'static str,
+    no: &'static str,
+    proceed: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
     if cx.global::<Ui>().dialog_open {
         // Молчать нельзя: человек нажал кнопку и обязан узнать, почему ничего
         // не произошло. Молчаливый выход отсюда и был вторым тупиком той же
@@ -322,13 +339,7 @@ pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Hos
         return;
     }
     cx.global_mut::<Ui>().dialog_open = true;
-    let rx = window.prompt(
-        PromptLevel::Warning,
-        &message,
-        Some(&detail),
-        &[PromptButton::ok("Да, сохранить"), PromptButton::cancel("Нет, не сохранять")],
-        cx,
-    );
+    let rx = window.prompt(PromptLevel::Warning, message, Some(detail), &[PromptButton::ok(yes), PromptButton::cancel(no)], cx);
     cx.spawn(async move |cx| {
         let yes = matches!(rx.await, Ok(0));
         cx.update(|cx| {

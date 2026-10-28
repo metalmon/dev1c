@@ -571,7 +571,20 @@ fn pi_entry(e: &Entry, exe: &Path) -> serde_json::Value {
 /// ради вида файла не та (решение владельца №2). Правило чужой записи то
 /// же, что у Zed: имя совпало, а команда чужая — отказ со списком имён, без
 /// правки файла (решение владельца №3).
+///
+/// BOM в начале файла — тоже отказ, но не терпимость, как у Zed с висящей
+/// запятой: Zed сам читает JSONC с комментарием и запятой, а pi сам такой
+/// файл не прочтёт (BOM не входит в чистый JSON). Тихо переписать его без
+/// BOM значило бы отрапортовать успех о файле, который pi всё равно не
+/// подхватит молча — отказ называет причину по имени, чтобы человек понял,
+/// что чинить (пересохранить файл в UTF-8 без метки), а не наткнулся на
+/// общее «не разбирается как JSON».
 pub fn merge_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
+    if text.starts_with('\u{feff}') {
+        return Err(
+            vec!["mcp.json начинается с BOM — pi сам не прочтёт такой файл; пересохраните его в UTF-8 без метки (BOM)".to_string()],
+        );
+    }
     let mut top: serde_json::Value = if text.trim().is_empty() {
         serde_json::json!({})
     } else {
@@ -669,6 +682,73 @@ mod tests {
     fn a_foreign_pi_entry_with_our_name_is_reported() {
         let before = r#"{"mcpServers":{"vrunner":{"command":"nc","args":["-N","localhost","7781"]}}}"#;
         assert_eq!(merge_pi(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["vrunner".to_string()]);
+    }
+
+    /// Симметрия с `merge_zed`: битый не-JSON текст — отказ, а не наш файл
+    /// вместо содержимого человека (ревью задачи 5, Important 1).
+    #[test]
+    fn garbage_that_is_not_json_is_a_refusal_for_pi_too() {
+        assert!(merge_pi("это вообще не json", Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// Та же симметрия: объект начат, но не закрыт — отказ, а не
+    /// наполовину написанный файл.
+    #[test]
+    fn an_unclosed_object_is_a_refusal_for_pi_too() {
+        let before = "{\n  \"mcpServers\": {\n  oops\n";
+        assert!(merge_pi(before, Path::new("/opt/1c-connect")).is_err());
+    }
+
+    /// `mcpServers` — не объект (решение, зеркальное проверке
+    /// `context_servers` у Zed): вписать рядом свой ключ значило бы молча
+    /// проиграть чужому значению (в JSON побеждает последний одноимённый
+    /// ключ), поэтому отказ для всех форм "не объект".
+    #[test]
+    fn mcp_servers_that_is_not_an_object_is_a_refusal() {
+        for bad in [r#"{"mcpServers": null}"#, r#"{"mcpServers": "выключено руками"}"#, r#"{"mcpServers": []}"#] {
+            assert!(merge_pi(bad, Path::new("/opt/1c-connect")).is_err(), "{bad}");
+        }
+    }
+
+    /// Оба наших имени заняты чужими записями разом — список `occupied`
+    /// несёт оба имени, а не только первое найденное.
+    #[test]
+    fn both_our_names_occupied_at_once_are_reported_together() {
+        let before = r#"{"mcpServers":{"1c":{"command":"nc"},"vrunner":{"command":"nc"}}}"#;
+        let mut err = merge_pi(before, Path::new("/opt/1c-connect")).unwrap_err();
+        err.sort();
+        assert_eq!(err, vec!["1c".to_string(), "vrunner".to_string()]);
+    }
+
+    /// Симметрия с `our_own_entry_is_updated_in_place` у Zed: наша же
+    /// запись (имя файла в `command` совпадает) переписывается на новый
+    /// путь исполняемого, а не копится рядом вторым конфликтом.
+    #[test]
+    fn pi_updates_our_own_entry_in_place_on_a_new_exe_path() {
+        let before = r#"{"mcpServers":{"1c":{"command":"/old/1c-connect","args":["mcp","1c"],"timeout":300}}}"#;
+        let out = merge_pi(before, Path::new("/new/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcpServers"]["1c"]["command"], "/new/1c-connect");
+    }
+
+    /// Симметрия с `a_windows_path_is_escaped_and_parses_back` у Zed:
+    /// путь с пробелом и кириллицей переживает экранирование `serde_json`
+    /// и возвращается тем же текстом после разбора (ревью задачи 5,
+    /// Important 2).
+    #[test]
+    fn a_windows_path_with_spaces_and_cyrillic_round_trips_for_pi() {
+        let out = merge_pi("", Path::new(r"C:\Users\Иван Петров\1c-connect.exe")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcpServers"]["1c"]["command"], r"C:\Users\Иван Петров\1c-connect.exe");
+    }
+
+    /// Minor ревью задачи 5: BOM называется по имени, а не тонет в общем
+    /// «не разбирается как JSON» — человек должен понять, что чинить.
+    #[test]
+    fn a_bom_is_named_by_name_not_folded_into_a_generic_parse_error() {
+        let before = "\u{feff}{}";
+        let err = merge_pi(before, Path::new("/opt/1c-connect")).unwrap_err();
+        assert!(err.iter().any(|m| m.contains("BOM")), "{err:?}");
     }
 
     #[test]

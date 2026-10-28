@@ -530,10 +530,10 @@ fn modes_of(cx: &App) -> (String, String) {
 /// показывается пустым полем: решение владельца 26.10 «пустые поля вместо
 /// выдуманных значений». Своё значение показывается как есть.
 pub fn shown_base_url(host: &Host) -> &str {
-    if host.base_url.is_empty() || host.base_url == crate::cfg::derived_base_url(&host.base_path) {
+    if crate::cfg::is_derived_address(host) {
         ""
     } else {
-        &host.base_url
+        host.base_url.trim()
     }
 }
 

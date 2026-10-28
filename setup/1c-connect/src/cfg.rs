@@ -82,6 +82,21 @@ pub fn derived_base_url(base_path: &str) -> String {
     format!("http://localhost/{}/hs/mcp-1c", if ok { name } else { "Buh" })
 }
 
+/// Наша ли это догадка, а не адрес человека. Спрашивается ровно в одном
+/// месте и ровно в один момент — когда человек переключает публикацию на
+/// «уже опубликована» (`gui::tray::apply_publication`): в обычном режиме
+/// `carried_base_url` держит в toml выведенный от каталога базы адрес, и
+/// принять его за ответ человека нельзя — в этом режиме он ничего не
+/// вписывал.
+///
+/// Сравнением строк это решается только здесь. Дальше — никогда: человек, у
+/// которого база и правда опубликована как `http://localhost/<папка>`,
+/// вписывает ровно такую строку, и выбрасывать её как «догадку» значило бы
+/// ломать самый частый случай.
+pub fn is_derived_address(host: &Host) -> bool {
+    host.base_url.trim() == derived_base_url(&host.base_path)
+}
+
 /// Полный адрес HTTP-сервиса из того, что человек вписал в окне. Свою
 /// публикацию он знает как `http://localhost/Buh` — именно её он открывает в
 /// браузере, — а `/hs/mcp-1c` это имя нашего сервиса в расширении, и слышать
@@ -410,6 +425,8 @@ impl Cfg {
     pub fn base_url(&self) -> String {
         if self.host.publication == "auto" {
             format!("http://localhost:{}/hs/mcp-1c", self.http_port())
+        } else if self.publication_address_missing() {
+            String::new()
         } else {
             // Поле для адреса в окне теперь есть («Параметры», видно только в
             // этом режиме), и пустое значит «не задан». Выведенная догадка
@@ -423,6 +440,12 @@ impl Cfg {
 
     /// Адрес чужой публикации не задан — работать не по чему. В режиме `auto`
     /// адрес считается сам, и «не задан» там не бывает.
+    ///
+    /// Пусто — значит не задан, и только пусто: что в поле написано, то и
+    /// адрес. Выведенная догадка сюда не попадает — её снимает переключение
+    /// режима (`is_derived_address`, `gui::tray::apply_publication`), а
+    /// судить уже записанное по виду строки нельзя: `http://localhost/Buh`
+    /// это и наша догадка, и законный адрес человека.
     pub fn publication_address_missing(&self) -> bool {
         self.host.publication != "auto" && self.host.base_url.trim().is_empty()
     }
@@ -706,11 +729,14 @@ mod tests {
 
     #[test]
     fn webserver_keeps_the_field() {
-        // Написанный адрес отдаётся как есть; пустой значит «не задан»
-        // (`an_empty_base_url_is_not_set_and_not_invented`), поэтому берём
-        // заполненный набор.
+        // Написанный адрес отдаётся как есть. Адрес набора совпадает с
+        // выведенным от каталога базы, а это «не задан»
+        // (`a_derived_guess_in_the_toml_counts_as_no_address_at_all`),
+        // поэтому вписываем свой — тест про чужую публикацию, а не про
+        // нашу догадку.
         let mut c = filled();
         c.host.publication = "webserver".into();
+        c.host.base_url = "http://localhost/UNF/hs/mcp-1c".into();
         assert_eq!(c.base_url(), c.host.base_url);
     }
 
@@ -905,6 +931,27 @@ mod tests {
             let e = c.validate().unwrap_err().to_string();
             assert!(e.contains("адрес публикации"), "{typed}: {e}");
         }
+    }
+
+    #[test]
+    fn a_guess_is_told_from_an_answer_only_at_the_moment_of_switching() {
+        // Машина, где когда-то нажали «Сохранить» в обычном режиме, несёт в
+        // toml выведенную догадку (`carried_base_url`), и принять её за
+        // ответ человека нельзя — в том режиме он ничего не вписывал.
+        let mut c = filled();
+        c.host.base_path = "C:\\Bases\\Buh".into();
+        c.host.base_url = derived_base_url(&c.host.base_path);
+        assert!(is_derived_address(&c.host));
+        // А вот та же строка, вписанная руками в режиме «уже опубликована»,
+        // — законный адрес, и выбрасывать его нельзя: именно так выглядит
+        // самый частый случай (публикация названа по имени базы, порт 80).
+        // Поэтому дальше судят только по пустоте.
+        c.host.publication = "webserver".into();
+        assert!(!c.publication_address_missing());
+        assert_eq!(c.base_url(), derived_base_url(&c.host.base_path));
+        c.host.base_url = String::new();
+        assert!(c.publication_address_missing());
+        assert_eq!(c.base_url(), "");
     }
 
     #[test]

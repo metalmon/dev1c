@@ -357,6 +357,28 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
 /// иначе она увидела бы в параметрах «публикует веб-сервер» и вышла бы, не
 /// тронув ничего.
 fn apply_publication(cx: &mut App, publication: &'static str) {
+    // Уходя в чужую публикацию, забираем своё: гасим свой httpd и убираем
+    // свой дескриптор с логином и паролем базы. **До** записи режима — после
+    // неё уборка увидела бы «публикует веб-сервер» и не тронула бы ничего
+    // (`leave_own_publication`), — и только здесь, после согласия человека:
+    // ответил «нет» на вопрос о смене — ничего не тронуто.
+    if publication == "webserver" {
+        let ctx = super::ctx_for(cx.global::<Ui>());
+        if let Err(e) = crate::ops_host::leave_own_publication(&ctx) {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("{e:#}") });
+            return;
+        }
+        let ui = cx.global_mut::<Ui>();
+        ui.raised_publication = false;
+        // Выведенный от каталога базы адрес в toml написали мы, а не человек
+        // (`carried_base_url` в обычном режиме). Принять его за ответ нельзя:
+        // в этом режиме он ничего не вписывал, а проба по нашей догадке ушла
+        // бы на чужой веб-сервер. Снимаем — и замок окна честно скажет
+        // «адрес не задан».
+        if crate::cfg::is_derived_address(&ui.cfg.host) {
+            ui.cfg.host.base_url = String::new();
+        }
+    }
     cx.global_mut::<Ui>().cfg.host.publication = publication.into();
     let host = cx.global::<Ui>().cfg.host.clone();
     match save_host(cx.global_mut::<Ui>(), host) {
@@ -469,18 +491,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             if let Some(tray) = &ui.tray {
                 tray.set_publication(&current);
             }
-            // Уходя в чужую публикацию, забираем своё: гасим свой httpd и
-            // убираем свой дескриптор с логином и паролем базы. Делается это
-            // ДО записи режима — после неё уборка увидела бы «публикует
-            // веб-сервер» и не тронула бы ничего (`leave_own_publication`).
-            if publication == "webserver" {
-                let ctx = super::ctx_for(cx.global::<Ui>());
-                if let Err(e) = crate::ops_host::leave_own_publication(&ctx) {
-                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("{e:#}") });
-                    return;
-                }
-                cx.global_mut::<Ui>().raised_publication = false;
-            }
+            // Уборка своей публикации — не здесь, а в `apply_publication`:
+            // вопрос ниже человек может отклонить, и тогда гасить что-либо
+            // было бы прямым вредом (свой httpd убит, режим прежний).
             let mut host = cx.global::<Ui>().cfg.host.clone();
             host.publication = publication.into();
             let ui = cx.global::<Ui>();

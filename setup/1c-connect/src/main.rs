@@ -13,7 +13,7 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx};
-use one_c_connect::{cfg, flow, licence, project, session, single_instance, verify};
+use one_c_connect::{allow, cfg, flow, licence, project, session, single_instance, verify};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -264,6 +264,15 @@ fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Снимает признак разрешения (`allow::write(.., false)`) любым путём, каким `connect`/`serve` выходят — в т.ч. через `?`: `Drop`, а не строка на каждый возврат, иначе ранний отказ (например, `tokio::runtime::Runtime::new()`) оставлял бы на диске «on» от процесса, которого уже нет.
+struct OffOnExit<'a>(&'a Kit);
+
+impl Drop for OffOnExit<'_> {
+    fn drop(&mut self) {
+        allow::write(self.0, false);
+    }
+}
+
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
     let params = ctx.kit.state_path(cfg::FILE);
@@ -280,6 +289,12 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // файл не заводится, и второй долгоживущий процесс (другой редактор,
     // будущая подкоманда `mcp`) замка вовсе не увидит.
     project::set_lock_target(ctx.kit.state());
+    // `connect` — такой же владелец рабочего места, как окно (спека,
+    // «у рабочего места один владелец»), и признак разрешения на диске
+    // обязан сказать «on» здесь же, иначе подкоманда `mcp` отказывала бы в
+    // каждом вызове при исправно работающей связи.
+    allow::write(&ctx.kit, true);
+    let _off = OffOnExit(&ctx.kit);
     let ports = ctx.cfg.ports();
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
@@ -325,6 +340,11 @@ fn serve(ctx: &Ctx) -> Result<()> {
     let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
     project::set_lock_target(ctx.kit.state());
+    // На стенде связь держит именно `serve` (сам он и есть «окно» этого
+    // рабочего места) — тот же признак разрешения, что пишет `connect`, см.
+    // комментарий там.
+    allow::write(&ctx.kit, true);
+    let _off = OffOnExit(&ctx.kit);
     // Без сеанса на стенде никто больше базу не публикует (см. спеку
     // «HTTP-сервис базы ведёт коннектор») — поднимаем её перед тем, как
     // начать слушать, тем же сервисом, что умрёт вместе с этим процессом

@@ -806,6 +806,11 @@ pub fn run_check(cx: &mut App) {
 /// обрывается не чисто. Ждём не дольше `STOP_WAIT`: застрявший `stop` не
 /// должен держать «Выход» навсегда.
 pub fn quit(cx: &mut App) {
+    // Выход — владелец рабочего места уходит, и признак на диске обязан
+    // сказать «off» раньше, чем замок (`single_instance::Guard`) и правда
+    // освободится: иначе подкоманда `mcp`, успевшая прочитать файл в это
+    // окно, увидела бы «on» при уже умирающем окне.
+    crate::allow::write(&cx.global::<Ui>().kit, false);
     if let Some(s) = cx.global_mut::<Ui>().session.take() {
         let (done, stopped) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1253,6 +1258,8 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // режима в трее (`tray::on_menu`).
         tray.set_mode(&cfg.host.mode);
         tray.set_publication(&cfg.host.publication);
+        // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл.
+        crate::allow::write(&kit, serve_on_start);
         cx.set_global(Ui {
             kit,
             cfg,

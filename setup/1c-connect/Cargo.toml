@@ -44,7 +44,10 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 # behaviour that differs by version, and it takes the password only from a
 # keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.
 russh = { version = "0.64", default-features = false, features = ["ring"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "time", "sync", "signal"] }
+# io-std: stdin/stdout как AsyncRead/AsyncWrite — ими подкоманда `mcp` отдаёт
+# стандартные потоки в тот же `Serve::dispatch`, что принимает TCP и канал
+# туннеля (`ops_host::run_mcp`).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "io-std", "time", "sync", "signal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Трею нужен инициализированный GTK и прокрутка его цикла (`tray::init`,

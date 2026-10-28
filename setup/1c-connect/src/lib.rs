@@ -8,6 +8,7 @@ pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
 pub mod flow;
+pub mod gate;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod holder;

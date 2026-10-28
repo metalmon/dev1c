@@ -35,32 +35,12 @@ pub fn link_is_current(ui: &Ui, gen: u64) -> bool {
     gen == ui.session_gen
 }
 
-/// Холодный замок на текущих параметрах: всё, за чем надо на диск, спрашиваем
-/// здесь, решает `gate::cold_gate`. Отдельно от `refresh_gate` ниже, потому
-/// что `launch` считает замок до того, как `Ui` вообще появился — начальное
-/// значение переключателя уже обязано его слушаться.
-pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
-    let tools = ops_host::tools_state(&kit.root);
-    // Существование спрашиваем только у файловой базы (`gate::wants_directory`,
-    // правило самого факта «база»): `exists()` по недоступной сетевой шаре
-    // висит на таймауте SMB, а считается это на главном потоке окна.
-    let base = &cfg.host.base_path;
-    let base_exists = gate::wants_directory(base) && std::path::Path::new(base).exists();
-    let platform = ops_host::platform_choice(cfg);
-    gate::cold_gate(
-        cfg,
-        kit.state_path(cfg::FILE).exists(),
-        base_exists,
-        &tools,
-        // Выбор платформы и причина отказа — одной лестницей (`platform_choice`):
-        // окно запирает переключатель тем же текстом, что показывает проверка.
-        platform.as_ref().map(|c| c.exe.as_path()).map_err(String::as_str),
-        ops_host::mcp_exe(kit).exists(),
-        // Срок спрашиваем у часов, а не у запомненного при запуске: окно может
-        // простоять открытым через полночь срока (так же поступает `run_op`).
-        &crate::licence::state_now(),
-    )
-}
+/// Холодный замок на текущих параметрах — общая функция, не своя
+/// (`crate::gate::gate_now`): подкоманде `1c-connect mcp` он нужен тем же
+/// путём, без второй формулировки причин отказа. Отдельно от `refresh_gate`
+/// ниже, потому что `launch` считает замок до того, как `Ui` вообще
+/// появился — начальное значение переключателя уже обязано его слушаться.
+pub use crate::gate::gate_now;
 
 /// Пересчитать замок и донести причину до моста: пока замок заперт, отказ
 /// агенту несёт её текстом (`bridge::disabled_text`), иначе ни агент, ни

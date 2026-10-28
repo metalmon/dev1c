@@ -48,7 +48,12 @@ use common::kit::Kit;
 /// Linux. Не нашли — общий `?` на всех без логина в окружении: замок при
 /// этом не менее надёжен, просто не различил бы несколько таких учёток на
 /// одной машине (случай, которого на наших рабочих местах не бывает).
-fn current_user() -> String {
+///
+/// `pub(crate)`: подкоманде `1c-connect mcp` (`ops_host::run_mcp`) нужен тот
+/// же пользователь, что и замку рабочего места — для `allow::watch`, который
+/// проверяет живость того же владельца (`guard_key`), не свой второй способ
+/// узнать логин.
+pub(crate) fn current_user() -> String {
     let found = if cfg!(windows) { std::env::var("USERNAME") } else { std::env::var("USER").or_else(|_| std::env::var("LOGNAME")) };
     found.unwrap_or_else(|_| "?".into())
 }

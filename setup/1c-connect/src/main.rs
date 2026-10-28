@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
-use one_c_connect::ops_host::{self, Ctx};
+use one_c_connect::ops_host::{self, Ctx, McpServer};
 use one_c_connect::{allow, cfg, flow, licence, project, session, single_instance, verify};
 use std::sync::Arc;
 
@@ -59,6 +59,13 @@ enum Cmd {
     /// Без окна: поднять сеанс и держать его до Ctrl+C/SIGTERM. Для стенда и
     /// другого автозапуска без рабочего стола.
     Serve,
+    /// Мост на стандартный поток — для MCP-клиента в редакторе (Zed, pi), у
+    /// которого на машине человека нет проброшенного порта рабочего места
+    /// (спека «MCP в редакторе ставит и держит коннектор»).
+    Mcp {
+        /// Какой из двух наших серверов: `1c` (mcp-1c) или `vrunner` (vrunner-mcp).
+        server: McpServer,
+    },
     /// Выгрузить конфигурацию в src (cf_decompile) и отправить ветку в Gitea.
     Export {
         /// Сообщение коммита.
@@ -162,6 +169,13 @@ fn run() -> Result<()> {
         print!("{}", cfg::EXAMPLE);
         return Ok(());
     }
+    // Самостоятельная: свой комплект (внутри `run_mcp`), свой журнал файлом
+    // (ни строки в stdout — та труба занята протоколом MCP), свои проверки
+    // срока и холодного замка. `ctx`/`--dry-run`/`--yes` ей не нужны —
+    // редактор поднимает её без них.
+    if let Some(Cmd::Mcp { server }) = cli.cmd {
+        return ops_host::run_mcp(server);
+    }
     let ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
     let ops = ops_host::host();
     let cmd = cli.cmd.unwrap_or(Cmd::Status);
@@ -176,6 +190,7 @@ fn run() -> Result<()> {
     }
     match cmd {
         Cmd::Example => unreachable!(),
+        Cmd::Mcp { .. } => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
             println!("Рабочее место {} → среда {}", ctx.cfg.host.workstation, ctx.cfg.host.server);
@@ -404,6 +419,19 @@ mod tests {
     #[test]
     fn serve_takes_no_flags_of_its_own() {
         assert!(Cli::try_parse_from(["1c-connect", "serve", "--port", "1"]).is_err());
+    }
+
+    /// Ровно два сервера — те самые имена, что увидит `settings.json` Zed и
+    /// `~/.pi/agent/mcp.json` (спека «MCP в редакторе», «Не цели»). Третьему
+    /// имени взяться неоткуда: `McpServer` — закрытый `ValueEnum`.
+    #[test]
+    fn mcp_takes_exactly_our_two_server_names() {
+        let cli = Cli::try_parse_from(["1c-connect", "mcp", "1c"]).expect("1c разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Mcp { server: McpServer::OneC })));
+        let cli = Cli::try_parse_from(["1c-connect", "mcp", "vrunner"]).expect("vrunner разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Mcp { server: McpServer::Vrunner })));
+        assert!(Cli::try_parse_from(["1c-connect", "mcp", "bsl-reference"]).is_err(), "чужой сервер не проходит мимо clap");
+        assert!(Cli::try_parse_from(["1c-connect", "mcp"]).is_err(), "без имени сервера — отказ");
     }
 
     #[test]

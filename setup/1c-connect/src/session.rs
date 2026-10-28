@@ -404,6 +404,72 @@ impl Serve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops_host::{port_of, McpServer};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Набор, который `Serve::new` принимает без лишних вопросов: сервер
+    /// файловой базы на выдуманном рабочем месте `dev1` — те же значения, что
+    /// и у остальных тестов этого файла (`filled_for_test`).
+    fn filled() -> Cfg {
+        crate::cfg::filled_for_test()
+    }
+
+    /// Порты для теста — не 777x/778x настоящей машины, а те, что выводит
+    /// сам `Cfg::ports()` по номеру рабочего места `filled()`.
+    fn ports() -> Ports {
+        filled().ports()
+    }
+
+    fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("onec-session-mcp-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn kit_in(dir: std::path::PathBuf) -> Kit {
+        Kit::at(dir)
+    }
+
+    /// Пишет запрос агента в `stream` и отдаёт первую строку ответа — тем же
+    /// приёмом, что `bridge.rs` гоняет `tokio::io::duplex` в своих тестах, но
+    /// без ожидания и закрытия: мосту этого соединения закрывать не нужно,
+    /// пока тест сам не позвал `task.abort()`.
+    async fn ask<S>(stream: S, request: &[u8]) -> String
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (r, mut w) = tokio::io::split(stream);
+        w.write_all(request).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(r);
+        tokio::time::timeout(std::time::Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("мост обязан ответить сам, без ребёнка")
+            .unwrap();
+        line
+    }
+
+    #[tokio::test]
+    async fn the_stdio_path_answers_initialize_without_a_child() {
+        // Комплекта в тестах нет, ребёнок не поднимется — и это главный случай:
+        // мост обязан ответить сам, иначе Zed сочтёт сервер упавшим.
+        let (mine, theirs) = tokio::io::duplex(64 * 1024);
+        let serve = Serve::new(&filled(), &kit_in(tempdir()), Arc::new(|_| {}), ports(), Arc::new(AtomicBool::new(true)));
+        let task = serve.dispatch(ports().mcp, theirs).unwrap();
+        let reply = ask(mine, br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
+        assert!(reply.contains("\"result\""), "{reply}");
+        task.abort();
+    }
+
+    #[test]
+    fn the_server_argument_picks_the_port() {
+        assert_eq!(port_of(McpServer::OneC, ports()), ports().mcp);
+        assert_eq!(port_of(McpServer::Vrunner, ports()), ports().vrunner);
+    }
 
     #[test]
     fn the_tunnel_events_drive_the_state() {

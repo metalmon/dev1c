@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
-use common::{Phase, Prompt, Runner, Sink};
+use common::{Event, Phase, Prompt, Runner, Sink};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct Ctx {
     pub kit: Kit,
@@ -1251,6 +1252,111 @@ pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
         return Ok(());
     }
     raise_publication(ctx, crate::publication::Lifetime::WithCaller)
+}
+
+/// Какой из двух наших серверов моста поднимает подкоманда `1c-connect mcp`:
+/// `1c` — mcp-1c, `vrunner` — vrunner-mcp. Через мост идут ровно эти два
+/// (спека «MCP в редакторе», «Не цели»), третьего не бывает — отдельный флаг
+/// или строка снаружи были бы дверью туда, куда ходить не должны.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum McpServer {
+    #[value(name = "1c")]
+    OneC,
+    Vrunner,
+}
+
+/// Порт, на который `Serve::dispatch` слушает выбранный сервер — рядом с
+/// `run_mcp`, а не внутри него: тест (`the_server_argument_picks_the_port`)
+/// проверяет соответствие без стенда и без tokio.
+pub fn port_of(server: McpServer, ports: crate::cfg::Ports) -> u16 {
+    match server {
+        McpServer::OneC => ports.mcp,
+        McpServer::Vrunner => ports.vrunner,
+    }
+}
+
+/// Журнал подкоманды `mcp` — в файл (`Kit::cmd_log`), ни строки в stdout: та
+/// труба занята протоколом MCP, и даже отладочная строка в ней — повод Zed
+/// счесть мост упавшим (спека «MCP в редакторе»). Тот же разбор событий, что
+/// у `make_ctx` в `main.rs`, только писатель — файл, а не терминал.
+fn cmd_log_sink(kit: &Kit) -> Sink {
+    let kit = kit.clone();
+    Arc::new(move |e: Event| {
+        if kit.journal(&e) {
+            return;
+        }
+        let line = match &e {
+            Event::Ok(t) => format!("[ ok ] {t}"),
+            Event::Warn(t) => format!("[ !! ] {t}"),
+            Event::Fail(t) => format!("[FAIL] {t}"),
+            Event::Say(t) => t.clone(),
+            Event::Progress(p) => format!("== {}", p.phase.title()),
+            Event::Command(_) | Event::Output { .. } => return,
+        };
+        let path = kit.cmd_log();
+        if let Some(d) = path.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+    })
+}
+
+/// Подкоманда `1c-connect mcp 1c|vrunner`: редактор (Zed, pi) запускает мост
+/// как свой stdio-процесс вместо похода на проброшенный порт рабочего
+/// места, которого на машине человека нет (спека «MCP в редакторе ставит и
+/// держит коннектор», «Где это строится»). Ребёнка (`mcp-1c`/`vrunner-mcp`)
+/// поднимает сам `Serve::dispatch` — труба до окна здесь не нужна и не была
+/// бы: Zed спрашивает `tools/list` один раз за сеанс и не обрабатывает
+/// `notifications/tools/list_changed`, значит список обязан быть настоящим
+/// всегда, даже когда окно не запущено.
+///
+/// Замок рабочего места (`single_instance::acquire`) эта подкоманда не
+/// берёт — его держит окно (спека «Замок рабочего места подкоманда не
+/// берёт»). Межпроцессный замок проекта (`project::set_lock_target`) берёт —
+/// тем же каталогом состояния, что окно и `connect`/`serve`: второй клиент
+/// (другой редактор, второй `mcp`) обязан получить «занято», а не вторую
+/// выгрузку в тот же каталог.
+///
+/// Срок действия и холодный замок проверяются один раз, до первого ответа
+/// агенту, тем же кодом, что окно (`crate::gate::gate_now`) — не своей
+/// формулировкой причин: отказ — одна строка в stderr и ненулевой код
+/// выхода, это то, что редактор покажет человеку. `enabled` дальше —
+/// отдельный, горячий переключатель (`allow::watch`): разрешение меняется на
+/// лету, пока процесс уже слушает, и его читает только мост на каждый
+/// `tools/call`.
+pub fn run_mcp(server: McpServer) -> Result<()> {
+    let kit = wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
+    ensure_state(&kit);
+    let params = kit.state_path(crate::cfg::FILE);
+    anyhow::ensure!(
+        params.exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
+        params.display(),
+        params.display()
+    );
+    let cfg = Cfg::load(&kit)?;
+    // Межпроцессная часть замка проекта: без этого вызова второй
+    // долгоживущий процесс (Zed и pi, запущенные разом) его вовсе не увидит
+    // (см. тот же вызов в `main.rs::connect`).
+    crate::project::set_lock_target(kit.state());
+    if let Some(why) = crate::gate::gate_now(&kit, &cfg) {
+        anyhow::bail!("{why}");
+    }
+    let log = cmd_log_sink(&kit);
+    let enabled = crate::allow::watch(&kit, crate::single_instance::current_user(), cfg.host.workstation.clone());
+    let port = port_of(server, cfg.ports());
+    let serve = crate::session::Serve::new(&cfg, &kit, log, cfg.ports(), enabled);
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let stdio = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
+        if let Some(task) = serve.dispatch(port, stdio) {
+            let _ = task.await;
+        }
+    });
+    Ok(())
 }
 
 /// Погасить СВОЙ HTTP-сервис — путь выхода окна (`gui::quit`). Та же

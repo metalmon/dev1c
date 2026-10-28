@@ -360,6 +360,23 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
     cx.refresh_windows();
 }
 
+/// Строка журнала, когда режим переключён, но в файл не записан. Применить
+/// его мы вправе: это намерение человека, а не действие над базой —
+/// публикацию здесь никто не поднимает, и связь при этом выключена. А вот
+/// записать нечего, пока параметры не заполнены: `save_host` пишет весь
+/// файл и проверяет его целиком (одна запись, один сторож — второго пути в
+/// toml не заводим).
+///
+/// Поэтому `Warn`, а не `Fail`: сделано не всё, но сделано. И сказано, что
+/// осталось, — иначе человек узнает о потере режима только после
+/// перезапуска.
+fn unsaved_switch_line(label: &str, why: String) -> Line {
+    Line {
+        kind: Kind::Warn,
+        text: format!("публикация базы: {label}. В файл не записано — заполните параметры и нажмите «Сохранить»: {why}"),
+    }
+}
+
 /// Записать, кто публикует базу, и поднять сеанс заново — та же форма, что у
 /// `apply_mode`, и по той же причине: `save_host` берёт режим публикации из
 /// текущих параметров, поэтому правится он здесь, после согласия человека.
@@ -413,7 +430,29 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
             }
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("публикация: {}", label.to_lowercase()) });
         }
-        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+        Err(e) => {
+            // Записать не вышло — параметры ещё не заполнены. Режим всё
+            // равно применён: он уже лежит в `ui.cfg.host.publication`, а
+            // `save_host` до присвоения `ui.cfg` не дошёл. Галочку ставим на
+            // новое значение — она показывает то, что есть на самом деле.
+            let mut label = publication;
+            for (p, _, text) in PUBLICATIONS {
+                if p == publication {
+                    label = text;
+                }
+            }
+            let line = unsaved_switch_line(&label.to_lowercase(), e);
+            note_line(cx.global_mut::<Ui>(), line);
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_publication(publication);
+            }
+            // И открываем то, что человеку осталось сделать: «Параметры».
+            // В режиме «публикует платформа 1С» там же появляется поле
+            // «Адрес публикации», которое этот режим и требует, — иначе до
+            // него было не добраться вовсе.
+            cx.global_mut::<Ui>().tab = Tab::Params;
+            window::show_window(cx);
+        }
     }
     cx.refresh_windows();
 }
@@ -557,8 +596,8 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, MenuAction, TrayState, Ui,
-        MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind,
+        MenuAction, TrayState, Ui, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
@@ -577,6 +616,21 @@ mod tests {
         assert_eq!(menu_action("mode:tunnel"), Some(MenuAction::Mode("tunnel")));
         assert_eq!(menu_action("mode:local"), Some(MenuAction::Mode("local")));
         assert_eq!(menu_action("nope"), None);
+    }
+
+    #[test]
+    fn a_switch_that_could_not_be_saved_still_happened() {
+        // Режим публикации — намерение человека, а не действие над базой:
+        // публикацию здесь никто не поднимает. Поэтому на незаполненных
+        // параметрах он применяется, а человек читает, что осталось сделать
+        // (находка владельца 28.10: «ничего не происходит» на комплекте, где
+        // поля ещё не заполнены).
+        let l = unsaved_switch_line("публикует платформа 1С", "[host]: workstation — dev1, dev2 или dev3".into());
+        assert_eq!(l.kind, Kind::Warn);
+        assert_eq!(
+            l.text,
+            "публикация базы: публикует платформа 1С. В файл не записано — заполните параметры и нажмите «Сохранить»: [host]: workstation — dev1, dev2 или dev3"
+        );
     }
 
     #[test]

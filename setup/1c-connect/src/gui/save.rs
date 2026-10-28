@@ -118,7 +118,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // здесь — смена режима в трее поднимает его сама, отдельным путём
     // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
     // лишней строкой в журнал и лишним миганием портов.
-    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode);
+    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode, &cfg.host.publication);
     ui.cfg = cfg;
     for text in moved {
         note_line(ui, Line { kind: Kind::Warn, text });

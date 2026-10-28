@@ -53,6 +53,9 @@ pub struct Fields {
     pub db_password: Entity<InputState>,
     pub project: Entity<InputState>,
     pub workstation: Entity<InputState>,
+    /// Адрес чужой публикации. Показывается только в режиме «уже
+    /// опубликована» (`shown_fields`), в обычном режиме адрес считается сам.
+    pub base_url: Entity<InputState>,
 }
 
 pub struct Panel {
@@ -505,11 +508,32 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
 /// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
 /// и показывать их незачем. Всё, что не `"local"`, — режим `tunnel`.
 /// Отрисовка рядов и сравнение «изменилось ли» ходят только через этот список.
-pub fn shown_fields(mode: &str) -> &'static [&'static str] {
-    if mode == "local" {
-        &["base_path", "db_user", "db_password", "project"]
+pub fn shown_fields(mode: &str, publication: &str) -> &'static [&'static str] {
+    match (mode == "local", publication == "webserver") {
+        (true, false) => &["base_path", "db_user", "db_password", "project"],
+        (true, true) => &["base_path", "db_user", "db_password", "project", "base_url"],
+        (false, false) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"],
+        (false, true) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project", "base_url"],
+    }
+}
+
+/// Режим работы и режим публикации из текущих параметров: пара, от которой
+/// зависит, какие поля показаны (`shown_fields`). Оба правятся только из
+/// меню трея, поля в окне у них нет.
+fn modes_of(cx: &App) -> (String, String) {
+    let h = &cx.global::<Ui>().cfg.host;
+    (h.mode.clone(), h.publication.clone())
+}
+
+/// Что показать в поле адреса публикации. Выведенный от каталога базы адрес
+/// (`cfg::derived_base_url`) — наша догадка про Apache на 80, и человеку она
+/// показывается пустым полем: решение владельца 26.10 «пустые поля вместо
+/// выдуманных значений». Своё значение показывается как есть.
+pub fn shown_base_url(host: &Host) -> &str {
+    if host.base_url.is_empty() || host.base_url == crate::cfg::derived_base_url(&host.base_path) {
+        ""
     } else {
-        &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"]
+        &host.base_url
     }
 }
 
@@ -522,6 +546,11 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
         "db_user" => &h.db_user,
         "db_password" => &h.db_password,
         "project" => &h.project,
+        // Через тот же `shown_base_url`, что и показ: иначе форма («пусто»)
+        // и сохранённое (выведенная догадка) расходились бы вечно —
+        // «Сохранить» горела бы с открытия окна, а `adopt_fields`
+        // подставляла бы догадку обратно в поле на каждом обновлении.
+        "base_url" => shown_base_url(h),
         _ => "",
     }
 }
@@ -533,8 +562,8 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
 /// `Panel::save` сам переносит рабочее место, адрес среды и пароль рабочего
 /// места из текущих параметров, как `save_host` уже делает для
 /// `dump`/`tools`/`mode`/`publication`/`http_port`.
-pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
-    let shown = shown_fields(mode);
+pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
+    let shown = shown_fields(mode, publication);
     let v = |name: &str, e: &Entity<InputState>| {
         if shown.contains(&name) {
             e.read(cx).value().to_string()
@@ -553,7 +582,10 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
         platform: String::new(),
         db_user: v("db_user", &f.db_user),
         db_password: v("db_password", &f.db_password),
-        base_url: String::new(),
+        // Человек вписывает адрес, каким открывает базу в браузере, —
+        // `/hs/mcp-1c` дописываем мы (`cfg::full_base_url`), и в `Host`
+        // адрес попадает уже полным. Пустое остаётся пустым: это «не задан».
+        base_url: crate::cfg::full_base_url(&v("base_url", &f.base_url)),
         dump: String::new(),
         project: v("project", &f.project),
         tools: Vec::new(),
@@ -583,18 +615,20 @@ pub fn host_of(f: &Fields, mode: &str, cx: &App) -> Host {
 /// открытого окна без фокуса — диалога поверх или правки с другой машины.
 /// Узкий случай не стоит второй системы учёта изменений, которая будет
 /// расходиться с первой.
-pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str) -> bool {
-    fields_differ(file, saved, mode) && !fields_differ(form, saved, mode)
+pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str, publication: &str) -> bool {
+    fields_differ(file, saved, mode, publication) && !fields_differ(form, saved, mode, publication)
 }
 
 /// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
 /// режим показывает: правка скрытого поля (адрес среды, пароль рабочего
 /// места, рабочее место в локальном режиме) не должна зажигать «Сохранить» —
-/// оно ни на что не влияет, пока режим не сменился. `dump`, `tools`,
-/// `base_url` и `mode` в окне не редактируются (`host_of` отдаёт их
-/// пустыми/нулями), поэтому и так не входят в список.
-pub fn fields_differ(a: &Host, b: &Host, mode: &str) -> bool {
-    shown_fields(mode).iter().any(|f| field_value(a, f) != field_value(b, f))
+/// оно ни на что не влияет, пока режим не сменился. `dump`, `tools` и `mode`
+/// в окне не редактируются (`host_of` отдаёт их пустыми/нулями), поэтому и
+/// так не входят в список; `base_url` редактируется, но только в режиме
+/// «уже опубликована», и сравнивается через `shown_base_url` — тем же, чем
+/// показывается.
+pub fn fields_differ(a: &Host, b: &Host, mode: &str, publication: &str) -> bool {
+    shown_fields(mode, publication).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
 /// Радиус скругления корня окна коннектора: пусто — углы прямые.
@@ -685,6 +719,7 @@ impl Panel {
             db_password: field("пароль", &host.db_password, true, window, cx),
             project: field("C:\\proj\\Buh", &host.project, false, window, cx),
             workstation: field("dev1", &host.workstation, false, window, cx),
+            base_url: field("http://localhost/Buh", shown_base_url(&host), false, window, cx),
         };
         let original = host.clone();
         // Клавиатура сразу у панели: Esc прячет окно и до того, как щёлкнули
@@ -770,8 +805,8 @@ impl Panel {
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
-        let mode = cx.global::<Ui>().cfg.host.mode.clone();
-        fields_differ(&host_of(&self.fields, &mode, cx), &self.original, &mode)
+        let (mode, publication) = modes_of(cx);
+        fields_differ(&host_of(&self.fields, &mode, &publication, cx), &self.original, &mode, &publication)
     }
 
     /// Нужно ли подхватить перечитанные параметры в поля — и какие именно.
@@ -803,15 +838,15 @@ impl Panel {
     /// нет.
     fn adopted_host(&self, cx: &App) -> Option<Host> {
         let host = &cx.global::<Ui>().cfg.host;
-        let mode = host.mode.clone();
-        let form = host_of(&self.fields, &mode, cx);
-        adopt_needed(host, &form, &self.original, &mode).then(|| host.clone())
+        let (mode, publication) = (host.mode.clone(), host.publication.clone());
+        let form = host_of(&self.fields, &mode, &publication, cx);
+        adopt_needed(host, &form, &self.original, &mode, &publication).then(|| host.clone())
     }
 
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
     fn adopt_fields(&mut self, host: &Host, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = shown_fields(&host.mode);
+        let shown = shown_fields(&host.mode, &host.publication);
         for (name, state) in self.field_states() {
             if !shown.contains(&name) {
                 continue;
@@ -827,7 +862,7 @@ impl Panel {
     /// Поля формы вместе с их именами — тот же список имён, что у
     /// `field_value`/`shown_fields`, чтобы обход полей не заводил третьего
     /// мнения о составе формы.
-    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 7] {
+    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 8] {
         let f = &self.fields;
         [
             ("server", &f.server),
@@ -837,6 +872,7 @@ impl Panel {
             ("db_user", &f.db_user),
             ("db_password", &f.db_password),
             ("project", &f.project),
+            ("base_url", &f.base_url),
         ]
     }
 
@@ -845,8 +881,8 @@ impl Panel {
     /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
     /// спросить подтверждение смены базы и только потом писать.
     fn host_from_fields(&self, cx: &mut Context<Self>) -> Host {
-        let mode = cx.global::<Ui>().cfg.host.mode.clone();
-        let mut host = host_of(&self.fields, &mode, cx);
+        let (mode, publication) = modes_of(cx);
+        let mut host = host_of(&self.fields, &mode, &publication, cx);
         if mode == "local" {
             // Адрес среды, пароль рабочего места и имя рабочего места скрыты
             // в этом режиме — переносим их из текущих параметров, как
@@ -982,6 +1018,7 @@ impl Render for Panel {
         // выставляют разное).
         let running_op = ui.progress.as_ref().map(|r| r.which);
         let mode = ui.cfg.host.mode.clone();
+        let publication = ui.cfg.host.publication.clone();
         let gate = ui.gate.clone();
         let c = card(ui.progress.as_ref(), &link, &mode, &ready, gate.as_deref(), Instant::now());
         // Причина — один расчёт на весь `render`: та же строка уходит и в
@@ -1002,7 +1039,7 @@ impl Render for Panel {
         // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
         // себя.
         let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
-        let shown = shown_fields(&mode);
+        let shown = shown_fields(&mode, &publication);
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1159,6 +1196,10 @@ impl Render for Panel {
                                 .child(pick("pick-base", f.base_path.clone(), cx)),
                         ),
                     )
+                    // Адрес чужой публикации — сразу под базой, к которой он
+                    // и относится, и только в режиме «уже опубликована»:
+                    // в обычном режиме адрес считает сама программа.
+                    .when(shown.contains(&"base_url"), |d| d.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx)))
                     .child(
                         h_flex()
                             .gap_3()
@@ -1532,7 +1573,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, pick_face, project_facts, project_rows, reason, save_hint,
-        shown_fields, switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
+        shown_base_url, shown_fields, switch_locked, switch_tooltip, window_radius, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
@@ -1893,12 +1934,12 @@ mod tests {
         let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
         // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
         let shown = Host { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
-        assert!(!fields_differ(&shown, &saved, "tunnel"));
+        assert!(!fields_differ(&shown, &saved, "tunnel", "auto"));
         let edited = Host { server: "h:1".into(), ..shown.clone() };
-        assert!(fields_differ(&edited, &saved, "tunnel"));
+        assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
-        assert!(fields_differ(&moved, &saved, "tunnel"));
+        assert!(fields_differ(&moved, &saved, "tunnel", "auto"));
     }
 
     /// Ручная правка toml не должна пропасть под открытым окном: файл
@@ -1911,26 +1952,47 @@ mod tests {
         let form = saved.clone();
         // Файл правили руками — подхватываем.
         let file = Host { db_user: "Иванов".into(), ..saved.clone() };
-        assert!(adopt_needed(&file, &form, &saved, "local"));
+        assert!(adopt_needed(&file, &form, &saved, "local", "auto"));
         // Файл не менялся — подхватывать нечего.
-        assert!(!adopt_needed(&saved, &form, &saved, "local"));
+        assert!(!adopt_needed(&saved, &form, &saved, "local", "auto"));
         // Человек набирает в полях — его правку не затираем, даже если файл
         // тем временем сменился.
         let typing = Host { db_user: "Петров".into(), ..saved.clone() };
-        assert!(!adopt_needed(&file, &typing, &saved, "local"));
+        assert!(!adopt_needed(&file, &typing, &saved, "local", "auto"));
         // Поля, которых режим не показывает, подхват не будят: в локальном
         // режиме адрес среды ни на что не влияет.
         let hidden = Host { server: "10.0.0.5:3393".into(), ..saved.clone() };
-        assert!(!adopt_needed(&hidden, &form, &saved, "local"));
-        assert!(adopt_needed(&hidden, &form, &saved, "tunnel"));
+        assert!(!adopt_needed(&hidden, &form, &saved, "local", "auto"));
+        assert!(adopt_needed(&hidden, &form, &saved, "tunnel", "auto"));
     }
 
     #[test]
     fn local_mode_hides_the_environment_fields() {
-        assert_eq!(shown_fields("local").to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
-        assert_eq!(shown_fields("tunnel").len(), 7);
+        assert_eq!(shown_fields("local", "auto").to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
+        assert_eq!(shown_fields("tunnel", "auto").len(), 7);
         // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
-        assert_eq!(shown_fields("bogus"), shown_fields("tunnel"));
+        assert_eq!(shown_fields("bogus", "auto"), shown_fields("tunnel", "auto"));
+    }
+
+    #[test]
+    fn the_address_field_belongs_to_the_webserver_mode_only() {
+        assert!(shown_fields("tunnel", "webserver").contains(&"base_url"));
+        assert!(shown_fields("local", "webserver").contains(&"base_url"));
+        assert!(!shown_fields("tunnel", "auto").contains(&"base_url"));
+        assert!(!shown_fields("local", "auto").contains(&"base_url"));
+        // Прежнее правило не тронуто: адрес среды прячется в локальном режиме.
+        assert!(!shown_fields("local", "auto").contains(&"server"));
+    }
+
+    #[test]
+    fn a_derived_address_is_shown_as_an_empty_field() {
+        let mut h = Host { base_path: "C:\\Bases\\Buh".into(), ..Host::default() };
+        h.base_url = crate::cfg::derived_base_url(&h.base_path);
+        assert_eq!(shown_base_url(&h), "");
+        h.base_url = "http://localhost/UNF/hs/mcp-1c".into();
+        assert_eq!(shown_base_url(&h), "http://localhost/UNF/hs/mcp-1c");
+        h.base_url = String::new();
+        assert_eq!(shown_base_url(&h), "");
     }
 
     #[test]
@@ -1939,12 +2001,12 @@ mod tests {
         // Адрес среды, пароль рабочего места и само рабочее место правятся,
         // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
         let edited = Host { server: "10.0.0.5:3393".into(), password: "другой".into(), workstation: "dev2".into(), ..saved.clone() };
-        assert!(!fields_differ(&edited, &saved, "local"));
+        assert!(!fields_differ(&edited, &saved, "local", "auto"));
         // А то же самое в туннельном режиме — заметная правка.
-        assert!(fields_differ(&edited, &saved, "tunnel"));
+        assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
         // Видимое поле в локальном режиме по-прежнему включает «Сохранить».
         let moved = Host { project: "D:\\other\\Buh".into(), ..saved.clone() };
-        assert!(fields_differ(&moved, &saved, "local"));
+        assert!(fields_differ(&moved, &saved, "local", "auto"));
     }
 
     fn facts(ahead: &str, changed: usize) -> crate::project::Facts {

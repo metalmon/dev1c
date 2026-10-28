@@ -276,6 +276,10 @@ pub fn filled_for_test() -> Cfg {
     c
 }
 
+/// `Copy`: три `u16` — `cfg.ports()` считается один раз и используется по
+/// значению столько раз, сколько нужно (`ops_host::run_mcp` — находка ревью
+/// задачи 3, Minor 7), без второго вызова ради второго владельца.
+#[derive(Clone, Copy)]
 pub struct Ports {
     pub mcp: u16,
     pub vrunner: u16,

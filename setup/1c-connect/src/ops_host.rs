@@ -8,6 +8,7 @@ use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
 use common::{Event, Phase, Prompt, Runner, Sink};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub struct Ctx {
@@ -1304,6 +1305,69 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
     })
 }
 
+/// Один тик опроса подкоманды `mcp`: разрешение (признак на диске плюс
+/// живость владельца — `allow::read`), срок действия лицензии и файл
+/// параметров — втроём за один заход, а не в трёх отдельных потоках на один
+/// и тот же такт. Чистая по входу (сама не спит и не заводит поток), поэтому
+/// проверяется тестом без ожидания 200 мс.
+///
+/// Второй элемент — `Err` текстом, когда `Cfg::load` не смогла прочитать или
+/// разобрать файл (в т.ч. не прошла `validate()`): полуправленый toml посреди
+/// правки — не повод уронить трубу агенту, вызывающий (`watch_mcp`) оставляет
+/// прежний `Cfg` как был и несёт причину в журнал, а не агенту.
+///
+/// Срок истёк — `enabled` гасится тем же тактом, что и признак разрешения:
+/// без этого процесс, поднятый редактором задолго до срока, продолжал бы
+/// отвечать `tools/call` и после него (ревью задачи 3, Important 4).
+fn mcp_tick(kit: &Kit, user: &str, workstation: &str) -> (bool, Result<Cfg, String>) {
+    let allowed = crate::allow::read(kit, user, workstation);
+    let licensed = !matches!(crate::licence::state_now(), crate::licence::State::Expired);
+    (allowed && licensed, Cfg::load(kit).map_err(|e| e.to_string()))
+}
+
+/// Один поток на три проверки каждые 200 мс — не три нити на один и тот же
+/// такт. Кладёт разрешение в возвращаемый флаг и свежий `Cfg` в общую ячейку
+/// `live` (ту же, что `Serve::dispatch` перечитывает на каждый запрос, см.
+/// `session::Serve::shared`): «Сохранить» в окне или правка toml руками
+/// доходят до уже слушающего процесса без его перезапуска (ревью задачи 3,
+/// Important 3) — раньше `run_mcp` заводил разовую `Live` и `Rebuild`-рестарт
+/// не срабатывал никогда.
+///
+/// ponytail: такт 200 мс — потолок. Вызов, пришедший в эти 200 мс после
+/// выключения переключателя, истечения срока или «Сохранить» с новой базой,
+/// ещё пройдёт на старых условиях; опрос чаще значило бы читать диск
+/// (признак, toml) и держать замок рабочего места на каждый тик чаще, а
+/// 200 мс и так короче, чем человек успевает заметить разницу между своим
+/// действием и ответом моста.
+fn watch_mcp(kit: Kit, user: String, workstation: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let out = flag.clone();
+    std::thread::spawn(move || {
+        // Последняя пожалованная причина разбора — чтобы повторный тик с той
+        // же поломкой не заливал журнал одинаковыми строками, пока человек
+        // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
+        let mut last_parse_err: Option<String> = None;
+        loop {
+            let (enabled, cfg) = mcp_tick(&kit, &user, &workstation);
+            out.store(enabled, Ordering::Relaxed);
+            match cfg {
+                Ok(cfg) => {
+                    live.set(cfg);
+                    last_parse_err = None;
+                }
+                Err(msg) => {
+                    if last_parse_err.as_deref() != Some(msg.as_str()) {
+                        log(Event::Warn(format!("{}: не перечитан — {msg}", crate::cfg::FILE)));
+                        last_parse_err = Some(msg);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+    flag
+}
+
 /// Подкоманда `1c-connect mcp 1c|vrunner`: редактор (Zed, pi) запускает мост
 /// как свой stdio-процесс вместо похода на проброшенный порт рабочего
 /// места, которого на машине человека нет (спека «MCP в редакторе ставит и
@@ -1313,6 +1377,12 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// `notifications/tools/list_changed`, значит список обязан быть настоящим
 /// всегда, даже когда окно не запущено.
 ///
+/// `kit` — тот же, что уже посчитал `main.rs` (`Kit::discover`/`--kit`,
+/// `wire_state`, `ensure_state`): свой `Kit::discover` внутри этой функции
+/// был дефектом ревью (Important 1) — другой комплект здесь значил бы другой
+/// файл признака разрешения, другой журнал и замок не по тому каталогу, что
+/// у окна, а `--kit` для этой подкоманды был бы молча потерян.
+///
 /// Замок рабочего места (`single_instance::acquire`) эта подкоманда не
 /// берёт — его держит окно (спека «Замок рабочего места подкоманда не
 /// берёт»). Межпроцессный замок проекта (`project::set_lock_target`) берёт —
@@ -1320,23 +1390,24 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// (другой редактор, второй `mcp`) обязан получить «занято», а не вторую
 /// выгрузку в тот же каталог.
 ///
+/// ponytail: Zed и pi, запущенные разом, поднимут по своему ребёнку
+/// (`mcp-1c`/`vrunner-mcp`) — `project::set_lock_target` не пускает два
+/// `project_push` разом, но не мешает двум отдельным сеансам файловой базы.
+/// Потолок назван самой спекой («Два клиента — два ребёнка»): поведение надо
+/// увидеть на стенде (учебная платформа не держит двух сеансов одной
+/// файловой базы) и, если окажется бедой, — поднимать `mcp-1c` при первом
+/// разрешённом вызове, одного на весь каталог состояния, а не на каждое
+/// соединение.
+///
 /// Срок действия и холодный замок проверяются один раз, до первого ответа
 /// агенту, тем же кодом, что окно (`crate::gate::gate_now`) — не своей
 /// формулировкой причин: отказ — одна строка в stderr и ненулевой код
-/// выхода, это то, что редактор покажет человеку. `enabled` дальше —
-/// отдельный, горячий переключатель (`allow::watch`): разрешение меняется на
-/// лету, пока процесс уже слушает, и его читает только мост на каждый
-/// `tools/call`.
-pub fn run_mcp(server: McpServer) -> Result<()> {
-    let kit = wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
-    ensure_state(&kit);
-    let params = kit.state_path(crate::cfg::FILE);
-    anyhow::ensure!(
-        params.exists(),
-        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
-        params.display(),
-        params.display()
-    );
+/// выхода, это то, что редактор покажет человеку. Если файла параметров нет
+/// вовсе, `Cfg::load` отдаёт умолчание без ошибки (поведение `connect`/
+/// `serve`), и единственная причина — та, что называет сам `gate_now`
+/// («нет файла параметров» — минорная находка ревью, вторая формулировка
+/// этой же причины здесь была мёртвой веткой).
+pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     let cfg = Cfg::load(&kit)?;
     // Межпроцессная часть замка проекта: без этого вызова второй
     // долгоживущий процесс (Zed и pi, запущенные разом) его вовсе не увидит
@@ -1346,17 +1417,26 @@ pub fn run_mcp(server: McpServer) -> Result<()> {
         anyhow::bail!("{why}");
     }
     let log = cmd_log_sink(&kit);
-    let enabled = crate::allow::watch(&kit, crate::single_instance::current_user(), cfg.host.workstation.clone());
-    let port = port_of(server, cfg.ports());
-    let serve = crate::session::Serve::new(&cfg, &kit, log, cfg.ports(), enabled);
+    let live = crate::session::Live::new(cfg.clone());
+    let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), cfg.host.workstation.clone(), live.clone(), log.clone());
+    // Один раз: `Ports` — `Copy`, дальше используется по значению и для
+    // выбора порта, и для самого `Serve` (ревью задачи 3, Minor 7).
+    let ports = cfg.ports();
+    let port = port_of(server, ports);
+    let serve = crate::session::Serve::shared(live, &cfg, &kit, log, ports, enabled);
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let stdio = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
-        if let Some(task) = serve.dispatch(port, stdio) {
-            let _ = task.await;
-        }
-    });
-    Ok(())
+        // `None` не должен случаться (`port` всегда один из тех же `ports`,
+        // что и у `serve`), а паника задачи моста не должна молча кончаться
+        // `exit 0` — редактор увидел бы мгновенно умерший сервер без единого
+        // слова (ревью задачи 3, Minor 6).
+        let task = serve
+            .dispatch(port, stdio)
+            .ok_or_else(|| anyhow::anyhow!("порт {port} не обслуживается мостом — внутренняя ошибка (server и ports разошлись)"))?;
+        task.await.map_err(|e| anyhow::anyhow!("мост 1c-connect упал: {e}"))?;
+        Ok(())
+    })
 }
 
 /// Погасить СВОЙ HTTP-сервис — путь выхода окна (`gui::quit`). Та же
@@ -2561,5 +2641,67 @@ mod tests {
             assert_eq!(w.get_program(), "oscript");
             assert_eq!(args, ["mcp.os"]);
         }
+    }
+
+    /// Каталог, свежий на каждый вызов — счётчик плюс pid, как `unique` в
+    /// `single_instance.rs`: параллельные тесты этого файла не должны спорить
+    /// за один каталог состояния.
+    fn mcp_test_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::AtomicU64;
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("onec-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Ревью задачи 3, Important 2: до этого теста ни один тест не звал
+    /// `run_mcp` вовсе, и снятие проверки срока/холодного замка (или подмена
+    /// `watch_mcp` на всегда разрешённый) прошло бы любым прогоном пакета.
+    /// Пустой каталог состояния — ни файла параметров, ни `mcp-1c` в
+    /// комплекте — обязан отказать словами того же замка, что видит окно
+    /// (`gate::gate_now`), раньше, чем дело дойдёт до tokio и настоящих
+    /// stdin/stdout.
+    #[test]
+    fn run_mcp_refuses_an_empty_kit_with_the_readiness_gates_reason() {
+        let dir = mcp_test_dir("run-mcp-empty");
+        let kit = Kit::at(&dir);
+        let err = run_mcp(McpServer::OneC, kit).unwrap_err();
+        assert!(err.to_string().contains("параметров"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `mcp_tick` — втроём за один заход, а не три отдельных потока на один
+    /// такт. Без владельца рабочего места и без файла параметров разрешение
+    /// обязано быть `false`, а `Cfg::load` на пустом каталоге — не ошибкой
+    /// (`Ok(Cfg::default())`, то же поведение, что у `connect`/`serve`).
+    #[test]
+    fn mcp_tick_is_closed_by_default_on_an_empty_kit() {
+        let dir = mcp_test_dir("mcp-tick-empty");
+        let kit = Kit::at(&dir);
+        let (enabled, cfg) = mcp_tick(&kit, "someone", "dev1");
+        assert!(!enabled, "никто не держит замок рабочего места — разрешения нет");
+        assert!(cfg.is_ok(), "{cfg:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Тот же тик — `true`, когда признак на диске «on» и замок рабочего
+    /// места держит вызывающий (тем же приёмом, что
+    /// `allow::tests::read_follows_the_owners_lock_not_just_the_file`).
+    #[test]
+    fn mcp_tick_is_open_while_the_owner_holds_the_lock_and_the_flag_says_on() {
+        let dir = mcp_test_dir("mcp-tick-open");
+        let kit = Kit::at(&dir);
+        let workstation = format!("ws-{}", std::process::id());
+        crate::allow::write(&kit, true).unwrap();
+        let key = crate::single_instance::guard_key("owner", &workstation);
+        let lock_on = crate::single_instance::lock_target(&kit);
+        let guard = crate::single_instance::try_acquire(&key, &lock_on).unwrap().expect("замок свободен в начале теста");
+        let (enabled, _) = mcp_tick(&kit, "owner", &workstation);
+        assert!(enabled, "владелец держит замок, признак «on» — разрешение должно быть");
+        drop(guard);
+        let (enabled, _) = mcp_tick(&kit, "owner", &workstation);
+        assert!(!enabled, "владелец ушёл — тот же файл больше не разрешение");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

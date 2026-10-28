@@ -353,3 +353,40 @@ fn confirm_text_names_folders_and_keeps_full_paths_in_the_detail() {
     assert_eq!(message, "Агент сейчас работает с базой «Buh», после сохранения перейдёт на «УНФ». Сохранить?");
     assert_eq!(detail, "C:\\Bases\\Buh → C:\\Bases\\УНФ");
 }
+
+#[test]
+fn what_a_person_typed_is_what_gets_written() {
+    let saved = Host { publication: "webserver".into(), ..Host::default() };
+    assert_eq!(base_url_to_write(&saved, "http://localhost/Buh", "webserver", "C:\\Bases\\Buh"), "http://localhost/Buh/hs/mcp-1c");
+    // Пустое поле остаётся пустым: выдуманного адреса здесь не появляется.
+    assert_eq!(base_url_to_write(&saved, "   ", "webserver", "C:\\Bases\\Buh"), "");
+}
+
+#[test]
+fn an_own_address_survives_a_workstation_move() {
+    let saved = Host { publication: "webserver".into(), base_url: "http://localhost/UNF/hs/mcp-1c".into(), ..Host::default() };
+    assert_eq!(base_url_to_write(&saved, "http://localhost/UNF", "webserver", "C:\\Bases\\Other"), "http://localhost/UNF/hs/mcp-1c");
+}
+
+#[test]
+fn a_foreign_address_waits_through_a_round_trip_to_our_own_httpd() {
+    // Переключились на «публикует коннектор» и обратно — вписанное не стёрто.
+    let saved = Host {
+        publication: "auto".into(),
+        base_url: "http://localhost/UNF/hs/mcp-1c".into(),
+        base_path: "C:\\Bases\\UNF".into(),
+        ..Host::default()
+    };
+    assert_eq!(base_url_to_write(&saved, "", "auto", "C:\\Bases\\UNF"), "http://localhost/UNF/hs/mcp-1c");
+}
+
+#[test]
+fn in_auto_mode_the_address_still_follows_the_base_folder() {
+    let saved = Host {
+        publication: "auto".into(),
+        base_path: "C:\\Bases\\Buh".into(),
+        base_url: cfg::derived_base_url("C:\\Bases\\Buh"),
+        ..Host::default()
+    };
+    assert_eq!(base_url_to_write(&saved, "", "auto", "C:\\Bases\\UNF"), cfg::derived_base_url("C:\\Bases\\UNF"));
+}

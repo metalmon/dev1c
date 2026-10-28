@@ -15,6 +15,24 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
     }
 }
 
+/// Адрес публикации для записи. Две формы, и они не смешиваются:
+///
+/// * «уже опубликована» — адрес знает только человек, и пишется ровно то,
+///   что он вписал, приведённое к полному (`cfg::full_base_url`). Пустое
+///   остаётся пустым: это «не задан», и его видит замок окна, а не выдумка
+///   про Apache на 80;
+/// * «публикует коннектор» — поля в окне нет, адрес считается от своего
+///   порта, а хранимое умолчание по-прежнему едет за каталогом базы
+///   (`carried_base_url`). Своё значение переживает и это: переключение
+///   туда-обратно не стирает вписанный когда-то чужой адрес.
+pub fn base_url_to_write(saved: &Host, from_form: &str, publication: &str, new_base_path: &str) -> String {
+    if publication == "webserver" {
+        cfg::full_base_url(from_form)
+    } else {
+        carried_base_url(saved, new_base_path)
+    }
+}
+
 /// Каталог выгрузки для записи — тот же приём, что у адреса публикации.
 /// `install` дописывает выведенный `<project>\src` в toml, и записанное
 /// умолчание обязано и дальше идти за каталогом проекта: иначе смена проекта
@@ -100,7 +118,8 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();
     host.http_port = carried_http_port(&ui.cfg.host, &host.workstation);
-    host.base_url = carried_base_url(&ui.cfg.host, &host.base_path);
+    let typed = host.base_url.clone();
+    host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
     // Переезды — не молчком, и все до одного: см. `moved_lines`.
     let moved = moved_lines(&old_host, &host);
     let cfg = Cfg { host };

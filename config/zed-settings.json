@@ -324,6 +324,27 @@
               "cache_show": false,
               "cache_clear": false
             }
+          },
+          // mcp-1c чужой: список его инструментов не наш код, и теста рядом
+          // с ним, как у vrunner (CHANGES_STATE), нет — сверено руками по
+          // исходникам upstream на теге релиза (server/tool_registry_contract_test.go,
+          // v1.23.0). До этой версии мост отдавал только читающее (метаданные,
+          // запросы, журнал), и список здесь был не нужен вовсе. 1.23.0
+          // добавил восемь инструментов; из них пять отмечены в исходнике
+          // upstream `ReadOnlyHint: true` (get_storage_structure, count_records,
+          // metadata_summary, environment_passport, form_patterns) — это факты,
+          // гасить их на разборе незачем. Три остальные такой пометки не
+          // несут и правят файлы на диске, поэтому гашены здесь:
+          // register_schema пишет SHA-256 и версию схемы в manifest проекта,
+          // image_grid записывает новый PNG рядом с исходным, help_add правит
+          // справку внешнего отчёта/обработки (с backup, но правит). Разбору
+          // это правка дерева, а не сбор факта.
+          "1c": {
+            "tools": {
+              "register_schema": false,
+              "image_grid": false,
+              "help_add": false
+            }
           }
         }
       },

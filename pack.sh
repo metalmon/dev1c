@@ -171,8 +171,8 @@ sha_of() { # $1 = file name → pinned SHA-256
         cudart-llama-bin-win-cuda-13.4-x64.zip) echo 738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668 ;;
         llama-b11734-bin-ubuntu-cuda-13.4-x64.tar.gz) echo f165c871d0473ace56b05b5ed32fef7ecb47d6a01ca06cbda0ad9d55132b0892 ;;
         cudart-llama-b11734-bin-ubuntu-cuda-13.4-x64.tar.gz) echo e0aa65934ed0171a8784a32d072ac473cd001d3ff041bc08ff370a908a853daa ;;
-        mcp-1c-windows-amd64.exe) echo 0922a0e15c2ffc7201650ad0f17e96a405439a30d8b0adcb97744946a32081b2 ;;
-        MCP_HTTPService.cfe) echo 76df5ccf993c10caef73fe8399d2fa7df1cc3b7e9b24fc6662ab402aeea1bf61 ;;
+        mcp-1c-windows-amd64.exe) echo 2361fd20c41227452febcdd74b70656f56feaa56fd8dd6cc31ecb4e29fd9c368 ;;
+        MCP_HTTPService.cfe) echo f65522006d5e55da7239c9b14339ff566d3e91a42d27256cc6b327507e2c4313 ;;
         OneScript-2.2.0-win-x64.zip) echo b12f2c44445e19d5c627f63af5cefd3eb7ad4e36b939bbd49c073e0956928267 ;;
         MinGit-2.56.0.2-64-bit.zip) echo da35e72aa21c005a5a0d298cfbae110bc1609a815730ea0dde84b01a1b3cd3be ;;
         "nvidia-container-toolkit_${NVIDIA_TOOLKIT_VERSION}_amd64.deb") echo a95c9d206a7ecd6a90adff9290635271fa167a86b5767b17eaa0478a552eb02c ;;
@@ -204,7 +204,7 @@ if [ "$OS" = "windows" ]; then
 # The developer's kit: mcp-1c for the machine with the platform, the same
 # release the image was designed against. Pinned here, not in the Dockerfile:
 # the image no longer carries mcp-1c.
-MCP_1C_VERSION=v1.22.3
+MCP_1C_VERSION=v1.23.0
 for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
     fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/$f"
 done

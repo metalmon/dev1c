@@ -294,6 +294,13 @@ pub struct Ui {
     /// Когда тик в последний раз подвинул подсказку трея на фазу операции —
     /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
     pub tooltip_at: Option<Instant>,
+    /// Щелчок по галочке какого агента сейчас в полёте (индекс — тот же, что
+    /// в `editors::AGENTS`). Второй щелчок по тому же агенту, пока первый не
+    /// вернулся, не затевает вторую такую же работу: у Claude Code это четыре
+    /// запуска CLI по 6–8 с, и два набега разом звали бы `remove`/`add` на одни
+    /// и те же имена вперемешку — итог решал бы порядок финиша, а не человек.
+    /// Соседние агенты друг другу не мешают — работы у них разные.
+    pub agents_busy: [bool; crate::editors::AGENTS.len()],
     pub tx: UnboundedSender<Ev>,
 }
 
@@ -419,6 +426,14 @@ pub enum Ev {
     /// расчёт в полёте, не два). `loud` — громкий показ (отчёт на диске,
     /// строки в журнал, вкладка «Журнал»): его просила кнопка, а не такт.
     Ready(u64, Vec<Check>, bool),
+    /// Итог щелчка галочки одного локального агента, посчитанный в своём
+    /// потоке (`toggle_agent`): индекс в `editors::AGENTS` и строка журнала,
+    /// если сказать есть что (`None` — вышло ровно то, о чём просили, и
+    /// молчание тут и есть успех). Своим потоком потому, что у Claude Code
+    /// это `remove`+`add` на два имени — четыре запуска CLI по 6–8 с, то есть
+    /// около 25 с мёртвого окна на один щелчок (замер 30.10); тот же приём и
+    /// по той же причине, что `Ev::Publish`.
+    Agent(usize, Option<Line>),
     /// Итог дешёвого такта, посчитанный в своём потоке (`spawn_cheap`,
     /// Important 4): число открытых сеансов 1С и — только на медленном такте
     /// — весь дешёвый набор. `None` в любом из полей значит «не спрашивали»
@@ -827,25 +842,54 @@ fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<St
 /// «Четыре локальных агента, и настраиваются они по-разному»): у файлового
 /// путь к настройкам может не найтись на машине, у CLI такого случая нет
 /// (CLI сам знает, куда писать), и это единственная асимметрия, которую
-/// видит этот код. Отдаёт `false`, когда дело не вышло (отказ или нежданный
-/// итог уже легли строкой в журнал через `setup_line`) — трей обязан
-/// вернуть галочку в прежнее положение, раз она обещала то, чего мы не
-/// сделали.
+/// видит этот код.
+///
+/// Работа уходит в свой поток, и окно остаётся живым: у Claude Code щелчок —
+/// это `remove`+`add` на два имени, четыре запуска CLI по 6–8 с, около 25 с
+/// мёртвого окна на главном потоке GPUI (замер 30.10). Итог приходит
+/// `Ev::Agent`, и там же ложится строка журнала и перестраивается подменю.
+///
+/// Отдаёт `false`, только если щелчок не приняли вовсе (по этому агенту уже
+/// идёт работа) — тогда трей возвращает галочку на место сразу, как и
+/// прежде. На принятом щелчке (`true`) галочка стоит там, куда её поставил
+/// сам нативный пункт, и в прежнее положение её возвращает не трей, а
+/// перестройка подменю по `Ev::Agent` (`tray::set_agents`): настоящий итог
+/// известен только после ответа CLI, а состояние теперь читается с диска и
+/// стоит миллисекунды — перестройка покажет, встала галочка или нет.
 pub fn toggle_agent(cx: &mut App, i: usize, on: bool) -> bool {
-    let def = &crate::editors::AGENTS[i];
-    let line = match std::env::current_exe() {
-        Ok(exe) => {
-            let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
-            setup_line(def.label, on, result)
-        }
-        Err(e) => Some(Line {
-            kind: Kind::Fail, text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label)
-        }),
-    };
-    let Some(line) = line else { return true };
-    note_line(cx.global_mut::<Ui>(), line);
-    cx.refresh_windows();
-    false
+    let ui = cx.global_mut::<Ui>();
+    if ui.agents_busy[i] {
+        let text = format!("{}: прежний щелчок ещё в работе — дождитесь ответа", crate::editors::AGENTS[i].label);
+        note_line(ui, Line { kind: Kind::Warn, text });
+        cx.refresh_windows();
+        return false;
+    }
+    ui.agents_busy[i] = true;
+    let tx = ui.tx.clone();
+    std::thread::spawn(move || {
+        guarded(
+            &tx,
+            move || {
+                let def = &crate::editors::AGENTS[i];
+                let line = match std::env::current_exe() {
+                    Ok(exe) => {
+                        let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
+                        setup_line(def.label, on, result)
+                    }
+                    Err(e) => Some(Line {
+                        kind: Kind::Fail,
+                        text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label),
+                    }),
+                };
+                Ev::Agent(i, line)
+            },
+            // Паника в потоке — всё равно ответ: иначе защёлка осталась бы
+            // взведённой навсегда и агент стал бы неподатлив до перезапуска.
+            // Про саму панику журналу говорит `guarded`.
+            || Ev::Agent(i, None),
+        );
+    });
+    true
 }
 
 /// Полный набор от основания к вершине, громко: отчёт пишется в
@@ -1125,6 +1169,21 @@ fn handle(ev: Ev, cx: &mut App) {
             ui.pending = ui.pending.saturating_sub(1);
             cx.refresh_windows();
         }
+        Ev::Agent(i, line) => {
+            let ui = cx.global_mut::<Ui>();
+            ui.agents_busy[i] = false;
+            if let Some(line) = line {
+                note_line(ui, line);
+            }
+            // Подменю перестраивается всегда, и на молчаливом успехе тоже:
+            // это единственное место, где галочка приходит в согласие с тем,
+            // что правда лежит в файле агента — щелчок её только попросил.
+            let ui = cx.global::<Ui>();
+            if let Some(tray) = &ui.tray {
+                tray.set_agents(&ui.cfg.host.mode);
+            }
+            cx.refresh_windows();
+        }
         Ev::Publish(r) => match r {
             Ok(()) => {
                 cx.global_mut::<Ui>().raised_publication = true;
@@ -1390,6 +1449,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
+            agents_busy: [false; crate::editors::AGENTS.len()],
             tx,
         });
         // Единый тик приложения: сам решает свой срок (занято — секунда,
@@ -1528,6 +1588,7 @@ impl Ui {
             hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
+            agents_busy: [false; crate::editors::AGENTS.len()],
             tx,
         }
     }

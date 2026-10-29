@@ -928,7 +928,7 @@ pub fn editor_mcp_fact(found: Option<&editors::Found>) -> Check {
 ///
 /// `states` — весь реестр `editors::AGENTS`, посчитанный вызывающим, а не два имени руками: имена в тексте факта тоже из реестра. Иначе человек, настроивший только Claude Code, получал красное — факт знал двоих из четырёх (находка ревью 30.10).
 ///
-/// Нечитаемое состояние (`Err` — файл агента есть, а разобрать его не вышло) идёт в «не настроен»: подтвердить, что агент настроен, мы не можем, а значит хвалить его нечем. Отдельной формулировки у него здесь нет нарочно — фраза «не проверено» в фактах набора запрещена (`the_set_never_says_it_did_not_check`), а причину человек увидит словами в журнале при щелчке галочки.
+/// Нечитаемое состояние (`Err` — файл агента есть, а открыть или разобрать его не вышло) — третья ветвь, не «не настроен»: вердикт тот же (провал — подтвердить, что агент дойдёт до базы, мы не можем, и fail-closed здесь честнее зелёного), а слова другие. Прежде `Err` молча сливался с «записей нет», и человек с одним установленным Claude Code читал «не настроен ни один установленный агент» и совет поставить галочку, которая потом откажет по причине, известной нам с самого начала (находка ре-ревью). Фраза «не проверено» в тексте запрещена (`the_set_never_says_it_did_not_check`), и умолчанием запрет не обходится: мы проверили и наткнулись на нечитаемый файл — это и сказано, вместе с причиной, которую вернул `Err`.
 ///
 /// Контейнерного режима эта функция не касается (там один редактор — Zed, и там же живёт `editor_mcp_fact`/`editor_mcp: EditorMcpSeen`; контейнерная механика правки по SSH на рассмотрении у владельца отдельно и может целиком переехать — трогать её здесь не нужно).
 fn local_editor_mcp_fact(states: &[(&str, Result<editors::Found, String>)]) -> Check {
@@ -939,19 +939,32 @@ fn local_editor_mcp_fact(states: &[(&str, Result<editors::Found, String>)]) -> C
         return Check::note(EDITOR_MCP, format!("ни один локальный агент на этой машине не найден ({all}) — настраивать пока нечего"));
     }
     let configured: Vec<&str> = installed.iter().filter(|(_, f)| matches!(f, Ok(editors::Found::Ours))).map(|(name, _)| *name).collect();
-    let unconfigured: Vec<&str> = installed.iter().filter(|(_, f)| !matches!(f, Ok(editors::Found::Ours))).map(|(name, _)| *name).collect();
+    let unconfigured: Vec<&str> =
+        installed.iter().filter(|(_, f)| matches!(f, Ok(found) if !matches!(found, editors::Found::Ours))).map(|(name, _)| *name).collect();
+    // Причина — та, что вернул `Err` агента, с его именем впереди: своей формулировки у нас нет и быть не должно, иначе человек чинит не то.
+    let unreadable: Vec<String> = installed.iter().filter_map(|(name, f)| f.as_ref().err().map(|why| format!("{name} — {why}"))).collect();
+    let tail = if unreadable.is_empty() {
+        String::new()
+    } else {
+        format!("; состояние не прочитать: {}", unreadable.join("; "))
+    };
     if configured.is_empty() {
+        // Нечитаемы ВСЕ установленные — совет про галочку был бы ложным: она откажет той же причиной. Говорим про файл.
+        if unconfigured.is_empty() {
+            return Check::fail(
+                EDITOR_MCP,
+                format!("состояние не прочитать: {}", unreadable.join("; ")),
+                "приведите файл настроек агента в порядок и нажмите «Проверить»",
+            );
+        }
         return Check::fail(
             EDITOR_MCP,
-            format!("не настроен ни один установленный агент ({})", unconfigured.join(", ")),
+            format!("не настроен ни один установленный агент ({}){tail}", unconfigured.join(", ")),
             "значок в трее → «Локальные агенты» → поставьте галочку",
         );
     }
-    if unconfigured.is_empty() {
-        Check::pass(EDITOR_MCP, format!("настроен: {}", configured.join(", ")))
-    } else {
-        Check::pass(EDITOR_MCP, format!("настроен: {} (не настроен: {})", configured.join(", "), unconfigured.join(", ")))
-    }
+    let not = if unconfigured.is_empty() { String::new() } else { format!(" (не настроен: {})", unconfigured.join(", ")) };
+    Check::pass(EDITOR_MCP, format!("настроен: {}{not}{tail}", configured.join(", ")))
 }
 
 /// Срок всего набора — один, на окно и на командную строку одинаково (спека:
@@ -2528,13 +2541,38 @@ mod tests {
         assert!(c.detail.contains("Claude Code") && !c.detail.contains("Zed"), "{c:?}");
     }
 
-    /// Нечитаемое состояние — не «настроен»: подтвердить мы ничего не можем, и агент идёт в ненастроенные. Фразы «не проверено» в тексте нет — она запрещена во всех фактах набора (`the_set_never_says_it_did_not_check`).
+    /// Нечитаемое состояние — провал (подтвердить мы ничего не можем), но называется своими словами и С ПРИЧИНОЙ: прежде оно сливалось с «записей нет», и единственный установленный агент получал совет поставить галочку, которая откажет по той же причине (находка ре-ревью). Фразы «не проверено» в тексте нет — она запрещена во всех фактах набора (`the_set_never_says_it_did_not_check`).
     #[test]
-    fn local_editor_mcp_fact_counts_an_unreadable_state_as_unconfigured() {
+    fn local_editor_mcp_fact_names_the_reason_an_unreadable_state_gave() {
         let c = local_editor_mcp_fact(&[("Claude Code", Err("не прочитать .claude.json: отказано в доступе".to_string()))]);
         assert!(!c.ok, "{c:?}");
-        assert!(c.detail.contains("Claude Code"), "{c:?}");
+        assert!(c.detail.contains("Claude Code") && c.detail.contains("отказано в доступе"), "причина обязана дойти до человека: {c:?}");
+        assert!(!c.detail.contains("не настроен"), "это не «не настроен»: {c:?}");
         assert!(!c.detail.contains("не проверено"), "{c:?}");
+        assert!(!c.hint.is_empty() && !c.hint.contains("галочку"), "совет про галочку здесь был бы ложным: {c:?}");
+    }
+
+    /// Нечитаемый агент рядом с ненастроенным: совет снова про галочку (её есть кому поставить), но причина отказа чтения всё равно названа — она не должна теряться только потому, что рядом нашёлся обычный «не настроен».
+    #[test]
+    fn local_editor_mcp_fact_keeps_the_unreadable_reason_next_to_an_unconfigured_agent() {
+        let c = local_editor_mcp_fact(&[
+            state("Zed", editors::Found::Absent),
+            ("Claude Code", Err("не прочитать .claude.json: отказано в доступе".to_string())),
+        ]);
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("Zed") && c.detail.contains("отказано в доступе"), "{c:?}");
+        assert!(c.hint.contains("галочку"), "{c:?}");
+    }
+
+    /// И при зелёном вердикте (один агент настроен) нечитаемое состояние соседа названо с причиной — хвалить настроенного и промолчать про нечитаемого значило бы скрыть известный нам отказ.
+    #[test]
+    fn local_editor_mcp_fact_stays_green_but_names_an_unreadable_neighbour() {
+        let c = local_editor_mcp_fact(&[
+            state("Zed", editors::Found::Ours),
+            ("Claude Code", Err("не прочитать .claude.json: отказано в доступе".to_string())),
+        ]);
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("настроен: Zed") && c.detail.contains("отказано в доступе"), "{c:?}");
     }
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с WORKSTATION_PORTS»).

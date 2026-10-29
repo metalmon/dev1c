@@ -37,6 +37,11 @@ common = { path = "../common" }
 # ОС (`aead`/`crypto-common`/`getrandom` 0.4) для nonce и ключа, а новой
 # библиотеки в сборку не добавляет.
 aes-gcm = "0.11"
+# Тем же ходом, что aes-gcm — уже в Cargo.lock транзитивно (его тянет pkcs5
+# через aes-gcm). Затираем материал ключа и расшифрованные значения, которые
+# держим в памяти дольше, чем они нужны (ревью задачи 1, Important 4): это
+# модуль секретов, и там это дороже, чем где-либо ещё в проекте.
+zeroize = "1.9"
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

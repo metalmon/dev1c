@@ -8,6 +8,7 @@
 pub mod check;
 pub mod console;
 pub mod docker;
+pub mod fsperm;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod integrity;

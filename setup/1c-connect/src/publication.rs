@@ -130,50 +130,23 @@ pub fn service_responds(base_url: &str) -> bool {
 /// ветки для Windows здесь нет и не нужно.
 pub fn write_vrd(pub_dir: &Path, text: &str) -> Result<(), String> {
     ensure_pub_dir(pub_dir)?;
-    write_owner_only(&pub_dir.join("default.vrd"), text)
+    common::fsperm::write_owner_only(&pub_dir.join("default.vrd"), text)
 }
 
 #[cfg(unix)]
 fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| format!("{} не создан: {e}", dir.display()))?;
-    // `mode()` у DirBuilder действует только на вновь созданные каталоги; если
-    // каталог остался с прошлого запуска (или с версии до этого фикса) с более
-    // широкими правами — поджимаем явно, а не оставляем как есть.
-    tighten_dir(dir)
+    common::fsperm::ensure_private_dir(dir)?;
+    // `mode()` при создании действует только на вновь созданные каталоги;
+    // если каталог остался с прошлого запуска (или с версии до этого фикса) с
+    // более широкими правами — поджимаем явно, а не оставляем как есть. У
+    // ключа шифрования (`secrets.rs`) своя причина не делать того же —
+    // см. комментарий у `common::fsperm::ensure_private_dir`.
+    common::fsperm::tighten_dir(dir)
 }
 
 #[cfg(not(unix))]
 fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{} не создан: {e}", dir.display()))
-}
-
-#[cfg(unix)]
-fn tighten_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("права {} не выставлены: {e}", dir.display()))
-}
-
-#[cfg(unix)]
-fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| format!("{} не создан: {e}", path.display()))?;
-    f.write_all(text.as_bytes()).map_err(|e| format!("{} не записан: {e}", path.display()))?;
-    // Та же причина, что и у каталога: `mode()` в OpenOptions действует только
-    // при создании файла — если он остался с прошлого запуска, поджимаем.
-    f.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("права {} не выставлены: {e}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn write_owner_only(path: &Path, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|e| format!("{} не записан: {e}", path.display()))
+    common::fsperm::ensure_private_dir(dir)
 }
 
 /// Пути одной публикации: свой httpd (Windows) или системный apache2

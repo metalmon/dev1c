@@ -1164,6 +1164,13 @@ fn read_agent_config(path: Option<&Path>) -> Result<Option<String>, String> {
         return Err("не узнать путь к его настройкам на этой машине".to_string());
     };
     match std::fs::read_to_string(path) {
+        // Пустой файл — то же «записей нет», что и отсутствующий, хотя разбор
+        // пустого JSON отказал бы: чужой записи в пустом файле нет по
+        // определению, терять нечего, а отказ запер бы галочку у человека,
+        // поставившего агента и ни разу его не открывшего. У TOML того же
+        // случая нет (пустой файл — законная пустая таблица), и различать два
+        // агента на этом месте было бы несимметрично без причины.
+        Ok(text) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(Some(text)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("не прочитать {}: {e}", path.display())),
@@ -2170,6 +2177,10 @@ args = ["mcp", "1c"]
         assert_eq!(look_cli_agent(exe, true, Some(&p), parse_claude_config).unwrap(), Found::Absent);
         std::fs::write(&p, "{это не json").unwrap();
         assert!(look_cli_agent(exe, true, Some(&p), parse_claude_config).is_err());
+        // Пустой файл — «записей нет», а не отказ: чужого в нём нет, и
+        // отказ запер бы галочку у человека, ни разу не открывшего агента.
+        std::fs::write(&p, "   \n").unwrap();
+        assert_eq!(look_cli_agent(exe, true, Some(&p), parse_claude_config).unwrap(), Found::Absent);
         // Агента нет на машине — `Missing`, и файл не читается вовсе.
         assert_eq!(look_cli_agent(exe, false, None, parse_claude_config).unwrap(), Found::Missing);
     }

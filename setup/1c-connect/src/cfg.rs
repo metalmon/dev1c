@@ -174,7 +174,7 @@ pub fn derived_dump(project: &str) -> String {
     format!("{}{}src", project.trim_end_matches(['\\', '/']), std::path::MAIN_SEPARATOR)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
     pub host: Host,
@@ -190,7 +190,16 @@ pub struct Cfg {
     pub undecryptable: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Производный `Debug` печатал бы пароль полем как есть, а этот журнал
+/// прикладывают к обращению в поддержку — значит, `{c:?}` должен уходить
+/// наружу безопасным.
+impl std::fmt::Debug for Cfg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cfg").field("host", &self.host).field("undecryptable", &self.undecryptable).finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Host {
     pub server: String,
@@ -230,6 +239,31 @@ pub struct Host {
     /// места). В toml хранится как число, `0` значит «не задан».
     #[serde(deserialize_with = "http_port_de", skip_serializing_if = "Option::is_none")]
     pub http_port: Option<u16>,
+}
+
+/// Поля перечислены как у производного `Debug`, кроме `password` и
+/// `db_password`: журнал коннектора прикладывают к обращению в поддержку, и
+/// одна отладочная строка не должна обнулять шифрование паролей.
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("server", &self.server)
+            .field("gitea", &self.gitea)
+            .field("password", &"<скрыт>")
+            .field("workstation", &self.workstation)
+            .field("base_path", &self.base_path)
+            .field("platform", &self.platform)
+            .field("db_user", &self.db_user)
+            .field("db_password", &"<скрыт>")
+            .field("base_url", &self.base_url)
+            .field("dump", &self.dump)
+            .field("project", &self.project)
+            .field("tools", &self.tools)
+            .field("mode", &self.mode)
+            .field("publication", &self.publication)
+            .field("http_port", &self.http_port)
+            .finish()
+    }
 }
 
 /// `http_port`: `0` в toml — «не задан» (`None`), иначе порт как есть.
@@ -798,6 +832,20 @@ mod tests {
     fn the_empty_sample_is_not_yet_a_valid_config() {
         assert!(sample().validate().is_err());
         filled().validate().unwrap();
+    }
+
+    /// Журнал коннектора прикладывают к обращению в поддержку — производный
+    /// `Debug` печатал бы оба пароля полями как есть, и вся работа по
+    /// шифрованию обнулилась бы одной отладочной строкой.
+    #[test]
+    fn debug_output_never_carries_a_password() {
+        let mut c = filled();
+        c.host.password = "секрет-ssh".into();
+        c.host.db_password = "секрет-базы".into();
+        let text = format!("{c:?}");
+        assert!(!text.contains("секрет-ssh") && !text.contains("секрет-базы"), "{text}");
+        assert_eq!(text.matches("<скрыт>").count(), 2);
+        assert!(text.contains(&c.host.workstation), "отладка не должна ослепнуть");
     }
 
     /// Клиент-серверная база против файловой и сетевой. Решает то, что

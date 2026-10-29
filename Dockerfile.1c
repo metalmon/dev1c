@@ -87,7 +87,7 @@ RUN opm install -d /out vanessa-runner@${VRUNNER_VERSION} add@${ADD_VERSION} >/d
 FROM ${BASE} AS tools
 ARG DEBIAN_FRONTEND=noninteractive
 ARG PLATFORM_VERSION
-ARG MCP_1C_VERSION=v1.22.3
+ARG MCP_1C_VERSION=v1.23.0
 # Re-declared from the "vrunner" stage (ARGs do not cross stages on their
 # own, see PLATFORM_VERSION above): only needed here to stamp the kit's own
 # tools.version (built below).
@@ -123,12 +123,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # its checksums.txt. The .cfe is applied to the demo base in the payload stage.
 RUN curl -fsSL -o /usr/local/bin/mcp-1c \
       "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/mcp-1c-linux-amd64" \
-    && echo "8118fa6005e6a6c4add82d920142254f97e82a5d7bd7856b3d2276dd216abd92  /usr/local/bin/mcp-1c" | sha256sum -c --quiet \
+    && echo "2fbb5cd81e1a85529584f3573a2d49f2f56b1dec39b6d6e3aab1b71c830ff60a  /usr/local/bin/mcp-1c" | sha256sum -c --quiet \
     && chmod +x /usr/local/bin/mcp-1c \
     && mkdir -p /opt/mcp-1c \
     && curl -fsSL -o /opt/mcp-1c/MCP_HTTPService.cfe \
       "https://github.com/feenlace/mcp-1c/releases/download/${MCP_1C_VERSION}/MCP_HTTPService.cfe" \
-    && echo "76df5ccf993c10caef73fe8399d2fa7df1cc3b7e9b24fc6662ab402aeea1bf61  /opt/mcp-1c/MCP_HTTPService.cfe" | sha256sum -c --quiet \
+    && echo "f65522006d5e55da7239c9b14339ff566d3e91a42d27256cc6b327507e2c4313  /opt/mcp-1c/MCP_HTTPService.cfe" | sha256sum -c --quiet \
     && mcp-1c --version
 
 # --- vanessa-runner ----------------------------------------------------------

@@ -5,8 +5,9 @@
 
 use super::{
     autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, save_tray_key, start_session,
-    stop_session, theme, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    stop_session, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
+use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -20,7 +21,8 @@ const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
 const AUTOSTART_TEXT: &str = "Запускать при входе";
 
 /// Трей: значок, пункт-переключатель (меняет надпись), подменю «Режим
-/// работы» и «Публикация базы» (в каждом отмечен ровно один), три пункта
+/// работы», «Публикация базы» и «Локальные агенты» (в первых двух отмечен
+/// ровно один, в третьем — независимые галочки по агенту), три пункта
 /// темы (отмечен ровно один) и два пункта-галочки — автозапуск и
 /// автоподключение.
 pub struct Tray {
@@ -28,6 +30,7 @@ pub struct Tray {
     toggle: MenuItem,
     modes: [CheckMenuItem; 2],
     publications: [CheckMenuItem; 2],
+    agents: [CheckMenuItem; 2],
     themes: [CheckMenuItem; 3],
     autostart: CheckMenuItem,
     autoconnect: CheckMenuItem,
@@ -64,6 +67,16 @@ const PUBLICATIONS: [(&str, &str, &str); 2] =
 /// (решение владельца 28.10).
 const PUBLICATION_SUBMENU: &str = "Публикация базы";
 
+/// Локальный агент → id пункта меню и подпись (решение владельца 29.10,
+/// «Управление переехало в трей: „Локальные агенты“»). Названы агентами, а
+/// не редакторами: человек работает с агентом внутри Zed или pi, не с
+/// редактором как таким. Порядок — тот же, что был у раздела «Редакторы» во
+/// вкладке «Проект»: Zed, затем pi.
+const AGENTS: [(&str, &str, &str); 2] = [("zed", "agent:zed", "Zed"), ("pi", "agent:pi", "pi")];
+
+/// Заголовок подменю «Локальные агенты».
+const AGENTS_SUBMENU: &str = "Локальные агенты";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
     /// Показать окно. Пункт есть только на Linux: там значок не сообщает о
@@ -77,6 +90,8 @@ pub enum MenuAction {
     Mode(&'static str),
     /// Выбор пункта подменю «Публикация базы» — несёт "auto" или "webserver".
     Publication(&'static str),
+    /// Щелчок по галочке подменю «Локальные агенты» — несёт "zed" или "pi".
+    Agent(&'static str),
     Theme(theme::Choice),
     Autostart,
     Autoconnect,
@@ -99,6 +114,11 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     for (publication, publication_id, _) in PUBLICATIONS {
         if id == publication_id {
             return Some(MenuAction::Publication(publication));
+        }
+    }
+    for (agent, agent_id, _) in AGENTS {
+        if id == agent_id {
+            return Some(MenuAction::Agent(agent));
         }
     }
     match id {
@@ -185,6 +205,12 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let publication_items = PUBLICATIONS.map(|(p, id, text)| CheckMenuItem::with_id(id, text, true, p == "auto", None));
     let publication_refs: Vec<&dyn IsMenuItem> = publication_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let publication_submenu = Submenu::with_items(PUBLICATION_SUBMENU, true, &publication_refs)?;
+    // Начальные галочка и доступность — оба `false`: `launch` поправляет их
+    // сразу после `build` (`Tray::set_agents`), тем же приёмом, что у режима
+    // и публикации выше — здесь ни `Found`, ни режим ещё не читали.
+    let agent_items = AGENTS.map(|(_, id, text)| CheckMenuItem::with_id(id, text, false, false, None));
+    let agent_refs: Vec<&dyn IsMenuItem> = agent_items.iter().map(|i| i as &dyn IsMenuItem).collect();
+    let agents_submenu = Submenu::with_items(AGENTS_SUBMENU, true, &agent_refs)?;
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
     let theme_refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let themes_submenu = Submenu::with_items("Тема", true, &theme_refs)?;
@@ -201,6 +227,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &PredefinedMenuItem::separator(),
         &mode_submenu,
         &publication_submenu,
+        &agents_submenu,
         &themes_submenu,
         &autostart,
         &autoconnect,
@@ -225,7 +252,8 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
     let modes = [mode_items[0].clone(), mode_items[1].clone()];
     let publications = [publication_items[0].clone(), publication_items[1].clone()];
-    Ok(Tray { icon: tray, toggle, modes, publications, themes, autostart, autoconnect })
+    let agents = [agent_items[0].clone(), agent_items[1].clone()];
+    Ok(Tray { icon: tray, toggle, modes, publications, agents, themes, autostart, autoconnect })
 }
 
 impl Tray {
@@ -272,6 +300,59 @@ impl Tray {
             item.set_checked(p == publication);
         }
     }
+
+    /// Галочки и доступность подменю «Локальные агенты» — зовётся при
+    /// запуске и при каждой смене режима (решение владельца: доступность
+    /// обязана обновляться на ходу, а не только при старте — режим
+    /// переключается тем же меню трея, без перезапуска окна). Галочка стоит
+    /// только на `Found::Ours` (`agent_checked`), доступность — агенты живут
+    /// на этой машине (`agents_live_here`) и агент на машине вообще есть
+    /// (`agent_available`): там, где агентов настраивает не наше меню (точка
+    /// входа образа), и отсутствующего агента галочкой не включить.
+    pub fn set_agents(&self, mode: &str) {
+        let exe = std::env::current_exe().ok();
+        let found = |present: bool, path: Option<std::path::PathBuf>| match &exe {
+            Some(exe) => editors::look(path.as_deref(), exe, present),
+            None => editors::Found::Missing,
+        };
+        let zed_present = editors::zed_present();
+        let pi_present = editors::pi_present();
+        self.agents[0].set_checked(agent_checked(&found(zed_present, editors::zed_path())));
+        self.agents[0].set_enabled(agent_available(mode, zed_present));
+        self.agents[1].set_checked(agent_checked(&found(pi_present, editors::pi_path())));
+        self.agents[1].set_enabled(agent_available(mode, pi_present));
+    }
+}
+
+/// Галочка одного агента стоит только на `Found::Ours` — остальные
+/// состояния (`Missing`/`Absent`/`Foreign`) из галочки неотличимы нарочно:
+/// решение владельца — молчание про детали в меню, причина отказа идёт
+/// отдельно, строкой в журнал, не текстом пункта.
+fn agent_checked(found: &editors::Found) -> bool {
+    matches!(found, editors::Found::Ours)
+}
+
+/// Живут ли локальные агенты на ЭТОЙ машине — отдельно от режима работы,
+/// хотя сегодня это ровно `mode == "local"` и считается тем же способом.
+/// Названо по смыслу, а не по режиму, нарочно: уточнение владельца 30.10 —
+/// следующий шаг — серверный режим коннектора, где он стоит на рабочем месте
+/// разработчика и ПРИНИМАЕТ подключение из туннеля, а не звонит сам; агенты
+/// там будут настраиваться на этой же машине, то есть «агенты здесь» станет
+/// истиной ещё при одном значении режима, помимо «local». Когда серверный
+/// режим появится, этот предикат — единственное место, которое расширяется;
+/// называть условие «локальный режим» значило бы, что меню окажется заперто
+/// ровно там, где оно нужнее всего.
+fn agents_live_here(mode: &str) -> bool {
+    mode == "local"
+}
+
+/// Доступен ли пункт меню одного агента: агенты живут на этой машине
+/// (`agents_live_here`) и агент на машине вообще есть — отсутствующего
+/// агента показываем недоступным, а не прячем вовсе: набор агентов
+/// расширяется, и серый пункт — единственный способ человеку узнать, что
+/// агент вообще поддерживается.
+fn agent_available(mode: &str, present: bool) -> bool {
+    agents_live_here(mode) && present
 }
 
 /// Состояние значка по точке карточки: трей следует тому же порядку
@@ -337,6 +418,10 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
         Ok(()) => {
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_mode(mode);
+                // Доступность «Локальных агентов» зависит от режима — обязана
+                // обновиться тут же, не только при запуске (задача «Управление
+                // переехало в трей»).
+                tray.set_agents(mode);
             }
             // Новый транспорт — сеанс поднимается заново; `stop_session`
             // безвредна, если сеанса и не было.
@@ -368,6 +453,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_mode(mode);
+                tray.set_agents(mode);
             }
             cx.global_mut::<Ui>().tab = Tab::Params;
             window::show_window(cx);
@@ -576,6 +662,20 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 confirm_database_change(window, cx, &host, move |_window, cx| apply_publication(cx, publication));
             });
         }
+        // Независимая галочка, не радио-группа (в отличие от режима и
+        // публикации выше): нативный пункт уже переключил сам себя, и
+        // `is_checked()` здесь читает то, что он только что выставил, —
+        // тот же приём, что у «Автозапуска»/«Автоподключения» ниже.
+        MenuAction::Agent(which) => {
+            let ui = cx.global::<Ui>();
+            let Some(i) = AGENTS.iter().position(|&(w, ..)| w == which) else { return };
+            let Some(on) = ui.tray.as_ref().map(|t| t.agents[i].is_checked()) else { return };
+            if !toggle_agent(cx, i == 0, on) {
+                if let Some(t) = &cx.global::<Ui>().tray {
+                    t.agents[i].set_checked(!on);
+                }
+            }
+        }
         MenuAction::Theme(c) => {
             let kit = cx.global::<Ui>().kit.clone();
             if let Err(e) = c.store(&kit) {
@@ -614,8 +714,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind,
-        MenuAction, TrayState, Ui, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        agent_available, agent_checked, agents_live_here, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
+        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS, AGENTS_SUBMENU, MODES, PUBLICATIONS,
+        PUBLICATION_SUBMENU,
     };
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
@@ -813,5 +914,50 @@ mod tests {
         assert!(busy.chunks(4).any(|p| p == [0xfa, 0xcc, 0x1f, 255]), "no yellow pixel in the busy badge");
         let up = icon_rgba(TrayState::Up);
         assert!(up.chunks(4).any(|p| p == [0x2f, 0x8f, 0x4e, 255]), "no green pixel in the up badge");
+    }
+
+    /// Задача «Управление переехало в трей»: id пунктов подменю «Локальные
+    /// агенты» разбираются в действие, незнакомый id — по-прежнему `None`.
+    #[test]
+    fn agent_menu_ids_map_to_actions() {
+        assert_eq!(menu_action("agent:zed"), Some(MenuAction::Agent("zed")));
+        assert_eq!(menu_action("agent:pi"), Some(MenuAction::Agent("pi")));
+        assert_eq!(menu_action("agent:bsl-reference"), None);
+        assert_eq!(AGENTS_SUBMENU, "Локальные агенты");
+        assert_eq!(AGENTS.map(|(name, ..)| name), ["zed", "pi"]);
+    }
+
+    /// Галочка стоит только на `Found::Ours` — остальные состояния из неё не
+    /// различимы нарочно, причина отказа идёт отдельно, в журнал.
+    #[test]
+    fn the_checkbox_is_checked_only_on_ours() {
+        use crate::editors::Found;
+        assert!(agent_checked(&Found::Ours));
+        assert!(!agent_checked(&Found::Missing));
+        assert!(!agent_checked(&Found::Absent));
+        assert!(!agent_checked(&Found::Foreign(vec!["1c".into()])));
+    }
+
+    /// Пункт доступен только когда агенты живут на этой машине и только
+    /// если агент на машине вообще есть — любое из двух условий само по
+    /// себе не хватает.
+    #[test]
+    fn an_agent_item_needs_agents_here_and_the_agent_present() {
+        assert!(agent_available("local", true));
+        assert!(!agent_available("local", false), "агента нет — нечего включать галочкой");
+        assert!(!agent_available("tunnel", true), "в туннеле агентов настраивает образ, не мы");
+        assert!(!agent_available("tunnel", false));
+    }
+
+    /// Сегодня «агенты здесь» ровно `mode == "local"` — именованный предикат
+    /// существует, чтобы расшириться без переименования условия, когда
+    /// появится серверный режим (уточнение владельца 30.10): там коннектор
+    /// стоит на машине разработчика и принимает подключение из туннеля, а
+    /// агенты всё равно здесь же.
+    #[test]
+    fn agents_are_here_only_in_local_mode_for_now() {
+        assert!(agents_live_here("local"));
+        assert!(!agents_live_here("tunnel"));
+        assert!(!agents_live_here("something-else"));
     }
 }

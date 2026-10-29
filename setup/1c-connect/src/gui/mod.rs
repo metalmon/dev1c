@@ -295,13 +295,6 @@ pub struct Ui {
     /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
     pub tooltip_at: Option<Instant>,
     pub tx: UnboundedSender<Ev>,
-    /// Установлены ли на машине Zed и pi (`editors::zed_present`/`pi_present`) — считано РАЗ при
-    /// запуске окна (Important 3 финального ревью): каждый из двух обходит весь `PATH` (каталог ×
-    /// расширение × `is_file`), а раздел «Редакторы» звал их на каждую отрисовку вкладки «Проект» —
-    /// сетевой каталог в `PATH` заикался окном на каждый кадр. Редакторы на ходу не ставятся, пока
-    /// окно открыто, — перечитывать файл настроек (два маленьких JSON) каждый кадр остаётся, это
-    /// дешёво; дорог был именно обход `PATH`, не чтение файла.
-    pub editor_present: (bool, bool),
 }
 
 impl Global for Ui {}
@@ -792,66 +785,73 @@ pub fn refresh_project(cx: &mut App) {
     });
 }
 
-/// Жмём «Настроить» у одного редактора (задача 6): читаем путь к своему
-/// исполняемому и к настройкам редактора, просим `editors::setup` вписать
-/// наши две записи, и итог — строкой в журнал и в подвал, тем же путём, что
-/// и у любой другой кнопки окна (`note_line`/`set_status`). Раздел «Редакторы»
-/// сам перечитывает файл при следующей отрисовке (`editors::look` в
-/// `render` — он не кеширует состояние), поэтому здесь нет отдельного шага
-/// «обновить карточку»: писать некуда, кроме диска, а диск у раздела и так
-/// единственный источник правды.
-///
-/// `zed` различает, какой путь и какой `merge` брать — `editors::zed_path`/
-/// `merge_zed` или `editors::pi_path`/`merge_pi`; само чтение/запись и приём
-/// отказа у обоих одинаковы, поэтому один параметр, а не две функции.
-/// Строка журнала/подвала по итогу `editors::setup` — чистая функция без `cx` и диска, тем же
-/// приёмом, что у соседних помощников этого файла: расхождение, которое закрывает эта правка
-/// (Important 1 финального ревью), проверяется тестом над ней, а не только живым окном.
-///
-/// `setup` отдаёт не «получилось записать», а то, что `look` увидел на диске ПОСЛЕ записи
-/// (докстрока `editors::setup`) — любой `Ok`, кроме `Found::Ours`, значит «записали, но файл всё
-/// ещё не тот» (гонка, чужая правка между записью и перечитом), и говорить надо именно это, а не
-/// «записано», как было раньше при любом `Ok(_)`.
-fn setup_line(name: &str, zed: bool, result: Result<crate::editors::Found, Vec<String>>) -> Line {
-    match result {
-        Ok(crate::editors::Found::Ours) if zed => {
-            Line { kind: Kind::Ok, text: format!("{name}: записано, сервер поднят сам") }
-        }
-        Ok(crate::editors::Found::Ours) => {
-            Line { kind: Kind::Ok, text: format!("{name}: записано — наберите /reload в открытой сессии") }
-        }
-        Ok(other) => Line {
-            kind: Kind::Fail,
-            text: format!("{name}: записали, но файл всё ещё не тот — {}", panel::found_text(&other, false)),
-        },
-        // Important 1 ревью задачи 6: причина отказа — та, что отдал
-        // `merge`/`setup` (`editors::refusal_text`), не наша
-        // одна-на-всё фраза про занятую запись. Битый JSON, BOM у
-        // pi, отказ ввода-вывода — прозу показываем как есть; «занято»
-        // остаётся только там, где реально заняты наши имена.
-        Err(reasons) => Line { kind: Kind::Fail, text: format!("{name}: {}", crate::editors::refusal_text(&reasons)) },
+/// То, что мы просили (`on` — поставить наши записи или убрать их), сошлось
+/// с тем, что увидел `look` на диске ПОСЛЕ правки: поставить — только
+/// `Found::Ours`; убрать — `Absent` или `Missing` (`Found::Foreign` сюда не
+/// входит даже при `on == false` — чужая запись с нашим именем это не то,
+/// о чём мы просили, а нежданный итог, достойный строки в журнал).
+fn agent_as_expected(on: bool, found: &crate::editors::Found) -> bool {
+    if on {
+        matches!(found, crate::editors::Found::Ours)
+    } else {
+        matches!(found, crate::editors::Found::Absent | crate::editors::Found::Missing)
     }
 }
 
-pub fn setup_editor(cx: &mut App, zed: bool) {
+/// Галочка одного локального агента в трее (замысел «Управление переехало в
+/// трей»): `on` — то, что галочка теперь просит (поставлена — наши записи
+/// на месте, снята — их нет). Молчание — успех (решение владельца: «поставил
+/// галочку — она встала», ничего говорить не надо), любой отказ или нежданный
+/// итог (гонка, чужая правка между записью/удалением и перечитом) — строка в
+/// журнал, а не «записано» при любом `Ok(_)`, как было у прежней кнопки.
+/// Чистая функция без `cx` и диска, тем же приёмом, что у соседних помощников
+/// этого файла — проверяется тестом над ней, а не только живым окном.
+fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<String>>) -> Option<Line> {
+    match result {
+        Ok(found) if agent_as_expected(on, &found) => None,
+        Ok(other) => Some(Line {
+            kind: Kind::Fail,
+            text: format!("{name}: не удалось {} — {}", if on { "настроить" } else { "убрать записи" }, panel::found_text(&other)),
+        }),
+        // Причина отказа — та, что отдал `merge`/`remove` (`editors::refusal_text`), не наша
+        // одна-на-всё фраза про занятую запись. Битый JSON, BOM у pi, отказ ввода-вывода —
+        // прозу показываем как есть; «занято» остаётся только там, где реально заняты наши имена.
+        Err(reasons) => Some(Line { kind: Kind::Fail, text: format!("{name}: {}", crate::editors::refusal_text(&reasons)) }),
+    }
+}
+
+/// Щёлкнули галочку «Локальные агенты» в трее: `zed` различает путь и пару
+/// `merge`/`remove` — `editors::zed_path`/`merge_zed`/`remove_zed` или
+/// `editors::pi_path`/`merge_pi`/`remove_pi`; `on` — ставить наши записи
+/// (`editors::setup`) или убирать их (`editors::teardown`). Отдаёт `false`,
+/// когда дело не вышло (отказ или нежданный итог уже легли строкой в
+/// журнал через `setup_line`) — трей обязан вернуть галочку в прежнее
+/// положение, раз она обещала то, чего мы не сделали.
+pub fn toggle_agent(cx: &mut App, zed: bool, on: bool) -> bool {
     let name = if zed { "Zed" } else { "pi" };
     let line = match (std::env::current_exe(), if zed { crate::editors::zed_path() } else { crate::editors::pi_path() }) {
         (Ok(exe), Some(path)) => {
-            type Merge = fn(&str, &std::path::Path) -> Result<String, Vec<String>>;
-            let merge: Merge = if zed { crate::editors::merge_zed } else { crate::editors::merge_pi };
-            setup_line(name, zed, crate::editors::setup(&path, &exe, merge))
+            type MergeOrRemove = fn(&str, &std::path::Path) -> Result<String, Vec<String>>;
+            let result = if on {
+                let merge: MergeOrRemove = if zed { crate::editors::merge_zed } else { crate::editors::merge_pi };
+                crate::editors::setup(&path, &exe, merge)
+            } else {
+                let remove: MergeOrRemove = if zed { crate::editors::remove_zed } else { crate::editors::remove_pi };
+                crate::editors::teardown(&path, &exe, remove)
+            };
+            setup_line(name, on, result)
         }
-        (Err(e), _) => Line {
+        (Err(e), _) => Some(Line {
             kind: Kind::Fail, text: format!("{name}: не узнать путь к своему исполняемому файлу: {e}")
-        },
-        (_, None) => Line {
+        }),
+        (_, None) => Some(Line {
             kind: Kind::Fail, text: format!("{name}: не узнать путь к его настройкам на этой машине")
-        },
+        }),
     };
-    let ui = cx.global_mut::<Ui>();
-    note_line(ui, line.clone());
-    set_status(ui, line, None);
+    let Some(line) = line else { return true };
+    note_line(cx.global_mut::<Ui>(), line);
     cx.refresh_windows();
+    false
 }
 
 /// Полный набор от основания к вершине, громко: отчёт пишется в
@@ -1342,6 +1342,11 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // режима в трее (`tray::on_menu`).
         tray.set_mode(&cfg.host.mode);
         tray.set_publication(&cfg.host.publication);
+        // Раздел «Редакторы» ушёл из вкладки «Проект» в трей (замысел «Управление
+        // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
+        // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та
+        // же первичная поправка, что у режима и публикации выше.
+        tray.set_agents(&cfg.host.mode);
         // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл. Журнала для этой ошибки здесь ещё нет — `Ui` не выставлен ни строкой ниже; первый же щелчок переключателем перезапишет файл и громко скажет, если он и тогда не пишется.
         let _ = crate::allow::write(&kit, serve_on_start);
         cx.set_global(Ui {
@@ -1392,7 +1397,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             dialog_open: false,
             tooltip_at: None,
             tx,
-            editor_present: (crate::editors::zed_present(), crate::editors::pi_present()),
         });
         // Единый тик приложения: сам решает свой срок (занято — секунда,
         // иначе полминуты) и заменяет прежний тик панели `Panel::new`, тот
@@ -1531,7 +1535,6 @@ impl Ui {
             dialog_open: false,
             tooltip_at: None,
             tx,
-            editor_present: (crate::editors::zed_present(), crate::editors::pi_present()),
         }
     }
 }

@@ -366,32 +366,31 @@ fn done_clears_progress_and_renews_cancel() {
     assert!(!Arc::ptr_eq(&old_cancel, &ui.cancel));
 }
 
-/// Important 1 финального ревью: `editors::setup` отдаёт то, что `look` увидел на диске ПОСЛЕ
-/// записи, а не факт успеха `merge` — старая версия матчила `Ok(_)` и печатала «записано» при любом
-/// значении, включая файл, который на диске всё ещё не наш. Только `Ok(Found::Ours)` — успех;
-/// любой другой `Ok` обязан назвать, что увидел `look`, и показать это провалом, не победой.
+/// Замысел «Управление переехало в трей»: успех молчит — поставил галочку,
+/// она встала, журналу сказать нечего. Говорит только то, что не совпало с
+/// тем, что попросила галочка (`on`), и отказ `merge`/`remove`.
+/// `editors::setup`/`teardown` отдают то, что `look` увидел на диске ПОСЛЕ
+/// правки, а не факт успеха `merge`/`remove` — любой `Ok`, не совпавший с
+/// `on`, обязан назвать, что увидел `look`, и показать это провалом, не
+/// молчаливой победой.
 #[test]
-fn only_ours_after_write_is_reported_as_success() {
-    let ours = setup_line("Zed", true, Ok(crate::editors::Found::Ours));
-    assert_eq!(ours.kind, Kind::Ok, "{ours:?}");
-    assert!(ours.text.contains("записано"), "{ours:?}");
+fn success_is_silent_and_a_mismatch_speaks() {
+    assert_eq!(setup_line("Zed", true, Ok(crate::editors::Found::Ours)), None);
+    assert_eq!(setup_line("Zed", false, Ok(crate::editors::Found::Absent)), None);
+    assert_eq!(setup_line("Zed", false, Ok(crate::editors::Found::Missing)), None);
 
-    let still_absent = setup_line("Zed", true, Ok(crate::editors::Found::Absent));
+    let still_absent = setup_line("Zed", true, Ok(crate::editors::Found::Absent)).unwrap();
     assert_eq!(still_absent.kind, Kind::Fail, "{still_absent:?}");
-    assert!(still_absent.text.contains("записали, но файл всё ещё не тот"), "{still_absent:?}");
+    assert!(still_absent.text.contains("не удалось настроить"), "{still_absent:?}");
     assert!(still_absent.text.contains("серверы не настроены"), "{still_absent:?}");
 
-    let foreign = setup_line("pi", false, Ok(crate::editors::Found::Foreign(vec!["1c".into()])));
+    let still_there = setup_line("pi", false, Ok(crate::editors::Found::Ours)).unwrap();
+    assert!(still_there.text.contains("не удалось убрать записи"), "{still_there:?}");
+
+    let foreign = setup_line("pi", false, Ok(crate::editors::Found::Foreign(vec!["1c".into()]))).unwrap();
     assert_eq!(foreign.kind, Kind::Fail, "{foreign:?}");
     assert!(foreign.text.contains("занята чужой командой"), "{foreign:?}");
-}
 
-/// pi без `/reload` для Zed (сервер у Zed поднимается сам), и наоборот — симметрия, что была у
-/// прежнего кода, не должна потеряться при разводе `Ok(Found::Ours)` от прочих исходов.
-#[test]
-fn pi_still_asks_for_reload_and_zed_does_not() {
-    let zed = setup_line("Zed", true, Ok(crate::editors::Found::Ours));
-    assert!(!zed.text.contains("/reload"), "{zed:?}");
-    let pi = setup_line("pi", false, Ok(crate::editors::Found::Ours));
-    assert!(pi.text.contains("/reload"), "{pi:?}");
+    let refused = setup_line("Zed", true, Err(vec!["vrunner".into()])).unwrap();
+    assert!(refused.text.contains("занята чужой командой"), "{refused:?}");
 }

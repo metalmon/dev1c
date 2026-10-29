@@ -923,7 +923,7 @@ fn local_editor_mcp_fact(zed: &editors::Found, pi: &editors::Found) -> Check {
         return Check::fail(
             EDITOR_MCP,
             format!("не настроен ни один установленный редактор ({})", unconfigured.join(", ")),
-            "раздел «Редакторы» — нажмите «Настроить»",
+            "значок в трее → «Локальные агенты» → поставьте галочку",
         );
     }
     if unconfigured.is_empty() {

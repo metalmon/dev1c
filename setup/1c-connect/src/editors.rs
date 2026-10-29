@@ -440,6 +440,42 @@ fn parse_fields(t: &str, open: usize) -> (Vec<Field>, usize) {
     }
 }
 
+/// Удаляет поля с именами из `names` внутри одного объекта, чьи прямые поля
+/// — `fields` (порядок — порядок в исходном тексте, как отдаёт
+/// `parse_fields`), возвращая список правок без пересечений — даже когда
+/// удаляемые поля стоят в тексте друг за другом (иначе граница одного
+/// „съедала" бы запятую, которую уже забрала граница соседнего). Соседние по
+/// позиции имена из `names` обрабатываются одним куском: берём запятую ПОСЛЕ
+/// последнего поля куска, если кусок не последний в объекте, иначе запятую
+/// ПЕРЕД первым полем куска (кусок последний, но не единственный); кусок,
+/// занимающий весь объект, уносит содержимое без запятых вовсе.
+fn remove_fields_by_name(body: &str, fields: &[Field], names: &[&str]) -> Vec<Edit> {
+    let mut idxs: Vec<usize> = fields.iter().enumerate().filter(|(_, f)| names.contains(&f.key.as_str())).map(|(i, _)| i).collect();
+    idxs.sort_unstable();
+    let mut edits = Vec::new();
+    let mut k = 0;
+    while k < idxs.len() {
+        let (start_i, mut end_i) = (idxs[k], idxs[k]);
+        while k + 1 < idxs.len() && idxs[k + 1] == end_i + 1 {
+            k += 1;
+            end_i = idxs[k];
+        }
+        let (first, last) = (&fields[start_i], &fields[end_i]);
+        let (start, end) = if end_i + 1 < fields.len() {
+            let after = skip_ws_and_comments(body, last.value_end);
+            let comma_end = if body.as_bytes().get(after) == Some(&b',') { after + 1 } else { last.value_end };
+            (first.key_start, comma_end)
+        } else if start_i > 0 {
+            (fields[start_i - 1].value_end, last.value_end)
+        } else {
+            (first.key_start, last.value_end)
+        };
+        edits.push(Edit { start, end, text: String::new() });
+        k += 1;
+    }
+    edits
+}
+
 /// Запись в `context_servers` — наша, если имя файла в её `command`
 /// совпадает с именем файла нашего исполняемого (`1c-connect`/
 /// `1c-connect.exe`); остальное — чужое (спека, решение владельца №3).
@@ -535,6 +571,59 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     // Страховка от собственной ошибки сканера: правка обязана остаться
     // валидным JSON, иначе Zed отвергнет файл целиком, а мы отрапортуем
     // успех (Critical 2 ревью задачи).
+    if serde_json::from_str::<serde_json::Value>(&as_json(&edited)).is_err() {
+        return Err(vec!["правка дала невалидный JSON — отказ, файл не менялся".to_string()]);
+    }
+    Ok(format!("{bom}{edited}"))
+}
+
+/// Снимаем галочку «Zed» в трее: убираем наши две записи `context_servers`
+/// из текста `settings.json`, не трогая ничего чужого — обратное к
+/// `merge_zed`. Чужая запись с нашим именем не удаляется, это отказ, как и
+/// при записи (решение владельца, «чужую запись не правим и не
+/// перезаписываем никогда»). Пустой текст (файла и не было) или текст без
+/// наших записей — `Ok` с тем же текстом без изменений: состояние уже
+/// такое, какое просили, это успех, а не повод что-то переписывать на диске.
+pub fn remove_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
+    let (bom, body) = split_bom(text);
+    if body.trim().is_empty() {
+        return Ok(text.to_string());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&as_json(body))
+        .map_err(|e| vec![format!("settings.json не разбирается как JSON (после снятия комментариев): {e}")])?;
+    if !parsed.is_object() {
+        return Err(vec!["верхний уровень settings.json — не объект".to_string()]);
+    }
+    let top_open = skip_ws_and_comments(body, 0);
+    if body.as_bytes().get(top_open) != Some(&b'{') {
+        return Err(vec!["не нашли границу верхнего объекта settings.json".to_string()]);
+    }
+    let (top_fields, _) = parse_fields(body, top_open);
+    let Some(cs_field) = top_fields.iter().find(|f| f.key == "context_servers") else {
+        return Ok(text.to_string()); // ключа нет вовсе — нечего убирать
+    };
+    if body.as_bytes().get(cs_field.value_start) != Some(&b'{') {
+        return Err(vec!["context_servers в settings.json — не объект".to_string()]);
+    }
+    let (cs_fields, _) = parse_fields(body, cs_field.value_start);
+    let mut occupied = Vec::new();
+    let mut remove_names: Vec<&str> = Vec::new();
+    for e in OURS.iter() {
+        if let Some(f) = cs_fields.iter().find(|f| f.key == e.name) {
+            if is_ours(body, f, exe) {
+                remove_names.push(e.name);
+            } else {
+                occupied.push(e.name.to_string());
+            }
+        }
+    }
+    if !occupied.is_empty() {
+        return Err(occupied);
+    }
+    if remove_names.is_empty() {
+        return Ok(text.to_string());
+    }
+    let edited = apply_edits(body, remove_fields_by_name(body, &cs_fields, &remove_names));
     if serde_json::from_str::<serde_json::Value>(&as_json(&edited)).is_err() {
         return Err(vec!["правка дала невалидный JSON — отказ, файл не менялся".to_string()]);
     }
@@ -646,6 +735,46 @@ pub fn merge_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         servers.insert(e.name.to_string(), pi_entry(e, exe));
     }
 
+    Ok(serde_json::to_string_pretty(&top).expect("serde_json::Value всегда сериализуется") + "\n")
+}
+
+/// Снимаем галочку «pi» в трее — обратное к `merge_pi`, тот же честный
+/// разбор и печать заново целиком: `mcp.json` комментариев не допускает,
+/// терять нечего. Правило чужой записи то же, что у Zed: имя совпало, а
+/// команда чужая — отказ со списком имён, файл не трогаем. Файла нет, или
+/// `mcpServers` нет, или наших записей там и так нет — `Ok` без изменений
+/// текста: состояние уже такое, какое просили.
+pub fn remove_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
+    if text.starts_with('\u{feff}') {
+        return Err(
+            vec!["mcp.json начинается с BOM — pi сам не прочтёт такой файл; пересохраните его в UTF-8 без метки (BOM)".to_string()],
+        );
+    }
+    if text.trim().is_empty() {
+        return Ok(text.to_string());
+    }
+    let mut top: serde_json::Value = serde_json::from_str(text).map_err(|e| vec![format!("mcp.json не разбирается как JSON: {e}")])?;
+    let Some(obj) = top.as_object_mut() else {
+        return Err(vec!["верхний уровень mcp.json — не объект".to_string()]);
+    };
+    let Some(servers_slot) = obj.get_mut("mcpServers") else {
+        return Ok(text.to_string()); // ключа нет вовсе — нечего убирать
+    };
+    let Some(servers) = servers_slot.as_object_mut() else {
+        return Err(vec!["mcpServers в mcp.json — не объект".to_string()]);
+    };
+    let occupied: Vec<String> =
+        OURS.iter().filter(|e| servers.get(e.name).is_some_and(|f| !pi_entry_is_ours(f, exe))).map(|e| e.name.to_string()).collect();
+    if !occupied.is_empty() {
+        return Err(occupied);
+    }
+    let mut changed = false;
+    for e in OURS.iter() {
+        changed |= servers.remove(e.name).is_some();
+    }
+    if !changed {
+        return Ok(text.to_string());
+    }
     Ok(serde_json::to_string_pretty(&top).expect("serde_json::Value всегда сериализуется") + "\n")
 }
 
@@ -835,6 +964,32 @@ pub fn setup(path: &Path, exe: &Path, merge: impl Fn(&str, &Path) -> Result<Stri
         return Err(e);
     }
     // Мы только что создали/переписали этот файл — редактор, очевидно, есть.
+    Ok(look(Some(path), exe, true))
+}
+
+/// Снял галочку: просим `remove` убрать наши записи и, если текст
+/// изменился, переписываем файл тем же атомарным приёмом, что и `setup`
+/// (временный файл + `rename`) — без резервной копии: это обратное действие,
+/// а не правка чужого содержимого, катастрофы восстанавливать не из чего.
+/// Файла на диске не было — `remove` на пустом тексте и так отдаёт пустой
+/// текст, запись на диск не нужна вовсе (решение владельца, «файла нет —
+/// это успех, а не ошибка»). Итог, как и у `setup`, — то, что `look` увидел
+/// на диске ПОСЛЕ правки, а не наше предположение об успехе.
+pub fn teardown(path: &Path, exe: &Path, remove: impl Fn(&str, &Path) -> Result<String, Vec<String>>) -> Result<Found, Vec<String>> {
+    let text = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| vec![format!("не прочитать {}: {e}", path.display())])?
+    } else {
+        String::new()
+    };
+    let removed = remove(&text, exe)?;
+    if removed != text {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let tmp = sibling_path(&target, ".tmp");
+        if let Err(e) = write_and_rename(&tmp, &target, &removed) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    }
     Ok(look(Some(path), exe, true))
 }
 
@@ -1387,5 +1542,109 @@ mod tests {
         assert_eq!(found_by_name(""), Found::Absent);
         assert_eq!(found_by_name("это не json"), Found::Absent);
         assert_eq!(found_by_name(r#"{"theme":"One Dark"}"#), Found::Absent);
+    }
+
+    /// Снятая галочка не трогает чужие ключи верхнего уровня, чужие записи
+    /// `context_servers` и комментарии человека — ровно то же обещание, что
+    /// у `merge_zed`, в обратную сторону.
+    #[test]
+    fn remove_zed_keeps_foreign_keys_comments_and_servers() {
+        let before = "{\n  // моя тема\n  \"theme\": \"One Dark\",\n  \"context_servers\": {\n    \"bsl-reference\": {\"command\": \"/opt/bsl-analyzer\"},\n    \"1c\": {\"command\": \"/opt/1c-connect\", \"args\": [\"mcp\", \"1c\"]},\n    \"vrunner\": {\"command\": \"/opt/1c-connect\", \"args\": [\"mcp\", \"vrunner\"]}\n  }\n}\n";
+        let out = remove_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        assert!(out.contains("// моя тема"), "{out}");
+        assert!(out.contains("\"theme\": \"One Dark\""), "{out}");
+        let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
+        assert!(v["context_servers"]["1c"].is_null(), "{out}");
+        assert!(v["context_servers"]["vrunner"].is_null(), "{out}");
+        assert_eq!(v["context_servers"]["bsl-reference"]["command"], "/opt/bsl-analyzer");
+    }
+
+    /// Наши две записи могут оказаться не рядом в файле — чужая запись между
+    /// ними не должна остаться без своей запятой и не должна слиться с
+    /// соседним удалённым куском (границы двух несмежных удалений независимы).
+    #[test]
+    fn remove_zed_handles_our_entries_separated_by_a_foreign_one() {
+        let before = r#"{"context_servers":{"1c":{"command":"/opt/1c-connect","args":["mcp","1c"]},"bsl-reference":{"command":"/opt/bsl-analyzer"},"vrunner":{"command":"/opt/1c-connect","args":["mcp","vrunner"]}}}"#;
+        let out = remove_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
+        assert!(v["context_servers"]["1c"].is_null(), "{out}");
+        assert!(v["context_servers"]["vrunner"].is_null(), "{out}");
+        assert_eq!(v["context_servers"]["bsl-reference"]["command"], "/opt/bsl-analyzer");
+    }
+
+    /// Файл без наших записей (или без файла вовсе, пустой текст) — успех
+    /// без единой правки: состояние уже такое, какое просили.
+    #[test]
+    fn remove_zed_on_a_file_without_our_entries_is_a_success_noop() {
+        let before = "{\"theme\":\"One\"}";
+        assert_eq!(remove_zed(before, Path::new("/opt/1c-connect")).unwrap(), before);
+        assert_eq!(remove_zed("", Path::new("/opt/1c-connect")).unwrap(), "");
+    }
+
+    /// Чужая запись с нашим именем — отказ, как и при записи; файл не трогаем.
+    #[test]
+    fn remove_zed_refuses_a_foreign_entry_with_our_name() {
+        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
+        assert_eq!(remove_zed(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["1c".to_string()]);
+    }
+
+    #[test]
+    fn remove_pi_keeps_foreign_keys_and_servers() {
+        let before = r#"{"_comment":"мой файл","mcpServers":{"bsl-reference":{"command":"/opt/bsl-analyzer"},"1c":{"command":"/opt/1c-connect","args":["mcp","1c"]}}}"#;
+        let out = remove_pi(before, Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["_comment"], "мой файл");
+        assert!(v["mcpServers"]["bsl-reference"].is_object());
+        assert!(v["mcpServers"]["1c"].is_null());
+    }
+
+    #[test]
+    fn remove_pi_on_a_file_without_our_entries_is_a_success_noop() {
+        let before = r#"{"mcpServers":{"bsl-reference":{"command":"/opt/bsl-analyzer"}}}"#;
+        assert_eq!(remove_pi(before, Path::new("/opt/1c-connect")).unwrap(), before);
+        assert_eq!(remove_pi("", Path::new("/opt/1c-connect")).unwrap(), "");
+    }
+
+    #[test]
+    fn remove_pi_refuses_a_foreign_entry_with_our_name() {
+        let before = r#"{"mcpServers":{"vrunner":{"command":"nc"}}}"#;
+        assert_eq!(remove_pi(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["vrunner".to_string()]);
+    }
+
+    /// `teardown` на отсутствующем файле — успех без записи на диск: нечего
+    /// убирать — нечего и писать.
+    #[test]
+    fn teardown_on_a_missing_file_is_a_success_noop_and_does_not_create_it() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(teardown(&p, exe, remove_zed).unwrap(), Found::Absent);
+        assert!(!p.exists());
+    }
+
+    /// Сам круг «снял — поставил»: файл после второго `setup` снова рабочий
+    /// (`look` видит обе записи), независимо от того, что `teardown` мог
+    /// оставить пустой `context_servers` на месте бывших записей.
+    #[test]
+    fn switching_off_then_on_again_returns_a_working_file() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
+        assert_eq!(teardown(&p, exe, remove_zed).unwrap(), Found::Absent);
+        assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
+        assert_eq!(look(Some(&p), exe, true), Found::Ours);
+    }
+
+    /// Занятая чужой записью `1c` — отказ, и файл на диске не меняется вовсе.
+    #[test]
+    fn teardown_refuses_and_leaves_a_foreign_record_untouched() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json");
+        let exe = Path::new("/opt/1c-connect");
+        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
+        std::fs::write(&p, before).unwrap();
+        assert_eq!(teardown(&p, exe, remove_zed).unwrap_err(), vec!["1c".to_string()]);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
     }
 }

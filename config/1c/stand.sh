@@ -115,7 +115,6 @@ else
     DEMO_TITLE_KNOWN=0
     DEMO_TITLE="Учебная база"
 fi
-IB_USR=${DB_USER:+Usr=$DB_USER;Pwd=;}   # tail of the publication's connection string
 IB_N=${DB_USER:+/N$DB_USER}             # the key every interactive start carries
 LOG=/var/log/1c
 STARTER=/opt/1cv8t/common/1cestartt
@@ -658,13 +657,19 @@ publish)
     u=$2; port=$3; base=$4; d=$5; mkdir -p "$d/pub"
     # The publication: what webinstt writes, with the HTTP services on and
     # nothing else. Written on every start — nothing in it is anybody's edit.
+    # No Usr/Pwd in `ib`: measured 2026-10-29 (docs/superpowers/specs/
+    # 2026-10-29-secrets-encryption-design.md) that pair means anonymous
+    # login — a call with no credentials at all got a session under the
+    # written user. The platform takes the user from the request instead
+    # (Basic auth, same as mcp-1c and vrunner already use) — same change as
+    # 1c-connect's own descriptor (publication.rs::vrd).
     cat >"$d/pub/default.vrd" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <point xmlns="http://v8.1c.ru/8.2/virtual-resource-system"
 		xmlns:xs="http://www.w3.org/2001/XMLSchema"
 		xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 		base="/base"
-		ib="File=$base;$IB_USR">
+		ib="File=$base;">
 	<ws pointEnableCommon="false"/>
 	<!-- reuseSessions="dontuse", and on the service itself: the container
 	     element does not take these attributes, the platform refuses the

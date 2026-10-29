@@ -23,10 +23,10 @@ use std::sync::Mutex;
 /// расширение (`host.extension`).
 const SERVICE_ROOT_URL: &str = "mcp-1c";
 
-/// Экранирует пять спецсимволов XML. Путь базы, логин и пароль идут в
-/// атрибуты дескриптора как есть — кавычка или амперсанд в пароле иначе рвут
-/// XML, платформа отвергает весь файл, а причина оседает в журнале
-/// веб-сервера, не в журнале коннектора: агент просто не видит адреса.
+/// Экранирует пять спецсимволов XML. Путь базы идёт в атрибут `ib` как
+/// есть — кавычка или амперсанд в пути иначе рвут XML, платформа отвергает
+/// весь файл, а причина оседает в журнале веб-сервера, не в журнале
+/// коннектора: агент просто не видит адреса.
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -60,13 +60,21 @@ fn ib_connection(cfg: &Cfg) -> String {
 }
 
 /// Текст `default.vrd`: публикация в корень своего порта (`base="/"`, у
-/// каждого рабочего места свой порт — корень свободен), с паролем базы
-/// внутри. Этот текст никогда не печатается в журнал — только пишется в файл.
+/// каждого рабочего места свой порт — корень свободен). Без `Usr`/`Pwd`
+/// нарочно, а не по забывчивости (замер 29.10, спека «Пароля в дескрипторе
+/// публикации не должно быть вовсе»): с этими атрибутами вызов сервиса БЕЗ
+/// всяких учётных данных отвечал `200` — платформа открывала сеанс под
+/// записанным пользователем всякому, кто дотянулся до порта. `Usr`/`Pwd`
+/// нужны только для анонимного входа; платформа по умолчанию берёт
+/// пользователя из самого запроса (Basic-аутентификация), и ровно так
+/// ходит каждый наш потребитель (`mcp-1c`, vrunner) — без них тот же вызов
+/// без учётных данных отвечает `401`, с верным паролем — `200`. Этот текст
+/// никогда не печатается в журнал — только пишется в файл.
 pub fn vrd(cfg: &Cfg) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <point xmlns=\"http://v8.1c.ru/8.2/virtual-resource-system\"\n\
-\t\tbase=\"/\" ib=\"{ib}Usr=&quot;{user}&quot;;Pwd=&quot;{password}&quot;;\"\n\
+\t\tbase=\"/\" ib=\"{ib}\"\n\
 \t\tenable=\"true\">\n\
 \t<httpServices publishByDefault=\"true\" publishExtensionsByDefault=\"true\">\n\
 \t\t<service name=\"MCPService\" rootUrl=\"{root}\" enable=\"true\"\n\
@@ -74,17 +82,16 @@ pub fn vrd(cfg: &Cfg) -> String {
 \t</httpServices>\n\
 </point>\n",
         ib = ib_connection(cfg),
-        user = xml_escape(&cfg.host.db_user),
-        password = xml_escape(&cfg.host.db_password),
         root = SERVICE_ROOT_URL,
     )
 }
 
 /// Убрать свой дескриптор. Зовётся при уходе в чужую публикацию: `stop`
-/// гасит только процесс, а `default.vrd` с логином и паролем базы остаётся
-/// лежать — на машине, где базу публикует кто-то другой, это вторая дверь в
-/// неё, о которой администратор не знает. Отсутствие файла — успех: уходить
-/// уже не из чего.
+/// гасит только процесс, а `default.vrd` остаётся лежать — вход в него
+/// проверяется паролем базы (с задачи 6 анонимного входа у него больше нет),
+/// но сам HTTP-сервис на машине, где базу публикует кто-то другой, —
+/// лишняя дверь, о которой администратор не знает. Отсутствие файла —
+/// успех: уходить уже не из чего.
 pub fn remove_descriptor(pub_dir: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(pub_dir.join("default.vrd")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -93,9 +100,10 @@ pub fn remove_descriptor(pub_dir: &Path) -> std::io::Result<()> {
 }
 
 /// Дескриптор на диске — ровно то, что `vrd(cfg)` написал бы сейчас. Иначе
-/// пароль/пользователь/база поменялись (человек нажал «Сохранить»), а
-/// HTTP-сервис всё ещё держит старый текст — `state()` обязан увидеть это как
-/// расхождение, а не читать совпадение порта за «сделано».
+/// база поменялась (человек нажал «Сохранить»), а HTTP-сервис всё ещё держит
+/// старый текст — `state()` обязан увидеть это как расхождение, а не читать
+/// совпадение порта за «сделано». Пароль и логин больше не входят в
+/// сравнение — их с задачи 6 в дескрипторе нет вовсе, менять их незачем.
 pub fn descriptor_matches(pub_dir: &Path, cfg: &Cfg) -> bool {
     std::fs::read_to_string(pub_dir.join("default.vrd")).map(|on_disk| on_disk == vrd(cfg)).unwrap_or(false)
 }
@@ -122,12 +130,13 @@ pub fn service_responds(base_url: &str) -> bool {
 }
 
 /// Готовит каталог публикации и пишет в него `default.vrd` с правами только
-/// для владельца (Unix) — дескриптор несёт пароль базы, и на образе три
-/// рабочих места (`dev1`/`dev2`/`dev3`) делят диск под разными
-/// пользователями: без ограничения `dev1` читает пароль базы `dev2` прямо из
-/// `/home/dev2/dev1c/pub/default.vrd`. На Windows ограничивать нечего: каталог
-/// живёт под `%LOCALAPPDATA%`, у него уже свой ACL на пользователя — отдельной
-/// ветки для Windows здесь нет и не нужно.
+/// для владельца (Unix) — не потому, что там пароль (с задачи 6 его там нет
+/// вовсе), а потому, что путь к базе и состав публикации — чужое дело: на
+/// образе три рабочих места (`dev1`/`dev2`/`dev3`) делят диск под разными
+/// пользователями, и без ограничения `dev1` читал бы, какую базу и как
+/// публикует `dev2`, прямо из `/home/dev2/dev1c/pub/default.vrd`. На Windows
+/// ограничивать нечего: каталог живёт под `%LOCALAPPDATA%`, у него уже свой
+/// ACL на пользователя — отдельной ветки для Windows здесь нет и не нужно.
 pub fn write_vrd(pub_dir: &Path, text: &str) -> Result<(), String> {
     ensure_pub_dir(pub_dir)?;
     common::fsperm::write_owner_only(&pub_dir.join("default.vrd"), text)
@@ -196,12 +205,13 @@ fn paths_under(state: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths
 /// Запускается — из комплекта (`<комплект>/httpd` на Windows, системный
 /// apache2 в образе): инструменты работают с места, в профиль не переносится
 /// ничего (леджер комплекта, пункт 15). Пишет — только в состояние
-/// пользователя, и это не вкусовщина: в `default.vrd` лежит строка
-/// подключения с логином и паролем базы (`vrd` выше, пишется «только
-/// владельцу»). В комплекте ему нельзя по двум причинам сразу — комплект
-/// переезжает на флешке и в общей папке, а в стенде он один на три рабочих
-/// места и только для чтения, так что запись туда либо не удастся, либо
-/// отдаст пароль одного человека всем трём.
+/// пользователя, и это не вкусовщина: в `default.vrd` лежит путь к базе и
+/// состав публикации (`vrd` выше, пишется «только владельцу») — не секрет
+/// с задачи 6 (пароля там больше нет), но и не чужое дело. В комплекте ему
+/// нельзя по двум причинам сразу — комплект переезжает на флешке и в общей
+/// папке, а в стенде он один на три рабочих места и только для чтения, так
+/// что запись туда либо не удастся, либо покажет путь и состав публикации
+/// одного человека всем трём.
 ///
 /// Чистая функция ровно затем, чтобы это держал тест: `Paths::of` ниже
 /// проверить нечем — ему нужна настоящая платформа на диске.
@@ -457,7 +467,7 @@ fn kill_tracked(p: &Paths) {
 /// режиме (`-f <conf>`, без `-k`) — с `-k start` httpd передаёт работу
 /// диспетчеру служб, и выживший процесс нам уже не принадлежит, а Job-бэкстоп
 /// держит нечего. Идемпотентно: уже отслеженный процесс сперва гасится —
-/// повторный вызов после смены пароля/базы не падает на «порт занят».
+/// повторный вызов после смены базы не падает на «порт занят».
 ///
 /// `lifetime` решает, что происходит с httpd, когда этот процесс
 /// заканчивается (штатно или крахом): `Detached` — ничего, сервис остаётся
@@ -679,9 +689,9 @@ mod tests {
 
     #[test]
     fn leaving_our_own_publication_takes_the_descriptor_with_it() {
-        // Дескриптор несёт логин и пароль базы. Уходя в чужую публикацию, мы
-        // обязаны забрать его с собой: оставленный файл — вторая дверь в
-        // базу на машине, где её уже публикует кто-то другой.
+        // Дескриптор несёт путь к базе и состав публикации. Уходя в чужую
+        // публикацию, мы обязаны забрать его с собой: оставленный файл —
+        // лишний HTTP-сервис на машине, где базу уже публикует кто-то другой.
         let dir = crate::project::tempdir::Dir::new();
         std::fs::write(dir.path().join("default.vrd"), "<point/>").unwrap();
         remove_descriptor(dir.path()).unwrap();
@@ -706,8 +716,6 @@ mod tests {
         ] {
             assert!(text.contains(needle), "в дескрипторе нет {needle:?}:\n{text}");
         }
-        // Пароль там, но строкой, не для печати (см. host.publication::apply).
-        assert!(text.contains("Pwd=&quot;секрет&quot;"));
     }
 
     #[test]
@@ -732,22 +740,30 @@ mod tests {
 
     #[test]
     fn vrd_escapes_xml_special_characters_in_every_substituted_value() {
-        // Кавычка или амперсанд в пароле иначе рвут XML — платформа отвергает
-        // весь файл, и агент не видит адреса базы вовсе.
+        // Кавычка или амперсанд в пароле раньше рвали XML — тест стоял на
+        // пароле, пока он был в дескрипторе. С задачи 6 пароля там нет, и
+        // экранировать осталось то, что в дескрипторе и правда осталось:
+        // путь базы, в обеих его формах, файловой и клиент-серверной.
         let mut c = cfg_for_test();
-        c.host.db_password = "p@ss\"&<>'".into();
+        c.host.base_path = "C:\\Bases\\p@th\"&<>'".into();
         let text = vrd(&c);
-        assert!(text.contains("Pwd=&quot;p@ss&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
+        assert!(text.contains("File=&quot;C:\\Bases\\p@th&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
         // В значении атрибута не осталось «сырых» спецсимволов — только их escape-формы.
-        let pwd_start = text.find("Pwd=&quot;").unwrap() + "Pwd=&quot;".len();
-        let pwd_end = pwd_start + text[pwd_start..].find("&quot;;").unwrap();
-        let raw_value = &text[pwd_start..pwd_end];
+        let file_start = text.find("File=&quot;").unwrap() + "File=&quot;".len();
+        let file_end = file_start + text[file_start..].find("&quot;;").unwrap();
+        let raw_value = &text[file_start..file_end];
         assert!(!raw_value.contains('"') && !raw_value.contains('<') && !raw_value.contains('>'), "{raw_value:?}");
+
+        c.host.base_path = "srv\"&<>'\\base\"&<>'".into();
+        let text = vrd(&c);
+        assert!(text.contains("Srvr=&quot;srv&quot;&amp;&lt;&gt;&apos;&quot;;Ref=&quot;base&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
     }
 
     #[test]
-    fn descriptor_matches_detects_a_changed_password() {
-        // «Сохранить» с новым паролем — старый файл на диске больше не
+    fn descriptor_matches_detects_a_changed_base_path() {
+        // Прежний тест ловил смену ПАРОЛЯ; пароля в дескрипторе больше нет
+        // (задача 6), и сторожить теперь надо то, что в нём осталось — путь
+        // базы. «Сохранить» с новым путём — старый файл на диске больше не
         // совпадает с тем, что vrd(cfg) написал бы сейчас: state() обязан
         // увидеть расхождение, а не читать совпадение порта за «сделано».
         let tmp = std::env::temp_dir().join(format!("dev1c-pub-descriptor-{}", std::process::id()));
@@ -759,9 +775,32 @@ mod tests {
         assert!(descriptor_matches(&dir, &before));
 
         let mut after = before.clone();
-        after.host.db_password = "новый-пароль".into();
+        after.host.base_path = "C:\\Bases\\Other".into();
         assert!(!descriptor_matches(&dir, &after));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_descriptor_carries_no_credentials() {
+        // Замер 29.10: с Usr/Pwd в дескрипторе вызов сервиса без всяких
+        // учётных данных отвечал 200 — анонимный вход под записанным
+        // пользователем. Без них платформа берёт пользователя из запроса, и
+        // ни один наш потребитель (mcp-1c, vrunner) в этой паре не нуждается.
+        let text = vrd(&cfg_for_test());
+        assert!(!text.contains("Usr=") && !text.contains("Pwd="), "{text}");
+        assert!(!text.contains(&cfg_for_test().host.db_password), "{text}");
+    }
+
+    #[test]
+    fn the_connection_string_itself_is_unchanged() {
+        // Убрали Usr/Pwd — путь базы остаётся в тех же двух формах, что и
+        // раньше: File= для файловой базы, Srvr=/Ref= для клиент-серверной.
+        let mut c = cfg_for_test();
+        c.host.base_path = "/home/dev1/base".into();
+        assert!(vrd(&c).contains("File=&quot;/home/dev1/base&quot;;"));
+        c.host.base_path = r"srv\base".into();
+        let t = vrd(&c);
+        assert!(t.contains("Srvr=&quot;srv&quot;;") && t.contains("Ref=&quot;base&quot;;"), "{t}");
     }
 
     #[test]
@@ -779,12 +818,35 @@ mod tests {
     }
 
     #[test]
-    fn vrd_never_leaks_the_password_into_the_journal_by_itself() {
+    fn service_responds_survives_a_401_without_credentials() {
+        // Замер 29.10: без Usr/Pwd платформа отвечает вызову без учётных
+        // данных кодом 401, а `service_responds` смотрит только на
+        // `send().is_ok()` (`publication.rs:119-121`) — для reqwest 401 такой
+        // же успешный HTTP-ответ, как 200. Проба публикации обязана выжить
+        // правку без изменений, и это тест, а не только ручной замер на
+        // стенде, это доказывает.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        assert!(service_responds(&format!("http://127.0.0.1:{port}")));
+    }
+
+    #[test]
+    fn vrd_is_a_pure_function_that_never_touches_the_journal_by_itself() {
         // vrd() — чистая функция текста, не событие: она ничего никуда не
         // пишет и не печатает сама — писать её в файл и решать, что сказать в
-        // журнал, обязан вызывающий (host.publication::apply).
+        // журнал, обязан вызывающий (host.publication::apply). Прежде это
+        // доказывал пароль в тексте; с задачи 6 пароля там нет, и смысл теста
+        // держит путь базы — единственное, что в текст по-прежнему подставляется.
         let text = vrd(&cfg_for_test());
-        assert!(text.contains("секрет"), "тест ничего не проверял бы без пароля в тексте");
+        assert!(text.contains("C:\\Bases\\УНФ"), "тест ничего не проверял бы без пути базы в тексте");
     }
 
     fn sample_paths() -> Paths {
@@ -927,12 +989,6 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         }
     }
 
-    /// Пароль базы не уезжает в комплект. `default.vrd` несёт строку
-    /// подключения с `Usr`/`Pwd`, а комплект переезжает на флешке и в общей
-    /// папке, в стенде же он один на три рабочих места и только для чтения.
-    /// Поэтому httpd запускается ИЗ комплекта, а пишет публикация только в
-    /// состояние — ровно это и держит тест. Живой случай: 25.10, уводя
-    /// инструменты в комплект, я увёл туда заодно и дескриптор с паролем.
     /// Ожидание условия — единственная часть подъёма, которую можно
     /// проверить без apache: дождались, не дождались, и условие спрашивают
     /// повторно, а не один раз.
@@ -953,8 +1009,15 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         assert!(t0.elapsed() < Duration::from_secs(3), "ждали дольше срока: {:?}", t0.elapsed());
     }
 
+    /// Путь к базе и состав публикации не уезжают в комплект. Комплект
+    /// переезжает на флешке и в общей папке, в стенде же он один на три
+    /// рабочих места и только для чтения — поэтому httpd запускается ИЗ
+    /// комплекта, а пишет публикация только в состояние — ровно это и
+    /// держит тест. Живой случай: 25.10, уводя инструменты в комплект, я
+    /// увёл туда заодно и дескриптор (тогда ещё — с паролем; с задачи 6 его
+    /// там нет, но доводу про комплект это не мешает).
     #[test]
-    fn the_descriptor_with_the_password_never_lands_in_the_kit() {
+    fn the_descriptor_never_lands_in_the_kit() {
         let kit = Path::new("K:\\kit");
         let state = Path::new("S:\\state");
         let (server, writes) = bases(kit, state);
@@ -1038,9 +1101,11 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     #[cfg(unix)]
     #[test]
     fn the_descriptor_and_its_directory_are_owner_only() {
-        // Дескриптор несёт пароль базы, и на образе три рабочих места делят
-        // диск под разными пользователями — без этого dev1 читал бы пароль
-        // базы dev2 прямо из /home/dev2/dev1c/pub/default.vrd.
+        // Дескриптор несёт путь к базе и состав публикации — не секрет с
+        // задачи 6 (пароля там нет), но и не чужое дело: на образе три
+        // рабочих места делят диск под разными пользователями, и без этого
+        // dev1 читал бы, какую базу публикует dev2, прямо из
+        // /home/dev2/dev1c/pub/default.vrd.
         use std::os::unix::fs::PermissionsExt;
         let tmp = std::env::temp_dir().join(format!("dev1c-pub-vrd-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);

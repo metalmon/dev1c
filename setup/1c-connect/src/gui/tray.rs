@@ -30,7 +30,7 @@ pub struct Tray {
     toggle: MenuItem,
     modes: [CheckMenuItem; 2],
     publications: [CheckMenuItem; 2],
-    agents: [CheckMenuItem; 2],
+    agents: [CheckMenuItem; 4],
     themes: [CheckMenuItem; 3],
     autostart: CheckMenuItem,
     autoconnect: CheckMenuItem,
@@ -67,12 +67,15 @@ const PUBLICATIONS: [(&str, &str, &str); 2] =
 /// (решение владельца 28.10).
 const PUBLICATION_SUBMENU: &str = "Публикация базы";
 
-/// Локальный агент → id пункта меню и подпись (решение владельца 29.10,
-/// «Управление переехало в трей: „Локальные агенты“»). Названы агентами, а
-/// не редакторами: человек работает с агентом внутри Zed или pi, не с
-/// редактором как таким. Порядок — тот же, что был у раздела «Редакторы» во
-/// вкладке «Проект»: Zed, затем pi.
-const AGENTS: [(&str, &str, &str); 2] = [("zed", "agent:zed", "Zed"), ("pi", "agent:pi", "pi")];
+/// Набор локальных агентов живёт одним реестром в `editors::AGENTS`
+/// (решение владельца 29.10, «Четыре локальных агента, и настраиваются они
+/// по-разному») — здесь id пункта меню строится из `def.id` как
+/// `agent:<id>`, по той же причине, по которой раньше был отдельный массив:
+/// названы агентами, а не редакторами, человек работает с агентом внутри
+/// Zed/pi/Claude Code/Codex, не с редактором как таким.
+fn agent_menu_id(id: &str) -> String {
+    format!("agent:{id}")
+}
 
 /// Заголовок подменю «Локальные агенты».
 const AGENTS_SUBMENU: &str = "Локальные агенты";
@@ -116,9 +119,9 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
             return Some(MenuAction::Publication(publication));
         }
     }
-    for (agent, agent_id, _) in AGENTS {
-        if id == agent_id {
-            return Some(MenuAction::Agent(agent));
+    for def in editors::AGENTS.iter() {
+        if id == agent_menu_id(def.id) {
+            return Some(MenuAction::Agent(def.id));
         }
     }
     match id {
@@ -208,7 +211,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     // Начальные галочка и доступность — оба `false`: `launch` поправляет их
     // сразу после `build` (`Tray::set_agents`), тем же приёмом, что у режима
     // и публикации выше — здесь ни `Found`, ни режим ещё не читали.
-    let agent_items = AGENTS.map(|(_, id, text)| CheckMenuItem::with_id(id, text, false, false, None));
+    let agent_items = editors::AGENTS.map(|def| CheckMenuItem::with_id(agent_menu_id(def.id), def.label, false, false, None));
     let agent_refs: Vec<&dyn IsMenuItem> = agent_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let agents_submenu = Submenu::with_items(AGENTS_SUBMENU, true, &agent_refs)?;
     let items = THEMES.map(|(c, id, text)| CheckMenuItem::with_id(id, text, true, c == choice, None));
@@ -252,7 +255,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
     let modes = [mode_items[0].clone(), mode_items[1].clone()];
     let publications = [publication_items[0].clone(), publication_items[1].clone()];
-    let agents = [agent_items[0].clone(), agent_items[1].clone()];
+    let agents = [agent_items[0].clone(), agent_items[1].clone(), agent_items[2].clone(), agent_items[3].clone()];
     Ok(Tray { icon: tray, toggle, modes, publications, agents, themes, autostart, autoconnect })
 }
 
@@ -308,19 +311,21 @@ impl Tray {
     /// только на `Found::Ours` (`agent_checked`), доступность — агенты живут
     /// на этой машине (`agents_live_here`) и агент на машине вообще есть
     /// (`agent_available`): там, где агентов настраивает не наше меню (точка
-    /// входа образа), и отсутствующего агента галочкой не включить.
+    /// входа образа), и отсутствующего агента галочкой не включить. Состояние
+    /// файловых агентов читается с диска, CLI-агентов (Claude Code, Codex) —
+    /// их собственным CLI (`Setup::look`, решение владельца «Четыре
+    /// локальных агента») — цикл по реестру один, разница спрятана там.
     pub fn set_agents(&self, mode: &str) {
         let exe = std::env::current_exe().ok();
-        let found = |present: bool, path: Option<std::path::PathBuf>| match &exe {
-            Some(exe) => editors::look(path.as_deref(), exe, present),
-            None => editors::Found::Missing,
-        };
-        let zed_present = editors::zed_present();
-        let pi_present = editors::pi_present();
-        self.agents[0].set_checked(agent_checked(&found(zed_present, editors::zed_path())));
-        self.agents[0].set_enabled(agent_available(mode, zed_present));
-        self.agents[1].set_checked(agent_checked(&found(pi_present, editors::pi_path())));
-        self.agents[1].set_enabled(agent_available(mode, pi_present));
+        for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
+            let present = def.setup.present();
+            let found = match &exe {
+                Some(exe) => def.setup.look(exe),
+                None => editors::Found::Missing,
+            };
+            item.set_checked(agent_checked(&found));
+            item.set_enabled(agent_available(mode, present));
+        }
     }
 }
 
@@ -668,9 +673,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
         // тот же приём, что у «Автозапуска»/«Автоподключения» ниже.
         MenuAction::Agent(which) => {
             let ui = cx.global::<Ui>();
-            let Some(i) = AGENTS.iter().position(|&(w, ..)| w == which) else { return };
+            let Some(i) = editors::AGENTS.iter().position(|d| d.id == which) else { return };
             let Some(on) = ui.tray.as_ref().map(|t| t.agents[i].is_checked()) else { return };
-            if !toggle_agent(cx, i == 0, on) {
+            if !toggle_agent(cx, i, on) {
                 if let Some(t) = &cx.global::<Ui>().tray {
                     t.agents[i].set_checked(!on);
                 }
@@ -714,10 +719,11 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_available, agent_checked, agents_live_here, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
-        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS, AGENTS_SUBMENU, MODES, PUBLICATIONS,
-        PUBLICATION_SUBMENU,
+        agent_available, agent_checked, agent_menu_id, agents_live_here, icon_rgba, menu_action, mode_change_blocked,
+        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS_SUBMENU,
+        MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
+    use crate::editors;
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
     use common::Phase;
@@ -916,15 +922,19 @@ mod tests {
         assert!(up.chunks(4).any(|p| p == [0x2f, 0x8f, 0x4e, 255]), "no green pixel in the up badge");
     }
 
-    /// Задача «Управление переехало в трей»: id пунктов подменю «Локальные
-    /// агенты» разбираются в действие, незнакомый id — по-прежнему `None`.
+    /// Задача «Четыре локальных агента»: id пунктов подменю «Локальные
+    /// агенты» разбираются в действие для всех четырёх, незнакомый id —
+    /// по-прежнему `None`. Порядок в реестре — файловые агенты, затем
+    /// CLI-агенты, как и задумано.
     #[test]
     fn agent_menu_ids_map_to_actions() {
-        assert_eq!(menu_action("agent:zed"), Some(MenuAction::Agent("zed")));
-        assert_eq!(menu_action("agent:pi"), Some(MenuAction::Agent("pi")));
+        assert_eq!(menu_action(&agent_menu_id("zed")), Some(MenuAction::Agent("zed")));
+        assert_eq!(menu_action(&agent_menu_id("pi")), Some(MenuAction::Agent("pi")));
+        assert_eq!(menu_action(&agent_menu_id("claude")), Some(MenuAction::Agent("claude")));
+        assert_eq!(menu_action(&agent_menu_id("codex")), Some(MenuAction::Agent("codex")));
         assert_eq!(menu_action("agent:bsl-reference"), None);
         assert_eq!(AGENTS_SUBMENU, "Локальные агенты");
-        assert_eq!(AGENTS.map(|(name, ..)| name), ["zed", "pi"]);
+        assert_eq!(editors::AGENTS.iter().map(|d| d.id).collect::<Vec<_>>(), ["zed", "pi", "claude", "codex"]);
     }
 
     /// Галочка стоит только на `Found::Ours` — остальные состояния из неё не

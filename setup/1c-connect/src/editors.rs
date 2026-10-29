@@ -1029,6 +1029,322 @@ pub fn refusal_text(reasons: &[String]) -> String {
     }
 }
 
+// Claude Code и Codex (решение владельца 29.10, «Четыре локальных агента, и
+// настраиваются они по-разному»): у Zed и pi файл настроек только про MCP и
+// больше ни про что, поэтому правим его сами. У Claude Code конфигурация
+// живёт в `~/.claude.json` вместе со списком проектов и прочим хозяйством, у
+// Codex — в `~/.codex/config.toml`, который человек правит руками;
+// переписывать такие файлы целиком ради одной записи несоразмерно, и для
+// обоих мы зовём их собственное CLI (`claude mcp ...`, `codex mcp ...`),
+// проверенное на машине владельца 29.10 и лежащее на `PATH`.
+
+/// Запустить `claude`/`codex` и получить его `stdout`/`stderr`/код выхода —
+/// одно место для обоих, раз PATH ищет исполняемый файл сам (на Windows это
+/// `CreateProcess` с `PATHEXT`, не наш самодельный `on_path`, который бьёт
+/// только по явному списку расширений).
+fn run_cli<S: AsRef<std::ffi::OsStr>>(bin: &str, args: impl IntoIterator<Item = S>) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(bin).args(args).output()
+}
+
+/// Код выхода CLI в наш общий язык отказа: `0` — успех, иначе его `stderr`
+/// как есть, без своей формулировки (задача прямо требует не придумывать
+/// слова за CLI — у файловых агентов причину тоже называет не наш текст, а
+/// `merge`/`remove`).
+fn cli_result(out: std::process::Output) -> Result<(), String> {
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// Есть ли Claude Code на этой машине — признак тот же, что у Zed/pi:
+/// исполняемый файл на `PATH`. Своего каталога настроек у него для этого не
+/// попросить: `~/.claude.json` несёт в себе список проектов человека и
+/// прочее хозяйство, и использовать его присутствие как признак — значило
+/// бы путать «CLI поставлен» с «человек хоть раз его открыл».
+pub fn claude_present() -> bool {
+    on_path("claude")
+}
+
+/// Есть ли Codex на этой машине — тем же способом.
+pub fn codex_present() -> bool {
+    on_path("codex")
+}
+
+/// Аргументы `claude mcp add` для одной нашей записи: область —
+/// пользовательская (`--scope user`), чтобы запись жила у человека, а не в
+/// одном проекте (решение владельца) — CLI сам решает, в какой файл её
+/// положить. Чистая функция ради теста: какие аргументы мы строим, не
+/// зависит от того, что CLI сделает с ними.
+fn claude_add_args(name: &str, exe: &str) -> Vec<String> {
+    vec!["mcp".into(), "add".into(), name.into(), "--scope".into(), "user".into(), "--".into(), exe.into(), "mcp".into(), name.into()]
+}
+
+/// Аргументы `claude mcp remove` для одной нашей записи, той же области.
+fn claude_remove_args(name: &str) -> Vec<String> {
+    vec!["mcp".into(), "remove".into(), name.into(), "-s".into(), "user".into()]
+}
+
+/// `command`, стоящий в записи `claude mcp get <name>` — поле `Command:`
+/// отдельной строкой; `Args:`, `Scope:`, `Status:`, `Environment:` для
+/// галочки не нужны. `claude mcp list` для этого не годится (замерено
+/// отдельно): там командная строка и аргументы склеены пробелом без кавычек,
+/// и путь с пробелом от первого аргумента не отличить, а `get` отдаёт их
+/// раздельными строками.
+fn parse_claude_get(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|l| l.strip_prefix("  Command: ")).map(|s| s.trim().to_string())
+}
+
+fn claude_get_command(name: &str) -> Option<String> {
+    let out = run_cli("claude", ["mcp", "get", name]).ok()?;
+    if !out.status.success() {
+        return None; // записи нет, или CLI отказал по другой причине — для состояния галочки это одно и то же «нет записи»
+    }
+    parse_claude_get(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Состояние наших записей у Claude Code — опрашивается CLI напрямую, не
+/// угадывается по файлу (решение владельца): `claude mcp get` на каждое из
+/// двух наших имён, правило совпадения файла исполняемого то же, что у
+/// Zed/pi (`is_ours`) — развёртка общая, `found_via`.
+pub fn look_claude(exe: &Path, present: bool) -> Found {
+    found_via(exe, present, claude_get_command)
+}
+
+/// Ставит одну нашу запись у Claude Code: сперва `remove` (результат
+/// отбрасываем — записи может и не быть), затем `add`. `remove` перед `add`
+/// — не хирургия на всякий случай: замерено отдельно, что `claude mcp add`
+/// отказывает на уже существующем имени целиком, даже если это наша же
+/// запись со старым путём к исполняемому, — значит обновить её можно только
+/// «снять и добавить».
+pub fn claude_set(name: &str, exe: &Path) -> Result<(), String> {
+    let _ = run_cli("claude", claude_remove_args(name));
+    let out = run_cli("claude", claude_add_args(name, &exe.display().to_string())).map_err(|e| format!("не запустить claude: {e}"))?;
+    cli_result(out)
+}
+
+/// Снимает одну нашу запись у Claude Code.
+pub fn claude_unset(name: &str) -> Result<(), String> {
+    let out = run_cli("claude", claude_remove_args(name)).map_err(|e| format!("не запустить claude: {e}"))?;
+    cli_result(out)
+}
+
+/// Аргументы `codex mcp add`/`remove` для одной нашей записи: у Codex нет
+/// ключа области — `config.toml` человека один на всех проектов, и это уже
+/// то, что нам нужно (решение владельца).
+fn codex_add_args(name: &str, exe: &str) -> Vec<String> {
+    vec!["mcp".into(), "add".into(), name.into(), "--".into(), exe.into(), "mcp".into(), name.into()]
+}
+
+fn codex_remove_args(name: &str) -> Vec<String> {
+    vec!["mcp".into(), "remove".into(), name.into()]
+}
+
+/// Записи из вывода `codex mcp list --json` — пары «имя, command» всех
+/// серверов разом, чем он отличается от Claude Code: у Codex `--json` отдаёт
+/// честный JSON (замерено отдельно), и одного вызова достаточно на оба наших
+/// имени, вместо двух походов через `get`. Разбор — чистая функция ради
+/// теста на образце вывода, не на живом вызове; что угодно, не разобравшееся
+/// как ожидаемый JSON (пустой список, чужая форма), — пустой список: это не
+/// отказ смотреть, а повод решить, что записи нет.
+fn parse_codex_list(json: &str) -> Vec<(String, String)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    let Some(arr) = v.as_array() else { return Vec::new() };
+    arr.iter()
+        .filter_map(|e| Some((e.get("name")?.as_str()?.to_string(), e.get("transport")?.get("command")?.as_str()?.to_string())))
+        .collect()
+}
+
+fn codex_commands() -> Vec<(String, String)> {
+    let Ok(out) = run_cli("codex", ["mcp", "list", "--json"]) else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_codex_list(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Состояние наших записей у Codex — тем же правилом, что у Claude Code, но
+/// по уже прочитанному списку: один вызов `list --json`, не два `get`.
+pub fn look_codex(exe: &Path, present: bool) -> Found {
+    let commands = codex_commands();
+    found_via(exe, present, |name| commands.iter().find(|(n, _)| n == name).map(|(_, c)| c.clone()))
+}
+
+/// Ставит одну нашу запись у Codex: просто `add` — замерено отдельно, что
+/// повторный `add` на занятое имя не отказывает, а переписывает запись (в
+/// отличие от Claude Code), значит «снять и добавить» здесь не нужно.
+pub fn codex_set(name: &str, exe: &Path) -> Result<(), String> {
+    let out = run_cli("codex", codex_add_args(name, &exe.display().to_string())).map_err(|e| format!("не запустить codex: {e}"))?;
+    cli_result(out)
+}
+
+/// Снимает одну нашу запись у Codex.
+pub fn codex_unset(name: &str) -> Result<(), String> {
+    let out = run_cli("codex", codex_remove_args(name)).map_err(|e| format!("не запустить codex: {e}"))?;
+    cli_result(out)
+}
+
+/// Общая развёртка `Found` для CLI-агентов по двум нашим именам: `get`
+/// отдаёт `command`, стоящий сейчас в записи под этим именем (`None` —
+/// записи нет), правило «наша/чужая» то же, что у файловых агентов —
+/// совпало имя файла `command` с нашим исполняемым, остальное чужое.
+fn found_via(exe: &Path, present: bool, get: impl Fn(&str) -> Option<String>) -> Found {
+    if !present {
+        return Found::Missing;
+    }
+    let want = exe.file_name().map(|n| n.to_string_lossy().to_string());
+    let mut foreign = Vec::new();
+    let mut ours_count = 0usize;
+    for e in OURS.iter() {
+        let Some(cmd) = get(e.name) else { continue };
+        let got = Path::new(&cmd).file_name().map(|n| n.to_string_lossy().to_string());
+        if want.is_some() && got == want {
+            ours_count += 1;
+        } else {
+            foreign.push(e.name.to_string());
+        }
+    }
+    if !foreign.is_empty() {
+        return Found::Foreign(foreign);
+    }
+    if ours_count == OURS.len() {
+        Found::Ours
+    } else {
+        Found::Absent
+    }
+}
+
+/// Жмём «Настроить» для CLI-агента: сперва смотрим, не занято ли одно из
+/// наших имён чужой командой (`look`) — та же защита, что у файловых
+/// агентов (решение владельца, «чужую запись не перезаписываем никогда»), и
+/// только если не занято — зовём `set` на обоих именах. `Ok` несёт то, что
+/// увидел повторный `look` ПОСЛЕ вызова CLI, не наше предположение об успехе
+/// — тот же приём, что у `setup` для файловых агентов.
+pub fn setup_cli(
+    exe: &Path,
+    present: bool,
+    look: impl Fn(&Path, bool) -> Found,
+    set: impl Fn(&str, &Path) -> Result<(), String>,
+) -> Result<Found, Vec<String>> {
+    if let Found::Foreign(names) = look(exe, present) {
+        return Err(names);
+    }
+    for e in OURS.iter() {
+        set(e.name, exe).map_err(|msg| vec![msg])?;
+    }
+    Ok(look(exe, present))
+}
+
+/// Снимаем галочку для CLI-агента — обратное к `setup_cli`: занято чужим —
+/// отказ без вызова CLI, записей и так нет — успех без вызова, иначе `unset`
+/// на обоих именах и свежий `look` ради итога.
+pub fn teardown_cli(
+    exe: &Path,
+    present: bool,
+    look: impl Fn(&Path, bool) -> Found,
+    unset: impl Fn(&str) -> Result<(), String>,
+) -> Result<Found, Vec<String>> {
+    match look(exe, present) {
+        Found::Foreign(names) => return Err(names),
+        Found::Missing | Found::Absent => return Ok(look(exe, present)),
+        Found::Ours => {}
+    }
+    for e in OURS.iter() {
+        unset(e.name).map_err(|msg| vec![msg])?;
+    }
+    Ok(look(exe, present))
+}
+
+/// Честное различение двух способов настройки одного локального агента —
+/// не больше сущностей, чем способов сегодня: правкой файла настроек,
+/// который только про MCP и больше ни про что (Zed, pi), — у него есть путь
+/// и `merge`/`remove` правят его текст; или вызовом собственного CLI агента
+/// (Claude Code, Codex) — у него нет файла, который мы бы трогали, только
+/// `status`/`set`/`unset`.
+pub enum Setup {
+    File {
+        path: fn() -> Option<PathBuf>,
+        present: fn() -> bool,
+        merge: fn(&str, &Path) -> Result<String, Vec<String>>,
+        remove: fn(&str, &Path) -> Result<String, Vec<String>>,
+    },
+    Cli {
+        present: fn() -> bool,
+        status: fn(&Path, bool) -> Found,
+        set: fn(&str, &Path) -> Result<(), String>,
+        unset: fn(&str) -> Result<(), String>,
+    },
+}
+
+impl Setup {
+    /// Есть ли агент на машине вообще.
+    pub fn present(&self) -> bool {
+        match self {
+            Setup::File { present, .. } => present(),
+            Setup::Cli { present, .. } => present(),
+        }
+    }
+
+    /// Текущее состояние наших записей — файл читается с диска, CLI
+    /// опрашивается напрямую; угадывания в обоих случаях нет.
+    pub fn look(&self, exe: &Path) -> Found {
+        match self {
+            Setup::File { path, present, .. } => look(path().as_deref(), exe, present()),
+            Setup::Cli { present, status, .. } => status(exe, present()),
+        }
+    }
+
+    /// Ставит галочку: пишет наши две записи (идемпотентно — повторный вызов
+    /// на уже своей записи не плодит конфликт).
+    pub fn enable(&self, exe: &Path) -> Result<Found, Vec<String>> {
+        match self {
+            Setup::File { path, merge, .. } => match path() {
+                Some(p) => setup(&p, exe, merge),
+                None => Err(vec!["не узнать путь к его настройкам на этой машине".to_string()]),
+            },
+            Setup::Cli { present, status, set, .. } => setup_cli(exe, present(), status, set),
+        }
+    }
+
+    /// Снимает галочку: убирает наши записи, не трогая чужие.
+    pub fn disable(&self, exe: &Path) -> Result<Found, Vec<String>> {
+        match self {
+            Setup::File { path, remove, .. } => match path() {
+                Some(p) => teardown(&p, exe, remove),
+                None => Err(vec!["не узнать путь к его настройкам на этой машине".to_string()]),
+            },
+            Setup::Cli { present, status, unset, .. } => teardown_cli(exe, present(), status, unset),
+        }
+    }
+}
+
+/// Один локальный агент в разделе трея «Локальные агенты»: `id` — он же
+/// хвост `1c-connect mcp <id>` для записи в настройках и суффикс id пункта
+/// меню (`agent:<id>`), `label` — подпись человеку. Порядок в массиве — он
+/// же порядок в меню: оба файловых агента, как было, затем оба CLI-агента
+/// (решение владельца 29.10, «Четыре локальных агента»).
+pub struct AgentDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub setup: Setup,
+}
+
+pub const AGENTS: [AgentDef; 4] = [
+    AgentDef { id: "zed", label: "Zed", setup: Setup::File { path: zed_path, present: zed_present, merge: merge_zed, remove: remove_zed } },
+    AgentDef { id: "pi", label: "pi", setup: Setup::File { path: pi_path, present: pi_present, merge: merge_pi, remove: remove_pi } },
+    AgentDef {
+        id: "claude",
+        label: "Claude Code",
+        setup: Setup::Cli { present: claude_present, status: look_claude, set: claude_set, unset: claude_unset },
+    },
+    AgentDef {
+        id: "codex",
+        label: "Codex",
+        setup: Setup::Cli { present: codex_present, status: look_codex, set: codex_set, unset: codex_unset },
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1646,5 +1962,145 @@ mod tests {
         std::fs::write(&p, before).unwrap();
         assert_eq!(teardown(&p, exe, remove_zed).unwrap_err(), vec!["1c".to_string()]);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+    }
+
+    // Claude Code и Codex: тесты не зовут настоящий CLI (то же правило, что
+    // у DPAPI) — разбор вывода проверяется на образцах, пойманных живым
+    // прогоном `claude mcp get`/`codex mcp list --json` в выбрасываемом
+    // каталоге (не в настоящих файлах человека, отчёт задачи несёт три
+    // полных образца), а не на повторном вызове настоящей программы.
+
+    /// Образец — буквальный вывод `claude mcp get 1c` на записи, которую
+    /// только что поставил `claude mcp add 1c --scope project -- /usr/bin/true
+    /// mcp 1c` во временном каталоге.
+    #[test]
+    fn parses_the_command_line_out_of_claude_mcp_get() {
+        let sample = "1c:\n  Scope: Project config (shared via .mcp.json)\n  Status: ⏸ Pending approval (run `claude` to approve)\n  Type: stdio\n  Command: C:/Program Files/Git/usr/bin/true\n  Args: mcp 1c\n  Environment:\n\nTo remove this server, run: claude mcp remove 1c -s project\n";
+        assert_eq!(parse_claude_get(sample), Some("C:/Program Files/Git/usr/bin/true".to_string()));
+    }
+
+    /// `claude mcp get` на отсутствующее имя не несёт строки `Command:` —
+    /// только это, а не код выхода (его читает вызывающий), отличает
+    /// присутствие записи в этом разборе.
+    #[test]
+    fn a_sample_without_a_command_line_parses_to_none() {
+        let sample = "No MCP server named \"doesnotexist\". Configured servers: oktaplus-kb\n";
+        assert_eq!(parse_claude_get(sample), None);
+    }
+
+    /// Образец — буквальный вывод `codex mcp list --json` на двух наших
+    /// записях, пойманных тем же замером (`CODEX_HOME` на временный каталог).
+    #[test]
+    fn parses_names_and_commands_out_of_codex_mcp_list_json() {
+        let sample = r#"[
+  {
+    "name": "1c",
+    "enabled": true,
+    "transport": { "type": "stdio", "command": "C:/Program Files/Git/usr/bin/true", "args": ["mcp", "1c"] }
+  },
+  {
+    "name": "vrunner",
+    "enabled": true,
+    "transport": { "type": "stdio", "command": "C:/Program Files/Git/usr/bin/true", "args": ["mcp", "vrunner"] }
+  }
+]"#;
+        let got = parse_codex_list(sample);
+        assert_eq!(
+            got,
+            vec![
+                ("1c".to_string(), "C:/Program Files/Git/usr/bin/true".to_string()),
+                ("vrunner".to_string(), "C:/Program Files/Git/usr/bin/true".to_string())
+            ]
+        );
+    }
+
+    /// Образец пустого списка (`codex mcp list --json` без единой записи) и
+    /// мусор — оба читаются как «записей нет», а не как отказ разбирать.
+    #[test]
+    fn an_empty_list_and_garbage_both_parse_to_no_entries() {
+        assert_eq!(parse_codex_list("[]"), Vec::<(String, String)>::new());
+        assert_eq!(parse_codex_list("это не json"), Vec::<(String, String)>::new());
+    }
+
+    /// Аргументы `claude mcp add`/`remove` — область пользовательская
+    /// (`--scope user`/`-s user`), команда — наш исполняемый с `mcp <name>`,
+    /// как у Zed/pi, но без ключа предела: его у `claude mcp add` нет.
+    #[test]
+    fn claude_add_and_remove_arguments_use_the_user_scope() {
+        assert_eq!(
+            claude_add_args("1c", "/opt/1c-connect"),
+            ["mcp", "add", "1c", "--scope", "user", "--", "/opt/1c-connect", "mcp", "1c"].map(String::from)
+        );
+        assert_eq!(claude_remove_args("vrunner"), ["mcp", "remove", "vrunner", "-s", "user"].map(String::from));
+    }
+
+    /// Аргументы `codex mcp add`/`remove` — без ключа области вовсе: у
+    /// Codex `config.toml` один на всех проектов, и это и есть нужная нам
+    /// область (решение владельца).
+    #[test]
+    fn codex_add_and_remove_arguments_have_no_scope_flag() {
+        assert_eq!(codex_add_args("1c", "/opt/1c-connect"), ["mcp", "add", "1c", "--", "/opt/1c-connect", "mcp", "1c"].map(String::from));
+        assert_eq!(codex_remove_args("vrunner"), ["mcp", "remove", "vrunner"].map(String::from));
+    }
+
+    /// `found_via` — то же правило, что у файловых агентов (`is_ours`): имя
+    /// файла `command` совпало с нашим исполняемым — наша запись, не
+    /// совпало — чужая, обоих нет — отсутствует, агента нет вовсе — `Missing`.
+    #[test]
+    fn found_via_tells_ours_from_foreign_from_absent_from_missing() {
+        let exe = Path::new("/opt/1c-connect");
+        assert_eq!(found_via(exe, false, |_| None), Found::Missing);
+        assert_eq!(found_via(exe, true, |_| None), Found::Absent);
+        assert_eq!(found_via(exe, true, |_| Some("/opt/1c-connect".to_string())), Found::Ours);
+        assert_eq!(found_via(exe, true, |_| Some("nc".to_string())), Found::Foreign(vec!["1c".to_string(), "vrunner".to_string()]));
+    }
+
+    /// `setup_cli`/`teardown_cli` — та же защита чужой записи, что у
+    /// файловых агентов, и тот же итог «то, что увидел повторный `look`»,
+    /// без единого настоящего вызова CLI: `look`/`set`/`unset` здесь —
+    /// поддельные замыкания над общей ячейкой, не `claude`/`codex`.
+    #[test]
+    fn setup_cli_refuses_a_foreign_name_without_calling_set() {
+        let calls = std::cell::RefCell::new(Vec::<String>::new());
+        let look = |_: &Path, _: bool| Found::Foreign(vec!["1c".to_string()]);
+        let set = |name: &str, _: &Path| {
+            calls.borrow_mut().push(name.to_string());
+            Ok(())
+        };
+        let err = setup_cli(Path::new("/opt/1c-connect"), true, look, set).unwrap_err();
+        assert_eq!(err, vec!["1c".to_string()]);
+        assert!(calls.borrow().is_empty(), "занятое имя не должно звать set вовсе");
+    }
+
+    #[test]
+    fn setup_cli_calls_set_for_both_names_and_reports_what_look_sees_after() {
+        let state = std::cell::RefCell::new(Found::Absent);
+        let look = |_: &Path, _: bool| state.borrow().clone();
+        let set = |_: &str, _: &Path| {
+            *state.borrow_mut() = Found::Ours;
+            Ok(())
+        };
+        assert_eq!(setup_cli(Path::new("/opt/1c-connect"), true, look, set).unwrap(), Found::Ours);
+    }
+
+    #[test]
+    fn teardown_cli_is_a_noop_success_when_already_absent() {
+        let calls = std::cell::RefCell::new(0);
+        let look = |_: &Path, _: bool| Found::Absent;
+        let unset = |_: &str| {
+            *calls.borrow_mut() += 1;
+            Ok(())
+        };
+        assert_eq!(teardown_cli(Path::new("/opt/1c-connect"), true, look, unset).unwrap(), Found::Absent);
+        assert_eq!(*calls.borrow(), 0, "записей и так нет — unset звать незачем");
+    }
+
+    /// Реестр `AGENTS` не рассыпается по длине под тестом `tray::AGENTS`
+    /// (четыре имени, порядок — файловые агенты, затем CLI-агенты) — тот же
+    /// контракт, по которому меню строит свои id пунктов `agent:<id>`.
+    #[test]
+    fn the_agent_registry_has_four_agents_in_the_documented_order() {
+        assert_eq!(AGENTS.iter().map(|a| a.id).collect::<Vec<_>>(), ["zed", "pi", "claude", "codex"]);
+        assert_eq!(AGENTS.iter().map(|a| a.label).collect::<Vec<_>>(), ["Zed", "pi", "Claude Code", "Codex"]);
     }
 }

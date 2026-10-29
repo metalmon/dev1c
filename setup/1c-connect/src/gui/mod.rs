@@ -820,32 +820,26 @@ fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<St
     }
 }
 
-/// Щёлкнули галочку «Локальные агенты» в трее: `zed` различает путь и пару
-/// `merge`/`remove` — `editors::zed_path`/`merge_zed`/`remove_zed` или
-/// `editors::pi_path`/`merge_pi`/`remove_pi`; `on` — ставить наши записи
-/// (`editors::setup`) или убирать их (`editors::teardown`). Отдаёт `false`,
-/// когда дело не вышло (отказ или нежданный итог уже легли строкой в
-/// журнал через `setup_line`) — трей обязан вернуть галочку в прежнее
-/// положение, раз она обещала то, чего мы не сделали.
-pub fn toggle_agent(cx: &mut App, zed: bool, on: bool) -> bool {
-    let name = if zed { "Zed" } else { "pi" };
-    let line = match (std::env::current_exe(), if zed { crate::editors::zed_path() } else { crate::editors::pi_path() }) {
-        (Ok(exe), Some(path)) => {
-            type MergeOrRemove = fn(&str, &std::path::Path) -> Result<String, Vec<String>>;
-            let result = if on {
-                let merge: MergeOrRemove = if zed { crate::editors::merge_zed } else { crate::editors::merge_pi };
-                crate::editors::setup(&path, &exe, merge)
-            } else {
-                let remove: MergeOrRemove = if zed { crate::editors::remove_zed } else { crate::editors::remove_pi };
-                crate::editors::teardown(&path, &exe, remove)
-            };
-            setup_line(name, on, result)
+/// Щёлкнули галочку «Локальные агенты» в трее: `i` — индекс в
+/// `editors::AGENTS`, `on` — ставить наши записи (`Setup::enable`) или
+/// убирать их (`Setup::disable`). Файловый агент и CLI-агент здесь не
+/// различаются вовсе — разница спрятана в `Setup` (решение владельца,
+/// «Четыре локальных агента, и настраиваются они по-разному»): у файлового
+/// путь к настройкам может не найтись на машине, у CLI такого случая нет
+/// (CLI сам знает, куда писать), и это единственная асимметрия, которую
+/// видит этот код. Отдаёт `false`, когда дело не вышло (отказ или нежданный
+/// итог уже легли строкой в журнал через `setup_line`) — трей обязан
+/// вернуть галочку в прежнее положение, раз она обещала то, чего мы не
+/// сделали.
+pub fn toggle_agent(cx: &mut App, i: usize, on: bool) -> bool {
+    let def = &crate::editors::AGENTS[i];
+    let line = match std::env::current_exe() {
+        Ok(exe) => {
+            let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
+            setup_line(def.label, on, result)
         }
-        (Err(e), _) => Some(Line {
-            kind: Kind::Fail, text: format!("{name}: не узнать путь к своему исполняемому файлу: {e}")
-        }),
-        (_, None) => Some(Line {
-            kind: Kind::Fail, text: format!("{name}: не узнать путь к его настройкам на этой машине")
+        Err(e) => Some(Line {
+            kind: Kind::Fail, text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label)
         }),
     };
     let Some(line) = line else { return true };

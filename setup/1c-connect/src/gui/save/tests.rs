@@ -321,6 +321,52 @@ fn save_needs_confirm_only_when_all_three_hold() {
     let _ = ui.session.take().unwrap().stop();
 }
 
+/// Ядро шага 5 (задача 6): два потребителя одного вопроса «что считать
+/// сменой базы», и у них разные списки не по ошибке, а по решению — без
+/// этого теста следующая правка сольёт `descriptor_changed` и
+/// `database_changed` обратно незаметно (ревью задачи 6, Important 2).
+/// Смена пароля или логина — смена базы для человека и для сеанса
+/// (`database_changed`, вопрос `save_question`/перезапуск), но не для
+/// дескриптора публикации (`descriptor_changed`, `publication::vrd`): с
+/// задачи 6 он пароль и логин не несёт вовсе, и переподнимать публикацию
+/// ради них незачем. Путь базы — единственное поле, на которое согласны
+/// оба списка.
+#[test]
+fn descriptor_changed_ignores_credentials_but_database_changed_does_not() {
+    let base =
+        Host {
+            base_path: "C:\\Bases\\Buh".into(), db_user: "Администратор".into(), db_password: "секрет".into(), ..Host::default()
+        };
+
+    let mut password_only = base.clone();
+    password_only.db_password = "новый-пароль".into();
+    assert!(database_changed(&password_only, &base), "смена пароля — смена базы для вопроса человеку и сеанса");
+    assert!(!descriptor_changed(&password_only, &base), "дескриптор пароль не несёт — переподнимать публикацию незачем");
+
+    let mut user_only = base.clone();
+    user_only.db_user = "Другой".into();
+    assert!(database_changed(&user_only, &base));
+    assert!(!descriptor_changed(&user_only, &base));
+
+    let mut path_changed = base.clone();
+    path_changed.base_path = "C:\\Bases\\Other".into();
+    assert!(database_changed(&path_changed, &base));
+    assert!(descriptor_changed(&path_changed, &base), "путь базы — то единственное, что дескриптор несёт");
+}
+
+/// Та же смена пароля через настоящий вход окна: `save_needs_confirm`
+/// (вопрос человеку) завязан на `database_changed`, не на `descriptor_changed`
+/// — смена одного пароля обязана спросить то же самое, что и смена пути.
+#[test]
+fn save_needs_confirm_fires_on_a_password_only_change_too() {
+    let mut ui = Ui::for_test();
+    ui.session = Some(doomed_session(&ui));
+    let mut new_password = ui.cfg.host.clone();
+    new_password.db_password = "другой-пароль".into();
+    assert!(save_needs_confirm(&ui, &new_password));
+    let _ = ui.session.take().unwrap().stop();
+}
+
 #[test]
 fn save_needs_confirm_is_false_on_each_near_miss() {
     let mut ui = Ui::for_test();

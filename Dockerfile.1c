@@ -375,7 +375,13 @@ RUN --mount=type=bind,from=platform,target=/platform \
     && cp -a "$B" /tmp/chk && chown -R www-data:www-data /tmp/chk \
     && 1c-stand publish www-data 8089 /tmp/chk /tmp/chk-pub \
     && apache2 -f /tmp/chk-pub/apache.conf -k start && sleep 3 \
-    && code=$(curl -s -o /tmp/hs -w '%{http_code}' http://127.0.0.1:8089/base/hs/mcp-1c/version) \
+    # -u with the written user, empty password: the descriptor stopped
+    # carrying Usr/Pwd (task 6, docs/superpowers/specs/2026-10-29-secrets-
+    # encryption-design.md) — the platform now takes the user from the
+    # request, and a call with no credentials at all gets 401 instead of
+    # 200. An empty DEMO_DB_USER still means a userless base and curl sends
+    # an empty "-u :", which the platform reads the same as no header.
+    && code=$(curl -s -o /tmp/hs -w '%{http_code}' -u "${DEMO_DB_USER}:" http://127.0.0.1:8089/base/hs/mcp-1c/version) \
     && apache2 -f /tmp/chk-pub/apache.conf -k stop && sleep 2 \
     && case "$code" in \
          200) echo "demo base: mcp-1c HTTP service answers $(tr -d ' \n' </tmp/hs)" ;; \

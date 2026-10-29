@@ -332,7 +332,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // больше незачем: платформа и так берёт их из запроса, а не из
     // дескриптора. `descriptor_changed`, а не `database_changed` — у них
     // разные списки полей не по ошибке (см. доку обеих).
-    let descriptor_changed = descriptor_changed(&cfg.host, &old_host);
+    let base_changed = descriptor_changed(&cfg.host, &old_host);
     // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
     // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
     // здесь — смена режима в трее поднимает его сама, отдельным путём
@@ -351,7 +351,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // целостного ревью) — до следующего вызова она обязана смотреть на
     // новую. `ensure_publication` сама решает «auto»/«webserver» и когда уже
     // «сделано» — здесь только зовём её, не повторяя эту логику.
-    if republish_after_save(descriptor_changed, ui.session.is_some()) {
+    if republish_after_save(base_changed, ui.session.is_some()) {
         ensure_publication_now(ui);
     }
     if changed && ui.session.is_some() {
@@ -568,14 +568,16 @@ pub fn ask_yes_no(
 /// сообщение об успешном поднятии http сервера, хотя я даже не пытался
 /// включить MCP».
 ///
-/// Переменилась база — старый дескриптор указывает не туда, и сервис обязан
+/// Переменился путь базы (`descriptor_changed`, не `database_changed` — с
+/// задачи 6 логин и пароль дескриптор не несёт, переподнимать публикацию
+/// ради них незачем) — старый дескриптор указывает не туда, и сервис обязан
 /// посмотреть на новую, иначе агент отвечал бы из прежней базы. Но нужно это
 /// только тому, кто сейчас обслуживает: при выключенном переключателе мост
 /// отказывает ещё до публикации, и поднимать её — работа, которой никто не
 /// просил, да ещё и объявленная в журнале как успех. Включат MCP —
 /// `ensure_publication` сходит сама.
-pub fn republish_after_save(database_changed: bool, serving: bool) -> bool {
-    database_changed && serving
+pub fn republish_after_save(descriptor_changed: bool, serving: bool) -> bool {
+    descriptor_changed && serving
 }
 
 /// Подъём публикации в своём потоке. Голос к базе он берёт не здесь, а внутри

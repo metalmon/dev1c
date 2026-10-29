@@ -165,8 +165,13 @@ for n in 1 2 3; do
     # следующую строку, где тот же сервис той же базы отвечает исправно, —
     # а однажды его спишут на гонку, когда он будет настоящим. Поэтому
     # ждём готовности сервиса, и только потом спрашиваем агента.
+    # -u with the written user, empty password: with task 6 the descriptor
+    # stopped carrying Usr/Pwd, so a call with no credentials at all gets
+    # 401 forever, and this warm-up loop would spin all 30 tries and move
+    # on regardless — the same 401 branch below would then fire on a
+    # service that was never actually given a chance to warm up.
     for try in $(seq 30); do
-        [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' \
+        [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' -u "${DEMO_DB_USER-}:" \
              "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version" 2>/dev/null)" = 200 ] && break
         sleep 1
     done
@@ -178,14 +183,18 @@ for n in 1 2 3; do
     # call above (the pool keeps it 20 s): on the connection-limit answer,
     # wait and ask again rather than fail
     for try in 1 2 3 4 5 6; do
-        code=$(curl -s -o $T/hs.$n -w '%{http_code}' "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version")
+        code=$(curl -s -o $T/hs.$n -w '%{http_code}' -u "${DEMO_DB_USER-}:" "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version")
         grep -q 'количество подключений\|connections limitation' $T/hs.$n || break
         sleep 15
     done
     case "$code" in
         200) say "ok   $u: HTTP service $(tr -d ' \n' <$T/hs.$n)" ;;
         404) say "WARN $u: HTTP service answers 404 — the mcp-1c extension is not applied to the base" ;;
-        401) say "FAIL $u: HTTP service answers 401 — the publication does not carry the infobase user (DEMO_DB_USER)"; fail=1 ;;
+        # Since task 6 the descriptor no longer carries Usr/Pwd — a 401
+        # here means the call above sent the wrong (or no) credentials,
+        # not that the publication is missing the infobase user; the
+        # right fix is the -u above, not the descriptor.
+        401) say "FAIL $u: HTTP service answers 401 — credentials rejected (checked user: ${DEMO_DB_USER-(none)})"; fail=1 ;;
         *)   say "FAIL $u: HTTP service http=$code $(head -c 200 $T/hs.$n)"; fail=1 ;;
     esac
     [ -f "/home/$u/base/1Cv8.1CD" ] && [ "$(stat -c %U "/home/$u/base/1Cv8.1CD")" = "$u" ] \

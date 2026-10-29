@@ -503,7 +503,15 @@ mcp)
     # --base is the HTTP service itself, not the publication (as in
     # 1c-connect.toml). The connector publishes it at the root of its own
     # port now (host.publication), no "/base" segment.
-    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/hs/mcp-1c"
+    # The descriptor stopped carrying Usr/Pwd (task 6, docs/superpowers/
+    # specs/2026-10-29-secrets-encryption-design.md): without --user the
+    # platform gets no credentials at all and answers 401, not the old
+    # anonymous 200. Same split as the connector's own bridge
+    # (bridge.rs::mcp_command): the user is a plain argument, the password
+    # (always empty on the training platform) goes by environment, never
+    # the command line.
+    export MCP_1C_PASSWORD=
+    exec mcp-1c --base "http://127.0.0.1:$((8080 + n))/hs/mcp-1c" --user "$DB_USER"
     ;;
 vrunner)
     n=$2; export HOME; HOME=$(home_of "dev$n"); cd "$HOME"; seed

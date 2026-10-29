@@ -78,7 +78,7 @@ pub fn carried_http_port(saved: &Host, new_workstation: &str) -> Option<u16> {
 pub fn moved_lines(old: &Host, new: &Host) -> Vec<String> {
     let mut v = Vec::new();
     if old.workstation != new.workstation {
-        let p = Cfg { host: new.clone() }.ports();
+        let p = Cfg { host: new.clone(), ..Default::default() }.ports();
         let port = match (old.http_port, new.http_port) {
             (Some(from), Some(to)) if from != to => format!(", порт публикации {from} → {to}"),
             _ => String::new(),
@@ -122,8 +122,9 @@ pub fn database_changed(a: &Host, b: &Host) -> bool {
 /// базу, ни порты, а публикацию переключение разбирает само
 /// (`tray::apply_publication`).
 pub fn save_tray_key(ui: &mut Ui, host: Host) -> Result<(), String> {
-    let cfg = Cfg { host };
-    write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    let cfg = Cfg { host, ..Default::default() };
+    let store = secrets::Store::system(ui.kit.state())?;
+    cfg::write_checked(&ui.kit, &cfg, &store)?;
     ui.cfg = cfg;
     Ok(())
 }
@@ -149,9 +150,10 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
     // Переезды — не молчком, и все до одного: см. `moved_lines`.
     let moved = moved_lines(&old_host, &host);
-    let cfg = Cfg { host };
+    let cfg = Cfg { host, ..Default::default() };
     cfg.validate().map_err(|e| format!("{e:#}"))?;
-    write_text(&ui.kit.state_path(cfg::FILE), &cfg.render()).map_err(|e| format!("{e:#}"))?;
+    let store = secrets::Store::system(ui.kit.state())?;
+    cfg::write_checked(&ui.kit, &cfg, &store)?;
     let base_path = cfg.host.base_path.clone();
     // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
     // пароль — переподнять его нужно при смене любого из трёх, не только
@@ -235,7 +237,7 @@ pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
     if host.mode.is_empty() {
         host.mode = ui.cfg.host.mode.clone();
     }
-    locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg { host }), serving)
+    locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg { host, ..Default::default() }), serving)
 }
 
 /// О чём спросить перед «Сохранить», и спрашивать ли вообще: готовый текст

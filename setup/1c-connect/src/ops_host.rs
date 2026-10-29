@@ -2731,10 +2731,18 @@ mod tests {
         // Имя рабочего места обязано пройти `Cfg::validate` (`dev1`/`dev2`/`dev3` — см.
         // `cfg::number_of`), поэтому уникальность теста несёт не оно, а пользователь.
         let user = format!("owner-{}", std::process::id());
+        // `watch_mcp` читает файл настоящим `Cfg::load` (боевая подложка —
+        // DPAPI на Windows), а этот тест — про переезд замка за именем
+        // рабочего места, не про пароли: пароль обнулён, `seal`/`open` его
+        // пропускают как есть на любой подложке, и подложка для записи
+        // (здесь — файловая, без DPAPI, спека «Ловушки») не обязана
+        // совпадать с той, что читает `watch_mcp`.
+        let store = crate::secrets::Store::file(kit.state());
         let write_workstation = |name: &str| {
             let mut cfg = crate::cfg::filled_for_test();
             cfg.host.workstation = name.into();
-            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render()).unwrap();
+            cfg.host.password = String::new();
+            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render(&store).unwrap()).unwrap();
         };
         write_workstation("dev1");
         crate::allow::write(&kit, true).unwrap();

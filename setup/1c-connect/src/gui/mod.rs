@@ -7,6 +7,7 @@ use crate::cfg::{self, Cfg, Host};
 use crate::flow;
 use crate::ops_host::{self, Ctx};
 use crate::project::{self, Layout, Project};
+use crate::secrets;
 use crate::session::{self, Session, State};
 use crate::verify;
 use common::check::{self, Check};
@@ -1562,7 +1563,11 @@ fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
 
 #[cfg(test)]
 fn with_params_file(ui: &Ui) {
-    write_text(&ui.kit.state_path(cfg::FILE), &ui.cfg.render()).unwrap();
+    // `Store::file`, не `Store::system`: спека прямо запрещает звать DPAPI
+    // из тестов (он привязан к пользователю машины, на которой идёт CI) —
+    // тот же приём, что у `kit`, своя изолированная песочница на вызов.
+    let store = secrets::Store::file(ui.kit.state());
+    write_text(&ui.kit.state_path(cfg::FILE), &ui.cfg.render(&store).unwrap()).unwrap();
 }
 
 #[cfg(test)]

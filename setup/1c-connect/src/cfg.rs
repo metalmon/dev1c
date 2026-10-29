@@ -1,6 +1,7 @@
 //! Параметры разработчика: `1c-connect.toml` на флешке. Сервер про базу не
 //! знает ничего; всё здесь.
 
+use crate::secrets;
 use anyhow::{Context, Result};
 use common::kit::Kit;
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,16 @@ pub fn derived_dump(project: &str) -> String {
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
     pub host: Host,
+    /// Имена полей, которые не открылись при чтении (`"password"`,
+    /// `"db_password"`) — считается заново при каждом `load_unchecked_with`
+    /// и в файл не идёт: это не настройка, а диагноз текущего чтения.
+    /// `load` при непустом списке отказывает словами (анти-цель спеки:
+    /// «serve»/«connect»/«mcp» не имеют права уехать молча с пустым
+    /// паролем — `validate` пароли не проверяет); `load_unchecked` (её
+    /// зовёт окно) отдаёт список как есть — человек должен ввести пароль
+    /// заново, а не прочитать отказ там, где раньше открывалось окно.
+    #[serde(skip)]
+    pub undecryptable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -287,16 +298,37 @@ pub struct Ports {
 }
 
 impl Cfg {
+    /// Боевой путь: подложка системы (DPAPI на Windows, файл ключа на
+    /// Linux) строится здесь же, а не раньше — узнать, что её не завести
+    /// (`Store::system`), негде и не нужно до первого реального чтения.
     pub fn load(kit: &Kit) -> Result<Cfg> {
-        // На Windows это тот же путь, что и раньше (toml при комплекте); на
-        // Linux — состояние пользователя, не общий только-для-чтения
-        // комплект (см. `ops_host::wire_state`, задача «комплект в образе»).
-        let p = kit.state_path(crate::cfg::FILE);
-        if !p.exists() {
-            return Ok(Cfg::default());
+        let store = secrets::Store::system(kit.state()).map_err(anyhow::Error::msg)?;
+        Self::load_with(kit, &store)
+    }
+
+    /// То же, но подложку даёт вызывающий — ей проверяются тесты (спека,
+    /// «Ловушки»: DPAPI в тестах не зовём, а `load` его строит сам).
+    /// Непустой список `undecryptable` — отказ словами: без него
+    /// `serve`/`connect`/подкоманда `mcp` поехали бы с пустым паролем
+    /// молча, а `validate` пароли не проверяет (анти-цель спеки). Отказ
+    /// проверяется раньше `validate`: человеку нужен один понятный диагноз,
+    /// а не жалоба на незаполненный `workstation` вместо настоящей причины.
+    pub fn load_with(kit: &Kit, store: &secrets::Store) -> Result<Cfg> {
+        let cfg = Self::load_unchecked_with(kit, store)?;
+        // Файла параметров нет вовсе — это умолчание без отказа (поведение
+        // `connect`/`serve`, не этой задачи): пустой каталог состояния не
+        // имеет паролей, которые могли бы не открыться, и жаловаться на
+        // незаполненный `workstation` здесь настолько же неверно, как и
+        // прежде, когда `validate` тут вовсе не звался.
+        if !kit.state_path(crate::cfg::FILE).exists() {
+            return Ok(cfg);
         }
-        let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
-        let cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
+        if !cfg.undecryptable.is_empty() {
+            anyhow::bail!(
+                "{FILE}: пароль зашифрован на другой машине или другим пользователем — откройте окно и введите заново ({})",
+                cfg.undecryptable.join(", ")
+            );
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -314,12 +346,27 @@ impl Cfg {
     /// заполнено», а «не прочитать». Чего не хватает в разобранном файле —
     /// говорит набор фактов, у него на это есть свои слова и свои советы.
     pub fn load_unchecked(kit: &Kit) -> Result<Cfg> {
+        let store = secrets::Store::system(kit.state()).map_err(anyhow::Error::msg)?;
+        Self::load_unchecked_with(kit, &store)
+    }
+
+    /// То же, но подложку даёт вызывающий. Нерасшифрованное поле становится
+    /// пустым — готовым к новому вводу, а не мусором с диска, — и его имя
+    /// уходит в `undecryptable`; окно (задача 4) читает этот список и
+    /// говорит человеку, что пароль нужно ввести заново, а не тихо
+    /// подставляет то, что не открылось.
+    pub fn load_unchecked_with(kit: &Kit, store: &secrets::Store) -> Result<Cfg> {
         let p = kit.state_path(crate::cfg::FILE);
         if !p.exists() {
             return Ok(Cfg::default());
         }
         let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
-        toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))
+        let mut cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
+        let mut bad = Vec::new();
+        cfg.host.password = open_or_mark(store, "password", &cfg.host.password, &mut bad);
+        cfg.host.db_password = open_or_mark(store, "db_password", &cfg.host.db_password, &mut bad);
+        cfg.undecryptable = bad;
+        Ok(cfg)
     }
 
     pub fn number(&self) -> Option<u16> {
@@ -463,21 +510,34 @@ impl Cfg {
         self.host.publication != "auto" && self.host.base_url.trim().is_empty()
     }
 
-    pub fn render(&self) -> String {
+    /// Печатает параметры в виде toml, пароли — ЧЕРЕЗ `store`: это
+    /// единственное место, где пароль превращается из строки в памяти в
+    /// шифртекст на диске (замысел 29.10, `secrets::Store::seal`). Пустой
+    /// пароль не шифруется (`seal` отдаёт его пустым как есть) — иначе
+    /// случайный nonce сделал бы печать недетерминированной, и два
+    /// существующих теста образца (пустые пароли, сравнение строки
+    /// дословно) упали бы правильно, но об это незачем биться каждый раз.
+    /// Обе половины сеются ДО самого рисования: `common::toml_render::render`
+    /// берёт обычный (безотказный) `Fn`, и протаскивать `Result` через его
+    /// замыкание было бы сложнее, чем сосчитать два значения заранее и
+    /// отказать через `?` здесь.
+    pub fn render(&self, store: &secrets::Store) -> std::result::Result<String, String> {
         let h = &self.host;
-        common::toml_render::render(EXAMPLE, |s, k| {
+        let password = store.seal("password", &h.password)?;
+        let db_password = store.seal("db_password", &h.db_password)?;
+        let text = common::toml_render::render(EXAMPLE, |s, k| {
             if s != "[host]" {
                 return None;
             }
             Some(match k {
                 "server" => format!("{:?}", h.server),
                 "gitea" => format!("{:?}", h.gitea),
-                "password" => format!("{:?}", h.password),
+                "password" => format!("{:?}", password),
                 "workstation" => format!("{:?}", h.workstation),
                 "base_path" => format!("{:?}", h.base_path),
                 "platform" => format!("{:?}", h.platform),
                 "db_user" => format!("{:?}", h.db_user),
-                "db_password" => format!("{:?}", h.db_password),
+                "db_password" => format!("{:?}", db_password),
                 "base_url" => format!("{:?}", h.base_url),
                 "dump" => format!("{:?}", h.dump),
                 "project" => format!("{:?}", h.project),
@@ -487,13 +547,81 @@ impl Cfg {
                 "http_port" => h.http_port.unwrap_or(0).to_string(),
                 _ => return None,
             })
-        })
+        });
+        Ok(text)
     }
+}
+
+/// Открывает одно поле паролем; не получилось — пустая строка и имя поля в
+/// `bad`. `OpenError::Foreign` и `OpenError::Broken` здесь не различаются
+/// нарочно: отдельной структуры-ошибки у задачи 2 нет (список имён в `Cfg`
+/// достаточен), а снаружи обе причины читаются одинаково — «пароль не
+/// открылся, введите заново» (окно, задача 4), а не «файл битый, зовите
+/// админа». Пустую строку (открытый текст или незаполненное поле)
+/// `Store::open` возвращает как есть, в `bad` она не попадает.
+fn open_or_mark(store: &secrets::Store, field: &str, value: &str, bad: &mut Vec<String>) -> String {
+    match store.open(field, value) {
+        Ok(v) => v,
+        Err(_) => {
+            bad.push(field.to_string());
+            String::new()
+        }
+    }
+}
+
+/// Единственный путь записи параметров (решение владельца, спека
+/// «Анти-цели»: «шифрование, которое тихо не состоялось»). Печатает,
+/// пишет, затем читает файл обратно и проверяет, что оба пароля
+/// открываются в те же строки, что были до записи — не сошлось, отказ:
+/// человеку лучше увидеть его сейчас, чем файл, который завтра не
+/// откроется. `common::kit::write_text` сегодня — голый `fs::write` без
+/// временного файла и `.bak` (их в проекте нет и заводить не нужно, спека
+/// «Ловушки») — именно поэтому проверка после записи обязательна здесь, а
+/// не просто желательна.
+pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::result::Result<(), String> {
+    let text = cfg.render(store)?;
+    common::kit::write_text(&kit.state_path(FILE), &text).map_err(|e| format!("{e:#}"))?;
+    let back = Cfg::load_unchecked_with(kit, store).map_err(|e| format!("{e:#}"))?;
+    if back.host.password != cfg.host.password || back.host.db_password != cfg.host.db_password {
+        return Err(format!("{FILE}: запись не прошла проверку — пароль после записи читается не так, как до неё"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Самоимпорт — ради `cfg::FILE`/`cfg::write_checked` в тестах ниже:
+    // модуль пишет про себя так же, как про него пишет вызывающий код
+    // (`gui::save`, `ops_host`), а не через `FILE`/`write_checked` без
+    // пути — так виднее, что это одна и та же точка входа.
+    use crate::cfg;
+
+    /// Временный каталог для `Store::file` и для файла параметров в тестах
+    /// — тем же приёмом, что `secrets.rs` и `publication.rs`: имя плюс pid
+    /// процесса, без внешнего крейта `tempfile`.
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("cfg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `Kit`, чей файл параметров уже содержит `text` — то, что тесты этой
+    /// задачи держат в руках перед `load`/`load_unchecked`. Счётчик в имени
+    /// каталога — тесты зовут этот помощник не по одному разу на весь
+    /// файл (как `tmp`), а в каждом своём тесте, и `cargo test` гоняет их
+    /// по умолчанию параллельно: без счётчика все попадали бы в один и тот
+    /// же каталог одного процесса и портили файлы друг друга (тем же
+    /// приёмом, что `gui::Ui::for_test`).
+    fn kit_with(text: &str) -> Kit {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = tmp(&format!("kit-{n}"));
+        std::fs::write(dir.join(FILE), text).unwrap();
+        Kit::at(dir)
+    }
 
     /// Настройки Zed из образа — рядом, не копией: имена инструментов
     /// согласованы между нашим списком и профилями агента, а разойтись им
@@ -676,7 +804,8 @@ mod tests {
         assert_eq!(without.host.mode, "tunnel");
         let local: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "mode = \"local\"")).unwrap();
         assert_eq!(local.host.mode, "local");
-        assert!(local.render().contains("mode = \"local\""));
+        let store = secrets::Store::file(&tmp("mode"));
+        assert!(local.render(&store).unwrap().contains("mode = \"local\""));
         // Проверку заполненности гоняем на заполненном: образец пуст нарочно.
         let mut filled_local = filled();
         filled_local.host.mode = "local".into();
@@ -819,7 +948,8 @@ mod tests {
         // Заполненное поле доходит до toml через render() и читается обратно.
         let filled = EXAMPLE.replace("gitea = \"\"", "gitea = \"http://localhost:3000\"");
         let c: Cfg = toml::from_str(&filled).unwrap();
-        assert_eq!(c.render(), filled);
+        let store = secrets::Store::file(&tmp("gitea"));
+        assert_eq!(c.render(&store).unwrap(), filled);
         assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
     }
 
@@ -909,10 +1039,11 @@ mod tests {
 
     #[test]
     fn render_keeps_comments_and_round_trips() {
+        let store = secrets::Store::file(&tmp("render-roundtrip"));
         let mut c = sample();
-        assert_eq!(c.render(), EXAMPLE);
+        assert_eq!(c.render(&store).unwrap(), EXAMPLE);
         c.host.workstation = "dev2".into();
-        let t = c.render();
+        let t = c.render(&store).unwrap();
         assert!(t.contains("workstation = \"dev2\"") && t.contains("# Ваш логин в среде"));
         assert_eq!(toml::from_str::<Cfg>(&t).unwrap(), c);
     }
@@ -989,5 +1120,101 @@ mod tests {
         c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
         assert_eq!(c.base_url(), "http://localhost:8081/hs/mcp-1c");
         assert!(!c.publication_address_missing());
+    }
+
+    // --- Задача 2: пароли читаются и пишутся через секреты ------------
+
+    /// Старый файл (до этой задачи) продолжает читаться: открытый текст —
+    /// не ошибка и не повод в `undecryptable`, а законное значение.
+    #[test]
+    fn a_plaintext_file_still_loads() {
+        let kit = kit_with("[host]\npassword = \"открытый\"\ndb_password = \"тоже открытый\"\n");
+        let c = Cfg::load_unchecked(&kit).unwrap();
+        assert_eq!(c.host.password, "открытый");
+        assert_eq!(c.host.db_password, "тоже открытый");
+        assert!(c.undecryptable.is_empty());
+    }
+
+    /// Печать всегда уходит шифртекстом — оба пароля, не только тот, с
+    /// которого начался разговор (решение владельца 29.10).
+    #[test]
+    fn render_always_writes_ciphertext() {
+        let s = secrets::Store::file(&tmp("render"));
+        let mut c = filled();
+        c.host.password = "секрет".into();
+        c.host.db_password = "второй".into();
+        let text = c.render(&s).unwrap();
+        assert!(!text.contains("секрет") && !text.contains("второй"), "{text}");
+        assert_eq!(text.matches(secrets::PREFIX).count(), 2);
+    }
+
+    /// Образец (`1c-connect.example.toml`) несёт оба пароля пустыми, и
+    /// `render` обязан остаться детерминированным — иначе падают
+    /// `example_prints_gitea_with_its_rule` и `render_keeps_comments_and_round_trips`.
+    #[test]
+    fn an_empty_password_stays_empty_in_the_file() {
+        let s = secrets::Store::file(&tmp("renderempty"));
+        let c = Cfg::default();
+        let text = c.render(&s).unwrap();
+        assert!(!text.contains(secrets::PREFIX), "{text}");
+        assert_eq!(text, c.render(&s).unwrap(), "render обязан быть детерминированным");
+    }
+
+    /// Один пароль уже перешифрован, второй — ещё открытым текстом: оба
+    /// читаются за один проход, перешифровка — только при следующей записи.
+    #[test]
+    fn a_half_migrated_file_reads_both_halves() {
+        let s = secrets::Store::file(&tmp("half"));
+        let sealed = s.seal("password", "зашифрованный").unwrap();
+        let kit = kit_with(&format!("[host]\npassword = \"{sealed}\"\ndb_password = \"открытый\"\n"));
+        let c = Cfg::load_unchecked_with(&kit, &s).unwrap();
+        assert_eq!(c.host.password, "зашифрованный");
+        assert_eq!(c.host.db_password, "открытый");
+    }
+
+    /// Окно не отказывает на чужом шифртексте — поле пустое и готово к
+    /// новому вводу, а имя поля уходит в список (задача 4 читает его).
+    #[test]
+    fn the_window_load_reports_the_field_instead_of_refusing() {
+        let (mine, theirs) = (secrets::Store::file(&tmp("w1")), secrets::Store::file(&tmp("w2")));
+        let kit = kit_with(&format!("[host]\npassword = \"{}\"\n", mine.seal("password", "секрет").unwrap()));
+        let c = Cfg::load_unchecked_with(&kit, &theirs).expect("окно не отказывает");
+        assert_eq!(c.host.password, "", "поле обязано быть пустым, а не мусором");
+        assert_eq!(c.undecryptable, vec!["password".to_string()]);
+    }
+
+    /// `validate` пароли НЕ проверяет (строки 350-380 выше), поэтому без
+    /// этого отказа `serve`/`connect`/`mcp` поехали бы с пустым паролем
+    /// молча.
+    #[test]
+    fn a_cli_load_refuses_instead_of_running_with_an_empty_password() {
+        let (mine, theirs) = (secrets::Store::file(&tmp("c1")), secrets::Store::file(&tmp("c2")));
+        let kit = kit_with(&format!("[host]\npassword = \"{}\"\n", mine.seal("password", "секрет").unwrap()));
+        let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
+        assert!(e.contains("другой машине") || e.contains("другим пользователем"), "{e}");
+        assert!(e.contains("введите"), "{e}");
+    }
+
+    /// Разовая команда вроде `status` не имеет права переписывать параметры
+    /// человека — чтение файла ничего на диске не меняет.
+    #[test]
+    fn reading_does_not_rewrite_the_file() {
+        let kit = kit_with("[host]\npassword = \"открытый\"\n");
+        let before = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
+        let _ = Cfg::load_unchecked(&kit).unwrap();
+        assert_eq!(std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap(), before);
+    }
+
+    /// Анти-цель спеки: «шифрование, которое тихо не состоялось». Запись
+    /// обязана прочитать файл обратно и убедиться, что значения открываются.
+    #[test]
+    fn a_write_that_did_not_seal_is_caught_on_read_back() {
+        let s = secrets::Store::file(&tmp("readback"));
+        let kit = kit_with("");
+        let mut c = filled();
+        c.host.password = "секрет".into();
+        cfg::write_checked(&kit, &c, &s).unwrap();
+        let back = Cfg::load_unchecked_with(&kit, &s).unwrap();
+        assert_eq!(back.host.password, "секрет");
     }
 }

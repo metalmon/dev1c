@@ -205,6 +205,28 @@ fn raw_literal(text: &str, key: &str) -> Option<String> {
     Some(format!("{s:?}"))
 }
 
+/// Для каждого сохраняемого имени — его прежняя правая часть из `before`,
+/// или отказ словами (ревью задачи 4, круг 2). Не нашли прежний литерал (текст
+/// не разобрался, ключа нет вовсе — переставил кто-то рукой) — отказываем ДО
+/// записи, а не подставляем пустоту: человек должен увидеть причину и не
+/// потерять ничего, а не прочитать в журнале «оставлен прежним» про пароль,
+/// которого на самом деле уже нет.
+fn resolve_patches(before: &str, keep: &[&'static str]) -> Result<Vec<(&'static str, String)>, String> {
+    let mut patches = Vec::new();
+    for &key in keep {
+        match raw_literal(before, key) {
+            Some(raw) => patches.push((key, raw)),
+            None => {
+                return Err(format!(
+                    "{}: прежний шифртекст не нашёлся в файле параметров — сохранение отменено, пароль не тронут",
+                    field_label(key)
+                ))
+            }
+        }
+    }
+    Ok(patches)
+}
+
 /// Имя сохранённого поля словами человека — те же два слова, что у
 /// `panel::undecryptable_line`, но своя маленькая копия: оттуда не достать,
 /// имя там приватное, а тащить видимость через модуль ради двух строк
@@ -250,9 +272,17 @@ fn kept_password_line(keep: &[&'static str]) -> Option<Line> {
 /// рабочее место) и жмёт «Сохранить» — без этой защиты форма отдала бы
 /// пустой пароль, обычная запись зашифровала бы пустую строку, и шифртекст,
 /// который ещё можно было открыть под прежней учёткой, исчез бы безвозвратно.
-/// `fields_to_keep` решает это ДО записи; обычная запись проходит как
-/// всегда (с пустым полем — у неё и так нет других сведений), а следом
-/// байт в байт возвращается прежняя строка (`raw_literal` + `toml_render::set`).
+///
+/// Подстановка идёт ДО записи, а не отдельным походом на диск после неё
+/// (ревью, круг 2): прежняя версия сперва писала файл с пустым паролем и
+/// только потом патчила строку обратно — между этими двумя записями было
+/// окно, где смерть процесса (питание, `taskkill`, падение окна) оставляла
+/// бы на диске навсегда ровно то, что эта защита и чинит. `resolve_patches`
+/// достаёт прежний литерал ДО какой-либо записи и отказывает словами, если
+/// его не нашлось (текст не разобрался, ключа нет) — файл в этом случае не
+/// трогается вовсе. Иначе собранные пары «ключ — литерал» уходят в
+/// `cfg::write_checked` одним параметром: один файл, одна запись, одна
+/// проверка после неё.
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
@@ -270,7 +300,10 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let path = ui.kit.state_path(cfg::FILE);
     // Читаем диск ДО записи — после неё поле будет пустым, прежний
     // шифртекст возьмём ровно отсюда.
-    let before = if keep.is_empty() { String::new() } else { std::fs::read_to_string(&path).unwrap_or_default() };
+    let before = if keep.is_empty() { String::new() } else { std::fs::read_to_string(&path).map_err(|e| format!("{e:#}"))? };
+    // Нашлось не всё — отказываем здесь: до этой строки ни одной записи ещё
+    // не было, файл не тронут.
+    let patches = resolve_patches(&before, &keep)?;
     let mut cfg = Cfg { host, ..Default::default() };
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не
@@ -278,18 +311,8 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     cfg.undecryptable = keep.iter().map(|s| s.to_string()).collect();
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     let store = store_for(&ui.kit)?;
-    cfg::write_checked(&ui.kit, &cfg, &store)?;
-    // Обычная запись уже легла и прошла свою проверку (`write_checked`) —
-    // той нас не обмануть: на этом шаге пустое поле было пустым и для
-    // записи, и для чтения обратно. Патч ниже правит только то, что эта
-    // запись сама оставила пустым.
-    for key in &keep {
-        if let Some(raw) = raw_literal(&before, key) {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            let text = common::toml_render::set(&text, "[host]", key, &raw);
-            write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
-        }
-    }
+    let patch_refs: Vec<(&str, &str)> = patches.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    cfg::write_checked(&ui.kit, &cfg, &store, &patch_refs)?;
     let base_path = cfg.host.base_path.clone();
     // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
     // пароль — переподнять его нужно при смене любого из трёх, не только

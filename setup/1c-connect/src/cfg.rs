@@ -622,8 +622,21 @@ fn open_or_mark(store: &secrets::Store, field: &str, value: &str, bad: &mut Vec<
 /// временного файла и `.bak` (их в проекте нет и заводить не нужно, спека
 /// «Ловушки») — именно поэтому проверка после записи обязательна здесь, а
 /// не просто желательна.
-pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::result::Result<(), String> {
-    let text = cfg.render(store)?;
+///
+/// `patches` — пары «ключ секции `[host]` — готовая правая часть», которые
+/// подставляются в напечатанный текст ДО записи (`common::toml_render::set`),
+/// а не после неё отдельным походом на диск (ревью задачи 4, круг 2). Это
+/// ровно то место, которым `gui::save::save_host` возвращает прежний
+/// шифртекст пароля, не расшифровавшийся на этой машине: подстановка после
+/// отдельной записи оставляла бы окно, где процесс мог умереть между двумя
+/// записями файла, и на диске навсегда осталось бы то, что ушло первой
+/// записью (здесь — пустой пароль). Один файл — одна запись — одна
+/// проверка; обычный путь (`patches` пуст) не меняется ни на шаг.
+pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&str, &str)]) -> std::result::Result<(), String> {
+    let mut text = cfg.render(store)?;
+    for (key, value) in patches {
+        text = common::toml_render::set(&text, "[host]", key, value);
+    }
     common::kit::write_text(&kit.state_path(FILE), &text).map_err(|e| format!("{e:#}"))?;
     let back = Cfg::load_unchecked_with(kit, store).map_err(|e| format!("{e:#}"))?;
     if !passwords_match(cfg, &back) {
@@ -1283,7 +1296,7 @@ mod tests {
         let kit = kit_with("");
         let mut c = filled();
         c.host.password = "секрет".into();
-        cfg::write_checked(&kit, &c, &s).unwrap();
+        cfg::write_checked(&kit, &c, &s, &[]).unwrap();
         // Круговой `load_unchecked_with` один (ревью задачи 2, Minor 3: он
         // не ловит ничего сам по себе — убери вызов проверки из
         // `write_checked`, и он всё равно будет зелёным, потому что обычная
@@ -1325,7 +1338,7 @@ mod tests {
         std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let mut c = filled();
         c.host.password = "секрет".into();
-        let e = cfg::write_checked(&kit, &c, &s);
+        let e = cfg::write_checked(&kit, &c, &s, &[]);
         std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let e = e.unwrap_err();
         assert!(e.contains(cfg::FILE), "{e}");

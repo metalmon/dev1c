@@ -9,6 +9,21 @@ use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+/// Каталог для «чужой» подложки — отдельной от `ui.kit.state()`, которую
+/// возьмёт `store_for` внутри самого `save_host`. Два разных каталога — два
+/// разных ключа `secret.key` (`Store::file`), и то, что сеяно одним, другой
+/// действительно не откроет: не фокус с ручной подменой поля, а настоящая
+/// непрочитанность, тем же приёмом, что у `cfg.rs`-тестов (`mine`/`theirs`).
+/// Без этого разведения `write_checked`'s собственная проверка после записи
+/// читала бы патч обратно ТЕМ ЖЕ ключом, каким его сеяли, — и находила бы
+/// настоящий пароль там, где тест заявляет «чужая машина, не открыть».
+fn foreign_store_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("onec-connect-foreign-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[test]
 fn a_bad_server_leaves_the_toml_alone_and_says_why() {
     let mut ui = Ui::for_test();
@@ -442,7 +457,11 @@ fn a_tray_key_write_does_not_touch_an_unreadable_password() {
 #[test]
 fn an_unreadable_password_survives_a_save_with_an_empty_field() {
     let mut ui = Ui::for_test();
-    let store = crate::secrets::Store::file(ui.kit.state());
+    // Настоящая «чужая машина» — другой каталог, другой ключ (см.
+    // `foreign_store_dir`): та подложка, что возьмёт сам `save_host`
+    // (`ui.kit.state()`), эту строку не откроет, и проверка после записи
+    // внутри `write_checked` увидит то же пустое поле, что и до неё.
+    let store = crate::secrets::Store::file(&foreign_store_dir("survives"));
     let mut seeded = ui.cfg.host.clone();
     seeded.password = "секрет с другой машины".into();
     let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
@@ -489,4 +508,45 @@ fn a_freshly_typed_password_still_overwrites_an_unreadable_one() {
     assert!(!after.lines().any(|l| l == old_password_line), "новый пароль введён — старый шифртекст не обязан остаться:\n{after}");
     assert!(after.contains("password = \"enc1:"), "новое значение тоже зашифровано:\n{after}");
     assert!(!ui.log.iter().any(|l| l.text.contains("оставлен прежним")), "пароль заменили, а не оставили: {:?}", ui.log);
+}
+
+/// Пункт 2 ревью, круг 2: строка «пароль оставлен прежним» печаталась по
+/// списку, а не по факту — если прежний литерал не нашёлся, патч молча не
+/// применялся, а человек читал, что пароль цел, хотя он уже потерян. Ключа
+/// `password` в файле нет вовсе (строку стёрли руками, или файл правили не
+/// нашей программой) — `resolve_patches` обязана отказать СЛОВАМИ до любой
+/// записи, и файл остаётся нетронутым ни на байт: человек видит причину и
+/// ничего не теряет, вместо тихой подмены на пустоту.
+#[test]
+fn a_missing_previous_ciphertext_refuses_the_save_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut seeded = ui.cfg.host.clone();
+    seeded.password = "секрет с другой машины".into();
+    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    // Ключа `password` в файле нет вовсе — как если бы строку стёрли руками.
+    let without_password: String = rendered.lines().filter(|l| !l.starts_with("password = ")).collect::<Vec<_>>().join("\n") + "\n";
+    std::fs::write(ui.kit.state_path(cfg::FILE), &without_password).unwrap();
+
+    // «Чужая машина» + «ключа больше нет»: поле пустое, имя в списке — как
+    // после настоящего `load_unchecked`, который на этом файле нашёл бы то же
+    // самое (пустое значение по умолчанию, когда ключа нет, и т.к. оно всё
+    // равно расшифровалось бы в пустую строку, не попало бы в `undecryptable`
+    // само — мы доводим это условие руками, тем же приёмом, что у соседних
+    // тестов, ради сценария «список говорит про поле, а в файле его нет»).
+    ui.cfg.host.password = String::new();
+    ui.cfg.undecryptable = vec!["password".to_string()];
+
+    let mut host = ui.cfg.host.clone();
+    host.workstation = "dev2".into();
+    let err = save_host(&mut ui, host).unwrap_err();
+    assert!(err.contains("рабочего места"), "{err}");
+
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert_eq!(after, without_password, "отказ — файл не тронут ни на байт");
+    assert!(
+        !ui.log.iter().any(|l| l.text.contains("оставлен прежним")),
+        "строка не должна звучать, если ничего не подставлено: {:?}",
+        ui.log
+    );
 }

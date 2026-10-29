@@ -249,6 +249,11 @@ pub fn flip_warning(on: bool, e: &str) -> String {
 }
 
 /// Обёртка `flip_with`, подставляющая настоящий канал — `Tunnel::exec` по уже поднятому туннелю. `Tunnel::exec` асинхронный, а канал `flip_with` ждёт обычный (синхронный) — `block_in_place` уводит текущую задачу туннеля на отдельный поток рантайма ровно на время этих команд, не блокируя остальных (рантайм здесь многопоточный — `tunnel::run` зовётся из потока, поднявшего его `Runtime::new()`, см. `start_with_enabled`).
+///
+/// Важное свойство (Important 5 финального ревью): эта функция не отказывает на однопоточном
+/// рантайме — она ПАНИКУЕТ. `block_in_place` требует многопоточный `Runtime` (`tokio::test` без
+/// `flavor = "multi_thread"` поднимает однопоточный) — позвать отсюда на нём значит упасть, а не
+/// получить `Err`. Живой тест `tunnel_live.rs` уже ловил эту панику вместо честного «SSH недоступен».
 pub fn flip_remote_servers(t: &tunnel::Tunnel, on: bool, seen: &EditorMcpSeen) -> Result<(), String> {
     let r = tokio::task::block_in_place(|| {
         let exec = |cmd: &str| -> Result<String, String> { tokio::runtime::Handle::current().block_on(t.exec(cmd)) };

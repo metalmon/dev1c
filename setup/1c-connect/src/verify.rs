@@ -767,15 +767,20 @@ pub fn runner_evidence() -> Option<RunnerState> {
     evidence_from(busy_now(), crate::bridge::runner_answered_ago())
 }
 
-/// Идёт ли под мьютексом проекта наша долгая операция, и какая.
+/// Идёт ли под замком проекта долгая операция, и какая — в памяти (этот
+/// процесс) или межпроцессно (`project::file_lock_busy`, Important 4
+/// финального ревью): до этой правки факт знал только про свой же процесс, и
+/// расходился с `project::facts_locked`, которая под тем же замком честно
+/// отказывает «занято», когда файл держит сосед. Своя `DOING` не знает
+/// имени чужой операции — в межпроцессном случае текст тот же «другая
+/// операция», что и у пустой `DOING` этого процесса.
 fn busy_now() -> Option<String> {
-    match crate::project::LOCK.try_lock() {
-        Err(std::sync::TryLockError::WouldBlock) => {
-            let what = crate::project::doing();
-            Some(if what.is_empty() { "другая операция".into() } else { what.to_string() })
-        }
-        _ => None,
+    let mem_busy = matches!(crate::project::LOCK.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+    if mem_busy || crate::project::file_lock_busy() {
+        let what = crate::project::doing();
+        return Some(if what.is_empty() { "другая операция".into() } else { what.to_string() });
     }
+    None
 }
 
 /// Развилка сама по себе, без глобалов: порядок важен — пока идёт выгрузка,
@@ -965,7 +970,9 @@ const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
 /// повторного ревью (Important 4) `gather` и `cheap` звали его оба по
 /// отдельности, рискуя получить два разных числа между вызовами и
 /// противоречащий набор.
-pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors::Found>, ports: PortUse, sessions: usize) -> Vec<Check> {
+// `editor_mcp` больше не читается здесь (Critical финального ревью, см. ниже) — оставлен в
+// сигнатуре ради общего вызова с `gather`/`run`, отмечен подчёркиванием.
+pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, _editor_mcp: Option<&editors::Found>, ports: PortUse, sessions: usize) -> Vec<Check> {
     let local = ctx.cfg.host.mode == "local";
     let mut v = Vec::new();
     let h = &ctx.cfg.host;
@@ -1070,14 +1077,19 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors:
             None => editor_mcp_fact(None),
         }
     } else {
-        // Два разных незнания, и путать их нельзя (Critical 1 ревью): туннеля нет вовсе (командная строка между вызовами, окно до первого подключения) — читать было НЕКЕМ, это сведение, а не провал, иначе `1c-connect install`/`check` отказывали бы всегда. Туннель поднят, а `editor_mcp` всё равно `None` — читать пытались и не вышло, и это настоящий провал-предупреждение (горячий факт: красит точку, замок не держит).
+        // Критическая находка финального ревью: правка настроек Zed в контейнере по SSH измерена
+        // неработающей и работать не может — `ForceCommand /bin/false` у рабочих мест
+        // (`config/sshd-setup.sh:76-85`) не пускает по SSH вовсе никаких команд, значит `editor_mcp`
+        // в туннельном режиме не заполнится никогда (`session::flip_with` читать не сможет), и старый
+        // `editor_mcp_fact(editor_mcp)` при живом туннеле был вечным `Check::fail` — жёлтая точка
+        // навсегда при исправной связи, плюс предупреждение на каждый пересчёт. Владелец решение по
+        // самой механике отложил, но пока его нет, факт в туннельном режиме — сведение, не провал: мы
+        // честно говорим, что не смотрим, а не красим вердикт механизмом, которым решено не
+        // пользоваться. Текст НЕ содержит «не проверено»: эта фраза запрещена в любом факте набора
+        // (`the_set_never_says_it_did_not_check`).
         match tunnel_state {
-            // Текст НЕ содержит «не проверено»: эта фраза запрещена в
-            // любом факте набора (`the_set_never_says_it_did_not_check`) —
-            // набор отвечает уверенно всегда, даже когда ответ «пока
-            // нечем». Слова те же, что у соседнего `tunnel_fact(None)`.
             None => Check::note(EDITOR_MCP, "нет сеанса — поднимется командой connect"),
-            Some(_) => editor_mcp_fact(editor_mcp),
+            Some(_) => Check::note(EDITOR_MCP, "в контейнере записи MCP не проверяем"),
         }
     });
     v
@@ -2251,18 +2263,21 @@ mod tests {
         assert_ne!(unknown.detail, missing.detail);
     }
 
-    /// Критическая находка ревью (Critical 1): туннеля нет вовсе (командная строка между вызовами, окно до первого подключения) — читать было некем, и это сведение, а не провал, иначе `1c-connect install`/`check` отказывали бы всегда. Для этого различия и нужен `tunnel_state` рядом с `editor_mcp` — сам факт (`editor_mcp_fact`) с `None` только читает «попытались и не вышло».
+    /// Критическая находка финального ревью: контейнерная правка настроек Zed по SSH измерена
+    /// неработающей насовсем (`ForceCommand /bin/false`, `config/sshd-setup.sh:76-85`) — `editor_mcp`
+    /// в туннельном режиме не заполнится никогда, и факт, бравший провал из пустого `editor_mcp`, был
+    /// бы вечным `Check::fail` при исправной связи. Пока решение по механике не принято, факт в
+    /// туннельном режиме — сведение в обоих случаях: нет сеанса, или сеанс есть, а записи не смотрим.
     #[test]
-    fn a_tunnel_never_raised_is_a_note_not_a_failure_for_editor_mcp() {
+    fn a_live_tunnel_does_not_fail_on_the_unreachable_container_editor_mcp() {
         let ctx = test_ctx("tunnel");
         let checks = cheap(&ctx, None, None, PortUse::WeDont, 0);
         let c = checks.iter().find(|c| c.what == EDITOR_MCP).expect("факт обязан быть в наборе");
         assert!(c.ok && c.info, "командная строка без сеанса не обязана заваливать проверку: {c:?}");
-        // А живой туннель с тем же `None` у `editor_mcp` — настоящий провал:
-        // читать пытались (сеанс есть), и не вышло.
+        // Живой туннель — та же сведомость, не провал: читать в контейнере не пытаемся вовсе.
         let checks = cheap(&ctx, Some("подключён 3 мин"), None, PortUse::WeDont, 0);
         let c = checks.iter().find(|c| c.what == EDITOR_MCP).expect("факт обязан быть в наборе");
-        assert!(!c.ok, "живой туннель и пустой `editor_mcp` — настоящий провал: {c:?}");
+        assert!(c.ok && c.info, "живой туннель в контейнере не обязан красить вердикт: {c:?}");
     }
 
     /// Решение владельца 30.10: оба установлены, оба настроены — зелёный, и ни один не назван в подробности отдельно (называть настроенное незачем).
@@ -2391,6 +2406,26 @@ mod tests {
         let c = runner_fact(&ev.unwrap_or(RunnerState::Idle));
         assert!(t0.elapsed() < std::time::Duration::from_secs(2), "факт о раннере ждал: {:?}", t0.elapsed());
         assert!(c.ok && c.info && c.detail.contains("не поднимался"), "{c:?}");
+    }
+
+    /// Important 4 финального ревью: `busy_now` до этой правки знал только про мьютекс в памяти —
+    /// занятый межпроцессный `project.lock` (тот же файл, что честно отказывает `project::facts_locked`)
+    /// молчал бы как свободный. Берём файл напрямую, как бы другой процесс, не трогая `project::LOCK`
+    /// в памяти этого процесса вовсе, — `busy_now` обязан увидеть занятость через межпроцессную часть.
+    #[test]
+    fn busy_now_sees_a_cross_process_file_lock_too() {
+        let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("onec-busy-now-file-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::project::set_lock_target(&dir);
+        assert_eq!(busy_now(), None, "файл свободен — не занято");
+        let other = crate::project::file_lock(&dir.join("project.lock")).unwrap().expect("замок свободен в начале теста");
+        assert_eq!(busy_now().as_deref(), Some("другая операция"), "файл занят соседним процессом — должно быть видно отсюда");
+        drop(other);
+        assert_eq!(busy_now(), None, "файл отпущен — снова свободно");
+        crate::project::clear_lock_target_for_test();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Развилка целиком, без глобалов: занятость старше живого ответа, а без

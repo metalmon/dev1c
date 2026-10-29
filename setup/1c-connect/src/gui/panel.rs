@@ -386,7 +386,7 @@ fn found_dot(f: &editors::Found) -> Dot {
 /// открытая сессия не увидела правку. Напоминание идёт только при `Ours`:
 /// до настройки (`Absent`) перечитывать ещё нечего, а там, где кнопка заперта
 /// (`Missing`/`Foreign`), ему не к чему относиться.
-fn found_text(f: &editors::Found, reload: bool) -> String {
+pub(super) fn found_text(f: &editors::Found, reload: bool) -> String {
     let text = match f {
         editors::Found::Missing => "не найден на этой машине".to_string(),
         editors::Found::Absent => "найден, серверы не настроены".to_string(),
@@ -1359,7 +1359,7 @@ impl Render for Panel {
                 let ui = cx.global::<Ui>();
                 let facts = fact_rows(&project_facts(&ui.facts));
                 let rows = project_rows(ui.project.as_ref());
-                // ponytail: читается с диска прямо тут, блокирующе, на
+                // ponytail: `look` читается с диска прямо тут, блокирующе, на
                 // каждую отрисовку вкладки «Проект» — два маленьких JSON-
                 // файла, и раздел «Редакторы» ничего своего не хранит в `Ui`
                 // (решение владельца №2: раздел говорит о файле, а не о
@@ -1369,17 +1369,24 @@ impl Render for Panel {
                 // кадре вкладки — приемлемо, пока файлы маленькие и локальные
                 // (миллисекунды); поднять до фонового потока с кэшем в `Ui`,
                 // как `refresh_project`, если это станет заметно на глаз.
+                //
+                // `present` — не читается здесь (Important 3 финального
+                // ревью): `zed_present`/`pi_present` каждый обходит весь
+                // `PATH` (каталог × расширение × `is_file`), и звать их на
+                // каждый кадр заикалось окном на сетевом каталоге в `PATH`.
+                // Редакторы не ставятся, пока окно открыто, — `ui.editor_present`
+                // посчитан один раз при запуске (`launch`/`Ui::for_test`) и
+                // живёт неизменным весь срок окна.
                 let exe = std::env::current_exe().ok();
-                // `present` — отдельный от файла настроек факт (Critical
-                // ревью живого прогона 29.10): «редактора нет на машине» и
-                // «редактор есть, но файла настроек ещё не создавал» — два
-                // разных состояния, и `editors::look` теперь их не путает.
+                // «редактора нет на машине» и «редактор есть, но файла
+                // настроек ещё не создавал» — два разных состояния (Critical
+                // ревью живого прогона 29.10), и `editors::look` их не путает.
                 let found = |path: Option<std::path::PathBuf>, present: bool| match &exe {
                     Some(exe) => editors::look(path.as_deref(), exe, present),
                     None => editors::Found::Missing,
                 };
-                let (zed_found, pi_found) =
-                    (found(editors::zed_path(), editors::zed_present()), found(editors::pi_path(), editors::pi_present()));
+                let (zed_present, pi_present) = ui.editor_present;
+                let (zed_found, pi_found) = (found(editors::zed_path(), zed_present), found(editors::pi_path(), pi_present));
                 let mut editor_list = editor_rows(&zed_found, &pi_found);
                 let locked = [setup_locked(&zed_found), setup_locked(&pi_found)];
                 if exe.is_none() {

@@ -285,6 +285,13 @@ pub struct Ui {
     /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
     pub tooltip_at: Option<Instant>,
     pub tx: UnboundedSender<Ev>,
+    /// Установлены ли на машине Zed и pi (`editors::zed_present`/`pi_present`) — считано РАЗ при
+    /// запуске окна (Important 3 финального ревью): каждый из двух обходит весь `PATH` (каталог ×
+    /// расширение × `is_file`), а раздел «Редакторы» звал их на каждую отрисовку вкладки «Проект» —
+    /// сетевой каталог в `PATH` заикался окном на каждый кадр. Редакторы на ходу не ставятся, пока
+    /// окно открыто, — перечитывать файл настроек (два маленьких JSON) каждый кадр остаётся, это
+    /// дешёво; дорог был именно обход `PATH`, не чтение файла.
+    pub editor_present: (bool, bool),
 }
 
 impl Global for Ui {}
@@ -775,24 +782,42 @@ pub fn refresh_project(cx: &mut App) {
 /// `zed` различает, какой путь и какой `merge` брать — `editors::zed_path`/
 /// `merge_zed` или `editors::pi_path`/`merge_pi`; само чтение/запись и приём
 /// отказа у обоих одинаковы, поэтому один параметр, а не две функции.
+/// Строка журнала/подвала по итогу `editors::setup` — чистая функция без `cx` и диска, тем же
+/// приёмом, что у соседних помощников этого файла: расхождение, которое закрывает эта правка
+/// (Important 1 финального ревью), проверяется тестом над ней, а не только живым окном.
+///
+/// `setup` отдаёт не «получилось записать», а то, что `look` увидел на диске ПОСЛЕ записи
+/// (докстрока `editors::setup`) — любой `Ok`, кроме `Found::Ours`, значит «записали, но файл всё
+/// ещё не тот» (гонка, чужая правка между записью и перечитом), и говорить надо именно это, а не
+/// «записано», как было раньше при любом `Ok(_)`.
+fn setup_line(name: &str, zed: bool, result: Result<crate::editors::Found, Vec<String>>) -> Line {
+    match result {
+        Ok(crate::editors::Found::Ours) if zed => {
+            Line { kind: Kind::Ok, text: format!("{name}: записано, сервер поднят сам") }
+        }
+        Ok(crate::editors::Found::Ours) => {
+            Line { kind: Kind::Ok, text: format!("{name}: записано — наберите /reload в открытой сессии") }
+        }
+        Ok(other) => Line {
+            kind: Kind::Fail,
+            text: format!("{name}: записали, но файл всё ещё не тот — {}", panel::found_text(&other, false)),
+        },
+        // Important 1 ревью задачи 6: причина отказа — та, что отдал
+        // `merge`/`setup` (`editors::refusal_text`), не наша
+        // одна-на-всё фраза про занятую запись. Битый JSON, BOM у
+        // pi, отказ ввода-вывода — прозу показываем как есть; «занято»
+        // остаётся только там, где реально заняты наши имена.
+        Err(reasons) => Line { kind: Kind::Fail, text: format!("{name}: {}", crate::editors::refusal_text(&reasons)) },
+    }
+}
+
 pub fn setup_editor(cx: &mut App, zed: bool) {
     let name = if zed { "Zed" } else { "pi" };
     let line = match (std::env::current_exe(), if zed { crate::editors::zed_path() } else { crate::editors::pi_path() }) {
         (Ok(exe), Some(path)) => {
             type Merge = fn(&str, &std::path::Path) -> Result<String, Vec<String>>;
             let merge: Merge = if zed { crate::editors::merge_zed } else { crate::editors::merge_pi };
-            match crate::editors::setup(&path, &exe, merge) {
-                Ok(_) if zed => Line { kind: Kind::Ok, text: format!("{name}: записано, сервер поднят сам") },
-                Ok(_) => Line {
-                    kind: Kind::Ok, text: format!("{name}: записано — наберите /reload в открытой сессии")
-                },
-                // Important 1 ревью задачи 6: причина отказа — та, что отдал
-                // `merge`/`setup` (`editors::refusal_text`), не наша
-                // одна-на-всё фраза про занятую запись. Битый JSON, BOM у
-                // pi, отказ ввода-вывода — прозу показываем как есть; «занято»
-                // остаётся только там, где реально заняты наши имена.
-                Err(reasons) => Line { kind: Kind::Fail, text: format!("{name}: {}", crate::editors::refusal_text(&reasons)) },
-            }
+            setup_line(name, zed, crate::editors::setup(&path, &exe, merge))
         }
         (Err(e), _) => Line {
             kind: Kind::Fail, text: format!("{name}: не узнать путь к своему исполняемому файлу: {e}")
@@ -1344,6 +1369,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             dialog_open: false,
             tooltip_at: None,
             tx,
+            editor_present: (crate::editors::zed_present(), crate::editors::pi_present()),
         });
         // Единый тик приложения: сам решает свой срок (занято — секунда,
         // иначе полминуты) и заменяет прежний тик панели `Panel::new`, тот
@@ -1481,6 +1507,7 @@ impl Ui {
             dialog_open: false,
             tooltip_at: None,
             tx,
+            editor_present: (crate::editors::zed_present(), crate::editors::pi_present()),
         }
     }
 }

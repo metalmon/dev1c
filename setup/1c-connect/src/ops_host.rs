@@ -1343,6 +1343,16 @@ fn watch_mcp(kit: Kit, user: String, workstation: String, live: crate::session::
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
     std::thread::spawn(move || {
+        // Important 2 финального ревью: `workstation` замороженным параметром
+        // держала имя рабочего места на весь срок процесса `mcp` — человек
+        // переименовал рабочее место, сохранил, перезапустил окно, а этот
+        // процесс (его поднял редактор раньше и держит стрим) продолжал
+        // спрашивать `allow::read` про старое имя, получал `is_held == false`
+        // и отказывал агенту при включённом переключателе и живом окне, до
+        // перезапуска редактора. Переменная ниже — mutable, и каждый тик,
+        // перечитавший `Cfg` удачно, подвигает её на свежее имя: лаг — один
+        // такт (200 мс), тот же потолок, что у самого опроса.
+        let mut workstation = workstation;
         // Последняя пожалованная причина разбора — чтобы повторный тик с той
         // же поломкой не заливал журнал одинаковыми строками, пока человек
         // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
@@ -1352,6 +1362,7 @@ fn watch_mcp(kit: Kit, user: String, workstation: String, live: crate::session::
             out.store(enabled, Ordering::Relaxed);
             match cfg {
                 Ok(cfg) => {
+                    workstation = cfg.host.workstation.clone();
                     live.set(cfg);
                     last_parse_err = None;
                 }
@@ -2702,6 +2713,44 @@ mod tests {
         drop(guard);
         let (enabled, _) = mcp_tick(&kit, "owner", &workstation);
         assert!(!enabled, "владелец ушёл — тот же файл больше не разрешение");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Important 2 финального ревью: `watch_mcp` держала имя рабочего места
+    /// параметром, замороженным на старте подкоманды `mcp` — человек
+    /// переименовал рабочее место в окне, сохранил, а уже поднятый `mcp`
+    /// (его держит Zed/pi стримом с самого своего запуска) продолжал
+    /// спрашивать замок про старое имя до перезапуска редактора. Здесь
+    /// переименование — правка файла параметров без окна, а замок берём
+    /// под НОВЫМ именем заранее: поток обязан сам подхватить его на
+    /// следующем удачном перечите `Cfg`, без единой подсказки снаружи.
+    #[test]
+    fn watch_mcp_follows_a_renamed_workstation_without_a_restart() {
+        let dir = mcp_test_dir("watch-mcp-rename");
+        let kit = Kit::at(&dir);
+        // Имя рабочего места обязано пройти `Cfg::validate` (`dev1`/`dev2`/`dev3` — см.
+        // `cfg::number_of`), поэтому уникальность теста несёт не оно, а пользователь.
+        let user = format!("owner-{}", std::process::id());
+        let write_workstation = |name: &str| {
+            let mut cfg = crate::cfg::filled_for_test();
+            cfg.host.workstation = name.into();
+            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render()).unwrap();
+        };
+        write_workstation("dev1");
+        crate::allow::write(&kit, true).unwrap();
+        // Замок — сразу под НОВЫМ именем: владелец окна успел сохранить и
+        // перезапустить его раньше, чем этот тест проверит первый тик.
+        let key = crate::single_instance::guard_key(&user, "dev2");
+        let lock_on = crate::single_instance::lock_target(&kit);
+        let _guard = crate::single_instance::try_acquire(&key, &lock_on).unwrap().expect("замок свободен в начале теста");
+        let live = crate::session::Live::new(Cfg::default());
+        let log: Sink = Arc::new(|_| {});
+        let enabled = watch_mcp(kit.clone(), user, "dev1".to_string(), live, log);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!enabled.load(Ordering::Relaxed), "старым именем замка не поднять — он взят под новым");
+        write_workstation("dev2");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(enabled.load(Ordering::Relaxed), "тик перечитал Cfg и спросил замок уже под новым именем");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -32,7 +32,12 @@ async fn forwards_7771_and_remembers_the_host_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
+// Important 5 финального ревью: `tunnel::run` на каждом удачном коннекте зовёт
+// `session::flip_remote_servers`, а та — `tokio::task::block_in_place` (докстрока
+// `flip_remote_servers`: ПАНИКА, не отказ, вне многопоточного рантайма). По умолчанию
+// `#[tokio::test]` — однопоточный рантайм, и именно на нём эта ветка сломала тест: панику ловили
+// не как «SSH недоступен», а как настоящий крах `cargo test`.
+#[tokio::test(flavor = "multi_thread")]
 async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     let Some((server, password)) = env() else { return };
     let dir = std::env::temp_dir().join(format!("1c-connect-run-{}", std::process::id()));
@@ -83,7 +88,11 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
 /// Второе SSH-соединение (без пробросов — `&[]`, чтобы не спорить с тем,
 /// что держит сам `run()`) сеет файл редактора своей командой и читает его
 /// независимо, пока `run()` живёт своей жизнью на отдельном соединении.
-#[tokio::test]
+///
+/// Important 5 финального ревью: `flip_remote_servers` зовёт `block_in_place`, который паникует
+/// вне многопоточного рантайма — `flavor = "multi_thread"` здесь обязателен, не только у соседнего
+/// теста, иначе SSH-отказ и паника рантайма неотличимы в выводе `cargo test`.
+#[tokio::test(flavor = "multi_thread")]
 async fn run_flips_editor_mcp_enabled_around_the_session() {
     let Some((server, password)) = env() else { return };
     let dir = std::env::temp_dir().join(format!("1c-connect-flip-{}", std::process::id()));

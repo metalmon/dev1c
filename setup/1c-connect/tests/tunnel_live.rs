@@ -76,3 +76,53 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Задача 7, Important 4 ревью: доказывает именно проводку в `tunnel::run`
+/// (`tunnel.rs:221`/`236`), а не только `flip_with`/`flip_remote_servers`
+/// сами по себе — убери любой из двух вызовов оттуда, и этот тест упадёт.
+/// Второе SSH-соединение (без пробросов — `&[]`, чтобы не спорить с тем,
+/// что держит сам `run()`) сеет файл редактора своей командой и читает его
+/// независимо, пока `run()` живёт своей жизнью на отдельном соединении.
+#[tokio::test]
+async fn run_flips_editor_mcp_enabled_around_the_session() {
+    let Some((server, password)) = env() else { return };
+    let dir = std::env::temp_dir().join(format!("1c-connect-flip-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let password = if std::env::var("DEV1C_DOCKER").is_ok() { "dev3".to_string() } else { password };
+
+    let control = one_c_connect::tunnel::Tunnel::connect(&server, "dev3", &password, &dir.join("known_hosts_control"), &[])
+        .await
+        .expect("control connect (no forwards)");
+    let before = r#"{"context_servers":{"1c":{"command":"nc","enabled":false},"vrunner":{"command":"nc","enabled":false}}}"#;
+    control.exec(&format!("mkdir -p ~/.config/zed && cat > ~/.config/zed/settings.json\n{before}")).await.expect("seed the file");
+
+    let mut cfg = one_c_connect::cfg::Cfg::default();
+    cfg.host.server = server;
+    cfg.host.workstation = "dev3".into();
+    cfg.host.password = password;
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let editor_mcp = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let kh = dir.join("known_hosts");
+    let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx, editor_mcp).await });
+
+    let mut on = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if task.is_finished() {
+            panic!("run() завершился раньше, чем успел включить записи: {:?}", task.await);
+        }
+        on = control.exec("cat ~/.config/zed/settings.json").await.expect("read after connect");
+        if on.contains("\"enabled\": true") {
+            break;
+        }
+    }
+    assert!(on.contains("\"enabled\": true"), "run() обязан включить записи после удачного проброса: {on}");
+
+    tx.send(true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();
+    let off = control.exec("cat ~/.config/zed/settings.json").await.expect("read after stop");
+    assert!(off.contains("\"enabled\": false"), "run() обязан выключить записи ДО разрыва: {off}");
+
+    control.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

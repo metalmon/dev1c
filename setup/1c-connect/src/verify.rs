@@ -1034,7 +1034,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors:
     }
     // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у редактора нет (решение владельца 29.10). В контейнере — то, что уже увидело чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH быть не должно); на машине человека читаем диск здесь же, тем же `editors::look`, что раздел «Редакторы».
     v.push(if local {
-        let found = std::env::current_exe().ok().map(|exe| editors::look(editors::zed_path().as_deref(), &exe));
+        let found = std::env::current_exe().ok().map(|exe| editors::look(editors::zed_path().as_deref(), &exe, editors::zed_present()));
         editor_mcp_fact(found.as_ref())
     } else {
         // Два разных незнания, и путать их нельзя (Critical 1 ревью): туннеля нет вовсе (командная строка между вызовами, окно до первого подключения) — читать было НЕКЕМ, это сведение, а не провал, иначе `1c-connect install`/`check` отказывали бы всегда. Туннель поднят, а `editor_mcp` всё равно `None` — читать пытались и не вышло, и это настоящий провал-предупреждение (горячий факт: красит точку, замок не держит).

@@ -1370,11 +1370,16 @@ impl Render for Panel {
                 // (миллисекунды); поднять до фонового потока с кэшем в `Ui`,
                 // как `refresh_project`, если это станет заметно на глаз.
                 let exe = std::env::current_exe().ok();
-                let found = |path: Option<std::path::PathBuf>| match &exe {
-                    Some(exe) => editors::look(path.as_deref(), exe),
+                // `present` — отдельный от файла настроек факт (Critical
+                // ревью живого прогона 29.10): «редактора нет на машине» и
+                // «редактор есть, но файла настроек ещё не создавал» — два
+                // разных состояния, и `editors::look` теперь их не путает.
+                let found = |path: Option<std::path::PathBuf>, present: bool| match &exe {
+                    Some(exe) => editors::look(path.as_deref(), exe, present),
                     None => editors::Found::Missing,
                 };
-                let (zed_found, pi_found) = (found(editors::zed_path()), found(editors::pi_path()));
+                let (zed_found, pi_found) =
+                    (found(editors::zed_path(), editors::zed_present()), found(editors::pi_path(), editors::pi_present()));
                 let mut editor_list = editor_rows(&zed_found, &pi_found);
                 let locked = [setup_locked(&zed_found), setup_locked(&pi_found)];
                 if exe.is_none() {

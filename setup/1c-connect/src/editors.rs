@@ -38,6 +38,18 @@ pub fn zed_path() -> Option<PathBuf> {
     }
 }
 
+/// Есть ли на этой машине Zed вообще — факт, отдельный от того, настроен ли
+/// он нами (дефект живого прогона 29.10: `look` раньше судил «Zed есть» по
+/// наличию `settings.json`, а у только что установленного и ни разу не
+/// открытого Zed этого файла нет вовсе — каталог `%APPDATA%\Zed` появляется
+/// при установке, файл настроек — только при первом открытии). Признак —
+/// каталог настроек (родитель `zed_path()`) существует, ИЛИ `zed`/`zed.exe`
+/// нашёлся на `PATH`; любой из двух достаточен — мы не можем знать заранее,
+/// каким способом редактор поставлен.
+pub fn zed_present() -> bool {
+    zed_path().and_then(|p| p.parent().map(|d| d.exists())).unwrap_or(false) || on_path("zed")
+}
+
 /// Снимает комментарии `//` и `/* ... */`, затем висящую запятую перед `}`
 /// или `]` — то, что `serde_json` (строгий JSON) не разбирает, а Zed
 /// разбирает: его парсер настроек — JSONC, комментарии и висящая запятая
@@ -543,6 +555,32 @@ pub fn pi_path() -> Option<PathBuf> {
     }
 }
 
+/// Есть ли на этой машине pi вообще — та же причина, что у `zed_present`
+/// (дефект живого прогона 29.10: на машине владельца pi стоял — `~/.pi/agent`
+/// с `settings.json`, `auth.json`, `bin/pi`, `sessions` — но `mcp.json` в нём
+/// ни разу не создавался, и старый `look` читал это как «pi нет вовсе»).
+/// Признак — любой из трёх: каталог `~/.pi`, каталог `~/.pi/agent` (родитель
+/// `pi_path()`), или `pi`/`pi.exe` на `PATH`.
+pub fn pi_present() -> bool {
+    let home = if cfg!(windows) { std::env::var_os("USERPROFILE") } else { std::env::var_os("HOME") };
+    if let Some(h) = home {
+        let base = PathBuf::from(h).join(".pi");
+        if base.exists() || base.join("agent").exists() {
+            return true;
+        }
+    }
+    on_path("pi")
+}
+
+/// Ищет `name` (с расширениями-кандидатами на Windows) в каждом каталоге
+/// `PATH` — свой маленький `which`, без нового зависимого крейта: ровно
+/// столько кода, сколько нужно для одного вопроса «исполняемый файл с таким
+/// именем вообще есть на этой машине».
+fn on_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path_var).any(|dir| ["", ".exe", ".cmd", ".bat"].iter().any(|ext| dir.join(format!("{name}{ext}")).is_file()))
+}
+
 /// Запись в `mcpServers` вышла бы нашей по тому же правилу, что у Zed: имя
 /// файла в `command` совпадает с именем файла нашего исполняемого.
 fn pi_entry_is_ours(entry: &serde_json::Value, exe: &Path) -> bool {
@@ -667,20 +705,32 @@ pub enum Found {
     Foreign(Vec<String>),
 }
 
-/// Опознание по уже прочитанному пути: `path` — `None`, когда путь к файлу
-/// определить не вышло (переменной окружения нет — `zed_path`/`pi_path`), или
-/// сам файл прочитать не вышло (его нет на диске — редактор ни разу не
-/// трогал эти настройки): оба случая говорят человеку одно и то же — «не
-/// найден на этой машине», разбирать их дальше незачем.
+/// Опознание по уже прочитанному пути И по отдельному факту «редактор на
+/// машине есть» (`present` — `zed_present`/`pi_present`). Эти два факта
+/// РАЗНЫЕ, и путать их — дефект, найденный живым прогоном 29.10: на машине
+/// владельца pi стоял (`~/.pi/agent`, свои `settings.json`/`auth.json`/`bin`),
+/// но `mcp.json` у него ни разу не создавался, а старый `look` судил
+/// «редактор есть» по наличию ИМЕННО ЭТОГО файла — и запирал кнопку там, где
+/// её нажатие должно было создать файл с нуля (`merge_zed`/`merge_pi` на
+/// пустом тексте это умеют). То же ждало только что установленный, но ни
+/// разу не открытый Zed — самый частый первый запуск из всех.
+///
+/// `present=false` — редактора нет вовсе: `Found::Missing`, нажимать нечего.
+/// `present=true` — редактор есть, и дальше смотрим файл настроек как обычно:
+/// нет файла, не читается, не разбирается, нет нашего ключа, нет наших
+/// записей — всё это `Found::Absent` («найден, серверы не настроены»), а не
+/// `Missing`.
 ///
 /// Генерична по обоим редакторам сразу: ищет контейнер записей по любому из
 /// двух имён ключа — `context_servers` у Zed, `mcpServers` у pi; тот
 /// редактор, которого это не касается, такого ключа и не заводит.
 /// Комментарии и висящая запятая (Zed, JSONC) снимает `as_json` — на честном
 /// JSON pi для неё нечего снимать, и вызов безвреден.
-pub fn look(path: Option<&Path>, exe: &Path) -> Found {
-    let Some(path) = path else { return Found::Missing };
-    let Ok(text) = std::fs::read_to_string(path) else { return Found::Missing };
+pub fn look(path: Option<&Path>, exe: &Path, present: bool) -> Found {
+    if !present {
+        return Found::Missing;
+    }
+    let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Found::Absent };
     let (_, body) = split_bom(&text);
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&as_json(body)) else { return Found::Absent };
     let Some(obj) = parsed.as_object() else { return Found::Absent };
@@ -783,7 +833,8 @@ pub fn setup(path: &Path, exe: &Path, merge: impl Fn(&str, &Path) -> Result<Stri
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(look(Some(path), exe))
+    // Мы только что создали/переписали этот файл — редактор, очевидно, есть.
+    Ok(look(Some(path), exe, true))
 }
 
 /// Пишет во временный файл и переименовывает его в целевой — вынесено одним
@@ -1132,15 +1183,26 @@ mod tests {
     use crate::project::tempdir::Dir;
 
     #[test]
-    fn look_with_no_path_is_missing() {
-        assert_eq!(look(None, Path::new("/opt/1c-connect")), Found::Missing);
-    }
-
-    #[test]
-    fn look_of_a_file_that_is_not_on_disk_is_missing() {
+    fn an_absent_editor_is_missing_regardless_of_the_path() {
+        // Критический дефект живого прогона 29.10: `present=false` — Zed/pi
+        // на машине нет вовсе, и это `Missing` независимо от того, можем ли
+        // мы вообще назвать путь к несуществующим настройкам.
+        assert_eq!(look(None, Path::new("/opt/1c-connect"), false), Found::Missing);
         let d = Dir::new();
         let p = d.path().join("settings.json");
-        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Missing);
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect"), false), Found::Missing);
+    }
+
+    /// Ровно сценарий владельца 29.10: редактор на машине ЕСТЬ (`present =
+    /// true`), а файла настроек с нашими записями ни разу не было — это
+    /// `Found::Absent` («найден, серверы не настроены»), а НЕ `Missing`.
+    /// Старая версия `look` путала эти два факта и запирала кнопку там, где
+    /// нажатие должно было создать файл с нуля.
+    #[test]
+    fn a_present_editor_without_a_settings_file_is_absent_not_missing() {
+        let d = Dir::new();
+        let p = d.path().join("settings.json"); // каталог редактора есть, этого файла в нём нет
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect"), true), Found::Absent);
     }
 
     #[test]
@@ -1148,7 +1210,7 @@ mod tests {
         let d = Dir::new();
         let p = d.path().join("settings.json");
         std::fs::write(&p, "{\"theme\": \"One\"}").unwrap();
-        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Absent);
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect"), true), Found::Absent);
     }
 
     #[test]
@@ -1157,7 +1219,7 @@ mod tests {
         let p = d.path().join("settings.json");
         let exe = Path::new("/opt/1c-connect");
         std::fs::write(&p, merge_zed("", exe).unwrap()).unwrap();
-        assert_eq!(look(Some(&p), exe), Found::Ours);
+        assert_eq!(look(Some(&p), exe, true), Found::Ours);
     }
 
     #[test]
@@ -1166,7 +1228,7 @@ mod tests {
         let p = d.path().join("mcp.json");
         let exe = Path::new("/opt/1c-connect");
         std::fs::write(&p, merge_pi("", exe).unwrap()).unwrap();
-        assert_eq!(look(Some(&p), exe), Found::Ours);
+        assert_eq!(look(Some(&p), exe, true), Found::Ours);
     }
 
     #[test]
@@ -1174,7 +1236,7 @@ mod tests {
         let d = Dir::new();
         let p = d.path().join("settings.json");
         std::fs::write(&p, "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}").unwrap();
-        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect")), Found::Foreign(vec!["1c".to_string()]));
+        assert_eq!(look(Some(&p), Path::new("/opt/1c-connect"), true), Found::Foreign(vec!["1c".to_string()]));
     }
 
     #[test]
@@ -1185,7 +1247,7 @@ mod tests {
         assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
         assert!(p.exists());
         assert!(!sibling_path(&p, ".bak").exists(), "файла раньше не было — нечего резервировать");
-        assert!(look(Some(&p), exe) == Found::Ours);
+        assert!(look(Some(&p), exe, true) == Found::Ours);
     }
 
     /// Первая правка снимает `.bak` с исходным текстом; вторая правку того же
@@ -1229,7 +1291,7 @@ mod tests {
         let p = d.path().join("settings.json");
         let exe = Path::new("/opt/1c-connect");
         std::fs::write(&p, format!(r#"{{"context_servers":{{"1c":{{"command":"{}"}}}}}}"#, exe.display())).unwrap();
-        assert_eq!(look(Some(&p), exe), Found::Absent);
+        assert_eq!(look(Some(&p), exe, true), Found::Absent);
     }
 
     /// Important 4 ревью задачи 6: ревьюер подменил перечит на диске
@@ -1250,7 +1312,7 @@ mod tests {
         let got = setup(&p, exe, suspicious_merge).unwrap();
         assert_eq!(got, Found::Foreign(vec!["vrunner".to_string()]));
         // И независимый перечит того же файла видит то же самое: одна правда.
-        assert_eq!(look(Some(&p), exe), got);
+        assert_eq!(look(Some(&p), exe, true), got);
     }
 
     /// Та же мысль с другой стороны: файл, который мы записали, подменили на
@@ -1264,7 +1326,7 @@ mod tests {
         let exe = Path::new("/opt/1c-connect");
         assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
         std::fs::write(&p, r#"{"context_servers":{"1c":{"command":"nc"}}}"#).unwrap();
-        assert_eq!(look(Some(&p), exe), Found::Foreign(vec!["1c".to_string()]));
+        assert_eq!(look(Some(&p), exe, true), Found::Foreign(vec!["1c".to_string()]));
     }
 
     /// Important 1 ревью задачи 6: причина прозой (битый JSON) идёт в текст
@@ -1300,7 +1362,7 @@ mod tests {
         let dirty = d.path().join(".").join("settings.json");
         let exe = Path::new("/opt/1c-connect");
         assert_eq!(setup(&dirty, exe, merge_zed).unwrap(), Found::Ours);
-        assert_eq!(look(Some(&real), exe), Found::Ours);
+        assert_eq!(look(Some(&real), exe, true), Found::Ours);
         assert!(sibling_path(&real, ".bak").exists(), "резервная копия обязана лежать при настоящем файле");
     }
 

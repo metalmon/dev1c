@@ -557,6 +557,38 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
     (Some(Dot::Warn), "Не отправлено".into(), parts.join(", "))
 }
 
+/// Имя поля из `Cfg::undecryptable` словами человека — он открывает окно, а
+/// не toml, и имени `password`/`db_password` не знает и не обязан.
+/// Неизвестное имя (другого `undecryptable` не заводит задача 2) получает то
+/// же слово, что `password`: молчать о поле — хуже, чем назвать его не тем.
+fn undecryptable_field_name(field: &str) -> &'static str {
+    match field {
+        "db_password" => "пароль пользователя базы",
+        _ => "пароль рабочего места",
+    }
+}
+
+/// Строка журнала о пароле, который не открылся (задача 4; замысел — «Анти-цели»,
+/// «человек остался без доступа и не понял почему»): причина — зашифрован
+/// другим пользователем или на другой машине, и что делать — ввести заново,
+/// с названием каждого такого поля словами человека. `None` — список пуст,
+/// расшифровка прошла у обоих полей.
+///
+/// Строку показывает `mod.rs` (`adopt_cfg`) один раз на загрузку параметров,
+/// а не на каждый показ окна: оно перечитывает файл при каждом открытии
+/// (`window::reread_and_recheck`), и без отдельной метки «уже сказано» тот же
+/// нерасшифрованный пароль сыпался бы в журнал на каждый клик по значку трея.
+pub fn undecryptable_line(fields: &[String]) -> Option<Line> {
+    if fields.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = fields.iter().map(|f| undecryptable_field_name(f)).collect();
+    Some(Line {
+        kind: Kind::Warn,
+        text: format!("Пароль зашифрован другим пользователем или на другой машине — введите {} заново.", names.join(" и ")),
+    })
+}
+
 /// Поля вкладки «Параметры», которые режим реально показывает. В локальном
 /// режиме коннектор слушает loopback, а не поднимает туннель в среду —
 /// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
@@ -1784,7 +1816,7 @@ mod tests {
     use super::{
         adopt_needed, can_save, card, editor_rows, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts,
         project_menu, project_rows, reason, save_hint, setup_locked, shown_base_url, shown_fields, switch_locked, switch_tooltip,
-        window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::editors::Found;
@@ -2523,5 +2555,28 @@ mod tests {
         let (label, tooltip) = pick_face();
         assert_eq!(label, None, "подпись вернулась на кнопку и снова съедает строку пути");
         assert_eq!(tooltip, "Выбрать…");
+    }
+
+    #[test]
+    fn an_undecryptable_password_is_explained_in_words() {
+        let l = undecryptable_line(&["password".to_string()]).expect("строка есть");
+        assert_eq!(l.kind, Kind::Warn);
+        assert!(l.text.contains("другой машине") || l.text.contains("другим пользователем"), "{}", l.text);
+        assert!(l.text.contains("введите"), "{}", l.text);
+        assert!(l.text.contains("рабочего места"), "поле названо словами человека: {}", l.text);
+    }
+
+    #[test]
+    fn both_fields_are_named_in_one_line() {
+        let l = undecryptable_line(&["password".into(), "db_password".into()]).unwrap();
+        assert!(l.text.contains("рабочего места") && l.text.contains("базы"), "{}", l.text);
+    }
+
+    #[test]
+    fn an_empty_list_says_nothing_and_a_full_one_says_something() {
+        // Пара: пустой список молчит, непустой говорит — иначе тест прошёл бы и
+        // у функции, которая всегда молчит.
+        assert!(undecryptable_line(&[]).is_none());
+        assert!(undecryptable_line(&["db_password".into()]).is_some());
     }
 }

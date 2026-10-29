@@ -112,6 +112,15 @@ pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
 pub struct Ui {
     pub kit: Kit,
     pub cfg: Cfg,
+    /// Какие поля из `cfg.undecryptable` уже сказаны в журнал
+    /// (`panel::undecryptable_line`, `adopt_cfg`) — отдельно от самого
+    /// `cfg.undecryptable`, потому что окно перечитывает файл при каждом
+    /// показе (`window::reread_and_recheck`): без этой метки один и тот же
+    /// нерасшифрованный пароль сыпался бы в журнал на каждое открытие.
+    /// Строка уходит заново только когда список меняется — пароль починили
+    /// (список опустел) или испортился по-новому (другая машина, другая
+    /// учётка).
+    pub undecryptable_noted: Vec<String>,
     pub session: Option<Session>,
     /// Растёт на каждый новый сеанс и на каждую остановку: хвостовое
     /// событие от уже не текущего сеанса (умирающий поток ещё договаривает)
@@ -549,6 +558,18 @@ pub fn open_path(cx: &mut App, path: &std::path::Path) {
 /// не обойтись (порты живут внутри SSH — там `restart_session`), а рвать
 /// туннель под человеком на показе окна нельзя: правку подхватит «Сохранить».
 pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
+    // Задача 4: причина непрочитанного пароля — словами, один раз на
+    // загрузку. Список сравнивается с тем, что уже сказано (`undecryptable_noted`),
+    // а не с прежним `ui.cfg.undecryptable` — тот на первом же показе совпал
+    // бы с новым (оба читают один и тот же файл) и строка не появилась бы
+    // никогда.
+    if cfg.undecryptable != ui.undecryptable_noted {
+        let line = panel::undecryptable_line(&cfg.undecryptable);
+        ui.undecryptable_noted = cfg.undecryptable.clone();
+        if let Some(line) = line {
+            note_line(ui, line);
+        }
+    }
     ui.cfg = cfg;
     if ui.cfg.host.mode == "local" {
         if let Some(s) = &ui.session {
@@ -1326,6 +1347,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         cx.set_global(Ui {
             kit,
             cfg,
+            undecryptable_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,
@@ -1464,6 +1486,7 @@ impl Ui {
         Ui {
             kit,
             cfg,
+            undecryptable_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,

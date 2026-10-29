@@ -16,6 +16,38 @@ fn a_fresh_ui_has_not_run_the_readiness_check_yet() {
     assert!(matches!(ui.verdict, Verdict::Checking), "{:?}", ui.verdict);
 }
 
+/// Задача 4: `adopt_cfg` зовётся из `window::reread_and_recheck` на каждый
+/// показ окна, и файл на диске к этому моменту мог не измениться ни на байт —
+/// тот же нерасшифрованный пароль читается заново. Без метки «уже сказано»
+/// (`Ui::undecryptable_noted`) строка сыпалась бы в журнал на каждое открытие
+/// окна; эта проверка сторожит именно переход, а не сам текст строки (его
+/// сторожат тесты `panel::undecryptable_line`).
+#[test]
+fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
+    let mut ui = Ui::for_test();
+    let warn_count = |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && l.text.contains("рабочего места")).count();
+
+    let mut broken = ui.cfg.clone();
+    broken.undecryptable = vec!["password".to_string()];
+
+    adopt_cfg(&mut ui, broken.clone());
+    assert_eq!(warn_count(&ui), 1, "первая загрузка с незакрытым паролем — одна строка");
+
+    // Второй показ перечитывает тот же файл: тот же список, строка не повторяется.
+    adopt_cfg(&mut ui, broken.clone());
+    assert_eq!(warn_count(&ui), 1, "повторный показ того же состояния не добавляет вторую строку");
+
+    // Пароль ввели заново и сохранили — список опустел: молчим, но метку сбрасываем.
+    let mut fixed = broken.clone();
+    fixed.undecryptable = Vec::new();
+    adopt_cfg(&mut ui, fixed);
+    assert_eq!(warn_count(&ui), 1, "починка не добавляет строку");
+
+    // Испортилось снова (другая машина, другая учётка) — строка возвращается.
+    adopt_cfg(&mut ui, broken);
+    assert_eq!(warn_count(&ui), 2, "новая беда после починки — новая строка");
+}
+
 /// Итог прошлой операции не держит подвал вечно: пришёл новый набор —
 /// подвал говорит о состоянии, а «Готово за 19 с» остаётся в журнале.
 /// Прежде этот слот не снимался никем, и в покое человек читал про

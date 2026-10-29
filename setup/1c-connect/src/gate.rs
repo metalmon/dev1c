@@ -300,6 +300,40 @@ mod tests {
         assert!(why.contains("mcp-1c"), "{why}");
     }
 
+    /// Поручение владельца 30.10: `mcp-1c` переехал в свою папку комплекта
+    /// (`mcp-1c/`), как `vrunner/`, `git/` и `httpd/`. Замок обязан видеть
+    /// бинарь на новом месте (комплект полон) и не видеть на старом — файл в
+    /// корне, где он лежал раньше, больше не считается. Проверяется не
+    /// булев параметр `cold_gate` (его уже проверяют соседние тесты), а
+    /// настоящий `ops_host::mcp_exe` на настоящем диске — ровно то место,
+    /// которое `gate_now` зовёт за этим булем.
+    #[test]
+    fn mcp_in_kit_sees_the_binary_in_its_own_folder_not_in_the_root() {
+        let dir = std::env::temp_dir().join(format!("onec-gate-mcp-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kit = Kit::at(&dir);
+        let exe = ops_host::mcp_exe(&kit);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+        // Старое место — россыпью в корне комплекта: замок не должен его видеть.
+        std::fs::write(dir.join(exe.file_name().unwrap()), b"").unwrap();
+        assert!(!exe.exists(), "{}", exe.display());
+        let why =
+            cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), exe.exists(), &licence::State::Valid)
+                .unwrap();
+        assert!(why.contains("mcp-1c"), "{why}");
+
+        // Новое место — своя папка: замок должен его видеть и не запирать по mcp-1c.
+        std::fs::write(&exe, b"").unwrap();
+        assert!(exe.exists(), "{}", exe.display());
+        assert_eq!(
+            cold_gate(&crate::cfg::filled_for_test(), true, true, &done(), Ok(Path::new("1cv8.exe")), exe.exists(), &licence::State::Valid),
+            None,
+            "полный комплект не должен говорить «в комплекте нет mcp-1c»"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn an_incomplete_kit_holds_the_switch() {
         // `Missing` и `Drifted` `tools_state` больше не возвращает — копии

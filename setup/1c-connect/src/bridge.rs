@@ -20,10 +20,12 @@ where
     Ok(())
 }
 
-/// `mcp-1c.exe` as the bridge starts it: the kit's binary, the developer's base.
+/// `mcp-1c.exe` as the bridge starts it: the kit's binary, the developer's
+/// base. Путь — через `ops_host::mcp_exe`, а не повторён здесь: второй
+/// экземпляр той же строки был ровно той болезнью, из-за которой перенос
+/// `mcp-1c` в свою папку комплекта требовал правки в двух местах.
 pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::process::Command {
-    let exe = kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" });
-    let mut c = tokio::process::Command::new(exe);
+    let mut c = tokio::process::Command::new(crate::ops_host::mcp_exe(kit));
     // Пароль — переменной окружения, а ключ `--password` убран физически, не
     // просто продублирован переменной рядом: командная строка процесса на
     // Windows видна любому процессу пользователя (`tasklist`, `wmic`,

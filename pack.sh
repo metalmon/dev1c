@@ -213,8 +213,11 @@ MCP_1C_VERSION=v1.23.0
 # чужих слов. Согласие с константой в verify.rs (EXTENSION, факт готовности)
 # держит тест, не память человека — разойдутся, падает тест, а не поставка.
 MCP_EXTENSION_MIN_VERSION=0.4.10
+# Своя папка, как у vrunner/git/httpd — поручение владельца 30.10: в корне
+# комплекта законно живёт только сам коннектор и его параметры.
+mkdir -p "$CONNECT/mcp-1c"
 for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
-    fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/$f"
+    fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/mcp-1c/$f"
 done
 
 # The developer's program itself, Windows only (the platform is there), and

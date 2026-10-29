@@ -166,9 +166,9 @@ RUN printf '#!/bin/sh\nexec oscript /opt/vrunner/vanessa-runner/src/mcp.os "$@"\
 # now and never touched again. It is NOT the same file as the one `host.tools`
 # writes into tools_dir() at install time (what is actually laid out on a
 # given machine) — `ops_host::tools_state` compares the two.
-RUN mkdir -p /opt/dev1c-kit/vrunner/bin /opt/dev1c-kit/git/bin \
-    && ln -s /usr/local/bin/mcp-1c /opt/dev1c-kit/mcp-1c-linux-amd64 \
-    && ln -s /opt/mcp-1c/MCP_HTTPService.cfe /opt/dev1c-kit/MCP_HTTPService.cfe \
+RUN mkdir -p /opt/dev1c-kit/vrunner/bin /opt/dev1c-kit/git/bin /opt/dev1c-kit/mcp-1c \
+    && ln -s /usr/local/bin/mcp-1c /opt/dev1c-kit/mcp-1c/mcp-1c-linux-amd64 \
+    && ln -s /opt/mcp-1c/MCP_HTTPService.cfe /opt/dev1c-kit/mcp-1c/MCP_HTTPService.cfe \
     && ln -s "$(command -v oscript)" /opt/dev1c-kit/vrunner/bin/oscript \
     && ln -s /opt/vrunner /opt/dev1c-kit/vrunner/lib \
     && ln -s "$(command -v git)" /opt/dev1c-kit/git/bin/git \

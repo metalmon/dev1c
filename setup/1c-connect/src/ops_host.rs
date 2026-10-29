@@ -433,8 +433,13 @@ impl Op<Ctx> for Tools {
     }
 }
 
+/// `mcp-1c` лежит в комплекте своей папкой, как `vrunner/`, `git/` и `httpd/`
+/// (поручение владельца 30.10) — в корне комплекта законно живёт только сам
+/// коннектор и его параметры. Единственное место, где собирается этот путь:
+/// мост (`bridge::mcp_command`) зовёт эту же функцию, а не повторяет строку —
+/// вторая копия и была причиной, по которой перенос вообще требовал работы.
 pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
-    kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" })
+    kit.path(if cfg!(windows) { "mcp-1c/mcp-1c-windows-amd64.exe" } else { "mcp-1c/mcp-1c-linux-amd64" })
 }
 
 /// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: пароль базы — ключом `--db-password`, а не переменной `MCP_1C_PASSWORD`. Это второе честное исключение задачи 5, рядом с `/P` Конфигуратору (`revert_apply` ниже) — не выбор удобства, а то, что установщик умеет читать: ветка `if *installDB != "" { installer.Install(…) }` в `cmd/mcp-1c/main.go` тега `v1.23.0` стоит ВЫШЕ `cfg := config.Load()`, и ни в `main.go`, ни в `installer/installer.go` нет ни одного `os.Getenv` — переменная окружения до установки просто не доходит (замер 30.10, по исходнику тега; найдено ревью задачи 7, Critical 1: установка расширения на базе с непустым паролем молча уезжала с пустым).
@@ -2382,11 +2387,18 @@ mod tests {
         assert_eq!(ib_switch("srv-1c\\buh_prod"), "/Ssrv-1c\\buh_prod");
     }
 
+    /// Поручение владельца 30.10: `mcp-1c` лежит в комплекте своей папкой, как
+    /// `vrunner/`, `git/` и `httpd/`, а не россыпью в корне. Путь строится
+    /// только здесь — тест закрепляет и имя бинаря, и папку, в которой оно
+    /// лежит, одним местом на оба моста (`ops_host::install_command` и
+    /// `bridge::mcp_command` зовут одну и ту же функцию).
     #[test]
     fn the_kit_names_the_binary_for_this_platform() {
         let k = Kit::at("X");
-        let name = mcp_exe(&k).file_name().unwrap().to_string_lossy().to_string();
+        let exe = mcp_exe(&k);
+        let name = exe.file_name().unwrap().to_string_lossy().to_string();
         assert!(name.starts_with("mcp-1c-"), "{name}");
+        assert_eq!(exe.parent().unwrap().file_name().unwrap(), "mcp-1c", "{}", exe.display());
     }
 
     #[test]

@@ -453,34 +453,6 @@ pub fn install_command(cfg: &Cfg, kit: &Kit) -> tokio::process::Command {
     c
 }
 
-/// Переменная окружения ЭТОГО процесса на время одного дочернего вызова:
-/// ставится перед спавном (дочерний наследует окружение родителя целиком) и
-/// снимается при выходе из блока, восстановив прежнее значение, если оно
-/// было. Нужна там, где секрет обязан дойти до ребёнка переменной, а
-/// запускающая его функция (`docker::exec`) берёт программу и аргументы
-/// строками и своего места для окружения вызова не оставляет.
-struct TempEnv {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-
-impl TempEnv {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var_os(key);
-        std::env::set_var(key, value);
-        TempEnv { key, prev }
-    }
-}
-
-impl Drop for TempEnv {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 /// Переменная окружения, которая целиком перекрывает поиск платформы: указывает
 /// каталог, где лежит исполняемый файл (а не каталог версии).
 const ONEC_PLATFORM: &str = "ONEC_PLATFORM";
@@ -1672,27 +1644,28 @@ impl Op<Ctx> for Extension {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         let h = &ctx.cfg.host;
-        // Программа и аргументы — из `install_command` (без пароля в них);
-        // экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на
-        // Linux без `DISPLAY` он не стартует. `docker::exec` берёт программу
-        // и аргументы строками, а не готовый `Command` — общая функция на
-        // весь комплект, менять её сигнатуру ради одного вызова не стоит.
+        // Программа, аргументы и переменная окружения — все из
+        // `install_command`: `.env("MCP_1C_PASSWORD", …)`, который она ставит
+        // на свой `Command`, отсюда и читается, а не набирается второй раз
+        // отдельной строкой — иначе кто-то однажды уберёт переменную у
+        // `install_command`, глядя на неё как на источник правды, а
+        // установка молча продолжит ходить без пароля, потому что
+        // доставляла его не она. Экран Конфигуратору даём здесь же (см.
+        // `display_prefix`): иначе на Linux без `DISPLAY` он не стартует.
+        // `docker::exec_env` берёт программу, аргументы и окружение
+        // строками — общая функция на весь комплект, своей сигнатуры эта
+        // правка у неё не меняет (только у приватной `exec_inner`).
         let install = install_command(&ctx.cfg, &ctx.kit);
         let exe = install.as_std().get_program().to_string_lossy().into_owned();
         let install_args: Vec<String> = install.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let install_env: Vec<(String, String)> = install
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect();
         let (prog, args) = display_argv(&exe, &install_args.iter().map(String::as_str).collect::<Vec<_>>(), display_wrapper().as_deref());
-        // Пароль доезжает до `mcp-1c` переменной, а `docker::exec` спавнит
-        // дочерний процесс с окружением ЭТОГО процесса (как и всегда — она
-        // ничего не изолирует): выставляем переменную на время вызова и
-        // снимаем её сразу же, восстановив, что было, — страж `TempEnv`
-        // переживает и досрочный выход через `?`.
-        //
-        // ponytail: переменная процесса — общее состояние на всю программу,
-        // не на один вызов; окно устанавливает расширение по одному шагу за
-        // раз, так что гонки здесь нет. Понадобится параллельная установка —
-        // следующий шаг: научить `docker::exec` принимать окружение вызова.
-        let _env = TempEnv::set("MCP_1C_PASSWORD", &h.db_password);
-        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let env: Vec<(&str, &str)> = install_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let o = docker::exec_env(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>(), &env)?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
         anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
@@ -1753,10 +1726,6 @@ pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
 mod tests {
     use super::*;
 
-    fn filled() -> Cfg {
-        crate::cfg::filled_for_test()
-    }
-
     /// Комплект для теста `install_command`: функция только строит `Command`
     /// (`Command::new` на диск не ходит), каталог существовать не обязан.
     fn kit_for_test() -> Kit {
@@ -1765,12 +1734,21 @@ mod tests {
 
     #[test]
     fn the_install_command_hides_the_password_too() {
-        let mut cfg = filled();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.db_password = "секрет-базы".into();
         let c = install_command(&cfg, &kit_for_test());
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(!args.iter().any(|a| a.contains("секрет-базы")), "{args:?}");
-        assert!(!args.iter().any(|a| a == "--password"), "{args:?}");
+        // Ключ реальный у этой команды — `--db-password`, не `--password`
+        // (у того старая проверка, списанная с мэйна, всегда была бы верна
+        // и ничего не доказывала бы).
+        assert!(!args.iter().any(|a| a == "--db-password"), "{args:?}");
+        // Пароль всё равно обязан дойти до ребёнка — переменной: закрепляет
+        // Important 2 ревью, чтобы однажды не оказалось, что `.env(...)`
+        // здесь есть, а установка его никуда не передаёт.
+        let envs: Vec<(String, String)> =
+            c.as_std().get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into(), v?.to_string_lossy().into()))).collect();
+        assert!(envs.contains(&("MCP_1C_PASSWORD".into(), "секрет-базы".into())), "{envs:?}");
     }
 
     #[test]

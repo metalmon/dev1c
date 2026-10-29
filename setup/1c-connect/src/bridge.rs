@@ -24,15 +24,15 @@ where
 pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::process::Command {
     let exe = kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" });
     let mut c = tokio::process::Command::new(exe);
-    // Пароль — переменной окружения, не ключом `--password`: командная
-    // строка процесса на Windows видна любому процессу пользователя
-    // (`tasklist`, `wmic`, диспетчер задач), а ключ в ней — пароль базы на
-    // весь срок жизни процесса. `--base`/`--user`/`--dump`/`--quiet`
-    // остаются ключами: замер задачи 0 (`task-0-report.md`) показал, что
-    // `mcp-1c` читает и `MCP_1C_PASSWORD`, и ключ `--password`, но
-    // переменная у него ПЕРЕБИВАЕТ ключ (`internal/config/config.go`) —
-    // ровно так же она перебила бы и эти ключи, так что переписывать их в
-    // переменные не даёт выигрыша в безопасности, только лишнюю правку.
+    // Пароль — переменной окружения, а ключ `--password` убран физически, не
+    // просто продублирован переменной рядом: командная строка процесса на
+    // Windows видна любому процессу пользователя (`tasklist`, `wmic`,
+    // диспетчер задач), а замер задачи 0 (`task-0-report.md`) показал, что у
+    // `mcp-1c` КЛЮЧ ПЕРЕБИВАЕТ переменную (`internal/config/config.go`,
+    // `cfg := config.Load()` и только потом перезапись из флага) — оставь
+    // `--password` рядом с переменной, и он победил бы её, обнулив всю
+    // правку. `--base`/`--user`/`--dump`/`--quiet` остаются ключами по другой
+    // причине — они не секреты, и переписывать их в переменные нет смысла.
     c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--quiet"]);
     c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
@@ -1060,10 +1060,6 @@ mod tests {
     use crate::cfg::Cfg;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
-    fn filled() -> Cfg {
-        crate::cfg::filled_for_test()
-    }
-
     /// Комплект для теста `mcp_command`: ни `Command::new`, ни `.args`/`.env`
     /// не трогают диск — каталог может не существовать вовсе.
     fn kit_for_test() -> common::kit::Kit {
@@ -1072,7 +1068,7 @@ mod tests {
 
     #[test]
     fn the_db_password_never_appears_in_the_command_line() {
-        let mut cfg = filled();
+        let mut cfg = crate::cfg::filled_for_test();
         cfg.host.db_password = "секрет-базы".into();
         let c = mcp_command(&cfg, &kit_for_test());
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();

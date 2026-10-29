@@ -1354,6 +1354,6 @@ ssh -p 3393 -N -R 7771:localhost:7771 -R 7791:localhost:80 dev@<host>
 # the base's HTTP service on this machine
 curl -u mcp:mcp http://localhost:8081/InfoBase/hs/mcp-1c/version
 
-# extension into a base (Windows, drives the configurator)
-mcp-1c.exe --install "C:\Users\bucher\Documents\InfoBase" --db-user mcp --db-password mcp
+# extension into a base (Windows, drives the configurator; password by env, not argv — task 5)
+MCP_1C_PASSWORD=mcp mcp-1c.exe --install "C:\Users\bucher\Documents\InfoBase" --db-user mcp
 ```

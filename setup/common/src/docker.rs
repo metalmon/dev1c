@@ -37,13 +37,23 @@ pub fn quiet(mut cmd: Command) -> Command {
 
 /// Запустить произвольную программу и собрать её вывод (stdout и stderr вместе).
 pub fn exec<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
-    exec_inner(ctx, program, args, false)
+    exec_inner(ctx, program, args, &[], false)
+}
+
+/// Как `exec`, но с довеском переменных окружения дочернему процессу — тем,
+/// что секрету нельзя ехать аргументом (командная строка процесса на Windows
+/// видна любому процессу пользователя), а брать его из окружения ЭТОГО
+/// процесса, подменяя своё на время вызова, — путь к гонке между потоками
+/// этой же программы (другой спавн тем же именем переменной попал бы в
+/// процесс неправильным значением).
+pub fn exec_env<X: Runner>(ctx: &X, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Out> {
+    exec_inner(ctx, program, args, env, false)
 }
 
 /// Спросить машину о состоянии. Выполняется ВСЕГДА, в том числе в режиме
 /// показа: иначе `--dry-run` докладывал бы, что ничего не установлено.
 pub fn probe<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
-    exec_inner(ctx, program, args, true)
+    exec_inner(ctx, program, args, &[], true)
 }
 
 /// Командная строка для журнала и плана: значения ключей и паролей скрыты.
@@ -164,7 +174,7 @@ pub fn redact(args: &[&str]) -> String {
     out.join(" ")
 }
 
-fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool) -> Result<Out> {
+fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], env: &[(&str, &str)], read_only: bool) -> Result<Out> {
     let shown = format!("{program} {}", redact(args));
     // Вопрос машине — не изменение: в журнале он остаётся строкой вывода
     // (`# <команда>` и ответ), а событие Command несёт только изменяющие
@@ -176,7 +186,14 @@ fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], read_only: bool)
     if ctx.dry_run() && !read_only {
         return Ok(Out { code: 0, text: String::new() });
     }
-    let output = quiet(Command::new(program)).args(args).output().with_context(|| format!("не удалось запустить {program}"))?;
+    // `env` — довесок к окружению, которое дочерний и так наследует целиком;
+    // имена переменных в журнал не идут (как и раньше у обычного `exec`,
+    // значения которого программа передаёт аргументом, а не окружением).
+    let output = quiet(Command::new(program))
+        .args(args)
+        .envs(env.iter().copied())
+        .output()
+        .with_context(|| format!("не удалось запустить {program}"))?;
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     ctx.emit(Event::Output { command: shown, text: redact_text(&text) });
@@ -240,6 +257,53 @@ pub fn sh_in_volume_ro<X: Runner>(ctx: &X, image: &str, volume: &str, mount: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::Kit;
+    use crate::Sink;
+    use std::sync::Arc;
+
+    struct T {
+        sink: Sink,
+    }
+    impl Runner for T {
+        fn dry_run(&self) -> bool {
+            false
+        }
+        fn sink(&self) -> &Sink {
+            &self.sink
+        }
+        fn kit(&self) -> &Kit {
+            unimplemented!("не нужен exec_env")
+        }
+    }
+
+    /// Ребёнок, которым `exec_env_hands_the_pair_to_the_real_child` проверяет
+    /// доставку: не обычный тест, а печатает одну переменную окружения и
+    /// выходит — портативный «чужой процесс» без вынесенного бинаря, тем же
+    /// приёмом, что `bridge.rs` (`__echo_child`).
+    #[test]
+    fn __echo_env_child() {
+        if let Ok(v) = std::env::var("DOCKER_EXEC_ENV_TEST") {
+            println!("{v}");
+        }
+    }
+
+    #[test]
+    fn exec_env_hands_the_pair_to_the_real_child() {
+        // Довод Important 1 ревью: секрет обязан дойти до РЕБЁНКА переменной
+        // окружения, а не до текущего процесса — здесь это проверяется не
+        // чтением своего же `std::env`, а тем, что сказал настоящий дочерний
+        // процесс на стандартный вывод.
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let ctx = T { sink: Arc::new(|_: Event| {}) };
+        let o = exec_env(
+            &ctx,
+            &exe,
+            &["--exact", "docker::tests::__echo_env_child", "--nocapture", "--quiet"],
+            &[("DOCKER_EXEC_ENV_TEST", "секрет-базы")],
+        )
+        .unwrap();
+        assert!(o.text.contains("секрет-базы"), "{}", o.text);
+    }
 
     #[test]
     fn git_and_platform_secrets_are_blotted_out() {

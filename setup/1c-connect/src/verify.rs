@@ -859,6 +859,31 @@ pub fn editor_mcp_fact(found: Option<&editors::Found>) -> Check {
     }
 }
 
+/// Факт для машины человека (решение владельца 30.10, дополнение к задаче 7): там настраиваются оба редактора, и факт, глядящий только на Zed, врёт в обе стороны — скажет «всё хорошо», когда к нам не придёт ни один агент из pi. Правило владельца: зелёный, если настроен хотя бы один УСТАНОВЛЕННЫЙ редактор (разработчик вправе пользоваться одним Zed, и жёлтая точка из-за ненастроенного pi, которым он не пользуется, была бы ложной тревогой); жёлтый — только когда ни один установленный редактор не настроен (агент точно не дойдёт до базы ни из одного). Ненастроенный редактор при зелёном называется в подробности факта, а не превращает его в провал. Редактора, которого на машине нет (`Found::Missing`), факт не поминает вовсе — настраивать там нечего, и ни «зелёным», ни «жёлтым» он не считается.
+///
+/// Контейнерного режима эта функция не касается (там один редактор — Zed, и там же живёт `editor_mcp_fact`/`editor_mcp: EditorMcpSeen`; контейнерная механика правки по SSH на рассмотрении у владельца отдельно и может целиком переехать — трогать её здесь не нужно).
+fn local_editor_mcp_fact(zed: &editors::Found, pi: &editors::Found) -> Check {
+    let installed: Vec<(&str, &editors::Found)> =
+        [("Zed", zed), ("pi", pi)].into_iter().filter(|(_, f)| !matches!(f, editors::Found::Missing)).collect();
+    if installed.is_empty() {
+        return Check::note(EDITOR_MCP, "ни Zed, ни pi на этой машине не найдены — настраивать пока нечего");
+    }
+    let configured: Vec<&str> = installed.iter().filter(|(_, f)| matches!(f, editors::Found::Ours)).map(|(name, _)| *name).collect();
+    let unconfigured: Vec<&str> = installed.iter().filter(|(_, f)| !matches!(f, editors::Found::Ours)).map(|(name, _)| *name).collect();
+    if configured.is_empty() {
+        return Check::fail(
+            EDITOR_MCP,
+            format!("не настроен ни один установленный редактор ({})", unconfigured.join(", ")),
+            "раздел «Редакторы» — нажмите «Настроить»",
+        );
+    }
+    if unconfigured.is_empty() {
+        Check::pass(EDITOR_MCP, format!("настроен: {}", configured.join(", ")))
+    } else {
+        Check::pass(EDITOR_MCP, format!("настроен: {} (не настроен: {})", configured.join(", "), unconfigured.join(", ")))
+    }
+}
+
 /// Срок всего набора — один, на окно и на командную строку одинаково (спека:
 /// «набор один, срок один»). Раньше у готовности был отдельный короткий срок
 /// (бюджет 20 с, сеть 5 с) и терпеливый второй заход без срока вовсе, а
@@ -1032,10 +1057,18 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, editor_mcp: Option<&editors:
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
-    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у редактора нет (решение владельца 29.10). В контейнере — то, что уже увидело чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH быть не должно); на машине человека читаем диск здесь же, тем же `editors::look`, что раздел «Редакторы».
+    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у редактора нет (решение владельца 29.10). В контейнере — то, что уже увидело чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH быть не должно); на машине человека читаем диск здесь же, тем же `editors::look`, что раздел «Редакторы», и считаем Zed и pi оба (решение владельца 30.10 — факт, глядящий только на Zed, врёт в обе стороны, когда человек держит оба редактора).
     v.push(if local {
-        let found = std::env::current_exe().ok().map(|exe| editors::look(editors::zed_path().as_deref(), &exe, editors::zed_present()));
-        editor_mcp_fact(found.as_ref())
+        match std::env::current_exe().ok() {
+            Some(exe) => {
+                let zed = editors::look(editors::zed_path().as_deref(), &exe, editors::zed_present());
+                let pi = editors::look(editors::pi_path().as_deref(), &exe, editors::pi_present());
+                local_editor_mcp_fact(&zed, &pi)
+            }
+            // Свой путь неизвестен — ни один `Found` не посчитать;
+            // то же «не смог проверить», что в контейнере на `None`.
+            None => editor_mcp_fact(None),
+        }
     } else {
         // Два разных незнания, и путать их нельзя (Critical 1 ревью): туннеля нет вовсе (командная строка между вызовами, окно до первого подключения) — читать было НЕКЕМ, это сведение, а не провал, иначе `1c-connect install`/`check` отказывали бы всегда. Туннель поднят, а `editor_mcp` всё равно `None` — читать пытались и не вышло, и это настоящий провал-предупреждение (горячий факт: красит точку, замок не держит).
         match tunnel_state {
@@ -2230,6 +2263,51 @@ mod tests {
         let checks = cheap(&ctx, Some("подключён 3 мин"), None, PortUse::WeDont, 0);
         let c = checks.iter().find(|c| c.what == EDITOR_MCP).expect("факт обязан быть в наборе");
         assert!(!c.ok, "живой туннель и пустой `editor_mcp` — настоящий провал: {c:?}");
+    }
+
+    /// Решение владельца 30.10: оба установлены, оба настроены — зелёный, и ни один не назван в подробности отдельно (называть настроенное незачем).
+    #[test]
+    fn local_editor_mcp_fact_is_green_when_both_installed_editors_are_configured() {
+        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Ours);
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
+    }
+
+    /// Оба установлены, настроен один — зелёный (разработчик вправе пользоваться одним редактором), а второй, ненастроенный, назван в подробности — не провал, но и не тишина о нём.
+    #[test]
+    fn local_editor_mcp_fact_is_green_with_one_configured_and_names_the_other() {
+        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Absent);
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "pi обязан быть назван: {c:?}");
+
+        // Та же симметрия в обратную сторону — настроен pi, не настроен Zed.
+        let c = local_editor_mcp_fact(&editors::Found::Absent, &editors::Found::Ours);
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
+    }
+
+    /// Оба установлены, не настроен ни один — жёлтый с причиной: агенту точно не дойти ни из одного редактора.
+    #[test]
+    fn local_editor_mcp_fact_is_yellow_when_no_installed_editor_is_configured() {
+        let c = local_editor_mcp_fact(&editors::Found::Absent, &editors::Found::Foreign(vec!["1c".to_string()]));
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
+        assert!(!c.hint.is_empty(), "{c:?}");
+    }
+
+    /// Установлен один (другого на машине нет вовсе) и настроен — зелёный, второй не поминается: настраивать там нечего.
+    #[test]
+    fn local_editor_mcp_fact_is_green_with_only_one_editor_installed() {
+        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Missing);
+        assert!(c.ok && !c.info, "{c:?}");
+        assert!(c.detail.contains("Zed") && !c.detail.contains("pi"), "pi не установлен — молчим про него: {c:?}");
+    }
+
+    /// Не установлено ни одного редактора — факт не говорит о провале: нечего настраивать, и красить точку жёлтым означало бы требовать того, чего на этой машине не бывает.
+    #[test]
+    fn local_editor_mcp_fact_says_nothing_about_failure_when_nothing_is_installed() {
+        let c = local_editor_mcp_fact(&editors::Found::Missing, &editors::Found::Missing);
+        assert!(c.ok, "{c:?}");
     }
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с WORKSTATION_PORTS»).

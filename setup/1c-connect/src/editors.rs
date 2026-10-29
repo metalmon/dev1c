@@ -578,6 +578,7 @@ pub fn pi_present() -> bool {
 /// именем вообще есть на этой машине».
 fn on_path(name: &str) -> bool {
     let Some(path_var) = std::env::var_os("PATH") else { return false };
+    // ponytail: расширения из `PATHEXT` не читаются — перебор не покроет `.ps1`/`.com`/`.py`/`.vbs`, только то, что здесь перечислено вручную. Признано некритичным в ре-ревью задачи 7: каталог настроек (`zed_present`) — первый, более надёжный признак, а `.cmd` уже закрывает установку pi через npm. Поднять до чтения `PATHEXT`, если найдётся редактор, ставящийся именно одним из непокрытых расширений.
     std::env::split_paths(&path_var).any(|dir| ["", ".exe", ".cmd", ".bat"].iter().any(|ext| dir.join(format!("{name}{ext}")).is_file()))
 }
 

@@ -31,6 +31,12 @@ gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image"
 
 [dependencies]
 common = { path = "../common" }
+# Уже в Cargo.lock транзитивно через russh (pkcs5←pkcs8←…), но без фичи
+# `getrandom` — замер задачи 0: объявление прямой зависимости с дефолтными
+# фичами промотирует её в прямую и включает настоящий источник случайности
+# ОС (`aead`/`crypto-common`/`getrandom` 0.4) для nonce и ключа, а новой
+# библиотеки в сборку не добавляет.
+aes-gcm = "0.11"
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
@@ -88,7 +94,10 @@ raw-window-handle = { version = "0.6", optional = true }
 # каждом такте. Крейт уже в `Cargo.lock` — скачивать нечего. Фича одна,
 # «system»: нужны процессы, не диски и не сеть.
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
-windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry"] }
+# Win32_Security_Cryptography — ради CryptProtectData/CryptUnprotectData
+# (подложка DPAPI в secrets.rs): шифрование пароля областью пользователя, без
+# ключа на диске.
+windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"

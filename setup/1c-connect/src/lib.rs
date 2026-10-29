@@ -23,6 +23,7 @@ pub mod ops_host;
 pub mod platform;
 pub mod project;
 pub mod publication;
+pub mod secrets;
 pub mod session;
 pub mod single_instance;
 pub mod tunnel;

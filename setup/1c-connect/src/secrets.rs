@@ -191,7 +191,7 @@ mod file_backend {
     };
     use common::fsperm;
     use std::path::{Path, PathBuf};
-    use zeroize::Zeroizing;
+    use zeroize::{Zeroize, Zeroizing};
 
     /// Nonce AES-GCM — 12 байт; константа, а не `Nonce::<_>::default().len()`,
     /// чтобы длина была видна на месте разбора шифртекста без похода в
@@ -238,10 +238,22 @@ mod file_backend {
     /// пароль человеку из-за одного `chmod` был бы хуже.
     fn read_key_bytes(path: &Path) -> Result<Zeroizing<[u8; 32]>, KeyReadError> {
         match std::fs::read(path) {
-            Ok(bytes) => {
-                let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| KeyReadError::BadLength(bytes.len()))?;
-                let _ = fsperm::tighten_file(path);
-                Ok(Zeroizing::new(key))
+            // `mut bytes`: это сырая копия ключа, и она обязана быть затёрта
+            // перед возвратом в обоих исходах (успех и `BadLength`) — иначе
+            // обещание «ключ везде как Zeroizing» не выполняется там, где он
+            // ненадолго лежит в обычном `Vec<u8>` (ревью задачи 1, круг 3,
+            // пункт 2).
+            Ok(mut bytes) => {
+                let len = bytes.len();
+                let key: Option<[u8; 32]> = bytes.as_slice().try_into().ok();
+                bytes.zeroize();
+                match key {
+                    Some(key) => {
+                        let _ = fsperm::tighten_file(path);
+                        Ok(Zeroizing::new(key))
+                    }
+                    None => Err(KeyReadError::BadLength(len)),
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(KeyReadError::NotFound),
             Err(e) => Err(KeyReadError::Io(e)),
@@ -266,7 +278,7 @@ mod file_backend {
     /// умолчанию).
     fn create_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, CreateKeyError> {
         use std::io::Write;
-        let generated: Key<Aes256Gcm> =
+        let mut generated: Key<Aes256Gcm> =
             Key::<Aes256Gcm>::try_generate().map_err(|e| CreateKeyError::Failed(format!("не удалось получить случайный ключ: {e}")))?;
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -285,6 +297,10 @@ mod file_backend {
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(generated.as_slice());
+        // `generated` — обычный `GenericArray`, не `Zeroizing`: без этого он
+        // остался бы незатёртой второй копией ключа до конца функции (ревью
+        // задачи 1, круг 3, пункт 2).
+        generated.as_mut_slice().zeroize();
         Ok(Zeroizing::new(key))
     }
 
@@ -295,15 +311,19 @@ mod file_backend {
 
     /// Ключ для шифрования: читаем существующий или заводим новый. Каталог —
     /// через `ensure_private_dir` (0700 на создании вместо umask обычного
-    /// `create_dir_all`), но без принудительного поджатия уже существующего
-    /// каталога: у теста на каталог с суженными человеком правами (симуляция
-    /// внешнего отказа) это отняло бы смысл — мы сами сняли бы ограничение,
-    /// которое должны были уважать (см. комментарий у
-    /// `common::fsperm::ensure_private_dir`). Отказывает ровно здесь, а не в
-    /// конструкторе `Store::file` — узнать об этом раньше первого реального
-    /// шифрования негде и не нужно.
+    /// `create_dir_all`) и затем безусловно `tighten_dir`, как делает
+    /// `publication::ensure_pub_dir`: на стенде три рабочих места делят один
+    /// диск, и унаследованные права группы/остальных на этом каталоге — путь,
+    /// которым соседний пользователь мог прочитать или подменить
+    /// `secret.key` (ревью задачи 1, круг 3, пункт 1). `tighten_dir` при этом
+    /// только снимает биты группы/остальных и не поднимает владельца — тест
+    /// на каталог с суженными человеком правами (симуляция внешнего отказа)
+    /// остаётся в силе: см. комментарий у `common::fsperm::tighten_dir`.
+    /// Отказывает ровно здесь, а не в конструкторе `Store::file` — узнать об
+    /// этом раньше первого реального шифрования негде и не нужно.
     fn load_or_create_key(dir: &Path) -> Result<Zeroizing<[u8; 32]>, String> {
         fsperm::ensure_private_dir(dir)?;
+        fsperm::tighten_dir(dir)?;
         let path = key_path(dir);
         match create_key_file(&path) {
             Ok(key) => Ok(key),

@@ -133,20 +133,14 @@ pub fn write_vrd(pub_dir: &Path, text: &str) -> Result<(), String> {
     common::fsperm::write_owner_only(&pub_dir.join("default.vrd"), text)
 }
 
-#[cfg(unix)]
+// `tighten_dir` — без cfg: на Unix она действует, на прочих платформах не
+// делает ничего (там каталог уже под ACL пользователя). `mode()` при
+// создании действует только на вновь созданные каталоги; если каталог
+// остался с прошлого запуска (или с версии до этого фикса) с более широкими
+// правами — поджимаем явно, а не оставляем как есть.
 fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
     common::fsperm::ensure_private_dir(dir)?;
-    // `mode()` при создании действует только на вновь созданные каталоги;
-    // если каталог остался с прошлого запуска (или с версии до этого фикса) с
-    // более широкими правами — поджимаем явно, а не оставляем как есть. У
-    // ключа шифрования (`secrets.rs`) своя причина не делать того же —
-    // см. комментарий у `common::fsperm::ensure_private_dir`.
     common::fsperm::tighten_dir(dir)
-}
-
-#[cfg(not(unix))]
-fn ensure_pub_dir(dir: &Path) -> Result<(), String> {
-    common::fsperm::ensure_private_dir(dir)
 }
 
 /// Пути одной публикации: свой httpd (Windows) или системный apache2

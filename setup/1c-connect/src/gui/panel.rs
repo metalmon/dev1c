@@ -2579,4 +2579,15 @@ mod tests {
         assert!(undecryptable_line(&[]).is_none());
         assert!(undecryptable_line(&["db_password".into()]).is_some());
     }
+
+    /// Minor ревью задачи 4: неизвестное имя поля (такого `Cfg::undecryptable`
+    /// не заводит — задача 2 кладёт туда только `password`/`db_password`) не
+    /// должно остаться без слов — молчать о поле хуже, чем назвать его не
+    /// вполне точным словом. Решение закреплено тестом, а не только
+    /// комментарием у ветки `_`.
+    #[test]
+    fn an_unknown_field_name_falls_back_to_the_workstation_password() {
+        let l = undecryptable_line(&["unknown".to_string()]).unwrap();
+        assert!(l.text.contains("рабочего места"), "{}", l.text);
+    }
 }

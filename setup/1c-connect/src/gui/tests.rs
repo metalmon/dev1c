@@ -48,6 +48,29 @@ fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
     assert_eq!(warn_count(&ui), 2, "новая беда после починки — новая строка");
 }
 
+/// Minor ревью задачи 4: список меняется не только «пусто ↔ не пусто» — ко
+/// второму полю может добавиться беда, когда первое уже не раз было
+/// показано. Сравнение в `adopt_cfg` идёт по всему списку (`Vec<String>`
+/// целиком через `!=`), и уже поэтому верно, но следующая правка могла бы
+/// незаметно сузить его до «список был/не был пуст» — этот тест сторожит
+/// именно переход «одно поле → два поля».
+#[test]
+fn a_second_field_joining_the_list_is_noted_again() {
+    let mut ui = Ui::for_test();
+    let warn_count =
+        |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && (l.text.contains("рабочего места") || l.text.contains("базы"))).count();
+
+    let mut one = ui.cfg.clone();
+    one.undecryptable = vec!["password".to_string()];
+    adopt_cfg(&mut ui, one);
+    assert_eq!(warn_count(&ui), 1, "одно поле — одна строка");
+
+    let mut both = ui.cfg.clone();
+    both.undecryptable = vec!["password".to_string(), "db_password".to_string()];
+    adopt_cfg(&mut ui, both);
+    assert_eq!(warn_count(&ui), 2, "список стал другим — новая строка, хоть первое поле и было уже сказано");
+}
+
 /// Итог прошлой операции не держит подвал вечно: пришёл новый набор —
 /// подвал говорит о состоянии, а «Готово за 19 с» остаётся в журнале.
 /// Прежде этот слот не снимался никем, и в покое человек читал про

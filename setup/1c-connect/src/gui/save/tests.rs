@@ -429,3 +429,64 @@ fn a_tray_key_write_does_not_touch_an_unreadable_password() {
     let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(after.lines().any(|l| l == password_line), "шифртекст пароля должен остаться дословно:\n{after}");
 }
+
+/// Блокер ревью задачи 4: `save_host` способна была записать пустой пароль
+/// поверх нерасшифрованного шифртекста. Сценарий тот же, ради которого
+/// писана вся задача 4: файл переехал на другую машину, `load_unchecked`
+/// отдала пустое поле и список `undecryptable`, окно сказало об этом
+/// словами. Человек правит что-то другое (здесь — рабочее место) и жмёт
+/// «Сохранить»; форма отдаёт пустой пароль, и без защиты обычная запись
+/// зашифровала бы эту пустую строку, уничтожив шифртекст, который ещё
+/// можно было открыть под прежней учёткой, — тот самый исход хуже открытого
+/// текста, против которого писана задача 4 (замысел, «Анти-цели»).
+#[test]
+fn an_unreadable_password_survives_a_save_with_an_empty_field() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut seeded = ui.cfg.host.clone();
+    seeded.password = "секрет с другой машины".into();
+    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
+    let password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
+
+    // «Чужая машина»: поле — пустое, имя — в списке, в точности как после
+    // настоящего `load_unchecked` на непрочитанном шифртексте (без похода за
+    // DPAPI в тесте — та же договорённость, что у соседнего теста трея выше).
+    ui.cfg.host.password = String::new();
+    ui.cfg.undecryptable = vec!["password".to_string()];
+
+    let mut host = ui.cfg.host.clone();
+    host.workstation = "dev2".into();
+    save_host(&mut ui, host).unwrap();
+
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(after.lines().any(|l| l == password_line), "шифртекст пароля должен остаться дословно:\n{after}");
+    assert!(ui.log.iter().any(|l| l.text.contains("оставлен прежним")), "журнал должен сказать, что пароль оставлен прежним: {:?}", ui.log);
+}
+
+/// Другая половина того же блокера: заполненное поле заменяет шифртекст как
+/// раньше. Имя поля остаётся в `undecryptable` до следующего перечитывания
+/// файла (окно о вводе ещё не знает), но форма отдала непустую строку —
+/// значит человек ввёл новый пароль, и стирать есть что заменить.
+#[test]
+fn a_freshly_typed_password_still_overwrites_an_unreadable_one() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut seeded = ui.cfg.host.clone();
+    seeded.password = "секрет с другой машины".into();
+    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
+    let old_password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
+
+    ui.cfg.host.password = String::new();
+    ui.cfg.undecryptable = vec!["password".to_string()];
+
+    let mut host = ui.cfg.host.clone();
+    host.password = "новый пароль рабочего места".into();
+    save_host(&mut ui, host).unwrap();
+
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(!after.lines().any(|l| l == old_password_line), "новый пароль введён — старый шифртекст не обязан остаться:\n{after}");
+    assert!(after.contains("password = \"enc1:"), "новое значение тоже зашифровано:\n{after}");
+    assert!(!ui.log.iter().any(|l| l.text.contains("оставлен прежним")), "пароль заменили, а не оставили: {:?}", ui.log);
+}

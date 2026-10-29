@@ -173,6 +173,67 @@ fn store_for(kit: &Kit) -> Result<secrets::Store, String> {
     secrets::Store::system(kit.state())
 }
 
+/// Поля формы, пустые ровно там, где прежний пароль не расшифровался
+/// (`undecryptable`, из `ui.cfg` — список последнего `load_unchecked`,
+/// задача 2). Такое пустое поле не значит «сотрите» — его отдала пустым сама
+/// программа, человек его не трогал, — а значит «я не знаю, что сюда
+/// вписать». Непустое поле (новый пароль введён) по-прежнему заменяет всё,
+/// как раньше: проверка здесь только по тому, что форма отдала пустую
+/// строку для имени, которое и так в списке.
+fn fields_to_keep(host: &Host, undecryptable: &[String]) -> Vec<&'static str> {
+    let mut keep = Vec::new();
+    if host.password.is_empty() && undecryptable.iter().any(|f| f == "password") {
+        keep.push("password");
+    }
+    if host.db_password.is_empty() && undecryptable.iter().any(|f| f == "db_password") {
+        keep.push("db_password");
+    }
+    keep
+}
+
+/// Правая часть ключа `[host].<key>` в тексте toml, в том же экранировании,
+/// что даёт `Cfg::render` (`format!("{:?}", ..)`) — не значение пароля, а
+/// сам шифртекст для чужой машины: эта машина его всё равно не откроет, и
+/// превращать его в строку и обратно через `secrets::Store` незачем и
+/// нельзя (`seal` на уже зашифрованном дал бы другой шифртекст тем же
+/// текстом — случайный nonce). `toml::Value`, а не свой разбор строк:
+/// `common::toml_render` только пишет готовую строку, читать ею нечем, а
+/// заводить это в `common` ради одного места не стоит.
+fn raw_literal(text: &str, key: &str) -> Option<String> {
+    let doc: toml::Value = toml::from_str(text).ok()?;
+    let s = doc.get("host")?.get(key)?.as_str()?;
+    Some(format!("{s:?}"))
+}
+
+/// Имя сохранённого поля словами человека — те же два слова, что у
+/// `panel::undecryptable_line`, но своя маленькая копия: оттуда не достать,
+/// имя там приватное, а тащить видимость через модуль ради двух строк
+/// незачем.
+fn field_label(field: &str) -> &'static str {
+    if field == "db_password" {
+        "Пароль пользователя базы"
+    } else {
+        "Пароль рабочего места"
+    }
+}
+
+/// Строка журнала про то, что «Сохранить» не тронула пароль, хоть поле и
+/// пустое: подлежащее у каждого предложения — «пароль» (муж., ед. ч.) в
+/// обоих словах (`field_label`), поэтому склеенные подряд предложения не
+/// путают число и род, даже когда полей два. `None` — нечего сохранять
+/// нетронутым, обычная запись сделала всё как попросили.
+fn kept_password_line(keep: &[&'static str]) -> Option<Line> {
+    if keep.is_empty() {
+        return None;
+    }
+    let text = keep
+        .iter()
+        .map(|&f| format!("{} не расшифрован — он оставлен прежним; чтобы заменить, введите новый.", field_label(f)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(Line { kind: Kind::Warn, text })
+}
+
 /// Сохранить параметры сервера. Списка инструментов, каталога выгрузки,
 /// режима публикации (его пишет подменю трея), её порта и адреса Gitea среды
 /// в окне нет: берём их из текущих параметров, иначе пустые
@@ -181,6 +242,17 @@ fn store_for(kit: &Kit) -> Result<secrets::Store, String> {
 /// (`carried_dump`) и — за рабочим местом — порт публикации
 /// (`carried_http_port`). О каждом переезде — строка в журнал
 /// (`moved_lines`).
+///
+/// **Пароль, который сюда пришёл пустым, потому что не расшифровался
+/// (задача 4, ревью), не записывается пустым.** Сценарий ровно тот, ради
+/// которого писана задача 4: файл переехал на другую машину, окно сказало
+/// об этом словами, а человек правит что-то совсем другое (путь к базе,
+/// рабочее место) и жмёт «Сохранить» — без этой защиты форма отдала бы
+/// пустой пароль, обычная запись зашифровала бы пустую строку, и шифртекст,
+/// который ещё можно было открыть под прежней учёткой, исчез бы безвозвратно.
+/// `fields_to_keep` решает это ДО записи; обычная запись проходит как
+/// всегда (с пустым полем — у неё и так нет других сведений), а следом
+/// байт в байт возвращается прежняя строка (`raw_literal` + `toml_render::set`).
 pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let old_host = ui.cfg.host.clone();
     host.gitea = ui.cfg.host.gitea.clone();
@@ -194,10 +266,30 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
     // Переезды — не молчком, и все до одного: см. `moved_lines`.
     let moved = moved_lines(&old_host, &host);
-    let cfg = Cfg { host, ..Default::default() };
+    let keep = fields_to_keep(&host, &ui.cfg.undecryptable);
+    let path = ui.kit.state_path(cfg::FILE);
+    // Читаем диск ДО записи — после неё поле будет пустым, прежний
+    // шифртекст возьмём ровно отсюда.
+    let before = if keep.is_empty() { String::new() } else { std::fs::read_to_string(&path).unwrap_or_default() };
+    let mut cfg = Cfg { host, ..Default::default() };
+    // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
+    // осталось тем же непрочитанным шифртекстом, что и было, запись его не
+    // открыла — иначе показ окна решил бы, что беда прошла сама.
+    cfg.undecryptable = keep.iter().map(|s| s.to_string()).collect();
     cfg.validate().map_err(|e| format!("{e:#}"))?;
     let store = store_for(&ui.kit)?;
     cfg::write_checked(&ui.kit, &cfg, &store)?;
+    // Обычная запись уже легла и прошла свою проверку (`write_checked`) —
+    // той нас не обмануть: на этом шаге пустое поле было пустым и для
+    // записи, и для чтения обратно. Патч ниже правит только то, что эта
+    // запись сама оставила пустым.
+    for key in &keep {
+        if let Some(raw) = raw_literal(&before, key) {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let text = common::toml_render::set(&text, "[host]", key, &raw);
+            write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+        }
+    }
     let base_path = cfg.host.base_path.clone();
     // Дескриптор публикации (`publication::vrd`) несёт путь базы, логин и
     // пароль — переподнять его нужно при смене любого из трёх, не только
@@ -214,6 +306,9 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     ui.cfg = cfg;
     for text in moved {
         note_line(ui, Line { kind: Kind::Warn, text });
+    }
+    if let Some(line) = kept_password_line(&keep) {
+        note_line(ui, line);
     }
     // Публикация не должна молчать про старую базу: иначе агент отвечает из
     // прежней, пока кто-нибудь не перезапустит HTTP-сервис руками (находка

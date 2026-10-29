@@ -312,16 +312,18 @@ impl Tray {
     /// на этой машине (`agents_live_here`) и агент на машине вообще есть
     /// (`agent_available`): там, где агентов настраивает не наше меню (точка
     /// входа образа), и отсутствующего агента галочкой не включить. Состояние
-    /// файловых агентов читается с диска, CLI-агентов (Claude Code, Codex) —
-    /// их собственным CLI (`Setup::look`, решение владельца «Четыре
-    /// локальных агента») — цикл по реестру один, разница спрятана там.
+    /// у всех четырёх читается с диска — у файловых агентов свой файл
+    /// настроек, у CLI-агентов тот, в который пишет их CLI (`Setup::look`):
+    /// цикл по реестру один, разница спрятана там. Опрос самих CLI отсюда
+    /// убран — замер 30.10 дал 17–22 с замершего окна на один проход этого
+    /// цикла (подробности у `editors::look_cli_agent`).
     pub fn set_agents(&self, mode: &str) {
         let exe = std::env::current_exe().ok();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
             let found = match &exe {
                 Some(exe) => def.setup.look(exe),
-                None => editors::Found::Missing,
+                None => Ok(editors::Found::Missing),
             };
             item.set_checked(agent_checked(&found));
             item.set_enabled(agent_available(mode, present));
@@ -333,8 +335,14 @@ impl Tray {
 /// состояния (`Missing`/`Absent`/`Foreign`) из галочки неотличимы нарочно:
 /// решение владельца — молчание про детали в меню, причина отказа идёт
 /// отдельно, строкой в журнал, не текстом пункта.
-fn agent_checked(found: &editors::Found) -> bool {
-    matches!(found, editors::Found::Ours)
+///
+/// Нечитаемое состояние (`Err` — файл агента есть, а разобрать его не вышло)
+/// — тоже снятая галочка при доступном пункте: это не `Ours` и не `Absent`, и
+/// меню тут выбирает молчать, а не красить. Отказ человек увидит словами при
+/// щелчке — `setup_cli`/`teardown_cli` на нечитаемом состоянии CLI не зовут
+/// вовсе и называют причину.
+fn agent_checked(found: &Result<editors::Found, String>) -> bool {
+    matches!(found, Ok(editors::Found::Ours))
 }
 
 /// Живут ли локальные агенты на ЭТОЙ машине — отдельно от режима работы,
@@ -938,14 +946,17 @@ mod tests {
     }
 
     /// Галочка стоит только на `Found::Ours` — остальные состояния из неё не
-    /// различимы нарочно, причина отказа идёт отдельно, в журнал.
+    /// различимы нарочно, причина отказа идёт отдельно, в журнал. Нечитаемое
+    /// состояние (`Err`) — тоже снятая галочка: `Ours` на том, чего мы не
+    /// прочитали, был бы обещанием за чужой файл.
     #[test]
     fn the_checkbox_is_checked_only_on_ours() {
         use crate::editors::Found;
-        assert!(agent_checked(&Found::Ours));
-        assert!(!agent_checked(&Found::Missing));
-        assert!(!agent_checked(&Found::Absent));
-        assert!(!agent_checked(&Found::Foreign(vec!["1c".into()])));
+        assert!(agent_checked(&Ok(Found::Ours)));
+        assert!(!agent_checked(&Ok(Found::Missing)));
+        assert!(!agent_checked(&Ok(Found::Absent)));
+        assert!(!agent_checked(&Ok(Found::Foreign(vec!["1c".into()]))));
+        assert!(!agent_checked(&Err("не прочитать .claude.json".to_string())));
     }
 
     /// Пункт доступен только когда агенты живут на этой машине и только

@@ -924,21 +924,26 @@ pub fn editor_mcp_fact(found: Option<&editors::Found>) -> Check {
     }
 }
 
-/// Факт для машины человека (решение владельца 30.10, дополнение к задаче 7): там настраиваются оба редактора, и факт, глядящий только на Zed, врёт в обе стороны — скажет «всё хорошо», когда к нам не придёт ни один агент из pi. Правило владельца: зелёный, если настроен хотя бы один УСТАНОВЛЕННЫЙ редактор (разработчик вправе пользоваться одним Zed, и жёлтая точка из-за ненастроенного pi, которым он не пользуется, была бы ложной тревогой); жёлтый — только когда ни один установленный редактор не настроен (агент точно не дойдёт до базы ни из одного). Ненастроенный редактор при зелёном называется в подробности факта, а не превращает его в провал. Редактора, которого на машине нет (`Found::Missing`), факт не поминает вовсе — настраивать там нечего, и ни «зелёным», ни «жёлтым» он не считается.
+/// Факт для машины человека (решение владельца 30.10, дополнение к задаче 7): там настраиваются ВСЕ локальные агенты, и факт, глядящий только на Zed, врёт в обе стороны — скажет «всё хорошо», когда к нам не придёт ни один агент из pi. Правило владельца: зелёный, если настроен хотя бы один УСТАНОВЛЕННЫЙ агент (разработчик вправе пользоваться одним Zed, и жёлтая точка из-за ненастроенного pi, которым он не пользуется, была бы ложной тревогой); жёлтый — только когда ни один установленный агент не настроен (агент точно не дойдёт до базы ни из одного). Ненастроенный агент при зелёном называется в подробности факта, а не превращает его в провал. Агента, которого на машине нет (`Found::Missing`), факт не поминает вовсе — настраивать там нечего, и ни «зелёным», ни «жёлтым» он не считается.
+///
+/// `states` — весь реестр `editors::AGENTS`, посчитанный вызывающим, а не два имени руками: имена в тексте факта тоже из реестра. Иначе человек, настроивший только Claude Code, получал красное — факт знал двоих из четырёх (находка ревью 30.10).
+///
+/// Нечитаемое состояние (`Err` — файл агента есть, а разобрать его не вышло) идёт в «не настроен»: подтвердить, что агент настроен, мы не можем, а значит хвалить его нечем. Отдельной формулировки у него здесь нет нарочно — фраза «не проверено» в фактах набора запрещена (`the_set_never_says_it_did_not_check`), а причину человек увидит словами в журнале при щелчке галочки.
 ///
 /// Контейнерного режима эта функция не касается (там один редактор — Zed, и там же живёт `editor_mcp_fact`/`editor_mcp: EditorMcpSeen`; контейнерная механика правки по SSH на рассмотрении у владельца отдельно и может целиком переехать — трогать её здесь не нужно).
-fn local_editor_mcp_fact(zed: &editors::Found, pi: &editors::Found) -> Check {
-    let installed: Vec<(&str, &editors::Found)> =
-        [("Zed", zed), ("pi", pi)].into_iter().filter(|(_, f)| !matches!(f, editors::Found::Missing)).collect();
+fn local_editor_mcp_fact(states: &[(&str, Result<editors::Found, String>)]) -> Check {
+    let installed: Vec<(&str, &Result<editors::Found, String>)> =
+        states.iter().map(|(n, f)| (*n, f)).filter(|(_, f)| !matches!(f, Ok(editors::Found::Missing))).collect();
     if installed.is_empty() {
-        return Check::note(EDITOR_MCP, "ни Zed, ни pi на этой машине не найдены — настраивать пока нечего");
+        let all = states.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ");
+        return Check::note(EDITOR_MCP, format!("ни один локальный агент на этой машине не найден ({all}) — настраивать пока нечего"));
     }
-    let configured: Vec<&str> = installed.iter().filter(|(_, f)| matches!(f, editors::Found::Ours)).map(|(name, _)| *name).collect();
-    let unconfigured: Vec<&str> = installed.iter().filter(|(_, f)| !matches!(f, editors::Found::Ours)).map(|(name, _)| *name).collect();
+    let configured: Vec<&str> = installed.iter().filter(|(_, f)| matches!(f, Ok(editors::Found::Ours))).map(|(name, _)| *name).collect();
+    let unconfigured: Vec<&str> = installed.iter().filter(|(_, f)| !matches!(f, Ok(editors::Found::Ours))).map(|(name, _)| *name).collect();
     if configured.is_empty() {
         return Check::fail(
             EDITOR_MCP,
-            format!("не настроен ни один установленный редактор ({})", unconfigured.join(", ")),
+            format!("не настроен ни один установленный агент ({})", unconfigured.join(", ")),
             "значок в трее → «Локальные агенты» → поставьте галочку",
         );
     }
@@ -1125,13 +1130,13 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, _editor_mcp: Option<&editors
     } else {
         v.push(tunnel_fact(tunnel_state));
     }
-    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у редактора нет (решение владельца 29.10). В контейнере — то, что уже увидело чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH быть не должно); на машине человека читаем диск здесь же, тем же `editors::look`, что раздел «Редакторы», и считаем Zed и pi оба (решение владельца 30.10 — факт, глядящий только на Zed, врёт в обе стороны, когда человек держит оба редактора).
+    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у агента нет (решение владельца 29.10). В контейнере — то, что уже увидело чтение ради правки `enabled` (`editor_mcp`, второго похода по SSH быть не должно); на машине человека читаем диск здесь же, тем же `Setup::look`, что и раздел «Редакторы», и проходим по всему реестру `editors::AGENTS`, а не по двум именам руками: реестр для этого и завели, а факт, знающий двоих из четырёх, красил красным человека, настроившего только Claude Code (находка ревью 30.10).
     v.push(if local {
         match std::env::current_exe().ok() {
             Some(exe) => {
-                let zed = editors::look(editors::zed_path().as_deref(), &exe, editors::zed_present());
-                let pi = editors::look(editors::pi_path().as_deref(), &exe, editors::pi_present());
-                local_editor_mcp_fact(&zed, &pi)
+                let states: Vec<(&str, Result<editors::Found, String>)> =
+                    editors::AGENTS.iter().map(|d| (d.label, d.setup.look(&exe))).collect();
+                local_editor_mcp_fact(&states)
             }
             // Свой путь неизвестен — ни один `Found` не посчитать;
             // то же «не смог проверить», что в контейнере на `None`.
@@ -2459,10 +2464,15 @@ mod tests {
         assert!(c.ok && c.info, "живой туннель в контейнере не обязан красить вердикт: {c:?}");
     }
 
+    /// Пара «имя — состояние» в том виде, в каком факт её принимает от реестра.
+    fn state(name: &'static str, found: editors::Found) -> (&'static str, Result<editors::Found, String>) {
+        (name, Ok(found))
+    }
+
     /// Решение владельца 30.10: оба установлены, оба настроены — зелёный, и ни один не назван в подробности отдельно (называть настроенное незачем).
     #[test]
     fn local_editor_mcp_fact_is_green_when_both_installed_editors_are_configured() {
-        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Ours);
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Ours), state("pi", editors::Found::Ours)]);
         assert!(c.ok && !c.info, "{c:?}");
         assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
     }
@@ -2470,12 +2480,12 @@ mod tests {
     /// Оба установлены, настроен один — зелёный (разработчик вправе пользоваться одним редактором), а второй, ненастроенный, назван в подробности — не провал, но и не тишина о нём.
     #[test]
     fn local_editor_mcp_fact_is_green_with_one_configured_and_names_the_other() {
-        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Absent);
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Ours), state("pi", editors::Found::Absent)]);
         assert!(c.ok && !c.info, "{c:?}");
         assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "pi обязан быть назван: {c:?}");
 
         // Та же симметрия в обратную сторону — настроен pi, не настроен Zed.
-        let c = local_editor_mcp_fact(&editors::Found::Absent, &editors::Found::Ours);
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Absent), state("pi", editors::Found::Ours)]);
         assert!(c.ok && !c.info, "{c:?}");
         assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
     }
@@ -2483,7 +2493,8 @@ mod tests {
     /// Оба установлены, не настроен ни один — жёлтый с причиной: агенту точно не дойти ни из одного редактора.
     #[test]
     fn local_editor_mcp_fact_is_yellow_when_no_installed_editor_is_configured() {
-        let c = local_editor_mcp_fact(&editors::Found::Absent, &editors::Found::Foreign(vec!["1c".to_string()]));
+        let c =
+            local_editor_mcp_fact(&[state("Zed", editors::Found::Absent), state("pi", editors::Found::Foreign(vec!["1c".to_string()]))]);
         assert!(!c.ok, "{c:?}");
         assert!(c.detail.contains("Zed") && c.detail.contains("pi"), "{c:?}");
         assert!(!c.hint.is_empty(), "{c:?}");
@@ -2492,7 +2503,7 @@ mod tests {
     /// Установлен один (другого на машине нет вовсе) и настроен — зелёный, второй не поминается: настраивать там нечего.
     #[test]
     fn local_editor_mcp_fact_is_green_with_only_one_editor_installed() {
-        let c = local_editor_mcp_fact(&editors::Found::Ours, &editors::Found::Missing);
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Ours), state("pi", editors::Found::Missing)]);
         assert!(c.ok && !c.info, "{c:?}");
         assert!(c.detail.contains("Zed") && !c.detail.contains("pi"), "pi не установлен — молчим про него: {c:?}");
     }
@@ -2500,8 +2511,30 @@ mod tests {
     /// Не установлено ни одного редактора — факт не говорит о провале: нечего настраивать, и красить точку жёлтым означало бы требовать того, чего на этой машине не бывает.
     #[test]
     fn local_editor_mcp_fact_says_nothing_about_failure_when_nothing_is_installed() {
-        let c = local_editor_mcp_fact(&editors::Found::Missing, &editors::Found::Missing);
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Missing), state("pi", editors::Found::Missing)]);
         assert!(c.ok, "{c:?}");
+    }
+
+    /// Находка ревью 30.10: факт обязан считать ВСЕХ агентов реестра, а не Zed с pi. Человек с одним Claude Code получал красное — здесь этот случай зелёный, а Zed с pi, которых на машине нет, в тексте не поминаются вовсе.
+    #[test]
+    fn local_editor_mcp_fact_counts_cli_agents_too() {
+        let c = local_editor_mcp_fact(&[
+            state("Zed", editors::Found::Missing),
+            state("pi", editors::Found::Missing),
+            state("Claude Code", editors::Found::Ours),
+            state("Codex", editors::Found::Missing),
+        ]);
+        assert!(c.ok && !c.info, "один настроенный Claude Code — зелёный: {c:?}");
+        assert!(c.detail.contains("Claude Code") && !c.detail.contains("Zed"), "{c:?}");
+    }
+
+    /// Нечитаемое состояние — не «настроен»: подтвердить мы ничего не можем, и агент идёт в ненастроенные. Фразы «не проверено» в тексте нет — она запрещена во всех фактах набора (`the_set_never_says_it_did_not_check`).
+    #[test]
+    fn local_editor_mcp_fact_counts_an_unreadable_state_as_unconfigured() {
+        let c = local_editor_mcp_fact(&[("Claude Code", Err("не прочитать .claude.json: отказано в доступе".to_string()))]);
+        assert!(!c.ok, "{c:?}");
+        assert!(c.detail.contains("Claude Code"), "{c:?}");
+        assert!(!c.detail.contains("не проверено"), "{c:?}");
     }
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с WORKSTATION_PORTS»).

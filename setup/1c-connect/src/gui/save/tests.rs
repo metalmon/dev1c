@@ -402,8 +402,30 @@ fn a_tray_key_is_written_even_when_the_rest_is_not_filled_in() {
     let mut host = ui.cfg.host.clone();
     host.publication = "webserver".into();
     assert!(Cfg { host: host.clone(), ..Default::default() }.validate().is_err(), "набор нарочно негодный");
-    save_tray_key(&mut ui, host).unwrap();
+    save_tray_key(&mut ui, "publication", "webserver").unwrap();
     assert_eq!(ui.cfg.host.publication, "webserver");
     let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(text.contains("publication = \"webserver\""), "{text}");
+}
+
+/// Important 1 ревью задачи 2: переключатель в трее правит ОДИН ключ текстом,
+/// а не перерисовывает файл через `render` — иначе шифртекст пароля, который
+/// `ui.cfg` прочитал пустым (чужая машина или чужая учётка, `load_unchecked`),
+/// заменился бы пустой строкой при первом же нажатии в меню значка, и то, что
+/// ещё можно было открыть, вернувшись на свою машину, было бы потеряно.
+#[test]
+fn a_tray_key_write_does_not_touch_an_unreadable_password() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut host = ui.cfg.host.clone();
+    host.password = "секрет с другой машины".into();
+    let rendered = Cfg { host, ..Default::default() }.render(&store).unwrap();
+    std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
+    let password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
+    // «Чужая машина»: `ui.cfg` несёт пустое поле, как после `load_unchecked`
+    // на непрочитанном шифртексте — без настоящего похода за DPAPI в тесте.
+    ui.cfg.host.password = String::new();
+    save_tray_key(&mut ui, "mode", "local").unwrap();
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(after.lines().any(|l| l == password_line), "шифртекст пароля должен остаться дословно:\n{after}");
 }

@@ -314,13 +314,15 @@ impl Cfg {
     /// проверяется раньше `validate`: человеку нужен один понятный диагноз,
     /// а не жалоба на незаполненный `workstation` вместо настоящей причины.
     pub fn load_with(kit: &Kit, store: &secrets::Store) -> Result<Cfg> {
-        let cfg = Self::load_unchecked_with(kit, store)?;
+        let (cfg, existed) = Self::load_raw(kit, store)?;
         // Файла параметров нет вовсе — это умолчание без отказа (поведение
         // `connect`/`serve`, не этой задачи): пустой каталог состояния не
         // имеет паролей, которые могли бы не открыться, и жаловаться на
         // незаполненный `workstation` здесь настолько же неверно, как и
-        // прежде, когда `validate` тут вовсе не звался.
-        if !kit.state_path(crate::cfg::FILE).exists() {
+        // прежде, когда `validate` тут вовсе не звался. `existed` — одним
+        // флагом из `load_raw`, не вторым отдельным `exists()` (ревью
+        // задачи 2, Minor 5): файл на диске спрашивается ровно раз.
+        if !existed {
             return Ok(cfg);
         }
         if !cfg.undecryptable.is_empty() {
@@ -356,9 +358,17 @@ impl Cfg {
     /// говорит человеку, что пароль нужно ввести заново, а не тихо
     /// подставляет то, что не открылось.
     pub fn load_unchecked_with(kit: &Kit, store: &secrets::Store) -> Result<Cfg> {
+        Ok(Self::load_raw(kit, store)?.0)
+    }
+
+    /// Общее тело `load_unchecked_with`/`load_with`: читает файл не больше
+    /// одного раза и говорит, существовал ли он вовсе — `load_with` решает
+    /// по этому флагу, звать ли `validate`, не трогая диск второй раз
+    /// (ревью задачи 2, Minor 5).
+    fn load_raw(kit: &Kit, store: &secrets::Store) -> Result<(Cfg, bool)> {
         let p = kit.state_path(crate::cfg::FILE);
         if !p.exists() {
-            return Ok(Cfg::default());
+            return Ok((Cfg::default(), false));
         }
         let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
         let mut cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
@@ -366,7 +376,7 @@ impl Cfg {
         cfg.host.password = open_or_mark(store, "password", &cfg.host.password, &mut bad);
         cfg.host.db_password = open_or_mark(store, "db_password", &cfg.host.db_password, &mut bad);
         cfg.undecryptable = bad;
-        Ok(cfg)
+        Ok((cfg, true))
     }
 
     pub fn number(&self) -> Option<u16> {
@@ -582,10 +592,22 @@ pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::resul
     let text = cfg.render(store)?;
     common::kit::write_text(&kit.state_path(FILE), &text).map_err(|e| format!("{e:#}"))?;
     let back = Cfg::load_unchecked_with(kit, store).map_err(|e| format!("{e:#}"))?;
-    if back.host.password != cfg.host.password || back.host.db_password != cfg.host.db_password {
+    if !passwords_match(cfg, &back) {
         return Err(format!("{FILE}: запись не прошла проверку — пароль после записи читается не так, как до неё"));
     }
     Ok(())
+}
+
+/// Сравнение, которым `write_checked` решает, сошлась ли проверка после
+/// записи. Отдельная чистая функция — ревью задачи 2 (Minor 3) справедливо
+/// заметило, что круговой тест «записали — перечитали — совпало» не ловит
+/// регресс, если из `write_checked` убрать сам вызов сравнения: он всё
+/// равно будет зелёным, потому что обычная запись и так читается верно.
+/// Эта функция проверяется отдельно, на сконструированном несовпадении —
+/// там, где обычная запись никогда не окажется, но баг в `write_checked`
+/// (например, забытый вызов) — окажется.
+fn passwords_match(written: &Cfg, reread: &Cfg) -> bool {
+    written.host.password == reread.host.password && written.host.db_password == reread.host.db_password
 }
 
 #[cfg(test)]
@@ -1214,7 +1236,64 @@ mod tests {
         let mut c = filled();
         c.host.password = "секрет".into();
         cfg::write_checked(&kit, &c, &s).unwrap();
+        // Круговой `load_unchecked_with` один (ревью задачи 2, Minor 3: он
+        // не ловит ничего сам по себе — убери вызов проверки из
+        // `write_checked`, и он всё равно будет зелёным, потому что обычная
+        // запись и так читается верно). Независимое доказательство — сам
+        // файл: в нём есть префикс и нет открытого пароля.
+        let text = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
+        assert!(text.contains(secrets::PREFIX), "{text}");
+        assert!(!text.contains("секрет"), "{text}");
         let back = Cfg::load_unchecked_with(&kit, &s).unwrap();
         assert_eq!(back.host.password, "секрет");
+    }
+
+    /// Сравнение, которым `write_checked` решает «сошлось или нет», —
+    /// отдельно от самой записи: несовпадение (как после неудачной
+    /// расшифровки — пустое поле там, где записали непустое) обязано
+    /// отличаться от совпадения.
+    #[test]
+    fn passwords_match_tells_a_real_mismatch_from_a_match() {
+        let mut written = filled();
+        written.host.password = "секрет".into();
+        let mut reread = written.clone();
+        assert!(passwords_match(&written, &reread), "одинаковые пароли — совпадение");
+        reread.host.password = String::new();
+        assert!(!passwords_match(&written, &reread), "пустое поле там, где был пароль, — несовпадение");
+    }
+
+    /// `write_checked` не обязан молчать, если запись самого файла не
+    /// удалась (здесь — каталог состояния без прав на запись): отказ
+    /// обязан дойти до вызывающего словами, а не потеряться на пути.
+    #[cfg(unix)]
+    #[test]
+    fn write_checked_refuses_when_the_file_cannot_be_written() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let s = secrets::Store::file(&tmp("readback-writefail"));
+        let kit = kit_with("");
+        std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut c = filled();
+        c.host.password = "секрет".into();
+        let e = cfg::write_checked(&kit, &c, &s);
+        std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = e.unwrap_err();
+        assert!(e.contains(cfg::FILE), "{e}");
+    }
+
+    /// Пустой пароль — не повод `load` отказывать: `seal`/`open` пропускают
+    /// пустую строку как есть на любой подложке, и в `undecryptable` она не
+    /// попадает (ревью задачи 2, Minor 4).
+    #[test]
+    fn an_empty_password_does_not_refuse_load() {
+        let s = secrets::Store::file(&tmp("empty-pwd-load"));
+        let mut c = filled();
+        c.host.password = String::new();
+        let kit = kit_with(&c.render(&s).unwrap());
+        let loaded = Cfg::load_with(&kit, &s).unwrap();
+        assert!(loaded.undecryptable.is_empty());
+        assert_eq!(loaded.host.password, "");
     }
 }

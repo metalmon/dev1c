@@ -121,8 +121,12 @@ fn main() {
     }
 }
 
-fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
-    let cfg = cfg::Cfg::load(&kit)?;
+/// `cfg` приходит уже загруженным — вызывающий (`run`) сам решает, каким
+/// путём: `Cfg::load` с отказом на чужом шифртексте или `Cfg::load_unchecked`
+/// без него (см. комментарий в `run` про разбор команд на «смотрят» и
+/// «пользуются»). Здесь выбора нет и не может быть: один общий `Ctx` на все
+/// подкоманды, кроме `example`/`mcp`.
+fn make_ctx(kit: Kit, cfg: cfg::Cfg, dry_run: bool, yes: bool) -> Ctx {
     let k = kit.clone();
     let sink = Arc::new(move |e: Event| {
         if k.journal(&e) {
@@ -138,7 +142,7 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool) -> Result<Ctx> {
         }
     });
     let prompt: Box<dyn Prompt> = if yes { Box::new(AlwaysDefault) } else { Box::new(StdinPrompt) };
-    Ok(Ctx { kit, cfg, dry_run, sink, prompt })
+    Ctx { kit, cfg, dry_run, sink, prompt }
 }
 
 fn run() -> Result<()> {
@@ -179,9 +183,21 @@ fn run() -> Result<()> {
     if let Some(Cmd::Mcp { server }) = cli.cmd {
         return ops_host::run_mcp(server, kit);
     }
-    let ctx = make_ctx(kit, cli.dry_run, cli.yes)?;
-    let ops = ops_host::host();
     let cmd = cli.cmd.unwrap_or(Cmd::Status);
+    // Команды, которые только смотрят и рассказывают (`status`, `check`,
+    // `verify`, `checksums`), не имеют права отказать на чужом шифртексте —
+    // человек теряет диагностику ровно тогда, когда она нужнее всего (ревью
+    // задачи 2, «Решение владельца»): `load_unchecked`, непрочитанный пароль
+    // остаётся фактом в `Cfg::undecryptable`, а не отказом. Команды, которые
+    // пароль ИСПОЛЬЗУЮТ — ходят в базу, SSH, Gitea (`connect`, `serve`,
+    // подкоманда `mcp` — та и так на `Cfg::load` отдельной веткой выше,
+    // `export`, `import`, `install`, `uninstall`) — остаются на `Cfg::load` и
+    // отказывают как раньше: молчать там, где без пароля ничего не выйдет,
+    // было бы хуже открытого текста.
+    let read_only = matches!(cmd, Cmd::Status | Cmd::Check | Cmd::Verify | Cmd::Checksums);
+    let cfg = if read_only { cfg::Cfg::load_unchecked(&kit)? } else { cfg::Cfg::load(&kit)? };
+    let ctx = make_ctx(kit, cfg, cli.dry_run, cli.yes);
+    let ops = ops_host::host();
     // Срок заглушки лицензии вышел — разовые команды, меняющие машину, не
     // работают (спека, п. 9). `status`, `check` и `example` остаются: человеку
     // надо чем-то показать поддержке. `connect`/`serve` тоже поднимаются —
@@ -197,6 +213,15 @@ fn run() -> Result<()> {
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
             println!("Рабочее место {} → среда {}", ctx.cfg.host.workstation, ctx.cfg.host.server);
+            // `status` смотрит и рассказывает (`Cfg::load_unchecked` выше),
+            // а не отказывает на чужом шифртексте — но молчать про это тоже
+            // нельзя: это и есть диагностика, за которой человек сюда пришёл.
+            if !ctx.cfg.undecryptable.is_empty() {
+                println!(
+                    "  [ !! ] пароль зашифрован на другой машине или другим пользователем — откройте окно и введите заново ({})",
+                    ctx.cfg.undecryptable.join(", ")
+                );
+            }
             println!();
             for (id, title, st) in common::run::status(&ctx, &ops) {
                 println!("  {:<16} {:<26} {}", id, title, st.label());
@@ -267,6 +292,17 @@ fn run() -> Result<()> {
 
 fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
     println!("Проверка:");
+    // `check` смотрит и рассказывает (`Cfg::load_unchecked` в `run`), а не
+    // отказывает на чужом шифртексте — но называет находку фактом в своём же
+    // отчёте, а не молчит про неё (решение владельца по итогам ревью задачи
+    // 2, 2026-10-29). У `install`, который зовёт `check` тем же путём, этот
+    // список всегда пуст: он сам на `Cfg::load` и отказал бы раньше.
+    if !ctx.cfg.undecryptable.is_empty() {
+        println!(
+            "  [ !! ] пароль зашифрован на другой машине или другим пользователем — откройте окно и введите заново ({})",
+            ctx.cfg.undecryptable.join(", ")
+        );
+    }
     // Командная строка (`check`, и `install` сразу за установкой) портов
     // рабочего места не занимает: занятый порт для неё — сведение, а не
     // провал (спека, «порты важны там, где мы их занимаем»).

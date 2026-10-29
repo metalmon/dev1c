@@ -360,9 +360,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // режима — намерение человека, а не действие над базой, и на
             // свежем комплекте с пустыми полями он обязан сработать. Память
             // тут не годится: окно перечитывает файл на каждом показе.
-            let mut host = cx.global::<Ui>().cfg.host.clone();
-            host.mode = mode.into();
-            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), host) {
+            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "mode", mode) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }
@@ -457,9 +455,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
             // показе, и намерение, оставленное в памяти, стирается первым же
             // открытием окна — поле «Адрес публикации» тогда не появляется
             // вовсе (находка владельца 28.10).
-            let mut host = cx.global::<Ui>().cfg.host.clone();
-            host.publication = publication.into();
-            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), host) {
+            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "publication", publication) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }

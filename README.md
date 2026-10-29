@@ -69,6 +69,16 @@ Writing those two entries is one button. The connector window has an **Editors**
 
 The **MCP** switch denies tool calls, it does not kill the server: the tool list stays, and turning it back on needs no restart in the editor. Step 9 of `УСТАНОВКА.md` walks the whole thing through with the answers to expect.
 
+## Passwords in the connector's parameter file
+
+The two passwords in `1c-connect.toml` — `[host] password` for SSH to the workstation and `[host] db_password` for the 1C base user — are not kept as plain text. What you find in the file is ciphertext behind a visible `enc1:` prefix, so it reads as what it is: not a password, and pointless to paste anywhere else. On Windows the key is held by the system and tied to your account (per-user DPAPI), so there is no key on disk at all and the file opens on neither another machine nor another Windows account — exactly the property a backup, a support ticket or a copied folder needs. On Linux the key is a `secret.key` file next to the parameters, readable by its owner only; there a stolen pair of parameters-plus-key does work elsewhere, and we say so instead of pretending the two systems protect you equally.
+
+You do nothing to get there. A file with plain-text passwords keeps working — plain text is accepted always, which is both the upgrade path and a legitimate choice for an air-gapped site — and the first **Save** from the window turns the values into ciphertext. When decryption fails, the window shows an empty password field and says why in words; the commands that need the password to do their job (`connect`, `serve`, `mcp`, `export`, `import`, `install`, `uninstall`) refuse to start with the same sentence, while the ones that only look and report (`status`, `check`, `verify`) still run and name the unread password as a fact — you keep your diagnostics where you need them most. Type the password in and Save; saving with the field left empty keeps the old ciphertext rather than destroying it.
+
+The password reaches no process command line any more — on Windows that is readable by every process of the same user — and the publication descriptor `default.vrd` carries neither a login nor a password: with them, a call to the HTTP service **with no credentials at all** opened a full session for anyone who could reach the port, and now it gets `401`. The platform takes the user from the request, and `mcp-1c` always speaks plain Basic auth. Two limits are honest ones: the password still goes to the configurator as a `/P` switch for the single command that removes the extension from the base, because the platform accepts it no other way; and none of this defends against code running under your own account — what is closed is the copied file, the backup, the screenshot and the shared screen, not a local attacker.
+
+The Russian walkthrough is in the kit: `УСТАНОВКА.md`, section «Пароли в файле параметров коннектора».
+
 ## Documentation
 
 | Page | What it answers |

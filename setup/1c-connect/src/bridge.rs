@@ -24,7 +24,17 @@ where
 pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::process::Command {
     let exe = kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" });
     let mut c = tokio::process::Command::new(exe);
-    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--password", &cfg.host.db_password, "--quiet"]);
+    // Пароль — переменной окружения, не ключом `--password`: командная
+    // строка процесса на Windows видна любому процессу пользователя
+    // (`tasklist`, `wmic`, диспетчер задач), а ключ в ней — пароль базы на
+    // весь срок жизни процесса. `--base`/`--user`/`--dump`/`--quiet`
+    // остаются ключами: замер задачи 0 (`task-0-report.md`) показал, что
+    // `mcp-1c` читает и `MCP_1C_PASSWORD`, и ключ `--password`, но
+    // переменная у него ПЕРЕБИВАЕТ ключ (`internal/config/config.go`) —
+    // ровно так же она перебила бы и эти ключи, так что переписывать их в
+    // переменные не даёт выигрыша в безопасности, только лишнюю правку.
+    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--quiet"]);
+    c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
     // `Cfg::dump_override`.
     if let Some(dump) = cfg.dump_override() {
@@ -231,6 +241,10 @@ impl Rules {
 /// пароль не передаётся — иначе платформа получит `/P` с пустым значением.
 /// Зовётся на каждый подходящий вызов (см. `handle_request`), а не один раз
 /// на соединение — иначе смена базы не дошла бы до уже открытого у Zed порта.
+/// `db-pwd` здесь не ключ командной строки процесса: это поле аргумента
+/// JSON-RPC `tools/call`, и уходит оно в трубу stdin уже запущенному
+/// `vrunner-mcp` — `tasklist`/диспетчер задач его не видят, так что заботы
+/// задачи 5 (пароль не в командной строке) это место не касается.
 pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
     let mut a = serde_json::json!({"ibconnection": crate::ops_host::ib_switch(&cfg.host.base_path), "db-user": cfg.host.db_user});
     if !cfg.host.db_password.is_empty() {
@@ -1045,6 +1059,29 @@ mod tests {
     // Короткое имя нужно только тестам: рабочий код пишет полный путь.
     use crate::cfg::Cfg;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    fn filled() -> Cfg {
+        crate::cfg::filled_for_test()
+    }
+
+    /// Комплект для теста `mcp_command`: ни `Command::new`, ни `.args`/`.env`
+    /// не трогают диск — каталог может не существовать вовсе.
+    fn kit_for_test() -> common::kit::Kit {
+        common::kit::Kit::at(std::env::temp_dir())
+    }
+
+    #[test]
+    fn the_db_password_never_appears_in_the_command_line() {
+        let mut cfg = filled();
+        cfg.host.db_password = "секрет-базы".into();
+        let c = mcp_command(&cfg, &kit_for_test());
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        assert!(!args.iter().any(|a| a.contains("секрет-базы")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--password"), "{args:?}");
+        let envs: Vec<(String, String)> =
+            c.as_std().get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into(), v?.to_string_lossy().into()))).collect();
+        assert!(envs.contains(&("MCP_1C_PASSWORD".into(), "секрет-базы".into())), "{envs:?}");
+    }
 
     /// The test binary itself as the child: `__echo_child` below runs one of
     /// the scripted shapes picked by an env var — a portable fake mcp-1c/

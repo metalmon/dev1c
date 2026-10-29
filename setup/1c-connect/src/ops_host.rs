@@ -437,6 +437,50 @@ pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
     kit.path(if cfg!(windows) { "mcp-1c-windows-amd64.exe" } else { "mcp-1c-linux-amd64" })
 }
 
+/// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: без
+/// `--db-password` в аргументах — пароль идёт переменной `MCP_1C_PASSWORD`,
+/// тем же путём и по той же причине, что у моста (`bridge::mcp_command`):
+/// командная строка процесса на Windows видна любому процессу пользователя
+/// (`tasklist`, диспетчер задач). Отдельная функция, а не инлайн внутри
+/// `apply`: иначе тест на отсутствие пароля в аргументах не на чем писать.
+/// `--db-user` остаётся ключом — он не секрет, и переменная его всё равно не
+/// заменяет ничего, кроме лишней правки.
+pub fn install_command(cfg: &Cfg, kit: &Kit) -> tokio::process::Command {
+    let h = &cfg.host;
+    let mut c = tokio::process::Command::new(mcp_exe(kit));
+    c.args(["--install", &h.base_path, "--db-user", &h.db_user]);
+    c.env("MCP_1C_PASSWORD", &h.db_password);
+    c
+}
+
+/// Переменная окружения ЭТОГО процесса на время одного дочернего вызова:
+/// ставится перед спавном (дочерний наследует окружение родителя целиком) и
+/// снимается при выходе из блока, восстановив прежнее значение, если оно
+/// было. Нужна там, где секрет обязан дойти до ребёнка переменной, а
+/// запускающая его функция (`docker::exec`) берёт программу и аргументы
+/// строками и своего места для окружения вызова не оставляет.
+struct TempEnv {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl TempEnv {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, value);
+        TempEnv { key, prev }
+    }
+}
+
+impl Drop for TempEnv {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 /// Переменная окружения, которая целиком перекрывает поиск платформы: указывает
 /// каталог, где лежит исполняемый файл (а не каталог версии).
 const ONEC_PLATFORM: &str = "ONEC_PLATFORM";
@@ -1615,7 +1659,7 @@ impl Op<Ctx> for Extension {
         // команда без `xvfb-run` в ней не заработала бы.
         let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
         vec![Action::new(format!(
-            "{prefix}mcp-1c --install {} --db-user {} --db-password … (вызовет конфигуратор, минута-две)",
+            "{prefix}mcp-1c --install {} --db-user {} (пароль — переменной MCP_1C_PASSWORD, не ключом; вызовет конфигуратор, минута-две)",
             ctx.cfg.host.base_path, ctx.cfg.host.db_user
         ))]
     }
@@ -1627,15 +1671,27 @@ impl Op<Ctx> for Extension {
         if !ctx.dry_run {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        let exe = mcp_exe(&ctx.kit);
         let h = &ctx.cfg.host;
-        // Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на
-        // Linux без `DISPLAY` он не стартует.
-        let (prog, args) = display_argv(
-            &exe.to_string_lossy(),
-            &["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password],
-            display_wrapper().as_deref(),
-        );
+        // Программа и аргументы — из `install_command` (без пароля в них);
+        // экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на
+        // Linux без `DISPLAY` он не стартует. `docker::exec` берёт программу
+        // и аргументы строками, а не готовый `Command` — общая функция на
+        // весь комплект, менять её сигнатуру ради одного вызова не стоит.
+        let install = install_command(&ctx.cfg, &ctx.kit);
+        let exe = install.as_std().get_program().to_string_lossy().into_owned();
+        let install_args: Vec<String> = install.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let (prog, args) = display_argv(&exe, &install_args.iter().map(String::as_str).collect::<Vec<_>>(), display_wrapper().as_deref());
+        // Пароль доезжает до `mcp-1c` переменной, а `docker::exec` спавнит
+        // дочерний процесс с окружением ЭТОГО процесса (как и всегда — она
+        // ничего не изолирует): выставляем переменную на время вызова и
+        // снимаем её сразу же, восстановив, что было, — страж `TempEnv`
+        // переживает и досрочный выход через `?`.
+        //
+        // ponytail: переменная процесса — общее состояние на всю программу,
+        // не на один вызов; окно устанавливает расширение по одному шагу за
+        // раз, так что гонки здесь нет. Понадобится параллельная установка —
+        // следующий шаг: научить `docker::exec` принимать окружение вызова.
+        let _env = TempEnv::set("MCP_1C_PASSWORD", &h.db_password);
         let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
@@ -1672,6 +1728,11 @@ impl Op<Ctx> for Extension {
         let h = &ctx.cfg.host;
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);
+        // `/P` остаётся ключом Конфигуратору — у платформы 1С другого
+        // способа отдать ей пароль нет (ни переменной окружения, ни файла);
+        // это и названо в спеке единственным честным исключением задачи 5.
+        // Сама строка в журнал не идёт как есть: `docker::redact_text`
+        // затирает `/P…` построчно, прежде чем что-то попадёт в лог.
         let p = format!("/P{}", h.db_password);
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
         // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
@@ -1691,6 +1752,26 @@ pub fn host() -> Vec<Box<dyn Op<Ctx>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn filled() -> Cfg {
+        crate::cfg::filled_for_test()
+    }
+
+    /// Комплект для теста `install_command`: функция только строит `Command`
+    /// (`Command::new` на диск не ходит), каталог существовать не обязан.
+    fn kit_for_test() -> Kit {
+        Kit::at(".")
+    }
+
+    #[test]
+    fn the_install_command_hides_the_password_too() {
+        let mut cfg = filled();
+        cfg.host.db_password = "секрет-базы".into();
+        let c = install_command(&cfg, &kit_for_test());
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        assert!(!args.iter().any(|a| a.contains("секрет-базы")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--password"), "{args:?}");
+    }
 
     #[test]
     fn publication_sits_between_project_and_extension() {

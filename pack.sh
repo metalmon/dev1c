@@ -205,6 +205,14 @@ if [ "$OS" = "windows" ]; then
 # release the image was designed against. Pinned here, not in the Dockerfile:
 # the image no longer carries mcp-1c.
 MCP_1C_VERSION=v1.23.0
+# Минимальная версия расширения MCP_HTTPService.cfe, которую понимает этот
+# релиз mcp-1c — правится парой с MCP_1C_VERSION выше: описание релиза
+# называет требование к версии расширения для новых инструментов, старые
+# инструменты со старым расширением работают и дальше. Число подтверждено по
+# https://github.com/feenlace/mcp-1c/releases/tag/v1.23.0, а не переписано с
+# чужих слов. Согласие с константой в verify.rs (EXTENSION, факт готовности)
+# держит тест, не память человека — разойдутся, падает тест, а не поставка.
+MCP_EXTENSION_MIN_VERSION=0.4.10
 for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
     fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/$f"
 done

@@ -550,6 +550,33 @@ pub fn web_fact(port: u16, up: bool, own: bool) -> Check {
 /// причину на холодную — установка не поднята, или расширение не опубликовано.
 const PUBLICATION_HINT: &str = "1c-connect install, затем публикация в Конфигураторе (см. install)";
 
+/// Минимальная версия расширения `MCP_HTTPService.cfe`, которую понимает
+/// комплект — пара с `MCP_EXTENSION_MIN_VERSION` в `pack.sh`, а не второе
+/// место правды: согласие двух держит тест
+/// `pack_sh_agrees_with_min_extension_version`, разойдутся — упадёт тест, а
+/// не поставка. Число подтверждено по описанию релиза mcp-1c v1.23.0, а не
+/// переписано с чужих слов.
+const MIN_EXTENSION_VERSION: &str = "0.4.10";
+
+/// Совет при расширении старее нужного: оно уже стоит в базе, ставить заново
+/// нечего — его нужно обновить, и `1c-connect install` это умеет. Не
+/// `PUBLICATION_HINT`: тот совет — про установку с нуля.
+const OUTDATED_EXTENSION_HINT: &str = "обновите расширение командой 1c-connect install";
+
+/// Разбирает версию по точкам в числа для числового сравнения: `0.4.10` не
+/// старее `0.4.9`, хотя по строкам наоборот (главная ловушка версий с
+/// двузначными частями). Любая часть не из цифр — вся строка неразбираема.
+fn parse_version(v: &str) -> Option<Vec<u32>> {
+    v.split('.').map(|part| part.parse().ok()).collect()
+}
+
+/// Старее ли версия расширения в базе, чем `MIN_EXTENSION_VERSION`. `None` —
+/// строку не разобрали (своя или чужая часть не число): тогда судить не
+/// о чём, и вызывающий ведёт себя как при отсутствии требования.
+fn extension_outdated(found: &str) -> Option<bool> {
+    Some(parse_version(found)? < parse_version(MIN_EXTENSION_VERSION)?)
+}
+
 /// Совет, когда базу публикует чужой веб-сервер, а его адреса мы не знаем.
 /// Чинится одним полем в окне, и ни к базе, ни к расширению отношения не
 /// имеет — поэтому совет свой, а не `PUBLICATION_HINT`.
@@ -622,7 +649,24 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
     }
     let foreign = publication == "webserver";
     match reach {
-        Some(Reach::Version(v)) => Check::pass(EXTENSION, v.clone()),
+        Some(Reach::Version(v)) => match extension_outdated(v) {
+            // Старее нужной — и то, и другое число в тексте, а не только
+            // найденное: человек правит по разнице, не по одному концу её.
+            Some(true) => Check::fail(
+                EXTENSION,
+                format!("расширение в базе {v}, комплекту нужно {MIN_EXTENSION_VERSION}"),
+                OUTDATED_EXTENSION_HINT,
+            ),
+            // Не старее, либо строку не разобрали (находка 29.10 при
+            // обновлении mcp-1c до v1.23.0: комплект уже требует новую
+            // версию расширения, а факт готовности её ни с чем не сравнивал
+            // — зелёная точка молчала до первого отказа HTTP-сервиса на
+            // новом инструменте агента). Неразбираемую строку не судим: не
+            // мы её прислали, обвинять человека в том, что не разобрали
+            // чужой ответ, нечестно — поэтому здесь тот же `pass`, без
+            // подсказки.
+            _ => Check::pass(EXTENSION, v.clone()),
+        },
         // 404 значит разное у своей публикации и у чужой. Своя публикует наш
         // сервис явно (`publication::vrd`), и 404 там — расширения в базе
         // правда нет. Чужая публикует сервисы расширений одной общей
@@ -1790,13 +1834,102 @@ mod tests {
         let c = extension_fact(None, Some(("идёт cf_decompile", "дождитесь конца операции")), "auto");
         assert_eq!(c.outcome(), Outcome::Busy);
         assert!(c.detail.contains("не спрашивали"), "{c:?}");
-        // Свободна — разбор по исходу: нет расширения значит плохо, версия — хорошо.
+        // Свободна — разбор по исходу: нет расширения значит плохо, версия не
+        // старее нужной — хорошо (ниже нужной разобрано отдельным тестом).
         assert_eq!(extension_fact(Some(&Reach::Absent), None, "auto").outcome(), Outcome::Bad);
-        assert_eq!(extension_fact(Some(&Reach::Version("0.4.8".into())), None, "auto").outcome(), Outcome::Good);
+        assert_eq!(extension_fact(Some(&Reach::Version(MIN_EXTENSION_VERSION.into())), None, "auto").outcome(), Outcome::Good);
         // Публикация и расширение — два разных факта, и путать их нельзя.
         assert_eq!(publication_responds_fact("http://x", false, None).outcome(), Outcome::Bad);
         assert_eq!(descriptor_fact(Descriptor::Differs).outcome(), Outcome::Bad);
         assert_eq!(descriptor_fact(Descriptor::Matches).outcome(), Outcome::Good);
+    }
+
+    /// Находка 29.10 при обновлении mcp-1c до v1.23.0: `extension_fact` при
+    /// `Some(Reach::Version(v))` отдавал `pass` для любого `v` — зелёная
+    /// точка ничего не говорила о том, что комплект уже требует новую версию
+    /// расширения, и человек узнавал о расхождении только по отказу
+    /// HTTP-сервиса на новом инструменте агента. Текст отказа несёт оба
+    /// числа — что нашли и что нужно — и совет-действие, а не «что-то не так».
+    #[test]
+    fn an_extension_older_than_required_fails_with_both_numbers_and_a_fix() {
+        let c = extension_fact(Some(&Reach::Version("0.4.9".into())), None, "auto");
+        assert_eq!(c.outcome(), Outcome::Bad, "{c:?}");
+        assert!(c.detail.contains("0.4.9"), "{c:?}");
+        assert!(c.detail.contains(MIN_EXTENSION_VERSION), "{c:?}");
+        assert!(c.hint.contains("1c-connect install"), "{c:?}");
+    }
+
+    /// Ровно нужная версия — не старее, проходит молча.
+    #[test]
+    fn an_extension_at_exactly_the_required_version_passes() {
+        let c = extension_fact(Some(&Reach::Version(MIN_EXTENSION_VERSION.into())), None, "auto");
+        assert_eq!(c.outcome(), Outcome::Good, "{c:?}");
+        assert_eq!(c.detail, MIN_EXTENSION_VERSION);
+    }
+
+    /// Новее нужной — проходит.
+    #[test]
+    fn an_extension_newer_than_required_passes() {
+        let c = extension_fact(Some(&Reach::Version("0.4.11".into())), None, "auto");
+        assert_eq!(c.outcome(), Outcome::Good, "{c:?}");
+    }
+
+    /// Строку не разобрали — ведём себя как раньше: `pass` со строкой как
+    /// есть, и без подсказки — обвинять человека в том, что не разобрали МЫ,
+    /// нельзя (правило задачи 29.10).
+    #[test]
+    fn an_unparsable_extension_version_passes_without_blame() {
+        let c = extension_fact(Some(&Reach::Version("собрание неизвестно".into())), None, "auto");
+        assert_eq!(c.outcome(), Outcome::Good, "{c:?}");
+        assert_eq!(c.detail, "собрание неизвестно");
+        assert!(c.hint.is_empty(), "{c:?}");
+    }
+
+    /// Главная ловушка задачи: `0.4.10` не старее `0.4.9`, хотя по строкам
+    /// («0.4.10" < "0.4.9»` посимвольно) выходит наоборот — сравнение обязано
+    /// быть числовым по частям, а не строковым.
+    #[test]
+    fn version_1_10_is_not_older_than_version_1_9() {
+        assert_eq!(extension_outdated("0.4.10"), Some(false), "строковое сравнение сказало бы Some(true)");
+        assert!(parse_version("0.4.10") > parse_version("0.4.9"));
+    }
+
+    /// Одна правда о минимальной версии расширения, не две: число живёт в
+    /// `pack.sh` (`MCP_EXTENSION_MIN_VERSION`) и здесь (`MIN_EXTENSION_VERSION`),
+    /// и разойтись им молча нельзя — тест читает тот же `pack.sh`, что и
+    /// поставка (`include_str!`, приём `cfg.rs::tests::ZED`), а не копию.
+    #[test]
+    fn pack_sh_agrees_with_min_extension_version() {
+        const PACK_SH: &str = include_str!("../../../pack.sh");
+        let line = PACK_SH
+            .lines()
+            .find(|l| l.starts_with("MCP_EXTENSION_MIN_VERSION="))
+            .expect("pack.sh больше не задаёт MCP_EXTENSION_MIN_VERSION");
+        let version = line.trim_start_matches("MCP_EXTENSION_MIN_VERSION=");
+        assert_eq!(version, MIN_EXTENSION_VERSION, "pack.sh и verify.rs расходятся в минимальной версии расширения");
+    }
+
+    /// Та же болезнь, другая утечка (ревью соседней работы 29.10): версия
+    /// `mcp-1c` прибита в `pack.sh` (комплект разработчика) и отдельно в
+    /// `Dockerfile.1c` (образ демостенда) — и ничего не проверяло, что они не
+    /// расползлись. Сами значения здесь не трогаем, их правит другая задача;
+    /// держим только их согласие.
+    #[test]
+    fn pack_sh_agrees_with_dockerfile_on_mcp_1c_version() {
+        const PACK_SH: &str = include_str!("../../../pack.sh");
+        const DOCKERFILE: &str = include_str!("../../../Dockerfile.1c");
+        let pack_version = PACK_SH
+            .lines()
+            .find(|l| l.starts_with("MCP_1C_VERSION="))
+            .expect("pack.sh больше не задаёт MCP_1C_VERSION")
+            .trim_start_matches("MCP_1C_VERSION=");
+        let dockerfile_version = DOCKERFILE
+            .lines()
+            .find(|l| l.trim_start().starts_with("ARG MCP_1C_VERSION="))
+            .expect("Dockerfile.1c больше не задаёт ARG MCP_1C_VERSION")
+            .trim_start()
+            .trim_start_matches("ARG MCP_1C_VERSION=");
+        assert_eq!(pack_version, dockerfile_version, "pack.sh и Dockerfile.1c расходятся в версии mcp-1c");
     }
 
     /// Critical 1 (повторное ревью): дескриптор не судится там, где

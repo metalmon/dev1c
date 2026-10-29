@@ -61,6 +61,14 @@ A model file, if any, goes into `model/` of the kit and is named in `[model] fil
 
 Russian step-by-step instructions ship inside the kit as `УСТАНОВКА.md`.
 
+## Editors on the developer's machine
+
+The editor reaches the base through the connector itself: Zed and pi launch `1c-connect mcp 1c` and `1c-connect mcp vrunner` as their own stdio MCP servers, so no port has to be free and no `nc` has to exist on the machine. `1c-connect` starts the child (`mcp-1c`, `vrunner-mcp`) on its own, and a stand is not required for any of this — the platform and the connector are enough.
+
+Writing those two entries is one button. The connector window has an **Editors** section on the **Project** tab: per editor it says whether it was found and whether it is already configured, and the button writes `1c` and `vrunner` into `%APPDATA%\Zed\settings.json` (`~/.config/zed/settings.json` on Linux and macOS) or `~/.pi/agent/mcp.json`. Foreign keys, foreign servers and your own comments survive the edit, a `.bak` of the first edit stays next to the file, and an entry already taken by someone else's command is never touched — you rename or remove yours, and the button unlocks. Zed watches its settings file and brings the servers up itself; pi needs `/reload` or a new session.
+
+The **MCP** switch denies tool calls, it does not kill the server: the tool list stays, and turning it back on needs no restart in the editor. Step 9 of `УСТАНОВКА.md` walks the whole thing through with the answers to expect.
+
 ## Documentation
 
 | Page | What it answers |

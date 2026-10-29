@@ -6,6 +6,7 @@
 //!
 //! Модуль не за фичей `gui`: сами условия не зависят от окна, а подкоманде `1c-connect mcp` (`ops_host::run_mcp`, спека «MCP в редакторе», ловушка «Лицензия и холодный замок») нужны ровно они же — до первого ответа агенту, без второй формулировки причин отказа. Окно видит их тем же путём `gui::gate::cold_gate`/`gui::link::gate_now` — там теперь реэкспорт отсюда.
 
+use crate::cfg;
 use crate::cfg::Cfg;
 use crate::licence;
 use crate::ops_host;
@@ -44,6 +45,10 @@ pub fn cold_gate(
     }
     if !mcp_in_kit {
         return Some("в комплекте нет mcp-1c".into());
+    }
+    // Нерасшифрованный пароль базы (а в туннельном режиме — и пароль рабочего места) — то же условие, что держит CLI (`Cfg::load_with`), только тот отказывает раньше, самим `Cfg::load`, а окно вместо отказа открывается и до этой правки молчало: переключатель включался, мост ехал с пустым паролем, «Установить расширение» — тоже (ревью задачи 7, Important 2). Смертельно для работы и видно без сети — ровно то, чем замок и отбирает условия; причина — короткой строкой, без упоминания окна или кнопок, которых здесь нет.
+    if !cfg::blocking_undecryptable(&cfg.host.mode, &cfg.undecryptable).is_empty() {
+        return Some("пароль не расшифрован — введите заново".into());
     }
     // «Сделано» и ничего другого. Копии инструментов на машине больше нет
     // (леджер комплекта, пункт 15), поэтому единственный не-`Done` исход —
@@ -198,6 +203,33 @@ mod tests {
         c.host.db_user = "   ".into();
         let why = open(&c).unwrap();
         assert!(why.contains("пользователь базы"), "{why}");
+    }
+
+    /// Important 2 ревью задачи 7: до этой правки `cold_gate` ничего не знал про `undecryptable` вовсе — переключатель включался, мост ехал с пустым паролем базы, «Установить расширение» — тоже. `db_password` запирает замок в любом режиме.
+    #[test]
+    fn an_unreadable_database_password_holds_the_switch() {
+        let mut c = crate::cfg::filled_for_test();
+        c.undecryptable = vec!["db_password".to_string()];
+        let why = open(&c).unwrap();
+        assert!(why.contains("не расшифрован"), "{why}");
+    }
+
+    /// Пароль рабочего места запирает замок в туннельном режиме — там он нужен для туннеля в среду.
+    #[test]
+    fn an_unreadable_workstation_password_holds_the_switch_in_tunnel_mode() {
+        let mut c = crate::cfg::filled_for_test();
+        c.undecryptable = vec!["password".to_string()];
+        let why = open(&c).unwrap();
+        assert!(why.contains("не расшифрован"), "{why}");
+    }
+
+    /// В локальном режиме то же самое поле — не повод: его не читает никто (`panel::shown_fields` его там не показывает), тем же снисхождением, что у `Cfg::load_with` (`cfg::blocking_undecryptable`).
+    #[test]
+    fn an_unreadable_workstation_password_does_not_hold_the_switch_in_local_mode() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.mode = "local".into();
+        c.undecryptable = vec!["password".to_string()];
+        assert_eq!(open(&c), None);
     }
 
     #[test]

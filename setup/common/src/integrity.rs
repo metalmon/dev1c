@@ -42,10 +42,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-/// Что входит в список: всё, кроме самого списка, того, что программа пишет
-/// сама, файлов параметров — их человек правит по назначению, — и секрета
-/// сервера модели формы docker вместе с его файлом переменных: оба
-/// появляются только на установке, в комплекте их при сборке поставки нет.
+/// Что входит в список: всё, кроме самого списка, того, что программа пишет сама, файлов параметров — их человек правит по назначению, — секрета сервера модели формы docker вместе с его файлом переменных (оба появляются только на установке, в комплекте их при сборке поставки нет), и ключа шифрования паролей (`secrets::KEY_FILE` в `onec-connect` — крейты разные, имя продублировано литералом, как и у остальных файлов этого списка). На Linux каталог состояния может совпасть с корнем комплекта (`Store::system` там — тот же файловый ключ, что и `Store::file`), и без исключения ключ попал бы в `checksums.txt`, снятый до установки, — и сверка живого ключа с той суммой проваливалась бы всегда зря (Minor ревью задачи 7).
 fn listed(rel: &str) -> bool {
     !(rel == LIST
         || rel.ends_with(".log")
@@ -54,7 +51,8 @@ fn listed(rel: &str) -> bool {
         || rel == "dev1c.toml"
         || rel == "1c-connect.toml"
         || rel == "dev1c-llama.token"
-        || rel == "llama.env")
+        || rel == "llama.env"
+        || rel == "secret.key")
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -130,6 +128,8 @@ mod tests {
         // generated at install time, not shipped in the kit: never listed.
         std::fs::write(d.join("dev1c-llama.token"), "secret").unwrap();
         std::fs::write(d.join("llama.env"), "LLAMA_API_KEY=secret\n").unwrap();
+        // Ключ шифрования паролей (`secrets::KEY_FILE` в onec-connect): на Linux каталог состояния может совпасть с корнем комплекта, и этот файл не должен попасть в checksums.txt (Minor ревью задачи 7).
+        std::fs::write(d.join("secret.key"), [0u8; 32]).unwrap();
         Kit::at(d)
     }
 
@@ -137,7 +137,7 @@ mod tests {
     fn list_then_verify_then_detect_damage() {
         let k = tmp_kit();
         let n = write_list(&k, |_| {}).unwrap();
-        assert_eq!(n, 2, "the log, the parameter files and the generated secret files are not listed");
+        assert_eq!(n, 2, "the log, the parameter files, the generated secret files and the encryption key are not listed");
         std::fs::write(k.path("dev1c.toml"), "[server]\nport = 4000\n").unwrap();
         assert!(verify(&k, |_, _, _| {}).unwrap().ok(), "editing parameters is not damage");
         assert!(verify(&k, |_, _, _| {}).unwrap().ok());

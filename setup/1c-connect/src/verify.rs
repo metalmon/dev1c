@@ -26,6 +26,8 @@ const VRUNNER: &str = "vrunner-mcp отвечает";
 pub const PROJECT: &str = "проект";
 pub const BASE: &str = "база";
 const DB_USER: &str = "пользователь базы";
+/// Ревью задачи 7, Important 2: `main.rs` печатал эту находку `println!` мимо набора фактов — отчёт, который человек прикладывает к обращению (`last-check.txt`), о ней молчал. Теперь это факт как все остальные, с тем же условием, что держит замок (`gate::cold_gate`, `cfg::blocking_undecryptable`).
+const UNDECRYPTABLE: &str = "пароль расшифрован";
 const SYSTEM_WEB: &str = "веб-сервер в системе";
 // Имя про порт, а не про веб-сервер вообще: рядом стоит «веб-сервер в
 // системе» (есть ли чем публиковать), и два похожих имени читались бы как
@@ -74,7 +76,7 @@ pub fn order(mode: &str) -> Vec<&'static str> {
     }
     // «Пользователь базы» — сразу за базой и до веб-сервера с публикацией:
     // без него работы не будет, как бы хорошо ни отвечала публикация.
-    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, DB_USER]);
+    v.extend([KIT, TOOLS, VRUNNER, PROJECT, BASE, DB_USER, UNDECRYPTABLE]);
     // «Веб-сервер в системе» — перед портом веб-сервера и до публикации:
     // без системного apache2 и модуля платформы ни порт не ответит, ни
     // публикация не поднимется, и причина должна быть настоящей, а не
@@ -468,6 +470,20 @@ pub fn db_user_fact(user: &str) -> Check {
 /// идентифицирован»), и так это должно читаться в обеих.
 pub fn db_user_is_set(user: &str) -> bool {
     !user.trim().is_empty()
+}
+
+/// Факт готовности (ревью задачи 7, Important 2): нерасшифрованный пароль базы (а в туннельном режиме — и пароль рабочего места) — то же условие, что держит холодный замок (`gate::cold_gate`), иначе статус зелёный, пока MCP и «Установить расширение» бесшумно едут с пустым паролем. Раньше находка печаталась мимо набора фактов (`main.rs`, `println!` в `status`/`check`) — отчёт `last-check.txt`, который человек прикладывает к обращению, о ней молчал. Чистая функция от `cfg::blocking_undecryptable` — то же сито, что у замка, одна поверхность на двоих.
+pub fn undecryptable_fact(mode: &str, undecryptable: &[String]) -> Check {
+    let blocking = crate::cfg::blocking_undecryptable(mode, undecryptable);
+    if blocking.is_empty() {
+        Check::pass(UNDECRYPTABLE, "да")
+    } else {
+        Check::fail(
+            UNDECRYPTABLE,
+            format!("не расшифрован: {}", blocking.join(", ")),
+            "откройте окно, введите пароль заново и нажмите «Сохранить»",
+        )
+    }
 }
 
 /// Чем публиковать базу под Linux: системный `apache2` и модуль платформы
@@ -1066,6 +1082,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, _editor_mcp: Option<&editors
     v.push(base_fact(&h.base_path, base_exists_on_disk(&h.base_path)));
     // Чистая функция от настроек, без сети и без срока.
     v.push(db_user_fact(&h.db_user));
+    v.push(undecryptable_fact(&h.mode, &ctx.cfg.undecryptable));
     #[cfg(target_os = "linux")]
     v.push(system_web_server_fact(&ctx.cfg));
     // Сколько сеансов 1С открыто прямо сейчас — число пришло от вызывающего
@@ -1290,10 +1307,12 @@ fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
     arranged
 }
 
-/// Параметры для отчёта без паролей.
+/// Параметры для отчёта без паролей. Маска «…» ставится только НЕпустому полю: безусловная маска на пустом поле сообщала бы в отчёте «пароль есть», хотя его нет вовсе (Minor ревью задачи 7 — `password` до этой правки маскировался без проверки, `db_password` рядом — уже правильно).
 pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     let mut c = cfg.clone();
-    c.host.password = "…".into();
+    if !c.host.password.is_empty() {
+        c.host.password = "…".into();
+    }
     if !c.host.db_password.is_empty() {
         c.host.db_password = "…".into();
     }
@@ -1331,6 +1350,7 @@ mod tests {
             media_fact(Some("FAT32".into()), "E:\\"),
             base_fact("C:\\нет-такого-каталога-для-теста-one-truth", false),
             db_user_fact(""),
+            undecryptable_fact("tunnel", &["db_password".to_string()]),
             web_server_fact(None, None),
             web_fact(1818, false, false),
             publication_responds_fact("http://x", false, None),
@@ -1389,6 +1409,21 @@ mod tests {
         assert!(tunnel.contains("192.168.1.10"), "в туннеле адрес среды нужен: {tunnel}");
     }
 
+    /// Minor ревью задачи 7: маска «…» ставится только НЕпустому полю — иначе отчёт говорит «пароль есть» про поле, которого нет вовсе.
+    #[test]
+    fn an_empty_password_is_not_masked_as_if_it_were_set() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.password = String::new();
+        cfg.host.db_password = String::new();
+        let report = cfg_for_report(&cfg);
+        assert!(!report.contains("password = \"…\""), "{report}");
+        assert!(!report.contains("db_password = \"…\""), "{report}");
+        cfg.host.password = "секрет".into();
+        cfg.host.db_password = "секрет базы".into();
+        let report = cfg_for_report(&cfg);
+        assert!(report.contains("password = \"…\"") && report.contains("db_password = \"…\""), "{report}");
+    }
+
     fn test_ctx(mode: &str) -> Ctx {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.mode = mode.to_string();
@@ -1428,28 +1463,26 @@ mod tests {
         // всё остальное целиком.
         let l = usize::from(cfg!(feature = "licence"));
         let tunnel = order("tunnel");
-        // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на
-        // три факта (публикация, расширение, дескриптор). +1 ещё: задача 7
-        // (решение владельца 29.10) добавила «записи MCP у редактора»
-        // последним стражем набора, после туннеля/портов рабочего места.
-        assert_eq!(tunnel.len(), 18 + w + l);
-        assert_eq!(tunnel[16 + w + l], "туннель");
-        assert_eq!(tunnel[17 + w + l], EDITOR_MCP);
+        // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на три факта (публикация, расширение, дескриптор). +1: задача 7 (решение владельца 29.10) добавила «записи MCP у редактора» последним стражем набора, после туннеля/портов рабочего места. +1 ещё: ревью той же задачи 7 (Important 2) добавило «пароль расшифрован» сразу за пользователем базы.
+        assert_eq!(tunnel.len(), 19 + w + l);
+        assert_eq!(tunnel[17 + w + l], "туннель");
+        assert_eq!(tunnel[18 + w + l], EDITOR_MCP);
         // Платформа и строка платформы для анализатора — рядом: вторая без
         // первой не считается вовсе.
         assert_eq!(tunnel[1 + l], "платформа 1С");
         assert_eq!(tunnel[2 + l], "платформа для анализатора");
         assert_eq!(tunnel[5 + d + l], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[13 + w + l], "Gitea");
+        assert_eq!(tunnel[9 + d + l], UNDECRYPTABLE);
+        assert_eq!(tunnel[14 + w + l], "Gitea");
         if d == 1 {
             assert_eq!(tunnel[3 + l], "экран для конфигуратора");
-            assert_eq!(tunnel[10 + l], "веб-сервер в системе");
-            assert_eq!(tunnel[11 + l], "порт веб-сервера");
+            assert_eq!(tunnel[11 + l], "веб-сервер в системе");
+            assert_eq!(tunnel[12 + l], "порт веб-сервера");
         }
         let local = order("local");
-        assert_eq!(local.len(), 18 + w + l);
-        assert_eq!(local[16 + w + l], "порты рабочего места");
-        assert_eq!(local[17 + w + l], EDITOR_MCP);
+        assert_eq!(local.len(), 19 + w + l);
+        assert_eq!(local[17 + w + l], "порты рабочего места");
+        assert_eq!(local[18 + w + l], EDITOR_MCP);
         // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
         assert_eq!(order("something-else"), tunnel);
     }
@@ -2367,6 +2400,19 @@ mod tests {
         assert!(c.info && c.ok, "{c:?}");
         let c = tunnel_fact(Some("работает с 12:40"));
         assert!(!c.info && c.ok);
+    }
+
+    /// Ревью задачи 7, Important 2: тот же замок, что держит переключатель (`gate::cold_gate`), теперь и в наборе фактов — одно сито (`cfg::blocking_undecryptable`) на обе поверхности. `db_password` проваливает факт в любом режиме, `password` — только в туннельном.
+    #[test]
+    fn undecryptable_fact_follows_the_same_sieve_as_the_switch() {
+        assert!(undecryptable_fact("tunnel", &[]).ok, "расшифровалось — зелёный");
+        let c = undecryptable_fact("tunnel", &["db_password".to_string()]);
+        assert!(!c.ok && c.detail.contains("db_password") && !c.hint.is_empty(), "{c:?}");
+        let c = undecryptable_fact("tunnel", &["password".to_string()]);
+        assert!(!c.ok && c.detail.contains("password"), "{c:?}");
+        // Локальный режим: пароль рабочего места никто не читает — зелёный, то же снисхождение, что у `cfg::blocking_undecryptable`.
+        assert!(undecryptable_fact("local", &["password".to_string()]).ok, "в локальном режиме поле не в счёт");
+        assert!(!undecryptable_fact("local", &["db_password".to_string()]).ok, "db_password в счёт в любом режиме");
     }
 
     /// Решение владельца 29.10: три состояния, и факт не врёт в обе стороны. `Ours` — зелёный; `Missing`/`Absent`/`Foreign` — провал (горячий, красит точку жёлтым, но это и есть `Check::fail`: `ok == false`); `None` — тоже провал, но причина другая — «не смог проверить», а не «нет записей» — и, в отличие от них, с советом (Important 5 ревью: провал без совета не годится).

@@ -168,6 +168,10 @@ jobs:
         # надо, иначе отложенный код тихо развалится к тому дню, когда окно
         # решат вернуть.
         run: cargo test --workspace --features dev1c-setup/gui --manifest-path setup/Cargo.toml
+      - name: Test (DPAPI round trip)
+        # Единственный `#[ignore]` в наборе (`secrets::tests::the_system_store_on_windows_round_trips_through_dpapi`) не зовётся в шаге выше — спека прямо запрещает звать DPAPI из обычных тестов (он привязан к пользователю, под которым идёт прогон). Этот шаг гоняет ровно его, и только на Windows (DPAPI — Windows-специфика, `#[cfg(windows)]`): проверка кругового шифрования (`seal`+`open`) под ОДНИМ пользователем в ОДНОМ процессе CI-агента, а не заявление о переносе шифртекста между учётками или машинами — того спека и не обещает (ревью задачи 7, Important 6).
+        if: matrix.name == 'windows'
+        run: cargo test -p onec-connect --features gui --manifest-path setup/Cargo.toml -- --ignored
       - name: Build
         run: |
           # Без окна на обеих системах: в поставку идёт консольная

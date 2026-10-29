@@ -384,6 +384,14 @@ mod dpapi {
     use super::OpenError;
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB};
+    use zeroize::Zeroize;
+
+    /// Затирает буфер, который выделил сам DPAPI (`LocalAlloc`), прежде чем отдать его системе через `LocalFree` — `bytes` уже своя копия, `output.pbData` дальше не нужен никому, кроме освобождения, и без этого шифртекст (`seal`) или открытый пароль (`open`) остаются лежать в куче процесса неопределённо долго после `LocalFree` (Minor ревью задачи 7 — файловая подложка бьётся за это же везде, у DPAPI не было).
+    unsafe fn zero_local_alloc(output: &CRYPT_INTEGER_BLOB) {
+        if !output.pbData.is_null() {
+            std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize).zeroize();
+        }
+    }
 
     /// Имя поля — `pOptionalEntropy`: тот же механизм связанных данных, что
     /// AAD у AEAD-подложки (Minor 7 ревью задачи 1) — симметрично по смыслу,
@@ -408,7 +416,10 @@ mod dpapi {
             }));
         }
         let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-        unsafe { LocalFree(output.pbData as _) };
+        unsafe {
+            zero_local_alloc(&output);
+            LocalFree(output.pbData as _);
+        }
         Ok(bytes)
     }
 
@@ -434,7 +445,10 @@ mod dpapi {
             return Err(OpenError::Foreign);
         }
         let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
-        unsafe { LocalFree(output.pbData as _) };
+        unsafe {
+            zero_local_alloc(&output);
+            LocalFree(output.pbData as _);
+        }
         Ok(bytes)
     }
 }

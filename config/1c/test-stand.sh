@@ -170,8 +170,9 @@ for n in 1 2 3; do
     # 401 forever, and this warm-up loop would spin all 30 tries and move
     # on regardless — the same 401 branch below would then fire on a
     # service that was never actually given a chance to warm up.
+    # То же умолчание, что у DB_USER в stand.sh (`${DEMO_DB_USER-Администратор}`): `-`, а не `:-`, чтобы явно пустой DEMO_DB_USER остался пустым, но НЕзаданный обязан совпасть с тем пользователем, которым база и была засеяна — иначе этот curl стучится пустым именем, и каждый 401 ниже спишут на отсутствие пользователя ИБ, а не на устаревшее умолчание здесь (Minor ревью задачи 7).
     for try in $(seq 30); do
-        [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' -u "${DEMO_DB_USER-}:" \
+        [ "$(curl -s -o /dev/null -m 2 -w '%{http_code}' -u "${DEMO_DB_USER-Администратор}:" \
              "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version" 2>/dev/null)" = 200 ] && break
         sleep 1
     done
@@ -183,7 +184,7 @@ for n in 1 2 3; do
     # call above (the pool keeps it 20 s): on the connection-limit answer,
     # wait and ask again rather than fail
     for try in 1 2 3 4 5 6; do
-        code=$(curl -s -o $T/hs.$n -w '%{http_code}' -u "${DEMO_DB_USER-}:" "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version")
+        code=$(curl -s -o $T/hs.$n -w '%{http_code}' -u "${DEMO_DB_USER-Администратор}:" "http://127.0.0.1:$((8080 + n))/hs/mcp-1c/version")
         grep -q 'количество подключений\|connections limitation' $T/hs.$n || break
         sleep 15
     done

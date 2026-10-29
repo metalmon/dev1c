@@ -359,11 +359,10 @@ impl Cfg {
         if !existed {
             return Ok(cfg);
         }
-        if !cfg.undecryptable.is_empty() {
-            anyhow::bail!(
-                "{FILE}: пароль зашифрован на другой машине или другим пользователем — откройте окно и введите заново ({})",
-                cfg.undecryptable.join(", ")
-            );
+        let blocking = blocking_undecryptable(&cfg.host.mode, &cfg.undecryptable);
+        if !blocking.is_empty() {
+            let blocking: Vec<String> = blocking.into_iter().map(str::to_string).collect();
+            anyhow::bail!("{}", undecryptable_message(&blocking));
         }
         cfg.validate()?;
         Ok(cfg)
@@ -613,6 +612,28 @@ fn open_or_mark(store: &secrets::Store, field: &str, value: &str, bad: &mut Vec<
     }
 }
 
+/// Имя поля `Cfg::undecryptable` словами человека — одно на оба места, что его произносят не глазами на toml, а на экране: журнал окна (`gui::panel::undecryptable_line`) и строка «оставлен прежним» у «Сохранить» (`gui::save::field_label`). Раньше оба держали свою копию этих двух слов (ревью задачи 7, Important 4, вторая половина) — норма в этом репозитории обратная (`NO_GITEA`): одна причина, одна формулировка. Неизвестное имя (другого `undecryptable` задача 2 не заводит) получает то же слово, что `password`: молчать о поле хуже, чем назвать его не тем.
+pub fn secret_field_name(field: &str) -> &'static str {
+    if field == "db_password" {
+        "пароль пользователя базы"
+    } else {
+        "пароль рабочего места"
+    }
+}
+
+/// Причина, по которой пароль читается пустым, — одна формулировка на все четыре места, что о ней говорят: отказ `load_with` ниже (команды, которым без пароля не работать), диагноз `status`/`check` (`main.rs`, не отказ — только сведение) и строка окна (`gui::panel::undecryptable_line`, другими словами то же самое). Раньше каждое место собирало фразу само, и для одной причины нашлось четыре формулировки, местами в разном порядке слов (ревью задачи 7, Important 4) — как и у имени поля выше, норма обратная (`NO_GITEA`).
+pub const UNDECRYPTABLE_REASON: &str = "зашифрован на другой машине или другим пользователем";
+
+/// Отказ/диагноз командной строки: имя файла, причина, имена полей программы (`password`, `db_password`) через запятую — этому читателю (разработчик на своей машине, не окно) незачем переводить их на слова человека.
+pub fn undecryptable_message(fields: &[String]) -> String {
+    format!("{FILE}: пароль {UNDECRYPTABLE_REASON} — откройте окно и введите заново ({})", fields.join(", "))
+}
+
+/// Какие из `undecryptable` и правда мешают работе — не любое непрочитанное поле подряд. Пароль рабочего места (`password`) в ЛОКАЛЬНОМ режиме не читает никто: туннеля в среду нет, коннектор слушает loopback, и `gui::panel::shown_fields` само поле там не показывает вовсе — отказывать на нём молчаливой команде незачем, тем же приёмом, что `validate` уже не спрашивает `server` в этом режиме (ревью задачи 7, Important 1). `db_password` этого снисхождения не получает ни в каком режиме: без пользователя и пароля базы работать не выйдет и локально. Общая функция — CLI (`load_with` ниже) и холодный замок окна (`gate::cold_gate`) смотрят на один и тот же список, а не на два независимо собранных (тот же ревью, Important 2).
+pub fn blocking_undecryptable<'a>(mode: &str, undecryptable: &'a [String]) -> Vec<&'a str> {
+    undecryptable.iter().map(String::as_str).filter(|f| mode != "local" || *f != "password").collect()
+}
+
 /// Единственный путь записи параметров (решение владельца, спека
 /// «Анти-цели»: «шифрование, которое тихо не состоялось»). Печатает,
 /// пишет, затем читает файл обратно и проверяет, что оба пароля
@@ -637,12 +658,32 @@ pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&
     for (key, value) in patches {
         text = common::toml_render::set(&text, "[host]", key, value);
     }
-    common::kit::write_text(&kit.state_path(FILE), &text).map_err(|e| format!("{e:#}"))?;
+    let path = kit.state_path(FILE);
+    common::kit::write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+    // Проверка расшифрованного с расшифрованным (ниже) не ловит запись открытого текста без префикса: `Store::open` отдаёт значение без префикса как есть, и если оно совпало с тем, что ожидалось (например, патч по ошибке подставил сам пароль, а не его шифртекст), сравнение сойдётся на открытом тексте так же, как на честном шифртексте (ревью задачи 7, Important 5). Поэтому читаем сам ТЕКСТ файла и отдельно убеждаемся, что непустой пароль на диске начинается с `secrets::PREFIX` — это и есть факт «зашифровалось», отдельный от факта «читается как до записи».
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("{e:#}"))?;
+    sealed_or_empty(&raw, "password")?;
+    sealed_or_empty(&raw, "db_password")?;
     let back = Cfg::load_unchecked_with(kit, store).map_err(|e| format!("{e:#}"))?;
     if !passwords_match(cfg, &back) {
         return Err(format!("{FILE}: запись не прошла проверку — пароль после записи читается не так, как до неё"));
     }
     Ok(())
+}
+
+/// Непустое значение ключа `[host].<key>` на диске — либо пусто, либо начинается с `secrets::PREFIX`; открытый текст без префикса здесь всегда отказ, в отличие от чтения параметров (`secrets::Store::open`), где открытый текст — законный переходный случай. `write_checked` печатает сама — то, что она напечатала, обязано быть шифртекстом или пустой строкой, и ничем третьим (ревью задачи 7, Important 5).
+fn sealed_or_empty(text: &str, key: &str) -> std::result::Result<(), String> {
+    let doc: toml::Value = toml::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
+    let value = doc.get("host").and_then(|h| h.get(key)).and_then(|v| v.as_str()).unwrap_or("");
+    if value.is_empty() || value.starts_with(secrets::PREFIX) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{FILE}: запись не прошла проверку — {} на диске не зашифрован (нет префикса {})",
+            secret_field_name(key),
+            secrets::PREFIX
+        ))
+    }
 }
 
 /// Сравнение, которым `write_checked` решает, сошлась ли проверка после
@@ -1278,6 +1319,34 @@ mod tests {
         assert!(e.contains("введите"), "{e}");
     }
 
+    /// Important 1 ревью задачи 7: пароль рабочего места (`password`) в ЛОКАЛЬНОМ режиме не читает никто — туннеля нет, поле в окне не показано (`panel::shown_fields`). Отказывать на нём командной строке незачем — то же снисхождение, что `validate` уже даёт полю `server`.
+    #[test]
+    fn a_local_workstation_is_not_refused_over_an_unreadable_workstation_password() {
+        let (mine, theirs) = (secrets::Store::file(&tmp("local-ok1")), secrets::Store::file(&tmp("local-ok2")));
+        let mut filled_local = filled();
+        filled_local.host.mode = "local".into();
+        filled_local.host.password = "секрет".into();
+        let text = filled_local.render(&mine).unwrap();
+        let kit = kit_with(&text);
+        let loaded = Cfg::load_with(&kit, &theirs).expect("локальный режим не спрашивает пароль рабочего места");
+        assert_eq!(loaded.host.password, "", "поле всё равно отдаётся пустым — просто это не повод отказать");
+    }
+
+    /// Та же команда на том же режиме отказывает, когда непрочитан именно `db_password` — он нужен в любом режиме, снисхождения нет. Пароль рабочего места шифруем ТОЙ же подложкой, которой читаем (`theirs`), он обязан открыться сам — ломаем только `db_password`, чтобы причина отказа была однозначной.
+    #[test]
+    fn a_local_workstation_is_still_refused_over_an_unreadable_database_password() {
+        let (mine, theirs) = (secrets::Store::file(&tmp("local-bad1")), secrets::Store::file(&tmp("local-bad2")));
+        let mut filled_local = filled();
+        filled_local.host.mode = "local".into();
+        filled_local.host.db_password = "секрет базы".into();
+        let mut text = filled_local.render(&mine).unwrap();
+        let readable_password = theirs.seal("password", &filled_local.host.password).unwrap();
+        text = common::toml_render::set(&text, "[host]", "password", &format!("{readable_password:?}"));
+        let kit = kit_with(&text);
+        let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
+        assert!(e.contains("db_password"), "{e}");
+    }
+
     /// Разовая команда вроде `status` не имеет права переписывать параметры
     /// человека — чтение файла ничего на диске не меняет.
     #[test]
@@ -1321,6 +1390,30 @@ mod tests {
         assert!(passwords_match(&written, &reread), "одинаковые пароли — совпадение");
         reread.host.password = String::new();
         assert!(!passwords_match(&written, &reread), "пустое поле там, где был пароль, — несовпадение");
+    }
+
+    /// Important 5 ревью задачи 7: `passwords_match` сравнивает расшифрованное с расшифрованным, и патч, который подставляет сам пароль ОТКРЫТЫМ ТЕКСТОМ (без префикса `enc1:`), эту проверку проходит — `Store::open` отдаёт значение без префикса как есть, и обе стороны читают одну и ту же строку. Подложка нужна самая обычная, лгущая заглушка не нужна: хватает патча с неверным (не запечатанным) литералом. Без добавленной проверки текста на диске (`sealed_or_empty`) этот тест не падает — падает он именно её удалением.
+    #[test]
+    fn write_checked_refuses_a_patch_that_writes_the_password_as_plain_text() {
+        let s = secrets::Store::file(&tmp("plain-patch"));
+        let kit = kit_with("");
+        let mut c = filled();
+        c.host.password = "дев1".into();
+        // Литерал toml, тот же пароль, но без префикса `enc1:` — ровно то, что когда-либо вернул бы чужой код, перепутавший пароль с его шифртекстом.
+        let literal = format!("{:?}", c.host.password);
+        let err = cfg::write_checked(&kit, &c, &s, &[("password", &literal)]).unwrap_err();
+        assert!(err.contains("не зашифрован") || err.contains(secrets::PREFIX), "{err}");
+        // Файл всё равно написан (запись печатает раньше, чем отказывает проверка) — но без префикса, и дальше по нему никто не поедет молча.
+        let text = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
+        assert!(text.contains("password = \"дев1\""), "{text}");
+    }
+
+    /// `sealed_or_empty` сама по себе: пусто и честный шифртекст проходят, открытый текст и битый toml — отказ.
+    #[test]
+    fn sealed_or_empty_accepts_blank_and_prefixed_and_rejects_plain_text() {
+        assert!(sealed_or_empty("[host]\npassword = \"\"\n", "password").is_ok());
+        assert!(sealed_or_empty(&format!("[host]\npassword = \"{}deadbeef\"\n", secrets::PREFIX), "password").is_ok());
+        assert!(sealed_or_empty("[host]\npassword = \"открытый\"\n", "password").is_err());
     }
 
     /// `write_checked` не обязан молчать, если запись самого файла не

@@ -469,6 +469,25 @@ fn a_tray_key_is_written_even_when_the_rest_is_not_filled_in() {
     assert!(text.contains("publication = \"webserver\""), "{text}");
 }
 
+/// Critical 2 ревью задачи 7: `read_to_string(..).unwrap_or_else(|_| EXAMPLE)` не отличала «файла нет» от любой другой причины отказа (антивирус держит файл, нет прав, временный сбой диска) — и в обоих случаях следующая строка писала образец ПОВЕРХ существующего файла, стирая оба шифртекста молча. Права 0o200 (писать можно, читать нельзя) — ровно такой разрыв без chmod каталога: `read_to_string` откажет не `NotFound`, а старый код после этого как ни в чём не бывало писал бы образец — право на запись у файла есть. Под root права не действуют — тест бессмыслен, пропускаем, как и соседний тест `secrets::tests::a_read_only_state_dir_is_a_named_refusal`.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_but_existing_file_refuses_instead_of_overwriting() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let mut ui = Ui::for_test();
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = "[host]\nserver = \"настоящие данные\"\n";
+    std::fs::write(&path, before).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o200)).unwrap();
+    let result = save_tray_key(&mut ui, "mode", "local");
+    // Права вернуть до любых проверок — иначе отказавший `assert!` оставит файл нечитаемым, и следующая же попытка его прочитать (хоть здесь, хоть в чистке temp-каталога) наткнётся на ту же самую причину, что проверяет этот тест.
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "файл не тронут ни на байт");
+}
+
 /// Important 1 ревью задачи 2: переключатель в трее правит ОДИН ключ текстом,
 /// а не перерисовывает файл через `render` — иначе шифртекст пароля, который
 /// `ui.cfg` прочитал пустым (чужая машина или чужая учётка, `load_unchecked`),

@@ -1389,6 +1389,11 @@ pub fn codex_unset(name: &str) -> Result<(), String> {
 /// «записи нет»: спутать их значит перезаписать чужую запись) до сюда не
 /// доходит вовсе, он остаётся `Err` у вызывающего.
 fn found_via(exe: &Path, cmds: &[Option<String>]) -> Found {
+    // Срез короче реестра дал бы `Found::Absent` навсегда и ни одного отказа:
+    // `ours_count == OURS.len()` стало бы недостижимо. Оба `parse_*` отдают
+    // ровно `OURS.len()` по построению — здесь это закреплено, чтобы правка в
+    // них не ушла в молчаливое «записей нет».
+    debug_assert_eq!(cmds.len(), OURS.len(), "состояние даётся по одной записи на имя реестра");
     let want = exe.file_name().map(|n| n.to_string_lossy().to_string());
     let mut foreign = Vec::new();
     let mut ours_count = 0usize;

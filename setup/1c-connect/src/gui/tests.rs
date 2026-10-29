@@ -6,7 +6,7 @@ use crate::session::State;
 use common::check::Check;
 use common::Phase;
 use core::prelude::v1::test;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -393,4 +393,91 @@ fn success_is_silent_and_a_mismatch_speaks() {
 
     let refused = setup_line("Zed", true, Err(vec!["vrunner".into()])).unwrap();
     assert!(refused.text.contains("занята чужой командой"), "{refused:?}");
+}
+
+/// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
+/// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
+/// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.
+fn next_agent(rx: &mut futures::channel::mpsc::UnboundedReceiver<Ev>) -> (usize, Option<Line>, Instant) {
+    loop {
+        match futures::executor::block_on(futures::StreamExt::next(rx)).expect("поток щелчка не ответил") {
+            Ev::Agent { i, line, started } => return (i, line, started),
+            _ => continue,
+        }
+    }
+}
+
+/// Шов щелчка галочки: защёлка, её срок и ответ потока. Тело поддельное —
+/// настоящее (`agent_work`) зовёт CLI агента и пишет в файлы человека;
+/// проверяется здесь всё остальное, то есть ровно то, что сломалось бы.
+#[test]
+fn an_agent_click_is_latched_and_answers_with_its_own_event() {
+    let mut ui = Ui::for_test();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    ui.tx = tx;
+    // Якорь в будущем: на свежей машине `Instant::now() - 90 с` паникует.
+    let now = Instant::now() + Duration::from_secs(3600);
+    let said = Line { kind: Kind::Fail, text: "Zed: не удалось настроить".into() };
+
+    let mine = said.clone();
+    assert!(toggle_agent_ui(&mut ui, 0, true, now, move || Some(mine)), "первый щелчок не приняли");
+    // Признак работы на принятом щелчке — строка в журнал: щёлкают из трея,
+    // при закрытом окне, и до 25 с человеку иначе не видно ничего.
+    let started_line = ui.log.last().expect("принятый щелчок не сказал в журнал ни слова").clone();
+    assert_eq!(started_line.kind, Kind::Say, "{started_line:?}");
+    assert!(started_line.text.contains("настраиваю записи MCP"), "{started_line:?}");
+
+    // Второй щелчок по тому же агенту не принят — и это предупреждение, а не
+    // отказ работы: ничего не сломалось, надо дождаться ответа.
+    assert!(!toggle_agent_ui(&mut ui, 0, true, now, || unreachable!("второй поток на одного агента")));
+    assert_eq!(ui.log.last().unwrap().kind, Kind::Warn, "{:?}", ui.log.last());
+    // Сосед при этом не заперт: работы у агентов разные.
+    assert!(toggle_agent_ui(&mut ui, 1, false, now, || None), "щелчок по соседнему агенту заперт чужой работой");
+
+    // Оба принятых щелчка отвечают своим событием с тем, что отдало тело;
+    // порядок финиша потоков произволен, поэтому разбираем по индексу.
+    let mut got = [next_agent(&mut rx), next_agent(&mut rx)];
+    got.sort_by_key(|(i, ..)| *i);
+    assert_eq!(got[0], (0, Some(said), now));
+    assert_eq!(got[1], (1, None, now));
+
+    // Срок отпускает защёлку аварийно: `editors::cli` ждёт `c.output()` без
+    // предела, и без этого галочка зависшего агента была бы мертва до
+    // перезапуска приложения.
+    let later = now + AGENT_CLICK_LOST + Duration::from_secs(1);
+    assert!(!agent_click_busy(ui.agent_clicks[0], later), "срок не вышел");
+    assert!(toggle_agent_ui(&mut ui, 0, true, later, || None), "по истечении срока щелчок всё равно не пускают");
+    assert_eq!(next_agent(&mut rx), (0, None, later), "ответ пришёл с отметкой не своего щелчка");
+    // Запоздавший ответ отпущенного щелчка безвреден: защёлку живого он не
+    // снимает — сверка по отметке (`on_agent`).
+    on_agent(&mut ui, 0, None, now);
+    assert_eq!(ui.agent_clicks[0], Some(later), "запоздавший ответ снял защёлку следующего щелчка");
+    on_agent(&mut ui, 0, None, later);
+    assert_eq!(ui.agent_clicks[0], None, "свой ответ защёлку не снял");
+
+    // Паника в потоке — тоже ответ: иначе агент оставался бы неподатливым до
+    // срока без всякой причины.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    assert!(toggle_agent_ui(&mut ui, 2, true, now, || panic!("CLI упал")));
+    let panicked = next_agent(&mut rx);
+    std::panic::set_hook(prev);
+    assert_eq!(panicked, (2, None, now));
+    on_agent(&mut ui, 2, None, now);
+    assert_eq!(ui.agent_clicks[2], None, "паника оставила галочку агента мёртвой");
+}
+
+/// Пункт 7: щелчок и сразу «Выход» могли оборвать процесс между `remove` и
+/// `add` и оставить файл агента без записи, которая там была ДО нас. Выход
+/// ждёт потоки щелчка тем же порядком, что сеанс, и по истечении уходит
+/// всё равно.
+#[test]
+fn quitting_waits_for_clicks_in_flight_but_not_forever() {
+    let live = AtomicUsize::new(1);
+    let t0 = Instant::now();
+    assert!(!wait_quiet(&live, Duration::from_millis(200)), "ждали вечно");
+    assert!(t0.elapsed() >= Duration::from_millis(200), "срок не выдержан");
+
+    live.store(0, Ordering::Relaxed);
+    assert!(wait_quiet(&live, Duration::from_secs(5)), "ждать было нечего");
 }

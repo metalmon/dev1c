@@ -687,6 +687,33 @@ fn a_verdict_reaches_the_tray_and_the_log() {
     assert_eq!(ui.tray_shown.unwrap().state, TrayState::Up);
 }
 
+/// Пункт 5 круга 3: `claude_set_with` делает `remove`, потом `add`, и между
+/// ними ~7 с, в которые нашей записи в файле нет. Окно теперь живое, и такт
+/// в эту щель попадает: `EDITOR_MCP` сказал бы «не настроен ни один
+/// установленный агент» сразу после щелчка «включить», значок оранжевеет, а
+/// через проход всё само чинится. Лечение — пропуск пересчёта, той же
+/// защёлкой, что держит его при живом расчёте.
+#[test]
+fn the_set_is_not_recomputed_while_an_agent_click_is_in_flight() {
+    let mut ui = Ui::for_test();
+    ui.cfg.host.mode = "local".into();
+    ui.enabled.store(true, Ordering::Relaxed);
+    // Якорь в будущем: на свежей машине `Instant::now() - 90 с` паникует.
+    let now = Instant::now() + Duration::from_secs(3600);
+    ui.agent_clicks[2] = Some(now);
+
+    assert!(start_facts(&mut ui, now).is_none(), "расчёт пошёл в щель между `remove` и `add`");
+    assert!(ui.facts_again, "пересчёт не обещан — набор остался бы прежним до медленного такта");
+    assert!(!ui.facts_pending, "защёлка набора взведена чужой работой");
+
+    // Итог щелчка (`Ev::Agent` → `run_readiness`) отпускает пересчёт; то же
+    // делает и срок защёлки, если ответа не будет никогда.
+    assert!(start_facts(&mut ui, now + super::AGENT_CLICK_LOST + Duration::from_secs(1)).is_some(), "срок щелчка не отпустил пересчёт");
+    ui.facts_pending = false;
+    ui.agent_clicks[2] = None;
+    assert!(start_facts(&mut ui, now).is_some(), "ответ щелчка не отпустил пересчёт");
+}
+
 /// Проводка срока (находка S4): мост спрашивает часы на каждый вызов и
 /// после полуночи отказывает всем, а окно смотрело в запомненное и
 /// показывало зелёное. Смена состояния лицензии — такое же событие,

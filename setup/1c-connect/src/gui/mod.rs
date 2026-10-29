@@ -16,7 +16,7 @@ use common::op::CleanLevel;
 use common::{run, AlwaysDefault, Event, Phase, Progress, Runner, Sink};
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -294,13 +294,20 @@ pub struct Ui {
     /// Когда тик в последний раз подвинул подсказку трея на фазу операции —
     /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
     pub tooltip_at: Option<Instant>,
-    /// Щелчок по галочке какого агента сейчас в полёте (индекс — тот же, что
-    /// в `editors::AGENTS`). Второй щелчок по тому же агенту, пока первый не
-    /// вернулся, не затевает вторую такую же работу: у Claude Code это четыре
-    /// запуска CLI по 6–8 с, и два набега разом звали бы `remove`/`add` на одни
-    /// и те же имена вперемешку — итог решал бы порядок финиша, а не человек.
-    /// Соседние агенты друг другу не мешают — работы у них разные.
-    pub agents_busy: [bool; crate::editors::AGENTS.len()],
+    /// Когда принят щелчок по галочке агента (индекс — тот же, что в
+    /// `editors::AGENTS`); `None` — по этому агенту ничего не идёт. Второй
+    /// щелчок по тому же агенту, пока первый не вернулся, не затевает вторую
+    /// такую же работу: у Claude Code это четыре запуска CLI по 6–8 с, и два
+    /// набега разом звали бы `remove`/`add` на одни и те же имена вперемешку —
+    /// итог решал бы порядок финиша, а не человек. Соседние агенты друг другу
+    /// не мешают — работы у них разные.
+    ///
+    /// Отметка времени, а не просто «занято»: `editors::cli` ждёт `c.output()`
+    /// без всякого предела, и зависший `claude`/`codex` (node ждёт сеть, замок,
+    /// авторизацию) запер бы галочку до перезапуска приложения. Срок
+    /// (`agent_click_busy`) отпускает защёлку аварийно — тот же приём и ровно
+    /// та же причина, что у `facts_since`/`readiness_lost`.
+    pub agent_clicks: [Option<Instant>; crate::editors::AGENTS.len()],
     pub tx: UnboundedSender<Ev>,
 }
 
@@ -433,7 +440,18 @@ pub enum Ev {
     /// это `remove`+`add` на два имени — четыре запуска CLI по 6–8 с, то есть
     /// около 25 с мёртвого окна на один щелчок (замер 30.10); тот же приём и
     /// по той же причине, что `Ev::Publish`.
-    Agent(usize, Option<Line>),
+    ///
+    /// `started` — отметка того щелчка, что этот ответ родил; защёлку снимает
+    /// только совпавшая с ней (`on_agent`). Этим безвреден и запоздавший ответ
+    /// щелчка, отпущенного по сроку (`agent_click_busy`): без сверки он снял бы
+    /// защёлку СЛЕДУЮЩЕГО щелчка, и два набега CLI пошли бы на одного агента
+    /// вперемешку — ровно то, от чего защёлка и заведена. Поколения отдельным
+    /// полем для этого не нужно: отметка времени у щелчка уже есть.
+    Agent {
+        i: usize,
+        line: Option<Line>,
+        started: Instant,
+    },
     /// Итог дешёвого такта, посчитанный в своём потоке (`spawn_cheap`,
     /// Important 4): число открытых сеансов 1С и — только на медленном такте
     /// — весь дешёвый набор. `None` в любом из полей значит «не спрашивали»
@@ -856,40 +874,108 @@ fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<St
 /// перестройка подменю по `Ev::Agent` (`tray::set_agents`): настоящий итог
 /// известен только после ответа CLI, а состояние теперь читается с диска и
 /// стоит миллисекунды — перестройка покажет, встала галочка или нет.
+///
+/// Обёртке достаётся одно — перерисовка окна; всё решение живёт в
+/// `toggle_agent_ui` от `&mut Ui`, как у прочих заводил потоков этого окна, и
+/// проверяется тестом на поддельном канале (`Ui::for_test`), а не только живым
+/// окном.
 pub fn toggle_agent(cx: &mut App, i: usize, on: bool) -> bool {
-    let ui = cx.global_mut::<Ui>();
-    if ui.agents_busy[i] {
-        let text = format!("{}: прежний щелчок ещё в работе — дождитесь ответа", crate::editors::AGENTS[i].label);
-        note_line(ui, Line { kind: Kind::Warn, text });
-        cx.refresh_windows();
+    let accepted = toggle_agent_ui(cx.global_mut::<Ui>(), i, on, Instant::now(), move || agent_work(i, on));
+    cx.refresh_windows();
+    accepted
+}
+
+/// Сколько щелчок держит защёлку, прежде чем её отпускают аварийно. Замер
+/// 30.10: один вызов CLI отвечает 6–8 с, у Claude Code их на щелчок четыре —
+/// около 32 с; взято с запасом почти втрое, потому что ошибиться в меньшую
+/// сторону хуже (два набега CLI на одного агента вперемешку), а в большую —
+/// всего лишь неподатливая галочка. Предел на сам вызов CLI это не заменяет:
+/// зависший процесс остаётся жить, срок снимает только защёлку.
+pub const AGENT_CLICK_LOST: Duration = Duration::from_secs(90);
+
+/// Идёт ли по агенту работа прямо сейчас: защёлка взведена и срок не вышел.
+/// Тем же приёмом, что `readiness_lost` у защёлки набора, и по той же
+/// причине — ответа от зависшего CLI может не быть никогда.
+pub fn agent_click_busy(since: Option<Instant>, now: Instant) -> bool {
+    since.is_some_and(|t| now.saturating_duration_since(t) <= AGENT_CLICK_LOST)
+}
+
+/// Сколько потоков щелчка в полёте — счётчик на процесс, а не ручки потоков:
+/// выходу (`quit`) важно лишь то, договорили ли они все, а не кто из них кто.
+static AGENT_CLICKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Тело щелчка на своём потоке: правка настроек агента и строка, если сказать
+/// есть что. Без `Ui` и без `cx` — чтобы заводила потока (`toggle_agent_ui`)
+/// проверялся тестом с поддельным телом: настоящее здесь зовёт CLI агента и
+/// пишет в файлы человека.
+fn agent_work(i: usize, on: bool) -> Option<Line> {
+    let def = &crate::editors::AGENTS[i];
+    match std::env::current_exe() {
+        Ok(exe) => {
+            let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
+            setup_line(def.label, on, result)
+        }
+        Err(e) => Some(Line {
+            kind: Kind::Fail, text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label)
+        }),
+    }
+}
+
+/// Решение щелчка: пустить его или нет, отметить защёлку, сказать человеку,
+/// что работа пошла, и завести поток. `work` — тело (`agent_work` в живой
+/// программе).
+///
+/// Строка в журнал на принятый щелчок — обязательна и выбрана единственным
+/// признаком работы: щёлкают из трея, то есть при закрытом окне, и журнал —
+/// это то, что человек увидит, когда его откроет; при закрытом окне она же
+/// растит счётчик непрочитанных (`note_line`), то есть бейдж вкладки
+/// «Журнал» — отдельного признака для скрытого окна заводить не нужно.
+/// В `Ui::working()` щелчок
+/// нарочно не входит: полоса хода читает его без часов, а защёлка отпускается
+/// по сроку только при следующем вопросе — зависший CLI оставил бы полосу
+/// крутиться навсегда. Своей карточки хода щелчку тоже не заводим — `Progress`
+/// на одну операцию в 25 с несоразмерен.
+fn toggle_agent_ui(ui: &mut Ui, i: usize, on: bool, now: Instant, work: impl FnOnce() -> Option<Line> + Send + 'static) -> bool {
+    let label = crate::editors::AGENTS[i].label;
+    if agent_click_busy(ui.agent_clicks[i], now) {
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn, text: format!("{label}: прежний щелчок ещё в работе — дождитесь ответа")
+            },
+        );
         return false;
     }
-    ui.agents_busy[i] = true;
+    ui.agent_clicks[i] = Some(now);
+    let what = if on { "настраиваю записи MCP" } else { "убираю записи MCP" };
+    note_line(ui, Line { kind: Kind::Say, text: format!("{label}: {what}…") });
     let tx = ui.tx.clone();
+    AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
         guarded(
             &tx,
-            move || {
-                let def = &crate::editors::AGENTS[i];
-                let line = match std::env::current_exe() {
-                    Ok(exe) => {
-                        let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
-                        setup_line(def.label, on, result)
-                    }
-                    Err(e) => Some(Line {
-                        kind: Kind::Fail,
-                        text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label),
-                    }),
-                };
-                Ev::Agent(i, line)
-            },
+            move || Ev::Agent { i, line: work(), started: now },
             // Паника в потоке — всё равно ответ: иначе защёлка осталась бы
-            // взведённой навсегда и агент стал бы неподатлив до перезапуска.
-            // Про саму панику журналу говорит `guarded`.
-            || Ev::Agent(i, None),
+            // взведённой до срока и агент был бы неподатлив полторы минуты
+            // без всякой причины. Про саму панику журналу говорит `guarded`.
+            move || Ev::Agent { i, line: None, started: now },
         );
+        AGENT_CLICKS.fetch_sub(1, Ordering::Relaxed);
     });
     true
+}
+
+/// Ответ потока щелчка: защёлку снимает только тот щелчок, что её и поставил
+/// (сверка по `started`), и строка итога ложится в журнал. Отдельно от
+/// обработчика события — там остались только трей и пересчёт, которым нужен
+/// `cx`.
+fn on_agent(ui: &mut Ui, i: usize, line: Option<Line>, started: Instant) {
+    if ui.agent_clicks[i] == Some(started) {
+        ui.agent_clicks[i] = None;
+    }
+    if let Some(line) = line {
+        note_line(ui, line);
+    }
 }
 
 /// Полный набор от основания к вершине, громко: отчёт пишется в
@@ -932,6 +1018,23 @@ pub fn run_check(cx: &mut App) {
     }
 }
 
+/// Подождать, пока счётчик живых потоков не опустеет, но не дольше `wait`;
+/// `false` — срок вышел, а кто-то ещё в работе. Опрос, а не ожидание на
+/// канале: ручек потоков щелчка никто не держит (их индекс известен, а
+/// `JoinHandle` не нужен больше нигде), и шаг опроса в десятую секунды на
+/// выходе не стоит ничего. Счётчик параметром, а не глобалом внутри: иначе
+/// тест срока залипал бы на общем счётчике и ронял соседей по процессу.
+fn wait_quiet(live: &AtomicUsize, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    while live.load(Ordering::Relaxed) > 0 {
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
 /// Выход: ждём, пока сеанс действительно опустится (поток собственного
 /// рантайма сеанса), и только потом закрываем приложение — иначе туннель
 /// обрывается не чисто. Ждём не дольше `STOP_WAIT`: застрявший `stop` не
@@ -945,6 +1048,15 @@ pub fn quit(cx: &mut App) {
         });
         let _ = stopped.recv_timeout(STOP_WAIT);
     }
+    // Потоки щелчка — тем же порядком, что сеанс выше: ждём, не дольше
+    // `STOP_WAIT`, и по истечении уходим всё равно. Ждём потому, что у Claude
+    // Code щелчок — это `remove`, потом `add`, и обрыв процесса между ними
+    // оставляет `.claude.json` без записи, которая там была ДО нас: это потеря
+    // чужой настройки, а не своей. Полностью случай не закрыт и закрыт быть не
+    // может: щелчок идёт до 25 с, зависший CLI — дольше любого срока, а держать
+    // «Выход» минуту хуже. Ждём ту же пятёрку секунд, что сеансу, и этим
+    // забираем с собой щелчки, которые почти договорили.
+    let _ = wait_quiet(&AGENT_CLICKS, STOP_WAIT);
     // Итог — строкой в файл журнала, а не в окно: окна к этому моменту уже нет, читать её человек будет потом, разбираясь, куда делся сервер или почему подкоманда `mcp` ещё отказывает.
     let ui = cx.global::<Ui>();
     // Выход — владелец рабочего места уходит, и признак на диске обязан сказать «off» раньше, чем замок (`single_instance::Guard`) и правда освободится: иначе подкоманда `mcp`, успевшая прочитать файл в это же окно, увидела бы «on» при уже умирающем окне. Непрошедшая запись — не тишина (минорная находка ревью задачи 2): она оставляет на диске «on» при мёртвом владельце, то есть разрешение, которого никто не давал.
@@ -1169,12 +1281,8 @@ fn handle(ev: Ev, cx: &mut App) {
             ui.pending = ui.pending.saturating_sub(1);
             cx.refresh_windows();
         }
-        Ev::Agent(i, line) => {
-            let ui = cx.global_mut::<Ui>();
-            ui.agents_busy[i] = false;
-            if let Some(line) = line {
-                note_line(ui, line);
-            }
+        Ev::Agent { i, line, started } => {
+            on_agent(cx.global_mut::<Ui>(), i, line, started);
             // Подменю перестраивается всегда, и на молчаливом успехе тоже:
             // это единственное место, где галочка приходит в согласие с тем,
             // что правда лежит в файле агента — щелчок её только попросил.
@@ -1183,6 +1291,14 @@ fn handle(ev: Ev, cx: &mut App) {
                 tray.set_agents(&ui.cfg.host.mode);
             }
             cx.refresh_windows();
+            // Почва сдвинулась — тем же порядком, что у `Ev::Done`: факт
+            // `EDITOR_MCP` считается в `verify::cheap`, а тот идёт медленным
+            // тактом (30 с при открытом окне, 120 с при закрытом), и без этого
+            // вызова человек, включивший агента из трея, до двух минут читал бы
+            // в карточке «не настроен ни один установленный агент» при
+            // настроенном агенте. Он же отпускает пересчёт, который защёлка
+            // щелчка держала (`start_facts`).
+            run_readiness(cx.global_mut::<Ui>());
         }
         Ev::Publish(r) => match r {
             Ok(()) => {
@@ -1449,7 +1565,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
-            agents_busy: [false; crate::editors::AGENTS.len()],
+            agent_clicks: [None; crate::editors::AGENTS.len()],
             tx,
         });
         // Единый тик приложения: сам решает свой срок (занято — секунда,
@@ -1588,7 +1704,7 @@ impl Ui {
             hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
-            agents_busy: [false; crate::editors::AGENTS.len()],
+            agent_clicks: [None; crate::editors::AGENTS.len()],
             tx,
         }
     }

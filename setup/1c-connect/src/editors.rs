@@ -450,6 +450,13 @@ fn duplicate_key(fields: &[Field], names: &[&str]) -> Option<String> {
     names.iter().find(|n| fields.iter().filter(|f| f.key == **n).count() > 1).map(|n| n.to_string())
 }
 
+/// Один текст отказа на оба случая одноимённых полей — и при записи, и при
+/// снятии: причина у них одна, и человеку незачем читать её в двух
+/// формулировках.
+fn dup_refusal(key: &str) -> String {
+    format!("в settings.json два поля «{key}» — какое из них увидит Zed, зависит от порядка, и угадывать мы не станем")
+}
+
 /// Удаляет поля с именами из `names` внутри одного объекта, чьи прямые поля
 /// — `fields` (порядок — порядок в исходном тексте, как отдаёт
 /// `parse_fields`), возвращая список правок без пересечений — даже когда
@@ -545,9 +552,7 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     // настоящим, мы не вправе (находка ревью целого 30.10, сомнение 2
     // четвёртого круга).
     if let Some(dup) = duplicate_key(&top_fields, &["context_servers"]) {
-        return Err(vec![format!(
-            "в settings.json два поля «{dup}» — какое из них увидит Zed, зависит от порядка, и угадывать мы не станем"
-        )]);
+        return Err(vec![dup_refusal(&dup)]);
     }
     let cs = top_fields.iter().find(|f| f.key == "context_servers");
 
@@ -565,9 +570,7 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
             let (cs_fields, _) = parse_fields(body, cs_field.value_start);
             let names: Vec<&str> = OURS.iter().map(|e| e.name).collect();
             if let Some(dup) = duplicate_key(&cs_fields, &names) {
-                return Err(vec![format!(
-                    "в settings.json два поля «{dup}» — какое из них увидит Zed, зависит от порядка, и угадывать мы не станем"
-                )]);
+                return Err(vec![dup_refusal(&dup)]);
             }
             let mut occupied = Vec::new();
             let mut missing = Vec::new();
@@ -636,6 +639,9 @@ pub fn remove_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         return Err(vec!["не нашли границу верхнего объекта settings.json".to_string()]);
     }
     let (top_fields, _) = parse_fields(body, top_open);
+    if let Some(dup) = duplicate_key(&top_fields, &["context_servers"]) {
+        return Err(vec![dup_refusal(&dup)]);
+    }
     let Some(cs_field) = top_fields.iter().find(|f| f.key == "context_servers") else {
         return Ok(text.to_string()); // ключа нет вовсе — нечего убирать
     };
@@ -643,6 +649,17 @@ pub fn remove_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         return Err(vec!["context_servers в settings.json — не объект".to_string()]);
     }
     let (cs_fields, _) = parse_fields(body, cs_field.value_start);
+    // Тот же страж, что у `merge_zed`, и по той же причине — но здесь он
+    // лечит не порчу файла, а ЛОЖЬ о нём: пропуск сомнительного имени (ниже)
+    // оставлял наше поле жить у Zed, снимал галочку и говорил «наши записи
+    // убраны». Случай: `"1c"` дважды, первое чужое, второе наше, и наш
+    // `vrunner` рядом. Снятие уносило `vrunner`, после чего serde (и Zed)
+    // видел в `1c` нашу запись — то есть агент работал с нашим мостом при
+    // снятой галочке и молчаливом «убрано». До разворота правила это был
+    // честный отказ; отказом и остаётся (находка 1 ре-ревью четвёртого круга).
+    if let Some(dup) = duplicate_key(&cs_fields, &OURS.iter().map(|e| e.name).collect::<Vec<_>>()) {
+        return Err(vec![dup_refusal(&dup)]);
+    }
     // Убираем ровно свои записи; занятое чужой командой имя пропускаем, а не
     // отказываем всей правке.
     //
@@ -815,6 +832,7 @@ pub fn merge_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         servers.insert(e.name.to_string(), pi_entry(e, exe));
     }
 
+    // ponytail: разбор и печать заново схлопывают одноимённые ключи во всём файле — serde_json оставляет последний и молча теряет остальные, так что файл с двумя `"1c"` (или двумя любыми ключами) вернётся человеку без одного из них. У Zed этот случай — отказ (`duplicate_key`), потому что там мы правим текст по границам и расходимся с serde в том, какое поле настоящее; здесь расхождения нет — и читаем, и пишем одним serde, — а дубликаты в `mcp.json` патологичны: комментариев формат не допускает, и писать его руками человеку незачем. Поднять до отказа, если найдётся живой файл pi с одноимёнными ключами (находка 7 ре-ревью четвёртого круга).
     Ok(serde_json::to_string_pretty(&top).expect("serde_json::Value всегда сериализуется") + "\n")
 }
 
@@ -2145,6 +2163,27 @@ mod tests {
         assert!(merge_zed(r#"{"other":1}"#, exe).is_ok());
     }
 
+    /// Находка 1 ре-ревью четвёртого круга: снятие на одноимённых полях
+    /// пропускало имя, уносило вторую нашу запись и говорило «убрано», а
+    /// наша запись при этом оставалась жить у Zed — serde (и значит Zed)
+    /// читает последнее поле. Теперь отказ, и файл не тронут.
+    #[test]
+    fn removal_refuses_two_fields_with_one_name_instead_of_lying() {
+        let exe = Path::new("/opt/1c-connect");
+        let ours = r#"{"command":"/opt/1c-connect","args":["mcp","1c"]}"#;
+        let ours_vr = r#"{"command":"/opt/1c-connect","args":["mcp","vrunner"]}"#;
+        let text = format!(r#"{{"context_servers":{{"1c":{{"command":"nc"}},"1c":{ours},"vrunner":{ours_vr}}}}}"#);
+        let reasons = remove_zed(&text, exe).unwrap_err();
+        assert!(refusal_text(&reasons).contains("два поля «1c»"), "{}", refusal_text(&reasons));
+        // Два `context_servers` — то же самое: правили бы первый, Zed читает последний.
+        let two_cs = r#"{"context_servers":{},"context_servers":{}}"#;
+        assert!(remove_zed(two_cs, exe).is_err());
+        // Обычный путь снятия отказом не стал.
+        let one = format!(r#"{{"context_servers":{{"1c":{ours},"vrunner":{ours_vr}}}}}"#);
+        let left = remove_zed(&one, exe).unwrap();
+        assert!(!left.contains("1c-connect"), "наши записи должны уйти: {left}");
+    }
+
     /// Important 1 ревью задачи 6: причина прозой (битый JSON) идёт в текст
     /// как есть, а не тонет в «занята чужой командой» — чужая фраза про
     /// отказ, которого не было.
@@ -2255,11 +2294,13 @@ mod tests {
         // Все наши имена заняты чужим — убирать нечего, и файл не переписываем.
         let only_foreign = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
         assert_eq!(remove_zed(only_foreign, Path::new("/opt/1c-connect")).unwrap(), only_foreign);
-        // Два поля с одним именем (JSONC такого не запрещает): одно наше, одно
-        // чужое — удаление идёт по имени, то есть забрало бы оба. Чья запись
-        // победит у Zed, из текста не решить, поэтому имя пропускаем целиком.
+        // Два поля с одним именем (JSONC такого не запрещает) — отказ, а не
+        // молчаливый пропуск: пропуск уносил вторую нашу запись и говорил
+        // «убрано», оставляя нашу запись жить у Zed (находка 1 ре-ревью
+        // четвёртого круга, подробнее —
+        // `removal_refuses_two_fields_with_one_name_instead_of_lying`).
         let twice = r#"{"context_servers":{"1c":{"command":"/opt/1c-connect"},"1c":{"command":"nc"}}}"#;
-        assert_eq!(remove_zed(twice, Path::new("/opt/1c-connect")).unwrap(), twice, "сомнительное имя тронули");
+        assert!(remove_zed(twice, Path::new("/opt/1c-connect")).is_err(), "сомнительное имя обязано быть отказом");
     }
 
     #[test]

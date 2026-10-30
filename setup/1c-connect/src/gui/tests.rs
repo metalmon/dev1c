@@ -398,7 +398,10 @@ fn success_is_silent_and_a_mismatch_speaks() {
 
     let foreign_off = setup_line("pi", false, Ok(crate::editors::Found::Foreign(vec!["1c".into()]))).unwrap();
     assert_eq!(foreign_off.kind, Kind::Ok, "{foreign_off:?}");
-    assert!(foreign_off.text.contains("наши записи убраны"), "{foreign_off:?}");
+    // Не «наши записи убраны»: в этом состоянии наших записей могло не быть
+    // вовсе, и тогда прежний текст сообщал о работе, которой не было
+    // (находка 3 ре-ревью четвёртого круга).
+    assert!(foreign_off.text.contains("наших записей больше нет"), "{foreign_off:?}");
     assert!(foreign_off.text.contains("1c"), "{foreign_off:?}");
     assert!(!foreign_off.text.contains("не удалось"), "просьбу выполнили — отказом это звать нельзя: {foreign_off:?}");
 

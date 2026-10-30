@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn a_missing_editor_mcp_record_does_not_hold_the_switch() {
         assert_eq!(open(&crate::cfg::filled_for_test()), None, "замок открыт, даже когда факт ниже окажется жёлтым");
-        assert!(!crate::verify::editor_mcp_fact(Some(&crate::editors::Found::Absent)).ok, "а факт при этом красный");
+        assert!(!crate::verify::editor_mcp_fact().ok, "а факт при этом красный");
     }
 
     /// `gate_now` — то же самое, что звало бы окно: пустой каталог состояния (ни файла параметров, ни mcp-1c в комплекте) обязан запереть замок, а не паниковать и не возвращать «можно».

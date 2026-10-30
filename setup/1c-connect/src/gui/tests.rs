@@ -387,9 +387,20 @@ fn success_is_silent_and_a_mismatch_speaks() {
     let still_there = setup_line("pi", false, Ok(crate::editors::Found::Ours)).unwrap();
     assert!(still_there.text.contains("не удалось убрать записи"), "{still_there:?}");
 
-    let foreign = setup_line("pi", false, Ok(crate::editors::Found::Foreign(vec!["1c".into()]))).unwrap();
-    assert_eq!(foreign.kind, Kind::Fail, "{foreign:?}");
-    assert!(foreign.text.contains("занята чужой командой"), "{foreign:?}");
+    // Пункт 3 ревью целого: включение на занятом чужим имени — отказ, а снятие
+    // на том же итоге — успех со словами о том, что осталось: наши записи
+    // убраны, чужая не наша не только чтобы её писать, но и чтобы ею нас
+    // запирать. Молчать на снятии нельзя — человек просил снять записи с этими
+    // именами и обязан узнать, какая осталась и почему.
+    let foreign_on = setup_line("pi", true, Ok(crate::editors::Found::Foreign(vec!["1c".into()]))).unwrap();
+    assert_eq!(foreign_on.kind, Kind::Fail, "{foreign_on:?}");
+    assert!(foreign_on.text.contains("занята чужой командой"), "{foreign_on:?}");
+
+    let foreign_off = setup_line("pi", false, Ok(crate::editors::Found::Foreign(vec!["1c".into()]))).unwrap();
+    assert_eq!(foreign_off.kind, Kind::Ok, "{foreign_off:?}");
+    assert!(foreign_off.text.contains("наши записи убраны"), "{foreign_off:?}");
+    assert!(foreign_off.text.contains("1c"), "{foreign_off:?}");
+    assert!(!foreign_off.text.contains("не удалось"), "просьбу выполнили — отказом это звать нельзя: {foreign_off:?}");
 
     let refused = setup_line("Zed", true, Err(vec!["vrunner".into()])).unwrap();
     assert!(refused.text.contains("занята чужой командой"), "{refused:?}");
@@ -468,9 +479,10 @@ fn an_agent_click_is_latched_and_answers_with_its_own_event() {
 }
 
 /// Пункт 7: щелчок и сразу «Выход» могли оборвать процесс между `remove` и
-/// `add` и оставить файл агента без записи, которая там была ДО нас. Выход
-/// ждёт потоки щелчка тем же порядком, что сеанс, и по истечении уходит
-/// всё равно.
+/// `add` и оставить агента вовсе без записи `1c` — человек просил её поставить,
+/// а не получил ни старой, ни новой (чужой настройки там не теряется: к CLI с
+/// занятым чужим именем мы не идём вовсе). Выход ждёт потоки щелчка тем же
+/// порядком, что сеанс, и по истечении уходит всё равно.
 #[test]
 fn quitting_waits_for_clicks_in_flight_but_not_forever() {
     let live = AtomicUsize::new(1);

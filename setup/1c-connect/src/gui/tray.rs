@@ -318,6 +318,22 @@ impl Tray {
     /// убран — замер 30.10 дал 17–22 с замершего окна на один проход этого
     /// цикла (подробности у `editors::look_cli_agent`).
     pub fn set_agents(&self, mode: &str) {
+        // Выбор из двух, названных ревью целого (пункт 5): не гасим подменю
+        // целиком, а снимаем отметки там, где агенты живут не здесь. Погасить
+        // целиком нельзя без пересборки всего меню трея (`muda` строит его
+        // один раз при запуске, а режим переключается тем же меню), а серый
+        // пункт с отметкой — это ровно то, на что ревью и указало: человек
+        // видел «Zed ✓» при карточке «в контейнере записи MCP не проверяем».
+        // Отметки с локального диска в туннельном режиме не про то, что
+        // работает, и читать их человеку незачем; диск при этом не читаем
+        // вовсе — лишний поход за знанием, которое всё равно не покажем.
+        if !editors::agents_live_here(mode) {
+            for item in self.agents.iter() {
+                item.set_checked(false);
+                item.set_enabled(false);
+            }
+            return;
+        }
         let exe = std::env::current_exe().ok();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
@@ -345,27 +361,13 @@ fn agent_checked(found: &Result<editors::Found, String>) -> bool {
     matches!(found, Ok(editors::Found::Ours))
 }
 
-/// Живут ли локальные агенты на ЭТОЙ машине — отдельно от режима работы,
-/// хотя сегодня это ровно `mode == "local"` и считается тем же способом.
-/// Названо по смыслу, а не по режиму, нарочно: уточнение владельца 30.10 —
-/// следующий шаг — серверный режим коннектора, где он стоит на рабочем месте
-/// разработчика и ПРИНИМАЕТ подключение из туннеля, а не звонит сам; агенты
-/// там будут настраиваться на этой же машине, то есть «агенты здесь» станет
-/// истиной ещё при одном значении режима, помимо «local». Когда серверный
-/// режим появится, этот предикат — единственное место, которое расширяется;
-/// называть условие «локальный режим» значило бы, что меню окажется заперто
-/// ровно там, где оно нужнее всего.
-fn agents_live_here(mode: &str) -> bool {
-    mode == "local"
-}
-
 /// Доступен ли пункт меню одного агента: агенты живут на этой машине
-/// (`agents_live_here`) и агент на машине вообще есть — отсутствующего
-/// агента показываем недоступным, а не прячем вовсе: набор агентов
-/// расширяется, и серый пункт — единственный способ человеку узнать, что
-/// агент вообще поддерживается.
+/// (`editors::agents_live_here` — один предикат на трей и на факт набора) и
+/// агент на машине вообще есть — отсутствующего агента показываем
+/// недоступным, а не прячем вовсе: набор агентов расширяется, и серый пункт —
+/// единственный способ человеку узнать, что агент вообще поддерживается.
 fn agent_available(mode: &str, present: bool) -> bool {
-    agents_live_here(mode) && present
+    editors::agents_live_here(mode) && present
 }
 
 /// Состояние значка по точке карточки: трей следует тому же порядку
@@ -735,9 +737,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_available, agent_checked, agent_menu_id, agents_live_here, icon_rgba, menu_action, mode_change_blocked,
-        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS_SUBMENU,
-        MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
+        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS_SUBMENU, MODES, PUBLICATIONS,
+        PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -976,17 +978,5 @@ mod tests {
         assert!(!agent_available("local", false), "агента нет — нечего включать галочкой");
         assert!(!agent_available("tunnel", true), "в туннеле агентов настраивает образ, не мы");
         assert!(!agent_available("tunnel", false));
-    }
-
-    /// Сегодня «агенты здесь» ровно `mode == "local"` — именованный предикат
-    /// существует, чтобы расшириться без переименования условия, когда
-    /// появится серверный режим (уточнение владельца 30.10): там коннектор
-    /// стоит на машине разработчика и принимает подключение из туннеля, а
-    /// агенты всё равно здесь же.
-    #[test]
-    fn agents_are_here_only_in_local_mode_for_now() {
-        assert!(agents_live_here("local"));
-        assert!(!agents_live_here("tunnel"));
-        assert!(!agents_live_here("something-else"));
     }
 }

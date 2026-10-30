@@ -579,11 +579,18 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
 
 /// Снимаем галочку «Zed» в трее: убираем наши две записи `context_servers`
 /// из текста `settings.json`, не трогая ничего чужого — обратное к
-/// `merge_zed`. Чужая запись с нашим именем не удаляется, это отказ, как и
-/// при записи (решение владельца, «чужую запись не правим и не
-/// перезаписываем никогда»). Пустой текст (файла и не было) или текст без
-/// наших записей — `Ok` с тем же текстом без изменений: состояние уже
-/// такое, какое просили, это успех, а не повод что-то переписывать на диске.
+/// `merge_zed`. Пустой текст (файла и не было) или текст без наших записей —
+/// `Ok` с тем же текстом без изменений: состояние уже такое, какое просили,
+/// это успех, а не повод что-то переписывать на диске.
+///
+/// Чужая запись с нашим именем здесь не отказ, а просто не наше дело: правило
+/// владельца «чужую запись не трогаем никогда» в эту сторону и так выполнено
+/// — снятие её НЕ касается. Прежде отказ был общим с записью, и человек,
+/// подменивший одну запись из двух после настройки, не мог снять вторую, нашу,
+/// больше никогда: галочка при этом стояла снятой, агент работал с нашей
+/// записью, а окно говорило «не настроен ни один установленный агент» (находка
+/// ревью целого 30.10). Что осталось нетронутым, человеку говорит строка
+/// журнала по итоговому `Found::Foreign` (`gui::setup_line`).
 pub fn remove_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     let (bom, body) = split_bom(text);
     if body.trim().is_empty() {
@@ -606,20 +613,25 @@ pub fn remove_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         return Err(vec!["context_servers в settings.json — не объект".to_string()]);
     }
     let (cs_fields, _) = parse_fields(body, cs_field.value_start);
-    let mut occupied = Vec::new();
-    let mut remove_names: Vec<&str> = Vec::new();
-    for e in OURS.iter() {
-        if let Some(f) = cs_fields.iter().find(|f| f.key == e.name) {
-            if is_ours(body, f, exe) {
-                remove_names.push(e.name);
-            } else {
-                occupied.push(e.name.to_string());
-            }
-        }
-    }
-    if !occupied.is_empty() {
-        return Err(occupied);
-    }
+    // Убираем ровно свои записи; занятое чужой командой имя пропускаем, а не
+    // отказываем всей правке.
+    //
+    // Снимаем имя только когда НАШИ все одноимённые поля, а не хоть одно:
+    // `settings.json` — JSONC, и двух полей `"1c"` в одном объекте он не
+    // запрещает, а `remove_fields_by_name` удаляет их по имени, то есть все
+    // сразу. Условие «хоть одно наше» унесло бы с нашим полем и чужое
+    // соседнее — та же беда, из-за которой пошёл этот круг, только в другом
+    // месте. Сомнительный случай целиком пропускаем: чья запись победит у
+    // Zed, из текста не решить (в JSON побеждает последний одноимённый ключ,
+    // а наш сканер читает первый), и трогать мы такое не вправе.
+    let remove_names: Vec<&str> = OURS
+        .iter()
+        .filter(|e| {
+            let named: Vec<&Field> = cs_fields.iter().filter(|f| f.key == e.name).collect();
+            !named.is_empty() && named.iter().all(|f| is_ours(body, f, exe))
+        })
+        .map(|e| e.name)
+        .collect();
     if remove_names.is_empty() {
         return Ok(text.to_string());
     }
@@ -778,10 +790,10 @@ pub fn merge_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
 
 /// Снимаем галочку «pi» в трее — обратное к `merge_pi`, тот же честный
 /// разбор и печать заново целиком: `mcp.json` комментариев не допускает,
-/// терять нечего. Правило чужой записи то же, что у Zed: имя совпало, а
-/// команда чужая — отказ со списком имён, файл не трогаем. Файла нет, или
-/// `mcpServers` нет, или наших записей там и так нет — `Ok` без изменений
-/// текста: состояние уже такое, какое просили.
+/// терять нечего. Правило чужой записи то же, что у Zed и по той же причине:
+/// занятое чужой командой имя мы просто не снимаем, отказа всей правке из
+/// этого не делаем. Файла нет, или `mcpServers` нет, или наших записей там и
+/// так нет — `Ok` без изменений текста: состояние уже такое, какое просили.
 pub fn remove_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     if text.starts_with('\u{feff}') {
         return Err(
@@ -801,14 +813,10 @@ pub fn remove_pi(text: &str, exe: &Path) -> Result<String, Vec<String>> {
     let Some(servers) = servers_slot.as_object_mut() else {
         return Err(vec!["mcpServers в mcp.json — не объект".to_string()]);
     };
-    let occupied: Vec<String> =
-        OURS.iter().filter(|e| servers.get(e.name).is_some_and(|f| !pi_entry_is_ours(f, exe))).map(|e| e.name.to_string()).collect();
-    if !occupied.is_empty() {
-        return Err(occupied);
-    }
+    let ours: Vec<&str> = OURS.iter().filter(|e| servers.get(e.name).is_some_and(|f| pi_entry_is_ours(f, exe))).map(|e| e.name).collect();
     let mut changed = false;
-    for e in OURS.iter() {
-        changed |= servers.remove(e.name).is_some();
+    for name in ours {
+        changed |= servers.remove(name).is_some();
     }
     if !changed {
         return Ok(text.to_string());
@@ -1012,7 +1020,9 @@ pub fn setup(path: &Path, exe: &Path, merge: impl Fn(&str, &Path) -> Result<Stri
 /// Файла на диске не было — `remove` на пустом тексте и так отдаёт пустой
 /// текст, запись на диск не нужна вовсе (решение владельца, «файла нет —
 /// это успех, а не ошибка»). Итог, как и у `setup`, — то, что `look` увидел
-/// на диске ПОСЛЕ правки, а не наше предположение об успехе.
+/// на диске ПОСЛЕ правки, а не наше предположение об успехе; `Found::Foreign`
+/// в этом итоге — не провал снятия, а оставленная чужая запись с нашим именем
+/// (`remove_zed`/`remove_pi`, то же решение, что у `teardown_cli`).
 pub fn teardown(path: &Path, exe: &Path, remove: impl Fn(&str, &Path) -> Result<String, Vec<String>>) -> Result<Found, Vec<String>> {
     let text = if path.exists() {
         std::fs::read_to_string(path).map_err(|e| vec![format!("не прочитать {}: {e}", path.display())])?
@@ -1249,12 +1259,22 @@ fn claude_config_path_of(dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<
 /// "args":[…],"env":{}}` (образец замерен 30.10). Из записи нужно одно поле,
 /// остальное для галочки без надобности. Не разобралось — отказ, а не
 /// «записи нет»: файл есть, и судить о нём по неудачному разбору мы не вправе.
+///
+/// Запись ЕСТЬ, а `command` в ней нет или он не строка — всё равно `Some`, с
+/// пустой командой: это ровно удалённый MCP-сервер (`{"type":"http","url":…}`),
+/// то есть чужая запись, а не её отсутствие. Прежний `and_then(get("command"))`
+/// отдавал на ней `None`, `found_via` читал это как `Absent`, и `setup_cli`
+/// пускал `claude mcp remove 1c -s user` — чужой удалённый сервер исчезал
+/// молча, без строки в журнале и без копии (находка ревью целого 30.10).
+/// Пустая команда с именем нашего исполняемого не совпадёт никогда, значит
+/// выйдет `Foreign`, и CLI не позовётся вовсе — тот же fail-closed, что у
+/// файловых агентов (`is_ours` тоже требует строкового `command`).
 fn parse_claude_config(text: &str) -> Result<Vec<Option<String>>, String> {
     let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!(".claude.json не разбирается как JSON: {e}"))?;
     let servers = v.get("mcpServers");
     Ok(OURS
         .iter()
-        .map(|e| servers.and_then(|s| s.get(e.name)).and_then(|x| x.get("command")).and_then(|c| c.as_str()).map(str::to_string))
+        .map(|e| servers.and_then(|s| s.get(e.name)).map(|x| x.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()))
         .collect())
 }
 
@@ -1334,12 +1354,18 @@ fn codex_config_path_of(dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 /// Команды наших записей в `config.toml` Codex, в порядке `OURS`: таблица
 /// `[mcp_servers.<имя>]` с полями `command` и `args` (образец замерен
 /// 30.10). `toml` уже в зависимостях — нового крейта разбор не требует.
+///
+/// Таблица есть, а `command` в ней нет — `Some` с пустой командой, по той же
+/// причине и с той же ценой ошибки, что у `parse_claude_config`: у Codex это
+/// `[mcp_servers.1c]` с одним `url`, и `codex mcp add` на занятое имя не
+/// отказывает, а переписывает запись молча (замерено 30.10) — приняв такую
+/// запись за отсутствующую, мы бы её и затёрли.
 fn parse_codex_config(text: &str) -> Result<Vec<Option<String>>, String> {
     let v: toml::Value = toml::from_str(text).map_err(|e| format!("config.toml не разбирается как TOML: {e}"))?;
     let servers = v.get("mcp_servers");
     Ok(OURS
         .iter()
-        .map(|e| servers.and_then(|s| s.get(e.name)).and_then(|x| x.get("command")).and_then(|c| c.as_str()).map(str::to_string))
+        .map(|e| servers.and_then(|s| s.get(e.name)).map(|x| x.get("command").and_then(|c| c.as_str()).unwrap_or_default().to_string()))
         .collect())
 }
 
@@ -1379,9 +1405,11 @@ pub fn codex_unset(name: &str) -> Result<(), String> {
 
 /// Общая развёртка `Found` для CLI-агентов по двум нашим именам: `cmds` —
 /// команды, стоящие сейчас в записях, по одной на имя в порядке `OURS`
-/// (`None` — записи нет). Правило «наша/чужая» то же, что у файловых
-/// агентов: совпало имя файла `command` с нашим исполняемым — наша,
-/// остальное чужое.
+/// (`None` — записи нет, пустая строка — запись есть, а `command` в ней нет:
+/// удалённый MCP-сервер, см. `parse_claude_config`). Правило «наша/чужая» то
+/// же, что у файловых агентов: совпало имя файла `command` с нашим
+/// исполняемым — наша, остальное чужое, и пустая команда попадает именно в
+/// «чужое» — `Path::new("").file_name()` не даёт ничего, совпасть не с чем.
 ///
 /// Готовым срезом, а не замыканием-геттером: разбор файла — дело
 /// `look_cli_agent`, и он разбирает его один раз на оба имени, а не по разу
@@ -1449,17 +1477,28 @@ pub fn setup_cli(
     look(exe, present).map_err(|msg| vec![msg])
 }
 
-/// Снимаем галочку для CLI-агента — обратное к `setup_cli`: занято чужим или
-/// состояние не прочиталось — отказ без вызова CLI, агента нет на машине —
-/// успех без вызова, иначе `unset` на ОБОИХ именах и свежий `look` ради
-/// итога.
+/// Снимаем галочку для CLI-агента — обратное к `setup_cli`: состояние не
+/// прочиталось — отказ без вызова CLI (fail-closed, как и при записи), агента
+/// нет на машине — успех без вызова, иначе `unset` на наших именах и свежий
+/// `look` ради итога.
 ///
-/// `Absent` здесь — не повод уйти успехом: `Absent` значит «обеих наших
-/// записей нет», а половина (одна наша, второй нет) даёт тот же `Absent` —
-/// прежний код на нём выходил успехом, оставив нашу запись в чужом конфиге
-/// (находка ревью). Поэтому зовём `unset` на оба имени, не разбирая,
-/// половина там или пусто: два лишних вызова на пустом месте дешевле
-/// забытой записи.
+/// Занятое чужой командой имя (`Found::Foreign`) здесь не отказ, а пропуск
+/// ровно этого имени: правило «чужую запись не трогаем» в сторону снятия и так
+/// соблюдено — `unset` по такому имени как раз и стёр бы чужую запись. Отказ
+/// был общим с записью, и это запирало нашу запись навсегда: подменили `1c`
+/// после настройки — и снять нашу `vrunner` галочкой нельзя больше никогда
+/// (находка ревью целого 30.10). Итог `Found::Foreign` при снятии значит
+/// «наши записи убраны, чужая осталась»; что именно осталось, человеку
+/// говорит строка журнала (`gui::setup_line`), и то же решение одинаково у
+/// файловых агентов (`remove_zed`/`remove_pi`) — они делят один `Found`, и
+/// расхождение здесь стоило бы человеку понимания.
+///
+/// `Absent` — не повод уйти успехом: `Absent` значит «обеих наших записей
+/// нет», а половина (одна наша, второй нет) даёт тот же `Absent` — прежний
+/// код на нём выходил успехом, оставив нашу запись в чужом конфиге (находка
+/// ревью). Поэтому зовём `unset` на все не занятые чужим имена, не разбирая,
+/// половина там или пусто: лишний вызов на пустом месте дешевле забытой
+/// записи.
 ///
 /// Отказ отдельного `unset` провалом не считаем: замерено, что `claude mcp
 /// remove` на несуществующем имени выходит кодом 1 (у Codex — 0), и принимать
@@ -1471,17 +1510,16 @@ pub fn teardown_cli(
     look: impl Fn(&Path, bool) -> Result<Found, String>,
     unset: impl Fn(&str) -> Result<(), String>,
 ) -> Result<Found, Vec<String>> {
-    match look(exe, present).map_err(|msg| vec![msg])? {
-        Found::Foreign(names) => return Err(names),
+    let foreign = match look(exe, present).map_err(|msg| vec![msg])? {
         Found::Missing => return Ok(Found::Missing),
-        Found::Absent | Found::Ours => {}
-    }
-    for e in OURS.iter() {
+        Found::Foreign(names) => names,
+        Found::Absent | Found::Ours => Vec::new(),
+    };
+    for e in OURS.iter().filter(|e| !foreign.iter().any(|n| n == e.name)) {
         let _ = unset(e.name);
     }
     match look(exe, present).map_err(|msg| vec![msg])? {
-        after @ (Found::Missing | Found::Absent) => Ok(after),
-        Found::Foreign(names) => Err(names),
+        after @ (Found::Missing | Found::Absent | Found::Foreign(_)) => Ok(after),
         Found::Ours => Err(vec!["наши записи остались на месте — снять их не удалось".to_string()]),
     }
 }
@@ -1581,6 +1619,25 @@ pub const AGENTS: [AgentDef; 4] = [
         setup: Setup::Cli { present: codex_present, status: look_codex, set: codex_set, unset: codex_unset },
     },
 ];
+
+/// Живут ли локальные агенты на ЭТОЙ машине — один предикат на всех, кто про
+/// это спрашивает: доступность подменю и отметки в нём (`gui::tray::set_agents`)
+/// и ветвь факта набора `EDITOR_MCP` (`verify::cheap`). Жил он в `tray.rs`
+/// приватным, а факт выбирал ветвь своим `mode == "local"` — и в серверном
+/// режиме, под который предикат и назван, подменю открылось бы с живыми
+/// галочками, а карточка в окне говорила бы «в контейнере записи MCP не
+/// проверяем» (находка ревью целого 30.10). Отсюда и дом в `editors`: это
+/// знание про агентов, а не про трей.
+///
+/// Назван по смыслу, а не по режиму, нарочно: уточнение владельца 30.10 —
+/// следующий шаг — серверный режим коннектора, где он стоит на рабочем месте
+/// разработчика и ПРИНИМАЕТ подключение из туннеля, а не звонит сам; агенты
+/// там настраиваются на этой же машине, то есть «агенты здесь» станет истиной
+/// ещё при одном значении режима, помимо `"local"`. Когда серверный режим
+/// появится, этот предикат — единственное место, которое расширяется.
+pub fn agents_live_here(mode: &str) -> bool {
+    mode == "local"
+}
 
 #[cfg(test)]
 mod tests {
@@ -2134,11 +2191,25 @@ mod tests {
         assert_eq!(remove_zed("", Path::new("/opt/1c-connect")).unwrap(), "");
     }
 
-    /// Чужая запись с нашим именем — отказ, как и при записи; файл не трогаем.
+    /// Пункт 3 ревью целого: снятие убирает НАШИ записи и не трогает чужие —
+    /// половинное состояние (`1c` подменён чужой командой, `vrunner` наш)
+    /// прежде отказывало целиком, и нашу запись нельзя было снять галочкой
+    /// больше никогда.
     #[test]
-    fn remove_zed_refuses_a_foreign_entry_with_our_name() {
-        let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
-        assert_eq!(remove_zed(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["1c".to_string()]);
+    fn remove_zed_takes_ours_and_leaves_a_foreign_entry_with_our_name() {
+        let before = r#"{"context_servers":{"1c":{"command":"nc"},"vrunner":{"command":"/opt/1c-connect","args":["mcp","vrunner"]}}}"#;
+        let out = remove_zed(before, Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&as_json(&out)).unwrap();
+        assert_eq!(v["context_servers"]["1c"]["command"], "nc", "чужую запись снятие тронуло: {out}");
+        assert!(v["context_servers"]["vrunner"].is_null(), "нашу запись снятие не убрало: {out}");
+        // Все наши имена заняты чужим — убирать нечего, и файл не переписываем.
+        let only_foreign = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
+        assert_eq!(remove_zed(only_foreign, Path::new("/opt/1c-connect")).unwrap(), only_foreign);
+        // Два поля с одним именем (JSONC такого не запрещает): одно наше, одно
+        // чужое — удаление идёт по имени, то есть забрало бы оба. Чья запись
+        // победит у Zed, из текста не решить, поэтому имя пропускаем целиком.
+        let twice = r#"{"context_servers":{"1c":{"command":"/opt/1c-connect"},"1c":{"command":"nc"}}}"#;
+        assert_eq!(remove_zed(twice, Path::new("/opt/1c-connect")).unwrap(), twice, "сомнительное имя тронули");
     }
 
     #[test]
@@ -2158,10 +2229,17 @@ mod tests {
         assert_eq!(remove_pi("", Path::new("/opt/1c-connect")).unwrap(), "");
     }
 
+    /// То же решение, что у Zed, и тем же тестом: расхождение файловых агентов
+    /// между собой на защите чужого человеку стоило бы понимания.
     #[test]
-    fn remove_pi_refuses_a_foreign_entry_with_our_name() {
-        let before = r#"{"mcpServers":{"vrunner":{"command":"nc"}}}"#;
-        assert_eq!(remove_pi(before, Path::new("/opt/1c-connect")).unwrap_err(), vec!["vrunner".to_string()]);
+    fn remove_pi_takes_ours_and_leaves_a_foreign_entry_with_our_name() {
+        let before = r#"{"mcpServers":{"vrunner":{"command":"nc"},"1c":{"command":"/opt/1c-connect","args":["mcp","1c"]}}}"#;
+        let out = remove_pi(before, Path::new("/opt/1c-connect")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcpServers"]["vrunner"]["command"], "nc", "чужую запись снятие тронуло: {out}");
+        assert!(v["mcpServers"]["1c"].is_null(), "нашу запись снятие не убрало: {out}");
+        let only_foreign = r#"{"mcpServers":{"vrunner":{"command":"nc"}}}"#;
+        assert_eq!(remove_pi(only_foreign, Path::new("/opt/1c-connect")).unwrap(), only_foreign);
     }
 
     /// `teardown` на отсутствующем файле — успех без записи на диск: нечего
@@ -2189,15 +2267,17 @@ mod tests {
         assert_eq!(look(Some(&p), exe, true), Found::Ours);
     }
 
-    /// Занятая чужой записью `1c` — отказ, и файл на диске не меняется вовсе.
+    /// Снятие при занятой чужим `1c`: итог — `Foreign` (успех снятия, а не
+    /// отказ, пункт 3 ревью целого), а файл на диске не меняется вовсе —
+    /// убирать там было нечего, и писать незачем.
     #[test]
-    fn teardown_refuses_and_leaves_a_foreign_record_untouched() {
+    fn teardown_leaves_a_foreign_record_untouched_on_disk() {
         let d = Dir::new();
         let p = d.path().join("settings.json");
         let exe = Path::new("/opt/1c-connect");
         let before = "{\"context_servers\":{\"1c\":{\"command\":\"nc\"}}}";
         std::fs::write(&p, before).unwrap();
-        assert_eq!(teardown(&p, exe, remove_zed).unwrap_err(), vec!["1c".to_string()]);
+        assert_eq!(teardown(&p, exe, remove_zed).unwrap(), Found::Foreign(vec!["1c".to_string()]));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
     }
 
@@ -2232,6 +2312,30 @@ args = ["mcp", "1c"]
     fn reads_our_command_out_of_a_real_codex_config_toml() {
         assert_eq!(parse_codex_config(CODEX_SAMPLE).unwrap(), vec![Some(r"E:\dev 1C\1c-connect.exe".to_string()), None]);
         assert_eq!(parse_codex_config("model = \"gpt-5\"\n").unwrap(), vec![None, None]);
+    }
+
+    /// Главная находка ревью целого: запись ЕСТЬ, а `command` в ней нет — это
+    /// удалённый MCP-сервер человека, и прежде оба парсера отдавали на нём
+    /// `None`, то есть `Absent`; дальше `claude mcp remove 1c -s user` уносил
+    /// чужую запись, а `codex mcp add` переписывал её молча. Образцы
+    /// настоящие: `claude mcp add --transport http 1c https://…` и
+    /// `[mcp_servers.1c]` с одним `url`. Итог обязан быть `Foreign` — тогда ни
+    /// `setup_cli`, ни `teardown_cli` CLI по этому имени не позовут.
+    #[test]
+    fn a_remote_mcp_server_without_a_command_is_foreign_not_absent() {
+        let exe = Path::new(r"E:\dev 1C\1c-connect.exe");
+        let claude_http = r#"{"mcpServers":{"1c":{"type":"http","url":"https://mcp.example.org/sse"}}}"#;
+        assert_eq!(parse_claude_config(claude_http).unwrap(), vec![Some(String::new()), None]);
+        assert_eq!(found_via(exe, &parse_claude_config(claude_http).unwrap()), Found::Foreign(vec!["1c".to_string()]));
+        let codex_url = "[mcp_servers.1c]\nurl = \"https://mcp.example.org/sse\"\n";
+        assert_eq!(parse_codex_config(codex_url).unwrap(), vec![Some(String::new()), None]);
+        assert_eq!(found_via(exe, &parse_codex_config(codex_url).unwrap()), Found::Foreign(vec!["1c".to_string()]));
+        // `command` есть, но не строка (человек правил файл руками) — тот же
+        // случай: запись есть, чья она — не понять, значит не наша.
+        assert_eq!(
+            found_via(exe, &parse_claude_config(r#"{"mcpServers":{"vrunner":{"command":["sh","-c"]}}}"#).unwrap()),
+            Found::Foreign(vec!["vrunner".to_string()])
+        );
     }
 
     /// Критическая находка ревью: «не смог прочитать» не должно значить
@@ -2525,6 +2629,30 @@ args = ["mcp", "1c"]
         assert_eq!(*calls.borrow(), OURS.iter().map(|e| e.name.to_string()).collect::<Vec<_>>());
     }
 
+    /// Пункт 3 ревью целого: снятие убирает наши записи и не трогает чужие.
+    /// `1c` занят чужой командой, `vrunner` наш — `unset` зовётся только по
+    /// `vrunner`, а итог `Foreign(["1c"])` — успех снятия, не отказ: прежде
+    /// отказывали целиком, и нашу `vrunner` нельзя было снять галочкой больше
+    /// никогда. Нечитаемое состояние при этом по-прежнему отказ без вызовов:
+    /// fail-closed обязан держаться в обе стороны.
+    #[test]
+    fn teardown_cli_unsets_ours_and_leaves_a_foreign_name_alone() {
+        let calls = std::cell::RefCell::new(Vec::<String>::new());
+        let look = |_: &Path, _: bool| Ok(Found::Foreign(vec!["1c".to_string()]));
+        let unset = |name: &str| {
+            calls.borrow_mut().push(name.to_string());
+            Ok(())
+        };
+        assert_eq!(teardown_cli(Path::new("/opt/1c-connect"), true, look, unset).unwrap(), Found::Foreign(vec!["1c".to_string()]));
+        assert_eq!(*calls.borrow(), vec!["vrunner".to_string()], "по занятому чужим имени CLI звать нельзя");
+
+        calls.borrow_mut().clear();
+        let unreadable = |_: &Path, _: bool| Err("не прочитать .claude.json: отказано в доступе".to_string());
+        let err = teardown_cli(Path::new("/opt/1c-connect"), true, unreadable, unset).unwrap_err();
+        assert!(err[0].contains("не прочитать"), "{err:?}");
+        assert!(calls.borrow().is_empty(), "не зная состояния, CLI не зовём вовсе");
+    }
+
     /// Агента нет на машине — `unset` не зовём вовсе: снимать нечего и нечем.
     #[test]
     fn teardown_cli_calls_nothing_when_the_agent_is_missing() {
@@ -2555,6 +2683,19 @@ args = ["mcp", "1c"]
         *state.borrow_mut() = Found::Ours;
         let err = teardown_cli(Path::new("/opt/1c-connect"), true, look, |_: &str| Ok(())).unwrap_err();
         assert!(err[0].contains("остались на месте"), "{err:?}");
+    }
+
+    /// Сегодня «агенты здесь» ровно `mode == "local"` — именованный предикат
+    /// существует, чтобы расшириться без переименования условия, когда
+    /// появится серверный режим (уточнение владельца 30.10): там коннектор
+    /// стоит на машине разработчика и принимает подключение из туннеля, а
+    /// агенты всё равно здесь же. Живёт он в `editors`, а не в трее, потому
+    /// что спрашивают его двое — подменю и факт набора `EDITOR_MCP`.
+    #[test]
+    fn agents_are_here_only_in_local_mode_for_now() {
+        assert!(agents_live_here("local"));
+        assert!(!agents_live_here("tunnel"));
+        assert!(!agents_live_here("something-else"));
     }
 
     /// Реестр `AGENTS` не рассыпается по длине под тестом `tray::AGENTS`

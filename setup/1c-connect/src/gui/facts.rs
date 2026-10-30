@@ -288,8 +288,6 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
     let mode = ui.cfg.host.mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
-    // Решение владельца 29.10: ячейка, не снимок — свежее значение берём прямо перед расчётом, на потоке расчёта, а не на потоке окна в момент заведения (SSH-чтение могло случиться позже).
-    let editor_mcp = ui.editor_mcp.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.
     let ports = ports_use(ui);
     std::thread::spawn(move || {
@@ -297,11 +295,10 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
             &tx,
             move || {
                 let state = link.is_up().then(|| link.label(&mode));
-                let seen = session::seen(&editor_mcp);
                 let facts = if loud {
-                    verify::run(&ctx, state.as_deref(), seen.as_ref(), ports)
+                    verify::run(&ctx, state.as_deref(), ports)
                 } else {
-                    verify::gather(&ctx, state.as_deref(), seen.as_ref(), ports, Instant::now() + verify::SET_DEADLINE)
+                    verify::gather(&ctx, state.as_deref(), ports, Instant::now() + verify::SET_DEADLINE)
                 };
                 if loud {
                     let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &facts);
@@ -620,7 +617,6 @@ pub fn spawn_cheap(ui: &Ui, whole: bool) {
     let mode = ui.cfg.host.mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
-    let editor_mcp = ui.editor_mcp.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.
     let ports = ports_use(ui);
     std::thread::spawn(move || {
@@ -630,8 +626,7 @@ pub fn spawn_cheap(ui: &Ui, whole: bool) {
                 let sessions = crate::bridge::configurator_count();
                 let facts = whole.then(|| {
                     let state = link.is_up().then(|| link.label(&mode));
-                    let seen = session::seen(&editor_mcp);
-                    verify::cheap(&ctx, state.as_deref(), seen.as_ref(), ports, sessions)
+                    verify::cheap(&ctx, state.as_deref(), ports, sessions)
                 });
                 Ev::Cheap { sessions: Some(sessions), facts }
             },

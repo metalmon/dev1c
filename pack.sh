@@ -266,7 +266,14 @@ tools_row() {
     cp -r "$tmp/opm"/. "$CONNECT/vrunner/lib/"
     [ -f "$CONNECT/vrunner/lib/vanessa-runner/src/mcp.os" ] && [ -f "$CONNECT/vrunner/lib/add/xddTestRunner.epf" ] \
         || { echo "vrunner lib: mcp.os or xddTestRunner.epf missing" >&2; exit 1; }
-    printf 'OneScript %s; vanessa-runner %s; add %s; MinGit %s\n' "$ONESCRIPT_VERSION" "$VRUNNER_VERSION" "$ADD_VERSION" "$MINGIT_VERSION" >"$CONNECT/tools.version"
+    # mcp-1c назван здесь же, хотя едет не этим шагом: эту строку программа
+    # показывает человеку как состояние инструментов комплекта
+    # (`ops_host::tools_state`), и без неё версию mcp-1c в чужом комплекте
+    # нельзя узнать иначе как считать sha256 и сверять с этим файлом — так и
+    # вышло 30.10 на комплекте владельца, где лежал mcp-1c пятью версиями
+    # старше. Одна запись на оба файла: бинарь и `MCP_HTTPService.cfe` едут
+    # из одного релиза.
+    printf 'OneScript %s; vanessa-runner %s; add %s; MinGit %s; mcp-1c %s\n' "$ONESCRIPT_VERSION" "$VRUNNER_VERSION" "$ADD_VERSION" "$MINGIT_VERSION" "$MCP_1C_VERSION" >"$CONNECT/tools.version"
     rm -rf "$tmp"
     echo "tools: $(du -sh "$CONNECT/vrunner" | cut -f1) vrunner, $(du -sh "$CONNECT/git" | cut -f1) git"
 }

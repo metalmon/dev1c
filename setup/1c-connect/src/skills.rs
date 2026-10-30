@@ -246,6 +246,11 @@ fn kit_skill_names(kit: &Kit) -> Result<Vec<String>, String> {
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("не прочитать {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("не прочитать {}: {e}", dir.display()))?;
+        // `DirEntry::file_type` смотрит на саму запись и не идёт по ссылке —
+        // ссылка на месте скилла В КОМПЛЕКТЕ здесь тихо пропускается, а не
+        // ведётся по объявленной для комплекта `Links::Follow`: это выбор,
+        // не забывчивость — комплект собирает хозяин кита, и ссылка там на
+        // его совести, не дом человека, которому служит всё остальное правило.
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
@@ -447,8 +452,12 @@ pub fn remove(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Ve
             Seen::Ours => {
                 std::fs::remove_dir_all(&dst).map_err(|e| format!("не удалить {}: {e}", dst.display()))?;
                 // Отпечаток уходит следом за каталогом — иначе он переживёт
-                // собственный скилл. Отсутствующего файла не пугаемся: снятие
-                // после снятия не обязано находить то, что уже убрано.
+                // собственный скилл. Отсутствующего файла не пугаемся не
+                // потому, что повторное снятие законно (сюда доходим только
+                // через Seen::Ours, то есть отпечаток был прочитан только
+                // что и существовал) — а потому, что между тем чтением и
+                // этим удалением файл мог исчезнуть сам: человек стёр его
+                // руками, или рядом работает ещё один процесс (гонка).
                 match std::fs::remove_file(&stamp) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -721,6 +730,46 @@ mod tests {
         assert_eq!(one, other, "два написания одного каталога должны делить один отпечаток");
     }
 
+    /// Тот же вопрос, но ДО появления каталога назначения — ровно первая
+    /// раскладка, где `fs::canonicalize` самого `dst` обречён на неудачу и
+    /// обязан отступить к существующему предку (`home.path()`), а не отдать
+    /// буквальный текст как есть: иначе лишний `.` в написании дал бы другой
+    /// отпечаток, хотя место на диске то же самое.
+    #[test]
+    fn stamp_path_is_stable_across_spellings_before_the_destination_exists() {
+        let state = Dir::new();
+        let home = Dir::new();
+        let dst = home.path().join("1c");
+        let messy = home.path().join(".").join("1c");
+
+        let one = stamp_path(state.path(), &dst, "1c").unwrap();
+        let other = stamp_path(state.path(), &messy, "1c").unwrap();
+        assert_eq!(one, other, "до появления каталога написания всё равно должны совпадать");
+    }
+
+    /// Другое написание РЕГИСТРОМ — тоже до появления каталога, тот же
+    /// хвост, который `canonicalize` ещё не может подтвердить. На Windows
+    /// это то же самое место на диске («другой регистр `USERPROFILE`» —
+    /// находка ревью 31.10, круг 1), и отпечаток обязан совпасть; на Unix
+    /// регистр в имени значащий — это буквально другое имя, и отпечатки
+    /// обязаны разойтись, а не притвориться одним.
+    #[test]
+    fn stamp_path_case_sensitivity_matches_the_platform() {
+        let state = Dir::new();
+        let home = Dir::new();
+        let dst = home.path().join("1c");
+        let shouted = home.path().join("1C");
+
+        let one = stamp_path(state.path(), &dst, "1c").unwrap();
+        let other = stamp_path(state.path(), &shouted, "1c").unwrap();
+
+        if cfg!(windows) {
+            assert_eq!(one, other, "на Windows регистр не значащий даже для ещё не созданного пути");
+        } else {
+            assert_ne!(one, other, "на Unix регистр значащий — «1c» и «1C» разные имена");
+        }
+    }
+
     /// Комплект с несколькими скиллами внутри `skills/` — своя небольшая
     /// обёртка, чтобы проверки задачи 3 не повторяли одно и то же устройство
     /// комплекта по несколько строк каждая. `kit_with_skill` — частный случай
@@ -800,6 +849,55 @@ mod tests {
         // install не притронулся и не дописал отпечаток.
         let stamp = stamp_path(state.path(), &home.path().join("1c"), "1c").unwrap();
         assert_eq!(read_stamp(&stamp).unwrap(), None);
+    }
+
+    /// `look` после чистой раскладки — все скиллы `Untouched`, вердикт
+    /// `Found::Ours`. Единственный путь внутрь `Seen::Ours => ours += 1` у
+    /// самого `look` (три прежних вызова в тестах давали только `Foreign`
+    /// или `Err` — находка ревью 31.10, круг 2): без счёта `ours` общий счёт
+    /// не сравнялся бы с числом скиллов, и `summarize` отдал бы `Absent`.
+    #[test]
+    fn look_reports_ours_right_after_a_clean_install() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+        install(&kit, state.path(), home.path()).unwrap();
+
+        assert_eq!(look(&kit, state.path(), home.path()).unwrap(), editors::Found::Ours);
+    }
+
+    /// `look` на пустом доме — скилл в комплекте есть, в доме его вообще
+    /// нет: `Found::Absent`, не `Ours` и не `Foreign`. Этот исход `look`
+    /// тоже не был проверен ни разу.
+    #[test]
+    fn look_reports_absent_before_anything_is_installed() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+
+        assert_eq!(look(&kit, state.path(), home.path()).unwrap(), editors::Found::Absent);
+    }
+
+    /// Критично, круг 2: `copy_skill` удаляет старый каталог целиком перед
+    /// копией, не копирует поверх — иначе файл, пропавший в новой версии
+    /// скилла, пережил бы обновление (докстрока `copy_skill`). Доказываем
+    /// не словами, а фактом: кладём версию с лишним файлом, потом версию без
+    /// него, и смотрим, остался ли он в доме после второго `install`.
+    #[test]
+    fn a_file_dropped_from_a_newer_kit_version_does_not_survive_the_update() {
+        let (root, kit) = kit_with_skill("1c", "первая версия");
+        std::fs::write(root.path().join(KIT_DIR).join("1c/extra.md"), "лишний файл").unwrap();
+        let state = Dir::new();
+        let home = Dir::new();
+        install(&kit, state.path(), home.path()).unwrap();
+        assert!(home.path().join("1c/extra.md").exists());
+
+        // Новая версия скилла — файл extra.md пропал из комплекта.
+        std::fs::remove_file(root.path().join(KIT_DIR).join("1c/extra.md")).unwrap();
+        std::fs::write(root.path().join(KIT_DIR).join("1c/SKILL.md"), "вторая версия").unwrap();
+        install(&kit, state.path(), home.path()).unwrap();
+
+        assert!(!home.path().join("1c/extra.md").exists(), "файл, пропавший из новой версии, не должен выжить");
     }
 
     #[test]

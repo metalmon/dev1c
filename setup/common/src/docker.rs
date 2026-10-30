@@ -100,27 +100,36 @@ fn blot_words(line: &str) -> String {
     out.join(" ")
 }
 
-/// Адрес без учётных данных: `https://имя:токен@host/путь` → `https://host/путь`.
+/// Текст без учётных данных в адресах: `https://имя:токен@host/путь` →
+/// `https://host/путь`, сколько бы адресов в строке ни было.
 ///
 /// Нужна там же, где прочая чистка, и по той же причине: origin человека
 /// вправе носить токен (обычная форма для GitHub и корпоративных серверов), а
 /// мы печатаем адреса в журнал, в план и отдаём их инструментом агенту — то
-/// есть модели на той стороне. Один случай сюда приходит не из нашей команды,
-/// а из чужого текста: git, отказав в доступе, сам печатает адрес целиком, и
-/// ни один из прежних образцов (`Basic`, `--password`, `…pwd=`) такую строку
-/// не ловил (находка проверки безопасности 30.10). Форма `git@host:путь`
-/// паролей не носит — её не трогаем.
-pub fn without_credentials(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
-    let (authority, path) = match rest.split_once('/') {
-        Some((a, p)) => (a, Some(p)),
-        None => (rest, None),
-    };
-    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    match path {
-        Some(p) => format!("{scheme}://{host}/{p}"),
-        None => format!("{scheme}://{host}"),
+/// есть модели на той стороне. Один случай приходит не из нашей команды, а из
+/// чужого текста: git, отказав в доступе, сам печатает адрес целиком, и ни
+/// один из прежних образцов (`Basic`, `--password`, `…pwd=`) такую строку не
+/// ловил (находка проверки безопасности 30.10).
+///
+/// Проход по ВСЕМ вхождениям, а не по первому: в одном слове может стоять два
+/// адреса (`from=https://…,to=https://…`), и у первой редакции второй уезжал
+/// нетронутым — вторая находка той же проверки. Авторитет кончается на первом
+/// из `/?#`, кавычке или пробеле; всё до последней `@` внутри него и есть
+/// учётные данные. Форма `git@host:путь` паролей не носит и `://` не
+/// содержит — её проход не задевает.
+pub fn without_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail.find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'') || c.is_whitespace()).unwrap_or(tail.len());
+        let (authority, after) = tail.split_at(end);
+        out.push_str(authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority));
+        rest = after;
     }
+    out.push_str(rest);
+    out
 }
 
 /// Разбивает строку на «слова» как `split(' ')`, но кавычки защищают от
@@ -295,6 +304,14 @@ mod tests {
         assert!(out.contains("https://github.com/me/repo.git"), "{out}");
         // Адрес без учётных данных остаётся собой — чистка не портит обычный текст.
         assert_eq!(redact_text("fatal: https://github.com/me/repo.git not found"), "fatal: https://github.com/me/repo.git not found");
+        // Два адреса в ОДНОМ слове: у первой редакции второй уезжал нетронутым.
+        let pair = "from=https://a:T1@h/one.git,to=https://b:T2@h/two.git";
+        let out = redact_text(pair);
+        assert!(!out.contains("T1") && !out.contains("T2"), "{out}");
+        assert!(out.contains("https://h/one.git") && out.contains("https://h/two.git"), "{out}");
+        // Адрес в кавычках — одно слово целиком, и кавычка закрывает авторитет.
+        let quoted = "remote: repository 'https://u:T3@h/p.git/' not found";
+        assert!(!redact_text(quoted).contains("T3"), "{}", redact_text(quoted));
     }
     use std::sync::Arc;
 

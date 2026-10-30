@@ -92,7 +92,13 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
             return Err(e);
         }
     };
-    on_event(Event::Ok(format!("MCP включены: порты {} и {}", ports.mcp, ports.vrunner)));
+    // Нейтрально, не зелёной галочкой: поднятые слушатели — это начало
+    // проверки, а не её итог. Зелёное в этой программе означает «работать
+    // можно», и правило «зелёной точки до вердикта готовности не бывает»
+    // карточка держит давно, а журнал ставил ✓ раньше вердикта — и тот же
+    // вердикт следующей строкой её отменял (наблюдение владельца 30.10:
+    // «сперва пишет Подключено, горит зелёный, потом — Не всё готово»).
+    on_event(Event::Say(format!("MCP включены: порты {} и {}", ports.mcp, ports.vrunner)));
     // Пара (задача моста, дубликат дескриптора) на каждое живое соединение.
     // Задача снимается из списка сама, как только закончилась — иначе список
     // и число открытых дескрипторов растут без предела за долгий рабочий
@@ -231,14 +237,16 @@ mod tests {
 
         // Ждём, пока оба слушателя поднимутся, вместо фиксированной паузы.
         for _ in 0..50 {
-            if events.lock().unwrap().iter().any(|e| matches!(e, Event::Ok(_))) {
+            if events.lock().unwrap().iter().any(|e| matches!(e, Event::Say(_))) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let said: Vec<Event> = events.lock().unwrap().clone();
         assert!(
-            said.iter().any(|e| matches!(e, Event::Ok(s) if s.contains(&mcp_port.to_string()) && s.contains(&vrunner_port.to_string()) && !s.contains("туннель"))),
+            // Именно `Say`, а не `Ok`: поднятые слушатели — не вердикт
+            // готовности, и зелёного в журнале здесь быть не должно.
+            said.iter().any(|e| matches!(e, Event::Say(s) if s.contains(&mcp_port.to_string()) && s.contains(&vrunner_port.to_string()) && !s.contains("туннель"))),
             "{said:?}"
         );
 

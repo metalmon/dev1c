@@ -1632,10 +1632,13 @@ impl Op<Ctx> for Publication {
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.cfg.host.publication == "webserver" {
-            // Публикация — забота человека; только проверяем и предупреждаем.
-            if extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password).is_none() {
-                ctx.warn(format!("публикация {} не отвечает — проверьте веб-сервер", ctx.cfg.base_url()));
-            }
+            // Публикация — забота человека, и мы её только проверяем. Своего
+            // предупреждения здесь больше нет: ту же беду теми же словами,
+            // но с советом, говорит факт готовности (`verify::PUBLICATION`), а
+            // он приходит следом везде — и в окне (пересчёт по `Ev::Publish`),
+            // и в командной строке (`install` кончается проверкой). Две
+            // строки об одном подряд человек читает как две разные беды
+            // (наблюдение владельца 30.10).
             return Ok(());
         }
         if ctx.dry_run {
@@ -1848,30 +1851,26 @@ mod tests {
 
     #[test]
     fn ensure_publication_in_webserver_mode_only_checks_and_never_starts_anything() {
-        // "webserver": ensure_publication не должна пытаться поднять что-то
-        // своё — делегирует в Publication::apply, которая лишь проверяет и
-        // предупреждает. dry_run здесь нарочно false: с dry_run=true тест
-        // проходил бы и после удаления всей ветки "webserver" — функция
-        // вышла бы в "auto" и всё равно вернула бы Ok просто из-за самого
-        // dry_run, не доходя до какой-либо настоящей ветки. Здесь нет
-        // платформы 1С и httpd — если бы ветки "webserver" не было, функция
-        // ушла бы в "auto" и либо провалилась на Paths::of (платформа не
-        // найдена), либо не выдала бы предупреждение «не отвечает», которое
-        // выдаёт только настоящая проверка webserver-режима.
+        // Режим «публикует платформа 1С»: мы ничего не поднимаем и ничего не
+        // пишем — ни default.vrd, ни httpd.conf. И НЕ предупреждаем своими
+        // словами, даже когда адрес не отвечает: ту же беду с советом говорит
+        // факт готовности, который приходит следом и в окне, и в командной
+        // строке, а две строки об одном подряд человек читает как две разные
+        // беды (наблюдение владельца 30.10).
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
         cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
-        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = warnings.clone();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = said.clone();
         let sink: common::Sink = std::sync::Arc::new(move |e| {
-            if let common::Event::Warn(t) = e {
+            if let common::Event::Warn(t) | common::Event::Ok(t) | common::Event::Fail(t) = e {
                 w.lock().unwrap().push(t);
             }
         });
         let ctx = Ctx { kit: Kit::at("."), cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
         assert!(ensure_publication(&ctx).is_ok());
-        let warnings = warnings.lock().unwrap();
-        assert!(warnings.iter().any(|w| w.contains("не отвечает")), "{warnings:?}");
+        let said = said.lock().unwrap();
+        assert!(said.is_empty(), "в этом режиме шаг молчит — говорит факт готовности: {said:?}");
     }
 
     #[test]

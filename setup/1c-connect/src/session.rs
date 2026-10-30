@@ -72,6 +72,14 @@ impl State {
     }
 
     /// Следующее состояние после события туннеля.
+    ///
+    /// `Event::Ok` здесь — сигнал «канал поднят», а не цвет строки: транспорты
+    /// (`listen::run`, `tunnel::run`) шлют его именно за этим. Цветом он
+    /// занимался заодно, и это стоило дорого: смена `Ok` на `Say` ради того,
+    /// чтобы журнал не зеленел раньше вердикта, отняла у состояния переход в
+    /// «поднято» — карточка навсегда застревала на «Включаю…» (30.10). Теперь
+    /// за цвет отвечает `for_log` ниже, за состояние — этот разбор, и спутать
+    /// их больше негде.
     pub fn next(self, e: &Event) -> State {
         match e {
             Event::Ok(_) => State::Up { since: Instant::now() },
@@ -83,6 +91,8 @@ impl State {
 
     /// Состояние после того, как `tunnel::run` вернулся: остановлен человеком
     /// или упал на том, что чинить ему же.
+    ///
+    /// (`for_log` — ниже, рядом с `State`: он про журнал, а не про состояние.)
     pub fn ended(r: &anyhow::Result<()>) -> State {
         match r {
             Ok(()) => State::Off,
@@ -128,6 +138,25 @@ impl State {
                 }
             }
         }
+    }
+}
+
+/// Каким событие пойдёт в ЖУРНАЛ — в отличие от того, каким его прочло
+/// состояние (`State::next`). Подъём канала транспорт шлёт как `Ok`, потому
+/// что по нему состояние становится «поднято», но для человека это не итог, а
+/// начало проверки: зелёное в этой программе значит «работать можно», и
+/// правило «зелёной точки до вердикта готовности не бывает» карточка держит
+/// давно. Журнал же ставил ✓ раньше вердикта, и следующая строка её отменяла —
+/// «сперва пишет Подключено, горит зелёный, потом Не всё готово» (владелец,
+/// 30.10). Поэтому здесь, и только здесь, подъём понижается до нейтрального.
+///
+/// Чистая функция с тестом рядом: прежняя попытка решить то же самое сменой
+/// события в транспорте выглядела так же безобидно и отняла у связи переход в
+/// «поднято».
+fn for_log(e: &Event, now_up: bool) -> Event {
+    match e {
+        Event::Ok(t) if now_up => Event::Say(t.clone()),
+        other => other.clone(),
     }
 }
 
@@ -348,9 +377,10 @@ pub fn start_with_enabled(
             let state = Mutex::new(State::Connecting);
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), cfg.ports(), enabled));
             let on_event = |e: Event| {
-                log(e.clone());
                 let mut s = state.lock().unwrap();
-                *s = s.clone().next(&e);
+                let next = s.clone().next(&e);
+                log(for_log(&e, next.is_up()));
+                *s = next;
                 on_state(s.clone());
             };
             let r = if cfg.host.mode == "local" {
@@ -596,6 +626,24 @@ mod tests {
     fn the_server_argument_picks_the_port() {
         assert_eq!(port_of(McpServer::OneC, ports()), ports().mcp);
         assert_eq!(port_of(McpServer::Vrunner, ports()), ports().vrunner);
+    }
+
+    /// Два смысла одного события разведены: состояние читает `Ok` как «канал
+    /// поднят», журнал показывает тот же момент нейтрально. Проверяем оба —
+    /// 30.10 попытка добиться второго сменой события в транспорте отняла
+    /// первое, и карточка навсегда застряла на «Включаю…».
+    #[test]
+    fn the_rise_of_the_channel_is_a_state_signal_and_a_quiet_journal_line() {
+        let up = State::Connecting.next(&Event::Ok("MCP включены: порты 7771 и 7781".into()));
+        assert!(up.is_up(), "по `Ok` связь обязана стать поднятой");
+        match for_log(&Event::Ok("MCP включены: порты 7771 и 7781".into()), up.is_up()) {
+            Event::Say(t) => assert!(t.contains("7771"), "{t}"),
+            other => panic!("подъём канала в журнале обязан быть нейтральным, а не зелёным: {other:?}"),
+        }
+        // Всё прочее идёт в журнал как есть: понижается ровно подъём.
+        assert!(matches!(for_log(&Event::Ok("иное".into()), false), Event::Ok(_)));
+        assert!(matches!(for_log(&Event::Warn("оборвалась".into()), false), Event::Warn(_)));
+        assert!(matches!(for_log(&Event::Fail("отказ".into()), false), Event::Fail(_)));
     }
 
     #[test]

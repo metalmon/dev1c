@@ -210,11 +210,10 @@ pub async fn run(
                 attempt = 0;
                 forward_refusals = 0;
                 had_session = true;
-                // Нейтрально, не зелёной галочкой, по той же причине, что у
-                // слушателей в локальном режиме (`listen::run`): поднятый
-                // туннель — начало проверки готовности, а не её итог, и
-                // зелёное в этой программе значит «работать можно».
-                on_event(common::Event::Say(format!(
+                // `Ok` — сигнал состояния, а не цвет: по нему связь
+                // становится «поднятой» (`session::State::next`). Нейтральным
+                // в журнале его делает `session`.
+                on_event(common::Event::Ok(format!(
                     "туннель поднят: {} → порты {} (mcp-1c), {} (vrunner) и {} (веб-клиент)",
                     cfg.host.server, ports.mcp, ports.vrunner, ports.web
                 )));

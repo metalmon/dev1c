@@ -366,18 +366,26 @@ fn done_clears_progress_and_renews_cancel() {
     assert!(!Arc::ptr_eq(&old_cancel, &ui.cancel));
 }
 
-/// Замысел «Управление переехало в трей»: успех молчит — поставил галочку,
-/// она встала, журналу сказать нечего. Говорит только то, что не совпало с
-/// тем, что попросила галочка (`on`), и отказ `merge`/`remove`.
+/// Успех говорит — наблюдение владельца 30.10 («по журналу непонятно, успех
+/// это или нет»): щелчок уходит в поток и пишет «убираю записи MCP…», а ответ
+/// CLI агента идёт 6–8 с, и прежнее молчание на успехе оставляло в журнале
+/// незаконченную фразу. Молчание годилось, пока действие было мгновенным.
+/// По-прежнему отдельно говорит то, что не совпало с тем, что попросила
+/// галочка (`on`), и отказ `merge`/`remove`.
 /// `editors::setup`/`teardown` отдают то, что `look` увидел на диске ПОСЛЕ
 /// правки, а не факт успеха `merge`/`remove` — любой `Ok`, не совпавший с
 /// `on`, обязан назвать, что увидел `look`, и показать это провалом, не
 /// молчаливой победой.
 #[test]
 fn success_is_silent_and_a_mismatch_speaks() {
-    assert_eq!(setup_line("Zed", true, Ok(crate::editors::Found::Ours)), None);
-    assert_eq!(setup_line("Zed", false, Ok(crate::editors::Found::Absent)), None);
-    assert_eq!(setup_line("Zed", false, Ok(crate::editors::Found::Missing)), None);
+    let done_on = setup_line("Zed", true, Ok(crate::editors::Found::Ours)).unwrap();
+    assert_eq!(done_on.kind, Kind::Ok, "{done_on:?}");
+    assert!(done_on.text.contains("на месте"), "{done_on:?}");
+    for off in [crate::editors::Found::Absent, crate::editors::Found::Missing] {
+        let done_off = setup_line("Zed", false, Ok(off)).unwrap();
+        assert_eq!(done_off.kind, Kind::Ok, "{done_off:?}");
+        assert!(done_off.text.contains("убраны"), "{done_off:?}");
+    }
 
     let still_absent = setup_line("Zed", true, Ok(crate::editors::Found::Absent)).unwrap();
     assert_eq!(still_absent.kind, Kind::Fail, "{still_absent:?}");

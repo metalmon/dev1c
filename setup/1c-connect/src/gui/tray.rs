@@ -31,6 +31,16 @@ pub struct Tray {
     modes: [CheckMenuItem; 2],
     publications: [CheckMenuItem; 2],
     agents: [CheckMenuItem; 4],
+    /// Само меню и раздел агентов в нём — чтобы раздел можно было убрать и
+    /// вернуть на месте, а не гасить серым (решение владельца 30.10: «может
+    /// скрывать это меню в туннельном режиме?», и его же изначальное «раздела
+    /// нет»). `Menu` и `Submenu` в `muda` клонируемы (внутри `Rc`), а
+    /// `Menu::remove`/`Menu::insert` правят живое меню — прежний комментарий
+    /// здесь утверждал, что без пересборки меню это невозможно, и был неверен.
+    menu: Menu,
+    agents_submenu: Submenu,
+    agents_pos: usize,
+    agents_shown: std::cell::Cell<bool>,
     themes: [CheckMenuItem; 3],
     autostart: CheckMenuItem,
     autoconnect: CheckMenuItem,
@@ -240,9 +250,13 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let tray = TrayIconBuilder::new()
         .with_icon(icon(TrayState::Off))
         .with_tooltip("1c-connect: не подключён")
-        .with_menu(Box::new(menu))
+        .with_menu(Box::new(menu.clone()))
         .with_menu_on_left_click(false)
         .build()?;
+    // Место раздела агентов считаем у готового меню, а не считаем пункты
+    // глазами: на Linux впереди ещё два пункта, и число разъехалось бы с
+    // кодом при первой же правке списка.
+    let agents_pos = menu.items().iter().position(|k| k.id() == agents_submenu.id()).unwrap_or(menu.items().len());
 
     let t2 = tx.clone();
     TrayIconEvent::set_event_handler(Some(move |e| {
@@ -256,7 +270,20 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let modes = [mode_items[0].clone(), mode_items[1].clone()];
     let publications = [publication_items[0].clone(), publication_items[1].clone()];
     let agents = [agent_items[0].clone(), agent_items[1].clone(), agent_items[2].clone(), agent_items[3].clone()];
-    Ok(Tray { icon: tray, toggle, modes, publications, agents, themes, autostart, autoconnect })
+    Ok(Tray {
+        icon: tray,
+        toggle,
+        modes,
+        publications,
+        agents,
+        themes,
+        autostart,
+        autoconnect,
+        menu,
+        agents_submenu,
+        agents_pos,
+        agents_shown: std::cell::Cell::new(true),
+    })
 }
 
 impl Tray {
@@ -318,20 +345,29 @@ impl Tray {
     /// убран — замер 30.10 дал 17–22 с замершего окна на один проход этого
     /// цикла (подробности у `editors::look_cli_agent`).
     pub fn set_agents(&self, mode: &str) {
-        // Выбор из двух, названных ревью целого (пункт 5): не гасим подменю
-        // целиком, а снимаем отметки там, где агенты живут не здесь. Погасить
-        // целиком нельзя без пересборки всего меню трея (`muda` строит его
-        // один раз при запуске, а режим переключается тем же меню), а серый
-        // пункт с отметкой — это ровно то, на что ревью и указало: человек
-        // видел «Zed ✓» при карточке «в контейнере записи MCP не проверяем».
-        // Отметки с локального диска в туннельном режиме не про то, что
-        // работает, и читать их человеку незачем; диск при этом не читаем
-        // вовсе — лишний поход за знанием, которое всё равно не покажем.
-        if !editors::agents_live_here(mode) {
-            for item in self.agents.iter() {
-                item.set_checked(false);
-                item.set_enabled(false);
+        // Раздел не гаснет серым, а исчезает — решение владельца 30.10,
+        // увидевшего четыре серых пункта и спросившего «может скрывать это
+        // меню в туннельном режиме?»; оно же было его изначальным «раздела
+        // нет». Серый раздел ничего не сообщал: ни что агенты есть, ни чего с
+        // ними делать, — а вопрос «почему серо» задавал каждому, кто его
+        // открыл. Диск при этом не читаем вовсе: лишний поход за знанием,
+        // которого всё равно не покажем.
+        let live = editors::agents_live_here(mode);
+        if live != self.agents_shown.get() {
+            let changed = if live {
+                // Вернуть на прежнее место, а не в конец: раздел стоит между
+                // «Публикацией базы» и «Темой», и переключение режима не
+                // повод тасовать меню. Не вышло (меню короче, чем было) —
+                // лучше в конец, чем нигде.
+                self.menu.insert(&self.agents_submenu, self.agents_pos).or_else(|_| self.menu.append(&self.agents_submenu)).is_ok()
+            } else {
+                self.menu.remove(&self.agents_submenu).is_ok()
+            };
+            if changed {
+                self.agents_shown.set(live);
             }
+        }
+        if !live {
             return;
         }
         let exe = std::env::current_exe().ok();

@@ -438,25 +438,12 @@ fn origin_url(p: &Project) -> Result<Option<String>, String> {
     Ok((o.ok && !o.text.trim().is_empty()).then(|| o.text.trim().to_string()))
 }
 
-/// Адрес без учётных данных — для показа, не для вызова git. Человек вправе
-/// держать в origin токен (`https://имя:токен@host/путь.git`, обычная форма
-/// для GitHub и корпоративных серверов), а этот адрес мы печатаем в журнал
-/// окна и отдаём инструментом агенту — то есть модели на той стороне. Токен
-/// в чужую модель не уедет (находка проверки безопасности 30.10; владелец
-/// держит трансграничную передачу чувствительных данных главным условием
-/// проекта). Форма `git@host:путь` паролей не носит вовсе — её не трогаем.
-pub fn without_credentials(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
-    let (authority, path) = match rest.split_once('/') {
-        Some((a, p)) => (a, Some(p)),
-        None => (rest, None),
-    };
-    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    match path {
-        Some(p) => format!("{scheme}://{host}/{p}"),
-        None => format!("{scheme}://{host}"),
-    }
-}
+/// Адрес без учётных данных — для показа, не для вызова git: берём общую
+/// чистку журнала (`common::docker::without_credentials`), а не заводим
+/// вторую такую же здесь. Человек вправе держать в origin токен
+/// (`https://имя:токен@host/путь.git`), а этот адрес мы печатаем в журнал
+/// окна и отдаём инструментом агенту — то есть модели на той стороне.
+use common::docker::without_credentials;
 
 /// `dev1c/<имя>` из `remote` (`.../dev1c/<имя>.git`) — агент это имя
 /// угадать не может: его собственный каталог зовётся просто `project`.

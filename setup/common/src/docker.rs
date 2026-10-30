@@ -93,11 +93,34 @@ fn blot_words(line: &str) -> String {
         } else if w.starts_with("/P") && w.len() > 2 {
             "/P…".to_string()
         } else {
-            blot_secrets_in_word(w)
+            blot_secrets_in_word(&without_credentials(w))
         };
         out.push(blotted);
     }
     out.join(" ")
+}
+
+/// Адрес без учётных данных: `https://имя:токен@host/путь` → `https://host/путь`.
+///
+/// Нужна там же, где прочая чистка, и по той же причине: origin человека
+/// вправе носить токен (обычная форма для GitHub и корпоративных серверов), а
+/// мы печатаем адреса в журнал, в план и отдаём их инструментом агенту — то
+/// есть модели на той стороне. Один случай сюда приходит не из нашей команды,
+/// а из чужого текста: git, отказав в доступе, сам печатает адрес целиком, и
+/// ни один из прежних образцов (`Basic`, `--password`, `…pwd=`) такую строку
+/// не ловил (находка проверки безопасности 30.10). Форма `git@host:путь`
+/// паролей не носит — её не трогаем.
+pub fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    match path {
+        Some(p) => format!("{scheme}://{host}/{p}"),
+        None => format!("{scheme}://{host}"),
+    }
 }
 
 /// Разбивает строку на «слова» как `split(' ')`, но кавычки защищают от
@@ -259,6 +282,20 @@ mod tests {
     use super::*;
     use crate::kit::Kit;
     use crate::Sink;
+
+    /// Чужой текст с адресом внутри: git, отказав в доступе, печатает origin
+    /// целиком, а он вправе нести токен. Прежние образцы (`Basic`,
+    /// `--password`, `…pwd=`) такую строку не ловили (находка проверки
+    /// безопасности 30.10), и она шла в журнал и агенту как есть.
+    #[test]
+    fn a_url_in_someone_elses_text_loses_its_credentials() {
+        let line = "remote: Invalid username or password for https://bucher:ghp_SECRET@github.com/me/repo.git";
+        let out = redact_text(line);
+        assert!(!out.contains("ghp_SECRET"), "{out}");
+        assert!(out.contains("https://github.com/me/repo.git"), "{out}");
+        // Адрес без учётных данных остаётся собой — чистка не портит обычный текст.
+        assert_eq!(redact_text("fatal: https://github.com/me/repo.git not found"), "fatal: https://github.com/me/repo.git not found");
+    }
     use std::sync::Arc;
 
     struct T {

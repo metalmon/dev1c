@@ -2183,8 +2183,11 @@ mod tests {
     /// и без необязательных ключей вовсе. На образце сохранность «чужих
     /// строк» проверялась бы на тех же строках, что программа и пишет, —
     /// тавтология (находка ревью задачи 35).
+    /// Образец параметров человека, работающего ЧЕРЕЗ СРЕДУ: режим назван
+    /// вслух, потому что умолчание стало локальным 30.10, а адрес Gitea
+    /// выводится только в туннельном режиме.
     const MINE: &str = concat!(
-        "# мои параметры, не трогать\n[host]\nworkstation = \"dev2\"\n",
+        "# мои параметры, не трогать\n[host]\nworkstation = \"dev2\"\nmode = \"tunnel\"\n",
         "# среда в офисе\nserver = \"10.0.0.5:4403\"\n",
         "project = \"C:\\\\proj\\\\Buh\"\nbase_url = \"http://localhost/Buh/hs/mcp-1c\"\n"
     );
@@ -2311,7 +2314,9 @@ mod tests {
     #[test]
     fn a_local_workstation_gets_no_made_up_environment_address() {
         let kit = TomlKit::new("local");
-        let text = format!("{MINE}mode = \"local\"\n");
+        // Тот же образец, но локальный: именно подменой, а не второй строкой
+        // `mode` — два одноимённых ключа в одном toml разбору не нравятся.
+        let text = MINE.replace("mode = \"tunnel\"", "mode = \"local\"");
         let path = kit.put(&text);
         let mut cfg: Cfg = toml::from_str(&text).unwrap();
 

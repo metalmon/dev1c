@@ -297,7 +297,13 @@ impl Default for Host {
             dump: String::new(),
             project: String::new(),
             tools: DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect(),
-            mode: "tunnel".into(),
+            // Умолчание — локальный режим (решение владельца 30.10): коннектор
+            // стал самостоятельным приложением, и человек, поставивший его
+            // рядом со своей 1С, не должен ничего знать про среду, которой у
+            // него нет. Туннельному режиму умолчание не нужно: контейнер
+            // стенда пишет своё значение сам (`config/1c/stand.sh`), а
+            // человеку с пилотом режим переключает подменю трея.
+            mode: "local".into(),
             publication: "auto".into(),
             http_port: None,
         }
@@ -319,6 +325,11 @@ pub fn filled_for_test() -> Cfg {
     c.host.db_user = "Администратор".into();
     c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
     c.host.project = "C:\\proj\\Buh".into();
+    // Режим назван вслух: образец заполняет именно туннельные поля (адрес
+    // среды, логин и пароль рабочего места), и с умолчанием, ставшим локальным
+    // 30.10, он описывал бы конфигурацию, в которой половина его же полей не
+    // читается никем.
+    c.host.mode = "tunnel".into();
     c
 }
 
@@ -946,11 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn mode_defaults_to_tunnel_accepts_local_and_rejects_the_rest() {
-        let without: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "")).unwrap();
-        assert_eq!(without.host.mode, "tunnel");
-        let local: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"tunnel\"", "mode = \"local\"")).unwrap();
+    fn mode_defaults_to_local_accepts_tunnel_and_rejects_the_rest() {
+        // Умолчание локальное: поле не вписали — значит всё на одной машине,
+        // и ни адреса среды, ни логина в ней человек не вводит.
+        let without: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"local\"", "")).unwrap();
+        assert_eq!(without.host.mode, "local");
+        let local: Cfg = toml::from_str(EXAMPLE).unwrap();
         assert_eq!(local.host.mode, "local");
+        let tunnel: Cfg = toml::from_str(&EXAMPLE.replace("mode = \"local\"", "mode = \"tunnel\"")).unwrap();
+        assert_eq!(tunnel.host.mode, "tunnel");
         let store = secrets::Store::file(&tmp("mode"));
         assert!(local.render(&store).unwrap().contains("mode = \"local\""));
         // Проверку заполненности гоняем на заполненном: образец пуст нарочно.
@@ -1003,6 +1018,9 @@ mod tests {
         assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791));
         c.host.workstation = "dev3".into();
         assert_eq!(c.ports().web, 7793);
+        // Отказ на неизвестном номере — правило туннельного режима: в
+        // локальном логина в среде не существует, и поле не обязательно.
+        c.host.mode = "tunnel".into();
         c.host.workstation = "dev4".into();
         assert!(c.validate().unwrap_err().to_string().contains("workstation"));
     }
@@ -1372,7 +1390,10 @@ mod tests {
     #[test]
     fn a_cli_load_refuses_instead_of_running_with_an_empty_password() {
         let (mine, theirs) = (secrets::Store::file(&tmp("c1")), secrets::Store::file(&tmp("c2")));
-        let kit = kit_with(&format!("[host]\npassword = \"{}\"\n", mine.seal("password", "секрет").unwrap()));
+        // Режим туннельный вслух: пароль рабочего места читает только он, и
+        // отказ, который проверяет этот тест, бывает только в нём (умолчание
+        // стало локальным 30.10).
+        let kit = kit_with(&format!("[host]\nmode = \"tunnel\"\npassword = \"{}\"\n", mine.seal("password", "секрет").unwrap()));
         let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
         assert!(e.contains("другой машине") || e.contains("другим пользователем"), "{e}");
         assert!(e.contains("введите"), "{e}");

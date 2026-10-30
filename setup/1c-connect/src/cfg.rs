@@ -417,7 +417,20 @@ impl Cfg {
     }
 
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(self.number().is_some(), "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)");
+        // «Логин в среде» — понятие туннельного режима: три рабочих места
+        // (`dev1`-`dev3`) прибиты в контейнере среды, и там это настоящий
+        // логин человека. В локальном режиме никакой среды нет, спрашивать
+        // логин в ней не у кого, и требование оборачивалось красной строкой
+        // «workstation — dev1, dev2 или dev3 (ваш логин в среде)» у человека,
+        // который всё держит на одной машине (наблюдение владельца 30.10).
+        // Оговорка та же и по той же причине, что у `server` ниже. Пустое
+        // поле в локальном режиме работает: номер рабочего места нужен лишь
+        // как набор портов и ключ замка, и без номера берётся первый
+        // (`derived_http_port`, `number_of` → `unwrap_or(1)`).
+        anyhow::ensure!(
+            self.host.mode == "local" || self.number().is_some(),
+            "[host]: workstation — dev1, dev2 или dev3 (ваш логин в среде)"
+        );
         // Адрес среды спрашиваем только там, где по нему ходят. В локальном
         // режиме базы лежат рядом, туннеля нет, и поле не заполняет никто —
         // ни стенд, ни программа (`a_local_workstation_gets_no_made_up_environment_address`).
@@ -962,6 +975,23 @@ mod tests {
         c.host.workstation = "dev3".into();
         assert_eq!(c.ports().web, 7793);
         c.host.workstation = "dev4".into();
+        assert!(c.validate().unwrap_err().to_string().contains("workstation"));
+    }
+
+    /// Наблюдение владельца 30.10: «какие логины в среде он просит в
+    /// локальном режиме?» — в локальном режиме среды нет, и требовать логин в
+    /// ней не у кого. Оговорка та же, что у адреса среды рядом.
+    #[test]
+    fn a_local_workstation_is_not_a_login_in_any_environment() {
+        let mut c = filled();
+        c.host.mode = "local".into();
+        c.host.workstation = String::new();
+        c.validate().expect("локальному режиму логин в среде не нужен");
+        // Порты при этом — первого рабочего места, а не ошибка.
+        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791));
+        // В туннельном режиме поле по-прежнему обязательно: там это
+        // настоящий логин человека в контейнере среды.
+        c.host.mode = "tunnel".into();
         assert!(c.validate().unwrap_err().to_string().contains("workstation"));
     }
 

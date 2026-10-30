@@ -123,17 +123,19 @@ pub fn without_credentials(text: &str) -> String {
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
-        // Конец авторитета: первый символ, которого в нём быть не может. К
-        // `/?#`, кавычкам и пробелу добавлены разделители перечислений и
-        // скобки — без запятой авторитет проглатывал СЛЕДУЮЩИЙ адрес целиком
-        // («https://a:T1@h,https://b:T2@h/x»), и второй токен выживал: третья
-        // находка той же проверки. Сверху страховка от той же беды в других
-        // видах: авторитет не вправе дойти до следующего `://`.
-        let stop = tail
-            .find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'' | ',' | ';' | '<' | '>' | '(' | ')') || c.is_whitespace())
-            .unwrap_or(tail.len());
-        let end = tail.find("://").map_or(stop, |next| stop.min(next));
+        // Где кончается авторитет — только по тем символам, которых в
+        // учётных данных не бывает: `/?#`, кавычка, пробел, и не дальше
+        // следующего `://`. Запятую, точку с запятой и скобки в этот список
+        // добавлять НЕЛЬЗЯ, хотя так и подмывает: пароль вправе их содержать,
+        // и на `https://u:pa,ss@h/x` обрыв по запятой оставлял половину
+        // пароля в тексте (четвёртая находка проверки 30.10 — мой же регресс
+        // от третьей). Следующий адрес вместо них стережёт `://`.
+        let hard = tail.find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'') || c.is_whitespace()).unwrap_or(tail.len());
+        let end = tail.find("://").map_or(hard, |next| hard.min(next));
         let (authority, after) = tail.split_at(end);
+        // Учётные данные — всё до ПОСЛЕДНЕЙ `@` внутри авторитета: `@` в
+        // пароле обязана быть закодирована, а вот в имени встречается
+        // (учётка-почта). Нет `@` — отдаём как есть, резать нечего.
         out.push_str(authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority));
         rest = after;
     }
@@ -333,6 +335,13 @@ mod tests {
         ] {
             let out = redact_text(nasty);
             assert!(!out.contains("T1") && !out.contains("T2"), "{nasty} → {out}");
+        }
+        // Пароль со знаками препинания внутри: обрыв авторитета по запятой
+        // или скобке оставлял его половину в тексте.
+        for nasty in ["https://u:pa,ssT1@h/x", "https://u:p;w(1)T1@h", "https://u:T1<>@h/x"] {
+            let out = redact_text(nasty);
+            assert!(!out.contains("T1"), "{nasty} → {out}");
+            assert!(out.contains("https://h"), "{nasty} → {out}");
         }
     }
     use std::sync::Arc;

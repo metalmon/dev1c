@@ -220,6 +220,12 @@ for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
     fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/mcp-1c/$f"
 done
 
+# Same skills the image installs to ~/.agents/skills (Dockerfile: COPY
+# config/skills/), copied as-is — one source for the image and the kit, so the
+# two never drift apart silently. Optional: a repo without config/skills/
+# ships a kit without the skills/ row, not a broken build.
+[ -d "$DIR/config/skills" ] && cp -r "$DIR/config/skills" "$CONNECT/skills"
+
 # The developer's program itself, Windows only (the platform is there), and
 # its commented parameters.
 [ -f "$BIN_DIR/1c-connect.exe" ] && cp "$BIN_DIR/1c-connect.exe" "$CONNECT/" || true

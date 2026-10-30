@@ -2206,7 +2206,7 @@ mod tests {
     }
 
     fn view(f: Option<crate::project::Facts>) -> ProjectView {
-        ProjectView { dir: "C:\\proj\\Buh".into(), branch: "dev1".into(), facts: f, ok: true, why: String::new(), busy: false }
+        ProjectView { dir: "C:\\proj\\Buh".into(), facts: f, ok: true, why: String::new(), busy: false }
     }
 
     #[test]

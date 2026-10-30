@@ -1230,15 +1230,24 @@ impl Op<Ctx> for ProjectOp {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
             Layout::NoGitea => OpState::Blocked(crate::cfg::no_gitea()),
+            // Чужой origin раскладка не правит вовсе — это не расхождение, а
+            // настройка человека: шаг заперт словами, как и при пустом адресе
+            // среды.
+            Layout::ForeignOrigin(u) => {
+                OpState::Blocked(format!("{} — {}", crate::project::foreign_origin(&u), crate::project::foreign_origin_fix(&p.remote)))
+            }
             // Куда приводим — только то, что и правда приводим: в локальном
             // режиме ветка и origin принадлежат человеку, раскладка их не
-            // трогает, и «origin » с пустым хвостом там обещало бы чужую
-            // настройку переписать.
+            // трогает, и расхождением там бывают только служебные файлы.
             Layout::Drifted(d) => OpState::Drifted {
                 from: d,
-                to: if p.local { format!("ветка {}", p.branch) } else { format!("ветка {}, origin {}", p.branch, p.remote) },
+                to: if p.local {
+                    "служебные файлы проекта".to_string()
+                } else {
+                    format!("ветка {}, origin {}", p.branch, p.remote)
+                },
             },
-            Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), p.branch)),
+            Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), crate::project::branch_label(&p))),
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
@@ -1252,7 +1261,10 @@ impl Op<Ctx> for ProjectOp {
         vec![Action::new(format!(
             "{}: git init -b {}{origin}, .gitattributes/.gitignore/autumn-properties.json{bsl}",
             p.dir.display(),
-            p.branch
+            // Имя из одного места с самой раскладкой: план обещает ровно то,
+            // что сделает `init` на пустом каталоге, и ни слова про ветку
+            // существующего репозитория — её мы в локальном режиме не трогаем.
+            crate::project::init_branch(&p)
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
@@ -2229,10 +2241,12 @@ mod tests {
     /// ветка в локальном режиме принадлежат человеку, и план их не обещает.
     #[test]
     fn the_plan_promises_nothing_about_an_environment_the_mode_has_not_got() {
-        // Каталога проекта на диске нет — ветку в локальном режиме тогда
-        // называет умолчание `main`. Путь берём свой, а не `C:\proj\Buh` из
-        // `filled_for_test`: на машине владельца там лежит настоящий
-        // репозиторий, и его ветка читалась бы вместо умолчания.
+        // Ветку в локальном режиме план называет только одну — ту, что
+        // заведёт `git init -b` на пустом месте (`project::init_branch`); к
+        // существующему репозиторию человека мы не прикасаемся, и на диск за
+        // его веткой план не ходит. Путь всё равно берём свой, а не
+        // `C:\proj\Buh` из `filled_for_test`: на машине владельца там лежит
+        // настоящий репозиторий, и шагу незачем его трогать.
         let nowhere = std::env::temp_dir().join(format!("dev1c-plan-{}", std::process::id()));
         let plan = |op: &dyn Op<Ctx>, mode: &str| {
             let mut cfg = crate::cfg::filled_for_test();
@@ -2254,6 +2268,35 @@ mod tests {
         let local = plan(&ProjectOp, "local");
         assert!(!local.contains("origin"), "{local}");
         assert!(local.contains("git init -b main"), "пустое рабочее место не делает ветку пустой: {local}");
+    }
+
+    /// Куда шаг приводит каталог — ровно то, что он и правда делает. В
+    /// локальном режиме ветка и origin принадлежат человеку, раскладка их не
+    /// трогает, и обещать «ветка main» там значило бы обещать переключить
+    /// чужую ветку (находка ревью 30.10).
+    #[test]
+    fn the_local_project_step_promises_only_the_service_files() {
+        let t = crate::project::tempdir::Dir::new();
+        // Репозиторий есть, служебных файлов нет — это и есть расхождение.
+        std::fs::create_dir_all(t.path().join(".git")).unwrap();
+        let state = |mode: &str| {
+            let mut cfg = crate::cfg::filled_for_test();
+            cfg.host.mode = mode.into();
+            cfg.host.gitea = "http://localhost:3000".into();
+            cfg.host.project = t.path().display().to_string();
+            ProjectOp.state(&publication_ctx(cfg, true))
+        };
+        match state("local") {
+            OpState::Drifted { from, to } => {
+                assert!(from.contains(".gitattributes"), "{from}");
+                assert_eq!(to, "служебные файлы проекта");
+            }
+            other => panic!("{other:?}"),
+        }
+        match state("tunnel") {
+            OpState::Drifted { to, .. } => assert!(to.contains("ветка dev1") && to.contains("origin http://localhost:3000/dev1c/"), "{to}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Адрес среды выводится только там, где вывод верен. В локальном режиме

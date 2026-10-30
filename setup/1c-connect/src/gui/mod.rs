@@ -389,12 +389,14 @@ pub fn first_phase(which: Which) -> Phase {
     }
 }
 
-/// Вкладка «Проект»: раскладка каталога и, если она в порядке, состояние
-/// ветки строками `project::status`.
+/// Вкладка «Проект»: раскладка каталога и, если она в порядке, разобранное
+/// состояние (`project::Facts`). Своего поля «ветка» здесь нет: ветку знает
+/// `Facts::branch` — то есть git, а не мы, — и второе имя рядом с ним было бы
+/// ровно той копией, что до 30.10 показывала `main` там, где человек стоял на
+/// своей ветке.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectView {
     pub dir: String,
-    pub branch: String,
     /// Занят мьютекс проекта (идёт наша выгрузка или загрузка) — это
     /// единственная причина молчания вкладки, которой НЕТ в наборе фактов:
     /// раскладку (`Layout`) набор называет сам, своими словами и со своим
@@ -790,6 +792,9 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
                     Layout::NoGitea => (false, cfg::NO_GITEA.into()),
+                    Layout::ForeignOrigin(u) => {
+                        (false, format!("{} — {}", project::foreign_origin(&u), project::foreign_origin_fix(&p.remote)))
+                    }
                     Layout::Drifted(d) => (false, d),
                 };
                 // Те же факты и под тем же замком, что отдаёт агенту
@@ -802,18 +807,9 @@ pub fn refresh_project(cx: &mut App) {
                     Some(Err(e)) => (None, false, e, true),
                     None => (None, ok, why, false),
                 };
-                Ev::Project(ProjectView { dir: p.dir.display().to_string(), branch: p.branch, facts, ok, why, busy })
+                Ev::Project(ProjectView { dir: p.dir.display().to_string(), facts, ok, why, busy })
             },
-            || {
-                Ev::Project(ProjectView {
-                    dir: String::new(),
-                    branch: String::new(),
-                    facts: None,
-                    ok: false,
-                    why: PANIC_TEXT.into(),
-                    busy: false,
-                })
-            },
+            || Ev::Project(ProjectView { dir: String::new(), facts: None, ok: false, why: PANIC_TEXT.into(), busy: false }),
         );
     });
 }

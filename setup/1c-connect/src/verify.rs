@@ -886,7 +886,10 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
     use crate::project::Layout;
     let p = crate::project::Project::from_cfg(&ctx.cfg, tools);
     match crate::project::layout_state(&p) {
-        Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), p.branch)),
+        // Ветка — та, что есть на самом деле (`branch_label`): в локальном
+        // режиме навязанной у нас нет, а показывать `main` там, где человек
+        // стоит на своей ветке, значило бы спорить с карточкой состояния.
+        Layout::Ok => Check::pass(PROJECT, format!("{}, ветка {}", p.dir.display(), crate::project::branch_label(&p))),
         Layout::Missing => Check::fail(PROJECT, format!("{} не разложен", p.dir.display()), "1c-connect install (host.project)"),
         Layout::BaseDir(f) => {
             Check::fail(PROJECT, format!("{} — каталог базы ({f})", p.dir.display()), "project в 1c-connect.toml — другой каталог")
@@ -904,6 +907,9 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
             },
         ),
         Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
+        // Чужой origin — не то, что правит `install`: совет называет команды
+        // git, которыми человек решает это сам.
+        Layout::ForeignOrigin(u) => Check::fail(PROJECT, crate::project::foreign_origin(&u), crate::project::foreign_origin_fix(&p.remote)),
     }
 }
 
@@ -1485,6 +1491,23 @@ mod tests {
             sink,
             prompt: Box::new(common::AlwaysDefault),
         }
+    }
+
+    /// Совет факта «проект» называет то, что `install` и правда сделает. В
+    /// локальном режиме это только служебные файлы: ветка и origin там
+    /// принадлежат человеку, и обещать их правку нельзя (находка ревью 30.10).
+    #[test]
+    fn the_project_fact_advises_only_what_install_really_does() {
+        let t = crate::project::tempdir::Dir::new();
+        std::fs::create_dir_all(t.path().join(".git")).unwrap();
+        let fact = |mode: &str| {
+            let mut ctx = test_ctx(mode);
+            ctx.cfg.host.project = t.path().display().to_string();
+            project_fact(&ctx, std::path::Path::new("nowhere"))
+        };
+        let local = fact("local");
+        assert!(local.hint.contains("служебные файлы") && !local.hint.contains("origin"), "{}", local.hint);
+        assert!(fact("tunnel").hint.contains("origin"));
     }
 
     #[test]

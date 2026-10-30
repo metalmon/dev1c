@@ -18,8 +18,11 @@ pub struct Deps<'a> {
     /// Какими командами git идёт отправка — словами, для плана сухого
     /// прогона и для журнала. В туннельном режиме это ветка рабочего места и
     /// Gitea среды; в локальном ни той, ни другой нет, и отправка идёт в
-    /// origin человека. Строку даёт вызывающий (`with_real`), который один и
-    /// знает режим.
+    /// origin человека — которого он мог и не заводить, поэтому там она
+    /// обещана с оговоркой: обещать надо то, что будет сделано (находка
+    /// ревью 30.10 — журнал писал «фиксирую и отправляю … push в ваш origin»
+    /// ДО самого push, и без origin обещание не исполнялось). Строку даёт
+    /// вызывающий (`with_real`), который один и знает режим.
     pub push_plan: &'a str,
     pub dump_index_exists: bool,
     /// `--dry-run`: только план, ни одного вызова.
@@ -194,7 +197,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log(format!("не удалось записать отметку о платформе рядом с выгрузкой: {e}"));
     }
     (d.phase)(Phase::Push);
-    log(format!("фиксирую и отправляю файлы проекта ({})", d.push_plan));
+    log(format!("файлы проекта: {}", d.push_plan));
     (d.push)(message)
 }
 
@@ -278,9 +281,9 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
         push: &push,
         pull: &pull,
         push_plan: if p.local {
-            "git add, commit, push в ваш origin"
+            "git add, commit, затем отправка в ваш origin, если он заведён (git push)"
         } else {
-            "git add, commit, push ветки рабочего места в Gitea"
+            "git add, commit, затем отправка ветки рабочего места в Gitea (git push)"
         },
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
@@ -375,7 +378,7 @@ mod tests {
                 platform_running: &platform_running,
                 push: &push,
                 pull: &pull,
-                push_plan: "git add, commit, push ветки рабочего места в Gitea",
+                push_plan: "git add, commit, затем отправка ветки рабочего места в Gitea (git push)",
                 dump_index_exists: self.index,
                 dry_run: self.dry,
                 phase: &phase,
@@ -465,8 +468,10 @@ mod tests {
         let log = log.borrow();
         // Человек должен узнать про отправку до того, как она пойдёт: вторая
         // половина выгрузки дольше первой и выглядит как зависание, если о
-        // ней не сказать.
-        assert!(log.iter().any(|l| l.contains("отправляю") && l.contains("git")), "{log:?}");
+        // ней не сказать. Но обещано ровно то, что будет сделано: глагол
+        // «отправляю» ушёл из рамки в саму строку плана, где у локального
+        // режима стоит оговорка про origin (находка ревью 30.10).
+        assert!(log.iter().any(|l| l.contains("отправка") && l.contains("git")), "{log:?}");
         // И не обещать при этом времени: прежние «минуты» писались по УНФ, а
         // на демонстрационной базе стенда это секунды (замер 2026-10-21).
         assert!(!log.iter().any(|l| l.contains("минут")), "строки хода работы не обещают времени: {log:?}");

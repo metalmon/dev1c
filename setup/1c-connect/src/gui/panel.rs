@@ -1491,12 +1491,16 @@ impl Render for Panel {
                                 }
                                 let to_write = host.clone();
                                 gui::confirm_database_change(window, cx, &host, move |_window, cx| {
-                                    let ui = cx.global::<Ui>();
-                                    let (Some(w), Some(panel)) = (ui.window, ui.panel.clone()) else { return };
-                                    let _ = w.update(cx, |_, _window, cx| {
-                                        panel.update(cx, |this, cx| {
-                                            this.write(to_write, cx);
-                                        });
+                                    // Запись — БЕЗ `window.update` вокруг: ответ диалога приходит
+                                    // внутри уже идущего обновления того же окна, и повторный вход
+                                    // в него тихо не делает ничего. Это ровно второй тупик той же
+                                    // кнопки: ветвь без вопроса вылечили 21.10 тем же способом
+                                    // (комментарий выше), а эта осталась, и «Да, сохранить» молча
+                                    // не сохраняло (наблюдение владельца 30.10 — живьём, на
+                                    // вопросе про гашение MCP).
+                                    let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
+                                    panel.update(cx, |this, cx| {
+                                        this.write(to_write, cx);
                                     });
                                     cx.refresh_windows();
                                 });

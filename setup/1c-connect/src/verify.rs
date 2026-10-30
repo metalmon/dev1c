@@ -684,7 +684,7 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
             // найденное: человек правит по разнице, не по одному концу её.
             Some(true) => Check::fail(
                 EXTENSION,
-                format!("расширение в базе {v}, комплекту нужно {MIN_EXTENSION_VERSION}"),
+                format!("стоит {v}, комплекту нужно {MIN_EXTENSION_VERSION}"),
                 OUTDATED_EXTENSION_HINT,
             ),
             // Не старее, либо строку не разобрали (находка 29.10 при
@@ -790,9 +790,7 @@ enum Descriptor {
 fn descriptor_fact(d: Descriptor) -> Check {
     match d {
         Descriptor::Matches => Check::pass(DESCRIPTOR, "совпадает с нашим"),
-        Descriptor::Differs => {
-            Check::fail(DESCRIPTOR, "дескриптор публикации разошёлся с нашим", "1c-connect install — перепишет default.vrd текущим")
-        }
+        Descriptor::Differs => Check::fail(DESCRIPTOR, "разошёлся с нашим", "1c-connect install — перепишет default.vrd текущим"),
         // Ни пройденный, ни проваленный исход (`Check::note`): сравнивать
         // было не с чем, и говорим ровно почему, а не «либо, либо».
         Descriptor::NotOurs => Check::note(DESCRIPTOR, "публикацию держит веб-сервер — default.vrd пишет не коннектор"),
@@ -1407,6 +1405,9 @@ mod tests {
             web_fact(1818, false, false),
             publication_responds_fact("http://x", false, None),
             extension_fact(Some(&Reach::Absent), None, "auto"),
+            // Устаревшее расширение — именно та ветвь, на которой владелец
+            // 30.10 прочитал имя факта дважды; без неё страж ниже её не видит.
+            extension_fact(Some(&Reach::Version("0.4.8".into())), None, "auto"),
             descriptor_fact(Descriptor::Differs),
             gitea_address_fact(),
             gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
@@ -1435,6 +1436,22 @@ mod tests {
         // И ни одна чистая фактовая функция модуля не говорит так сама по
         // себе — тот же запрет и на уровне отдельного факта.
         assert!(!format!("{:?}", all_facts_sample()).contains("не проверено"));
+    }
+
+    /// Наблюдение владельца 30.10 на живом журнале: строка читалась как
+    /// «не всё готово: расширение в базе: расширение в базе 0.4.8, комплекту
+    /// нужно 0.4.10». Имя факта подставляет вызывающий
+    /// (`facts::readiness_reason`), и повторять его в собственной подробности
+    /// факта — значит сказать одно дважды через двоеточие. Сторожим весь
+    /// набор, а не один текст: следующий факт напишут так же.
+    #[test]
+    fn no_fact_repeats_its_own_name_in_its_detail() {
+        let repeats: Vec<String> = all_facts_sample()
+            .into_iter()
+            .filter(|c| c.detail.to_lowercase().starts_with(&c.what.to_lowercase()))
+            .map(|c| format!("«{}» → «{}»", c.what, c.detail))
+            .collect();
+        assert!(repeats.is_empty(), "имя факта стоит дважды, через двоеточие: {}", repeats.join("; "));
     }
 
     #[test]

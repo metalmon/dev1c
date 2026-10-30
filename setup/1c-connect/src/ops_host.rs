@@ -254,20 +254,42 @@ pub fn media_kind(_path: &Path) -> Option<String> {
 /// что лежит рядом с программой.
 const VERSION_FILE: &str = "tools.version";
 
-/// Каталоги, которых мост и `host.tools` ждут от комплекта: vrunner и git —
-/// на обеих ОС (сборка/публикация), httpd — только на Windows (свой
+/// Файлы комплекта, которыми работает коннектор: vrunner и git — на обеих ОС
+/// (сборка/публикация), mcp-1c — мост к базе, httpd — только на Windows (свой
 /// локальный веб-сервер, которым 1c-connect публикует базу без ручной
-/// установки Apache/IIS). На Linux эту роль уже играет системный apache2
-/// образа — второй веб-сервер в комплект незачем класть. Единственное место
-/// в коде, где раскладка комплекта названа — остальные функции этого файла
-/// (`mcp_exe`, `oscript_exe`, `vrunner_lib`, `git_exe`) описывают имена
-/// внутри неё, но не то, какие каталоги обязаны быть.
-fn required_kit_dirs() -> &'static [&'static str] {
+/// установки Apache/IIS; на Linux эту роль играет системный apache2 образа, и
+/// второй веб-сервер в комплект незачем класть).
+///
+/// Путь каждого строит ТА ЖЕ функция, которой этот файл запускают, — чтобы
+/// «проверено» и «запущено» не могли разойтись. Прежде здесь стоял список
+/// КАТАЛОГОВ, и это был второй механизм рядом с проверками самих файлов
+/// (`mcp_exe(kit).exists()` в холодном замке, `bin/httpd.exe` в публикации):
+/// пустой `vrunner/` такую проверку проходил, а mcp-1c она не видела вовсе —
+/// и версию mcp-1c в комплекте владельца 30.10 пришлось узнавать счётом
+/// sha256. Вопрос владельца был поставлен прямо: «нахрена делать разные
+/// механизмы». Разные ОТВЕТЫ остаются законными — холодный замок
+/// останавливает мост, эта строка рассказывает про инструменты, публикация
+/// объясняет свой отказ, — но путь и вопрос «есть ли файл» теперь одни.
+fn kit_files(kit_root: &Path) -> Vec<PathBuf> {
+    let mut v = vec![oscript_exe(kit_root), git_exe(kit_root), mcp_exe_at(kit_root)];
     if cfg!(windows) {
-        &["vrunner", "git", "httpd"]
-    } else {
-        &["vrunner", "git"]
+        v.push(crate::publication::kit_httpd_exe(kit_root));
     }
+    v
+}
+
+/// Чего из этого в комплекте нет — путями внутри комплекта, какими человек
+/// увидит их в проводнике: «нет `vrunner/bin/oscript.exe`» говорит, что
+/// комплект распакован наполовину, а не что его не копировали вовсе.
+fn missing_kit_files(kit_root: &Path) -> Vec<String> {
+    kit_files(kit_root)
+        .into_iter()
+        .filter(|p| !p.exists())
+        .map(|p| match p.strip_prefix(kit_root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => p.display().to_string(),
+        })
+        .collect()
 }
 
 /// Состояние: есть ли в комплекте то, чем работают, и запускается ли оно
@@ -285,12 +307,9 @@ fn required_kit_dirs() -> &'static [&'static str] {
 /// состояние спрашивают и при каждом расчёте готовности. Её проверяет
 /// `apply` один раз, явно.
 pub fn tools_state(kit_root: &Path) -> OpState {
-    let missing: Vec<&str> = required_kit_dirs().iter().copied().filter(|d| !kit_root.join(d).is_dir()).collect();
+    let missing = missing_kit_files(kit_root);
     if !missing.is_empty() {
-        return OpState::Blocked(format!(
-            "в комплекте нет {} — скопируйте полный комплект заново",
-            missing.iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ")
-        ));
+        return OpState::Blocked(format!("в комплекте нет {} — скопируйте полный комплект заново", missing.join(", ")));
     }
     let shipped = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
     let shipped = shipped.trim();
@@ -364,9 +383,13 @@ impl Op<Ctx> for Tools {
         tools_state(&ctx.kit.root)
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let dirs = required_kit_dirs().iter().map(|d| format!("{d}/")).collect::<Vec<_>>().join(", ");
+        let what = kit_files(&ctx.kit.root)
+            .iter()
+            .filter_map(|p| p.strip_prefix(&ctx.kit.root).ok().map(|rel| rel.display().to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut v =
-            vec![Action::new(format!("проверить, что {dirs} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
+            vec![Action::new(format!("проверить, что {what} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
         if cfg!(windows) {
             v.push(Action::new("зарегистрировать учебную платформу в 1С под обычным именем".to_string()));
         }
@@ -439,7 +462,13 @@ impl Op<Ctx> for Tools {
 /// мост (`bridge::mcp_command`) зовёт эту же функцию, а не повторяет строку —
 /// вторая копия и была причиной, по которой перенос вообще требовал работы.
 pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
-    kit.path(if cfg!(windows) { "mcp-1c/mcp-1c-windows-amd64.exe" } else { "mcp-1c/mcp-1c-linux-amd64" })
+    mcp_exe_at(&kit.root)
+}
+
+/// То же от корня комплекта путём, а не `Kit` — этим видом его спрашивает
+/// проверка полноты комплекта (`kit_files`), у которой на руках только путь.
+fn mcp_exe_at(kit_root: &Path) -> PathBuf {
+    kit_root.join(if cfg!(windows) { "mcp-1c/mcp-1c-windows-amd64.exe" } else { "mcp-1c/mcp-1c-linux-amd64" })
 }
 
 /// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: пароль базы — ключом `--db-password`, а не переменной `MCP_1C_PASSWORD`. Это второе честное исключение задачи 5, рядом с `/P` Конфигуратору (`revert_apply` ниже) — не выбор удобства, а то, что установщик умеет читать: ветка `if *installDB != "" { installer.Install(…) }` в `cmd/mcp-1c/main.go` тега `v1.23.0` стоит ВЫШЕ `cfg := config.Load()`, и ни в `main.go`, ни в `installer/installer.go` нет ни одного `os.Getenv` — переменная окружения до установки просто не доходит (замер 30.10, по исходнику тега; найдено ревью задачи 7, Critical 1: установка расширения на базе с непустым паролем молча уезжала с пустым).
@@ -2270,12 +2299,21 @@ mod tests {
         assert_eq!(media_kind(root), None);
     }
 
+    /// Полнота комплекта проверяется теми же путями, которыми файлы
+    /// запускают, и в список входит mcp-1c — прежде его там не было вовсе, а
+    /// каталоги проверялись отдельно от файлов (вопрос владельца 30.10
+    /// «нахрена делать разные механизмы»). httpd — только на Windows.
     #[test]
-    fn required_kit_dirs_need_httpd_only_on_windows() {
-        let dirs = required_kit_dirs();
-        assert!(dirs.contains(&"vrunner"), "{dirs:?}");
-        assert!(dirs.contains(&"git"), "{dirs:?}");
-        assert_eq!(dirs.contains(&"httpd"), cfg!(windows), "{dirs:?}");
+    fn kit_files_are_the_very_files_we_launch() {
+        let root = Path::new("X");
+        let files = kit_files(root);
+        assert!(files.contains(&oscript_exe(root)), "{files:?}");
+        assert!(files.contains(&git_exe(root)), "{files:?}");
+        assert!(files.contains(&mcp_exe(&Kit::at("X"))), "{files:?}");
+        assert_eq!(files.contains(&crate::publication::kit_httpd_exe(root)), cfg!(windows), "{files:?}");
+        // Ни одного каталога комплекта: каждый путь лежит ВНУТРИ своей папки
+        // инструмента, а не является ею — пустой `vrunner/` прежнюю проверку проходил.
+        assert!(files.iter().all(|p| p.parent() != Some(root)), "{files:?}");
     }
 
     #[test]
@@ -2361,10 +2399,19 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dev1c-tools-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let kit = tmp.join("kit");
-        std::fs::create_dir_all(kit.join("vrunner")).unwrap();
-        std::fs::create_dir_all(kit.join("git")).unwrap();
-        std::fs::create_dir_all(kit.join("httpd")).unwrap();
-        // Каталоги есть, отметки нет: работать можно, но версий не назвать —
+        // Кладём ФАЙЛЫ, а не каталоги: проверяется то, что запускается.
+        for f in kit_files(&kit) {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"x").unwrap();
+        }
+        // Пустой каталог вместо файла — отказ, и он называет сам файл: так
+        // выглядит комплект, распакованный наполовину (прежняя проверка
+        // каталогов такое пропускала).
+        let half = kit_files(&kit)[0].clone();
+        std::fs::remove_file(&half).unwrap();
+        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("oscript")));
+        std::fs::write(&half, b"x").unwrap();
+        // Файлы есть, отметки нет: работать можно, но версий не назвать —
         // и это сказано словами, а не молчанием.
         assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("не указаны")));
         std::fs::write(
@@ -2374,9 +2421,9 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("3.0.2") && d.contains("из комплекта")));
-        // Нет каталога в самом комплекте — единственный оставшийся отказ.
+        // Нет файла в самом комплекте — единственный оставшийся отказ.
         std::fs::remove_dir_all(kit.join("git")).unwrap();
-        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("git/")));
+        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("git")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

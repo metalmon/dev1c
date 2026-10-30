@@ -220,6 +220,14 @@ pub(crate) fn bases(kit_root: &Path, state: &Path) -> (PathBuf, PathBuf) {
     (server, state.to_path_buf())
 }
 
+/// Httpd комплекта — одна функция на всех, кто про него спрашивает: и
+/// проверка полноты комплекта (`ops_host::kit_files`), и `Paths::of` ниже.
+/// Прежде каждый спрашивал по-своему, и полнота комплекта проверялась тремя
+/// разными способами (вопрос владельца 30.10).
+pub(crate) fn kit_httpd_exe(kit_root: &Path) -> PathBuf {
+    kit_root.join("httpd").join("bin").join("httpd.exe")
+}
+
 impl Paths {
     /// Пути публикации на этой машине: `ServerRoot` — свой httpd из комплекта
     /// (`<комплект>/httpd`, запускается оттуда, где лежит) на Windows,
@@ -228,7 +236,7 @@ impl Paths {
     /// сказано у `bases`.
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
         let (root, state) = bases(&kit.root, &ops_host::state_dir());
-        if cfg!(windows) && !root.join("bin").join("httpd.exe").exists() {
+        if cfg!(windows) && !kit_httpd_exe(&kit.root).exists() {
             return Err(format!(
                 "в {} нет bin/httpd.exe — скопируйте полный комплект заново (комплект: {})",
                 root.display(),

@@ -247,11 +247,17 @@ fn kit_skill_names(kit: &Kit) -> Result<Vec<String>, String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("не прочитать {}: {e}", dir.display()))?;
         // `DirEntry::file_type` смотрит на саму запись и не идёт по ссылке —
-        // ссылка на месте скилла В КОМПЛЕКТЕ здесь тихо пропускается, а не
-        // ведётся по объявленной для комплекта `Links::Follow`: это выбор,
-        // не забывчивость — комплект собирает хозяин кита, и ссылка там на
-        // его совести, не дом человека, которому служит всё остальное правило.
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        // этим и ловим ссылку на месте скилла В КОМПЛЕКТЕ. Молчать здесь
+        // нельзя (находка ре-ревью, круг 3): такой скилл просто исчез бы из
+        // списка имён — `look` решил бы, что всё наше на месте, `remove`
+        // потерял бы его из виду, и каталог с отпечатком остался бы сиротой
+        // в доме человека. Отказ словами, тем же приёмом, что чуть ниже для
+        // неправильного имени скилла.
+        let file_type = entry.file_type().map_err(|e| format!("не прочитать тип {}: {e}", entry.path().display()))?;
+        if file_type.is_symlink() {
+            return Err(format!("{} в комплекте — ссылка на месте скилла, раскладку не веду", entry.path().display()));
+        }
+        if !file_type.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -734,17 +740,44 @@ mod tests {
     /// раскладка, где `fs::canonicalize` самого `dst` обречён на неудачу и
     /// обязан отступить к существующему предку (`home.path()`), а не отдать
     /// буквальный текст как есть: иначе лишний `.` в написании дал бы другой
-    /// отпечаток, хотя место на диске то же самое.
+    /// отпечаток, хотя место на диске то же самое. Несуществующих уровней —
+    /// не меньше двух (`.agents` и `.agents/skills`), ровно как в настоящей
+    /// первой раскладке (`~/.agents/skills/<имя>`): при одном недостающем
+    /// уровне длина хвоста восхождения — единица, и порядок в нём не виден
+    /// (находка ре-ревью, круг 3).
     #[test]
     fn stamp_path_is_stable_across_spellings_before_the_destination_exists() {
         let state = Dir::new();
         let home = Dir::new();
-        let dst = home.path().join("1c");
-        let messy = home.path().join(".").join("1c");
+        let dst = home.path().join(".agents").join("skills").join("1c");
+        let messy = home.path().join(".agents").join("skills").join(".").join("1c");
 
         let one = stamp_path(state.path(), &dst, "1c").unwrap();
         let other = stamp_path(state.path(), &messy, "1c").unwrap();
         assert_eq!(one, other, "до появления каталога написания всё равно должны совпадать");
+    }
+
+    /// Главное свойство отступления к существующему предку (находка
+    /// ре-ревью, круг 3): ключ отпечатка, посчитанный ДО появления каталога
+    /// назначения, обязан совпасть с ключом, посчитанным ПОСЛЕ — иначе
+    /// отпечаток первой раскладки осиротеет в тот самый момент, когда
+    /// каталог появляется на диске, и скилл станет чужим навсегда (ни
+    /// обновить, ни снять). Несуществующих уровней — не меньше двух, той же
+    /// причиной, что и выше: при одном уровне восхождение и прямая
+    /// канонизация дают один и тот же хвост без разницы в порядке, и
+    /// подмена, ломающая порядок (например, выкинутый `.rev()`), осталась бы
+    /// незамеченной.
+    #[test]
+    fn stamp_path_survives_the_destination_coming_into_existence() {
+        let state = Dir::new();
+        let home = Dir::new();
+        let dst = home.path().join(".agents").join("skills").join("1c");
+
+        let before = stamp_path(state.path(), &dst, "1c").unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let after = stamp_path(state.path(), &dst, "1c").unwrap();
+
+        assert_eq!(before, after, "появление каталога назначения не должно менять ключ его отпечатка");
     }
 
     /// Другое написание РЕГИСТРОМ — тоже до появления каталога, тот же
@@ -958,6 +991,37 @@ mod tests {
         let found = result.unwrap();
         assert_eq!(found, editors::Found::Ours);
         assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "текст скилла");
+    }
+
+    /// Ссылка на месте скилла не снаружи, а В САМОМ КОМПЛЕКТЕ (находка
+    /// ре-ревью, круг 3): молчаливый пропуск был бы хуже тихой неисправности
+    /// — `kit_skill_names` просто не назвал бы этот скилл, `look` отрапортовал
+    /// бы «всё наше на месте», и, если этот скилл когда-то ставился
+    /// каталогом, `remove` больше не увидел бы его вовсе — каталог и
+    /// отпечаток остались бы сиротами в доме человека. Отказ словами, как и
+    /// у неправильного имени скилла в комплекте.
+    #[test]
+    fn a_link_in_place_of_a_skill_inside_the_kit_is_refused_in_words() {
+        let (root, kit) = kit_with_skill("1c", "текст скилла");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let link = root.path().join(KIT_DIR).join("linked");
+        if !try_link(&link, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
+            return;
+        }
+        let state = Dir::new();
+        let home = Dir::new();
+
+        let look_err = look(&kit, state.path(), home.path()).unwrap_err();
+        assert_eq!(look_err.len(), 1, "{look_err:?}");
+        assert!(look_err[0].contains("ссылка"), "{look_err:?}");
+        let install_err = install(&kit, state.path(), home.path()).unwrap_err();
+        assert_eq!(install_err.len(), 1, "{install_err:?}");
+        assert!(install_err[0].contains("ссылка"), "{install_err:?}");
+        let remove_err = remove(&kit, state.path(), home.path()).unwrap_err();
+        assert_eq!(remove_err.len(), 1, "{remove_err:?}");
+        assert!(remove_err[0].contains("ссылка"), "{remove_err:?}");
     }
 
     #[test]

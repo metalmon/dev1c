@@ -167,12 +167,17 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
             // (`Dot::Busy`, та же, что у идущей операции: «подожди», а не
             // «починяй»), а чем занято — говорит `reason` рядом.
             Verdict::Busy(_) => return card(Dot::Busy, "Занято".into()),
-            // `Ready` и `Off` уходят в разбор `link` ниже: зелёное называется
-            // словами про связь («MCP включены»/«Подключён»), а `Off` сюда
-            // доходить и не должен — ветка под `link.is_up()` значит
-            // «обслуживание включено». Матч исчерпывающий, чтобы новый исход
-            // вердикта не остался забытым.
-            Verdict::Ready | Verdict::Off => {}
+            // Зелёное — только у `Ready`, и это правило теперь в коде, а не в
+            // обещании. `Off` при поднятой связи прежде проваливался сюда же
+            // и красил карточку зелёным «MCP включены» на том основании, что
+            // такого состояния «не бывает»: оно бывало ровно между включением
+            // и первым набором — вердикт оставался `Off` с прошлого
+            // выключения (наблюдение владельца 30.10, дважды). Причину убрали
+            // в `sync_tray`; здесь — замок на тот же случай, потому что цена
+            // ошибки односторонняя: лишнее «Проверяю…» человек переживёт,
+            // ложное зелёное — нет.
+            Verdict::Off => return card(Dot::Busy, "Проверяю…".into()),
+            Verdict::Ready => {}
         }
     }
     let (dot, title): (Dot, String) = match link {
@@ -1975,6 +1980,26 @@ mod tests {
         let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
+    }
+
+    /// Зелёное — только у `Ready`. Между включением и первым набором вердикт
+    /// успевает побыть `Off` (он остаётся с прошлого выключения, пока расчёт
+    /// идёт), и карточка проваливалась на этом в зелёное «MCP включены», а
+    /// следующий набор отменял его жёлтым. Владелец видел это дважды —
+    /// в первый раз я поправил цвет строки в журнале, не тронув причину.
+    #[test]
+    fn no_green_card_before_the_readiness_verdict() {
+        let now = Instant::now();
+        let up = State::Up { since: now };
+        for mode in ["local", "tunnel"] {
+            for v in [Verdict::Off, Verdict::Checking] {
+                let c = card(None, &up, mode, &v, None, now);
+                assert_eq!(c.dot, Dot::Busy, "{mode} {v:?}: {}", c.title);
+                assert_eq!(c.title, "Проверяю…", "{mode} {v:?}");
+            }
+            // А с вердиктом — зелёное, как и было.
+            assert_eq!(card(None, &up, mode, &Verdict::Ready, None, now).dot, Dot::Up);
+        }
     }
 
     #[test]

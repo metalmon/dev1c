@@ -15,6 +15,12 @@ pub struct Deps<'a> {
     pub platform_running: &'a dyn Fn() -> usize,
     pub push: &'a dyn Fn(&str) -> Result<String, String>,
     pub pull: &'a dyn Fn() -> Result<String, String>,
+    /// Какими командами git идёт отправка — словами, для плана сухого
+    /// прогона и для журнала. В туннельном режиме это ветка рабочего места и
+    /// Gitea среды; в локальном ни той, ни другой нет, и отправка идёт в
+    /// origin человека. Строку даёт вызывающий (`with_real`), который один и
+    /// знает режим.
+    pub push_plan: &'a str,
     pub dump_index_exists: bool,
     /// `--dry-run`: только план, ни одного вызова.
     pub dry_run: bool,
@@ -172,7 +178,7 @@ fn lock(what: &str) -> Result<crate::project::Hold, String> {
 pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<String, String> {
     let _g = lock("project_push")?;
     if d.dry_run {
-        log("план: cf_decompile → src, затем git add/commit/push ветки рабочего места (project_push)".into());
+        log(format!("план: cf_decompile → src, затем {} (project_push)", d.push_plan));
         return Ok("план напечатан, на машине ничего не менялось".into());
     }
     (d.phase)(Phase::Decompile);
@@ -188,7 +194,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
         log(format!("не удалось записать отметку о платформе рядом с выгрузкой: {e}"));
     }
     (d.phase)(Phase::Push);
-    log("отправляю файлы агенту (git add, commit, push в Gitea)".into());
+    log(format!("фиксирую и отправляю файлы проекта ({})", d.push_plan));
     (d.push)(message)
 }
 
@@ -271,6 +277,11 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
         platform_running: &crate::bridge::configurator_count,
         push: &push,
         pull: &pull,
+        push_plan: if p.local {
+            "git add, commit, push в ваш origin"
+        } else {
+            "git add, commit, push ветки рабочего места в Gitea"
+        },
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
         phase: &phase,
@@ -364,6 +375,7 @@ mod tests {
                 platform_running: &platform_running,
                 push: &push,
                 pull: &pull,
+                push_plan: "git add, commit, push ветки рабочего места в Gitea",
                 dump_index_exists: self.index,
                 dry_run: self.dry,
                 phase: &phase,

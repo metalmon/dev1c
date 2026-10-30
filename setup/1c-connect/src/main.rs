@@ -212,7 +212,17 @@ fn run() -> Result<()> {
         Cmd::Mcp { .. } => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
-            println!("Рабочее место {} → среда {}", ctx.cfg.host.workstation, ctx.cfg.host.server);
+            // Про рабочее место и среду — только в том режиме, где они есть:
+            // локально обе дырки были пустыми («Рабочее место  → среда »).
+            // Слова для локального — те же, что у плана установки и у первого
+            // факта набора (`ops_host::env_line`/`ENV_NEARBY`). Отказ разбора
+            // адреса печатается как строка, а не обрывает `status`: это
+            // диагностика, за которой человек сюда и пришёл.
+            if cfg::mode_needs_env(&ctx.cfg.host.mode) {
+                println!("Рабочее место {} → среда {}", ctx.cfg.host.workstation, ctx.cfg.host.server);
+            } else {
+                println!("{}", ops_host::env_line(&ctx.cfg.host.mode, &ctx.cfg.host.server).unwrap_or_else(|e| format!("{e:#}")));
+            }
             // `status` смотрит и рассказывает (`Cfg::load_unchecked` выше),
             // а не отказывает на чужом шифртексте — но молчать про это тоже
             // нельзя: это и есть диагностика, за которой человек сюда пришёл.
@@ -325,7 +335,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
     );
     // У рабочего места один владелец (спека): вторая копия не борется за
     // порты и мьютекс проекта с этой — см. `single_instance`.
-    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation, &ctx.cfg.host.mode)?;
     // Межпроцессная часть замка проекта (`project::hold`): без этого вызова
     // файл не заводится, и второй долгоживущий процесс (другой редактор,
     // будущая подкоманда `mcp`) замка вовсе не увидит.
@@ -378,7 +388,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
     );
     // Тот же единственный владелец рабочего места, что у `connect` — см.
     // `single_instance`.
-    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation)?;
+    let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation, &ctx.cfg.host.mode)?;
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
     project::set_lock_target(ctx.kit.state());
     // На стенде связь держит именно `serve` (сам он и есть «окно» этого

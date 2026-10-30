@@ -1502,7 +1502,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // автозапуск при живом трее) на Windows тихо поднимает окно первой и
     // выходит; замок держим до конца `run()` ниже — переменная остаётся на
     // стеке этой функции, пока приложение не закроется.
-    let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation)?;
+    let _guard = crate::single_instance::acquire(&kit, &cfg.host.workstation, &cfg.host.mode)?;
     // Межпроцессная часть замка проекта (`project::hold`) — та же, что у
     // `connect`/`serve`: без неё второй долгоживущий процесс замка вовсе не
     // увидит.

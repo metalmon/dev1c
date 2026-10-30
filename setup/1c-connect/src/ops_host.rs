@@ -1136,15 +1136,22 @@ fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::
     }
 }
 
+/// Честные слова про среду в локальном режиме — одна формулировка на все три
+/// поверхности, что о ней говорят: план и журнал установки (`env_line` ниже),
+/// первый факт набора готовности (`verify::params_fact`) и `1c-connect status`
+/// (`main.rs`). Раньше две последние печатали `среда {server}` безусловно и в
+/// локальном режиме показывали пустую дырку (находка аудита 30.10).
+pub const ENV_NEARBY: &str = "база рядом, адрес не нужен";
+
 /// Строка про среду для шага `host.env` — и единственное место, где решается,
 /// спрашивать ли адрес вообще. В локальном режиме среды нет: база лежит рядом,
 /// туннеля нет, поле никем не заполняется, и проверять там нечего. Та же
 /// развилка стоит в `Cfg::validate`, и обе выросли из одного дня: пока у поля
 /// было умолчание-образец, безусловная проверка его пропускала, а с пустыми
 /// умолчаниями (26.10, `adce1c6`) она стала обрывать на стенде любую установку.
-fn env_line(mode: &str, server: &str) -> Result<String> {
-    if mode == "local" {
-        return Ok("среда: база рядом, адрес не нужен".into());
+pub fn env_line(mode: &str, server: &str) -> Result<String> {
+    if !crate::cfg::mode_needs_env(mode) {
+        return Ok(format!("среда: {ENV_NEARBY}"));
     }
     let addr: std::result::Result<Vec<_>, _> = std::net::ToSocketAddrs::to_socket_addrs(server).map(|a| a.collect());
     anyhow::ensure!(addr.is_ok(), "адрес среды {server} не разбирается — проверьте server в 1c-connect.toml");
@@ -1165,8 +1172,15 @@ impl Op<Ctx> for Env {
     fn state(&self, _ctx: &Ctx) -> OpState {
         OpState::Missing
     }
-    fn plan(&self, _ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new("проверить платформу 1С, mcp-1c в комплекте и адрес среды")]
+    /// План обещает ровно то, что сделает `apply`: он сам ветвится по режиму
+    /// (`env_line`), и в локальном режиме адрес среды не проверяет — обещать
+    /// проверку того, чего в этом режиме нет, значит врать в плане.
+    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
+        vec![Action::new(if crate::cfg::mode_needs_env(&ctx.cfg.host.mode) {
+            "проверить платформу 1С, mcp-1c в комплекте и адрес среды"
+        } else {
+            "проверить платформу 1С и mcp-1c в комплекте"
+        })]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         match find_1cv8(&ctx.cfg) {
@@ -1216,7 +1230,14 @@ impl Op<Ctx> for ProjectOp {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
             Layout::NoGitea => OpState::Blocked(crate::cfg::no_gitea()),
-            Layout::Drifted(d) => OpState::Drifted { from: d, to: format!("ветка {}, origin {}", p.branch, p.remote) },
+            // Куда приводим — только то, что и правда приводим: в локальном
+            // режиме ветка и origin принадлежат человеку, раскладка их не
+            // трогает, и «origin » с пустым хвостом там обещало бы чужую
+            // настройку переписать.
+            Layout::Drifted(d) => OpState::Drifted {
+                from: d,
+                to: if p.local { format!("ветка {}", p.branch) } else { format!("ветка {}, origin {}", p.branch, p.remote) },
+            },
             Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), p.branch)),
         }
     }
@@ -1225,11 +1246,13 @@ impl Op<Ctx> for ProjectOp {
         let analyzer = analyzer_lines(&ctx.cfg);
         let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
         let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
+        // `origin` в плане — только там, где раскладка его и ставит: в
+        // локальном режиме строка обещала «origin » с пустым адресом.
+        let origin = if p.local { String::new() } else { format!(", origin {}", p.remote) };
         vec![Action::new(format!(
-            "{}: git init -b {}, origin {}, .gitattributes/.gitignore/autumn-properties.json{bsl}",
+            "{}: git init -b {}{origin}, .gitattributes/.gitignore/autumn-properties.json{bsl}",
             p.dir.display(),
-            p.branch,
-            p.remote
+            p.branch
         ))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
@@ -2197,6 +2220,40 @@ mod tests {
         assert!(env_line("local", "").unwrap().contains("рядом"));
         assert!(env_line("tunnel", "").is_err(), "в туннеле адрес обязателен");
         assert_eq!(env_line("tunnel", "192.168.1.10:3393").unwrap(), "среда: 192.168.1.10:3393");
+    }
+
+    /// План обещает то, что `apply` и сделает: его развилка по режиму стояла
+    /// с 27.10, а план говорил «и адрес среды» в обоих режимах — обещание
+    /// проверить то, чего в локальном режиме нет вовсе (находка аудита
+    /// 30.10). Та же правка у шага «Каталог проекта»: `origin` и «нужная»
+    /// ветка в локальном режиме принадлежат человеку, и план их не обещает.
+    #[test]
+    fn the_plan_promises_nothing_about_an_environment_the_mode_has_not_got() {
+        // Каталога проекта на диске нет — ветку в локальном режиме тогда
+        // называет умолчание `main`. Путь берём свой, а не `C:\proj\Buh` из
+        // `filled_for_test`: на машине владельца там лежит настоящий
+        // репозиторий, и его ветка читалась бы вместо умолчания.
+        let nowhere = std::env::temp_dir().join(format!("dev1c-plan-{}", std::process::id()));
+        let plan = |op: &dyn Op<Ctx>, mode: &str| {
+            let mut cfg = crate::cfg::filled_for_test();
+            cfg.host.mode = mode.into();
+            cfg.host.project = nowhere.display().to_string();
+            if mode == "local" {
+                cfg.host.workstation.clear();
+            } else {
+                cfg.host.gitea = "http://localhost:3000".into();
+            }
+            op.plan(&publication_ctx(cfg, true)).iter().map(|a| a.0.clone()).collect::<Vec<_>>().join(" ")
+        };
+        assert!(plan(&Env, "tunnel").contains("адрес среды"));
+        let local = plan(&Env, "local");
+        assert!(!local.contains("среды"), "{local}");
+        assert!(local.contains("mcp-1c в комплекте"), "{local}");
+
+        assert!(plan(&ProjectOp, "tunnel").contains("origin http://localhost:3000/dev1c/"));
+        let local = plan(&ProjectOp, "local");
+        assert!(!local.contains("origin"), "{local}");
+        assert!(local.contains("git init -b main"), "пустое рабочее место не делает ветку пустой: {local}");
     }
 
     /// Адрес среды выводится только там, где вывод верен. В локальном режиме

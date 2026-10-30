@@ -473,7 +473,9 @@ where
                             let fr = pending_frames.pop_front().unwrap();
                             if let Frame::Line(l) = &fr {
                                 capture_handshake(l, &handshake);
-                                if let Some(reply) = degraded_reply(l, rules.inject, who, &e.to_string()) {
+                                if let Some(reply) =
+                                    degraded_reply(l, rules.inject, !crate::cfg::mode_needs_env(&cfg.host.mode), who, &e.to_string())
+                                {
                                     let _ = out_tx.send(reply).await;
                                 }
                             }
@@ -511,6 +513,8 @@ where
         let from_child = {
             let (out, pending, log, in_flight, inject, swallow) =
                 (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
+            // Режим — снимком того же `cfg`, что собрал команду этого ребёнка: описания наших инструментов идут за ним (`jsonrpc::our_tools`).
+            let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
             tokio::spawn(async move {
                 let mut f = Framer::new();
                 let mut buf = vec![0u8; 64 * 1024];
@@ -536,7 +540,7 @@ where
                                 dec_in_flight(&in_flight);
                             }
                         }
-                        if out.send(rewrite_reply(fr, inject, &pending)).await.is_err() {
+                        if out.send(rewrite_reply(fr, inject, local, &pending)).await.is_err() {
                             return;
                         }
                     }
@@ -551,7 +555,7 @@ where
                             dec_in_flight(&in_flight);
                         }
                     }
-                    let _ = out.send(rewrite_reply(fr, inject, &pending)).await;
+                    let _ = out.send(rewrite_reply(fr, inject, local, &pending)).await;
                 }
             })
         };
@@ -668,7 +672,7 @@ where
     let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, (id, _))| id).collect();
     if rules.inject {
         for id in unanswered {
-            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
+            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(!crate::cfg::mode_needs_env(&cfg.host.mode)))).await;
         }
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
@@ -936,7 +940,7 @@ fn capture_handshake(line: &[u8], handshake: &HandshakeCell) {
 /// кого, в списке только они, у 777N — пусто), `tools/call` и всё прочее
 /// именованное с `id` — явным отказом с причиной; уведомление (нет `id`) —
 /// отвечать нечем, и это не повод для записи в журнал.
-fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec<u8>> {
+fn degraded_reply(line: &[u8], inject: bool, local: bool, who: &str, why: &str) -> Option<Vec<u8>> {
     let v: Value = serde_json::from_slice(line).ok()?;
     let method = v.get("method")?.as_str()?.to_string();
     let id = v.get("id").cloned();
@@ -952,7 +956,7 @@ fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec
         Some(out)
     } else if method.eq_ignore_ascii_case("tools/list") {
         let id = id?;
-        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools() } else { Vec::new() }))
+        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools(local) } else { Vec::new() }))
     } else {
         let id = id?;
         Some(jsonrpc::text_reply(&id, &format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите"), true))
@@ -998,14 +1002,14 @@ async fn replay_handshake(stdin: &mut tokio::process::ChildStdin, handshake: &Ha
 /// допущенных инструментов для фильтрации берётся не из текущих параметров
 /// (к моменту ответа они могли уже смениться), а из того, что действовало
 /// на момент самого запроса — он и лежит в `pending` рядом с `id`.
-fn rewrite_reply(fr: Frame, inject: bool, pending: &Pending) -> Vec<u8> {
+fn rewrite_reply(fr: Frame, inject: bool, local: bool, pending: &Pending) -> Vec<u8> {
     match fr {
         Frame::Raw(b) => b,
         Frame::Line(mut l) => {
             let entry = jsonrpc::is_response_with_id(&l).and_then(|id| pending.lock().unwrap().remove(&key(&id)));
             if inject {
                 if let Some((_, allowed)) = &entry {
-                    if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed) {
+                    if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed, local) {
                         return out;
                     }
                 }

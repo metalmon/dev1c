@@ -419,7 +419,7 @@ pub fn lock_target(kit: &Kit) -> std::path::PathBuf {
 /// бесшумно уступить (нашли и подняли окно первой — Windows) либо вернуть
 /// читаемую причину отказа. Держите возвращённый `Guard` до конца процесса —
 /// ранний `drop` снимает замок раньше срока.
-pub fn acquire(kit: &Kit, workstation: &str) -> anyhow::Result<Guard> {
+pub fn acquire(kit: &Kit, workstation: &str, mode: &str) -> anyhow::Result<Guard> {
     let key = guard_key(&current_user(), workstation);
     let lock_on = lock_target(kit);
     match try_acquire(&key, &lock_on)? {
@@ -428,8 +428,21 @@ pub fn acquire(kit: &Kit, workstation: &str) -> anyhow::Result<Guard> {
             if raise_other() {
                 std::process::exit(0);
             }
-            anyhow::bail!("рабочее место {workstation} занято: коннектор для него уже запущен — закройте его перед повторным запуском")
+            anyhow::bail!("{}", taken(mode, workstation))
         }
+    }
+}
+
+/// Отказ второй копии словами. Сам ключ замка уникален по пользователю ОС
+/// (`guard_key`) и в локальном режиме работает ровно так же, но называть
+/// причину именем рабочего места там нельзя: поле пусто по замыслу, и
+/// человек читал «рабочее место  занято» (находка аудита 30.10). Чистая
+/// функция — замок в тесте не берётся.
+fn taken(mode: &str, workstation: &str) -> String {
+    if crate::cfg::mode_needs_env(mode) {
+        format!("рабочее место {workstation} занято: коннектор для него уже запущен — закройте его перед повторным запуском")
+    } else {
+        "программа уже запущена — закройте первую копию перед повторным запуском".into()
     }
 }
 
@@ -440,6 +453,18 @@ mod tests {
     /// Ключ теста: уникален на каждый вызов (счётчик плюс pid процесса
     /// `cargo test`) — как `tempdir::Dir` в `project.rs`, иначе параллельные
     /// тесты этого файла спорили бы за один и тот же мьютекс/файл.
+    /// Вторая копия отказывала именем рабочего места, и в локальном режиме
+    /// человек читал «рабочее место  занято» — поле там пусто по замыслу
+    /// (находка аудита 30.10). Ключ замка это не трогает: он уникален по
+    /// пользователю ОС и работает в обоих режимах одинаково.
+    #[test]
+    fn the_second_copy_refuses_without_naming_a_workstation_in_local_mode() {
+        let t = taken("local", "");
+        assert!(t.contains("программа уже запущена"), "{t}");
+        assert!(!t.contains("рабоч"), "{t}");
+        assert!(taken("tunnel", "dev2").contains("рабочее место dev2 занято"));
+    }
+
     fn unique(tag: &str) -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);

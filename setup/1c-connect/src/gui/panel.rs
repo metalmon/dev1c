@@ -471,11 +471,20 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     // 1. Репозиторий — куда поедет отправка. Каталог и ветку здесь не
     //    повторяем: их уже сказал факт «проект» из набора, и две карточки
     //    подряд с одним и тем же текстом человек читает как ошибку.
-    let mut rows = vec![(Some(Dot::Up), "репозиторий".into(), f.repo.clone())];
+    //
+    //    Пусто — отправлять некуда: локальный репозиторий, у которого человек
+    //    не заводил origin. Карточка с пустым адресом говорила бы о
+    //    репозитории, которого нет; молчим, как молчим и о нераспознанной
+    //    раскладке выше.
+    let mut rows = Vec::new();
+    if !f.repo.is_empty() {
+        rows.push((Some(Dot::Up), "репозиторий".into(), f.repo.clone()));
+    }
     // Ветка в параметрах разошлась с тем, где человек стоит, — это и есть
     // единственный повод показать обе: отправка пойдёт не туда, куда он
-    // смотрит.
-    if f.branch != f.want_branch {
+    // смотрит. Пустая `want_branch` — локальный режим: ветку там выбирает
+    // человек, расходиться ей не с чем.
+    if !f.want_branch.is_empty() && f.branch != f.want_branch {
         rows.push((
             Some(Dot::Warn),
             "Ветка разошлась с параметрами".into(),
@@ -498,12 +507,25 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
 
 /// Карточка «есть ли что отправлять». Числа со склонением (`common::word`):
 /// «1 коммит», «3 коммита», «5 коммитов» — иначе отчёт выглядит машинным.
+///
+/// Заголовок — про отправку только там, где она есть. В локальном режиме
+/// («обмена нет»: агент правит те самые файлы, которые читает загрузка)
+/// «Всё отправлено» было бы ложью про механизм, которого нет, а работа всё
+/// равно доходит до базы — там речь только о том, зафиксирована ли она.
 fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
+    let (good, bad) = if f.exchange {
+        ("Всё отправлено", "Не отправлено")
+    } else {
+        ("Всё зафиксировано", "Не зафиксировано")
+    };
     if !f.unsent() {
-        return (Some(Dot::Up), "Всё отправлено".into(), String::new());
+        return (Some(Dot::Up), good.into(), String::new());
     }
     let mut parts = Vec::new();
     match f.ahead.as_str() {
+        // Отправлять некуда — неотправленного не бывает: остаётся только то,
+        // что не закоммичено.
+        "" => {}
         // Ветки на сервере ещё нет: считать нечего, и «все коммиты» честнее
         // любого числа.
         "все" => parts.push("ветка ещё не отправлялась".to_string()),
@@ -518,7 +540,7 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
     if f.changed > 0 {
         parts.push(format!("{} не закоммичено", common::word::count(f.changed as u64, "файл", "файла", "файлов")));
     }
-    (Some(Dot::Warn), "Не отправлено".into(), parts.join(", "))
+    (Some(Dot::Warn), bad.into(), parts.join(", "))
 }
 
 /// Строка журнала о пароле, который не открылся (задача 4; замысел — «Анти-цели», «человек остался без доступа и не понял почему»): причина — зашифрован другим пользователем или на другой машине, и что делать — ввести заново, с названием каждого такого поля словами человека (`cfg::secret_field_name` — одна формулировка с `gui::save::field_label`, ревью задачи 7, Important 4) и той же причиной, что у командной строки (`cfg::UNDECRYPTABLE_REASON`). `None` — список пуст, расшифровка прошла у обоих полей.
@@ -2179,6 +2201,7 @@ mod tests {
             ahead: ahead.into(),
             changed,
             index: true,
+            exchange: true,
         }
     }
 
@@ -2234,6 +2257,29 @@ mod tests {
         // Ветки на сервере ещё нет — считать нечего.
         let rows = project_rows(Some(&view(Some(facts("все", 0)))));
         assert_eq!(rows[1].2, "ветка ещё не отправлялась");
+    }
+
+    /// Локальный репозиторий без origin: отправлять некуда, и вкладка не
+    /// показывает ни пустой карточки «репозиторий», ни «Всё отправлено» про
+    /// обмен, которого в этом режиме нет (находка аудита 30.10). Речь только
+    /// о том, зафиксирована ли работа: базе она доступна и так — `cf_load`
+    /// читает те самые файлы.
+    #[test]
+    fn a_local_project_without_an_origin_speaks_of_commits_not_of_sending() {
+        let mine = |changed| crate::project::Facts {
+            repo: String::new(),
+            want_branch: String::new(),
+            ahead: String::new(),
+            exchange: false,
+            changed,
+            ..facts("0", 0)
+        };
+        let rows = project_rows(Some(&view(Some(mine(0)))));
+        assert!(!rows.iter().any(|r| r.1 == "репозиторий"), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.1.contains("отправлен")), "{rows:?}");
+        assert_eq!(rows[0], (Some(Dot::Up), "Всё зафиксировано".into(), String::new()));
+        let rows = project_rows(Some(&view(Some(mine(2)))));
+        assert_eq!(rows[0], (Some(Dot::Warn), "Не зафиксировано".into(), "2 файла не закоммичено".into()));
     }
 
     /// Две ветки показываются ровно тогда, когда они разные: в этом и был

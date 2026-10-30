@@ -86,7 +86,7 @@ pub fn cold_gate(
     // этих трёх полей в окне нет вовсе (`panel::shown_fields`), и запирать ими
     // переключатель значило бы спрашивать человека о том, чего ему не
     // показывают.
-    if h.mode != "local" {
+    if cfg::mode_needs_env(&h.mode) {
         if h.server.trim().is_empty() {
             return Some("не задан адрес среды".into());
         }

@@ -123,7 +123,16 @@ pub fn without_credentials(text: &str) -> String {
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
-        let end = tail.find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'') || c.is_whitespace()).unwrap_or(tail.len());
+        // Конец авторитета: первый символ, которого в нём быть не может. К
+        // `/?#`, кавычкам и пробелу добавлены разделители перечислений и
+        // скобки — без запятой авторитет проглатывал СЛЕДУЮЩИЙ адрес целиком
+        // («https://a:T1@h,https://b:T2@h/x»), и второй токен выживал: третья
+        // находка той же проверки. Сверху страховка от той же беды в других
+        // видах: авторитет не вправе дойти до следующего `://`.
+        let stop = tail
+            .find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'' | ',' | ';' | '<' | '>' | '(' | ')') || c.is_whitespace())
+            .unwrap_or(tail.len());
+        let end = tail.find("://").map_or(stop, |next| stop.min(next));
         let (authority, after) = tail.split_at(end);
         out.push_str(authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority));
         rest = after;
@@ -312,6 +321,19 @@ mod tests {
         // Адрес в кавычках — одно слово целиком, и кавычка закрывает авторитет.
         let quoted = "remote: repository 'https://u:T3@h/p.git/' not found";
         assert!(!redact_text(quoted).contains("T3"), "{}", redact_text(quoted));
+        // Формы, на которых чистка спотыкалась по очереди: без запятой в
+        // стоп-списке авторитет проглатывал следующий адрес, и его токен
+        // выживал. Проверяем не форму ответа, а то, что секрета в нём нет.
+        for nasty in [
+            "https://a:T1@h,https://b:T2@h/x",
+            "https://a:T1@h;https://b:T2@h/x",
+            "см. https://a:T1@h и https://b:T2@h/x",
+            "(https://a:T1@h/p) https://b:T2@h",
+            "url=\"https://a:T1@h/p\" url2=\"https://b:T2@h/p\"",
+        ] {
+            let out = redact_text(nasty);
+            assert!(!out.contains("T1") && !out.contains("T2"), "{nasty} → {out}");
+        }
     }
     use std::sync::Arc;
 

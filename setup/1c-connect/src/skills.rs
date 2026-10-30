@@ -10,12 +10,15 @@
 //!
 //! Каталог, в который мы лезем, принадлежит человеку и может содержать что
 //! угодно — в том числе ссылку (на Windows и соединение `mklink /J`, его
-//! заводит обычная учётка без прав администратора). Ревью 30.10 нашло две
-//! дыры именно в этом: запись по ссылке на месте отпечатка и обход без
-//! защиты от циклов. Обе закрыты здесь же, первоисточником (`[ -L ]` в
-//! `entrypoint.sh`) и общим `common::integrity::walk`.
+//! заводит обычная учётка без прав администратора; на Unix — обычную
+//! символьную ссылку, тоже без привилегий). Ревью 30.10 нашло две дыры
+//! именно в этом: запись по ссылке на месте отпечатка и обход без защиты от
+//! циклов. Обе закрыты здесь же, первоисточником (`[ -L ]` в `entrypoint.sh`)
+//! и общим `common::integrity::walk`, который зовётся со строгой политикой
+//! (`Links::Refuse`) — в отличие от сверки комплекта (`write_list`), где
+//! ссылки свои и `Links::Follow` как и было всегда.
 
-use common::integrity::{rel, sha256_file, sha256_text, walk};
+use common::integrity::{rel, sha256_file, sha256_text, walk, Links};
 use std::path::{Path, PathBuf};
 
 /// Имя папки со скиллами внутри комплекта — раскладка найдёт её в комплекте
@@ -52,16 +55,27 @@ pub fn home_dir(h: Home) -> Option<PathBuf> {
 /// отсортированный список хешируется снова, той же функцией (`sha256_text`),
 /// что и файлы (`sha256_file`): второй независимый алгоритм хеширования ради
 /// одной сверки был бы лишней зависимостью без причины. Обход — общий
-/// `common::integrity::walk`: внутрь ссылок он не ходит и сам откажет, если
-/// внутри каталога скилла обнаружится ссылка или циклическое соединение
-/// (Critical 2 ревью 30.10) — тот же отказ, что у ссылки на месте скилла, и
-/// по той же причине.
+/// `common::integrity::walk` со строгой политикой (`Links::Refuse`, в
+/// отличие от `write_list`, который доверяет собственным ссылкам комплекта):
+/// он откажет, если внутри каталога скилла обнаружится ссылка или
+/// циклическое соединение (Critical 2 ревью 30.10) — тот же отказ, что у
+/// ссылки на месте скилла, и по той же причине. Верхний каталог проверяется
+/// тем же способом отдельно: `walk` видит только то, что внутри, а функция
+/// публичная — следующая задача будет звать её напрямую, минуя `verdict`,
+/// где эта проверка уже есть (Important 4 ревью 31.10, круг 2).
 pub fn dir_sum(dir: &Path) -> Result<String, String> {
+    if is_symlink(dir) {
+        return Err(format!("{} — ссылка: отпечаток не считаю", dir.display()));
+    }
     let mut files = Vec::new();
-    walk(dir, &mut files).map_err(|e| e.to_string())?;
+    // `{e:#}` — не `{e}`: у anyhow голый Display печатает только внешний
+    // контекст (путь), а причина ОС («Отказано в доступе») живёт в цепочке
+    // и видна лишь через альтернативный формат (как `cfg.rs`/`gui/mod.rs`,
+    // Important 3 ревью 31.10, круг 2).
+    walk(dir, Links::Refuse, &mut files).map_err(|e| format!("{e:#}"))?;
     let mut lines: Vec<(String, String)> = Vec::new();
     for p in &files {
-        let sum = sha256_file(p).map_err(|e| e.to_string())?;
+        let sum = sha256_file(p).map_err(|e| format!("{e:#}"))?;
         lines.push((rel(dir, p), sum));
     }
     lines.sort();
@@ -72,7 +86,10 @@ pub fn dir_sum(dir: &Path) -> Result<String, String> {
 /// Простое имя скилла — без разделителей пути и не «.»/«..»: оно идёт прямо
 /// в имя файла отпечатка, и `../..` увело бы его из каталога состояния куда
 /// угодно (Important 4 ревью 30.10). Разрешены буквы, цифры, дефис,
-/// подчёркивание и точка (внутри имени, не как имя целиком).
+/// подчёркивание и точка (внутри имени, не как имя целиком) — только ASCII:
+/// все имена скиллов в комплекте сейчас латиницей (`cf-edit`, `form-add` и
+/// прочие), так что задаче 3 это не мешает, но русское имя скилла правило
+/// придётся расширить (к сведению ревью 31.10, круг 2, правки не требует).
 fn valid_skill_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
@@ -163,20 +180,36 @@ mod tests {
     use super::*;
     use crate::project::tempdir::Dir;
 
-    /// Соединение каталогов (`mklink /J`) — приём Windows, не требует прав
-    /// администратора (в отличие от символьной ссылки на файл). Возвращает
-    /// `false`, если создать не вышло: тест, который его зовёт, тогда себя
-    /// пропускает с объяснением, а не падает — на некоторых машинах (без
-    /// NTFS-тома или с иной политикой) и это может не выйти.
-    fn try_junction(link: &Path, target: &Path) -> bool {
-        if !cfg!(windows) {
-            return false;
-        }
-        std::process::Command::new("cmd")
+    /// Ссылка `link` на `target`, настоящая на обеих системах: на Windows —
+    /// соединение каталогов (`mklink /J`, не требует прав администратора, но
+    /// работает только на каталог), на Unix — `std::os::unix::fs::symlink`
+    /// (тоже без привилегий, и на файл, и на каталог). CI гоняет тесты на
+    /// ubuntu (`.github/workflows/build.yml`), и до круга 2 эти тесты там
+    /// ничего не проверяли (`cfg!(windows)` сразу отдавал `false`) — находка
+    /// ревью 31.10. `false`, если создать не вышло: тест, который зовёт,
+    /// тогда себя пропускает с объяснением, а не падает. А если команда
+    /// отчиталась об успехе, а ссылки на самом деле нет — падает здесь же,
+    /// а не тихо: `eprintln!` в прошедшем тесте не виден в логе CI.
+    #[cfg(windows)]
+    fn try_link(link: &Path, target: &Path) -> bool {
+        let made = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J", &link.display().to_string(), &target.display().to_string()])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if made {
+            assert!(is_symlink(link), "{} — соединение не появилось после создания", link.display());
+        }
+        made
+    }
+
+    #[cfg(unix)]
+    fn try_link(link: &Path, target: &Path) -> bool {
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        if made {
+            assert!(is_symlink(link), "{} — ссылка не появилась после создания", link.display());
+        }
+        made
     }
 
     #[test]
@@ -202,27 +235,25 @@ mod tests {
         assert_eq!(verdict(&dst, None).unwrap(), Verdict::Edited);
     }
 
-    /// На месте скилла — соединение каталогов: `verdict` отказывает `Link`
-    /// раньше, чем заглянул бы внутрь (реальный приём, а не одна только
-    /// функция решения по факту метаданных — поправка ревью 30.10: соединение
-    /// каталогов обычной учётке Windows доступно).
+    /// На месте скилла — настоящая ссылка (соединение на Windows, симлинк на
+    /// Unix): `verdict` отказывает `Link` раньше, чем заглянул бы внутрь.
     #[test]
     fn a_junction_where_a_skill_should_be_is_refused() {
         let t = Dir::new();
         let elsewhere = t.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let dst = t.path().join("1c");
-        if !try_junction(&dst, &elsewhere) {
-            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+        if !try_link(&dst, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
             return;
         }
         assert_eq!(verdict(&dst, None).unwrap(), Verdict::Link);
     }
 
-    /// Соединение каталогов ВНУТРИ скилла — не только на его месте: обход не
-    /// идёт по нему и отказывает словами, а не уходит в бесконечную
-    /// рекурсию (Critical 2 ревью 30.10 — соединение на самого себя даёт
-    /// цикл, `path.is_dir()` в прежнем обходе шёл бы по нему вечно).
+    /// Ссылка ВНУТРИ скилла — не только на его месте: обход не идёт по ней и
+    /// отказывает словами, а не уходит в бесконечную рекурсию (Critical 2
+    /// ревью 30.10 — ссылка на самого себя даёт цикл, прежний обход шёл бы
+    /// по нему вечно).
     #[test]
     fn a_junction_inside_a_skill_directory_is_refused_not_followed() {
         let t = Dir::new();
@@ -230,19 +261,17 @@ mod tests {
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "текст скилла").unwrap();
         let loop_link = skill.join("loop");
-        if !try_junction(&loop_link, &skill) {
-            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+        if !try_link(&loop_link, &skill) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
             return;
         }
         let err = dir_sum(&skill).unwrap_err();
         assert!(err.contains("ссылка"), "{err}");
     }
 
-    /// На месте файла отпечатка — соединение (не файловый симлинк: тот
-    /// обычной учётке Windows недоступен, а проверка ровно та же, по
-    /// `symlink_metadata`, ей всё равно, что на другом конце). `write_stamp`
-    /// обязан отказать, а не последовать по нему и записать в чужую цель
-    /// (Critical 1 ревью 30.10); `read_stamp` — не прочитать чужое молча.
+    /// На месте файла отпечатка — ссылка. `write_stamp` обязан отказать, а
+    /// не последовать по ней и записать в чужую цель (Critical 1 ревью
+    /// 30.10); `read_stamp` — не прочитать чужое молча.
     #[test]
     fn a_junction_where_a_stamp_should_be_is_refused_not_followed() {
         let t = Dir::new();
@@ -250,8 +279,8 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::write(elsewhere.join("захваченное"), "чужое").unwrap();
         let stamp = t.path().join("stamp");
-        if !try_junction(&stamp, &elsewhere) {
-            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+        if !try_link(&stamp, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
             return;
         }
         assert!(write_stamp(&stamp, "новая сумма").is_err());

@@ -67,25 +67,35 @@ fn listed(rel: &str) -> bool {
         || rel == "secret.key")
 }
 
-/// Обход каталога — общий для сверки комплекта и для раскладки скиллов
-/// (`onec_connect::skills`): открыт наружу, чтобы не держать вторую копию
-/// того же обхода (расхождение двух копий мы уже ловили в этом проекте).
-/// Внутрь ссылок не ходит вовсе — ни файловых, ни каталожных (на Windows это
-/// и соединения `mklink /J`, их создаёт обычная учётка без прав
-/// администратора): `DirEntry::file_type()` типа записи не идёт по ссылке
-/// сам, поэтому проверка ничего не стоит. Для сверки комплекта это не меняет
-/// поведения — ссылок там не бывает, — а для чужого каталога (дома агента)
-/// это единственное, что спасает от бесконечной рекурсии через соединение,
-/// заведённое на родителя, и от похода по висячей ссылке в чужую цель.
-pub fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Что делать с найденной ссылкой — у двух вызывающих разная политика, и она
+/// называется параметром, а не зашита в обходе (ревью 30.10, круг 2).
+/// Комплект — наш собственный каталог: ссылки в нём заводим мы сами при
+/// сборке образа (`Dockerfile.1c:170-174` кладёт туда пять ссылок, включая
+/// `vrunner/lib` на каталог) — подписи комплекта (`write_list`/`verify`)
+/// ссылка не помеха, и обход идёт по ней, как шёл всегда. Дом агента на
+/// машине человека — чужой каталог (`onec_connect::skills::dir_sum`), и там
+/// ссылка — отказ: соединение каталогов (`mklink /J` на Windows, обычная
+/// учётка без прав администратора) на родителя иначе уводит обход в
+/// бесконечную рекурсию, а висячая ссылка — в чужую цель.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Links {
+    Follow,
+    Refuse,
+}
+
+/// Обход каталога — общий для сверки комплекта и для раскладки скиллов:
+/// открыт наружу, чтобы не держать вторую копию того же обхода (расхождение
+/// двух копий мы уже ловили в этом проекте). `DirEntry::file_type()` типа
+/// записи не идёт по ссылке сам, поэтому решение по `links` ничего не стоит.
+pub fn walk(dir: &Path, links: Links, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("не прочитать {}", dir.display()))? {
         let entry = entry.with_context(|| format!("не прочитать запись в {}", dir.display()))?;
         let p = entry.path();
         let ft = entry.file_type().with_context(|| format!("не узнать тип {}", p.display()))?;
-        if ft.is_symlink() {
+        if ft.is_symlink() && links == Links::Refuse {
             anyhow::bail!("{} — ссылка: обходить такие небезопасно", p.display());
-        } else if ft.is_dir() {
-            walk(&p, out)?;
+        } else if p.is_dir() {
+            walk(&p, links, out)?;
         } else {
             out.push(p);
         }
@@ -100,7 +110,7 @@ pub fn rel(root: &Path, p: &Path) -> String {
 /// Собрать список сумм (при сборке поставки). Возвращает число файлов.
 pub fn write_list(kit: &Kit, mut progress: impl FnMut(&str)) -> Result<usize> {
     let mut files = Vec::new();
-    walk(&kit.root, &mut files)?;
+    walk(&kit.root, Links::Follow, &mut files)?;
     files.sort();
     let mut lines = Vec::new();
     for p in files {
@@ -139,6 +149,54 @@ pub fn verify(kit: &Kit, mut progress: impl FnMut(usize, usize, &str)) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ссылка `link` на `target`, настоящая на обеих системах (соединение
+    /// каталогов на Windows, символьная ссылка на Unix) — без прав
+    /// администратора на любой. `false`, если не вышло: тест себя пропускает
+    /// с объяснением, а не падает.
+    #[cfg(windows)]
+    fn try_link(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.display().to_string(), &target.display().to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    fn try_link(link: &Path, target: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    /// Regression ревью 31.10, круг 2: защита `walk` от ссылок не имела права
+    /// сломать `write_list` в контейнере — там `/opt/dev1c-kit` несёт свои
+    /// же ссылки (`Dockerfile.1c:170-174`, например `vrunner/lib` на
+    /// каталог), и их заводим мы сами при сборке образа. `Links::Follow`
+    /// проходит ссылку, как и раньше; `Links::Refuse` (политика
+    /// `onec_connect::skills::dir_sum` для чужого каталога) на той же ссылке
+    /// отказывает.
+    #[test]
+    fn links_follow_for_the_kit_and_refuse_for_a_foreign_directory() {
+        let d = std::env::temp_dir().join(format!("integrity-walk-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::fs::write(d.join("real/f.txt"), "x").unwrap();
+        if !try_link(&d.join("linked"), &d.join("real")) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let mut followed = Vec::new();
+        walk(&d, Links::Follow, &mut followed).unwrap();
+        assert!(followed.iter().any(|p| p.ends_with("f.txt")), "{followed:?}");
+
+        let mut refused = Vec::new();
+        let err = walk(&d, Links::Refuse, &mut refused).unwrap_err();
+        assert!(err.to_string().contains("ссылка"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn tmp_kit() -> Kit {
         let d = std::env::temp_dir().join(format!("integrity-test-{}", std::process::id()));

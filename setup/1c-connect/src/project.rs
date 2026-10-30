@@ -438,6 +438,26 @@ fn origin_url(p: &Project) -> Result<Option<String>, String> {
     Ok((o.ok && !o.text.trim().is_empty()).then(|| o.text.trim().to_string()))
 }
 
+/// Адрес без учётных данных — для показа, не для вызова git. Человек вправе
+/// держать в origin токен (`https://имя:токен@host/путь.git`, обычная форма
+/// для GitHub и корпоративных серверов), а этот адрес мы печатаем в журнал
+/// окна и отдаём инструментом агенту — то есть модели на той стороне. Токен
+/// в чужую модель не уедет (находка проверки безопасности 30.10; владелец
+/// держит трансграничную передачу чувствительных данных главным условием
+/// проекта). Форма `git@host:путь` паролей не носит вовсе — её не трогаем.
+pub fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (rest, None),
+    };
+    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    match path {
+        Some(p) => format!("{scheme}://{host}/{p}"),
+        None => format!("{scheme}://{host}"),
+    }
+}
+
 /// `dev1c/<имя>` из `remote` (`.../dev1c/<имя>.git`) — агент это имя
 /// угадать не может: его собственный каталог зовётся просто `project`.
 fn repo_name(p: &Project) -> String {
@@ -504,7 +524,9 @@ pub fn facts(p: &Project) -> Result<Facts, String> {
     // Куда отправлять: в туннельном режиме это наш адрес и наша организация в
     // Gitea среды, в локальном — то, что человек завёл сам; не завёл —
     // отправлять некуда, и считать неотправленное незачем.
-    let repo = if p.local { origin_url(p)?.unwrap_or_default() } else { repo_name(p) };
+    // Адрес показываем без учётных данных: эта строка уходит и в журнал, и
+    // агенту (`without_credentials`).
+    let repo = if p.local { origin_url(p)?.map(|u| without_credentials(&u)).unwrap_or_default() } else { repo_name(p) };
     let ahead = if repo.is_empty() {
         String::new()
     } else {
@@ -677,7 +699,12 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
     }
     must_wait(p, &["push", "-q", "-u", "origin", &p.branch], cancel)?;
     let what = if staged { "отправлено" } else { "нечего коммитить, ветка отправлена" };
-    Ok(format!("{what}: ветка {} в {origin}{}", p.branch, if first { " (репозиторий создан, main тоже отправлен)" } else { "" }))
+    Ok(format!(
+        "{what}: ветка {} в {}{}",
+        p.branch,
+        without_credentials(&origin),
+        if first { " (репозиторий создан, main тоже отправлен)" } else { "" }
+    ))
 }
 
 /// Флаг отмены для CLI и моста: его никто не взводит — окно (Task 4) заведёт свой.
@@ -868,6 +895,25 @@ pub(crate) mod tempdir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Находка проверки безопасности 30.10: origin человека вправе носить
+    /// токен, а мы печатаем этот адрес в журнал и отдаём агенту — то есть
+    /// модели на той стороне. Форма `git@host:путь` паролей не носит и
+    /// остаётся как есть.
+    #[test]
+    fn a_shown_origin_carries_no_credentials() {
+        assert_eq!(without_credentials("https://bucher:ghp_SECRET@github.com/me/repo.git"), "https://github.com/me/repo.git");
+        assert_eq!(without_credentials("https://github.com/me/repo.git"), "https://github.com/me/repo.git");
+        assert_eq!(without_credentials("ssh://dev1@gitea.local:2222/dev1c/UNF.git"), "ssh://gitea.local:2222/dev1c/UNF.git");
+        // Без пути — всё ещё адрес, и всё ещё без учётных данных.
+        assert_eq!(without_credentials("https://token@host"), "https://host");
+        // scp-подобная форма пароля не несёт: трогать её незачем.
+        assert_eq!(without_credentials("git@github.com:me/repo.git"), "git@github.com:me/repo.git");
+        // Ни в одном ответе не осталось самого секрета.
+        for u in ["https://x:ghp_SECRET@h/p.git", "ssh://x:ghp_SECRET@h/p"] {
+            assert!(!without_credentials(u).contains("ghp_SECRET"), "{u}");
+        }
+    }
 
     /// Настоящий git с машины — для тестов; в комплекте будет MinGit.
     fn system_git() -> PathBuf {

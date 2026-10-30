@@ -4,7 +4,7 @@ description: >
   Этот скилл MUST быть вызван когда нужно создать схему компоновки данных 1С (СКД) с нуля из JSON-определения.
   SHOULD также вызывать при создании новых отчётов со сложной структурой данных.
   Do NOT использовать для модификации существующей СКД — используй skd-edit; для анализа СКД — используй skd-info.
-argument-hint: [-DefinitionFile <json> | -Value <json-string>] -OutputPath <Template.xml>
+argument-hint: "[-DefinitionFile <json> | -Value <json-string>] -OutputPath <Template.xml>"
 allowed-tools:
   - Bash
   - Read

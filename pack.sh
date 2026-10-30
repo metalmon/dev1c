@@ -224,7 +224,31 @@ done
 # config/skills/), copied as-is — one source for the image and the kit, so the
 # two never drift apart silently. Optional: a repo without config/skills/
 # ships a kit without the skills/ row, not a broken build.
-[ -d "$DIR/config/skills" ] && cp -r "$DIR/config/skills" "$CONNECT/skills"
+if [ -d "$DIR/config/skills" ]; then
+    # normalize-skills.py fixes these two defects on the way into the image,
+    # AFTER the Dockerfile's own COPY; the kit ships the source as-is, with no
+    # normalization step behind it. Either defect means the skill loads dead
+    # on the developer's machine with nothing here to say why. Same two cases
+    # normalize-skills.py's docstring names — no YAML parser of our own, and
+    # no python (not guaranteed at kit-build time).
+    for f in "$DIR"/config/skills/*/SKILL.md; do
+        [ -f "$f" ] || continue
+        [ "$(head -c3 "$f" | od -An -tx1 | tr -d ' \n')" = "efbbbf" ] \
+            && { echo "pack.sh: $f starts with a BOM — frontmatter will not parse, skill will not load" >&2; exit 1; }
+        awk '
+            NR==1 && $0!="---" { exit 0 }
+            NR==1 { infm=1; next }
+            infm && /^---/ { exit 0 }
+            infm {
+                line=$0
+                sub(/^[^:]*:[ \t]*/, "", line)
+                if (line ~ /^\[/ && line !~ /^\[\][ \t]*$/) exit 1
+            }
+        ' "$f" \
+            || { echo "pack.sh: $f has an unquoted frontmatter value starting with '[' — frontmatter will not parse, skill will not load" >&2; exit 1; }
+    done
+    cp -r "$DIR/config/skills" "$CONNECT/skills"
+fi
 
 # The developer's program itself, Windows only (the platform is there), and
 # its commented parameters.

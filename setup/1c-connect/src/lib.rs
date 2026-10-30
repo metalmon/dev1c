@@ -26,5 +26,6 @@ pub mod publication;
 pub mod secrets;
 pub mod session;
 pub mod single_instance;
+pub mod skills;
 pub mod tunnel;
 pub mod verify;

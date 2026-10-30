@@ -7,8 +7,15 @@
 //! человек место не трогал». Этот модуль — фундамент: дом агента, отпечаток
 //! каталога скилла и вердикт по отпечатку. Саму раскладку (`install`/`remove`)
 //! заводит следующая задача.
+//!
+//! Каталог, в который мы лезем, принадлежит человеку и может содержать что
+//! угодно — в том числе ссылку (на Windows и соединение `mklink /J`, его
+//! заводит обычная учётка без прав администратора). Ревью 30.10 нашло две
+//! дыры именно в этом: запись по ссылке на месте отпечатка и обход без
+//! защиты от циклов. Обе закрыты здесь же, первоисточником (`[ -L ]` в
+//! `entrypoint.sh`) и общим `common::integrity::walk`.
 
-use common::integrity::sha256_file;
+use common::integrity::{rel, sha256_file, sha256_text, walk};
 use std::path::{Path, PathBuf};
 
 /// Имя папки со скиллами внутри комплекта — раскладка найдёт её в комплекте
@@ -38,93 +45,55 @@ pub fn home_dir(h: Home) -> Option<PathBuf> {
     std::env::var_os(var).map(|home| PathBuf::from(home).join(sub).join("skills"))
 }
 
-/// Имена файлов каталога `dir`, относительно `root`, со слэшем вперёд —
-/// обход диска читает их в произвольном порядке, а `dir_sum` ниже должен
-/// давать одну и ту же сумму независимо от него.
-fn relative_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            relative_files(root, &path, out)?;
-        } else {
-            out.push(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"));
-        }
-    }
-    Ok(())
-}
-
 /// Отпечаток каталога скилла — той же мыслью, что `dir_sum` в точке входа
 /// образа (`find … -exec md5sum {} + | sort | md5sum`): сумма каждого файла
 /// по имени относительно каталога, список отсортирован по имени — не по
 /// порядку обхода диска, который ничем не гарантирован, — и уже
-/// отсортированный список хешируется снова, через временный файл: второй
-/// независимый хеш-алгоритм ради одной сверки — лишняя зависимость без
-/// причины, а `sha256_file` считает файлы, не строки.
+/// отсортированный список хешируется снова, той же функцией (`sha256_text`),
+/// что и файлы (`sha256_file`): второй независимый алгоритм хеширования ради
+/// одной сверки был бы лишней зависимостью без причины. Обход — общий
+/// `common::integrity::walk`: внутрь ссылок он не ходит и сам откажет, если
+/// внутри каталога скилла обнаружится ссылка или циклическое соединение
+/// (Critical 2 ревью 30.10) — тот же отказ, что у ссылки на месте скилла, и
+/// по той же причине.
 pub fn dir_sum(dir: &Path) -> Result<String, String> {
     let mut files = Vec::new();
-    relative_files(dir, dir, &mut files).map_err(|e| e.to_string())?;
-    files.sort();
-    let mut text = String::new();
-    for rel in &files {
-        let sum = sha256_file(&dir.join(rel)).map_err(|e| e.to_string())?;
-        text.push_str(&sum);
-        text.push_str("  ");
-        text.push_str(rel);
-        text.push('\n');
+    walk(dir, &mut files).map_err(|e| e.to_string())?;
+    let mut lines: Vec<(String, String)> = Vec::new();
+    for p in &files {
+        let sum = sha256_file(p).map_err(|e| e.to_string())?;
+        lines.push((rel(dir, p), sum));
     }
-    let tmp = std::env::temp_dir().join(format!(
-        "dev1c-dirsum-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-    ));
-    std::fs::write(&tmp, &text).map_err(|e| e.to_string())?;
-    let sum = sha256_file(&tmp).map_err(|e| e.to_string());
-    let _ = std::fs::remove_file(&tmp);
-    sum
+    lines.sort();
+    let text: String = lines.iter().map(|(r, s)| format!("{s}  {r}\n")).collect();
+    Ok(sha256_text(&text))
+}
+
+/// Простое имя скилла — без разделителей пути и не «.»/«..»: оно идёт прямо
+/// в имя файла отпечатка, и `../..` увело бы его из каталога состояния куда
+/// угодно (Important 4 ревью 30.10). Разрешены буквы, цифры, дефис,
+/// подчёркивание и точка (внутри имени, не как имя целиком).
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Где лежит отпечаток последней раскладки — в состоянии программы, не в
-/// доме агента: один файл на пару (дом, имя скилла), чтобы раскладка для
-/// Zed/pi (`Home::Agents`) и для Claude Code (`Home::Claude`) не путала
-/// отпечатки друг друга в общем каталоге состояния.
-pub fn stamp_path(state: &Path, h: Home, skill: &str) -> PathBuf {
+/// доме агента. Имя файла несёт три вещи: дом (`agents`/`claude`), короткую
+/// сумму каталога НАЗНАЧЕНИЯ и имя скилла — без каталога назначения в ключе
+/// два разных места с одним домом делили бы один отпечаток, и чужой скилл
+/// сочли бы нашим (Important 3 ревью 30.10); сам путь в имя файла не идёт
+/// (длина, разделители) — только его сумма. Отказ, если имя скилла не
+/// простое (Important 4).
+pub fn stamp_path(state: &Path, h: Home, dst: &Path, skill: &str) -> Result<PathBuf, String> {
+    if !valid_skill_name(skill) {
+        return Err(format!("{skill:?} — не простое имя скилла, отпечаток не строю"));
+    }
     let tag = match h {
         Home::Agents => "agents",
         Home::Claude => "claude",
     };
-    state.join(format!("skill_{tag}_{skill}"))
-}
-
-/// Прочитанный отпечаток — `None`, если файла нет: первой раскладке так и
-/// положено, прошлого отпечатка у неё нет.
-pub fn read_stamp(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
-}
-
-/// Записать отпечаток после раскладки.
-pub fn write_stamp(path: &Path, sum: &str) -> Result<(), String> {
-    std::fs::write(path, sum).map_err(|e| e.to_string())
-}
-
-/// Три случая и отказ — как в точке входа образа: каталога нет → `New`; есть,
-/// и отпечаток совпал с прежним → `Untouched`; есть, и не совпал → `Edited`
-/// (человек правил скилл на месте — из комплекта его не трогают); на месте
-/// скилла ссылка → `Link`, отказ раньше прочих случаев.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    New,
-    Untouched,
-    Edited,
-    Link,
-}
-
-/// Решение по ссылке — от одного факта метаданных (`is_symlink`), не от
-/// самого пути: выделено отдельно ради теста. Висячая ссылка на месте
-/// скилла опаснее прочего — `exists()` на ней ложно, и запись пошла бы по
-/// ней в чужую цель, — поэтому в `verdict` этот случай проверяется первым,
-/// раньше `New`.
-fn link_verdict(is_symlink: bool) -> Option<Verdict> {
-    is_symlink.then_some(Verdict::Link)
+    let dst_sum = &sha256_text(&dst.to_string_lossy())[..12];
+    Ok(state.join(format!("skill_{tag}_{dst_sum}_{skill}")))
 }
 
 /// `std::fs::symlink_metadata`, не `metadata`: вторая идёт по ссылке на цель,
@@ -133,10 +102,51 @@ fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
 }
 
+/// Ссылка на месте файла отпечатка — отказ раньше любого чтения или записи:
+/// `fs::read_to_string`/`fs::write` идут по ссылке в её цель, и висячая или
+/// подставная ссылка на месте отпечатка привела бы нас в чужой файл (Critical
+/// 1 ревью 30.10, тем же рассуждением, что у ссылки на месте скилла).
+fn refuse_if_link(path: &Path) -> Result<(), String> {
+    if is_symlink(path) {
+        return Err(format!("{} — ссылка, а не файл отпечатка: не читаю и не пишу по ней", path.display()));
+    }
+    Ok(())
+}
+
+/// Прочитанный отпечаток — `Ok(None)`, если файла нет: первой раскладке так
+/// и положено, прошлого отпечатка у неё нет.
+pub fn read_stamp(path: &Path) -> Result<Option<String>, String> {
+    refuse_if_link(path)?;
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s.trim().to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("не прочитать {}: {e}", path.display())),
+    }
+}
+
+/// Записать отпечаток после раскладки.
+pub fn write_stamp(path: &Path, sum: &str) -> Result<(), String> {
+    refuse_if_link(path)?;
+    std::fs::write(path, sum).map_err(|e| format!("не записать {}: {e}", path.display()))
+}
+
+/// Три случая и отказ — как в точке входа образа: каталога нет → `New`; есть,
+/// и отпечаток совпал с прежним → `Untouched`; есть, и не совпал → `Edited`
+/// (человек правил скилл на месте — из комплекта его не трогают); на месте
+/// скилла ссылка → `Link`, отказ раньше прочих случаев — висячая ссылка не
+/// видна `exists()`, а запись пошла бы по ней в чужую цель.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    New,
+    Untouched,
+    Edited,
+    Link,
+}
+
 /// Вердикт для каталога `dst` по его прежнему отпечатку `stamp`.
 pub fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
-    if let Some(v) = link_verdict(is_symlink(dst)) {
-        return Ok(v);
+    if is_symlink(dst) {
+        return Ok(Verdict::Link);
     }
     if !dst.exists() {
         return Ok(Verdict::New);
@@ -152,6 +162,22 @@ pub fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
 mod tests {
     use super::*;
     use crate::project::tempdir::Dir;
+
+    /// Соединение каталогов (`mklink /J`) — приём Windows, не требует прав
+    /// администратора (в отличие от символьной ссылки на файл). Возвращает
+    /// `false`, если создать не вышло: тест, который его зовёт, тогда себя
+    /// пропускает с объяснением, а не падает — на некоторых машинах (без
+    /// NTFS-тома или с иной политикой) и это может не выйти.
+    fn try_junction(link: &Path, target: &Path) -> bool {
+        if !cfg!(windows) {
+            return false;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.display().to_string(), &target.display().to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 
     #[test]
     fn the_three_cases_are_the_ones_the_container_uses() {
@@ -174,15 +200,64 @@ mod tests {
         // Отпечатка вовсе не было, а каталог уже есть — тоже Edited: взять
         // его прошлым не из чего.
         assert_eq!(verdict(&dst, None).unwrap(), Verdict::Edited);
+    }
 
-        // На месте скилла ссылка → Link. Настоящую ссылку на этой машине не
-        // создать без прав администратора (тот же потолок, что у
-        // `ops_host.rs::the_same_tree_seen_through_a_symlink_appears_once` и
-        // `editors.rs::setup_canonicalizes_an_existing_path_before_writing`),
-        // поэтому здесь доказывается механизм — функция решения по факту
-        // метаданных, — а не весь сценарий целиком.
-        assert_eq!(link_verdict(true), Some(Verdict::Link));
-        assert_eq!(link_verdict(false), None);
+    /// На месте скилла — соединение каталогов: `verdict` отказывает `Link`
+    /// раньше, чем заглянул бы внутрь (реальный приём, а не одна только
+    /// функция решения по факту метаданных — поправка ревью 30.10: соединение
+    /// каталогов обычной учётке Windows доступно).
+    #[test]
+    fn a_junction_where_a_skill_should_be_is_refused() {
+        let t = Dir::new();
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let dst = t.path().join("1c");
+        if !try_junction(&dst, &elsewhere) {
+            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+            return;
+        }
+        assert_eq!(verdict(&dst, None).unwrap(), Verdict::Link);
+    }
+
+    /// Соединение каталогов ВНУТРИ скилла — не только на его месте: обход не
+    /// идёт по нему и отказывает словами, а не уходит в бесконечную
+    /// рекурсию (Critical 2 ревью 30.10 — соединение на самого себя даёт
+    /// цикл, `path.is_dir()` в прежнем обходе шёл бы по нему вечно).
+    #[test]
+    fn a_junction_inside_a_skill_directory_is_refused_not_followed() {
+        let t = Dir::new();
+        let skill = t.path().join("1c");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "текст скилла").unwrap();
+        let loop_link = skill.join("loop");
+        if !try_junction(&loop_link, &skill) {
+            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+            return;
+        }
+        let err = dir_sum(&skill).unwrap_err();
+        assert!(err.contains("ссылка"), "{err}");
+    }
+
+    /// На месте файла отпечатка — соединение (не файловый симлинк: тот
+    /// обычной учётке Windows недоступен, а проверка ровно та же, по
+    /// `symlink_metadata`, ей всё равно, что на другом конце). `write_stamp`
+    /// обязан отказать, а не последовать по нему и записать в чужую цель
+    /// (Critical 1 ревью 30.10); `read_stamp` — не прочитать чужое молча.
+    #[test]
+    fn a_junction_where_a_stamp_should_be_is_refused_not_followed() {
+        let t = Dir::new();
+        let elsewhere = t.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("захваченное"), "чужое").unwrap();
+        let stamp = t.path().join("stamp");
+        if !try_junction(&stamp, &elsewhere) {
+            eprintln!("пропущено: соединение каталогов недоступно на этой машине");
+            return;
+        }
+        assert!(write_stamp(&stamp, "новая сумма").is_err());
+        assert!(read_stamp(&stamp).is_err());
+        // Чужой каталог не тронут.
+        assert!(elsewhere.join("захваченное").exists());
     }
 
     #[test]
@@ -208,5 +283,21 @@ mod tests {
         std::fs::write(b.path().join("sub/extra.md"), "подробности!").unwrap();
         let sum_b_changed = dir_sum(b.path()).unwrap();
         assert_ne!(sum_a, sum_b_changed);
+    }
+
+    #[test]
+    fn stamp_path_refuses_a_skill_name_that_is_not_simple() {
+        let t = Dir::new();
+        assert!(stamp_path(t.path(), Home::Agents, &t.path().join("1c"), "../../etc").is_err());
+        assert!(stamp_path(t.path(), Home::Agents, &t.path().join("1c"), "..").is_err());
+        assert!(stamp_path(t.path(), Home::Agents, &t.path().join("1c"), "1c").is_ok());
+    }
+
+    #[test]
+    fn stamp_path_tells_apart_two_destinations_with_the_same_home_and_skill() {
+        let state = Dir::new();
+        let one = stamp_path(state.path(), Home::Agents, &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
+        let other = stamp_path(state.path(), Home::Agents, &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
+        assert_ne!(one, other, "разные каталоги назначения не должны делить один отпечаток");
     }
 }

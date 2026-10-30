@@ -18,7 +18,9 @@
 //! (`Links::Refuse`) — в отличие от сверки комплекта (`write_list`), где
 //! ссылки свои и `Links::Follow` как и было всегда.
 
+use crate::editors;
 use common::integrity::{rel, sha256_file, sha256_text, walk, Links};
+use common::kit::Kit;
 use std::path::{Path, PathBuf};
 
 /// Имя папки со скиллами внутри комплекта — раскладка найдёт её в комплекте
@@ -175,6 +177,205 @@ pub fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
     })
 }
 
+/// Имена скиллов в комплекте — подкаталоги `kit.path(KIT_DIR)`, отсортированы
+/// по имени, чтобы порядок обхода диска не влиял на то, в каком порядке
+/// `look`/`install`/`remove` их переберут. `Ok(None)`, если раздела `skills/`
+/// в комплекте вовсе нет — решение хозяина: комплект без скиллов не отказ,
+/// записи MCP у него всё равно работают (эта разница видна в `Found::Missing`
+/// у вызывающего, не в комментарии здесь). Имя скилла не по правилу
+/// (`valid_skill_name`) — отказ словами сразу: по решению задания пропускать
+/// его молча нельзя, а раз оно внутри самого комплекта, это неисправность
+/// комплекта, а не дома агента.
+fn kit_skill_names(kit: &Kit) -> Result<Option<Vec<String>>, String> {
+    let dir = kit.path(KIT_DIR);
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut names = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("не прочитать {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("не прочитать {}: {e}", dir.display()))?;
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !valid_skill_name(&name) {
+            return Err(format!("{name:?} в комплекте — не простое имя скилла, раскладку не веду"));
+        }
+        names.push(name);
+    }
+    names.sort();
+    Ok(Some(names))
+}
+
+/// Итоговое слово о скиллах в доме — тем же словарём, что у MCP-записей
+/// редактора (`editors::Found`), чтобы окно показывало обе половины галочки
+/// одним языком: хоть один скилл занят чужим (правлен человеком или вовсе не
+/// наш) — `Foreign` с именами, раскладку это не останавливает, но и не
+/// трогает их; иначе все наши и на месте — `Ours`; иначе (что-то ещё не
+/// поставлено) — `Absent`. Общая для `look`/`install`/`remove`, чтобы три
+/// функции не придумывали три разных способа сказать одно и то же.
+fn summarize(total: usize, foreign: Vec<String>, ours: usize) -> editors::Found {
+    if !foreign.is_empty() {
+        editors::Found::Foreign(foreign)
+    } else if total > 0 && ours == total {
+        editors::Found::Ours
+    } else {
+        editors::Found::Absent
+    }
+}
+
+/// Копия каталога скилла из комплекта в дом агента. `Links::Follow`, не
+/// `Links::Refuse`: это содержимое комплекта, не чужой каталог — тем же
+/// доверием, каким `write_list` сверяет сам комплект (комментарий модуля).
+/// Старое на месте назначения удаляется целиком перед копией — не поверх:
+/// иначе файл, пропавший в новой версии скилла, пережил бы обновление.
+fn copy_skill(src: &Path, dst: &Path) -> Result<(), String> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst).map_err(|e| format!("не удалить {}: {e}", dst.display()))?;
+    }
+    std::fs::create_dir_all(dst).map_err(|e| format!("не создать {}: {e}", dst.display()))?;
+    let mut files = Vec::new();
+    walk(src, Links::Follow, &mut files).map_err(|e| format!("{e:#}"))?;
+    for f in &files {
+        let to = dst.join(rel(src, f));
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("не создать {}: {e}", parent.display()))?;
+        }
+        std::fs::copy(f, &to).map_err(|e| format!("не скопировать {}: {e}", f.display()))?;
+    }
+    Ok(())
+}
+
+/// Что сейчас в доме агента — ничего не меняет, только читает. Дом назначения
+/// (`home`) — уже решённый путь (`~/.agents/skills` или `~/.claude/skills`):
+/// звонить `home_dir` здесь значило бы читать переменную среды, общую для
+/// всего набора тестов, и получать гонку с соседями — решили отдать это
+/// вызывающему.
+pub fn look(kit: &Kit, state: &Path, h: Home, home: &Path) -> Result<editors::Found, String> {
+    let Some(names) = kit_skill_names(kit)? else { return Ok(editors::Found::Missing) };
+    let mut foreign = Vec::new();
+    let mut ours = 0usize;
+    for name in &names {
+        let dst = home.join(name);
+        let stamp = stamp_path(state, h, &dst, name)?;
+        let prev = read_stamp(&stamp)?;
+        match verdict(&dst, prev.as_deref())? {
+            Verdict::Link => return Err(format!("{} — ссылка на месте скилла, не трогаю", dst.display())),
+            Verdict::Untouched => ours += 1,
+            Verdict::Edited => foreign.push(name.clone()),
+            Verdict::New => {}
+        }
+    }
+    Ok(summarize(names.len(), foreign, ours))
+}
+
+/// Поставить и обновить — разницы в правиле нет, ровно так устроен
+/// контейнер (`container-rule.txt`): каждый скилл по своему вердикту. Нет
+/// или не тронут — копируем свежее из комплекта и пишем отпечаток (это и
+/// есть обновление, когда комплект успел поменяться, и безвредный повтор,
+/// когда не успел). Правлен человеком — не трогаем, называем в `Foreign`.
+/// Ссылка на его месте — отказ словами, но только для этого скилла: ошибка
+/// одного не должна останавливать раскладку остальных, поэтому они собираются
+/// в список, а не обрывают цикл.
+///
+/// Внутри «правлен» — особый случай: содержимое СЕЙЧАС совпадает с тем, что
+/// даёт комплект, хотя своего отпечатка нет вовсе. Это не правка человека —
+/// это недоделанная прошлая раскладка (процесс прервался между копией и
+/// записью отпечатка). Такую докладываем отпечатком и считаем своей, а не
+/// отказываем — иначе половина раскладки застряла бы навсегда, будучи
+/// неотличимой словами от настоящей правки.
+pub fn install(kit: &Kit, state: &Path, h: Home, home: &Path) -> Result<editors::Found, Vec<String>> {
+    let names = match kit_skill_names(kit) {
+        Ok(Some(n)) => n,
+        Ok(None) => return Ok(editors::Found::Missing),
+        Err(e) => return Err(vec![e]),
+    };
+    let mut errors = Vec::new();
+    let mut foreign = Vec::new();
+    let mut ours = 0usize;
+    for name in &names {
+        let src = kit.path(KIT_DIR).join(name);
+        let dst = home.join(name);
+        let outcome = (|| -> Result<bool, String> {
+            let stamp = stamp_path(state, h, &dst, name)?;
+            let prev = read_stamp(&stamp)?;
+            match verdict(&dst, prev.as_deref())? {
+                Verdict::Link => Err(format!("{} — ссылка на месте скилла, не трогаю", dst.display())),
+                Verdict::New | Verdict::Untouched => {
+                    copy_skill(&src, &dst)?;
+                    let sum = dir_sum(&dst)?;
+                    write_stamp(&stamp, &sum)?;
+                    Ok(true)
+                }
+                Verdict::Edited => {
+                    let src_sum = dir_sum(&src)?;
+                    let dst_sum = dir_sum(&dst)?;
+                    if dst_sum == src_sum {
+                        write_stamp(&stamp, &src_sum)?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                }
+            }
+        })();
+        match outcome {
+            Ok(true) => ours += 1,
+            Ok(false) => foreign.push(name.clone()),
+            Err(e) => errors.push(e),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(summarize(names.len(), foreign, ours))
+}
+
+/// Снять наши скиллы — только те, что не тронуты: правленые остаются на
+/// месте и названы в `Foreign` («remove не уносит»), ссылка на месте скилла —
+/// отказ словами, не обрывая снятие остальных. Отпечаток уходит вместе с
+/// каталогом: иначе он пережил бы собственный скилл и соврал бы при
+/// следующей раскладке (хотя `verdict` этой лжи и не слушает — каталога
+/// уже нет, вердикт `New` раньше, чем отпечаток был бы прочитан).
+pub fn remove(kit: &Kit, state: &Path, h: Home, home: &Path) -> Result<editors::Found, Vec<String>> {
+    let names = match kit_skill_names(kit) {
+        Ok(Some(n)) => n,
+        Ok(None) => return Ok(editors::Found::Missing),
+        Err(e) => return Err(vec![e]),
+    };
+    let mut errors = Vec::new();
+    let mut foreign = Vec::new();
+    for name in &names {
+        let dst = home.join(name);
+        let outcome = (|| -> Result<bool, String> {
+            let stamp = stamp_path(state, h, &dst, name)?;
+            let prev = read_stamp(&stamp)?;
+            match verdict(&dst, prev.as_deref())? {
+                Verdict::Link => Err(format!("{} — ссылка на месте скилла, не трогаю", dst.display())),
+                Verdict::Untouched => {
+                    std::fs::remove_dir_all(&dst).map_err(|e| format!("не удалить {}: {e}", dst.display()))?;
+                    if stamp.exists() {
+                        std::fs::remove_file(&stamp).map_err(|e| format!("не удалить {}: {e}", stamp.display()))?;
+                    }
+                    Ok(true)
+                }
+                Verdict::New => Ok(true),
+                Verdict::Edited => Ok(false),
+            }
+        })();
+        match outcome {
+            Ok(true) => {}
+            Ok(false) => foreign.push(name.clone()),
+            Err(e) => errors.push(e),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(summarize(names.len(), foreign, 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +529,132 @@ mod tests {
         let one = stamp_path(state.path(), Home::Agents, &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
         let other = stamp_path(state.path(), Home::Agents, &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
         assert_ne!(one, other, "разные каталоги назначения не должны делить один отпечаток");
+    }
+
+    /// Комплект с одним скиллом внутри `skills/` — своя небольшая обёртка,
+    /// чтобы шесть проверок задачи 3 не повторяли одно и то же устройство
+    /// комплекта по пять строк каждая.
+    fn kit_with_skill(name: &str, text: &str) -> (Dir, common::kit::Kit) {
+        let root = Dir::new();
+        std::fs::create_dir_all(root.path().join(KIT_DIR).join(name)).unwrap();
+        std::fs::write(root.path().join(KIT_DIR).join(name).join("SKILL.md"), text).unwrap();
+        let kit = common::kit::Kit::at(root.path());
+        (root, kit)
+    }
+
+    #[test]
+    fn install_copies_the_kit_skills_and_writes_their_stamps() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+
+        let found = install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(found, editors::Found::Ours);
+
+        let dst = home.path().join("1c");
+        assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "текст скилла");
+        let stamp = stamp_path(state.path(), Home::Agents, &dst, "1c").unwrap();
+        assert_eq!(read_stamp(&stamp).unwrap().unwrap(), dir_sum(&dst).unwrap());
+    }
+
+    /// Папка с нашим именем уже есть, но мы её не клали — отпечатка для неё
+    /// никогда не было. `look` называет её чужой; `install` её не
+    /// перезаписывает; `remove` не уносит.
+    #[test]
+    fn a_skill_we_never_put_there_is_left_alone() {
+        let (_root, kit) = kit_with_skill("1c", "из комплекта");
+        let state = Dir::new();
+        let home = Dir::new();
+        std::fs::create_dir_all(home.path().join("1c")).unwrap();
+        std::fs::write(home.path().join("1c/SKILL.md"), "чужое содержимое").unwrap();
+
+        assert_eq!(look(&kit, state.path(), Home::Agents, home.path()).unwrap(), editors::Found::Foreign(vec!["1c".to_string()]));
+
+        let after_install = install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(after_install, editors::Found::Foreign(vec!["1c".to_string()]));
+        assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "чужое содержимое");
+
+        let after_remove = remove(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(after_remove, editors::Found::Foreign(vec!["1c".to_string()]));
+        assert!(home.path().join("1c").exists());
+    }
+
+    #[test]
+    fn an_edited_skill_survives_both_update_and_removal_and_is_named() {
+        let (_root, kit) = kit_with_skill("1c", "версия раз");
+        let state = Dir::new();
+        let home = Dir::new();
+        install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+
+        // Человек правит поставленный скилл на месте.
+        std::fs::write(home.path().join("1c/SKILL.md"), "правка человека").unwrap();
+
+        // Комплект обновился — но правленое install не трогает.
+        std::fs::write(_root.path().join(KIT_DIR).join("1c/SKILL.md"), "версия два").unwrap();
+        let after_install = install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(after_install, editors::Found::Foreign(vec!["1c".to_string()]));
+        assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "правка человека");
+
+        let after_remove = remove(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(after_remove, editors::Found::Foreign(vec!["1c".to_string()]));
+        assert!(home.path().join("1c").exists(), "правленый скилл не должен уноситься");
+    }
+
+    #[test]
+    fn a_new_kit_replaces_the_untouched_skills() {
+        let (root, kit) = kit_with_skill("1c", "версия раз");
+        let state = Dir::new();
+        let home = Dir::new();
+        install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+
+        // Скилл в доме не тронут — комплект меняет версию.
+        std::fs::write(root.path().join(KIT_DIR).join("1c/SKILL.md"), "версия два").unwrap();
+        let found = install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(found, editors::Found::Ours);
+        assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "версия два");
+    }
+
+    #[test]
+    fn a_symlink_in_place_of_a_skill_is_refused_in_words() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+        let elsewhere = home.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let dst = home.path().join("1c");
+        if !try_link(&dst, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
+            return;
+        }
+
+        let look_err = look(&kit, state.path(), Home::Agents, home.path()).unwrap_err();
+        assert!(look_err.contains("ссылка"), "{look_err}");
+        let install_err = install(&kit, state.path(), Home::Agents, home.path()).unwrap_err();
+        assert_eq!(install_err.len(), 1);
+        assert!(install_err[0].contains("ссылка"), "{install_err:?}");
+        let remove_err = remove(&kit, state.path(), Home::Agents, home.path()).unwrap_err();
+        assert_eq!(remove_err.len(), 1);
+        assert!(remove_err[0].contains("ссылка"), "{remove_err:?}");
+    }
+
+    /// Раскладка прервалась между копией и записью отпечатка: в доме лежит
+    /// каталог, байт в байт совпадающий с тем, что даёт комплект СЕЙЧАС, а
+    /// своего отпечатка для него нет вовсе. Это не правка человека — это
+    /// недоделанное дело, и `install` обязан его завершить (дописать
+    /// отпечаток), а не отказать, сочтя чужим.
+    #[test]
+    fn a_half_deleted_install_is_completed_not_refused() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+        std::fs::create_dir_all(home.path().join("1c")).unwrap();
+        std::fs::write(home.path().join("1c/SKILL.md"), "текст скилла").unwrap();
+
+        let found = install(&kit, state.path(), Home::Agents, home.path()).unwrap();
+        assert_eq!(found, editors::Found::Ours);
+
+        let dst = home.path().join("1c");
+        let stamp = stamp_path(state.path(), Home::Agents, &dst, "1c").unwrap();
+        assert_eq!(read_stamp(&stamp).unwrap().unwrap(), dir_sum(&dst).unwrap());
     }
 }

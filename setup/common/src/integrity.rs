@@ -153,19 +153,32 @@ mod tests {
     /// Ссылка `link` на `target`, настоящая на обеих системах (соединение
     /// каталогов на Windows, символьная ссылка на Unix) — без прав
     /// администратора на любой. `false`, если не вышло: тест себя пропускает
-    /// с объяснением, а не падает.
+    /// с объяснением, а не падает. Если команда отчиталась об успехе, а
+    /// ссылки на самом деле нет — падает здесь же, `assert!`, а не тихо
+    /// (та же проверка, что в `skills.rs::tests::try_link`; её отсутствие
+    /// здесь ре-ревью 31.10 назвало находкой отдельно).
     #[cfg(windows)]
     fn try_link(link: &Path, target: &Path) -> bool {
-        std::process::Command::new("cmd")
+        let made = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J", &link.display().to_string(), &target.display().to_string()])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if made {
+            let is_link = std::fs::symlink_metadata(link).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            assert!(is_link, "{} — соединение не появилось после создания", link.display());
+        }
+        made
     }
 
     #[cfg(unix)]
     fn try_link(link: &Path, target: &Path) -> bool {
-        std::os::unix::fs::symlink(target, link).is_ok()
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        if made {
+            let is_link = std::fs::symlink_metadata(link).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            assert!(is_link, "{} — ссылка не появилась после создания", link.display());
+        }
+        made
     }
 
     /// Regression ревью 31.10, круг 2: защита `walk` от ссылок не имела права
@@ -189,7 +202,18 @@ mod tests {
 
         let mut followed = Vec::new();
         walk(&d, Links::Follow, &mut followed).unwrap();
-        assert!(followed.iter().any(|p| p.ends_with("f.txt")), "{followed:?}");
+        // Не просто «файл с таким именем где-то нашёлся» — `real/f.txt`
+        // нашёлся бы и без похода по ссылке вовсе. Нужен файл ЗА ссылкой,
+        // `linked/f.txt`: его обнаружение и означает, что `Follow` решает по
+        // цели ссылки (`p.is_dir()`), а не по самой записи (`ft.is_dir()`,
+        // которая у ссылки всегда `false` и была бы той самой поломкой,
+        // из-за которой этот круг и начался). Проверено подменой на месте:
+        // с `ft.is_dir()` вместо `p.is_dir()` в `walk` этот `assert!` падает,
+        // а предыдущий (`.any(|p| p.ends_with("f.txt"))`) — нет (находка
+        // ре-ревью 31.10, круг 3).
+        let via_link = d.join("linked").join("f.txt");
+        assert!(followed.contains(&via_link), "{followed:?}");
+        assert_eq!(followed.len(), 2, "{followed:?}");
 
         let mut refused = Vec::new();
         let err = walk(&d, Links::Refuse, &mut refused).unwrap_err();

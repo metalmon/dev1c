@@ -4,6 +4,7 @@
 //! нельзя. У pi (`merge_pi`) комментариев в `mcp.json` не бывает, терять
 //! нечего — там честный разбор `serde_json` целиком и печать заново.
 
+use crate::skills;
 use std::path::{Path, PathBuf};
 
 /// Одна из наших записей `context_servers`: имя сервера совпадает с
@@ -929,6 +930,28 @@ pub enum Found {
     Foreign(Vec<String>),
 }
 
+/// Галочка в трее несёт две половины — записи MCP и скиллы — и показывает
+/// одно слово про обе сразу. Агента на машине нет — спрашивать половины не о
+/// чём, и это перекрывает всё остальное, даже нечитаемую вторую половину:
+/// галочка всё равно недоступна. Нечитаемая половина — отдельный исход, не
+/// «нет»: приравнять её к `Absent` значило бы выдать непрочитанное состояние
+/// за пустое место, хотя там могло быть что угодно, в том числе наше. Чужое
+/// хоть в одной половине — `Foreign` с её именами: что отвечено на письме —
+/// неважно, одной подмены достаточно, чтобы галочка не считалась «нашей».
+/// Обе свои — `Ours`; иначе (хоть одна `Absent`, другая `Ours`) — всё ещё
+/// `Absent`, та же логика, что у `look` для двух записей MCP одного агента.
+pub fn both(mcp: &Result<Found, String>, skills: &Result<Found, String>) -> Result<Found, String> {
+    if matches!(mcp, Ok(Found::Missing)) || matches!(skills, Ok(Found::Missing)) {
+        return Ok(Found::Missing);
+    }
+    match (mcp, skills) {
+        (Err(e), _) | (_, Err(e)) => Err(e.clone()),
+        (Ok(Found::Foreign(names)), _) | (_, Ok(Found::Foreign(names))) => Ok(Found::Foreign(names.clone())),
+        (Ok(Found::Ours), Ok(Found::Ours)) => Ok(Found::Ours),
+        _ => Ok(Found::Absent),
+    }
+}
+
 /// Опознание по уже прочитанному пути И по отдельному факту «редактор на
 /// машине есть» (`present` — `zed_present`/`pi_present`). Эти два факта
 /// РАЗНЫЕ, и путать их — дефект, найденный живым прогоном 29.10: на машине
@@ -1647,26 +1670,66 @@ impl Setup {
 /// меню (`agent:<id>`), `label` — подпись человеку. Порядок в массиве — он
 /// же порядок в меню: оба файловых агента, как было, затем оба CLI-агента
 /// (решение владельца 29.10, «Четыре локальных агента»).
+/// `skills` — чей дом скиллов (`skills::Home`) достаётся этому агенту: имя
+/// только задаёт подпапку, путь строит `skills::home_dir` в вызывающем коде
+/// (докстрока `skills::Home`). Zed, pi и Codex делят один дом (`~/.agents`,
+/// решение владельца — общий каталог для всех трёх), у Claude Code свой
+/// (`~/.claude`), потому что так зовётся его собственный каталог скиллов.
 pub struct AgentDef {
     pub id: &'static str,
     pub label: &'static str,
     pub setup: Setup,
+    pub skills: skills::Home,
 }
 
 pub const AGENTS: [AgentDef; 4] = [
-    AgentDef { id: "zed", label: "Zed", setup: Setup::File { path: zed_path, present: zed_present, merge: merge_zed, remove: remove_zed } },
-    AgentDef { id: "pi", label: "pi", setup: Setup::File { path: pi_path, present: pi_present, merge: merge_pi, remove: remove_pi } },
+    AgentDef {
+        id: "zed",
+        label: "Zed",
+        setup: Setup::File { path: zed_path, present: zed_present, merge: merge_zed, remove: remove_zed },
+        skills: skills::Home::Agents,
+    },
+    AgentDef {
+        id: "pi",
+        label: "pi",
+        setup: Setup::File { path: pi_path, present: pi_present, merge: merge_pi, remove: remove_pi },
+        skills: skills::Home::Agents,
+    },
     AgentDef {
         id: "claude",
         label: "Claude Code",
         setup: Setup::Cli { present: claude_present, status: look_claude, set: claude_set, unset: claude_unset },
+        skills: skills::Home::Claude,
     },
     AgentDef {
         id: "codex",
         label: "Codex",
         setup: Setup::Cli { present: codex_present, status: look_codex, set: codex_set, unset: codex_unset },
+        skills: skills::Home::Agents,
     },
 ];
+
+/// Есть ли у ДРУГИХ агентов, делящих с нами тот же дом скиллов, свои записи
+/// MCP — вопрос задаём именно про MCP, не про скиллы: в общем доме
+/// (`~/.agents/skills`) файлы у Zed, pi и Codex одни и те же, и спрашивать
+/// про скиллы соседа значило бы спрашивать про самого себя, не узнавая
+/// ничего нового (докстрока модуля `skills`, решение хозяина). Нечитаемая
+/// половина соседа (`Err`) и чужая запись на его месте (`Foreign`) считаются
+/// «настроен»: не унести лишнего важнее, чем прибраться, и ошибка чтения не
+/// повод решить, что сосед свободен. Своей записи у себя при этом тоже
+/// спрашиваем — но к моменту вызова она уже снята тем, кто снимает галочку
+/// (`Setup::disable` зовётся раньше), и потому не мешает счёту.
+pub fn others_hold(home: skills::Home, exe: &Path) -> bool {
+    any_agent_holds(&AGENTS, home, exe)
+}
+
+/// Та же проверка, но над явным списком агентов — так тест строит маленький
+/// свой набор с управляемыми `Setup::Cli` без похода в настоящую файловую
+/// систему и переменные среды (которые этот модуль трогать не должен, они
+/// общие на весь прогон тестов).
+fn any_agent_holds(agents: &[AgentDef], home: skills::Home, exe: &Path) -> bool {
+    agents.iter().filter(|a| a.skills == home).any(|a| !matches!(a.setup.look(exe), Ok(Found::Absent) | Ok(Found::Missing)))
+}
 
 /// Живут ли локальные агенты на ЭТОЙ машине — один предикат на всех, кто про
 /// это спрашивает: доступность подменю и отметки в нём (`gui::tray::set_agents`)
@@ -2796,5 +2859,94 @@ args = ["mcp", "1c"]
     fn the_agent_registry_has_four_agents_in_the_documented_order() {
         assert_eq!(AGENTS.iter().map(|a| a.id).collect::<Vec<_>>(), ["zed", "pi", "claude", "codex"]);
         assert_eq!(AGENTS.iter().map(|a| a.label).collect::<Vec<_>>(), ["Zed", "pi", "Claude Code", "Codex"]);
+        // Общий дом скиллов у трёх, свой — у Claude Code (докстрока `AgentDef::skills`).
+        assert_eq!(
+            AGENTS.iter().map(|a| a.skills).collect::<Vec<_>>(),
+            [skills::Home::Agents, skills::Home::Agents, skills::Home::Claude, skills::Home::Agents]
+        );
+    }
+
+    #[test]
+    fn the_checkbox_is_on_only_when_both_halves_are_ours() {
+        let ours: Result<Found, String> = Ok(Found::Ours);
+        let absent: Result<Found, String> = Ok(Found::Absent);
+        let missing: Result<Found, String> = Ok(Found::Missing);
+        let foreign_mcp: Result<Found, String> = Ok(Found::Foreign(vec!["1c".to_string()]));
+        let foreign_skills: Result<Found, String> = Ok(Found::Foreign(vec!["cf-edit".to_string()]));
+        let err: Result<Found, String> = Err("не прочитать".to_string());
+
+        assert_eq!(both(&ours, &ours), Ok(Found::Ours));
+        assert_eq!(both(&ours, &absent), Ok(Found::Absent));
+        assert_eq!(both(&absent, &ours), Ok(Found::Absent));
+
+        // Чужое в любой половине — Foreign с ИМЕННО её именами, не перепутанными.
+        assert_eq!(both(&foreign_mcp, &ours), Ok(Found::Foreign(vec!["1c".to_string()])));
+        assert_eq!(both(&ours, &foreign_skills), Ok(Found::Foreign(vec!["cf-edit".to_string()])));
+
+        // Агента нет на машине — перекрывает всё, даже нечитаемую другую половину.
+        assert_eq!(both(&missing, &ours), Ok(Found::Missing));
+        assert_eq!(both(&ours, &missing), Ok(Found::Missing));
+        assert_eq!(both(&missing, &err), Ok(Found::Missing));
+
+        // Нечитаемая половина — Err, а не «нет»: сравнивается уже не с Missing.
+        assert_eq!(both(&err, &ours), Err("не прочитать".to_string()));
+        assert_eq!(both(&ours, &err), Err("не прочитать".to_string()));
+    }
+
+    /// Простые заглушки под `Setup::Cli`, чтобы собрать свой маленький реестр
+    /// агентов без файловой системы и переменных среды — они общие на весь
+    /// прогон тестов, трогать их здесь нельзя (правило проекта).
+    fn always_present() -> bool {
+        true
+    }
+    fn noop_set(_: &str, _: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    fn noop_unset(_: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn status_ours(_: &Path, _: bool) -> Result<Found, String> {
+        Ok(Found::Ours)
+    }
+    fn status_absent(_: &Path, _: bool) -> Result<Found, String> {
+        Ok(Found::Absent)
+    }
+    fn status_err(_: &Path, _: bool) -> Result<Found, String> {
+        Err("не прочитать".to_string())
+    }
+    fn status_foreign(_: &Path, _: bool) -> Result<Found, String> {
+        Ok(Found::Foreign(vec!["vrunner".to_string()]))
+    }
+    fn fake_agent(id: &'static str, home: skills::Home, status: fn(&Path, bool) -> Result<Found, String>) -> AgentDef {
+        AgentDef { id, label: id, setup: Setup::Cli { present: always_present, status, set: noop_set, unset: noop_unset }, skills: home }
+    }
+
+    /// Zed и Codex делят `~/.agents/skills`: пока у Codex свои записи MCP —
+    /// общий дом занят, снимать скиллы рано. Нужны ровно два агента с разным
+    /// статусом: одного было бы не отличить от «общий дом всегда свободен».
+    #[test]
+    fn the_shared_folder_waits_for_the_last_agent() {
+        let exe = Path::new("/opt/1c-connect");
+
+        let codex_still_holds =
+            [fake_agent("zed", skills::Home::Agents, status_absent), fake_agent("codex", skills::Home::Agents, status_ours)];
+        assert!(any_agent_holds(&codex_still_holds, skills::Home::Agents, exe), "Codex ещё держит записи — общий дом не свободен");
+
+        let both_let_go =
+            [fake_agent("zed", skills::Home::Agents, status_absent), fake_agent("codex", skills::Home::Agents, status_absent)];
+        assert!(!any_agent_holds(&both_let_go, skills::Home::Agents, exe), "оба сняли записи — общий дом свободен");
+    }
+
+    /// Нечитаемая запись соседа и чужая запись на его месте — обе «настроен»,
+    /// не «нет»: решение хозяина «не унести лишнего важнее, чем прибраться».
+    /// И дом, который не совпадает с запрошенным (`Home::Claude` при вопросе
+    /// про `Home::Agents`), в счёт не идёт — иначе Claude Code держал бы
+    /// общий каталог Zed/pi/Codex, которым не пользуется вовсе.
+    #[test]
+    fn unreadable_or_foreign_neighbors_count_as_held_but_other_homes_do_not() {
+        let exe = Path::new("/opt/1c-connect");
+        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_err)], skills::Home::Agents, exe));
+        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_foreign)], skills::Home::Agents, exe));
+        assert!(!any_agent_holds(&[fake_agent("claude", skills::Home::Claude, status_ours)], skills::Home::Agents, exe));
     }
 }

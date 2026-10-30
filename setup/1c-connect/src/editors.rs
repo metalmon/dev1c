@@ -440,6 +440,16 @@ fn parse_fields(t: &str, open: usize) -> (Vec<Field>, usize) {
     }
 }
 
+/// Первое из `names`, встреченное в `fields` дважды и более. Нужна там, где
+/// мы собираемся ПИСАТЬ: одноимённые поля в одном объекте JSONC не запрещает,
+/// а наш сканер и Zed читают их по-разному (первое против последнего), и
+/// правка на угад тронула бы файл, чтобы потом отказать. На снятии такой
+/// вопрос не встаёт — там уносятся все одноимённые сразу
+/// (`remove_fields_by_name`) и только когда наши все.
+fn duplicate_key(fields: &[Field], names: &[&str]) -> Option<String> {
+    names.iter().find(|n| fields.iter().filter(|f| f.key == **n).count() > 1).map(|n| n.to_string())
+}
+
 /// Удаляет поля с именами из `names` внутри одного объекта, чьи прямые поля
 /// — `fields` (порядок — порядок в исходном тексте, как отдаёт
 /// `parse_fields`), возвращая список правок без пересечений — даже когда
@@ -525,6 +535,20 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
         return Err(vec!["не нашли границу верхнего объекта settings.json".to_string()]);
     }
     let (top_fields, _) = parse_fields(body, top_open);
+    // Одноимённые поля в одном объекте JSONC не запрещает, а наш сканер и
+    // Zed читают их по-разному: `find` берёт первое, serde (и значит Zed) —
+    // последнее. Правка первого поля при чужом последнем дала бы худшее из
+    // двух: файл тронут, а `look` после записи честно скажет `Foreign`, то
+    // есть человек получит «не удалось настроить» уже ПОСЛЕ правки своего
+    // файла. Поэтому отказ — тем же правилом, что ниже у `context_servers`,
+    // который не объект: угадывать, какое из двух полей человек считает
+    // настоящим, мы не вправе (находка ревью целого 30.10, сомнение 2
+    // четвёртого круга).
+    if let Some(dup) = duplicate_key(&top_fields, &["context_servers"]) {
+        return Err(vec![format!(
+            "в settings.json два поля «{dup}» — какое из них увидит Zed, зависит от порядка, и угадывать мы не станем"
+        )]);
+    }
     let cs = top_fields.iter().find(|f| f.key == "context_servers");
 
     let mut edits = Vec::new();
@@ -539,6 +563,12 @@ pub fn merge_zed(text: &str, exe: &Path) -> Result<String, Vec<String>> {
                 return Err(vec!["context_servers в settings.json — не объект".to_string()]);
             }
             let (cs_fields, _) = parse_fields(body, cs_field.value_start);
+            let names: Vec<&str> = OURS.iter().map(|e| e.name).collect();
+            if let Some(dup) = duplicate_key(&cs_fields, &names) {
+                return Err(vec![format!(
+                    "в settings.json два поля «{dup}» — какое из них увидит Zed, зависит от порядка, и угадывать мы не станем"
+                )]);
+            }
             let mut occupied = Vec::new();
             let mut missing = Vec::new();
             for e in OURS.iter() {
@@ -2093,6 +2123,26 @@ mod tests {
         assert_eq!(setup(&p, exe, merge_zed).unwrap(), Found::Ours);
         std::fs::write(&p, r#"{"context_servers":{"1c":{"command":"nc"}}}"#).unwrap();
         assert_eq!(look(Some(&p), exe, true), Found::Foreign(vec!["1c".to_string()]));
+    }
+
+    /// Сомнение 2 четвёртого круга: одноимённые поля наш сканер читает
+    /// первым, а Zed — последним, и правка первого при чужом последнем
+    /// тронула бы файл, чтобы потом отказать. Отказ обязан случиться ДО
+    /// правки, и текст файла остаться тем же — проверяем оба имени и сам
+    /// `context_servers`.
+    #[test]
+    fn two_fields_with_one_name_are_a_refusal_before_any_edit() {
+        let exe = Path::new("/opt/1c-connect");
+        let ours = r#"{"command":"/opt/1c-connect","args":["mcp","1c"]}"#;
+        let twice_inside = format!(r#"{{"context_servers":{{"1c":{ours},"1c":{{"command":"nc"}}}}}}"#);
+        let reasons = merge_zed(&twice_inside, exe).unwrap_err();
+        assert!(refusal_text(&reasons).contains("два поля «1c»"), "{}", refusal_text(&reasons));
+        let twice_top = r#"{"context_servers":{},"context_servers":{}}"#;
+        let reasons = merge_zed(twice_top, exe).unwrap_err();
+        assert!(refusal_text(&reasons).contains("два поля «context_servers»"), "{}", refusal_text(&reasons));
+        // Одно поле каждого имени — обычный путь, отказа быть не должно.
+        assert!(merge_zed(r#"{"context_servers":{"1c":{"command":"nc"}}}"#, exe).is_err(), "чужая запись — другой отказ, но отказ");
+        assert!(merge_zed(r#"{"other":1}"#, exe).is_ok());
     }
 
     /// Important 1 ревью задачи 6: причина прозой (битый JSON) идёт в текст

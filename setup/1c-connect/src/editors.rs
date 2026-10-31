@@ -932,21 +932,39 @@ pub enum Found {
 
 /// Галочка в трее несёт две половины — записи MCP и скиллы — и показывает
 /// одно слово про обе сразу. Агента на машине нет — спрашивать половины не о
-/// чём, и это перекрывает всё остальное, даже нечитаемую вторую половину:
-/// галочка всё равно недоступна. Нечитаемая половина — отдельный исход, не
-/// «нет»: приравнять её к `Absent` значило бы выдать непрочитанное состояние
-/// за пустое место, хотя там могло быть что угодно, в том числе наше. Чужое
-/// хоть в одной половине — `Foreign` с её именами: что отвечено на письме —
-/// неважно, одной подмены достаточно, чтобы галочка не считалась «нашей».
-/// Обе свои — `Ours`; иначе (хоть одна `Absent`, другая `Ours`) — всё ещё
+/// чём, и это перекрывает всё остальное, даже нечитаемую вторую половину или
+/// чужую запись в ней: галочка всё равно недоступна, и это бывает каждый
+/// день — общий `~/.agents/skills` может нести наш скилл (его туда положил
+/// сосед) ровно тогда, когда САМ агент на машине не стоит вовсе. Нечитаемая
+/// половина — отдельный исход, не «нет»: приравнять её к `Absent` значило бы
+/// выдать непрочитанное состояние за пустое место, хотя там могло быть что
+/// угодно, в том числе наше; из двух нечитаемых половин называем причину
+/// MCP — она проверяется первой, порядок зафиксирован и закреплён тестом,
+/// иначе человек увидит СВОЮ, а не ту причину, которую назвал бы код.
+/// Чужое хоть в одной половине — `Foreign`, и называем ОБЕИХ: если чужие
+/// записи заняты в MCP и в скиллах одновременно (разные причины, разные
+/// имена), молчание про вторую означало бы, что после исправления первой
+/// человек снова получит «чужое» без объяснения, о чём теперь речь. Обе
+/// свои — `Ours`; иначе (хоть одна `Absent`, другая `Ours`) — всё ещё
 /// `Absent`, та же логика, что у `look` для двух записей MCP одного агента.
 pub fn both(mcp: &Result<Found, String>, skills: &Result<Found, String>) -> Result<Found, String> {
     if matches!(mcp, Ok(Found::Missing)) || matches!(skills, Ok(Found::Missing)) {
         return Ok(Found::Missing);
     }
+    if let Err(e) = mcp {
+        return Err(e.clone());
+    }
+    if let Err(e) = skills {
+        return Err(e.clone());
+    }
+    let mcp_foreign = if let Ok(Found::Foreign(names)) = mcp { names.clone() } else { Vec::new() };
+    let skills_foreign = if let Ok(Found::Foreign(names)) = skills { names.clone() } else { Vec::new() };
+    if !mcp_foreign.is_empty() || !skills_foreign.is_empty() {
+        let mut names = mcp_foreign;
+        names.extend(skills_foreign);
+        return Ok(Found::Foreign(names));
+    }
     match (mcp, skills) {
-        (Err(e), _) | (_, Err(e)) => Err(e.clone()),
-        (Ok(Found::Foreign(names)), _) | (_, Ok(Found::Foreign(names))) => Ok(Found::Foreign(names.clone())),
         (Ok(Found::Ours), Ok(Found::Ours)) => Ok(Found::Ours),
         _ => Ok(Found::Absent),
     }
@@ -1713,22 +1731,30 @@ pub const AGENTS: [AgentDef; 4] = [
 /// MCP — вопрос задаём именно про MCP, не про скиллы: в общем доме
 /// (`~/.agents/skills`) файлы у Zed, pi и Codex одни и те же, и спрашивать
 /// про скиллы соседа значило бы спрашивать про самого себя, не узнавая
-/// ничего нового (докстрока модуля `skills`, решение хозяина). Нечитаемая
-/// половина соседа (`Err`) и чужая запись на его месте (`Foreign`) считаются
-/// «настроен»: не унести лишнего важнее, чем прибраться, и ошибка чтения не
-/// повод решить, что сосед свободен. Своей записи у себя при этом тоже
-/// спрашиваем — но к моменту вызова она уже снята тем, кто снимает галочку
-/// (`Setup::disable` зовётся раньше), и потому не мешает счёту.
-pub fn others_hold(home: skills::Home, exe: &Path) -> bool {
-    any_agent_holds(&AGENTS, home, exe)
+/// ничего нового (докстрока модуля `skills`, решение хозяина). `id` —
+/// СПРАШИВАЮЩИЙ, его самого из счёта исключаем явно, а не надеждой на
+/// порядок вызовов: круг 1 ревью нашёл, что без этого своя же `Ours`-запись
+/// заставила бы функцию держать общий дом вечно (спроси до `Setup::disable`
+/// — и он ещё не снят; спроси после `teardown_cli`, закончившегося `Foreign`
+/// — и чужая запись на месте нашей тоже сочтена «держит»; а у Claude Code,
+/// у которого соседей в его каталоге нет вовсе, функция без исключения себя
+/// превращалась в отчёт о самой себе). Нечитаемая половина соседа (`Err`) и
+/// чужая запись на его месте (`Foreign`) считаются «настроен»: не унести
+/// лишнего важнее, чем прибраться, и ошибка чтения не повод решить, что
+/// сосед свободен. Агента физически нет на машине (`Missing`) — повод
+/// противоположный: спрашивать нечего, сосед не держит, и без этой ветки
+/// дом, где реально стоит только один из троих общих агентов, не
+/// освобождался бы никогда.
+pub fn others_hold(id: &str, home: skills::Home, exe: &Path) -> bool {
+    any_agent_holds(&AGENTS, id, home, exe)
 }
 
 /// Та же проверка, но над явным списком агентов — так тест строит маленький
 /// свой набор с управляемыми `Setup::Cli` без похода в настоящую файловую
 /// систему и переменные среды (которые этот модуль трогать не должен, они
 /// общие на весь прогон тестов).
-fn any_agent_holds(agents: &[AgentDef], home: skills::Home, exe: &Path) -> bool {
-    agents.iter().filter(|a| a.skills == home).any(|a| !matches!(a.setup.look(exe), Ok(Found::Absent) | Ok(Found::Missing)))
+fn any_agent_holds(agents: &[AgentDef], id: &str, home: skills::Home, exe: &Path) -> bool {
+    agents.iter().filter(|a| a.skills == home && a.id != id).any(|a| !matches!(a.setup.look(exe), Ok(Found::Absent) | Ok(Found::Missing)))
 }
 
 /// Живут ли локальные агенты на ЭТОЙ машине — один предикат на всех, кто про
@@ -2873,24 +2899,39 @@ args = ["mcp", "1c"]
         let missing: Result<Found, String> = Ok(Found::Missing);
         let foreign_mcp: Result<Found, String> = Ok(Found::Foreign(vec!["1c".to_string()]));
         let foreign_skills: Result<Found, String> = Ok(Found::Foreign(vec!["cf-edit".to_string()]));
-        let err: Result<Found, String> = Err("не прочитать".to_string());
+        // Две РАЗНЫЕ строки, не одна на обе половины: иначе подмена,
+        // возвращающая всегда один и тот же жёсткий литерал вместо настоящей
+        // причины, прошла бы незамеченной (круг 1 ревью, пункт 3).
+        let err_mcp: Result<Found, String> = Err("не прочитать ~/.codex/config.toml".to_string());
+        let err_skills: Result<Found, String> = Err("не прочитать отпечаток скилла".to_string());
 
         assert_eq!(both(&ours, &ours), Ok(Found::Ours));
         assert_eq!(both(&ours, &absent), Ok(Found::Absent));
         assert_eq!(both(&absent, &ours), Ok(Found::Absent));
 
-        // Чужое в любой половине — Foreign с ИМЕННО её именами, не перепутанными.
+        // Чужое в одной половине — Foreign с ИМЕННО её именами, не перепутанными.
         assert_eq!(both(&foreign_mcp, &ours), Ok(Found::Foreign(vec!["1c".to_string()])));
         assert_eq!(both(&ours, &foreign_skills), Ok(Found::Foreign(vec!["cf-edit".to_string()])));
+        // Чужое в ОБЕИХ половинах разом — называем обе, не теряем вторую
+        // (круг 1 ревью, пункт 4): человек правит записи MCP, жмёт снова, и
+        // не должен услышать «чужое» без упоминания скилла, о котором
+        // промолчали в прошлый раз.
+        assert_eq!(both(&foreign_mcp, &foreign_skills), Ok(Found::Foreign(vec!["1c".to_string(), "cf-edit".to_string()])));
 
-        // Агента нет на машине — перекрывает всё, даже нечитаемую другую половину.
+        // Агента нет на машине — перекрывает всё, даже нечитаемую другую
+        // половину и даже чужую запись в ней: это происходит каждый день —
+        // агента вовсе не ставили, а общий `~/.agents/skills` уже несёт
+        // (чужой или наш) скилл, положенный туда соседом (круг 1 ревью,
+        // пункт 5 — зеркало того случая, которого не бывает).
         assert_eq!(both(&missing, &ours), Ok(Found::Missing));
         assert_eq!(both(&ours, &missing), Ok(Found::Missing));
-        assert_eq!(both(&missing, &err), Ok(Found::Missing));
+        assert_eq!(both(&missing, &err_skills), Ok(Found::Missing));
+        assert_eq!(both(&missing, &foreign_skills), Ok(Found::Missing));
 
-        // Нечитаемая половина — Err, а не «нет»: сравнивается уже не с Missing.
-        assert_eq!(both(&err, &ours), Err("не прочитать".to_string()));
-        assert_eq!(both(&ours, &err), Err("не прочитать".to_string()));
+        // Нечитаемая половина — Err с ЕЁ ПРИЧИНОЙ, а не «нет» и не причина
+        // другой половины.
+        assert_eq!(both(&err_mcp, &ours), err_mcp.clone());
+        assert_eq!(both(&ours, &err_skills), err_skills.clone());
     }
 
     /// Простые заглушки под `Setup::Cli`, чтобы собрать свой маленький реестр
@@ -2911,6 +2952,9 @@ args = ["mcp", "1c"]
     fn status_absent(_: &Path, _: bool) -> Result<Found, String> {
         Ok(Found::Absent)
     }
+    fn status_missing(_: &Path, _: bool) -> Result<Found, String> {
+        Ok(Found::Missing)
+    }
     fn status_err(_: &Path, _: bool) -> Result<Found, String> {
         Err("не прочитать".to_string())
     }
@@ -2921,20 +2965,47 @@ args = ["mcp", "1c"]
         AgentDef { id, label: id, setup: Setup::Cli { present: always_present, status, set: noop_set, unset: noop_unset }, skills: home }
     }
 
+    /// Своя же запись не повод ждать самого себя — `others_hold`/
+    /// `any_agent_holds` спрашивают про СОСЕДЕЙ, а спрашивающий передан
+    /// отдельно и исключается явно (круг 1 ревью, пункт 1). Без исключения
+    /// единственный агент в списке, спрашивающий сам про себя с живой
+    /// `Ours`-записью, держал бы общий дом вечно.
+    #[test]
+    fn asking_about_yourself_does_not_count_as_a_neighbor_holding() {
+        let exe = Path::new("/opt/1c-connect");
+        let only_self = [fake_agent("zed", skills::Home::Agents, status_ours)];
+        assert!(!any_agent_holds(&only_self, "zed", skills::Home::Agents, exe));
+    }
+
     /// Zed и Codex делят `~/.agents/skills`: пока у Codex свои записи MCP —
     /// общий дом занят, снимать скиллы рано. Нужны ровно два агента с разным
     /// статусом: одного было бы не отличить от «общий дом всегда свободен».
+    /// Спрашивает Zed — он в списке тоже есть, но свой статус не должен
+    /// влиять на ответ про соседей.
     #[test]
-    fn the_shared_folder_waits_for_the_last_agent() {
+    fn the_shared_folder_waits_for_the_last_other_agent() {
         let exe = Path::new("/opt/1c-connect");
 
         let codex_still_holds =
             [fake_agent("zed", skills::Home::Agents, status_absent), fake_agent("codex", skills::Home::Agents, status_ours)];
-        assert!(any_agent_holds(&codex_still_holds, skills::Home::Agents, exe), "Codex ещё держит записи — общий дом не свободен");
+        assert!(any_agent_holds(&codex_still_holds, "zed", skills::Home::Agents, exe), "Codex ещё держит записи — общий дом не свободен");
 
         let both_let_go =
             [fake_agent("zed", skills::Home::Agents, status_absent), fake_agent("codex", skills::Home::Agents, status_absent)];
-        assert!(!any_agent_holds(&both_let_go, skills::Home::Agents, exe), "оба сняли записи — общий дом свободен");
+        assert!(!any_agent_holds(&both_let_go, "zed", skills::Home::Agents, exe), "оба сняли записи — общий дом свободен");
+    }
+
+    /// У кого из трёх общих агентов стоит только Zed, Codex и pi физически
+    /// нет на машине (`Missing`) — и спрашивать не о чём: без этой ветки
+    /// (круг 1 ревью, пункт 2) дом с единственным реально установленным
+    /// агентом из троих не освобождался бы никогда, даже когда у этого
+    /// единственного своя запись давно снята.
+    #[test]
+    fn an_uninstalled_neighbor_does_not_count_as_holding() {
+        let exe = Path::new("/opt/1c-connect");
+        let neighbor_not_installed =
+            [fake_agent("zed", skills::Home::Agents, status_absent), fake_agent("codex", skills::Home::Agents, status_missing)];
+        assert!(!any_agent_holds(&neighbor_not_installed, "zed", skills::Home::Agents, exe));
     }
 
     /// Нечитаемая запись соседа и чужая запись на его месте — обе «настроен»,
@@ -2945,8 +3016,22 @@ args = ["mcp", "1c"]
     #[test]
     fn unreadable_or_foreign_neighbors_count_as_held_but_other_homes_do_not() {
         let exe = Path::new("/opt/1c-connect");
-        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_err)], skills::Home::Agents, exe));
-        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_foreign)], skills::Home::Agents, exe));
-        assert!(!any_agent_holds(&[fake_agent("claude", skills::Home::Claude, status_ours)], skills::Home::Agents, exe));
+        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_err)], "zed", skills::Home::Agents, exe));
+        assert!(any_agent_holds(&[fake_agent("codex", skills::Home::Agents, status_foreign)], "zed", skills::Home::Agents, exe));
+        assert!(!any_agent_holds(&[fake_agent("claude", skills::Home::Claude, status_ours)], "zed", skills::Home::Agents, exe));
+    }
+
+    /// Проверка самого `others_hold` (не только `any_agent_holds`, которого
+    /// здесь не хватало — круг 1 ревью, пункт 6), на настоящем `AGENTS`, но
+    /// без похода в файлы: `Home::Claude` в реестре несёт только самого
+    /// Claude Code (докстрока `AgentDef::skills`), и, спрашивая от его же
+    /// имени, фильтр по `id` отбрасывает единственного кандидата ДО того,
+    /// как до него дойдёт `.any()` — значит `setup.look` ни разу не
+    /// позовётся, и результат не зависит от того, что в реальности лежит в
+    /// `~/.claude.json` на этой машине.
+    #[test]
+    fn others_hold_asks_about_neighbors_through_the_real_registry_too() {
+        let exe = Path::new("/opt/1c-connect");
+        assert!(!others_hold("claude", skills::Home::Claude, exe));
     }
 }

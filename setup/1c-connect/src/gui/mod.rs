@@ -1106,6 +1106,25 @@ fn agent_line(mcp: Line, skill: Line) -> Line {
     Line { kind, text: format!("{}; {}", mcp.text, skill.text) }
 }
 
+/// Кому из `editors::AGENTS` тихая доставка разрешена — чистая функция, круг
+/// исправления задачи 6, пункт 3. Прежде решение жило `matches!` прямо в
+/// цикле `refresh_skills`, и подмена `Found::Ours` на `Found::Foreign` (или
+/// на голый `.is_ok()`) оставляла прогон зелёным — а доставка уходила бы
+/// агенту, который записи MCP не разрешал вовсе, нарушая правило владельца
+/// «чужое не трогаем» (`editors::both`, docstring `Found`). Разрешением
+/// считаем ТОЛЬКО `Ok(Found::Ours)` — тем же словарём, что
+/// `agent_as_expected` чуть выше: чужая запись, пустое место, отсутствие
+/// агента на машине и нечитаемая половина разрешения не дают. `looks[i]`
+/// отвечает `AGENTS[i]` по индексу — порядок вызывающий не меняет.
+fn allowed(looks: &[Result<crate::editors::Found, String>]) -> Vec<usize> {
+    looks
+        .iter()
+        .enumerate()
+        .filter(|(_, look)| matches!(look, Ok(crate::editors::Found::Ours)))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// Тихая доставка при запуске окна (задача 6) — без всякого щелчка: скиллы
 /// тем агентам, у кого записи MCP УЖЕ наши. Галочкой человек разрешил давно,
 /// и новую версию комплекта он получает сам, не догадываясь щёлкнуть второй
@@ -1122,7 +1141,20 @@ fn agent_line(mcp: Line, skill: Line) -> Line {
 /// чем. Общий дом `~/.agents/skills` у Zed, pi и Codex тут же сам собой и
 /// лечится от повторов: первый из них всё обновил, и соседям по дому
 /// `refresh` отвечает молчанием.
+///
+/// Круг исправления задачи 6, пункт 2: комплект без каталога `skills/`
+/// проверяется ЗДЕСЬ, до цикла по агентам — раньше её держал только сам
+/// `skills::refresh` (первая строка его тела), то есть уже ПОСЛЕ того, как
+/// цикл успевал опросить все четыре агента (`def.setup.look`) и выяснить,
+/// кому разрешено доставлять. Комплекту без `skills/` это нечему служить —
+/// доставлять всё равно нечего никому, а цена отказа раньше осталась прежней
+/// (словами на щелчок, молчанием на запуск — её несёт сам `skills::refresh`,
+/// который эта функция тоже зовёт, и ветка внутри него остаётся на случай,
+/// если кто-то позовёт его не через `refresh_skills`).
 fn refresh_skills(kit: &Kit, exe: &std::path::Path) -> Vec<Line> {
+    if !kit.path(crate::skills::KIT_DIR).exists() {
+        return Vec::new();
+    }
     // Причину отказа состояния несём словами, как и щелчок (`skills_plan`):
     // без каталога отпечатков раскладки нет вовсе, и проглотить это значило
     // бы оставить человека со старыми скиллами и без объяснения.
@@ -1130,11 +1162,10 @@ fn refresh_skills(kit: &Kit, exe: &std::path::Path) -> Vec<Line> {
         Ok(state) => state,
         Err(why) => return vec![Line { kind: Kind::Fail, text: format!("скиллы при запуске: {why}") }],
     };
+    let looks: Vec<Result<crate::editors::Found, String>> = crate::editors::AGENTS.iter().map(|def| def.setup.look(exe)).collect();
     let mut lines = Vec::new();
-    for def in crate::editors::AGENTS.iter() {
-        if !matches!(def.setup.look(exe), Ok(crate::editors::Found::Ours)) {
-            continue;
-        }
+    for i in allowed(&looks) {
+        let def = &crate::editors::AGENTS[i];
         let Some(home) = crate::skills::home_dir(def.skills) else {
             lines.push(Line {
                 kind: Kind::Fail,

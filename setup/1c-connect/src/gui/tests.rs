@@ -523,6 +523,25 @@ fn the_startup_delivery_speaks_only_when_it_changed_something() {
     assert!(line.text.contains("beta"), "правленый обязан быть назван: {line:?}");
 }
 
+/// Круг исправления задачи 6, пункт 3: `allowed` таблицей — тем же приёмом,
+/// которым уже закреплён `skills_plan` чуть выше. Падает на обеих подменах,
+/// от которых стоит: `Found::Ours` → `Found::Foreign` пропустила бы индекс
+/// 1 (чужую запись сочли бы разрешением); `.is_ok()` пропустила бы и его, и
+/// индекс 2 (`Absent` тоже читаемый результат, но разрешения не несёт).
+#[test]
+fn allowed_lets_through_only_our_own_records() {
+    use crate::editors::Found;
+    let looks: Vec<Result<Found, String>> = vec![
+        Ok(Found::Ours),
+        Ok(Found::Foreign(vec!["beta".to_string()])),
+        Ok(Found::Absent),
+        Ok(Found::Missing),
+        Err("не прочитать".to_string()),
+        Ok(Found::Ours),
+    ];
+    assert_eq!(allowed(&looks), vec![0, 5]);
+}
+
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
 /// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
 /// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.

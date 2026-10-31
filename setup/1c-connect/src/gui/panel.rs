@@ -2591,7 +2591,7 @@ mod tests {
     /// `foreign_label` сменит формат — см. следующие три теста).
     #[test]
     fn skill_found_text_speaks_of_a_directory_not_a_record_or_a_command() {
-        let label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), true);
+        let label = crate::skills::foreign_label("beta", true);
         let foreign = editors::Found::Foreign(vec![label]);
         let text = skill_found_text(&foreign);
         assert!(!text.contains("запис"), "{text}");
@@ -2612,7 +2612,7 @@ mod tests {
     /// тест обязан это заметить, а не остаться зелёным на старом тексте.
     #[test]
     fn skill_found_text_does_not_pile_a_second_explanation_onto_foreign_labels_own() {
-        let label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let label = crate::skills::foreign_label("beta", false);
         let text = skill_found_text(&editors::Found::Foreign(vec![label.clone()]));
         // Точное равенство, а не поиск по подстроке: любой добавленный сверху
         // суффикс (старый «— правлен не нами, не трогаем» или новый) здесь
@@ -2629,12 +2629,12 @@ mod tests {
     /// `skills::foreign_label` (круг 3, пункт 3), не руками.
     #[test]
     fn skill_found_text_explains_a_short_foreign_label_but_not_a_long_one() {
-        let short_label = crate::skills::foreign_label("1c", std::path::Path::new("/home/.agents/skills/1c"), true);
+        let short_label = crate::skills::foreign_label("1c", true);
         let short = skill_found_text(&editors::Found::Foreign(vec![short_label]));
         assert!(short.contains("1c"), "{short}");
         assert!(short.contains("правили на месте"), "короткая форма обязана назвать причину: {short}");
 
-        let long_label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let long_label = crate::skills::foreign_label("beta", false);
         let long = skill_found_text(&editors::Found::Foreign(vec![long_label.clone()]));
         assert_eq!(long, format!("каталог {long_label}"), "длинная форма не должна получать добавку сверху: {long}");
     }
@@ -2646,8 +2646,8 @@ mod tests {
     /// общая для списка. Обе метки — через `skills::foreign_label`.
     #[test]
     fn skill_found_text_explains_each_name_in_a_mixed_list_on_its_own() {
-        let short_label = crate::skills::foreign_label("1c", std::path::Path::new("/home/.agents/skills/1c"), true);
-        let long_label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let short_label = crate::skills::foreign_label("1c", true);
+        let long_label = crate::skills::foreign_label("beta", false);
         let text = skill_found_text(&editors::Found::Foreign(vec![short_label.clone(), long_label.clone()]));
         assert!(text.contains(&format!("{short_label} — правили на месте")), "{text}");
         assert!(text.contains(&long_label), "{text}");

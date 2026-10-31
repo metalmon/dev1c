@@ -1237,7 +1237,11 @@ fn refresh_line(label: &str, done: &crate::skills::Done) -> Option<Line> {
         what.push(format!("обновлены {}", done.updated.join(", ")));
     }
     if !done.kept.is_empty() {
-        what.push(format!("{} оставлены как есть — их правили на месте", done.kept.join(", ")));
+        // «их правили на месте» больше не говорим общим словом: в списке
+        // теперь два разных случая — правленые на месте (имя без пометки) и
+        // помеченные «отпечатка нет», у которых причина другая и объяснение
+        // стоит одной строкой в конце самого списка (`skills::with_group_hint`).
+        what.push(format!("оставлены как есть: {}", done.kept.join(", ")));
     }
     Some(Line { kind: Kind::Ok, text: format!("{label}: скиллы — {}", what.join("; ")) })
 }

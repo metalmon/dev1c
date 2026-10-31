@@ -444,32 +444,52 @@ fn summarize(total: usize, foreign: Vec<String>, ours: usize) -> editors::Found 
     }
 }
 
+/// Пометка «отпечатка нет» — короткая и одинаковая у всех, кого она
+/// касается. По ней же группируется объяснение (`with_group_hint` ниже) и
+/// делится форма в панели.
+pub(crate) const NO_STAMP: &str = "(отпечатка нет)";
+
 /// Имя скилла в `Foreign`: короткое, если отпечаток был и просто не совпал —
 /// человек правил на месте, ожидаемая и самоочевидная причина, напоминать
-/// нечего. С подсказкой, если отпечатка не было вовсе: эту причину от
+/// нечего. С пометкой, если отпечатка не было вовсе: эту причину от
 /// «человек сам положил сюда что-то своё» различить нельзя (Important 3
 /// ревью 31.10, круг 1 — совпадение содержимого с комплектом ничего не
 /// решает, отпечатка нет и точка), а одна из них — стёртое состояние
-/// программы после переустановки (Important 6), и без подсказки человек
-/// застревает без выхода: не наш скилл ни обновить, ни снять. Подсказка
-/// называет каталог и говорит, что его можно удалить руками, после чего
-/// галочка поставит скилл заново.
+/// программы после переустановки (Important 6), и без выхода человек
+/// застревает: не наш скилл ни обновить, ни снять.
+///
+/// Выход называется ОДИН РАЗ НА ГРУППУ, а не при каждом имени (заказчик
+/// 31.10.2026, по снимку журнала): прежняя длинная форма повторяла одно и
+/// то же объяснение с путём для КАЖДОГО скилла, а после переустановки
+/// программы без отпечатка остаются сразу все сорок — лист из сорока
+/// одинаковых абзацев, в котором не виден ни один из сорока имён. Объяснение
+/// переехало в `with_group_hint`, здесь остаётся пометка.
 ///
 /// `pub(crate)` (круговое ревью, круг 3, пункт 3): тест `panel::skill_found_text`
-/// обязан собирать длинную и короткую метку ЭТОЙ функцией, а не рукописной
-/// строкой со скобкой — иначе шов между модулями (где текст делится на
-/// «короткую» и «длинную» форму по наличию `(`) остаётся непроверенным, и
-/// смена формата здесь (например, тире вместо скобки) тихо разошлась бы с
-/// панелью при зелёных тестах.
-pub(crate) fn foreign_label(name: &str, dst: &Path, had_stamp: bool) -> String {
+/// обязан собирать обе метки ЭТОЙ функцией, а не рукописной строкой со
+/// скобкой — иначе шов между модулями (где текст делится на формы по
+/// наличию `(`) остаётся непроверенным, и смена формата здесь (например,
+/// тире вместо скобки) тихо разошлась бы с панелью при зелёных тестах.
+pub(crate) fn foreign_label(name: &str, had_stamp: bool) -> String {
     if had_stamp {
         name.to_string()
     } else {
-        format!(
-            "{name} (своего отпечатка нет; если это наш скилл после переустановки программы — удалите {} руками, и галочка поставит его заново)",
-            dst.display()
-        )
+        format!("{name} {NO_STAMP}")
     }
+}
+
+/// Объяснение для всех помеченных «отпечатка нет» — одной строкой в конце
+/// списка, и только если такие вообще есть. Каталог называется один, общий:
+/// у всех этих скиллов он и так один, а сорок строк с сорока путями,
+/// отличающимися последним звеном, человек не читает вовсе.
+fn with_group_hint(mut labels: Vec<String>, home: &Path) -> Vec<String> {
+    if labels.iter().any(|l| l.ends_with(NO_STAMP)) {
+        labels.push(format!(
+            "(помеченные «отпечатка нет» положены не нами или остались от прежней установки: если это наши — удалите {} целиком, и галочка разложит их заново)",
+            home.display()
+        ));
+    }
+    labels
 }
 
 /// Куда отнести скилл по вердикту — общее для чтения (`look`) и для снятия
@@ -493,7 +513,7 @@ fn classify(state: &State, dst: &Path, name: &str) -> Result<(PathBuf, Seen), St
         Verdict::Link => return Err(format!("{} — ссылка на месте скилла, не трогаю", dst.display())),
         Verdict::New => Seen::New,
         Verdict::Untouched => Seen::Ours,
-        Verdict::Edited => Seen::Foreign(foreign_label(name, dst, prev.is_some())),
+        Verdict::Edited => Seen::Foreign(foreign_label(name, prev.is_some())),
     };
     Ok((stamp, seen))
 }
@@ -561,7 +581,7 @@ pub fn look(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(summarize(names.len(), foreign, ours))
+    Ok(summarize(names.len(), with_group_hint(foreign, home), ours))
 }
 
 /// Что раскладка СДЕЛАЛА — не что в доме лежит (`Found`). Тихой доставке при
@@ -659,7 +679,7 @@ fn lay(kit: &Kit, state: &State, home: &Path) -> Result<(editors::Found, Done), 
                     write_stamp(&stamp, &sum)?;
                     Ok(Change::Updated)
                 }
-                Verdict::Edited => Ok(Change::Kept(foreign_label(name, &dst, prev.is_some()))),
+                Verdict::Edited => Ok(Change::Kept(foreign_label(name, prev.is_some()))),
             }
         })();
         match outcome {
@@ -679,6 +699,11 @@ fn lay(kit: &Kit, state: &State, home: &Path) -> Result<(editors::Found, Done), 
     if !errors.is_empty() {
         return Err(errors);
     }
+    // Объяснение «отпечатка нет» — одно на группу, и ставится здесь, где
+    // список уже собран целиком: и карточка (`Found`), и строка журнала
+    // (`Done`) берут его из одного места, иначе два потребителя одного
+    // правила разошлись бы в словах.
+    done.kept = with_group_hint(done.kept, home);
     Ok((summarize(names.len(), done.kept.clone(), ours), done))
 }
 
@@ -760,7 +785,7 @@ pub fn remove(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, V
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(summarize(names.len(), foreign, 0))
+    Ok(summarize(names.len(), with_group_hint(foreign, home), 0))
 }
 
 #[cfg(test)]
@@ -1153,17 +1178,41 @@ mod tests {
         let home = Dir::new();
         std::fs::create_dir_all(home.path().join("1c")).unwrap();
         std::fs::write(home.path().join("1c/SKILL.md"), "чужое содержимое").unwrap();
-        let label = foreign_label("1c", &home.path().join("1c"), false);
+        // Имя с пометкой плюс ОДНА строка объяснения на группу — проверяем
+        // все три пути одним ожиданием, чтобы они не разошлись словами.
+        let want = editors::Found::Foreign(with_group_hint(vec![foreign_label("1c", false)], home.path()));
 
-        assert_eq!(look(&kit, &ts(&state), home.path()).unwrap(), editors::Found::Foreign(vec![label.clone()]));
+        assert_eq!(look(&kit, &ts(&state), home.path()).unwrap(), want);
 
         let after_install = install(&kit, &ts(&state), home.path()).unwrap();
-        assert_eq!(after_install, editors::Found::Foreign(vec![label.clone()]));
+        assert_eq!(after_install, want);
         assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "чужое содержимое");
 
         let after_remove = remove(&kit, &ts(&state), home.path()).unwrap();
-        assert_eq!(after_remove, editors::Found::Foreign(vec![label]));
+        assert_eq!(after_remove, want);
         assert!(home.path().join("1c").exists());
+    }
+
+    /// Заказчик 31.10.2026, по снимку журнала: объяснение «отпечатка нет»
+    /// печаталось при КАЖДОМ имени, а после переустановки программы без
+    /// отпечатка остаются сразу все скиллы комплекта — сорок одинаковых
+    /// абзацев с путями, отличающимися последним звеном. Теперь причина
+    /// называется один раз на группу, и каталог в ней общий.
+    ///
+    /// Вторая грань важнее первой: когда помеченных нет вовсе (все правлены
+    /// на месте), объяснения не должно быть ни одного — иначе человек,
+    /// сознательно правивший свой скилл, читал бы совет удалить дом целиком.
+    #[test]
+    fn the_no_stamp_reason_is_said_once_for_the_whole_group() {
+        let home = Path::new("/home/.agents/skills");
+        let many = with_group_hint(vec![foreign_label("alpha", false), foreign_label("beta", false), foreign_label("gamma", true)], home);
+        assert_eq!(many.len(), 4, "три имени и одно объяснение: {many:?}");
+        assert_eq!(many.iter().filter(|l| l.contains("удалите")).count(), 1, "{many:?}");
+        assert!(many.last().unwrap().contains("/home/.agents/skills"), "{many:?}");
+        assert!(many[0].ends_with(NO_STAMP) && many[2] == "gamma", "пометка только у тех, у кого отпечатка нет: {many:?}");
+
+        let edited = with_group_hint(vec![foreign_label("gamma", true)], home);
+        assert_eq!(edited, vec!["gamma".to_string()], "правленым на месте объяснять нечего");
     }
 
     /// Точка 3 ревью, круг 1: отпечатка нет — скилл не наш, даже если его
@@ -1181,8 +1230,7 @@ mod tests {
         std::fs::write(home.path().join("1c/SKILL.md"), "текст скилла").unwrap();
 
         let found = install(&kit, &ts(&state), home.path()).unwrap();
-        let label = foreign_label("1c", &home.path().join("1c"), false);
-        assert_eq!(found, editors::Found::Foreign(vec![label]));
+        assert_eq!(found, editors::Found::Foreign(with_group_hint(vec![foreign_label("1c", false)], home.path())));
 
         // install не притронулся и не дописал отпечаток.
         let stamp = stamp_path(&ts(&state), &home.path().join("1c"), "1c").unwrap();

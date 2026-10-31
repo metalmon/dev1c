@@ -335,17 +335,20 @@ pub const FOOT_LINES: usize = 2;
 ///
 /// Раскладка по двум строкам, обрезка третьей и подсказка по наведению —
 /// дело `render`, здесь только выбор источника.
+///
+/// Текст уходит через `gui::capitalized` — та же заглавная, что у карточек и
+/// журнала. Путь комплекта она не трогает (первое слово с `:` и `\`).
 pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
-    if let Some(l) = status {
-        return (l.text.clone(), matches!(l.kind, Kind::Fail));
-    }
-    if let Some(why) = reason {
-        return (why.to_string(), false);
-    }
-    if let Some(h) = hint {
-        return (h.to_string(), false);
-    }
-    (kit_path.to_string(), false)
+    let (text, bad) = if let Some(l) = status {
+        (l.text.clone(), matches!(l.kind, Kind::Fail))
+    } else if let Some(why) = reason {
+        (why.to_string(), false)
+    } else if let Some(h) = hint {
+        (h.to_string(), false)
+    } else {
+        (kit_path.to_string(), false)
+    };
+    (gui::capitalized(&text), bad)
 }
 
 /// Строки вкладки «Инструменты» по набору фактов — тому самому, из которого
@@ -368,7 +371,16 @@ pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<
 /// `Option<Dot>` в кортеже — ради общей раскладки с `project_rows` (там
 /// `None` у подсказки, которая не факт); у факта точка есть всегда.
 pub fn fact_rows(facts: &[Check]) -> Vec<(Option<Dot>, String, String)> {
-    facts.iter().map(|c| (Some(fact_dot(c)), c.what.clone(), gui::fact_detail(c))).collect()
+    facts.iter().map(|c| shown_row(Some(fact_dot(c)), &c.what, &gui::fact_detail(c))).collect()
+}
+
+/// Строка карточки, готовая к показу: и заголовок, и подробность — с
+/// заглавной (`gui::capitalized`). Одно место на оба списка вкладки, чтобы
+/// «репозиторий» и «Не зафиксировано» не стояли рядом разной орфографией
+/// (снимок владельца 31.10). Имена фактов при этом остаются строчными
+/// константами: заглавная живёт только в показе.
+fn shown_row(d: Option<Dot>, title: &str, detail: &str) -> (Option<Dot>, String, String) {
+    (d, gui::capitalized(title), gui::capitalized(detail))
 }
 
 /// Слова по состоянию `Found` — не найден, настроен, записи нет, занято чужим
@@ -554,7 +566,7 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
         //
         // Занятость — единственное исключение: мьютекс проекта держит наша
         // же выгрузка, и в наборе этого нет.
-        return if v.busy { vec![(Some(Dot::Busy), "Проект занят".into(), v.why.clone())] } else { Vec::new() };
+        return if v.busy { vec![shown_row(Some(Dot::Busy), "Проект занят", &v.why)] } else { Vec::new() };
     };
     // 1. Репозиторий — куда поедет отправка. Каталог и ветку здесь не
     //    повторяем: их уже сказал факт «проект» из набора, и две карточки
@@ -590,7 +602,7 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     if !f.index {
         rows.push((Some(Dot::Warn), "Первая загрузка будет полной".into(), "в выгрузке нет ConfigDumpInfo.xml".into()));
     }
-    rows
+    rows.into_iter().map(|(d, title, detail)| shown_row(d, &title, &detail)).collect()
 }
 
 /// Карточка «есть ли что отправлять». Числа со склонением (`common::word`):
@@ -1839,7 +1851,7 @@ mod tests {
     };
     use crate::cfg::Host;
     use crate::editors;
-    use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
+    use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
     use crate::verify;
     use common::check::Check;
@@ -1862,8 +1874,11 @@ mod tests {
         // Ровно столько строк, сколько фактов: лишней своей строки у вкладки
         // нет, и ни один факт она не прячет.
         assert_eq!(rows.len(), facts.len());
+        // Заголовок — то же имя факта, своего вкладка не придумывает; с
+        // 31.10 оно поднимается при показе (`capitalized`), а константа
+        // `verify` остаётся строчной — её ещё читает составленная фраза.
         for (row, fact) in rows.iter().zip(&facts) {
-            assert_eq!(row.1, fact.what, "заголовок строки — имя факта");
+            assert_eq!(row.1, capitalized(&fact.what), "заголовок строки — имя факта");
         }
         // Цвет точки — по исходу факта, и это всё, что строка решает.
         let dots: Vec<Option<Dot>> = rows.iter().map(|r| r.0).collect();
@@ -1871,7 +1886,7 @@ mod tests {
         // Подробность — то же, что говорит причина вердикта: совет
         // провалившегося факта идёт в ту же строку, а не теряется.
         assert_eq!(rows[1].2, "0.4.8");
-        assert_eq!(rows[4].2, "не разложен — 1c-connect install");
+        assert_eq!(rows[4].2, "Не разложен — 1c-connect install");
         // Пройденному факту совет приписывать нечего.
         assert_eq!(rows[0].2, "127.0.0.1:8081/version отвечает");
     }
@@ -1895,7 +1910,7 @@ mod tests {
             vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "MinGit 2.56.0.2; mcp-1c v1.23.0")];
         let rows = fact_rows(&project_facts(tab_facts(&[], &kit)));
         let shown: Vec<String> = rows.iter().map(|(_, title, _)| title.clone()).collect();
-        assert!(shown.iter().any(|t| t == verify::TOOLS), "про полноту комплекта вкладка молчит: {shown:?}");
+        assert!(shown.iter().any(|t| *t == capitalized(verify::TOOLS)), "про полноту комплекта вкладка молчит: {shown:?}");
         let mcp_mentions = rows.iter().filter(|(_, title, detail)| title.contains("mcp-1c") || detail.contains("mcp-1c")).count();
         assert_eq!(mcp_mentions, 1, "про mcp-1c сказано дважды: {rows:?}");
 
@@ -1903,7 +1918,7 @@ mod tests {
         // `KIT` она и не показывает.
         let broken = vec![Check::fail(verify::KIT, "файла нет", "комплект неполный — скопируйте заново")];
         let shown: Vec<String> = fact_rows(&project_facts(tab_facts(&[], &broken))).into_iter().map(|(_, title, _)| title).collect();
-        assert!(shown.iter().any(|t| t == verify::KIT), "пропажа `mcp-1c` молчит: {shown:?}");
+        assert!(shown.iter().any(|t| *t == capitalized(verify::KIT)), "пропажа `mcp-1c` молчит: {shown:?}");
     }
 
     /// Вторая половина того же правила: как только полный набор есть, говорит
@@ -1917,8 +1932,8 @@ mod tests {
         let kit = vec![Check::pass(verify::TOOLS, "из отдельного прохода")];
         let set = vec![Check::pass(verify::TOOLS, "из полного набора"), Check::pass(verify::EXTENSION, "0.4.8")];
         let rows = fact_rows(&project_facts(tab_facts(&set, &kit)));
-        let kits: Vec<&String> = rows.iter().filter(|(_, t, _)| t == verify::TOOLS).map(|(_, _, d)| d).collect();
-        assert_eq!(kits, vec!["из полного набора"], "комплект показан дважды или не из набора: {rows:?}");
+        let kits: Vec<&String> = rows.iter().filter(|(_, t, _)| *t == capitalized(verify::TOOLS)).map(|(_, _, d)| d).collect();
+        assert_eq!(kits, vec!["Из полного набора"], "комплект показан дважды или не из набора: {rows:?}");
     }
 
     /// Решение владельца 26.10.2026 на сомнение 2 отчёта по задачам 7+8:
@@ -1943,17 +1958,20 @@ mod tests {
             Check::busy(outsider_busy, "сеансов больше не осталось", "закройте «Предприятие»"),
         ];
         let shown: Vec<String> = fact_rows(&project_facts(&set)).into_iter().map(|(_, title, _)| title).collect();
+        // Имя факта на карточке — с заглавной при показе (`capitalized`),
+        // сама константа строчная.
+        let cap = |name: &str| capitalized(name);
         // Проблемы — все до одной, как бы факт ни звался: поверхность не
         // имеет права знать о них меньше набора.
-        assert!(shown.iter().any(|t| t == outsider_bad), "красный факт не по предмету потерян: {shown:?}");
-        assert!(shown.iter().any(|t| t == outsider_busy), "занятый факт не по предмету потерян: {shown:?}");
+        assert!(shown.contains(&cap(outsider_bad)), "красный факт не по предмету потерян: {shown:?}");
+        assert!(shown.contains(&cap(outsider_busy)), "занятый факт не по предмету потерян: {shown:?}");
         // Зелёное и серое — только по предмету вкладки.
-        assert!(shown.iter().any(|t| t == verify::EXTENSION), "{shown:?}");
-        assert!(shown.iter().any(|t| t == verify::DESCRIPTOR), "{shown:?}");
-        assert!(!shown.iter().any(|t| t == outsider_green), "зелёная платформа говорит, когда сказать нечего: {shown:?}");
-        assert!(!shown.iter().any(|t| t == outsider_grey), "серый носитель не предмет «Проекта»: {shown:?}");
+        assert!(shown.contains(&cap(verify::EXTENSION)), "{shown:?}");
+        assert!(shown.contains(&cap(verify::DESCRIPTOR)), "{shown:?}");
+        assert!(!shown.contains(&cap(outsider_green)), "зелёная платформа говорит, когда сказать нечего: {shown:?}");
+        assert!(!shown.contains(&cap(outsider_grey)), "серый носитель не предмет «Проекта»: {shown:?}");
         // Порядок — набора, а не отбора.
-        assert_eq!(shown, vec![verify::EXTENSION, verify::DESCRIPTOR, outsider_bad, outsider_busy]);
+        assert_eq!(shown, vec![cap(verify::EXTENSION), cap(verify::DESCRIPTOR), cap(outsider_bad), cap(outsider_busy)]);
     }
 
     /// Правило заказчика дословно: «Переключатель включения должен быть
@@ -2434,7 +2452,7 @@ mod tests {
 
         // Занятость — единственное, чего в наборе нет: её говорим.
         let busy = ProjectView { ok: false, busy: true, why: "идёт выгрузка".into(), ..view(None) };
-        assert_eq!(project_rows(Some(&busy)), vec![(Some(Dot::Busy), "Проект занят".into(), "идёт выгрузка".into())]);
+        assert_eq!(project_rows(Some(&busy)), vec![(Some(Dot::Busy), "Проект занят".into(), "Идёт выгрузка".into())]);
     }
 
     /// Чистый проект: две карточки, и ни одной лишней. Ни про совпадающие
@@ -2445,7 +2463,10 @@ mod tests {
         assert_eq!(rows.len(), 3, "{rows:?}");
         // Каталог и ветку здесь не повторяем — их сказал факт «проект» из
         // набора; вкладка добавляет только то, чего в наборе нет.
-        assert_eq!(rows[0], (Some(Dot::Up), "репозиторий".into(), "dev1c/Buh".into()));
+        // «Репозиторий» с заглавной — рядом с «Не зафиксировано» ниже это и
+        // резало глаз владельцу (снимок 31.10); адрес `dev1c/Buh` трогать
+        // нельзя, и `capitalized` его не трогает (в первом слове `/`).
+        assert_eq!(rows[0], (Some(Dot::Up), "Репозиторий".into(), "dev1c/Buh".into()));
         assert!(!rows.iter().any(|r| r.1.contains("proj") || r.2.contains("ветка dev1")), "повтор каталога или ветки: {rows:?}");
         assert_eq!(rows[1], (Some(Dot::Up), "Всё отправлено".into(), String::new()));
         assert_eq!(rows[2], (Some(Dot::Off), "Последний коммит".into(), "a1b2c3 выгрузка (2 часа назад)".into()));
@@ -2463,7 +2484,7 @@ mod tests {
         assert_eq!(rows[1].2, "1 файл не закоммичено");
         // Ветки на сервере ещё нет — считать нечего.
         let rows = project_rows(Some(&view(Some(facts("все", 0)))));
-        assert_eq!(rows[1].2, "ветка ещё не отправлялась");
+        assert_eq!(rows[1].2, "Ветка ещё не отправлялась");
     }
 
     /// Локальный репозиторий без origin: отправлять некуда, и вкладка не
@@ -2482,7 +2503,7 @@ mod tests {
             ..facts("0", 0)
         };
         let rows = project_rows(Some(&view(Some(mine(0)))));
-        assert!(!rows.iter().any(|r| r.1 == "репозиторий"), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.1 == "Репозиторий"), "{rows:?}");
         assert!(!rows.iter().any(|r| r.1.contains("отправлен")), "{rows:?}");
         assert_eq!(rows[0], (Some(Dot::Up), "Всё зафиксировано".into(), String::new()));
         let rows = project_rows(Some(&view(Some(mine(2)))));
@@ -2562,7 +2583,9 @@ mod tests {
         let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
         assert_eq!(foot_left_text(Some(&ok), None, Some("Подождите: идёт проверка"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        assert_eq!(foot_left_text(Some(&err), None, Some("Подождите: идёт проверка"), path), (err.text.clone(), true));
+        // Начало фразы — с заглавной (`capitalized`), а путь комплекта выше
+        // остаётся как есть: в его первом слове `:` и `\`.
+        assert_eq!(foot_left_text(Some(&err), None, Some("Подождите: идёт проверка"), path), ("Порт занят".to_string(), true));
     }
 
     /// Причина важнее подсказки про сохранение. Исторически слот был занят
@@ -2578,7 +2601,7 @@ mod tests {
         // Но настоящий итог всё ещё сильнее причины: человек только что
         // нажал и ждёт ответа именно на своё нажатие.
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        assert_eq!(foot_left_text(Some(&err), Some(why), None, path), (err.text.clone(), true));
+        assert_eq!(foot_left_text(Some(&err), Some(why), None, path), ("Порт занят".to_string(), true));
     }
 
     /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки

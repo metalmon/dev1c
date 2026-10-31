@@ -57,7 +57,44 @@ fn note_line_appends_marks_and_head_lines_to_the_log_file() {
     note_line(&mut ui, Line { kind: Kind::Head, text: "— устанавливаю — · 12:34".into() });
     note_line(&mut ui, Line { kind: Kind::Ok, text: "готово".into() });
     let text = std::fs::read_to_string(ui.kit.state_path(LOG_FILE)).unwrap();
-    assert_eq!(text, "\n— устанавливаю — · 12:34\n✓ готово\n");
+    // «Готово» с заглавной: `note_line` поднимает первую букву до записи, и
+    // файл журнала говорит ровно то же, что окно. Заголовок раздела
+    // начинается с тире — не буква, поднимать нечего.
+    assert_eq!(text, "\n— устанавливаю — · 12:34\n✓ Готово\n");
+}
+
+/// Начала фраз — с заглавной, но не ценой правды: техническое имя, путь,
+/// версия и команда остаются как написаны (владелец 31.10: «либо с большой
+/// буквы все начала предложений, либо с маленькой»).
+#[test]
+fn shown_text_starts_with_a_capital_unless_the_first_word_is_a_technical_name() {
+    assert_eq!(capitalized("инструменты комплекта"), "Инструменты комплекта");
+    assert_eq!(capitalized("mcp-1c в комплекте"), "mcp-1c в комплекте");
+    assert_eq!(capitalized("vrunner-mcp отвечает"), "vrunner-mcp отвечает");
+    assert_eq!(capitalized("oscript 2.2.0 из комплекта"), "oscript 2.2.0 из комплекта");
+    assert_eq!(capitalized(r"C:\dev1c-connect-kit"), r"C:\dev1c-connect-kit");
+    assert_eq!(capitalized("Не зафиксировано"), "Не зафиксировано");
+    assert_eq!(capitalized(""), "");
+    // Имя проверяется целиком, а не по началу строки: «гитом» — слово, не `git`.
+    assert_eq!(capitalized("гитом отправлено"), "Гитом отправлено");
+    // Путь и версия — по признаку первого слова, в какой бы фразе ни стояли.
+    assert_eq!(capitalized("1.2.3 — версия комплекта"), "1.2.3 — версия комплекта");
+    assert_eq!(capitalized("setup.log дописан"), "setup.log дописан");
+    // Отпечаток коммита — не слово: «A1b2c3» было бы выдумкой про имя.
+    assert_eq!(capitalized("a1b2c3 выгрузка (2 часа назад)"), "a1b2c3 выгрузка (2 часа назад)");
+    // Двоеточие в хвосте слова — не путь: «план: …» это начало фразы.
+    assert_eq!(capitalized("план: cf_decompile → src"), "План: cf_decompile → src");
+    assert_eq!(capitalized("mcp-1c: строка отброшена"), "mcp-1c: строка отброшена");
+}
+
+/// Шов: заглавную ставит `note_line` — единственная дорога строки в журнал
+/// окна, — а не показ, поэтому и список окна, и `1c-connect.log` несут один
+/// текст.
+#[test]
+fn a_line_arriving_in_the_log_comes_out_with_a_capital() {
+    let mut ui = Ui::for_test();
+    note_line(&mut ui, Line { kind: Kind::Warn, text: "признак разрешения не записан".into() });
+    assert_eq!(ui.log[0].text, "Признак разрешения не записан");
 }
 
 #[test]
@@ -171,9 +208,10 @@ fn a_line_during_an_operation_reaches_the_journal_and_moves_seen() {
         seen: now - Duration::from_secs(10),
         stale_noted: false,
     });
-    let line = Line { kind: Kind::Say, text: "cf_decompile → src (минуты…)".into() };
-    on_line(&mut ui, line.clone(), now);
-    assert_eq!(ui.log.last(), Some(&line));
+    let line = Line { kind: Kind::Say, text: "выгружаю конфигурацию из 1С (cf_decompile → src)".into() };
+    on_line(&mut ui, line, now);
+    // Та же строка, и с заглавной: дорога в журнал одна — `note_line`.
+    assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Say, text: "Выгружаю конфигурацию из 1С (cf_decompile → src)".into() }));
     let r = ui.progress.as_ref().unwrap();
     assert_eq!(r.seen, now);
     assert!(ui.dirty);
@@ -187,6 +225,10 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     let line = on_done(&mut ui, Some("прервано".into()), true);
     note_line(&mut ui, line.clone());
     ui.status = Some(line);
-    assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "прервано".into() }));
+    // Главное здесь — `Warn`, а не `Fail`. Заглавную в журнале ставит
+    // `note_line`; подвал держит строку как есть и поднимает её при показе
+    // (`panel::foot_left_text`), поэтому человек читает одно и то же.
+    assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
     assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
+    assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, None, "C:\\kit").0, "Прервано");
 }

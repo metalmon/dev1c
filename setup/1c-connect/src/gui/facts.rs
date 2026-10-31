@@ -286,7 +286,7 @@ pub fn spawn_kit_pass(ui: &Ui) {
         guarded(
             &tx,
             move || Ev::Kit(verify::kit_facts(&kit)),
-            || Ev::Kit(vec![Check::fail("комплект", PANIC_TEXT, "нажмите «Проверить»")]),
+            || Ev::Kit(vec![Check::fail(verify::KIT, PANIC_TEXT, "нажмите «Проверить»")]),
         );
     });
 }

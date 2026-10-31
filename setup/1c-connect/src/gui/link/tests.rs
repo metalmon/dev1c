@@ -7,7 +7,7 @@ use crate::session::State;
 use common::check::Check;
 use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Important 1 ревью задач 7+8: «выключено значит выключено». Набор
 /// сбрасывался в одном месте — `apply_facts`, — а при выключенном
@@ -54,6 +54,57 @@ fn the_switch_going_off_drops_the_set() {
     assert!(!serving(&ui));
     assert!(ui.facts.is_empty(), "замок погасил обслуживание, а набор остался на экране");
     assert_eq!(ui.verdict, Verdict::Off, "{:?}", ui.verdict);
+}
+
+/// Круг исправления 31.10, пункт 2: уронить набор при выключении — половина
+/// дела, вторая половина — чтобы вкладке «Инструменты» было что показать
+/// ВМЕСТО него. Самый частый путь ровно этот: запуск при включённых MCP —
+/// полный набор ушёл в ветку обслуживания, кит-проход (`spawn_kit_pass`) не
+/// звался ни разу, `ui.kit_facts` пуст; человек щёлкает переключателем при
+/// открытом окне, набор роняется — и вкладка пустеет до следующего
+/// дискретного события. Проверяем сквозь настоящий шов: переход, ответ
+/// потока из канала, `panel::tab_facts`.
+///
+/// Падает на подмене, от которой стоит: убрать `spawn_kit_pass` из ветки
+/// `!serving` в `sync_tray` — `Ev::Kit` не придёт, и ожидание упадёт по
+/// сроку. Ждать со сроком, а не бесконечно, — ровно для этого.
+#[test]
+fn the_tab_still_has_the_kit_to_show_the_moment_the_switch_goes_off() {
+    let mut ui = Ui::for_test();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    ui.tx = tx;
+    ui.cfg.host.mode = "local".into();
+    ui.enabled.store(true, Ordering::Relaxed);
+    assert!(serving(&ui));
+    let gen = ui.facts_gen;
+    apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
+    assert_eq!(ui.facts.len(), 1, "набор не применился — тест проверяет не то");
+    assert!(ui.kit_facts.is_empty(), "кит-проход уже звали — самый частый путь проверять нечем");
+
+    ui.enabled.store(false, Ordering::Relaxed);
+    ui.link = local_display("local", false, ui.link.clone());
+    sync_tray(&mut ui, Instant::now());
+    assert!(!serving(&ui));
+    assert!(ui.facts.is_empty(), "набор выключенного обслуживания остался на экране");
+
+    // Ответ кит-прохода — ровно то, что делает с ним `Ev::Kit`. Ждём со
+    // сроком, а не `block_on(rx.next())`: отправитель жив в `ui.tx`, и
+    // подмена «убрать `spawn_kit_pass` из `sync_tray`» повесила бы тест
+    // навсегда вместо того, чтобы его уронить.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let facts = loop {
+        match rx.try_next() {
+            Ok(Some(Ev::Kit(facts))) => break facts,
+            Ok(Some(_)) => continue,
+            _ => {
+                assert!(Instant::now() < deadline, "кит-проход при выключении не завёлся — вкладке показывать нечего");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    assert!(!facts.is_empty(), "кит-проход ответил пустым набором");
+    ui.kit_facts = facts;
+    assert!(!crate::gui::panel::tab_facts(&ui.facts, &ui.kit_facts).is_empty(), "вкладка «Инструменты» пуста в момент выключения MCP");
 }
 
 /// Minor 3 ревью задач 7+8: час «проверено в 15:54» — это момент, когда

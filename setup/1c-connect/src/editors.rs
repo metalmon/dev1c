@@ -930,46 +930,6 @@ pub enum Found {
     Foreign(Vec<String>),
 }
 
-/// Галочка в трее несёт две половины — записи MCP и скиллы — и показывает
-/// одно слово про обе сразу. Агента на машине нет — спрашивать половины не о
-/// чём, и это перекрывает всё остальное, даже нечитаемую вторую половину или
-/// чужую запись в ней: галочка всё равно недоступна, и это бывает каждый
-/// день — общий `~/.agents/skills` может нести наш скилл (его туда положил
-/// сосед) ровно тогда, когда САМ агент на машине не стоит вовсе. Нечитаемая
-/// половина — отдельный исход, не «нет»: приравнять её к `Absent` значило бы
-/// выдать непрочитанное состояние за пустое место, хотя там могло быть что
-/// угодно, в том числе наше; из двух нечитаемых половин называем причину
-/// MCP — она проверяется первой, порядок зафиксирован и закреплён тестом,
-/// иначе человек увидит СВОЮ, а не ту причину, которую назвал бы код.
-/// Чужое хоть в одной половине — `Foreign`, и называем ОБЕИХ: если чужие
-/// записи заняты в MCP и в скиллах одновременно (разные причины, разные
-/// имена), молчание про вторую означало бы, что после исправления первой
-/// человек снова получит «чужое» без объяснения, о чём теперь речь. Обе
-/// свои — `Ours`; иначе (хоть одна `Absent`, другая `Ours`) — всё ещё
-/// `Absent`, та же логика, что у `look` для двух записей MCP одного агента.
-pub fn both(mcp: &Result<Found, String>, skills: &Result<Found, String>) -> Result<Found, String> {
-    if matches!(mcp, Ok(Found::Missing)) || matches!(skills, Ok(Found::Missing)) {
-        return Ok(Found::Missing);
-    }
-    if let Err(e) = mcp {
-        return Err(e.clone());
-    }
-    if let Err(e) = skills {
-        return Err(e.clone());
-    }
-    let mcp_foreign = if let Ok(Found::Foreign(names)) = mcp { names.clone() } else { Vec::new() };
-    let skills_foreign = if let Ok(Found::Foreign(names)) = skills { names.clone() } else { Vec::new() };
-    if !mcp_foreign.is_empty() || !skills_foreign.is_empty() {
-        let mut names = mcp_foreign;
-        names.extend(skills_foreign);
-        return Ok(Found::Foreign(names));
-    }
-    match (mcp, skills) {
-        (Ok(Found::Ours), Ok(Found::Ours)) => Ok(Found::Ours),
-        _ => Ok(Found::Absent),
-    }
-}
-
 /// Опознание по уже прочитанному пути И по отдельному факту «редактор на
 /// машине есть» (`present` — `zed_present`/`pi_present`). Эти два факта
 /// РАЗНЫЕ, и путать их — дефект, найденный живым прогоном 29.10: на машине
@@ -2896,54 +2856,6 @@ args = ["mcp", "1c"]
             AGENTS.iter().map(|a| a.skills).collect::<Vec<_>>(),
             [skills::Home::Agents, skills::Home::Agents, skills::Home::Claude, skills::Home::Agents]
         );
-    }
-
-    #[test]
-    fn the_checkbox_is_on_only_when_both_halves_are_ours() {
-        let ours: Result<Found, String> = Ok(Found::Ours);
-        let absent: Result<Found, String> = Ok(Found::Absent);
-        let missing: Result<Found, String> = Ok(Found::Missing);
-        let foreign_mcp: Result<Found, String> = Ok(Found::Foreign(vec!["1c".to_string()]));
-        let foreign_skills: Result<Found, String> = Ok(Found::Foreign(vec!["cf-edit".to_string()]));
-        // Две РАЗНЫЕ строки, не одна на обе половины: иначе подмена,
-        // возвращающая всегда один и тот же жёсткий литерал вместо настоящей
-        // причины, прошла бы незамеченной (круг 1 ревью, пункт 3).
-        let err_mcp: Result<Found, String> = Err("не прочитать ~/.codex/config.toml".to_string());
-        let err_skills: Result<Found, String> = Err("не прочитать отпечаток скилла".to_string());
-
-        assert_eq!(both(&ours, &ours), Ok(Found::Ours));
-        assert_eq!(both(&ours, &absent), Ok(Found::Absent));
-        assert_eq!(both(&absent, &ours), Ok(Found::Absent));
-
-        // Чужое в одной половине — Foreign с ИМЕННО её именами, не перепутанными.
-        assert_eq!(both(&foreign_mcp, &ours), Ok(Found::Foreign(vec!["1c".to_string()])));
-        assert_eq!(both(&ours, &foreign_skills), Ok(Found::Foreign(vec!["cf-edit".to_string()])));
-        // Чужое в ОБЕИХ половинах разом — называем обе, не теряем вторую
-        // (круг 1 ревью, пункт 4): человек правит записи MCP, жмёт снова, и
-        // не должен услышать «чужое» без упоминания скилла, о котором
-        // промолчали в прошлый раз.
-        assert_eq!(both(&foreign_mcp, &foreign_skills), Ok(Found::Foreign(vec!["1c".to_string(), "cf-edit".to_string()])));
-
-        // Агента нет на машине — перекрывает всё, даже нечитаемую другую
-        // половину и даже чужую запись в ней: это происходит каждый день —
-        // агента вовсе не ставили, а общий `~/.agents/skills` уже несёт
-        // (чужой или наш) скилл, положенный туда соседом (круг 1 ревью,
-        // пункт 5 — зеркало того случая, которого не бывает).
-        assert_eq!(both(&missing, &ours), Ok(Found::Missing));
-        assert_eq!(both(&ours, &missing), Ok(Found::Missing));
-        assert_eq!(both(&missing, &err_skills), Ok(Found::Missing));
-        assert_eq!(both(&missing, &foreign_skills), Ok(Found::Missing));
-
-        // Нечитаемая половина — Err с ЕЁ ПРИЧИНОЙ, а не «нет» и не причина
-        // другой половины.
-        assert_eq!(both(&err_mcp, &ours), err_mcp.clone());
-        assert_eq!(both(&ours, &err_skills), err_skills.clone());
-        // Обе половины нечитаемы разом — доходит причина MCP: порядок
-        // проверок в `both` содержательный (докстрока выше), а не случайная
-        // расстановка двух одинаковых по весу `if let`, и без этого теста
-        // перестановка блоков местами осталась бы незамеченной (круг 2
-        // ре-ревью, пункт 2).
-        assert_eq!(both(&err_mcp, &err_skills), err_mcp.clone());
     }
 
     /// Простые заглушки под `Setup::Cli`, чтобы собрать свой маленький реестр

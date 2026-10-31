@@ -8,8 +8,6 @@ use super::{
     stop_session, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
-use crate::verify;
-use common::kit::Kit;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -347,11 +345,13 @@ impl Tray {
     /// убран — замер 30.10 дал 17–22 с замершего окна на один проход этого
     /// цикла (подробности у `editors::look_cli_agent`).
     ///
-    /// `kit` — путь к состоянию программы (задача 5): галочка несёт теперь
-    /// ОБЕ половины, записи MCP и скиллы, и вторую половину без него не
-    /// прочитать (`verify::agent_found` — та же функция, что считает факт
-    /// набора, расходиться им нельзя).
-    pub fn set_agents(&self, mode: &str, kit: &Kit) {
+    /// Галочка отражает ОДНУ половину — записи MCP (решение владельца 31.10,
+    /// повод 2): записи наши — галочка стоит, что бы сейчас ни лежало в доме
+    /// навыков. Навыки не условие работы инструментов, и проблема с ними
+    /// называется строкой журнала (`gui::skill_line`, `gui::refresh_line`), а
+    /// не снятой галочкой. Та же половина, что у факта набора
+    /// (`verify::cheap` → `local_editor_mcp_fact`): расходиться им нельзя.
+    pub fn set_agents(&self, mode: &str) {
         // Раздел не гаснет серым, а исчезает — решение владельца 30.10,
         // увидевшего четыре серых пункта и спросившего «может скрывать это
         // меню в туннельном режиме?»; оно же было его изначальным «раздела
@@ -378,21 +378,11 @@ impl Tray {
             return;
         }
         let exe = std::env::current_exe().ok();
-        // Круг 4: `skills::state()` отказывает словами, если каталог состояния
-        // пришлось бы угадывать. В меню говорить нечем — текст несём туда же,
-        // куда `agent_found` несёт любую другую причину (`Err(String)`):
-        // галочка не встанет, а карточка в окне (`verify.rs`) скажет словами.
-        let state = crate::skills::state();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
-            let found = match (&exe, &state) {
-                (Some(exe), Ok(state)) => {
-                    let mcp = def.setup.look(exe);
-                    let home = crate::skills::home_dir(def.skills);
-                    verify::agent_found(kit, &mcp, home.as_deref(), state)
-                }
-                (_, Err(why)) => Err(why.clone()),
-                (None, _) => Ok(editors::Found::Missing),
+            let found = match &exe {
+                Some(exe) => def.setup.look(exe),
+                None => Ok(editors::Found::Missing),
             };
             item.set_checked(agent_checked(&found));
             item.set_enabled(agent_available(mode, present));
@@ -491,7 +481,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
                 // Доступность «Локальных агентов» зависит от режима — обязана
                 // обновиться тут же, не только при запуске (задача «Управление
                 // переехало в трей»).
-                tray.set_agents(mode, &cx.global::<Ui>().kit);
+                tray.set_agents(mode);
             }
             // Новый транспорт — сеанс поднимается заново; `stop_session`
             // безвредна, если сеанса и не было.
@@ -523,7 +513,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_mode(mode);
-                tray.set_agents(mode, &cx.global::<Ui>().kit);
+                tray.set_agents(mode);
             }
             cx.global_mut::<Ui>().tab = Tab::Params;
             window::show_window(cx);

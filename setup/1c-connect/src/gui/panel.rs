@@ -430,15 +430,20 @@ pub(super) fn skill_found_text(f: &editors::Found) -> String {
 }
 
 /// Предмет вкладки «Инструменты»: проект, база, публикация, расширение, дескриптор,
-/// инструменты. По именам-константам `verify`, а не по текстам —
-/// переименованный факт ломает сборку, а не тихо исчезает со вкладки.
-const PROJECT_SUBJECT: [&str; 6] = [
+/// инструменты, `mcp-1c` в комплекте. По именам-константам `verify`, а не по
+/// текстам — переименованный факт ломает сборку, а не тихо исчезает со вкладки.
+///
+/// `KIT` здесь с 31.10 (спека, повод 1): вкладка обещает именем сказать про
+/// комплект, и доехал ли в нём `mcp-1c` — первое, что человек идёт туда
+/// узнать. В зелёном виде он прежде на вкладку не попадал вовсе.
+const PROJECT_SUBJECT: [&str; 7] = [
     crate::verify::PROJECT,
     crate::verify::BASE,
     crate::verify::PUBLICATION,
     crate::verify::EXTENSION,
     crate::verify::DESCRIPTOR,
     crate::verify::TOOLS,
+    crate::verify::KIT,
 ];
 
 /// Что из набора идёт на вкладку «Инструменты». Два правила, и первое нерушимо:
@@ -457,6 +462,22 @@ const PROJECT_SUBJECT: [&str; 6] = [
 /// ей передали — один набор, одни строки, без своего мнения.
 pub fn project_facts(facts: &[Check]) -> Vec<Check> {
     facts.iter().filter(|c| c.outcome() != Outcome::Good || PROJECT_SUBJECT.contains(&c.what.as_str())).cloned().collect()
+}
+
+/// Из какого списка вкладка берёт факты: полный набор, пока он есть, иначе —
+/// состояние комплекта (`Ui::kit_facts`, спека 31.10, повод 1).
+///
+/// Набора нет в двух случаях: MCP выключены (`apply_facts` его роняет) и
+/// первый расчёт ещё не вернулся. В оба вкладка всё равно обязана сказать про
+/// комплект, и это ровно то, что она про него знает. Как только набор есть —
+/// говорит он: те же два факта о комплекте уже внутри него, и два списка
+/// показали бы их дважды.
+pub fn tab_facts<'a>(facts: &'a [Check], kit_facts: &'a [Check]) -> &'a [Check] {
+    if facts.is_empty() {
+        kit_facts
+    } else {
+        facts
+    }
 }
 
 fn fact_dot(c: &Check) -> Dot {
@@ -1423,7 +1444,7 @@ impl Render for Panel {
             // сверху факты набора, ниже — каталог и состояние ветки.
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
-                let facts = fact_rows(&project_facts(&ui.facts));
+                let facts = fact_rows(&project_facts(tab_facts(&ui.facts, &ui.kit_facts)));
                 let mut rows = project_rows(ui.project.as_ref());
                 // Пустая вкладка — всегда наша вина, а не состояние человека
                 // (заказчик 31.10: «почему пока не включили эта вкладка
@@ -1807,7 +1828,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question, pick_face,
-        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
+        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, tab_facts,
         switch_tooltip, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
@@ -1847,6 +1868,32 @@ mod tests {
         assert_eq!(rows[4].2, "не разложен — 1c-connect install");
         // Пройденному факту совет приписывать нечего.
         assert_eq!(rows[0].2, "127.0.0.1:8081/version отвечает");
+    }
+
+    /// Спека 31.10, повод 1: «почему мы не можем отобразить инструменты, пока
+    /// не настроили базу и MCP? Это же база, наличие всего необходимого в
+    /// комплекте». Полного набора нет (MCP выключены — `apply_facts` его
+    /// роняет), а про комплект вкладка говорит всё равно: берёт `kit_facts` и
+    /// пропускает оба факта — ЗЕЛЁНЫМИ, то есть по предмету вкладки, а не по
+    /// правилу «все проблемы».
+    #[test]
+    fn the_tools_tab_shows_the_kit_while_mcp_are_off() {
+        let kit = vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "vrunner 1.23 из комплекта")];
+        let shown: Vec<String> = fact_rows(&project_facts(tab_facts(&[], &kit))).into_iter().map(|(_, title, _)| title).collect();
+        assert!(shown.iter().any(|t| t == verify::KIT), "про `mcp-1c` в комплекте вкладка молчит: {shown:?}");
+        assert!(shown.iter().any(|t| t == verify::TOOLS), "про полноту комплекта вкладка молчит: {shown:?}");
+    }
+
+    /// Вторая половина того же правила: как только полный набор есть, говорит
+    /// он один. Те же два факта о комплекте уже внутри него (`verify::cheap`
+    /// зовёт ту же `kit_facts`), и два списка показали бы их дважды.
+    #[test]
+    fn the_full_set_replaces_the_kit_facts_rather_than_doubling_them() {
+        let kit = vec![Check::pass(verify::KIT, "из отдельного прохода")];
+        let set = vec![Check::pass(verify::KIT, "из полного набора"), Check::pass(verify::EXTENSION, "0.4.8")];
+        let rows = fact_rows(&project_facts(tab_facts(&set, &kit)));
+        let kits: Vec<&String> = rows.iter().filter(|(_, t, _)| t == verify::KIT).map(|(_, _, d)| d).collect();
+        assert_eq!(kits, vec!["из полного набора"], "комплект показан дважды или не из набора: {rows:?}");
     }
 
     /// Решение владельца 26.10.2026 на сомнение 2 отчёта по задачам 7+8:

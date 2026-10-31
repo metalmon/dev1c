@@ -20,7 +20,7 @@ const PARAMS: &str = "параметры";
 const PLATFORM: &str = "платформа 1С";
 const DISPLAY: &str = "экран для конфигуратора";
 const ANALYZER: &str = "платформа для анализатора";
-const KIT: &str = "mcp-1c в комплекте";
+pub const KIT: &str = "mcp-1c в комплекте";
 pub const TOOLS: &str = "инструменты комплекта";
 const VRUNNER: &str = "vrunner-mcp отвечает";
 pub const PROJECT: &str = "проект";
@@ -458,6 +458,32 @@ pub fn tools_fact(kit_root: &std::path::Path) -> Check {
         OpState::Missing | OpState::Drifted { .. } => Check::fail(TOOLS, "комплект неполный", "скопируйте полный комплект заново"),
         OpState::Blocked(d) => Check::fail(TOOLS, d, "скопируйте полный комплект заново"),
     }
+}
+
+/// Состояние комплекта двумя фактами: доехал ли `mcp-1c` (`KIT`) и полон ли
+/// комплект, какие в нём версии инструментов (`TOOLS`).
+///
+/// Отдельной функцией потому, что потребителей два и они в разных состояниях
+/// мира: полный набор (`cheap`, ниже) считает это при обслуживании вместе со
+/// всем остальным, а вкладка «Инструменты» — всегда, в том числе при
+/// выключенных MCP и незаполненных параметрах (спека 31.10, повод 1: «это же
+/// база, наличие всего необходимого в комплекте»). Правило о комплекте при
+/// этом одно, а не две копии: разойдясь, они говорили бы об одном комплекте
+/// разными словами.
+///
+/// От настроек не зависит ничем: ни сети, ни базы, ни агентов — только чтение
+/// каталога комплекта. Поэтому её и можно звать при выключенном обслуживании,
+/// в отличие от остального набора.
+pub fn kit_facts(kit: &common::kit::Kit) -> Vec<Check> {
+    let exe = mcp_exe(kit);
+    vec![
+        if exe.exists() {
+            Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
+        } else {
+            Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
+        },
+        tools_fact(&kit.root),
+    ]
 }
 
 /// Пользователь базы задан. Чистая функция от настроек: ни одного запроса в
@@ -948,35 +974,6 @@ pub fn editor_mcp_fact() -> Check {
     Check::fail(EDITOR_MCP, "не смог проверить записи MCP у редактора", "перезапустите программу — свой путь к файлу она узнаёт при старте")
 }
 
-/// Обе половины галочки одним `Found` — записи MCP (уже посчитаны
-/// вызывающим, `Setup::look`) и скиллы (`skills::look` по готовому
-/// домашнему каталогу), склеены `editors::both`. Общая точка для факта
-/// набора (`cheap`, ниже) и для галочки в трее (`gui::tray::set_agents`,
-/// задача 5): считай каждый сам — и правило могло бы разойтись, а галочка
-/// показывала бы не то, что знает карточка.
-///
-/// `state: &skills::State` (круговое ревью, круг 3, пункт 1): барьер
-/// переехал в сам `skills.rs` — `skills::look`/`install`/`remove` берут
-/// этот тип, а не `&Path`, и подставить собственный путь мимо
-/// `skills::state()` невозможно совсем, не только здесь, а в любом модуле.
-///
-/// `home: None` — переменная среды, которой назначен домашний каталог
-/// скиллов, не задана: узнать нечего, и это отказ словами, той же природы,
-/// что у файлового агента без пути к настройкам MCP (`editors::Setup::enable`),
-/// а не «скиллов нет».
-pub(crate) fn agent_found(
-    kit: &common::kit::Kit,
-    mcp: &Result<editors::Found, String>,
-    home: Option<&std::path::Path>,
-    state: &crate::skills::State,
-) -> Result<editors::Found, String> {
-    let skills = match home {
-        None => Err("домашний каталог агента на этой машине неизвестен".to_string()),
-        Some(h) => crate::skills::look(kit, state, h).map_err(|errs| errs.join("; ")),
-    };
-    editors::both(mcp, &skills)
-}
-
 /// Факт для машины человека (решение владельца 30.10, дополнение к задаче 7): там настраиваются ВСЕ локальные агенты, и факт, глядящий только на Zed, врёт в обе стороны — скажет «всё хорошо», когда к нам не придёт ни один агент из pi. Правило владельца: зелёный, если настроен хотя бы один УСТАНОВЛЕННЫЙ агент (разработчик вправе пользоваться одним Zed, и жёлтая точка из-за ненастроенного pi, которым он не пользуется, была бы ложной тревогой); жёлтый — только когда ни один установленный агент не настроен (агент точно не дойдёт до базы ни из одного). Ненастроенный агент при зелёном называется в подробности факта, а не превращает его в провал. Агента, которого на машине нет (`Found::Missing`), факт не поминает вовсе — настраивать там нечего, и ни «зелёным», ни «жёлтым» он не считается.
 ///
 /// `states` — весь реестр `editors::AGENTS`, посчитанный вызывающим, а не два имени руками: имена в тексте факта тоже из реестра. Иначе человек, настроивший только Claude Code, получал красное — факт знал двоих из четырёх (находка ревью 30.10).
@@ -1127,19 +1124,13 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
             display_fact(d.as_deref(), d.as_deref().is_some_and(crate::ops_host::display_alive), xvfb.as_deref())
         });
     }
-    v.push({
-        let exe = mcp_exe(&ctx.kit);
-        if exe.exists() {
-            Check::pass(KIT, exe.file_name().unwrap_or_default().to_string_lossy().to_string())
-        } else {
-            Check::fail(KIT, "файла нет", "комплект неполный — скопируйте заново")
-        }
-    });
     let tools = ctx.kit.root.clone();
-    let tf = tools_fact(&ctx.kit.root);
+    // Те же два факта, что вкладка «Инструменты» показывает и при выключенных
+    // MCP (`kit_facts`), — одной функцией, не второй копией правила.
+    let kf = kit_facts(&ctx.kit);
     // Инструментов нет — факт об этом и говорит, пробовать нечего.
-    let tools_ok = tf.ok;
-    v.push(tf);
+    let tools_ok = kf.iter().find(|c| c.what == TOOLS).is_some_and(|c| c.ok);
+    v.extend(kf);
     v.push(if !tools_ok {
         Check::fail(VRUNNER, "инструментов на машине нет", "1c-connect install")
     } else {
@@ -1196,31 +1187,16 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
             mcp_ports_fact(p.mcp, p.vrunner, &busy_ports, ports)
         });
     }
-    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у агента нет (решение владельца 29.10). Читаем диск здесь же, тем же `agent_found`, что и подменю трея (задача 5 — галочка несёт обе половины, записи MCP и скиллы, и факт обязан знать ту же, а не считать свою), и проходим по всему реестру `editors::AGENTS`, а не по двум именам руками: реестр для этого и завели, а факт, знающий двоих из четырёх, красил красным человека, настроившего только Claude Code (находка ревью 30.10).
+    // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у агента нет (решение владельца 29.10). Читаем диск здесь же, тем же `Setup::look`, что и подменю трея, и проходим по всему реестру `editors::AGENTS`, а не по двум именам руками: реестр для этого и завели, а факт, знающий двоих из четырёх, красил красным человека, настроившего только Claude Code (находка ревью 30.10).
+    //
+    // Половина у факта ОДНА — записи MCP (решение владельца 31.10, повод 2). Навыки — не условие работы инструментов: агент без них доходит до базы и вызывает инструменты ровно так же, они лишь делают его работу лучше. Поэтому чужая папка на месте скилла, отсутствующий отпечаток или недокопированный каталог навыков больше не красят набор и не гасят галочку в трее — об этом говорит строка журнала (`gui::skill_line` при щелчке, `gui::refresh_line` при тихой доставке на запуске), и больше нигде. Прежнее правило (задача 5, склейка обеих половин через `editors::both`) отменено: сорок чужих каталогов в доме не давали поставить галочку вовсе, и человек оставался без инструментов из-за навыков, которые ему для инструментов не нужны.
     //
     // Ветвь выбирает `editors::agents_live_here`, а не свой `mode == "local"` (пункт 4 ревью целого): предикат один и тот же у подменю трея и у этого факта. Прежде подменю брало его, а факт считал сам — и в серверном режиме, под который предикат и назван (журнал владельца 29.10: коннектор принимает туннель, агенты всегда локальные), подменю открылось бы с живыми галочками, а карточка в окне говорила бы «в контейнере записи MCP не проверяем».
     v.push(if editors::agents_live_here(&ctx.cfg.host.mode) {
         match std::env::current_exe().ok() {
             Some(exe) => {
-                // Круг 4: `skills::state()` отказывает словами, если каталог
-                // состояния пришлось бы угадывать. У факта канал для причины
-                // уже есть — `Err(String)` на агента, его и заполняем, чтобы
-                // человек читал причину, а не «скиллов нет».
-                let state = crate::skills::state();
-                let states: Vec<(&str, Result<editors::Found, String>)> = editors::AGENTS
-                    .iter()
-                    .map(|d| {
-                        let found = match &state {
-                            Ok(state) => {
-                                let mcp = d.setup.look(&exe);
-                                let home = crate::skills::home_dir(d.skills);
-                                agent_found(&ctx.kit, &mcp, home.as_deref(), state)
-                            }
-                            Err(why) => Err(why.clone()),
-                        };
-                        (d.label, found)
-                    })
-                    .collect();
+                let states: Vec<(&str, Result<editors::Found, String>)> =
+                    editors::AGENTS.iter().map(|d| (d.label, d.setup.look(&exe))).collect();
                 local_editor_mcp_fact(&states)
             }
             // Свой путь неизвестен — ни один `Found` не посчитать; единственный
@@ -2707,45 +2683,57 @@ mod tests {
         assert!(c.detail.contains("настроен: Zed") && c.detail.contains("отказано в доступе"), "{c:?}");
     }
 
-    /// Задача 5: галочка несёт обе половины (записи MCP и скиллы), и факт
-    /// набора обязан знать склеенную, а не одну из них в отдельности —
-    /// записи на месте, скиллов нет: `editors::both` даёт `Absent`, не
-    /// `Ours`, и это всё ещё «не настроен ни один установленный агент».
+    /// Спека 31.10, повод 1: состояние комплекта — два факта, и оба считаются
+    /// чтением одного каталога, без сети, базы и агентов. Это и есть то
+    /// свойство, ради которого вкладка «Инструменты» зовёт их при выключенных
+    /// MCP: подставить сюда можно любой каталог, настройки машины ни при чём.
+    ///
+    /// Обе стороны: пустой каталог — оба факта красные и называют, чего нет;
+    /// полный комплект с отметкой версий — оба зелёные, и версия названа.
     #[test]
-    fn the_card_counts_an_agent_configured_only_with_its_skills() {
-        let combined = editors::both(&Ok(editors::Found::Ours), &Ok(editors::Found::Absent)).unwrap();
-        assert_eq!(combined, editors::Found::Absent, "записей мало без скиллов — считаются обе половины");
-        let c = local_editor_mcp_fact(&[state("Zed", combined)]);
-        assert!(!c.ok, "{c:?}");
-        assert!(c.detail.contains("Zed"), "{c:?}");
+    fn kit_facts_read_the_kit_and_nothing_else() {
+        let dir = crate::project::tempdir::Dir::new();
+        let kit = common::kit::Kit::at(dir.path());
+
+        let empty = kit_facts(&kit);
+        let got: Vec<&str> = empty.iter().map(|c| c.what.as_str()).collect();
+        assert_eq!(got, vec![KIT, TOOLS], "порядок и состав двух фактов о комплекте: {got:?}");
+        assert!(empty.iter().all(|c| !c.ok), "пустой каталог — оба факта красные: {empty:?}");
+
+        // Тот же комплект, но целый: ровно те файлы, которые проверяет
+        // `ops_host::kit_files`, плюс отметка версий.
+        for p in [crate::ops_host::oscript_exe(dir.path()), crate::ops_host::git_exe(dir.path()), crate::ops_host::mcp_exe(&kit)]
+            .into_iter()
+            .chain(cfg!(windows).then(|| crate::publication::kit_httpd_exe(dir.path())))
+        {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "двоичный файл").unwrap();
+        }
+        std::fs::write(dir.path().join("tools.version"), "vrunner 1.23\n").unwrap();
+
+        let full = kit_facts(&kit);
+        assert!(full.iter().all(|c| c.ok), "целый комплект — оба факта зелёные: {full:?}");
+        let tools = full.iter().find(|c| c.what == TOOLS).unwrap();
+        assert!(tools.detail.contains("vrunner 1.23"), "версия из комплекта обязана быть названа: {tools:?}");
     }
 
-    /// Та же мысль, но через настоящую раскладку на диске (`agent_found` +
-    /// `skills::install`), а не готовую пару `Found`: записи MCP считаются
-    /// вызывающим (как и в `cheap`), скиллы читаются тем же `skills::look`,
-    /// что и подменю трея. `skills::State` собран через тестовый
-    /// конструктор `skills::state_for_test` (круговое ревью, круг 3, пункт
-    /// 1: приватное поле типа живёт в `skills.rs`, этот тест ему не потомок
-    /// — поэтому `#[cfg(test)]`-конструктор, а не прямая сборка) —
-    /// переменные среды настоящей машины не трогаем.
+    /// Решение владельца 31.10 (повод 2) отменяет задачу 5: факт считает ОДНУ
+    /// половину — записи MCP. Навыки не условие работы инструментов, и факт
+    /// зелёный на `Found::Ours` от `Setup::look`, что бы ни лежало в доме
+    /// навыков. Прежде здесь склеивались обе половины (`editors::both`), и
+    /// человек с чужими каталогами в доме читал «не настроен ни один
+    /// установленный агент» при полностью настроенном агенте.
+    ///
+    /// Проверяет это ровно то, что осталось проверяемым: сам факт на том
+    /// `Found`, какой теперь приходит из `cheap`. Дорогу «скиллы НЕ попадают
+    /// в факт» тестом не покрыть — после правки их туда просто некому нести,
+    /// а ветвь `cheap`, где собираются `states`, читает дом настоящего
+    /// человека (подменить его нечем: переменные среды общие на весь прогон).
     #[test]
-    fn agent_found_reads_the_skills_half_from_disk() {
-        let root = crate::project::tempdir::Dir::new();
-        std::fs::create_dir_all(root.path().join("skills").join("1c")).unwrap();
-        std::fs::write(root.path().join("skills").join("1c").join("SKILL.md"), "текст скилла").unwrap();
-        let kit = common::kit::Kit::at(root.path());
-        let state = crate::skills::state_for_test(crate::project::tempdir::Dir::new().path().to_path_buf());
-        let home = crate::project::tempdir::Dir::new();
-        let mcp = Ok(editors::Found::Ours);
-
-        // Записи MCP на месте, скиллов в доме ещё нет.
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), &state), Ok(editors::Found::Absent));
-
-        // Поставили скиллы той же функцией, что зовёт щелчок галочки
-        // (`skills::install`) — каталога отпечатков заранее не было,
-        // `create_dir_all` внутри самой `install` обязана была его завести.
-        crate::skills::install(&kit, &state, home.path()).unwrap();
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), &state), Ok(editors::Found::Ours));
+    fn the_card_counts_only_the_mcp_half() {
+        let c = local_editor_mcp_fact(&[state("Zed", editors::Found::Ours)]);
+        assert!(c.ok && !c.info, "записи MCP на месте — факт зелёный независимо от навыков: {c:?}");
+        assert!(c.detail.contains("Zed"), "{c:?}");
     }
 
     /// Круг 2 ревью, пункт 2: прежний тест сравнивал с ВЫДУМАННЫМ путём

@@ -158,6 +158,16 @@ pub struct Ui {
     /// Пуст, пока ничего не посчитано, либо когда обслуживание выключено
     /// (`apply_facts`).
     pub facts: Vec<Check>,
+    /// Состояние комплекта — два факта (`verify::kit_facts`), которые от
+    /// настроек не зависят вовсе: доехал ли `mcp-1c` и полон ли комплект.
+    /// Живёт отдельно от `facts` нарочно: вкладка «Инструменты» показывает
+    /// их и при выключенных MCP (спека 31.10, повод 1), а вердикт, значок,
+    /// бейдж «Проблем: N» и час «проверено в 15:54» остаются при своём —
+    /// они про полный набор, и подмешивать в них два факта о комплекте
+    /// значило бы сказать «проверено» там, где проверяли одну десятую.
+    /// Показываются, только когда полного набора нет (`panel`): в нём те же
+    /// два факта уже есть, и два списка дали бы их дважды.
+    pub kit_facts: Vec<Check>,
     /// Вердикт — чистая функция от `facts` и того, обслуживаем ли мы вызовы
     /// (`verdict_of`). Хранится здесь, а не пересчитывается на каждый показ,
     /// только чтобы не гонять `verdict_of` по кругу — источник правды всё
@@ -463,6 +473,13 @@ pub enum Ev {
         sessions: Option<usize>,
         facts: Option<Vec<Check>>,
     },
+    /// Состояние комплекта (`verify::kit_facts`), посчитанное в своём потоке
+    /// при ВЫКЛЮЧЕННЫХ MCP (`spawn_kit_pass`): вкладка «Инструменты» говорит
+    /// о комплекте всегда, а не только при обслуживании. Поколения этому
+    /// событию не нужно: набор оно не трогает и вердикта не красит — кладётся
+    /// в отдельное поле `Ui::kit_facts`, а запоздавший ответ отличается от
+    /// свежего разве что версией инструментов, прочитанной секундой раньше.
+    Kit(Vec<Check>),
 }
 
 /// Сколько ждать опускания туннеля на «Выходе».
@@ -1651,7 +1668,7 @@ fn handle(ev: Ev, cx: &mut App) {
             // что правда лежит в файле агента — щелчок её только попросил.
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
-                tray.set_agents(&ui.cfg.host.mode, &ui.kit);
+                tray.set_agents(&ui.cfg.host.mode);
             }
             cx.refresh_windows();
             // Почва сдвинулась — тем же порядком, что у `Ev::Done`: факт
@@ -1764,6 +1781,10 @@ fn handle(ev: Ev, cx: &mut App) {
                 start_full_pass(cx.global_mut::<Ui>());
             }
         }
+        Ev::Kit(facts) => {
+            cx.global_mut::<Ui>().kit_facts = facts;
+            cx.refresh_windows();
+        }
         Ev::Cheap { sessions, facts } => {
             let now = Instant::now();
             let ui = cx.global_mut::<Ui>();
@@ -1786,7 +1807,7 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
                 if !ui.agent_clicks.iter().any(|&t| agent_click_busy(t, now)) {
-                    tray.set_agents(&ui.cfg.host.mode, &ui.kit);
+                    tray.set_agents(&ui.cfg.host.mode);
                 }
             }
         }
@@ -1899,7 +1920,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
         // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та
         // же первичная поправка, что у режима и публикации выше.
-        tray.set_agents(&cfg.host.mode, &kit);
+        tray.set_agents(&cfg.host.mode);
         // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл. Журнала для этой ошибки здесь ещё нет — `Ui` не выставлен ни строкой ниже; первый же щелчок переключателем перезапишет файл и громко скажет, если он и тогда не пишется.
         let _ = crate::allow::write(&kit, serve_on_start);
         cx.set_global(Ui {
@@ -1915,6 +1936,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             gate: gate.clone(),
             facts: Vec::new(),
             verdict: Verdict::Checking,
+            kit_facts: Vec::new(),
             facts_at: None,
             facts_gen: 0,
             facts_pending: false,
@@ -2058,6 +2080,7 @@ impl Ui {
             gate,
             facts: Vec::new(),
             verdict: Verdict::Checking,
+            kit_facts: Vec::new(),
             facts_at: None,
             facts_gen: 0,
             facts_pending: false,

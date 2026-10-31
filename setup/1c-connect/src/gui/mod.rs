@@ -2007,7 +2007,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // Замок при запуске — строкой в журнал: человек видит серую точку и
         // запертый переключатель, и обязан прочитать, почему.
         if let Some(why) = &gate {
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
+            note_line(cx.global_mut::<Ui>(), gate_line(why, autoconnect_on));
         }
         // Скиллы — тем, кто галочкой уже разрешил: доставить недостающее и
         // обновить устаревшее, не дожидаясь второго щелчка (задача 6). Своим

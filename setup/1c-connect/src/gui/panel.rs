@@ -1451,15 +1451,22 @@ impl Render for Panel {
                     v_flex()
                         // 12 px между фактами набора и строками проекта: два разных списка, а не один.
                         .gap_3()
+                        // `flex_1().min_w_0()` у строки без кружка — ровно по той же
+                        // причине, что у строк журнала этажом ниже: flex-ребёнок не
+                        // уже своего текста, и длинная подсказка не переносится, а
+                        // ОБРЕЗАЕТСЯ по краю карточки (заказчик 31.10 прислал снимок
+                        // с обрывом «…укажите базу в «Параметрах», з»). Объяснение
+                        // уже стояло в этом файле — применить его к новой строке я
+                        // забыл.
                         .child(v_flex().gap_2().children(facts.into_iter().map(|(d, title, detail)| match d {
                             Some(d) => fact(d, title, detail),
-                            None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
+                            None => row().child(div().flex_1().min_w_0().text_size(px(13.)).text_color(caption).child(title)),
                         })))
                         .child(v_flex().gap_2().children(rows.into_iter().map(|(d, title, detail)| {
                             // Подсказка — не факт о проекте: мелкий текст без кружка.
                             match d {
                                 Some(d) => fact(d, title, detail),
-                                None => row().child(div().text_size(px(13.)).text_color(caption).child(title)),
+                                None => row().child(div().flex_1().min_w_0().text_size(px(13.)).text_color(caption).child(title)),
                             }
                         }))),
                 )

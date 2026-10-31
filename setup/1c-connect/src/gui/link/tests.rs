@@ -230,6 +230,22 @@ fn autostart_does_not_enable_while_the_gate_holds() {
     assert!(!autostart_enabled(Some("в комплекте нет mcp-1c"), false));
 }
 
+/// Строка о запертом переключателе не должна обещать попытку, которой не
+/// было: заказчик 31.10.2026 — «что значит „не включены при запуске“? у меня
+/// галочки включать при запуске не стояло». Причина звучит в обоих случаях,
+/// но про запуск — только когда запуск просили.
+#[test]
+fn the_gate_line_mentions_startup_only_when_startup_was_asked_for() {
+    let asked = gate_line("не указана база", true);
+    assert!(asked.text.contains("при запуске"), "{}", asked.text);
+    assert!(asked.text.contains("не указана база"), "{}", asked.text);
+
+    let not_asked = gate_line("не указана база", false);
+    assert!(!not_asked.text.contains("при запуске"), "галочки не было — про запуск молчим: {}", not_asked.text);
+    assert!(not_asked.text.contains("не указана база"), "причина остаётся в обоих случаях: {}", not_asked.text);
+    assert_eq!(not_asked.kind, Kind::Warn, "это предупреждение, а не сообщение об успехе");
+}
+
 /// Проводка замка к мосту: пока он заперт, отказ агенту несёт причину.
 /// Сверяем не текст (в каталоге теста замок запирает что придётся, и
 /// соседние тесты пишут в тот же процессный глобал), а то, что причина

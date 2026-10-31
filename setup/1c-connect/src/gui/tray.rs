@@ -378,7 +378,7 @@ impl Tray {
             return;
         }
         let exe = std::env::current_exe().ok();
-        let state = verify::skills_state();
+        let state = crate::skills::state();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
             let found = match &exe {

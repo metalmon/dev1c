@@ -146,6 +146,49 @@ fn stable_path(path: &Path) -> String {
     }
 }
 
+/// Каталог отпечатков раскладки — ТИП с приватным полем, не голый `PathBuf`
+/// (круговое ревью задачи 5, круг 3, пункт 1): прежде барьер стоял только в
+/// `verify.rs` поверх обёрток, а сами `look`/`install`/`remove` были
+/// публичны и брали `&Path` — три строки в любом другом модуле (например
+/// `gui/mod.rs`) собирали путь напрямую (`kit.state_path(skills::KIT_DIR)`)
+/// и звали их, минуя барьер целиком; на Windows это сам комплект, где папка
+/// `skills/` уже есть, и обе критические находки круга 1 вернулись бы.
+/// Теперь тип и единственный публичный конструктор (`state()` ниже) живут В
+/// ТОМ ЖЕ модуле, что сами `look`/`install`/`remove`, и эти функции берут
+/// `&State`, а не `&Path`, — подставить свой путь невозможно совсем, не
+/// только неудобно. Вне крейта `skills::` никто не зовёт, сужение ничего не
+/// ломает.
+#[derive(Debug, Clone)]
+pub struct State(PathBuf);
+
+impl State {
+    /// `pub(crate)`, не только для этого модуля: читать уже готовый путь
+    /// (вывести в сообщение, сравнить) безопасно откуда угодно в крейте —
+    /// барьер стоит на КОНСТРУКТОРЕ (приватное поле), не на чтении.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// `#[cfg(test)]` — не компилируется в обычную сборку вовсе, значит ни
+/// `gui/mod.rs`, ни любой другой боевой код этим путём барьер не обойдёт;
+/// виден он только тестам этого крейта (`verify::tests` в их числе —
+/// собрать `State` с временным каталогом им нужно, а переменные среды
+/// настоящей машины трогать запрещают правила задачи).
+#[cfg(test)]
+pub(crate) fn state_for_test(path: PathBuf) -> State {
+    State(path)
+}
+
+/// Где лежат отпечатки на самой машине — `ops_host::state_dir()`, НЕ каталог
+/// кита (Critical 1 кругового ревью: на Windows `Kit::state()` окна — это
+/// сам комплект) и НЕ его корень напрямую (Critical, круг 2, пункт 2: там же
+/// `secret.key`, `params.toml`, `known_hosts`) — свой подкаталог, и имя у
+/// него не `"skills"`, чтобы не совпасть с `KIT_DIR` даже по случайности.
+pub fn state() -> State {
+    State(crate::ops_host::state_dir().join("skill-stamps"))
+}
+
 /// Где лежит отпечаток последней раскладки — в состоянии программы, не в
 /// доме агента. Имя файла несёт сумму устойчивого вида каталога НАЗНАЧЕНИЯ
 /// (`stable_path`, не буквальный текст пути — Critical 2 ревью 31.10, круг 1)
@@ -154,12 +197,15 @@ fn stable_path(path: &Path) -> String {
 /// Признака дома (`agents`/`claude`) в имени больше нет (круг 1, Подпись):
 /// сумма пути уже различает любые два места сама, отдельный тег только мог
 /// разойтись с ним незаметно. Отказ, если имя скилла не простое (Important 4).
-pub fn stamp_path(state: &Path, dst: &Path, skill: &str) -> Result<PathBuf, String> {
+///
+/// `state: &State` (круговое ревью, круг 3, пункт 1) — та же защита, что у
+/// `look`/`install`/`remove`.
+fn stamp_path(state: &State, dst: &Path, skill: &str) -> Result<PathBuf, String> {
     if !valid_skill_name(skill) {
         return Err(format!("{skill:?} — не простое имя скилла, отпечаток не строю"));
     }
     let dst_sum = &sha256_text(&stable_path(dst))[..12];
-    Ok(state.join(format!("skill_{dst_sum}_{skill}")))
+    Ok(state.path().join(format!("skill_{dst_sum}_{skill}")))
 }
 
 /// `std::fs::symlink_metadata`, не `metadata`: вторая идёт по ссылке на цель,
@@ -297,7 +343,14 @@ fn summarize(total: usize, foreign: Vec<String>, ours: usize) -> editors::Found 
 /// застревает без выхода: не наш скилл ни обновить, ни снять. Подсказка
 /// называет каталог и говорит, что его можно удалить руками, после чего
 /// галочка поставит скилл заново.
-fn foreign_label(name: &str, dst: &Path, had_stamp: bool) -> String {
+///
+/// `pub(crate)` (круговое ревью, круг 3, пункт 3): тест `panel::skill_found_text`
+/// обязан собирать длинную и короткую метку ЭТОЙ функцией, а не рукописной
+/// строкой со скобкой — иначе шов между модулями (где текст делится на
+/// «короткую» и «длинную» форму по наличию `(`) остаётся непроверенным, и
+/// смена формата здесь (например, тире вместо скобки) тихо разошлась бы с
+/// панелью при зелёных тестах.
+pub(crate) fn foreign_label(name: &str, dst: &Path, had_stamp: bool) -> String {
     if had_stamp {
         name.to_string()
     } else {
@@ -322,7 +375,7 @@ enum Seen {
 /// Разбор одного скилла: путь к его отпечатку и то, к чему он отнесён.
 /// Путь возвращается вместе с разбором, чтобы `remove` не считал его
 /// заново — `stamp_path` и `verdict` зовутся здесь ровно один раз.
-fn classify(state: &Path, dst: &Path, name: &str) -> Result<(PathBuf, Seen), String> {
+fn classify(state: &State, dst: &Path, name: &str) -> Result<(PathBuf, Seen), String> {
     let stamp = stamp_path(state, dst, name)?;
     let prev = read_stamp(&stamp)?;
     let seen = match verdict(dst, prev.as_deref())? {
@@ -363,7 +416,7 @@ fn copy_skill(src: &Path, dst: &Path) -> Result<(), String> {
 /// вызывающему. Одна ссылка на месте скилла не прячет состояние остальных
 /// (Important 4 ревью 31.10, круг 1) — ошибки копятся, а не обрывают цикл на
 /// первой.
-pub fn look(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Vec<String>> {
+pub fn look(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
     let names = kit_skill_names(kit).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut foreign = Vec::new();
@@ -398,7 +451,14 @@ pub fn look(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Vec<
 /// в `Foreign`. Ссылка на его месте — отказ словами, но только для этого
 /// скилла: ошибка одного не должна останавливать раскладку остальных,
 /// поэтому они собираются в список, а не обрывают цикл.
-pub fn install(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Vec<String>> {
+pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
+    // `write_stamp` ниже пишет отпечаток прямо в `state` — каталог обязан
+    // существовать, иначе первая же раскладка откажет пустым местом,
+    // которого ещё никто не создавал (круговое ревью, круг 2, пункт 5:
+    // без этой строки `write_stamp` честно отказывает словами, но раскладка
+    // откажет на первом же щелчке с пустым состоянием вместо того, чтобы
+    // завести каталог самой).
+    std::fs::create_dir_all(state.path()).map_err(|e| vec![format!("не создать {}: {e}", state.path().display())])?;
     let names = kit_skill_names(kit).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut foreign = Vec::new();
@@ -446,7 +506,7 @@ pub fn install(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, V
 /// каталогом: иначе он пережил бы собственный скилл и соврал бы при
 /// следующей раскладке (хотя `verdict` этой лжи и не слушает — каталога
 /// уже нет, вердикт `New` раньше, чем отпечаток был бы прочитан).
-pub fn remove(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Vec<String>> {
+pub fn remove(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
     let names = kit_skill_names(kit).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut foreign = Vec::new();
@@ -488,6 +548,14 @@ pub fn remove(kit: &Kit, state: &Path, home: &Path) -> Result<editors::Found, Ve
 mod tests {
     use super::*;
     use crate::project::tempdir::Dir;
+
+    /// Оборачивает временный каталог теста в `State` — поле приватно для
+    /// внешних модулей (круговое ревью, круг 3, пункт 1), но этот тест —
+    /// потомок модуля `skills`, ему видно. Один маленький помощник вместо
+    /// повторения `State(d.path().to_path_buf())` на каждый вызов.
+    fn ts(d: &Dir) -> State {
+        State(d.path().to_path_buf())
+    }
 
     /// Ссылка `link` на `target`, настоящая на обеих системах: на Windows —
     /// соединение каталогов (`mklink /J`, не требует прав администратора, но
@@ -708,16 +776,17 @@ mod tests {
     #[test]
     fn stamp_path_refuses_a_skill_name_that_is_not_simple() {
         let t = Dir::new();
-        assert!(stamp_path(t.path(), &t.path().join("1c"), "../../etc").is_err());
-        assert!(stamp_path(t.path(), &t.path().join("1c"), "..").is_err());
-        assert!(stamp_path(t.path(), &t.path().join("1c"), "1c").is_ok());
+        let state = ts(&t);
+        assert!(stamp_path(&state, &t.path().join("1c"), "../../etc").is_err());
+        assert!(stamp_path(&state, &t.path().join("1c"), "..").is_err());
+        assert!(stamp_path(&state, &t.path().join("1c"), "1c").is_ok());
     }
 
     #[test]
     fn stamp_path_tells_apart_two_destinations_with_the_same_skill() {
         let state = Dir::new();
-        let one = stamp_path(state.path(), &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
-        let other = stamp_path(state.path(), &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
+        let one = stamp_path(&ts(&state), &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
+        let other = stamp_path(&ts(&state), &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
         assert_ne!(one, other, "разные каталоги назначения не должны делить один отпечаток");
     }
 
@@ -731,8 +800,8 @@ mod tests {
         std::fs::create_dir_all(&dst).unwrap();
         let messy = home.path().join(".").join("1c");
 
-        let one = stamp_path(state.path(), &dst, "1c").unwrap();
-        let other = stamp_path(state.path(), &messy, "1c").unwrap();
+        let one = stamp_path(&ts(&state), &dst, "1c").unwrap();
+        let other = stamp_path(&ts(&state), &messy, "1c").unwrap();
         assert_eq!(one, other, "два написания одного каталога должны делить один отпечаток");
     }
 
@@ -752,8 +821,8 @@ mod tests {
         let dst = home.path().join(".agents").join("skills").join("1c");
         let messy = home.path().join(".agents").join("skills").join(".").join("1c");
 
-        let one = stamp_path(state.path(), &dst, "1c").unwrap();
-        let other = stamp_path(state.path(), &messy, "1c").unwrap();
+        let one = stamp_path(&ts(&state), &dst, "1c").unwrap();
+        let other = stamp_path(&ts(&state), &messy, "1c").unwrap();
         assert_eq!(one, other, "до появления каталога написания всё равно должны совпадать");
     }
 
@@ -773,9 +842,9 @@ mod tests {
         let home = Dir::new();
         let dst = home.path().join(".agents").join("skills").join("1c");
 
-        let before = stamp_path(state.path(), &dst, "1c").unwrap();
+        let before = stamp_path(&ts(&state), &dst, "1c").unwrap();
         std::fs::create_dir_all(&dst).unwrap();
-        let after = stamp_path(state.path(), &dst, "1c").unwrap();
+        let after = stamp_path(&ts(&state), &dst, "1c").unwrap();
 
         assert_eq!(before, after, "появление каталога назначения не должно менять ключ его отпечатка");
     }
@@ -793,8 +862,8 @@ mod tests {
         let dst = home.path().join("1c");
         let shouted = home.path().join("1C");
 
-        let one = stamp_path(state.path(), &dst, "1c").unwrap();
-        let other = stamp_path(state.path(), &shouted, "1c").unwrap();
+        let one = stamp_path(&ts(&state), &dst, "1c").unwrap();
+        let other = stamp_path(&ts(&state), &shouted, "1c").unwrap();
 
         if cfg!(windows) {
             assert_eq!(one, other, "на Windows регистр не значащий даже для ещё не созданного пути");
@@ -827,12 +896,12 @@ mod tests {
         let state = Dir::new();
         let home = Dir::new();
 
-        let found = install(&kit, state.path(), home.path()).unwrap();
+        let found = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(found, editors::Found::Ours);
 
         let dst = home.path().join("1c");
         assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "текст скилла");
-        let stamp = stamp_path(state.path(), &dst, "1c").unwrap();
+        let stamp = stamp_path(&ts(&state), &dst, "1c").unwrap();
         assert_eq!(read_stamp(&stamp).unwrap().unwrap(), dir_sum(&dst).unwrap());
     }
 
@@ -850,13 +919,13 @@ mod tests {
         std::fs::write(home.path().join("1c/SKILL.md"), "чужое содержимое").unwrap();
         let label = foreign_label("1c", &home.path().join("1c"), false);
 
-        assert_eq!(look(&kit, state.path(), home.path()).unwrap(), editors::Found::Foreign(vec![label.clone()]));
+        assert_eq!(look(&kit, &ts(&state), home.path()).unwrap(), editors::Found::Foreign(vec![label.clone()]));
 
-        let after_install = install(&kit, state.path(), home.path()).unwrap();
+        let after_install = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(after_install, editors::Found::Foreign(vec![label.clone()]));
         assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "чужое содержимое");
 
-        let after_remove = remove(&kit, state.path(), home.path()).unwrap();
+        let after_remove = remove(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(after_remove, editors::Found::Foreign(vec![label]));
         assert!(home.path().join("1c").exists());
     }
@@ -875,12 +944,12 @@ mod tests {
         std::fs::create_dir_all(home.path().join("1c")).unwrap();
         std::fs::write(home.path().join("1c/SKILL.md"), "текст скилла").unwrap();
 
-        let found = install(&kit, state.path(), home.path()).unwrap();
+        let found = install(&kit, &ts(&state), home.path()).unwrap();
         let label = foreign_label("1c", &home.path().join("1c"), false);
         assert_eq!(found, editors::Found::Foreign(vec![label]));
 
         // install не притронулся и не дописал отпечаток.
-        let stamp = stamp_path(state.path(), &home.path().join("1c"), "1c").unwrap();
+        let stamp = stamp_path(&ts(&state), &home.path().join("1c"), "1c").unwrap();
         assert_eq!(read_stamp(&stamp).unwrap(), None);
     }
 
@@ -894,9 +963,9 @@ mod tests {
         let (_root, kit) = kit_with_skill("1c", "текст скилла");
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
-        assert_eq!(look(&kit, state.path(), home.path()).unwrap(), editors::Found::Ours);
+        assert_eq!(look(&kit, &ts(&state), home.path()).unwrap(), editors::Found::Ours);
     }
 
     /// `look` на пустом доме — скилл в комплекте есть, в доме его вообще
@@ -908,7 +977,7 @@ mod tests {
         let state = Dir::new();
         let home = Dir::new();
 
-        assert_eq!(look(&kit, state.path(), home.path()).unwrap(), editors::Found::Absent);
+        assert_eq!(look(&kit, &ts(&state), home.path()).unwrap(), editors::Found::Absent);
     }
 
     /// Критично, круг 2: `copy_skill` удаляет старый каталог целиком перед
@@ -922,13 +991,13 @@ mod tests {
         std::fs::write(root.path().join(KIT_DIR).join("1c/extra.md"), "лишний файл").unwrap();
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
         assert!(home.path().join("1c/extra.md").exists());
 
         // Новая версия скилла — файл extra.md пропал из комплекта.
         std::fs::remove_file(root.path().join(KIT_DIR).join("1c/extra.md")).unwrap();
         std::fs::write(root.path().join(KIT_DIR).join("1c/SKILL.md"), "вторая версия").unwrap();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
         assert!(!home.path().join("1c/extra.md").exists(), "файл, пропавший из новой версии, не должен выжить");
     }
@@ -938,18 +1007,18 @@ mod tests {
         let (root, kit) = kit_with_skill("1c", "версия раз");
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
         // Человек правит поставленный скилл на месте.
         std::fs::write(home.path().join("1c/SKILL.md"), "правка человека").unwrap();
 
         // Комплект обновился — но правленое install не трогает.
         std::fs::write(root.path().join(KIT_DIR).join("1c/SKILL.md"), "версия два").unwrap();
-        let after_install = install(&kit, state.path(), home.path()).unwrap();
+        let after_install = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(after_install, editors::Found::Foreign(vec!["1c".to_string()]));
         assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "правка человека");
 
-        let after_remove = remove(&kit, state.path(), home.path()).unwrap();
+        let after_remove = remove(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(after_remove, editors::Found::Foreign(vec!["1c".to_string()]));
         assert!(home.path().join("1c").exists(), "правленый скилл не должен уноситься");
     }
@@ -959,11 +1028,11 @@ mod tests {
         let (root, kit) = kit_with_skill("1c", "версия раз");
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
         // Скилл в доме не тронут — комплект меняет версию.
         std::fs::write(root.path().join(KIT_DIR).join("1c/SKILL.md"), "версия два").unwrap();
-        let found = install(&kit, state.path(), home.path()).unwrap();
+        let found = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(found, editors::Found::Ours);
         assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "версия два");
     }
@@ -979,14 +1048,14 @@ mod tests {
         let (_root, kit) = kit_with_skill("1c", "текст скилла");
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
         let dst = home.path().join("1c");
         if !make_undeletable(&dst) {
             eprintln!("пропущено: запретить удаление не вышло на этой машине");
             return;
         }
-        let result = install(&kit, state.path(), home.path());
+        let result = install(&kit, &ts(&state), home.path());
         make_deletable_again(&dst);
         let found = result.unwrap();
         assert_eq!(found, editors::Found::Ours);
@@ -1013,13 +1082,13 @@ mod tests {
         let state = Dir::new();
         let home = Dir::new();
 
-        let look_err = look(&kit, state.path(), home.path()).unwrap_err();
+        let look_err = look(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(look_err.len(), 1, "{look_err:?}");
         assert!(look_err[0].contains("ссылка"), "{look_err:?}");
-        let install_err = install(&kit, state.path(), home.path()).unwrap_err();
+        let install_err = install(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(install_err.len(), 1, "{install_err:?}");
         assert!(install_err[0].contains("ссылка"), "{install_err:?}");
-        let remove_err = remove(&kit, state.path(), home.path()).unwrap_err();
+        let remove_err = remove(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(remove_err.len(), 1, "{remove_err:?}");
         assert!(remove_err[0].contains("ссылка"), "{remove_err:?}");
     }
@@ -1037,13 +1106,13 @@ mod tests {
             return;
         }
 
-        let look_err = look(&kit, state.path(), home.path()).unwrap_err();
+        let look_err = look(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(look_err.len(), 1);
         assert!(look_err[0].contains("ссылка"), "{look_err:?}");
-        let install_err = install(&kit, state.path(), home.path()).unwrap_err();
+        let install_err = install(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(install_err.len(), 1);
         assert!(install_err[0].contains("ссылка"), "{install_err:?}");
-        let remove_err = remove(&kit, state.path(), home.path()).unwrap_err();
+        let remove_err = remove(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(remove_err.len(), 1);
         assert!(remove_err[0].contains("ссылка"), "{remove_err:?}");
     }
@@ -1057,16 +1126,16 @@ mod tests {
         let state = Dir::new();
         let home = Dir::new();
 
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
         let dst = home.path().join("1c");
-        let stamp = stamp_path(state.path(), &dst, "1c").unwrap();
+        let stamp = stamp_path(&ts(&state), &dst, "1c").unwrap();
         assert!(stamp.exists());
 
-        remove(&kit, state.path(), home.path()).unwrap();
+        remove(&kit, &ts(&state), home.path()).unwrap();
         assert!(!dst.exists());
         assert!(!stamp.exists(), "отпечаток обязан уйти вместе со скиллом");
 
-        let found = install(&kit, state.path(), home.path()).unwrap();
+        let found = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(found, editors::Found::Ours);
         assert_eq!(std::fs::read_to_string(dst.join("SKILL.md")).unwrap(), "текст скилла");
     }
@@ -1081,15 +1150,15 @@ mod tests {
         let state = Dir::new();
         let home = Dir::new();
 
-        let look_err = look(&kit, state.path(), home.path()).unwrap_err();
+        let look_err = look(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(look_err.len(), 1);
         assert!(look_err[0].contains(KIT_DIR), "{look_err:?}");
 
-        let install_err = install(&kit, state.path(), home.path()).unwrap_err();
+        let install_err = install(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(install_err.len(), 1);
         assert!(install_err[0].contains(KIT_DIR), "{install_err:?}");
 
-        let remove_err = remove(&kit, state.path(), home.path()).unwrap_err();
+        let remove_err = remove(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(remove_err.len(), 1);
         assert!(remove_err[0].contains(KIT_DIR), "{remove_err:?}");
     }
@@ -1104,7 +1173,7 @@ mod tests {
         let (root, kit) = kit_with_skills(&[("alpha", "альфа раз"), ("beta", "бета раз")]);
         let state = Dir::new();
         let home = Dir::new();
-        install(&kit, state.path(), home.path()).unwrap();
+        install(&kit, &ts(&state), home.path()).unwrap();
 
         // beta правлена человеком, alpha не тронута.
         std::fs::write(home.path().join("beta/SKILL.md"), "правка человека").unwrap();
@@ -1113,7 +1182,7 @@ mod tests {
         std::fs::write(root.path().join(KIT_DIR).join("alpha/SKILL.md"), "альфа два").unwrap();
         std::fs::write(root.path().join(KIT_DIR).join("beta/SKILL.md"), "бета два").unwrap();
 
-        let found = install(&kit, state.path(), home.path()).unwrap();
+        let found = install(&kit, &ts(&state), home.path()).unwrap();
         assert_eq!(found, editors::Found::Foreign(vec!["beta".to_string()]));
         assert_eq!(std::fs::read_to_string(home.path().join("alpha/SKILL.md")).unwrap(), "альфа два");
         assert_eq!(std::fs::read_to_string(home.path().join("beta/SKILL.md")).unwrap(), "правка человека");
@@ -1137,11 +1206,11 @@ mod tests {
             return;
         }
 
-        let look_err = look(&kit, state.path(), home.path()).unwrap_err();
+        let look_err = look(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(look_err.len(), 2, "{look_err:?}");
-        let install_err = install(&kit, state.path(), home.path()).unwrap_err();
+        let install_err = install(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(install_err.len(), 2, "{install_err:?}");
-        let remove_err = remove(&kit, state.path(), home.path()).unwrap_err();
+        let remove_err = remove(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(remove_err.len(), 2, "{remove_err:?}");
     }
 }

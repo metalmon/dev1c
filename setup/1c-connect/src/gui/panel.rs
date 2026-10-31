@@ -2536,10 +2536,13 @@ mod tests {
     /// папки — подмена `skill_found_text` на `found_text` его проходила.
     /// Скиллу нечего делить с записью MCP словами: ни «запись», ни «команда»
     /// к каталогу на диске не относятся, и словарь обязан отличаться хотя бы
-    /// на `Foreign`.
+    /// на `Foreign`. Метка — через `skills::foreign_label` (круг 3, пункт 3:
+    /// рукописная строка со скобкой не поймала бы расхождение, если
+    /// `foreign_label` сменит формат — см. следующие три теста).
     #[test]
     fn skill_found_text_speaks_of_a_directory_not_a_record_or_a_command() {
-        let foreign = editors::Found::Foreign(vec!["beta".to_string()]);
+        let label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), true);
+        let foreign = editors::Found::Foreign(vec![label]);
         let text = skill_found_text(&foreign);
         assert!(!text.contains("запис"), "{text}");
         assert!(!text.contains("команд"), "{text}");
@@ -2553,11 +2556,14 @@ mod tests {
     /// Та же находка, другая грань: длинная форма `Foreign` (без прежнего
     /// отпечатка, `skills::foreign_label` сама несёт подсказку «удалите
     /// руками») не должна получать СВЕРХУ ещё одно общее объяснение — две
-    /// объяснялки подряд читались бы хуже одной.
+    /// объяснялки подряд читались бы хуже одной. Метка собрана вызовом
+    /// `foreign_label(..., had_stamp: false)` (круг 3, пункт 3) — не
+    /// рукописной строкой: если `foreign_label` сменит скобку на тире, этот
+    /// тест обязан это заметить, а не остаться зелёным на старом тексте.
     #[test]
     fn skill_found_text_does_not_pile_a_second_explanation_onto_foreign_labels_own() {
-        let label = "beta (своего отпечатка нет; если это наш скилл после переустановки программы — удалите C:\\home\\.agents\\skills\\beta руками, и галочка поставит его заново)";
-        let text = skill_found_text(&editors::Found::Foreign(vec![label.to_string()]));
+        let label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let text = skill_found_text(&editors::Found::Foreign(vec![label.clone()]));
         // Точное равенство, а не поиск по подстроке: любой добавленный сверху
         // суффикс (старый «— правлен не нами, не трогаем» или новый) здесь
         // обязан провалить тест, даже если он не содержит слова «отпечаток».
@@ -2569,15 +2575,17 @@ mod tests {
     /// без собственного объяснения ничего не говорит о причине — человек
     /// читал бы «скилл: не удалось поставить — каталог 1c» и не узнавал бы
     /// почему. Фиксируем обе формы одним тестом: короткая обязана получить
-    /// причину, длинная — остаться без добавки.
+    /// причину, длинная — остаться без добавки. Обе метки — через
+    /// `skills::foreign_label` (круг 3, пункт 3), не руками.
     #[test]
     fn skill_found_text_explains_a_short_foreign_label_but_not_a_long_one() {
-        let short = skill_found_text(&editors::Found::Foreign(vec!["1c".to_string()]));
+        let short_label = crate::skills::foreign_label("1c", std::path::Path::new("/home/.agents/skills/1c"), true);
+        let short = skill_found_text(&editors::Found::Foreign(vec![short_label]));
         assert!(short.contains("1c"), "{short}");
         assert!(short.contains("правили на месте"), "короткая форма обязана назвать причину: {short}");
 
-        let long_label = "beta (своего отпечатка нет; удалите каталог руками, и галочка поставит его заново)";
-        let long = skill_found_text(&editors::Found::Foreign(vec![long_label.to_string()]));
+        let long_label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let long = skill_found_text(&editors::Found::Foreign(vec![long_label.clone()]));
         assert_eq!(long, format!("каталог {long_label}"), "длинная форма не должна получать добавку сверху: {long}");
     }
 
@@ -2585,13 +2593,14 @@ mod tests {
     /// skills.rs: «часть наша и не тронута, другая правлена человеком» — тот
     /// же случай, что `a_kit_can_be_half_ours_and_half_foreign_at_once`, но
     /// здесь на уровне слов для человека): у каждого имени своя причина, не
-    /// общая для списка.
+    /// общая для списка. Обе метки — через `skills::foreign_label`.
     #[test]
     fn skill_found_text_explains_each_name_in_a_mixed_list_on_its_own() {
-        let long_label = "beta (своего отпечатка нет; удалите руками)";
-        let text = skill_found_text(&editors::Found::Foreign(vec!["1c".to_string(), long_label.to_string()]));
-        assert!(text.contains("1c — правили на месте"), "{text}");
-        assert!(text.contains(long_label), "{text}");
+        let short_label = crate::skills::foreign_label("1c", std::path::Path::new("/home/.agents/skills/1c"), true);
+        let long_label = crate::skills::foreign_label("beta", std::path::Path::new("/home/.agents/skills/beta"), false);
+        let text = skill_found_text(&editors::Found::Foreign(vec![short_label.clone(), long_label.clone()]));
+        assert!(text.contains(&format!("{short_label} — правили на месте")), "{text}");
+        assert!(text.contains(&long_label), "{text}");
         // Длинная форма не получила вторую добавку — считаем «отпечат» ровно один раз.
         assert_eq!(text.matches("отпечат").count(), 1, "{text}");
     }

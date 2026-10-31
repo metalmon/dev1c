@@ -154,7 +154,7 @@ fn run() -> Result<()> {
     #[cfg(feature = "gui")]
     if let Some(hidden) = gui_launch() {
         let kit = ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
-        ops_host::ensure_state(&kit);
+        ops_host::ensure_state(&kit)?;
         return one_c_connect::gui::launch(kit, hidden);
     }
     let cli = Cli::parse();
@@ -167,7 +167,7 @@ fn run() -> Result<()> {
         Some(p) => Kit::at(p),
         None => ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?),
     };
-    ops_host::ensure_state(&kit);
+    ops_host::ensure_state(&kit)?;
 
     if let Some(Cmd::Example) = cli.cmd {
         print!("{}", cfg::EXAMPLE);

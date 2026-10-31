@@ -996,17 +996,17 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
             kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
         };
     }
-    // Круговое ревью, круг 2, пункт 1: сам вызов `create_dir_all` и
-    // `install`/`remove` переехал в `verify::install_or_remove_skills` —
-    // так шов «путь считается ровно один раз» проверяется тестом (временный
-    // каталог, без GPUI и без реальных переменных среды), а не только тем,
-    // что три вызывающих места зовут одну и ту же функцию по доброй воле.
-    // `SkillsState`, которую отдаёт `verify::skills_state()`, — тип с
-    // приватным полем: подставить сюда `kit.state_path(...)` или любой свой
-    // путь невозможно, не поменяв саму функцию, — компилятор держит правило
-    // вместо теста, который можно обойти молча.
-    let state = verify::skills_state();
-    skill_line(on, verify::install_or_remove_skills(kit, on, &home, &state))
+    // Круговое ревью, круг 3, пункт 1: барьер переехал в сам `skills.rs` —
+    // `skills::install`/`skills::remove` берут `&skills::State`, тип с
+    // приватным полем, а не `&Path`. Подставить сюда `kit.state_path(...)`
+    // или любой свой путь невозможно совсем, не только неудобно: это не
+    // компилируется ни в этом модуле, ни в любом другом — барьер стоит там
+    // же, где сама запись, а не поверх обёртки, которую можно обойти, звякнув
+    // в `skills::install` напрямую (круг 2 держал барьер только в `verify.rs`
+    // над обёрткой — обходился тремя строками).
+    let state = crate::skills::state();
+    let result = if on { crate::skills::install(kit, &state, &home) } else { crate::skills::remove(kit, &state, &home) };
+    skill_line(on, result)
 }
 
 /// Слово о половине «скиллы» — тем же устройством, что у `setup_line`, но

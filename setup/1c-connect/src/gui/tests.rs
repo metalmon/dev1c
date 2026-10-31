@@ -441,6 +441,19 @@ fn a_refused_skill_does_not_cost_the_agent_its_mcp_entries() {
     assert_ne!(combined, crate::editors::Found::Ours, "галочка обязана остаться снятой: {combined:?}");
 }
 
+/// Important 1 кругового ревью: та же беда, что уже чинили для MCP
+/// (`success_is_silent_and_a_mismatch_speaks`, «наших записей больше нет», а
+/// не «наши убраны») — здесь могло не быть ни одного нашего скилла вовсе,
+/// только чужая папка, и «наш убран» сообщало бы о работе, которой не было.
+#[test]
+fn a_foreign_skill_left_alone_at_removal_is_not_called_our_own() {
+    let line = skill_line(false, Ok(crate::editors::Found::Foreign(vec!["beta".to_string()])));
+    assert_eq!(line.kind, Kind::Ok, "{line:?}");
+    assert!(line.text.contains("наших больше нет"), "{line:?}");
+    assert!(line.text.contains("beta"), "{line:?}");
+    assert!(!line.text.contains("наш убран"), "просьбу выполнили — отказом или работой, которой не было, это звать нельзя: {line:?}");
+}
+
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
 /// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
 /// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.

@@ -985,11 +985,23 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
         };
     };
     if !on && crate::editors::others_hold(def.id, def.skills, exe) {
+        // Minor 2 кругового ревью: у Zed/pi (`skills::Home::Agents`)
+        // `others_hold` зовёт `Setup::look` соседей по тому же дому, а среди
+        // них Codex — это запуск его CLI, 6–8 с (тот же замер 30.10, что у
+        // щелчка Claude Code). Худший случай одного такого снятия: своя
+        // файловая половина MCP (доли мс) плюс эта одна проверка — далеко
+        // меньше `AGENT_CLICK_LOST` (90 с, рассчитан на ЧЕТЫРЕ таких вызова
+        // подряд у Claude Code). Правки бюджета защёлки это не требует.
         return Line {
             kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
         };
     }
-    let state = verify::skills_state(kit);
+    // Критически (ревью, Critical 1/2): путь берём из `verify::skills_state()`
+    // — он никогда не зависит от `kit` и никогда не совпадает с каталогом
+    // источников в комплекте (`kit.path(skills::KIT_DIR)`). `create_dir_all`
+    // ниже создаёт КАТАЛОГ ОТПЕЧАТКОВ, а не что-либо в самом комплекте — в
+    // комплект эта раскладка не пишет вовсе.
+    let state = verify::skills_state();
     if on {
         // `skills::install` пишет отпечаток прямо в `state` — каталог обязан
         // существовать, иначе первая же раскладка откажет пустым местом,
@@ -1014,9 +1026,13 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
 /// прозы по форме списка причин, а не по тому, кто его позвал).
 fn skill_line(on: bool, result: Result<crate::editors::Found, Vec<String>>) -> Line {
     match result {
+        // Important 1 кругового ревью — та же беда, что уже чинили для MCP
+        // (`setup_line`, «наших записей больше нет», а не «наши убраны»):
+        // здесь мог не быть ни одного нашего скилла вовсе, только чужая
+        // папка — «наш убран» сообщало бы о работе, которой не было.
         Ok(crate::editors::Found::Foreign(names)) if !on => Line {
             kind: Kind::Ok,
-            text: format!("скилл: наш убран, {} оставлен нетронутым — он не наш", names.join(", ")),
+            text: format!("скилл: наших больше нет; {} оставлен нетронутым — он не наш", names.join(", ")),
         },
         Ok(found) if agent_as_expected(on, &found) => {
             Line { kind: Kind::Ok, text: format!("скилл: {}", if on { "поставлен" } else { "убран" }) }

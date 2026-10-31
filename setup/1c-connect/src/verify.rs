@@ -948,15 +948,24 @@ pub fn editor_mcp_fact() -> Check {
     Check::fail(EDITOR_MCP, "не смог проверить записи MCP у редактора", "перезапустите программу — свой путь к файлу она узнаёт при старте")
 }
 
-/// Где лежат отпечатки раскладки скиллов — подкаталог состояния программы
-/// (`Kit::state_path`), не домашний каталог агента: отпечаток — наша память
-/// между запусками, класть её в дом человека незачем (докстрока
-/// `skills::stamp_path`: «в состоянии программы, не в доме агента»). Общая
-/// точка для факта набора (`agent_found` ниже) и для галочки в трее
-/// (`gui::tray::set_agents`) — разные пути дали бы разные отпечатки одному и
-/// тому же каталогу назначения, и раскладка решила бы, что скилл чужой.
-pub(crate) fn skills_state(kit: &common::kit::Kit) -> std::path::PathBuf {
-    kit.state_path("skills")
+/// Где лежат отпечатки раскладки скиллов — `ops_host::state_dir()`, а НЕ
+/// `Kit::state_path` (Critical 1 кругового ревью задачи 5): для окна `Kit`
+/// приходит из `ops_host::wire_state`, который на Windows состояние не
+/// трогает вовсе — там `kit.state_path(...)` совпадает с самим комплектом, то
+/// есть ровно с тем каталогом, откуда раскладка берёт ИСТОЧНИКИ
+/// (`kit.path(skills::KIT_DIR)`). Человек, положивший новую версию комплекта
+/// (комплект заменяют ЦЕЛИКОМ), получил бы свои же скиллы объявленными
+/// чужими — отпечаток исчез бы вместе со старым комплектом ровно тогда, когда
+/// снятие обязано помнить, что клало (ограничение плана, записанное
+/// дословно). `ops_host::state_dir()` переживает замену комплекта на любой
+/// системе — отпечатки живут там всегда, а не только на Linux/в контейнере,
+/// где `wire_state` и так уводит состояние из комплекта.
+///
+/// Имя подкаталога — `"skill-stamps"`, не `"skills"`: совпади оно с
+/// `skills::KIT_DIR`, тот же класс путаницы мог бы вернуться при
+/// невнимательном чтении кода, даже когда путь больше не лежит в комплекте.
+pub(crate) fn skills_state() -> std::path::PathBuf {
+    crate::ops_host::state_dir().join("skill-stamps")
 }
 
 /// Обе половины галочки одним `Found` — записи MCP (уже посчитаны
@@ -966,6 +975,13 @@ pub(crate) fn skills_state(kit: &common::kit::Kit) -> std::path::PathBuf {
 /// задача 5): считай каждый сам — и правило могло бы разойтись, а галочка
 /// показывала бы не то, что знает карточка.
 ///
+/// `state` приходит параметром, а не считается внутри (`skills_state()`
+/// звал бы настоящий `ops_host::state_dir()` — переменные среды реальной
+/// машины, и тест, которому нужен временный каталог, не смог бы подменить
+/// его без их правки, что запрещено правилами задачи): тесты передают свой
+/// временный каталог, живой код — `skills_state()` вызывающего (`cheap`,
+/// `gui::tray::set_agents`).
+///
 /// `home: None` — переменная среды, которой назначен домашний каталог
 /// скиллов, не задана: узнать нечего, и это отказ словами, той же природы,
 /// что у файлового агента без пути к настройкам MCP (`editors::Setup::enable`),
@@ -974,10 +990,11 @@ pub(crate) fn agent_found(
     kit: &common::kit::Kit,
     mcp: &Result<editors::Found, String>,
     home: Option<&std::path::Path>,
+    state: &std::path::Path,
 ) -> Result<editors::Found, String> {
     let skills = match home {
         None => Err("домашний каталог агента на этой машине неизвестен".to_string()),
-        Some(h) => crate::skills::look(kit, &skills_state(kit), h).map_err(|errs| errs.join("; ")),
+        Some(h) => crate::skills::look(kit, state, h).map_err(|errs| errs.join("; ")),
     };
     editors::both(mcp, &skills)
 }
@@ -1207,12 +1224,13 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     v.push(if editors::agents_live_here(&ctx.cfg.host.mode) {
         match std::env::current_exe().ok() {
             Some(exe) => {
+                let state = skills_state();
                 let states: Vec<(&str, Result<editors::Found, String>)> = editors::AGENTS
                     .iter()
                     .map(|d| {
                         let mcp = d.setup.look(&exe);
                         let home = crate::skills::home_dir(d.skills);
-                        (d.label, agent_found(&ctx.kit, &mcp, home.as_deref()))
+                        (d.label, agent_found(&ctx.kit, &mcp, home.as_deref(), &state))
                     })
                     .collect();
                 local_editor_mcp_fact(&states)
@@ -2724,21 +2742,45 @@ mod tests {
         let root = crate::project::tempdir::Dir::new();
         std::fs::create_dir_all(root.path().join("skills").join("1c")).unwrap();
         std::fs::write(root.path().join("skills").join("1c").join("SKILL.md"), "текст скилла").unwrap();
+        let kit = common::kit::Kit::at(root.path());
+        // Каталог отпечатков — обычный временный, отдельно от кита: именно
+        // это разделение чинит Critical 1/2 кругового ревью (прежде
+        // `skills_state` совпадала на Windows с каталогом кита, то есть с
+        // каталогом источников).
         let state = crate::project::tempdir::Dir::new();
-        let kit = common::kit::Kit::with_state(root.path(), state.path());
         let home = crate::project::tempdir::Dir::new();
         let mcp = Ok(editors::Found::Ours);
 
         // Записи MCP на месте, скиллов в доме ещё нет.
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path())), Ok(editors::Found::Absent));
+        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), state.path()), Ok(editors::Found::Absent));
 
-        // Поставили скиллы (той же раскладкой, что зовёт щелчок галочки) —
-        // каталог состояния сперва создаёт вызывающий (`gui::skills_half`
-        // делает так же: `write_stamp` пишет прямо в него, и первая
-        // раскладка без каталога отказала бы пустым местом).
-        std::fs::create_dir_all(skills_state(&kit)).unwrap();
-        crate::skills::install(&kit, &skills_state(&kit), home.path()).unwrap();
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path())), Ok(editors::Found::Ours));
+        // Поставили скиллы (той же раскладкой, что зовёт щелчок галочки).
+        crate::skills::install(&kit, state.path(), home.path()).unwrap();
+        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), state.path()), Ok(editors::Found::Ours));
+
+        // Раскладка не завела никакого каталога отпечатков ВНУТРИ кита —
+        // ровно та беда, от которой чинит Critical 1/2: имя каталога
+        // отпечатков (`skills_state`) туда и не ушло бы.
+        assert!(!root.path().join("skill-stamps").exists(), "отпечаток не должен уйти в комплект");
+    }
+
+    /// Critical 1 кругового ревью: `kit.state_path("skills")` для окна на
+    /// Windows совпадал бы с каталогом кита целиком (`ops_host::wire_state`
+    /// там состояние не трогает) — то есть ровно с `kit.path(skills::KIT_DIR)`,
+    /// откуда раскладка берёт ИСТОЧНИКИ. Отпечатки обязаны жить в
+    /// `ops_host::state_dir()` на любой системе, а не повторять имя каталога
+    /// источников, чтобы та же путаница не вернулась при следующей правке.
+    #[test]
+    fn skills_state_never_resolves_under_a_kit_root() {
+        let kit_root = std::path::Path::new("/opt/dev1c-kit");
+        let state = skills_state();
+        assert!(!state.starts_with(kit_root), "{}", state.display());
+        assert!(state.starts_with(crate::ops_host::state_dir()), "{}", state.display());
+        assert_ne!(
+            state.file_name(),
+            Some(std::ffi::OsStr::new(crate::skills::KIT_DIR)),
+            "имя каталога отпечатков не должно совпадать с именем каталога источников в комплекте"
+        );
     }
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с MCP_PORTS»).

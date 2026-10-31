@@ -393,14 +393,27 @@ pub(super) fn found_text(f: &editors::Found) -> String {
 /// положил сам, а не «запись, занятая чужой командой» (находка ревью 31.10,
 /// `panel.rs:386`: прежняя фраза про запись и команду для скилла была бы
 /// неправдой — там ни записи, ни команды нет, есть только каталог на диске).
-/// Имена в `Foreign` уже готовы `skills::foreign_label` — здесь только
-/// склейка через запятую, той же, что у `found_text`.
+///
+/// Имена в `Foreign` уже готовы `skills::foreign_label`, и готовы ПОЛНОСТЬЮ:
+/// короткое — просто имя, когда причина самоочевидна (человек правил
+/// поставленный нами скилл на месте, напоминать нечего); длинное — имя и
+/// своя подсказка, когда отпечатка не было вовсе (Minor 1 кругового ревью:
+/// добавлять здесь ещё одно «правлен не нами, не трогаем» сверху значило бы
+/// подавать две объяснялки подряд — и дублировать короткую форму, и мешать
+/// длинной, у которой уже есть собственное объяснение).
 pub(super) fn skill_found_text(f: &editors::Found) -> String {
     match f {
+        // `skills::look`/`install`/`remove` никогда не отдают `Missing` —
+        // это исход про РЕДАКТОРА («агента на машине нет»), а у скилла
+        // такого вопроса не бывает (докстрока `skills::kit_skill_names`:
+        // комплект без каталога `skills/` — отказ словами, не `Missing`).
+        // Ветка остаётся ради исчерпывающего разбора общего `editors::Found`
+        // — он один на обе половины галочки, и подставной `_ =>` вместо
+        // неё тихо проглотил бы будущий пятый вариант перечисления.
         editors::Found::Missing => "не найден на этой машине".to_string(),
         editors::Found::Absent => "не поставлен".to_string(),
         editors::Found::Ours => "поставлен".to_string(),
-        editors::Found::Foreign(names) => format!("каталог {} — правлен не нами, не трогаем", names.join(", ")),
+        editors::Found::Foreign(names) => format!("каталог {}", names.join(", ")),
     }
 }
 
@@ -1738,11 +1751,12 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, op_question, pick_face, project_facts, project_menu,
-        project_rows, reason, save_hint, shown_base_url, shown_fields, switch_locked, switch_tooltip, undecryptable_line, window_radius,
-        ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, op_question, pick_face, project_facts,
+        project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip,
+        undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
+    use crate::editors;
     use crate::gui::{Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
     use crate::verify;
@@ -2504,5 +2518,37 @@ mod tests {
     fn an_unknown_field_name_falls_back_to_the_workstation_password() {
         let l = undecryptable_line(&["unknown".to_string()]).unwrap();
         assert!(l.text.contains("рабочего места"), "{}", l.text);
+    }
+
+    /// Minor 1 кругового ревью задачи 5: прежний тест требовал только имени
+    /// папки — подмена `skill_found_text` на `found_text` его проходила.
+    /// Скиллу нечего делить с записью MCP словами: ни «запись», ни «команда»
+    /// к каталогу на диске не относятся, и словарь обязан отличаться хотя бы
+    /// на `Foreign`.
+    #[test]
+    fn skill_found_text_speaks_of_a_directory_not_a_record_or_a_command() {
+        let foreign = editors::Found::Foreign(vec!["beta".to_string()]);
+        let text = skill_found_text(&foreign);
+        assert!(!text.contains("запис"), "{text}");
+        assert!(!text.contains("команд"), "{text}");
+        assert!(text.contains("beta"), "{text}");
+        assert_ne!(text, found_text(&foreign), "словарь скиллов обязан отличаться от словаря MCP хотя бы на Foreign");
+
+        assert_eq!(skill_found_text(&editors::Found::Ours), "поставлен");
+        assert_eq!(skill_found_text(&editors::Found::Absent), "не поставлен");
+    }
+
+    /// Та же находка, другая грань: длинная форма `Foreign` (без прежнего
+    /// отпечатка, `skills::foreign_label` сама несёт подсказку «удалите
+    /// руками») не должна получать СВЕРХУ ещё одно общее объяснение — две
+    /// объяснялки подряд читались бы хуже одной.
+    #[test]
+    fn skill_found_text_does_not_pile_a_second_explanation_onto_foreign_labels_own() {
+        let label = "beta (своего отпечатка нет; если это наш скилл после переустановки программы — удалите C:\\home\\.agents\\skills\\beta руками, и галочка поставит его заново)";
+        let text = skill_found_text(&editors::Found::Foreign(vec![label.to_string()]));
+        // Точное равенство, а не поиск по подстроке: любой добавленный сверху
+        // суффикс (старый «— правлен не нами, не трогаем» или новый) здесь
+        // обязан провалить тест, даже если он не содержит слова «отпечаток».
+        assert_eq!(text, format!("каталог {label}"), "{text}");
     }
 }

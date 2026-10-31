@@ -378,13 +378,14 @@ impl Tray {
             return;
         }
         let exe = std::env::current_exe().ok();
+        let state = verify::skills_state();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
             let found = match &exe {
                 Some(exe) => {
                     let mcp = def.setup.look(exe);
                     let home = crate::skills::home_dir(def.skills);
-                    verify::agent_found(kit, &mcp, home.as_deref())
+                    verify::agent_found(kit, &mcp, home.as_deref(), &state)
                 }
                 None => Ok(editors::Found::Missing),
             };

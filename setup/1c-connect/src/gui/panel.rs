@@ -477,6 +477,20 @@ fn fact_dot(c: &Check) -> Dot {
 /// устройство нашей установки вместо того, чтобы назвать своё состояние.
 const PROJECT_EMPTY: &str = "Читаю состояние проекта…";
 
+/// Что сказать, когда вкладке «Инструменты» сказать нечего обоими списками
+/// сразу. Чистая функция от двух признаков — вид её только печатает.
+///
+/// Молчание каждого списка по отдельности законно и объяснено у своего места
+/// (набор ещё не считали; раскладка проекта не разобрана — об этом уже
+/// говорит факт «проект»). Но вместе они дают ПУСТУЮ ВКЛАДКУ, и человек
+/// читает её не как «я ещё ничего не назвал», а как «инструментов нет, и
+/// включать нечего» — заказчик 31.10.2026 спросил ровно это. Поверхность не
+/// имеет права молчать целиком: у вкладки всегда есть что сказать хотя бы о
+/// себе самой.
+fn nothing_to_show(facts_empty: bool, rows_empty: bool) -> Option<String> {
+    (facts_empty && rows_empty).then(|| "Пока нечего показать: укажите базу в «Параметрах», затем нажмите «Проверить».".to_string())
+}
+
 /// Строки вкладки «Инструменты»: кружок, заголовок, подробность. Чистая — вид
 /// только раскладывает её по слоям. Кружка нет (`None`) у подсказки: она
 /// не факт о проекте, а объяснение, и рисуется мелким текстом.
@@ -1410,7 +1424,17 @@ impl Render for Panel {
             gui::Tab::Project => {
                 let ui = cx.global::<Ui>();
                 let facts = fact_rows(&project_facts(&ui.facts));
-                let rows = project_rows(ui.project.as_ref());
+                let mut rows = project_rows(ui.project.as_ref());
+                // Пустая вкладка — всегда наша вина, а не состояние человека
+                // (заказчик 31.10: «почему пока не включили эта вкладка
+                // пуста? зачем включать, если нет инструментов?»). Оба списка
+                // молчат законно — набор ещё не считали, раскладка проекта не
+                // разобрана, — но вместе это даёт пустой лист, из которого
+                // человек делает вывод «инструментов нет», а не «я их ещё не
+                // называл».
+                if let Some(say) = nothing_to_show(facts.is_empty(), rows.is_empty()) {
+                    rows.push((None, say, String::new()));
+                }
                 let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
                     row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
@@ -1450,7 +1474,15 @@ impl Render for Panel {
                 Self::scrolled(
                     "log",
                     &self.log_scroll,
-                    v_flex().gap_1().text_size(px(14.)).children(lines.into_iter().map(|l| {
+                    // 13 px и разделитель под каждой записью (заказчик
+                    // 2026-10-31: «шрифт поменьше и как-то делить записи,
+                    // чтобы они были читаемыми»). Одна длинная запись
+                    // переносится на десяток строк, и без линии между
+                    // записями лист читается как сплошной текст: глазу не за
+                    // что зацепиться, где кончилась одна и началась другая.
+                    // Отступ сверху у заголовка раздела остаётся больше
+                    // (`mt_2`), чтобы разделы были заметнее записей внутри.
+                    v_flex().text_size(px(13.)).children(lines.into_iter().map(|l| {
                         if l.kind == Kind::Head {
                             // Заголовок раздела: «{операция} · {HH:MM}» из `head_line`;
                             // на экране операция слева полужирным, время справа
@@ -1465,8 +1497,9 @@ impl Render for Panel {
                                 .items_baseline()
                                 .justify_between()
                                 .gap_2()
+                                .pb_1()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
-                                .child(div().text_size(px(13.)).text_color(caption).child(time))
+                                .child(div().text_size(px(12.)).text_color(caption).child(time))
                                 .into_any_element()
                         } else {
                             // Цвет — только у значка: строки, окрашенные целиком,
@@ -1483,6 +1516,9 @@ impl Render for Panel {
                             let text_color = if l.kind == Kind::Say { caption } else { fg };
                             h_flex()
                                 .items_start()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(border.opacity(0.4))
                                 .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
                                 .child(div().flex_1().min_w_0().text_color(text_color).child(l.text))
                                 .into_any_element()
@@ -1763,9 +1799,9 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, op_question, pick_face, project_facts,
-        project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip,
-        undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question, pick_face,
+        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
+        switch_tooltip, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::editors;
@@ -2285,6 +2321,20 @@ mod tests {
 
     fn view(f: Option<crate::project::Facts>) -> ProjectView {
         ProjectView { dir: "C:\\proj\\Buh".into(), facts: f, ok: true, why: String::new(), busy: false }
+    }
+
+    /// Пустая вкладка — не состояние, а молчание поверхности: заказчик
+    /// 31.10.2026 прочитал её как «инструментов нет, включать нечего».
+    /// Утверждение держит обе грани: молчат оба списка — говорим; молчит
+    /// только один — не мешаем второму, иначе подсказка встанет рядом с
+    /// настоящими фактами и будет спорить с ними.
+    #[test]
+    fn an_empty_tools_tab_says_what_to_do() {
+        let say = nothing_to_show(true, true).expect("оба списка молчат — вкладке есть что сказать о себе");
+        assert!(say.contains("Параметрах"), "{say}");
+        assert!(say.contains("Проверить"), "{say}");
+        assert_eq!(nothing_to_show(false, true), None, "факты есть — подсказка лишняя");
+        assert_eq!(nothing_to_show(true, false), None, "строки проекта есть — подсказка лишняя");
     }
 
     #[test]

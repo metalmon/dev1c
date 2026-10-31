@@ -69,7 +69,12 @@ pub fn home_dir(h: Home) -> Option<PathBuf> {
 /// тем же способом отдельно: `walk` видит только то, что внутри, а функция
 /// публичная — следующая задача будет звать её напрямую, минуя `verdict`,
 /// где эта проверка уже есть (Important 4 ревью 31.10, круг 2).
-pub fn dir_sum(dir: &Path) -> Result<String, String> {
+///
+/// Круг 4, пункт 3: приватная, а не `pub`. Вне `skills.rs` её не зовёт никто
+/// (упоминания в `common/src/integrity.rs` — только в комментариях), а
+/// барьер типа `State` полон лишь тогда, когда наружу не торчат и функции,
+/// берущие голый `&Path`. Следующей задаче вернуть видимость — одна строка.
+fn dir_sum(dir: &Path) -> Result<String, String> {
     if is_symlink(dir) {
         return Err(format!("{} — ссылка: отпечаток не считаю", dir.display()));
     }
@@ -185,8 +190,18 @@ pub(crate) fn state_for_test(path: PathBuf) -> State {
 /// сам комплект) и НЕ его корень напрямую (Critical, круг 2, пункт 2: там же
 /// `secret.key`, `params.toml`, `known_hosts`) — свой подкаталог, и имя у
 /// него не `"skills"`, чтобы не совпасть с `KIT_DIR` даже по случайности.
-pub fn state() -> State {
-    State(crate::ops_host::state_dir().join("skill-stamps"))
+///
+/// `Result` (круг 4, решение владельца процесса): она зовёт `state_dir()`
+/// САМА, отдельно от `kit.state()`, и на ЛЮБОЙ системе — значит своего
+/// отказа ей не миновать, и переносить его на старт программы (где он
+/// отказывал заодно `example` и `mcp`) было неверно. Пустая переменная среды
+/// увела бы отпечатки в системный временный каталог, где их подменит любой
+/// сосед по машине, а подменённый отпечаток — это «скилл не правили»
+/// (`Verdict::Untouched`) про чужой текст в доме агента. Текст причины —
+/// общий с `ensure_state` (`ops_host::STATE_DIR_REFUSAL`).
+pub fn state() -> Result<State, String> {
+    crate::ops_host::refuse_guessed_state_dir()?;
+    Ok(State(crate::ops_host::state_dir().join("skill-stamps")))
 }
 
 /// Где лежит отпечаток последней раскладки — в состоянии программы, не в
@@ -227,7 +242,8 @@ fn refuse_if_link(path: &Path) -> Result<(), String> {
 
 /// Прочитанный отпечаток — `Ok(None)`, если файла нет: первой раскладке так
 /// и положено, прошлого отпечатка у неё нет.
-pub fn read_stamp(path: &Path) -> Result<Option<String>, String> {
+/// Приватная (круг 4, пункт 3) — тем же доводом, что `dir_sum`.
+fn read_stamp(path: &Path) -> Result<Option<String>, String> {
     refuse_if_link(path)?;
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s.trim().to_string())),
@@ -236,8 +252,8 @@ pub fn read_stamp(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// Записать отпечаток после раскладки.
-pub fn write_stamp(path: &Path, sum: &str) -> Result<(), String> {
+/// Записать отпечаток после раскладки. Приватная (круг 4, пункт 3).
+fn write_stamp(path: &Path, sum: &str) -> Result<(), String> {
     refuse_if_link(path)?;
     std::fs::write(path, sum).map_err(|e| format!("не записать {}: {e}", path.display()))
 }
@@ -257,8 +273,10 @@ pub enum Verdict {
     Link,
 }
 
-/// Вердикт для каталога `dst` по его прежнему отпечатку `stamp`.
-pub fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
+/// Вердикт для каталога `dst` по его прежнему отпечатку `stamp`. Приватная
+/// (круг 4, пункт 3); сам `Verdict` остаётся публичным — его читают тесты
+/// `verify.rs` как значение, а не как дорогу в обход барьера.
+fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
     if is_symlink(dst) {
         return Ok(Verdict::Link);
     }
@@ -782,12 +800,21 @@ mod tests {
         assert!(stamp_path(&state, &t.path().join("1c"), "1c").is_ok());
     }
 
+    /// Круг 4, вторая находка ре-ревью: 763 теста проверяли только КАТАЛОГ,
+    /// собранный `state()`, и ни один — что сам файл отпечатка лежит ВНУТРИ
+    /// него. Подмена `state.path().join(...)` на
+    /// `state.path().parent().unwrap().join(...)` оставляла всё зелёным, а
+    /// отпечатки ложились ровно туда, куда круг 1 их запрещал, — в корень
+    /// состояния рядом с `secret.key`. Отсюда `starts_with` на оба пути.
     #[test]
     fn stamp_path_tells_apart_two_destinations_with_the_same_skill() {
-        let state = Dir::new();
-        let one = stamp_path(&ts(&state), &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
-        let other = stamp_path(&ts(&state), &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
+        let dir = Dir::new();
+        let state = ts(&dir);
+        let one = stamp_path(&state, &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
+        let other = stamp_path(&state, &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
         assert_ne!(one, other, "разные каталоги назначения не должны делить один отпечаток");
+        assert!(one.starts_with(state.path()), "{} не внутри {}", one.display(), state.path().display());
+        assert!(other.starts_with(state.path()), "{} не внутри {}", other.display(), state.path().display());
     }
 
     /// Точка 2 ревью, круг 1: другое написание того же самого каталога —

@@ -1202,13 +1202,23 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     v.push(if editors::agents_live_here(&ctx.cfg.host.mode) {
         match std::env::current_exe().ok() {
             Some(exe) => {
+                // Круг 4: `skills::state()` отказывает словами, если каталог
+                // состояния пришлось бы угадывать. У факта канал для причины
+                // уже есть — `Err(String)` на агента, его и заполняем, чтобы
+                // человек читал причину, а не «скиллов нет».
                 let state = crate::skills::state();
                 let states: Vec<(&str, Result<editors::Found, String>)> = editors::AGENTS
                     .iter()
                     .map(|d| {
-                        let mcp = d.setup.look(&exe);
-                        let home = crate::skills::home_dir(d.skills);
-                        (d.label, agent_found(&ctx.kit, &mcp, home.as_deref(), &state))
+                        let found = match &state {
+                            Ok(state) => {
+                                let mcp = d.setup.look(&exe);
+                                let home = crate::skills::home_dir(d.skills);
+                                agent_found(&ctx.kit, &mcp, home.as_deref(), state)
+                            }
+                            Err(why) => Err(why.clone()),
+                        };
+                        (d.label, found)
                     })
                     .collect();
                 local_editor_mcp_fact(&states)
@@ -2751,7 +2761,12 @@ mod tests {
     fn skills_state_never_lies_under_a_real_kit_root() {
         let root = crate::project::tempdir::Dir::new();
         let kit = common::kit::Kit::at(root.path());
-        let state = crate::skills::state();
+        // Круг 4: `state()` отдаёт `Result` — на машине без переменной среды
+        // проверять нечего, это её собственный отказ (тест ниже про него).
+        let Ok(state) = crate::skills::state() else {
+            eprintln!("пропущено: переменной среды для каталога состояния нет — `state()` отказала словами");
+            return;
+        };
         assert!(!state.path().starts_with(&kit.root), "{}", state.path().display());
         assert!(!state.path().starts_with(kit.state()), "{}", state.path().display());
         assert_ne!(
@@ -2783,8 +2798,21 @@ mod tests {
             eprintln!("пропущено: ни LOCALAPPDATA, ни XDG_DATA_HOME/HOME не заданы на этой машине");
             return;
         };
-        let state = crate::skills::state();
+        let state = crate::skills::state().expect("переменная среды есть — отказывать не за что");
         assert!(state.path().starts_with(&root), "{} не внутри {}", state.path().display(), root.display());
+    }
+
+    /// Круг 4, точка 2: `skills::state()` отдаёт причину СЛОВАМИ, а не панику
+    /// и не угаданный каталог, и причина — та же, что у `ensure_state`
+    /// (`ops_host::STATE_DIR_REFUSAL`): текст один на три точки отказа.
+    /// Среду не трогаем (правила задачи): спрашиваем тот же предикат, что и
+    /// сама функция, и проверяем ту ветку, в которой эта машина живёт.
+    #[test]
+    fn skills_state_answers_in_words_instead_of_guessing_or_panicking() {
+        match crate::skills::state() {
+            Ok(state) => assert!(state.path().is_absolute(), "{}", state.path().display()),
+            Err(why) => assert_eq!(why, crate::ops_host::STATE_DIR_REFUSAL, "причина обязана быть общей с ensure_state"),
+        }
     }
 
     /// Круг 2 ревью, пункт 5: `create_dir_all` перед `install` без теста

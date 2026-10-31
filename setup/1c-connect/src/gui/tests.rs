@@ -454,6 +454,19 @@ fn a_foreign_skill_left_alone_at_removal_is_not_called_our_own() {
     assert!(!line.text.contains("наш убран"), "просьбу выполнили — отказом или работой, которой не было, это звать нельзя: {line:?}");
 }
 
+/// Круг 4, точка 2: причина отказа `skills::state()` обязана дойти до строки
+/// журнала щелчка СЛОВАМИ, а не обернуться молчаливым «скиллов нет».
+/// Проверяем тот самый путь, которым её ведёт `skills_half`
+/// (`skill_line(on, Err(vec![why]))`) — в среду не ходя: правила задачи
+/// запрещают править `LOCALAPPDATA`/`HOME` на общем прогоне.
+#[test]
+fn the_click_log_line_carries_the_state_dir_refusal_in_words() {
+    let why = crate::ops_host::STATE_DIR_REFUSAL.to_string();
+    let line = skill_line(true, Err(vec![why.clone()]));
+    assert_eq!(line.kind, Kind::Fail, "{line:?}");
+    assert!(line.text.contains(&why), "причина обязана быть в строке целиком: {line:?}");
+}
+
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
 /// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
 /// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.

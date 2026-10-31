@@ -378,16 +378,21 @@ impl Tray {
             return;
         }
         let exe = std::env::current_exe().ok();
+        // Круг 4: `skills::state()` отказывает словами, если каталог состояния
+        // пришлось бы угадывать. В меню говорить нечем — текст несём туда же,
+        // куда `agent_found` несёт любую другую причину (`Err(String)`):
+        // галочка не встанет, а карточка в окне (`verify.rs`) скажет словами.
         let state = crate::skills::state();
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
-            let found = match &exe {
-                Some(exe) => {
+            let found = match (&exe, &state) {
+                (Some(exe), Ok(state)) => {
                     let mcp = def.setup.look(exe);
                     let home = crate::skills::home_dir(def.skills);
-                    verify::agent_found(kit, &mcp, home.as_deref(), &state)
+                    verify::agent_found(kit, &mcp, home.as_deref(), state)
                 }
-                None => Ok(editors::Found::Missing),
+                (_, Err(why)) => Err(why.clone()),
+                (None, _) => Ok(editors::Found::Missing),
             };
             item.set_checked(agent_checked(&found));
             item.set_enabled(agent_available(mode, present));

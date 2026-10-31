@@ -1004,7 +1004,17 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
     // же, где сама запись, а не поверх обёртки, которую можно обойти, звякнув
     // в `skills::install` напрямую (круг 2 держал барьер только в `verify.rs`
     // над обёрткой — обходился тремя строками).
-    let state = crate::skills::state();
+    //
+    // Круг 4: `skills::state()` теперь отказывает словами, если переменной
+    // среды для каталога состояния нет (отпечатки ушли бы в общий временный
+    // каталог, где их подменит сосед по машине). Причину несём в строку
+    // журнала — «галочка не сработала, вот почему», — а не глотаем. Своей
+    // речи у этого отказа нет нарочно: он идёт тем же путём, что любая другая
+    // причина отказа раскладки (`skill_line` → `editors::refusal_text`).
+    let state = match crate::skills::state() {
+        Ok(state) => state,
+        Err(why) => return skill_line(on, Err(vec![why])),
+    };
     let result = if on { crate::skills::install(kit, &state, &home) } else { crate::skills::remove(kit, &state, &home) };
     skill_line(on, result)
 }

@@ -2932,6 +2932,12 @@ args = ["mcp", "1c"]
         // другой половины.
         assert_eq!(both(&err_mcp, &ours), err_mcp.clone());
         assert_eq!(both(&ours, &err_skills), err_skills.clone());
+        // Обе половины нечитаемы разом — доходит причина MCP: порядок
+        // проверок в `both` содержательный (докстрока выше), а не случайная
+        // расстановка двух одинаковых по весу `if let`, и без этого теста
+        // перестановка блоков местами осталась бы незамеченной (круг 2
+        // ре-ревью, пункт 2).
+        assert_eq!(both(&err_mcp, &err_skills), err_mcp.clone());
     }
 
     /// Простые заглушки под `Setup::Cli`, чтобы собрать свой маленький реестр
@@ -2961,8 +2967,20 @@ args = ["mcp", "1c"]
     fn status_foreign(_: &Path, _: bool) -> Result<Found, String> {
         Ok(Found::Foreign(vec!["vrunner".to_string()]))
     }
+    /// Подпись НАРОЧНО не равна идентификатору (круг 2 ре-ревью, пункт 1):
+    /// фильтр самоисключения в `any_agent_holds` сравнивает именно `id`, и
+    /// если подставной агент давал `label == id`, подмена `a.id != id` на
+    /// `a.label != id` проходила бы тестами незамеченной — в настоящем
+    /// реестре подпись («Zed», «Claude Code») и идентификатор («zed»,
+    /// «claude») расходятся всегда, а в подставном это должно быть видно
+    /// тоже.
     fn fake_agent(id: &'static str, home: skills::Home, status: fn(&Path, bool) -> Result<Found, String>) -> AgentDef {
-        AgentDef { id, label: id, setup: Setup::Cli { present: always_present, status, set: noop_set, unset: noop_unset }, skills: home }
+        AgentDef {
+            id,
+            label: "подставная подпись",
+            setup: Setup::Cli { present: always_present, status, set: noop_set, unset: noop_unset },
+            skills: home,
+        }
     }
 
     /// Своя же запись не повод ждать самого себя — `others_hold`/
@@ -3022,16 +3040,33 @@ args = ["mcp", "1c"]
     }
 
     /// Проверка самого `others_hold` (не только `any_agent_holds`, которого
-    /// здесь не хватало — круг 1 ревью, пункт 6), на настоящем `AGENTS`, но
-    /// без похода в файлы: `Home::Claude` в реестре несёт только самого
-    /// Claude Code (докстрока `AgentDef::skills`), и, спрашивая от его же
-    /// имени, фильтр по `id` отбрасывает единственного кандидата ДО того,
-    /// как до него дойдёт `.any()` — значит `setup.look` ни разу не
+    /// здесь не хватало — круг 1 ревью, пункт 6), на настоящем `AGENTS`.
+    ///
+    /// Первое утверждение — на предпосылке: `Home::Claude` в реестре несёт
+    /// только самого Claude Code (докстрока `AgentDef::skills`), и, спрашивая
+    /// от его же имени, фильтр по `id` отбрасывает единственного кандидата ДО
+    /// того, как до него дойдёт `.any()` — значит `setup.look` ни разу не
     /// позовётся, и результат не зависит от того, что в реальности лежит в
-    /// `~/.claude.json` на этой машине.
+    /// `~/.claude.json` на этой машине. Предпосылка («ровно один агент с этим
+    /// домом») закреплена явно: появится второй агент на `Home::Claude`, или
+    /// сменится id — и без этой страховки тест тихо начал бы ходить в диск
+    /// (круг 2 ре-ревью, пункт 4).
+    ///
+    /// Второе утверждение — дифференциальное (круг 2 ре-ревью, пункт 3):
+    /// `others_hold` обязана отвечать ТО ЖЕ, что `any_agent_holds(&AGENTS, ..)`
+    /// на тех же аргументах — равенство верно на любой машине, поскольку
+    /// сравнивает её с собственным определением, а не с заранее знаемым
+    /// значением, но ловит ровно то, что первое утверждение не может: подмену
+    /// тела `others_hold` на жёсткую `false` ИЛИ `true`, и подмену реестра
+    /// (`&AGENTS` на что-то другое) — все три мутации разводят левую и правую
+    /// стороны. Чтение настоящих файлов агентов Zed/pi/Codex при этом
+    /// происходит — это разрешено («только читаем»), запрещена только правка
+    /// переменных среды и чужих файлов в тесте.
     #[test]
     fn others_hold_asks_about_neighbors_through_the_real_registry_too() {
         let exe = Path::new("/opt/1c-connect");
+        assert_eq!(AGENTS.iter().filter(|a| a.skills == skills::Home::Claude).count(), 1);
         assert!(!others_hold("claude", skills::Home::Claude, exe));
+        assert_eq!(others_hold("zed", skills::Home::Agents, exe), any_agent_holds(&AGENTS, "zed", skills::Home::Agents, exe));
     }
 }

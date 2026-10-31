@@ -84,8 +84,12 @@ pub fn call(
     crate::job::group_std(&mut cmd);
     let job = crate::job::Job::new();
     let mut child = cmd.spawn().map_err(|e| format!("vrunner-mcp не запустился: {e} — выполните 1c-connect install"))?;
-    if let Some(j) = &job {
-        j.assign_std(&child);
+    // Задание не создалось или назначение отказало — ребёнок (а с ним
+    // `1cv8.exe`) переживёт и отмену, и наш выход: скажем это словами, а не
+    // оставим человека гадать, откуда взялся висящий Конфигуратор.
+    match &job {
+        Some(j) if j.assign_std(&child) => {}
+        _ => on_log(crate::job::unheld("vrunner-mcp")),
     }
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();

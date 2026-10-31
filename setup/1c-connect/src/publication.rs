@@ -519,7 +519,13 @@ pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
         }
         Lifetime::WithCaller => {
             let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
-            job.assign_std(&child);
+            // Отказ назначения здесь — не отказ запуска: httpd уже слушает, и
+            // врать «не запустился» нельзя. Вторая линия у него своя, в
+            // отличие от ребёнка моста: процесс лежит в `WINDOWS_HTTPD`, его
+            // гасит `kill_tracked`, а поверх — резервный `-k stop` по
+            // pid-файлу самого httpd. Поэтому значение намеренно выброшено,
+            // а не оставлено молчать по забывчивости.
+            let _ = job.assign_std(&child);
             *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
         }
     }

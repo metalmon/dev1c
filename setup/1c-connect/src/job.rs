@@ -1,6 +1,19 @@
 //! Дерево процессов моста (`oscript.exe` → `1cv8.exe`) в Job Object: закрылся
 //! канал или вышел `1c-connect` — Конфигуратор не остаётся держать базу.
 
+/// Строка журнала о ребёнке, которого задание не удержало: задание не
+/// создалось или назначение отказало. Причины от нас не зависят (права,
+/// ребёнок уже вышел, он в чужом задании без права вложения), чинить их
+/// нечем — но молчать нельзя: именно такой ребёнок переживает наш выход и
+/// держит базу, а человек видит «висит 1cv8.exe» без единого слова о том,
+/// откуда он взялся.
+///
+/// Одна формулировка на все три места, где задание берут (`bridge`, `local`):
+/// человеку её различать незачем, а нам — не расходиться словами.
+pub fn unheld(who: &str) -> String {
+    format!("{who}: задание процессов не удержало ребёнка — он может пережить выход моста, и его придётся закрыть руками")
+}
+
 #[cfg(windows)]
 pub struct Job(windows_sys::Win32::Foundation::HANDLE);
 
@@ -31,6 +44,7 @@ impl Job {
 
     /// Процесс и всё, что он породит, — в задании. `false` — описателя нет
     /// (процесс уже вышел) или система отказала.
+    #[must_use = "ребёнок вне задания переживёт выход моста: скажите об этом в журнал (`job::unheld`)"]
     pub fn assign(&self, child: &tokio::process::Child) -> bool {
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
         let Some(h) = child.raw_handle() else { return false };
@@ -38,6 +52,7 @@ impl Job {
     }
 
     /// То же для процесса из `std` (локальный вызов без tokio).
+    #[must_use = "ребёнок вне задания переживёт выход моста: скажите об этом в журнал (`job::unheld`)"]
     pub fn assign_std(&self, child: &std::process::Child) -> bool {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
@@ -97,12 +112,14 @@ impl Job {
 
     /// `child.id()` и есть pgid: группу процессу выставил `group`/`group_std`
     /// ещё до `spawn`.
+    #[must_use = "ребёнок вне задания переживёт выход моста: скажите об этом в журнал (`job::unheld`)"]
     pub fn assign(&self, child: &tokio::process::Child) -> bool {
         if let Some(pid) = child.id() {
             self.remember(pid as i32);
         }
         true
     }
+    #[must_use = "ребёнок вне задания переживёт выход моста: скажите об этом в журнал (`job::unheld`)"]
     pub fn assign_std(&self, child: &std::process::Child) -> bool {
         self.remember(child.id() as i32);
         true

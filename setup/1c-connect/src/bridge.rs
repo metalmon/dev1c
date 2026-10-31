@@ -501,8 +501,12 @@ where
                 }
             }
         };
-        if let Some(j) = &job {
-            j.assign(&child);
+        // Одна проверка на оба несчастья: задание не создалось (`Job::new`
+        // отдал `None`) или назначение отказало. Молчать нельзя — такой
+        // ребёнок и переживает наш выход (круг 31.10 про осиротевший мост).
+        match &job {
+            Some(j) if j.assign(&child) => {}
+            _ => log(Event::Warn(crate::job::unheld(who))),
         }
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
@@ -622,6 +626,12 @@ where
                     }
                 }
                 status = child.wait() => break EpochEnd::ChildExited(status),
+                // Ушёл тот, кто запустил процесс (`orphan::guard`): для этого
+                // соединения это то же самое, что ушедший агент, — и уборка
+                // нужна та же, с `grace_kill` и `drop(job)`. Своего конца
+                // перечисление не просит: EOF от агента мы в этом случае и
+                // не дождались (замер 31.10), а итог один.
+                () = crate::orphan::launcher_gone() => break EpochEnd::AgentEof,
             }
         };
 

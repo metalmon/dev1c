@@ -2808,6 +2808,25 @@ mod tests {
         };
         let state = crate::skills::state().expect("переменная среды задана абсолютным путём — отказывать не за что");
         assert!(state.path().starts_with(&root), "{} не внутри {}", state.path().display(), root.display());
+        // Круг 6, пункт 2: `starts_with` и `assert_ne!` выше пропускали
+        // третью подмену — `state_dir().join("skill-stamps/..")`. У пути,
+        // кончающегося на `..`, `file_name()` даёт `None` (значит `assert_ne!`
+        // с `KIT_DIR` молчит), `components` `..` не раскрывает (значит путь не
+        // равен корню состояния буквально и `starts_with` проходит) — а
+        // отпечатки при этом ложатся в корень состояния, рядом с `secret.key`.
+        // Поэтому место названо целиком: имя последнего звена и родитель.
+        assert_eq!(
+            state.path().file_name(),
+            Some(std::ffi::OsStr::new("skill-stamps")),
+            "подкаталог отпечатков зовётся ровно skill-stamps: {}",
+            state.path().display()
+        );
+        assert_eq!(
+            state.path().parent(),
+            Some(crate::ops_host::state_dir().as_path()),
+            "родитель каталога отпечатков — ровно корень состояния: {}",
+            state.path().display()
+        );
     }
 
     /// Круг 2 ревью, пункт 5: `create_dir_all` перед `install` без теста

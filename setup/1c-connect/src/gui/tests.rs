@@ -539,11 +539,13 @@ fn the_startup_delivery_speaks_whenever_there_is_something_to_say() {
     let kept_line = refresh_line("Zed", &kept_only).expect("неразложенный навык обязан быть назван");
     assert!(kept_line.text.contains("Zed"), "{kept_line:?}");
     assert!(kept_line.text.contains("beta"), "имя каталога обязано быть в строке: {kept_line:?}");
+    assert_eq!(kept_line.kind, Kind::Warn, "зелёная строка про неразложенный навык читается как успех: {kept_line:?}");
 
-    // Работа была — строка называет и сделанное, и оставленное.
+    // Работа была И что-то оставлено — цвет по худшему: оставленный каталог
+    // не становится успехом оттого, что рядом поставили другой.
     let done = crate::skills::Done { added: vec!["1c".to_string()], updated: vec!["cf-edit".to_string()], kept: vec!["beta".to_string()] };
     let line = refresh_line("Zed", &done).expect("работа была — о ней говорят");
-    assert_eq!(line.kind, Kind::Ok, "{line:?}");
+    assert_eq!(line.kind, Kind::Warn, "{line:?}");
     assert!(line.text.contains("Zed"), "{line:?}");
     assert!(line.text.contains("1c"), "{line:?}");
     assert!(line.text.contains("cf-edit"), "{line:?}");

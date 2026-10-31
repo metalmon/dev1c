@@ -491,6 +491,38 @@ fn the_click_log_line_carries_the_state_dir_refusal_in_words() {
     assert!(skills_plan(true, Some(home.clone()), true, Ok(())).is_ok(), "включение общий дом не отменяет");
 }
 
+/// Задача 6: запуск окна человек ни о чём не просил, и строка в журнал
+/// появляется только тогда, когда на диске что-то менялось. Молчание — не
+/// забывчивость, а решение владельца: иначе при каждом старте человек читает
+/// одно и то же и перестаёт читать журнал вовсе.
+///
+/// Падает на обеих подменах, от которых стоит: выкинуть ранний возврат по
+/// `Done::quiet` (молчание станет строкой «скиллы — » ни о чём) — падают оба
+/// `is_none`; перестать называть правленый скилл — падает `contains("beta")`.
+#[test]
+fn the_startup_delivery_speaks_only_when_it_changed_something() {
+    // Менять было нечего — молчим.
+    assert!(refresh_line("Zed", &crate::skills::Done::default()).is_none(), "пустой результат — молчание");
+
+    // Правленый человеком скилл сам по себе работой не является: называть
+    // его при каждом запуске значит читать человеку его же давнюю правку.
+    let kept_only = crate::skills::Done { kept: vec!["beta".to_string()], ..Default::default() };
+    assert!(refresh_line("Zed", &kept_only).is_none(), "чужая правка — не повод говорить при каждом старте");
+
+    // Работа была — строка называет и сделанное, и оставленное.
+    let done = crate::skills::Done {
+        added: vec!["1c".to_string()],
+        updated: vec!["cf-edit".to_string()],
+        kept: vec!["beta".to_string()],
+    };
+    let line = refresh_line("Zed", &done).expect("работа была — о ней говорят");
+    assert_eq!(line.kind, Kind::Ok, "{line:?}");
+    assert!(line.text.contains("Zed"), "{line:?}");
+    assert!(line.text.contains("1c"), "{line:?}");
+    assert!(line.text.contains("cf-edit"), "{line:?}");
+    assert!(line.text.contains("beta"), "правленый обязан быть назван: {line:?}");
+}
+
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
 /// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
 /// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.

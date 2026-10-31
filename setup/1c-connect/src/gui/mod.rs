@@ -1106,6 +1106,110 @@ fn agent_line(mcp: Line, skill: Line) -> Line {
     Line { kind, text: format!("{}; {}", mcp.text, skill.text) }
 }
 
+/// Тихая доставка при запуске окна (задача 6) — без всякого щелчка: скиллы
+/// тем агентам, у кого записи MCP УЖЕ наши. Галочкой человек разрешил давно,
+/// и новую версию комплекта он получает сам, не догадываясь щёлкнуть второй
+/// раз (решение владельца).
+///
+/// Разрешением считаем только `Found::Ours`: чужая запись на месте нашей,
+/// пустое место и отсутствие самого агента на машине разрешения не дают.
+///
+/// Ходит по диску и зовёт CLI агентов (`Setup::look` у Claude Code и Codex —
+/// запуск их CLI, 6–8 с каждый, замер 30.10), поэтому живёт в своём потоке, а
+/// не на главном потоке окна.
+///
+/// Отдаёт строки журнала; пустой список — менять было нечего и говорить не о
+/// чем. Общий дом `~/.agents/skills` у Zed, pi и Codex тут же сам собой и
+/// лечится от повторов: первый из них всё обновил, и соседям по дому
+/// `refresh` отвечает молчанием.
+fn refresh_skills(kit: &Kit, exe: &std::path::Path) -> Vec<Line> {
+    // Причину отказа состояния несём словами, как и щелчок (`skills_plan`):
+    // без каталога отпечатков раскладки нет вовсе, и проглотить это значило
+    // бы оставить человека со старыми скиллами и без объяснения.
+    let state = match crate::skills::state() {
+        Ok(state) => state,
+        Err(why) => return vec![Line { kind: Kind::Fail, text: format!("скиллы при запуске: {why}") }],
+    };
+    let mut lines = Vec::new();
+    for def in crate::editors::AGENTS.iter() {
+        if !matches!(def.setup.look(exe), Ok(crate::editors::Found::Ours)) {
+            continue;
+        }
+        let Some(home) = crate::skills::home_dir(def.skills) else {
+            lines.push(Line {
+                kind: Kind::Fail,
+                text: format!("{}: скиллы не доставлены — не узнать домашний каталог агента", def.label),
+            });
+            continue;
+        };
+        match crate::skills::refresh(kit, &state, &home) {
+            Ok(done) => lines.extend(refresh_line(def.label, &done)),
+            Err(reasons) => lines.push(Line {
+                kind: Kind::Fail,
+                text: format!("{}: скиллы — {}", def.label, crate::editors::refusal_text(&reasons)),
+            }),
+        }
+    }
+    lines
+}
+
+/// Слово о тихой доставке — одна строка на агента, и ТОЛЬКО когда на диске
+/// что-то менялось (`Done::quiet`). Человек запуска не просил: сказать ему
+/// «скиллы на месте» при каждом старте значит приучить не читать журнал.
+/// Правленый им скилл называем лишь заодно с работой — сам по себе он новость
+/// не каждого дня, а его же собственная давняя правка.
+fn refresh_line(label: &str, done: &crate::skills::Done) -> Option<Line> {
+    if done.quiet() {
+        return None;
+    }
+    let mut what = Vec::new();
+    if !done.added.is_empty() {
+        what.push(format!("поставлены {}", done.added.join(", ")));
+    }
+    if !done.updated.is_empty() {
+        what.push(format!("обновлены {}", done.updated.join(", ")));
+    }
+    if !done.kept.is_empty() {
+        what.push(format!("{} оставлены как есть — их правили на месте", done.kept.join(", ")));
+    }
+    Some(Line { kind: Kind::Ok, text: format!("{label}: скиллы — {}", what.join("; ")) })
+}
+
+/// Завести ту доставку своим потоком и отдать её строки журналу.
+///
+/// Счётчик щелчков (`AGENT_CLICKS`) взводим тот же: выход обязан дождаться и
+/// этого потока — обрыв между сносом каталога и записью отпечатка оставил бы
+/// скилл без отпечатка, то есть чужим навсегда (докстрока `skills::lay`).
+///
+/// Не `guarded`: у него тело отдаёт РОВНО одно событие, а здесь их столько,
+/// сколько агентов нашлось, и ноль — законный исход. Паника ловится тем же
+/// приёмом и говорит тем же текстом (`PANIC_TEXT`).
+///
+/// Чего этот поток не умеет: защёлку агента (`ui.agent_clicks`) он не
+/// занимает — она живёт на главном потоке и снимается событием. Значит
+/// щелчок по той же галочке в те же несколько секунд пойдёт в тот же каталог
+/// вторым потоком. Случай узкий (щёлкнуть надо именно в окно доставки) и
+/// ценой закрывается несоразмерной — отдельным путём занятия защёлки до
+/// первого показа трея; названо здесь, чтобы не считалось невозможным.
+fn start_skill_refresh(cx: &mut App) {
+    let ui = cx.global::<Ui>();
+    let (kit, tx) = (ui.kit.clone(), ui.tx.clone());
+    AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let lines = match std::env::current_exe() {
+            Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe)))
+                .unwrap_or_else(|_| vec![Line { kind: Kind::Fail, text: PANIC_TEXT.into() }]),
+            Err(e) => {
+                vec![Line { kind: Kind::Fail, text: format!("скиллы при запуске: не узнать путь к своему исполняемому файлу: {e}") }]
+            }
+        };
+        for line in lines {
+            let _ = tx.unbounded_send(Ev::Line(line));
+        }
+        AGENT_CLICKS.fetch_sub(1, Ordering::Relaxed);
+    });
+}
+
 /// Решение щелчка: пустить его или нет, отметить защёлку, сказать человеку,
 /// что работа пошла, и завести поток. `work` — тело (`agent_work` в живой
 /// программе).
@@ -1834,6 +1938,10 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         if let Some(why) = &gate {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("MCP не включены при запуске: {why}") });
         }
+        // Скиллы — тем, кто галочкой уже разрешил: доставить недостающее и
+        // обновить устаревшее, не дожидаясь второго щелчка (задача 6). Своим
+        // потоком, строки придут `Ev::Line`.
+        start_skill_refresh(cx);
         if serve_on_start {
             match start_session(cx.global_mut::<Ui>()) {
                 Ok(()) => ensure_publication_now(cx.global_mut::<Ui>()),

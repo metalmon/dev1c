@@ -458,22 +458,62 @@ pub fn look(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec
     Ok(summarize(names.len(), foreign, ours))
 }
 
+/// Что раскладка СДЕЛАЛА — не что в доме лежит (`Found`). Тихой доставке при
+/// запуске (задача 6) нужен именно этот ответ: молчать ей положено ровно
+/// тогда, когда на диске ничего не менялось, а `Found::Ours` этих двух
+/// случаев не различает — им отвечают и «только что положили пять скиллов»,
+/// и «всё и так было на месте».
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Done {
+    /// Скиллов в доме не было — положили (`Verdict::New`).
+    pub added: Vec<String>,
+    /// Лежали наши и нетронутые, а комплект сменил версию — заменили.
+    pub updated: Vec<String>,
+    /// Правлены человеком или не наши вовсе — оставлены как есть и названы
+    /// (`foreign_label`), тем же словарём, что `Found::Foreign` у галочки.
+    pub kept: Vec<String>,
+}
+
+impl Done {
+    /// Менялось ли на диске хоть что-нибудь. `kept` сюда не входит нарочно:
+    /// оставленный чужой каталог — не работа, и называть его при КАЖДОМ
+    /// запуске значило бы читать человеку шум про его же давнюю правку
+    /// (решение владельца: пустой результат — молчание).
+    pub fn quiet(&self) -> bool {
+        self.added.is_empty() && self.updated.is_empty()
+    }
+}
+
+/// Что сталось с одним скиллом — ответ одного шага цикла раскладки.
+/// `Same` отдельно от `Added`/`Updated`: именно он и есть молчание.
+enum Change {
+    Added,
+    Updated,
+    Same,
+    Kept(String),
+}
+
 /// Поставить и обновить — разницы в правиле нет, ровно так устроен
 /// контейнер (`container-rule.txt`): каждый скилл по своему вердикту. Нет →
 /// копируем и пишем отпечаток. Не тронут (`Untouched`) — первая ветка
 /// первоисточника, которой не было до круга 1: отпечаток и есть сумма
 /// образа на момент прошлой раскладки, и если она совпала с суммой образа
 /// СЕЙЧАС — делать нечего, кроме как ничего не делать (Critical 1 ревью
-/// 31.10). Это не только экономия: без этой ветки `install` на каждый
-/// щелчок сносил бы каталог и копировал заново даже когда менять нечего, и
+/// 31.10). Это не только экономия: без этой ветки раскладка на каждый
+/// щелчок сносила бы каталог и копировала заново даже когда менять нечего, и
 /// обрыв между удалением и копией (ошибка диска, закрытие окна) оставлял бы
 /// каталог без отпечатка — а без отпечатка скилл не наш, точка (Important 3
-/// ревью 31.10, круг 1), и следующий `install` объявлял бы его чужим
+/// ревью 31.10, круг 1), и следующая раскладка объявляла бы его чужим
 /// навсегда: ни обновить, ни снять. Правлен человеком — не трогаем, называем
 /// в `Foreign`. Ссылка на его месте — отказ словами, но только для этого
 /// скилла: ошибка одного не должна останавливать раскладку остальных,
 /// поэтому они собираются в список, а не обрывают цикл.
-pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
+///
+/// Один цикл на двух потребителей, а не два цикла: галочке нужно слово о доме
+/// (`Found`), тихой доставке при запуске — перечень сделанного (`Done`).
+/// Правило трёх случаев у них общее, и переписывать его вторым телом значило
+/// бы развести их незаметно (задача 6).
+fn lay(kit: &Kit, state: &State, home: &Path) -> Result<(editors::Found, Done), Vec<String>> {
     // `write_stamp` ниже пишет отпечаток прямо в `state` — каталог обязан
     // существовать, иначе первая же раскладка откажет пустым местом,
     // которого ещё никто не создавал (круговое ревью, круг 2, пункт 5:
@@ -483,12 +523,12 @@ pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, 
     std::fs::create_dir_all(state.path()).map_err(|e| vec![format!("не создать {}: {e}", state.path().display())])?;
     let names = kit_skill_names(kit).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
-    let mut foreign = Vec::new();
+    let mut done = Done::default();
     let mut ours = 0usize;
     for name in &names {
         let src = kit.path(KIT_DIR).join(name);
         let dst = home.join(name);
-        let outcome = (|| -> Result<Option<String>, String> {
+        let outcome = (|| -> Result<Change, String> {
             let stamp = stamp_path(state, &dst, name)?;
             let prev = read_stamp(&stamp)?;
             match verdict(&dst, prev.as_deref())? {
@@ -497,29 +537,69 @@ pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, 
                     let sum = dir_sum(&src)?;
                     copy_skill(&src, &dst)?;
                     write_stamp(&stamp, &sum)?;
-                    Ok(None)
+                    Ok(Change::Added)
                 }
                 Verdict::Untouched => {
                     let sum = dir_sum(&src)?;
-                    if prev.as_deref() != Some(sum.as_str()) {
-                        copy_skill(&src, &dst)?;
-                        write_stamp(&stamp, &sum)?;
+                    if prev.as_deref() == Some(sum.as_str()) {
+                        return Ok(Change::Same);
                     }
-                    Ok(None)
+                    copy_skill(&src, &dst)?;
+                    write_stamp(&stamp, &sum)?;
+                    Ok(Change::Updated)
                 }
-                Verdict::Edited => Ok(Some(foreign_label(name, &dst, prev.is_some()))),
+                Verdict::Edited => Ok(Change::Kept(foreign_label(name, &dst, prev.is_some()))),
             }
         })();
         match outcome {
-            Ok(None) => ours += 1,
-            Ok(Some(label)) => foreign.push(label),
+            Ok(Change::Added) => {
+                done.added.push(name.clone());
+                ours += 1;
+            }
+            Ok(Change::Updated) => {
+                done.updated.push(name.clone());
+                ours += 1;
+            }
+            Ok(Change::Same) => ours += 1,
+            Ok(Change::Kept(label)) => done.kept.push(label),
             Err(e) => errors.push(e),
         }
     }
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(summarize(names.len(), foreign, ours))
+    Ok((summarize(names.len(), done.kept.clone(), ours), done))
+}
+
+/// Щелчок галочки: раскладка и слово о доме. Что именно она сделала, щелчку
+/// не нужно — он и так сказал человеку «поставлен»/«убран».
+pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
+    lay(kit, state, home).map(|(found, _)| found)
+}
+
+/// Запуск окна без щелчка: доставить недостающее и обновить устаревшее тем,
+/// кто галочкой уже разрешил (решение владельца — молча доставить им новую
+/// версию комплекта, не дожидаясь второго щелчка). Правило то же самое, что у
+/// щелчка, и тело то же (`lay`): правленое человеком не трогаем никогда,
+/// неизменённое обновляем.
+///
+/// `home: &Path`, а не `Home` — тем же решением, что у `look` (её докстрока):
+/// звать `home_dir` здесь значило бы ходить в переменную среды, общую на весь
+/// прогон тестов, и доставлять скиллы в настоящий дом человека прямо из
+/// теста. Путь решает вызывающий, он же один на все четыре функции.
+///
+/// Комплект без каталога `skills/` — не отказ, а пустой ответ, и это
+/// единственное место, где раскладка молчит о нём: щелчок — просьба, на
+/// просьбу отвечают словами (`kit_skill_names`), а запуск окна человек ни о
+/// чём не просил, и строка «в комплекте нет skills/» при КАЖДОМ запуске была
+/// бы ровно тем шумом, которого велено избегать. Прочие неисправности
+/// комплекта (ссылка на месте скилла, нечитаемый каталог, имя не по правилу)
+/// по-прежнему отказ словами: там сломано то, что человек может починить.
+pub fn refresh(kit: &Kit, state: &State, home: &Path) -> Result<Done, Vec<String>> {
+    if !kit.path(KIT_DIR).exists() {
+        return Ok(Done::default());
+    }
+    lay(kit, state, home).map(|(_, done)| done)
 }
 
 /// Снять наши скиллы — только те, что не тронуты: правленые остаются на
@@ -1225,6 +1305,75 @@ mod tests {
         assert_eq!(found, editors::Found::Foreign(vec!["beta".to_string()]));
         assert_eq!(std::fs::read_to_string(home.path().join("alpha/SKILL.md")).unwrap(), "альфа два");
         assert_eq!(std::fs::read_to_string(home.path().join("beta/SKILL.md")).unwrap(), "правка человека");
+    }
+
+    /// Задача 6, главный случай: комплект обновился, а человек правил один из
+    /// скиллов на месте. Запуск окна (`refresh`, без всякого щелчка) обязан
+    /// заменить неизменённый новой версией и НЕ трогать правленый, назвав
+    /// его. Падает на подмене «обновлять всё подряд» (`Verdict::Edited` →
+    /// копия): `kept` опустеет, а текст правки пропадёт.
+    #[test]
+    fn a_new_kit_updates_the_untouched_files_and_leaves_the_changed_one() {
+        let (root, kit) = kit_with_skills(&[("alpha", "альфа раз"), ("beta", "бета раз")]);
+        let state = Dir::new();
+        let home = Dir::new();
+        install(&kit, &ts(&state), home.path()).unwrap();
+
+        // Человек правит beta у себя в доме.
+        std::fs::write(home.path().join("beta/SKILL.md"), "правка человека").unwrap();
+        // Вышла новая версия комплекта — обе части сменились.
+        std::fs::write(root.path().join(KIT_DIR).join("alpha/SKILL.md"), "альфа два").unwrap();
+        std::fs::write(root.path().join(KIT_DIR).join("beta/SKILL.md"), "бета два").unwrap();
+
+        let done = refresh(&kit, &ts(&state), home.path()).unwrap();
+        assert_eq!(done.updated, vec!["alpha".to_string()], "неизменённый обязан обновиться: {done:?}");
+        assert!(done.added.is_empty(), "ставить заново было нечего: {done:?}");
+        assert_eq!(done.kept, vec!["beta".to_string()], "правленый обязан быть назван: {done:?}");
+        assert!(!done.quiet(), "работа была — молчать нельзя");
+
+        assert_eq!(std::fs::read_to_string(home.path().join("alpha/SKILL.md")).unwrap(), "альфа два");
+        assert_eq!(std::fs::read_to_string(home.path().join("beta/SKILL.md")).unwrap(), "правка человека");
+    }
+
+    /// Задача 6, второй случай: галочкой человек разрешил давно, а скиллы
+    /// завела только новая версия программы — ни скиллов, ни отпечатков в доме
+    /// нет. Запуск окна доставляет их молча и говорит об этом один раз: второй
+    /// запуск подряд обязан молчать (`quiet`), иначе человек читает одно и то
+    /// же при каждом старте.
+    #[test]
+    fn the_first_run_after_the_release_delivers_skills_to_a_configured_agent() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let home = Dir::new();
+
+        let done = refresh(&kit, &ts(&state), home.path()).unwrap();
+        assert_eq!(done.added, vec!["1c".to_string()], "{done:?}");
+        assert!(done.kept.is_empty(), "{done:?}");
+        assert_eq!(std::fs::read_to_string(home.path().join("1c/SKILL.md")).unwrap(), "текст скилла");
+
+        let again = refresh(&kit, &ts(&state), home.path()).unwrap();
+        assert!(again.quiet(), "второй запуск менять нечего: {again:?}");
+        assert!(again.kept.is_empty(), "свой же скилл чужим звать нельзя: {again:?}");
+    }
+
+    /// Задача 6, третий случай: у комплекта нет каталога `skills/` вовсе
+    /// (старая сборка). Запуск окна не трогает ни дом агента, ни отпечатки —
+    /// и не отказывает словами, в отличие от щелчка: человек ни о чём не
+    /// просил, и строка при каждом запуске была бы шумом.
+    #[test]
+    fn refresh_touches_nothing_when_the_kit_has_no_skills_folder() {
+        let root = Dir::new();
+        let kit = Kit::at(root.path());
+        let state = Dir::new();
+        let home = Dir::new();
+
+        let done = refresh(&kit, &ts(&state), home.path()).unwrap();
+        assert_eq!(done, Done::default(), "сказать нечего: {done:?}");
+        assert!(std::fs::read_dir(home.path()).unwrap().next().is_none(), "в доме агента ничего не должно появиться");
+        assert!(std::fs::read_dir(state.path()).unwrap().next().is_none(), "отпечатков тоже не должно появиться");
+
+        // А щелчок на том же комплекте по-прежнему отвечает словами.
+        assert!(install(&kit, &ts(&state), home.path()).is_err(), "щелчок — просьба, на неё отвечают");
     }
 
     /// Пункт 4 и 8 ревью, круг 1: два скилла, оба — ссылки. `look` раньше

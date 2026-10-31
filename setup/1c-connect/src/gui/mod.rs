@@ -996,24 +996,17 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
             kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
         };
     }
-    // Критически (ревью, Critical 1/2): путь берём из `verify::skills_state()`
-    // — он никогда не зависит от `kit` и никогда не совпадает с каталогом
-    // источников в комплекте (`kit.path(skills::KIT_DIR)`). `create_dir_all`
-    // ниже создаёт КАТАЛОГ ОТПЕЧАТКОВ, а не что-либо в самом комплекте — в
-    // комплект эта раскладка не пишет вовсе.
+    // Круговое ревью, круг 2, пункт 1: сам вызов `create_dir_all` и
+    // `install`/`remove` переехал в `verify::install_or_remove_skills` —
+    // так шов «путь считается ровно один раз» проверяется тестом (временный
+    // каталог, без GPUI и без реальных переменных среды), а не только тем,
+    // что три вызывающих места зовут одну и ту же функцию по доброй воле.
+    // `SkillsState`, которую отдаёт `verify::skills_state()`, — тип с
+    // приватным полем: подставить сюда `kit.state_path(...)` или любой свой
+    // путь невозможно, не поменяв саму функцию, — компилятор держит правило
+    // вместо теста, который можно обойти молча.
     let state = verify::skills_state();
-    if on {
-        // `skills::install` пишет отпечаток прямо в `state` — каталог обязан
-        // существовать, иначе первая же раскладка откажет пустым местом,
-        // которого ещё никто не создавал (в отличие от `look`/`remove`,
-        // которым отсутствующий каталог ничем не мешает — непрочитанный
-        // отпечаток и так значит «первая раскладка»).
-        if let Err(e) = std::fs::create_dir_all(&state) {
-            return Line { kind: Kind::Fail, text: format!("скилл: не создать {}: {e}", state.display()) };
-        }
-    }
-    let result = if on { crate::skills::install(kit, &state, &home) } else { crate::skills::remove(kit, &state, &home) };
-    skill_line(on, result)
+    skill_line(on, verify::install_or_remove_skills(kit, on, &home, &state))
 }
 
 /// Слово о половине «скиллы» — тем же устройством, что у `setup_line`, но

@@ -52,13 +52,34 @@ fn env_dir(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(name).filter(|v| !v.is_empty())
 }
 
+/// База каталога состояния, когда переменная среды не найдена — найденную
+/// переменную оборачивает вызывающий (`state_dir`), сюда приходит уже
+/// прочитанное значение, а не имя переменной: чистая функция без похода в
+/// среду, и тестируется без переменных среды настоящей машины (правила
+/// задачи их трогать запрещают).
+///
+/// Было: `"."`. Круговое ревью задачи 5 (находка «вне круга», важнее своей
+/// пометки): рабочий каталог окна на Windows — это и есть каталог САМОГО
+/// КОМПЛЕКТА, и молчаливый откат к `"."` оставлял дорогу назад в комплект
+/// открытой — обе критические находки задачи 5 (отпечатки скиллов внутри
+/// комплекта) вернулись бы через этот чёрный ход, стоило `LOCALAPPDATA`/`HOME`
+/// не найтись. Системный временный каталог абсолютен всегда (гарантия
+/// `std::env::temp_dir`, не зависит от рабочего каталога) и не бывает
+/// каталогом кита ни при каком запуске.
+fn absolute_base(found: Option<std::ffi::OsString>) -> PathBuf {
+    match found {
+        Some(v) => PathBuf::from(v),
+        None => std::env::temp_dir(),
+    }
+}
+
 pub fn state_dir() -> PathBuf {
     if cfg!(windows) {
-        PathBuf::from(env_dir("LOCALAPPDATA").unwrap_or_else(|| ".".into())).join("dev1c")
+        absolute_base(env_dir("LOCALAPPDATA")).join("dev1c")
     } else {
         match env_dir("XDG_DATA_HOME") {
             Some(d) => PathBuf::from(d).join("dev1c"),
-            None => PathBuf::from(env_dir("HOME").unwrap_or_else(|| ".".into())).join(".local/share/dev1c"),
+            None => absolute_base(env_dir("HOME")).join(".local/share/dev1c"),
         }
     }
 }
@@ -2438,6 +2459,25 @@ mod tests {
         let laid_out_stamp = state.join(VERSION_FILE);
         assert!(!laid_out_stamp.starts_with(kit_root), "{}", laid_out_stamp.display());
         assert!(laid_out_stamp.starts_with(&state), "{}", laid_out_stamp.display());
+    }
+
+    /// Круговое ревью задачи 5, находка «вне круга» (4): переменной среды
+    /// нет — раньше `state_dir()` тихо откатывался на `"."`, относительный
+    /// путь, который на Windows разворачивается в рабочий каталог окна, а он
+    /// там и есть сам комплект. Доказываем на чистой функции, без переменных
+    /// среды настоящей машины: отсутствие значения не должно давать
+    /// относительный путь.
+    #[test]
+    fn absolute_base_never_resolves_to_a_relative_path() {
+        let p = absolute_base(None);
+        assert!(p.is_absolute(), "{}", p.display());
+        assert_ne!(p, Path::new("."), "{}", p.display());
+    }
+
+    #[test]
+    fn absolute_base_uses_the_found_value_as_is() {
+        let p = absolute_base(Some(std::ffi::OsString::from("/custom/base")));
+        assert_eq!(p, Path::new("/custom/base"));
     }
 
     #[test]

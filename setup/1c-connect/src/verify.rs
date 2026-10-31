@@ -948,6 +948,29 @@ pub fn editor_mcp_fact() -> Check {
     Check::fail(EDITOR_MCP, "не смог проверить записи MCP у редактора", "перезапустите программу — свой путь к файлу она узнаёт при старте")
 }
 
+/// Каталог отпечатков раскладки скиллов — ТИП, а не голый `PathBuf` (круговое
+/// ревью задачи 5, круг 2, пункт 1). Поле приватное: за пределами этого
+/// модуля значение можно получить только у `skills_state()` ниже — ни
+/// `gui::skills_half`, ни `gui::tray::set_agents`, ни `cheap` не могут
+/// подставить собственное вычисление пути (например, вернувшийся
+/// `kit.state_path(skills::KIT_DIR)` — ровно Critical 1/2 круга 1) потому
+/// что из `PathBuf` в `SkillsState` их код не попадёт: компилятор держит
+/// правило «путь считается в одном месте» вместо теста, который можно было
+/// обойти молча (три вызывающих места звали одну и ту же функцию, но ничто
+/// не держало их от того, чтобы разойтись).
+///
+/// Тестам (тому же модулю `verify::tests`, потомку) приватное поле видно —
+/// `SkillsState(временный_путь)` там собирается напрямую, без похода в
+/// настоящие переменные среды машины (правила задачи это запрещают).
+#[derive(Debug, Clone)]
+pub(crate) struct SkillsState(std::path::PathBuf);
+
+impl SkillsState {
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
 /// Где лежат отпечатки раскладки скиллов — `ops_host::state_dir()`, а НЕ
 /// `Kit::state_path` (Critical 1 кругового ревью задачи 5): для окна `Kit`
 /// приходит из `ops_host::wire_state`, который на Windows состояние не
@@ -964,8 +987,8 @@ pub fn editor_mcp_fact() -> Check {
 /// Имя подкаталога — `"skill-stamps"`, не `"skills"`: совпади оно с
 /// `skills::KIT_DIR`, тот же класс путаницы мог бы вернуться при
 /// невнимательном чтении кода, даже когда путь больше не лежит в комплекте.
-pub(crate) fn skills_state() -> std::path::PathBuf {
-    crate::ops_host::state_dir().join("skill-stamps")
+pub(crate) fn skills_state() -> SkillsState {
+    SkillsState(crate::ops_host::state_dir().join("skill-stamps"))
 }
 
 /// Обе половины галочки одним `Found` — записи MCP (уже посчитаны
@@ -975,13 +998,6 @@ pub(crate) fn skills_state() -> std::path::PathBuf {
 /// задача 5): считай каждый сам — и правило могло бы разойтись, а галочка
 /// показывала бы не то, что знает карточка.
 ///
-/// `state` приходит параметром, а не считается внутри (`skills_state()`
-/// звал бы настоящий `ops_host::state_dir()` — переменные среды реальной
-/// машины, и тест, которому нужен временный каталог, не смог бы подменить
-/// его без их правки, что запрещено правилами задачи): тесты передают свой
-/// временный каталог, живой код — `skills_state()` вызывающего (`cheap`,
-/// `gui::tray::set_agents`).
-///
 /// `home: None` — переменная среды, которой назначен домашний каталог
 /// скиллов, не задана: узнать нечего, и это отказ словами, той же природы,
 /// что у файлового агента без пути к настройкам MCP (`editors::Setup::enable`),
@@ -990,13 +1006,43 @@ pub(crate) fn agent_found(
     kit: &common::kit::Kit,
     mcp: &Result<editors::Found, String>,
     home: Option<&std::path::Path>,
-    state: &std::path::Path,
+    state: &SkillsState,
 ) -> Result<editors::Found, String> {
     let skills = match home {
         None => Err("домашний каталог агента на этой машине неизвестен".to_string()),
-        Some(h) => crate::skills::look(kit, state, h).map_err(|errs| errs.join("; ")),
+        Some(h) => crate::skills::look(kit, state.path(), h).map_err(|errs| errs.join("; ")),
     };
     editors::both(mcp, &skills)
+}
+
+/// Записывающая половина: поставить или снять скиллы агента — общая точка
+/// для `gui::skills_half`, перенесённая сюда из `gui/mod.rs` (круг 2
+/// ревью, пункт 1), чтобы `create_dir_all` и сам вызов `install`/`remove`
+/// можно было проверить тестом с временным каталогом, не трогая GPUI,
+/// `std::env::current_exe()` и реальные переменные среды.
+///
+/// `create_dir_all` обязателен перед `install`: `skills::install` пишет
+/// отпечаток прямо в `state` (`skills.rs::write_stamp`), и первая же
+/// раскладка на каталоге, которого ещё никто не создавал, отказала бы
+/// пустым местом (круг 2, пункт 5 — без этой строки отказ был бы честным,
+/// но ненужным: каталог для него — не каталог кита, его создать можно и
+/// нужно). `remove`/`look` каталог не требуют — непрочитанный отпечаток и
+/// так значит «первая раскладка», `read_stamp` отличает отсутствующий
+/// каталог от отсутствующего файла одинаково (`ErrorKind::NotFound`).
+pub(crate) fn install_or_remove_skills(
+    kit: &common::kit::Kit,
+    on: bool,
+    home: &std::path::Path,
+    state: &SkillsState,
+) -> Result<editors::Found, Vec<String>> {
+    if on {
+        std::fs::create_dir_all(state.path()).map_err(|e| vec![format!("не создать {}: {e}", state.path().display())])?;
+    }
+    if on {
+        crate::skills::install(kit, state.path(), home)
+    } else {
+        crate::skills::remove(kit, state.path(), home)
+    }
 }
 
 /// Факт для машины человека (решение владельца 30.10, дополнение к задаче 7): там настраиваются ВСЕ локальные агенты, и факт, глядящий только на Zed, врёт в обе стороны — скажет «всё хорошо», когда к нам не придёт ни один агент из pi. Правило владельца: зелёный, если настроен хотя бы один УСТАНОВЛЕННЫЙ агент (разработчик вправе пользоваться одним Zed, и жёлтая точка из-за ненастроенного pi, которым он не пользуется, была бы ложной тревогой); жёлтый — только когда ни один установленный агент не настроен (агент точно не дойдёт до базы ни из одного). Ненастроенный агент при зелёном называется в подробности факта, а не превращает его в провал. Агента, которого на машине нет (`Found::Missing`), факт не поминает вовсе — настраивать там нечего, и ни «зелёным», ни «жёлтым» он не считается.
@@ -2732,55 +2778,104 @@ mod tests {
         assert!(c.detail.contains("Zed"), "{c:?}");
     }
 
-    /// Та же мысль, но через настоящую раскладку на диске (`agent_found`), а
-    /// не готовую пару `Found`: записи MCP считаются вызывающим (как и в
-    /// `cheap`), скиллы `agent_found` читает сам — тем же `skills::look`, что
-    /// и подменю трея. Переменные среды не трогаем: домашний каталог —
-    /// обычный временный, передан параметром.
+    /// Та же мысль, но через настоящую раскладку на диске (`agent_found` +
+    /// `install_or_remove_skills`), а не готовую пару `Found`: записи MCP
+    /// считаются вызывающим (как и в `cheap`), скиллы читаются тем же
+    /// `skills::look`, что и подменю трея. `SkillsState` собран здесь прямо
+    /// (круг 2 ревью, пункт 1: поле приватно для внешних модулей, но этот
+    /// тест — потомок `verify`, ему видно) — переменные среды настоящей
+    /// машины не трогаем, каталог отпечатков обычный временный.
     #[test]
     fn agent_found_reads_the_skills_half_from_disk() {
         let root = crate::project::tempdir::Dir::new();
         std::fs::create_dir_all(root.path().join("skills").join("1c")).unwrap();
         std::fs::write(root.path().join("skills").join("1c").join("SKILL.md"), "текст скилла").unwrap();
         let kit = common::kit::Kit::at(root.path());
-        // Каталог отпечатков — обычный временный, отдельно от кита: именно
-        // это разделение чинит Critical 1/2 кругового ревью (прежде
-        // `skills_state` совпадала на Windows с каталогом кита, то есть с
-        // каталогом источников).
-        let state = crate::project::tempdir::Dir::new();
+        let state = SkillsState(crate::project::tempdir::Dir::new().path().to_path_buf());
         let home = crate::project::tempdir::Dir::new();
         let mcp = Ok(editors::Found::Ours);
 
         // Записи MCP на месте, скиллов в доме ещё нет.
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), state.path()), Ok(editors::Found::Absent));
+        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), &state), Ok(editors::Found::Absent));
 
-        // Поставили скиллы (той же раскладкой, что зовёт щелчок галочки).
-        crate::skills::install(&kit, state.path(), home.path()).unwrap();
-        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), state.path()), Ok(editors::Found::Ours));
-
-        // Раскладка не завела никакого каталога отпечатков ВНУТРИ кита —
-        // ровно та беда, от которой чинит Critical 1/2: имя каталога
-        // отпечатков (`skills_state`) туда и не ушло бы.
-        assert!(!root.path().join("skill-stamps").exists(), "отпечаток не должен уйти в комплект");
+        // Поставили скиллы той же функцией, что зовёт щелчок галочки
+        // (`install_or_remove_skills`, `on = true`) — каталога отпечатков
+        // заранее не было (`SkillsState` выше указывает на путь временного
+        // каталога, а не на сам временный каталог), `create_dir_all` внутри
+        // обязана была его завести.
+        install_or_remove_skills(&kit, true, home.path(), &state).unwrap();
+        assert_eq!(agent_found(&kit, &mcp, Some(home.path()), &state), Ok(editors::Found::Ours));
     }
 
-    /// Critical 1 кругового ревью: `kit.state_path("skills")` для окна на
-    /// Windows совпадал бы с каталогом кита целиком (`ops_host::wire_state`
-    /// там состояние не трогает) — то есть ровно с `kit.path(skills::KIT_DIR)`,
-    /// откуда раскладка берёт ИСТОЧНИКИ. Отпечатки обязаны жить в
-    /// `ops_host::state_dir()` на любой системе, а не повторять имя каталога
-    /// источников, чтобы та же путаница не вернулась при следующей правке.
+    /// Круг 2 ревью, пункт 2: прежний тест сравнивал с ВЫДУМАННЫМ путём
+    /// `/opt/dev1c-kit`, а не с настоящим комплектом из теста — здесь кит
+    /// настоящий, временный. `skills_state()` не берёт `kit` параметром
+    /// вовсе, так что совпасть с НИМ не может ни при какой реализации, но
+    /// проверяем явно: имя подкаталога отпечатков не совпадает с именем
+    /// каталога источников (`skills::KIT_DIR`) — тем же именем, под которым
+    /// `kit.path(...)` искал бы скиллы в этом самом ките.
     #[test]
-    fn skills_state_never_resolves_under_a_kit_root() {
-        let kit_root = std::path::Path::new("/opt/dev1c-kit");
+    fn skills_state_never_lies_under_a_real_kit_root() {
+        let root = crate::project::tempdir::Dir::new();
+        let kit = common::kit::Kit::at(root.path());
         let state = skills_state();
-        assert!(!state.starts_with(kit_root), "{}", state.display());
-        assert!(state.starts_with(crate::ops_host::state_dir()), "{}", state.display());
+        assert!(!state.path().starts_with(&kit.root), "{}", state.path().display());
+        assert!(!state.path().starts_with(kit.state()), "{}", state.path().display());
         assert_ne!(
-            state.file_name(),
+            state.path().file_name(),
             Some(std::ffi::OsStr::new(crate::skills::KIT_DIR)),
             "имя каталога отпечатков не должно совпадать с именем каталога источников в комплекте"
         );
+    }
+
+    /// Пересчёт ожидаемого корня НЕ вызовом `ops_host::state_dir()` (иначе
+    /// проверка сравнивала бы реализацию с собой — круг 2 ревью, пункт 2),
+    /// а теми же двумя переменными среды настоящей машины, прочитанными
+    /// прямо здесь. Пустые значения не в счёт, тем же правилом, что
+    /// `ops_host::env_dir` (пустая `XDG_DATA_HOME=""` не задана).
+    fn expected_app_data_root() -> Option<std::path::PathBuf> {
+        let v = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+        if cfg!(windows) {
+            v("LOCALAPPDATA")
+        } else {
+            v("XDG_DATA_HOME").or_else(|| v("HOME"))
+        }
+    }
+
+    #[test]
+    fn skills_state_lives_under_the_real_app_data_location() {
+        let Some(root) = expected_app_data_root() else {
+            eprintln!("пропущено: ни LOCALAPPDATA, ни XDG_DATA_HOME/HOME не заданы на этой машине");
+            return;
+        };
+        let state = skills_state();
+        assert!(state.path().starts_with(&root), "{} не внутри {}", state.path().display(), root.display());
+    }
+
+    /// Круг 2 ревью, пункт 5: `create_dir_all` перед `install` без теста
+    /// можно удалить молча (`skills::write_stamp` сам по себе честно
+    /// отказывает словами, если каталога нет — но тогда раскладка отказывала
+    /// бы на первом же щелчке с пустым состоянием, вместо того чтобы завести
+    /// каталог самой). Каталог отпечатков здесь — ПОДкаталог временного, и
+    /// он не существует до вызова: без `create_dir_all` `install` вернул бы
+    /// `Err` (`write_stamp`: «не записать …», родителя нет), с ним — `Ok`.
+    #[test]
+    fn install_creates_its_own_stamp_directory_when_missing() {
+        let (_root, kit) = {
+            let root = crate::project::tempdir::Dir::new();
+            std::fs::create_dir_all(root.path().join("skills").join("1c")).unwrap();
+            std::fs::write(root.path().join("skills").join("1c").join("SKILL.md"), "текст скилла").unwrap();
+            let kit = common::kit::Kit::at(root.path());
+            (root, kit)
+        };
+        let state_root = crate::project::tempdir::Dir::new();
+        let state = SkillsState(state_root.path().join("not-yet-created"));
+        let home = crate::project::tempdir::Dir::new();
+        assert!(!state.path().exists(), "каталог отпечатков обязан отсутствовать до вызова — иначе тест ничего не проверяет");
+
+        let result = install_or_remove_skills(&kit, true, home.path(), &state);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(state.path().exists(), "create_dir_all обязана была завести каталог отпечатков сама");
     }
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с MCP_PORTS»).

@@ -454,6 +454,24 @@ fn a_foreign_skill_left_alone_at_removal_is_not_called_our_own() {
     assert!(!line.text.contains("наш убран"), "просьбу выполнили — отказом или работой, которой не было, это звать нельзя: {line:?}");
 }
 
+/// Пункт 5 ревью целого, первая половина: та же беда в соседней ветке —
+/// снятие при ПУСТОМ доме говорило «убран». `remove` отвечает одним и тем же
+/// `Found::Absent` и когда унёс наши каталоги, и когда уносить было нечего
+/// вовсе, различить эти случаи `skill_line` нечем — значит слово обязано быть
+/// правдой в обоих. Падает на возврате к «убран».
+#[test]
+fn a_removal_with_nothing_of_ours_to_take_does_not_claim_work() {
+    let line = skill_line(false, Ok(crate::editors::Found::Absent));
+    assert_eq!(line.kind, Kind::Ok, "{line:?}");
+    assert!(line.text.contains("наших больше нет"), "{line:?}");
+    assert!(!line.text.contains("убран"), "о работе, которой могло не быть, говорить нельзя: {line:?}");
+
+    // Включение по-прежнему говорит о работе: там `Found::Ours` — это и есть
+    // доказательство, что наши каталоги на месте.
+    let on = skill_line(true, Ok(crate::editors::Found::Ours));
+    assert!(on.text.contains("поставлен"), "{on:?}");
+}
+
 /// Круг 4, точка 2: причина отказа `skills::state()` обязана дойти до строки
 /// журнала щелчка СЛОВАМИ, а не обернуться молчаливым «скиллов нет». Круг 5,
 /// пункт 3: держим это на САМОМ решении (`skills_plan`), а не на печати уже
@@ -521,6 +539,35 @@ fn the_startup_delivery_speaks_only_when_it_changed_something() {
     assert!(line.text.contains("1c"), "{line:?}");
     assert!(line.text.contains("cf-edit"), "{line:?}");
     assert!(line.text.contains("beta"), "правленый обязан быть назван: {line:?}");
+}
+
+/// Пункт 1 ревью целого (дефект режима): в туннельном режиме тихой доставки
+/// нет вовсе — ни опроса агентов, ни раскладки в доме человека, ни строки в
+/// журнал. Решение держим на чистой функции (`delivery_needed`), а не на
+/// живом проходе: в локальном режиме настоящий проход полез бы в настоящий
+/// дом человека и в CLI агентов, что правила задачи запрещают прямо.
+///
+/// Падает на обеих подменах, от которых стоит: выкинуть режим из условия —
+/// падает строка про `tunnel`; выкинуть проверку комплекта — падает строка
+/// про комплект без скиллов. Строка `refresh_skills` ниже сторожит, что
+/// решение и правда стоит на входе доставки, а не осталось функцией, которую
+/// никто не зовёт.
+#[test]
+fn the_startup_delivery_does_nothing_at_all_in_tunnel_mode() {
+    assert!(delivery_needed("local", true), "локальный режим с комплектом — доставка нужна");
+    assert!(!delivery_needed("tunnel", true), "в туннельном режиме делать не нужно ничего");
+    assert!(!delivery_needed("something-else", true), "незнакомый режим локальным не считаем");
+    assert!(!delivery_needed("local", false), "в комплекте нечего доставлять");
+
+    // И сама доставка молчит, не сходив ни к агентам, ни за каталогом
+    // отпечатков: комплект здесь со скиллами, то есть пустой ответ может
+    // дать только режим.
+    let root = crate::project::tempdir::Dir::new();
+    std::fs::create_dir_all(root.path().join(crate::skills::KIT_DIR).join("1c")).unwrap();
+    std::fs::write(root.path().join(crate::skills::KIT_DIR).join("1c/SKILL.md"), "текст скилла").unwrap();
+    let kit = Kit::at(root.path());
+    let lines = refresh_skills(&kit, std::path::Path::new("c:/нет-такого/1c-connect.exe"), "tunnel");
+    assert!(lines.is_empty(), "в туннельном режиме говорить нечего: {lines:?}");
 }
 
 /// Круг исправления задачи 6, пункт 3: `allowed` таблицей — тем же приёмом,

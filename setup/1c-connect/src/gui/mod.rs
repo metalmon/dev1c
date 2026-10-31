@@ -1089,8 +1089,15 @@ fn skill_line(on: bool, result: Result<crate::editors::Found, Vec<String>>) -> L
             kind: Kind::Ok,
             text: format!("скилл: наших больше нет; {} оставлен нетронутым — он не наш", names.join(", ")),
         },
+        // Снятие говорит «наших больше нет», а не «убран» (пункт 5 ревью
+        // целого, та же беда, что уже чинили ветвью выше и у записей MCP):
+        // `remove` отвечает `Found::Absent` и когда унёс наши каталоги, и
+        // когда уносить было нечего вовсе — ни одного нашего скилла в доме не
+        // лежало, — а различить эти два случая `Found` не может. «Убран»
+        // сообщало бы во втором случае о работе, которой не было; «наших
+        // больше нет» правда в обоих.
         Ok(found) if agent_as_expected(on, &found) => {
-            Line { kind: Kind::Ok, text: format!("скилл: {}", if on { "поставлен" } else { "убран" }) }
+            Line { kind: Kind::Ok, text: format!("скилл: {}", if on { "поставлен" } else { "наших больше нет" }) }
         }
         Ok(other) => Line {
             kind: Kind::Fail,
@@ -1127,6 +1134,17 @@ fn allowed(looks: &[Result<crate::editors::Found, String>]) -> Vec<usize> {
         .collect()
 }
 
+/// Нужна ли тихая доставка вообще — чистая функция решения, тем же приёмом,
+/// что `skills_plan` и `allowed` (пункт 1 ревью целого). Два условия, и оба
+/// про «кому это служит»: агенты живут на ЭТОЙ машине
+/// (`editors::agents_live_here` — один предикат на подменю трея, на факт
+/// набора и на эту доставку, третьего счёта режима в программе нет) и в
+/// комплекте есть что доставлять. Не сошлось — ни опроса агентов, ни похода
+/// за каталогом отпечатков, ни строки в журнал.
+fn delivery_needed(mode: &str, kit_has_skills: bool) -> bool {
+    crate::editors::agents_live_here(mode) && kit_has_skills
+}
+
 /// Тихая доставка при запуске окна (задача 6) — без всякого щелчка: скиллы
 /// тем агентам, у кого записи MCP УЖЕ наши. Галочкой человек разрешил давно,
 /// и новую версию комплекта он получает сам, не догадываясь щёлкнуть второй
@@ -1158,8 +1176,19 @@ fn allowed(looks: &[Result<crate::editors::Found, String>]) -> Vec<usize> {
 /// (словами на щелчок, молчанием на запуск — её несёт сам `skills::refresh`,
 /// который эта функция тоже зовёт, и ветка внутри него остаётся на случай,
 /// если кто-то позовёт его не через `refresh_skills`).
-fn refresh_skills(kit: &Kit, exe: &std::path::Path) -> Vec<Line> {
-    if !kit.path(crate::skills::KIT_DIR).exists() {
+///
+/// Пункт 1 ревью целого: режим спрашиваем ЗДЕСЬ, а не в `start_skill_refresh`
+/// — предикат стоит там же, где работа, и значит его не обойдёт ни один
+/// вызывающий, а решение при этом остаётся проверяемым без `cx` и без диска
+/// (`delivery_needed` ниже). Прежде доставка не смотрела режим вовсе, в
+/// отличие от подменю трея (`tray::set_agents`) и факта набора
+/// (`verify::cheap`): в туннельном режиме на машине, которая раньше была
+/// локальной (переключение штатное, `apply_mode`), запуск окна опрашивал всех
+/// четырёх агентов и МОЛЧА обновлял каталоги навыков в доме человека — в
+/// режиме, где раздела «Локальные агенты» нет вовсе и отменить это галочкой
+/// нельзя. Спека, строка 60: «В туннельном режиме делать не нужно ничего».
+fn refresh_skills(kit: &Kit, exe: &std::path::Path, mode: &str) -> Vec<Line> {
+    if !delivery_needed(mode, kit.path(crate::skills::KIT_DIR).exists()) {
         return Vec::new();
     }
     // Причину отказа состояния несём словами, как и щелчок (`skills_plan`):
@@ -1231,11 +1260,11 @@ fn refresh_line(label: &str, done: &crate::skills::Done) -> Option<Line> {
 /// первого показа трея; названо здесь, чтобы не считалось невозможным.
 fn start_skill_refresh(cx: &mut App) {
     let ui = cx.global::<Ui>();
-    let (kit, tx) = (ui.kit.clone(), ui.tx.clone());
+    let (kit, tx, mode) = (ui.kit.clone(), ui.tx.clone(), ui.cfg.host.mode.clone());
     AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
         let lines = match std::env::current_exe() {
-            Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe)))
+            Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe, &mode)))
                 .unwrap_or_else(|_| vec![Line { kind: Kind::Fail, text: PANIC_TEXT.into() }]),
             Err(e) => {
                 vec![Line { kind: Kind::Fail, text: format!("скиллы при запуске: не узнать путь к своему исполняемому файлу: {e}") }]

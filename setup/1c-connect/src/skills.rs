@@ -13,7 +13,10 @@
 //! заводит обычная учётка без прав администратора; на Unix — обычную
 //! символьную ссылку, тоже без привилегий). Ревью 30.10 нашло две дыры
 //! именно в этом: запись по ссылке на месте отпечатка и обход без защиты от
-//! циклов. Обе закрыты здесь же, первоисточником (`[ -L ]` в `entrypoint.sh`)
+//! циклов; ревью целого 31.10 нашло третью — ссылку на самом доме навыков
+//! или на его родителе (`refuse_linked_home`), которую первоисточник
+//! проверяет первой строкой своей раскладки, а мы не проверяли вовсе. Все
+//! закрыты здесь же, первоисточником (`[ -L ]` в `entrypoint.sh`)
 //! и общим `common::integrity::walk`, который зовётся со строгой политикой
 //! (`Links::Refuse`) — в отличие от сверки комплекта (`write_list`), где
 //! ссылки свои и `Links::Follow` как и было всегда.
@@ -281,6 +284,27 @@ fn refuse_if_link(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Ссылка на самом доме навыков (`~/.agents/skills`) или на его родителе
+/// (`~/.agents`) — отказ словами раньше любого обхода, и это ровно та
+/// проверка, которой первоисточник открывает свою раскладку
+/// (`config/entrypoint.sh:370`: `[ ! -L "$home/.agents" ] && [ ! -L "$skills" ]`).
+/// У нас её не было: проверялся только каталог самого скилла и файл
+/// отпечатка, то есть `mklink /J %USERPROFILE%\.agents\skills → куда-то`
+/// уводил и копию, и `create_dir_all` за ссылку, хотя комментарий модуля
+/// обещал «ссылка снаружи, внутри и на отпечатке» (пункт 4 ревью целого).
+/// Выше родителя не поднимаемся: первоисточник не поднимается тоже, а
+/// проверять весь путь до корня значило бы отказывать человеку, который
+/// держит ссылкой сам свой профиль, — это его дело и ничего нашего за ней не
+/// прячется.
+fn refuse_linked_home(home: &Path) -> Result<(), String> {
+    for dir in std::iter::once(home).chain(home.parent()) {
+        if is_symlink(dir) {
+            return Err(format!("{} — ссылка, а не дом навыков: раскладку не веду", dir.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Прочитанный отпечаток — `Ok(None)`, если файла нет: первой раскладке так
 /// и положено, прошлого отпечатка у неё нет.
 /// Приватная (круг 4, пункт 3) — тем же доводом, что `dir_sum`.
@@ -346,6 +370,10 @@ fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
 /// (решение хозяина). Имя скилла не по правилу (`valid_skill_name`) — тоже
 /// отказ словами: пропускать его молча нельзя, а раз оно внутри самого
 /// комплекта, это неисправность комплекта, а не дома агента.
+///
+/// Пустой перечень эта функция отдаёт как есть (`Ok(vec![])`) — отказ за него
+/// несёт `kit_skills_to_lay` ниже: запуску окна пустой комплект сказать
+/// нечего, и ему нужен тот же счёт без отказа.
 fn kit_skill_names(kit: &Kit) -> Result<Vec<String>, String> {
     let dir = kit.path(KIT_DIR);
     if !dir.exists() {
@@ -376,6 +404,26 @@ fn kit_skill_names(kit: &Kit) -> Result<Vec<String>, String> {
         names.push(name);
     }
     names.sort();
+    Ok(names)
+}
+
+/// Имена скиллов для щелчка: то же, что `kit_skill_names`, но ПУСТОЙ каталог
+/// `skills/` — отказ словами, такой же, как отсутствующий (пункт 5 ревью
+/// целого). Прежде пустой каталог доезжал до `summarize` пустым перечнем, а
+/// тот отдавал `Absent`: галочка не вставала никогда, а щелчок говорил «не
+/// удалось поставить» про комплект, в котором ставить попросту нечего.
+/// «Нечего ставить» — одно состояние, как бы оно ни получилось, и говорить о
+/// нём надо одинаково.
+///
+/// Отдельной функцией, а не веткой внутри `kit_skill_names`: запуск окна
+/// (`refresh`) обязан на том же комплекте МОЛЧАТЬ, и ему нужен счёт без
+/// отказа — иначе пустой каталог говорил бы человеку строку при каждом
+/// старте.
+fn kit_skills_to_lay(kit: &Kit) -> Result<Vec<String>, String> {
+    let names = kit_skill_names(kit)?;
+    if names.is_empty() {
+        return Err(format!("{} в комплекте пуст — ставить нечего, записи MCP это не касается", kit.path(KIT_DIR).display()));
+    }
     Ok(names)
 }
 
@@ -479,8 +527,25 @@ fn copy_skill(src: &Path, dst: &Path) -> Result<(), String> {
 /// вызывающему. Одна ссылка на месте скилла не прячет состояние остальных
 /// (Important 4 ревью 31.10, круг 1) — ошибки копятся, а не обрывают цикл на
 /// первой.
+///
+/// Замок `LAY` берётся и здесь, хотя функция только читает (пункт 3 ревью
+/// целого): её зовут главный поток (`gui::tray::set_agents` через
+/// `verify::agent_found`) и поток фактов (`verify::cheap`), пока
+/// `lay`/`remove` из третьего потока копирует каталог. Полускопированный
+/// каталог даёт сумму, не равную отпечатку, то есть `Verdict::Edited`, — и
+/// карточка с журналом сказали бы «каталог X — правили на месте» про то,
+/// чего человек не касался. Само бы прошло следующим проходом, но это ложь
+/// про его диск, и вероятнее всего она случилась бы при первом запуске после
+/// обновления комплекта.
+///
+/// Цена названа честно: главный поток может подождать одну раскладку — ревью
+/// замерило ≈115 мс на четыре дома тёплым кэшем. Платим этим, а не копией во
+/// временный каталог с переименованием (решение владельца: другой приём
+/// рассмотрен и не выбран).
 pub fn look(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
-    let names = kit_skill_names(kit).map_err(|e| vec![e])?;
+    let _guard = LAY.lock().unwrap_or_else(|e| e.into_inner());
+    let names = kit_skills_to_lay(kit).map_err(|e| vec![e])?;
+    refuse_linked_home(home).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut foreign = Vec::new();
     let mut ours = 0usize;
@@ -557,6 +622,9 @@ enum Change {
 fn lay(kit: &Kit, state: &State, home: &Path) -> Result<(editors::Found, Done), Vec<String>> {
     // Замок на всю дисковую работу этой функции — докстрока `LAY`.
     let _guard = LAY.lock().unwrap_or_else(|e| e.into_inner());
+    // Ссылка на доме навыков или на его родителе — отказ раньше любой нашей
+    // записи на диск, в том числе раньше каталога отпечатков ниже.
+    refuse_linked_home(home).map_err(|e| vec![e])?;
     // `write_stamp` ниже пишет отпечаток прямо в `state` — каталог обязан
     // существовать, иначе первая же раскладка откажет пустым местом,
     // которого ещё никто не создавал (круговое ревью, круг 2, пункт 5:
@@ -564,7 +632,7 @@ fn lay(kit: &Kit, state: &State, home: &Path) -> Result<(editors::Found, Done), 
     // откажет на первом же щелчке с пустым состоянием вместо того, чтобы
     // завести каталог самой).
     std::fs::create_dir_all(state.path()).map_err(|e| vec![format!("не создать {}: {e}", state.path().display())])?;
-    let names = kit_skill_names(kit).map_err(|e| vec![e])?;
+    let names = kit_skills_to_lay(kit).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut done = Done::default();
     let mut ours = 0usize;
@@ -631,15 +699,18 @@ pub fn install(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, 
 /// прогон тестов, и доставлять скиллы в настоящий дом человека прямо из
 /// теста. Путь решает вызывающий, он же один на все четыре функции.
 ///
-/// Комплект без каталога `skills/` — не отказ, а пустой ответ, и это
+/// Комплект, в котором ставить нечего, — не отказ, а пустой ответ, и это
 /// единственное место, где раскладка молчит о нём: щелчок — просьба, на
 /// просьбу отвечают словами (`kit_skill_names`), а запуск окна человек ни о
 /// чём не просил, и строка «в комплекте нет skills/» при КАЖДОМ запуске была
-/// бы ровно тем шумом, которого велено избегать. Прочие неисправности
-/// комплекта (ссылка на месте скилла, нечитаемый каталог, имя не по правилу)
-/// по-прежнему отказ словами: там сломано то, что человек может починить.
+/// бы ровно тем шумом, которого велено избегать. Случаев таких два, и они
+/// одно и то же: каталога `skills/` нет вовсе, и каталог есть, но пуст (пункт
+/// 5 ревью целого). Прочие неисправности комплекта (ссылка на месте скилла,
+/// нечитаемый каталог, имя не по правилу) по-прежнему отказ словами — отсюда
+/// `is_ok_and`, а не `unwrap_or`: ошибка проваливается в `lay` и говорит
+/// словами, там сломано то, что человек может починить.
 pub fn refresh(kit: &Kit, state: &State, home: &Path) -> Result<Done, Vec<String>> {
-    if !kit.path(KIT_DIR).exists() {
+    if !kit.path(KIT_DIR).exists() || kit_skill_names(kit).is_ok_and(|names| names.is_empty()) {
         return Ok(Done::default());
     }
     lay(kit, state, home).map(|(_, done)| done)
@@ -654,7 +725,8 @@ pub fn refresh(kit: &Kit, state: &State, home: &Path) -> Result<Done, Vec<String
 pub fn remove(kit: &Kit, state: &State, home: &Path) -> Result<editors::Found, Vec<String>> {
     // Замок на всю дисковую работу этой функции — докстрока `LAY`.
     let _guard = LAY.lock().unwrap_or_else(|e| e.into_inner());
-    let names = kit_skill_names(kit).map_err(|e| vec![e])?;
+    let names = kit_skills_to_lay(kit).map_err(|e| vec![e])?;
+    refuse_linked_home(home).map_err(|e| vec![e])?;
     let mut errors = Vec::new();
     let mut foreign = Vec::new();
     for name in &names {
@@ -1445,6 +1517,105 @@ mod tests {
         assert_eq!(install_err.len(), 2, "{install_err:?}");
         let remove_err = remove(&kit, &ts(&state), home.path()).unwrap_err();
         assert_eq!(remove_err.len(), 2, "{remove_err:?}");
+    }
+
+    /// Пункт 4 ревью целого: ссылкой оказался САМ дом навыков
+    /// (`~/.agents/skills`) — отказ словами у всех трёх функций, как у
+    /// первоисточника (`entrypoint.sh:370`). Прежде проверялся только каталог
+    /// отдельного скилла, и запись шла бы за ссылку: `create_dir_all` и копия
+    /// легли бы в её цель. Доказываем не словами, а чужим файлом за ссылкой —
+    /// он обязан остаться единственным в том каталоге.
+    #[test]
+    fn a_link_in_place_of_the_skills_home_is_refused_in_words() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let outside = Dir::new();
+        let elsewhere = outside.path().join("чужое");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("чужой-файл"), "не наше").unwrap();
+
+        let holder = Dir::new();
+        let home = holder.path().join("skills");
+        if !try_link(&home, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
+            return;
+        }
+
+        for err in [
+            look(&kit, &ts(&state), &home).unwrap_err(),
+            install(&kit, &ts(&state), &home).unwrap_err(),
+            remove(&kit, &ts(&state), &home).unwrap_err(),
+        ] {
+            assert_eq!(err.len(), 1, "{err:?}");
+            assert!(err[0].contains("ссылка"), "{err:?}");
+        }
+        // Тихая доставка при запуске тоже не идёт за ссылку: неисправность
+        // дома человек может починить, и она отказывает словами, в отличие
+        // от пустого комплекта.
+        assert!(refresh(&kit, &ts(&state), &home).is_err());
+
+        let left: Vec<_> = std::fs::read_dir(&elsewhere).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(left.len(), 1, "за ссылкой ничего не должно появиться: {left:?}");
+    }
+
+    /// Та же находка, но ссылкой оказался РОДИТЕЛЬ дома навыков
+    /// (`~/.agents`) — ровно второе условие первоисточника
+    /// (`[ ! -L "$home/.agents" ]`). Сам `~/.agents/skills` при этом не
+    /// ссылка, а настоящий каталог ВНУТРИ чужой цели, и `is_symlink` на нём
+    /// говорит «нет»: без проверки родителя мы бы спокойно писали за ссылку.
+    #[test]
+    fn a_link_in_place_of_the_agents_directory_is_refused_in_words() {
+        let (_root, kit) = kit_with_skill("1c", "текст скилла");
+        let state = Dir::new();
+        let outside = Dir::new();
+        let elsewhere = outside.path().join("чужое");
+        std::fs::create_dir_all(elsewhere.join("skills")).unwrap();
+
+        let holder = Dir::new();
+        let agents = holder.path().join(".agents");
+        if !try_link(&agents, &elsewhere) {
+            eprintln!("пропущено: ссылку создать не вышло на этой машине");
+            return;
+        }
+        let home = agents.join("skills");
+        assert!(!is_symlink(&home), "сам дом навыков ссылкой быть не должен — иначе тест проверяет не то");
+
+        let err = install(&kit, &ts(&state), &home).unwrap_err();
+        assert_eq!(err.len(), 1, "{err:?}");
+        assert!(err[0].contains("ссылка"), "{err:?}");
+        assert!(look(&kit, &ts(&state), &home).is_err());
+        assert!(remove(&kit, &ts(&state), &home).is_err());
+        assert!(!elsewhere.join("skills/1c").exists(), "за ссылкой ничего не должно появиться");
+    }
+
+    /// Пункт 5 ревью целого: каталог `skills/` в комплекте ЕСТЬ, но пуст.
+    /// Прежде пустой перечень доезжал до `summarize`, и тот отдавал `Absent`:
+    /// галочка не встала бы никогда, а щелчок сказал бы «не удалось
+    /// поставить» про комплект, в котором ставить нечего. Теперь слово то же,
+    /// что про отсутствующий каталог, — отказ, — а запуск окна по-прежнему
+    /// молчит.
+    #[test]
+    fn an_empty_skills_folder_in_the_kit_speaks_like_a_missing_one() {
+        let root = Dir::new();
+        std::fs::create_dir_all(root.path().join(KIT_DIR)).unwrap();
+        let kit = Kit::at(root.path());
+        let state = Dir::new();
+        let home = Dir::new();
+
+        for err in [
+            look(&kit, &ts(&state), home.path()).unwrap_err(),
+            install(&kit, &ts(&state), home.path()).unwrap_err(),
+            remove(&kit, &ts(&state), home.path()).unwrap_err(),
+        ] {
+            assert_eq!(err.len(), 1, "{err:?}");
+            assert!(err[0].contains("пуст"), "{err:?}");
+        }
+
+        // Запуск окна человек ни о чём не просил — молчание, как и на
+        // комплекте вовсе без `skills/`.
+        let done = refresh(&kit, &ts(&state), home.path()).unwrap();
+        assert_eq!(done, Done::default(), "сказать нечего: {done:?}");
+        assert!(std::fs::read_dir(state.path()).unwrap().next().is_none(), "отпечатков появиться не должно");
     }
 
     // Круг исправления задачи 6, пункт 1: честно, не подделывая — теста НА

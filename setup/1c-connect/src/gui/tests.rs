@@ -455,16 +455,40 @@ fn a_foreign_skill_left_alone_at_removal_is_not_called_our_own() {
 }
 
 /// Круг 4, точка 2: причина отказа `skills::state()` обязана дойти до строки
-/// журнала щелчка СЛОВАМИ, а не обернуться молчаливым «скиллов нет».
-/// Проверяем тот самый путь, которым её ведёт `skills_half`
-/// (`skill_line(on, Err(vec![why]))`) — в среду не ходя: правила задачи
-/// запрещают править `LOCALAPPDATA`/`HOME` на общем прогоне.
+/// журнала щелчка СЛОВАМИ, а не обернуться молчаливым «скиллов нет». Круг 5,
+/// пункт 3: держим это на САМОМ решении (`skills_plan`), а не на печати уже
+/// готовой ошибки — прежний тест звал `skill_line(true, Err(vec![why]))` и
+/// остался бы зелёным, проглоти причину кто-нибудь внутри `skills_half`.
+/// Функция чистая, так что в среду не ходим вовсе: правила задачи запрещают
+/// править `LOCALAPPDATA`/`HOME` на общем прогоне.
+///
+/// Падает на обеих подменах, от которых стоит: проглотить причину
+/// (`state.ok()`, решение «раскладывать») — падает `expect_err`; подставить
+/// вместо неё пустую строку — падает `contains`.
 #[test]
 fn the_click_log_line_carries_the_state_dir_refusal_in_words() {
+    let home = std::path::PathBuf::from("/home/a/.agents/skills");
     let why = crate::ops_host::STATE_DIR_REFUSAL.to_string();
-    let line = skill_line(true, Err(vec![why.clone()]));
+
+    let line = skills_plan::<()>(true, Some(home.clone()), false, Err(why.clone()))
+        .expect_err("отказ состояния — не раскладка: писать отпечатки некуда");
     assert_eq!(line.kind, Kind::Fail, "{line:?}");
     assert!(line.text.contains(&why), "причина обязана быть в строке целиком: {line:?}");
+
+    // Без отказа решение — именно разложить, и в тот самый дом.
+    let ready = skills_plan(true, Some(home.clone()), false, Ok(())).expect("состояние годно — раскладываем");
+    assert_eq!(ready, (home.clone(), ()), "дом агента обязан дойти до раскладки неизменным");
+
+    // Дома не узнать — ни раскладки, ни молчания.
+    let no_home = skills_plan::<()>(true, None, false, Ok(())).expect_err("без дома агента раскладывать некуда");
+    assert_eq!(no_home.kind, Kind::Fail, "{no_home:?}");
+
+    // Общий дом ещё нужен соседу: снятие не трогает его тексты, и это не отказ.
+    let kept = skills_plan::<()>(false, Some(home.clone()), true, Ok(())).expect_err("общий дом не трогаем");
+    assert_eq!(kept.kind, Kind::Ok, "{kept:?}");
+    assert!(kept.text.contains("ещё нужен другому агенту"), "{kept:?}");
+    // А при ВКЛЮЧЕНИИ тот же сосед раскладке не мешает.
+    assert!(skills_plan(true, Some(home.clone()), true, Ok(())).is_ok(), "включение общий дом не отменяет");
 }
 
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой

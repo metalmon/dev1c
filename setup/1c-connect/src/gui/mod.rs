@@ -979,23 +979,18 @@ fn agent_work(i: usize, on: bool, kit: Kit) -> Option<Line> {
 /// ими всё ещё пользуется (решение владельца). При включении общий дом не
 /// мешает — раскладка идёт по содержимому комплекта одинаково для всех троих.
 fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::path::Path) -> Line {
-    let Some(home) = crate::skills::home_dir(def.skills) else {
-        return Line {
-            kind: Kind::Fail, text: "скилл: не узнать домашний каталог агента — переменная среды не задана".to_string()
-        };
-    };
-    if !on && crate::editors::others_hold(def.id, def.skills, exe) {
-        // Minor 2 кругового ревью: у Zed/pi (`skills::Home::Agents`)
-        // `others_hold` зовёт `Setup::look` соседей по тому же дому, а среди
-        // них Codex — это запуск его CLI, 6–8 с (тот же замер 30.10, что у
-        // щелчка Claude Code). Худший случай одного такого снятия: своя
-        // файловая половина MCP (доли мс) плюс эта одна проверка — далеко
-        // меньше `AGENT_CLICK_LOST` (90 с, рассчитан на ЧЕТЫРЕ таких вызова
-        // подряд у Claude Code). Правки бюджета защёлки это не требует.
-        return Line {
-            kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
-        };
-    }
+    let home = crate::skills::home_dir(def.skills);
+    // `others_hold` спрашиваем только там, где его ответ может что-то
+    // решить: при включении общий дом не мешает, а без дома говорить всё
+    // равно будем про дом. Беречь тут есть что — Minor 2 кругового ревью: у
+    // Zed/pi (`skills::Home::Agents`) `others_hold` зовёт `Setup::look`
+    // соседей по тому же дому, а среди них Codex — это запуск его CLI, 6–8 с
+    // (тот же замер 30.10, что у щелчка Claude Code). Худший случай одного
+    // такого снятия: своя файловая половина MCP (доли мс) плюс эта одна
+    // проверка — далеко меньше `AGENT_CLICK_LOST` (90 с, рассчитан на ЧЕТЫРЕ
+    // таких вызова подряд у Claude Code). Правки бюджета защёлки это не
+    // требует.
+    let others_hold = !on && home.is_some() && crate::editors::others_hold(def.id, def.skills, exe);
     // Круговое ревью, круг 3, пункт 1: барьер переехал в сам `skills.rs` —
     // `skills::install`/`skills::remove` берут `&skills::State`, тип с
     // приватным полем, а не `&Path`. Подставить сюда `kit.state_path(...)`
@@ -1005,18 +1000,60 @@ fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::p
     // в `skills::install` напрямую (круг 2 держал барьер только в `verify.rs`
     // над обёрткой — обходился тремя строками).
     //
-    // Круг 4: `skills::state()` теперь отказывает словами, если переменной
-    // среды для каталога состояния нет (отпечатки ушли бы в общий временный
-    // каталог, где их подменит сосед по машине). Причину несём в строку
-    // журнала — «галочка не сработала, вот почему», — а не глотаем. Своей
-    // речи у этого отказа нет нарочно: он идёт тем же путём, что любая другая
-    // причина отказа раскладки (`skill_line` → `editors::refusal_text`).
-    let state = match crate::skills::state() {
-        Ok(state) => state,
-        Err(why) => return skill_line(on, Err(vec![why])),
+    // `skills::state()` зовём до решения и без условий: она читает
+    // переменную среды и ничего не пишет — цена ей никакая, в отличие от
+    // `others_hold` выше.
+    let (home, state) = match skills_plan(on, home, others_hold, crate::skills::state()) {
+        Ok(ready) => ready,
+        Err(line) => return line,
     };
     let result = if on { crate::skills::install(kit, &state, &home) } else { crate::skills::remove(kit, &state, &home) };
     skill_line(on, result)
+}
+
+/// Решение половины «скиллы»: раскладывать ли — и что сказать, если нет.
+/// Чистая функция, без похода в среду и на диск, тем же приёмом, что
+/// `ops_host::ensure_state_decision`.
+///
+/// Круг 5, пункт 3: круг 4 требовал «причина отказа состояния доходит до
+/// строки журнала щелчка», а держал это `skill_line(true, Err(vec![why]))` —
+/// печать уже готовой ошибки. Проглоти её кто-нибудь внутри `skills_half`, и
+/// тот тест остался бы зелёным; теперь решение отдельно от работы, и глотать
+/// её негде незаметно.
+///
+/// Круг 4: причину несём в строку журнала — «галочка не сработала, вот
+/// почему», — а не глотаем. Своей речи у этого отказа нет нарочно: он идёт
+/// тем же путём, что любая другая причина отказа раскладки (`skill_line` →
+/// `editors::refusal_text`).
+///
+/// `state: Result<S, String>` обобщённо по `S`: решению важно одно — есть ли
+/// у состояния причина отказа, а тесту так не нужно собирать
+/// `skills::State` (поле приватно, боевой конструктор ходит в среду).
+/// Годное состояние возвращается назад тем же значением — `unwrap` на пути
+/// «всё хорошо» не нужен вовсе.
+fn skills_plan<S>(
+    on: bool,
+    home: Option<std::path::PathBuf>,
+    others_hold: bool,
+    state: Result<S, String>,
+) -> Result<(std::path::PathBuf, S), Line> {
+    let Some(home) = home else {
+        return Err(Line {
+            kind: Kind::Fail, text: "скилл: не узнать домашний каталог агента — переменная среды не задана".to_string()
+        });
+    };
+    // Общий дом скиллов у Zed, pi и Codex один: снятие галочки у одного
+    // агента не вправе унести готовые тексты у соседа, который ими всё ещё
+    // пользуется (решение владельца).
+    if !on && others_hold {
+        return Err(Line {
+            kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
+        });
+    }
+    match state {
+        Ok(state) => Ok((home, state)),
+        Err(why) => Err(skill_line(on, Err(vec![why]))),
+    }
 }
 
 /// Слово о половине «скиллы» — тем же устройством, что у `setup_line`, но

@@ -2781,10 +2781,18 @@ mod tests {
     /// Пересчёт ожидаемого корня НЕ вызовом `ops_host::state_dir()` (иначе
     /// проверка сравнивала бы реализацию с собой — круг 2 ревью, пункт 2),
     /// а теми же двумя переменными среды настоящей машины, прочитанными
-    /// прямо здесь. Пустые значения не в счёт, тем же правилом, что
-    /// `ops_host::env_dir` (пустая `XDG_DATA_HOME=""` не задана).
+    /// прямо здесь.
+    ///
+    /// Круг 5, пункт 2: условие годности — АБСОЛЮТНОСТЬ, то самое правило,
+    /// по которому решает код (`ops_host::absolute_found`), а не «значение не
+    /// пусто». Правило названо здесь своими словами (`is_absolute`), а не
+    /// вызовом `state_dir_env_missing()`: иначе тест спрашивал бы у
+    /// реализации её же ответ. Пустое значение сюда входит само — пустой путь
+    /// не абсолютен; относительная `LOCALAPPDATA=sub` раньше вела тест не в
+    /// пропуск, а в панику на `.expect` ниже, потому что реализация на таком
+    /// значении отказывает.
     fn expected_app_data_root() -> Option<std::path::PathBuf> {
-        let v = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+        let v = |name: &str| std::env::var_os(name).map(std::path::PathBuf::from).filter(|p| p.is_absolute());
         if cfg!(windows) {
             v("LOCALAPPDATA")
         } else {
@@ -2795,24 +2803,11 @@ mod tests {
     #[test]
     fn skills_state_lives_under_the_real_app_data_location() {
         let Some(root) = expected_app_data_root() else {
-            eprintln!("пропущено: ни LOCALAPPDATA, ни XDG_DATA_HOME/HOME не заданы на этой машине");
+            eprintln!("пропущено: ни LOCALAPPDATA, ни XDG_DATA_HOME/HOME не заданы абсолютным путём на этой машине");
             return;
         };
-        let state = crate::skills::state().expect("переменная среды есть — отказывать не за что");
+        let state = crate::skills::state().expect("переменная среды задана абсолютным путём — отказывать не за что");
         assert!(state.path().starts_with(&root), "{} не внутри {}", state.path().display(), root.display());
-    }
-
-    /// Круг 4, точка 2: `skills::state()` отдаёт причину СЛОВАМИ, а не панику
-    /// и не угаданный каталог, и причина — та же, что у `ensure_state`
-    /// (`ops_host::STATE_DIR_REFUSAL`): текст один на три точки отказа.
-    /// Среду не трогаем (правила задачи): спрашиваем тот же предикат, что и
-    /// сама функция, и проверяем ту ветку, в которой эта машина живёт.
-    #[test]
-    fn skills_state_answers_in_words_instead_of_guessing_or_panicking() {
-        match crate::skills::state() {
-            Ok(state) => assert!(state.path().is_absolute(), "{}", state.path().display()),
-            Err(why) => assert_eq!(why, crate::ops_host::STATE_DIR_REFUSAL, "причина обязана быть общей с ensure_state"),
-        }
     }
 
     /// Круг 2 ревью, пункт 5: `create_dir_all` перед `install` без теста

@@ -265,8 +265,13 @@ fn write_stamp(path: &Path, sum: &str) -> Result<(), String> {
 /// Important 3 ревью 31.10, круг 1); на месте скилла ссылка → `Link`, отказ
 /// раньше прочих случаев — висячая ссылка не видна `exists()`, а запись
 /// пошла бы по ней в чужую цель.
+///
+/// Приватный (круг 5, пункт 5): `pub` был снабжён обоснованием «его читают
+/// тесты `verify.rs`» — неправдой, `grep` по крейту чистый, вне `skills.rs`
+/// его не читает никто. Врущий комментарий дороже лишнего `pub`: по нему
+/// принимают решения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
+enum Verdict {
     New,
     Untouched,
     Edited,
@@ -274,8 +279,7 @@ pub enum Verdict {
 }
 
 /// Вердикт для каталога `dst` по его прежнему отпечатку `stamp`. Приватная
-/// (круг 4, пункт 3); сам `Verdict` остаётся публичным — его читают тесты
-/// `verify.rs` как значение, а не как дорогу в обход барьера.
+/// (круг 4, пункт 3) — как и сам `Verdict` (круг 5, пункт 5).
 fn verdict(dst: &Path, stamp: Option<&str>) -> Result<Verdict, String> {
     if is_symlink(dst) {
         return Ok(Verdict::Link);
@@ -805,7 +809,15 @@ mod tests {
     /// него. Подмена `state.path().join(...)` на
     /// `state.path().parent().unwrap().join(...)` оставляла всё зелёным, а
     /// отпечатки ложились ровно туда, куда круг 1 их запрещал, — в корень
-    /// состояния рядом с `secret.key`. Отсюда `starts_with` на оба пути.
+    /// состояния рядом с `secret.key`.
+    ///
+    /// Круг 5, пункт 1: `starts_with` этого не ловит до конца —
+    /// `Path::starts_with` сравнивает компоненты и `..` не раскрывает,
+    /// поэтому `…\skill-stamps\..\skill_ab_1c` считается лежащим внутри
+    /// `…\skill-stamps`, и подмена `join("skill_…")` на `join("../skill_…")`
+    /// проходила мимо. Утверждение о РОДИТЕЛЕ (`parent() == state.path()`)
+    /// убивает обе подмены разом: лишний `..` меняет родителя, подъём к
+    /// `parent().unwrap()` — тоже.
     #[test]
     fn stamp_path_tells_apart_two_destinations_with_the_same_skill() {
         let dir = Dir::new();
@@ -813,8 +825,8 @@ mod tests {
         let one = stamp_path(&state, &PathBuf::from("/home/a/.agents/skills"), "1c").unwrap();
         let other = stamp_path(&state, &PathBuf::from("/home/b/.agents/skills"), "1c").unwrap();
         assert_ne!(one, other, "разные каталоги назначения не должны делить один отпечаток");
-        assert!(one.starts_with(state.path()), "{} не внутри {}", one.display(), state.path().display());
-        assert!(other.starts_with(state.path()), "{} не внутри {}", other.display(), state.path().display());
+        assert_eq!(one.parent(), Some(state.path()), "{} не прямо в {}", one.display(), state.path().display());
+        assert_eq!(other.parent(), Some(state.path()), "{} не прямо в {}", other.display(), state.path().display());
     }
 
     /// Точка 2 ревью, круг 1: другое написание того же самого каталога —

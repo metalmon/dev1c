@@ -915,7 +915,13 @@ fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<St
 /// проверяется тестом на поддельном канале (`Ui::for_test`), а не только живым
 /// окном.
 pub fn toggle_agent(cx: &mut App, i: usize, on: bool) -> bool {
-    let accepted = toggle_agent_ui(cx.global_mut::<Ui>(), i, on, Instant::now(), move || agent_work(i, on));
+    // Своего `cx` у тела щелчка (`agent_work`) нет — оно идёт на отдельном
+    // потоке, и путь к состоянию программы (`kit.state()`, там же лежат
+    // отпечатки раскладки скиллов) иначе не узнать. `Kit` клонируется
+    // (поля — пути, клон дешёвый), а не передаётся ссылкой: поток живёт
+    // дольше, чем этот вызов.
+    let kit = cx.global::<Ui>().kit.clone();
+    let accepted = toggle_agent_ui(cx.global_mut::<Ui>(), i, on, Instant::now(), move || agent_work(i, on, kit));
     cx.refresh_windows();
     accepted
 }
@@ -943,17 +949,92 @@ static AGENT_CLICKS: AtomicUsize = AtomicUsize::new(0);
 /// есть что. Без `Ui` и без `cx` — чтобы заводила потока (`toggle_agent_ui`)
 /// проверялся тестом с поддельным телом: настоящее здесь зовёт CLI агента и
 /// пишет в файлы человека.
-fn agent_work(i: usize, on: bool) -> Option<Line> {
+fn agent_work(i: usize, on: bool, kit: Kit) -> Option<Line> {
     let def = &crate::editors::AGENTS[i];
-    match std::env::current_exe() {
-        Ok(exe) => {
-            let result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
-            setup_line(def.label, on, result)
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            return Some(Line {
+                kind: Kind::Fail, text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label)
+            })
         }
-        Err(e) => Some(Line {
-            kind: Kind::Fail, text: format!("{}: не узнать путь к своему исполняемому файлу: {e}", def.label)
-        }),
+    };
+    let mcp_result = if on { def.setup.enable(&exe) } else { def.setup.disable(&exe) };
+    // `setup_line` всегда отвечает `Some` — у него нет ветки, которая бы
+    // молчала (см. его же тело): разворачиваем сразу, а не тащим `Option`
+    // дальше туда, где он ничего не может означать.
+    let mcp = setup_line(def.label, on, mcp_result).expect("setup_line всегда отвечает Some");
+    let skill = skills_half(def, on, &kit, &exe);
+    // Решение владельца: «руки важнее знания» — отказ скилла не отменяет
+    // записей MCP, они уже на диске к этому моменту. Строка называет ОБА
+    // исхода, даже когда они совпали, — иначе человек, которому сказали
+    // половину, второй никогда не узнает.
+    Some(agent_line(mcp, skill))
+}
+
+/// Половина «скиллы» одного щелчка (задача 5: галочка несёт обе половины).
+/// Общий дом скиллов у Zed, pi и Codex один (`~/.agents/skills`) —
+/// `editors::others_hold` решает, держит ли его ещё кто-то другой; снятие
+/// галочки у одного агента не вправе унести готовые тексты у соседа, который
+/// ими всё ещё пользуется (решение владельца). При включении общий дом не
+/// мешает — раскладка идёт по содержимому комплекта одинаково для всех троих.
+fn skills_half(def: &crate::editors::AgentDef, on: bool, kit: &Kit, exe: &std::path::Path) -> Line {
+    let Some(home) = crate::skills::home_dir(def.skills) else {
+        return Line {
+            kind: Kind::Fail, text: "скилл: не узнать домашний каталог агента — переменная среды не задана".to_string()
+        };
+    };
+    if !on && crate::editors::others_hold(def.id, def.skills, exe) {
+        return Line {
+            kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
+        };
     }
+    let state = verify::skills_state(kit);
+    if on {
+        // `skills::install` пишет отпечаток прямо в `state` — каталог обязан
+        // существовать, иначе первая же раскладка откажет пустым местом,
+        // которого ещё никто не создавал (в отличие от `look`/`remove`,
+        // которым отсутствующий каталог ничем не мешает — непрочитанный
+        // отпечаток и так значит «первая раскладка»).
+        if let Err(e) = std::fs::create_dir_all(&state) {
+            return Line { kind: Kind::Fail, text: format!("скилл: не создать {}: {e}", state.display()) };
+        }
+    }
+    let result = if on { crate::skills::install(kit, &state, &home) } else { crate::skills::remove(kit, &state, &home) };
+    skill_line(on, result)
+}
+
+/// Слово о половине «скиллы» — тем же устройством, что у `setup_line`, но
+/// другой речью там, где смысл другой: `Found::Foreign` для скилла — это
+/// каталог, который человек правил сам или положил не из комплекта, а не
+/// «запись, занятая чужой командой» (находка ревью 31.10, `panel.rs:386`:
+/// прежняя фраза была бы неправдой про скилл — там ни записи, ни команды
+/// нет). `panel::skill_found_text` несёт эту разницу, `editors::refusal_text`
+/// — общий для обеих половин (он и так отличает «заняты наши имена» от
+/// прозы по форме списка причин, а не по тому, кто его позвал).
+fn skill_line(on: bool, result: Result<crate::editors::Found, Vec<String>>) -> Line {
+    match result {
+        Ok(crate::editors::Found::Foreign(names)) if !on => Line {
+            kind: Kind::Ok,
+            text: format!("скилл: наш убран, {} оставлен нетронутым — он не наш", names.join(", ")),
+        },
+        Ok(found) if agent_as_expected(on, &found) => {
+            Line { kind: Kind::Ok, text: format!("скилл: {}", if on { "поставлен" } else { "убран" }) }
+        }
+        Ok(other) => Line {
+            kind: Kind::Fail,
+            text: format!("скилл: не удалось {} — {}", if on { "поставить" } else { "убрать" }, panel::skill_found_text(&other)),
+        },
+        Err(reasons) => Line { kind: Kind::Fail, text: format!("скилл: {}", crate::editors::refusal_text(&reasons)) },
+    }
+}
+
+/// Одна строка журнала про ОБЕ половины сразу (задача 5). Называет обе
+/// всегда, а не только когда они разошлись: не называть совпавшую означало
+/// бы прятать половину от человека, который её не просил угадывать.
+fn agent_line(mcp: Line, skill: Line) -> Line {
+    let kind = if mcp.kind == Kind::Ok && skill.kind == Kind::Ok { Kind::Ok } else { Kind::Fail };
+    Line { kind, text: format!("{}; {}", mcp.text, skill.text) }
 }
 
 /// Решение щелчка: пустить его или нет, отметить защёлку, сказать человеку,
@@ -1326,7 +1407,7 @@ fn handle(ev: Ev, cx: &mut App) {
             // что правда лежит в файле агента — щелчок её только попросил.
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
-                tray.set_agents(&ui.cfg.host.mode);
+                tray.set_agents(&ui.cfg.host.mode, &ui.kit);
             }
             cx.refresh_windows();
             // Почва сдвинулась — тем же порядком, что у `Ev::Done`: факт
@@ -1461,7 +1542,7 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
                 if !ui.agent_clicks.iter().any(|&t| agent_click_busy(t, now)) {
-                    tray.set_agents(&ui.cfg.host.mode);
+                    tray.set_agents(&ui.cfg.host.mode, &ui.kit);
                 }
             }
         }
@@ -1574,7 +1655,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
         // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та
         // же первичная поправка, что у режима и публикации выше.
-        tray.set_agents(&cfg.host.mode);
+        tray.set_agents(&cfg.host.mode, &kit);
         // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл. Журнала для этой ошибки здесь ещё нет — `Ui` не выставлен ни строкой ниже; первый же щелчок переключателем перезапишет файл и громко скажет, если он и тогда не пишется.
         let _ = crate::allow::write(&kit, serve_on_start);
         cx.set_global(Ui {

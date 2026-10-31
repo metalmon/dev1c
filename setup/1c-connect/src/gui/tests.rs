@@ -417,6 +417,30 @@ fn success_is_silent_and_a_mismatch_speaks() {
     assert!(refused.text.contains("занята чужой командой"), "{refused:?}");
 }
 
+/// Задача 5, решение владельца («руки важнее знания»): скилл отказал (чужая
+/// папка на месте скилла), а записи MCP уже поставлены — отказ скилла не
+/// отменяет их. Строка журнала обязана назвать ОБА исхода, а не только
+/// неудачный, иначе человек, которому сказали половину, второй не узнает.
+#[test]
+fn a_refused_skill_does_not_cost_the_agent_its_mcp_entries() {
+    let mcp = setup_line("Zed", true, Ok(crate::editors::Found::Ours)).unwrap();
+    let skill = skill_line(true, Ok(crate::editors::Found::Foreign(vec!["чужая-папка".to_string()])));
+    let line = agent_line(mcp, skill);
+
+    // Обе половины в тексте: записи MCP на месте, и имя чужой папки у скилла.
+    assert!(line.text.contains("на месте"), "{line:?}");
+    assert!(line.text.contains("чужая-папка"), "{line:?}");
+    // Половина со скиллом не как просили — строка обязана это показать.
+    assert_eq!(line.kind, Kind::Fail, "{line:?}");
+
+    // Та же пара `Found`, что дала этот итог, идёт и в галочку (`editors::both`,
+    // `tray::agent_checked` смотрит именно на `Ours`) — она останется снятой.
+    let combined =
+        crate::editors::both(&Ok(crate::editors::Found::Ours), &Ok(crate::editors::Found::Foreign(vec!["чужая-папка".to_string()])))
+            .unwrap();
+    assert_ne!(combined, crate::editors::Found::Ours, "галочка обязана остаться снятой: {combined:?}");
+}
+
 /// Итог щелчка из канала, мимо прочих событий (`guarded` шлёт перед паникой
 /// ещё и строку в журнал) — тем же приёмом, что `loudness_of_the_pass` в
 /// `facts::tests`: поддельный канал `Ui::for_test` и `block_on`.

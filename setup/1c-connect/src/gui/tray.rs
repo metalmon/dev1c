@@ -8,6 +8,8 @@ use super::{
     stop_session, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
+use crate::verify;
+use common::kit::Kit;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -344,7 +346,12 @@ impl Tray {
     /// цикл по реестру один, разница спрятана там. Опрос самих CLI отсюда
     /// убран — замер 30.10 дал 17–22 с замершего окна на один проход этого
     /// цикла (подробности у `editors::look_cli_agent`).
-    pub fn set_agents(&self, mode: &str) {
+    ///
+    /// `kit` — путь к состоянию программы (задача 5): галочка несёт теперь
+    /// ОБЕ половины, записи MCP и скиллы, и вторую половину без него не
+    /// прочитать (`verify::agent_found` — та же функция, что считает факт
+    /// набора, расходиться им нельзя).
+    pub fn set_agents(&self, mode: &str, kit: &Kit) {
         // Раздел не гаснет серым, а исчезает — решение владельца 30.10,
         // увидевшего четыре серых пункта и спросившего «может скрывать это
         // меню в туннельном режиме?»; оно же было его изначальным «раздела
@@ -374,7 +381,11 @@ impl Tray {
         for (item, def) in self.agents.iter().zip(editors::AGENTS.iter()) {
             let present = def.setup.present();
             let found = match &exe {
-                Some(exe) => def.setup.look(exe),
+                Some(exe) => {
+                    let mcp = def.setup.look(exe);
+                    let home = crate::skills::home_dir(def.skills);
+                    verify::agent_found(kit, &mcp, home.as_deref())
+                }
                 None => Ok(editors::Found::Missing),
             };
             item.set_checked(agent_checked(&found));
@@ -472,7 +483,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
                 // Доступность «Локальных агентов» зависит от режима — обязана
                 // обновиться тут же, не только при запуске (задача «Управление
                 // переехало в трей»).
-                tray.set_agents(mode);
+                tray.set_agents(mode, &cx.global::<Ui>().kit);
             }
             // Новый транспорт — сеанс поднимается заново; `stop_session`
             // безвредна, если сеанса и не было.
@@ -504,7 +515,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_mode(mode);
-                tray.set_agents(mode);
+                tray.set_agents(mode, &cx.global::<Ui>().kit);
             }
             cx.global_mut::<Ui>().tab = Tab::Params;
             window::show_window(cx);

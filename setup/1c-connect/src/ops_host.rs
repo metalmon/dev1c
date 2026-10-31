@@ -130,15 +130,27 @@ pub(crate) fn state_dir_env_missing() -> bool {
 /// `state_dir_env_missing()` любая подмена оставалась бы зелёной).
 ///
 /// Три значения сразу, а ветвление внутри: правило расходится по платформам
-/// (Windows смотрит только `LOCALAPPDATA`, unix — `XDG_DATA_HOME` и `HOME`),
-/// и принимая все три, функция проверяется на обеих платформах одним набором
-/// утверждений.
+/// (Windows смотрит только `LOCALAPPDATA`, unix — `XDG_DATA_HOME` и `HOME`).
+///
+/// Unix-половина — ОТДЕЛЬНОЙ функцией (`unix_env_missing` ниже), и не ради
+/// красоты: `cfg!(windows)` решается при сборке, значит на машине прогона
+/// (Windows) ветка unix не исполняется ни в бою, ни в тесте, и подмена
+/// `&&` → `||` внутри неё оставалась бы зелёной — ровно тот изъян, из-за
+/// которого весь предикат и вынесли в чистую функцию. Вынесенная половина
+/// компилируется и проверяется на ЛЮБОЙ платформе.
 fn env_missing_of(local: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> bool {
     if cfg!(windows) {
         absolute_found(local).is_none()
     } else {
-        absolute_found(xdg).is_none() && absolute_found(home).is_none()
+        unix_env_missing(xdg, home)
     }
+}
+
+/// Правило unix-ветки: каталог состояния даёт `XDG_DATA_HOME`, а если он не
+/// задан — `HOME`; отказ, только когда ни одна из двух не дала абсолютного
+/// пути. Тот же порядок, что у `state_dir()`.
+fn unix_env_missing(xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> bool {
+    absolute_found(xdg).is_none() && absolute_found(home).is_none()
 }
 
 /// Отказ для тех, кто зовёт `state_dir()` САМ, минуя `kit.state()`, и уводит
@@ -2709,11 +2721,16 @@ mod tests {
         // Задано, но относительным путём — тот же отказ (возврат к
         // `env_dir(..).is_none()` без `absolute_found` валится здесь).
         assert!(env_missing_of(rel(), rel(), rel()));
-        // Unix: хватает любой одной из двух — не отказ (`&&` → `||` валится
-        // здесь). Случай «не задана ни одна» — это строка `None, None, None`
-        // выше: на Windows её иначе не записать, там `local` решает сам.
-        assert!(!env_missing_of(abs("local"), abs("xdg"), None));
-        assert!(!env_missing_of(abs("local"), None, abs("home")));
+        // Unix-пара — на самом правиле (`unix_env_missing`), а не сквозь
+        // `env_missing_of`: на Windows ветка unix не компилируется вовсе, и
+        // подмена `&&` → `||` внутри неё оставалась бы зелёной — здесь она
+        // валится на любой платформе. Хватает любой одной из двух.
+        assert!(!unix_env_missing(abs("xdg"), None));
+        assert!(!unix_env_missing(None, abs("home")));
+        // Ни одна не дала абсолютного пути — отказ (это и есть случай,
+        // который `||` превратил бы в «порядок»).
+        assert!(unix_env_missing(None, None));
+        assert!(unix_env_missing(rel(), rel()));
     }
 
     #[test]

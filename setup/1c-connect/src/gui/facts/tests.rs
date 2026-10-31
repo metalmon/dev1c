@@ -741,6 +741,41 @@ fn the_set_is_not_recomputed_while_an_agent_click_is_in_flight() {
     assert!(start_facts(&mut ui, now).is_some(), "ответ щелчка не отпустил пересчёт");
 }
 
+/// Снимок владельца 31.10: включил MCP — журнал сказал «не всё готово: порт
+/// 8081 не отвечает», а через секунду «всё готово». Обслуживание становится
+/// живым сразу, публикацию поднимает свой поток, и такт в эту щель попадал.
+/// Лечение — тот же пропуск, что у щелчка агента, с отметкой повтора.
+#[test]
+fn the_set_is_not_recomputed_while_the_publication_is_being_raised() {
+    let mut ui = Ui::for_test();
+    ui.cfg.host.mode = "local".into();
+    ui.enabled.store(true, Ordering::Relaxed);
+    // Якорь в будущем: на свежей машине `Instant::now() - 60 с` паникует.
+    let now = Instant::now() + Duration::from_secs(3600);
+    ui.publishing = Some(now);
+
+    assert!(start_facts(&mut ui, now).is_none(), "расчёт пошёл по ещё не поднятому порту публикации");
+    assert!(ui.facts_again, "пересчёт не обещан — набор остался бы прежним до медленного такта");
+    assert!(!ui.facts_pending, "защёлка набора взведена чужой работой");
+
+    // Срок отпускает отметку аварийно: поток мог умереть молча (паника
+    // события не посылает), и без срока набор не посчитался бы больше ни разу.
+    assert!(
+        start_facts(&mut ui, now + super::PUBLISH_LOST + Duration::from_secs(1)).is_some(),
+        "срок подъёма не отпустил пересчёт"
+    );
+    ui.facts_pending = false;
+
+    // Ответ подъёма (`Ev::Publish` → `on_publish`) отпускает пересчёт — и
+    // снимает отметку только тот подъём, что её поставил.
+    ui.publishing = Some(now);
+    super::super::on_publish(&mut ui, now + Duration::from_secs(1));
+    assert!(start_facts(&mut ui, now).is_none(), "чужой запоздавший ответ снял отметку живого подъёма");
+    ui.publishing = Some(now);
+    super::super::on_publish(&mut ui, now);
+    assert!(start_facts(&mut ui, now).is_some(), "ответ подъёма не отпустил пересчёт");
+}
+
 /// Проводка срока (находка S4): мост спрашивает часы на каждый вызов и
 /// после полуночи отказывает всем, а окно смотрело в запомненное и
 /// показывало зелёное. Смена состояния лицензии — такое же событие,

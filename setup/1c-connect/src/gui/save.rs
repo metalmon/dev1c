@@ -579,12 +579,19 @@ pub fn republish_after_save(descriptor_changed: bool, serving: bool) -> bool {
 /// `ops_host::extension_reach` — в единственном месте, которое правда говорит
 /// с базой (Important 2 ревью круга 2): мьютекс вокруг потока можно отменить,
 /// убрав одну строку, а дорогу к базе мимо `extension_reach` не проложить.
+///
+/// Здесь же ставится отметка «публикация поднимается» (`ui.publishing`) — в
+/// том же месте, где заводится поток, как у щелчка агента: пока она стоит,
+/// расчёт готовности не идёт вовсе (`start_facts`), и человек не читает «не
+/// всё готово» про порт, который мы сами в эту секунду и поднимаем.
 pub fn ensure_publication_now(ui: &mut Ui) {
     let ctx = ctx_for(ui);
     let tx = ui.tx.clone();
+    let started = Instant::now();
+    ui.publishing = Some(started);
     std::thread::spawn(move || {
         let r = ops_host::ensure_publication(&ctx).map_err(|e| format!("{e:#}"));
-        let _ = tx.unbounded_send(Ev::Publish(r));
+        let _ = tx.unbounded_send(Ev::Publish { started, r });
     });
 }
 

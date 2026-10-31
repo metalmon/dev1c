@@ -436,14 +436,13 @@ pub(super) fn skill_found_text(f: &editors::Found) -> String {
 /// `KIT` здесь с 31.10 (спека, повод 1): вкладка обещает именем сказать про
 /// комплект, и доехал ли в нём `mcp-1c` — первое, что человек идёт туда
 /// узнать. В зелёном виде он прежде на вкладку не попадал вовсе.
-const PROJECT_SUBJECT: [&str; 7] = [
+const PROJECT_SUBJECT: [&str; 6] = [
     crate::verify::PROJECT,
     crate::verify::BASE,
     crate::verify::PUBLICATION,
     crate::verify::EXTENSION,
     crate::verify::DESCRIPTOR,
     crate::verify::TOOLS,
-    crate::verify::KIT,
 ];
 
 /// Что из набора идёт на вкладку «Инструменты». Два правила, и первое нерушимо:
@@ -1885,10 +1884,26 @@ mod tests {
     /// правилу «все проблемы».
     #[test]
     fn the_tools_tab_shows_the_kit_while_mcp_are_off() {
-        let kit = vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "vrunner 1.23 из комплекта")];
-        let shown: Vec<String> = fact_rows(&project_facts(tab_facts(&[], &kit))).into_iter().map(|(_, title, _)| title).collect();
-        assert!(shown.iter().any(|t| t == verify::KIT), "про `mcp-1c` в комплекте вкладка молчит: {shown:?}");
+        // Зелёный `KIT` на вкладку не идёт нарочно (заказчик 31.10: «нафига
+        // два раза сообщать про MCP?»): строка версий внутри `TOOLS` уже
+        // называет `mcp-1c` и его версию, а отдельная карточка «mcp-1c в
+        // комплекте» говорила ровно то же вторым рядом. Пропажу файла это не
+        // прячет: незелёные факты идут на вкладку независимо от списка
+        // предметов (первое правило `project_facts`), и красный `KIT`
+        // появится сам — это проверено ниже.
+        let kit =
+            vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "MinGit 2.56.0.2; mcp-1c v1.23.0")];
+        let rows = fact_rows(&project_facts(tab_facts(&[], &kit)));
+        let shown: Vec<String> = rows.iter().map(|(_, title, _)| title.clone()).collect();
         assert!(shown.iter().any(|t| t == verify::TOOLS), "про полноту комплекта вкладка молчит: {shown:?}");
+        let mcp_mentions = rows.iter().filter(|(_, title, detail)| title.contains("mcp-1c") || detail.contains("mcp-1c")).count();
+        assert_eq!(mcp_mentions, 1, "про mcp-1c сказано дважды: {rows:?}");
+
+        // Файла в комплекте нет — вкладка обязана сказать это, хотя зелёный
+        // `KIT` она и не показывает.
+        let broken = vec![Check::fail(verify::KIT, "файла нет", "комплект неполный — скопируйте заново")];
+        let shown: Vec<String> = fact_rows(&project_facts(tab_facts(&[], &broken))).into_iter().map(|(_, title, _)| title).collect();
+        assert!(shown.iter().any(|t| t == verify::KIT), "пропажа `mcp-1c` молчит: {shown:?}");
     }
 
     /// Вторая половина того же правила: как только полный набор есть, говорит
@@ -1896,10 +1911,13 @@ mod tests {
     /// зовёт ту же `kit_facts`), и два списка показали бы их дважды.
     #[test]
     fn the_full_set_replaces_the_kit_facts_rather_than_doubling_them() {
-        let kit = vec![Check::pass(verify::KIT, "из отдельного прохода")];
-        let set = vec![Check::pass(verify::KIT, "из полного набора"), Check::pass(verify::EXTENSION, "0.4.8")];
+        // На `TOOLS`, а не на `KIT`: зелёный `KIT` вкладка не показывает
+        // вовсе (дубль про `mcp-1c`, заказчик 31.10), и тест на нём проверял
+        // бы фильтр предметов вместо выбора списка.
+        let kit = vec![Check::pass(verify::TOOLS, "из отдельного прохода")];
+        let set = vec![Check::pass(verify::TOOLS, "из полного набора"), Check::pass(verify::EXTENSION, "0.4.8")];
         let rows = fact_rows(&project_facts(tab_facts(&set, &kit)));
-        let kits: Vec<&String> = rows.iter().filter(|(_, t, _)| t == verify::KIT).map(|(_, _, d)| d).collect();
+        let kits: Vec<&String> = rows.iter().filter(|(_, t, _)| t == verify::TOOLS).map(|(_, _, d)| d).collect();
         assert_eq!(kits, vec!["из полного набора"], "комплект показан дважды или не из набора: {rows:?}");
     }
 

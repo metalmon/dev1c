@@ -1709,6 +1709,11 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
         anyhow::bail!("{why}");
     }
     let log = cmd_log_sink(&kit);
+    // Уйти вместе с тем, кто нас запустил: на EOF от агента рассчитывать
+    // нельзя (замер 31.10 — четыре моста с мёртвыми родителями висели час
+    // двадцать и держали по ребёнку). При живом родителе — ни строки в
+    // журнале, ни задержки.
+    crate::orphan::guard(log.clone());
     let live = crate::session::Live::new(cfg.clone());
     let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), cfg.host.workstation.clone(), live.clone(), log.clone());
     // Один раз: `Ports` — `Copy`, дальше используется по значению и для

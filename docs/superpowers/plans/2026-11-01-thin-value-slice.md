@@ -88,31 +88,33 @@ git commit -m "Порты подбираются при занятости, а �
 
 ---
 
-### Задача 2: Профиль `mcp-1c` передаётся коннектором
+### Задача 2: Вид конфигурации базы передаётся коннектором
+
+**Поправка ведущего 2.11: ключ называется `[host] configuration`, а метод — `Cfg::configuration()`, не `profile`.** Довод: слово «профиль» в этом продукте уже занято контрактом подключения, где «Профиль» карточки — это «Разработчик» или «Бизнес-пользователь» (`2026-11-01-connection-contract.md`). Если тем же словом назвать вид конфигурации базы (`auto`/`generic`/`buh_3_0`), в toml и в окне одно слово будет значить разные вещи — а это ровно тот сорт путаницы, который потом правится переименованием через всю ветку. У ребёнка флаг всё равно зовётся `--profile`, и расхождение имён надо объяснить докстрокой в одну строку, а не устранять, подчиняясь чужому словарю. Вторая ось — `--toolset developer|business`, та самая, что отвечает «Профилю» карточки, — живёт в задаче 3 вместе с потолком записи.
 
 **Файлы:**
-- Изменить: `setup/1c-connect/src/cfg.rs` (поле `[host] profile`)
+- Изменить: `setup/1c-connect/src/cfg.rs` (поле `[host] configuration`)
 - Изменить: `setup/1c-connect/src/bridge.rs:38` (`mcp_command`)
 
 **Интерфейсы:**
 - Потребляет: ничего из задачи 1.
-- Отдаёт: `Cfg::profile(&self) -> Result<&str, String>` — проверенное значение (`auto` | `generic` | `buh_3_0`), иначе отказ словами со списком допустимых.
+- Отдаёт: `Cfg::configuration(&self) -> Result<&str, String>` — проверенное значение (`auto` | `generic` | `buh_3_0`), иначе отказ словами со списком допустимых.
 
 - [ ] **Шаг 1: Тест на разбор значения**
 
 ```rust
 #[test]
-fn an_unknown_profile_is_refused_with_the_allowed_list_in_words() {
+fn an_unknown_configuration_is_refused_with_the_allowed_list_in_words() {
     let mut c = sample();
-    c.host.profile = "buh".into();
-    let err = c.profile().unwrap_err();
+    c.host.configuration = "buh".into();
+    let err = c.configuration().unwrap_err();
     assert!(err.contains("buh_3_0") && err.contains("generic"), "{err}");
-    c.host.profile = "".into();
-    assert_eq!(c.profile(), Ok("auto"), "пустое значение — это auto, а не отказ");
+    c.host.configuration = "".into();
+    assert_eq!(c.configuration(), Ok("auto"), "пустое значение — это auto, а не отказ");
 }
 ```
 
-- [ ] **Шаг 2: Прогнать — падает.** Выполнить: `cargo test -p onec-connect profile`.
+- [ ] **Шаг 2: Прогнать — падает.** Выполнить: `cargo test -p onec-connect configuration`.
 
 - [ ] **Шаг 3: Добавить поле и разбор.** Умолчание в образце `1c-connect.toml` — пусто, с пояснением одной строкой: пусто значит «определить по конфигурации базы».
 
@@ -133,50 +135,80 @@ git commit -m "Профиль mcp-1c задаётся в параметрах и
 
 ---
 
-### Задача 3: Потолок записи отбирает список инструментов
+### Задача 3: Потолок записи и набор инструментов — флагами ребёнку, а не фильтром в посреднике
 
-**Файлы:**
-- Изменить: `setup/1c-connect/src/cfg.rs` (поле `[host] write` и список пишущих имён)
-- Изменить: `setup/1c-connect/src/bridge.rs` (`Rules::for_mcp`, отбор в `tools/list` и отказ в `tools/call`)
+**Переписана ведущим 2.11 после измерения форка.** Прежняя редакция предписывала держать в нашем Rust-коде свой список пишущих имён и отбирать `tools/list` в посреднике, а в шаге 3 сама признавала, что признак «пишет в базу» «обязан однажды приехать из самого `mcp-1c`». Он уже приехал, и измерение это показало:
+
+- `--toolset developer|business` — какой набор инструментов поднимать;
+- `--access read_write|read_only` — потолок записи;
+- и при `read_only` пишущие инструменты **не регистрируются вовсе** (`server/server.go:76-79` → `RegisterTools(s, client, readOnly)`: `RegisterReadTools`, и при `readOnly` — `return` до `RegisterWriteTools`). То есть их нет и в `tools/list`, а не «мы их спрятали».
+
+Это строго лучше фильтра в посреднике по двум причинам, и обе — не вкусовые. Первая: наш список имён пришлось бы вручную держать в согласии с набором форка, а расхождение давало бы молчаливо неверный результат — показанный инструмент, которого нет, или спрятанный, который есть. Вторая: спрятанное фильтром всё ещё существует у ребёнка, а незарегистрированного нет вовсе, и агент, помнящий имя из прошлого списка, получит от ребёнка честное «нет такого инструмента» вместо выполнения.
+
+**Files:**
+- Изменить: `setup/1c-connect/src/cfg.rs` (поля `[host] toolset` и `[host] write`, их разбор)
+- Изменить: `setup/1c-connect/src/bridge.rs` (`mcp_command` — три флага ребёнку)
 - Изменить: `setup/1c-connect/src/gui/tray.rs` (пункт меню «Запись в базу»)
 
-**Интерфейсы:**
-- Потребляет: `Cfg::profile` из задачи 2 не нужен; потолок независим от профиля.
-- Отдаёт: `Ceiling { ReadOnly, Full }` и `bridge::writes_to_base(tool: &str) -> bool`.
+**Interfaces:**
+- Потребляет: `Cfg::configuration()` из задачи 2 (флаг `--profile`); `mcp_command`/`mcp_command_guarded` в том виде, в каком их оставила задача 1 (сборка команды фаллибельна, пересборка при смене настроек уже работает через `rules.live`).
+- Отдаёт: `Cfg::toolset(&self) -> Result<&str, String>` (`developer` | `business`) и `Cfg::access(&self) -> &str` (`read_write` | `read_only`).
 
-- [ ] **Шаг 1: Тест на отбор списка**
+**Чего в этой задаче больше НЕТ:** списка пишущих имён в нашем коде, `bridge::writes_to_base`, отбора `tools/list` и отказа в `tools/call` на нашей стороне. Если при исполнении окажется, что без чего-то из этого не обойтись, — это находка, и её надо назвать в отчёте словами, а не вернуть фильтр молча.
+
+- [ ] **Шаг 1: Тест на разбор обоих значений и на умолчание**
 
 ```rust
 #[test]
-fn read_only_hides_writing_tools_from_the_list_and_refuses_their_calls() {
-    // список приходит с именами из профиля buh_3_0
-    let shown = filter_for(Ceiling::ReadOnly, &["execute_query", "create_sales_document", "update_sales_invoice"]);
-    assert_eq!(shown, ["execute_query"], "пишущие не показываем вовсе: агент выбирает из того, что видит");
-    assert!(writes_to_base("create_counterparty"));
-    assert!(!writes_to_base("execute_query"));
+fn the_toolset_defaults_to_business_and_the_ceiling_to_read_only() {
+    let c = sample();
+    assert_eq!(c.toolset(), Ok("business"), "умолчание — бизнес-пользователь: бухгалтеров больше, и им опаснее");
+    assert_eq!(c.access(), "read_only", "умолчание потолка — только чтение (решение владельца 1.11)");
+}
+
+#[test]
+fn an_unknown_toolset_is_refused_with_the_allowed_list_in_words() {
+    let mut c = sample();
+    c.host.toolset = "бухгалтер".into();
+    let err = c.toolset().unwrap_err();
+    assert!(err.contains("developer") && err.contains("business"), "{err}");
 }
 ```
 
-- [ ] **Шаг 2: Прогнать — падает.**
+- [ ] **Шаг 2: Прогнать — падает.** Run: `cargo test -p onec-connect toolset`
 
-- [ ] **Шаг 3: Реализовать отбор.** Список пишущих имён — явный, в одном месте, с комментарием: признак «пишет в базу» обязан однажды приехать из самого `mcp-1c`, а пока он наш (`connection-contract.md`: «признак — свойство инструмента, а не настройка»).
+- [ ] **Шаг 3: Добавить поля и разбор.** `[host] toolset` пустое значит `business`; `[host] write` пустое значит `read_only`. В образце `1c-connect.toml` — с пояснением одной строкой каждое. Имена значений брать теми же словами, что понимает ребёнок (`developer`/`business`, `read_write`/`read_only`), а не своими: перевод здесь создал бы третью таблицу соответствий без всякой пользы.
 
-- [ ] **Шаг 4: Тест на отказ вызова**
+- [ ] **Шаг 4: Тест на то, что все три флага доходят до ребёнка**
 
-Имя: `a_writing_tool_called_under_read_only_is_refused_before_the_child`. Утверждение: ответ агенту — отказ словами, и в журнале ребёнка вызова нет (тем же приёмом, что `disabled_tool_never_reaches_the_child`).
+```rust
+#[test]
+fn the_child_gets_the_toolset_the_access_and_the_configuration() {
+    let mut c = sample();
+    c.host.toolset = "business".into();
+    c.host.write = "read_only".into();
+    let cmd = mcp_command(&c, &kit_for_test());
+    let argv: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    assert!(argv.windows(2).any(|w| w == ["--toolset", "business"]), "{argv:?}");
+    assert!(argv.windows(2).any(|w| w == ["--access", "read_only"]), "{argv:?}");
+    assert!(argv.windows(2).any(|w| w[0] == "--profile"), "{argv:?}");
+}
+```
 
-- [ ] **Шаг 5: Пункт меню «Запись в базу».** Два положения, умолчание — «Только чтение». Строится тем же кодом, что остальные радиопункты трея.
+- [ ] **Шаг 5: Передать флаги в `mcp_command`.** Ключами, не переменными окружения: это не секреты, и в командной строке они читаемы человеком, который разбирается, почему агент не видит инструмента. Пароль при этом остаётся переменной — не трогай это решение (`bridge.rs`, докстрока `mcp_command`).
 
-- [ ] **Шаг 6: Прогнать набор.** `cargo test -p onec-connect`.
+- [ ] **Шаг 6: Пункт меню «Запись в базу».** Два положения, умолчание «Только чтение», строится тем же кодом, что остальные радиопункты трея. Смена положения должна дойти до уже работающего ребёнка: механизм для этого есть (`rules.live` + пересборка, задача 1), и тест должен показать, что после смены потолка собранная заново команда несёт другой `--access`.
 
-- [ ] **Шаг 7: Коммит**
+- [ ] **Шаг 7: Сквозная проверка, если она достаётся дёшево.** Поднять собранный `mcp-1c` с `--toolset business --access read_only` и спросить `tools/list` по stdio; ожидается, что пишущих имён (`create_counterparty`, `create_sales_document`, `update_sales_invoice`) в ответе нет. **Если без живой базы ребёнок список не отдаёт — не выдумывай обход:** скажи это в отчёте одной строкой, и ограничься проверкой флагов. Поднимать контейнер или базу тебе НЕ разрешено.
+
+- [ ] **Шаг 8: Прогнать набор.** Run: `cargo test -p onec-connect`
+
+- [ ] **Шаг 9: Коммит**
 
 ```bash
 git add setup/1c-connect/src/cfg.rs setup/1c-connect/src/bridge.rs setup/1c-connect/src/gui/tray.rs
-git commit -m "Потолок записи: пишущие инструменты не видны и не вызываются"
+git commit -m "Потолок записи и набор инструментов уезжают флагами ребёнку"
 ```
-
----
 
 ### Задача 4: Комплект несёт сборку форка
 

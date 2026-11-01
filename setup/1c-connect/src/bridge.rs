@@ -175,6 +175,14 @@ pub fn disabled_text(reason: Option<&str>) -> String {
     }
 }
 
+/// Тот же счёт, что в `handle_request` (`off`), но отдельной функцией:
+/// `pipe_jsonrpc` спрашивает его не на каждый вызов, а на каждый такт
+/// проверки рестарта — не ради вызова агента, а чтобы решить, жить ребёнку
+/// дальше или уйти в спячку (`EpochEnd::Dormant`).
+fn mcp_is_off(enabled: &AtomicBool) -> bool {
+    matches!(crate::licence::state_now(), crate::licence::State::Expired) || !enabled.load(Ordering::Relaxed)
+}
+
 /// Пересборка команды запуска агента по текущим параметрам. Тип назван,
 /// потому что дословно повторялся в трёх местах (`Rules`, `Rules::new`,
 /// `session.rs`) и читался хуже, чем называется.
@@ -418,6 +426,13 @@ where
         /// Параметры сменились, и ни один вызов не висит без ответа: поднять
         /// нового ребёнка на свежих параметрах, не трогая само соединение.
         Restart,
+        /// MCP выключили (переключателем или сроком лицензии), и ни один
+        /// вызов не висит без ответа: отпустить ребёнка — `mcp-1c`/
+        /// `vrunner-mcp` и всё его дерево уходят той же уборкой, что и при
+        /// `AgentEof` (`grace_kill` + `drop(job)`) — а само соединение
+        /// остаётся: решение владельца 31.10, «выключили MCP — уходит то,
+        /// что тяжело».
+        Dormant,
     }
 
     let mut f = Framer::new();
@@ -602,6 +617,14 @@ where
                 // Без `rebuild` рестарта вообще не бывает — один ребёнок на
                 // всю жизнь соединения, как у `Rules::for_mcp` без доустройки.
                 if rules.rebuild.is_some() && in_flight.load(Ordering::Relaxed) == 0 {
+                    // Выключение проверяется первым и первым же решает: пока
+                    // MCP выключены, сменившиеся параметры — не повод поднять
+                    // ребёнка на новой базе, которому тут же откажут. Их он
+                    // получит всё равно — тем же `gen`/`cfg`, перечитанными
+                    // перед самым следующим спавном (ниже, выход из спячки).
+                    if mcp_is_off(&rules.enabled) {
+                        break EpochEnd::Dormant;
+                    }
                     let (now_gen, now_cfg) = rules.live.get();
                     if now_gen != gen {
                         gen = now_gen;
@@ -610,7 +633,7 @@ where
                     }
                 }
                 let fr = pending_frames.pop_front().unwrap();
-                if handle_request(fr, &rules, &out_tx, &pending, &running, &mut stdin, &log, &mcp_off_warned, &in_flight, &handshake)
+                if handle_request(fr, &rules, &out_tx, &pending, &running, Some(&mut stdin), &log, &mcp_off_warned, &in_flight, &handshake)
                     .await
                     .is_err()
                 {
@@ -674,6 +697,51 @@ where
                 log(Event::Say(format!("{who}: параметры базы сменились, следующий вызов идёт в {}", cfg.host.base_path)));
                 continue;
             }
+            EpochEnd::Dormant => {
+                let _ = grace_kill(stdin, child).await;
+                let _ = from_child.await;
+                let _ = err_tail.await;
+                drop(job);
+                log(Event::Say(format!("{who}: MCP выключены — ребёнок освобождён, соединение остаётся")));
+                // Без ребёнка, пока не включат снова: та же `handle_request`,
+                // которой отвечается и живой ребёнок, со `stdin: None` —
+                // второй механизм ответа без ребёнка заводить незачем,
+                // отказ агенту несёт то же слово, что и при живом ребёнке
+                // (`DISABLED_TEXT`/`disabled_text`/`licence::REFUSAL`).
+                loop {
+                    // Выключение проверяется первым, даже если строка от
+                    // агента уже легла в очередь: включили снова — она ждёт
+                    // СВЕЖЕГО ребёнка (ниже, выход из спячки), а не отказ
+                    // без него. Иначе включение, застигшее мост с непустой
+                    // `pending_frames`, отвечало бы первому же вызову после
+                    // «Сохранить» всё той же спячкой на один такт позже.
+                    if !mcp_is_off(&rules.enabled) {
+                        break;
+                    }
+                    if !pending_frames.is_empty() {
+                        let fr = pending_frames.pop_front().unwrap();
+                        let _ =
+                            handle_request(fr, &rules, &out_tx, &pending, &running, None, &log, &mcp_off_warned, &in_flight, &handshake)
+                                .await;
+                        continue;
+                    }
+                    tokio::select! {
+                        n = sr.read(&mut buf) => match n {
+                            Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока MCP были выключены".to_string()),
+                            Ok(n) => pending_frames.extend(f.push(&buf[..n])),
+                        },
+                        () = crate::orphan::launcher_gone() => break 'connection (-1, true, "агент отключился, пока MCP были выключены".to_string()),
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+                    }
+                }
+                // Включили снова: свежие параметры на спавн нового ребёнка —
+                // не те, что были до спячки (та же причина, что у `Restart`).
+                let (now_gen, now_cfg) = rules.live.get();
+                gen = now_gen;
+                cfg = now_cfg;
+                log(Event::Say(format!("{who}: MCP включены — поднимаю ребёнка в {}", cfg.host.base_path)));
+                continue;
+            }
         }
     };
 
@@ -701,6 +769,13 @@ where
 /// вызова (`&mut stdin` среди них), и у функции единственный вызывающий.
 /// Собрать их в структуру значит завести тип с временем жизни и `&mut`
 /// внутри — читателю от этого не легче, а место ошибки прибавится.
+///
+/// `stdin` — `None`, когда ребёнка нет вовсе: мост в спячке
+/// (`EpochEnd::Dormant`), MCP выключены и ребёнок отпущен. Вызывающий тот же
+/// самый (единственный, по-прежнему) — второй функции-двойника для «без
+/// ребёнка» не завели: каждая ветка ниже, которой нужен ребёнок, при `None`
+/// отвечает агенту тем же отказом, каким отвечает сегодня при включённом
+/// переключателе, а не распадается по-своему.
 #[allow(clippy::too_many_arguments)]
 async fn handle_request(
     fr: Frame,
@@ -708,7 +783,7 @@ async fn handle_request(
     out: &mpsc::Sender<Vec<u8>>,
     pending: &Pending,
     running: &Running,
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: Option<&mut tokio::process::ChildStdin>,
     log: &Sink,
     mcp_off_warned: &AtomicBool,
     in_flight: &AtomicU64,
@@ -763,14 +838,33 @@ async fn handle_request(
         if !off {
             let mut raw = line;
             raw.push(b'\n');
-            return forward_counted(stdin, &raw, in_flight, reply_expected).await;
+            return match stdin {
+                // Включённый мост без ребёнка не бывает (спячка держит `off`
+                // всегда истинным, см. `pipe_jsonrpc`) — но на отказ честнее,
+                // чем на панику, если это предположение однажды подведёт.
+                Some(s) => forward_counted(s, &raw, in_flight, reply_expected).await,
+                None => Err(()),
+            };
         }
         return match jsonrpc::mcp_gate_while_off(&line) {
-            jsonrpc::McpOffGate::Forward => {
-                let mut raw = line;
-                raw.push(b'\n');
-                forward_counted(stdin, &raw, in_flight, reply_expected).await
-            }
+            jsonrpc::McpOffGate::Forward => match stdin {
+                Some(s) => {
+                    let mut raw = line;
+                    raw.push(b'\n');
+                    forward_counted(s, &raw, in_flight, reply_expected).await
+                }
+                // Ребёнка нет (спячка): рукопожатие и прочие признанные
+                // методы отвечаются тем же отказом, что и `tools/call`, —
+                // уведомление (нет `id`) отвечать нечем, молча мимо.
+                None => {
+                    if reply_expected {
+                        if let Some(id) = request_id(&line) {
+                            let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
+                        }
+                    }
+                    Ok(())
+                }
+            },
             jsonrpc::McpOffGate::Refuse(id) => {
                 let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
                 Ok(())
@@ -811,10 +905,22 @@ async fn handle_request(
             let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
             Ok(())
         }
-        Route::ListRequest { id, line } => {
-            pending.lock().unwrap().insert(key(&id), (id, tools.clone()));
-            forward_counted(stdin, &line, in_flight, reply_expected).await
-        }
+        Route::ListRequest { id, line } => match stdin {
+            Some(s) => {
+                pending.lock().unwrap().insert(key(&id), (id, tools.clone()));
+                forward_counted(s, &line, in_flight, reply_expected).await
+            }
+            // Ребёнка нет (спячка) — список инструментов редактору отвечаем
+            // своими: тем же приёмом, которым отвечается `tools/list`,
+            // оставшийся без ответа на уходе ребёнка (конец этой функции,
+            // `unanswered` ниже) — список в редакторе остаётся живым, как
+            // того требует заголовок `ops_host::run_mcp`.
+            None => {
+                let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(local))).await;
+                Ok(())
+            }
+        },
         Route::Disabled { id, tool } => {
             let text = if off {
                 refusal_text()
@@ -836,7 +942,18 @@ async fn handle_request(
                     .await;
                 Ok(())
             } else {
-                forward_counted(stdin, &line, in_flight, reply_expected).await
+                match stdin {
+                    Some(s) => forward_counted(s, &line, in_flight, reply_expected).await,
+                    // Недостижимо при включённых MCP наяву (см. `off`
+                    // выше — пустой список допущенных гонит любой tools/call
+                    // в `Disabled` раньше, чем дело дойдёт до платформенного
+                    // инструмента); отказ честнее тишины, если это всё же
+                    // не так.
+                    None => {
+                        let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
+                        Ok(())
+                    }
+                }
             }
         }
         Route::OurCall { id, tool, args } => {
@@ -871,10 +988,28 @@ async fn handle_request(
             if ours {
                 Ok(())
             } else {
-                forward_counted(stdin, &line, in_flight, reply_expected).await
+                match stdin {
+                    Some(s) => forward_counted(s, &line, in_flight, reply_expected).await,
+                    // Ребёнка нет (спячка) — отменять уже нечего, а отмена —
+                    // уведомление, ответа не ждёт.
+                    None => Ok(()),
+                }
             }
         }
-        Route::Forward(line) => forward_counted(stdin, &line, in_flight, reply_expected).await,
+        Route::Forward(line) => match stdin {
+            Some(s) => forward_counted(s, &line, in_flight, reply_expected).await,
+            // Ребёнок нет (спячка): протокольные методы вроде `ping` или
+            // повторного `initialize` отвечаются тем же отказом, что и
+            // вызов инструмента, — уведомление отвечать нечем.
+            None => {
+                if reply_expected {
+                    if let Some(id) = request_id(&line) {
+                        let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
+                    }
+                }
+                Ok(())
+            }
+        },
     }
 }
 
@@ -1393,12 +1528,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_tool_call_is_refused_while_mcp_are_off() {
-        // Ребёнок запускается сразу на соединении, даже при выключенном
-        // переключателе (решение заказчика: простаивающий ребёнок не держит
-        // сеанс 1С и умирает вместе с сеансом) — и отвечает на initialize/
-        // tools/list. Единственное, что до него не должно дойти, — сам
-        // вызов инструмента; "CALL cf_load" — метка, которую ребёнок пишет,
-        // только когда и если увидел tools/call (см. BRIDGE_SCRIPT_RECORD).
+        // MCP выключены уже на старте соединения: ребёнок, успев спавниться,
+        // уходит в спячку на первом же такте проверки (`EpochEnd::Dormant`,
+        // решение владельца 31.10, — простаивающий ребёнок не должен держать
+        // сеанс 1С), и initialize/tools/list отвечаются уже без него (см.
+        // ветки `stdin: None` в `handle_request`). Единственное, что до
+        // ребёнка не должно дойти НИ В КАКОМ случае, — сам вызов инструмента;
+        // "CALL cf_load" — метка, которую он пишет, только когда и если
+        // увидел tools/call (см. BRIDGE_SCRIPT_RECORD).
         let enabled = Arc::new(AtomicBool::new(false));
         let (replies, raw, _) = talk(
             ("BRIDGE_SCRIPT_RECORD", "1"),
@@ -1543,36 +1680,117 @@ mod tests {
         assert!(seen[0].contains("не пишутся"), "{}", seen[0]);
     }
 
+    /// Решение владельца 31.10 меняет и эту проверку: выключенный мост
+    /// больше не держит ребёнка живым между вызовами — первый вызов отвечает
+    /// отказом без него (спячка, `EpochEnd::Dormant`), а включение поднимает
+    /// СВЕЖЕГО ребёнка тем же рестартом, что и смена параметров (`rebuild`).
+    /// Поэтому `rebuild` здесь — рабочая команда, не заглушка `rules_with`:
+    /// до этого решения рестарт при одном включённом переключателе и вовсе
+    /// не звался, и заглушки хватало.
     #[tokio::test]
     async fn flipping_the_switch_mid_connection_starts_serving() {
         let enabled = Arc::new(AtomicBool::new(false));
+        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT", "1"));
+        let cfg = test_cfg(&["cf_load"]);
+        let rules =
+            Rules::for_vrunner(Live::new(cfg.clone()), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(
-            theirs,
-            child(("BRIDGE_SCRIPT", "1")),
-            rules_with(&["cf_load"], 0, enabled.clone()),
-            no_log(),
-            move |code, _by_us, err| {
-                let _ = tx.send((code, err));
-            },
-        ));
+        tokio::spawn(pipe_jsonrpc(theirs, make_cmd(&cfg), rules, no_log(), move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
         let (r, mut w) = tokio::io::split(ours);
+        let mut lines = tokio::io::BufReader::new(r).lines();
         let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let reply1 = wait_line(&mut lines, |l| l.starts_with('{')).await;
+        assert!(reply1.contains(DISABLED_PREFIX), "{reply1}");
         enabled.store(true, Ordering::Relaxed);
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let reply2 = wait_line(&mut lines, |l| l.starts_with('{')).await;
+        assert!(reply2.contains("child ran cf_load"), "{reply2}");
         w.shutdown().await.unwrap();
-        let mut got = String::new();
-        tokio::io::BufReader::new(r).read_to_string(&mut got).await.unwrap();
-        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        assert_eq!(replies.len(), 2, "{got}");
-        assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{got}");
-        assert_eq!(replies[1]["result"]["content"][0]["text"], "child ran cf_load", "{got}");
+    }
+
+    /// Решение владельца 31.10, прямо: выключили MCP на разговоре, где
+    /// ребёнок уже отвечал (рукопожатие прошло) — ребёнок освобождён
+    /// (`EpochEnd::Dormant`, `grace_kill`+`drop(job)`, как у `AgentEof`), а
+    /// само соединение держится; включили снова — свежий ребёнок поднят с
+    /// переигранным рукопожатием, тем же приёмом, что и смена параметров
+    /// (`restart_replays_the_handshake_and_the_client_sees_one_reply_per_request`).
+    #[tokio::test]
+    async fn disabling_mcp_mid_connection_releases_the_child_and_enabling_replays_the_handshake() {
+        let enabled = Arc::new(AtomicBool::new(true));
+        let cfg = test_cfg(&["cf_load"]);
+        let live = Live::new(cfg.clone());
+        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT_RECORD", "1"));
+        let cmd0 = make_cmd(&cfg);
+        let rules = Rules::for_vrunner(live, std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        let mut got: Vec<u8> = Vec::new();
+
+        w.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        w.write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 1), std::time::Duration::from_secs(10)).await,
+            "нет ответа на initialize: {}",
+            String::from_utf8_lossy(&got)
+        );
+
+        // Выключили — следующий вызов получает отказ, а до единственного на
+        // тот момент ребёнка (он ещё жив, но праздный) не должен дойти вовсе:
+        // мост обязан увести его в спячку раньше, чем отдаст ему вызов.
+        enabled.store(false, Ordering::Relaxed);
+        w.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 2), std::time::Duration::from_secs(10)).await,
+            "нет ответа на вызов при выключенных MCP: {}",
+            String::from_utf8_lossy(&got)
+        );
+        {
+            let text = String::from_utf8_lossy(&got).into_owned();
+            let replies: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+            let r2 = replies.iter().find(|r| r["id"] == 2).unwrap();
+            assert!(r2["result"]["content"][0]["text"].as_str().unwrap_or_default().starts_with(DISABLED_PREFIX), "{text}");
+            assert!(!text.contains("CALL cf_load"), "ребёнка нет — вызов не мог дойти ни до кого: {text}");
+        }
+
+        // Включили снова — свежий ребёнок поднимается, рукопожатие
+        // переигрывается ему, и тот же вызов теперь доходит до него.
+        enabled.store(true, Ordering::Relaxed);
+        w.write_all(br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 3), std::time::Duration::from_secs(10)).await,
+            "нет ответа после включения: {}",
+            String::from_utf8_lossy(&got)
+        );
+        w.shutdown().await.unwrap();
+        let mut tail = Vec::new();
+        let _ = r.read_to_end(&mut tail).await;
+        got.extend_from_slice(&tail);
+
+        let text = String::from_utf8_lossy(&got).into_owned();
+        let replies: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+        assert_eq!(replies.iter().find(|r| r["id"] == 3).unwrap()["result"]["content"][0]["text"], "child ran cf_load", "{text}");
+        // "GOT ..." печатает каждый ребёнок на каждую прочитанную строку
+        // (см. __echo_child): рукопожатие дошло и до первого ребёнка (сам
+        // вызов агента), и до второго, поднятого уже после включения
+        // (переигранное) — ровно два раза, не один и не три.
+        assert_eq!(text.matches(r#""method":"initialize""#).count(), 2, "{text}");
+        // Вызов инструмента дошёл ровно один раз — от третьего запроса,
+        // уже после включения; второй (пока выключено) не долетел никуда.
+        assert_eq!(text.matches("CALL cf_load").count(), 1, "{text}");
     }
 
     #[tokio::test]

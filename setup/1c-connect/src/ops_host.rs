@@ -1715,6 +1715,12 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // журнале, ни задержки.
     crate::orphan::guard(log.clone());
     let live = crate::session::Live::new(cfg.clone());
+    // Второй сторож, за коннектором (решение владельца 31.10): закрыли
+    // коннектор рабочего места — мост уходит вместе с ним, даже когда
+    // родитель (`guard` выше) не умер вовсе (см. замер 31.10 — Zed запускает
+    // мост через промежуточный процесс, который тут же умирает, и `guard`
+    // этот случай не закрывает).
+    crate::orphan::guard_owner(kit.clone(), crate::single_instance::current_user(), live.clone(), log.clone());
     let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), cfg.host.workstation.clone(), live.clone(), log.clone());
     // Один раз: `Ports` — `Copy`, дальше используется по значению и для
     // выбора порта, и для самого `Serve` (ревью задачи 3, Minor 7).

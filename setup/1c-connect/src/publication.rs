@@ -231,9 +231,8 @@ pub(crate) fn kit_httpd_exe(kit_root: &Path) -> PathBuf {
 /// `Listen` в `httpd.conf`) — выбранный в этом сеансе (`ports::choose`), не
 /// `cfg.http_port()` как есть: тот остаётся умолчанием ПЕРВОЙ попытки
 /// подбора, а не окончательным ответом (план «тонкий срез ценности», задача
-/// 1). `cfg.ports()` даёт первые попытки для mcp/vrunner/web — их этот сеанс
-/// подбирает и запоминает заодно, одним выбором на всю четвёрку, хоть сейчас
-/// в дескриптор идёт только `http`.
+/// 1). Подбирается ровно он один — порты моста этот сеанс не трогает (см.
+/// докстроку `ports::Chosen`).
 ///
 /// Чистая по каталогу состояния (параметр, не `ops_host::state_dir()` сама
 /// по себе) — тем же приёмом, что `paths_under`: тест подаёт временный
@@ -1200,7 +1199,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let cfg = crate::cfg::filled_for_test();
         let derived = cfg.http_port();
         assert_eq!(derived, 8081, "dev1 из filled_for_test() — именно тот умолчание-порт первой попытки");
-        crate::ports::write(&dir, &cfg.first_attempt_ports(), &crate::ports::Chosen { mcp: 1, vrunner: 2, web: 3, http: 47802 }).unwrap();
+        crate::ports::write(&dir, &cfg.first_attempt_ports(), &crate::ports::Chosen { http: 47802 }).unwrap();
         let port = resolve_http_port(&dir, &cfg).unwrap();
         assert_eq!(port, 47802, "дескриптор обязан нести выбранный порт, а не выведенный");
         assert_ne!(port, derived);

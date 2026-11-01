@@ -571,12 +571,14 @@ impl Cfg {
         Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
     }
 
-    /// ПРЕДПОЧТЕНИЕ все четыре сразу — то, чего человек хочет сейчас (явный
-    /// `host.http_port` или выведенный, номер рабочего места для сестёр —
-    /// умолчание пилота, которое контракт подключения уже вычёркивает,
+    /// ПРЕДПОЧТЕНИЕ порта публикации — то, чего человек хочет сейчас (явный
+    /// `host.http_port` или выведенный из имени рабочего места — умолчание
+    /// пилота, которое контракт подключения уже вычёркивает,
     /// `docs/superpowers/specs/2026-11-01-connection-contract.md`; поле
     /// уйдёт, предпочтение как понятие — нет), а не то, что уже досталось
-    /// (`resolved`). Круг исправления 3, находка ведущего: раньше здесь
+    /// (`resolved`). Порты моста (`ports()`) сюда больше не идут: их никто
+    /// не подбирает — см. докстроку `ports::Chosen`, находка 7 ревью круга
+    /// 3. Круг исправления 3, находка ведущего: раньше здесь
     /// стоял `self.http_port()` — УЖЕ улаженный порт, и вход `ports::choose`
     /// замыкался сам на себя (запомненный выбор кормил себя же как
     /// «предпочтение», и новое предпочтение человека — например, явный
@@ -585,12 +587,10 @@ impl Cfg {
     /// дело — явный порт или вывод, не то, что выбрал `ports::choose`.
     ///
     /// Одна сборка на обоих вызывающих (`publication::Paths::of`,
-    /// `ops_host::settle_chosen_http_port`) — врозь она дважды повторяла бы
-    /// один и тот же литерал `Chosen { mcp: ..., vrunner: ..., ... }`.
+    /// `ops_host::settle_chosen_http_port`) — врозь они дважды повторяли бы
+    /// одно и то же правило «явный порт человека, иначе выведенный».
     pub fn first_attempt_ports(&self) -> crate::ports::Chosen {
-        let p = self.ports();
-        let preferred_http = self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation));
-        crate::ports::Chosen { mcp: p.mcp, vrunner: p.vrunner, web: p.web, http: preferred_http }
+        crate::ports::Chosen { http: self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation)) }
     }
 
     /// Порт веб-сервера из действующего адреса публикации (`base_url()`, не

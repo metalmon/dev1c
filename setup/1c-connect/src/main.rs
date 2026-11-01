@@ -131,7 +131,7 @@ fn make_ctx(kit: Kit, mut cfg: cfg::Cfg, dry_run: bool, yes: bool) -> Ctx {
     // `ctx.cfg.base_url()`/`verify` называли бы выведенный порт, а httpd
     // слушал бы ВЫБРАННЫЙ (`publication::Paths::of`) — агент шёл бы по
     // старому адресу и получал молчание.
-    ops_host::settle_chosen_http_port(&mut cfg);
+    ops_host::settle_chosen_http_port(&mut cfg, &kit);
     let k = kit.clone();
     let sink = Arc::new(move |e: Event| {
         if k.journal(&e) {

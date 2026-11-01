@@ -78,6 +78,89 @@ pub fn listener_pid(port: u16) -> Option<u32> {
     pid_owning_inode(inode)
 }
 
+/// Путь к образу процесса по его номеру — ЛИЧНОСТЬ процесса, которую, в
+/// отличие от номера, сосед подделать не может.
+///
+/// Зачем (находка автоматической проверки безопасности по кругу 4,
+/// 2.11.2026). Номер процесса Windows переиспользует охотно, а pid-файл
+/// нашего httpd после краха (или после того, как его сняли принудительно —
+/// а снимают регулярно: `httpd -k stop` на консольном экземпляре ищет службу
+/// `Apache2.4` и не останавливает ничего, замер ведущего) остаётся лежать с
+/// номером мёртвого процесса. Сосед по терминальному серверу, плодя
+/// процессы, однажды получит тот самый номер и займёт наш порт — и страж,
+/// сравнивающий ТОЛЬКО номера, скажет «свой», а `MCP_1C_PASSWORD` уедет к
+/// соседу. Образ это закрывает: оказаться нашим httpd по нашему пути сосед
+/// не может.
+///
+/// Потребителей двое, и примитив живёт здесь ради второго. Первый — страж
+/// порта публикации (`publication::refuse_unless_ours` и проба подбора
+/// `publication::busy_for_choice`). Второй — задача 7 плана, где процесс по
+/// pid-файлу надо будет ГАСИТЬ: там цена ошибки выше, чем утечка пароля
+/// словами, — убить чужую программу вместо своего httpd.
+///
+/// Windows — `QueryFullProcessImageNameW` под
+/// `PROCESS_QUERY_LIMITED_INFORMATION`: самое слабое из прав на процесс.
+/// Хватает ли его обычному пользователю — ИЗМЕРЕНО, не предположено
+/// (2.11.2026, эта машина, прогон под НЕповышенным токеном: `whoami /groups`
+/// без High Mandatory Level): образ трёх процессов `svchost.exe`,
+/// принадлежащих SYSTEM, добылся — `C:\Windows\System32\svchost.exe` для
+/// pid 1148, 1236, 1364. `None` вернул только pid 4 (ядровой `System`,
+/// защищённый) — нашим httpd он не бывает. То есть права достаточно и на
+/// чужого пользователя, а значит «не опознали» в бою означает «процесса
+/// нет», а не «не дали посмотреть».
+///
+/// Unix — `/proc/<pid>/exe`, то же ядро, что уже читает `listener_pid`
+/// (ссылку на чужой процесс другого пользователя там как раз может не дать
+/// прочитать — и это тоже «не опознали»).
+///
+/// `None` — процесса нет, права не хватило или путь не добыть; решать, что
+/// это значит, остаётся вызывающему, и для стража это «не свой».
+#[cfg(windows)]
+pub fn image_of_pid(pid: u32) -> Option<std::path::PathBuf> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        return None;
+    }
+    // С запасом: расширенный путь бывает длиннее MAX_PATH, но не бесконечно.
+    let mut buf = vec![0u16; 4096];
+    let mut len = buf.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) };
+    unsafe {
+        CloseHandle(h);
+    }
+    if ok == 0 || len == 0 {
+        return None;
+    }
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+}
+
+#[cfg(not(windows))]
+pub fn image_of_pid(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// Один ли это образ — чистое правило, без всякого похода в систему (тем же
+/// приёмом, что `ops_host::env_missing_of`/`ensure_state_decision`: решение
+/// отдельно от добычи сведений, чтобы проверялось без них).
+///
+/// Сравнение не байтовое. `canonicalize` разворачивает короткие имена 8.3,
+/// `..` и символические ссылки — без этого один и тот же файл, названный
+/// двумя путями, читался бы как два разных процесса. На Windows поверх того
+/// регистр не значит ничего: `C:\Kit\httpd.exe` и `c:\kit\HTTPD.EXE` — один
+/// файл. Приведение юникодное (`to_lowercase`), не ASCII-овское: комплект
+/// может лежать в каталоге с русским именем.
+pub fn same_image(expected: &std::path::Path, actual: &std::path::Path) -> bool {
+    fn normal(p: &std::path::Path) -> String {
+        let full = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let s = full.to_string_lossy().to_string();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    }
+    normal(expected) == normal(actual)
+}
+
 /// Имя и pid процесса, слушающего `port` на loopback (или на всех адресах —
 /// самый частый случай: Windows отдаёт занятые порты как `0.0.0.0:N`), в виде
 /// `1c-connect (pid 812)` — `None`, если порт свободен, или сведений не
@@ -426,6 +509,34 @@ TCP    127.0.0.1:17771        0.0.0.0:0              LISTENING       123
         assert_eq!(parse_netstat(NETSTAT_SAMPLE, 17771), Some(123), "17771 не должен спутаться с 7771");
         assert_eq!(parse_netstat(NETSTAT_SAMPLE, 7772), None);
         assert_eq!(parse_netstat("", 7771), None);
+    }
+
+    /// Примитив личности процесса работает на обеих платформах — это нижняя
+    /// проверка, без которой `same_image` сравнивал бы `None` с `None`:
+    /// образ СВОЕГО процесса обязан добываться и совпадать с
+    /// `current_exe()`, а номера, которого нет, — не паника, а `None`.
+    #[test]
+    fn image_of_pid_names_our_own_image_and_refuses_a_number_that_is_not_there() {
+        let image = image_of_pid(std::process::id()).expect("образ своего процесса обязан добываться");
+        assert!(same_image(&std::env::current_exe().unwrap(), &image), "{}", image.display());
+        assert_eq!(image_of_pid(4_294_967_290), None, "номера нет — None, а не паника и не чужой образ");
+    }
+
+    /// Правило сравнения — чистое, без похода в систему: один файл, названный
+    /// по-разному, это один процесс. Регистр на Windows не значит ничего,
+    /// `.` и `..` разворачиваются.
+    #[test]
+    fn same_image_sees_through_case_and_dot_segments() {
+        let me = std::env::current_exe().unwrap();
+        let dir = me.parent().unwrap();
+        let name = me.file_name().unwrap();
+        let roundabout = dir.join(".").join(name);
+        assert!(same_image(&me, &roundabout), "{}", roundabout.display());
+        if cfg!(windows) {
+            let shouting = std::path::PathBuf::from(me.to_string_lossy().to_uppercase());
+            assert!(same_image(&me, &shouting), "{}", shouting.display());
+        }
+        assert!(!same_image(&me, &dir.join("не-наш-httpd.exe")));
     }
 
     #[test]

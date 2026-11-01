@@ -218,8 +218,8 @@ pub fn state_dir() -> PathBuf {
 /// (`publication::busy_for_choice`, находка 2 ревью круга 3), и два вызова
 /// с разными пробами — ровно тот способ развести `base_url()` и `Listen` в
 /// `httpd.conf`, от которого в круге 2 пришлось ставить барьер.
-pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg) {
-    if let Ok(port) = crate::publication::resolve_http_port(dir, cfg) {
+pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg, our_image: &Path) {
+    if let Ok(port) = crate::publication::resolve_http_port(dir, cfg, our_image) {
         cfg.resolved_http_port = Some(port);
     }
 }
@@ -285,8 +285,8 @@ pub(crate) fn with_state_dir_for_test<T>(dir: &Path, f: impl FnOnce() -> T) -> T
 /// `test_state_dir`: прежде здесь была пустышка, теперь — подмена, которую
 /// тест ставит сам).
 #[cfg(not(test))]
-pub fn settle_chosen_http_port(cfg: &mut Cfg) {
-    settle_chosen_http_port_in(&state_dir(), cfg);
+pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
+    settle_chosen_http_port_in(&state_dir(), cfg, &crate::publication::our_httpd_image(&kit.root));
 }
 
 /// Та же обёртка в тестовой сборке: каталог берётся из потоко-локальной
@@ -296,9 +296,9 @@ pub fn settle_chosen_http_port(cfg: &mut Cfg) {
 /// (живой случай: `gui::save` так и сломался, прочитав чужой, настоящий
 /// выбор).
 #[cfg(test)]
-pub fn settle_chosen_http_port(cfg: &mut Cfg) {
+pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
     if let Some(dir) = test_state_dir::get() {
-        settle_chosen_http_port_in(&dir, cfg);
+        settle_chosen_http_port_in(&dir, cfg, &crate::publication::our_httpd_image(&kit.root));
     }
 }
 
@@ -1820,7 +1820,7 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // Круг исправления задачи 1 плана «тонкий срез ценности»: подкоманда
     // `mcp` не идёт через `make_ctx` (та ветка в `main.rs` возвращает раньше
     // неё) — свой вызов `settle_chosen_http_port`, не общий с CLI.
-    settle_chosen_http_port(&mut cfg);
+    settle_chosen_http_port(&mut cfg, &kit);
     // Межпроцессная часть замка проекта: без этого вызова второй
     // долгоживущий процесс (Zed и pi, запущенные разом) его вовсе не увидит
     // (см. тот же вызов в `main.rs::connect`).
@@ -2016,7 +2016,7 @@ impl Op<Ctx> for Extension {
         // Страж перед отправкой пароля базы (круг исправления 2, находка
         // автоматической проверки безопасности, одна функция на все дороги
         // — см. докстроку `publication::guard_own_listener`).
-        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg) {
+        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
             return OpState::Blocked(reason);
         }
         match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
@@ -2088,7 +2088,7 @@ impl Op<Ctx> for Extension {
         // (`verify::facts_when_the_listener_is_foreign`, `Extension::state`
         // выше). Порядок тот же, что был у `&&`: отказал страж — до пароля
         // дело не доходит.
-        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg) {
+        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
             ctx.warn(reason);
         } else if extension_version(&base_url, &h.db_user, &h.db_password).is_none() {
             ctx.warn(format!(
@@ -3362,6 +3362,14 @@ mod tests {
         p
     }
 
+    /// Ожидаемый образ «нашего httpd» для тестов улаживания: сам тестовый
+    /// бинарник (тем же приёмом, что у `publication::tests`). Эти тесты
+    /// занимают порт слушателем в своём же процессе — с чужим образом правило
+    /// проверялось бы только отказом.
+    fn image_for_test() -> std::path::PathBuf {
+        std::env::current_exe().expect("путь к тестовому бинарнику")
+    }
+
     /// Круг исправления 2, пункт 2: правило («выбранный порт побеждает
     /// выведенный») проверяется на `_in` во временном каталоге — без похода
     /// на настоящую машину (`settle_chosen_http_port`, тонкая обёртка
@@ -3379,7 +3387,7 @@ mod tests {
         cfg.host.http_port = Some(47501);
         let preferred = cfg.http_port();
         let busy = std::net::TcpListener::bind(("127.0.0.1", preferred)).unwrap();
-        settle_chosen_http_port_in(&dir, &mut cfg);
+        settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
         let chosen = cfg.http_port();
         assert_ne!(chosen, preferred, "предпочтительный занят — улаживание обязано сдвинуть порт");
         assert_eq!(cfg.base_url(), format!("http://127.0.0.1:{chosen}/hs/mcp-1c"));
@@ -3399,14 +3407,14 @@ mod tests {
         let dir = mcp_test_dir("settle-changed-pref");
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(47601);
-        settle_chosen_http_port_in(&dir, &mut cfg);
+        settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
         assert_eq!(cfg.http_port(), 47601);
 
         // Человек поставил другой явный порт и сохранил — свежая `Cfg`,
         // как после «Сохранить» (`resolved_http_port` снова `None`).
         let mut cfg2 = crate::cfg::filled_for_test();
         cfg2.host.http_port = Some(47602);
-        settle_chosen_http_port_in(&dir, &mut cfg2);
+        settle_chosen_http_port_in(&dir, &mut cfg2, &image_for_test());
         assert_eq!(cfg2.http_port(), 47602, "новое предпочтение обязано дойти до подбора, не застыть на старом");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3427,14 +3435,14 @@ mod tests {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(47621);
         let busy_preference = std::net::TcpListener::bind(("127.0.0.1", 47621)).unwrap();
-        settle_chosen_http_port_in(&dir, &mut cfg);
+        settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
         let settled = cfg.http_port();
         assert_ne!(settled, 47621, "предпочтение занято — улаживание обязано сдвинуть порт");
         drop(busy_preference);
 
         // Наш собственный httpd теперь слушает УЛАЖЕННЫЙ (не предпочтённый) порт.
         let our_listener = std::net::TcpListener::bind(("127.0.0.1", settled)).unwrap();
-        settle_chosen_http_port_in(&dir, &mut cfg); // та же Cfg, тот же сеанс
+        settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test()); // та же Cfg, тот же сеанс
         assert_eq!(cfg.http_port(), settled, "повторное улаживание в одном сеансе не должно уезжать на соседний порт из-за собственного слушателя");
         drop(our_listener);
         let _ = std::fs::remove_dir_all(&dir);

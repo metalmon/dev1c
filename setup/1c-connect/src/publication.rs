@@ -249,8 +249,24 @@ pub(crate) fn kit_httpd_exe(kit_root: &Path) -> PathBuf {
 /// нарочно: `base_url()` и `Listen` в `httpd.conf` обязаны назвать ОДИН
 /// номер, а два вызова `ports::choose` с разными пробами — это ровно тот
 /// способ их развести, от которого в круге 2 пришлось ставить барьер.
-pub(crate) fn resolve_http_port(state: &Path, cfg: &Cfg) -> Result<u16, String> {
-    Ok(crate::ports::choose(state, cfg.first_attempt_ports(), &|p| busy_for_choice(state, p))?.http)
+pub(crate) fn resolve_http_port(state: &Path, cfg: &Cfg, our_image: &Path) -> Result<u16, String> {
+    Ok(crate::ports::choose(state, cfg.first_attempt_ports(), &|p| busy_for_choice(state, p, our_image))?.http)
+}
+
+/// Образ, который обязан быть у НАШЕГО httpd на этой платформе: на Windows —
+/// httpd из комплекта (оттуда он и запускается, `start`), в образе —
+/// системный `apache2` (его зовёт Linux-ветка `start`). Одна функция на всех,
+/// кто спрашивает «а наш-то кто»: страж, проба подбора и улаживание порта.
+pub(crate) fn our_httpd_image(kit_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        kit_httpd_exe(kit_root)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = kit_root;
+        apache2_on_path().unwrap_or_else(|| PathBuf::from("/usr/sbin/apache2"))
+    }
 }
 
 /// «Занят» для подбора — занят КЕМ-ТО ДРУГИМ. Порт, который слушает наш
@@ -267,14 +283,19 @@ pub(crate) fn resolve_http_port(state: &Path, cfg: &Cfg) -> Result<u16, String> 
 /// экземпляре ищет службу `Apache2.4` и не делает ничего (замер ведущего,
 /// 2.11.2026) — переживший сеанс httpd на своём порту возможен.
 ///
-/// Совпадение требуется ЯВНОЕ, с обеих сторон: нет pid-файла и держателя не
-/// видно — это два `None`, и сравнивать их как «совпало» означало бы считать
-/// свободным порт, который `bind` только что не дал.
-fn busy_for_choice(state: &Path, port: u16) -> bool {
-    if !crate::ports::port_is_busy(port) {
-        return false;
-    }
-    !matches!((holder::listener_pid(port), our_httpd_pid(&pid_file_in(state))), (Some(holder), Some(ours)) if holder == ours)
+/// «Наш держатель» здесь — ровно тот же вопрос, на который отвечает страж, и
+/// отвечает на него ОН ЖЕ, одной реализацией: номер из pid-файла, личность
+/// процесса по образу (находка автоматической проверки безопасности по кругу
+/// 4 — номер подделывается переиспользованием pid, образ нет) и держатель
+/// слушающего сокета. Своя копия этого правила разошлась бы с ним при первой
+/// же правке, а разойтись им нельзя: подбор решает, на каком порту поднимать
+/// httpd, страж — туда ли уходит пароль.
+///
+/// `.is_err()` здесь не теряет причину (в отличие от находки 3 ревью): проба
+/// занятости по природе отвечает «да/нет», ей некому сказать слова, а тот же
+/// отказ с теми же числами человек увидит от стража на той же дороге.
+fn busy_for_choice(state: &Path, port: u16, our_image: &Path) -> bool {
+    crate::ports::port_is_busy(port) && refuse_unless_ours(&pid_file_in(state), port, our_image).is_err()
 }
 
 impl Paths {
@@ -309,7 +330,7 @@ impl Paths {
             .ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
         let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
         let module = module_in(bin)?;
-        let port = resolve_http_port(&state, cfg)?;
+        let port = resolve_http_port(&state, cfg, &our_httpd_image(&kit.root))?;
         Ok(paths_under(&state, root, module, port))
     }
 }
@@ -484,14 +505,45 @@ fn our_httpd_pid(pid_file: &Path) -> Option<u32> {
 /// OwningProcess` = `23668`; ребёнок (pid 2204, родитель 23668) сокетом НЕ
 /// владеет. То есть сравнение ниже на Windows верно как есть. Передоказывать
 /// не нужно — цифры здесь.
-/// Параметры — pid-файл и порт, а не `Paths` целиком (находка 4 ревью круга
-/// 3): собрать `Paths` означало бы пройти через `resolve_http_port`, то есть
-/// через ПОДБОР, а подбор пишет на диск. Проверке перед отправкой пароля
-/// право переизбрать порт не нужно и вредно.
-pub fn refuse_unless_ours(pid_file: &Path, port: u16) -> Result<(), String> {
+/// Параметры — pid-файл, порт и ОЖИДАЕМЫЙ ОБРАЗ нашего httpd, а не `Paths`
+/// целиком (находка 4 ревью круга 3): собрать `Paths` означало бы пройти
+/// через `resolve_http_port`, то есть через ПОДБОР, а подбор пишет на диск.
+/// Проверке перед отправкой пароля право переизбрать порт не нужно и вредно.
+///
+/// Образ — параметром, а не `kit_httpd_exe` внутри: в бою его называет
+/// `our_httpd_image`, а тест подаёт собственный (`current_exe`) и слушает в
+/// самом тестовом процессе — иначе правило проверялось бы только отказом, то
+/// есть никак.
+/// Каждый отказ называет ПОРТ, который проверяли, — все четыре, не только
+/// те, где порт и есть причина: человек должен видеть, о каком номере речь
+/// (а тест — что страж проверил именно тот порт, который называет
+/// `base_url()`, см. `the_guard_checks_exactly_the_port_base_url_names`).
+pub fn refuse_unless_ours(pid_file: &Path, port: u16, our_image: &Path) -> Result<(), String> {
     let Some(ours) = our_httpd_pid(pid_file) else {
-        return Err(format!("{}: pid-файл публикации не прочитать — пароль базы не отправлен", pid_file.display()));
+        return Err(format!("порт {port}: pid-файл публикации {} не прочитать — пароль базы не отправлен", pid_file.display()));
     };
+    // Личность процесса, а не только его номер (находка автоматической
+    // проверки безопасности по кругу 4). Номера Windows переиспользует, и
+    // сосед, получивший номер из нашего несвежего pid-файла, иначе читался бы
+    // как «наш httpd» — см. докстроку `holder::image_of_pid`.
+    match holder::image_of_pid(ours) {
+        None => {
+            forget_stale_pid_file(pid_file);
+            return Err(format!(
+                "порт {port}: процесс pid {ours} из pid-файла публикации ({}) не опознать — его больше нет (или не хватило прав посмотреть) — файл несвежий и убран, пароль базы не отправлен",
+                pid_file.display()
+            ));
+        }
+        Some(image) if !holder::same_image(our_image, &image) => {
+            forget_stale_pid_file(pid_file);
+            return Err(format!(
+                "порт {port}: pid {ours} из pid-файла публикации — не наш httpd, его образ {}, а наш {} — файл несвежий и убран, пароль базы не отправлен",
+                image.display(),
+                our_image.display()
+            ));
+        }
+        Some(_) => {}
+    }
     let Some(listening) = holder::listener_pid(port) else {
         return Err(format!("порт {port} никем не слушается — пароль базы не отправлен"));
     };
@@ -499,6 +551,20 @@ pub fn refuse_unless_ours(pid_file: &Path, port: u16) -> Result<(), String> {
         return Err(format!("порт {port} занят не нами (его слушает pid {listening}, у нашего httpd pid {ours}) — пароль базы не отправлен"));
     }
     Ok(())
+}
+
+/// Несвежий pid-файл убираем за собой: процесса с таким номером нет вовсе
+/// или он не наш httpd — значит, личность в файле мёртвая, и оставлять её
+/// нельзя. Иначе сосед, которому система когда-нибудь выдаст тот же номер,
+/// встаёт ровно на эту личность (решение ведущего, 2.11.2026, пункт 5
+/// находки). Остановка публикации прибирает его своим путём — это задача 7
+/// плана; здесь только «не нашли своего, значит файла быть не должно».
+///
+/// Отказ удаления молчаливый нарочно: файла может не быть уже (две пробы
+/// разом), он может быть только для чтения — и ни то, ни другое не меняет
+/// ответа стража, который к этому моменту уже решён и будет озвучен словами.
+fn forget_stale_pid_file(pid_file: &Path) {
+    let _ = std::fs::remove_file(pid_file);
 }
 
 /// Дорога, которой зовут все, кто собирается отправить пароль базы на
@@ -527,12 +593,15 @@ pub fn refuse_unless_ours(pid_file: &Path, port: u16) -> Result<(), String> {
 /// pid-файлу от порта не зависит (`pid_file_in`), значит собрать его можно
 /// без всякого подбора — что и делается.
 ///
-/// `kit` этой функции больше не нужен: он был нужен только `Paths::of`.
-pub fn guard_own_listener(cfg: &Cfg) -> Result<(), String> {
+/// `kit` нужен ровно за одним — путём к НАШЕМУ httpd (`our_httpd_image`),
+/// чтобы сверять личность держателя, а не только его номер (находка
+/// автоматической проверки безопасности по кругу 4). Ни `Paths::of`, ни
+/// подбора порта за этим не стоит: `kit.root` — чистое значение.
+pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Result<(), String> {
     if cfg.host.publication != "auto" {
         return Ok(());
     }
-    refuse_unless_ours(&pid_file_in(&guard_state_dir()?), cfg.http_port())
+    refuse_unless_ours(&pid_file_in(&guard_state_dir()?), cfg.http_port(), &our_httpd_image(&kit.root))
 }
 
 /// Каталог состояния, в котором страж ищет pid-файл: тот же, что у
@@ -1251,10 +1320,19 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let derived = cfg.http_port();
         assert_eq!(derived, 8081, "dev1 из filled_for_test() — именно тот умолчание-порт первой попытки");
         crate::ports::write(&dir, &cfg.first_attempt_ports(), &crate::ports::Chosen { http: 47802 }).unwrap();
-        let port = resolve_http_port(&dir, &cfg).unwrap();
+        let port = resolve_http_port(&dir, &cfg, &our_image_for_test()).unwrap();
         assert_eq!(port, 47802, "дескриптор обязан нести выбранный порт, а не выведенный");
         assert_ne!(port, derived);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ожидаемый образ «нашего httpd» для тестов: сам тестовый бинарник. Он
+    /// же и слушает порт, и его pid идёт в pid-файл — то есть проверка
+    /// личности (`holder::same_image`) проходит так же, как в бою проходит
+    /// настоящий httpd из комплекта. Образ — параметр ровно затем: с жёстко
+    /// зашитым `kit_httpd_exe` любой тест мог бы проверить только отказ.
+    fn our_image_for_test() -> PathBuf {
+        std::env::current_exe().expect("путь к тестовому бинарнику")
     }
 
     /// Находка 2 ревью круга 3: СВОЙ СОБСТВЕННЫЙ httpd не повод уезжать с
@@ -1281,7 +1359,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(port);
-        assert_eq!(resolve_http_port(&dir, &cfg).unwrap(), port, "порт держит наш же httpd — это тот порт, который мы и хотим, а не повод уезжать");
+        assert_eq!(resolve_http_port(&dir, &cfg, &our_image_for_test()).unwrap(), port, "порт держит наш же httpd — это тот порт, который мы и хотим, а не повод уезжать");
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1299,7 +1377,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(port);
-        let chosen = resolve_http_port(&dir, &cfg).unwrap();
+        let chosen = resolve_http_port(&dir, &cfg, &our_image_for_test()).unwrap();
         assert_ne!(chosen, port, "порт держит чужой процесс — подбор обязан сдвинуться");
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1315,14 +1393,90 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     fn guard_own_listener_skips_the_check_entirely_in_webserver_mode() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-webserver-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "webserver".into();
-        assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg)).is_ok());
+        assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ok());
         cfg.host.publication = "auto".into();
         assert!(
-            ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg)).is_err(),
+            ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_err(),
             "тест опирается на то, что в auto на этом же каталоге страж отказывает"
         );
+    }
+
+    /// Находка автоматической проверки безопасности по кругу 4: страж верит
+    /// ЛИЧНОСТИ процесса, а не его номеру. Сценарий, против которого это
+    /// стоит: наш httpd умер, не убрав pid-файл (крах или принудительное
+    /// снятие — а снимают регулярно, `httpd -k stop` на консольном
+    /// экземпляре не останавливает ничего), Windows переиспользовала номер,
+    /// и сосед по терминальному серверу с этим номером слушает наш порт.
+    /// Номера совпадают — образы нет, и пароль базы не уходит.
+    ///
+    /// Процесс здесь живой и настоящий (это сам прогон), и порт он правда
+    /// слушает: по номерам страж сказал бы «свой». Отличается только образ.
+    #[test]
+    fn refuse_unless_ours_refuses_when_the_pid_is_alive_but_the_image_is_foreign() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        // «Наш httpd» — другой файл, не тот, которым запущен прогон.
+        let foreign = dir.join("httpd.exe");
+        std::fs::write(&foreign, b"not a real httpd").unwrap();
+        let e = refuse_unless_ours(&pid_file, port, &foreign).unwrap_err();
+        assert!(e.contains("не наш httpd") && e.contains("образ"), "отказ обязан назвать причиной образ, а не номер: {e}");
+        assert!(e.contains("пароль базы не отправлен"), "{e}");
+        // И мёртвая личность убрана: встать на неё больше нечему.
+        assert!(!pid_file.exists(), "несвежий pid-файл обязан исчезнуть");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Вторая половина того же: процесса с таким номером нет вовсе — тоже
+    /// отказ, и тоже с уборкой. Мёртвый httpd не должен оставлять личность,
+    /// на которую можно встать (решение ведущего, пункт 5 находки).
+    #[test]
+    fn a_stale_pid_file_is_removed_so_nobody_can_stand_on_that_identity() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = pid_file_in(&dir);
+        // Номер, которого на машине почти наверняка нет: за пределами и
+        // windows-овских, и linux-овских живых номеров прогона.
+        std::fs::write(&pid_file, "4294967290").unwrap();
+        let e = refuse_unless_ours(&pid_file, 47906, &our_image_for_test()).unwrap_err();
+        assert!(e.contains("не опознать") && e.contains("4294967290"), "{e}");
+        assert!(!pid_file.exists(), "несвежий pid-файл обязан исчезнуть");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Та же личность — в пробе подбора, а не только у стража: ошибка там
+    /// даёт не утечку пароля, а переезд на другой порт, но пропустить её
+    /// нельзя — иначе подбор счёл бы «нашим» порт соседа и поднимал httpd
+    /// туда, где он не стартует. Правило у них одно и живёт в одном месте
+    /// (`busy_for_choice` зовёт `refuse_unless_ours`), этот тест держит, что
+    /// оно и правда одно.
+    #[test]
+    fn the_choice_moves_off_a_port_whose_holder_only_matches_by_number() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-choice-image-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Номер держателя совпадает с pid-файлом (это один и тот же процесс
+        // — прогон), а образ «нашего httpd» другой.
+        std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
+        let foreign = dir.join("httpd.exe");
+        std::fs::write(&foreign, b"not a real httpd").unwrap();
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.http_port = Some(port);
+        let chosen = resolve_http_port(&dir, &cfg, &foreign).unwrap();
+        assert_ne!(chosen, port, "держатель совпал только номером — для подбора порт занят");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Находка 4 ревью круга 3, главное утверждение взамен снятого барьера
@@ -1333,56 +1487,40 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     /// отдельной проверкой; теперь источник один, и проверка, которая не
     /// может провалиться, в рантайме не нужна — нужна здесь.
     ///
-    /// Доказательство — через текст отказа: он называет порт, который страж
-    /// и правда смотрел («порт N никем не слушается»). Номер высокий и
-    /// заведомо свободный, а в `Cfg` он положен тем же полем
-    /// (`resolved_http_port`), которым его кладёт улаживание.
+    /// Доказательство — через текст отказа: каждый отказ стража называет
+    /// порт, который он смотрел (см. докстроку `refuse_unless_ours`). Номер
+    /// высокий и заведомо свободный, а в `Cfg` он положен тем же полем
+    /// (`resolved_http_port`), которым его кладёт улаживание. Пропуск стража
+    /// (`Ok`) проверен у `refuse_unless_ours` — там ожидаемый образ
+    /// подаётся параметром, а здесь его назвал бы `kit`, и подделать
+    /// настоящий httpd комплекта тестом нечем.
     #[test]
     fn the_guard_checks_exactly_the_port_base_url_names() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-same-port-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // Pid-файл есть и читается — иначе отказ был бы про него, а не про порт.
-        std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
+        let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         cfg.resolved_http_port = Some(47903);
-        let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg)).unwrap_err();
+        let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();
         assert_eq!(cfg.base_url(), "http://127.0.0.1:47903/hs/mcp-1c");
         assert!(e.contains("47903"), "страж обязан проверять тот порт, который называет base_url(): {e}");
         assert!(!e.contains("8081"), "выведенный порт тут ни при чём: {e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Вторая половина того же: страж ПРОПУСКАЕТ, когда на порту из
-    /// `base_url()` слушает наш собственный процесс, названный pid-файлом.
-    /// Без этого теста «страж всегда отказывает» прошло бы прогоном так же
-    /// тихо, как прежде проходила пустышка улаживания.
-    #[test]
-    fn the_guard_passes_when_our_own_pid_listens_on_the_port_base_url_names() {
-        let dir = std::env::temp_dir().join(format!("dev1c-guard-ours-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.resolved_http_port = Some(port);
-        assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg)).is_ok());
-        drop(listener);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Находка 4, обратная сторона: у стража не должно быть побочного
-    /// эффекта записи. Прежде он шёл через `Paths::of` → `resolve_http_port`
-    /// → `ports::choose`, а тот при разошедшемся предпочтении
-    /// ПЕРЕЗАПИСЫВАЛ `ports.state` — то есть проверка, которую зовут перед
-    /// каждой отправкой пароля, имела право сменить выбранный порт у
-    /// работающего httpd. Теперь каталог состояния после стража обязан
-    /// остаться таким, каким был.
+    /// эффекта ПОДБОРА. Прежде он шёл через `Paths::of` →
+    /// `resolve_http_port` → `ports::choose`, а тот при разошедшемся
+    /// предпочтении ПЕРЕЗАПИСЫВАЛ `ports.state` — то есть проверка, которую
+    /// зовут перед каждой отправкой пароля, имела право сменить выбранный
+    /// порт у работающего httpd. Запомненная пара после стража обязана
+    /// остаться той же. (Несвежий pid-файл страж, наоборот, убирает — это
+    /// другой файл и другое утверждение, см.
+    /// `a_stale_pid_file_is_removed_so_nobody_can_stand_on_that_identity`.)
     #[test]
-    fn the_guard_writes_nothing_into_the_state_dir() {
+    fn the_guard_never_repicks_the_port() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-no-writes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1391,9 +1529,10 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         // `filled_for_test`), ровно как в сценарии находки.
         crate::ports::write(&dir, &crate::ports::Chosen { http: 47904 }, &crate::ports::Chosen { http: 47905 }).unwrap();
         let before = std::fs::read_to_string(dir.join("ports.state")).unwrap();
+        let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
-        let _ = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg));
+        let _ = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit));
         assert_eq!(std::fs::read_to_string(dir.join("ports.state")).unwrap(), before, "страж не имеет права переизбирать порт");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1410,14 +1549,46 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = listener.local_addr().unwrap().port();
         let pid_file = dir.join("httpd.pid");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
-        assert!(refuse_unless_ours(&pid_file, port).is_ok());
+        assert!(refuse_unless_ours(&pid_file, port, &our_image_for_test()).is_ok());
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Порт занят не нами: слушатель в этом же процессе (его правда слушает
-    /// наш pid), а pid-файл называет кого-то другого — отказ словами, без
+    /// Живой посторонний процесс и его собственный образ — для теста ниже.
+    /// Нужен настоящий второй процесс: утверждение там именно про то, что
+    /// личность из pid-файла, пусть и подтверждённая образом, ещё обязана
+    /// совпасть с ДЕРЖАТЕЛЕМ порта. Долгоживущий и ничего не делающий:
+    /// `cmd /c pause` ждёт ввода, которого нет, `sleep` спит.
+    #[cfg(windows)]
+    fn a_live_stranger() -> (std::process::Child, PathBuf) {
+        let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        let child = std::process::Command::new(&comspec)
+            .args(["/c", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("второй процесс для теста");
+        (child, PathBuf::from(comspec))
+    }
+
+    #[cfg(not(windows))]
+    fn a_live_stranger() -> (std::process::Child, PathBuf) {
+        let sleep = ["/bin/sleep", "/usr/bin/sleep"].into_iter().find(|p| Path::new(p).exists()).expect("sleep на машине");
+        let child = std::process::Command::new(sleep).arg("60").spawn().expect("второй процесс для теста");
+        (child, PathBuf::from(sleep))
+    }
+
+    /// Порт занят не нами: слушатель — этот процесс (его правда слушает наш
+    /// pid), а pid-файл называет ДРУГОЙ процесс — отказ словами, без
     /// угадывания и без молчаливого «ну и ладно».
+    ///
+    /// Процесс в pid-файле здесь живой, и образ у него тот, который подан
+    /// как «наш httpd»: проверка личности его пропускает. Иначе тест
+    /// упирался бы в неё и не доходил до того, что проверяет, — а проверяет
+    /// он связку, без которой личность бесполезна: подтверждённый свой
+    /// процесс обязан быть ТЕМ, КТО ДЕРЖИТ ПОРТ. Снимешь это сравнение — и
+    /// страж разрешит отправку пароля, пока наш httpd жив хоть где-нибудь,
+    /// даже когда порт держит сосед.
     #[test]
     fn refuse_unless_ours_fails_in_words_when_the_pid_file_names_someone_else() {
         let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-mismatch-{}", std::process::id()));
@@ -1425,10 +1596,17 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::create_dir_all(&dir).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (mut stranger, stranger_image) = a_live_stranger();
         let pid_file = dir.join("httpd.pid");
-        std::fs::write(&pid_file, "1").unwrap(); // почти наверняка не наш pid
-        let e = refuse_unless_ours(&pid_file, port).unwrap_err();
+        std::fs::write(&pid_file, stranger.id().to_string()).unwrap();
+        let e = refuse_unless_ours(&pid_file, port, &stranger_image).unwrap_err();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
         assert!(e.contains("занят не нами") && e.contains(&port.to_string()), "{e}");
+        assert!(e.contains(&std::process::id().to_string()) && e.contains(&stranger.id().to_string()), "отказ называет оба номера: {e}");
+        // Этот pid-файл не несвежий — процесс в нём жив и образом свой, —
+        // значит убирать его не за что.
+        assert!(pid_file.exists(), "живую личность страж убирать не должен");
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1438,7 +1616,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     fn refuse_unless_ours_fails_in_words_when_the_pid_file_is_missing() {
         let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-nofile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = refuse_unless_ours(&pid_file_in(&dir), 1).unwrap_err();
+        let e = refuse_unless_ours(&pid_file_in(&dir), 1, &our_image_for_test()).unwrap_err();
         assert!(e.contains("pid-файл"), "{e}");
     }
 
@@ -1450,7 +1628,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("httpd.pid");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
-        let e = refuse_unless_ours(&pid_file, 1).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, 1, &our_image_for_test()).unwrap_err();
         assert!(e.contains("никем не слушается"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }

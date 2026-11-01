@@ -59,7 +59,7 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
 /// диск/в сеть — её держит `the_install_command_passes_the_password_as_a_flag`
 /// и соседние тесты, которым страж не нужен и не должен менять сигнатуру.
 pub fn mcp_command_guarded(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Result<tokio::process::Command, String> {
-    crate::publication::guard_own_listener(cfg)?;
+    crate::publication::guard_own_listener(cfg, kit)?;
     Ok(mcp_command(cfg, kit))
 }
 

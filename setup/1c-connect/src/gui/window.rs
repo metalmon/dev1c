@@ -263,7 +263,7 @@ fn reread_and_recheck(cx: &mut App) {
         // Круг исправления задачи 1 плана «тонкий срез ценности»: перечитывание
         // строит свою копию `Cfg` — не общую с `gui::launch`'ой начальной и не
         // с «Сохранить» (`gui::save::save_host`).
-        ops_host::settle_chosen_http_port(&mut cfg);
+        ops_host::settle_chosen_http_port(&mut cfg, &ui.kit);
         // Не только в окно, но и в живой сеанс — иначе агент остался бы на
         // старой базе (`gui::adopt_cfg`).
         super::adopt_cfg(ui, cfg);

@@ -356,7 +356,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // (`gui::window::reread_and_recheck`) или начальный запуск
     // (`gui::launch`); без своего вызова она осталась бы с
     // `resolved_http_port: None` до следующего перечитывания файла.
-    ops_host::settle_chosen_http_port(&mut cfg);
+    ops_host::settle_chosen_http_port(&mut cfg, &ui.kit);
     // Переезды — не молчком, и все до одного: см. `moved_lines`. Строка
     // собирается здесь, после улаживания, именно затем, чтобы назвать
     // доставшийся порт, а не предпочтение (находка 6). `ui.cfg` — ещё

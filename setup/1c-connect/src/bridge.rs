@@ -1812,6 +1812,71 @@ mod tests {
     }
 
     /// Решение владельца 31.10 меняет и эту проверку: выключенный мост
+    /// Круг исправления 3, пункт 2: доказывает отказ стража СКВОЗЬ
+    /// `pipe_jsonrpc` целиком, не только у `mcp_command_guarded` в изоляции.
+    /// `rebuild` здесь — не тестовая заглушка, а настоящая функция с
+    /// внутренним счётчиком: первый вызов отказывает словами (как отказал
+    /// бы `mcp_command_guarded`, застав чужого владельца порта), второй и
+    /// далее — успешная сборка (порт снова наш). Два свойства:
+    /// 1. первый вызов на соединении получает ОТКАЗ СО СЛОВАМИ причины —
+    ///    не тишину, не разрыв соединения, не зависший вызов;
+    /// 2. ВТОРОЙ вызов на ТОМ ЖЕ соединении — выздоравливает: уходит
+    ///    настоящему ребёнку без какого-либо перезапуска агента. Второе
+    ///    важнее первого: ради него и выбрана деградированная ветка вместо
+    ///    отказа при `dispatch`.
+    #[tokio::test]
+    async fn a_guard_refusal_degrades_with_the_reason_and_the_next_call_recovers_without_restarting_the_agent() {
+        let attempts = Arc::new(AtomicU64::new(0));
+        let make_cmd = {
+            let attempts = attempts.clone();
+            move |_: &Cfg| {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    // Та же форма текста, что и у настоящего стража
+                    // (`publication::refuse_unless_ours`): порт назван,
+                    // причина названа.
+                    Err("порт 8081 занят не нами (его слушает pid 999, у нашего httpd pid 111) — пароль базы не отправлен".to_string())
+                } else {
+                    Ok(child(("BRIDGE_SCRIPT_RECORD", "1")))
+                }
+            }
+        };
+        let cfg = test_cfg(&["cf_load"]);
+        // Первый вызов `make_cmd` — здесь же, до спавна: та самая попытка,
+        // что отказывает (счётчик == 0).
+        let cmd0 = make_cmd(&cfg);
+        let rules = Rules::for_vrunner(
+            Live::new(cfg.clone()),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (r, mut w) = tokio::io::split(ours);
+        let mut lines = tokio::io::BufReader::new(r).lines();
+
+        // Первый вызов: отказ стража ДО того, как команда родилась —
+        // словами причины, не тишина и не разрыв соединения.
+        w.write_all(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let reply1 = wait_line(&mut lines, |l| l.starts_with('{')).await;
+        assert!(reply1.contains("занят не нами"), "{reply1}");
+        assert!(reply1.contains("id\":1"), "{reply1}");
+
+        // Второй вызов на ТОМ ЖЕ соединении, без перезапуска агента: порт
+        // снова наш (счётчик >= 1) — доходит до настоящего ребёнка.
+        w.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let reply2 = wait_line(&mut lines, |l| l.starts_with('{')).await;
+        assert!(reply2.contains("child ran cf_load"), "{reply2}");
+        assert!(!reply2.contains("занят не нами"), "{reply2}");
+        w.shutdown().await.unwrap();
+    }
+
     /// больше не держит ребёнка живым между вызовами — первый вызов отвечает
     /// отказом без него (спячка, `EpochEnd::Dormant`), а включение поднимает
     /// СВЕЖЕГО ребёнка тем же рестартом, что и смена параметров (`rebuild`).

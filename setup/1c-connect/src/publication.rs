@@ -1188,7 +1188,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let cfg = crate::cfg::filled_for_test();
         let derived = cfg.http_port();
         assert_eq!(derived, 8081, "dev1 из filled_for_test() — именно тот умолчание-порт первой попытки");
-        crate::ports::write(&dir, &crate::ports::Chosen { mcp: 1, vrunner: 2, web: 3, http: 47802 }).unwrap();
+        crate::ports::write(&dir, &cfg.first_attempt_ports(), &crate::ports::Chosen { mcp: 1, vrunner: 2, web: 3, http: 47802 }).unwrap();
         let port = resolve_http_port(&dir, &cfg).unwrap();
         assert_eq!(port, 47802, "дескриптор обязан нести выбранный порт, а не выведенный");
         assert_ne!(port, derived);

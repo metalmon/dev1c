@@ -174,6 +174,12 @@ pub fn number_of(workstation: &str) -> Option<u16> {
 /// вывод) садится не на занятый этой формулой порт, а на следующий
 /// свободный, вместо того чтобы не стартовать вовсе (план «тонкий срез
 /// ценности», задача 1).
+///
+/// «Рабочее место» — умолчание пилота: `workstation` контракт подключения
+/// уже вычёркивает (`docs/superpowers/specs/2026-11-01-connection-contract.md`),
+/// и эта формула `8080 + N` уедет вместе с полем (её снятие — отдельная
+/// работа, не эта задача). Подбор при занятости (`ports.rs`) переживёт её —
+/// ему всё равно, откуда взялось предпочтение первой попытки.
 pub fn derived_http_port(workstation: &str) -> u16 {
     8080 + number_of(workstation).unwrap_or(1)
 }
@@ -565,13 +571,26 @@ impl Cfg {
         Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
     }
 
-    /// Умолчания первой попытки все четыре сразу — то, с чего начинает
-    /// `ports::choose` (`publication::Paths::of`, `ops_host::settle_chosen_http_port`).
-    /// Одна сборка на обоих вызывающих — врозь она дважды повторяла бы
+    /// ПРЕДПОЧТЕНИЕ все четыре сразу — то, чего человек хочет сейчас (явный
+    /// `host.http_port` или выведенный, номер рабочего места для сестёр —
+    /// умолчание пилота, которое контракт подключения уже вычёркивает,
+    /// `docs/superpowers/specs/2026-11-01-connection-contract.md`; поле
+    /// уйдёт, предпочтение как понятие — нет), а не то, что уже досталось
+    /// (`resolved`). Круг исправления 3, находка ведущего: раньше здесь
+    /// стоял `self.http_port()` — УЖЕ улаженный порт, и вход `ports::choose`
+    /// замыкался сам на себя (запомненный выбор кормил себя же как
+    /// «предпочтение», и новое предпочтение человека — например, явный
+    /// `http_port` — до подбора не доходило никогда). `http_port()`-а эта
+    /// функция НЕ зовёт больше: её
+    /// дело — явный порт или вывод, не то, что выбрал `ports::choose`.
+    ///
+    /// Одна сборка на обоих вызывающих (`publication::Paths::of`,
+    /// `ops_host::settle_chosen_http_port`) — врозь она дважды повторяла бы
     /// один и тот же литерал `Chosen { mcp: ..., vrunner: ..., ... }`.
     pub fn first_attempt_ports(&self) -> crate::ports::Chosen {
         let p = self.ports();
-        crate::ports::Chosen { mcp: p.mcp, vrunner: p.vrunner, web: p.web, http: self.http_port() }
+        let preferred_http = self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation));
+        crate::ports::Chosen { mcp: p.mcp, vrunner: p.vrunner, web: p.web, http: preferred_http }
     }
 
     /// Порт веб-сервера из действующего адреса публикации (`base_url()`, не
@@ -1175,6 +1194,19 @@ mod tests {
         // `127.0.0.1` — адрес прибит к тому семейству, которое слушает httpd
         // и проверяет страж (круг исправления 2).
         assert_eq!(c.base_url(), "http://127.0.0.1:9100/hs/mcp-1c");
+    }
+
+    /// Круг исправления 3, находка ведущего: `first_attempt_ports()` обязана
+    /// нести ПРЕДПОЧТЕНИЕ (явный порт человека или вывод), а не уже
+    /// УЛАЖЕННЫЙ — иначе `ports::choose` кормили бы его же прошлым выбором,
+    /// и вход замыкался бы сам на себя: новое предпочтение человека до
+    /// подбора не доходило бы никогда.
+    #[test]
+    fn first_attempt_ports_is_the_preference_not_the_already_resolved_port() {
+        let mut c = sample();
+        c.host.http_port = Some(9000);
+        c.resolved_http_port = Some(12345); // уже улажено на что-то совсем другое
+        assert_eq!(c.first_attempt_ports().http, 9000, "предпочтение — явный порт человека, не то, что уже выбрано");
     }
 
     /// `render`/`write_checked` печатают только `host.http_port` — поле

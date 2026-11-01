@@ -3309,6 +3309,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Круг исправления 3, находка ведущего: прежняя редакция замыкала вход
+    /// `ports::choose` сам на себя (`first_attempt_ports()` кормила его уже
+    /// улаженным портом) — новый явный `host.http_port`, поставленный
+    /// человеком и сохранённый, не доходил бы до подбора никогда, молча.
+    /// Здесь — тот же каталог состояния, другое предпочтение: второе
+    /// улаживание обязано пойти от НОВОГО порта, а не вернуть то, что было
+    /// улажено для старого.
+    #[test]
+    fn a_changed_explicit_http_port_reaches_the_next_settling() {
+        let dir = mcp_test_dir("settle-changed-pref");
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.http_port = Some(47601);
+        settle_chosen_http_port_in(&dir, &mut cfg);
+        assert_eq!(cfg.http_port(), 47601);
+
+        // Человек поставил другой явный порт и сохранил — свежая `Cfg`,
+        // как после «Сохранить» (`resolved_http_port` снова `None`).
+        let mut cfg2 = crate::cfg::filled_for_test();
+        cfg2.host.http_port = Some(47602);
+        settle_chosen_http_port_in(&dir, &mut cfg2);
+        assert_eq!(cfg2.http_port(), 47602, "новое предпочтение обязано дойти до подбора, не застыть на старом");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Тот же круг, обратная сторона: `Paths::of` зовётся не один раз за
+    /// сеанс (установка, проверка дескриптора, остановка) на ОДНОЙ и той же
+    /// уже улаженной `Cfg`. Прежняя редакция `first_attempt_ports()` кормила
+    /// `ports::choose` уже улаженным портом как «предпочтением» — и когда
+    /// предпочтение было занято при первом улаживании (пришлось сдвинуться),
+    /// второй вызов на той же `Cfg` видел «предпочтение» = уже сдвинутый
+    /// порт, не совпадающий с запомненным, запускал подбор заново, и, застав
+    /// СВОЙ ЖЕ только что поднятый слушатель на нём, уезжал ещё дальше —
+    /// порт дёргался бы внутри одного сеанса, ровно та беда, которую решала
+    /// функция `choose` с самого начала задачи.
+    #[test]
+    fn settling_twice_in_the_same_session_does_not_drift_after_moving_off_a_busy_preference() {
+        let dir = mcp_test_dir("settle-same-session");
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.http_port = Some(47621);
+        let busy_preference = std::net::TcpListener::bind(("127.0.0.1", 47621)).unwrap();
+        settle_chosen_http_port_in(&dir, &mut cfg);
+        let settled = cfg.http_port();
+        assert_ne!(settled, 47621, "предпочтение занято — улаживание обязано сдвинуть порт");
+        drop(busy_preference);
+
+        // Наш собственный httpd теперь слушает УЛАЖЕННЫЙ (не предпочтённый) порт.
+        let our_listener = std::net::TcpListener::bind(("127.0.0.1", settled)).unwrap();
+        settle_chosen_http_port_in(&dir, &mut cfg); // та же Cfg, тот же сеанс
+        assert_eq!(cfg.http_port(), settled, "повторное улаживание в одном сеансе не должно уезжать на соседний порт из-за собственного слушателя");
+        drop(our_listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Ревью задачи 3, Important 2: до этого теста ни один тест не звал
     /// `run_mcp` вовсе, и снятие проверки срока/холодного замка (или подмена
     /// `watch_mcp` на всегда разрешённый) прошло бы любым прогоном пакета.

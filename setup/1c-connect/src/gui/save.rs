@@ -55,11 +55,18 @@ pub fn carried_dump(saved: &Host, new_project: &str) -> String {
 /// выведенного) смену рабочего места переживает; незаданный остаётся
 /// незаданным.
 ///
-/// Переезд не молчаливый: новый порт может оказаться занят — например, вторым
-/// коннектором другого рабочего места на этой же машине, — поэтому о нём (как
-/// и обо всём прочем, что едет за рабочим местом) `save_host` пишет строку в
-/// журнал (`moved_lines`); поднять HTTP-сервис на занятом порту всё равно не
-/// выйдет, и операция публикации скажет, кто его держит.
+/// Переезд не молчаливый: о нём (как и обо всём прочем, что едет за рабочим
+/// местом) `save_host` пишет строку в журнал (`moved_lines`).
+///
+/// Это ПРЕДПОЧТЕНИЕ, а не окончательный порт: новый номер может оказаться
+/// занят — например, вторым коннектором другого рабочего места на этой же
+/// машине, — и тогда подбор уедет на следующий свободный (`ports::choose`,
+/// задача 1 плана «тонкий срез ценности»). Прежняя докстрока здесь
+/// обещала, что «поднять HTTP-сервис на занятом порту всё равно не выйдет, и
+/// операция публикации скажет, кто его держит» — ровно эта задача сделала
+/// так, что выйдет, на другом номере (находка 6 ревью круга 3). Поэтому
+/// строку журнала собирает `moved_lines` из УЛАЖЕННЫХ портов, а не из этого
+/// предпочтения: человек заводит по тому номеру правило в средствах защиты.
 pub fn carried_http_port(saved: &Host, new_workstation: &str) -> Option<u16> {
     if saved.http_port == Some(cfg::derived_http_port(&saved.workstation)) {
         Some(cfg::derived_http_port(new_workstation))
@@ -75,21 +82,31 @@ pub fn carried_http_port(saved: &Host, new_workstation: &str) -> Option<u16> {
 /// каталогом проекта — каталог выгрузки). `Warn`, а не `Ok`: новые порты
 /// может держать другой коннектор, а прежний каталог выгрузки остаётся
 /// лежать со старым содержимым.
-pub fn moved_lines(old: &Host, new: &Host) -> Vec<String> {
+///
+/// Параметры — `Cfg`, а не `Host` (находка 6 ревью круга 3): порт публикации
+/// в строке обязан быть тем, который ДОСТАЛСЯ (`http_port()`, он же номер в
+/// `base_url()` и в `Listen` у httpd), а не предпочтением из
+/// `host.http_port`. Прежде строка собиралась из предпочтения — человек
+/// читал «порт публикации 8081 → 8083», заводил по этому числу правило в
+/// средствах защиты и правил по нему документацию, а httpd жил на 8084,
+/// потому что 8083 держал сосед по терминальному серверу. Поэтому
+/// `save_host` зовёт эту функцию ПОСЛЕ улаживания
+/// (`ops_host::settle_chosen_http_port`), а не до. Порты моста (`ports()`)
+/// по-прежнему выводятся формулой — их никто не подбирает (см.
+/// `ports::Chosen`), и мост слушает ровно их.
+pub fn moved_lines(old: &Cfg, new: &Cfg) -> Vec<String> {
     let mut v = Vec::new();
-    if old.workstation != new.workstation {
-        let p = Cfg { host: new.clone(), ..Default::default() }.ports();
-        let port = match (old.http_port, new.http_port) {
-            (Some(from), Some(to)) if from != to => format!(", порт публикации {from} → {to}"),
-            _ => String::new(),
-        };
+    if old.host.workstation != new.host.workstation {
+        let p = new.ports();
+        let (from, to) = (old.http_port(), new.http_port());
+        let port = if from != to { format!(", порт публикации {from} → {to}") } else { String::new() };
         v.push(format!(
             "за рабочим местом {} → {} переехали: ветка проекта и origin, порты {}/{}/{}{port}",
-            old.workstation, new.workstation, p.mcp, p.vrunner, p.web
+            old.host.workstation, new.host.workstation, p.mcp, p.vrunner, p.web
         ));
     }
-    if old.project != new.project && old.dump != new.dump {
-        v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.dump));
+    if old.host.project != new.host.project && old.host.dump != new.host.dump {
+        v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.host.dump));
     }
     v
 }
@@ -310,8 +327,6 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.http_port = carried_http_port(&ui.cfg.host, &host.workstation);
     let typed = host.base_url.clone();
     host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
-    // Переезды — не молчком, и все до одного: см. `moved_lines`.
-    let moved = moved_lines(&old_host, &host);
     let keep = fields_to_keep(&host, &ui.cfg.undecryptable);
     let path = ui.kit.state_path(cfg::FILE);
     // Читаем диск ДО записи — после неё поле будет пустым, прежний
@@ -321,12 +336,6 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // не было, файл не тронут.
     let patches = resolve_patches(&before, &keep)?;
     let mut cfg = Cfg { host, ..Default::default() };
-    // Круг исправления задачи 1 плана «тонкий срез ценности»: «Сохранить»
-    // строит СВОЮ, новую `Cfg` (`Cfg { host, ..Default::default() }` выше) —
-    // не ту, что перечитывание (`gui::window::reread_and_recheck`) или
-    // начальный запуск (`gui::launch`); без своего вызова она осталась бы с
-    // `resolved_http_port: None` до следующего перечитывания файла.
-    ops_host::settle_chosen_http_port(&mut cfg);
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не
     // открыла — иначе показ окна решил бы, что беда прошла сама.
@@ -335,6 +344,24 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     let store = store_for(&ui.kit)?;
     let patch_refs: Vec<(&str, &str)> = patches.iter().map(|(k, v)| (*k, v.as_str())).collect();
     cfg::write_checked(&ui.kit, &cfg, &store, &patch_refs)?;
+    // Улаживание порта — ПОСЛЕ записи (находка 5 ревью круга 3). Стояло до
+    // неё, и неудавшееся «Сохранить» успевало переписать `ports.state`:
+    // человек менял рабочее место и заодно портил путь базы, `validate()`
+    // отказывал, toml оставался прежним — а запомненная пара уже уехала на
+    // новое предпочтение, которого в файле человека нет. Пока настройки не
+    // записаны, запоминать выбор не за что.
+    //
+    // Круг исправления задачи 1: «Сохранить» строит СВОЮ, новую `Cfg`
+    // (`Cfg { host, ..Default::default() }` выше) — не ту, что перечитывание
+    // (`gui::window::reread_and_recheck`) или начальный запуск
+    // (`gui::launch`); без своего вызова она осталась бы с
+    // `resolved_http_port: None` до следующего перечитывания файла.
+    ops_host::settle_chosen_http_port(&mut cfg);
+    // Переезды — не молчком, и все до одного: см. `moved_lines`. Строка
+    // собирается здесь, после улаживания, именно затем, чтобы назвать
+    // доставшийся порт, а не предпочтение (находка 6). `ui.cfg` — ещё
+    // прежняя: её заменяет `ui.cfg = cfg` ниже.
+    let moved = moved_lines(&ui.cfg, &cfg);
     let base_path = cfg.host.base_path.clone();
     // Дескриптор публикации (`publication::vrd`) с задачи 6 несёт только
     // путь базы — переподнимать публикацию при смене логина или пароля

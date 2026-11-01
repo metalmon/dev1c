@@ -74,19 +74,94 @@ fn carried_http_port_follows_the_workstation_unless_it_was_chosen_by_hand() {
     assert_eq!(carried_http_port(&saved, "dev2"), None);
 }
 
+/// `moved_lines` принимает `Cfg`, а не `Host` (находка 6: порт в строке —
+/// доставшийся, а не предпочтение), а тесты ниже строят именно `Host`.
+fn as_cfg(h: &Host) -> Cfg {
+    Cfg { host: h.clone(), ..Default::default() }
+}
+
+/// Каталог состояния для тестов, которым улаживание порта
+/// (`ops_host::settle_chosen_http_port`) нужно НАСТОЯЩИМ, а не пустышкой
+/// (находка 8 ревью круга 3). Ставится потоко-локально, переменные среды не
+/// трогаются — это жёсткий запрет владельца.
+fn state_dir_for(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("onec-connect-save-state-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
 /// Переезд порта не молчком: новый порт может быть занят, и человек
 /// должен прочитать про переезд, а не искать, почему публикация упала.
+///
+/// Улаживание здесь настоящее (находка 8): каталог состояния подставлен, и
+/// после «Сохранить» в нём лежит `ports.state` с новым предпочтением —
+/// прежде эта проверка была невозможна, `settle_chosen_http_port` в тестах
+/// была пустышкой, и утверждение про `base_url()` держалось ровно на том,
+/// что улаживание ничего не делает.
+///
+/// Числа названы относительно, а не литералом 8083: подбор мог сдвинуться,
+/// если 8083 на этой машине занят. Утверждение от этого не слабеет — оно про
+/// то, что `base_url()` и строка журнала называют ОДИН И ТОТ ЖЕ доставшийся
+/// порт, а предпочтение переехало за рабочим местом.
 #[test]
 fn saving_a_new_workstation_moves_a_derived_port_and_says_so() {
+    let dir = state_dir_for("moved-port");
     let mut ui = Ui::for_test();
     ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
     let mut host = ui.cfg.host.clone();
     host.workstation = "dev3".into();
-    save_host(&mut ui, host).unwrap();
-    assert_eq!(ui.cfg.host.http_port, Some(8083));
+    crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap();
+    assert_eq!(ui.cfg.host.http_port, Some(8083), "предпочтение переехало за рабочим местом");
+    let chosen = ui.cfg.http_port();
     // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
-    assert_eq!(ui.cfg.base_url(), "http://127.0.0.1:8083/hs/mcp-1c");
-    assert!(ui.log.iter().any(|l| l.text.contains("порт публикации 8081 → 8083")), "{:?}", ui.log);
+    assert_eq!(ui.cfg.base_url(), format!("http://127.0.0.1:{chosen}/hs/mcp-1c"));
+    assert!(ui.log.iter().any(|l| l.text.contains(&format!("порт публикации 8081 → {chosen}"))), "{:?}", ui.log);
+    // Улаживание и правда сходило в каталог состояния — иначе этот файл не
+    // появился бы, и удаление вызова из `save_host` прошло бы незамеченным.
+    assert_eq!(std::fs::read_to_string(dir.join("ports.state")).unwrap(), format!("pref_http=8083\nhttp={chosen}\n"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Находка 6 ревью круга 3: строка журнала называет ДОСТАВШИЙСЯ порт, а не
+/// предпочтение. Сценарий находки: `dev1` → `dev3`, предпочтение 8083 держит
+/// сосед по терминальному серверу, подбор уехал на 8084 — человек заводит
+/// правило в средствах защиты по числу из этой строки, и 8083 в ней было бы
+/// числом, на котором не слушает никто.
+///
+/// Здесь подбор не нужен: `resolved_http_port` — то самое поле, которым
+/// улаживание кладёт выбор, и чистая функция обязана читать его, а не
+/// `host.http_port`.
+#[test]
+fn the_moved_port_line_names_the_port_that_was_chosen_not_the_preference() {
+    let old = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port("dev1")), ..Host::default() };
+    let mut new = old.clone();
+    new.workstation = "dev3".into();
+    new.http_port = carried_http_port(&old, "dev3");
+    assert_eq!(new.http_port, Some(8083), "предпочтение — выведенное из нового имени");
+    let before = Cfg { host: old, ..Default::default() };
+    // Подбор сдвинулся: 8083 занят соседом, достался 8084.
+    let after = Cfg { host: new, resolved_http_port: Some(8084), ..Default::default() };
+    let line = moved_lines(&before, &after).join("\n");
+    assert!(line.contains("порт публикации 8081 → 8084"), "строка обязана назвать доставшийся порт: {line}");
+    assert!(!line.contains("8083"), "предпочтение, на котором никто не слушает, в журнал не идёт: {line}");
+}
+
+/// Находка 5 ревью круга 3: неудавшееся «Сохранить» не двигает запомненный
+/// порт. Прежде улаживание стояло ДО `validate()`/`write_checked` — человек
+/// менял рабочее место и заодно портил поле, запись не проходила, toml
+/// оставался прежним, а `ports.state` уже уезжал на предпочтение, которого в
+/// файле человека нет.
+#[test]
+fn a_refused_save_does_not_remember_a_new_port() {
+    let dir = state_dir_for("refused-save");
+    let mut ui = Ui::for_test();
+    ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
+    let mut host = ui.cfg.host.clone();
+    host.workstation = "dev3".into();
+    host.server = "no-port".into(); // `validate()` на этом откажет
+    let err = crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap_err();
+    assert!(!err.is_empty());
+    assert!(!dir.join("ports.state").exists(), "настройки не записаны — запоминать выбор не за что");
 }
 
 /// Та же ловушка на живом «Сохранить»: записанный выведенный каталог
@@ -118,12 +193,12 @@ fn every_move_gets_a_line_not_just_the_port() {
         http_port: Some(cfg::derived_http_port("dev1")),
         ..Host::default()
     };
-    assert!(moved_lines(&old, &old).is_empty());
+    assert!(moved_lines(&as_cfg(&old), &as_cfg(&old)).is_empty());
 
     let mut new = old.clone();
     new.workstation = "dev3".into();
     new.http_port = carried_http_port(&old, "dev3");
-    let line = moved_lines(&old, &new).join("\n");
+    let line = moved_lines(&as_cfg(&old), &as_cfg(&new)).join("\n");
     for part in ["dev1 → dev3", "ветка проекта и origin", "7773/7783/7793", "порт публикации 8081 → 8083"] {
         assert!(line.contains(part), "{part} не назван: {line}");
     }
@@ -131,7 +206,7 @@ fn every_move_gets_a_line_not_just_the_port() {
     let mut moved_project = old.clone();
     moved_project.project = "C:\\proj\\Torg".into();
     moved_project.dump = carried_dump(&old, "C:\\proj\\Torg");
-    let lines = moved_lines(&old, &moved_project);
+    let lines = moved_lines(&as_cfg(&old), &as_cfg(&moved_project));
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains(&cfg::derived_dump("C:\\proj\\Torg")), "{lines:?}");
 
@@ -141,7 +216,7 @@ fn every_move_gets_a_line_not_just_the_port() {
     let mut own_new = own.clone();
     own_new.project = "C:\\proj\\Torg".into();
     own_new.dump = carried_dump(&own, "C:\\proj\\Torg");
-    assert!(moved_lines(&own, &own_new).is_empty());
+    assert!(moved_lines(&as_cfg(&own), &as_cfg(&own_new)).is_empty());
 }
 
 #[test]

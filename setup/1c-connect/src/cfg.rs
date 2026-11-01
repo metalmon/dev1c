@@ -199,6 +199,21 @@ pub struct Cfg {
     /// заново, а не прочитать отказ там, где раньше открывалось окно.
     #[serde(skip)]
     pub undecryptable: Vec<String>,
+    /// Порт, выбранный в ЭТОМ сеансе (`ports::choose`), а не выведенный из
+    /// рабочего места, — `None`, пока его никто не проставил. `#[serde(skip)]`,
+    /// как `undecryptable`: это не настройка человека, а выбор программы на
+    /// сегодня, и `render`/`write_checked` сюда не заглядывают — печатают
+    /// только `host.http_port`. Нарочно НЕ `host.http_port`: то поле читают
+    /// `write_derived_fields` и `gui::save::carried_http_port`, решая, стало
+    /// ли оно явным выбором человека (установка один раз пишет сюда
+    /// `derived_http_port`, и дальше это чужое поле, которое программа не
+    /// трогает) — подставь туда подобранный порт, и обе эти проверки приняли
+    /// бы подбор за ручной ввод и заморозили бы его в toml навсегда при
+    /// следующей настройке или «Сохранить» (а поля для http_port в окне нет
+    /// вовсе — человек не увидел бы, что подписывает). `Cfg::http_port()`
+    /// ниже предпочитает это поле, когда оно есть.
+    #[serde(skip)]
+    pub resolved_http_port: Option<u16>,
 }
 
 /// Производный `Debug` печатал бы пароль полем как есть, а этот журнал
@@ -206,7 +221,11 @@ pub struct Cfg {
 /// наружу безопасным.
 impl std::fmt::Debug for Cfg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cfg").field("host", &self.host).field("undecryptable", &self.undecryptable).finish()
+        f.debug_struct("Cfg")
+            .field("host", &self.host)
+            .field("undecryptable", &self.undecryptable)
+            .field("resolved_http_port", &self.resolved_http_port)
+            .finish()
     }
 }
 
@@ -546,6 +565,15 @@ impl Cfg {
         Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
     }
 
+    /// Умолчания первой попытки все четыре сразу — то, с чего начинает
+    /// `ports::choose` (`publication::Paths::of`, `ops_host::settle_chosen_http_port`).
+    /// Одна сборка на обоих вызывающих — врозь она дважды повторяла бы
+    /// один и тот же литерал `Chosen { mcp: ..., vrunner: ..., ... }`.
+    pub fn first_attempt_ports(&self) -> crate::ports::Chosen {
+        let p = self.ports();
+        crate::ports::Chosen { mcp: p.mcp, vrunner: p.vrunner, web: p.web, http: self.http_port() }
+    }
+
     /// Порт веб-сервера из действующего адреса публикации (`base_url()`, не
     /// хранимое поле `host.base_url`); 80, если не указан. В режиме `auto`
     /// действующий адрес считается от `http_port()` — читать хранимое поле
@@ -558,12 +586,15 @@ impl Cfg {
         hostport.split_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(80)
     }
 
-    /// Порт своего httpd в режиме `auto`: явный `http_port` человека, иначе
-    /// `derived_http_port` — умолчание ПЕРВОЙ попытки подбора, не
-    /// окончательный порт публикации (тот несёт `publication::Paths`, см.
-    /// `ports::choose`).
+    /// Порт своего httpd в режиме `auto`: ВЫБРАННЫЙ в этом сеансе
+    /// (`resolved_http_port`), если его уже проставили, — тот же порт, что
+    /// достался httpd (`publication::Paths::of`/`ports::choose`), а иначе
+    /// явный `http_port` человека, иначе `derived_http_port` — умолчание
+    /// ПЕРВОЙ попытки подбора. Эта функция сама подбор никогда не запускает
+    /// (это сеть и диск, а не чистое чтение полей) — только читает то, что
+    /// в `resolved_http_port` уже положил `ops_host::settle_chosen_http_port`.
     pub fn http_port(&self) -> u16 {
-        self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation))
+        self.resolved_http_port.unwrap_or_else(|| self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation)))
     }
 
     /// Адрес публикации: в режиме `auto` считает от своего httpd (`http_port`),
@@ -1107,6 +1138,36 @@ mod tests {
         let mut c = sample();
         c.host.http_port = Some(9000);
         assert_eq!(c.base_url(), "http://localhost:9000/hs/mcp-1c");
+    }
+
+    /// Круг исправления задачи 1 плана «тонкий срез ценности»: выбранный в
+    /// этом сеансе порт (`resolved_http_port`, который проставляет
+    /// `ops_host::settle_chosen_http_port`) побеждает И явный `http_port`
+    /// человека, И выведенный — иначе `base_url()` называл бы не тот порт,
+    /// на котором на самом деле поднят httpd (`publication::Paths::of`
+    /// читает его же выбором, `ports::choose`), и агент шёл бы в молчание.
+    #[test]
+    fn a_resolved_port_wins_over_both_the_explicit_and_the_derived_one() {
+        let mut c = sample();
+        c.resolved_http_port = Some(9100);
+        assert_eq!(c.http_port(), 9100, "ничего не задано кроме выбранного — он и побеждает");
+        c.host.http_port = Some(9000);
+        assert_eq!(c.http_port(), 9100, "выбранный сильнее явного порта человека");
+        assert_eq!(c.base_url(), "http://localhost:9100/hs/mcp-1c");
+    }
+
+    /// `render`/`write_checked` печатают только `host.http_port` — поле
+    /// `resolved_http_port` в файл не идёт никогда (та же защита, что у
+    /// `undecryptable`): иначе выбор этого сеанса застыл бы в toml навсегда
+    /// при следующем «Сохранить» (`gui::save::carried_http_port` принял бы
+    /// его за ручной ввод человека).
+    #[test]
+    fn resolved_http_port_never_reaches_the_rendered_file() {
+        let store = secrets::Store::file(&tmp("resolved-port-render"));
+        let mut c = filled();
+        c.resolved_http_port = Some(12345);
+        let text = c.render(&store).unwrap();
+        assert!(!text.contains("12345"), "{text}");
     }
 
     #[test]

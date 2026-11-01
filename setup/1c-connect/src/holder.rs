@@ -20,6 +20,64 @@ fn no_window(c: &mut Command) {
 #[cfg(not(windows))]
 fn no_window(_c: &mut Command) {}
 
+/// Pid процесса, слушающего `port` — системным вызовом/ядром, БЕЗ внешнего
+/// процесса: эту пробу зовут часто (перед каждой отправкой пароля базы,
+/// `publication::refuse_unless_ours`), а `of_port`/`others_of_port` выше
+/// заводят `netstat`/`tasklist` на каждый вызов — приемлемо для редкого
+/// диагностического текста, неприемлемо здесь (решение владельца, план
+/// «тонкий срез ценности», задача 1, круг исправления).
+///
+/// Windows — `GetExtendedTcpTable` напрямую (тот же API, которым живёт
+/// `netstat`, но без порождения процесса). Unix — то же ядро, что уже
+/// использует `of_port_proc`: `/proc/net/tcp`(6) даёт inode, `/proc/<pid>/fd`
+/// отображает его на процесс; второй копии этого пути здесь нет.
+///
+/// Несколько слушателей одного порта (разные семейства адресов) — здесь не
+/// различаются, берётся первый найденный: эта проба — не диагностика
+/// человеку (там это различие важно, `others_of_port`), а охрана перед
+/// отправкой пароля, и достаточно знать ОДНОГО держателя, чтобы решить,
+/// наш он или нет.
+#[cfg(windows)]
+pub fn listener_pid(port: u16) -> Option<u32> {
+    use windows_sys::Win32::Foundation::NO_ERROR;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER};
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    let mut size: u32 = 0;
+    // Первый вызов — только узнать нужный размер буфера (так документирован
+    // GetExtendedTcpTable); код возврата здесь не смотрим, он и должен быть
+    // "буфер мал" при нулевом буфере.
+    unsafe {
+        GetExtendedTcpTable(std::ptr::null_mut(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    }
+    if size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size as usize];
+    let rc = unsafe { GetExtendedTcpTable(buf.as_mut_ptr().cast(), &mut size, 0, AF_INET as u32, TCP_TABLE_OWNER_PID_LISTENER, 0) };
+    if rc != NO_ERROR {
+        return None;
+    }
+    // `MIB_TCPTABLE_OWNER_PID`: dwNumEntries, затем массив строк
+    // переменной длины — читаем как заголовок плюс срез по месту, не
+    // копируя буфер.
+    let header = buf.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>();
+    let n = unsafe { (*header).dwNumEntries } as usize;
+    let rows_ptr = unsafe { (*header).table.as_ptr() };
+    let rows = unsafe { std::slice::from_raw_parts(rows_ptr, n) };
+    // `dwLocalPort` несёт порт в сетевом порядке байт в младших двух байтах.
+    let want = port.to_be();
+    rows.iter().find(|r| (r.dwLocalPort as u16) == want).map(|r| r.dwOwningPid)
+}
+
+#[cfg(not(windows))]
+pub fn listener_pid(port: u16) -> Option<u32> {
+    let tcp = std::fs::read_to_string("/proc/net/tcp").unwrap_or_default();
+    let tcp6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
+    let inode = parse_proc_net_tcp(&tcp, port).or_else(|| parse_proc_net_tcp(&tcp6, port))?;
+    pid_owning_inode(inode)
+}
+
 /// Имя и pid процесса, слушающего `port` на loopback (или на всех адресах —
 /// самый частый случай: Windows отдаёт занятые порты как `0.0.0.0:N`), в виде
 /// `1c-connect (pid 812)` — `None`, если порт свободен, или сведений не
@@ -258,6 +316,24 @@ fn parse_tasklist_name(csv: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Настоящий слушатель в этом же процессе: `listener_pid` обязан назвать
+    /// pid самого тестового процесса — без `netstat`/`tasklist`, прямым ядром
+    /// или системным вызовом. Красное было до самой функции: `listener_pid`
+    /// не существовал.
+    #[test]
+    fn listener_pid_names_the_process_holding_a_real_socket() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(listener_pid(port), Some(std::process::id()), "слушатель в этом же процессе — pid обязан совпасть");
+        drop(listener);
+    }
+
+    /// Закрытый порт — `None`, не угаданный чужой pid.
+    #[test]
+    fn listener_pid_is_none_on_a_closed_port() {
+        assert_eq!(listener_pid(1), None);
+    }
 
     const SS_LINE: &str = "LISTEN 0 4096 127.0.0.1:7771 0.0.0.0:* users:((\"1c-connect\",pid=812,fd=9))";
 

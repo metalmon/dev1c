@@ -6,6 +6,7 @@
 use super::panel::Panel;
 use super::{note_file, note_line, run_readiness, Kind, Line, Tab, Ui};
 use crate::cfg::Cfg;
+use crate::ops_host;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
@@ -258,7 +259,11 @@ pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
 /// прежних параметрах молча, о них человеку уже сказали при запуске.
 fn reread_and_recheck(cx: &mut App) {
     let ui = cx.global_mut::<Ui>();
-    if let Ok(cfg) = Cfg::load_unchecked(&ui.kit) {
+    if let Ok(mut cfg) = Cfg::load_unchecked(&ui.kit) {
+        // Круг исправления задачи 1 плана «тонкий срез ценности»: перечитывание
+        // строит свою копию `Cfg` — не общую с `gui::launch`'ой начальной и не
+        // с «Сохранить» (`gui::save::save_host`).
+        ops_host::settle_chosen_http_port(&mut cfg);
         // Не только в окно, но и в живой сеанс — иначе агент остался бы на
         // старой базе (`gui::adopt_cfg`).
         super::adopt_cfg(ui, cfg);

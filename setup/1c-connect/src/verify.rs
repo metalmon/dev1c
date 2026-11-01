@@ -664,6 +664,23 @@ const UNREACHED_HINT: &str =
 /// Причина и подсказка к ней — парой (`busy_reason`, Important 6): функция не
 /// держит свой литерал подсказки, иначе советовала бы закрыть сеанс, которого
 /// может не быть открыто вовсе.
+/// Факты группы «база», когда своя публикация существует, но слушатель на
+/// её порту — не наш httpd (`publication::refuse_unless_ours`): пароль базы
+/// никуда не уходит, и обе пробы, что его несут бы, честно говорят «не
+/// спрашивали», той же парой «причина — подсказка», что и занятость другой
+/// операцией (`busy_reason`). Отдельная чистая функция (не прямо в
+/// `gather`) — тест держит её без настоящей платформы на диске: `gather`
+/// передаёт уже готовый текст отказа `refuse_unless_ours`, а не зовёт его
+/// здесь заново.
+fn facts_when_the_listener_is_foreign(base_url: &str, publication: &str, cfg: &crate::cfg::Cfg, kit: &common::kit::Kit, reason: &str) -> (Check, Check, Check) {
+    let hint = "порт занят посторонним процессом — закройте его или переставьте публикацию";
+    (
+        publication_responds_fact(base_url, false, Some((reason, hint))),
+        extension_fact(None, Some((reason, hint)), publication),
+        descriptor_fact(base_descriptor(cfg, kit)),
+    )
+}
+
 fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str, &str)>) -> Check {
     if responds {
         return Check::pass(PUBLICATION, format!("{base_url}/version отвечает"));
@@ -1318,6 +1335,17 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
                     extension_fact(None, None, &h.publication),
                     descriptor_fact(base_descriptor(&ctx.cfg, &ctx.kit)),
                 );
+            }
+            // Страж перед отправкой пароля базы (круг исправления, находка
+            // автоматической проверки безопасности): на терминальном сервере
+            // локальный порт после подбора мог освободиться и достаться
+            // чужому процессу. Порт, на который уходит пароль
+            // (`base_url()`), известен независимо от `publication::Paths::of`
+            // — поэтому ЕЁ ОТКАЗ ТОЖЕ ОТКАЗ (`guard_own_listener`), не повод
+            // пропустить сверку: см. докстроку там же, первая редакция этой
+            // ветки рассуждала наоборот и была неверна.
+            if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+                return facts_when_the_listener_is_foreign(&base_url, &h.publication, &ctx.cfg, &ctx.kit, &reason);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             let reach = crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left);
@@ -2081,6 +2109,24 @@ mod tests {
             .trim_start()
             .trim_start_matches("ARG MCP_1C_VERSION=");
         assert_eq!(pack_version, dockerfile_version, "pack.sh и Dockerfile.1c расходятся в версии mcp-1c");
+    }
+
+    /// Круг исправления (находка автоматической проверки безопасности):
+    /// слушатель на порту публикации — не наш httpd. Обе пробы, что несли
+    /// бы пароль базы, честно говорят «не спрашивали» — ни одна не
+    /// притворяется, что проверила что-то, чего не проверяла.
+    #[test]
+    fn a_foreign_listener_refuses_both_password_carrying_probes_in_words() {
+        let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-foreign-kit-{}", std::process::id())));
+        let cfg = crate::cfg::filled_for_test();
+        let reason = "порт 8081 занят не нами (его слушает pid 999, у нашего httpd pid 111) — пароль базы не отправлен";
+        let (publication, extension, _descriptor) =
+            facts_when_the_listener_is_foreign("http://localhost:8081/hs/mcp-1c", &cfg.host.publication, &cfg, &kit, reason);
+        for c in [&publication, &extension] {
+            assert_eq!(c.outcome(), Outcome::Busy, "{c:?}");
+            assert!(c.detail.contains("занят не нами"), "{c:?}");
+            assert!(!c.ok || c.info, "{c:?}"); // busy() — не провал и не честный проход
+        }
     }
 
     /// Critical 1 (повторное ревью): дескриптор не судится там, где

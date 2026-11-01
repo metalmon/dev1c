@@ -321,6 +321,12 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // не было, файл не тронут.
     let patches = resolve_patches(&before, &keep)?;
     let mut cfg = Cfg { host, ..Default::default() };
+    // Круг исправления задачи 1 плана «тонкий срез ценности»: «Сохранить»
+    // строит СВОЮ, новую `Cfg` (`Cfg { host, ..Default::default() }` выше) —
+    // не ту, что перечитывание (`gui::window::reread_and_recheck`) или
+    // начальный запуск (`gui::launch`); без своего вызова она осталась бы с
+    // `resolved_http_port: None` до следующего перечитывания файла.
+    ops_host::settle_chosen_http_port(&mut cfg);
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не
     // открыла — иначе показ окна решил бы, что беда прошла сама.

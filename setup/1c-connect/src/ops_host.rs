@@ -183,6 +183,52 @@ pub fn state_dir() -> PathBuf {
     }
 }
 
+/// Простановка выбранного в этом сеансе порта публикации в `Cfg`, живущей в
+/// памяти (круг исправления, план «тонкий срез ценности», задача 1: без
+/// этого `base_url()`/`verify` называли бы выведенный порт, а httpd
+/// (`publication::Paths::of`) слушал бы ВЫБРАННЫЙ — агент шёл бы по старому
+/// адресу и получал молчание, то есть ровно ту беду, против которой весь
+/// подбор). Пишет в `Cfg::resolved_http_port` (`#[serde(skip)]`), НЕ в
+/// `host.http_port` — почему именно так, см. докстроку поля в `cfg.rs`.
+///
+/// Нет ни одной готовой точки, через которую проходят все потребители сразу
+/// (окно, `connect`/`serve`, подкоманда `mcp`): CLI собирает `Ctx` в
+/// `main.rs::make_ctx`, подкоманда `mcp` грузит свой `Cfg` отдельно
+/// (`run_mcp` ниже), окно — в третьем месте (`gui::launch`), а «Сохранить» и
+/// перечитывание файла строят четвёртую и пятую копию (`gui::save::save_host`,
+/// `gui::window::reread_and_recheck`). Вместо одной точки — одна функция,
+/// которую зовут все пять (назвал их, а не молча выбрал одну).
+///
+/// Молчит на отказе подбора (`Ok` без изменений, `resolved_http_port`
+/// остаётся как был): настоящий отказ покажет `publication::Paths::of`, когда
+/// дойдёт до реальной публикации — здесь задача только не разойтись с ним,
+/// когда подбор удался, а не продублировать его отказ вторым текстом там,
+/// где человек его не ждёт (чтение параметров, показ окна).
+///
+/// **В тестах — заведомый no-op**, и это не обходной путь, а честное
+/// признание: `state_dir()` читает настоящие `LOCALAPPDATA`/`HOME`, не
+/// каталог тестового `Kit`, — у неё, в отличие от `kit.state()`, нет
+/// параметра для подмены (та же причина, по которой `skills.rs` и
+/// `publication.rs` зовут её, минуя `kit.state()`, — см. докстроку самой
+/// `state_dir()`). Эта функция — единственная из пяти вызывающих, что
+/// зовётся из уже существующих тестов (`gui::save::save_host`,
+/// `ops_host::run_mcp`) напрямую, без гейта вида «нет `bin/httpd.exe`» перед
+/// ней (как у `publication::Paths::of`, которую тесты поэтому и не ловят на
+/// этом). Без `#[cfg(test)]` прогон `cargo test` читал и писал бы НАСТОЯЩИЙ
+/// `%LOCALAPPDATA%\dev1c\ports.state` на машине разработчика — живой пример:
+/// `gui::save::tests::saving_a_new_workstation_moves_a_derived_port_and_says_so`
+/// сломался именно так, прочитав чужой, настоящий выбор. Поведенческого
+/// теста на саму эту функцию поэтому и нет — он был бы тестом не того, что
+/// написано, а того, что лежит на диске у того, кто его запустил.
+pub fn settle_chosen_http_port(cfg: &mut Cfg) {
+    #[cfg(not(test))]
+    if let Ok(chosen) = crate::ports::choose(&state_dir(), cfg.first_attempt_ports()) {
+        cfg.resolved_http_port = Some(chosen.http);
+    }
+    #[cfg(test)]
+    let _ = cfg;
+}
+
 /// OneScript лежит как в своём архиве: `bin/` и `lib/` рядом, `oscript.cfg`
 /// говорит `lib.system = ../lib` — библиотеки (и `lib/add` для vrunner)
 /// находятся без переменных окружения.
@@ -1697,7 +1743,11 @@ fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> A
 /// («нет файла параметров» — минорная находка ревью, вторая формулировка
 /// этой же причины здесь была мёртвой веткой).
 pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
-    let cfg = Cfg::load(&kit)?;
+    let mut cfg = Cfg::load(&kit)?;
+    // Круг исправления задачи 1 плана «тонкий срез ценности»: подкоманда
+    // `mcp` не идёт через `make_ctx` (та ветка в `main.rs` возвращает раньше
+    // неё) — свой вызов `settle_chosen_http_port`, не общий с CLI.
+    settle_chosen_http_port(&mut cfg);
     // Межпроцессная часть замка проекта: без этого вызова второй
     // долгоживущий процесс (Zed и pi, запущенные разом) его вовсе не увидит
     // (см. тот же вызов в `main.rs::connect`).
@@ -1890,6 +1940,12 @@ impl Op<Ctx> for Extension {
     }
     fn state(&self, ctx: &Ctx) -> OpState {
         let url = ctx.cfg.base_url();
+        // Страж перед отправкой пароля базы (круг исправления 2, находка
+        // автоматической проверки безопасности, одна функция на все дороги
+        // — см. докстроку `publication::guard_own_listener`).
+        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+            return OpState::Blocked(reason);
+        }
         match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
             Some(v) => OpState::Done(format!("расширение {v}, публикация отвечает")),
             // «Не установлено» — утверждение о базе, и делать его можно
@@ -1948,7 +2004,11 @@ impl Op<Ctx> for Extension {
             return Ok(());
         }
         let base_url = ctx.cfg.base_url();
-        if extension_version(&base_url, &h.db_user, &h.db_password).is_none() {
+        // Тот же страж, что в `state` выше — проба после установки несёт
+        // пароль точно так же (`publication::guard_own_listener`).
+        let reach_ok = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit).is_ok()
+            && extension_version(&base_url, &h.db_user, &h.db_password).is_some();
+        if !reach_ok {
             ctx.warn(format!(
                 "публикация {} не отвечает. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
                 base_url
@@ -2015,6 +2075,30 @@ mod tests {
         assert!(!masked.contains("секрет-базы") && masked.contains("--db-password …"), "{masked}");
         // Окружение `install_command` больше не несёт пароль — установщик его там не ищет (см. докстроку), и держать его там было бы просто лишней, никому не нужной копией.
         assert_eq!(c.as_std().get_envs().count(), 0);
+    }
+
+    /// Круг исправления 2 (находка автоматической проверки безопасности):
+    /// `host.extension`'s `state()` не имеет права дойти до пароля базы,
+    /// когда `guard_own_listener` отказал. Доказательство поведенческое, не
+    /// структурное: без гейта `extension_version` на недостижимый адрес
+    /// вернула бы `None`, и `state()` сказала бы «публикация не отвечает —
+    /// расширение не спросить» — ДРУГОЙ текст. Текст с причиной отказа
+    /// именно `Paths::of` («bin/httpd.exe») доказывает, что гейт сработал
+    /// раньше, чем дело дошло до пароля.
+    #[test]
+    fn extension_state_is_blocked_by_the_port_guard_before_it_asks_the_base() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-guard-{}", std::process::id())));
+        assert!(!crate::publication::kit_httpd_exe(&kit.root).exists(), "тест опирается на отказ Paths::of");
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
+        let ops = host();
+        let ext = ops.iter().find(|o| o.id() == "host.extension").expect("host.extension есть в списке");
+        match ext.state(&ctx) {
+            OpState::Blocked(reason) => assert!(reason.contains("httpd.exe"), "{reason}"),
+            other => panic!("ожидался Blocked с причиной Paths::of, получено {other:?}"),
+        }
     }
 
     #[test]

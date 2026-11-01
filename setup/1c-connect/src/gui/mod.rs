@@ -1957,7 +1957,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // Окно открывается и на незаполненном файле: в нём человек поля и
     // заполняет. Чего не хватает — скажет набор фактов своими словами, а не
     // отказ при запуске (решение владельца 26.10).
-    let cfg = Cfg::load_unchecked(&kit)?;
+    let mut cfg = Cfg::load_unchecked(&kit)?;
+    // Круг исправления задачи 1 плана «тонкий срез ценности»: окно — своя
+    // точка загрузки `Cfg`, не общая с CLI (`main.rs::make_ctx`) и не с
+    // подкомандой `mcp` (`ops_host::run_mcp`) — см. докстроку
+    // `ops_host::settle_chosen_http_port`.
+    ops_host::settle_chosen_http_port(&mut cfg);
     // Тот же единственный владелец рабочего места, что у `connect`/`serve` —
     // см. `crate::single_instance`. Вторая копия окна (двойной щелчок или
     // автозапуск при живом трее) на Windows тихо поднимает окно первой и

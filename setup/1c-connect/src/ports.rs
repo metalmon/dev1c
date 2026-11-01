@@ -64,7 +64,12 @@ pub fn pick(first: u16, count: u16, busy: &dyn Fn(u16) -> bool) -> Result<u16, S
 
 /// Настоящая проба занятости: попытка слушать на loopback. Удалось — порт
 /// свободен, значит «занят» здесь — отрицание успеха попытки.
-fn port_is_busy(port: u16) -> bool {
+///
+/// `pub(crate)`, потому что прод-проба подбора живёт не здесь: `publication`
+/// заворачивает эту в свою, которая знает, что порт, занятый НАШИМ же httpd,
+/// — не повод уезжать (`publication::busy_for_choice`, находка 2 ревью
+/// круга 3). Этот модуль про «кто-то слушает», и только.
+pub(crate) fn port_is_busy(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
@@ -133,14 +138,19 @@ pub(crate) fn write(state_dir: &Path, preference: &Chosen, chosen: &Chosen) -> R
 /// нынешним (человек задал явный `host.http_port`, переименовал рабочее
 /// место) — выбор не вечен, подбор идёт заново от нового `first`, и файл
 /// перезаписывается новой парой. Ничего не лежит вовсе — тот же подбор от
-/// `first` (умолчание первой попытки — `cfg::derived_http_port` и сёстры).
-pub fn choose(state_dir: &Path, first: Chosen) -> Result<Chosen, String> {
+/// `first` (умолчание первой попытки — `cfg::derived_http_port`).
+///
+/// Проба — параметром, как у `pick`: этот модуль не знает и не должен знать,
+/// чем «занят соседом» отличается от «занят нашим же httpd» — это знание
+/// живёт у pid-файла, то есть в `publication` (находка 2 ревью круга 3,
+/// решение ведущего).
+pub fn choose(state_dir: &Path, first: Chosen, busy: &dyn Fn(u16) -> bool) -> Result<Chosen, String> {
     if let Some(remembered) = read(state_dir) {
         if remembered.preference == first {
             return Ok(remembered.chosen);
         }
     }
-    let chosen = Chosen { http: pick(first.http, RANGE, &port_is_busy)? };
+    let chosen = Chosen { http: pick(first.http, RANGE, busy)? };
     write(state_dir, &first, &chosen)?;
     Ok(chosen)
 }
@@ -178,12 +188,27 @@ mod tests {
         Chosen { http: 47801 }
     }
 
+    /// Проба, которая никогда не говорит «занято». Тест этого модуля в сеть
+    /// не ходит вовсе (проба — параметр ровно затем), а настоящую пробу
+    /// подбора собирает `publication::resolve_http_port` — там она и
+    /// проверена, живым слушателем.
+    fn never_busy(_p: u16) -> bool {
+        false
+    }
+
+    /// И обратная: занято всё. Ею проверяется, что запомненный выбор
+    /// отдаётся БЕЗ какой-либо пробы вообще, а не «проба случайно сказала
+    /// свободно».
+    fn always_busy(_p: u16) -> bool {
+        true
+    }
+
     /// `choose` на пустом каталоге состояния подбирает и запоминает —
     /// красное было: до `pick()` этот модуль не существовал вовсе.
     #[test]
     fn choose_picks_and_remembers_when_nothing_is_stored_yet() {
         let dir = tmp("choose-fresh");
-        let chosen = choose(&dir, sample()).unwrap();
+        let chosen = choose(&dir, sample(), &never_busy).unwrap();
         assert_eq!(chosen, sample(), "диапазон свободен — первая попытка и есть выбор");
         assert_eq!(read(&dir), Some(Remembered { preference: sample(), chosen: sample() }));
         let _ = std::fs::remove_dir_all(&dir);
@@ -196,12 +221,11 @@ mod tests {
     #[test]
     fn choose_reuses_what_was_remembered_even_if_the_port_looks_busy_now() {
         let dir = tmp("choose-remembered");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let busy_port = listener.local_addr().unwrap().port();
-        write(&dir, &sample(), &Chosen { http: busy_port }).unwrap();
-        let chosen = choose(&dir, sample()).unwrap();
-        assert_eq!(chosen.http, busy_port, "выбор из состояния не пересматривается на занятости");
-        drop(listener);
+        write(&dir, &sample(), &Chosen { http: 47811 }).unwrap();
+        // Занято ВСЁ: если бы запомненное перепроверялось пробой, подбор
+        // отказал бы словами «свободного порта нет в диапазоне».
+        let chosen = choose(&dir, sample(), &always_busy).unwrap();
+        assert_eq!(chosen.http, 47811, "выбор из состояния не пересматривается на занятости");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -220,7 +244,7 @@ mod tests {
         // Предпочтение сменилось (например, человек задал явный
         // `host.http_port`) — подбор обязан пойти от НОВОГО `first`, не
         // вернуть устаревший выбор.
-        let fresh = choose(&dir, sample()).unwrap();
+        let fresh = choose(&dir, sample(), &never_busy).unwrap();
         assert_eq!(fresh, sample(), "предпочтение разошлось — подбор заново от нового first");
         // Файл перезаписан новой парой: следующий вызов с ТЕМ ЖЕ новым
         // предпочтением снова получает его без повторной пробы.
@@ -245,7 +269,7 @@ mod tests {
         write(&dir, &sample(), &remembered).unwrap();
         // `sample()` — тот же `first`, что и породил `remembered`: он тоже
         // свободен, и всё равно не должен победить прошлый выбор.
-        let chosen = choose(&dir, sample()).unwrap();
+        let chosen = choose(&dir, sample(), &never_busy).unwrap();
         assert_eq!(chosen, remembered, "предпочтительный свободен — и всё равно не должен победить прошлый выбор");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -258,7 +282,7 @@ mod tests {
         let dir = tmp("choose-broken");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(file_in(&dir), "pref_http=не число\nhttp=4\n").unwrap();
-        let chosen = choose(&dir, sample()).unwrap();
+        let chosen = choose(&dir, sample(), &never_busy).unwrap();
         assert_eq!(chosen, sample());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -273,7 +297,7 @@ mod tests {
         let dir = tmp("choose-old-format");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(file_in(&dir), "mcp=7772\nvrunner=7782\nweb=7791\nhttp=8082\n").unwrap();
-        let chosen = choose(&dir, sample()).unwrap();
+        let chosen = choose(&dir, sample(), &never_busy).unwrap();
         assert_eq!(chosen, sample(), "старый формат не разбирается — подбор заново, а не порт 8082 из него");
         assert_eq!(std::fs::read_to_string(file_in(&dir)).unwrap(), format!("pref_http={}\nhttp={}\n", sample().http, sample().http));
         let _ = std::fs::remove_dir_all(&dir);

@@ -212,9 +212,15 @@ pub fn state_dir() -> PathBuf {
 /// предпочтительным портом: он и доказывает то, ради чего вся задача писалась
 /// (`base_url()` после улаживания называет выбранный порт), а не только то,
 /// что функция существует.
+/// Дорога к подбору — одна и та же, что у дескриптора
+/// (`publication::resolve_http_port`), а не свой второй вызов
+/// `ports::choose`: проба подбора умеет отличать НАШ httpd от чужого
+/// (`publication::busy_for_choice`, находка 2 ревью круга 3), и два вызова
+/// с разными пробами — ровно тот способ развести `base_url()` и `Listen` в
+/// `httpd.conf`, от которого в круге 2 пришлось ставить барьер.
 pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg) {
-    if let Ok(chosen) = crate::ports::choose(dir, cfg.first_attempt_ports()) {
-        cfg.resolved_http_port = Some(chosen.http);
+    if let Ok(port) = crate::publication::resolve_http_port(dir, cfg) {
+        cfg.resolved_http_port = Some(port);
     }
 }
 

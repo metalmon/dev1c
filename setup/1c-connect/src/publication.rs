@@ -187,15 +187,17 @@ pub(crate) fn module_in(bin: &Path) -> Result<PathBuf, String> {
 /// настоящей платформы 1С: вынесены отдельно, чтобы тест считал их с
 /// временным каталогом, а не с настоящим `%LOCALAPPDATA%`/`$HOME`.
 fn paths_under(state: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths {
-    Paths {
-        root,
-        pub_dir: state.join("pub"),
-        conf: state.join("httpd.conf"),
-        pid: state.join("httpd.pid"),
-        log: state.join("httpd.log"),
-        module,
-        port,
-    }
+    Paths { root, pub_dir: state.join("pub"), conf: state.join("httpd.conf"), pid: pid_file_in(state), log: state.join("httpd.log"), module, port }
+}
+
+/// Путь к pid-файлу нашего httpd — одна формула на троих: дескриптор
+/// (`paths_under` выше), проба занятости (`busy_for_choice`) и страж
+/// (`guard_own_listener`). Двум последним `Paths` целиком не нужна, и это
+/// не мелочь: от ПОРТА этот путь не зависит, значит и страж, и проба строят
+/// его, не запуская подбор порта (находка 4 ревью круга 3 — проверка не
+/// имеет права переизбирать порт, см. `guard_own_listener`).
+pub(crate) fn pid_file_in(state: &Path) -> PathBuf {
+    state.join("httpd.pid")
 }
 
 /// Две основы публикации, и путать их нельзя: откуда httpd ЗАПУСКАЕТСЯ и куда
@@ -234,11 +236,45 @@ pub(crate) fn kit_httpd_exe(kit_root: &Path) -> PathBuf {
 /// 1). Подбирается ровно он один — порты моста этот сеанс не трогает (см.
 /// докстроку `ports::Chosen`).
 ///
+/// Проба занятости для подбора идёт отсюда, а не из `ports.rs`: знание «этот
+/// порт держит НАШ httpd» живёт здесь, рядом с pid-файлом, — `ports.rs`
+/// остаётся чистым, проба у него параметр (находка 2 ревью круга 3, решение
+/// ведущего).
+///
 /// Чистая по каталогу состояния (параметр, не `ops_host::state_dir()` сама
 /// по себе) — тем же приёмом, что `paths_under`: тест подаёт временный
 /// каталог, не настоящий `%LOCALAPPDATA%`.
-fn resolve_http_port(state: &Path, cfg: &Cfg) -> Result<u16, String> {
-    Ok(crate::ports::choose(state, cfg.first_attempt_ports())?.http)
+///
+/// `pub(crate)` и одна на двоих с `ops_host::settle_chosen_http_port_in`
+/// нарочно: `base_url()` и `Listen` в `httpd.conf` обязаны назвать ОДИН
+/// номер, а два вызова `ports::choose` с разными пробами — это ровно тот
+/// способ их развести, от которого в круге 2 пришлось ставить барьер.
+pub(crate) fn resolve_http_port(state: &Path, cfg: &Cfg) -> Result<u16, String> {
+    Ok(crate::ports::choose(state, cfg.first_attempt_ports(), &|p| busy_for_choice(state, p))?.http)
+}
+
+/// «Занят» для подбора — занят КЕМ-ТО ДРУГИМ. Порт, который слушает наш
+/// собственный httpd (pid из `<состояние>/httpd.pid` совпал с держателем
+/// слушающего сокета, `holder::listener_pid`), считается СВОБОДНЫМ: это тот
+/// самый порт, который мы и хотим, а не повод уезжать на соседний.
+///
+/// Без этого различия апгрейд живой установки уезжал с собственного порта
+/// (находка 2 ревью): `ports.state` у неё либо нет, либо он прежнего
+/// формата, подбор идёт заново, `bind` на 8081 не удаётся — потому что там
+/// НАШ httpd, — и `base_url()` после этого называет 8082, где не слушает
+/// никто. И это не теория: публикация поднимается `Lifetime::Detached`, без
+/// `Job` и без отслеживания, а `httpd -k stop` на запущенном из консоли
+/// экземпляре ищет службу `Apache2.4` и не делает ничего (замер ведущего,
+/// 2.11.2026) — переживший сеанс httpd на своём порту возможен.
+///
+/// Совпадение требуется ЯВНОЕ, с обеих сторон: нет pid-файла и держателя не
+/// видно — это два `None`, и сравнивать их как «совпало» означало бы считать
+/// свободным порт, который `bind` только что не дал.
+fn busy_for_choice(state: &Path, port: u16) -> bool {
+    if !crate::ports::port_is_busy(port) {
+        return false;
+    }
+    !matches!((holder::listener_pid(port), our_httpd_pid(&pid_file_in(state))), (Some(holder), Some(ours)) if holder == ours)
 }
 
 impl Paths {
@@ -408,12 +444,14 @@ pub fn httpd_responds(port: u16) -> bool {
     !port_is_free(port)
 }
 
-/// Pid из `PidFile` httpd (`p.pid`) — httpd пишет туда свой собственный pid
-/// сам, тем же текстом, что `netstat`/`GetExtendedTcpTable` отдают держателя
+/// Pid из `PidFile` httpd — httpd пишет туда свой собственный pid сам, тем
+/// же текстом, что `netstat`/`GetExtendedTcpTable` отдают держателя
 /// (`holder::listener_pid`). `None` — файла нет или в нём не число: решать,
-/// отказ это или нет, остаётся вызывающему (`refuse_unless_ours`).
-fn our_httpd_pid(p: &Paths) -> Option<u32> {
-    std::fs::read_to_string(&p.pid).ok()?.trim().parse().ok()
+/// отказ это или нет, остаётся вызывающему (`refuse_unless_ours`,
+/// `busy_for_choice`). Параметр — путь к файлу, не `Paths`: обоим
+/// вызывающим `Paths` целиком не нужна (см. `pid_file_in`).
+fn our_httpd_pid(pid_file: &Path) -> Option<u32> {
+    std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()
 }
 
 /// Страж перед отправкой пароля базы на локальный порт (находка
@@ -447,7 +485,7 @@ fn our_httpd_pid(p: &Paths) -> Option<u32> {
 /// владеет. То есть сравнение ниже на Windows верно как есть. Передоказывать
 /// не нужно — цифры здесь.
 pub fn refuse_unless_ours(p: &Paths) -> Result<(), String> {
-    let Some(ours) = our_httpd_pid(p) else {
+    let Some(ours) = our_httpd_pid(&p.pid) else {
         return Err(format!("{}: pid-файл публикации не прочитать — пароль базы не отправлен", p.pid.display()));
     };
     let Some(listening) = holder::listener_pid(p.port) else {
@@ -1203,6 +1241,54 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = resolve_http_port(&dir, &cfg).unwrap();
         assert_eq!(port, 47802, "дескриптор обязан нести выбранный порт, а не выведенный");
         assert_ne!(port, derived);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Находка 2 ревью круга 3: СВОЙ СОБСТВЕННЫЙ httpd не повод уезжать с
+    /// порта. У живой установки `ports.state` либо нет вовсе, либо он
+    /// прежнего формата — и первый же запуск этой сборки видел «8081 занят»
+    /// (а держал его наш же httpd, поднятый `Lifetime::Detached` и
+    /// переживший прошлый сеанс), уезжал на 8082, и дальше `base_url()`
+    /// называл 8082, где никто не слушает. Спека ветки требует обратного:
+    /// «подбор начинается с предпочтительного (8081) и сдвигается на
+    /// следующий свободный, ТОЛЬКО ЕСЛИ ТОТ ЗАНЯТ»
+    /// (`docs/superpowers/specs/2026-11-01-where-1c-and-agents-live-design.md:272`)
+    /// — занят нами — не тот случай.
+    ///
+    /// Слушатель здесь настоящий, в этом же процессе, и pid-файл называет
+    /// наш же pid — ровно тот приём, которым проверен сам страж
+    /// (`refuse_unless_ours_passes_when_the_pid_file_names_the_real_listener`).
+    #[test]
+    fn a_port_held_by_our_own_httpd_is_not_a_reason_to_move() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-ours-is-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.http_port = Some(port);
+        assert_eq!(resolve_http_port(&dir, &cfg).unwrap(), port, "порт держит наш же httpd — это тот порт, который мы и хотим, а не повод уезжать");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Обратная сторона той же пробы: держит ЧУЖОЙ процесс — подбор обязан
+    /// уехать, как и раньше. Здесь pid-файла нет вовсе (его и не бывает,
+    /// пока наш httpd ни разу не поднимался), а порт занят настоящим
+    /// слушателем — «своим» он от этого не становится.
+    #[test]
+    fn a_port_held_by_someone_else_still_moves_the_choice() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-foreign-is-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.http_port = Some(port);
+        let chosen = resolve_http_port(&dir, &cfg).unwrap();
+        assert_ne!(chosen, port, "порт держит чужой процесс — подбор обязан сдвинуться");
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

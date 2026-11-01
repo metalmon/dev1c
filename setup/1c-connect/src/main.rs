@@ -344,6 +344,12 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // У рабочего места один владелец (спека): вторая копия не борется за
     // порты и мьютекс проекта с этой — см. `single_instance`.
     let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation, &ctx.cfg.host.mode)?;
+    // Признак «обслуживает этот комплект» — рядом, своим смыслом (не
+    // взаимозаменяем с замком рабочего места выше): его слушает сторож
+    // моста по коннектору (`orphan::guard_owner`), и ключ у него не плывёт
+    // при переименовании рабочего места на ходу (круг исправления, см.
+    // заголовок `orphan.rs`).
+    let _serving = single_instance::hold_serving(&ctx.kit);
     // Межпроцессная часть замка проекта (`project::hold`): без этого вызова
     // файл не заводится, и второй долгоживущий процесс (другой редактор,
     // будущая подкоманда `mcp`) замка вовсе не увидит.
@@ -397,6 +403,8 @@ fn serve(ctx: &Ctx) -> Result<()> {
     // Тот же единственный владелец рабочего места, что у `connect` — см.
     // `single_instance`.
     let _guard = single_instance::acquire(&ctx.kit, &ctx.cfg.host.workstation, &ctx.cfg.host.mode)?;
+    // Тот же признак обслуживания, что у `connect` — см. комментарий там.
+    let _serving = single_instance::hold_serving(&ctx.kit);
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
     project::set_lock_target(ctx.kit.state());
     // На стенде связь держит именно `serve` (сам он и есть «окно» этого

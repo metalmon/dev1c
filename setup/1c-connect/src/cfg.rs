@@ -155,14 +155,25 @@ pub fn is_server_base(base_path: &str) -> bool {
     !drive && !head.is_empty()
 }
 
-/// Номер рабочего места: `dev1`, `dev2` или `dev3`. От него считаются порты.
+/// Номер рабочего места: `dev1`, `dev2` или `dev3`. От него считаются
+/// умолчания первой попытки (`derived_http_port`, `ports`) — не сами порты:
+/// на пустом или незнакомом имени `unwrap_or(1)` отдаёт одно и то же
+/// умолчание всем, кто его не заполнил, и именно поэтому настоящий порт
+/// подбирается при занятости (`ports::pick`/`ports::choose`), а не
+/// принимается как есть.
 pub fn number_of(workstation: &str) -> Option<u16> {
     workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
 }
 
-/// Порт своего httpd по умолчанию: `8080 + N` рабочего места. Поля в окне
-/// нет — умолчание идёт за рабочим местом, а правку переносит
-/// `gui::carried_http_port`.
+/// Умолчание ПЕРВОЙ попытки подбора: `8080 + N` рабочего места — не
+/// окончательный порт httpd. Поля в окне нет — умолчание идёт за рабочим
+/// местом, а правку переносит `gui::carried_http_port`. Настоящий порт
+/// публикации нащупывается от этого числа при занятости и запоминается в
+/// каталоге состояния (`ports::choose`, `publication::Paths::of`) — вторая
+/// бухгалтерка на том же терминальном сервере (то же пустое имя, тот же
+/// вывод) садится не на занятый этой формулой порт, а на следующий
+/// свободный, вместо того чтобы не стартовать вовсе (план «тонкий срез
+/// ценности», задача 1).
 pub fn derived_http_port(workstation: &str) -> u16 {
     8080 + number_of(workstation).unwrap_or(1)
 }
@@ -526,6 +537,10 @@ impl Cfg {
         }
     }
 
+    /// Умолчания первой попытки для mcp/vrunner/web — не окончательные
+    /// порты: та же оговорка, что у `derived_http_port` ниже. Настоящий
+    /// подбор этой тройки (задача 1 плана «тонкий срез ценности» вяжет пока
+    /// только `http` — `publication::Paths::of`) — дело `ports::choose`.
     pub fn ports(&self) -> Ports {
         let n = self.number().unwrap_or(1);
         Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
@@ -543,7 +558,10 @@ impl Cfg {
         hostport.split_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(80)
     }
 
-    /// Порт своего httpd в режиме `auto`: `http_port`, иначе `8080 + N`.
+    /// Порт своего httpd в режиме `auto`: явный `http_port` человека, иначе
+    /// `derived_http_port` — умолчание ПЕРВОЙ попытки подбора, не
+    /// окончательный порт публикации (тот несёт `publication::Paths`, см.
+    /// `ports::choose`).
     pub fn http_port(&self) -> u16 {
         self.host.http_port.unwrap_or_else(|| derived_http_port(&self.host.workstation))
     }

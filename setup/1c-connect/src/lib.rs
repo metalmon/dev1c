@@ -22,6 +22,7 @@ pub mod onec_error;
 pub mod ops_host;
 pub mod orphan;
 pub mod platform;
+pub mod ports;
 pub mod project;
 pub mod publication;
 pub mod secrets;

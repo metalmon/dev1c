@@ -228,6 +228,22 @@ pub(crate) fn kit_httpd_exe(kit_root: &Path) -> PathBuf {
     kit_root.join("httpd").join("bin").join("httpd.exe")
 }
 
+/// Порт, который и правда идёт в дескриптор публикации (`Paths::port`, он же
+/// `Listen` в `httpd.conf`) — выбранный в этом сеансе (`ports::choose`), не
+/// `cfg.http_port()` как есть: тот остаётся умолчанием ПЕРВОЙ попытки
+/// подбора, а не окончательным ответом (план «тонкий срез ценности», задача
+/// 1). `cfg.ports()` даёт первые попытки для mcp/vrunner/web — их этот сеанс
+/// подбирает и запоминает заодно, одним выбором на всю четвёрку, хоть сейчас
+/// в дескриптор идёт только `http`.
+///
+/// Чистая по каталогу состояния (параметр, не `ops_host::state_dir()` сама
+/// по себе) — тем же приёмом, что `paths_under`: тест подаёт временный
+/// каталог, не настоящий `%LOCALAPPDATA%`.
+fn resolve_http_port(state: &Path, cfg: &Cfg) -> Result<u16, String> {
+    let first = crate::ports::Chosen { mcp: cfg.ports().mcp, vrunner: cfg.ports().vrunner, web: cfg.ports().web, http: cfg.http_port() };
+    Ok(crate::ports::choose(state, first)?.http)
+}
+
 impl Paths {
     /// Пути публикации на этой машине: `ServerRoot` — свой httpd из комплекта
     /// (`<комплект>/httpd`, запускается оттуда, где лежит) на Windows,
@@ -240,6 +256,12 @@ impl Paths {
     /// функция зовёт САМА, мимо `kit.state()`, а в каталог состояния уезжает
     /// `.vrd`, где строка соединения с базой может нести учётные данные —
     /// место для неё тоже не угадывают. Текст причины общий с `ensure_state`.
+    ///
+    /// Порт — не `cfg.http_port()` напрямую, а `resolve_http_port` выше:
+    /// на пустом имени рабочего места (`cfg::number_of` → `None` →
+    /// `unwrap_or(1)`) формула отдавала бы один и тот же порт каждому, кто
+    /// имя не заполнил, и вторая бухгалтерка на том же терминальном сервере
+    /// не стартовала бы вовсе — ровно это и чинит подбор.
     pub fn of(cfg: &Cfg, kit: &Kit) -> Result<Paths, String> {
         ops_host::refuse_guessed_state_dir()?;
         let (root, state) = bases(&kit.root, &ops_host::state_dir());
@@ -254,7 +276,8 @@ impl Paths {
             .ok_or_else(|| "платформа 1С не найдена — установите её или укажите переменную ONEC_PLATFORM".to_string())?;
         let bin = exe.parent().ok_or_else(|| format!("у {} нет каталога", exe.display()))?;
         let module = module_in(bin)?;
-        Ok(paths_under(&state, root, module, cfg.http_port()))
+        let port = resolve_http_port(&state, cfg)?;
+        Ok(paths_under(&state, root, module, port))
     }
 }
 
@@ -1067,6 +1090,26 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         assert_eq!(p.pid, tools.join("httpd.pid"));
         assert_eq!(p.log, tools.join("httpd.log"));
         assert_eq!(p.port, 8083);
+    }
+
+    /// Шаг 4 задачи 1 («тонкий срез ценности»): дескриптор публикации несёт
+    /// ВЫБРАННЫЙ порт (`ports::Chosen.http`), не `8080 + номер рабочего
+    /// места`. Другой процесс под тем же пользователем (тот же каталог
+    /// состояния) уже выбрал и запомнил свой — именно так второй сеанс на
+    /// терминальном сервере садится на другой порт, а не читает занятость
+    /// первого как «надо выше».
+    #[test]
+    fn publication_descriptor_carries_the_chosen_port_not_the_derived_one() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-chosen-port-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = crate::cfg::filled_for_test();
+        let derived = cfg.http_port();
+        assert_eq!(derived, 8081, "dev1 из filled_for_test() — именно тот умолчание-порт первой попытки");
+        crate::ports::write(&dir, &crate::ports::Chosen { mcp: 1, vrunner: 2, web: 3, http: 47802 }).unwrap();
+        let port = resolve_http_port(&dir, &cfg).unwrap();
+        assert_eq!(port, 47802, "дескриптор обязан нести выбранный порт, а не выведенный");
+        assert_ne!(port, derived);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

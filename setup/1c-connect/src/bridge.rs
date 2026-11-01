@@ -50,6 +50,19 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     c
 }
 
+/// `mcp_command`, но со стражем перед сборкой (круг исправления 2, пункт 1,
+/// находка автоматической проверки безопасности): это главная дорога, несущая
+/// пароль базы — `MCP_1C_PASSWORD` переменной окружения — и она важнее трёх
+/// уже закрытых (`verify.rs`, `Extension::state`/`apply`). Владелец локального
+/// порта не наш httpd — команда не собирается вовсе, пароль в окружение не
+/// попадает. `mcp_command` остаётся отдельной, чистой сборкой без похода на
+/// диск/в сеть — её держит `the_install_command_passes_the_password_as_a_flag`
+/// и соседние тесты, которым страж не нужен и не должен менять сигнатуру.
+pub fn mcp_command_guarded(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Result<tokio::process::Command, String> {
+    crate::publication::guard_own_listener(cfg, kit)?;
+    Ok(mcp_command(cfg, kit))
+}
+
 /// Процесс `vrunner-mcp` из инструментов на машине: cwd — проект, библиотеки
 /// oscript находит сам (`lib.system = ../lib`), git — из `tools` через PATH,
 /// подключение к базе — переменными (не в командной строке).
@@ -186,7 +199,13 @@ fn mcp_is_off(enabled: &AtomicBool) -> bool {
 /// Пересборка команды запуска агента по текущим параметрам. Тип назван,
 /// потому что дословно повторялся в трёх местах (`Rules`, `Rules::new`,
 /// `session.rs`) и читался хуже, чем называется.
-pub type Rebuild = Arc<dyn Fn(&crate::cfg::Cfg) -> tokio::process::Command + Send + Sync>;
+///
+/// `Result`, а не голая команда (круг исправления 2, пункт 1): замыкание
+/// `mcp` (`session.rs::Serve::dispatch`) заводит `mcp_command_guarded`, и
+/// страж перед сборкой обязан уметь сказать «нет» — чужой владелец порта —
+/// не породив команду вовсе. Замыкание `vrunner` (та же сигнатура, страж ему
+/// не нужен) просто заворачивает результат в `Ok`.
+pub type Rebuild = Arc<dyn Fn(&crate::cfg::Cfg) -> Result<tokio::process::Command, String> + Send + Sync>;
 
 /// Правила моста на одно соединение. Строка подключения, её пользователь и
 /// каталог проекта здесь не лежат готовыми — они читаются из `live` на
@@ -374,7 +393,14 @@ fn key(id: &Value) -> String {
 /// вход, тот за пять секунд не вышел, и мы сняли его сигналом. Код `-1` при
 /// этом означает «кода нет, снят сигналом» — то есть строка пугала человека
 /// нашим собственным штатным действием.
-pub async fn pipe_jsonrpc<S>(stream: S, cmd: tokio::process::Command, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, bool, String))
+///
+/// `cmd: Result<...>`, не голая команда (круг исправления 2, пункт 1):
+/// страж (`bridge::mcp_command_guarded`) может отказать ДО того, как команда
+/// родилась — чужой владелец локального порта, — и это не повод не поднимать
+/// мост вовсе (агент видел бы мёртвый порт), а повод отвечать каждому вызову
+/// честным отказом (`degraded_reply`) и пробовать снова на следующем, как и
+/// при обычной неудаче `spawn()`.
+pub async fn pipe_jsonrpc<S>(stream: S, cmd: Result<tokio::process::Command, String>, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, bool, String))
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -446,73 +472,83 @@ where
     let mut next_cmd = Some(cmd);
 
     let (code, by_us, tail) = 'connection: loop {
-        let (mut is_restart, mut cmd) = match next_cmd.take() {
-            Some(c) => (false, c),
-            None => match &rules.rebuild {
-                Some(rebuild) => (true, rebuild(&cfg)),
-                // Рестарт только и всегда гейтится наличием `rebuild` (см.
-                // ниже) — сюда попасть без него нельзя; но падать насмерть
-                // вместо непонятного паникующего unwrap лучше честной ошибкой.
-                None => break 'connection (-1, false, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
-            },
-        };
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
-        crate::job::group(&mut cmd);
-        let mut job = crate::job::Job::new();
-        // Запуск — с повтором: команда не находится (бинарь, каталог) — не
-        // повод рвать соединение или отвечать тишиной. Zed держит это
-        // соединение весь сеанс, и разрыв означает для человека ручной
-        // перезапуск обоих портов в Zed ровно тогда, когда он разбирается с
-        // настройками. Каждый следующий запрос — новая попытка на свежих
-        // параметрах; до первой удачи каждый вызов получает честный отказ
-        // (`degraded_reply`).
         let mut last_logged_error: Option<String> = None;
-        let mut child = loop {
-            match cmd.spawn() {
-                Ok(c) => break c,
+        // Добывание уже запущенного ребёнка — в своём цикле: отказ СТРАЖА
+        // (команда не родилась вовсе — круг исправления 2, пункт 1, чужой
+        // владелец локального порта) и неудача самого `spawn()` лечатся ОДНИМ
+        // путём — ждём следующий запрос агента, отвечаем ему отказом со
+        // словами причины (`degraded_reply`) и пробуем снова на свежих
+        // параметрах, не разрывая соединение. Разница между ними — только в
+        // ТЕКСТЕ причины, не в поведении: Zed держит это соединение весь
+        // сеанс, и разрыв означает для человека ручной перезапуск обоих
+        // портов ровно тогда, когда он разбирается с настройками.
+        let (is_restart, mut child, job) = 'acquire: loop {
+            let is_restart_now;
+            let attempt: Result<tokio::process::Command, String> = match next_cmd.take() {
+                Some(c) => {
+                    is_restart_now = false;
+                    c
+                }
+                None => match &rules.rebuild {
+                    Some(rebuild) => {
+                        is_restart_now = true;
+                        rebuild(&cfg)
+                    }
+                    // Рестарт только и всегда гейтится наличием `rebuild` (см.
+                    // ниже) — сюда попасть без него нельзя; но падать насмерть
+                    // вместо непонятного паникующего unwrap лучше честной ошибкой.
+                    None => break 'connection (-1, false, "внутренняя ошибка: рестарт без пересборщика команды".to_string()),
+                },
+            };
+            let mut cmd = match attempt {
+                Ok(c) => c,
                 Err(e) => {
-                    let Some(rebuild) = &rules.rebuild else {
+                    if rules.rebuild.is_none() {
+                        // Единственная попытка, и повторить её нечем:
+                        // разрывать соединение, не выдумывая второй шанс.
+                        break 'connection (-1, false, e);
+                    }
+                    if last_logged_error.as_deref() != Some(e.as_str()) {
+                        log(Event::Warn(format!("{who}: {e} — отвечаю отказом вызовам, пока не исправится")));
+                        last_logged_error = Some(e.clone());
+                    }
+                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, local, who, &e, &out_tx)
+                        .await
+                        .is_err()
+                    {
+                        break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
+                    }
+                    continue 'acquire;
+                }
+            };
+            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            #[cfg(windows)]
+            cmd.creation_flags(0x0800_0000);
+            crate::job::group(&mut cmd);
+            let job_now = crate::job::Job::new();
+            match cmd.spawn() {
+                Ok(c) => break 'acquire (is_restart_now, c, job_now),
+                Err(e) => {
+                    if rules.rebuild.is_none() {
                         break 'connection (-1, false, format!("не удалось запустить: {e}"));
-                    };
+                    }
                     let msg = e.to_string();
                     if last_logged_error.as_deref() != Some(msg.as_str()) {
                         log(Event::Warn(format!("{who}: не удалось запустить: {msg} — отвечаю отказом вызовам, пока не исправится")));
-                        last_logged_error = Some(msg);
+                        last_logged_error = Some(msg.clone());
                     }
-                    // Ждём следующий запрос (или конец соединения): отвечаем
-                    // ему отказом и пробуем снова, а не спавним вслепую по кругу.
-                    loop {
-                        if !pending_frames.is_empty() {
-                            let fr = pending_frames.pop_front().unwrap();
-                            if let Frame::Line(l) = &fr {
-                                capture_handshake(l, &handshake);
-                                if let Some(reply) =
-                                    degraded_reply(l, rules.inject, !crate::cfg::mode_needs_env(&cfg.host.mode), who, &e.to_string())
-                                {
-                                    let _ = out_tx.send(reply).await;
-                                }
-                            }
-                            break;
-                        }
-                        tokio::select! {
-                            n = sr.read(&mut buf) => match n {
-                                Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string()),
-                                Ok(n) => pending_frames.extend(f.push(&buf[..n])),
-                            }
-                        }
+                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, local, who, &msg, &out_tx)
+                        .await
+                        .is_err()
+                    {
+                        break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
                     }
                     // Следующий ребёнок никогда не видел рукопожатия, даже
                     // если первая попытка была самой первой на этом
                     // соединении — его переиграют ниже (см. `is_restart`).
-                    is_restart = true;
-                    cmd = rebuild(&cfg);
-                    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-                    #[cfg(windows)]
-                    cmd.creation_flags(0x0800_0000);
-                    crate::job::group(&mut cmd);
-                    job = crate::job::Job::new();
+                    continue 'acquire;
                 }
             }
         };
@@ -1129,6 +1165,49 @@ fn degraded_reply(line: &[u8], inject: bool, local: bool, who: &str, why: &str) 
     }
 }
 
+/// Ждёт следующую строку от агента (из уже вынутых `pending_frames` или
+/// читая поток заново) и отвечает ей отказом `degraded_reply` с данным
+/// текстом причины — общий путь для двух бед с одним лечением (круг
+/// исправления 2, пункт 1): ребёнка поднять не вышло, будь то отказ стража
+/// раньше `spawn()` (чужой владелец локального порта) или сам `spawn()`,
+/// упавший (бинарь/каталог не нашлись). `Ok(())` — отказ отправлен или
+/// рукопожатие перехвачено, `Err(())` — агент отключился, и соединение пора
+/// закрывать.
+async fn wait_and_reply_degraded<R>(
+    sr: &mut R,
+    buf: &mut [u8],
+    f: &mut Framer,
+    pending_frames: &mut std::collections::VecDeque<Frame>,
+    handshake: &HandshakeCell,
+    inject: bool,
+    local: bool,
+    who: &str,
+    reason: &str,
+    out_tx: &mpsc::Sender<Vec<u8>>,
+) -> Result<(), ()>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        if !pending_frames.is_empty() {
+            let fr = pending_frames.pop_front().unwrap();
+            if let Frame::Line(l) = &fr {
+                capture_handshake(l, handshake);
+                if let Some(reply) = degraded_reply(l, inject, local, who, reason) {
+                    let _ = out_tx.send(reply).await;
+                }
+            }
+            return Ok(());
+        }
+        tokio::select! {
+            n = sr.read(buf) => match n {
+                Ok(0) | Err(_) => return Err(()),
+                Ok(n) => pending_frames.extend(f.push(&buf[..n])),
+            }
+        }
+    }
+}
+
 /// Рукопожатие одного соединения: `initialize` и, если он пришёл, идущий
 /// следом `notifications/initialized` — ровно то, что агент послал бы
 /// заново сам, если бы Zed переподключался. Нужно пережить рестарт ребёнка
@@ -1249,6 +1328,37 @@ mod tests {
         let envs: Vec<(String, String)> =
             c.as_std().get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into(), v?.to_string_lossy().into()))).collect();
         assert!(envs.contains(&("MCP_1C_PASSWORD".into(), "секрет-базы".into())), "{envs:?}");
+    }
+
+    /// Круг исправления 2, пункт 1 (находка автоматической проверки
+    /// безопасности): главная дорога, несущая пароль базы — `MCP_1C_PASSWORD`
+    /// переменной окружения, — обязана идти через `mcp_command_guarded`, а
+    /// не прямиком через `mcp_command`. Когда страж (`guard_own_listener`)
+    /// не может подтвердить, что порт публикации наш (здесь — тем же
+    /// доказанным путём, что и `guard_own_listener_refuses_when_paths_of_itself_fails`
+    /// в `publication.rs`: комплект без `bin/httpd.exe`, как раз то, что даёт
+    /// `kit_for_test()`), `mcp_command_guarded` отдаёт `Err` — и в этом `Err`
+    /// физически нет `Command`, значит нет и переменной окружения: пароль не
+    /// появляется «в собранной, но не запущенной команде» — команда не
+    /// собрана вовсе, `pipe_jsonrpc` не получает что спавнить, и ни один
+    /// настоящий процесс пароля не увидит.
+    #[test]
+    fn mcp_command_guarded_refuses_before_any_command_with_the_password_is_born() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.db_password = "секрет-базы".into();
+        assert!(mcp_command_guarded(&cfg, &kit_for_test()).is_err());
+    }
+
+    /// Вторая половина того же утверждения: отказ не молчит абстрактным
+    /// кодом — он несёт причину стража (здесь — ту же, что называет
+    /// `Paths::of`), ту же, что видит человек в `verify`/`Extension::state`.
+    #[test]
+    fn mcp_command_guarded_refusal_names_the_guards_reason() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
+        assert!(err.contains("httpd.exe"), "{err}");
     }
 
     /// The test binary itself as the child: `__echo_child` below runs one of
@@ -1393,7 +1503,7 @@ mod tests {
         Rules::for_vrunner(
             Live::new(test_cfg(allowed)),
             std::path::PathBuf::new(),
-            std::sync::Arc::new(|_: &Cfg| tokio::process::Command::new("rebuild-unused")),
+            std::sync::Arc::new(|_: &Cfg| Ok(tokio::process::Command::new("rebuild-unused"))),
             std::sync::Arc::new(move || running),
             enabled,
         )
@@ -1444,7 +1554,7 @@ mod tests {
     async fn talk(child_env: (&str, &str), rules: Rules, send: &[&str]) -> (Vec<serde_json::Value>, String, i32) {
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(child_env), rules, no_log(), move |code, _by_us, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, Ok(child(child_env)), rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1597,7 +1707,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, _by_us, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1645,7 +1755,7 @@ mod tests {
             let rules = Rules::for_mcp(Arc::new(AtomicBool::new(on)));
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             let (tx, _rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, no_log(), move |code, _by_us, err| {
+            tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, no_log(), move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             }));
             let (r, mut w) = tokio::io::split(ours);
@@ -1683,7 +1793,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, child(("BRIDGE_SCRIPT_RECORD", "1")), rules, log, move |code, _by_us, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, log, move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1711,7 +1821,7 @@ mod tests {
     #[tokio::test]
     async fn flipping_the_switch_mid_connection_starts_serving() {
         let enabled = Arc::new(AtomicBool::new(false));
-        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT", "1"));
+        let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT", "1")));
         let cfg = test_cfg(&["cf_load"]);
         let rules =
             Rules::for_vrunner(Live::new(cfg.clone()), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
@@ -1746,7 +1856,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(true));
         let cfg = test_cfg(&["cf_load"]);
         let live = Live::new(cfg.clone());
-        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT_RECORD", "1"));
+        let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT_RECORD", "1")));
         let cmd0 = make_cmd(&cfg);
         let rules = Rules::for_vrunner(live, std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
         let (ours, theirs) = tokio::io::duplex(1 << 16);
@@ -1821,7 +1931,7 @@ mod tests {
         let rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd, rules, no_log(), move |code, _by_us, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, Ok(cmd), rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (r, mut w) = tokio::io::split(ours);
@@ -1860,7 +1970,7 @@ mod tests {
         let (replies, raw, _) = {
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(pipe_jsonrpc(theirs, cmd, rules(&["task_status"], 0), log, move |code, _by_us, err| {
+            tokio::spawn(pipe_jsonrpc(theirs, Ok(cmd), rules(&["task_status"], 0), log, move |code, _by_us, err| {
                 let _ = tx.send((code, err));
             }));
             let (r, mut w) = tokio::io::split(ours);
@@ -1968,7 +2078,7 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(
             theirs,
-            child(("BRIDGE_DIE", "ошибка подключения: --db-password hunter2")),
+            Ok(child(("BRIDGE_DIE", "ошибка подключения: --db-password hunter2"))),
             rules(&[], 0),
             no_log(),
             move |code, _by_us, err| {
@@ -2002,7 +2112,7 @@ mod tests {
         let make_cmd = |cfg: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT_RECORD", "1"));
             c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
-            c
+            Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
         let rules = Rules::for_vrunner(
@@ -2086,7 +2196,7 @@ mod tests {
         let make_cmd = |_: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT", "1"));
             c.env("BRIDGE_SCRIPT_ARGS", "1");
-            c
+            Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
         let rules = Rules::for_vrunner(
@@ -2143,7 +2253,7 @@ mod tests {
     async fn restart_replays_the_handshake_and_the_client_sees_one_reply_per_request() {
         let cfg_a = test_cfg(&["cf_load"]);
         let live = Live::new(cfg_a.clone());
-        let make_cmd = |_: &Cfg| child(("BRIDGE_SCRIPT_RECORD", "1"));
+        let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT_RECORD", "1")));
         let cmd0 = make_cmd(&cfg_a);
         let rules = Rules::for_vrunner(
             live.clone(),

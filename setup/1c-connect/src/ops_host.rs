@@ -205,26 +205,34 @@ pub fn state_dir() -> PathBuf {
 /// когда подбор удался, а не продублировать его отказ вторым текстом там,
 /// где человек его не ждёт (чтение параметров, показ окна).
 ///
-/// **В тестах — заведомый no-op**, и это не обходной путь, а честное
-/// признание: `state_dir()` читает настоящие `LOCALAPPDATA`/`HOME`, не
-/// каталог тестового `Kit`, — у неё, в отличие от `kit.state()`, нет
-/// параметра для подмены (та же причина, по которой `skills.rs` и
-/// `publication.rs` зовут её, минуя `kit.state()`, — см. докстроку самой
-/// `state_dir()`). Эта функция — единственная из пяти вызывающих, что
-/// зовётся из уже существующих тестов (`gui::save::save_host`,
-/// `ops_host::run_mcp`) напрямую, без гейта вида «нет `bin/httpd.exe`» перед
-/// ней (как у `publication::Paths::of`, которую тесты поэтому и не ловят на
-/// этом). Без `#[cfg(test)]` прогон `cargo test` читал и писал бы НАСТОЯЩИЙ
-/// `%LOCALAPPDATA%\dev1c\ports.state` на машине разработчика — живой пример:
-/// `gui::save::tests::saving_a_new_workstation_moves_a_derived_port_and_says_so`
-/// сломался именно так, прочитав чужой, настоящий выбор. Поведенческого
-/// теста на саму эту функцию поэтому и нет — он был бы тестом не того, что
-/// написано, а того, что лежит на диске у того, кто его запустил.
-pub fn settle_chosen_http_port(cfg: &mut Cfg) {
-    #[cfg(not(test))]
-    if let Ok(chosen) = crate::ports::choose(&state_dir(), cfg.first_attempt_ports()) {
+/// Чистая по каталогу состояния (параметр, не `state_dir()` сама по себе) —
+/// тем же приёмом, что `ops_host::env_missing_of`/`ensure_state_decision`
+/// рядом: правило отделено от похода в переменные среды именно затем, чтобы
+/// проверяться без них. Тест на `_in` — во временном каталоге, с занятым
+/// предпочтительным портом: он и доказывает то, ради чего вся задача писалась
+/// (`base_url()` после улаживания называет выбранный порт), а не только то,
+/// что функция существует.
+pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg) {
+    if let Ok(chosen) = crate::ports::choose(dir, cfg.first_attempt_ports()) {
         cfg.resolved_http_port = Some(chosen.http);
     }
+}
+
+/// Тонкая обёртка `settle_chosen_http_port_in` настоящим каталогом состояния
+/// — единственное, что живёт под `#[cfg(test)]`-пустышкой, и честная причина
+/// этому ровно одна строка: `state_dir()` читает настоящие
+/// `LOCALAPPDATA`/`HOME`, не каталог тестового `Kit` — у неё, в отличие от
+/// `kit.state()`, нет параметра для подмены (та же причина, по которой
+/// `skills.rs` и `publication.rs` зовут её, минуя `kit.state()`). Без этой
+/// пустышки прогон `cargo test` читал и писал бы НАСТОЯЩИЙ
+/// `%LOCALAPPDATA%\dev1c\ports.state` на машине разработчика — живой пример:
+/// `gui::save::tests::saving_a_new_workstation_moves_a_derived_port_and_says_so`
+/// так и сломался, прочитав чужой, настоящий выбор, прежде чем это было
+/// замечено. Само правило («выбранный порт побеждает выведенный») теперь
+/// проверено — у `_in`, без похода на настоящую машину.
+pub fn settle_chosen_http_port(cfg: &mut Cfg) {
+    #[cfg(not(test))]
+    settle_chosen_http_port_in(&state_dir(), cfg);
     #[cfg(test)]
     let _ = cfg;
 }
@@ -2679,7 +2687,8 @@ mod tests {
         assert_eq!(back.host.http_port, Some(8082));
         // Записанное умолчание ничего не меняет ни в адресах, ни у моста:
         // ключ `--dump` остаётся выключенным (см. `Cfg::dump_override`).
-        assert_eq!(back.base_url(), "http://localhost:8082/hs/mcp-1c");
+        // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
+        assert_eq!(back.base_url(), "http://127.0.0.1:8082/hs/mcp-1c");
         assert_eq!(back.dump_dir(), dump);
         assert_eq!(back.dump_override(), None, "записанное умолчание — не свой каталог");
     }
@@ -3273,6 +3282,31 @@ mod tests {
         let p = std::env::temp_dir().join(format!("onec-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Круг исправления 2, пункт 2: правило («выбранный порт побеждает
+    /// выведенный») проверяется на `_in` во временном каталоге — без похода
+    /// на настоящую машину (`settle_chosen_http_port`, тонкая обёртка
+    /// настоящим `state_dir()`, остаётся no-op в тестах, см. её докстроку).
+    /// Занимаем предпочтительный порт реальным слушателем — `ports::choose`
+    /// обязана уйти на следующий свободный, и `http_port()`/`base_url()`
+    /// после `settle_chosen_http_port_in` должны называть именно его.
+    #[test]
+    fn settle_chosen_http_port_in_moves_cfg_off_a_busy_preferred_port() {
+        let dir = mcp_test_dir("settle");
+        let mut cfg = crate::cfg::filled_for_test();
+        // Высокий, явно нигде в проекте не используемый номер — не выведенный
+        // 8081: тот на машине разработчика может держать настоящий, живой
+        // коннектор (та же ловушка, что уже ловилась в `ports.rs`).
+        cfg.host.http_port = Some(47501);
+        let preferred = cfg.http_port();
+        let busy = std::net::TcpListener::bind(("127.0.0.1", preferred)).unwrap();
+        settle_chosen_http_port_in(&dir, &mut cfg);
+        let chosen = cfg.http_port();
+        assert_ne!(chosen, preferred, "предпочтительный занят — улаживание обязано сдвинуть порт");
+        assert_eq!(cfg.base_url(), format!("http://127.0.0.1:{chosen}/hs/mcp-1c"));
+        drop(busy);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Ревью задачи 3, Important 2: до этого теста ни один тест не звал

@@ -84,7 +84,8 @@ fn saving_a_new_workstation_moves_a_derived_port_and_says_so() {
     host.workstation = "dev3".into();
     save_host(&mut ui, host).unwrap();
     assert_eq!(ui.cfg.host.http_port, Some(8083));
-    assert_eq!(ui.cfg.base_url(), "http://localhost:8083/hs/mcp-1c");
+    // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
+    assert_eq!(ui.cfg.base_url(), "http://127.0.0.1:8083/hs/mcp-1c");
     assert!(ui.log.iter().any(|l| l.text.contains("порт публикации 8081 → 8083")), "{:?}", ui.log);
 }
 

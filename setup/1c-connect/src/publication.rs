@@ -473,7 +473,25 @@ pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Result<(), String> {
     if cfg.host.publication != "auto" {
         return Ok(());
     }
-    refuse_unless_ours(&Paths::of(cfg, kit)?)
+    let p = Paths::of(cfg, kit)?;
+    refuse_unless_ours(&p)?;
+    ports_agree(p.port, cfg.http_port())
+}
+
+/// Барьер (круг исправления 2, пункт 5): порт, который страж только что
+/// проверил (`p.port` из `guard_own_listener` — выбор `ports::choose`
+/// внутри `Paths::of`), обязан совпасть с портом, на который и уходит
+/// пароль (`cfg.http_port()`/`base_url()` — единственный голос к базе).
+/// Молчаливое расхождение бывало, когда `resolved_http_port` в `Cfg`
+/// устаревал (пункт 4: наблюдатель перечитывал файл и стирал улаженный
+/// порт, `Live::set` это теперь чинит) — страж проверял один порт, а пароль
+/// уходил на другой. Три строки превращают такое расхождение в отказ, а не
+/// в молчаливую удачу. Чистая функция — `Paths::of` для теста не нужна.
+fn ports_agree(checked: u16, wanted: u16) -> Result<(), String> {
+    if checked != wanted {
+        return Err(format!("порт публикации разошёлся: страж проверил {checked}, а адрес базы называет {wanted} — пароль базы не отправлен"));
+    }
+    Ok(())
 }
 
 /// Время жизни поднятого httpd относительно вызвавшего процесса.
@@ -1206,6 +1224,16 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         if cfg!(windows) {
             assert!(e.contains("httpd.exe"), "{e}");
         }
+    }
+
+    /// Круг исправления 2, пункт 5: расхождение между портом, который страж
+    /// проверил, и портом, на который уходит пароль, — отказ словами с
+    /// обоими числами, не молчаливая удача.
+    #[test]
+    fn ports_agree_refuses_in_words_on_a_mismatch_and_passes_on_a_match() {
+        assert!(ports_agree(8081, 8081).is_ok());
+        let e = ports_agree(8081, 8082).unwrap_err();
+        assert!(e.contains("8081") && e.contains("8082") && e.contains("разошёлся"), "{e}");
     }
 
     fn paths_for_guard(pid_file: PathBuf, port: u16) -> Paths {

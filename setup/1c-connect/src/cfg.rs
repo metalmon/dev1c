@@ -599,9 +599,23 @@ impl Cfg {
 
     /// Адрес публикации: в режиме `auto` считает от своего httpd (`http_port`),
     /// в `webserver` отдаёт хранимое поле `base_url` как есть.
+    ///
+    /// `127.0.0.1`, а не `localhost` — круг исправления 2, находка
+    /// автоматической проверки безопасности: свой httpd слушает именно
+    /// `127.0.0.1` (`Listen 127.0.0.1:{port}`, `windows_httpd_conf`/
+    /// `linux_httpd_conf`), а на Windows `localhost` резолвится в `::1`
+    /// РАНЬШЕ, чем в `127.0.0.1`. Сосед по терминальному серверу мог занять
+    /// `[::1]:{тот же порт}` одновременно с нашим httpd на `127.0.0.1` — это
+    /// разные сокеты, подбор порта (`ports::pick`) конфликта не увидел бы, а
+    /// клиент ушёл бы на `::1` к соседу вместе с паролем базы, пока страж
+    /// (`publication::guard_own_listener`) смотрел бы таблицу `127.0.0.1` и
+    /// говорил «свой». Называя адрес прибитым к семейству, которое слушает
+    /// httpd и проверяет страж, закрываем весь класс одной правкой — этот
+    /// адрес (`base_url()`) — единственный голос к базе (`verify.rs`, мост),
+    /// других дорог нет. `webserver` не трогаем: там адрес пишет человек.
     pub fn base_url(&self) -> String {
         if self.host.publication == "auto" {
-            format!("http://localhost:{}{SERVICE_PATH}", self.http_port())
+            format!("http://127.0.0.1:{}{SERVICE_PATH}", self.http_port())
         } else if self.publication_address_missing() {
             String::new()
         } else {
@@ -1113,7 +1127,10 @@ mod tests {
         let mut c = filled();
         assert_eq!(c.host.publication, "auto");
         c.host.workstation = "dev2".into();
-        assert_eq!(c.base_url(), "http://localhost:8082/hs/mcp-1c");
+        // `127.0.0.1`, не `localhost` — круг исправления 2: адрес прибит к
+        // тому семейству, которое слушает httpd и проверяет страж
+        // (`guard_own_listener`), см. докстроку `base_url()`.
+        assert_eq!(c.base_url(), "http://127.0.0.1:8082/hs/mcp-1c");
         // Хранимое поле вычисленный адрес не трогает (а умолчание его и не
         // содержит: образец пуст).
         assert_eq!(c.host.base_url, "http://localhost/Buh/hs/mcp-1c");
@@ -1137,7 +1154,9 @@ mod tests {
     fn an_explicit_port_wins() {
         let mut c = sample();
         c.host.http_port = Some(9000);
-        assert_eq!(c.base_url(), "http://localhost:9000/hs/mcp-1c");
+        // `127.0.0.1` — адрес прибит к тому семейству, которое слушает httpd
+        // (круг исправления 2).
+        assert_eq!(c.base_url(), "http://127.0.0.1:9000/hs/mcp-1c");
     }
 
     /// Круг исправления задачи 1 плана «тонкий срез ценности»: выбранный в
@@ -1153,7 +1172,9 @@ mod tests {
         assert_eq!(c.http_port(), 9100, "ничего не задано кроме выбранного — он и побеждает");
         c.host.http_port = Some(9000);
         assert_eq!(c.http_port(), 9100, "выбранный сильнее явного порта человека");
-        assert_eq!(c.base_url(), "http://localhost:9100/hs/mcp-1c");
+        // `127.0.0.1` — адрес прибит к тому семейству, которое слушает httpd
+        // и проверяет страж (круг исправления 2).
+        assert_eq!(c.base_url(), "http://127.0.0.1:9100/hs/mcp-1c");
     }
 
     /// `render`/`write_checked` печатают только `host.http_port` — поле
@@ -1398,7 +1419,8 @@ mod tests {
         c.host.workstation = "dev1".into();
         c.host.publication = "auto".into();
         c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
-        assert_eq!(c.base_url(), "http://localhost:8081/hs/mcp-1c");
+        // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
+        assert_eq!(c.base_url(), "http://127.0.0.1:8081/hs/mcp-1c");
         assert!(!c.publication_address_missing());
     }
 

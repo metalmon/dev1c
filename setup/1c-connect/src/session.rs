@@ -40,8 +40,24 @@ impl Live {
     /// (`ops_host::watch_mcp`), бил бы поколение на каждый тик, и
     /// `bridge::pipe_jsonrpc` рестартовал бы ребёнка практически на каждый
     /// вызов инструмента вместо «после правки параметров».
-    pub fn set(&self, cfg: Cfg) {
+    /// Выбранный в этом сеансе порт (`Cfg::resolved_http_port`) — факт
+    /// СЕАНСА, не файла, и перечитывание toml не вправе его стирать (круг
+    /// исправления 2, пункт 4): `watch_mcp` каждые 200 мс кладёт сюда
+    /// `Cfg::load(kit)` без `ops_host::settle_chosen_http_port` (его там и не
+    /// должно быть — такт читает диск, а не подбирает порты), и голый
+    /// `Cfg::load` всегда отдаёт `resolved_http_port: None`. Без переноса
+    /// улаженный порт жил бы в ячейке ровно до следующего такта: `http_port()`
+    /// откатывался бы на выведенный, `--base` для `mcp-1c` указывал бы не
+    /// туда, где слушает httpd, — тот же дефект, ради которого вся задача
+    /// писалась, вернувшийся второй дорогой. Перенос — ДО сравнения на
+    /// равенство: иначе голая перезагрузка файла с тем же содержимым читалась
+    /// бы как «параметры сменились» (пустое `None` ≠ улаженный `Some`) и
+    /// дёргала рестарт ребёнка напрасно.
+    pub fn set(&self, mut cfg: Cfg) {
         let mut g = self.0.lock().unwrap();
+        if cfg.resolved_http_port.is_none() {
+            cfg.resolved_http_port = g.1.resolved_http_port;
+        }
         if g.1 == cfg {
             return;
         }
@@ -466,10 +482,10 @@ impl Serve {
         if port == self.ports.vrunner {
             let (_, cfg0) = self.cfg.get();
             let tools_dir = self.tools_dir.clone();
-            let cmd0 = bridge::vrunner_command(&cfg0, &tools_dir);
+            let cmd0 = Ok(bridge::vrunner_command(&cfg0, &tools_dir));
             let rebuild: crate::bridge::Rebuild = {
                 let tools_dir = tools_dir.clone();
-                Arc::new(move |cfg: &Cfg| bridge::vrunner_command(cfg, &tools_dir))
+                Arc::new(move |cfg: &Cfg| Ok(bridge::vrunner_command(cfg, &tools_dir)))
             };
             let rules = bridge::Rules::for_vrunner(
                 self.cfg.clone(),
@@ -488,10 +504,15 @@ impl Serve {
         } else if port == self.ports.mcp {
             let (_, cfg0) = self.cfg.get();
             let kit = self.kit.clone();
-            let cmd0 = bridge::mcp_command(&cfg0, &kit);
+            // Страж перед сборкой (круг исправления 2, пункт 1, находка
+            // автоматической проверки безопасности): `mcp_command_guarded`
+            // отказывает, не собрав команду (и не положив пароль в
+            // окружение), когда владелец локального порта публикации —
+            // не наш httpd.
+            let cmd0 = bridge::mcp_command_guarded(&cfg0, &kit);
             let mut rules = bridge::Rules::for_mcp(self.enabled.clone());
             rules.live = self.cfg.clone();
-            rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command(cfg, &kit)));
+            rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command_guarded(cfg, &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
             Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
@@ -702,6 +723,31 @@ mod tests {
         let (gen2, got) = live.get();
         assert_ne!(gen1, gen2, "настоящая смена параметров обязана двинуть поколение");
         assert_eq!(got, changed);
+    }
+
+    /// Круг исправления 2, пункт 4: улаженный порт — факт сеанса, и такт
+    /// наблюдателя (`watch_mcp`, каждые 200 мс кладёт голый `Cfg::load`,
+    /// без `resolved_http_port`) не имеет права его стереть. Без переноса в
+    /// `set` `http_port()`/`base_url()` после такого такта откатывались бы
+    /// на выведенный порт — `--base` для `mcp-1c` указывал бы не туда, где
+    /// слушает httpd, ровно тот же дефект, ради которого вся задача писалась.
+    #[test]
+    fn a_watcher_tick_does_not_erase_the_port_settled_this_session() {
+        let mut settled = crate::cfg::filled_for_test();
+        settled.resolved_http_port = Some(9100);
+        let live = Live::new(settled.clone());
+        assert_eq!(live.get().1.http_port(), 9100);
+
+        // Такт наблюдателя: тот же файл, перечитанный с диска голым
+        // `Cfg::load` — `resolved_http_port` в нём пуст, как у любого
+        // свежего `Cfg`.
+        let reloaded = crate::cfg::filled_for_test();
+        assert_eq!(reloaded.resolved_http_port, None);
+        live.set(reloaded);
+
+        let after = live.get().1;
+        assert_eq!(after.http_port(), 9100, "улаженный порт обязан пережить такт наблюдателя");
+        assert_eq!(after.base_url(), "http://127.0.0.1:9100/hs/mcp-1c");
     }
 
     /// Главная опасность 6B: вызов, получивший строку подключения одной базы

@@ -1600,8 +1600,8 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// Срок истёк — `enabled` гасится тем же тактом, что и признак разрешения:
 /// без этого процесс, поднятый редактором задолго до срока, продолжал бы
 /// отвечать `tools/call` и после него (ревью задачи 3, Important 4).
-fn mcp_tick(kit: &Kit, user: &str, workstation: &str) -> (bool, Result<Cfg, String>) {
-    let allowed = crate::allow::read(kit, user, workstation);
+fn mcp_tick(kit: &Kit, user: &str) -> (bool, Result<Cfg, String>) {
+    let allowed = crate::allow::read(kit, user);
     let licensed = !matches!(crate::licence::state_now(), crate::licence::State::Expired);
     (allowed && licensed, Cfg::load(kit).map_err(|e| e.to_string()))
 }
@@ -1614,36 +1614,33 @@ fn mcp_tick(kit: &Kit, user: &str, workstation: &str) -> (bool, Result<Cfg, Stri
 /// Important 3) — раньше `run_mcp` заводил разовую `Live` и `Rebuild`-рестарт
 /// не срабатывал никогда.
 ///
+/// `workstation` параметром здесь больше нет (круг исправления после ревью
+/// `717c873`/`e1ff800`): `allow::read` проверяет живость коннектора
+/// признаком обслуживания комплекта (`single_instance::is_serving`), а не
+/// замком рабочего места, и имя рабочего места ему не нужно вовсе — значит
+/// и подхватывать его переезд при переименовании («Important 2 финального
+/// ревью», раньше решалось здесь мутацией `workstation` на каждый тик)
+/// больше нечем и не для чего.
+///
 /// ponytail: такт 200 мс — потолок. Вызов, пришедший в эти 200 мс после
 /// выключения переключателя, истечения срока или «Сохранить» с новой базой,
 /// ещё пройдёт на старых условиях; опрос чаще значило бы читать диск
-/// (признак, toml) и держать замок рабочего места на каждый тик чаще, а
+/// (признак, toml) и держать признак обслуживания на каждый тик чаще, а
 /// 200 мс и так короче, чем человек успевает заметить разницу между своим
 /// действием и ответом моста.
-fn watch_mcp(kit: Kit, user: String, workstation: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
+fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
     std::thread::spawn(move || {
-        // Important 2 финального ревью: `workstation` замороженным параметром
-        // держала имя рабочего места на весь срок процесса `mcp` — человек
-        // переименовал рабочее место, сохранил, перезапустил окно, а этот
-        // процесс (его поднял редактор раньше и держит стрим) продолжал
-        // спрашивать `allow::read` про старое имя, получал `is_held == false`
-        // и отказывал агенту при включённом переключателе и живом окне, до
-        // перезапуска редактора. Переменная ниже — mutable, и каждый тик,
-        // перечитавший `Cfg` удачно, подвигает её на свежее имя: лаг — один
-        // такт (200 мс), тот же потолок, что у самого опроса.
-        let mut workstation = workstation;
         // Последняя пожалованная причина разбора — чтобы повторный тик с той
         // же поломкой не заливал журнал одинаковыми строками, пока человек
         // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
         let mut last_parse_err: Option<String> = None;
         loop {
-            let (enabled, cfg) = mcp_tick(&kit, &user, &workstation);
+            let (enabled, cfg) = mcp_tick(&kit, &user);
             out.store(enabled, Ordering::Relaxed);
             match cfg {
                 Ok(cfg) => {
-                    workstation = cfg.host.workstation.clone();
                     live.set(cfg);
                     last_parse_err = None;
                 }
@@ -1723,7 +1720,7 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // комплектом, не за рабочим местом (круг исправления после ревью,
     // см. заголовок `orphan.rs`): `live` ему больше не нужна.
     crate::orphan::guard_owner(kit.clone(), crate::single_instance::current_user(), log.clone());
-    let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), cfg.host.workstation.clone(), live.clone(), log.clone());
+    let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), live.clone(), log.clone());
     // Один раз: `Ports` — `Copy`, дальше используется по значению и для
     // выбора порта, и для самого `Serve` (ревью задачи 3, Minor 7).
     let ports = cfg.ports();
@@ -3218,53 +3215,62 @@ mod tests {
     fn mcp_tick_is_closed_by_default_on_an_empty_kit() {
         let dir = mcp_test_dir("mcp-tick-empty");
         let kit = Kit::at(&dir);
-        let (enabled, cfg) = mcp_tick(&kit, "someone", "dev1");
-        assert!(!enabled, "никто не держит замок рабочего места — разрешения нет");
+        let (enabled, cfg) = mcp_tick(&kit, "someone");
+        assert!(!enabled, "никто не обслуживает комплект — разрешения нет");
         assert!(cfg.is_ok(), "{cfg:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Тот же тик — `true`, когда признак на диске «on» и замок рабочего
-    /// места держит вызывающий (тем же приёмом, что
-    /// `allow::tests::read_follows_the_owners_lock_not_just_the_file`).
+    /// То, чем на каждой платформе реально закреплён признак обслуживания —
+    /// тот же приём, что в `orphan.rs`/`allow.rs` (не общий, дублирован тем
+    /// же порядком, что и прочие мелкие тестовые помощники этого крейта).
+    #[cfg(windows)]
+    fn take_serving_for_test(kit: &Kit, user: &str) -> crate::single_instance::Guard {
+        crate::single_instance::acquire_serving(kit, user).unwrap().expect("признак свободен в начале теста")
+    }
+    #[cfg(not(windows))]
+    fn take_serving_for_test(kit: &Kit, _user: &str) -> crate::single_instance::Guard {
+        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit)).unwrap().expect("признак свободен в начале теста")
+    }
+
+    /// Тот же тик — `true`, когда признак на диске «on» и признак
+    /// обслуживания держит вызывающий (тем же приёмом, что
+    /// `allow::tests::read_follows_the_connector_not_just_the_file`).
     #[test]
-    fn mcp_tick_is_open_while_the_owner_holds_the_lock_and_the_flag_says_on() {
+    fn mcp_tick_is_open_while_the_connector_serves_and_the_flag_says_on() {
         let dir = mcp_test_dir("mcp-tick-open");
         let kit = Kit::at(&dir);
-        let workstation = format!("ws-{}", std::process::id());
         crate::allow::write(&kit, true).unwrap();
-        let key = crate::single_instance::guard_key("owner", &workstation);
-        let lock_on = crate::single_instance::lock_target(&kit);
-        let guard = crate::single_instance::try_acquire(&key, &lock_on).unwrap().expect("замок свободен в начале теста");
-        let (enabled, _) = mcp_tick(&kit, "owner", &workstation);
-        assert!(enabled, "владелец держит замок, признак «on» — разрешение должно быть");
+        let guard = take_serving_for_test(&kit, "owner");
+        let (enabled, _) = mcp_tick(&kit, "owner");
+        assert!(enabled, "коннектор обслуживает комплект, признак «on» — разрешение должно быть");
         drop(guard);
-        let (enabled, _) = mcp_tick(&kit, "owner", &workstation);
-        assert!(!enabled, "владелец ушёл — тот же файл больше не разрешение");
+        let (enabled, _) = mcp_tick(&kit, "owner");
+        assert!(!enabled, "коннектор ушёл — тот же файл больше не разрешение");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Important 2 финального ревью: `watch_mcp` держала имя рабочего места
-    /// параметром, замороженным на старте подкоманды `mcp` — человек
-    /// переименовал рабочее место в окне, сохранил, а уже поднятый `mcp`
-    /// (его держит Zed/pi стримом с самого своего запуска) продолжал
-    /// спрашивать замок про старое имя до перезапуска редактора. Здесь
-    /// переименование — правка файла параметров без окна, а замок берём
-    /// под НОВЫМ именем заранее: поток обязан сам подхватить его на
-    /// следующем удачном перечите `Cfg`, без единой подсказки снаружи.
+    /// Круг исправления после ревью `717c873`/`e1ff800`: раньше `watch_mcp`
+    /// держала имя рабочего места параметром и перечитывала его на каждый
+    /// такт («Important 2 финального ревью») именно потому, что
+    /// `allow::read` смотрела в замок РАБОЧЕГО МЕСТА — переименование без
+    /// перезапуска окна («Сохранить», `gui/save.rs`) уводило проверку
+    /// спрашивать замок уже под новым именем, и признак гас при живом
+    /// коннекторе. Теперь `allow::read` смотрит в признак обслуживания
+    /// комплекта (`single_instance::is_serving`), которому имя рабочего
+    /// места не нужно вовсе: этот тест берёт признак ОДИН раз, до
+    /// переименования, и проверяет, что оно разрешение не тревожит —
+    /// отслеживать переезд имени больше нечем и не для чего.
     #[test]
-    fn watch_mcp_follows_a_renamed_workstation_without_a_restart() {
+    fn watch_mcp_does_not_care_that_the_workstation_got_renamed() {
         let dir = mcp_test_dir("watch-mcp-rename");
         let kit = Kit::at(&dir);
-        // Имя рабочего места обязано пройти `Cfg::validate` (`dev1`/`dev2`/`dev3` — см.
-        // `cfg::number_of`), поэтому уникальность теста несёт не оно, а пользователь.
         let user = format!("owner-{}", std::process::id());
         // `watch_mcp` читает файл настоящим `Cfg::load` (боевая подложка —
-        // DPAPI на Windows), а этот тест — про переезд замка за именем
-        // рабочего места, не про пароли: пароль обнулён, `seal`/`open` его
-        // пропускают как есть на любой подложке, и подложка для записи
-        // (здесь — файловая, без DPAPI, спека «Ловушки») не обязана
-        // совпадать с той, что читает `watch_mcp`.
+        // DPAPI на Windows), а этот тест — не про пароли: пароль обнулён,
+        // `seal`/`open` его пропускают как есть на любой подложке, и
+        // подложка для записи (здесь — файловая, без DPAPI, спека
+        // «Ловушки») не обязана совпадать с той, что читает `watch_mcp`.
         let store = crate::secrets::Store::file(kit.state());
         let write_workstation = |name: &str| {
             let mut cfg = crate::cfg::filled_for_test();
@@ -3274,19 +3280,18 @@ mod tests {
         };
         write_workstation("dev1");
         crate::allow::write(&kit, true).unwrap();
-        // Замок — сразу под НОВЫМ именем: владелец окна успел сохранить и
-        // перезапустить его раньше, чем этот тест проверит первый тик.
-        let key = crate::single_instance::guard_key(&user, "dev2");
-        let lock_on = crate::single_instance::lock_target(&kit);
-        let _guard = crate::single_instance::try_acquire(&key, &lock_on).unwrap().expect("замок свободен в начале теста");
+        let _guard = take_serving_for_test(&kit, &user);
         let live = crate::session::Live::new(Cfg::default());
         let log: Sink = Arc::new(|_| {});
-        let enabled = watch_mcp(kit.clone(), user, "dev1".to_string(), live, log);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!enabled.load(Ordering::Relaxed), "старым именем замка не поднять — он взят под новым");
+        let enabled = watch_mcp(kit.clone(), user, live, log);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(enabled.load(Ordering::Relaxed), "признак обслуживания держится — разрешение должно быть сразу");
         write_workstation("dev2");
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        assert!(enabled.load(Ordering::Relaxed), "тик перечитал Cfg и спросил замок уже под новым именем");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            enabled.load(Ordering::Relaxed),
+            "переименование рабочего места не должно гасить разрешение — признак обслуживания не о нём вовсе"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

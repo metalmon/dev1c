@@ -59,7 +59,7 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
 /// диск/в сеть — её держит `the_install_command_passes_the_password_as_a_flag`
 /// и соседние тесты, которым страж не нужен и не должен менять сигнатуру.
 pub fn mcp_command_guarded(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Result<tokio::process::Command, String> {
-    crate::publication::guard_own_listener(cfg, kit)?;
+    crate::publication::guard_own_listener(cfg)?;
     Ok(mcp_command(cfg, kit))
 }
 
@@ -1333,32 +1333,46 @@ mod tests {
     /// Круг исправления 2, пункт 1 (находка автоматической проверки
     /// безопасности): главная дорога, несущая пароль базы — `MCP_1C_PASSWORD`
     /// переменной окружения, — обязана идти через `mcp_command_guarded`, а
-    /// не прямиком через `mcp_command`. Когда страж (`guard_own_listener`)
-    /// не может подтвердить, что порт публикации наш (здесь — тем же
-    /// доказанным путём, что и `guard_own_listener_refuses_when_paths_of_itself_fails`
-    /// в `publication.rs`: комплект без `bin/httpd.exe`, как раз то, что даёт
-    /// `kit_for_test()`), `mcp_command_guarded` отдаёт `Err` — и в этом `Err`
-    /// физически нет `Command`, значит нет и переменной окружения: пароль не
-    /// появляется «в собранной, но не запущенной команде» — команда не
-    /// собрана вовсе, `pipe_jsonrpc` не получает что спавнить, и ни один
+    /// не прямиком через `mcp_command`. Отказал страж — `Err`, и никакая
+    /// команда не собрана: `pipe_jsonrpc` не получает что спавнить, ни один
     /// настоящий процесс пароля не увидит.
+    ///
+    /// Что здесь держит ТЕСТ, а что компилятор (находка 11 ревью круга 3 —
+    /// прежняя докстрока выдавала второе за первое). Тест проверяет ровно
+    /// одно: на отказе стража `mcp_command_guarded` возвращает `Err`, а не
+    /// `Ok` с готовой командой. То, что в `Err` «физически нет `Command`», —
+    /// свойство типа `Result<Command, String>`, его держит компилятор, и
+    /// никакой `assert` тут не нужен и невозможен.
+    ///
+    /// Каталог состояния подставлен (`ops_host::with_state_dir_for_test`):
+    /// в нём нет pid-файла, и страж отказывает именно поэтому. Прежняя
+    /// редакция опиралась на отказ `Paths::of` из-за отсутствия
+    /// `bin/httpd.exe` — а та проверка стоит под `if cfg!(windows)`
+    /// (находка 9 ревью круга 3: на Linux тест держался на другом отказе или
+    /// не держался вовсе). Теперь причина одна на обеих платформах, и
+    /// `#[cfg(windows)]` не нужен.
     #[test]
     fn mcp_command_guarded_refuses_before_any_command_with_the_password_is_born() {
+        let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         cfg.host.db_password = "секрет-базы".into();
-        assert!(mcp_command_guarded(&cfg, &kit_for_test()).is_err());
+        let guarded = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test()));
+        assert!(guarded.is_err());
     }
 
     /// Вторая половина того же утверждения: отказ не молчит абстрактным
-    /// кодом — он несёт причину стража (здесь — ту же, что называет
-    /// `Paths::of`), ту же, что видит человек в `verify`/`Extension::state`.
+    /// кодом — он несёт причину стража дословно, ту же, что видит человек в
+    /// `verify`/`Extension::state`.
     #[test]
     fn mcp_command_guarded_refusal_names_the_guards_reason() {
+        let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-reason-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
-        let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
-        assert!(err.contains("httpd.exe"), "{err}");
+        let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
+        assert!(err.contains("pid-файл") && err.contains("пароль базы не отправлен"), "{err}");
     }
 
     /// The test binary itself as the child: `__echo_child` below runs one of

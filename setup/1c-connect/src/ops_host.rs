@@ -224,23 +224,82 @@ pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg) {
     }
 }
 
+/// Каталог состояния, подставленный тестом: потоко-локальная переменная,
+/// которую тест ставит сам (`with_state_dir_for_test`). Живёт только в
+/// тестовой сборке.
+///
+/// Зачем она (находка 8 ревью круга 3). `state_dir()` читает настоящие
+/// `LOCALAPPDATA`/`HOME` — у неё, в отличие от `kit.state()`, нет параметра
+/// для подмены (та же причина, по которой `skills.rs` и `publication.rs`
+/// зовут её, минуя `kit.state()`). Поэтому тонкая обёртка ниже была в
+/// тестах ПУСТЫШКОЙ — и следствие: ни один из пяти её вызовов (`main.rs`,
+/// `run_mcp`, `gui::launch`, `gui::window::reread_and_recheck`,
+/// `gui::save::save_host`) не был прикрыт, удали любой — набор остался бы
+/// зелёным. Хуже: тест `gui::save` утверждал `base_url()` с порядковым
+/// портом только потому, что улаживание ничего не делало.
+///
+/// Почему именно так, а не переменными среды: менять
+/// `LOCALAPPDATA`/`HOME`/`USERPROFILE`/`XDG_DATA_HOME` в прогоне запрещено
+/// (жёсткий запрет владельца — прогон идёт в несколько потоков, и подмена
+/// среды одного теста уводила бы соседние на подложный профиль). Поток —
+/// своя единица: тест ставит каталог себе и никому больше.
+#[cfg(test)]
+pub(crate) mod test_state_dir {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<PathBuf> {
+        DIR.with(|d| d.borrow().clone())
+    }
+
+    /// Поставить каталог на время `f` и вернуть как было — вложенность
+    /// переживает (прежнее значение возвращается, а не стирается). Паника
+    /// внутри `f` восстановления не делает: поток теста после неё всё равно
+    /// кончается, а прятать панику за `catch_unwind` здесь было бы хуже —
+    /// упавший тест должен падать.
+    pub(crate) fn with<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let prev = DIR.with(|d| d.borrow_mut().replace(dir.to_path_buf()));
+        let out = f();
+        DIR.with(|d| *d.borrow_mut() = prev);
+        out
+    }
+}
+
+/// Поставить тестовый каталог состояния на время вызова — см.
+/// `test_state_dir`. Тест, который её не зовёт, получает прежнее поведение:
+/// `settle_chosen_http_port` ничего не делает, а страж
+/// (`publication::guard_own_listener`) смотрит в заведомо несуществующий
+/// каталог и отказывает словами. В настоящий `%LOCALAPPDATA%` прогон не
+/// пишет ни в том, ни в другом случае.
+#[cfg(test)]
+pub(crate) fn with_state_dir_for_test<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    test_state_dir::with(dir, f)
+}
+
 /// Тонкая обёртка `settle_chosen_http_port_in` настоящим каталогом состояния
-/// — единственное, что живёт под `#[cfg(test)]`-пустышкой, и честная причина
-/// этому ровно одна строка: `state_dir()` читает настоящие
-/// `LOCALAPPDATA`/`HOME`, не каталог тестового `Kit` — у неё, в отличие от
-/// `kit.state()`, нет параметра для подмены (та же причина, по которой
-/// `skills.rs` и `publication.rs` зовут её, минуя `kit.state()`). Без этой
-/// пустышки прогон `cargo test` читал и писал бы НАСТОЯЩИЙ
-/// `%LOCALAPPDATA%\dev1c\ports.state` на машине разработчика — живой пример:
-/// `gui::save::tests::saving_a_new_workstation_moves_a_derived_port_and_says_so`
-/// так и сломался, прочитав чужой, настоящий выбор, прежде чем это было
-/// замечено. Само правило («выбранный порт побеждает выведенный») теперь
-/// проверено — у `_in`, без похода на настоящую машину.
+/// — единственное, что в тестовой сборке берёт каталог не параметром (см.
+/// `test_state_dir`: прежде здесь была пустышка, теперь — подмена, которую
+/// тест ставит сам).
+#[cfg(not(test))]
 pub fn settle_chosen_http_port(cfg: &mut Cfg) {
-    #[cfg(not(test))]
     settle_chosen_http_port_in(&state_dir(), cfg);
-    #[cfg(test)]
-    let _ = cfg;
+}
+
+/// Та же обёртка в тестовой сборке: каталог берётся из потоко-локальной
+/// подмены. Не поставлена — улаживания нет вовсе, и это нарочно: иначе
+/// каждый тест, которому порт публикации безразличен, читал и писал бы
+/// настоящий `%LOCALAPPDATA%\dev1c\ports.state` на машине разработчика
+/// (живой случай: `gui::save` так и сломался, прочитав чужой, настоящий
+/// выбор).
+#[cfg(test)]
+pub fn settle_chosen_http_port(cfg: &mut Cfg) {
+    if let Some(dir) = test_state_dir::get() {
+        settle_chosen_http_port_in(&dir, cfg);
+    }
 }
 
 /// OneScript лежит как в своём архиве: `bin/` и `lib/` рядом, `oscript.cfg`
@@ -1957,7 +2016,7 @@ impl Op<Ctx> for Extension {
         // Страж перед отправкой пароля базы (круг исправления 2, находка
         // автоматической проверки безопасности, одна функция на все дороги
         // — см. докстроку `publication::guard_own_listener`).
-        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg) {
             return OpState::Blocked(reason);
         }
         match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
@@ -2020,9 +2079,18 @@ impl Op<Ctx> for Extension {
         let base_url = ctx.cfg.base_url();
         // Тот же страж, что в `state` выше — проба после установки несёт
         // пароль точно так же (`publication::guard_own_listener`).
-        let reach_ok = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit).is_ok()
-            && extension_version(&base_url, &h.db_user, &h.db_password).is_some();
-        if !reach_ok {
+        // Причина отказа стража доезжает до человека ДОСЛОВНО (находка 3
+        // ревью круга 3): прежде здесь стоял `.is_ok()`, и человек,
+        // которому страж сказал «порт 8081 занят не нами (его слушает pid
+        // …)», читал «публикация не отвечает, опубликуйте базу» — и шёл
+        // публиковать базу руками, хотя публикация тут ни при чём. Два
+        // соседа по этой же дороге сделаны правильно и давно
+        // (`verify::facts_when_the_listener_is_foreign`, `Extension::state`
+        // выше). Порядок тот же, что был у `&&`: отказал страж — до пароля
+        // дело не доходит.
+        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg) {
+            ctx.warn(reason);
+        } else if extension_version(&base_url, &h.db_user, &h.db_password).is_none() {
             ctx.warn(format!(
                 "публикация {} не отвечает. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
                 base_url
@@ -2096,22 +2164,26 @@ mod tests {
     /// когда `guard_own_listener` отказал. Доказательство поведенческое, не
     /// структурное: без гейта `extension_version` на недостижимый адрес
     /// вернула бы `None`, и `state()` сказала бы «публикация не отвечает —
-    /// расширение не спросить» — ДРУГОЙ текст. Текст с причиной отказа
-    /// именно `Paths::of` («bin/httpd.exe») доказывает, что гейт сработал
-    /// раньше, чем дело дошло до пароля.
+    /// расширение не спросить» — ДРУГОЙ текст. Текст с причиной стража
+    /// доказывает, что гейт сработал раньше, чем дело дошло до пароля.
+    ///
+    /// Причина теперь — пустой каталог состояния (в нём нет pid-файла), а не
+    /// отсутствие `bin/httpd.exe`: страж больше не ходит через `Paths::of`
+    /// (находка 4 ревью круга 3).
     #[test]
     fn extension_state_is_blocked_by_the_port_guard_before_it_asks_the_base() {
+        let dir = std::env::temp_dir().join(format!("dev1c-extstate-guard-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-guard-{}", std::process::id())));
-        assert!(!crate::publication::kit_httpd_exe(&kit.root).exists(), "тест опирается на отказ Paths::of");
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
         let ops = host();
         let ext = ops.iter().find(|o| o.id() == "host.extension").expect("host.extension есть в списке");
-        match ext.state(&ctx) {
-            OpState::Blocked(reason) => assert!(reason.contains("httpd.exe"), "{reason}"),
-            other => panic!("ожидался Blocked с причиной Paths::of, получено {other:?}"),
+        match with_state_dir_for_test(&dir, || ext.state(&ctx)) {
+            OpState::Blocked(reason) => assert!(reason.contains("pid-файл"), "{reason}"),
+            other => panic!("ожидался Blocked с причиной стража, получено {other:?}"),
         }
     }
 

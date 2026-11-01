@@ -1344,7 +1344,7 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             // — поэтому ЕЁ ОТКАЗ ТОЖЕ ОТКАЗ (`guard_own_listener`), не повод
             // пропустить сверку: см. докстроку там же, первая редакция этой
             // ветки рассуждала наоборот и была неверна.
-            if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+            if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg) {
                 return facts_when_the_listener_is_foreign(&base_url, &h.publication, &ctx.cfg, &ctx.kit, &reason);
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());

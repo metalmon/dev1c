@@ -1590,6 +1590,56 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--quiet"), "форк не знает --quiet, а комплект теперь несёт его сборку: {args:?}");
     }
 
+    /// Барьер строже предыдущего теста, и не случайно: там проверялось
+    /// «нет лишнего известного ключа», здесь — «ключей ровно столько,
+    /// сколько названо, не больше и не меньше». Цена ошибки измерена
+    /// именно сегодня (задача 4 плана «тонкий срез ценности»): после задач
+    /// 2 и 3 коннектор отправлял ребёнку `--quiet`, которого форк не знает
+    /// — и до снятия этого ключа ребёнок умирал на старте с «flag provided
+    /// but not defined: -quiet», а у upstream-бинаря ровно так же умирал
+    /// `--profile`. В обоих случаях MCP пропадал целиком, а сверку всего
+    /// перечня со `--help` форка ведущий делал один раз руками, глазами —
+    /// следующий, кто добавит или снимет ключ, этой сверки может не
+    /// сделать и узнает о расхождении от живого бухгалтера.
+    ///
+    /// Поэтому здесь не «содержит» и не «не содержит такой-то ключ», а
+    /// точное равенство множеств: добавление или снятие любого ключа
+    /// красит тест, и автору придётся либо вписать новый ключ в список
+    /// ниже (и ответить себе — знает ли его форк), либо объяснить, почему
+    /// он пропал.
+    ///
+    /// Полный перечень ключей форка (замер 2.11 прямым запуском `--help`
+    /// на `D:\1c\projects\mcp-1c\bin\mcp-1c.exe`, `v1.6.0-14-g02d0fee`):
+    /// `-access -base -cache-dir -db-password -db-user -debug -dump
+    /// -install -install-profile -listen -password -platform
+    /// -platform-version -profile -reindex -server -toolset -transport
+    /// -user -version`. Коннектор передаёт подмножество: `--base --user
+    /// --profile --toolset --access` всегда, `--dump` — только когда у
+    /// `Cfg` свой каталог выгрузки (`dump_override`), поэтому сравниваются
+    /// два случая отдельно, а не одно множество на оба.
+    #[test]
+    fn mcp_command_carries_exactly_the_flags_the_fork_knows_no_more_no_less() {
+        fn flag_names(c: &tokio::process::Command) -> std::collections::BTreeSet<String> {
+            let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(args.len() % 2, 0, "ожидались только пары «ключ значение»: {args:?}");
+            args.iter().step_by(2).cloned().collect()
+        }
+        let expected_without_dump: std::collections::BTreeSet<String> =
+            ["--base", "--user", "--profile", "--toolset", "--access"].into_iter().map(String::from).collect();
+
+        let mut cfg = crate::cfg::filled_for_test();
+        assert!(cfg.dump_override().is_none(), "этот случай проверяет набор без --dump");
+        let c = mcp_command(&cfg, &kit_for_test());
+        assert_eq!(flag_names(&c), expected_without_dump, "без своего каталога выгрузки");
+
+        cfg.host.dump = "C:\\own\\dump".into();
+        assert!(cfg.dump_override().is_some(), "этот случай проверяет набор с --dump");
+        let mut expected_with_dump = expected_without_dump.clone();
+        expected_with_dump.insert("--dump".into());
+        let c2 = mcp_command(&cfg, &kit_for_test());
+        assert_eq!(flag_names(&c2), expected_with_dump, "со своим каталогом выгрузки");
+    }
+
     /// Круг исправления 2, пункт 1 (находка автоматической проверки
     /// безопасности): главная дорога, несущая пароль базы — `MCP_1C_PASSWORD`
     /// переменной окружения, — обязана идти через `mcp_command_guarded`, а

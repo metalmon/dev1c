@@ -39,7 +39,10 @@ async fn forwards_7771_and_remembers_the_host_key() {
 // не как «SSH недоступен», а как настоящий крах `cargo test`.
 #[tokio::test(flavor = "multi_thread")]
 async fn run_keeps_the_forward_open_and_the_container_sees_it() {
-    let Some((server, password)) = env() else { return };
+    let Some((server, password)) = env() else {
+        eprintln!("стенда нет: не задано DEV1C_SSH/DEV1C_SSH_PASSWORD, проверка пропущена");
+        return;
+    };
     let dir = std::env::temp_dir().join(format!("1c-connect-run-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut cfg = one_c_connect::cfg::Cfg::default();
@@ -94,7 +97,10 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
 /// теста, иначе SSH-отказ и паника рантайма неотличимы в выводе `cargo test`.
 #[tokio::test(flavor = "multi_thread")]
 async fn run_flips_editor_mcp_enabled_around_the_session() {
-    let Some((server, password)) = env() else { return };
+    let Some((server, password)) = env() else {
+        eprintln!("стенда нет: не задано DEV1C_SSH/DEV1C_SSH_PASSWORD, проверка пропущена");
+        return;
+    };
     let dir = std::env::temp_dir().join(format!("1c-connect-flip-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let password = if std::env::var("DEV1C_DOCKER").is_ok() { "dev3".to_string() } else { password };

@@ -54,7 +54,7 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 # The SSH client is embedded: ssh.exe is an optional Windows component with
 # behaviour that differs by version, and it takes the password only from a
 # keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.
-russh = { version = "0.64", default-features = false, features = ["ring"] }
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 # io-std: stdin/stdout как AsyncRead/AsyncWrite — ими подкоманда `mcp` отдаёт
 # стандартные потоки в тот же `Serve::dispatch`, что принимает TCP и канал
 # туннеля (`ops_host::run_mcp`).

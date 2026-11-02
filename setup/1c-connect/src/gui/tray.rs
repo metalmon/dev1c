@@ -667,20 +667,6 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
     cx.refresh_windows();
 }
 
-/// Клон `base` с подменённым одним полем — потолком записи. Не трогает
-/// остальные: `base` здесь — то, что уже лежит в живой ячейке сеанса
-/// (`Session::cfg_now`), заведомо годное, а толкать туда весь `ui.cfg`,
-/// который в этот момент может не пройти `validate()` целиком (поле не то
-/// правили, которое отвечает за потолок), — значило бы либо ронять
-/// работающего ребёнка на негодных данных, либо, как было до круга
-/// исправления, вовсе не донести ужесточение (находка проверки
-/// безопасности на `c22b058`: переключатель показывал «Только чтение», а
-/// ребёнок продолжал обслуживать `read_write`).
-fn access_onto(mut base: crate::cfg::Cfg, access: &str) -> crate::cfg::Cfg {
-    base.host.write = access.into();
-    base
-}
-
 /// Записать потолок записи и сообщить об этом уже работающему ребёнку — без
 /// перезапуска сеанса (в отличие от `apply_mode`/`apply_publication` выше):
 /// потолок не меняет транспорт, только флаг у `mcp_command` на канале
@@ -717,7 +703,8 @@ fn apply_access(cx: &mut App, access: &'static str) {
             // докстрока) — отдельной ветки по режиму, в отличие от
             // `save_host`, здесь не нужно. Весь `ui.cfg` годен (`save_host`
             // только что это проверил целиком) — толкаем его как есть, не
-            // через `access_onto` (та — для ветки отказа ниже, где это не так).
+            // через `Cfg::with_access` (та — для ветки отказа ниже, где это
+            // не так).
             if let Some(s) = &cx.global::<Ui>().session {
                 s.update_cfg(cx.global::<Ui>().cfg.clone());
             }
@@ -729,33 +716,55 @@ fn apply_access(cx: &mut App, access: &'static str) {
             }
             note_line(
                 cx.global_mut::<Ui>(),
-                Line { kind: Kind::Ok, text: format!("запись в базу: {} (действует на вызовы после смены)", label.to_lowercase()) },
+                Line {
+                    kind: Kind::Ok,
+                    text: format!(
+                        "запись в базу (mcp-1c): {} — действует на вызовы mcp-1c после смены; канал vrunner этим не ограничен",
+                        label.to_lowercase()
+                    ),
+                },
             );
         }
         Err(why) => {
-            // Та же развязка, что у режима и публикации, и по той же
-            // причине: потолок — намерение человека, а не действие над
-            // базой, и на свежем комплекте с пустыми полями он обязан
-            // сработать.
-            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "write", access) {
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                return;
-            }
-            // Остальные поля `ui.cfg` могли не пройти `validate()` — но это
-            // не повод не донести УЖЕСТОЧЕНИЕ (или ослабление) потолка до
-            // уже работающего ребёнка: берём не `ui.cfg`, а то, что сейчас
-            // лежит в живой ячейке сеанса (`Session::cfg_now` — последний
-            // годный `Cfg`), и меняем на его клоне только `write`
-            // (`access_onto`). Круг исправления задачи 3: раньше эта ветка
-            // молчала вовсе, и переключатель показывал «Только чтение»,
-            // пока ребёнок продолжал обслуживать `read_write`.
+            // Донести потолок до сеанса ДО попытки записи на диск, не после
+            // (круг исправления 2 задачи 3, находка 2): прежняя версия
+            // возвращалась раньше, если `save_tray_key` не смог записать, и
+            // `update_cfg` не звался вовсе — переключатель показывал новый
+            // потолок, а работающий ребёнок продолжал обслуживать прежний.
+            // Остальные поля `ui.cfg` могли не пройти `validate()` — берём
+            // не их, а то, что уже лежит в живой ячейке сеанса
+            // (`Cfg::with_access` поверх `Session::cfg_now` — последний
+            // годный `Cfg`).
             if let Some(s) = &cx.global::<Ui>().session {
-                s.update_cfg(access_onto(s.cfg_now(), access));
+                s.update_cfg(s.cfg_now().with_access(access));
             }
-            let label = ACCESS.iter().find(|(a, ..)| *a == access).map(|(_, _, t)| *t).unwrap_or(access);
-            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_access(access);
+            }
+            // Запись одного ключа — намерение человека, а не действие над
+            // базой (та же развязка, что у режима и публикации): на свежем
+            // комплекте с пустыми полями она обязана сработать даже при
+            // негодных остальных полях.
+            match save_tray_key(cx.global_mut::<Ui>(), "write", access) {
+                Ok(()) => {
+                    let label = ACCESS.iter().find(|(a, ..)| *a == access).map(|(_, _, t)| *t).unwrap_or(access);
+                    note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
+                }
+                Err(e) => {
+                    // На диск потолок не лёг — сказать это прямо, а не
+                    // молчать: сеанс уже на нём (`update_cfg` выше сработал
+                    // независимо от этого отказа), но файл при следующем
+                    // запуске программы прочтёт прежнее значение.
+                    note_line(
+                        cx.global_mut::<Ui>(),
+                        Line {
+                            kind: Kind::Warn,
+                            text: format!(
+                                "запись в базу (mcp-1c): применено к работающему сеансу, но не сохранено в файл — {e}; при перезапуске программы вернётся прежнее значение"
+                            ),
+                        },
+                    );
+                }
             }
             cx.global_mut::<Ui>().tab = Tab::Params;
             window::show_window(cx);
@@ -939,9 +948,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        access_onto, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
-        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS,
-        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
+        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES,
+        PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -1045,15 +1054,15 @@ mod tests {
     /// ужесточение потолка не должно зависеть от того, годны ли остальные
     /// поля `ui.cfg` — иначе переключатель показал бы «Только чтение», пока
     /// работающий ребёнок остаётся на `read_write`, и это молчаливый
-    /// неверный результат, худший из возможных. `access_onto` меняет ровно
-    /// одно поле на уже годном `Cfg` (том, что лежит в живой ячейке сеанса),
-    /// не трогая остальные.
+    /// неверный результат, худший из возможных. `Cfg::with_access` меняет
+    /// ровно одно поле на уже годном `Cfg` (том, что лежит в живой ячейке
+    /// сеанса), не трогая остальные.
     #[test]
     fn a_tightened_ceiling_reaches_the_rebuilt_command_even_with_bad_fields_elsewhere() {
         let mut live = crate::cfg::filled_for_test();
         live.host.write = "read_write".into();
         assert!(live.validate().is_ok(), "вводная: живая ячейка держит годный Cfg");
-        let tightened = access_onto(live.clone(), "read_only");
+        let tightened = live.clone().with_access("read_only");
         assert_eq!(tightened.host.base_path, live.host.base_path, "остальные поля не тронуты");
         assert_eq!(tightened.host.db_user, live.host.db_user, "остальные поля не тронуты");
         let kit = common::kit::Kit::at(std::env::temp_dir());

@@ -599,12 +599,25 @@ impl Cfg {
             );
         }
         anyhow::ensure!(!self.host.base_path.is_empty(), "[host]: base_path — путь к базе или сервер\\база");
+        // У набора `business` каталога исходников нет и быть не может: по
+        // замыслу контракта подключения смысл этой папки задаёт профиль
+        // («Папка исходников» у разработчика, «Папка документов» у бизнес-
+        // пользователя), а не фиксированное поле `project`. Требовать от
+        // бухгалтера полный путь к исходникам, которых у неё нет, — ровно та
+        // помеха, ради снятия которой контракт завёл два набора инструментов
+        // (круг исправления финального ревью, Б1: шаг 3 `БУХГАЛТЕРУ.md`
+        // прямо велит поле не трогать, а `validate()` до этой правки на
+        // пустом поле отказывала). У `developer` поведение не меняется —
+        // там каталог исходников нужен по делу. Непустое значение проверяем
+        // как раньше при ЛЮБОМ наборе: вписал — обязано быть годным.
         let p = &self.host.project;
-        let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
-        anyhow::ensure!(
-            full && !p.contains('"') && !p.contains('%'),
-            "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
-        );
+        if !(p.is_empty() && self.toolset().unwrap_or("business") == "business") {
+            let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
+            anyhow::ensure!(
+                full && !p.contains('"') && !p.contains('%'),
+                "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
+            );
+        }
         Ok(())
     }
 
@@ -1660,6 +1673,41 @@ mod tests {
         assert!(c.validate().is_ok());
         c.host.project = "/home/dev/proj".into();
         assert!(c.validate().is_ok());
+    }
+
+    /// Красный тест круга исправления финального ревью, Б1: бухгалтер
+    /// (набор `business`) каталога исходников не вписывает — `БУХГАЛТЕРУ.md`
+    /// шаг 3 прямо об этом просит, — и пустое поле не обязано быть отказом.
+    /// `filled()` набор не называет (`host.toolset` пусто), а
+    /// `Cfg::toolset()` пустоту отдаёт как `business` — тот же набор,
+    /// что получает бухгалтер по умолчанию.
+    #[test]
+    fn an_empty_project_is_fine_for_the_business_toolset() {
+        let mut c = filled();
+        assert_eq!(c.toolset().unwrap(), "business");
+        c.host.project = String::new();
+        c.validate().expect("бизнес-набору каталог исходников не нужен");
+    }
+
+    /// Непустое, но негодное значение — отказ тем же текстом независимо от
+    /// набора: если бухгалтер всё же что-то вписала, это обязано быть
+    /// годным путём, а не молчаливо принятым мусором.
+    #[test]
+    fn a_junk_project_is_still_refused_for_the_business_toolset() {
+        let mut c = filled();
+        c.host.project = "proj".into();
+        assert!(c.validate().unwrap_err().to_string().contains("project"));
+    }
+
+    /// `developer` поведение не меняет — там каталог исходников нужен по
+    /// делу (это его агент ищет код), и пустое поле остаётся отказом, как
+    /// до круга исправления.
+    #[test]
+    fn an_empty_project_is_still_refused_for_the_developer_toolset() {
+        let mut c = filled();
+        c.host.toolset = "developer".into();
+        c.host.project = String::new();
+        assert!(c.validate().unwrap_err().to_string().contains("project"));
     }
 
     #[test]

@@ -109,6 +109,29 @@ pub fn base_name(base_path: &str) -> &str {
     }
 }
 
+/// Имя для НОВОГО соединения — то, что предлагает программа, прежде чем
+/// человек впишет своё: `base_name(base_path)`, пусто — как у прежнего
+/// `[host]` без имени (`load_raw`), «Соединение 1». Занятое среди `taken`
+/// (имена уже существующих соединений) — не отказ: столкновение имён ловит
+/// `Cfg::validate` там, где его создал человек, правя файл руками, а
+/// программа, предлагающая имя сама, просто берёт следующий свободный номер
+/// через пробел — «Buh», «Buh 2», «Buh 3», …
+pub fn default_name(base_path: &str, taken: &[&str]) -> String {
+    let base = base_name(base_path);
+    let base = if base.is_empty() { "Соединение 1" } else { base };
+    if !taken.contains(&base) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} {n}");
+        if !taken.contains(&candidate.as_str()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 pub fn derived_base_url(base_path: &str) -> String {
     let name = base_name(base_path);
     let ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || "-._~".contains(c));
@@ -487,6 +510,21 @@ pub fn filled_for_test() -> Cfg {
     c
 }
 
+/// `Cfg` с соединениями по именам `names` — ТОЛЬКО их имена и отличаются,
+/// прочие поля берутся у `filled_for_test()`, чтобы проверки `validate()`,
+/// не относящиеся к списку соединений, не мешали тесту. Первое имя
+/// становится `current` (решение плана, 2.11: текущее называется именем).
+/// Помощник создан задачей 2 для её собственного теста, но зовут его и
+/// тесты задач 3, 8 и 9 (план «Модель соединений») — план не завёл его ни
+/// одной задачей, это дыра, найденная разбором до запуска.
+#[cfg(test)]
+pub fn cfg_with(names: &[&str]) -> Cfg {
+    let mut c = filled_for_test();
+    c.connections = names.iter().map(|n| Host { name: n.to_string(), ..Default::default() }).collect();
+    c.current = names.first().copied().unwrap_or("").to_string();
+    c
+}
+
 /// `Copy`: три `u16` — `cfg.ports()` считается один раз и используется по
 /// значению столько раз, сколько нужно (`ops_host::run_mcp` — находка ревью
 /// задачи 3, Minor 7), без второго вызова ради второго владельца.
@@ -721,6 +759,30 @@ impl Cfg {
                 "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
             );
         }
+        // `current` указывает соединение именем (решение плана, 2.11) — два
+        // одинаковых имени делают текущее неопределённым: от какого из
+        // совпавших блоков его тогда брать. Отдельная проверка, не слитая с
+        // проверкой пустого имени ниже: соседние задачи плана (5 — «одна
+        // база — одна карточка», 6 — «папка принадлежит одному соединению»)
+        // добавляют СВОИ проверки списка соединений рядом, а не вместо
+        // (решение координатора).
+        {
+            let mut seen: Vec<&str> = Vec::new();
+            for c in &self.connections {
+                anyhow::ensure!(
+                    !seen.contains(&c.name.as_str()),
+                    "[[connection]]: имя «{}» встречается у нескольких соединений — имена обязаны быть уникальными",
+                    c.name
+                );
+                seen.push(&c.name);
+            }
+        }
+        // Безымянное соединение нечем показать в списке (окно, команда
+        // переключения — обе читают имя, не номер блока).
+        anyhow::ensure!(
+            self.connections.iter().all(|c| !c.name.trim().is_empty()),
+            "[[connection]]: у соединения нет имени — его нечем показать в списке"
+        );
         Ok(())
     }
 
@@ -1714,6 +1776,22 @@ mod tests {
         c.host.write = "read_write".into();
         assert!(c.validate().is_ok());
         assert_eq!(c.access(), "read_write");
+    }
+
+    /// `current` указывает именем (решение плана, 2.11) — два одинаковых
+    /// имени делают текущее неопределённым, а пустое имя нечем показать в
+    /// списке соединений.
+    #[test]
+    fn two_connections_cannot_share_a_name_and_none_can_be_nameless() {
+        let same = cfg_with(&["Buh", "Buh"]);
+        let e = same.validate().unwrap_err();
+        assert!(format!("{e:#}").contains("Buh"), "отказ называет повторяющееся имя: {e:#}");
+
+        let nameless = cfg_with(&[""]);
+        assert!(nameless.validate().is_err(), "безымянное соединение в списке не показать");
+
+        assert_eq!(default_name(r"C:\Bases\Buh", &[]), "Buh");
+        assert_eq!(default_name(r"C:\Bases\Buh", &["Buh"]), "Buh 2", "занятое имя получает номер, а не отказ");
     }
 
     /// Отказ по умолчанию, не разрешение по умолчанию (круг исправления,

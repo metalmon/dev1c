@@ -772,6 +772,27 @@ pub fn shown_base_url(host: &Host) -> &str {
     }
 }
 
+/// Заголовок карточки соединения. Контракт подключения называет заголовком имя
+/// соединения, данное человеком, но хранить такое имя сегодня негде: в `[host]`
+/// поля нет, а модель настроек этот план не трогает. Поэтому заголовок берётся
+/// из базы — это то единственное, что уже сейчас отличает одну карточку от
+/// другой.
+///
+/// Путь к базе бывает не путём: `Срв\Бухгалтерия` — строка соединения с
+/// сервером, а не каталог. Правило одно на оба случая: что стоит после
+/// последнего разделителя, то и имя. Разделителем считаем и `\`, и `/` —
+/// серверная строка пишется через обратный, сетевой путь человек может ввести
+/// через любой.
+pub fn card_title(host: &Host) -> String {
+    let path = host.base_path.trim().trim_end_matches(['\\', '/']);
+    let name = path.rsplit(['\\', '/']).next().unwrap_or("").trim();
+    if name.is_empty() {
+        "База не указана".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
     match name {
         "server" => &h.server,
@@ -1290,6 +1311,10 @@ impl Render for Panel {
         // себя.
         let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
         let shown = shown_fields(&mode, &publication);
+        // Заголовок карточки соединения считается из ПОЛЕЙ, а не из
+        // сохранённого: человек меняет базу и видит, какую карточку он
+        // правит, ещё до «Сохранить».
+        let title = card_title(&host_of(&self.fields, &mode, &publication, cx));
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1416,59 +1441,95 @@ impl Render for Panel {
                     });
                     move |b, window, cx| m(&b, window, cx)
                 })
-                .id("params")
+                .id("link")
                 .size_full()
                 .overflow_y_scroll()
-                .child({
-                    // В локальном режиме коннектор слушает loopback, а не
-                    // поднимает туннель в среду: адрес среды, рабочее место и
-                    // его пароль ничего не меняют — показывать их незачем
-                    // (поле без действия роняет доверие к экрану параметров).
-                    // Без них ряд не рисуется вовсе — ни дыры, ни подписи
-                    // без поля: высота окна не прыгает между режимами, она
-                    // просто меньше.
-                    let mut col = v_flex().gap_3();
-                    if shown.contains(&"server") {
-                        col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
-                    }
-                    if shown.contains(&"workstation") {
-                        col = col.child(
-                            h_flex()
-                                .gap_3()
-                                .items_end()
-                                .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
-                                .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
-                        );
-                    }
-                    col.child(
-                        v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("База")).child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                .child(pick("pick-base", f.base_path.clone(), cx)),
-                        ),
-                    )
-                    // Адрес чужой публикации — сразу под базой, к которой он
-                    // и относится, и только в режиме «уже опубликована»:
-                    // в обычном режиме адрес считает сама программа.
-                    .when(shown.contains(&"base_url"), |d| d.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx)))
-                    .child(
-                        h_flex()
-                            .gap_3()
-                            .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
-                            .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-                    )
-                    .child(
-                        v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта")).child(
-                            h_flex()
-                                .gap_2()
-                                .items_center()
-                                .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                .child(pick("pick-project", f.project.clone(), cx)),
-                        ),
-                    )
-                })
+                .child(
+                    // Поля базы — не форма на вкладке, а карточка соединения:
+                    // контракт подключения знает одну единицу, «соединение», и
+                    // поля принадлежат ей, а не машине. Карточка пока одна —
+                    // хранить вторую негде, это план модели.
+                    Self::layer(card_bg, border)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .p_3()
+                        .child(
+                            // `min_w_0` обязателен: без него длинное имя базы не
+                            // переносится, а обрезается по краю карточки на 380
+                            // точках (находка владельца 31.10).
+                            h_flex().min_w_0().child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone())),
+                        )
+                        .child({
+                            // В локальном режиме коннектор слушает loopback, а не
+                            // поднимает туннель в среду: адрес среды, рабочее место и
+                            // его пароль ничего не меняют — показывать их незачем
+                            // (поле без действия роняет доверие к экрану параметров).
+                            // Без них ряд не рисуется вовсе — ни дыры, ни подписи
+                            // без поля: высота окна не прыгает между режимами, она
+                            // просто меньше.
+                            let mut col = v_flex().gap_3();
+                            if shown.contains(&"server") {
+                                col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
+                            }
+                            if shown.contains(&"workstation") {
+                                col = col.child(
+                                    h_flex()
+                                        .gap_3()
+                                        .items_end()
+                                        .child(div().flex_1().child(Self::row(
+                                            "Рабочее место",
+                                            caption,
+                                            accent,
+                                            &f.workstation,
+                                            window,
+                                            cx,
+                                        )))
+                                        .child(div().flex_1().child(Self::row(
+                                            "Пароль рабочего места",
+                                            caption,
+                                            accent,
+                                            &f.password,
+                                            window,
+                                            cx,
+                                        ))),
+                                );
+                            }
+                            col.child(
+                                v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("База")).child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
+                                        .child(pick("pick-base", f.base_path.clone(), cx)),
+                                ),
+                            )
+                            // Адрес чужой публикации — сразу под базой, к которой он
+                            // и относится, и только в режиме «уже опубликована»:
+                            // в обычном режиме адрес считает сама программа.
+                            .when(shown.contains(&"base_url"), |d| {
+                                d.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx))
+                            })
+                            .child(
+                                h_flex()
+                                    .gap_3()
+                                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                            .child(pick("pick-project", f.project.clone(), cx)),
+                                    ),
+                            )
+                        }),
+                )
                 .into_any_element(),
             // «Инструменты» = прежние «Расширение» и «Инструменты» одной лентой:
             // сверху факты набора, ниже — каталог и состояние ветки.
@@ -1857,9 +1918,9 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question, pick_face,
-        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
-        switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, card_title, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question,
+        pick_face, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text,
+        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::editors;
@@ -2436,6 +2497,21 @@ mod tests {
     /// Утверждение держит обе грани: молчат оба списка — говорим; молчит
     /// только один — не мешаем второму, иначе подсказка встанет рядом с
     /// настоящими фактами и будет спорить с ними.
+    #[test]
+    fn the_card_title_names_the_base_and_survives_what_a_path_is_not() {
+        let file = Host { base_path: r"C:\bases\Ромашка".into(), ..Host::default() };
+        assert_eq!(card_title(&file), "Ромашка", "файловая база — имя каталога, не весь путь");
+
+        let server = Host { base_path: r"Срв\Бухгалтерия".into(), ..Host::default() };
+        assert_eq!(card_title(&server), "Бухгалтерия", "серверная строка — имя базы после слэша");
+
+        let empty = Host { base_path: String::new(), ..Host::default() };
+        assert_eq!(card_title(&empty), "База не указана", "пусто говорит словами, а не пустой строкой");
+
+        let odd = Host { base_path: r"C:\bases\Ромашка\".into(), ..Host::default() };
+        assert_eq!(card_title(&odd), "Ромашка", "хвостовой разделитель не делает заголовок пустым");
+    }
+
     #[test]
     fn an_empty_tools_tab_says_what_to_do() {
         let say = nothing_to_show(true, true).expect("оба списка молчат — вкладке есть что сказать о себе");

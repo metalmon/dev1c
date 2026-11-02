@@ -353,7 +353,20 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
     let what =
         if code < 0 { format!("{who} снят сигналом") } else { format!("{who} завершился с кодом {code}") };
     let because = if said.is_empty() { " — на stderr он ничего не сказал".to_string() } else { because };
-    Some(Event::Warn(format!("{what}{because}")))
+    // Задача 4 плана «тонкий срез ценности», шаг 2а: сторож сборки
+    // (`pack.sh`) не даст собрать комплект с несовместимой парой
+    // коннектор/mcp-1c, но есть дорога мимо него — положить новый
+    // `1c-connect.exe` в уже собранный комплект, не трогая `mcp-1c` рядом
+    // (обычный путь владельца). Сторож тогда не зовётся, и ребёнок умирает
+    // на старте с этой фразой Go-пакета `flag`. Ключ добавили мы
+    // (`bridge.rs::mcp_command`), а умер чужой бинарь — без подсказки
+    // человеку узнать, что чинить, неоткуда.
+    let hint = if who == "mcp-1c" && said.contains("flag provided but not defined") {
+        " — в комплекте старый mcp-1c, он не понимает ключей этой версии коннектора; замените mcp-1c сборкой форка"
+    } else {
+        ""
+    };
+    Some(Event::Warn(format!("{what}{because}{hint}")))
 }
 
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
@@ -891,5 +904,38 @@ mod tests {
         // Снят сигналом НЕ нами — про код -1 тоже не говорим числом.
         let e = child_exit_line("mcp-1c", -1, false, "").unwrap();
         assert!(matches!(e, Event::Warn(ref t) if t.contains("снят сигналом")), "{e:?}");
+    }
+
+    /// Шаг 2а брифа задачи 4 плана «тонкий срез ценности»: обычный путь
+    /// владельца — положить свежий `1c-connect.exe` в уже собранный
+    /// комплект, не меняя `mcp-1c` рядом. Сторож сборки (`pack.sh`) тогда
+    /// не зовётся вовсе, и в комплекте остаётся upstream-бинарь, который
+    /// не знает `--profile`/`--toolset`/`--access` — Go-пакет `flag`
+    /// печатает «flag provided but not defined: -profile» и выходит.
+    /// Человек, увидев только эту строку, не узнает, что чинить: ключ
+    /// добавили мы, а умер чужой бинарь.
+    #[test]
+    fn an_old_mcp_1c_that_does_not_know_the_new_flags_gets_a_hint_to_replace_it() {
+        let e = child_exit_line("mcp-1c", 2, false, "flag provided but not defined: -profile").unwrap();
+        assert!(
+            matches!(e, Event::Warn(ref t) if t.contains("старый mcp-1c") && t.contains("сборкой форка")),
+            "{e:?}"
+        );
+
+        // Подсказка не для любой чужой ошибки — только для этой конкретной.
+        let e2 = child_exit_line("mcp-1c", 3, false, "платформа не найдена").unwrap();
+        assert!(
+            !matches!(e2, Event::Warn(ref t) if t.contains("старый mcp-1c")),
+            "подсказка появилась на чужой ошибке: {e2:?}"
+        );
+
+        // И не для vrunner-mcp — там та же фраза ничего не значила бы:
+        // подсказка привязана к бинарю, который мы меняем на форк, а не к
+        // словам в stderr.
+        let e3 = child_exit_line("vrunner-mcp", 2, false, "flag provided but not defined: -profile").unwrap();
+        assert!(
+            !matches!(e3, Event::Warn(ref t) if t.contains("старый mcp-1c")),
+            "подсказка появилась у другого ребёнка: {e3:?}"
+        );
     }
 }

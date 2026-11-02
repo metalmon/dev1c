@@ -402,7 +402,14 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
         fields.push(("dump", format!("{dir:?}")));
     }
     if cfg.host.http_port.is_none() {
-        let port = cfg.http_port();
+        // `cfg.http_port()` отдаёт УЛАЖЕННЫЙ порт сеанса, когда он уже
+        // подобран (а к этому моменту он подобран всегда — оба вызывающих
+        // идут после `settle_chosen_http_port`). В файл человека идёт
+        // умолчание первой попытки (`derived_http_port`), а не то, что
+        // случайно оказалось свободно в этом сеансе — иначе поле становится
+        // явным предпочтением человека, расходящимся с запомненным выбором
+        // в `ports.state` (круг исправления финального ревью, С2).
+        let port = crate::cfg::derived_http_port();
         cfg.host.http_port = Some(port);
         fields.push(("http_port", port.to_string()));
     }
@@ -2894,6 +2901,35 @@ mod tests {
         assert_eq!(back.base_url(), "http://127.0.0.1:8081/hs/mcp-1c");
         assert_eq!(back.dump_dir(), dump);
         assert_eq!(back.dump_override(), None, "записанное умолчание — не свой каталог");
+    }
+
+    /// Круг исправления финального ревью, С2: к моменту установки улаженный
+    /// порт сеанса (`resolved_http_port`) ВСЕГДА заполнен — оба вызывающих
+    /// идут после `settle_chosen_http_port`. `cfg.http_port()` предпочитает
+    /// его, и старый код клал в файл человека именно его — сеансовый выбор
+    /// ("второй бухгалтер, 8081 занят, подбор увёл на 8082"), а не умолчание
+    /// первой попытки, как требует докстрока поля (`cfg.rs`, `http_port`).
+    /// Поля в окне нет, человек не видел, что подписывает; запомненное в
+    /// `ports.state` предпочтение (8081) расходится с этим явным 8082, и
+    /// подбор начинает гулять при следующем запуске.
+    #[test]
+    fn install_writes_the_derived_port_not_this_sessions_resolved_pick() {
+        let kit = TomlKit::new("resolved-pick");
+        let text = MINE.replace("mode = \"tunnel\"", "mode = \"local\"");
+        let path = kit.put(&text);
+        let mut cfg: Cfg = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.host.http_port, None, "поле человека пусто — установка впервые выбирает умолчание");
+        // 8081 занят соседом, подбор этого сеанса увёл на 8082 — ровно то,
+        // что кладёт `settle_chosen_http_port` перед установкой.
+        cfg.resolved_http_port = Some(8082);
+
+        let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
+
+        assert_eq!(cfg.host.http_port, Some(8081), "в файл человека идёт умолчание первой попытки, не сеансовый подбор");
+        assert!(wrote.iter().any(|w| w == "http_port = 8081"), "{wrote:?}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("http_port = 8081"), "{written}");
+        assert!(!written.contains("8082"), "{written}");
     }
 
     #[test]

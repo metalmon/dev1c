@@ -98,6 +98,14 @@ pub fn listener_pid(port: u16) -> Option<u32> {
 /// pid-файлу надо будет ГАСИТЬ: там цена ошибки выше, чем утечка пароля
 /// словами, — убить чужую программу вместо своего httpd.
 ///
+/// Образа ОДНОГО не хватает, и это не теория: комплект лежит в
+/// `C:\dev1c-connect-kit`, права на папку в корне диска дают другим
+/// пользователям чтение и выполнение — сосед запускает НАШ ЖЕ `httpd.exe`
+/// со своим конфигом, и путь образа совпадает идеально, подделывать ничего
+/// не надо (находка автоматической проверки, решение ведущего, круг 5).
+/// Поэтому рядом стоит `owner_of_pid`: барьер — владелец процесса, его
+/// соседу не обойти без наших учётных данных.
+///
 /// Windows — `QueryFullProcessImageNameW` под
 /// `PROCESS_QUERY_LIMITED_INFORMATION`: самое слабое из прав на процесс.
 /// Хватает ли его обычному пользователю — ИЗМЕРЕНО, не предположено
@@ -140,6 +148,122 @@ pub fn image_of_pid(pid: u32) -> Option<std::path::PathBuf> {
 #[cfg(not(windows))]
 pub fn image_of_pid(pid: u32) -> Option<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// Владелец процесса по его номеру — второй и главный барьер личности
+/// (решение ведущего, круг 5 исправления).
+///
+/// Зачем он сверх образа. Образ говорит «это наш бинарь», а не «это наш
+/// процесс»: комплект лежит в корне диска (`C:\dev1c-connect-kit`), и обычные
+/// права дают соседу по терминальному серверу читать и ВЫПОЛНЯТЬ его. Сосед
+/// запускает наш же `httpd.exe` со своим конфигом на нашем порту — путь
+/// образа совпадает, потому что это буквально наш бинарь. Владелец не
+/// совпадёт: запустить процесс от НАШЕГО имени сосед не может, не имея наших
+/// учётных данных. Это и есть барьер, остальное — поднятая планка.
+///
+/// Почему пути и владельца достаточно, и не надо идти в идентификатор файла
+/// (том плюс file ID на Windows, dev+inode на Unix): после проверки владельца
+/// подмена файла по тому же пути ничего не даёт — подменить его может только
+/// тот, у кого есть права на наш комплект, то есть мы сами или администратор
+/// машины, а не модель угрозы «сосед — другой пользователь» (решение
+/// ведущего, круг 5: не ходить туда).
+///
+/// Третий потребитель — та же задача 7 плана, что и у `image_of_pid`:
+/// гасить чужой процесс нельзя тем более, чем нельзя отдать ему пароль.
+///
+/// Windows — `OpenProcessToken` + `GetTokenInformation(TokenUser)`, SID
+/// строкой (`ConvertSidToStringSidW`), под тем же слабым
+/// `PROCESS_QUERY_LIMITED_INFORMATION`. Unix — владелец каталога
+/// `/proc/<pid>`, то есть `uid` числом.
+///
+/// Хватает ли прав на ЧУЖОГО пользователя — ИЗМЕРЕНО (2.11.2026, эта машина,
+/// прогон под НЕповышенным токеном, `whoami /groups` без High Mandatory
+/// Level): владелец трёх процессов `svchost.exe` прочитался —
+/// `S-1-5-18` (SYSTEM) у pid 1148 и 1236, `S-1-5-20` (NETWORK SERVICE) у
+/// pid 1364, при нашем собственном `S-1-5-21-…-1001`. `None` вернул только
+/// pid 4 (ядровой `System`). То есть в сценарии соседа страж скажет точный
+/// текст «владелец не совпал», а не общий «не удалось установить».
+///
+/// `None` — процесса нет, прав не хватило или сведений не добыть; для стража
+/// это «не наш», и текст отказа у него отдельный: «не удалось установить
+/// владельца» — не то же самое, что «владелец не совпал», человек по ним
+/// чинит разное.
+#[cfg(windows)]
+pub fn owner_of_pid(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut token = std::ptr::null_mut();
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+    unsafe {
+        CloseHandle(process);
+    }
+    if opened == 0 {
+        return None;
+    }
+    // Первый вызов — только за размером (так документирован
+    // GetTokenInformation); код возврата здесь и должен быть «буфер мал».
+    let mut size: u32 = 0;
+    unsafe {
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
+    }
+    let sid = if size == 0 {
+        None
+    } else {
+        let mut buf = vec![0u8; size as usize];
+        let got = unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), size, &mut size) };
+        if got == 0 {
+            None
+        } else {
+            // `TOKEN_USER` — структура с указателем на SID внутри того же
+            // буфера; копируем SID в строку, пока буфер жив.
+            let user = buf.as_ptr().cast::<TOKEN_USER>();
+            let mut text: *mut u16 = std::ptr::null_mut();
+            let ok = unsafe { ConvertSidToStringSidW((*user).User.Sid, &mut text) };
+            if ok == 0 || text.is_null() {
+                None
+            } else {
+                let len = (0..).take_while(|i| unsafe { *text.offset(*i) } != 0).count();
+                let s = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+                unsafe {
+                    LocalFree(text.cast());
+                }
+                Some(s)
+            }
+        }
+    };
+    unsafe {
+        CloseHandle(token);
+    }
+    sid
+}
+
+#[cfg(not(windows))]
+pub fn owner_of_pid(pid: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    Some(std::fs::metadata(format!("/proc/{pid}")).ok()?.uid().to_string())
+}
+
+/// Владелец ЭТОГО процесса — то, с чем страж сверяет держателя порта. Своего
+/// процесса хватает и самых слабых прав, так что `None` здесь означает
+/// по-настоящему необычную машину; страж на нём закрывается, а не
+/// открывается.
+pub fn current_owner() -> Option<String> {
+    owner_of_pid(std::process::id())
+}
+
+/// Один ли это владелец — чистое правило, без похода в систему (та же пара
+/// «правило отдельно от добычи», что у `same_image`). SID на Windows
+/// канонически в верхнем регистре, но сравнение не полагается на это;
+/// на Unix это десятичный `uid`, и регистра там нет вовсе.
+pub fn same_owner(expected: &str, actual: &str) -> bool {
+    expected.eq_ignore_ascii_case(actual)
 }
 
 /// Один ли это образ — чистое правило, без всякого похода в систему (тем же
@@ -520,6 +644,23 @@ TCP    127.0.0.1:17771        0.0.0.0:0              LISTENING       123
         let image = image_of_pid(std::process::id()).expect("образ своего процесса обязан добываться");
         assert!(same_image(&std::env::current_exe().unwrap(), &image), "{}", image.display());
         assert_eq!(image_of_pid(4_294_967_290), None, "номера нет — None, а не паника и не чужой образ");
+    }
+
+    /// Владелец своего процесса добывается, совпадает сам с собой и не
+    /// совпадает с чужим — нижняя проверка второго барьера личности. Без
+    /// неё `same_owner` сравнивал бы `None` с `None` (решение ведущего,
+    /// круг 5).
+    #[test]
+    fn owner_of_pid_names_our_own_owner_and_refuses_a_number_that_is_not_there() {
+        let me = owner_of_pid(std::process::id()).expect("владелец своего процесса обязан добываться");
+        assert_eq!(current_owner().as_deref(), Some(me.as_str()));
+        assert!(same_owner(&me, &me));
+        // Ни один живой владелец не совпадёт с заведомо чужим.
+        assert!(!same_owner(&me, "S-1-5-21-0-0-0-500"), "{me}");
+        assert_eq!(owner_of_pid(4_294_967_290), None, "номера нет — None, а не чужой владелец");
+        if cfg!(windows) {
+            assert!(me.starts_with("S-1-"), "SID строкой: {me}");
+        }
     }
 
     /// Правило сравнения — чистое, без похода в систему: один файл, названный

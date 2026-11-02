@@ -106,7 +106,12 @@ sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 # GetExtendedTcpTable (holder::listener_pid): кто слушает порт, прямым
 # системным вызовом, без netstat.exe на каждую пробу (пробы частые — проверка
 # владельца порта перед отправкой пароля базы, план «тонкий срез ценности»).
-windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+# Win32_Security_Authorization — ради ConvertSidToStringSidW
+# (holder::owner_of_pid): владелец процесса-держателя порта строкой, чтобы
+# сверить его с текущим пользователем и назвать в отказе. Сосед по
+# терминальному серверу может запустить НАШ httpd.exe из комплекта (права на
+# папку в корне диска это позволяют) — образ совпадёт, владелец нет.
+windows-sys ={ version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_UI_HiDpi", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [target.'cfg(windows)'.dependencies.reqwest]
 version = "0.12"

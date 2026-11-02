@@ -218,8 +218,8 @@ pub fn state_dir() -> PathBuf {
 /// (`publication::busy_for_choice`, находка 2 ревью круга 3), и два вызова
 /// с разными пробами — ровно тот способ развести `base_url()` и `Listen` в
 /// `httpd.conf`, от которого в круге 2 пришлось ставить барьер.
-pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg, our_image: &Path) {
-    if let Ok(port) = crate::publication::resolve_http_port(dir, cfg, our_image) {
+pub fn settle_chosen_http_port_in(dir: &Path, cfg: &mut Cfg, ours: &crate::publication::OurHttpd) {
+    if let Ok(port) = crate::publication::resolve_http_port(dir, cfg, ours) {
         cfg.resolved_http_port = Some(port);
     }
 }
@@ -286,7 +286,7 @@ pub(crate) fn with_state_dir_for_test<T>(dir: &Path, f: impl FnOnce() -> T) -> T
 /// тест ставит сам).
 #[cfg(not(test))]
 pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
-    settle_chosen_http_port_in(&state_dir(), cfg, &crate::publication::our_httpd_image(&kit.root));
+    settle_chosen_http_port_in(&state_dir(), cfg, &crate::publication::OurHttpd::of(&kit.root));
 }
 
 /// Та же обёртка в тестовой сборке: каталог берётся из потоко-локальной
@@ -298,7 +298,7 @@ pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
 #[cfg(test)]
 pub fn settle_chosen_http_port(cfg: &mut Cfg, kit: &Kit) {
     if let Some(dir) = test_state_dir::get() {
-        settle_chosen_http_port_in(&dir, cfg, &crate::publication::our_httpd_image(&kit.root));
+        settle_chosen_http_port_in(&dir, cfg, &crate::publication::OurHttpd::of(&kit.root));
     }
 }
 
@@ -3366,8 +3366,11 @@ mod tests {
     /// бинарник (тем же приёмом, что у `publication::tests`). Эти тесты
     /// занимают порт слушателем в своём же процессе — с чужим образом правило
     /// проверялось бы только отказом.
-    fn image_for_test() -> std::path::PathBuf {
-        std::env::current_exe().expect("путь к тестовому бинарнику")
+    fn image_for_test() -> crate::publication::OurHttpd {
+        crate::publication::OurHttpd {
+            image: std::env::current_exe().expect("путь к тестовому бинарнику"),
+            owner: crate::holder::current_owner(),
+        }
     }
 
     /// Круг исправления 2, пункт 2: правило («выбранный порт побеждает

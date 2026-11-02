@@ -323,7 +323,11 @@ pub(crate) fn our_httpd_image(kit_root: &Path) -> PathBuf {
 /// занятости по природе отвечает «да/нет», ей некому сказать слова, а тот же
 /// отказ с теми же числами человек увидит от стража на той же дороге.
 fn busy_for_choice(state: &Path, port: u16, ours: &OurHttpd) -> bool {
-    crate::ports::port_is_busy(port) && refuse_unless_ours(&pid_file_in(state), port, ours).is_err()
+    // `has_password` не читает никто здесь — только `.is_err()`, а пароль
+    // решает лишь слово в тексте отказа (см. докстроку `refuse_unless_ours`),
+    // не сам факт отказа. Значение ни на что не влияет — `false` без потери
+    // точности.
+    crate::ports::port_is_busy(port) && refuse_unless_ours(&pid_file_in(state), port, ours, false).is_err()
 }
 
 impl Paths {
@@ -550,10 +554,52 @@ fn our_httpd_pid(pid_file: &Path) -> Option<u32> {
 /// те, где порт и есть причина: человек должен видеть, о каком номере речь
 /// (а тест — что страж проверил именно тот порт, который называет
 /// `base_url()`, см. `the_guard_checks_exactly_the_port_base_url_names`).
-pub fn refuse_unless_ours(pid_file: &Path, port: u16, expected: &OurHttpd) -> Result<(), String> {
+///
+/// **Три состояния, не два** (круг исправления, отмена решения 2.11 —
+/// отдельная докстрока у `guard_own_listener` называет саму ошибку).
+/// Прежняя правка пропускала весь страж при пустом пароле, рассудив «нечего
+/// защищать» — неверно: страж защищает не только пароль, он защищает
+/// ВОПРОСЫ агента (имена контрагентов, суммы, периоды — деловые данные
+/// человека, которые чужой слушатель получит) и ОТВЕТЫ (чужой может
+/// выдумать данные, и человек примет их за выписку из своей базы). Это не
+/// зависит от того, есть пароль или нет — поэтому состояние решает не
+/// пароль, а то, слушает ли кто-то порт вообще:
+///
+/// 1. Никто не слушает, и pid-файл прочитать не удалось — публикация просто
+///    ещё не поднималась, защищать нечего и некого: `Ok(())`, без единого
+///    похода за держателем дальше.
+/// 2. Слушает, и личность (pid-файл → процесс → образ → владелец → тот же
+///    pid правда держит порт сейчас) подтверждается — наш: `Ok(())`.
+/// 3. Слушает, но личность подтвердить не удалось (не прочитать pid-файл,
+///    хотя порт занят; записанный процесс мёртв, другого образа или
+///    владельца; наконец сам держатель порта — не тот pid) — отказ, и
+///    текст называет настоящую причину, а не пароль, которого может не
+///    быть: `has_password` решает только ХВОСТ фразы («— пароль базы не
+///    отправлен»), не отказ сам по себе. Упоминать пароль, которого нет, —
+///    лгать человеку в тексте, который он читает.
+pub fn refuse_unless_ours(pid_file: &Path, port: u16, expected: &OurHttpd, has_password: bool) -> Result<(), String> {
     let our_image = &expected.image;
+    // Пароль только дополняет текст отказа — решает его, слушает ли кто-то
+    // порт (см. докстроку выше), а не наоборот.
+    let password_tail = if has_password { " — пароль базы не отправлен" } else { "" };
+    // Кто и правда держит порт СЕЙЧАС — спрошено один раз, до pid-файла:
+    // от этого зависит, состояние 1 (никого нет — публикация не поднята) или
+    // 3 (кто-то есть, а личность подтвердить нечем). Тот же номер идёт в
+    // финальную проверку личности ниже — повторный системный вызов внёс бы
+    // только гонку между двумя чтениями одного и того же состояния.
+    let listening = holder::listener_pid(port);
     let Some(ours) = our_httpd_pid(pid_file) else {
-        return Err(format!("порт {port}: pid-файл публикации {} не прочитать — пароль базы не отправлен", pid_file.display()));
+        return match listening {
+            // Состояние 1: порт свободен и pid-файла нет — никто не
+            // публиковался, значения защищать негде.
+            None => Ok(()),
+            // Состояние 3 через отсутствующий/непрочитанный pid-файл: порт
+            // занят, а сверить его держателя не с чем вовсе.
+            Some(_) => Err(format!(
+                "порт {port}: его слушает кто-то, а pid-файл публикации {} не прочитать, чтобы проверить, наш ли это httpd{password_tail}",
+                pid_file.display()
+            )),
+        };
     };
     // Личность процесса, а не только его номер (находка автоматической
     // проверки безопасности по кругу 4). Номера Windows переиспользует, и
@@ -563,14 +609,14 @@ pub fn refuse_unless_ours(pid_file: &Path, port: u16, expected: &OurHttpd) -> Re
         None => {
             forget_stale_pid_file(pid_file);
             return Err(format!(
-                "порт {port}: процесс pid {ours} из pid-файла публикации ({}) не опознать — его больше нет (или не хватило прав посмотреть) — файл несвежий и убран, пароль базы не отправлен",
+                "порт {port}: процесс pid {ours} из pid-файла публикации ({}) не опознать — его больше нет (или не хватило прав посмотреть) — файл несвежий и убран{password_tail}",
                 pid_file.display()
             ));
         }
         Some(image) if !holder::same_image(our_image, &image) => {
             forget_stale_pid_file(pid_file);
             return Err(format!(
-                "порт {port}: pid {ours} из pid-файла публикации — не наш httpd, его образ {}, а наш {} — файл несвежий и убран, пароль базы не отправлен",
+                "порт {port}: pid {ours} из pid-файла публикации — не наш httpd, его образ {}, а наш {} — файл несвежий и убран{password_tail}",
                 image.display(),
                 our_image.display()
             ));
@@ -592,21 +638,21 @@ pub fn refuse_unless_ours(pid_file: &Path, port: u16, expected: &OurHttpd) -> Re
         (Some(our_owner), Some(owner)) if !holder::same_owner(our_owner, &owner) => {
             forget_stale_pid_file(pid_file);
             return Err(format!(
-                "порт {port}: владелец процесса pid {ours} не совпал с текущим пользователем (его {owner}, наш {our_owner}) — это не наш httpd, даже если запущен нашим файлом; файл несвежий и убран, пароль базы не отправлен"
+                "порт {port}: владелец процесса pid {ours} не совпал с текущим пользователем (его {owner}, наш {our_owner}) — это не наш httpd, даже если запущен нашим файлом; файл несвежий и убран{password_tail}"
             ));
         }
         (Some(_), Some(_)) => {}
         _ => {
             return Err(format!(
-                "порт {port}: не удалось установить владельца (нашего или процесса pid {ours}) — сверять не с чем, пароль базы не отправлен"
+                "порт {port}: не удалось установить владельца (нашего или процесса pid {ours}) — сверять не с чем{password_tail}"
             ));
         }
     }
-    let Some(listening) = holder::listener_pid(port) else {
-        return Err(format!("порт {port} никем не слушается — пароль базы не отправлен"));
+    let Some(listening) = listening else {
+        return Err(format!("порт {port} никем не слушается{password_tail}"));
     };
     if listening != ours {
-        return Err(format!("порт {port} занят не нами (его слушает pid {listening}, у нашего httpd pid {ours}) — пароль базы не отправлен"));
+        return Err(format!("порт {port} занят не нами (его слушает pid {listening}, у нашего httpd pid {ours}){password_tail}"));
     }
     Ok(())
 }
@@ -656,24 +702,29 @@ fn forget_stale_pid_file(pid_file: &Path) {
 /// автоматической проверки безопасности по кругу 4). Ни `Paths::of`, ни
 /// подбора порта за этим не стоит: `kit.root` — чистое значение.
 ///
-/// Пустой `cfg.host.db_password` — пропуск, тем же `Ok(())` раньше похода к
-/// `guard_state_dir()` (круг исправления, журнал владельца 2.11: база без
-/// пароля получала отказ «пароль базы не отправлен» про пароль, которого
-/// нет, — страж блокировал рабочую установку и при этом врал о причине).
-/// Правило: страж существует, чтобы не отдать пароль постороннему; нет
-/// пароля — нечего отдавать, и отказывать не для чего. Цена честная: при
-/// пустом пароле посторонний слушатель на этом порту может ответить за наш
-/// httpd и соврать про версию расширения (`Extension::state` зовёт этот же
-/// страж) — риск неверного ФАКТА в окне, не утечки, и он дешевле, чем
-/// блокировка установки, у которой пароля и не было.
+/// Пустой `cfg.host.db_password` здесь НЕ пропуск (отменённое решение
+/// 2.11 — круг исправления: ведущий сам отменил его как неверное). Довод
+/// отмены: страж защищает не только пароль — он защищает ВОПРОСЫ агента
+/// (в них имена контрагентов, суммы, периоды, деловые данные человека) и
+/// ОТВЕТЫ (посторонний может выдумать данные, и человек примет их за
+/// выписку из своей базы). И то и другое идёт через этот же порт
+/// независимо от того, пуст ли пароль, — отдавать его чужому слушателю
+/// нельзя при любом пароле, и прежняя правка открывала ровно это.
+///
+/// Настоящая причина жалобы, на которую отвечала (неверно) отменённая
+/// правка: журнал «host.extension пропущено: порт 8081: pid-файл
+/// публикации … не прочитать — пароль базы не отправлен» на базе без
+/// пароля — это не «порт держит чужой», а публикация, которая ЕЩЁ НЕ
+/// ПОДНИМАЛАСЬ: порт свободен, pid-файла нет. Лечит это не пропуск
+/// стража, а то, что `refuse_unless_ours` теперь различает «никто не
+/// слушает» (не отказ, см. его докстрока) от «слушает кто-то неизвестный»
+/// (отказ при любом пароле) — а пароль решает только слово в тексте
+/// отказа, не отказ сам по себе.
 pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Result<(), String> {
     if cfg.host.publication != "auto" {
         return Ok(());
     }
-    if cfg.host.db_password.is_empty() {
-        return Ok(());
-    }
-    refuse_unless_ours(&pid_file_in(&guard_state_dir()?), cfg.http_port(), &OurHttpd::of(&kit.root))
+    refuse_unless_ours(&pid_file_in(&guard_state_dir()?), cfg.http_port(), &OurHttpd::of(&kit.root), !cfg.host.db_password.is_empty())
 }
 
 /// Каталог состояния, в котором страж ищет pid-файл: тот же, что у
@@ -1649,38 +1700,41 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
 
     /// Круг исправления 2: в режиме `webserver` страж пропускает всё — адрес
     /// там чужой по определению (человек публикует сам), своего httpd и
-    /// pid-файла для сравнения не существует. Доказательство — каталог
-    /// состояния, в котором pid-файла нет: в режиме `auto` страж на нём
-    /// ОБЯЗАТЕЛЬНО отказал бы (следующий тест это и показывает), так что
-    /// `Ok` здесь — именно пропуск, а не удача.
+    /// pid-файла для сравнения не существует. Доказательство — настоящий
+    /// слушатель (не наш) на проверяемом порту: в режиме `auto` страж на
+    /// нём ОБЯЗАТЕЛЬНО отказал бы (личность подтвердить нечем — состояние 3
+    /// у `refuse_unless_ours`), так что `Ok` у `webserver` — именно пропуск
+    /// самой проверки, а не совпавшая удача «никто не слушает» (состояние
+    /// 1, которое `Ok` и без пропуска режима).
     #[test]
     fn guard_own_listener_skips_the_check_entirely_in_webserver_mode() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-webserver-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let kit = Kit::at(dir.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        // Непустой пароль: тест опирается на отказ стража в режиме `auto`
-        // ниже, а пустой пароль сам по себе пропускает страж (см.
-        // `guard_skips_the_check_entirely_with_an_empty_db_password`).
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.host.http_port = Some(port);
         cfg.host.publication = "webserver".into();
         assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ok());
         cfg.host.publication = "auto".into();
         assert!(
             ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_err(),
-            "тест опирается на то, что в auto на этом же каталоге страж отказывает"
+            "тест опирается на то, что в auto на этом же каталоге страж отказывает — порт занят чужим, а pid-файла нет"
         );
+        drop(listener);
     }
 
-    /// Круг исправления, журнал владельца 2.11: база без пароля получала
-    /// отказ «пароль базы не отправлен» — про пароль, которого нет, —
-    /// потому что страж не прочёл pid-файл публикации (каталог пуст,
-    /// публикации никогда не было). Правило: страж существует, чтобы не
-    /// отдать пароль постороннему; нет пароля — нечего отдавать. Доказано
-    /// красным: тот же пустой каталог, что валил бы страж с непустым
-    /// паролем (следующий тест), с пустым — пропускает работу дальше.
+    /// Круг исправления, отмена решения 2.11 (журнал владельца): на базе
+    /// без пароля страж видел пустой каталог состояния (публикация ещё не
+    /// поднималась — порт свободен, pid-файла нет) и отказывал текстом про
+    /// пароль, которого нет. Чинить это пропуском всего стража при пустом
+    /// пароле было ошибкой (следующий тест ловит её красным) — чинит
+    /// `refuse_unless_ours`, различая «никого нет» (не отказ) от «есть
+    /// кто-то неизвестный» (отказ при любом пароле). Здесь — именно случай
+    /// владельца: пусто, пароля нет, страж не отказывает.
     #[test]
-    fn guard_skips_the_check_entirely_with_an_empty_db_password() {
+    fn guard_lets_an_empty_publication_through_when_no_password_is_set_either() {
         let dir = std::env::temp_dir().join(format!("dev1c-guard-no-password-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let kit = Kit::at(dir.clone());
@@ -1689,23 +1743,51 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         cfg.host.db_password = String::new();
         assert!(
             ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ok(),
-            "пустой пароль — нечего защищать, страж не должен отказывать"
+            "никто не слушает и pid-файла нет — публикация просто не поднята, это не отказ"
         );
     }
 
-    /// Обратная сторона того же утверждения — мутация красным: тот же
-    /// пустой каталог (ни разу не было публикации, pid-файла нет), но
-    /// пароль непустой — страж отказывает, как и до этой правки.
+    /// Мутация красным против отменённого решения 2.11: та правка пропускала
+    /// страж целиком при пустом пароле — включая случай, когда порт
+    /// ЗАНЯТ чужим. Этот тест обязан был краснеть на ней: порт слушает
+    /// посторонний процесс, pid-файла нет, пароль пуст — а страж всё равно
+    /// должен отказать, потому что отдавать чужому слушателю вопросы и
+    /// ответы агента нельзя независимо от пароля (см. докстроку
+    /// `guard_own_listener`). Текст при этом не лжёт про пароль, которого
+    /// нет: фразы «пароль базы не отправлен» в нём быть не должно.
     #[test]
-    fn guard_still_refuses_with_a_password_and_an_unreadable_pid_file() {
-        let dir = std::env::temp_dir().join(format!("dev1c-guard-with-password-{}", std::process::id()));
+    fn guard_still_refuses_a_foreign_listener_with_an_empty_password() {
+        let dir = std::env::temp_dir().join(format!("dev1c-guard-foreign-no-password-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let kit = Kit::at(dir.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
+        cfg.host.db_password = String::new();
+        let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();
+        assert!(e.contains(&port.to_string()), "{e}");
+        assert!(!e.contains("пароль базы не отправлен"), "пароля нет — упоминать его в отказе было бы ложью: {e}");
+        drop(listener);
+    }
+
+    /// Та же чужая занятость порта, но пароль есть — отказ несёт прежний
+    /// хвост фразы, потому что на этот раз он не лжёт.
+    #[test]
+    fn guard_refuses_a_foreign_listener_with_a_password_and_names_it() {
+        let dir = std::env::temp_dir().join(format!("dev1c-guard-foreign-with-password-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kit = Kit::at(dir.clone());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
         cfg.host.db_password = "секрет-базы".into();
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();
-        assert!(e.contains("pid-файл") && e.contains("пароль базы не отправлен"), "{e}");
+        assert!(e.contains(&port.to_string()) && e.contains("пароль базы не отправлен"), "{e}");
+        drop(listener);
     }
 
     /// Находка автоматической проверки безопасности по кругу 4: страж верит
@@ -1730,7 +1812,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         // «Наш httpd» — другой файл, не тот, которым запущен прогон.
         let foreign = dir.join("httpd.exe");
         std::fs::write(&foreign, b"not a real httpd").unwrap();
-        let e = refuse_unless_ours(&pid_file, port, &ours_with_image(foreign)).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, port, &ours_with_image(foreign), true).unwrap_err();
         assert!(e.contains("не наш httpd") && e.contains("образ"), "отказ обязан назвать причиной образ, а не номер: {e}");
         assert!(e.contains("пароль базы не отправлен"), "{e}");
         // И мёртвая личность убрана: встать на неё больше нечему.
@@ -1761,7 +1843,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
         // Образ — наш, владелец — чужой: ровно сосед, запустивший наш httpd.
         let ours = OurHttpd { image: our_image_for_test(), owner: Some("S-1-5-21-0-0-0-500".into()) };
-        let e = refuse_unless_ours(&pid_file, port, &ours).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, port, &ours, true).unwrap_err();
         assert!(e.contains("владелец") && e.contains("не совпал"), "отказ обязан назвать причиной владельца: {e}");
         assert!(!e.contains("образ"), "образ тут как раз совпал — путать человека нечем: {e}");
         assert!(e.contains("пароль базы не отправлен"), "{e}");
@@ -1785,7 +1867,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let pid_file = pid_file_in(&dir);
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
         let ours = OurHttpd { image: our_image_for_test(), owner: None };
-        let e = refuse_unless_ours(&pid_file, port, &ours).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, port, &ours, true).unwrap_err();
         assert!(e.contains("не удалось установить владельца"), "{e}");
         assert!(!e.contains("не совпал"), "это другая причина и другой текст: {e}");
         // Личность не доказана чужой — доказать её не вышло вовсе; мёртвой
@@ -1807,7 +1889,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         // Номер, которого на машине почти наверняка нет: за пределами и
         // windows-овских, и linux-овских живых номеров прогона.
         std::fs::write(&pid_file, "4294967290").unwrap();
-        let e = refuse_unless_ours(&pid_file, 47906, &ours_for_test()).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, 47906, &ours_for_test(), true).unwrap_err();
         assert!(e.contains("не опознать") && e.contains("4294967290"), "{e}");
         assert!(!pid_file.exists(), "несвежий pid-файл обязан исчезнуть");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1883,14 +1965,21 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let kit = Kit::at(dir.clone());
+        // Чужой слушатель на явно заданном порту — не просто пустой каталог
+        // (круг исправления, отмена решения 2.11): «pid-файла нет» одно,
+        // без занятого порта, теперь не отказ вовсе (публикация не
+        // поднята), а этот тест — про то, какой порт страж проверяет, когда
+        // он действительно отказывает.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.db_password = "секрет-базы".into(); // пустой пароль сам пропускает страж — тест не про это
         cfg.host.publication = "auto".into();
-        cfg.resolved_http_port = Some(47903);
+        cfg.resolved_http_port = Some(port);
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();
-        assert_eq!(cfg.base_url(), "http://127.0.0.1:47903/hs/mcp-1c");
-        assert!(e.contains("47903"), "страж обязан проверять тот порт, который называет base_url(): {e}");
+        assert_eq!(cfg.base_url(), format!("http://127.0.0.1:{port}/hs/mcp-1c"));
+        assert!(e.contains(&port.to_string()), "страж обязан проверять тот порт, который называет base_url(): {e}");
         assert!(!e.contains("8081"), "выведенный порт тут ни при чём: {e}");
+        drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1933,7 +2022,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = listener.local_addr().unwrap().port();
         let pid_file = dir.join("httpd.pid");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
-        assert!(refuse_unless_ours(&pid_file, port, &ours_for_test()).is_ok());
+        assert!(refuse_unless_ours(&pid_file, port, &ours_for_test(), true).is_ok());
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1983,7 +2072,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let (mut stranger, stranger_image) = a_live_stranger();
         let pid_file = dir.join("httpd.pid");
         std::fs::write(&pid_file, stranger.id().to_string()).unwrap();
-        let e = refuse_unless_ours(&pid_file, port, &ours_with_image(stranger_image)).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, port, &ours_with_image(stranger_image), true).unwrap_err();
         let _ = stranger.kill();
         let _ = stranger.wait();
         assert!(e.contains("занят не нами") && e.contains(&port.to_string()), "{e}");
@@ -1995,13 +2084,38 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Pid-файла нет вовсе — отказ словами, не паника и не молчаливое «наш».
+    /// Круг исправления, отмена решения 2.11: pid-файла нет, и порт никем
+    /// не слушается — состояние 1 у `refuse_unless_ours` (докстрока там),
+    /// публикация просто не поднималась. Было отказом («отказ словами, не
+    /// паника и не молчаливое "наш"») до этой правки; теперь — `Ok`, и
+    /// слово «пароль» вообще не звучит, потому что звучать ему не для чего:
+    /// запроса к держателю не было, и его не с кем было бы вести.
     #[test]
-    fn refuse_unless_ours_fails_in_words_when_the_pid_file_is_missing() {
+    fn refuse_unless_ours_is_ok_when_nothing_listens_and_no_pid_file_exists() {
         let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-nofile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let e = refuse_unless_ours(&pid_file_in(&dir), 1, &ours_for_test()).unwrap_err();
-        assert!(e.contains("pid-файл"), "{e}");
+        assert!(
+            refuse_unless_ours(&pid_file_in(&dir), 1, &ours_for_test(), true).is_ok(),
+            "публикация не поднята (порт свободен, pid-файла нет) — это не отказ"
+        );
+    }
+
+    /// Обратная сторона: порт занят (кем-то, кто не доказуемо наш — живой
+    /// слушатель этого же теста), а pid-файла нет вовсе — отказ, и текст не
+    /// зовёт нечитаемый pid-файл «нашим» по умолчанию. Мутация красным
+    /// против отменённого решения 2.11: с пустым паролем это тоже отказ (та
+    /// правка его бы пропустила) — текст при этом не упоминает пароль,
+    /// которого нет.
+    #[test]
+    fn refuse_unless_ours_fails_in_words_when_someone_listens_but_no_pid_file_exists() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-nofile-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let e = refuse_unless_ours(&pid_file_in(&dir), port, &ours_for_test(), false).unwrap_err();
+        assert!(e.contains("pid-файл") && e.contains(&port.to_string()), "{e}");
+        assert!(!e.contains("пароль базы не отправлен"), "пароля нет — лгать про него в отказе незачем: {e}");
+        drop(listener);
     }
 
     /// Pid-файл называет нас, но порт никем не слушается — отказ, не "наш по умолчанию".
@@ -2012,7 +2126,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::create_dir_all(&dir).unwrap();
         let pid_file = dir.join("httpd.pid");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
-        let e = refuse_unless_ours(&pid_file, 1, &ours_for_test()).unwrap_err();
+        let e = refuse_unless_ours(&pid_file, 1, &ours_for_test(), true).unwrap_err();
         assert!(e.contains("никем не слушается"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }

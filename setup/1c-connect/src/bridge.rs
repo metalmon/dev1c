@@ -1762,11 +1762,20 @@ mod tests {
     fn mcp_command_guarded_refuses_before_any_command_with_the_password_is_born() {
         let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Чужой слушатель на проверяемом порту — не просто пустой каталог
+        // состояния (круг исправления, отмена решения 2.11): «никто не
+        // слушает, pid-файла нет» теперь не отказ вовсе (публикация просто
+        // не поднята), и тест должен доказывать отказ там, где он и правда
+        // случается — личность неизвестного держателя подтвердить нечем.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
         cfg.host.db_password = "секрет-базы".into();
         let guarded = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test()));
         assert!(guarded.is_err());
+        drop(listener);
     }
 
     /// Вторая половина того же утверждения: отказ не молчит абстрактным
@@ -1776,13 +1785,20 @@ mod tests {
     fn mcp_command_guarded_refusal_names_the_guards_reason() {
         let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-reason-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Чужой слушатель, не просто пустой каталог (см. довод в
+        // `mcp_command_guarded_refuses_before_any_command_with_the_password_is_born`):
+        // «pid-файла нет» одно, без занятого порта, теперь не отказ.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
-        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
-        // тест про текст отказа стража, не про это, и ему нужен непустой.
+        cfg.host.http_port = Some(port);
+        // Непустой пароль — этот тест про текст отказа (он называет пароль
+        // только когда пароль есть, см. докстроку `refuse_unless_ours`).
         cfg.host.db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл") && err.contains("пароль базы не отправлен"), "{err}");
+        drop(listener);
     }
 
     /// Круг исправления финального ревью, С3: `mcp_command` сам `Result` не
@@ -1821,17 +1837,18 @@ mod tests {
     fn mcp_command_guarded_lets_good_toolset_and_configuration_reach_the_guard() {
         let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-good-values-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Чужой слушатель, не просто пустой каталог — см. довод в
+        // `mcp_command_guarded_refuses_before_any_command_with_the_password_is_born`.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
         cfg.host.toolset = "developer".into();
         cfg.host.configuration = "generic".into();
-        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
-        // тест про то, что годные значения не стали ВТОРОЙ причиной отказа
-        // раньше стража, и ему нужен непустой пароль, чтобы страж успел
-        // отказать первым.
-        cfg.host.db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл"), "{err}");
+        drop(listener);
     }
 
     /// The test binary itself as the child: `__echo_child` below runs one of

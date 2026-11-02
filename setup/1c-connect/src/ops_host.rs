@@ -2301,12 +2301,16 @@ mod tests {
     fn extension_state_is_blocked_by_the_port_guard_before_it_asks_the_base() {
         let dir = std::env::temp_dir().join(format!("dev1c-extstate-guard-state-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Чужой слушатель, не просто пустой каталог состояния (круг
+        // исправления, отмена решения 2.11): «pid-файла нет» САМО ПО СЕБЕ,
+        // без занятого порта, больше не отказ — публикация просто не
+        // поднята (см. докстроку `publication::refuse_unless_ours`). Отказ
+        // стража тест доказывает там, где он и правда случается.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
-        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
-        // тест про то, что страж срабатывает РАНЬШЕ запроса к базе, и ему
-        // нужен непустой пароль, иначе страж пропустит и до пароля дело
-        // дойдёт настоящим (неуспешным) сетевым запросом.
+        cfg.host.http_port = Some(port);
         cfg.host.db_password = "секрет-базы".into();
         let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-guard-{}", std::process::id())));
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
@@ -2317,6 +2321,7 @@ mod tests {
             OpState::Blocked(reason) => assert!(reason.contains("pid-файл"), "{reason}"),
             other => panic!("ожидался Blocked с причиной стража, получено {other:?}"),
         }
+        drop(listener);
     }
 
     #[test]

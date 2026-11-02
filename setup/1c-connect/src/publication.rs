@@ -470,9 +470,11 @@ DocumentRoot \"{pub_dir}\"\n\
     ))
 }
 
-/// Бинарь httpd — используется только резервным путём на Windows (fallback
-/// в `kill_tracked`, когда процесс почему-то не отслежен) и для диагностики;
-/// основной Linux-путь зовёт системный `apache2` по имени напрямую.
+/// Бинарь httpd — используется, чтобы его ЗАПУСТИТЬ (`start` ниже); остановка
+/// (`kill_tracked`) по этому пути больше не ходит вовсе (замер 2.11.2026:
+/// `-k stop` на консольном экземпляре ничего не останавливает) — она гасит
+/// pid, а не бинарь. Основной Linux-путь зовёт системный `apache2` по имени
+/// напрямую.
 #[cfg(windows)]
 fn httpd_binary(p: &Paths) -> PathBuf {
     p.root.join("bin").join("httpd.exe")
@@ -740,10 +742,6 @@ struct WindowsHttpd {
 #[cfg(windows)]
 static WINDOWS_HTTPD: Mutex<Option<WindowsHttpd>> = Mutex::new(None);
 
-/// Гасит то, что отслежено как наше; если почему-то не отслежено (коннектор
-/// перезапустился без чистого выхода) — резервный путь: обычный `-k stop` по
-/// тому же конфигу (его `PidFile` укажет на старый процесс, если тот жив).
-#[cfg(windows)]
 /// Запуск без консольного окна: httpd — обычное консольное приложение, и
 /// без этого флага каждый его запуск и остановка открывают человеку чёрное
 /// окно поверх всего. Тот же приём, что у `common::docker::quiet`.
@@ -781,8 +779,14 @@ fn no_window(cmd: &mut std::process::Command) {
 /// серверу запускает НАШ ЖЕ `httpd.exe` со своим конфигом, путь образа
 /// совпадает идеально. Владелец — барьер, который без наших учётных данных
 /// не обойти.
+// Тексты `Foreign`/`Unknown` читают только тесты (`should_stop_*` ниже) —
+// `kill_tracked` после самого решения отличает друг от друга лишь то, чистит
+// ли он pid-файл, а причину не печатает никуда (нет журнала без `ctx`, а
+// плодить его здесь ради одной строки — лишнее: порт, занятый не нами,
+// `revert_apply` и так называет отдельным предупреждением).
 #[cfg(windows)]
 #[derive(Debug)]
+#[allow(dead_code)]
 enum StopDecision {
     Stop,
     Foreign(String),
@@ -791,31 +795,86 @@ enum StopDecision {
 
 #[cfg(windows)]
 fn should_stop(image: Option<&Path>, owner: Option<&str>, expected: &OurHttpd) -> StopDecision {
-    todo!("шаг 3: реализовать сверку образа и владельца, {image:?} {owner:?} {expected:?}")
+    let Some(image) = image else {
+        return StopDecision::Foreign("процесс из pid-файла не опознать (его уже нет, или не хватило прав посмотреть)".to_string());
+    };
+    if !holder::same_image(&expected.image, image) {
+        return StopDecision::Foreign(format!(
+            "это не наш httpd — его образ {}, наш {}",
+            image.display(),
+            expected.image.display()
+        ));
+    }
+    match (expected.owner.as_deref(), owner) {
+        (Some(e), Some(o)) if !holder::same_owner(e, o) => {
+            StopDecision::Foreign(format!("владелец процесса не совпал (его {o}, наш {e}) — это не наш httpd, даже если запущен нашим файлом"))
+        }
+        (Some(_), Some(_)) => StopDecision::Stop,
+        _ => StopDecision::Unknown("не удалось установить владельца — сверять не с чем".to_string()),
+    }
 }
 
 /// Гасит отслеженный httpd, а если он не отслежен в этом процессе (коннектор
 /// перезапустился без чистого выхода, или гасим публикацию прошлого сеанса)
 /// — по pid-файлу, проверив личность процесса (`should_stop`) прежде чем
-/// кого-либо убивать. Только Windows: на Linux остановкой ведает `-k stop`
-/// по своему файлу идентификатора — там им действительно ведает система.
+/// кого-либо убивать.
+///
+/// **`-k stop` здесь не живёт вовсе — замер, не теория.** 2.11.2026 поднял
+/// httpd из комплекта на выброшенном порту 47901 конфигом нашей же формы и
+/// позвал `httpd.exe -f <conf> -k stop`: он напечатал «The 'Apache2.4'
+/// service is not started» и ничего не сделал — консольный экземпляр
+/// (`-f <conf>`, без `-k start`) не слушает команды службы, потому что
+/// службой не является. Родителя пришлось снимать принудительно, а рабочий
+/// ребёнок остался сиротой и жил, пока я не снял и его. На Linux `-k stop`
+/// остаётся (см. `stop` ниже) — туда публикацией действительно ведает
+/// система (`apache2 -k start` демонизируется в системную сессию).
+///
+/// **Гасим дерево, не один pid.** `mpm_winnt` держит два процесса —
+/// родителя (его pid и лежит в `PidFile`) и рабочего ребёнка; слушающим
+/// сокетом владеет РОДИТЕЛЬ (замер: `PidFile` = 23668,
+/// `Get-NetTCPConnection -State Listen -LocalPort 47901 | Select
+/// OwningProcess` = 23668), а ребёнок — его прямой потомок и переживает
+/// смерть родителя (измерено тем же замером). `taskkill /PID <pid> /T /F` —
+/// штатное средство Windows для дерева процессов, прав администратора не
+/// требует для процесса в своей же сессии; писать обход `Toolhelp32` самим
+/// незачем (`taskkill` и есть тот обход, готовый).
+///
+/// Только Windows: на Linux остановкой ведает `-k stop` по своему файлу
+/// идентификатора — там им действительно ведает система.
 #[cfg(windows)]
 fn kill_tracked(p: &Paths, expected: &OurHttpd) {
-    // TODO(шаг 3): заменить на остановку по pid-файлу с проверкой личности
-    // (`should_stop`) и `taskkill /T /F` — замер 2.11.2026 показал, что этот
-    // `-k stop` печатает «The 'Apache2.4' service is not started» и не
-    // останавливает ничего.
-    let _ = expected;
     if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
         let _ = h.child.kill();
         let _ = h.child.wait();
         return;
     }
-    let mut stop = std::process::Command::new(httpd_binary(p));
-    stop.args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]);
-    #[cfg(windows)]
-    no_window(&mut stop);
-    let _ = stop.output();
+    let Some(pid) = our_httpd_pid(&p.pid) else {
+        return; // pid-файла нет или он не число — гасить нечего.
+    };
+    let image = holder::image_of_pid(pid);
+    let owner = holder::owner_of_pid(pid);
+    match should_stop(image.as_deref(), owner.as_deref(), expected) {
+        StopDecision::Stop => {
+            let mut kill = std::process::Command::new("taskkill");
+            kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            no_window(&mut kill);
+            let _ = kill.output();
+            // Наш процесс только что сняли — запись о нём можно забыть,
+            // следующий start() напишет свежую.
+            forget_stale_pid_file(&p.pid);
+        }
+        StopDecision::Foreign(_) => {
+            // Доказанно не наш (мёртв, не опознан, не тот образ или
+            // владелец) — не трогаем процесс, но и мёртвую запись не
+            // оставляем: встать на неё больше нечему (решение ведущего,
+            // пункт 5 находки).
+            forget_stale_pid_file(&p.pid);
+        }
+        StopDecision::Unknown(_) => {
+            // Ни подтвердить, ни исключить не вышло — закрываемся: не
+            // гасим и не трогаем файл, вдруг это и правда наш процесс.
+        }
+    }
 }
 
 /// Поднимает HTTP-сервис: httpd.exe — наш прямой ребёнок, в консольном
@@ -854,17 +913,18 @@ pub fn start(p: &Paths, lifetime: Lifetime, kit_root: &Path) -> Result<(), Strin
             // Публикация базы, не ребёнок установщика: намеренно не кладём
             // процесс ни в Job, ни в WINDOWS_HTTPD — выход этого процесса (в
             // т.ч. крах) httpd не касается. Остановить его позже сможет
-            // kill_tracked() через резервный `-k stop` по тому же конфигу.
+            // kill_tracked() по pid-файлу (`should_stop` + `taskkill /T`).
             drop(child);
         }
         Lifetime::WithCaller => {
             let Some(job) = job::Job::new() else { return Err("не удалось создать Job Object для httpd".to_string()) };
             // Отказ назначения здесь — не отказ запуска: httpd уже слушает, и
             // врать «не запустился» нельзя. Вторая линия у него своя, в
-            // отличие от ребёнка моста: процесс лежит в `WINDOWS_HTTPD`, его
-            // гасит `kill_tracked`, а поверх — резервный `-k stop` по
-            // pid-файлу самого httpd. Поэтому значение намеренно выброшено,
-            // а не оставлено молчать по забывчивости.
+            // отличие от ребёнка моста: процесс лежит в `WINDOWS_HTTPD`, и
+            // именно оттуда его гасит `kill_tracked` первым делом (`kill()` +
+            // `wait()`), раньше, чем дело дойдёт до pid-файла. Поэтому
+            // значение намеренно выброшено, а не оставлено молчать по
+            // забывчивости.
             let _ = job.assign_std(&child);
             *WINDOWS_HTTPD.lock().unwrap() = Some(WindowsHttpd { child, _job: job });
         }

@@ -485,6 +485,17 @@ mod tests {
         }
     }
 
+    /// `Deref` одного не хватает: обобщённые вызовы `std::fs` (`P: AsRef<Path>`)
+    /// разыменования не делают, и `set_permissions(&dir, …)` в unix-тесте ниже
+    /// падал сборкой — на Windows этот код не компилируется вовсе, поэтому
+    /// увидел его только CI (2.11.2026). `AsRef` закрывает весь класс сразу,
+    /// а не одно место звёздочкой.
+    impl AsRef<Path> for TmpDir {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
     impl Drop for TmpDir {
         fn drop(&mut self) {
             #[cfg(unix)]

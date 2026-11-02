@@ -280,7 +280,11 @@ pub fn same_image(expected: &std::path::Path, actual: &std::path::Path) -> bool 
     fn normal(p: &std::path::Path) -> String {
         let full = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
         let s = full.to_string_lossy().to_string();
-        if cfg!(windows) { s.to_lowercase() } else { s }
+        if cfg!(windows) {
+            s.to_lowercase()
+        } else {
+            s
+        }
     }
     normal(expected) == normal(actual)
 }

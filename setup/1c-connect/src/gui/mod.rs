@@ -296,7 +296,7 @@ pub struct Ui {
     /// а до самой панели ведёт отдельная сущность рядом.
     pub window: Option<AnyWindowHandle>,
     pub panel: Option<Entity<panel::Panel>>,
-    /// Высота окна, подобранная под содержимое «Параметров» (`window::fit_height`);
+    /// Высота окна, подобранная под содержимое «Связи» (`window::fit_height`);
     /// `None` — ещё не мерили, окно открывается наименьшим.
     pub height: Option<Pixels>,
     pub hidden_at: Option<Instant>,
@@ -351,17 +351,29 @@ impl Ui {
 /// Три вкладки (решение заказчика 2026-10-18): «Расширение» ушло в «Инструменты»,
 /// «Проверка» — в «Журнал». Пять подписей и по три кнопки в подвале в 380 px
 /// не помещались.
+///
+/// Имена вариантов — те же слова, что человек читает на вкладках: «Связь»,
+/// «Инструменты», «Журнал» (контракт подключения, решение владельца 1.11).
+/// «Связь» первая и открыта по умолчанию: она есть всегда, даже когда оба
+/// конца соединения на одной машине.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Tab {
     #[default]
-    Params,
-    Project,
+    Link,
+    Tools,
     Log,
 }
 
 impl Tab {
     /// Порядок вкладок в полосе; он же — порядок индексов `TabBar`.
-    pub const ALL: [Tab; 3] = [Tab::Params, Tab::Project, Tab::Log];
+    pub const ALL: [Tab; 3] = [Tab::Link, Tab::Tools, Tab::Log];
+}
+
+/// Вкладка, которую окно открывает, когда переключение из трея не сохранилось:
+/// та, где лежат поля, — «Связь». Одна функция на три места в `tray.rs`: три
+/// литерала со временем расходятся, а вкладку полей надо назвать один раз.
+pub fn tab_for_unsaved_switch() -> Tab {
+    Tab::Link
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1156,7 +1168,8 @@ fn skills_plan<S>(
     // пользуется (решение владельца).
     if !on && others_hold {
         return Err(Line {
-            kind: Kind::Ok, text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display())
+            kind: Kind::Ok,
+            text: format!("скилл: не трогаем — общий каталог {} ещё нужен другому агенту", home.display()),
         });
     }
     match state {
@@ -1190,9 +1203,10 @@ fn skill_line(on: bool, result: Result<crate::editors::Found, Vec<String>>) -> L
         // лежало, — а различить эти два случая `Found` не может. «Убран»
         // сообщало бы во втором случае о работе, которой не было; «наших
         // больше нет» правда в обоих.
-        Ok(found) if agent_as_expected(on, &found) => {
-            Line { kind: Kind::Ok, text: format!("скилл: {}", if on { "поставлен" } else { "наших больше нет" }) }
-        }
+        Ok(found) if agent_as_expected(on, &found) => Line {
+            kind: Kind::Ok,
+            text: format!("скилл: {}", if on { "поставлен" } else { "наших больше нет" }),
+        },
         Ok(other) => Line {
             kind: Kind::Fail,
             text: format!("скилл: не удалось {} — {}", if on { "поставить" } else { "убрать" }, panel::skill_found_text(&other)),
@@ -1220,12 +1234,7 @@ fn agent_line(mcp: Line, skill: Line) -> Line {
 /// агента на машине и нечитаемая половина разрешения не дают. `looks[i]`
 /// отвечает `AGENTS[i]` по индексу — порядок вызывающий не меняет.
 fn allowed(looks: &[Result<crate::editors::Found, String>]) -> Vec<usize> {
-    looks
-        .iter()
-        .enumerate()
-        .filter(|(_, look)| matches!(look, Ok(crate::editors::Found::Ours)))
-        .map(|(i, _)| i)
-        .collect()
+    looks.iter().enumerate().filter(|(_, look)| matches!(look, Ok(crate::editors::Found::Ours))).map(|(i, _)| i).collect()
 }
 
 /// Нужна ли тихая доставка вообще — чистая функция решения, тем же приёмом,
@@ -1298,17 +1307,16 @@ fn refresh_skills(kit: &Kit, exe: &std::path::Path, mode: &str) -> Vec<Line> {
         let def = &crate::editors::AGENTS[i];
         let Some(home) = crate::skills::home_dir(def.skills) else {
             lines.push(Line {
-                kind: Kind::Fail,
-                text: format!("{}: скиллы не доставлены — не узнать домашний каталог агента", def.label),
+                kind: Kind::Fail, text: format!("{}: скиллы не доставлены — не узнать домашний каталог агента", def.label)
             });
             continue;
         };
         match crate::skills::refresh(kit, &state, &home) {
             Ok(done) => lines.extend(refresh_line(def.label, &done)),
-            Err(reasons) => lines.push(Line {
-                kind: Kind::Fail,
-                text: format!("{}: скиллы — {}", def.label, crate::editors::refusal_text(&reasons)),
-            }),
+            Err(reasons) => lines
+                .push(Line {
+                    kind: Kind::Fail, text: format!("{}: скиллы — {}", def.label, crate::editors::refusal_text(&reasons))
+                }),
         }
     }
     lines
@@ -1380,7 +1388,9 @@ fn start_skill_refresh(cx: &mut App) {
             Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe, &mode)))
                 .unwrap_or_else(|_| vec![Line { kind: Kind::Fail, text: PANIC_TEXT.into() }]),
             Err(e) => {
-                vec![Line { kind: Kind::Fail, text: format!("скиллы при запуске: не узнать путь к своему исполняемому файлу: {e}") }]
+                vec![Line {
+                    kind: Kind::Fail, text: format!("скиллы при запуске: не узнать путь к своему исполняемому файлу: {e}")
+                }]
             }
         };
         for line in lines {

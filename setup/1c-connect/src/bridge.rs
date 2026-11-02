@@ -493,8 +493,13 @@ fn key(id: &Value) -> String {
 /// мост вовсе (агент видел бы мёртвый порт), а повод отвечать каждому вызову
 /// честным отказом (`degraded_reply`) и пробовать снова на следующем, как и
 /// при обычной неудаче `spawn()`.
-pub async fn pipe_jsonrpc<S>(stream: S, cmd: Result<tokio::process::Command, String>, rules: Rules, log: Sink, on_exit: impl FnOnce(i32, bool, String))
-where
+pub async fn pipe_jsonrpc<S>(
+    stream: S,
+    cmd: Result<tokio::process::Command, String>,
+    rules: Rules,
+    log: Sink,
+    on_exit: impl FnOnce(i32, bool, String),
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut sr, mut sw) = tokio::io::split(stream);
@@ -617,9 +622,20 @@ where
                         last_logged_error = Some(e.clone());
                     }
                     let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
-                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, local, who, &e, &out_tx)
-                        .await
-                        .is_err()
+                    if wait_and_reply_degraded(
+                        &mut sr,
+                        &mut buf,
+                        &mut f,
+                        &mut pending_frames,
+                        &handshake,
+                        rules.inject,
+                        local,
+                        who,
+                        &e,
+                        &out_tx,
+                    )
+                    .await
+                    .is_err()
                     {
                         break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
                     }
@@ -643,9 +659,20 @@ where
                         last_logged_error = Some(msg.clone());
                     }
                     let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
-                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, local, who, &msg, &out_tx)
-                        .await
-                        .is_err()
+                    if wait_and_reply_degraded(
+                        &mut sr,
+                        &mut buf,
+                        &mut f,
+                        &mut pending_frames,
+                        &handshake,
+                        rules.inject,
+                        local,
+                        who,
+                        &msg,
+                        &out_tx,
+                    )
+                    .await
+                    .is_err()
                     {
                         break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
                     }
@@ -781,8 +808,7 @@ where
                         // более широкими правами (находка проверки безопасности,
                         // круг исправления 2 задачи 3). Ждём тишины ограниченный
                         // срок, не трогая очередь, кроме как дочитывая в неё агента.
-                        match wait_for_quiet(&mut sr, &mut buf, &mut f, &mut pending_frames, &in_flight, GEN_SWITCH_QUIET_TIMEOUT).await
-                        {
+                        match wait_for_quiet(&mut sr, &mut buf, &mut f, &mut pending_frames, &in_flight, GEN_SWITCH_QUIET_TIMEOUT).await {
                             Quiet::AgentEof => break EpochEnd::AgentEof,
                             outcome => {
                                 // Выключение проверяется первым для обоих
@@ -2856,8 +2882,13 @@ mod tests {
         let live = Live::new(cfg_a.clone());
         let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT", "1")));
         let cmd0 = make_cmd(&cfg_a);
-        let rules =
-            Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {

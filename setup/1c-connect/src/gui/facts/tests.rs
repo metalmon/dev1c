@@ -760,10 +760,7 @@ fn the_set_is_not_recomputed_while_the_publication_is_being_raised() {
 
     // Срок отпускает отметку аварийно: поток мог умереть молча (паника
     // события не посылает), и без срока набор не посчитался бы больше ни разу.
-    assert!(
-        start_facts(&mut ui, now + super::PUBLISH_LOST + Duration::from_secs(1)).is_some(),
-        "срок подъёма не отпустил пересчёт"
-    );
+    assert!(start_facts(&mut ui, now + super::PUBLISH_LOST + Duration::from_secs(1)).is_some(), "срок подъёма не отпустил пересчёт");
     ui.facts_pending = false;
 
     // Ответ подъёма (`Ev::Publish` → `on_publish`) отпускает пересчёт — и

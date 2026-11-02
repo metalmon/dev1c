@@ -211,15 +211,7 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(());
         }
-        match Tunnel::connect(
-            &cfg.host.server,
-            &cfg.host.workstation,
-            &cfg.host.password,
-            &known_hosts,
-            &forward_ports(cfg),
-        )
-        .await
-        {
+        match Tunnel::connect(&cfg.host.server, &cfg.host.workstation, &cfg.host.password, &known_hosts, &forward_ports(cfg)).await {
             Ok(mut t) => {
                 attempt = 0;
                 forward_refusals = 0;

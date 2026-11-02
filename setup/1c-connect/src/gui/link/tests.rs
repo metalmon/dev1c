@@ -147,7 +147,7 @@ fn link_lines_say_where_and_as_whom() {
 
 #[test]
 fn local_mode_connecting_line_hides_the_environment_fields() {
-    // Адрес среды, пароль и имя рабочего места скрыты в «Параметрах» в
+    // Адрес среды, пароль и имя рабочего места скрыты в «Связи» в
     // локальном режиме и ничего не значат — журнал не должен о них
     // говорить (находка целостного ревью).
     let h = Host { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };

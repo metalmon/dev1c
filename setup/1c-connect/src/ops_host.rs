@@ -828,9 +828,9 @@ pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, 
 /// установки.
 fn install_profile(cfg: &Cfg) -> Result<&str, String> {
     match cfg.configuration()? {
-        "auto" => Err(
-            "не могу выбрать профиль расширения сам: укажите вид конфигурации в [host] configuration (generic или buh_3_0)".to_string(),
-        ),
+        "auto" => {
+            Err("не могу выбрать профиль расширения сам: укажите вид конфигурации в [host] configuration (generic или buh_3_0)".to_string())
+        }
         other => Ok(other),
     }
 }
@@ -3660,7 +3660,11 @@ mod tests {
         // Наш собственный httpd теперь слушает УЛАЖЕННЫЙ (не предпочтённый) порт.
         let our_listener = std::net::TcpListener::bind(("127.0.0.1", settled)).unwrap();
         settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test()); // та же Cfg, тот же сеанс
-        assert_eq!(cfg.http_port(), settled, "повторное улаживание в одном сеансе не должно уезжать на соседний порт из-за собственного слушателя");
+        assert_eq!(
+            cfg.http_port(),
+            settled,
+            "повторное улаживание в одном сеансе не должно уезжать на соседний порт из-за собственного слушателя"
+        );
         drop(our_listener);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3704,7 +3708,9 @@ mod tests {
     }
     #[cfg(not(windows))]
     fn take_serving_for_test(kit: &Kit, _user: &str) -> crate::single_instance::Guard {
-        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit)).unwrap().expect("признак свободен в начале теста")
+        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit))
+            .unwrap()
+            .expect("признак свободен в начале теста")
     }
 
     /// Тот же тик — `true`, когда признак на диске «on» и признак

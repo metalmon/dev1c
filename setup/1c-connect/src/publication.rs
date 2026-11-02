@@ -187,7 +187,15 @@ pub(crate) fn module_in(bin: &Path) -> Result<PathBuf, String> {
 /// настоящей платформы 1С: вынесены отдельно, чтобы тест считал их с
 /// временным каталогом, а не с настоящим `%LOCALAPPDATA%`/`$HOME`.
 fn paths_under(state: &Path, root: PathBuf, module: PathBuf, port: u16) -> Paths {
-    Paths { root, pub_dir: state.join("pub"), conf: state.join("httpd.conf"), pid: pid_file_in(state), log: state.join("httpd.log"), module, port }
+    Paths {
+        root,
+        pub_dir: state.join("pub"),
+        conf: state.join("httpd.conf"),
+        pid: pid_file_in(state),
+        log: state.join("httpd.log"),
+        module,
+        port,
+    }
 }
 
 /// Путь к pid-файлу нашего httpd — одна формула на троих: дескриптор
@@ -331,8 +339,7 @@ fn busy_for_choice(state: &Path, port: u16, ours: &OurHttpd) -> bool {
     // значение стража правда означает «можно брать» (докстрока `Guard`):
     // подбор порта ищет СВОБОДНЫЙ номер, а не «куда угодно слать пароль», и
     // «публикация не поднята» для него то же самое, что «свободен».
-    crate::ports::port_is_busy(port)
-        && matches!(refuse_unless_ours(&pid_file_in(state), port, ours, false), Guard::Refuse(_))
+    crate::ports::port_is_busy(port) && matches!(refuse_unless_ours(&pid_file_in(state), port, ours, false), Guard::Refuse(_))
 }
 
 impl Paths {
@@ -936,16 +943,12 @@ fn should_stop(image: Option<&Path>, owner: Option<&str>, expected: &OurHttpd) -
         return StopDecision::Foreign("процесс из pid-файла не опознать (его уже нет, или не хватило прав посмотреть)".to_string());
     };
     if !holder::same_image(&expected.image, image) {
-        return StopDecision::Foreign(format!(
-            "это не наш httpd — его образ {}, наш {}",
-            image.display(),
-            expected.image.display()
-        ));
+        return StopDecision::Foreign(format!("это не наш httpd — его образ {}, наш {}", image.display(), expected.image.display()));
     }
     match (expected.owner.as_deref(), owner) {
-        (Some(e), Some(o)) if !holder::same_owner(e, o) => {
-            StopDecision::Foreign(format!("владелец процесса не совпал (его {o}, наш {e}) — это не наш httpd, даже если запущен нашим файлом"))
-        }
+        (Some(e), Some(o)) if !holder::same_owner(e, o) => StopDecision::Foreign(format!(
+            "владелец процесса не совпал (его {o}, наш {e}) — это не наш httpd, даже если запущен нашим файлом"
+        )),
         (Some(_), Some(_)) => StopDecision::Stop,
         _ => StopDecision::Unknown("не удалось установить владельца — сверять не с чем".to_string()),
     }
@@ -1746,7 +1749,11 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(port);
-        assert_eq!(resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap(), port, "порт держит наш же httpd — это тот порт, который мы и хотим, а не повод уезжать");
+        assert_eq!(
+            resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap(),
+            port,
+            "порт держит наш же httpd — это тот порт, который мы и хотим, а не повод уезжать"
+        );
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
     }

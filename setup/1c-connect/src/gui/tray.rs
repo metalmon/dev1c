@@ -5,7 +5,7 @@
 
 use super::{
     autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, save_tray_key, start_session,
-    stop_session, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    stop_session, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
@@ -65,7 +65,7 @@ const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через т
 /// Кто публикует базу (`cfg.host.publication`, "auto"/"webserver") → id
 /// пункта меню и его подпись. Значения в toml прежние, подписи — человеческие:
 /// человек читает название, а не имя режима. Поля в окне нет; адрес чужой
-/// публикации спрашивается отдельным полем «Параметров», видимым только во
+/// публикации спрашивается отдельным полем «Связи», видимым только во
 /// втором положении (`panel::shown_fields`).
 const PUBLICATIONS: [(&str, &str, &str); 2] =
     [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Публикует платформа 1С")];
@@ -561,7 +561,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
                 tray.set_mode(mode);
                 tray.set_agents(mode);
             }
-            cx.global_mut::<Ui>().tab = Tab::Params;
+            cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
         }
     }
@@ -656,11 +656,11 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_publication(publication);
             }
-            // И открываем то, что человеку осталось сделать: «Параметры».
+            // И открываем то, что человеку осталось сделать: «Связь».
             // В режиме «публикует платформа 1С» там же появляется поле
             // «Адрес публикации», которое этот режим и требует, — иначе до
             // него было не добраться вовсе.
-            cx.global_mut::<Ui>().tab = Tab::Params;
+            cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
         }
     }
@@ -762,7 +762,7 @@ fn apply_access(cx: &mut App, access: &'static str) {
                     note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: access_not_applied_line(&e) });
                 }
             }
-            cx.global_mut::<Ui>().tab = Tab::Params;
+            cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
             // Трей отражает ФАКТИЧЕСКИЙ потолок — то, что реально лежит в
             // `ui.cfg` после перечитывания файла показом окна выше

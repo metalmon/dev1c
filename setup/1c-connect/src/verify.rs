@@ -684,7 +684,13 @@ const UNREACHED_HINT: &str =
 /// `gather`) — тест держит её без настоящей платформы на диске: `gather`
 /// передаёт уже готовый текст отказа `refuse_unless_ours`, а не зовёт его
 /// здесь заново.
-fn facts_when_the_listener_is_foreign(base_url: &str, publication: &str, cfg: &crate::cfg::Cfg, kit: &common::kit::Kit, reason: &str) -> (Check, Check, Check) {
+fn facts_when_the_listener_is_foreign(
+    base_url: &str,
+    publication: &str,
+    cfg: &crate::cfg::Cfg,
+    kit: &common::kit::Kit,
+    reason: &str,
+) -> (Check, Check, Check) {
     let hint = "порт занят посторонним процессом — закройте его или переставьте публикацию";
     (
         publication_responds_fact(base_url, false, Some((reason, hint))),

@@ -9,7 +9,7 @@ use super::*;
 /// Начало и конец видны и в журнале: туннель сам пишет только про поднятую
 /// связь и обрывы, а отказ возвращает ошибкой. `Connecting` — по режиму:
 /// адрес среды, пароль и имя рабочего места в локальном режиме скрыты в
-/// «Параметрах» (`panel::shown_fields`) и ничего не значат — печатать их в
+/// «Связи» (`panel::shown_fields`) и ничего не значат — печатать их в
 /// журнал всё равно было бы находкой целостного ревью (строка говорила про
 /// туннель, которого там нет).
 pub fn link_line(l: &State, host: &Host, mode: &str) -> Option<Line> {
@@ -127,8 +127,11 @@ pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
 /// строка говорит ровно то же, что подвал окна («Нельзя включить: …»), а про
 /// запуск — только когда запуск и правда просили.
 pub fn gate_line(why: &str, autoconnect_on: bool) -> Line {
-    let text =
-        if autoconnect_on { format!("MCP не включены при запуске: {why}") } else { format!("Включить MCP пока нельзя: {why}") };
+    let text = if autoconnect_on {
+        format!("MCP не включены при запуске: {why}")
+    } else {
+        format!("Включить MCP пока нельзя: {why}")
+    };
     Line { kind: Kind::Warn, text }
 }
 

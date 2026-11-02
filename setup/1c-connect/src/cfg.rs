@@ -647,10 +647,7 @@ impl Cfg {
         if ALLOWED.contains(&c) {
             Ok(c)
         } else {
-            Err(format!(
-                "[host]: configuration — неизвестный вид конфигурации «{c}»; допустимые значения: {}",
-                ALLOWED.join(", ")
-            ))
+            Err(format!("[host]: configuration — неизвестный вид конфигурации «{c}»; допустимые значения: {}", ALLOWED.join(", ")))
         }
     }
 
@@ -675,10 +672,7 @@ impl Cfg {
         if ALLOWED.contains(&t) {
             Ok(t)
         } else {
-            Err(format!(
-                "[host]: toolset — неизвестный набор инструментов «{t}»; допустимые значения: {}",
-                ALLOWED.join(", ")
-            ))
+            Err(format!("[host]: toolset — неизвестный набор инструментов «{t}»; допустимые значения: {}", ALLOWED.join(", ")))
         }
     }
 
@@ -871,7 +865,7 @@ impl Cfg {
         } else if self.publication_address_missing() {
             String::new()
         } else {
-            // Поле для адреса в окне теперь есть («Параметры», видно только в
+            // Поле для адреса в окне теперь есть («Связь», видно только в
             // этом режиме), и пустое значит «не задан». Выведенная догадка
             // `http://localhost/<папка базы>/hs/mcp-1c` отсюда убрана: она
             // отправляла бы пробу, проверку и третий канал туннеля на чужой

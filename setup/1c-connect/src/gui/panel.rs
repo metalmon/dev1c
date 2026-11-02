@@ -1,5 +1,5 @@
 //! Содержимое флайаута: шапка, карточка состояния, три вкладки-пивота
-//! (Параметры, Проект, Журнал), тело вкладки и подвал — слева итог
+//! (Связь, Инструменты, Журнал), тело вкладки и подвал — слева итог
 //! последнего действия, справа одна акцентная кнопка главного действия и
 //! кнопка «…» с меню остального.
 //!
@@ -43,7 +43,7 @@ fn icon() -> Arc<Image> {
     I.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, ICON_PNG.to_vec()))).clone()
 }
 
-/// Поля вкладки «Параметры». Рабочее место — обычный ввод, а не список:
+/// Поля вкладки «Связь». Рабочее место — обычный ввод, а не список:
 /// логины среды заводят позже, допустимые значения стережёт `cfg::validate`.
 /// Адреса публикации в окне нет — он считается от каталога базы
 /// (`cfg::derived_base_url`).
@@ -70,14 +70,14 @@ pub struct Panel {
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
     original: Host,
-    /// Высота видимой области тела вкладки и высота содержимого «Параметров»
+    /// Высота видимой области тела вкладки и высота содержимого «Связи»
     /// с последней отрисовки.
     viewport_h: Option<Pixels>,
     params_h: Option<Pixels>,
     /// Пара (видимая область, содержимое), по которой подбирали высоту в
     /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
     /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
-    /// содержимое «Параметров» меняется под окном (режим прячет три поля,
+    /// содержимое «Связи» меняется под окном (режим прячет три поля,
     /// диалог выбора каталога возвращает путь), и без повторной подгонки окно
     /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: его
     /// высота закреплена двумя строками (`FOOT_LINE`/`FOOT_LINES`) и от
@@ -286,7 +286,7 @@ pub fn can_save(dirty: bool, busy: bool, progress: bool) -> bool {
 ///
 /// Объясняем ровно один случай: человеку **есть что сохранить, но сейчас
 /// нельзя**. Нетронутые поля в объяснении не нуждаются — это состояние покоя
-/// вкладки «Параметры», и до 25.10.2026 подпись «Нечего сохранять — поля ещё
+/// вкладки «Связь», и до 25.10.2026 подпись «Нечего сохранять — поля ещё
 /// не менялись» висела в подвале постоянно, пересказывая погасшую кнопку.
 /// Заказчик на это и указал: «я трачу много времени на проверку таких
 /// абсурдов». Хорошая программа на недоступной кнопке, которой нечего
@@ -326,7 +326,7 @@ pub const FOOT_LINES: usize = 2;
 /// 4. путь комплекта — когда сказать больше нечего.
 ///
 /// Пункты 2 и 3 стояли наоборот, и причина не показывалась почти никогда:
-/// «Параметры» — вкладка по умолчанию, поля на ней не тронуты, а `save_hint`
+/// «Связь» — вкладка по умолчанию, поля на ней не тронуты, а `save_hint`
 /// тогда на нетронутых полях всегда говорил «Нечего сохранять». Человек
 /// видел оранжевую точку, «Не всё готово» и этот пересказ рядом — и ничего
 /// о том, что именно не готово (находка S3 итогового ревью). Саму подпись
@@ -527,7 +527,7 @@ const PROJECT_EMPTY: &str = "Читаю состояние проекта…";
 /// имеет права молчать целиком: у вкладки всегда есть что сказать хотя бы о
 /// себе самой.
 fn nothing_to_show(facts_empty: bool, rows_empty: bool) -> Option<String> {
-    (facts_empty && rows_empty).then(|| "Пока нечего показать: укажите базу в «Параметрах», затем нажмите «Проверить».".to_string())
+    (facts_empty && rows_empty).then(|| "Пока нечего показать: укажите базу на «Связи», затем нажмите «Проверить».".to_string())
 }
 
 /// Строки вкладки «Инструменты»: кружок, заголовок, подробность. Чистая — вид
@@ -656,7 +656,7 @@ pub fn undecryptable_line(fields: &[String]) -> Option<Line> {
     })
 }
 
-/// Поля вкладки «Параметры», которые режим реально показывает. В локальном
+/// Поля вкладки «Связь», которые режим реально показывает. В локальном
 /// режиме коннектор слушает loopback, а не поднимает туннель в среду —
 /// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
 /// и показывать их незачем. Всё, что не `"local"`, — режим `tunnel`.
@@ -988,7 +988,7 @@ impl Panel {
     }
 
     /// Обмер на отрисовке: как только известны и видимая область, и
-    /// содержимое «Параметров», окно подбирает высоту на их разницу — не
+    /// содержимое «Связи», окно подбирает высоту на их разницу — не
     /// только в первый раз, а при каждом обмере, заметно отличающемся от
     /// прошлого подбора (`window::needs_fit`). Цикла нет: после
     /// `window.resize` новый обмер даёт пару, для которой `fit_height_for`
@@ -1021,7 +1021,7 @@ impl Panel {
     /// — поверх, абсолютным слоем (как `Scrollable::render` в
     /// `gpui-component`). Дорожка прозрачная, бегунок 3 px (5 px при
     /// наведении), цвета бегунка — из темы (`scrollbar.thumb.background`),
-    /// режим показа — из темы. «Параметры» этим не зовёт: вкладка мерная,
+    /// режим показа — из темы. «Связь» этим не зовёт: вкладка мерная,
     /// окно подстраивается под неё, полосы там нет.
     fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement {
         div()
@@ -1275,13 +1275,13 @@ impl Render for Panel {
         // подсказку переключателя, и в левый слот подвала (спека: «причина
         // идёт туда, где для неё есть место»).
         let why = reason(&link, &ready, gate.as_deref(), ui.facts_at.as_deref());
-        // Причина недоступности «Сохранить» — только пока вкладка «Параметры»
+        // Причина недоступности «Сохранить» — только пока вкладка «Связь»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
         // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
         let busy_now = busy.is_some();
         let dirty = self.is_dirty(cx);
-        let hint = (tab == gui::Tab::Params).then(|| save_hint(dirty, busy_now, running_op)).flatten();
+        let hint = (tab == gui::Tab::Link).then(|| save_hint(dirty, busy_now, running_op)).flatten();
         // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
         // порядок держит сама `foot_left_text`, здесь только источники.
         let foot_left = foot_left_text(ui.status.as_ref(), why.as_deref(), hint.as_deref(), &ui.kit.root.display().to_string());
@@ -1327,7 +1327,7 @@ impl Render for Panel {
                 // уже фаза с часами выше: у карточки один слот под текст,
                 // второй строки это не прибавляет (заказчик 2026-10-19).
                 // Базу здесь не пишем: длинное имя сюда не влезет, а человек
-                // видит её в поле «База» на «Параметрах» (заказчик 2026-10-20).
+                // видит её в поле «База» на «Связи» (заказчик 2026-10-20).
                 div()
                     .id("status-title")
                     .flex_1()
@@ -1373,13 +1373,10 @@ impl Render for Panel {
             .underline()
             .small()
             .selected_index(gui::Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0))
-            // Подпись второй вкладки — «Инструменты» (решение владельца
-            // 30.10), а имя её состояния в коде осталось `Tab::Project`:
-            // переименование сквозь перечисление, обработчики и тесты ничего
-            // человеку не даёт, а читателю достаточно этой строки. На самой
-            // вкладке — расширение в базе, выгрузка и обмен с репозиторием,
-            // то есть инструменты работы с 1С, а не сведения о проекте.
-            .children([KitTab::new().label("Параметры"), KitTab::new().label("Инструменты"), log_tab])
+            // На второй вкладке — расширение в базе, выгрузка и обмен с
+            // репозиторием, то есть инструменты работы с 1С, а не сведения о
+            // проекте (решение владельца 30.10).
+            .children([KitTab::new().label("Связь"), KitTab::new().label("Инструменты"), log_tab])
             .on_click(cx.listener(|_, i: &usize, _, cx| {
                 let Some(t) = gui::Tab::ALL.get(*i).copied() else { return };
                 let ui = cx.global_mut::<Ui>();
@@ -1388,7 +1385,7 @@ impl Render for Panel {
                     ui.unread = 0;
                 }
                 // Состояние git читают при открытии вкладки, как в `app.js`.
-                if t == gui::Tab::Project {
+                if t == gui::Tab::Tools {
                     gui::refresh_project(cx);
                 }
                 cx.refresh_windows();
@@ -1411,7 +1408,7 @@ impl Render for Panel {
         let body: AnyElement = match tab {
             // Обмер до `.id`: `on_children_prepainted` есть у `Div`, а `.id`
             // отдаёт уже `Stateful<Div>`.
-            gui::Tab::Params => div()
+            gui::Tab::Link => div()
                 // Высота содержимого вкладки: по ней окно подбирает свою.
                 .on_children_prepainted({
                     let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
@@ -1475,7 +1472,7 @@ impl Render for Panel {
                 .into_any_element(),
             // «Инструменты» = прежние «Расширение» и «Инструменты» одной лентой:
             // сверху факты набора, ниже — каталог и состояние ветки.
-            gui::Tab::Project => {
+            gui::Tab::Tools => {
                 let ui = cx.global::<Ui>();
                 let facts = fact_rows(&project_facts(tab_facts(&ui.facts, &ui.kit_facts)));
                 let mut rows = project_rows(ui.project.as_ref());
@@ -1599,7 +1596,7 @@ impl Render for Panel {
         let more = |id: &'static str| Button::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
 
         let foot_actions: AnyElement = match tab {
-            gui::Tab::Params => {
+            gui::Tab::Link => {
                 let allowed = can_save(dirty, busy_now, has_progress);
                 // Кнопка гаснет сама, но молча — заказчик 2026-10-20: почему
                 // нельзя нажать, не видно. Причина теперь живёт в левом слоте
@@ -1662,7 +1659,7 @@ impl Render for Panel {
             // расширение, потом — выгружать в git. `Busy::Ext` и
             // `Busy::Project` не различают, что именно идёт: на время
             // работы заблокировано всё равно всё.
-            gui::Tab::Project => {
+            gui::Tab::Tools => {
                 let which = gui::project_primary(&cx.global::<Ui>().facts);
                 // Набора ещё нет — главной кнопке сказать нечего: «Установить»
                 // на пустом наборе было бы утверждением о том, чего мы не
@@ -1861,8 +1858,8 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question, pick_face,
-        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, tab_facts,
-        switch_tooltip, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
+        switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::editors;
@@ -1921,8 +1918,7 @@ mod tests {
         // прячет: незелёные факты идут на вкладку независимо от списка
         // предметов (первое правило `project_facts`), и красный `KIT`
         // появится сам — это проверено ниже.
-        let kit =
-            vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "MinGit 2.56.0.2; mcp-1c v1.23.0")];
+        let kit = vec![Check::pass(verify::KIT, "mcp-1c-windows-amd64.exe"), Check::pass(verify::TOOLS, "MinGit 2.56.0.2; mcp-1c v1.23.0")];
         let rows = fact_rows(&project_facts(tab_facts(&[], &kit)));
         let shown: Vec<String> = rows.iter().map(|(_, title, _)| title.clone()).collect();
         assert!(shown.iter().any(|t| *t == capitalized(verify::TOOLS)), "про полноту комплекта вкладка молчит: {shown:?}");
@@ -2443,7 +2439,7 @@ mod tests {
     #[test]
     fn an_empty_tools_tab_says_what_to_do() {
         let say = nothing_to_show(true, true).expect("оба списка молчат — вкладке есть что сказать о себе");
-        assert!(say.contains("Параметрах"), "{say}");
+        assert!(say.contains("«Связи»"), "подсказка обязана звать на вкладку, которая есть: {say}");
         assert!(say.contains("Проверить"), "{say}");
         assert_eq!(nothing_to_show(false, true), None, "факты есть — подсказка лишняя");
         assert_eq!(nothing_to_show(true, false), None, "строки проекта есть — подсказка лишняя");

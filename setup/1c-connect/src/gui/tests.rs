@@ -225,10 +225,15 @@ fn a_failed_tray_icon_leads_to_the_exit_path_not_a_silent_hang() {
 }
 
 #[test]
-fn three_tabs_in_the_order_the_window_draws_them() {
-    assert_eq!(Tab::ALL, [Tab::Params, Tab::Project, Tab::Log]);
+fn a_failed_save_opens_the_tab_that_holds_the_fields() {
+    assert_eq!(tab_for_unsaved_switch(), Tab::Link, "поля живут на «Связи», туда и вести");
+}
+
+#[test]
+fn tabs_are_named_as_they_are_labelled() {
+    assert_eq!(Tab::ALL, [Tab::Link, Tab::Tools, Tab::Log]);
     assert_eq!(Tab::ALL.len(), 3);
-    assert_eq!(Tab::default(), Tab::Params);
+    assert_eq!(Tab::default(), Tab::Link, "окно открывается на «Связи» — она первая по контракту");
     for (i, t) in Tab::ALL.iter().enumerate() {
         assert_eq!(Tab::ALL.iter().position(|x| x == t), Some(i));
     }

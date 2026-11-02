@@ -922,25 +922,16 @@ mod tests {
     #[test]
     fn an_old_mcp_1c_that_does_not_know_the_new_flags_gets_a_hint_to_replace_it() {
         let e = child_exit_line("mcp-1c", 2, false, "flag provided but not defined: -profile").unwrap();
-        assert!(
-            matches!(e, Event::Warn(ref t) if t.contains("старый mcp-1c") && t.contains("сборкой форка")),
-            "{e:?}"
-        );
+        assert!(matches!(e, Event::Warn(ref t) if t.contains("старый mcp-1c") && t.contains("сборкой форка")), "{e:?}");
 
         // Подсказка не для любой чужой ошибки — только для этой конкретной.
         let e2 = child_exit_line("mcp-1c", 3, false, "платформа не найдена").unwrap();
-        assert!(
-            !matches!(e2, Event::Warn(ref t) if t.contains("старый mcp-1c")),
-            "подсказка появилась на чужой ошибке: {e2:?}"
-        );
+        assert!(!matches!(e2, Event::Warn(ref t) if t.contains("старый mcp-1c")), "подсказка появилась на чужой ошибке: {e2:?}");
 
         // И не для vrunner-mcp — там та же фраза ничего не значила бы:
         // подсказка привязана к бинарю, который мы меняем на форк, а не к
         // словам в stderr.
         let e3 = child_exit_line("vrunner-mcp", 2, false, "flag provided but not defined: -profile").unwrap();
-        assert!(
-            !matches!(e3, Event::Warn(ref t) if t.contains("старый mcp-1c")),
-            "подсказка появилась у другого ребёнка: {e3:?}"
-        );
+        assert!(!matches!(e3, Event::Warn(ref t) if t.contains("старый mcp-1c")), "подсказка появилась у другого ребёнка: {e3:?}");
     }
 }

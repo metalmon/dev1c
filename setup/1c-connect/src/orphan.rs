@@ -397,7 +397,9 @@ mod tests {
     }
     #[cfg(not(windows))]
     fn take_serving_for_test(kit: &common::kit::Kit, _user: &str) -> crate::single_instance::Guard {
-        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit)).unwrap().expect("признак свободен в начале теста")
+        crate::single_instance::try_acquire("", &crate::single_instance::lock_target(kit))
+            .unwrap()
+            .expect("признак свободен в начале теста")
     }
 
     /// `owner_alive` обязана спрашивать ТОТ ЖЕ признак, что держит

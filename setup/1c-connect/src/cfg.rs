@@ -277,6 +277,11 @@ pub struct Host {
     /// словами, а не молчаливый откат на новейшую.
     #[serde(default)]
     pub platform: String,
+    /// Вид конфигурации базы для дочернего `mcp-1c` — `auto`, `generic` или
+    /// `buh_3_0` (Бухгалтерия 3.0). Разбор, допустимые значения и довод,
+    /// почему это не `profile`, — в `Cfg::configuration()`.
+    #[serde(default)]
+    pub configuration: String,
     pub db_user: String,
     pub db_password: String,
     pub base_url: String,
@@ -313,6 +318,7 @@ impl std::fmt::Debug for Host {
             .field("workstation", &self.workstation)
             .field("base_path", &self.base_path)
             .field("platform", &self.platform)
+            .field("configuration", &self.configuration)
             .field("db_user", &self.db_user)
             .field("db_password", &"<скрыт>")
             .field("base_url", &self.base_url)
@@ -350,6 +356,7 @@ impl Default for Host {
             workstation: String::new(),
             base_path: String::new(),
             platform: String::new(),
+            configuration: String::new(),
             db_user: String::new(),
             db_password: String::new(),
             base_url: String::new(),
@@ -531,6 +538,13 @@ impl Cfg {
             matches!(self.host.publication.as_str(), "auto" | "webserver"),
             "[host]: publication — \"auto\" (публикует сама программа) или \"webserver\" (уже опубликовано на Apache/IIS)"
         );
+        // Тот же приём, что у mode/publication выше: именованное, но
+        // неизвестное значение — отказ словами здесь, а не молчаливый откат
+        // на auto внутри mcp_command (там это уже было бы маскировкой
+        // опечатки человека — `Cfg::configuration`).
+        if let Err(e) = self.configuration() {
+            anyhow::bail!("{e}");
+        }
         // Пустой `base_url` — не ошибка, а «не задан»: поля для него в окне
         // нет вовсе, умолчание выводится из каталога базы
         // (`derived_base_url`), и требовать его руками значило бы заставлять
@@ -558,6 +572,39 @@ impl Cfg {
             "[host]: project — полный путь к каталогу проекта без кавычек и %, например C:\\proj\\Buh"
         );
         Ok(())
+    }
+
+    /// Вид конфигурации базы для дочернего `mcp-1c` — `auto`, `generic` или
+    /// `buh_3_0` (Бухгалтерия 3.0). У ребёнка это ключ `--profile`, не
+    /// `--configuration`: имя здесь нарочно другое — слово «профиль» в этом
+    /// продукте уже занято контрактом подключения («Разработчик»/«Бизнес-
+    /// пользователь», `2026-11-01-connection-contract.md`), и назвать тем же
+    /// словом вид конфигурации базы значило бы заставить одно слово в toml и
+    /// в окне значить два разных факта. Замер владельца
+    /// (`docs/research/2026-11-02-measured-tool-lists.md`) показал: `generic`
+    /// и `buh_3_0` отдают ОДИНАКОВЫЕ имена инструментов — вид меняет не
+    /// список, а то, что стоит за именами (какие объекты и реквизиты 1С
+    /// адресуются), и по списку эту пользу не найти.
+    ///
+    /// Пусто — `auto`, а не отказ: ребёнок сам угадывает вид по составу
+    /// конфигурации. Названное, но неизвестное значение — отказ словами со
+    /// списком допустимых: молчаливый откат на `auto` для опечатки человека
+    /// скрыл бы её — список инструментов у неё не меняется (см. замер выше),
+    /// и иначе узнать о ней просто не из чего.
+    pub fn configuration(&self) -> Result<&str, String> {
+        const ALLOWED: [&str; 3] = ["auto", "generic", "buh_3_0"];
+        let c = self.host.configuration.trim();
+        if c.is_empty() {
+            return Ok("auto");
+        }
+        if ALLOWED.contains(&c) {
+            Ok(c)
+        } else {
+            Err(format!(
+                "[host]: configuration — неизвестный вид конфигурации «{c}»; допустимые значения: {}",
+                ALLOWED.join(", ")
+            ))
+        }
     }
 
     /// Адрес Gitea среды — только то, что написано в поле `gitea`; пусто —
@@ -717,6 +764,7 @@ impl Cfg {
                 "workstation" => format!("{:?}", h.workstation),
                 "base_path" => format!("{:?}", h.base_path),
                 "platform" => format!("{:?}", h.platform),
+                "configuration" => format!("{:?}", h.configuration),
                 "db_user" => format!("{:?}", h.db_user),
                 "db_password" => format!("{:?}", db_password),
                 "base_url" => format!("{:?}", h.base_url),
@@ -1277,6 +1325,34 @@ mod tests {
         let mut c = filled();
         c.host.publication = "iis".into();
         assert!(c.validate().unwrap_err().to_string().contains("publication"));
+    }
+
+    /// Буквально из брифа задачи 2: неизвестный вид конфигурации — отказ со
+    /// списком допустимых, пустое — `auto`, а не отказ.
+    #[test]
+    fn an_unknown_configuration_is_refused_with_the_allowed_list_in_words() {
+        let mut c = sample();
+        c.host.configuration = "buh".into();
+        let err = c.configuration().unwrap_err();
+        assert!(err.contains("buh_3_0") && err.contains("generic"), "{err}");
+        c.host.configuration = "".into();
+        assert_eq!(c.configuration(), Ok("auto"), "пустое значение — это auto, а не отказ");
+    }
+
+    /// Тот же отказ доезжает через `validate()`: иначе неизвестный вид
+    /// конфигурации тихо подменился бы на `auto` только там, где его
+    /// подставляет `mcp_command` (`bridge.rs`), и опечатка человека осталась
+    /// бы незамеченной — список инструментов у неё не меняется (замер
+    /// `docs/research/2026-11-02-measured-tool-lists.md`), и больше ничего
+    /// её не покажет.
+    #[test]
+    fn validate_rejects_an_unknown_configuration() {
+        let mut c = filled();
+        c.host.configuration = "buh".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("configuration") && err.contains("buh_3_0"), "{err}");
+        c.host.configuration = "buh_3_0".into();
+        assert!(c.validate().is_ok());
     }
 
     #[test]

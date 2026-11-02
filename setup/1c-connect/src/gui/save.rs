@@ -287,6 +287,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     host.gitea = ui.cfg.host.gitea.clone();
     host.dump = carried_dump(&ui.cfg.host, &host.project);
     host.platform = ui.cfg.host.platform.clone();
+    host.configuration = ui.cfg.host.configuration.clone();
     host.tools = ui.cfg.host.tools.clone();
     host.mode = ui.cfg.host.mode.clone();
     host.publication = ui.cfg.host.publication.clone();

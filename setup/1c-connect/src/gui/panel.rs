@@ -815,6 +815,10 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
         // Поля в окне нет: версию платформы правят в toml, и `save_host`
         // переносит её из текущих параметров, как `tools` и `mode`.
         platform: String::new(),
+        // Той же причиной, что у platform выше: поля в окне нет, вид
+        // конфигурации правят в toml, и `save_host` переносит его из
+        // текущих параметров.
+        configuration: String::new(),
         db_user: v("db_user", &f.db_user),
         db_password: v("db_password", &f.db_password),
         // Человек вписывает адрес, каким открывает базу в браузере, —

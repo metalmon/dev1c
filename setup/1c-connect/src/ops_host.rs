@@ -1768,6 +1768,22 @@ fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> A
                         log(Event::Warn(format!("{}: не перечитан — {msg}", crate::cfg::FILE)));
                         last_parse_err = Some(msg);
                     }
+                    // Файл целиком не прошёл `Cfg::load` — но ужесточение
+                    // потолка записи обязано дойти до сеанса всё равно
+                    // (круг исправления 2 задачи 3, находка 3): терпимо
+                    // читаем один ключ `[host].write` из текста файла,
+                    // минуя полный разбор (`toml_render::get`). Пусто или
+                    // `read_only` — накладываем на живой `Cfg`
+                    // (`Cfg::with_access`); `read_write` из файла, который
+                    // целиком не прочитался, не доверяем — ослабление при
+                    // негодном файле донести не обязательно, решение
+                    // владельца круга исправления.
+                    if let Ok(text) = std::fs::read_to_string(kit.state_path(crate::cfg::FILE)) {
+                        let w = common::toml_render::get(&text, "[host]", "write").unwrap_or_default();
+                        if w.is_empty() || w == "read_only" {
+                            live.set(live.get().1.with_access("read_only"));
+                        }
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -3557,6 +3573,49 @@ mod tests {
             enabled.load(Ordering::Relaxed),
             "переименование рабочего места не должно гасить разрешение — признак обслуживания не о нём вовсе"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Круг исправления 2 задачи 3 (проверка безопасности), находка 3: файл
+    /// целиком может не пройти `Cfg::load` (опечатка в любом другом поле —
+    /// здесь: пустой `base_path`), а ужесточение потолка записи обязано
+    /// дойти до сеанса всё равно; ослабление — не обязано (решение
+    /// владельца).
+    #[test]
+    fn watch_mcp_tolerates_a_broken_file_to_still_tighten_the_write_ceiling() {
+        let dir = mcp_test_dir("watch-mcp-write-ceiling");
+        let kit = Kit::at(&dir);
+        let user = format!("owner-{}", std::process::id());
+        let store = crate::secrets::Store::file(kit.state());
+        let write_cfg = |base_path: &str, write: &str| {
+            let mut cfg = crate::cfg::filled_for_test();
+            cfg.host.password = String::new();
+            cfg.host.base_path = base_path.into();
+            cfg.host.write = write.into();
+            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render(&store).unwrap()).unwrap();
+        };
+        write_cfg("C:\\Bases\\Buh", "read_write");
+        crate::allow::write(&kit, true).unwrap();
+        let _guard = take_serving_for_test(&kit, &user);
+        let live = crate::session::Live::new(Cfg::default());
+        let log: Sink = Arc::new(|_| {});
+        let enabled = watch_mcp(kit.clone(), user, live.clone(), log);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(enabled.load(Ordering::Relaxed));
+        assert_eq!(live.get().1.access(), "read_write", "файл годный — читается как есть");
+
+        // Файл ломается (пустой base_path не проходит validate()), но
+        // потолок в нём — "read_only" (ужесточение).
+        write_cfg("", "read_only");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(live.get().1.access(), "read_only", "ужесточение обязано дойти даже из негодного файла");
+        assert_eq!(live.get().1.host.base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");
+
+        // Файл всё ещё ломается, но теперь несёт "read_write" — ослабление
+        // из непрочитанного целиком файла доверять не обязаны.
+        write_cfg("", "read_write");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(live.get().1.access(), "read_only", "ослабление из негодного файла — не донесённое, решение владельца");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

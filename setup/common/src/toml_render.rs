@@ -71,6 +71,35 @@ pub fn set(text: &str, section: &str, key: &str, value: &str) -> String {
     lines.join("\n")
 }
 
+/// Терпимое чтение одного значения из текста самого файла — без полного
+/// разбора TOML и без оглядки на то, проходят ли остальные строки свою
+/// проверку. Для случая, когда файл целиком не прошёл настоящий разбор
+/// (`toml::from_str`/`validate()`), а один конкретный ключ всё равно нужно
+/// прочитать (`ops_host::watch_mcp`, круг исправления 2 задачи 3 плана
+/// «тонкий срез ценности» — потолок записи обязан дойти до сеанса даже из
+/// негодного файла). Строковое значение возвращается без кавычек; ключа,
+/// секции или строки-комментария — `None`, тем же приёмом, что у `set`
+/// выше (секция узнаётся по последней встреченной `[...]`).
+pub fn get(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut cur = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            cur = t.to_string();
+            continue;
+        }
+        if cur != section || t.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = t.split_once('=') {
+            if k.trim() == key {
+                return Some(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +121,20 @@ mod tests {
         assert_eq!(set(EX, "[b]", "name", "\"B\""), "# top\n[a]\n# about x\nx = 1\nname = \"a\"\n\n[b]\nname = \"B\"\n");
         // Концы строк CRLF переживают правку.
         assert_eq!(set("[host]\r\nx = 1\r\n", "[host]", "x", "2"), "[host]\r\nx = 2\r\n");
+    }
+
+    /// Терпимое чтение одного ключа: без кавычек, по секции, мимо
+    /// комментариев и одноимённых ключей в чужой секции; отсутствующий
+    /// ключ или секция — `None`.
+    #[test]
+    fn get_reads_one_key_tolerantly() {
+        let mine = "[host]\n# комментарий\nwrite = \"read_only\"\nbase_path = \"\"\n\n[other]\nwrite = \"read_write\"\n";
+        assert_eq!(get(mine, "[host]", "write"), Some("read_only".into()));
+        assert_eq!(get(mine, "[host]", "base_path"), Some("".into()));
+        assert_eq!(get(mine, "[host]", "missing"), None);
+        assert_eq!(get(mine, "[missing]", "write"), None);
+        // Чужая секция под тем же именем ключа не подменяет свою.
+        assert_eq!(get(mine, "[other]", "write"), Some("read_write".into()));
     }
 
     #[test]

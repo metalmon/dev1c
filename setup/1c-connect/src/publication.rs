@@ -2078,6 +2078,85 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         }
     }
 
+    /// Шаг 4: проверка не решения, а ЭФФЕКТА остановки на настоящую розетку.
+    /// Поднимать для этого настоящий httpd.exe из комплекта — дорого
+    /// (платформа 1С, модуль `wsap24t.dll`, сам комплект) и необязательно:
+    /// здесь не проверяется подъём сервиса, а только то, что `kill_tracked`
+    /// и правда освобождает порт, который держит процесс из pid-файла, а не
+    /// только принимает решение на бумаге (это уже проверил `should_stop`).
+    /// Вместо httpd — настоящий посторонний процесс (`powershell.exe`), сам
+    /// слушающий настоящий TCP-порт: топология «родитель держит сокет»
+    /// не нужна для этого утверждения — довод «сокет закрывается, когда
+    /// умирает держащий его процесс» верен для любого процесса, не только
+    /// для httpd; само дерево (родитель+ребёнок) никакой тест кроме замера
+    /// на живом httpd не докажет без комплекта, и это не подмена: что
+    /// `taskkill /T` снимает дерево — задокументированное поведение
+    /// Windows, не моё утверждение.
+    ///
+    /// Образ ожидания — реальный путь powershell.exe, добытый обратно через
+    /// `holder::image_of_pid` (тот же приём, что `our_image_for_test()` для
+    /// самого тестового бинарника): не угадываем путь, а читаем тот, что
+    /// система и так знает — переживает разницу Windows PowerShell/pwsh и
+    /// различия путей на разных машинах.
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_tracked_httpd_frees_the_port() {
+        use std::io::{BufRead, BufReader};
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-stop-frees-port-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let script = "$l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); \
+            $l.Start(); [Console]::Out.WriteLine($l.LocalEndpoint.Port); [Console]::Out.Flush(); \
+            Start-Sleep -Seconds 120";
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("powershell для теста — должен быть на машине, как и у настоящего пользователя");
+        let port: u16 = {
+            let stdout = child.stdout.take().expect("stdout подключён");
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).expect("powershell печатает номер порта");
+            line.trim().parse().expect("напечатанное — число порта")
+        };
+        assert!(!port_is_free(port), "powershell обязан слушать порт к этому моменту");
+
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, child.id().to_string()).unwrap();
+        let p = Paths {
+            root: dir.clone(),
+            pub_dir: dir.join("pub"),
+            conf: dir.join("httpd.conf"),
+            pid: pid_file.clone(),
+            log: dir.join("httpd.log"),
+            module: dir.join("mod.dll"),
+            port,
+        };
+        // Ожидаемый образ — РЕАЛЬНЫЙ путь powershell у этого процесса, не
+        // угаданный: same_image сравнивает после canonicalize, и то, что
+        // мы читаем назад тем же примитивом, которым его читает и
+        // kill_tracked, делает проверку честной (как ours_for_test() для
+        // самого тестового бинарника).
+        let image = holder::image_of_pid(child.id()).expect("образ powershell обязан добываться");
+        let expected = OurHttpd { image, owner: holder::current_owner() };
+
+        kill_tracked(&p, &expected);
+
+        let freed = (0..25).any(|_| {
+            if port_is_free(port) {
+                true
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                false
+            }
+        });
+        assert!(freed, "порт {port} обязан освободиться после остановки");
+        assert!(!pid_file.exists(), "pid-файл нашего же httpd убран после остановки");
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn linux_httpd_conf_fails_readably_instead_of_writing_an_empty_runtime_dir() {
         // Path::parent() у однокомпонентного относительного пути отдаёт

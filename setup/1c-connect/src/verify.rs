@@ -649,7 +649,7 @@ fn extension_outdated(found: &str) -> Option<bool> {
 /// Чинится одним полем в окне, и ни к базе, ни к расширению отношения не
 /// имеет — поэтому совет свой, а не `PUBLICATION_HINT`.
 const PUBLICATION_ADDRESS_HINT: &str =
-    "«Параметры» → «Адрес публикации»: впишите адрес, каким открываете базу в браузере, и нажмите «Сохранить»";
+    "«Связь» → «Адрес публикации»: впишите адрес, каким открываете базу в браузере, и нажмите «Сохранить»";
 
 /// Совет, когда до базы не достучались ВОВСЕ. `PUBLICATION_HINT` тут не
 /// годится: ставить нечего — публикация либо не поднята, либо не отвечает, и
@@ -2010,7 +2010,7 @@ mod tests {
         let c = publication_responds_fact("", false, None);
         assert!(!c.ok);
         assert!(c.detail.contains("адрес публикации не задан"), "{c:?}");
-        assert!(c.hint.contains("Параметр"), "{c:?}");
+        assert!(c.hint.contains("«Связь»") && c.hint.contains("Адрес публикации"), "совет обязан назвать вкладку, которая есть: {c:?}");
         // С адресом — прежний текст про ответ.
         let known = publication_responds_fact("http://localhost/Buh/hs/mcp-1c", false, None);
         assert!(known.detail.contains("не отвечает"), "{known:?}");

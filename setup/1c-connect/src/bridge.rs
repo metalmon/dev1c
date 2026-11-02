@@ -44,20 +44,40 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     // разбирается как положено.
     //
     // `--profile` — вид конфигурации базы (`Cfg::configuration()`): пусто ⇒
-    // `auto`, ребёнок сам угадывает вид по составу конфигурации. Молчаливого
-    // отказа тут нет и быть не может: неизвестное имя `validate()` отсекает
-    // раньше, чем `Cfg` попадает сюда (см. докстроку `configuration()`),
-    // `unwrap_or` здесь — не маскировка опечатки, а тип-безопасный синоним
-    // уже проверенного значения.
+    // `auto`, ребёнок сам угадывает вид по составу конфигурации.
     //
     // `--toolset`/`--access` — какой набор инструментов поднимает ребёнок и
     // какой у него потолок записи (задача 3 плана «тонкий срез ценности»,
     // замер `docs/research/2026-11-02-measured-tool-lists.md`): при
     // `read_only` пишущие инструменты у ребёнка вообще не регистрируются
     // (`server/server.go` форка), и фильтра `tools/list` на нашей стороне
-    // нет и не будет — потолок несёт сам ребёнок. `access()` не возвращает
-    // `Result` ровно по той же причине, что `unwrap_or` у `--profile`:
-    // `validate()` уже отсёк неизвестное имя раньше.
+    // нет и не будет — потолок несёт сам ребёнок.
+    //
+    // `unwrap_or` у `--profile`/`--toolset` ниже — НЕ «значения уже
+    // проверены `validate()`», как уверяла прежняя редакция этого
+    // комментария (круг исправления финального ревью, С3 — довод был
+    // принят на слово и не выдержал прохода по коду). Эта функция сама
+    // ничьих значений не проверяет и `Result` не возвращает нарочно —
+    // проверяет ОБЁРТКА, `mcp_command_guarded` ниже, и именно через неё
+    // идут все живые вызывающие (`session.rs` — оба порта, `mcp` и
+    // `vrunner`, хотя второй `configuration`/`toolset`/`access` не
+    // спрашивает вовсе). Прямой вызов этой функции в живом коде отсутствует
+    // — он остался только у тестов этого модуля, которым страж не нужен и
+    // не должен менять подписи их `Cfg`.
+    //
+    // Это важно именно потому, что `Cfg` сюда попадает НЕ всегда проверенным:
+    // окно читает файл параметров через `Cfg::load_unchecked` (`gui/mod.rs`
+    // при запуске, `gui/window.rs::reread_and_recheck` при каждом показе
+    // флайаута) — `validate()` эта дорога не зовёт вовсе — и кладёт
+    // прочитанное прямо в живую ячейку сеанса (`gui::adopt_cfg` →
+    // `Session::update_cfg`), минуя сохранение (`validate()` стоит только в
+    // `save_host`). Опечатка в `toolset`/`configuration`, вписанная в toml
+    // руками, доходит до этой функции как есть — без обёртки ниже
+    // `unwrap_or` тут глушил бы её молча, подставляя `auto`/`business`.
+    // `access()` эту защиту не разделяет и не должна: `&str`, не `Result` —
+    // неизвестный потолок у него идёт ребёнку как есть, и форк отказывает
+    // по нему сам, громко (`mcp-1c`: `ParseAccessMode`, `os.Exit(1)`,
+    // измерено по исходнику форка).
     c.args([
         "--base",
         &cfg.base_url(),
@@ -92,7 +112,20 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
 /// попадает. `mcp_command` остаётся отдельной, чистой сборкой без похода на
 /// диск/в сеть — её держит `the_install_command_passes_the_password_as_a_flag`
 /// и соседние тесты, которым страж не нужен и не должен менять сигнатуру.
+///
+/// Круг исправления финального ревью, С3: та же причина, по которой здесь
+/// стоит страж владельца порта, требует и проверки значений, которые
+/// `mcp_command` сама не проверяет (`configuration()`/`toolset()`) — эта
+/// функция единственная стоит перед КАЖДЫМ живым вызывающим, независимо от
+/// того, каким путём непроверенный `Cfg` до неё добрался (путей несколько,
+/// см. докстроку `mcp_command`). Отказ — текстом самого метода, со списком
+/// допустимых значений: человек уже видел его у `validate()`, повторять
+/// своими словами незачем. `access()` сюда не идёт — у него нет `Result`, и
+/// опечатку в потолке записи отказывает сам ребёнок (см. докстроку
+/// `mcp_command`).
 pub fn mcp_command_guarded(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Result<tokio::process::Command, String> {
+    cfg.configuration()?;
+    cfg.toolset()?;
     crate::publication::guard_own_listener(cfg, kit)?;
     Ok(mcp_command(cfg, kit))
 }
@@ -1683,6 +1716,50 @@ mod tests {
         cfg.host.publication = "auto".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл") && err.contains("пароль базы не отправлен"), "{err}");
+    }
+
+    /// Круг исправления финального ревью, С3: `mcp_command` сам `Result` не
+    /// возвращает и опечатку в `toolset`/`configuration` глушит `unwrap_or`
+    /// (докстрока там называла это «уже проверенным значением» — неверно на
+    /// пути окна, см. `last-round-report.md`). Отказывать обязана именно эта
+    /// обёртка — она и так стоит перед КАЖДЫМ живым вызывающим (`session.rs`),
+    /// независимо от того, как непроверенный `Cfg` до неё добрался
+    /// (`load_unchecked` → `adopt_cfg` → живая ячейка, путей несколько).
+    /// `filled_for_test()` сам `validate()` не зовёт — это и есть
+    /// непроверенный `Cfg`, тот самый вход.
+    #[test]
+    fn mcp_command_guarded_refuses_a_bad_toolset_before_the_guard_or_the_password() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.toolset = "мусор".into();
+        cfg.host.db_password = "секрет-базы".into();
+        let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
+        assert!(err.contains("toolset") && err.contains("допустимые значения"), "{err}");
+    }
+
+    /// Тот же приём и тот же довод — для вида конфигурации.
+    #[test]
+    fn mcp_command_guarded_refuses_a_bad_configuration_before_the_guard_or_the_password() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.configuration = "мусор".into();
+        cfg.host.db_password = "секрет-базы".into();
+        let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
+        assert!(err.contains("configuration") && err.contains("допустимые значения"), "{err}");
+    }
+
+    /// Годные значения новую проверку не задевают: отказ всё равно приходит
+    /// — но от стража (пустой каталог состояния, pid-файла нет), не от
+    /// проверки `toolset`/`configuration`. Доказывает, что новая проверка не
+    /// стала второй причиной отказа там, где человек ничего не напутал.
+    #[test]
+    fn mcp_command_guarded_lets_good_toolset_and_configuration_reach_the_guard() {
+        let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-good-values-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.toolset = "developer".into();
+        cfg.host.configuration = "generic".into();
+        let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
+        assert!(err.contains("pid-файл"), "{err}");
     }
 
     /// The test binary itself as the child: `__echo_child` below runs one of

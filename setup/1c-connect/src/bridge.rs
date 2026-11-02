@@ -255,6 +255,16 @@ pub fn disabled_text(reason: Option<&str>) -> String {
     }
 }
 
+/// Текст отказа на вызов (и на пустой `tools/list`) канала vrunner, пока
+/// потолок записи — «только чтение». Причина другая, чем у выключенных MCP
+/// (`disabled_text`), и читатель чинит другое: там дело в переключателе
+/// «MCP», здесь — в переключателе «Запись в базу». Решение владельца 2.11:
+/// под этим потолком канал vrunner не предлагает ничего — своего списка
+/// «какие инструменты пишут в базу» не заводим, расхождение с реальностью
+/// дало бы молчаливо неверный результат в обе стороны.
+pub const VRUNNER_CEILING_TEXT: &str =
+    "потолок записи — «только чтение»: канал vrunner под этим потолком не предлагает инструментов (переключите «Запись в базу» → «Чтение и запись»)";
+
 /// Тот же счёт, что в `handle_request` (`off`), но отдельной функцией:
 /// `pipe_jsonrpc` спрашивает его не на каждый вызов, а на каждый такт
 /// проверки рестарта — не ради вызова агента, а чтобы решить, жить ребёнку
@@ -534,6 +544,14 @@ where
     // при рестарте остаются здесь и уходят уже новому, в своём порядке.
     let mut pending_frames: std::collections::VecDeque<Frame> = std::collections::VecDeque::new();
     let (mut gen, mut cfg) = rules.live.get();
+    // Один раз при подъёме канала — не на каждый вызов: разработчик должен
+    // узнать сразу, почему vrunner вдруг не предлагает ни одного
+    // инструмента, а не гадать между сломанным vrunner и своим же потолком.
+    if rules.inject && cfg.access() == "read_only" {
+        log(Event::Say(format!(
+            "{who}: потолок записи — «только чтение», инструменты разработчика сняты (переключите «Запись в базу» → «Чтение и запись», чтобы вернуть)"
+        )));
+    }
     // Первый ребёнок — тем же `cmd`, что передал вызывающий; следующие (если
     // дело дойдёт до рестарта) — свежей сборкой по `rules.rebuild`.
     let mut next_cmd = Some(cmd);
@@ -1098,7 +1116,14 @@ async fn handle_request(
     let (_, cfg) = rules.live.get();
     let empty: Vec<String> = Vec::new();
     let tools = cfg.host.tools.clone();
-    let allowed: &[String] = if off { &empty } else { &tools };
+    // Потолок «только чтение» закрывает список vrunner точно как выключенные
+    // MCP — решение владельца 2.11: различать внутри этого списка безопасные
+    // инструменты от пишущих нечем, и свой список для этого не заводим (он
+    // разошёлся бы с реальностью). `cfg` — уже свежий снимок на этот самый
+    // вызов (`rules.live.get()` выше, не захваченный при старте соединения),
+    // поэтому переключение потолка само подхватывается без рестарта моста.
+    let read_only = cfg.access() == "read_only";
+    let allowed: &[String] = if off || read_only { &empty } else { &tools };
     let defaults = connection_args(&cfg);
     match jsonrpc::route_request_with(&line, allowed, &defaults) {
         Route::Drop => Ok(()),
@@ -1106,25 +1131,41 @@ async fn handle_request(
             let _ = out.send(jsonrpc::error_reply(&id, code, &format!("мост 1c-connect: {why}"))).await;
             Ok(())
         }
-        Route::ListRequest { id, line } => match stdin {
-            Some(s) => {
-                pending.lock().unwrap().insert(key(&id), (id, tools.clone()));
-                forward_counted(s, &line, in_flight, reply_expected).await
+        Route::ListRequest { id, line } => {
+            // Потолок «только чтение» — список пуст целиком, включая свои
+            // (`project_status`/`pull`/`push`): то же решение владельца, что
+            // у `allowed` выше — различать внутри vrunner безопасные
+            // инструменты от пишущих нечем. Ребёнка даже не спрашиваем: его
+            // ответ всё равно был бы вырезан без остатка.
+            if read_only {
+                let _ = out.send(jsonrpc::list_reply(&id, Vec::new())).await;
+                return Ok(());
             }
-            // Ребёнка нет (спячка) — список инструментов редактору отвечаем
-            // своими: тем же приёмом, которым отвечается `tools/list`,
-            // оставшийся без ответа на уходе ребёнка (конец этой функции,
-            // `unanswered` ниже) — список в редакторе остаётся живым, как
-            // того требует заголовок `ops_host::run_mcp`.
-            None => {
-                let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
-                let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(local))).await;
-                Ok(())
+            match stdin {
+                Some(s) => {
+                    pending.lock().unwrap().insert(key(&id), (id, tools.clone()));
+                    forward_counted(s, &line, in_flight, reply_expected).await
+                }
+                // Ребёнка нет (спячка) — список инструментов редактору отвечаем
+                // своими: тем же приёмом, которым отвечается `tools/list`,
+                // оставшийся без ответа на уходе ребёнка (конец этой функции,
+                // `unanswered` ниже) — список в редакторе остаётся живым, как
+                // того требует заголовок `ops_host::run_mcp`.
+                None => {
+                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                    let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(local))).await;
+                    Ok(())
+                }
             }
-        },
+        }
         Route::Disabled { id, tool } => {
+            // Три разные причины — три разных текста: человек чинит не одно
+            // и то же в ответ на выключенные MCP, на потолок записи и на
+            // обычный белый список `[host] tools`.
             let text = if off {
                 refusal_text()
+            } else if read_only {
+                VRUNNER_CEILING_TEXT.to_string()
             } else {
                 format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)")
             };
@@ -1160,6 +1201,14 @@ async fn handle_request(
         Route::OurCall { id, tool, args } => {
             if off {
                 let _ = out.send(jsonrpc::text_reply(&id, &refusal_text(), true)).await;
+                return Ok(());
+            }
+            // Без исключений (решение владельца): `project_status`/`pull`/
+            // `push` — тоже инструменты vrunner, и потолок «только чтение»
+            // закрывает их не меньше `cf_load`/`infobase_delete` — иначе
+            // «агент не может менять данные» было бы правдой лишь отчасти.
+            if read_only {
+                let _ = out.send(jsonrpc::text_reply(&id, VRUNNER_CEILING_TEXT, true)).await;
                 return Ok(());
             }
             // Свежий `Project` из того же снимка `cfg`, что и выше — не из
@@ -1889,6 +1938,12 @@ mod tests {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.tools = allowed.iter().map(|s| s.to_string()).collect();
         cfg.host.project = std::env::temp_dir().to_string_lossy().into_owned();
+        // Эти тесты писаны до потолка записи и проверяют другое (белый
+        // список `tools`, переключатель, рестарт) — им нужен прежний
+        // «всё разрешено по списку», не пустая строка, которая с решения
+        // владельца 1.11 значит `read_only` по умолчанию. Сам потолок
+        // проверяют отдельные тесты ниже, с `read_only` явно.
+        cfg.host.write = "read_write".into();
         cfg
     }
 
@@ -1908,6 +1963,18 @@ mod tests {
             std::sync::Arc::new(move || running),
             enabled,
         )
+    }
+
+    /// Как `rules`, но с потолком записи «только чтение» — для тестов этой
+    /// правки (решение владельца 2.11: канал vrunner под этим потолком не
+    /// предлагает ничего). Прочие тесты файла проверяют другое и ждут
+    /// прежнего «читай-пиши» — см. довод у `test_cfg`.
+    fn rules_read_only(allowed: &[&str], running: usize) -> Rules {
+        let r = rules(allowed, running);
+        let mut cfg = r.live.get().1;
+        cfg.host.write = "read_only".into();
+        r.live.set(cfg);
+        r
     }
 
     /// Журнал, который ничего не делает — тестам, которым нужны только ответы агенту.
@@ -2047,6 +2114,45 @@ mod tests {
         assert_eq!(replies[0]["result"]["isError"], true);
         assert!(replies[0]["result"]["content"][0]["text"].as_str().unwrap().contains("1c-connect.toml"));
         assert!(!raw.contains("child ran"));
+    }
+
+    /// Решение владельца 2.11: «если режим только чтения, значит только
+    /// чтения, без исключений» — список vrunner пуст целиком, не только без
+    /// `cf_load` из `[host] tools`. Своего списка «какие инструменты
+    /// пишут в базу» не заводим, значит и свои (`project_status`/`pull`/
+    /// `push`) под этим потолком не предлагаются — различить их тут нечем.
+    #[tokio::test]
+    async fn tools_list_is_empty_under_the_read_only_ceiling() {
+        let (replies, raw, _) =
+            talk(("BRIDGE_SCRIPT", "1"), rules_read_only(&["cf_load"], 0), &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#]).await;
+        assert_eq!(replies.len(), 1, "{raw}");
+        assert_eq!(replies[0]["result"]["tools"].as_array().unwrap(), &Vec::<Value>::new(), "{raw}");
+    }
+
+    /// Любой вызов — из белого списка toml или свой (`OurCall`) — отказывает
+    /// одним и тем же текстом про потолок, не про выключенные MCP
+    /// (`DISABLED_TEXT`) и не про «выключен в 1c-connect.toml» ([host]
+    /// tools): причина другая, и разработчик чинит другое.
+    #[tokio::test]
+    async fn any_tool_call_is_refused_under_the_read_only_ceiling_with_its_own_reason() {
+        let (replies, raw, _) = talk(
+            ("BRIDGE_SCRIPT", "1"),
+            rules_read_only(&["cf_load"], 0),
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_status","arguments":{}}}"#,
+            ],
+        )
+        .await;
+        assert_eq!(replies.len(), 2, "{raw}");
+        for r in &replies {
+            assert_eq!(r["result"]["isError"], true, "{raw}");
+            let text = r["result"]["content"][0]["text"].as_str().unwrap();
+            assert_eq!(text, VRUNNER_CEILING_TEXT, "{raw}");
+            assert!(!text.contains("1c-connect.toml"), "{raw}");
+            assert_ne!(text, DISABLED_TEXT, "{raw}");
+        }
+        assert!(!raw.contains("child ran"), "cf_load не должен был дойти до ребёнка: {raw}");
     }
 
     #[tokio::test]
@@ -2422,6 +2528,35 @@ mod tests {
         assert!(!text.contains("ibconnection") && !text.contains("db-user"), "{text}");
     }
 
+    /// Решение владельца — закрыть потолком vrunner (778N), не mcp-1c
+    /// (777N): у того нет ни белого списка, ни своих инструментов, и
+    /// разбор JSON-RPC он не ведёт вовсе (`inject == false`) — его потолок
+    /// несёт сам ребёнок ключом `--access` (`mcp_command_guarded`). Этот
+    /// тест ставит `read_only` в ту же `cfg`, что видел бы vrunner, и
+    /// проверяет, что список и вызов по-прежнему приходят от ребёнка как
+    /// есть — правка этого места не задела.
+    #[tokio::test]
+    async fn the_mcp_port_ignores_the_write_ceiling_entirely() {
+        let mut rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.write = "read_only".into();
+        rules.live = Live::new(cfg);
+        let (replies, raw, _) = talk(
+            ("BRIDGE_SCRIPT", "1"),
+            rules,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"infobase_delete","arguments":{}}}"#,
+            ],
+        )
+        .await;
+        let list = replies.iter().find(|r| r["id"] == 1).unwrap();
+        let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["cf_load", "infobase_delete", "task_status"], "{raw}");
+        let call = replies.iter().find(|r| r["id"] == 2).unwrap();
+        assert_eq!(call["result"]["content"][0]["text"], "child ran infobase_delete", "{raw}");
+    }
+
     #[tokio::test]
     async fn a_session_limit_answer_adds_one_journal_line() {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2619,6 +2754,46 @@ mod tests {
             "MARKER UserB",
             "второй вызов должен был дойти до ребёнка, поднятого уже на новых параметрах"
         );
+        w.shutdown().await.unwrap();
+    }
+
+    /// Тот же приём, что уже проверен выше для рестарта параметров
+    /// (`config_change_restarts_the_child_with_fresh_values`) и для
+    /// `--access` (`rebuilding_the_command_after_the_ceiling_changes_carries_the_new_access`):
+    /// смена потолка записи на живом соединении видна следующему же
+    /// запросу, без переподключения агента — потому что `handle_request`
+    /// читает его из `rules.live.get()` заново на каждый вызов, не из
+    /// значения, захваченного при приёме соединения.
+    #[tokio::test]
+    async fn the_read_only_ceiling_switches_live_without_reconnecting() {
+        let cfg_a = test_cfg(&["cf_load"]);
+        let live = Live::new(cfg_a.clone());
+        let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT", "1")));
+        let cmd0 = make_cmd(&cfg_a);
+        let rules =
+            Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), Arc::new(AtomicBool::new(true)));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (r, mut w) = tokio::io::split(ours);
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        let list1 = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        w.write_all(list1).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let reply1 = wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":1")).await;
+        assert!(reply1.contains("cf_load"), "потолок «чтение-запись» — список как раньше: {reply1}");
+
+        let mut cfg_b = live.get().1;
+        cfg_b.host.write = "read_only".into();
+        live.set(cfg_b);
+        let list2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        w.write_all(list2).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let reply2 = wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":2")).await;
+        let v: Value = serde_json::from_str(&reply2).unwrap();
+        assert_eq!(v["result"]["tools"].as_array().unwrap(), &Vec::<Value>::new(), "потолок сменился без переподключения: {reply2}");
         w.shutdown().await.unwrap();
     }
 

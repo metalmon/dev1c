@@ -33,9 +33,15 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     // `mcp-1c` КЛЮЧ ПЕРЕБИВАЕТ переменную (`internal/config/config.go`,
     // `cfg := config.Load()` и только потом перезапись из флага) — оставь
     // `--password` рядом с переменной, и он победил бы её, обнулив всю
-    // правку. `--base`/`--user`/`--dump`/`--profile`/`--toolset`/`--access`/
-    // `--quiet` остаются ключами по другой причине — они не секреты, и
-    // переписывать их в переменные нет смысла.
+    // правку. `--base`/`--user`/`--dump`/`--profile`/`--toolset`/`--access`
+    // остаются ключами по другой причине — они не секреты, и переписывать их
+    // в переменные нет смысла. `--quiet` среди них больше нет (задача 4
+    // плана «тонкий срез ценности», шаг 0): комплект теперь несёт сборку
+    // форка (`v1.6.0-14-g02d0fee`), а форк этого ключа не знает вовсе —
+    // замер ведущего 2.11 прямым запуском `--help` и ночная проба
+    // `probe-tools.py` показали, что снятие безопасно: форк по stdio без
+    // `--quiet` не сыплет посторонних строк в поток, `tools/list`
+    // разбирается как положено.
     //
     // `--profile` — вид конфигурации базы (`Cfg::configuration()`): пусто ⇒
     // `auto`, ребёнок сам угадывает вид по составу конфигурации. Молчаливого
@@ -63,7 +69,6 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
         cfg.toolset().unwrap_or("business"),
         "--access",
         cfg.access(),
-        "--quiet",
     ]);
     c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
@@ -1565,6 +1570,24 @@ mod tests {
         let envs: Vec<(String, String)> =
             c.as_std().get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into(), v?.to_string_lossy().into()))).collect();
         assert!(envs.contains(&("MCP_1C_PASSWORD".into(), "секрет-базы".into())), "{envs:?}");
+    }
+
+    /// Задача 4 плана «тонкий срез ценности», шаг 0 (блокирующий): комплект
+    /// переезжает на сборку форка (`v1.6.0-14-g02d0fee`), а у форка нет
+    /// ключа `--quiet` — замер ведущего 2.11 прямым запуском `--help`
+    /// (форк знает `--profile`/`--toolset`/`--access`, но не `--quiet`;
+    /// upstream v1.23.0 — наоборот). Оставь `--quiet` в аргументах, и
+    /// ребёнок умирает на старте с «flag provided but not defined: -quiet»
+    /// — MCP не поднимается вовсе ни с одним из двух бинарей разом (у
+    /// upstream умирает `--profile`). Снятие безопасно: ночная проба
+    /// `probe-tools.py` поднимала форк без `--quiet` и `tools/list`
+    /// разобрался, посторонних строк в stdout не было.
+    #[test]
+    fn mcp_command_carries_no_quiet_flag_the_fork_does_not_know() {
+        let cfg = crate::cfg::filled_for_test();
+        let c = mcp_command(&cfg, &kit_for_test());
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a == "--quiet"), "форк не знает --quiet, а комплект теперь несёт его сборку: {args:?}");
     }
 
     /// Круг исправления 2, пункт 1 (находка автоматической проверки

@@ -571,6 +571,13 @@ impl Cfg {
         }
         let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
         let mut cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
+        // Пароли `[host]` открываем ДО того, как клонировать его в
+        // одноэлементный список ниже: иначе клон уносит в `connections`
+        // шифртекст, который ждут открытым текстом (круг починки 1, находка
+        // 1 — `cfg.current()` задачи 3 читал бы пароль не того вида).
+        let mut bad = Vec::new();
+        cfg.host.password = open_or_mark(store, "password", &cfg.host.password, &mut bad);
+        cfg.host.db_password = open_or_mark(store, "db_password", &cfg.host.db_password, &mut bad);
         // Блоков `[[connection]]` нет, а прежняя секция `[host]` непуста —
         // список из одного: так выглядят все уехавшие комплекты, включая
         // эталонный, и это законный вид файла, а не устаревший (общее
@@ -584,6 +591,16 @@ impl Cfg {
             cfg.current = only.name.clone();
             cfg.connections = vec![only];
         }
+        // Пароли КАЖДОГО соединения — настоящих `[[connection]]`-блоков тоже,
+        // не только клона `[host]` выше (который к этой точке уже открыт и
+        // повторное открытие его не трогает: `Store::open` без префикса
+        // `enc1:` отдаёт значение как есть). Без этого прохода пароль
+        // настоящего блока оставался бы шифртекстом, а отказ расшифровки —
+        // молчал бы, не попадая в `undecryptable` (круг починки 1, находка 1).
+        for c in cfg.connections.iter_mut() {
+            c.password = open_or_mark(store, "password", &c.password, &mut bad);
+            c.db_password = open_or_mark(store, "db_password", &c.db_password, &mut bad);
+        }
         // `current` называет то, чего нет среди соединений — отказ словами
         // с именем: человек правил файл руками и должен узнать, что
         // опечатался, а не получить тихий выбор первого (на что смотрит
@@ -591,9 +608,6 @@ impl Cfg {
         if !cfg.current.is_empty() && !cfg.connections.iter().any(|c| c.name == cfg.current) {
             anyhow::bail!("{FILE}: current называет соединение «{}», которого нет среди [[connection]]", cfg.current);
         }
-        let mut bad = Vec::new();
-        cfg.host.password = open_or_mark(store, "password", &cfg.host.password, &mut bad);
-        cfg.host.db_password = open_or_mark(store, "db_password", &cfg.host.db_password, &mut bad);
         cfg.undecryptable = bad;
         Ok((cfg, true))
     }
@@ -2223,5 +2237,36 @@ mod tests {
 
         let e = Cfg::load_unchecked(&kit_with("current = \"Ромашка\"\n\n[[connection]]\nname = \"Buh\"\n")).unwrap_err();
         assert!(format!("{e:#}").contains("Ромашка"), "отказ называет имя, которого нет: {e:#}");
+    }
+
+    /// Круг починки 1, находка 1: пароль НАСТОЯЩЕГО блока `[[connection]]`
+    /// обязан открыться точно так же, как пароль `[host]` — не только у
+    /// клона, который `load_raw` делает из прежнего файла, а у каждого
+    /// элемента списка.
+    #[test]
+    fn every_connection_blocks_password_is_opened_not_left_as_ciphertext() {
+        let s = secrets::Store::file(&tmp("two-connections-password"));
+        let sealed = s.seal("password", "секрет2").unwrap();
+        let text = format!(
+            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nbase_path = \"C:\\\\Bases\\\\Buh\"\n\n[[connection]]\nname = \"Ромашка\"\nbase_path = \"C:\\\\Bases\\\\Ромашка\"\npassword = {sealed:?}\n"
+        );
+        let kit = kit_with(&text);
+        let c = Cfg::load_unchecked_with(&kit, &s).unwrap();
+        assert_eq!(c.connections.len(), 2);
+        assert_eq!(c.connections[1].password, "секрет2", "пароль второго соединения обязан открыться, а не остаться шифртекстом");
+    }
+
+    /// Круг починки 1, находка 1: пароль соединения, который не открылся
+    /// (чужой шифртекст), попадает в `undecryptable` — так же, как пароль
+    /// `[host]` уже умеет; раньше для соединений это молчало.
+    #[test]
+    fn a_connections_undecryptable_password_is_named_in_the_list() {
+        let (mine, theirs) = (secrets::Store::file(&tmp("conn-u1")), secrets::Store::file(&tmp("conn-u2")));
+        let sealed = mine.seal("password", "секрет").unwrap();
+        let text = format!("current = \"Ромашка\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = {sealed:?}\n");
+        let kit = kit_with(&text);
+        let c = Cfg::load_unchecked_with(&kit, &theirs).expect("окно не отказывает на чужом шифртексте");
+        assert_eq!(c.connections[0].password, "", "поле обязано быть пустым, а не мусором");
+        assert!(c.undecryptable.contains(&"password".to_string()), "{:?}", c.undecryptable);
     }
 }

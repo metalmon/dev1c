@@ -1451,24 +1451,49 @@ fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
     arranged
 }
 
-/// Параметры для отчёта без паролей. Маска «…» ставится только НЕпустому полю: безусловная маска на пустом поле сообщала бы в отчёте «пароль есть», хотя его нет вовсе (Minor ревью задачи 7 — `password` до этой правки маскировался без проверки, `db_password` рядом — уже правильно).
+/// Прячет секреты ОДНОГО соединения — общее правило для `host` и для
+/// каждого элемента `connections` (круг починки 1, находка 2: `cfg_for_report`
+/// маскировал только `c.host.*`, а печатал `connections` как есть, то есть
+/// пароли соединений уходили в `last-check.txt` открытым текстом — отчёт,
+/// который человек прикладывает к обращению в поддержку).
+///
+/// Маска «…» ставится только НЕпустому полю: безусловная маска на пустом
+/// поле сообщала бы в отчёте «пароль есть», хотя его нет вовсе (Minor ревью
+/// задачи 7 — `password` до той правки маскировался без проверки, `db_password`
+/// рядом — уже правильно).
+///
+/// Туннельные поля (`server`, `password` рабочего места) снимаются целиком,
+/// не маской, когда СВОЕМУ режиму соединения среда не нужна
+/// (`mode_needs_env`) — тем же правилом, что раньше решало за `[host]`: в
+/// локальном режиме туннельных полей в toml обычно нет вовсе, и печатать
+/// умолчание образца («192.168.1.10:3393», которого никто не задавал) нельзя
+/// (находка соседней сессии 2026-10-21). Правило читает `mode` ИЗ ТОГО ЖЕ
+/// соединения, не из `host` снаружи: у соединения, склеенного из прежнего
+/// `[host]`, `mode` ровно тот же (клон), а у настоящего `[[connection]]`
+/// своё умолчание «local» (`Host::default`) — тот же довод, что и у `[host]`,
+/// применённый к каждому соединению по отдельности, а не только к первому.
+/// `db_password` эта оговорка не касается ни там, ни тут: это пароль
+/// пользователя БАЗЫ, не рабочего места, и он нужен независимо от режима.
+fn redact(h: &mut crate::cfg::Host) {
+    if !h.password.is_empty() {
+        h.password = "…".into();
+    }
+    if !h.db_password.is_empty() {
+        h.db_password = "…".into();
+    }
+    if !crate::cfg::mode_needs_env(&h.mode) {
+        h.server.clear();
+        h.password.clear();
+    }
+}
+
+/// Параметры для отчёта без паролей — ни у `host`, ни у единого соединения
+/// в `connections` (`redact` выше решает по одному правилу за обоих).
 pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     let mut c = cfg.clone();
-    if !c.host.password.is_empty() {
-        c.host.password = "…".into();
-    }
-    if !c.host.db_password.is_empty() {
-        c.host.db_password = "…".into();
-    }
-    // В локальном режиме туннельных полей в toml рабочего места обычно нет
-    // вовсе, и при чтении на их место встаёт умолчание образца. Печатать его
-    // нельзя: так в отчёте стенда и появился `server = "192.168.1.10:3393"` —
-    // адрес, которого никто не задавал и которым никто не пользуется (находка
-    // соседней сессии 2026-10-21). Окно эти поля в локальном режиме тоже не
-    // показывает; отчёт держится того же правила.
-    if !crate::cfg::mode_needs_env(&c.host.mode) {
-        c.host.server.clear();
-        c.host.password.clear();
+    redact(&mut c.host);
+    for conn in c.connections.iter_mut() {
+        redact(conn);
     }
     toml::to_string(&c).unwrap_or_default()
 }
@@ -1585,6 +1610,31 @@ mod tests {
         cfg.host.db_password = "секрет базы".into();
         let report = cfg_for_report(&cfg);
         assert!(report.contains("password = \"…\"") && report.contains("db_password = \"…\""), "{report}");
+    }
+
+    /// Круг починки 1, находка 2: `cfg_for_report` маскировал только
+    /// `c.host.*`, а печатал `toml::to_string(&c)` целиком — то есть пароли
+    /// в `connections` уходили в отчёт (`last-check.txt`, который человек
+    /// прикладывает к обращению в поддержку) открытым текстом. Правило
+    /// маски обязано быть ОДНО на `host` и на каждое соединение.
+    #[test]
+    fn connections_passwords_do_not_leak_into_the_report() {
+        let mut cfg = crate::cfg::filled_for_test();
+        // Собственное значение, не совпадающее с `workstation = "dev1"` у
+        // того же `Host` (иначе проверка «не утекло» ловила бы законное
+        // совпадение строк, а не маску).
+        cfg.host.password = "секрет_host".into();
+        cfg.host.db_password = "секрет_базы_1".into();
+        let mut second = cfg.host.clone();
+        second.name = "Ромашка".into();
+        second.password = "секрет_2".into();
+        second.db_password = "секрет_базы_2".into();
+        cfg.connections = vec![cfg.host.clone(), second];
+        let report = cfg_for_report(&cfg);
+        assert!(!report.contains("секрет_host"), "пароль host.password утёк немаскированным: {report}");
+        assert!(!report.contains("секрет_базы_1"), "{report}");
+        assert!(!report.contains("секрет_2"), "{report}");
+        assert!(!report.contains("секрет_базы_2"), "{report}");
     }
 
     fn test_ctx(mode: &str) -> Ctx {

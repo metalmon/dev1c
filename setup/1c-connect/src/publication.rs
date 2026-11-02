@@ -754,11 +754,58 @@ fn no_window(cmd: &mut std::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
-/// Гасит отслеженный httpd (или просит его остановиться), прежде чем
-/// поднимать новый. Только Windows: на Linux остановкой ведает `-k stop`
-/// по своему файлу идентификатора.
+/// Итог сверки личности процесса из pid-файла перед остановкой — ТРИ исхода,
+/// не два: важно не только «гасить или нет», но и можно ли забыть сам
+/// pid-файл как мёртвую запись (тем же правилом, что у `refuse_unless_ours`,
+/// круг 5 исправления задачи 1).
+///
+/// - `Stop` — личность подтверждена, это наш httpd.
+/// - `Foreign` — личность подтверждена ЧУЖОЙ: процесса нет вовсе (мёртв или
+///   не хватило прав посмотреть), образ другой, или владелец другой. Во всех
+///   трёх случаях запись в pid-файле мёртвая для НАС, и её можно забыть —
+///   встать на неё больше нечему (решение ведущего, пункт 5 находки).
+/// - `Unknown` — ни подтвердить, ни исключить не вышло (владельца не
+///   добыть ни у кого из двоих). Закрываемся, а не открываемся: не гасим, но
+///   и файл не трогаем — вдруг это и правда наш процесс.
+///
+/// Чистая функция, без похода в систему: добыча сведений
+/// (`holder::image_of_pid`, `holder::owner_of_pid`) отдельно от решения, тем
+/// же приёмом, что `ensure_state_decision`/`env_missing_of` в `ops_host.rs`.
+///
+/// **Отступление от буквального текста брифа задачи 7** (тот предлагал
+/// сверять только имя образа): цена ошибки здесь — не утечка пароля
+/// словами, а СНЯТИЕ ЧУЖОЙ ПРОГРАММЫ, и находка автоматической проверки
+/// безопасности по кругу 4/5 (см. `holder::image_of_pid`/`owner_of_pid`)
+/// прямо называет эту задачу третьим потребителем ОБОИХ барьеров: образ
+/// один не держит — комплект лежит в корне диска, и сосед по терминальному
+/// серверу запускает НАШ ЖЕ `httpd.exe` со своим конфигом, путь образа
+/// совпадает идеально. Владелец — барьер, который без наших учётных данных
+/// не обойти.
 #[cfg(windows)]
-fn kill_tracked(p: &Paths) {
+#[derive(Debug)]
+enum StopDecision {
+    Stop,
+    Foreign(String),
+    Unknown(String),
+}
+
+#[cfg(windows)]
+fn should_stop(image: Option<&Path>, owner: Option<&str>, expected: &OurHttpd) -> StopDecision {
+    todo!("шаг 3: реализовать сверку образа и владельца, {image:?} {owner:?} {expected:?}")
+}
+
+/// Гасит отслеженный httpd, а если он не отслежен в этом процессе (коннектор
+/// перезапустился без чистого выхода, или гасим публикацию прошлого сеанса)
+/// — по pid-файлу, проверив личность процесса (`should_stop`) прежде чем
+/// кого-либо убивать. Только Windows: на Linux остановкой ведает `-k stop`
+/// по своему файлу идентификатора — там им действительно ведает система.
+#[cfg(windows)]
+fn kill_tracked(p: &Paths, expected: &OurHttpd) {
+    // TODO(шаг 3): заменить на остановку по pid-файлу с проверкой личности
+    // (`should_stop`) и `taskkill /T /F` — замер 2.11.2026 показал, что этот
+    // `-k stop` печатает «The 'Apache2.4' service is not started» и не
+    // останавливает ничего.
+    let _ = expected;
     if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
         let _ = h.child.kill();
         let _ = h.child.wait();
@@ -784,9 +831,9 @@ fn kill_tracked(p: &Paths) {
 /// кладём в Job Object с `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, и уход
 /// последнего хэндла (конец этого процесса) гасит httpd вместе с ним.
 #[cfg(windows)]
-pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
+pub fn start(p: &Paths, lifetime: Lifetime, kit_root: &Path) -> Result<(), String> {
     use std::process::Stdio;
-    kill_tracked(p);
+    kill_tracked(p, &OurHttpd::of(kit_root));
     let bin = httpd_binary(p);
     let mut cmd = std::process::Command::new(&bin);
     // В /dev/null, не в пайп: пайп, который некому вычитывать, блокирует
@@ -830,8 +877,8 @@ pub fn start(p: &Paths, lifetime: Lifetime) -> Result<(), String> {
 /// только после выхода), без разговора про занятый порт: тот, кто там
 /// окажется после нас — не наша забота здесь (см. `httpd_responds` выше).
 #[cfg(windows)]
-pub fn stop(p: &Paths) -> Result<(), String> {
-    kill_tracked(p);
+pub fn stop(p: &Paths, kit_root: &Path) -> Result<(), String> {
+    kill_tracked(p, &OurHttpd::of(kit_root));
     Ok(())
 }
 
@@ -885,7 +932,7 @@ fn start_failure_text(port: u16, apache_text: &str, holder: Option<&str>) -> Str
 /// и так всегда выживает вызвавший процесс, какой бы он ни был — разница
 /// Detached/WithCaller — чисто windows-овская, Job Object там не бывает.
 #[cfg(not(windows))]
-pub fn start(p: &Paths, _lifetime: Lifetime) -> Result<(), String> {
+pub fn start(p: &Paths, _lifetime: Lifetime, _kit_root: &Path) -> Result<(), String> {
     apache2_on_path().ok_or_else(|| "apache2 не найден ни в $PATH, ни в /usr/sbin, /usr/local/sbin, /sbin — установите пакет apache2 или переключите publication на \"webserver\"".to_string())?;
     let _ = std::process::Command::new("apache2").args(["-f", &p.conf.to_string_lossy(), "-k", "stop"]).output();
     // Дать прежнему серверу отпустить порт. Без этой паузы `-k start` видит
@@ -957,7 +1004,7 @@ fn wait_until(limit: std::time::Duration, mut ready: impl FnMut() -> bool) -> bo
 /// есть проверка «наш сервис остановлен»; та же оговорка, что на Windows:
 /// кто-то другой на этом порту после нас — не повод для ошибки здесь.
 #[cfg(not(windows))]
-pub fn stop(p: &Paths) -> Result<(), String> {
+pub fn stop(p: &Paths, _kit_root: &Path) -> Result<(), String> {
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "stop"])
         .output()
@@ -1902,6 +1949,73 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let msg = start_failure_text(8083, apache_text, Some("apache2 (pid 456)"));
         assert!(!msg.contains("уже занят"), "{msg}");
         assert!(msg.contains(apache_text), "{msg}");
+    }
+
+    /// Шаг 1 задачи 7: гасить можно только то, чья личность подтверждена и
+    /// образом, и владельцем — обе половины совпали.
+    #[cfg(windows)]
+    #[test]
+    fn should_stop_agrees_to_stop_only_when_image_and_owner_both_match() {
+        let ours = ours_for_test();
+        let decision = should_stop(Some(&our_image_for_test()), ours.owner.as_deref(), &ours);
+        assert!(matches!(decision, StopDecision::Stop), "{decision:?}");
+    }
+
+    /// Образ не опознать (процесса нет, или не хватило прав) — личность
+    /// мёртвая для нас, `Foreign`: запись можно забыть, но гасить нечего.
+    #[cfg(windows)]
+    #[test]
+    fn should_stop_refuses_in_words_when_the_image_cannot_be_established() {
+        let ours = ours_for_test();
+        let decision = should_stop(None, ours.owner.as_deref(), &ours);
+        match decision {
+            StopDecision::Foreign(reason) => assert!(reason.contains("не опознать"), "{reason}"),
+            other => panic!("ожидали Foreign, получили {other:?}"),
+        }
+    }
+
+    /// Образ другой — доказанно чужая программа, `Foreign`.
+    #[cfg(windows)]
+    #[test]
+    fn should_stop_refuses_in_words_when_the_image_does_not_match() {
+        let ours = ours_for_test();
+        let foreign_image = std::env::temp_dir().join("не-наш-httpd.exe");
+        let decision = should_stop(Some(&foreign_image), ours.owner.as_deref(), &ours);
+        match decision {
+            StopDecision::Foreign(reason) => assert!(reason.contains("образ"), "{reason}"),
+            other => panic!("ожидали Foreign, получили {other:?}"),
+        }
+    }
+
+    /// Образ совпал, владелец другой — доказанно чужой процесс, даже если
+    /// запущен нашим же файлом (круг исправления 5: сосед запускает наш
+    /// httpd.exe своим конфигом). `Foreign`.
+    #[cfg(windows)]
+    #[test]
+    fn should_stop_refuses_in_words_when_the_owner_does_not_match() {
+        let ours = OurHttpd { image: our_image_for_test(), owner: Some("S-1-5-21-0-0-0-500".into()) };
+        let decision = should_stop(Some(&our_image_for_test()), Some("S-1-5-21-0-0-0-999"), &ours);
+        match decision {
+            StopDecision::Foreign(reason) => {
+                assert!(reason.contains("владел"), "{reason}");
+                assert!(!reason.contains("образ"), "образ тут совпал — путать человека нечем: {reason}");
+            }
+            other => panic!("ожидали Foreign, получили {other:?}"),
+        }
+    }
+
+    /// Владельца не добыть ни у кого из двоих — закрываемся, `Unknown`, а не
+    /// `Stop` и не `Foreign`: неустановленная личность — не повод ни
+    /// гасить, ни стирать чужую работу (решение ведущего, круг 5).
+    #[cfg(windows)]
+    #[test]
+    fn should_stop_is_unknown_in_words_when_the_owner_cannot_be_established() {
+        let ours = OurHttpd { image: our_image_for_test(), owner: None };
+        let decision = should_stop(Some(&our_image_for_test()), None, &ours);
+        match decision {
+            StopDecision::Unknown(reason) => assert!(reason.contains("не удалось установить владельца"), "{reason}"),
+            other => panic!("ожидали Unknown, получили {other:?}"),
+        }
     }
 
     #[test]

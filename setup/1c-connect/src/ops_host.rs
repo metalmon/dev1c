@@ -1655,7 +1655,7 @@ fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Resul
     // start() идемпотентен сам по себе (перезапускает уже поднятый сервис
     // поверх новой конфигурации) — второй вызов после смены базы не падает
     // на «порт занят».
-    crate::publication::start(&p, lifetime).map_err(|e| anyhow::anyhow!("{e}"))?;
+    crate::publication::start(&p, lifetime, &ctx.kit.root).map_err(|e| anyhow::anyhow!("{e}"))?;
     ctx.ok(format!("HTTP-сервис базы поднят на 127.0.0.1:{}", p.port));
     Ok(())
 }
@@ -2043,7 +2043,7 @@ impl Op<Ctx> for Publication {
             return Ok(());
         }
         let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
-        crate::publication::stop(&p).map_err(|e| anyhow::anyhow!("{e}"))?;
+        crate::publication::stop(&p, &ctx.kit.root).map_err(|e| anyhow::anyhow!("{e}"))?;
         // Наш сервис точно остановлен (stop() это гарантирует) — если порт
         // всё равно занят, там чужая программа: не наша ошибка, а информация.
         if crate::publication::httpd_responds(p.port) {

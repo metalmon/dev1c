@@ -708,30 +708,39 @@ where
                         // срок, не трогая очередь, кроме как дочитывая в неё агента.
                         match wait_for_quiet(&mut sr, &mut buf, &mut f, &mut pending_frames, &in_flight, GEN_SWITCH_QUIET_TIMEOUT).await
                         {
-                            Quiet::Reached => {
-                                let (now_gen, now_cfg) = rules.live.get();
-                                gen = now_gen;
-                                cfg = now_cfg;
-                                break EpochEnd::Restart;
-                            }
                             Quiet::AgentEof => break EpochEnd::AgentEof,
-                            Quiet::TimedOut => {
-                                // Висевший вызов так и не отпустил канал — кадру,
-                                // что ждал своей очереди, отвечаем честным отказом
-                                // сами (не ребёнку — `degraded_reply` уже умеет
-                                // этот текст) и рестартуем всё равно: иначе один
-                                // вечный вызов запер бы канал навсегда.
-                                let fr = pending_frames.pop_front().unwrap();
-                                if let Frame::Line(l) = &fr {
-                                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
-                                    if let Some(reply) = degraded_reply(
-                                        l,
-                                        rules.inject,
-                                        local,
-                                        who,
-                                        "параметры сменились, а предыдущий вызов не завершился вовремя",
-                                    ) {
-                                        let _ = out_tx.send(reply).await;
+                            outcome => {
+                                // Выключение проверяется первым для обоих
+                                // оставшихся исходов — тишина или истёкший срок:
+                                // пока MCP выключены, ни то ни другое не повод
+                                // поднимать ребёнка на новых параметрах, которому
+                                // тут же откажут. Кадр не трогаем: `handle_request`
+                                // в ветке `Dormant` ниже сама ответит ему честным
+                                // отказом без ребёнка, свой текст здесь не нужен
+                                // (находка проверки безопасности, круг исправления
+                                // 3, находка 2 — эта ветка её не звала вовсе).
+                                if mcp_is_off(&rules.enabled) {
+                                    break EpochEnd::Dormant;
+                                }
+                                if outcome == Quiet::TimedOut {
+                                    // Висевший вызов так и не отпустил канал —
+                                    // кадру, что ждал своей очереди, отвечаем
+                                    // честным отказом сами (не ребёнку —
+                                    // `degraded_reply` уже умеет этот текст) и
+                                    // рестартуем всё равно: иначе один вечный
+                                    // вызов запер бы канал навсегда.
+                                    let fr = pending_frames.pop_front().unwrap();
+                                    if let Frame::Line(l) = &fr {
+                                        let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                                        if let Some(reply) = degraded_reply(
+                                            l,
+                                            rules.inject,
+                                            local,
+                                            who,
+                                            "параметры сменились, а предыдущий вызов не завершился вовремя",
+                                        ) {
+                                            let _ = out_tx.send(reply).await;
+                                        }
                                     }
                                 }
                                 let (now_gen, now_cfg) = rules.live.get();
@@ -801,15 +810,38 @@ where
             }
             EpochEnd::Restart => {
                 let _ = grace_kill(stdin, child).await;
-                let _ = from_child.await;
-                let _ = err_tail.await;
+                // Задание снимается ДО ожиданий чтения, не после: внук,
+                // держащий те же трубы вывода (`oscript.exe` → `1cv8.exe`),
+                // иначе не выпустил бы `from_child`/`err_tail` из ожидания
+                // никогда — прямого ребёнка `grace_kill` уже снял, а внука
+                // способно снять только закрытие задания (Windows:
+                // `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, `job::Job::drop`).
+                // Находка проверки безопасности, круг исправления 3 —
+                // дефект старше этой правки (тот же порядок был и раньше),
+                // чинится одной перестановкой на этом же пути.
                 drop(job);
+                let _ = from_child.await;
+                // `in_flight` — счётчик на СОЕДИНЕНИЕ (заводится один раз
+                // вне цикла эпох), не на ребёнка: если этот рестарт
+                // форсирован истечением срока ожидания тишины (`TimedOut`),
+                // висевший вызов так и не получил ответа, и без сброса
+                // счётчик остался бы ненулевым навсегда — гейтя проверку
+                // тишины следующей эпохи до бесконечности (круг исправления
+                // 3, находка 1). Сброс — ПОСЛЕ `from_child.await`, не раньше:
+                // если старый ребёнок успел ответить в последний момент,
+                // его собственный `dec_in_flight` должен успеть сработать
+                // первым, не наступать ему на пятки гонкой.
+                in_flight.store(0, Ordering::Relaxed);
+                let _ = err_tail.await;
                 log(Event::Say(format!("{who}: параметры базы сменились, следующий вызов идёт в {}", cfg.host.base_path)));
                 continue;
             }
             EpochEnd::Dormant => {
                 let _ = grace_kill(stdin, child).await;
                 let _ = from_child.await;
+                // Тот же сброс и по той же причине, что у `Restart` выше —
+                // спячка тоже заходит сюда из ветки `TimedOut`.
+                in_flight.store(0, Ordering::Relaxed);
                 let _ = err_tail.await;
                 drop(job);
                 log(Event::Say(format!("{who}: MCP выключены — ребёнок освобождён, соединение остаётся")));
@@ -2610,6 +2642,19 @@ mod tests {
     /// (спящий ребёнок его никогда не прочитает). С фиксом мост ждёт тишины
     /// ограниченный срок, не дожидается её, отвечает вызову #2 честным
     /// отказом сам и рестартует: свежий ребёнок виден по новой `MARKER`.
+    ///
+    /// Довершение (круг исправления 3, находка 1): после форсированного
+    /// рестарта `in_flight` обязан сброситься — счётчик общий на всё
+    /// СОЕДИНЕНИЕ (не на ребёнка), и без сброса одно истечение срока
+    /// навсегда ломает уход в спячку на этом соединении. Отказ вызову #3
+    /// агент получит в любом случае — `handle_request` сама отдельно
+    /// проверяет переключатель на каждый вызов независимо от этой ветки
+    /// (пустой белый список инструментов при `off`), и это не то, что
+    /// здесь проверяется. Проверяется другое: без сброса счётчика внешний
+    /// цикл никогда не дойдёт до `EpochEnd::Dormant`, и свежий ребёнок
+    /// (`MARKER UserB`) останется висеть живым и дальше, вместо того чтобы
+    /// быть отпущенным, — отсюда и слежка за строкой журнала «ребёнок
+    /// освобождён», а не только за ответом агенту.
     #[tokio::test]
     async fn a_call_stuck_in_flight_cannot_keep_new_calls_on_the_stale_child() {
         let mut cfg_a = test_cfg(&["cf_load"]);
@@ -2622,16 +2667,21 @@ mod tests {
             Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
-        let rules = Rules::for_vrunner(
-            live.clone(),
-            std::path::PathBuf::new(),
-            Arc::new(make_cmd),
-            Arc::new(|| 0),
-            Arc::new(AtomicBool::new(true)),
-        );
+        let enabled = Arc::new(AtomicBool::new(true));
+        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        // Не `no_log()`: довершение теста (ниже) следит именно за строкой
+        // журнала, которой `EpochEnd::Dormant` отмечает освобождённого
+        // ребёнка — отдельно от ответа агенту, который дают независимо.
+        let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let said2 = said.clone();
+        let log: Sink = Arc::new(move |e: Event| {
+            if let Event::Say(s) = e {
+                said2.lock().unwrap().push(s);
+            }
+        });
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, log, move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
         let (mut r, mut w) = tokio::io::split(ours);
@@ -2669,6 +2719,112 @@ mod tests {
         assert!(
             read_until(&mut r, &mut got, |s| s.contains("MARKER UserB"), std::time::Duration::from_secs(10)).await,
             "свежий ребёнок на новых параметрах не поднялся: {}",
+            String::from_utf8_lossy(&got)
+        );
+        // Довершение: выключаем MCP и шлём третий вызов — без сброса
+        // `in_flight` после рестарта он ушёл бы свежему ребёнку как обычный
+        // (и повис бы там же, тот же `HANG`), с сбросом — получает отказ
+        // «MCP выключены» без ребёнка вовсе.
+        enabled.store(false, Ordering::Relaxed);
+        let call3 = br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call3).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        // Ответ агенту — не то, что здесь доказывается (см. докстроку): он
+        // приходит независимо от этой ветки. Доказывается, что СВЕЖИЙ
+        // ребёнок (`MARKER UserB`) действительно освобождён, а не повис —
+        // только это и отличает сброшенный `in_flight` от застрявшего.
+        let dormant_seen = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if said.lock().unwrap().iter().any(|s| s.contains("ребёнок освобождён")) {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        assert!(dormant_seen, "ребёнок на новых параметрах должен был освободиться при выключении MCP: {:?}", said.lock().unwrap());
+        w.shutdown().await.unwrap();
+    }
+
+    /// Круг исправления 3, находка 2: ветка «параметры сменились под висящим
+    /// вызовом» не звала `mcp_is_off` вовсе — выключение MCP ровно в это
+    /// окно ожидания тишины приводило бы к рестарту (новый ребёнок на новых
+    /// параметрах) вместо спячки, хотя переключатель уже снят. Выключаем
+    /// MCP сразу после второго вызова, пока первый всё ещё висит
+    /// (`BRIDGE_SCRIPT_HANG`) и мост ждёт тишины — ожидаемый исход: спячка
+    /// («ребёнок освобождён»), а не ребёнок на параметрах `UserB`.
+    #[tokio::test]
+    async fn a_pending_restart_becomes_dormant_when_mcp_is_disabled_while_waiting() {
+        let mut cfg_a = test_cfg(&["cf_load"]);
+        cfg_a.host.db_user = "UserA".into();
+        let live = Live::new(cfg_a.clone());
+        let make_cmd = |cfg: &Cfg| {
+            let mut c = child(("BRIDGE_SCRIPT_HANG", "1"));
+            c.env("BRIDGE_SCRIPT_RECORD", "1");
+            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            Ok(c)
+        };
+        let cmd0 = make_cmd(&cfg_a);
+        let enabled = Arc::new(AtomicBool::new(true));
+        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let said2 = said.clone();
+        let log: Sink = Arc::new(move |e: Event| {
+            if let Event::Say(s) = e {
+                said2.lock().unwrap().push(s);
+            }
+        });
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, log, move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        let mut got: Vec<u8> = Vec::new();
+        assert!(
+            read_until(&mut r, &mut got, |s| s.contains("MARKER UserA"), std::time::Duration::from_secs(10)).await,
+            "первый ребёнок не поднялся: {}",
+            String::from_utf8_lossy(&got)
+        );
+        let call1 = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call1).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        assert!(
+            read_until(&mut r, &mut got, |s| s.contains("GOT") && s.contains("\"id\":1"), std::time::Duration::from_secs(10)).await,
+            "первый ребёнок не увидел вызов #1: {}",
+            String::from_utf8_lossy(&got)
+        );
+        let mut cfg_b = live.get().1;
+        cfg_b.host.db_user = "UserB".into();
+        live.set(cfg_b);
+        let call2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call2).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        // Выключаем MCP, пока мост всё ещё ждёт тишины (окно до
+        // `GEN_SWITCH_QUIET_TIMEOUT`) — без проверки в этой ветке по
+        // истечении срока поднялся бы НОВЫЙ ребёнок на параметрах `UserB`,
+        // хотя переключатель уже снят.
+        enabled.store(false, Ordering::Relaxed);
+        let budget = GEN_SWITCH_QUIET_TIMEOUT + std::time::Duration::from_secs(10);
+        let dormant_seen = {
+            let deadline = std::time::Instant::now() + budget;
+            loop {
+                if said.lock().unwrap().iter().any(|s| s.contains("ребёнок освобождён")) {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        assert!(dormant_seen, "мост должен был уйти в спячку, а не рестартовать: {:?}", said.lock().unwrap());
+        assert!(
+            !String::from_utf8_lossy(&got).contains("MARKER UserB"),
+            "ребёнок на новых параметрах не должен был подняться, пока MCP выключены: {}",
             String::from_utf8_lossy(&got)
         );
         w.shutdown().await.unwrap();

@@ -814,6 +814,85 @@ fn should_stop(image: Option<&Path>, owner: Option<&str>, expected: &OurHttpd) -
     }
 }
 
+/// Абсолютный путь системного инструмента (каталог — `GetSystemDirectoryW`,
+/// не угаданная строка и не `%SystemRoot%`) — круг исправления ревью: вызов
+/// по одному короткому имени (`Command::new("taskkill")`) искал бы программу
+/// по `PATH`, а `PATH` — список снаружи процесса, который сосед способен
+/// подвинуть так, что по имени найдётся чужой `taskkill.exe` раньше
+/// системного; для операции, которая СНИМАЕТ ПРОЦЕСС, доверять поиску по
+/// имени нельзя. `%SystemRoot%` не годится по той же причине — переменная
+/// среды приходит снаружи процесса; `GetSystemDirectoryW` — системный
+/// вызов, не переменная, и называет каталог, из которого Windows запускает
+/// свои инструменты сама.
+///
+/// `None` — каталог не добыть (практически невозможная машина); вызывающий
+/// обязан отказать словами, а не угадывать путь.
+#[cfg(windows)]
+fn system_tool(name: &str) -> Option<PathBuf> {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 1024];
+    let len = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) };
+    if len == 0 || len as usize >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])).join(name))
+}
+
+/// Процесс умер в ответ на снятие? Опрашиваем `holder::image_of_pid` — тем
+/// же системным вызовом, которым добывали личность: пока он отдаёт `Some`,
+/// процесс жив. Таймаут — 2 с, с запасом: `taskkill /F` убивает синхронно
+/// изнутри себя, редкий случай промедления (система занята) не повод висеть
+/// дольше.
+#[cfg(windows)]
+fn wait_for_death(pid: u32) -> bool {
+    for _ in 0..20 {
+        if holder::image_of_pid(pid).is_none() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// Применяет решение `should_stop` к pid-файлу — круг исправления ревью:
+/// прежде `kill_tracked` выбрасывал исход снятия (`let _ = kill.output();`)
+/// и забывал pid-файл БЕЗУСЛОВНО для `Stop`, даже когда снять не вышло —
+/// единственная запись, по которой мёртвый-не-до-конца процесс можно было
+/// опознать, исчезала, а следующий `start()` написал бы свежую, оставив
+/// прежний httpd неопознаваемым навсегда. И `Unknown` некому было сказать
+/// словами — отказ проглатывался молча.
+///
+/// Теперь: `Stop` забывает файл ТОЛЬКО когда `kill` подтвердил смерть
+/// (вызывает его и сообщает исход, а не угадывает по коду возврата
+/// `taskkill`, который и для «уже нет такого процесса» может быть
+/// успешным); не подтвердил — отказ словами, файл остаётся как есть.
+/// `Unknown` теперь тоже отказ словами, а не молчание. `Foreign` — как и
+/// был: мёртвая для нас запись забывается, процесс не трогаем.
+///
+/// `kill` — параметром (`impl FnOnce(u32) -> bool`, true — подтверждена
+/// смерть), а не прямой вызов `taskkill` внутри: тест подаёт свой исход, не
+/// требуя процесса, который и правда сопротивляется `taskkill` (такой
+/// непросто и небезопасно устроить в юнит-тесте) — тот же приём, что у
+/// `wait_until` рядом (условие параметром).
+#[cfg(windows)]
+fn apply_stop_decision(decision: StopDecision, pid: u32, pid_file: &Path, kill: impl FnOnce(u32) -> bool) -> Result<(), String> {
+    match decision {
+        StopDecision::Stop => {
+            if kill(pid) {
+                forget_stale_pid_file(pid_file);
+                Ok(())
+            } else {
+                Err(format!("процесс pid {pid} не остановлен — taskkill не подтвердил смерть, pid-файл оставлен как есть"))
+            }
+        }
+        StopDecision::Foreign(_) => {
+            forget_stale_pid_file(pid_file);
+            Ok(())
+        }
+        StopDecision::Unknown(reason) => Err(reason),
+    }
+}
+
 /// Гасит отслеженный httpd, а если он не отслежен в этом процессе (коннектор
 /// перезапустился без чистого выхода, или гасим публикацию прошлого сеанса)
 /// — по pid-файлу, проверив личность процесса (`should_stop`) прежде чем
@@ -841,40 +920,32 @@ fn should_stop(image: Option<&Path>, owner: Option<&str>, expected: &OurHttpd) -
 ///
 /// Только Windows: на Linux остановкой ведает `-k stop` по своему файлу
 /// идентификатора — там им действительно ведает система.
+///
+/// Возвращает отказ словами — круг исправления ревью: прежде исход
+/// `taskkill` выбрасывался (`let _ = kill.output();`), а `Unknown` от
+/// `should_stop` было некому сказать. Теперь оба случая — `Err` с причиной,
+/// и вызывающий (`stop`) обязан довести её до человека, не проглотить.
 #[cfg(windows)]
-fn kill_tracked(p: &Paths, expected: &OurHttpd) {
+fn kill_tracked(p: &Paths, expected: &OurHttpd) -> Result<(), String> {
     if let Some(mut h) = WINDOWS_HTTPD.lock().unwrap().take() {
         let _ = h.child.kill();
         let _ = h.child.wait();
-        return;
+        return Ok(());
     }
     let Some(pid) = our_httpd_pid(&p.pid) else {
-        return; // pid-файла нет или он не число — гасить нечего.
+        return Ok(()); // pid-файла нет или он не число — гасить нечего.
     };
     let image = holder::image_of_pid(pid);
     let owner = holder::owner_of_pid(pid);
-    match should_stop(image.as_deref(), owner.as_deref(), expected) {
-        StopDecision::Stop => {
-            let mut kill = std::process::Command::new("taskkill");
-            kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            no_window(&mut kill);
-            let _ = kill.output();
-            // Наш процесс только что сняли — запись о нём можно забыть,
-            // следующий start() напишет свежую.
-            forget_stale_pid_file(&p.pid);
-        }
-        StopDecision::Foreign(_) => {
-            // Доказанно не наш (мёртв, не опознан, не тот образ или
-            // владелец) — не трогаем процесс, но и мёртвую запись не
-            // оставляем: встать на неё больше нечему (решение ведущего,
-            // пункт 5 находки).
-            forget_stale_pid_file(&p.pid);
-        }
-        StopDecision::Unknown(_) => {
-            // Ни подтвердить, ни исключить не вышло — закрываемся: не
-            // гасим и не трогаем файл, вдруг это и правда наш процесс.
-        }
-    }
+    let decision = should_stop(image.as_deref(), owner.as_deref(), expected);
+    apply_stop_decision(decision, pid, &p.pid, |pid| {
+        let Some(taskkill) = system_tool("taskkill.exe") else { return false };
+        let mut kill = std::process::Command::new(&taskkill);
+        kill.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        no_window(&mut kill);
+        let _ = kill.output();
+        wait_for_death(pid)
+    })
 }
 
 /// Поднимает HTTP-сервис: httpd.exe — наш прямой ребёнок, в консольном
@@ -892,7 +963,7 @@ fn kill_tracked(p: &Paths, expected: &OurHttpd) {
 #[cfg(windows)]
 pub fn start(p: &Paths, lifetime: Lifetime, kit_root: &Path) -> Result<(), String> {
     use std::process::Stdio;
-    kill_tracked(p, &OurHttpd::of(kit_root));
+    kill_tracked(p, &OurHttpd::of(kit_root))?;
     let bin = httpd_binary(p);
     let mut cmd = std::process::Command::new(&bin);
     // В /dev/null, не в пайп: пайп, который некому вычитывать, блокирует
@@ -932,14 +1003,17 @@ pub fn start(p: &Paths, lifetime: Lifetime, kit_root: &Path) -> Result<(), Strin
     Ok(())
 }
 
-/// Гасит сервис: наш собственный ребёнок — `kill()` плюс `wait()` и есть
-/// проверка «наш процесс действительно остановлен» (`wait()` возвращает
-/// только после выхода), без разговора про занятый порт: тот, кто там
-/// окажется после нас — не наша забота здесь (см. `httpd_responds` выше).
+/// Гасит сервис. Отслеженный в этом же процессе (`WINDOWS_HTTPD`) — наш
+/// собственный ребёнок, `kill()` плюс `wait()` и есть проверка «процесс
+/// действительно остановлен» (`wait()` возвращает только после выхода).
+/// Иначе — по pid-файлу (`kill_tracked`/`apply_stop_decision`): `Err` словами,
+/// если снять не вышло или личность не установить, — не угадывание и не
+/// молчаливый успех. Про занятый порт эта функция не говорит ничего: тот,
+/// кто там окажется после подтверждённого снятия, — не наша забота здесь
+/// (см. `httpd_responds` выше).
 #[cfg(windows)]
 pub fn stop(p: &Paths, kit_root: &Path) -> Result<(), String> {
-    kill_tracked(p, &OurHttpd::of(kit_root));
-    Ok(())
+    kill_tracked(p, &OurHttpd::of(kit_root))
 }
 
 // ----------------------------------------------------------------- Linux --
@@ -2078,6 +2152,95 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         }
     }
 
+    /// Круг исправления ревью, находка 1: `taskkill.exe` обязан резолвиться
+    /// абсолютным путём через системный вызов, а не угадываться строкой и не
+    /// искаться по `PATH`. Доказательство, что каталог — настоящий System32,
+    /// а не угаданная строка: там же обязан лежать `notepad.exe`, который
+    /// есть на любой Windows-машине.
+    #[cfg(windows)]
+    #[test]
+    fn system_tool_names_an_absolute_path_under_the_real_system_directory() {
+        let p = system_tool("taskkill.exe").expect("системный каталог обязан добываться");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert_eq!(p.file_name().unwrap(), std::ffi::OsStr::new("taskkill.exe"));
+        let dir = p.parent().unwrap();
+        assert!(dir.is_dir(), "{}", dir.display());
+        assert!(dir.join("notepad.exe").exists(), "не настоящий System32: {}", dir.display());
+    }
+
+    /// Круг исправления ревью, находка 2: подтверждённое снятие — и только
+    /// оно — забывает pid-файл.
+    #[cfg(windows)]
+    #[test]
+    fn apply_stop_decision_forgets_the_pid_file_only_after_the_kill_is_confirmed() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-apply-stop-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, "123").unwrap();
+        let r = apply_stop_decision(StopDecision::Stop, 123, &pid_file, |_| true);
+        assert!(r.is_ok(), "{r:?}");
+        assert!(!pid_file.exists(), "подтверждённая смерть — запись можно забыть");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Снятие НЕ подтвердилось (taskkill не доказал смерть) — отказ
+    /// словами, и pid-файл остаётся как есть: единственная запись, по
+    /// которой процесс можно опознать, не должна исчезать, пока мы не
+    /// знаем, жив он или мёртв.
+    #[cfg(windows)]
+    #[test]
+    fn apply_stop_decision_refuses_in_words_and_keeps_the_pid_file_when_the_kill_is_not_confirmed() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-apply-stop-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, "123").unwrap();
+        let e = apply_stop_decision(StopDecision::Stop, 123, &pid_file, |_| false).unwrap_err();
+        assert!(e.contains("123") && e.contains("не остановлен"), "{e}");
+        assert!(pid_file.exists(), "неподтверждённая смерть — запись трогать нельзя");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Foreign` — поведение не изменилось: мёртвая для нас запись
+    /// забывается без похода к процессу (`kill` паникует, если его всё же
+    /// позвали — доказательство, что он не вызывается).
+    #[cfg(windows)]
+    #[test]
+    fn apply_stop_decision_forgets_a_foreign_identity_without_touching_the_process() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-apply-stop-foreign-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, "999").unwrap();
+        let r = apply_stop_decision(StopDecision::Foreign("чужой".into()), 999, &pid_file, |_| panic!("Foreign — киллить не нужно"));
+        assert!(r.is_ok(), "{r:?}");
+        assert!(!pid_file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Unknown` — круг исправления ревью: прежде отказ проглатывался
+    /// молча, теперь он слова, и файл не трогается (`kill` не вызывается).
+    #[cfg(windows)]
+    #[test]
+    fn apply_stop_decision_refuses_in_words_for_an_unknown_identity_without_touching_the_file() {
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-apply-stop-unknown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = pid_file_in(&dir);
+        std::fs::write(&pid_file, "1").unwrap();
+        let e = apply_stop_decision(
+            StopDecision::Unknown("не удалось установить владельца — сверять не с чем".into()),
+            1,
+            &pid_file,
+            |_| panic!("Unknown — киллить не нужно"),
+        )
+        .unwrap_err();
+        assert!(e.contains("не удалось установить владельца"), "{e}");
+        assert!(pid_file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Шаг 4: проверка не решения, а ЭФФЕКТА остановки на настоящую розетку.
     /// Поднимать для этого настоящий httpd.exe из комплекта — дорого
     /// (платформа 1С, модуль `wsap24t.dll`, сам комплект) и необязательно:
@@ -2141,7 +2304,8 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let image = holder::image_of_pid(child.id()).expect("образ powershell обязан добываться");
         let expected = OurHttpd { image, owner: holder::current_owner() };
 
-        kill_tracked(&p, &expected);
+        let result = kill_tracked(&p, &expected);
+        assert!(result.is_ok(), "подтверждённое снятие обязано вернуть Ok: {result:?}");
 
         let freed = (0..25).any(|_| {
             if port_is_free(port) {

@@ -874,6 +874,12 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
         }
     };
     Host {
+        // Список соединений и переключение — не это окно (план интерфейса).
+        // Пока здесь всегда ровно одно соединение, тем же умолчанием, что
+        // у прежнего `[host]`.
+        name: String::new(),
+        base_here: true,
+        profile: String::new(),
         server: v("server", &f.server),
         gitea: String::new(),
         password: v("password", &f.password),

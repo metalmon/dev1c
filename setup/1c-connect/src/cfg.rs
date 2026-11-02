@@ -226,6 +226,19 @@ pub fn derived_dump(project: &str) -> String {
 #[serde(default, deny_unknown_fields)]
 pub struct Cfg {
     pub host: Host,
+    /// Список соединений. Прежний файл с одной секцией `[host]` и без
+    /// единого `[[connection]]` — законный вид настроек (так выглядят все
+    /// уехавшие комплекты, включая эталонный): при чтении он становится
+    /// списком из одного элемента (`load_raw`), а сама секция `[host]`
+    /// остаётся как есть — её читает весь остальной код до задачи 3.
+    #[serde(rename = "connection")]
+    pub connections: Vec<Host>,
+    /// Имя ТЕКУЩЕГО соединения из списка `connections` — имя, а не номер:
+    /// оно читаемо человеком и переживает перестановку блоков (решение
+    /// плана, 2.11). Имя, которого нет среди `connections`, — отказ при
+    /// чтении (`load_raw`): человек правил файл руками и должен узнать, что
+    /// опечатался, а не получить тихий выбор первого соединения.
+    pub current: String,
     /// Имена полей, которые не открылись при чтении (`"password"`,
     /// `"db_password"`) — считается заново при каждом `load_unchecked_with`
     /// и в файл не идёт: это не настройка, а диагноз текущего чтения.
@@ -261,6 +274,8 @@ impl std::fmt::Debug for Cfg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Cfg")
             .field("host", &self.host)
+            .field("connections", &self.connections)
+            .field("current", &self.current)
             .field("undecryptable", &self.undecryptable)
             .field("resolved_http_port", &self.resolved_http_port)
             .finish()
@@ -270,6 +285,11 @@ impl std::fmt::Debug for Cfg {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Host {
+    /// Имя соединения в списке `Cfg::connections` — то, чем его называет
+    /// `current` и чем его различает человек. У прежнего файла `[host]`
+    /// имени взять негде — его даёт `base_name(base_path)` при чтении
+    /// (`load_raw`), пусто — «Соединение 1».
+    pub name: String,
     pub server: String,
     /// Адрес Gitea среды целиком. Пусто — адрес не задан, и программа его не
     /// выдумывает: вывод «порт SSH минус два» верен только в туннеле, а в
@@ -300,6 +320,14 @@ pub struct Host {
     /// иroh-этапе, когда уйдёт и туннельный режим.
     pub workstation: String,
     pub base_path: String,
+    /// Топология соединения: `true` — база на этой машине, `false` — на той
+    /// стороне. Булево, а не строка с третьим состоянием: ровно два случая
+    /// контракта, третьего нет (решение плана, 2.11). Умолчание `true`
+    /// ставится рукописным `impl Default` ниже, не `#[serde(default)]` на
+    /// `bool`: отсутствующий ключ дал бы `false` — ровно ту ловушку, что
+    /// назначает Default через значение всего `Host::default()`, а не тип
+    /// поля (так выглядят и прежний `[host]`, и локальный режим).
+    pub base_here: bool,
     /// Версия платформы 1С или её маска (`8.3`), которой работать. Пусто —
     /// версию выбирает лестница `platform::resolve` (пин базы, общий пин,
     /// самая новая). Названная, но не установленная версия — отказ со
@@ -316,6 +344,13 @@ pub struct Host {
     /// `Cfg::toolset()`.
     #[serde(default)]
     pub toolset: String,
+    /// Профиль соединения в контракте подключения — «Разработчик» или
+    /// «Бизнес-пользователь» (таблица полей спеки). Одно понятие — одно
+    /// имя: у прежнего `toolset` та же роль, но под машинным именем, и при
+    /// появлении аксессоров (задача 3) значение переезжает сюда. Здесь —
+    /// только поле; разбор и перенос значения — не эта задача.
+    #[serde(default)]
+    pub profile: String,
     /// Потолок записи у дочернего `mcp-1c` — `read_write` или `read_only`.
     /// Разбор, допустимые значения и довод умолчания — в `Cfg::access()`.
     /// Поля в окне нет: потолок правит пункт меню значка «Запись в базу»
@@ -352,14 +387,17 @@ pub struct Host {
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Host")
+            .field("name", &self.name)
             .field("server", &self.server)
             .field("gitea", &self.gitea)
             .field("password", &"<скрыт>")
             .field("workstation", &self.workstation)
             .field("base_path", &self.base_path)
+            .field("base_here", &self.base_here)
             .field("platform", &self.platform)
             .field("configuration", &self.configuration)
             .field("toolset", &self.toolset)
+            .field("profile", &self.profile)
             .field("write", &self.write)
             .field("db_user", &self.db_user)
             .field("db_password", &"<скрыт>")
@@ -392,14 +430,20 @@ impl Default for Host {
             // заполнять пустые поля; окно показывает на их месте те же строки
             // серым (`panel::field`), а чего не хватает — говорит набор фактов
             // (решение владельца 26.10).
+            name: String::new(),
             server: String::new(),
             gitea: String::new(),
             password: String::new(),
             workstation: String::new(),
             base_path: String::new(),
+            // «База здесь» — умолчание, которое молчаливо совпадает и с
+            // прежним `[host]` (там топологии не было вовсе, а база всегда
+            // была локальной), и с локальным режимом (решение плана, 2.11).
+            base_here: true,
             platform: String::new(),
             configuration: String::new(),
             toolset: String::new(),
+            profile: String::new(),
             write: String::new(),
             db_user: String::new(),
             db_password: String::new(),
@@ -527,6 +571,26 @@ impl Cfg {
         }
         let text = std::fs::read_to_string(&p).with_context(|| format!("не прочитать {}", p.display()))?;
         let mut cfg: Cfg = toml::from_str(&text).with_context(|| format!("{FILE}: ошибка в файле параметров"))?;
+        // Блоков `[[connection]]` нет, а прежняя секция `[host]` непуста —
+        // список из одного: так выглядят все уехавшие комплекты, включая
+        // эталонный, и это законный вид файла, а не устаревший (общее
+        // ограничение плана). Непустой — по `base_path`: это единственное
+        // поле, которое `validate()` требует у соединения, остальные у
+        // свежего `[host]` могут быть пустыми и это норма.
+        if cfg.connections.is_empty() && !cfg.host.base_path.is_empty() {
+            let mut only = cfg.host.clone();
+            let derived = base_name(&only.base_path);
+            only.name = if derived.is_empty() { "Соединение 1".to_string() } else { derived.to_string() };
+            cfg.current = only.name.clone();
+            cfg.connections = vec![only];
+        }
+        // `current` называет то, чего нет среди соединений — отказ словами
+        // с именем: человек правил файл руками и должен узнать, что
+        // опечатался, а не получить тихий выбор первого (на что смотрит
+        // ревью, общие ограничения плана).
+        if !cfg.current.is_empty() && !cfg.connections.iter().any(|c| c.name == cfg.current) {
+            anyhow::bail!("{FILE}: current называет соединение «{}», которого нет среди [[connection]]", cfg.current);
+        }
         let mut bad = Vec::new();
         cfg.host.password = open_or_mark(store, "password", &cfg.host.password, &mut bad);
         cfg.host.db_password = open_or_mark(store, "db_password", &cfg.host.db_password, &mut bad);
@@ -2131,5 +2195,33 @@ mod tests {
         let loaded = Cfg::load_with(&kit, &s).unwrap();
         assert!(loaded.undecryptable.is_empty());
         assert_eq!(loaded.host.password, "");
+    }
+
+    /// Прежний файл с одной секцией `[host]` — законный вид настроек, не
+    /// устаревший: так выглядят все уехавшие комплекты, включая эталонный.
+    /// Список соединений обязан прочитать его как ОДНО соединение, а не
+    /// отказать и не отдать пустой список.
+    #[test]
+    fn an_old_file_with_one_host_section_reads_as_one_connection() {
+        let kit = kit_with("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\ndb_user = \"mcp\"\n");
+        let c = Cfg::load_unchecked(&kit).unwrap();
+        assert_eq!(c.connections.len(), 1, "прежний файл — это одно соединение, а не ноль");
+        assert_eq!(c.connections[0].name, "Buh", "имя берётся из базы: в прежнем файле его негде взять");
+        assert_eq!(c.current, "Buh", "единственное соединение и есть текущее");
+        assert!(c.connections[0].base_here, "у прежнего файла база здесь");
+    }
+
+    /// Свежий комплект без единой настройки — пустой список, не отказ; а
+    /// `current`, называющий соединение, которого нет среди блоков, — отказ
+    /// словами с именем, которое не нашлось (человек правил файл руками и
+    /// должен узнать, что опечатался, а не получить тихий выбор первого).
+    #[test]
+    fn an_empty_file_is_an_empty_list_and_a_missing_current_is_a_refusal() {
+        let empty = Cfg::load_unchecked(&kit_with("")).unwrap();
+        assert!(empty.connections.is_empty(), "свежий комплект — пустой список, не отказ");
+        assert_eq!(empty.current, "", "текущего нет, пока нет ни одного соединения");
+
+        let e = Cfg::load_unchecked(&kit_with("current = \"Ромашка\"\n\n[[connection]]\nname = \"Buh\"\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("Ромашка"), "отказ называет имя, которого нет: {e:#}");
     }
 }

@@ -772,6 +772,43 @@ pub fn shown_base_url(host: &Host) -> &str {
     }
 }
 
+/// Подпись поля папки: смысл папки задаёт профиль. У разработчика это место
+/// выгрузки и загрузки конфигурации, у бизнес-пользователя — папка с
+/// документами, с которыми работает агент. Прежняя подпись «Каталог исходников
+/// проекта» верна только для первого, а бухгалтеру говорит о том, чего у неё
+/// нет.
+///
+/// Порог: всё, что не `developer`, —
+/// бизнес-пользователь — так же решает `Cfg::toolset` (пусто ⇒ `business`), и
+/// третьей подписи для нераспознанного значения мы не выдумываем.
+pub fn folder_label(toolset: &str) -> &'static str {
+    if toolset.trim() == "developer" {
+        "Папка исходников"
+    } else {
+        "Папка документов"
+    }
+}
+
+/// Профиль словами человека. Пара к `folder_label`, порог тот же.
+pub fn profile_label(toolset: &str) -> &'static str {
+    if toolset.trim() == "developer" {
+        "Разработчик"
+    } else {
+        "Бизнес-пользователь"
+    }
+}
+
+/// Оговорка под профилем, когда в параметрах стоит значение, которого мы не
+/// знаем. Общее правило плана вида: молчаливый неверный результат хуже
+/// честного отказа — показываем умолчание И говорим, что это умолчание.
+/// Пусто оговорки не требует: пусто и есть умолчание, так его читает и
+/// `Cfg::toolset`. Отказ словами на негодное значение даёт `mcp_command`
+/// (`bridge.rs`) при запуске ребёнка; здесь не отказ, а честный показ.
+pub fn profile_note(toolset: &str) -> Option<String> {
+    let t = toolset.trim();
+    (!t.is_empty() && t != "developer" && t != "business").then(|| format!("в параметрах указано «{t}» — показано умолчание"))
+}
+
 /// Заголовок карточки соединения. Контракт подключения называет заголовком имя
 /// соединения, данное человеком, но хранить такое имя сегодня негде: в `[host]`
 /// поля нет, а модель настроек этот план не трогает. Поэтому заголовок берётся
@@ -1315,6 +1352,9 @@ impl Render for Panel {
         // сохранённого: человек меняет базу и видит, какую карточку он
         // правит, ещё до «Сохранить».
         let title = card_title(&host_of(&self.fields, &mode, &publication, cx));
+        // Профиль — свойство машины (`[host] toolset`), а не поля формы:
+        // карточка его показывает, но не правит, см. ведомость плана вида.
+        let toolset = cx.global::<Ui>().cfg.host.toolset.clone();
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1460,6 +1500,20 @@ impl Render for Panel {
                             // точках (находка владельца 31.10).
                             h_flex().min_w_0().child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone())),
                         )
+                        .child(
+                            // Профиль показан, а не выбран: `toolset` — свойство
+                            // машины, одно на все её соединения, а полем карточки
+                            // он становится вместе с моделью соединений. Он здесь
+                            // потому, что задаёт смысл папки ниже.
+                            v_flex()
+                                .gap_1()
+                                .min_w_0()
+                                .child(div().text_size(px(13.)).text_color(caption).child("Профиль"))
+                                .child(div().min_w_0().child(profile_label(&toolset)))
+                                .when_some(profile_note(&toolset), |d, note| {
+                                    d.child(div().min_w_0().text_size(px(12.)).text_color(caption).child(note))
+                                }),
+                        )
                         .child({
                             // В локальном режиме коннектор слушает loopback, а не
                             // поднимает туннель в среду: адрес среды, рабочее место и
@@ -1517,16 +1571,13 @@ impl Render for Panel {
                                     .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
                             )
                             .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(div().text_size(px(13.)).text_color(caption).child("Каталог исходников проекта"))
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                            .child(pick("pick-project", f.project.clone(), cx)),
-                                    ),
+                                v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child(folder_label(&toolset))).child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
+                                        .child(pick("pick-project", f.project.clone(), cx)),
+                                ),
                             )
                         }),
                 )
@@ -1918,9 +1969,10 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, card_title, fact_rows, fields_differ, foot_left_text, found_text, nothing_to_show, op_question,
-        pick_face, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields, skill_found_text,
-        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text, nothing_to_show,
+        op_question, pick_face, profile_label, profile_note, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url,
+        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu,
+        FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Host;
     use crate::editors;
@@ -2497,6 +2549,31 @@ mod tests {
     /// Утверждение держит обе грани: молчат оба списка — говорим; молчит
     /// только один — не мешаем второму, иначе подсказка встанет рядом с
     /// настоящими фактами и будет спорить с ними.
+    /// Профиль в карточке — показ, а не правка (ведомость плана вида), и
+    /// показывать его молча неверным нельзя: общее ограничение плана требует
+    /// показать умолчание И сказать, что оно умолчание.
+    #[test]
+    fn the_profile_row_says_when_it_shows_a_default_instead_of_what_is_written() {
+        assert_eq!(profile_label("developer"), "Разработчик");
+        assert_eq!(profile_label("business"), "Бизнес-пользователь");
+        assert_eq!(profile_label(""), "Бизнес-пользователь", "пусто — умолчание Cfg::toolset");
+        assert_eq!(profile_label("мусор"), "Бизнес-пользователь", "нераспознанное показывает умолчание");
+
+        assert_eq!(profile_note("developer"), None);
+        assert_eq!(profile_note("business"), None);
+        assert_eq!(profile_note(""), None, "пусто и есть умолчание — оговаривать нечего");
+        let note = profile_note("мусор").expect("нераспознанное значение обязано быть названо словами");
+        assert!(note.contains("мусор") && note.contains("умолчание"), "{note}");
+    }
+
+    #[test]
+    fn the_folder_label_follows_the_profile() {
+        assert_eq!(folder_label("developer"), "Папка исходников");
+        assert_eq!(folder_label("business"), "Папка документов");
+        assert_eq!(folder_label(""), "Папка документов", "пусто — это бизнес-пользователь, как и в Cfg::toolset");
+        assert_eq!(folder_label("мусор"), "Папка документов", "нераспознанное не выдумывает третьей подписи");
+    }
+
     #[test]
     fn the_card_title_names_the_base_and_survives_what_a_path_is_not() {
         let file = Host { base_path: r"C:\bases\Ромашка".into(), ..Host::default() };

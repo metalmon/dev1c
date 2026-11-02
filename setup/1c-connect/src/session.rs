@@ -413,7 +413,12 @@ pub fn start_with_enabled(
         let r = rt.block_on(async {
             on_state(State::Connecting);
             let state = Mutex::new(State::Connecting);
-            let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), cfg.ports(), enabled));
+            // Те же порты, что ниже выбирает транспорт: местный слушатель
+            // слушает `ports()`, туннель просит форвард на `tunnel_ports()`
+            // (круг исправления финального ревью, Б3) — `Serve` обязан
+            // знать то же число, иначе `dispatch` не узнаёт свой же порт.
+            let active_ports = if cfg.host.mode == "local" { cfg.ports() } else { cfg.tunnel_ports() };
+            let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             let on_event = |e: Event| {
                 let mut s = state.lock().unwrap();
                 let next = s.clone().next(&e);
@@ -422,7 +427,7 @@ pub fn start_with_enabled(
                 on_state(s.clone());
             };
             let r = if cfg.host.mode == "local" {
-                crate::listen::run(serve, cfg.ports(), on_event, stop_rx).await
+                crate::listen::run(serve, active_ports, on_event, stop_rx).await
             } else {
                 let dispatch = serve.clone();
                 let on_incoming = move |inc: tunnel::Incoming| {

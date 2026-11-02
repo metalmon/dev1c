@@ -366,7 +366,11 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // работающей связи.
     let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
-    let ports = ctx.cfg.ports();
+    // Числа, которые реально поднимутся: местный режим — константа,
+    // туннельный — то, что пойдёт среде как проброс (круг исправления
+    // финального ревью, Б3; `session::start_with_enabled` выбирает ту же
+    // пару тем же условием).
+    let ports = if ctx.cfg.host.mode == "local" { ctx.cfg.ports() } else { ctx.cfg.tunnel_ports() };
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
         ctx.cfg.host.server, ctx.cfg.host.workstation, ports.mcp, ports.web

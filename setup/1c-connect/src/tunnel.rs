@@ -179,6 +179,16 @@ pub fn is_terminal(e: &TunnelError, had_session: bool) -> bool {
 /// Держит туннель, пока его не остановят: переподключается после обрыва,
 /// останавливается на ошибке, которую надо чинить человеку. Каждое
 /// проброшенное соединение отдаёт `serve`.
+/// Список портов, который просим у среды ПРОБРОСИТЬ — ровно `tunnel_ports()`,
+/// вынесено в отдельную функцию ради круга исправления финального ревью
+/// (Б3): без неё единственной проверкой этой строки был бы живой стенд
+/// (`tests/tunnel_live.rs`), а он без стенда уходит первой строкой и не
+/// падает ни от какой правки здесь (находка того же ревью, Б4).
+fn forward_ports(cfg: &crate::cfg::Cfg) -> [u16; 3] {
+    let p = cfg.tunnel_ports();
+    [p.mcp, p.vrunner, p.web]
+}
+
 pub async fn run(
     cfg: &crate::cfg::Cfg,
     known_hosts: PathBuf,
@@ -188,7 +198,11 @@ pub async fn run(
     editor_mcp: crate::session::EditorMcpSeen,
 ) -> Result<()> {
     let serve = Arc::new(serve);
-    let ports = cfg.ports();
+    // `tunnel_ports()`, не `ports()`: эта тройка идёт среде как список
+    // ПРОБРАСЫВАЕМЫХ портов (`Tunnel::connect` ниже), а сторона среды
+    // настроена по рабочим местам — круг исправления финального ревью, Б3
+    // (докстрока `Cfg::tunnel_ports`).
+    let ports = cfg.tunnel_ports();
     let mut attempt = 0u32;
     let mut had_session = false;
     let mut forward_refusals = 0u32;
@@ -202,7 +216,7 @@ pub async fn run(
             &cfg.host.workstation,
             &cfg.host.password,
             &known_hosts,
-            &[ports.mcp, ports.vrunner, ports.web],
+            &forward_ports(cfg),
         )
         .await
         {
@@ -278,6 +292,21 @@ pub async fn run(
 #[cfg(test)]
 mod loop_tests {
     use super::*;
+
+    /// Красный тест круга исправления финального ревью, Б3: список портов,
+    /// которые `run()` просит среду пробросить, обязан быть ТУННЕЛЬНЫМ
+    /// (`tunnel_ports()`), а не местной константой (`ports()`) — иначе
+    /// `dev2` просит проброс занятого `dev1`-номера либо среда не находит
+    /// контейнерную сторону, настроенную по рабочим местам.
+    #[test]
+    fn the_forwarded_ports_are_the_tunnel_numbers_not_the_local_ones() {
+        let mut cfg = crate::cfg::filled_for_test(); // mode = "tunnel", workstation = "dev1"
+        assert_eq!(forward_ports(&cfg), [7771, 7781, 7791]);
+        cfg.host.workstation = "dev2".into();
+        assert_eq!(forward_ports(&cfg), [7772, 7782, 7792], "dev2 должен просить проброс своих номеров, не dev1");
+        // Местная константа этой сменой не трогается — порты другой функции.
+        assert_ne!(forward_ports(&cfg), [cfg.ports().mcp, cfg.ports().vrunner, cfg.ports().web]);
+    }
 
     #[test]
     fn backoff_grows_and_caps() {

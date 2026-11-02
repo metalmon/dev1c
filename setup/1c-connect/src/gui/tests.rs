@@ -71,6 +71,36 @@ fn a_second_field_joining_the_list_is_noted_again() {
     assert_eq!(warn_count(&ui), 2, "список стал другим — новая строка, хоть первое поле и было уже сказано");
 }
 
+/// Круг исправления 4 задачи 3 (проверка безопасности): если потолок
+/// записи ужесточён ТОЛЬКО в живом сеансе (`gui::tray::apply_access`,
+/// ветка отказа записи на диск), а показ окна перечитывает файл со
+/// старым, более широким значением, — `adopt_cfg` толкает его в сеанс как
+/// есть и откатывает живое ужесточение. Честный откат, не баг (докстрока
+/// `adopt_cfg`): другого источника правды для «перечитать файл» нет.
+#[test]
+fn adopt_cfg_rolls_back_a_live_only_tightening_to_what_is_on_disk() {
+    let mut ui = Ui::for_test();
+    ui.cfg.host.mode = "local".into();
+    ui.cfg.host.write = "read_write".into();
+    // Настоящий `Session` — та же ячейка (`Live`), что и в работающей
+    // программе; слушатели ей заводить незачем (`cfg_now`/`update_cfg` не
+    // зависят от того, поднялись ли реальные порты).
+    let session = crate::session::start(ui.cfg.clone(), ui.kit.clone(), Arc::new(|_| {}), |_| {});
+    // Живое ужесточение — то же самое, что `apply_access` делает в ветке
+    // отказа записи: клон живого `Cfg` с одним подменённым полем.
+    session.update_cfg(session.cfg_now().with_access("read_only"));
+    assert_eq!(session.cfg_now().access(), "read_only", "вводная: живое ужесточение применилось");
+    ui.session = Some(session);
+
+    // Показ окна перечитывает файл, где `write` всё ещё "read_write" —
+    // запись на диск не удалась, файл её не увидел.
+    let from_disk = ui.cfg.clone();
+    adopt_cfg(&mut ui, from_disk);
+    let s = ui.session.take().expect("сеанс потерян");
+    assert_eq!(s.cfg_now().access(), "read_write", "откат на то, что в файле — честный, не баг");
+    let _ = s.stop();
+}
+
 /// Итог прошлой операции не держит подвал вечно: пришёл новый набор —
 /// подвал говорит о состоянии, а «Готово за 19 с» остаётся в журнале.
 /// Прежде этот слот не снимался никем, и в покое человек читал про

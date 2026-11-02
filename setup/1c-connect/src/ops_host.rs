@@ -794,11 +794,38 @@ fn mcp_exe_at(kit_root: &Path) -> PathBuf {
 /// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: пароль базы — ключом `--db-password`, а не переменной `MCP_1C_PASSWORD`. Это второе честное исключение задачи 5, рядом с `/P` Конфигуратору (`revert_apply` ниже) — не выбор удобства, а то, что установщик умеет читать: ветка `if *installDB != "" { installer.Install(…) }` в `cmd/mcp-1c/main.go` тега `v1.23.0` стоит ВЫШЕ `cfg := config.Load()`, и ни в `main.go`, ни в `installer/installer.go` нет ни одного `os.Getenv` — переменная окружения до установки просто не доходит (замер 30.10, по исходнику тега; найдено ревью задачи 7, Critical 1: установка расширения на базе с непустым паролем молча уезжала с пустым).
 ///
 /// Переменной `MCP_1C_PASSWORD` пароль передаёт только мост (`bridge::mcp_command`) — другой запуск того же бинаря, читающий `config.Load()` по-настоящему; командная строка процесса на Windows видна любому процессу пользователя (`tasklist`, диспетчер задач) ровно так же, как и у `/P`, но дольше, чем секунды, она здесь не живёт, а в журнал и план значение после `--db-password` прячет `docker::redact`/`redact_text` тем же приёмом, что `/P…`. `--db-user` остаётся ключом открыто — он не секрет.
-pub fn install_command(cfg: &Cfg, kit: &Kit) -> tokio::process::Command {
+pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, String> {
     let h = &cfg.host;
+    let profile = install_profile(cfg)?;
     let mut c = tokio::process::Command::new(mcp_exe(kit));
-    c.args(["--install", &h.base_path, "--db-user", &h.db_user, "--db-password", &h.db_password]);
-    c
+    c.args(["--install", &h.base_path, "--db-user", &h.db_user, "--install-profile", profile, "--db-password", &h.db_password]);
+    Ok(c)
+}
+
+/// Вид конфигурации, который уйдёт `--install-profile`: тот же, что в работе
+/// коннектор просит `--profile` у ребёнка (задача 2, `Cfg::configuration()`)
+/// — иначе в базу уедет не тот фасад `MCPBusinessFacade` (`extension/embed.go`
+/// встраивает разную начинку под `generic` и `buh_3_0`), и расхождение
+/// заметят не сразу, а по неверным документам в настоящей бухгалтерской базе
+/// (замер ведущего 2.11).
+///
+/// `auto` у установки нет: флаг форка `--install-profile` принимает только
+/// `generic|buh_3_0` (`cmd/mcp-1c/main.go`), угадывать вид конфигурации
+/// умеет только РАБОТА (там `auto` разрешает сам сервер по составу базы).
+/// Тихо подставить `generic`, как было, нельзя — это и есть расхождение,
+/// которое ловит задача 8. Мой выбор — отказ словами, а не угадывание:
+/// установка расширения бывает один раз, и человек в этот момент рядом —
+/// он может тут же дописать `[host] configuration` и повторить; а неверно
+/// угаданный профиль он обнаружит только месяц спустя по неверным
+/// документам, когда это будет стоить куда дороже одной отменённой
+/// установки.
+fn install_profile(cfg: &Cfg) -> Result<&str, String> {
+    match cfg.configuration()? {
+        "auto" => Err(
+            "не могу выбрать профиль расширения сам: укажите вид конфигурации в [host] configuration (generic или buh_3_0)".to_string(),
+        ),
+        other => Ok(other),
+    }
 }
 
 /// Переменная окружения, которая целиком перекрывает поиск платформы: указывает
@@ -2060,18 +2087,25 @@ impl Op<Ctx> for Extension {
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
         // План печатает то, что действительно будет запущено, обёртку включая:
         // из этих строк собирается ручной путь в инструкции администратора, и
-        // команда без `xvfb-run` в ней не заработала бы.
+        // команда без `xvfb-run` в ней не заработала бы. Профиль — тем же
+        // `install_profile`, которым решает сам `install_command`: иначе план
+        // мог бы молчать про `auto`, а установка — отказать, и человек не
+        // понял бы заранее, почему.
         let prefix = display_wrapper().map(|x| format!("{} -a ", x.display())).unwrap_or_default();
-        vec![Action::new(format!(
-            // Скобка говорит человеку то, что ему пригодится: сколько ждать и
-            // что мелькнёт на экране. Почему пароль идёт ключом, а не
-            // переменной окружения, — объяснение для нас, оно живёт в
-            // докстроке `install_command`; в плане это была внутренняя
-            // заметка, утёкшая в текст для человека (наблюдение владельца
-            // 30.10: «это что за комментарии в выводе?»).
-            "{prefix}mcp-1c --install {} --db-user {} --db-password … (вызовет конфигуратор, минута-две)",
-            ctx.cfg.host.base_path, ctx.cfg.host.db_user
-        ))]
+        let line = match install_profile(&ctx.cfg) {
+            Ok(profile) => format!(
+                // Скобка говорит человеку то, что ему пригодится: сколько ждать и
+                // что мелькнёт на экране. Почему пароль идёт ключом, а не
+                // переменной окружения, — объяснение для нас, оно живёт в
+                // докстроке `install_command`; в плане это была внутренняя
+                // заметка, утёкшая в текст для человека (наблюдение владельца
+                // 30.10: «это что за комментарии в выводе?»).
+                "{prefix}mcp-1c --install {} --db-user {} --install-profile {profile} --db-password … (вызовет конфигуратор, минута-две)",
+                ctx.cfg.host.base_path, ctx.cfg.host.db_user
+            ),
+            Err(e) => e,
+        };
+        vec![Action::new(line)]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         ctx.progress(Phase::Install);
@@ -2083,7 +2117,7 @@ impl Op<Ctx> for Extension {
         }
         let h = &ctx.cfg.host;
         // Программа и аргументы — все из `install_command`: пароль в них уже есть ключом `--db-password` (второе честное исключение задачи 5, см. докстроку `install_command`), набирать его второй раз отдельной строкой незачем — иначе кто-то однажды поправит `install_command`, глядя на неё как на источник правды, а установка продолжит слать старые аргументы. Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует. Окружение у `install_command` теперь пусто — `docker::exec_env` берёт его тем же путём, что и раньше, просто со списком без пар; собственной сигнатуры у неё это не меняет.
-        let install = install_command(&ctx.cfg, &ctx.kit);
+        let install = install_command(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
         let exe = install.as_std().get_program().to_string_lossy().into_owned();
         let install_args: Vec<String> = install.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         let install_env: Vec<(String, String)> = install
@@ -2174,7 +2208,10 @@ mod tests {
     fn the_install_command_passes_the_password_as_a_flag() {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.db_password = "секрет-базы".into();
-        let c = install_command(&cfg, &kit_for_test());
+        // Вид конфигурации назван явно: задача 8 отказывает на `auto`
+        // (умолчание `filled_for_test`), а этот тест — про пароль, не про профиль.
+        cfg.host.configuration = "generic".into();
+        let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i = args.iter().position(|a| a == "--db-password").unwrap_or_else(|| panic!("--db-password нет в аргументах: {args:?}"));
         assert_eq!(args[i + 1], "секрет-базы", "{args:?}");
@@ -2182,6 +2219,64 @@ mod tests {
         assert!(!masked.contains("секрет-базы") && masked.contains("--db-password …"), "{masked}");
         // Окружение `install_command` больше не несёт пароль — установщик его там не ищет (см. докстроку), и держать его там было бы просто лишней, никому не нужной копией.
         assert_eq!(c.as_std().get_envs().count(), 0);
+    }
+
+    /// Задача 8: установка и работа обязаны просить у `mcp-1c` один и тот же
+    /// вид конфигурации, иначе в базу уедет не тот фасад
+    /// (`MCPBusinessFacade`) — см. докстроку `install_command`.
+    #[test]
+    fn the_installed_profile_matches_the_runtime_one() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.configuration = "buh_3_0".into();
+        let c = install_command(&cfg, &kit_for_test()).expect("buh_3_0 — известный профиль, отказа быть не должно");
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        assert!(args.windows(2).any(|w| w == ["--install-profile", "buh_3_0"]), "{args:?}");
+    }
+
+    /// Тот же замер, другое значение — чтобы профиль установки не был
+    /// закреплён на одно-единственное значение совпадением.
+    #[test]
+    fn the_installed_profile_matches_the_runtime_one_for_generic() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.configuration = "generic".into();
+        let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        assert!(args.windows(2).any(|w| w == ["--install-profile", "generic"]), "{args:?}");
+    }
+
+    /// Случай `auto` — мой выбор, не умолчание форка (см. докстроку
+    /// `install_command`): у установки `auto` нет, флаг форка принимает
+    /// только `generic|buh_3_0`. Отказ словами сейчас, при установке, а не
+    /// тихий `generic` — установка бывает один раз, человек рядом, а
+    /// неверный профиль он заметит только месяц спустя по неверным
+    /// документам.
+    #[test]
+    fn install_command_refuses_auto_instead_of_guessing_a_profile() {
+        let cfg = crate::cfg::filled_for_test(); // host.configuration пусто → auto
+        let err = install_command(&cfg, &kit_for_test()).expect_err("auto обязан отказать, а не тихо выбрать профиль");
+        assert!(err.contains("configuration"), "{err}");
+    }
+
+    /// `plan()` обязан печатать ту же команду, что потом реально запустит
+    /// `apply()` (докстрока `plan` — «что действительно будет запущено»):
+    /// без этого теста правка `install_command` могла уйти в одиночку, а
+    /// предпросмотр продолжал бы показывать команду без профиля.
+    #[test]
+    fn extension_plan_names_the_profile_it_will_install() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.configuration = "buh_3_0".into();
+        let ctx = publication_ctx(cfg, true);
+        let actions = Extension.plan(&ctx);
+        assert!(actions.iter().any(|a| a.0.contains("--install-profile buh_3_0")), "{actions:?}");
+    }
+
+    /// Тот же предпросмотр на `auto`: человек обязан увидеть отказ ДО того,
+    /// как нажмёт «применить», а не узнать о нём только из провала `apply()`.
+    #[test]
+    fn extension_plan_refuses_auto_instead_of_hiding_it() {
+        let ctx = publication_ctx(crate::cfg::filled_for_test(), true); // configuration пусто → auto
+        let actions = Extension.plan(&ctx);
+        assert!(actions.iter().any(|a| a.0.contains("configuration")), "{actions:?}");
     }
 
     /// Круг исправления 2 (находка автоматической проверки безопасности):

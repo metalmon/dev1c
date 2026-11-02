@@ -681,20 +681,65 @@ where
                 // откладывался бы до запроса, который его застанет праздным.
                 // Без `rebuild` рестарта вообще не бывает — один ребёнок на
                 // всю жизнь соединения, как у `Rules::for_mcp` без доустройки.
-                if rules.rebuild.is_some() && in_flight.load(Ordering::Relaxed) == 0 {
-                    // Выключение проверяется первым и первым же решает: пока
-                    // MCP выключены, сменившиеся параметры — не повод поднять
-                    // ребёнка на новой базе, которому тут же откажут. Их он
-                    // получит всё равно — тем же `gen`/`cfg`, перечитанными
-                    // перед самым следующим спавном (ниже, выход из спячки).
-                    if mcp_is_off(&rules.enabled) {
-                        break EpochEnd::Dormant;
-                    }
-                    let (now_gen, now_cfg) = rules.live.get();
-                    if now_gen != gen {
-                        gen = now_gen;
-                        cfg = now_cfg;
-                        break EpochEnd::Restart;
+                if rules.rebuild.is_some() {
+                    if in_flight.load(Ordering::Relaxed) == 0 {
+                        // Выключение проверяется первым и первым же решает: пока
+                        // MCP выключены, сменившиеся параметры — не повод поднять
+                        // ребёнка на новой базе, которому тут же откажут. Их он
+                        // получит всё равно — тем же `gen`/`cfg`, перечитанными
+                        // перед самым следующим спавном (ниже, выход из спячки).
+                        if mcp_is_off(&rules.enabled) {
+                            break EpochEnd::Dormant;
+                        }
+                        let (now_gen, now_cfg) = rules.live.get();
+                        if now_gen != gen {
+                            gen = now_gen;
+                            cfg = now_cfg;
+                            break EpochEnd::Restart;
+                        }
+                    } else if rules.live.get().0 != gen {
+                        // Вызов висит без ответа, а параметры уже сменились —
+                        // кадр впереди очереди СТАРОМУ ребёнку не отдаём: иначе
+                        // понижение потолка записи (или любая другая смена)
+                        // обходится долгим вызовом, который держит канал занятым,
+                        // пока новые вызовы продолжают уходить ребёнку с прежними,
+                        // более широкими правами (находка проверки безопасности,
+                        // круг исправления 2 задачи 3). Ждём тишины ограниченный
+                        // срок, не трогая очередь, кроме как дочитывая в неё агента.
+                        match wait_for_quiet(&mut sr, &mut buf, &mut f, &mut pending_frames, &in_flight, GEN_SWITCH_QUIET_TIMEOUT).await
+                        {
+                            Quiet::Reached => {
+                                let (now_gen, now_cfg) = rules.live.get();
+                                gen = now_gen;
+                                cfg = now_cfg;
+                                break EpochEnd::Restart;
+                            }
+                            Quiet::AgentEof => break EpochEnd::AgentEof,
+                            Quiet::TimedOut => {
+                                // Висевший вызов так и не отпустил канал — кадру,
+                                // что ждал своей очереди, отвечаем честным отказом
+                                // сами (не ребёнку — `degraded_reply` уже умеет
+                                // этот текст) и рестартуем всё равно: иначе один
+                                // вечный вызов запер бы канал навсегда.
+                                let fr = pending_frames.pop_front().unwrap();
+                                if let Frame::Line(l) = &fr {
+                                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                                    if let Some(reply) = degraded_reply(
+                                        l,
+                                        rules.inject,
+                                        local,
+                                        who,
+                                        "параметры сменились, а предыдущий вызов не завершился вовремя",
+                                    ) {
+                                        let _ = out_tx.send(reply).await;
+                                    }
+                                }
+                                let (now_gen, now_cfg) = rules.live.get();
+                                gen = now_gen;
+                                cfg = now_cfg;
+                                break EpochEnd::Restart;
+                            }
+                        }
                     }
                 }
                 let fr = pending_frames.pop_front().unwrap();
@@ -1191,6 +1236,72 @@ fn degraded_reply(line: &[u8], inject: bool, local: bool, who: &str, why: &str) 
     } else {
         let id = id?;
         Some(jsonrpc::text_reply(&id, &format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите"), true))
+    }
+}
+
+/// Сколько ждать тишины (`in_flight == 0`) после смены параметров, пока
+/// под разговором висит вызов без ответа, прежде чем форсировать рестарт.
+/// Без предела один вечный (или просто очень долгий — `cf_decompile` на
+/// крупной конфигурации) вызов держал бы канал занятым навсегда, и ни один
+/// новый вызов не добрался бы до параметров, на которых его ждёт собранная
+/// заново команда — находка проверки безопасности (круг исправления 2
+/// задачи 3 плана «тонкий срез ценности»): понижение потолка записи можно
+/// было обойти именно так — держать вызов открытым и слать новые поверх
+/// него тому же, более широкому по правам ребёнку.
+///
+/// ponytail: разумный срок, не измеренный на настоящем `cf_decompile` —
+/// поднять константу, если редкое совпадение долгой операции со сменой
+/// параметров начнёт рубить легитимные долгие вызовы заметно чаще, чем
+/// редкое совпадение по времени и оправдывает.
+const GEN_SWITCH_QUIET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Итог ожидания тишины (`wait_for_quiet`) после смены параметров, когда
+/// под разговором всё ещё висит вызов без ответа.
+#[derive(Debug, PartialEq, Eq)]
+enum Quiet {
+    /// Висевший вызов получил ответ (или был снят лишним `dec_in_flight`) —
+    /// можно рестартовать как обычно.
+    Reached,
+    /// Агент отключился, пока мы ждали тишины.
+    AgentEof,
+    /// Срок истёк, а вызов всё ещё висит.
+    TimedOut,
+}
+
+/// Ждёт, пока `in_flight` не станет нулём, НЕ трогая сам кадр, из-за
+/// которого её позвали (он остаётся первым в `pending_frames` — решает,
+/// что с ним делать, уже вызывающий, по итогу), но продолжая читать агента
+/// в ту же очередь, чтобы не задержать его поток на время ожидания: кадры,
+/// пришедшие в этом окне, просто копятся, как и всегда при занятом канале.
+/// Опрос тиком, не уведомлением — единственный долгий вызов на соединении
+/// — редкий путь, заводить под него `Notify`/condvar незачем.
+async fn wait_for_quiet<R>(
+    sr: &mut R,
+    buf: &mut [u8],
+    f: &mut Framer,
+    pending_frames: &mut std::collections::VecDeque<Frame>,
+    in_flight: &AtomicU64,
+    timeout: std::time::Duration,
+) -> Quiet
+where
+    R: AsyncRead + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if in_flight.load(Ordering::Relaxed) == 0 {
+            return Quiet::Reached;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Quiet::TimedOut;
+        }
+        tokio::select! {
+            n = sr.read(buf) => match n {
+                Ok(0) | Err(_) => return Quiet::AgentEof,
+                Ok(n) => pending_frames.extend(f.push(&buf[..n])),
+            },
+            _ = tokio::time::sleep(remaining.min(std::time::Duration::from_millis(50))) => {}
+        }
     }
 }
 
@@ -2488,6 +2599,134 @@ mod tests {
         // первого, и до второго (переигранного) ребёнка.
         assert_eq!(got.matches(r#""method":"initialize""#).count(), 2, "рукопожатие должно было дойти и до нового ребёнка: {got}");
         assert_eq!(got.matches("notifications/initialized").count(), 2, "{got}");
+    }
+
+    /// Круг исправления 2 задачи 3 (проверка безопасности): понижение
+    /// потолка записи не должно быть обходимо долгим вызовом. Первый вызов
+    /// висит без ответа навсегда (`BRIDGE_SCRIPT_HANG` — ребёнок синхронно
+    /// спит и в рамках этого теста никогда не отвечает и не читает дальше).
+    /// Без фикса второй вызов, посланный под сменившимися параметрами, ушёл
+    /// бы прямо этому ребёнку — тест бы просто не дождался ответа на него
+    /// (спящий ребёнок его никогда не прочитает). С фиксом мост ждёт тишины
+    /// ограниченный срок, не дожидается её, отвечает вызову #2 честным
+    /// отказом сам и рестартует: свежий ребёнок виден по новой `MARKER`.
+    #[tokio::test]
+    async fn a_call_stuck_in_flight_cannot_keep_new_calls_on_the_stale_child() {
+        let mut cfg_a = test_cfg(&["cf_load"]);
+        cfg_a.host.db_user = "UserA".into();
+        let live = Live::new(cfg_a.clone());
+        let make_cmd = |cfg: &Cfg| {
+            let mut c = child(("BRIDGE_SCRIPT_HANG", "1"));
+            c.env("BRIDGE_SCRIPT_RECORD", "1");
+            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            Ok(c)
+        };
+        let cmd0 = make_cmd(&cfg_a);
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            Arc::new(AtomicBool::new(true)),
+        );
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
+            let _ = tx.send((code, err));
+        }));
+        let (mut r, mut w) = tokio::io::split(ours);
+        let mut got: Vec<u8> = Vec::new();
+        assert!(
+            read_until(&mut r, &mut got, |s| s.contains("MARKER UserA"), std::time::Duration::from_secs(10)).await,
+            "первый ребёнок не поднялся: {}",
+            String::from_utf8_lossy(&got)
+        );
+        let call1 = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call1).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        assert!(
+            read_until(&mut r, &mut got, |s| s.contains("GOT") && s.contains("\"id\":1"), std::time::Duration::from_secs(10)).await,
+            "первый ребёнок не увидел вызов #1: {}",
+            String::from_utf8_lossy(&got)
+        );
+        // Параметры сменились ПОД висящим вызовом.
+        let mut cfg_b = live.get().1;
+        cfg_b.host.db_user = "UserB".into();
+        live.set(cfg_b);
+        let call2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
+        w.write_all(call2).await.unwrap();
+        w.write_all(b"\n").await.unwrap();
+        let budget = GEN_SWITCH_QUIET_TIMEOUT + std::time::Duration::from_secs(10);
+        assert!(
+            read_until(&mut r, &mut got, |s| has_reply(s, 2), budget).await,
+            "вызов #2 не получил ответа после срока ожидания тишины: {}",
+            String::from_utf8_lossy(&got)
+        );
+        let got_s = String::from_utf8_lossy(&got).into_owned();
+        let reply2: Value = got_s.lines().find_map(|l| serde_json::from_str::<Value>(l).ok().filter(|v| v["id"] == 2)).unwrap();
+        assert_eq!(reply2["result"]["isError"], true, "{got_s}");
+        assert!(reply2["result"]["content"][0]["text"].as_str().unwrap().contains("параметры сменились"), "{got_s}");
+        assert!(
+            read_until(&mut r, &mut got, |s| s.contains("MARKER UserB"), std::time::Duration::from_secs(10)).await,
+            "свежий ребёнок на новых параметрах не поднялся: {}",
+            String::from_utf8_lossy(&got)
+        );
+        w.shutdown().await.unwrap();
+    }
+
+    /// `wait_for_quiet` в изоляции: три исхода.
+    #[tokio::test]
+    async fn wait_for_quiet_returns_once_in_flight_drops_before_the_deadline() {
+        let in_flight = Arc::new(AtomicU64::new(1));
+        let probe = in_flight.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            dec_in_flight(&probe);
+        });
+        let (_ours, mut theirs) = tokio::io::duplex(64);
+        let mut buf = [0u8; 64];
+        let mut f = Framer::new();
+        let mut pending_frames = std::collections::VecDeque::new();
+        let outcome =
+            wait_for_quiet(&mut theirs, &mut buf, &mut f, &mut pending_frames, &in_flight, std::time::Duration::from_secs(5)).await;
+        assert_eq!(outcome, Quiet::Reached);
+    }
+
+    #[tokio::test]
+    async fn wait_for_quiet_times_out_when_the_call_never_finishes() {
+        let in_flight = Arc::new(AtomicU64::new(1)); // никогда не снимается в этом тесте
+        let (_ours, mut theirs) = tokio::io::duplex(64);
+        let mut buf = [0u8; 64];
+        let mut f = Framer::new();
+        let mut pending_frames = std::collections::VecDeque::new();
+        let t0 = std::time::Instant::now();
+        let outcome =
+            wait_for_quiet(&mut theirs, &mut buf, &mut f, &mut pending_frames, &in_flight, std::time::Duration::from_millis(80)).await;
+        assert_eq!(outcome, Quiet::TimedOut);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "предел ожидания — не настоящий час");
+    }
+
+    /// Пока ждём тишины, поток агента не бросаем читать: строка, пришедшая
+    /// в этом окне, обязана остаться в очереди, не потеряться.
+    #[tokio::test]
+    async fn wait_for_quiet_keeps_reading_the_agent_without_losing_frames() {
+        let in_flight = Arc::new(AtomicU64::new(1));
+        let (mut ours, mut theirs) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            ours.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n").await.unwrap();
+            // Не закрывать `ours` до конца проверки — иначе её дроп шлёт EOF
+            // раньше, чем успеет истечь срок ожидания, и тест ловит не то,
+            // что проверяет.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let mut buf = [0u8; 256];
+        let mut f = Framer::new();
+        let mut pending_frames = std::collections::VecDeque::new();
+        let outcome =
+            wait_for_quiet(&mut theirs, &mut buf, &mut f, &mut pending_frames, &in_flight, std::time::Duration::from_millis(150)).await;
+        assert_eq!(outcome, Quiet::TimedOut);
+        assert_eq!(pending_frames.len(), 1, "кадр, пришедший во время ожидания, не должен потеряться");
     }
 
     #[tokio::test]

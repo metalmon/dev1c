@@ -121,6 +121,12 @@ pub struct Ui {
     /// (список опустел) или испортился по-новому (другая машина, другая
     /// учётка).
     pub undecryptable_noted: Vec<String>,
+    /// Какие находки разбора (`cfg.read_notes`) уже сказаны в журнал — тем
+    /// же приёмом и ровно по той же причине, что `undecryptable_noted`
+    /// выше: окно перечитывает файл при каждом показе, и без метки «уже
+    /// сказано» фраза про опечатку в `current` сыпалась бы в журнал на
+    /// каждое открытие окна.
+    pub read_notes_noted: Vec<String>,
     pub session: Option<Session>,
     /// Растёт на каждый новый сеанс и на каждую остановку: хвостовое
     /// событие от уже не текущего сеанса (умирающий поток ещё договаривает)
@@ -665,6 +671,18 @@ pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
         ui.undecryptable_noted = cfg.undecryptable.clone();
         if let Some(line) = line {
             note_line(ui, line);
+        }
+    }
+    // Находки разбора (круг починки 1, находки A и D) — тем же приёмом и с
+    // той же меткой «уже сказано»: фразы в `read_notes` уже написаны для
+    // человека (`cfg::Cfg::read_notes`), окну остаётся их произнести. Окно —
+    // единственное место, где эти находки исправляют, поэтому оно о них
+    // говорит, а не отказывается открыться: отказывает на них командная
+    // строка (`Cfg::load_with`).
+    if cfg.read_notes != ui.read_notes_noted {
+        ui.read_notes_noted = cfg.read_notes.clone();
+        for text in cfg.read_notes.iter() {
+            note_line(ui, Line { kind: Kind::Warn, text: text.clone() });
         }
     }
     ui.cfg = cfg;
@@ -2074,6 +2092,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             kit,
             cfg,
             undecryptable_noted: Vec::new(),
+            read_notes_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,
@@ -2219,6 +2238,7 @@ impl Ui {
             kit,
             cfg,
             undecryptable_noted: Vec::new(),
+            read_notes_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,

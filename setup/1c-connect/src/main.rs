@@ -242,6 +242,12 @@ fn run() -> Result<()> {
             if !ctx.cfg.undecryptable.is_empty() {
                 println!("  [ !! ] {}", cfg::undecryptable_message(&ctx.cfg.undecryptable));
             }
+            // Находки разбора — по той же причине и тем же видом строки:
+            // `status` читает `load_unchecked` и обязан рассказать то, на чём
+            // `serve`/`connect` отказали бы (круг починки 1, A и D).
+            for note in &ctx.cfg.read_notes {
+                println!("  [ !! ] {note}");
+            }
             println!();
             for (id, title, st) in common::run::status(&ctx, &ops) {
                 println!("  {:<16} {:<26} {}", id, title, st.label());

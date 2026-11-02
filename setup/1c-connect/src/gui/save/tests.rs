@@ -195,6 +195,32 @@ fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
     assert!(moved_lines(&as_cfg(&own), &as_cfg(&own_new)).is_empty());
 }
 
+/// Круг починки 1, находка B: «Сохранить» правит ТЕКУЩЕЕ соединение, а не
+/// подменяет собой весь список. `cfg`, собранная из полей формы, несёт одно
+/// соединение, и прежнее `ui.cfg = cfg` стирало человеку все остальные
+/// карточки — в памяти окна, молча. Диск этим не лечится и не должен:
+/// `render` печатает одну секцию `[host]` без имени и без `current`, запись
+/// списка целиком — задача 4.
+#[test]
+fn saving_edits_the_current_connection_and_keeps_the_others() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    let current_name = ui.cfg.current().name.clone();
+    let mut host = ui.cfg.current().clone();
+    host.db_user = "mcp".into();
+    save_host(&mut ui, host).unwrap();
+    assert_eq!(ui.cfg.connections.len(), 2, "второе соединение переживает сохранение");
+    assert_eq!(ui.cfg.current, current_name, "текущим осталось то же соединение");
+    assert_eq!(ui.cfg.current().db_user, "mcp", "правка доехала до текущего");
+    let other = ui.cfg.connections.iter().find(|c| c.name == "Ромашка").expect("соседняя карточка на месте");
+    assert_eq!(other.base_path, "C:\\Bases\\Ромашка", "и её поля не тронуты");
+}
+
 #[test]
 fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
     let mut ui = Ui::for_test();

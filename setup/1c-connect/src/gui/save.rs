@@ -356,7 +356,24 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
     // лишней строкой в журнал и лишним миганием портов.
     let changed = panel::fields_differ(cfg.current(), &old_host, &cfg.current().mode, &cfg.current().publication);
-    ui.cfg = cfg;
+    // В памяти окна переносим ТЕКУЩЕЕ соединение, а не всю `Cfg` целиком:
+    // `cfg` выше собрана из полей формы и несёт ровно одно соединение, и
+    // `ui.cfg = cfg` стирал бы все прочие карточки человека (круг починки 1,
+    // находка B). Имя текущего ставим вслед: на первой настройке список был
+    // пуст, `current_mut()` создал соединение под своим именем, а у
+    // сохранённого имя выведено из каталога базы.
+    //
+    // Диск этой правкой не лечится и не должен: `render` печатает одну
+    // секцию `[host]` без `name` и без `current`, то есть на диске список
+    // пока и не живёт — запись списка целиком идёт задачей 4 (адресация
+    // блока по имени).
+    *ui.cfg.current_mut() = cfg.current().clone();
+    ui.cfg.current = cfg.current().name.clone();
+    // Сеансовые факты — не настройки человека, и они принадлежат только что
+    // прочитанному/записанному: какие пароля не открылись (`keep` выше) и
+    // какой порт публикации достался этой записи.
+    ui.cfg.undecryptable = cfg.undecryptable.clone();
+    ui.cfg.resolved_http_port = cfg.resolved_http_port;
     for text in moved {
         note_line(ui, Line { kind: Kind::Warn, text });
     }

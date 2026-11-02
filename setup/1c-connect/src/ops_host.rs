@@ -3167,8 +3167,14 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("dev1c-kit-ro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let kit = tmp.join("kit");
-        std::fs::create_dir_all(kit.join("vrunner")).unwrap();
-        std::fs::create_dir_all(kit.join("git")).unwrap();
+        // Имена инструментов берём у тех же функций, что их и проверяют:
+        // фикстура, выписанная руками, была windows-овой и на Linux давала
+        // `Blocked` вместо состояния — а тест `#[cfg(unix)]`, то есть не
+        // исполнялся ни на одной машине разработчика, только в CI.
+        for f in [oscript_exe(&kit), git_exe(&kit), mcp_exe_at(&kit)] {
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, "x").unwrap();
+        }
         std::fs::write(kit.join(VERSION_FILE), "x\n").unwrap();
         let ro = std::fs::Permissions::from_mode(0o555);
         std::fs::set_permissions(kit.join("vrunner"), ro.clone()).unwrap();

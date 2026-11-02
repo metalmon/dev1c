@@ -74,7 +74,26 @@ pub fn pick(first: u16, count: u16, busy: &dyn Fn(u16) -> bool) -> Result<u16, S
 /// — не повод уезжать (`publication::busy_for_choice`, находка 2 ревью
 /// круга 3). Этот модуль про «кто-то слушает», и только.
 pub(crate) fn port_is_busy(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_err()
+    !matches!(listening(port), Ok(false))
+}
+
+/// Слушает ли кто-то порт — три исхода, а не два: `Ok(true)` — занят
+/// (`AddrInUse`), `Ok(false)` — свободен (послушать удалось), `Err` — сказать
+/// нельзя, попытка не удалась по другой причине.
+///
+/// Разделение завелось не для красоты: на Linux любой порт ниже 1024 без
+/// root отдаёт `PermissionDenied`, а прежняя проба читала ЛЮБУЮ ошибку как
+/// «занят». Подбору (`port_is_busy` выше) этого хватает — занять такой порт
+/// мы всё равно не можем, — а страж публикации по той же строке утверждал
+/// человеку «порт занят, а чей — не установить» там, где не слушает никто,
+/// и запрещал публикацию на пустом месте. Нашлось первым прогоном CI на
+/// Linux за неделю (2.11.2026).
+pub(crate) fn listening(port: u16) -> std::io::Result<bool> {
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 fn file_in(state_dir: &Path) -> PathBuf {
@@ -163,6 +182,36 @@ pub fn choose(state_dir: &Path, first: Chosen, busy: &dyn Fn(u16) -> bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Проба отвечает на два РАЗНЫХ вопроса, и путать их нельзя: подбору
+    /// нужно «смогу ли я тут слушать», стражу публикации — «слушает ли
+    /// кто-то». До 2.11 функция была одна, и любая ошибка `bind` читалась
+    /// как «занят»; на Linux порт ниже 1024 без root даёт
+    /// `PermissionDenied`, и страж запрещал публикацию на пустом месте.
+    #[test]
+    fn listening_tells_a_held_port_from_one_it_could_not_even_try() {
+        let live = TcpListener::bind("127.0.0.1:0").unwrap();
+        let held = live.local_addr().unwrap().port();
+        assert_eq!(listening(held).ok(), Some(true), "слушатель жив — порт занят");
+
+        let free = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        assert_eq!(listening(free).ok(), Some(false), "слушателя нет — порт свободен");
+
+        // Для подбора оба «не удалось» одинаковы: занять нельзя — не берём.
+        assert!(port_is_busy(held), "подбор не вправе выбрать занятый порт");
+        assert!(!port_is_busy(free));
+    }
+
+    /// Та самая разница, которую видно только на Linux и только без root.
+    #[cfg(unix)]
+    #[test]
+    fn a_privileged_port_is_unknown_to_the_probe_not_busy() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        assert!(listening(1).is_err(), "порт 1 без root не послушать — и это не ответ «занят»");
+        assert!(port_is_busy(1), "а подбору всё равно: занять его мы не можем");
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("dev1c-ports-{name}-{}", std::process::id()));

@@ -361,7 +361,13 @@ pub fn parse_proc_locks(out: &str, dev: u64, ino: u64) -> bool {
         }
         let mut id = f[5].split(':');
         let (Some(maj), Some(min), Some(inode)) = (id.next(), id.next(), id.next()) else { return false };
-        let (Ok(maj), Ok(min), Ok(inode)) = (maj.parse::<u32>(), min.parse::<u32>(), inode.parse::<u64>()) else { return false };
+        // `major`/`minor` — ШЕСТНАДЦАТЕРИЧНЫЕ: ядро печатает их как
+        // `%02x:%02x` (`lock_get_status`), и десятичное чтение молча давало
+        // чужое устройство на любом minor от 0x0a (а на `3f` не давало
+        // ничего). Inode в той же строке — десятичный (`%lu`).
+        let (Ok(maj), Ok(min), Ok(inode)) = (u32::from_str_radix(maj, 16), u32::from_str_radix(min, 16), inode.parse::<u64>()) else {
+            return false;
+        };
         libc::makedev(maj, min) as u64 == dev && inode == ino
     })
 }
@@ -707,6 +713,23 @@ mod tests {
         assert!(!parse_proc_locks(line, libc::makedev(8, 2) as u64, 7092817), "другое устройство — не держат");
         assert!(!parse_proc_locks("1: FLOCK ADVISORY READ 2206 08:01:7092817 0 EOF\n", dev, 7092817), "READ — не наш LOCK_EX");
         assert!(!parse_proc_locks("", dev, 7092817));
+    }
+
+    /// Ядро печатает major и minor ШЕСТНАДЦАТЕРИЧНО (`lock_get_status`:
+    /// `"%d %02x:%02x:%lu "`), а не десятично. На примере `08:01` оба чтения
+    /// совпадают — поэтому тест выше ошибку и не ловил, а шесть тестов,
+    /// которые зовут `is_held` живьём, падали только на Linux и только в CI.
+    /// Числа здесь — замер с настоящего `/proc/locks` (2.11.2026): `08:30` —
+    /// это minor 48, а `00:3f` десятичным чтением не разбирается вовсе.
+    #[cfg(unix)]
+    #[test]
+    fn the_device_in_proc_locks_is_hexadecimal_not_decimal() {
+        let line = "1: FLOCK ADVISORY WRITE 565 08:30:16571 0 EOF\n";
+        assert!(parse_proc_locks(line, libc::makedev(8, 0x30) as u64, 16571), "minor 0x30 — это 48, и держат именно его");
+        assert!(!parse_proc_locks(line, libc::makedev(8, 30) as u64, 16571), "десятичное чтение minor даёт чужое устройство");
+
+        let lettered = "6: FLOCK ADVISORY WRITE 163 00:3f:591 0 EOF\n";
+        assert!(parse_proc_locks(lettered, libc::makedev(0, 0x3f) as u64, 591), "буквы в minor — тоже шестнадцатеричные");
     }
 
     // Два разных пользователя (или два разных сеанса) не конфликтуют.

@@ -2104,11 +2104,17 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let s = secrets::Store::file(&tmp("readback-writefail"));
         let kit = kit_with("");
-        std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        // Права снимаем с САМОГО ФАЙЛА, а не с каталога: существующий файл
+        // перезаписывается по правам файла, и каталог без `w` этого не
+        // запрещает — прежняя фикстура (0o500 на каталоге) отказа не
+        // добивалась и тест проходил зелёным мимо своего смысла. Увидеть это
+        // было негде: тест `#[cfg(unix)]`, на Windows не компилируется.
+        let file = kit.state_path(cfg::FILE);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
         let mut c = filled();
         c.host.password = "секрет".into();
         let e = cfg::write_checked(&kit, &c, &s, &[]);
-        std::fs::set_permissions(kit.state(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         let e = e.unwrap_err();
         assert!(e.contains(cfg::FILE), "{e}");
     }

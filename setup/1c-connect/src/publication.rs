@@ -659,13 +659,17 @@ pub fn refuse_unless_ours(pid_file: &Path, port: u16, expected: &OurHttpd, has_p
     let Some(ours) = our_httpd_pid(pid_file) else {
         // Состояние 1 от состояния 3 отличает прямая проба (`port_is_busy`),
         // не атрибуция (`holder::listener_pid`) — см. докстроку выше.
-        return if crate::ports::port_is_busy(port) {
-            Guard::Refuse(format!(
+        return match crate::ports::listening(port) {
+            Ok(true) => Guard::Refuse(format!(
                 "порт {port}: занят, а чей он — установить не удалось (pid-файл публикации {} не прочитать){password_tail}",
                 pid_file.display()
-            ))
-        } else {
-            Guard::NotPublished
+            )),
+            Ok(false) => Guard::NotPublished,
+            // Третий исход: послушать порт не дали вовсе (на Linux так
+            // отвечает любой порт ниже 1024 без root). Утверждать «занят»
+            // нельзя — этого проба не проверяла; молчать и отдавать «не
+            // поднята» тоже: мы не знаем, не работает ли там чужой сервер.
+            Err(e) => Guard::Refuse(format!("порт {port}: занят ли он — проверить не удалось ({e}){password_tail}")),
         };
     };
     // Личность процесса, а не только его номер (находка автоматической
@@ -2192,10 +2196,33 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
     fn refuse_unless_ours_is_ok_when_nothing_listens_and_no_pid_file_exists() {
         let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-nofile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // Свободный порт берём у системы и тут же отпускаем, а не пишем
+        // числом: порт 1 здесь стоял до 2.11 и был окном в Windows — на
+        // Linux без root его не послушать вовсе, и проба отвечала «занят»
+        // там, где не слушает никто.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         assert!(
-            refuse_unless_ours(&pid_file_in(&dir), 1, &ours_for_test(), true).is_not_published(),
+            refuse_unless_ours(&pid_file_in(&dir), port, &ours_for_test(), true).is_not_published(),
             "публикация не поднята (порт свободен, pid-файла нет) — это не отказ"
         );
+    }
+
+    /// Третий исход пробы, которого до 2.11 не было: порт не послушать, но и
+    /// утверждать «кто-то слушает» нельзя. На Linux это не экзотика — любой
+    /// порт ниже 1024 без root даёт `PermissionDenied`, и прежний страж
+    /// читал его как «занят, чей — не установить», то есть запрещал
+    /// публикацию там, где не занято ничего.
+    #[cfg(unix)]
+    #[test]
+    fn a_port_we_may_not_even_listen_on_is_not_the_same_as_a_port_someone_holds() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("dev1c-pub-guard-privileged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let e = refuse_unless_ours(&pid_file_in(&dir), 1, &ours_for_test(), false).unwrap_refuse();
+        assert!(e.contains("проверить не удалось"), "отказ обязан сказать, что проба не состоялась: {e}");
+        assert!(!e.contains("занят,"), "«занят» — это утверждение, которого проба не делала: {e}");
     }
 
     /// Обратная сторона: порт занят (кем-то, кто не доказуемо наш — живой

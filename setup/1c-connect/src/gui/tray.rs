@@ -691,6 +691,19 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
 /// ребёнком, как и начинался; только следующий застаёт пересобранного.
 /// Иначе быть не может: ответ ребёнка, уже начавшего работу, нельзя
 /// отозвать на середине.
+/// Текст предупреждения, когда потолок применён к живому сеансу, но не
+/// лёгший на диск — три части (круг исправления 4, проверка безопасности):
+/// применено к ЭТОМУ сеансу; мосты, поднятые агентским CLI, — отдельные
+/// процессы, читающие файл, не эту живую ячейку, и не узнают о перемене
+/// никогда (не только «до перезапуска» — вообще никак, пока файл не
+/// записан); при показе окна здесь тоже откатится (`adopt_cfg`).
+/// Отдельная функция — чтобы текст проверялся тестом без `cx`.
+fn access_disk_failure_line(e: &str) -> String {
+    format!(
+        "запись в базу (mcp-1c): применено к работающему сеансу, но не сохранено в файл — {e}; мосты, поднятые агентским CLI, остаются на прежнем потолке — они читают файл, не этот сеанс; при перезапуске программы (или при следующем показе этого окна) здесь тоже вернётся прежнее значение"
+    )
+}
+
 fn apply_access(cx: &mut App, access: &'static str) {
     cx.global_mut::<Ui>().cfg.host.write = access.into();
     let host = cx.global::<Ui>().cfg.host.clone();
@@ -751,19 +764,20 @@ fn apply_access(cx: &mut App, access: &'static str) {
                     note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
                 }
                 Err(e) => {
-                    // На диск потолок не лёг — сказать это прямо, а не
-                    // молчать: сеанс уже на нём (`update_cfg` выше сработал
-                    // независимо от этого отказа), но файл при следующем
-                    // запуске программы прочтёт прежнее значение.
-                    note_line(
-                        cx.global_mut::<Ui>(),
-                        Line {
-                            kind: Kind::Warn,
-                            text: format!(
-                                "запись в базу (mcp-1c): применено к работающему сеансу, но не сохранено в файл — {e}; при перезапуске программы вернётся прежнее значение"
-                            ),
-                        },
-                    );
+                    // На диск потолок не лёг — сказать это прямо, тремя
+                    // частями (круг исправления 4, проверка безопасности):
+                    // применено к ЭТОМУ сеансу; мосты, поднятые агентским
+                    // CLI (`1c-connect mcp 1c`/`mcp vrunner`), — отдельные
+                    // процессы, читающие ФАЙЛ, не нашу живую ячейку, и о
+                    // применённом здесь не узнают никогда (не только «до
+                    // перезапуска» — вообще никак, пока файл не записан);
+                    // при показе окна здесь тоже откатится (`adopt_cfg`
+                    // перечитывает файл и толкает его в сеанс как есть — не
+                    // борюсь с этим, он честный, см. его докстроку).
+                    // Текст — отдельной функцией (`access_disk_failure_line`):
+                    // `apply_access` недостижим в тесте без `cx`, а текст
+                    // проверить нужно.
+                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: access_disk_failure_line(&e) });
                 }
             }
             cx.global_mut::<Ui>().tab = Tab::Params;
@@ -948,9 +962,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
-        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES,
-        PUBLICATIONS, PUBLICATION_SUBMENU,
+        access_disk_failure_line, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
+        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS,
+        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -1069,6 +1083,17 @@ mod tests {
         let cmd = crate::bridge::mcp_command(&tightened, &kit);
         let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args.windows(2).any(|w| w == ["--access", "read_only"]), "{args:?}");
+    }
+
+    /// Круг исправления 4, пункт 2: строка журнала при отказе диска
+    /// обязана назвать мосты агентского CLI именно — не только «до
+    /// перезапуска».
+    #[test]
+    fn the_disk_failure_line_names_agent_cli_bridges() {
+        let line = access_disk_failure_line("диск только для чтения");
+        assert!(line.contains("применено к работающему сеансу"), "{line}");
+        assert!(line.contains("агентским CLI"), "{line}");
+        assert!(line.contains("диск только для чтения"), "{line}");
     }
 
     #[test]

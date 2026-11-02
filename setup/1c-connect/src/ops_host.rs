@@ -2707,7 +2707,9 @@ mod tests {
         assert_eq!(wrote.len(), 2, "каталог выгрузки и порт публикации — пишутся: {wrote:?}");
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("gitea"), "{written}");
-        assert!(written.contains("http_port = 8082") && written.contains("dump = "), "{written}");
+        // 8081, не 8082: с задачи 6 `derived_http_port` — константа, имя
+        // рабочего места (`dev2` в `MINE`) её больше не трогает.
+        assert!(written.contains("http_port = 8081") && written.contains("dump = "), "{written}");
 
         // Тот же файл в туннельном режиме — адрес записан.
         let kit = TomlKit::new("tunnel");
@@ -2758,15 +2760,18 @@ mod tests {
         let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
 
         assert_eq!(cfg.host.dump, dump);
-        assert_eq!(cfg.host.http_port, Some(8082), "8080 + номер рабочего места");
-        assert!(wrote.iter().any(|w| w == &format!("dump = {dump:?}")) && wrote.iter().any(|w| w == "http_port = 8082"), "{wrote:?}");
+        // 8081, не 8082: с задачи 6 плана «тонкий срез ценности»
+        // `derived_http_port` — константа, `workstation = "dev2"` в `MINE`
+        // на неё больше не влияет.
+        assert_eq!(cfg.host.http_port, Some(8081), "8081 — константа с задачи 6, не 8080 + номер рабочего места");
+        assert!(wrote.iter().any(|w| w == &format!("dump = {dump:?}")) && wrote.iter().any(|w| w == "http_port = 8081"), "{wrote:?}");
         let back: Cfg = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(back.host.dump, dump);
-        assert_eq!(back.host.http_port, Some(8082));
+        assert_eq!(back.host.http_port, Some(8081));
         // Записанное умолчание ничего не меняет ни в адресах, ни у моста:
         // ключ `--dump` остаётся выключенным (см. `Cfg::dump_override`).
         // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
-        assert_eq!(back.base_url(), "http://127.0.0.1:8082/hs/mcp-1c");
+        assert_eq!(back.base_url(), "http://127.0.0.1:8081/hs/mcp-1c");
         assert_eq!(back.dump_dir(), dump);
         assert_eq!(back.dump_override(), None, "записанное умолчание — не свой каталог");
     }

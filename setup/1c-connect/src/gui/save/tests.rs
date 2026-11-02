@@ -62,18 +62,6 @@ fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
     assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
 }
 
-/// Та же ловушка у порта публикации: записанный `8080 + N` идёт за
-/// рабочим местом, свой порт остаётся, незаданный — незаданным.
-#[test]
-fn carried_http_port_follows_the_workstation_unless_it_was_chosen_by_hand() {
-    let mut saved = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port("dev1")), ..Host::default() };
-    assert_eq!(carried_http_port(&saved, "dev2"), Some(8082));
-    saved.http_port = Some(9000);
-    assert_eq!(carried_http_port(&saved, "dev2"), Some(9000));
-    saved.http_port = None;
-    assert_eq!(carried_http_port(&saved, "dev2"), None);
-}
-
 /// `moved_lines` принимает `Cfg`, а не `Host` (находка 6: порт в строке —
 /// доставшийся, а не предпочтение), а тесты ниже строят именно `Host`.
 fn as_cfg(h: &Host) -> Cfg {
@@ -90,60 +78,46 @@ fn state_dir_for(name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// Переезд порта не молчком: новый порт может быть занят, и человек
-/// должен прочитать про переезд, а не искать, почему публикация упала.
-///
-/// Улаживание здесь настоящее (находка 8): каталог состояния подставлен, и
-/// после «Сохранить» в нём лежит `ports.state` с новым предпочтением —
-/// прежде эта проверка была невозможна, `settle_chosen_http_port` в тестах
-/// была пустышкой, и утверждение про `base_url()` держалось ровно на том,
-/// что улаживание ничего не делает.
-///
-/// Числа названы относительно, а не литералом 8083: подбор мог сдвинуться,
-/// если 8083 на этой машине занят. Утверждение от этого не слабеет — оно про
-/// то, что `base_url()` и строка журнала называют ОДИН И ТОТ ЖЕ доставшийся
-/// порт, а предпочтение переехало за рабочим местом.
+/// С задачи 6 плана «тонкий срез ценности» переименование рабочего места
+/// порт публикации не трогает вовсе: предпочтение (`host.http_port`)
+/// переносится как есть, а строка журнала о переезде называет только ветку
+/// проекта и `origin` — ни числа портов, ни слова «порт» в ней больше нет
+/// (до задачи 6 здесь проверялось обратное — что порт едет за именем).
 #[test]
-fn saving_a_new_workstation_moves_a_derived_port_and_says_so() {
-    let dir = state_dir_for("moved-port");
+fn renaming_the_workstation_does_not_move_the_port_anymore() {
+    let dir = state_dir_for("renamed-workstation");
     let mut ui = Ui::for_test();
-    ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
+    ui.cfg.host.http_port = Some(cfg::derived_http_port());
     let mut host = ui.cfg.host.clone();
     host.workstation = "dev3".into();
     crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap();
-    assert_eq!(ui.cfg.host.http_port, Some(8083), "предпочтение переехало за рабочим местом");
-    let chosen = ui.cfg.http_port();
-    // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
-    assert_eq!(ui.cfg.base_url(), format!("http://127.0.0.1:{chosen}/hs/mcp-1c"));
-    assert!(ui.log.iter().any(|l| l.text.contains(&format!("порт публикации 8081 → {chosen}"))), "{:?}", ui.log);
-    // Улаживание и правда сходило в каталог состояния — иначе этот файл не
-    // появился бы, и удаление вызова из `save_host` прошло бы незамеченным.
-    assert_eq!(std::fs::read_to_string(dir.join("ports.state")).unwrap(), format!("pref_http=8083\nhttp={chosen}\n"));
+    assert_eq!(ui.cfg.host.http_port, Some(cfg::derived_http_port()), "предпочтение не трогает рабочее место");
+    assert!(!ui.log.iter().any(|l| l.text.contains("порт")), "строка о переезде не должна называть портов: {:?}", ui.log);
+    assert!(ui.log.iter().any(|l| l.text.contains("ветка проекта и origin")), "{:?}", ui.log);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Находка 6 ревью круга 3: строка журнала называет ДОСТАВШИЙСЯ порт, а не
-/// предпочтение. Сценарий находки: `dev1` → `dev3`, предпочтение 8083 держит
-/// сосед по терминальному серверу, подбор уехал на 8084 — человек заводит
-/// правило в средствах защиты по числу из этой строки, и 8083 в ней было бы
-/// числом, на котором не слушает никто.
-///
-/// Здесь подбор не нужен: `resolved_http_port` — то самое поле, которым
-/// улаживание кладёт выбор, и чистая функция обязана читать его, а не
-/// `host.http_port`.
+/// До задачи 6 строка журнала называла доставшийся порт, а не предпочтение
+/// (находка 6 ревью круга 3) — сценарий требовал, чтобы ПЕРЕИМЕНОВАНИЕ
+/// двигало предпочтение, а подбор мог уехать дальше нового предпочтения.
+/// С задачи 6 переименование предпочтение не двигает вовсе (порт — константа,
+/// не выведенная из имени), и этого сценария больше нет: подбор всё ещё
+/// может сдвинуть `resolved_http_port` независимо от рабочего места, но
+/// `moved_lines` про порт теперь не говорит ничего — ни про предпочтение,
+/// ни про доставшееся.
 #[test]
-fn the_moved_port_line_names_the_port_that_was_chosen_not_the_preference() {
-    let old = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port("dev1")), ..Host::default() };
+fn renaming_the_workstation_leaves_the_port_out_of_the_moved_line_even_when_the_pick_shifted() {
+    let old = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port()), ..Host::default() };
     let mut new = old.clone();
     new.workstation = "dev3".into();
-    new.http_port = carried_http_port(&old, "dev3");
-    assert_eq!(new.http_port, Some(8083), "предпочтение — выведенное из нового имени");
     let before = Cfg { host: old, ..Default::default() };
-    // Подбор сдвинулся: 8083 занят соседом, достался 8084.
+    // Подбор этого сеанса ушёл на другой порт по причине, не связанной с
+    // переименованием (например, порт занят соседом) — строка о переезде
+    // рабочего места всё равно не должна называть портов.
     let after = Cfg { host: new, resolved_http_port: Some(8084), ..Default::default() };
     let line = moved_lines(&before, &after).join("\n");
-    assert!(line.contains("порт публикации 8081 → 8084"), "строка обязана назвать доставшийся порт: {line}");
-    assert!(!line.contains("8083"), "предпочтение, на котором никто не слушает, в журнал не идёт: {line}");
+    assert!(!line.contains("порт") && !line.contains("8084"), "порт не переезжает за рабочим местом: {line}");
+    assert!(line.contains("ветка проекта и origin"), "{line}");
 }
 
 /// Находка 5 ревью круга 3: неудавшееся «Сохранить» не двигает запомненный
@@ -155,7 +129,7 @@ fn the_moved_port_line_names_the_port_that_was_chosen_not_the_preference() {
 fn a_refused_save_does_not_remember_a_new_port() {
     let dir = state_dir_for("refused-save");
     let mut ui = Ui::for_test();
-    ui.cfg.host.http_port = Some(cfg::derived_http_port(&ui.cfg.host.workstation));
+    ui.cfg.host.http_port = Some(cfg::derived_http_port());
     let mut host = ui.cfg.host.clone();
     host.workstation = "dev3".into();
     host.server = "no-port".into(); // `validate()` на этом откажет
@@ -181,27 +155,28 @@ fn saving_a_new_project_moves_a_derived_dump_with_it() {
     assert!(ui.log.iter().any(|l| l.text.contains("переехал каталог выгрузки")), "{:?}", ui.log);
 }
 
-/// Правило одно на все переезды: о каждом — строка. За рабочим местом
-/// едут ветка, origin, порты и порт публикации; за каталогом проекта —
-/// каталог выгрузки; ничего не менялось — строк нет.
+/// Правило одно на все переезды: о каждом — строка. За рабочим местом едут
+/// только ветка и origin (с задачи 6 — порты и порт публикации больше не
+/// едут, это константы); за каталогом проекта — каталог выгрузки; ничего не
+/// менялось — строк нет.
 #[test]
-fn every_move_gets_a_line_not_just_the_port() {
+fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
     let old = Host {
         workstation: "dev1".into(),
         project: "C:\\proj\\Buh".into(),
         dump: cfg::derived_dump("C:\\proj\\Buh"),
-        http_port: Some(cfg::derived_http_port("dev1")),
+        http_port: Some(cfg::derived_http_port()),
         ..Host::default()
     };
     assert!(moved_lines(&as_cfg(&old), &as_cfg(&old)).is_empty());
 
     let mut new = old.clone();
     new.workstation = "dev3".into();
-    new.http_port = carried_http_port(&old, "dev3");
     let line = moved_lines(&as_cfg(&old), &as_cfg(&new)).join("\n");
-    for part in ["dev1 → dev3", "ветка проекта и origin", "7773/7783/7793", "порт публикации 8081 → 8083"] {
+    for part in ["dev1 → dev3", "ветка проекта и origin"] {
         assert!(line.contains(part), "{part} не назван: {line}");
     }
+    assert!(!line.contains("порт"), "порт больше не едет за рабочим местом: {line}");
 
     let mut moved_project = old.clone();
     moved_project.project = "C:\\proj\\Torg".into();

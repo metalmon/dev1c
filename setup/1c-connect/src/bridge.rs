@@ -33,19 +33,38 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     // `mcp-1c` КЛЮЧ ПЕРЕБИВАЕТ переменную (`internal/config/config.go`,
     // `cfg := config.Load()` и только потом перезапись из флага) — оставь
     // `--password` рядом с переменной, и он победил бы её, обнулив всю
-    // правку. `--base`/`--user`/`--dump`/`--profile`/`--quiet` остаются
-    // ключами по другой причине — они не секреты, и переписывать их в
-    // переменные нет смысла.
+    // правку. `--base`/`--user`/`--dump`/`--profile`/`--toolset`/`--access`/
+    // `--quiet` остаются ключами по другой причине — они не секреты, и
+    // переписывать их в переменные нет смысла.
     //
     // `--profile` — вид конфигурации базы (`Cfg::configuration()`): пусто ⇒
     // `auto`, ребёнок сам угадывает вид по составу конфигурации. Молчаливого
     // отказа тут нет и быть не может: неизвестное имя `validate()` отсекает
     // раньше, чем `Cfg` попадает сюда (см. докстроку `configuration()`),
     // `unwrap_or` здесь — не маскировка опечатки, а тип-безопасный синоним
-    // уже проверенного значения. Задача 3 плана дописывает рядом
-    // `--toolset`/`--access` — строка аргументов общая для обеих задач, не
-    // переписывай её целиком.
-    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--profile", cfg.configuration().unwrap_or("auto"), "--quiet"]);
+    // уже проверенного значения.
+    //
+    // `--toolset`/`--access` — какой набор инструментов поднимает ребёнок и
+    // какой у него потолок записи (задача 3 плана «тонкий срез ценности»,
+    // замер `docs/research/2026-11-02-measured-tool-lists.md`): при
+    // `read_only` пишущие инструменты у ребёнка вообще не регистрируются
+    // (`server/server.go` форка), и фильтра `tools/list` на нашей стороне
+    // нет и не будет — потолок несёт сам ребёнок. `access()` не возвращает
+    // `Result` ровно по той же причине, что `unwrap_or` у `--profile`:
+    // `validate()` уже отсёк неизвестное имя раньше.
+    c.args([
+        "--base",
+        &cfg.base_url(),
+        "--user",
+        &cfg.host.db_user,
+        "--profile",
+        cfg.configuration().unwrap_or("auto"),
+        "--toolset",
+        cfg.toolset().unwrap_or("business"),
+        "--access",
+        cfg.access(),
+        "--quiet",
+    ]);
     c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
     // `Cfg::dump_override`.
@@ -1346,6 +1365,50 @@ mod tests {
         let args2: Vec<String> = c2.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i2 = args2.iter().position(|a| a == "--profile").expect("--profile нет среди аргументов");
         assert_eq!(args2[i2 + 1], "auto", "пустое значение — это auto, а не пропущенный флаг");
+    }
+
+    /// Буквально из брифа задачи 3: оба новых флага и `--profile` рядом —
+    /// все три доходят до ребёнка ключами, не переменными.
+    #[test]
+    fn the_child_gets_the_toolset_the_access_and_the_configuration() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.toolset = "business".into();
+        c.host.write = "read_only".into();
+        let cmd = mcp_command(&c, &kit_for_test());
+        let argv: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(argv.windows(2).any(|w| w == ["--toolset", "business"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["--access", "read_only"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w[0] == "--profile"), "{argv:?}");
+    }
+
+    /// Пустые `toolset`/`write` доходят как резолвленные умолчания
+    /// (`business`/`read_only`), не как пропущенные флаги — тот же приём,
+    /// что у `--profile` в `the_profile_reaches_the_child_as_a_flag`.
+    #[test]
+    fn empty_toolset_and_write_reach_the_child_as_their_defaults() {
+        let cfg = crate::cfg::filled_for_test();
+        let c = mcp_command(&cfg, &kit_for_test());
+        let argv: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(argv.windows(2).any(|w| w == ["--toolset", "business"]), "{argv:?}");
+        assert!(argv.windows(2).any(|w| w == ["--access", "read_only"]), "{argv:?}");
+    }
+
+    /// Шаг 6 брифа: после смены потолка на уже работающем ребёнке
+    /// пересборка несёт другой `--access` — именно этот факт даёт жить
+    /// `rules.live`/`rebuild` (`Serve::dispatch`, `EpochEnd::Restart`) без
+    /// всякого GUI.
+    #[test]
+    fn rebuilding_the_command_after_the_ceiling_changes_carries_the_new_access() {
+        let mut c = crate::cfg::filled_for_test();
+        c.host.write = "read_only".into();
+        let before = mcp_command(&c, &kit_for_test());
+        let args_before: Vec<String> = before.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args_before.windows(2).any(|w| w == ["--access", "read_only"]), "{args_before:?}");
+
+        c.host.write = "read_write".into();
+        let after = mcp_command(&c, &kit_for_test());
+        let args_after: Vec<String> = after.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args_after.windows(2).any(|w| w == ["--access", "read_write"]), "{args_after:?}");
     }
 
     #[test]

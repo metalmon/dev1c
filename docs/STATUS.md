@@ -30,6 +30,29 @@ script days is obsolete; the scripts are gone.
 
 ## Verified by running it
 
+- **Apache on Windows: the parent owns the listening socket, and `PidFile`
+  names the parent.** Measured 2.11 with the kit's own httpd on a throwaway
+  port 47901: `PidFile` = 23668, `Get-NetTCPConnection -State Listen
+  -LocalPort 47901` reported `OwningProcess` 23668, and the worker child
+  (2204, parent 23668) owned no socket. This settles the port-ownership guard
+  in `publication::refuse_unless_ours`: comparing the pid file against the
+  socket owner is correct on Windows.
+- **`PROCESS_QUERY_LIMITED_INFORMATION` is enough for another user's
+  process.** Under an unelevated token (no High Mandatory Level in `whoami
+  /groups`), both the image path and the owner SID of foreign processes came
+  back: `C:\Windows\System32\svchost.exe` for pids 1148/1236/1364, owners
+  `S-1-5-18` and `S-1-5-20`. Only kernel pid 4 returns nothing. So "could not
+  identify the holder" in production means "the process is gone", not "no
+  rights".
+- **The `mcp-1c` fork's real tool lists**, measured over stdio with no live
+  base (`tools/list` answers without connecting): `--toolset developer` 8
+  tools including `execute_query`; `--toolset business --access read_only` 8
+  read tools; the same with `--access read_write` 17; and `--profile generic`
+  returns the *same* 17 names as `buh_3_0` — the profile changes what the
+  names do, not the list. Details and the consequence (no stock-balance tool,
+  and no `execute_query` for a business user) in
+  `docs/research/2026-11-02-measured-tool-lists.md`.
+
 - **Image builds in CI** and passes its own checks: services start, the model
   name reaches the editor settings for both providers, `oscript` runs Cyrillic
   code, skills are intact, no key in the image environment.
@@ -208,6 +231,24 @@ script days is obsolete; the scripts are gone.
 - **PRISM runs.** The benchmark is seeded into Gitea; nothing has been run yet.
 
 ## Known traps, each cost a build or an evening
+
+- **`httpd -k stop` does not stop a console-started httpd.** It goes looking
+  for the Windows service and prints `The 'Apache2.4' service is not
+  started`, changing nothing. Measured 2.11: the parent had to be killed by
+  hand, and the worker child then survived as an orphan. This matters because
+  the base publication is started with `Lifetime::Detached` — deliberately
+  outside any Job and untracked — so `-k stop` is its only stop path. The old
+  httpd therefore keeps the port, and "restart the publication" silently does
+  not happen. Fix planned as task 7 of the thin-value-slice plan; the guard
+  must verify the process image and owner before killing anything, because
+  Windows reuses pid numbers.
+- **A path check is not an identity check when the binary is readable by
+  others.** The kit sits in `C:\dev1c-connect-kit`, and ordinary permissions
+  on a folder in the drive root let another user read and *execute* it. A
+  neighbour on a terminal server can run *our own* `httpd.exe` with their own
+  config, so the image path matches perfectly with nothing forged. The owner
+  of the process is the barrier that cannot be crossed without our
+  credentials; the image path only raises the bar.
 
 - `exec` in a shebang script replaces the process image: the PID stays, but the
   process that ran the script is gone from `/proc`, so a child looking for its

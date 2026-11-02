@@ -1747,6 +1747,20 @@ fn mcp_tick(kit: &Kit, user: &str) -> (bool, Result<Cfg, String>) {
 /// (признак, toml) и держать признак обслуживания на каждый тик чаще, а
 /// 200 мс и так короче, чем человек успевает заметить разницу между своим
 /// действием и ответом моста.
+/// Можно ли доверять «потолок записи — `read_write`», прочитанному
+/// терпимо (`toml_render::get`) из файла, который целиком НЕ прошёл
+/// `Cfg::load`. Отказ по умолчанию, не разрешение (круг исправления 4,
+/// проверка безопасности): `None` (файл не прочитался вовсе) — то же
+/// самое, что нераспознанное или отсутствующее значение, — не доверяем;
+/// доверяем ровно точному совпадению со строкой `"read_write"`. Решение
+/// ведущего круга исправления, не владельца: единственное, чему здесь
+/// можно довериться, — разрешающее значение буквально, всё прочее (в т.ч.
+/// хвостовой мусор, который `unquote` не снимает, регистр, опечатка) —
+/// небезопасный случай и повод ужесточить.
+fn trusts_read_write(file_text: Option<&str>) -> bool {
+    file_text.and_then(|text| common::toml_render::get(text, "[host]", "write")).as_deref() == Some("read_write")
+}
+
 fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
@@ -1772,17 +1786,12 @@ fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> A
                     // потолка записи обязано дойти до сеанса всё равно
                     // (круг исправления 2 задачи 3, находка 3): терпимо
                     // читаем один ключ `[host].write` из текста файла,
-                    // минуя полный разбор (`toml_render::get`). Пусто или
-                    // `read_only` — накладываем на живой `Cfg`
-                    // (`Cfg::with_access`); `read_write` из файла, который
-                    // целиком не прочитался, не доверяем — ослабление при
-                    // негодном файле донести не обязательно, решение
-                    // владельца круга исправления.
-                    if let Ok(text) = std::fs::read_to_string(kit.state_path(crate::cfg::FILE)) {
-                        let w = common::toml_render::get(&text, "[host]", "write").unwrap_or_default();
-                        if w.is_empty() || w == "read_only" {
-                            live.set(live.get().1.with_access("read_only"));
-                        }
+                    // минуя полный разбор, и доверяем ему только при точном
+                    // совпадении — отказ по умолчанию, см. докстроку
+                    // `trusts_read_write` (круг исправления 4).
+                    let text = std::fs::read_to_string(kit.state_path(crate::cfg::FILE)).ok();
+                    if !trusts_read_write(text.as_deref()) {
+                        live.set(live.get().1.with_access("read_only"));
                     }
                 }
             }
@@ -3579,20 +3588,30 @@ mod tests {
     /// Круг исправления 2 задачи 3 (проверка безопасности), находка 3: файл
     /// целиком может не пройти `Cfg::load` (опечатка в любом другом поле —
     /// здесь: пустой `base_path`), а ужесточение потолка записи обязано
-    /// дойти до сеанса всё равно; ослабление — не обязано (решение
-    /// владельца).
+    /// дойти до сеанса всё равно. Круг исправления 4 перевернул умолчание:
+    /// прежнее («ослабление не донесённое») читалось как «пусто или
+    /// нераспознанное — ужесточаем», а всё прочее нераспознанное (несчитанный
+    /// файл, мусор) молча оставляло прежнее, возможно широкое значение —
+    /// разрешение по умолчанию там, где файл уже известен негодным. Здесь —
+    /// сквозная проверка ОБРАТНОГО направления: прежнее значение
+    /// («read_write») остаётся нетронутым именно потому, что файл несёт
+    /// точное совпадение, а не потому, что совпало случайно. Точечные
+    /// случаи (несчитанный файл, мусор, хвостовой комментарий) — в
+    /// `trusts_read_write_denies_by_default` ниже, без треска потоков и
+    /// `sleep`.
     #[test]
-    fn watch_mcp_tolerates_a_broken_file_to_still_tighten_the_write_ceiling() {
+    fn watch_mcp_keeps_the_previous_read_write_only_on_an_exact_match_from_a_broken_file() {
         let dir = mcp_test_dir("watch-mcp-write-ceiling");
         let kit = Kit::at(&dir);
         let user = format!("owner-{}", std::process::id());
+        let path = kit.state_path(crate::cfg::FILE);
         let store = crate::secrets::Store::file(kit.state());
         let write_cfg = |base_path: &str, write: &str| {
             let mut cfg = crate::cfg::filled_for_test();
             cfg.host.password = String::new();
             cfg.host.base_path = base_path.into();
             cfg.host.write = write.into();
-            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render(&store).unwrap()).unwrap();
+            std::fs::write(&path, cfg.render(&store).unwrap()).unwrap();
         };
         write_cfg("C:\\Bases\\Buh", "read_write");
         crate::allow::write(&kit, true).unwrap();
@@ -3605,17 +3624,37 @@ mod tests {
         assert_eq!(live.get().1.access(), "read_write", "файл годный — читается как есть");
 
         // Файл ломается (пустой base_path не проходит validate()), но
-        // потолок в нём — "read_only" (ужесточение).
-        write_cfg("", "read_only");
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        assert_eq!(live.get().1.access(), "read_only", "ужесточение обязано дойти даже из негодного файла");
-        assert_eq!(live.get().1.host.base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");
-
-        // Файл всё ещё ломается, но теперь несёт "read_write" — ослабление
-        // из непрочитанного целиком файла доверять не обязаны.
+        // write в нём — точное "read_write": единственное, чему здесь
+        // можно довериться. Прежнее значение (уже "read_write") остаётся
+        // нетронутым, не форсируется заново.
         write_cfg("", "read_write");
         std::thread::sleep(std::time::Duration::from_millis(500));
-        assert_eq!(live.get().1.access(), "read_only", "ослабление из негодного файла — не донесённое, решение владельца");
+        assert_eq!(live.get().1.access(), "read_write", "точное совпадение — прежнее значение сохраняется");
+        assert_eq!(live.get().1.host.base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");
+
+        // Тот же сломанный файл, но write в нём — мусор, не точное
+        // совпадение: отказ по умолчанию, ужесточаем, несмотря на то что
+        // прежнее значение было шире.
+        std::fs::write(&path, "[host]\nwrite = мусор\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(live.get().1.access(), "read_only", "нераспознанное значение — отказ по умолчанию, не прежнее широкое");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Круг исправления 4: та же проверка, что выше, но на уровне чистой
+    /// функции — без потоков и `sleep`. Четыре случая, которых ждал
+    /// ведущий: файл не прочитался, значение-мусор, точное "read_write",
+    /// то же самое с хвостовым комментарием (снимается `toml_render::get`,
+    /// круг исправления 4, пункт 2).
+    #[test]
+    fn trusts_read_write_denies_by_default() {
+        assert!(!trusts_read_write(None), "файл не прочитался — не доверяем");
+        assert!(!trusts_read_write(Some("[host]\nwrite = мусор\n")), "нераспознанное значение — не доверяем");
+        assert!(!trusts_read_write(Some("[host]\n")), "ключа нет вовсе — не доверяем");
+        assert!(trusts_read_write(Some("[host]\nwrite = \"read_write\"\n")), "точное совпадение — доверяем");
+        assert!(
+            trusts_read_write(Some("[host]\nwrite = \"read_write\" # вписал сам\n")),
+            "хвостовой комментарий не должен мешать распознать точное совпадение"
+        );
     }
 }

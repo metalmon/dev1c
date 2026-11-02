@@ -153,7 +153,8 @@ mod tests {
     /// замок РАБОЧЕГО МЕСТА, которым `window_alive` ошибочно и смотрела.
     /// Теперь держит `acquire_serving`/`try_acquire(lock_target)` — то же,
     /// что реально берёт коннектор (`single_instance::hold_serving`), без
-    /// рабочего места в ключе вовсе.
+    /// рабочего места в ключе вовсе. (С задачи 6 у `guard_key` и подписи
+    /// такой больше нет — она принимает только пользователя.)
     #[test]
     fn read_follows_the_connector_not_just_the_file() {
         let kit = kit_in(tempdir());

@@ -292,8 +292,11 @@ pub struct Host {
     /// `Cfg::base_url`), `webserver` — уже опубликовано вручную на Apache/IIS
     /// (адрес берётся из `base_url`).
     pub publication: String,
-    /// Порт своего httpd в режиме `auto`; `None` — `8080 + N` (номер рабочего
-    /// места). В toml хранится как число, `0` значит «не задан».
+    /// Порт своего httpd в режиме `auto`; `None` — умолчание ПЕРВОЙ попытки
+    /// подбора (`derived_http_port()`, с задачи 6 — константа `8081` для
+    /// всех, не формула от рабочего места). Настоящий порт нащупывается при
+    /// занятости и запоминается в каталоге состояния (`ports::choose`). В
+    /// toml хранится как число, `0` значит «не задан».
     #[serde(deserialize_with = "http_port_de", skip_serializing_if = "Option::is_none")]
     pub http_port: Option<u16>,
 }

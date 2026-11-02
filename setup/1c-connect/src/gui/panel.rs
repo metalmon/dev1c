@@ -819,6 +819,14 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
         // конфигурации правят в toml, и `save_host` переносит его из
         // текущих параметров.
         configuration: String::new(),
+        // Той же причиной, что у configuration выше: поля в окне нет, набор
+        // инструментов правят в toml, и `save_host` переносит его из
+        // текущих параметров.
+        toolset: String::new(),
+        // Поля в окне тоже нет: потолок записи правит пункт меню значка
+        // «Запись в базу» (`gui::tray`), и `save_host` переносит его из
+        // текущих параметров той же строкой, что `mode`/`publication`.
+        write: String::new(),
         db_user: v("db_user", &f.db_user),
         db_password: v("db_password", &f.db_password),
         // Человек вписывает адрес, каким открывает базу в браузере, —

@@ -282,6 +282,17 @@ pub struct Host {
     /// почему это не `profile`, — в `Cfg::configuration()`.
     #[serde(default)]
     pub configuration: String,
+    /// Какой набор инструментов поднимает дочерний `mcp-1c` — `developer`
+    /// или `business`. Разбор, допустимые значения и довод умолчания — в
+    /// `Cfg::toolset()`.
+    #[serde(default)]
+    pub toolset: String,
+    /// Потолок записи у дочернего `mcp-1c` — `read_write` или `read_only`.
+    /// Разбор, допустимые значения и довод умолчания — в `Cfg::access()`.
+    /// Поля в окне нет: потолок правит пункт меню значка «Запись в базу»
+    /// (`gui::tray`), тем же приёмом, что `mode`/`publication`.
+    #[serde(default)]
+    pub write: String,
     pub db_user: String,
     pub db_password: String,
     pub base_url: String,
@@ -319,6 +330,8 @@ impl std::fmt::Debug for Host {
             .field("base_path", &self.base_path)
             .field("platform", &self.platform)
             .field("configuration", &self.configuration)
+            .field("toolset", &self.toolset)
+            .field("write", &self.write)
             .field("db_user", &self.db_user)
             .field("db_password", &"<скрыт>")
             .field("base_url", &self.base_url)
@@ -357,6 +370,8 @@ impl Default for Host {
             base_path: String::new(),
             platform: String::new(),
             configuration: String::new(),
+            toolset: String::new(),
+            write: String::new(),
             db_user: String::new(),
             db_password: String::new(),
             base_url: String::new(),
@@ -545,6 +560,21 @@ impl Cfg {
         if let Err(e) = self.configuration() {
             anyhow::bail!("{e}");
         }
+        // Тот же приём и тот же довод: `mcp_command` не возвращает `Result`,
+        // и без проверки здесь опечатка в наборе инструментов тихо стала бы
+        // `business` только внутри сборщика команды (`Cfg::toolset`).
+        if let Err(e) = self.toolset() {
+            anyhow::bail!("{e}");
+        }
+        // `access()` сам не отказывает (возвращает `&str`, не `Result`) —
+        // ровно потому, что к его вызову это уже проверено здесь: названный,
+        // но неизвестный потолок записи — отказ со списком допустимых, а не
+        // молчаливый откат на `read_only` внутри сборщика команды.
+        anyhow::ensure!(
+            matches!(self.host.write.trim(), "" | "read_write" | "read_only"),
+            "[host]: write — неизвестный потолок записи «{}»; допустимые значения: read_write, read_only",
+            self.host.write.trim()
+        );
         // Пустой `base_url` — не ошибка, а «не задан»: поля для него в окне
         // нет вовсе, умолчание выводится из каталога базы
         // (`derived_base_url`), и требовать его руками значило бы заставлять
@@ -604,6 +634,57 @@ impl Cfg {
                 "[host]: configuration — неизвестный вид конфигурации «{c}»; допустимые значения: {}",
                 ALLOWED.join(", ")
             ))
+        }
+    }
+
+    /// Какой набор инструментов поднимает дочерний `mcp-1c` — `developer`
+    /// или `business`. У ребёнка это ключ `--toolset` (замер владельца,
+    /// `docs/research/2026-11-02-measured-tool-lists.md`: `developer` даёт
+    /// 8 инструментов, `business` — свои, с потолком записи поверх, см.
+    /// `access()`).
+    ///
+    /// Пусто — `business`, а не отказ: бухгалтеров, которые будут
+    /// открывать коннектор, больше, чем 1С-разработчиков, и им опаснее
+    /// получить разработческий набор по умолчанию. Названное, но
+    /// неизвестное значение — отказ словами со списком допустимых: тот же
+    /// приём, что у `configuration()`, и по той же причине — молчаливый
+    /// откат скрыл бы опечатку человека.
+    pub fn toolset(&self) -> Result<&str, String> {
+        const ALLOWED: [&str; 2] = ["developer", "business"];
+        let t = self.host.toolset.trim();
+        if t.is_empty() {
+            return Ok("business");
+        }
+        if ALLOWED.contains(&t) {
+            Ok(t)
+        } else {
+            Err(format!(
+                "[host]: toolset — неизвестный набор инструментов «{t}»; допустимые значения: {}",
+                ALLOWED.join(", ")
+            ))
+        }
+    }
+
+    /// Потолок записи у дочернего `mcp-1c` — `read_write` или `read_only`. У
+    /// ребёнка это ключ `--access`, и потолок у него не формальность: замер
+    /// владельца показал, что при `read_only` пишущие инструменты вообще не
+    /// регистрируются (`server/server.go` форка — `RegisterReadTools`, и
+    /// `return` до `RegisterWriteTools`), то есть их нет и в `tools/list`, а
+    /// не «мы их спрятали» фильтром на своей стороне.
+    ///
+    /// Пусто — `read_only` (решение владельца 1.11: по умолчанию
+    /// инструментов, пишущих в базу, нет). Возвращает `&str`, не `Result`:
+    /// именованное, но неизвестное значение отсекает `validate()` ещё при
+    /// чтении настроек (см. его тело) — к моменту вызова этого метода `Cfg`
+    /// уже проверен, и откат на `read_only` здесь для пустой строки — тип-
+    /// безопасный синоним уже проверенного значения, не маскировка
+    /// опечатки.
+    pub fn access(&self) -> &str {
+        let w = self.host.write.trim();
+        if w.is_empty() {
+            "read_only"
+        } else {
+            w
         }
     }
 
@@ -765,6 +846,8 @@ impl Cfg {
                 "base_path" => format!("{:?}", h.base_path),
                 "platform" => format!("{:?}", h.platform),
                 "configuration" => format!("{:?}", h.configuration),
+                "toolset" => format!("{:?}", h.toolset),
+                "write" => format!("{:?}", h.write),
                 "db_user" => format!("{:?}", h.db_user),
                 "db_password" => format!("{:?}", db_password),
                 "base_url" => format!("{:?}", h.base_url),
@@ -1353,6 +1436,55 @@ mod tests {
         assert!(err.contains("configuration") && err.contains("buh_3_0"), "{err}");
         c.host.configuration = "buh_3_0".into();
         assert!(c.validate().is_ok());
+    }
+
+    /// Буквально из брифа задачи 3: умолчания названы с доводом — бизнес-
+    /// пользователь (бухгалтеров больше, и им опаснее ошибиться) и потолок
+    /// «только чтение» (решение владельца 1.11).
+    #[test]
+    fn the_toolset_defaults_to_business_and_the_ceiling_to_read_only() {
+        let c = sample();
+        assert_eq!(c.toolset(), Ok("business"), "умолчание — бизнес-пользователь: бухгалтеров больше, и им опаснее");
+        assert_eq!(c.access(), "read_only", "умолчание потолка — только чтение (решение владельца 1.11)");
+    }
+
+    /// Тот же приём, что у `configuration()`: именованный, но неизвестный
+    /// набор инструментов — отказ со списком допустимых, а не молчаливый
+    /// откат на `business`.
+    #[test]
+    fn an_unknown_toolset_is_refused_with_the_allowed_list_in_words() {
+        let mut c = sample();
+        c.host.toolset = "бухгалтер".into();
+        let err = c.toolset().unwrap_err();
+        assert!(err.contains("developer") && err.contains("business"), "{err}");
+    }
+
+    /// Тот же отказ доезжает через `validate()` — та же причина, что у
+    /// `configuration`: без этого опечатка тихо стала бы `business` только
+    /// внутри `mcp_command`.
+    #[test]
+    fn validate_rejects_an_unknown_toolset() {
+        let mut c = filled();
+        c.host.toolset = "бухгалтер".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("toolset") && err.contains("developer"), "{err}");
+        c.host.toolset = "developer".into();
+        assert!(c.validate().is_ok());
+    }
+
+    /// `access()` возвращает значение напрямую (не `Result`): к моменту его
+    /// вызова `validate()` уже отсёк неизвестное имя (ниже), и откат на
+    /// `read_only` для пустой строки — синоним уже проверенного, а не
+    /// маскировка опечатки.
+    #[test]
+    fn validate_rejects_an_unknown_write_ceiling() {
+        let mut c = filled();
+        c.host.write = "может быть".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("write") && err.contains("read_only") && err.contains("read_write"), "{err}");
+        c.host.write = "read_write".into();
+        assert!(c.validate().is_ok());
+        assert_eq!(c.access(), "read_write");
     }
 
     #[test]

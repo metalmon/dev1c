@@ -2275,9 +2275,7 @@ impl Ui {
 /// важно лишь то, что `ui.session` не пусто.
 #[cfg(test)]
 fn doomed_session(ui: &Ui) -> crate::session::Session {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
     cfg.host.server = format!("127.0.0.1:{port}");
     session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {})
@@ -2290,9 +2288,7 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
 /// настоящие порты и остался бы жив, а тесту нужен мёртвый.
 #[cfg(test)]
 fn ended_session(ui: &Ui) -> crate::session::Session {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
+    let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
     cfg.host.mode = "tunnel".into();
     cfg.host.server = format!("127.0.0.1:{port}");

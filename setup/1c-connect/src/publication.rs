@@ -2037,9 +2037,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let dir = std::env::temp_dir().join(format!("dev1c-pub-choice-not-published-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.http_port = Some(port);
         let chosen = resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap();

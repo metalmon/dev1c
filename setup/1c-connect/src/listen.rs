@@ -279,8 +279,11 @@ mod tests {
     /// и это НЕ отказ: `bind_loopback` в таком случае работает на одном IPv4.
     #[tokio::test]
     async fn a_port_held_on_ipv6_only_is_still_busy() {
-        let Ok(held) = std::net::TcpListener::bind(("::1", 0)) else { return };
-        let port = held.local_addr().unwrap().port();
+        // Номер — из тестового диапазона, а не эфемерный: отпущенный ниже
+        // эфемерный порт успевал достаться соседнему тесту, и обратный
+        // захват («освободившийся порт берём сами») падал на пустом месте.
+        let port = crate::ports::test_port();
+        let Ok(held) = std::net::TcpListener::bind(("::1", port)) else { return };
         let e = bind_loopback(port).await.unwrap_err().to_string();
         assert!(e.contains(&port.to_string()) && e.contains("занят"), "{e}");
         drop(held);

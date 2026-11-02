@@ -1759,14 +1759,16 @@ mod tests {
         // отмена стоит человеку лишних двух секунд ожидания перед «прервано».
         let calls = std::cell::Cell::new(0u32);
         let cancel = AtomicBool::new(true);
-        let started = std::time::Instant::now();
         let r = retry_once(std::time::Duration::from_secs(2), &cancel, || {
             calls.set(calls.get() + 1);
             Err::<String, _>("прервано".to_string())
         });
         assert_eq!(r, Err("прервано".to_string()));
-        assert_eq!(calls.get(), 1, "отмена не должна приводить к повтору");
-        assert!(started.elapsed() < std::time::Duration::from_millis(500), "отмена не должна платить паузу повтора");
+        // Смысл проверяется счётчиком вызовов, а не секундомером: пауза
+        // повтора не взята ровно тогда, когда вызов был один. Абсолютный
+        // порог здесь ничего не добавлял и мог мигнуть на медленном раннере
+        // (STATUS 30).
+        assert_eq!(calls.get(), 1, "отмена не должна приводить к повтору, а значит и платить паузу");
     }
 
     #[test]

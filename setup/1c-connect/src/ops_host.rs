@@ -2350,9 +2350,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         // Порт, который только что был свободен, и pid-файла в каталоге
         // состояния нет и не было — ровно `NotPublished`.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
         cfg.host.http_port = Some(port);

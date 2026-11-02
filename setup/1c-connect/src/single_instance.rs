@@ -308,12 +308,30 @@ pub fn try_acquire(_key: &str, lock_on: &std::path::Path) -> std::io::Result<Opt
 /// Живость владельца БЕЗ попытки занять замок: `/proc/locks` по устройству и inode `lock_on` — тем же приёмом, что `holder.rs` берёт держателя порта в образе среды, где нет ни `ss`, ни `netstat`. В отличие от `try_acquire` здесь не открывается даже совместный `flock` на основном пути — чтение `/proc/locks` не трогает замок вовсе, и два читателя (`allow::watch` и прямой `allow::read`, два процесса подкоманды `mcp`) не видят тика друг друга как «владелец жив» (находка ревью задачи 2: раньше проверка сама звала `try_acquire`, и доля секунды, что один проверяющий держал `flock`, была для соседнего проверяющего «занято — значит жив»).
 #[cfg(not(windows))]
 pub fn is_held(_key: &str, lock_on: &std::path::Path) -> std::io::Result<bool> {
+    held_with(lock_on, std::fs::read_to_string("/proc/locks").ok().as_deref())
+}
+
+/// То же решение, но содержимое `/proc/locks` — параметром: `None` значит
+/// «прочитать не удалось». Шов нужен затем, что совпадение по номеру inode
+/// проверяется тестом детерминированно, а дождаться настоящего
+/// переиспользования номера от файловой системы нельзя (за 200 попыток ext4
+/// его не отдала ни разу).
+///
+/// **Совпадение в `/proc/locks` — ещё не владение.** `flock` на УДАЛЁННОМ
+/// каталоге живёт до закрытия дескриптора и остаётся в списке со своим
+/// `(dev, ino)`, а номер inode ядро вправе отдать новому каталогу. Поэтому
+/// положительный ответ списка подтверждается пробой самого пути; отказ
+/// принимается как есть — он ничего не стоит и никого не отмечает.
+#[cfg(not(windows))]
+fn held_with(lock_on: &std::path::Path, locks: Option<&str>) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(lock_on).map_err(|e| lock_error(lock_on, e))?;
-    if let Ok(locks) = std::fs::read_to_string("/proc/locks") {
-        return Ok(parse_proc_locks(&locks, meta.dev(), meta.ino()));
+    if let Some(locks) = locks {
+        if !parse_proc_locks(locks, meta.dev(), meta.ino()) {
+            return Ok(false);
+        }
     }
-    // ponytail: без `/proc/locks` (не Linux, песочница без `/proc`) резерв — разделяемый `flock`: не конфликтует с другим читателем вроде нас самих, но конфликтует с `LOCK_EX` владельца. Потолок — своё окно между этой попыткой и самым стартом владельца (до его собственного `flock`), в которое проверка отдаст «свободно» при уже бегущем, но не успевшем взять замок процессе; решает его только настоящий `/proc/locks`.
+    // ponytail: разделяемый `flock` не конфликтует с другим читателем вроде нас самих, но конфликтует с `LOCK_EX` владельца. Потолок — своё окно между этой попыткой и самым стартом владельца (до его собственного `flock`), в которое проверка отдаст «свободно» при уже бегущем, но не успевшем взять замок процессе; закрыть его нечем, и `/proc/locks` этого тоже не закрывал.
     let file = std::fs::OpenOptions::new().read(true).open(lock_on).map_err(|e| lock_error(lock_on, e))?;
     use std::os::unix::io::AsRawFd;
     let fd = file.as_raw_fd();
@@ -654,6 +672,38 @@ mod tests {
         drop(first);
         let third = try_acquire(&key, &dir).unwrap();
         assert!(third.is_some(), "после ухода держателя замок должен снова взяться");
+        // Замок отпускаем ДО удаления каталога: `flock` на удалённом
+        // каталоге остаётся в `/proc/locks` со своим номером inode, а ядро
+        // отдаёт этот номер следующему созданному каталогу — соседний тест
+        // (`allow::read_follows_the_connector`) ловил такую запись как
+        // «владелец жив» примерно в одном параллельном прогоне из трёх.
+        drop(third);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Та ловушка, которая роняла соседа (`allow::read_follows_the_connector`)
+    /// примерно в одном параллельном прогоне из трёх: в `/proc/locks` стоит
+    /// строка с НАШИМ номером inode, а настоящего замка на пути нет —
+    /// `flock` остался на удалённом каталоге, чей номер ядро отдало новому.
+    /// Совпадение по номеру владением не считается; проверяется швом, потому
+    /// что дождаться переиспользования номера от ext4 не удалось ни за 200
+    /// попыток.
+    #[cfg(unix)]
+    #[test]
+    fn a_matching_inode_number_without_a_real_lock_is_not_an_owner() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = existing_dir("stale-line");
+        let m = std::fs::metadata(&dir).unwrap();
+        let (maj, min) = (libc::major(m.dev()), libc::minor(m.dev()));
+        let line = format!("1: FLOCK  ADVISORY  WRITE 1 {maj:02x}:{min:02x}:{} 0 EOF\n", m.ino());
+
+        assert!(!held_with(&dir, Some(&line)).unwrap(), "строка есть, замка нет — это не владелец");
+
+        let guard = try_acquire("", &dir).unwrap().expect("каталог свободен");
+        assert!(held_with(&dir, Some(&line)).unwrap(), "замок настоящий — та же строка подтверждается пробой");
+        drop(guard);
+        assert!(!held_with(&dir, Some(&line)).unwrap(), "замок ушёл — строка снова ничего не доказывает");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

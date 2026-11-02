@@ -3337,9 +3337,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_dead_web_server_is_reported_not_swallowed() {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l); // nothing listens there any more
+        // Порт держим привязанным и НЕ слушающим: ядро отвергает соединение
+        // (`ECONNREFUSED`), а отдать порт кому-то ещё не может — ни соседнему
+        // тесту, ни чужому процессу. Прежде тест брал эфемерный порт и
+        // отпускал его, считая «мёртвым»: в параллельном прогоне его успевали
+        // занять, соединение удавалось, и тест падал на пустом месте.
+        let dead = tokio::net::TcpSocket::new_v4().unwrap();
+        dead.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = dead.local_addr().unwrap().port();
         let (_ours, theirs) = tokio::io::duplex(64);
         let r = pipe_tcp(theirs, port).await;
         assert!(r.is_err(), "connect to a closed port must be an error");

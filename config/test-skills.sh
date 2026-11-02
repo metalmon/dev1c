@@ -85,6 +85,15 @@ if [ -f "$ZED_SETTINGS" ] && [ -f "$ZED_BIN" ]; then
             its_help|cf_load|cf_decompile|project_pull|project_push) continue ;;
             infobase_update|task_cancel|cache_show|cache_clear) continue ;;
             test_xunit|test_vanessa|test_yaxunit) continue ;;
+            # Инструменты, погашенные у сервера `1c` после обновления форка
+            # mcp-1c до 1.23.0 (правят файлы на диске, см. комментарий в
+            # zed-settings.json). Цена списка, набитого руками, названа прямо:
+            # добавил инструмент в настройки — добавь имя сюда, иначе сборка
+            # образа упадёт ровно на этом месте, назвав ключи. Так и было
+            # 2.11.2026: сборка встала, и это дешевле, чем автоматический
+            # пропуск, который заодно перестал бы проверять встроенные
+            # инструменты Zed (абзац выше).
+            register_schema|image_grid|help_add) continue ;;
         esac
         grep -aq "$k" "$ZED_BIN" || UNKNOWN="$UNKNOWN $k"
     done

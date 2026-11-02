@@ -812,9 +812,7 @@ mod tests {
         // Nothing listens there: the first attempt is terminal (no session
         // ever existed), so wait() returns the error and stop() after it
         // does not hang.
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
+        let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = format!("127.0.0.1:{port}");
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));
@@ -854,9 +852,7 @@ mod tests {
         drop(quiet);
 
         // Кончившийся сам: звонить некуда, первая попытка терминальная.
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = l.local_addr().unwrap().port();
-        drop(l);
+        let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.server = format!("127.0.0.1:{port}");
         let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});

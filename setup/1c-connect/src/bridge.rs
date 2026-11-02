@@ -33,9 +33,19 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
     // `mcp-1c` КЛЮЧ ПЕРЕБИВАЕТ переменную (`internal/config/config.go`,
     // `cfg := config.Load()` и только потом перезапись из флага) — оставь
     // `--password` рядом с переменной, и он победил бы её, обнулив всю
-    // правку. `--base`/`--user`/`--dump`/`--quiet` остаются ключами по другой
-    // причине — они не секреты, и переписывать их в переменные нет смысла.
-    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--quiet"]);
+    // правку. `--base`/`--user`/`--dump`/`--profile`/`--quiet` остаются
+    // ключами по другой причине — они не секреты, и переписывать их в
+    // переменные нет смысла.
+    //
+    // `--profile` — вид конфигурации базы (`Cfg::configuration()`): пусто ⇒
+    // `auto`, ребёнок сам угадывает вид по составу конфигурации. Молчаливого
+    // отказа тут нет и быть не может: неизвестное имя `validate()` отсекает
+    // раньше, чем `Cfg` попадает сюда (см. докстроку `configuration()`),
+    // `unwrap_or` здесь — не маскировка опечатки, а тип-безопасный синоним
+    // уже проверенного значения. Задача 3 плана дописывает рядом
+    // `--toolset`/`--access` — строка аргументов общая для обеих задач, не
+    // переписывай её целиком.
+    c.args(["--base", &cfg.base_url(), "--user", &cfg.host.db_user, "--profile", cfg.configuration().unwrap_or("auto"), "--quiet"]);
     c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
     // `Cfg::dump_override`.
@@ -1315,6 +1325,27 @@ mod tests {
     /// не трогают диск — каталог может не существовать вовсе.
     fn kit_for_test() -> common::kit::Kit {
         common::kit::Kit::at(std::env::temp_dir())
+    }
+
+    /// Тем же приёмом, что `--base`/`--user`: `mcp_command` просто собирает
+    /// флаг по `cfg`, не заглядывая ни на диск, ни в сеть. Имя у ребёнка —
+    /// `--profile` (расхождение с `Cfg::configuration()` объяснено в её
+    /// докстроке). Пусто в `cfg.host.configuration` доходит как `auto`, не
+    /// как пропущенный флаг.
+    #[test]
+    fn the_profile_reaches_the_child_as_a_flag() {
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.configuration = "buh_3_0".into();
+        let c = mcp_command(&cfg, &kit_for_test());
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        let i = args.iter().position(|a| a == "--profile").expect("--profile нет среди аргументов");
+        assert_eq!(args[i + 1], "buh_3_0");
+
+        cfg.host.configuration = String::new();
+        let c2 = mcp_command(&cfg, &kit_for_test());
+        let args2: Vec<String> = c2.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
+        let i2 = args2.iter().position(|a| a == "--profile").expect("--profile нет среди аргументов");
+        assert_eq!(args2[i2 + 1], "auto", "пустое значение — это auto, а не пропущенный флаг");
     }
 
     #[test]

@@ -350,12 +350,12 @@ pub fn derived_gitea(server: &str) -> Option<String> {
 ///
 /// Пустой `server` или оставленное умолчание образца — тоже нечего выводить:
 /// этот адрес никто не задавал.
-pub fn gitea_to_write(host: &crate::cfg::Host) -> Option<String> {
+pub fn gitea_to_write(host: &crate::cfg::Connection) -> Option<String> {
     if host.mode != "tunnel" {
         return None;
     }
     let server = host.server.trim();
-    if server.is_empty() || server == crate::cfg::Host::default().server {
+    if server.is_empty() || server == crate::cfg::Connection::default().server {
         return None;
     }
     derived_gitea(server)
@@ -391,17 +391,17 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
         // `server`, `server` без порта) — поле остаётся пустым, и проверка
         // скажет про поле, а не подставит выдуманный адрес. См.
         // `gitea_to_write`.
-        if let Some(addr) = gitea_to_write(&cfg.host) {
-            cfg.host.gitea = addr.clone();
+        if let Some(addr) = gitea_to_write(cfg.current()) {
+            cfg.current_mut().gitea = addr.clone();
             fields.push(("gitea", format!("{addr:?}")));
         }
     }
-    if cfg.host.dump.is_empty() {
+    if cfg.current().dump.is_empty() {
         let dir = cfg.dump_dir();
-        cfg.host.dump = dir.clone();
+        cfg.current_mut().dump = dir.clone();
         fields.push(("dump", format!("{dir:?}")));
     }
-    if cfg.host.http_port.is_none() {
+    if cfg.current().http_port.is_none() {
         // `cfg.http_port()` отдаёт УЛАЖЕННЫЙ порт сеанса, когда он уже
         // подобран (а к этому моменту он подобран всегда — оба вызывающих
         // идут после `settle_chosen_http_port`). В файл человека идёт
@@ -410,7 +410,7 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
         // явным предпочтением человека, расходящимся с запомненным выбором
         // в `ports.state` (круг исправления финального ревью, С2).
         let port = crate::cfg::derived_http_port();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         fields.push(("http_port", port.to_string()));
     }
     if fields.is_empty() {
@@ -802,7 +802,7 @@ fn mcp_exe_at(kit_root: &Path) -> PathBuf {
 ///
 /// Переменной `MCP_1C_PASSWORD` пароль передаёт только мост (`bridge::mcp_command`) — другой запуск того же бинаря, читающий `config.Load()` по-настоящему; командная строка процесса на Windows видна любому процессу пользователя (`tasklist`, диспетчер задач) ровно так же, как и у `/P`, но дольше, чем секунды, она здесь не живёт, а в журнал и план значение после `--db-password` прячет `docker::redact`/`redact_text` тем же приёмом, что `/P…`. `--db-user` остаётся ключом открыто — он не секрет.
 pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, String> {
-    let h = &cfg.host;
+    let h = cfg.current();
     let profile = install_profile(cfg)?;
     let mut c = tokio::process::Command::new(mcp_exe(kit));
     c.args(["--install", &h.base_path, "--db-user", &h.db_user, "--install-profile", profile, "--db-password", &h.db_password]);
@@ -1530,7 +1530,7 @@ impl Op<Ctx> for Env {
     /// (`env_line`), и в локальном режиме адрес среды не проверяет — обещать
     /// проверку того, чего в этом режиме нет, значит врать в плане.
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(if crate::cfg::mode_needs_env(&ctx.cfg.host.mode) {
+        vec![Action::new(if crate::cfg::mode_needs_env(&ctx.cfg.current().mode) {
             "проверить платформу 1С, mcp-1c в комплекте и адрес среды"
         } else {
             "проверить платформу 1С и mcp-1c в комплекте"
@@ -1546,7 +1546,7 @@ impl Op<Ctx> for Env {
         let o = docker::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
         anyhow::ensure!(o.ok(), "mcp-1c не запускается: {}", o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
-        ctx.ok(env_line(&ctx.cfg.host.mode, &ctx.cfg.host.server)?);
+        ctx.ok(env_line(&ctx.cfg.current().mode, &ctx.cfg.current().server)?);
         Ok(())
     }
 }
@@ -1680,7 +1680,7 @@ fn raise_publication(ctx: &Ctx, lifetime: crate::publication::Lifetime) -> Resul
 /// Ctrl+C/SIGTERM, окно — пока открыто), и крах этого процесса обязан забрать
 /// httpd с собой, а не оставить сироту на порту со старой конфигурацией.
 pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
-    if ctx.cfg.host.publication == "webserver" {
+    if ctx.cfg.current().publication == "webserver" {
         return Publication.apply(ctx);
     }
     if ctx.dry_run || matches!(Publication.state(ctx), OpState::Done(_)) {
@@ -1939,7 +1939,7 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
 /// своему pid-файлу (`-k stop`): мёртвый или переиспользованный pid — его
 /// забота, и своей догадки о живости процесса здесь нет.
 pub fn stop_own_publication(ctx: &Ctx) -> Result<bool> {
-    if ctx.cfg.host.publication == "webserver" {
+    if ctx.cfg.current().publication == "webserver" {
         return Ok(false);
     }
     Publication.revert_apply(ctx, CleanLevel::Stack)?;
@@ -1958,7 +1958,7 @@ pub fn stop_own_publication(ctx: &Ctx) -> Result<bool> {
 /// гасит сервис, но каталог состояния разбирает сама, своим уровнем, и
 /// смешивать «ухожу в чужую публикацию» с «сношу установку» незачем.
 pub fn leave_own_publication(ctx: &Ctx) -> Result<bool> {
-    if ctx.cfg.host.publication == "webserver" {
+    if ctx.cfg.current().publication == "webserver" {
         return Ok(false);
     }
     // Своей публикации на этой машине быть не может — нет модуля платформы
@@ -1986,10 +1986,10 @@ impl Op<Ctx> for Publication {
         "Публикация базы (HTTP-сервис)"
     }
     fn state(&self, ctx: &Ctx) -> OpState {
-        if ctx.cfg.host.publication == "webserver" {
+        if ctx.cfg.current().publication == "webserver" {
             // Публикация не наша — показываем то же, что видит host.extension:
             // отдельного факта «свой httpd» здесь нет.
-            return match extension_version(&ctx.cfg.base_url(), &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
+            return match extension_version(&ctx.cfg.base_url(), &ctx.cfg.current().db_user, &ctx.cfg.current().db_password) {
                 Some(v) => OpState::Done(format!("публикация отвечает (расширение {v})")),
                 None => OpState::Missing,
             };
@@ -2015,7 +2015,7 @@ impl Op<Ctx> for Publication {
         }
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        if ctx.cfg.host.publication == "webserver" {
+        if ctx.cfg.current().publication == "webserver" {
             return vec![Action::new(format!(
                 "публикация на вашем веб-сервере ({}) — ничего не делаем, кроме проверки",
                 ctx.cfg.base_url()
@@ -2024,7 +2024,7 @@ impl Op<Ctx> for Publication {
         vec![Action::new(format!("записать default.vrd и httpd.conf, поднять httpd на 127.0.0.1:{}", ctx.cfg.http_port()))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
-        if ctx.cfg.host.publication == "webserver" {
+        if ctx.cfg.current().publication == "webserver" {
             // Публикация — забота человека, и мы её только проверяем. Своего
             // предупреждения здесь больше нет: ту же беду теми же словами,
             // но с советом, говорит факт готовности (`verify::PUBLICATION`), а
@@ -2043,10 +2043,10 @@ impl Op<Ctx> for Publication {
         raise_publication(ctx, crate::publication::Lifetime::Detached)
     }
     fn revert(&self, ctx: &Ctx, _level: CleanLevel) -> Option<Vec<Action>> {
-        (ctx.cfg.host.publication != "webserver").then(|| vec![Action::new("остановить свой httpd")])
+        (ctx.cfg.current().publication != "webserver").then(|| vec![Action::new("остановить свой httpd")])
     }
     fn revert_apply(&self, ctx: &Ctx, _level: CleanLevel) -> Result<()> {
-        if ctx.cfg.host.publication == "webserver" {
+        if ctx.cfg.current().publication == "webserver" {
             return Ok(());
         }
         let p = crate::publication::Paths::of(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -2084,7 +2084,7 @@ impl Op<Ctx> for Extension {
             crate::publication::Guard::NotPublished => return OpState::Missing,
             crate::publication::Guard::Ours => {}
         }
-        match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
+        match extension_version(&url, &ctx.cfg.current().db_user, &ctx.cfg.current().db_password) {
             Some(v) => OpState::Done(format!("расширение {v}, публикация отвечает")),
             // «Не установлено» — утверждение о базе, и делать его можно
             // только когда база отвечала. Публикация молчит — мы просто не
@@ -2114,7 +2114,8 @@ impl Op<Ctx> for Extension {
                 // заметка, утёкшая в текст для человека (наблюдение владельца
                 // 30.10: «это что за комментарии в выводе?»).
                 "{prefix}mcp-1c --install {} --db-user {} --install-profile {profile} --db-password … (вызовет конфигуратор, минута-две)",
-                ctx.cfg.host.base_path, ctx.cfg.host.db_user
+                ctx.cfg.current().base_path,
+                ctx.cfg.current().db_user
             ),
             Err(e) => e,
         };
@@ -2128,7 +2129,7 @@ impl Op<Ctx> for Extension {
         if !ctx.dry_run {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        let h = &ctx.cfg.host;
+        let h = ctx.cfg.current();
         // Программа и аргументы — все из `install_command`: пароль в них уже есть ключом `--db-password` (второе честное исключение задачи 5, см. докстроку `install_command`), набирать его второй раз отдельной строкой незачем — иначе кто-то однажды поправит `install_command`, глядя на неё как на источник правды, а установка продолжит слать старые аргументы. Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует. Окружение у `install_command` теперь пусто — `docker::exec_env` берёт его тем же путём, что и раньше, просто со списком без пар; собственной сигнатуры у неё это не меняет.
         let install = install_command(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
         let exe = install.as_std().get_program().to_string_lossy().into_owned();
@@ -2184,7 +2185,7 @@ impl Op<Ctx> for Extension {
         Some(vec![
             Action::new(format!(
                 "{prefix}1cv8 DESIGNER {} /DeleteCfg -Extension MCP_HTTPService (публикацию не трогаем)",
-                ib_switch(&ctx.cfg.host.base_path)
+                ib_switch(&ctx.cfg.current().base_path)
             )),
             Action::new(format!("удалить {}", ctx.kit.state_path("known_hosts").display())),
         ])
@@ -2195,7 +2196,7 @@ impl Op<Ctx> for Extension {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         let Some(v8) = find_1cv8(&ctx.cfg) else { anyhow::bail!("1cv8.exe не найден") };
-        let h = &ctx.cfg.host;
+        let h = ctx.cfg.current();
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);
         // `/P` остаётся ключом Конфигуратору — у платформы 1С другого способа отдать ей пароль нет (ни переменной окружения, ни файла); это первое из двух честных исключений задачи 5 — второе у `install_command` (установщик `mcp-1c`, по той же причине: не выбор удобства, а единственный способ, которым он умеет принимать пароль). Сама строка в журнал не идёт как есть: `docker::redact_text` затирает `/P…` построчно, прежде чем что-то попадёт в лог.
@@ -2229,10 +2230,10 @@ mod tests {
     #[test]
     fn the_install_command_passes_the_password_as_a_flag() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         // Вид конфигурации назван явно: задача 8 отказывает на `auto`
         // (умолчание `filled_for_test`), а этот тест — про пароль, не про профиль.
-        cfg.host.configuration = "generic".into();
+        cfg.current_mut().configuration = "generic".into();
         let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i = args.iter().position(|a| a == "--db-password").unwrap_or_else(|| panic!("--db-password нет в аргументах: {args:?}"));
@@ -2249,7 +2250,7 @@ mod tests {
     #[test]
     fn the_installed_profile_matches_the_runtime_one() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.configuration = "buh_3_0".into();
+        cfg.current_mut().configuration = "buh_3_0".into();
         let c = install_command(&cfg, &kit_for_test()).expect("buh_3_0 — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(args.windows(2).any(|w| w == ["--install-profile", "buh_3_0"]), "{args:?}");
@@ -2260,7 +2261,7 @@ mod tests {
     #[test]
     fn the_installed_profile_matches_the_runtime_one_for_generic() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.configuration = "generic".into();
+        cfg.current_mut().configuration = "generic".into();
         let c = install_command(&cfg, &kit_for_test()).expect("generic — известный профиль, отказа быть не должно");
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(args.windows(2).any(|w| w == ["--install-profile", "generic"]), "{args:?}");
@@ -2286,7 +2287,7 @@ mod tests {
     #[test]
     fn extension_plan_names_the_profile_it_will_install() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.configuration = "buh_3_0".into();
+        cfg.current_mut().configuration = "buh_3_0".into();
         let ctx = publication_ctx(cfg, true);
         let actions = Extension.plan(&ctx);
         assert!(actions.iter().any(|a| a.0.contains("--install-profile buh_3_0")), "{actions:?}");
@@ -2324,9 +2325,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().db_password = "секрет-базы".into();
         let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-guard-{}", std::process::id())));
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
@@ -2352,8 +2353,8 @@ mod tests {
         // состояния нет и не было — ровно `NotPublished`.
         let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
         let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-notup-kit-{}", std::process::id())));
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
@@ -2381,8 +2382,8 @@ mod tests {
         // Режим "webserver": состояние — тот же факт, что у host.extension,
         // никакого своего httpd тут нет и подниматься нечему.
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "webserver".into();
-        cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
+        cfg.current_mut().publication = "webserver".into();
+        cfg.current_mut().base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit: Kit::at("."), cfg, dry_run: true, sink, prompt: Box::new(common::AlwaysDefault) };
         assert_eq!(Publication.state(&ctx), OpState::Missing);
@@ -2417,8 +2418,8 @@ mod tests {
         // строке, а две строки об одном подряд человек читает как две разные
         // беды (наблюдение владельца 30.10).
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "webserver".into();
-        cfg.host.base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
+        cfg.current_mut().publication = "webserver".into();
+        cfg.current_mut().base_url = "http://localhost:1/hs/mcp-1c".into(); // порт 1 никто не слушает
         let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let w = said.clone();
         let sink: common::Sink = std::sync::Arc::new(move |e| {
@@ -2437,7 +2438,7 @@ mod tests {
         // --dry-run у serve: ensure_publication ничего не должна менять на
         // машине — ни писать файлы, ни поднимать httpd.
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         let ctx = publication_ctx(cfg, true);
         assert!(ensure_publication(&ctx).is_ok());
     }
@@ -2450,11 +2451,11 @@ mod tests {
     #[test]
     fn leaving_stops_our_own_httpd_and_never_someone_elses() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "webserver".into();
+        cfg.current_mut().publication = "webserver".into();
         assert_eq!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "чужой веб-сервер не наш — не трогаем");
 
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         assert_ne!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "свой httpd выход обязан погасить");
     }
 
@@ -2817,12 +2818,12 @@ mod tests {
         let nowhere = std::env::temp_dir().join(format!("dev1c-plan-{}", std::process::id()));
         let plan = |op: &dyn Op<Ctx>, mode: &str| {
             let mut cfg = crate::cfg::filled_for_test();
-            cfg.host.mode = mode.into();
-            cfg.host.project = nowhere.display().to_string();
+            cfg.current_mut().mode = mode.into();
+            cfg.current_mut().project = nowhere.display().to_string();
             if mode == "local" {
-                cfg.host.workstation.clear();
+                cfg.current_mut().workstation.clear();
             } else {
-                cfg.host.gitea = "http://localhost:3000".into();
+                cfg.current_mut().gitea = "http://localhost:3000".into();
             }
             op.plan(&publication_ctx(cfg, true)).iter().map(|a| a.0.clone()).collect::<Vec<_>>().join(" ")
         };
@@ -2848,9 +2849,9 @@ mod tests {
         std::fs::create_dir_all(t.path().join(".git")).unwrap();
         let state = |mode: &str| {
             let mut cfg = crate::cfg::filled_for_test();
-            cfg.host.mode = mode.into();
-            cfg.host.gitea = "http://localhost:3000".into();
-            cfg.host.project = t.path().display().to_string();
+            cfg.current_mut().mode = mode.into();
+            cfg.current_mut().gitea = "http://localhost:3000".into();
+            cfg.current_mut().project = t.path().display().to_string();
             ProjectOp.state(&publication_ctx(cfg, true))
         };
         match state("local") {
@@ -2893,7 +2894,7 @@ mod tests {
         let kit = TomlKit::new("tunnel");
         let path = kit.put(MINE);
         let mut cfg: Cfg = toml::from_str(MINE).unwrap();
-        assert_eq!(cfg.host.mode, "tunnel", "умолчание режима");
+        assert_eq!(cfg.current().mode, "tunnel", "умолчание режима");
         write_derived_fields(&kit, &mut cfg, false).unwrap();
         assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"));
         assert!(std::fs::read_to_string(&path).unwrap().contains("gitea = \"http://10.0.0.5:4401\""));
@@ -2903,11 +2904,11 @@ mod tests {
     /// умолчание образца, которого никто не задавал.
     #[test]
     fn an_unset_server_derives_no_address_either() {
-        let tunnel = |server: &str| crate::cfg::Host { server: server.into(), mode: "tunnel".into(), ..Default::default() };
+        let tunnel = |server: &str| crate::cfg::Connection { server: server.into(), mode: "tunnel".into(), ..Default::default() };
         assert_eq!(gitea_to_write(&tunnel("10.0.0.5:4403")).as_deref(), Some("http://10.0.0.5:4401"));
         assert_eq!(gitea_to_write(&tunnel("")), None);
         assert_eq!(gitea_to_write(&tunnel("  ")), None);
-        assert_eq!(gitea_to_write(&tunnel(&crate::cfg::Host::default().server)), None, "умолчание образца никто не задавал");
+        assert_eq!(gitea_to_write(&tunnel(&crate::cfg::Connection::default().server)), None, "умолчание образца никто не задавал");
         assert_eq!(gitea_to_write(&tunnel("10.0.0.5")), None, "без порта выводить не из чего");
         // Режим важнее всего остального.
         let mut local = tunnel("10.0.0.5:4403");
@@ -2937,15 +2938,15 @@ mod tests {
         let dump = cfg.dump_dir();
         let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
 
-        assert_eq!(cfg.host.dump, dump);
+        assert_eq!(cfg.current().dump, dump);
         // 8081, не 8082: с задачи 6 плана «тонкий срез ценности»
         // `derived_http_port` — константа, `workstation = "dev2"` в `MINE`
         // на неё больше не влияет.
-        assert_eq!(cfg.host.http_port, Some(8081), "8081 — константа с задачи 6, не 8080 + номер рабочего места");
+        assert_eq!(cfg.current().http_port, Some(8081), "8081 — константа с задачи 6, не 8080 + номер рабочего места");
         assert!(wrote.iter().any(|w| w == &format!("dump = {dump:?}")) && wrote.iter().any(|w| w == "http_port = 8081"), "{wrote:?}");
         let back: Cfg = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(back.host.dump, dump);
-        assert_eq!(back.host.http_port, Some(8081));
+        assert_eq!(back.current().dump, dump);
+        assert_eq!(back.current().http_port, Some(8081));
         // Записанное умолчание ничего не меняет ни в адресах, ни у моста:
         // ключ `--dump` остаётся выключенным (см. `Cfg::dump_override`).
         // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
@@ -2969,14 +2970,14 @@ mod tests {
         let text = MINE.replace("mode = \"tunnel\"", "mode = \"local\"");
         let path = kit.put(&text);
         let mut cfg: Cfg = toml::from_str(&text).unwrap();
-        assert_eq!(cfg.host.http_port, None, "поле человека пусто — установка впервые выбирает умолчание");
+        assert_eq!(cfg.current().http_port, None, "поле человека пусто — установка впервые выбирает умолчание");
         // 8081 занят соседом, подбор этого сеанса увёл на 8082 — ровно то,
         // что кладёт `settle_chosen_http_port` перед установкой.
         cfg.resolved_http_port = Some(8082);
 
         let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
 
-        assert_eq!(cfg.host.http_port, Some(8081), "в файл человека идёт умолчание первой попытки, не сеансовый подбор");
+        assert_eq!(cfg.current().http_port, Some(8081), "в файл человека идёт умолчание первой попытки, не сеансовый подбор");
         assert!(wrote.iter().any(|w| w == "http_port = 8081"), "{wrote:?}");
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("http_port = 8081"), "{written}");
@@ -2991,8 +2992,8 @@ mod tests {
         let mut cfg: Cfg = toml::from_str(&text).unwrap();
         assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty());
         assert_eq!(cfg.gitea_url(), Some("http://localhost:3000"));
-        assert_eq!(cfg.host.dump, "D:\\dump");
-        assert_eq!(cfg.host.http_port, Some(9000));
+        assert_eq!(cfg.current().dump, "D:\\dump");
+        assert_eq!(cfg.current().http_port, Some(9000));
         assert_eq!(cfg.dump_override(), Some("D:\\dump"), "свой каталог мост передаёт");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
@@ -3605,7 +3606,7 @@ mod tests {
         // Высокий, явно нигде в проекте не используемый номер — не выведенный
         // 8081: тот на машине разработчика может держать настоящий, живой
         // коннектор (та же ловушка, что уже ловилась в `ports.rs`).
-        cfg.host.http_port = Some(47501);
+        cfg.current_mut().http_port = Some(47501);
         let preferred = cfg.http_port();
         let busy = std::net::TcpListener::bind(("127.0.0.1", preferred)).unwrap();
         settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
@@ -3627,14 +3628,14 @@ mod tests {
     fn a_changed_explicit_http_port_reaches_the_next_settling() {
         let dir = mcp_test_dir("settle-changed-pref");
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(47601);
+        cfg.current_mut().http_port = Some(47601);
         settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
         assert_eq!(cfg.http_port(), 47601);
 
         // Человек поставил другой явный порт и сохранил — свежая `Cfg`,
         // как после «Сохранить» (`resolved_http_port` снова `None`).
         let mut cfg2 = crate::cfg::filled_for_test();
-        cfg2.host.http_port = Some(47602);
+        cfg2.current_mut().http_port = Some(47602);
         settle_chosen_http_port_in(&dir, &mut cfg2, &image_for_test());
         assert_eq!(cfg2.http_port(), 47602, "новое предпочтение обязано дойти до подбора, не застыть на старом");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3654,7 +3655,7 @@ mod tests {
     fn settling_twice_in_the_same_session_does_not_drift_after_moving_off_a_busy_preference() {
         let dir = mcp_test_dir("settle-same-session");
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(47621);
+        cfg.current_mut().http_port = Some(47621);
         let busy_preference = std::net::TcpListener::bind(("127.0.0.1", 47621)).unwrap();
         settle_chosen_http_port_in(&dir, &mut cfg, &image_for_test());
         let settled = cfg.http_port();
@@ -3758,8 +3759,8 @@ mod tests {
         let store = crate::secrets::Store::file(kit.state());
         let write_workstation = |name: &str| {
             let mut cfg = crate::cfg::filled_for_test();
-            cfg.host.workstation = name.into();
-            cfg.host.password = String::new();
+            cfg.current_mut().workstation = name.into();
+            cfg.current_mut().password = String::new();
             std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render(&store).unwrap()).unwrap();
         };
         write_workstation("dev1");
@@ -3802,9 +3803,9 @@ mod tests {
         let store = crate::secrets::Store::file(kit.state());
         let write_cfg = |base_path: &str, write: &str| {
             let mut cfg = crate::cfg::filled_for_test();
-            cfg.host.password = String::new();
-            cfg.host.base_path = base_path.into();
-            cfg.host.write = write.into();
+            cfg.current_mut().password = String::new();
+            cfg.current_mut().base_path = base_path.into();
+            cfg.current_mut().write = write.into();
             std::fs::write(&path, cfg.render(&store).unwrap()).unwrap();
         };
         write_cfg("C:\\Bases\\Buh", "read_write");
@@ -3824,7 +3825,7 @@ mod tests {
         write_cfg("", "read_write");
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert_eq!(live.get().1.access(), "read_write", "точное совпадение — прежнее значение сохраняется");
-        assert_eq!(live.get().1.host.base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");
+        assert_eq!(live.get().1.current().base_path, "C:\\Bases\\Buh", "остальные поля — прежний годный Cfg, не битый новый");
 
         // Тот же сломанный файл, но write в нём — мусор, не точное
         // совпадение: отказ по умолчанию, ужесточаем, несмотря на то что

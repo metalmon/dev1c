@@ -116,7 +116,7 @@ impl State {
         }
     }
 
-    /// Слова по `cfg.host.mode`: в туннельном — как раньше, в локальном —
+    /// Слова по `cfg.current().mode`: в туннельном — как раньше, в локальном —
     /// про MCP (слушатели держат порты сами, переподключаться там не от
     /// чего — см. `start`), а не про сеанс связи со средой.
     pub fn label(&self, mode: &str) -> String {
@@ -378,7 +378,7 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// «обслуживаются ли вызовы агента»: заводит и держит его окно (`gui::Ui`),
 /// он живёт дольше любого одного сеанса (переживает «Сохранить» и
 /// переключатель в локальном режиме), сюда только передаётся, а не
-/// создаётся заново на каждый перезапуск. Транспорт — по `cfg.host.mode`:
+/// создаётся заново на каждый перезапуск. Транспорт — по `cfg.current().mode`:
 /// `tunnel` держит SSH с переподключением, `local` слушает оба порта на
 /// петле сам (всё на одной машине — переподключаться там не от чего,
 /// `Retrying` в этом режиме не бывает). `editor_mcp` — та же ячейка, тем же
@@ -417,7 +417,7 @@ pub fn start_with_enabled(
             // слушает `ports()`, туннель просит форвард на `tunnel_ports()`
             // (круг исправления финального ревью, Б3) — `Serve` обязан
             // знать то же число, иначе `dispatch` не узнаёт свой же порт.
-            let active_ports = if cfg.host.mode == "local" { cfg.ports() } else { cfg.tunnel_ports() };
+            let active_ports = if cfg.current().mode == "local" { cfg.ports() } else { cfg.tunnel_ports() };
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             let on_event = |e: Event| {
                 let mut s = state.lock().unwrap();
@@ -426,7 +426,7 @@ pub fn start_with_enabled(
                 *s = next;
                 on_state(s.clone());
             };
-            let r = if cfg.host.mode == "local" {
+            let r = if cfg.current().mode == "local" {
                 crate::listen::run(serve, active_ports, on_event, stop_rx).await
             } else {
                 let dispatch = serve.clone();
@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(gen0, gen1, "одни и те же параметры не обязаны двигать поколение");
         assert_eq!(unchanged, cfg);
         let mut changed = cfg.clone();
-        changed.host.base_path = "C:\\Bases\\Other".into();
+        changed.current_mut().base_path = "C:\\Bases\\Other".into();
         live.set(changed.clone());
         let (gen2, got) = live.get();
         assert_ne!(gen1, gen2, "настоящая смена параметров обязана двинуть поколение");
@@ -784,11 +784,11 @@ mod tests {
     #[test]
     fn live_cfg_never_hands_out_a_mix_of_two_configurations() {
         let mut a = crate::cfg::filled_for_test();
-        a.host.base_path = "C:\\Bases\\A".into();
-        a.host.db_user = "UserA".into();
+        a.current_mut().base_path = "C:\\Bases\\A".into();
+        a.current_mut().db_user = "UserA".into();
         let mut b = crate::cfg::filled_for_test();
-        b.host.base_path = "C:\\Bases\\B".into();
-        b.host.db_user = "UserB".into();
+        b.current_mut().base_path = "C:\\Bases\\B".into();
+        b.current_mut().db_user = "UserB".into();
         let live = Live::new(a.clone());
         let writer_live = live.clone();
         let (wa, wb) = (a.clone(), b.clone());
@@ -800,9 +800,9 @@ mod tests {
         });
         for _ in 0..20_000 {
             let (_, cfg) = live.get();
-            let whole_a = cfg.host.base_path == a.host.base_path && cfg.host.db_user == a.host.db_user;
-            let whole_b = cfg.host.base_path == b.host.base_path && cfg.host.db_user == b.host.db_user;
-            assert!(whole_a || whole_b, "смешались половины двух конфигураций: {:?}", cfg.host);
+            let whole_a = cfg.current().base_path == a.current().base_path && cfg.current().db_user == a.current().db_user;
+            let whole_b = cfg.current().base_path == b.current().base_path && cfg.current().db_user == b.current().db_user;
+            assert!(whole_a || whole_b, "смешались половины двух конфигураций: {:?}", cfg.current());
         }
         writer.join().unwrap();
     }
@@ -814,7 +814,7 @@ mod tests {
         // does not hang.
         let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.server = format!("127.0.0.1:{port}");
+        cfg.current_mut().server = format!("127.0.0.1:{port}");
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -843,7 +843,7 @@ mod tests {
         // ни успехом, ни отказом, пока слушатель жив.
         let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
+        cfg.current_mut().server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
         let mut live = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
         assert!(!live.finished(), "сеанс только что заведён и никуда не ушёл");
         // Не `stop`: рукопожатие ждёт до 15 с, а тесту ждать нечего — роняем
@@ -854,7 +854,7 @@ mod tests {
         // Кончившийся сам: звонить некуда, первая попытка терминальная.
         let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.server = format!("127.0.0.1:{port}");
+        cfg.current_mut().server = format!("127.0.0.1:{port}");
         let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
         let ended = (0..200).any(|_| {
             if dead.finished() {

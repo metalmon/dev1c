@@ -9,7 +9,7 @@ use gpui_kit::component::WindowExt as _;
 
 /// Адрес публикации для записи: умолчание идёт за каталогом базы, правка в
 /// toml переживает его смену.
-pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
+pub fn carried_base_url(saved: &Connection, new_base_path: &str) -> String {
     if saved.base_url.is_empty() || saved.base_url == cfg::derived_base_url(&saved.base_path) {
         cfg::derived_base_url(new_base_path)
     } else {
@@ -27,7 +27,7 @@ pub fn carried_base_url(saved: &Host, new_base_path: &str) -> String {
 ///   порта, а хранимое умолчание по-прежнему едет за каталогом базы
 ///   (`carried_base_url`). Своё значение переживает и это: переключение
 ///   туда-обратно не стирает вписанный когда-то чужой адрес.
-pub fn base_url_to_write(saved: &Host, from_form: &str, publication: &str, new_base_path: &str) -> String {
+pub fn base_url_to_write(saved: &Connection, from_form: &str, publication: &str, new_base_path: &str) -> String {
     if publication == "webserver" {
         cfg::full_base_url(from_form)
     } else {
@@ -41,7 +41,7 @@ pub fn base_url_to_write(saved: &Host, from_form: &str, publication: &str, new_b
 /// оставила бы выгрузку в старом месте. Свой каталог (отличается от
 /// выведенного) смену `project` переживает. Пустое поле остаётся пустым: там
 /// умолчание и так считается при каждом чтении (`Cfg::dump_dir`).
-pub fn carried_dump(saved: &Host, new_project: &str) -> String {
+pub fn carried_dump(saved: &Connection, new_project: &str) -> String {
     if saved.dump == cfg::derived_dump(&saved.project) {
         cfg::derived_dump(new_project)
     } else {
@@ -67,11 +67,15 @@ pub fn carried_dump(saved: &Host, new_project: &str) -> String {
 /// трогает.
 pub fn moved_lines(old: &Cfg, new: &Cfg) -> Vec<String> {
     let mut v = Vec::new();
-    if old.host.workstation != new.host.workstation {
-        v.push(format!("за рабочим местом {} → {} переехали: ветка проекта и origin", old.host.workstation, new.host.workstation));
+    if old.current().workstation != new.current().workstation {
+        v.push(format!(
+            "за рабочим местом {} → {} переехали: ветка проекта и origin",
+            old.current().workstation,
+            new.current().workstation
+        ));
     }
-    if old.host.project != new.host.project && old.host.dump != new.host.dump {
-        v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.host.dump));
+    if old.current().project != new.current().project && old.current().dump != new.current().dump {
+        v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.current().dump));
     }
     v
 }
@@ -83,7 +87,7 @@ pub fn moved_lines(old: &Cfg, new: &Cfg) -> Vec<String> {
 /// на Y») и перезапуск сеанса — сеанс с новым паролем нужен так же, как с
 /// новым путём: агент обязан отвечать из той базы, в которую его только что
 /// перевели. У публикации список короче — см. `descriptor_changed`.
-pub fn database_changed(a: &Host, b: &Host) -> bool {
+pub fn database_changed(a: &Connection, b: &Connection) -> bool {
     a.base_path != b.base_path || a.db_user != b.db_user || a.db_password != b.db_password
 }
 
@@ -94,7 +98,7 @@ pub fn database_changed(a: &Host, b: &Host) -> bool {
 /// базы дескриптор не трогает — переподнимать публикацию ради неё незачем, и
 /// `republish_after_save` смотрит именно на этот, более короткий список, а
 /// не на `database_changed`.
-pub fn descriptor_changed(a: &Host, b: &Host) -> bool {
+pub fn descriptor_changed(a: &Connection, b: &Connection) -> bool {
     a.base_path != b.base_path
 }
 
@@ -105,7 +109,7 @@ pub fn descriptor_changed(a: &Host, b: &Host) -> bool {
 /// `render`.
 ///
 /// Почему не `render`/`write_checked` (ревью задачи 2, Important 1):
-/// `ui.cfg.host.password`/`db_password` могли прочитаться пустыми на чужом
+/// `ui.cfg.current().password`/`db_password` могли прочитаться пустыми на чужом
 /// шифртексте (`load_unchecked`, задача 2, — файл переехал на другую машину
 /// или под другую учётку). Перерисовка всего файла записала бы это пустое
 /// значение заново, стирая настоящий шифртекст человека, причём
@@ -149,9 +153,9 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
     // Синхронизируем только то, что сами только что записали — остальные
     // поля `ui.cfg` не трогаем, они и на диске остались как были.
     match key {
-        "mode" => ui.cfg.host.mode = value.to_string(),
-        "publication" => ui.cfg.host.publication = value.to_string(),
-        "write" => ui.cfg.host.write = value.to_string(),
+        "mode" => ui.cfg.current_mut().mode = value.to_string(),
+        "publication" => ui.cfg.current_mut().publication = value.to_string(),
+        "write" => ui.cfg.current_mut().write = value.to_string(),
         _ => {}
     }
     Ok(())
@@ -181,7 +185,7 @@ fn store_for(kit: &Kit) -> Result<secrets::Store, String> {
 /// вписать». Непустое поле (новый пароль введён) по-прежнему заменяет всё,
 /// как раньше: проверка здесь только по тому, что форма отдала пустую
 /// строку для имени, которое и так в списке.
-fn fields_to_keep(host: &Host, undecryptable: &[String]) -> Vec<&'static str> {
+fn fields_to_keep(host: &Connection, undecryptable: &[String]) -> Vec<&'static str> {
     let mut keep = Vec::new();
     if host.password.is_empty() && undecryptable.iter().any(|f| f == "password") {
         keep.push("password");
@@ -283,20 +287,27 @@ fn kept_password_line(keep: &[&'static str]) -> Option<Line> {
 /// трогается вовсе. Иначе собранные пары «ключ — литерал» уходят в
 /// `cfg::write_checked` одним параметром: один файл, одна запись, одна
 /// проверка после неё.
-pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
-    let old_host = ui.cfg.host.clone();
-    host.gitea = ui.cfg.host.gitea.clone();
-    host.dump = carried_dump(&ui.cfg.host, &host.project);
-    host.platform = ui.cfg.host.platform.clone();
-    host.configuration = ui.cfg.host.configuration.clone();
-    host.toolset = ui.cfg.host.toolset.clone();
-    host.write = ui.cfg.host.write.clone();
-    host.tools = ui.cfg.host.tools.clone();
-    host.mode = ui.cfg.host.mode.clone();
-    host.publication = ui.cfg.host.publication.clone();
-    host.http_port = ui.cfg.host.http_port;
+pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
+    let old_host = ui.cfg.current().clone();
+    // Имя соединения переносится, как и всё, чего в форме нет: поля имени в
+    // окне пока не существует (его заводит план интерфейса), а безымянное
+    // соединение `validate()` не пропустит — «Сохранить» отказывало бы про
+    // имя, которого человек не вводил. Пусто у прежнего — значит соединения
+    // не было вовсе (первая настройка свежего комплекта), и имя выводится из
+    // каталога базы тем же правилом, что и при чтении прежнего `[host]`.
+    host.name = if old_host.name.is_empty() { cfg::default_name(&host.base_path, &[]) } else { old_host.name.clone() };
+    host.gitea = ui.cfg.current().gitea.clone();
+    host.dump = carried_dump(ui.cfg.current(), &host.project);
+    host.platform = ui.cfg.current().platform.clone();
+    host.configuration = ui.cfg.current().configuration.clone();
+    host.toolset = ui.cfg.current().toolset.clone();
+    host.write = ui.cfg.current().write.clone();
+    host.tools = ui.cfg.current().tools.clone();
+    host.mode = ui.cfg.current().mode.clone();
+    host.publication = ui.cfg.current().publication.clone();
+    host.http_port = ui.cfg.current().http_port;
     let typed = host.base_url.clone();
-    host.base_url = base_url_to_write(&ui.cfg.host, &typed, &host.publication, &host.base_path);
+    host.base_url = base_url_to_write(ui.cfg.current(), &typed, &host.publication, &host.base_path);
     let keep = fields_to_keep(&host, &ui.cfg.undecryptable);
     let path = ui.kit.state_path(cfg::FILE);
     // Читаем диск ДО записи — после неё поле будет пустым, прежний
@@ -305,7 +316,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // Нашлось не всё — отказываем здесь: до этой строки ни одной записи ещё
     // не было, файл не тронут.
     let patches = resolve_patches(&before, &keep)?;
-    let mut cfg = Cfg { host, ..Default::default() };
+    let mut cfg = Cfg::of_one(host);
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не
     // открыла — иначе показ окна решил бы, что беда прошла сама.
@@ -332,19 +343,19 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
     // доставшийся порт, а не предпочтение (находка 6). `ui.cfg` — ещё
     // прежняя: её заменяет `ui.cfg = cfg` ниже.
     let moved = moved_lines(&ui.cfg, &cfg);
-    let base_path = cfg.host.base_path.clone();
+    let base_path = cfg.current().base_path.clone();
     // Дескриптор публикации (`publication::vrd`) с задачи 6 несёт только
     // путь базы — переподнимать публикацию при смене логина или пароля
     // больше незачем: платформа и так берёт их из запроса, а не из
     // дескриптора. `descriptor_changed`, а не `database_changed` — у них
     // разные списки полей не по ошибке (см. доку обеих).
-    let base_changed = descriptor_changed(&cfg.host, &old_host);
+    let base_changed = descriptor_changed(cfg.current(), &old_host);
     // То же сравнение, что решает, светится ли «Сохранить» (`panel::fields_differ`):
     // поля, которых окно не показывает (в т.ч. `mode`), сеанс не перезапускают
     // здесь — смена режима в трее поднимает его сама, отдельным путём
     // (`tray::on_menu`), и лишний перезапуск в довесок к тому был бы только
     // лишней строкой в журнал и лишним миганием портов.
-    let changed = panel::fields_differ(&cfg.host, &old_host, &cfg.host.mode, &cfg.host.publication);
+    let changed = panel::fields_differ(cfg.current(), &old_host, &cfg.current().mode, &cfg.current().publication);
     ui.cfg = cfg;
     for text in moved {
         note_line(ui, Line { kind: Kind::Warn, text });
@@ -361,7 +372,7 @@ pub fn save_host(ui: &mut Ui, mut host: Host) -> Result<(), String> {
         ensure_publication_now(ui);
     }
     if changed && ui.session.is_some() {
-        if ui.cfg.host.mode == "local" {
+        if ui.cfg.current().mode == "local" {
             // Локальный режим: слушатели подняты на весь срок жизни процесса
             // и не трогаются переключателем/«Сохранить» (см. `launch`) —
             // спека прямо требует, чтобы смена базы была незаметна для Zed:
@@ -409,16 +420,16 @@ pub fn locks_gate(gate_before: Option<&str>, gate_after: Option<String>, serving
 /// (он пересчитывается по тем же событиям и его же читает `toggle_link`), на
 /// диск ходим ровно раз — за «станет»: нажатие «Сохранить» не должно стоить
 /// шести обходов `Program Files` на главном потоке окна.
-pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
+pub fn save_locks_gate(ui: &Ui, new_host: &Connection) -> Option<String> {
     let serving = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
     if !serving || ui.gate.is_some() {
         return None;
     }
     let mut host = new_host.clone();
     if host.mode.is_empty() {
-        host.mode = ui.cfg.host.mode.clone();
+        host.mode = ui.cfg.current().mode.clone();
     }
-    locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg { host, ..Default::default() }), serving)
+    locks_gate(ui.gate.as_deref(), gate_now(&ui.kit, &Cfg::of_one(host)), serving)
 }
 
 /// О чём спросить перед «Сохранить», и спрашивать ли вообще: готовый текст
@@ -426,13 +437,13 @@ pub fn save_locks_gate(ui: &Ui, new_host: &Host) -> Option<String> {
 /// текст» отвечает он же, а не два одинаковых похода на диск подряд.
 /// Погасшее обслуживание важнее смены базы: оно оставляет агента без ответа
 /// вовсе.
-pub(crate) fn save_question(ui: &Ui, new_host: &Host) -> Option<(String, String)> {
+pub(crate) fn save_question(ui: &Ui, new_host: &Connection) -> Option<(String, String)> {
     if let Some(why) = save_locks_gate(ui, new_host) {
         return Some(confirm_gate_text(&why));
     }
     let live = ui.enabled.load(Ordering::Relaxed) && ui.session.is_some();
-    if database_changed(new_host, &ui.cfg.host) && live {
-        return Some(confirm_text(&ui.cfg.host.base_path, &new_host.base_path));
+    if database_changed(new_host, ui.cfg.current()) && live {
+        return Some(confirm_text(&ui.cfg.current().base_path, &new_host.base_path));
     }
     None
 }
@@ -440,7 +451,7 @@ pub(crate) fn save_question(ui: &Ui, new_host: &Host) -> Option<(String, String)
 /// Нужно ли спросить перед «Сохранить»: база меняется (`database_changed` выше — путь, логин И пароль; у публикации список короче, `descriptor_changed`, не этот же самый — с задачи 6 логин и пароль дескриптор не несёт, см. доку обеих; Important 3 ревью задачи 7: прежняя строка здесь утверждала обратное), агент прямо сейчас может отвечать (`enabled` — его читает мост на каждый вызов, в обоих режимах, не только в локальном), и сеанс жив (`ui.session`). Любая другая правка — каталог проекта, режим, рабочее место — сохраняется без вопроса, как и было задумано (заказчик просил вопрос именно и только в этом сочетании, 2026-10-20).
 ///
 /// Второй повод спросить — тот же диалог: правка убирает холодное условие и тем гасит обслуживание (`save_locks_gate`). Заказчик требовал вопроса именно в этом сочетании: цель спеки — чтобы смена параметров была незаметной для Zed, а тут агент остаётся без обслуживания.
-pub fn save_needs_confirm(ui: &Ui, new_host: &Host) -> bool {
+pub fn save_needs_confirm(ui: &Ui, new_host: &Connection) -> bool {
     save_question(ui, new_host).is_some()
 }
 
@@ -486,7 +497,12 @@ pub fn confirm_gate_text(why: &str) -> (String, String) {
 /// ничего не ждёт. `proceed` зовётся ровно раз («да», или вопроса не было)
 /// либо никогда (отказ — поля окна остаются как человек их оставил, здесь
 /// ничего не трогаем).
-pub fn confirm_database_change(window: &mut Window, cx: &mut App, new_host: &Host, proceed: impl FnOnce(&mut Window, &mut App) + 'static) {
+pub fn confirm_database_change(
+    window: &mut Window,
+    cx: &mut App,
+    new_host: &Connection,
+    proceed: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
     // Один диалог на оба повода (спека: «тот же диалог подтверждения, что уже
     // спрашивает при смене базы»), и один расчёт на нажатие: текст приходит
     // вместе с ответом «спрашивать ли».

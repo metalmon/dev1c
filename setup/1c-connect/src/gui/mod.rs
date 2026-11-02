@@ -3,7 +3,7 @@
 //! его опускает только «Выход». Трей и обработчики ОС кладут события в один
 //! канал; задача-читатель канала — единственное, что меняет `Ui`.
 
-use crate::cfg::{self, Cfg, Host};
+use crate::cfg::{self, Cfg, Connection};
 use crate::flow;
 use crate::ops_host::{self, Ctx};
 use crate::project::{self, Layout, Project};
@@ -668,7 +668,7 @@ pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
         }
     }
     ui.cfg = cfg;
-    if ui.cfg.host.mode == "local" {
+    if ui.cfg.current().mode == "local" {
         if let Some(s) = &ui.session {
             s.update_cfg(ui.cfg.clone());
         }
@@ -719,7 +719,7 @@ fn tray_state_now(ui: &Ui, now: Instant) -> TrayState {
     if ui.busy.is_some() {
         return TrayState::Busy;
     }
-    tray::tray_state_of(panel::card(ui.progress.as_ref(), &ui.link, &ui.cfg.host.mode, &ui.verdict, ui.gate.as_deref(), now).dot)
+    tray::tray_state_of(panel::card(ui.progress.as_ref(), &ui.link, &ui.cfg.current().mode, &ui.verdict, ui.gate.as_deref(), now).dot)
 }
 
 /// Синхронизировать трей с `Ui`: состояние (по точке карточки) и подсказка
@@ -1381,7 +1381,7 @@ fn refresh_line(label: &str, done: &crate::skills::Done) -> Option<Line> {
 /// первого показа трея; названо здесь, чтобы не считалось невозможным.
 fn start_skill_refresh(cx: &mut App) {
     let ui = cx.global::<Ui>();
-    let (kit, tx, mode) = (ui.kit.clone(), ui.tx.clone(), ui.cfg.host.mode.clone());
+    let (kit, tx, mode) = (ui.kit.clone(), ui.tx.clone(), ui.cfg.current().mode.clone());
     AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
         let lines = match std::env::current_exe() {
@@ -1702,7 +1702,7 @@ fn handle(ev: Ev, cx: &mut App) {
                     State::Up { .. } => ui.bind_failed = None,
                     _ => {}
                 }
-                let shown = local_display(&ui.cfg.host.mode, ui.enabled.load(Ordering::Relaxed), l);
+                let shown = local_display(&ui.cfg.current().mode, ui.enabled.load(Ordering::Relaxed), l);
                 set_link(cx, shown);
                 // Вердикт готовности здесь не считается: `launch`/`toggle_link`
                 // зовут `ensure_publication_now` на каждый случай, когда могла
@@ -1784,7 +1784,7 @@ fn handle(ev: Ev, cx: &mut App) {
             // что правда лежит в файле агента — щелчок её только попросил.
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
-                tray.set_agents(&ui.cfg.host.mode);
+                tray.set_agents(&ui.cfg.current().mode);
             }
             cx.refresh_windows();
             // Почва сдвинулась — тем же порядком, что у `Ev::Done`: факт
@@ -1805,7 +1805,7 @@ fn handle(ev: Ev, cx: &mut App) {
                 Ok(()) => {
                     cx.global_mut::<Ui>().raised_publication = true;
                     let ui = cx.global::<Ui>();
-                    let local = ui.cfg.host.mode == "local";
+                    let local = ui.cfg.current().mode == "local";
                     let enabled = ui.enabled.load(Ordering::Relaxed);
                     // Только здесь: локальный режим, переключатель включён и
                     // карточка ещё показывает «Включаю…» от этого самого клика
@@ -1941,7 +1941,7 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
                 if !ui.agent_clicks.iter().any(|&t| agent_click_busy(t, now)) {
-                    tray.set_agents(&ui.cfg.host.mode);
+                    tray.set_agents(&ui.cfg.current().mode);
                 }
             }
         }
@@ -2060,14 +2060,14 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // режима и всегда отмечал «Через туннель» первым — здесь сразу
         // поправляется на настоящий, тем же методом, что потом зовёт смена
         // режима в трее (`tray::on_menu`).
-        tray.set_mode(&cfg.host.mode);
-        tray.set_publication(&cfg.host.publication);
+        tray.set_mode(&cfg.current().mode);
+        tray.set_publication(&cfg.current().publication);
         tray.set_access(cfg.access());
         // Раздел «Редакторы» ушёл из вкладки «Инструменты» в трей (замысел «Управление
         // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
         // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та
         // же первичная поправка, что у режима и публикации выше.
-        tray.set_agents(&cfg.host.mode);
+        tray.set_agents(&cfg.current().mode);
         // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл. Журнала для этой ошибки здесь ещё нет — `Ui` не выставлен ни строкой ниже; первый же щелчок переключателем перезапишет файл и громко скажет, если он и тогда не пишется.
         let _ = crate::allow::write(&kit, serve_on_start);
         cx.set_global(Ui {
@@ -2277,7 +2277,7 @@ impl Ui {
 fn doomed_session(ui: &Ui) -> crate::session::Session {
     let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
-    cfg.host.server = format!("127.0.0.1:{port}");
+    cfg.current_mut().server = format!("127.0.0.1:{port}");
     session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {})
 }
 
@@ -2290,8 +2290,8 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
 fn ended_session(ui: &Ui) -> crate::session::Session {
     let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
-    cfg.host.mode = "tunnel".into();
-    cfg.host.server = format!("127.0.0.1:{port}");
+    cfg.current_mut().mode = "tunnel".into();
+    cfg.current_mut().server = format!("127.0.0.1:{port}");
     let mut s = session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {});
     for _ in 0..200 {
         if s.finished() {
@@ -2309,8 +2309,8 @@ fn ended_session(ui: &Ui) -> crate::session::Session {
 fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
     let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut cfg = ui.cfg.clone();
-    cfg.host.mode = "tunnel".into();
-    cfg.host.server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
+    cfg.current_mut().mode = "tunnel".into();
+    cfg.current_mut().server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
     (session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {}), quiet)
 }
 

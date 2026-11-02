@@ -312,7 +312,7 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
     // в карточке хода. Громкий зовёт `verify::run`, которая печатает фазу и
     // сама же зовёт `gather` — отдельного набора шагов для кнопки не нужно.
     let ctx = if loud { ctx_for(ui) } else { quiet_ctx(ui) };
-    let mode = ui.cfg.host.mode.clone();
+    let mode = ui.cfg.current().mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.
@@ -656,7 +656,7 @@ pub fn tick_facts(ui: &mut Ui, now: Instant, window_open: bool) {
 /// нуль сеансов.
 pub fn spawn_cheap(ui: &Ui, whole: bool) {
     let ctx = quiet_ctx(ui);
-    let mode = ui.cfg.host.mode.clone();
+    let mode = ui.cfg.current().mode.clone();
     let link = ui.link.clone();
     let tx = ui.tx.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.

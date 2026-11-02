@@ -47,7 +47,7 @@ pub fn cold_gate(
         return Some("в комплекте нет mcp-1c".into());
     }
     // Нерасшифрованный пароль базы (а в туннельном режиме — и пароль рабочего места) — то же условие, что держит CLI (`Cfg::load_with`), только тот отказывает раньше, самим `Cfg::load`, а окно вместо отказа открывается и до этой правки молчало: переключатель включался, мост ехал с пустым паролем, «Установить расширение» — тоже (ревью задачи 7, Important 2). Смертельно для работы и видно без сети — ровно то, чем замок и отбирает условия; причина — короткой строкой, без упоминания окна или кнопок, которых здесь нет.
-    if !cfg::blocking_undecryptable(&cfg.host.mode, &cfg.undecryptable).is_empty() {
+    if !cfg::blocking_undecryptable(&cfg.current().mode, &cfg.undecryptable).is_empty() {
         return Some("пароль не расшифрован — введите заново".into());
     }
     // «Сделано» и ничего другого. Копии инструментов на машине больше нет
@@ -57,7 +57,7 @@ pub fn cold_gate(
     if !matches!(tools, OpState::Done(_)) {
         return Some("инструментов в комплекте нет (vrunner/, git/, httpd/) — скопируйте полный комплект заново".into());
     }
-    let h = &cfg.host;
+    let h = cfg.current();
     // Пустое поле — «не указана база», а не «каталога  нет»: в пустой строке
     // человеку нечего прочитать.
     if h.base_path.trim().is_empty() {
@@ -116,7 +116,7 @@ pub fn gate_now(kit: &Kit, cfg: &Cfg) -> Option<String> {
     // Существование спрашиваем только у файловой базы (`wants_directory`,
     // правило самого факта «база»): `exists()` по недоступной сетевой шаре
     // висит на таймауте SMB, а считается это на главном потоке окна.
-    let base = &cfg.host.base_path;
+    let base = &cfg.current().base_path;
     let base_exists = wants_directory(base) && std::path::Path::new(base).exists();
     let platform = ops_host::platform_choice(cfg);
     cold_gate(
@@ -152,7 +152,7 @@ mod tests {
     fn everything_in_place_opens_the_switch() {
         assert_eq!(open(&crate::cfg::filled_for_test()), None);
         let mut local = crate::cfg::filled_for_test();
-        local.host.mode = "local".into();
+        local.current_mut().mode = "local".into();
         assert_eq!(open(&local), None);
     }
 
@@ -186,21 +186,21 @@ mod tests {
     #[test]
     fn webserver_without_an_address_locks_the_switch() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.publication = "webserver".into();
-        c.host.base_url = String::new();
+        c.current_mut().publication = "webserver".into();
+        c.current_mut().base_url = String::new();
         assert_eq!(open(&c).as_deref(), Some("не задан адрес публикации — впишите его и нажмите «Сохранить»"));
-        c.host.base_url = "http://localhost/Buh/hs/mcp-1c".into();
+        c.current_mut().base_url = "http://localhost/Buh/hs/mcp-1c".into();
         assert_eq!(open(&c), None);
         // В обычном режиме адрес считается сам — замку там не за что цепляться.
-        c.host.publication = "auto".into();
-        c.host.base_url = String::new();
+        c.current_mut().publication = "auto".into();
+        c.current_mut().base_url = String::new();
         assert_eq!(open(&c), None);
     }
 
     #[test]
     fn an_empty_db_user_holds_the_switch() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.db_user = "   ".into();
+        c.current_mut().db_user = "   ".into();
         let why = open(&c).unwrap();
         assert!(why.contains("пользователь базы"), "{why}");
     }
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn an_unreadable_workstation_password_does_not_hold_the_switch_in_local_mode() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.mode = "local".into();
+        c.current_mut().mode = "local".into();
         c.undecryptable = vec!["password".to_string()];
         assert_eq!(open(&c), None);
     }
@@ -236,7 +236,7 @@ mod tests {
     fn a_file_base_without_its_directory_holds_the_switch() {
         let c = crate::cfg::filled_for_test();
         let why = cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid).unwrap();
-        assert!(why.contains(&c.host.base_path), "{why}");
+        assert!(why.contains(&c.current().base_path), "{why}");
     }
 
     #[test]
@@ -244,10 +244,10 @@ mod tests {
         // `сервер\база` на диске не лежит — его существование не проверяется
         // вовсе, иначе переключатель был бы заперт навсегда.
         let mut c = crate::cfg::filled_for_test();
-        c.host.base_path = "srv-1c\\buh".into();
+        c.current_mut().base_path = "srv-1c\\buh".into();
         assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
         // Сетевой путь — предупреждение проверки, но не замок.
-        c.host.base_path = "\\\\nas\\bases\\buh".into();
+        c.current_mut().base_path = "\\\\nas\\bases\\buh".into();
         assert_eq!(cold_gate(&c, true, false, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid), None);
     }
 
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn an_empty_base_says_so_instead_of_naming_an_empty_directory() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.base_path = "  ".into();
+        c.current_mut().base_path = "  ".into();
         assert_eq!(open(&c).as_deref(), Some("не указана база"));
     }
 
@@ -354,9 +354,9 @@ mod tests {
     fn the_tunnel_asks_for_the_environment_and_the_local_mode_does_not() {
         type Case = (fn(&mut Cfg), &'static str);
         let cases: [Case; 3] = [
-            (|c: &mut Cfg| c.host.server = String::new(), "адрес среды"),
-            (|c: &mut Cfg| c.host.password = String::new(), "пароль"),
-            (|c: &mut Cfg| c.host.workstation = String::new(), "рабочего места"),
+            (|c: &mut Cfg| c.current_mut().server = String::new(), "адрес среды"),
+            (|c: &mut Cfg| c.current_mut().password = String::new(), "пароль"),
+            (|c: &mut Cfg| c.current_mut().workstation = String::new(), "рабочего места"),
         ];
         for (field, mark) in cases {
             let mut tunnel = crate::cfg::filled_for_test();
@@ -364,7 +364,7 @@ mod tests {
             let why = open(&tunnel).unwrap_or_else(|| panic!("туннель без «{mark}» обязан запереть переключатель"));
             assert!(why.contains(mark), "{why}");
             let mut local = crate::cfg::filled_for_test();
-            local.host.mode = "local".into();
+            local.current_mut().mode = "local".into();
             field(&mut local);
             assert_eq!(open(&local), None, "в локальном режиме поля «{mark}» в окне нет");
         }

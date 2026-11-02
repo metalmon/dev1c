@@ -30,7 +30,7 @@ pub struct Tray {
     toggle: MenuItem,
     modes: [CheckMenuItem; 2],
     publications: [CheckMenuItem; 2],
-    /// Потолок записи (`cfg.host.write`/`Cfg::access()`) — тем же приёмом,
+    /// Потолок записи (`cfg.current().write`/`Cfg::access()`) — тем же приёмом,
     /// что `modes`/`publications` выше: радио из двух пунктов, строится и
     /// читается одинаково.
     access: [CheckMenuItem; 2],
@@ -57,12 +57,12 @@ const THEMES: [(theme::Choice, &str, &str); 3] = [
     (theme::Choice::Dark, "theme:dark", "Тёмная"),
 ];
 
-/// Режим работы (`cfg.host.mode`, "tunnel"/"local") → id пункта меню и его
+/// Режим работы (`cfg.current().mode`, "tunnel"/"local") → id пункта меню и его
 /// подпись. Поля в окне нет — режим пишет только этот пункт (см.
 /// `gui::save_host`).
 const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через туннель"), ("local", "mode:local", "Локально")];
 
-/// Кто публикует базу (`cfg.host.publication`, "auto"/"webserver") → id
+/// Кто публикует базу (`cfg.current().publication`, "auto"/"webserver") → id
 /// пункта меню и его подпись. Значения в toml прежние, подписи — человеческие:
 /// человек читает название, а не имя режима. Поля в окне нет; адрес чужой
 /// публикации спрашивается отдельным полем «Связи», видимым только во
@@ -70,7 +70,7 @@ const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через т
 const PUBLICATIONS: [(&str, &str, &str); 2] =
     [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Публикует платформа 1С")];
 
-/// Потолок записи (`cfg.host.write`, значения — те же слова, что понимает
+/// Потолок записи (`cfg.current().write`, значения — те же слова, что понимает
 /// дочерний `mcp-1c`, `read_write`/`read_only`: перевод создал бы третью
 /// таблицу соответствий без всякой пользы) → id пункта меню и его подпись.
 /// Поля в окне нет — потолок пишет только этот пункт (см. `gui::save_host`,
@@ -232,7 +232,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let open = MenuItem::with_id("open", "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
-    // Отметка при создании меню: умолчание `Host::default()`, пока не
+    // Отметка при создании меню: умолчание `Connection::default()`, пока не
     // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
     // (тот читает `theme::Choice::load` до вызова). `launch` поправляет её на
     // настоящий сохранённый режим сразу после `build`, до показа окна
@@ -514,12 +514,12 @@ fn raise_session_after_mode_change(mode: &str, gate: Option<&str>) -> bool {
 }
 
 /// Записать новый режим и поднять сеанс заново. Зовётся после согласия
-/// человека (`confirm_database_change`), поэтому `ui.cfg.host.mode` правится
+/// человека (`confirm_database_change`), поэтому `ui.cfg.current().mode` правится
 /// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
 /// иначе переписал бы его обратно.
 fn apply_mode(cx: &mut App, mode: &'static str) {
-    cx.global_mut::<Ui>().cfg.host.mode = mode.into();
-    let host = cx.global::<Ui>().cfg.host.clone();
+    cx.global_mut::<Ui>().cfg.current_mut().mode = mode.into();
+    let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
             if let Some(tray) = &cx.global::<Ui>().tray {
@@ -533,7 +533,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // безвредна, если сеанса и не было.
             stop_session(cx);
             let ui = cx.global::<Ui>();
-            if raise_session_after_mode_change(&ui.cfg.host.mode, ui.gate.as_deref()) {
+            if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
                 if let Err(e) = start_session(cx.global_mut::<Ui>()) {
                     note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 }
@@ -611,12 +611,12 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
         // в этом режиме он ничего не вписывал, а проба по нашей догадке ушла
         // бы на чужой веб-сервер. Снимаем — и замок окна честно скажет
         // «адрес не задан».
-        if crate::cfg::is_derived_address(&ui.cfg.host) {
-            ui.cfg.host.base_url = String::new();
+        if crate::cfg::is_derived_address(ui.cfg.current()) {
+            ui.cfg.current_mut().base_url = String::new();
         }
     }
-    cx.global_mut::<Ui>().cfg.host.publication = publication.into();
-    let host = cx.global::<Ui>().cfg.host.clone();
+    cx.global_mut::<Ui>().cfg.current_mut().publication = publication.into();
+    let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
             if let Some(tray) = &cx.global::<Ui>().tray {
@@ -624,7 +624,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
             }
             stop_session(cx);
             let ui = cx.global::<Ui>();
-            if raise_session_after_mode_change(&ui.cfg.host.mode, ui.gate.as_deref()) {
+            if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
                 if let Err(e) = start_session(cx.global_mut::<Ui>()) {
                     note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 }
@@ -709,8 +709,8 @@ fn access_not_applied_line(e: &str) -> String {
 }
 
 fn apply_access(cx: &mut App, access: &'static str) {
-    cx.global_mut::<Ui>().cfg.host.write = access.into();
-    let host = cx.global::<Ui>().cfg.host.clone();
+    cx.global_mut::<Ui>().cfg.current_mut().write = access.into();
+    let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
             if let Some(tray) = &cx.global::<Ui>().tray {
@@ -812,7 +812,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             // меню уже успел отметить себя сам — возвращаем галочку на
             // настоящий режим, раз действие не состоялось.
             let ui = cx.global::<Ui>();
-            let current = ui.cfg.host.mode.clone();
+            let current = ui.cfg.current().mode.clone();
             if mode_change_blocked(ui) || mode == current {
                 if let Some(tray) = &ui.tray {
                     tray.set_mode(&current);
@@ -831,7 +831,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             // после согласия, а не до вопроса: иначе «было ли обслуживание
             // живым» считалось бы уже по новому режиму, и вопрос не
             // появлялся бы вовсе (находка ревью задачи 23).
-            let mut host = ui.cfg.host.clone();
+            let mut host = ui.cfg.current().clone();
             host.mode = mode.into();
             // Спрашивать не о чем (или спросить негде — значок живёт и без
             // окна) — пишем сразу, как делали раньше.
@@ -852,7 +852,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             // под идущей операцией не переключаем, а отметку, которую пункт
             // поставил себе сам, возвращаем на действующее значение.
             let ui = cx.global::<Ui>();
-            let current = ui.cfg.host.publication.clone();
+            let current = ui.cfg.current().publication.clone();
             if mode_change_blocked(ui) || publication == current {
                 if let Some(tray) = &ui.tray {
                     tray.set_publication(&current);
@@ -865,7 +865,7 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             // Уборка своей публикации — не здесь, а в `apply_publication`:
             // вопрос ниже человек может отклонить, и тогда гасить что-либо
             // было бы прямым вредом (свой httpd убит, режим прежний).
-            let mut host = cx.global::<Ui>().cfg.host.clone();
+            let mut host = cx.global::<Ui>().cfg.current().clone();
             host.publication = publication.into();
             let ui = cx.global::<Ui>();
             if !save_needs_confirm(ui, &host) || ui.window.is_none() {
@@ -1046,8 +1046,8 @@ mod tests {
     fn choosing_an_access_ceiling_writes_the_toml() {
         let mut ui = Ui::for_test();
         assert_eq!(ui.cfg.access(), "read_only");
-        ui.cfg.host.write = "read_write".into();
-        let host = ui.cfg.host.clone();
+        ui.cfg.current_mut().write = "read_write".into();
+        let host = ui.cfg.current().clone();
         save_host(&mut ui, host).unwrap();
         assert_eq!(ui.cfg.access(), "read_write");
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
@@ -1064,11 +1064,11 @@ mod tests {
     #[test]
     fn a_tightened_ceiling_reaches_the_rebuilt_command_even_with_bad_fields_elsewhere() {
         let mut live = crate::cfg::filled_for_test();
-        live.host.write = "read_write".into();
+        live.current_mut().write = "read_write".into();
         assert!(live.validate().is_ok(), "вводная: живая ячейка держит годный Cfg");
         let tightened = live.clone().with_access("read_only");
-        assert_eq!(tightened.host.base_path, live.host.base_path, "остальные поля не тронуты");
-        assert_eq!(tightened.host.db_user, live.host.db_user, "остальные поля не тронуты");
+        assert_eq!(tightened.current().base_path, live.current().base_path, "остальные поля не тронуты");
+        assert_eq!(tightened.current().db_user, live.current().db_user, "остальные поля не тронуты");
         let kit = common::kit::Kit::at(std::env::temp_dir());
         let cmd = crate::bridge::mcp_command(&tightened, &kit);
         let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -1112,11 +1112,11 @@ mod tests {
         // name promises: the config write that `stop_session`/`start_session`
         // key off next (mode lives in the config, not in extra state).
         let mut ui = Ui::for_test();
-        assert_eq!(ui.cfg.host.mode, "tunnel");
-        ui.cfg.host.mode = "local".into();
-        let host = ui.cfg.host.clone();
+        assert_eq!(ui.cfg.current().mode, "tunnel");
+        ui.cfg.current_mut().mode = "local".into();
+        let host = ui.cfg.current().clone();
         save_host(&mut ui, host).unwrap();
-        assert_eq!(ui.cfg.host.mode, "local");
+        assert_eq!(ui.cfg.current().mode, "local");
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
         assert!(text.contains("mode = \"local\""), "{text}");
     }
@@ -1179,7 +1179,7 @@ mod tests {
 
         let now = Instant::now();
         let mut ui = Ui::for_test();
-        ui.cfg.host.mode = "local".into();
+        ui.cfg.current_mut().mode = "local".into();
         ui.link = State::Up { since: now };
         // `Ui::for_test` считает замок по каталогу теста, и там он заперт
         // (ни инструментов, ни платформы) — а речь здесь про цвет значка при

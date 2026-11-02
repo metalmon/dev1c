@@ -58,7 +58,7 @@ fn a_red_kit_fact_does_not_colour_the_verdict_while_mcp_are_off() {
 #[test]
 fn a_recalculation_keeps_the_previous_verdict_on_screen() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     let gen = ui.facts_gen;
     apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
     assert!(matches!(ui.verdict, Verdict::Ready));
@@ -75,7 +75,7 @@ fn a_recalculation_keeps_the_previous_verdict_on_screen() {
 #[test]
 fn a_set_that_arrives_while_a_repeat_is_pending_is_applied_and_ends_the_chain() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.busy = Some(Busy::Check);
     let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
     // Такт при идущем расчёте: второго потока нет, просьба о повторе есть.
@@ -106,7 +106,7 @@ fn a_set_that_arrives_while_a_repeat_is_pending_is_applied_and_ends_the_chain() 
 #[test]
 fn a_finished_check_becomes_the_verdict() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     let gen = ui.facts_gen;
     let checks = vec![
         Check::pass("платформа 1С", "есть"),
@@ -194,7 +194,7 @@ fn a_changed_cheap_fact_pulls_the_expensive_ones() {
 #[test]
 fn the_window_thread_tick_only_raises_the_latch() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.sessions = Some(3);
     ui.prev_cheap = vec![Check::pass("в базе открыт сеанс", "нет")];
 
@@ -233,7 +233,7 @@ fn the_window_thread_tick_only_raises_the_latch() {
 fn a_cheap_answer_asks_for_the_expensive_pass_without_overtaking_it() {
     let free = vec![Check::pass("в базе открыт сеанс", "нет")];
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.gate = None;
     // Полный расчёт уже идёт: эскалация обязана только попросить добавку.
     ui.facts_pending = true;
@@ -393,7 +393,7 @@ fn a_busy_verdict_is_never_green_on_any_surface() {
 
     // Значок: жёлтый «занято», не зелёный.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.link = up;
     ui.gate = None;
     ui.verdict = busy;
@@ -415,7 +415,7 @@ fn nothing_is_computed_after_the_switch_went_off() {
     // Дорога первая: обещанный повтор в `Ev::Ready`. Повтор просят, пока
     // обслуживание живо; выключают до того, как ответ пришёл.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
     assert!(start_facts(&mut ui, Instant::now()).is_none(), "второго потока нет — только просьба о повторе");
@@ -504,7 +504,7 @@ fn the_journal_speaks_only_when_the_verdict_changes() {
     // туннельный), набор не применится и тест остался бы зелёным на
     // сломанном коде.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     assert!(serving(&ui), "иначе тест проверяет не то");
     let fact = || vec![Check::fail("проект", "не разложен", "1c-connect install")];
@@ -534,7 +534,7 @@ fn the_badge_counts_only_bad_facts() {
     // Набор живой: применился новый — изменилось и число, без всякого
     // нажатия «Проверить».
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     assert!(serving(&ui), "иначе набор не применится и тест проверяет не то");
     let gen = ui.facts_gen;
@@ -579,7 +579,7 @@ fn the_tray_says_it_is_checking_while_there_is_no_set_yet() {
 #[test]
 fn loudness_belongs_to_the_press_and_the_card_does_not_blink() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.busy = Some(Busy::Check);
     ui.check_requested = true;
     let gen = start_facts(&mut ui, Instant::now()).expect("расчёт пошёл");
@@ -613,7 +613,7 @@ fn loudness_belongs_to_the_press_and_the_card_does_not_blink() {
 
     // А без нажатия — тихий, и отчёта нет: такт человеку журнал не сыплет.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     ui.tx = tx;
     assert!(!ui.check_requested);
@@ -630,7 +630,7 @@ fn loudness_belongs_to_the_press_and_the_card_does_not_blink() {
 #[test]
 fn the_verdict_is_not_computed_while_serving_is_off() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(false, Ordering::Relaxed);
     // «Уже считается», чтобы доказательство не подняло настоящий поток
     // фактов: пересчёт тогда только пометит повтор — эта пометка и
@@ -681,7 +681,7 @@ fn a_lost_readiness_thread_does_not_latch_forever() {
 #[test]
 fn a_verdict_reaches_the_tray_and_the_log() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.link = State::Up { since: Instant::now() };
     // Замок закрыл бы карточку собой (в каталоге теста он заперт), а речь
     // здесь про вердикт.
@@ -723,7 +723,7 @@ fn a_verdict_reaches_the_tray_and_the_log() {
 #[test]
 fn the_set_is_not_recomputed_while_an_agent_click_is_in_flight() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     // Якорь в будущем: на свежей машине `Instant::now() - 90 с` паникует.
     let now = Instant::now() + Duration::from_secs(3600);
@@ -748,7 +748,7 @@ fn the_set_is_not_recomputed_while_an_agent_click_is_in_flight() {
 #[test]
 fn the_set_is_not_recomputed_while_the_publication_is_being_raised() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     // Якорь в будущем: на свежей машине `Instant::now() - 60 с` паникует.
     let now = Instant::now() + Duration::from_secs(3600);
@@ -786,7 +786,7 @@ fn a_licence_change_recomputes_readiness() {
     ui.licence = if real == crate::licence::State::Expired { crate::licence::State::Valid } else { crate::licence::State::Expired };
     // Обслуживание включено — иначе пересчёт и не начнётся (S9), и
     // доказательство ниже ничего бы не доказало.
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     // Поток фактов в тесте нам не нужен: «уже считается» (и не потеряно,
     // см. `readiness_lost`) заставляет пересчёт только пометить повтор —

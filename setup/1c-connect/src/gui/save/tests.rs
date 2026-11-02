@@ -2,7 +2,7 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
-use crate::cfg::{self, Host};
+use crate::cfg::{self, Connection};
 use crate::session::State;
 use common::op::OpState;
 use core::prelude::v1::test;
@@ -28,7 +28,7 @@ fn foreign_store_dir(name: &str) -> std::path::PathBuf {
 fn a_bad_server_leaves_the_toml_alone_and_says_why() {
     let mut ui = Ui::for_test();
     let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.server = "no-port".into();
     let err = save_host(&mut ui, host).unwrap_err();
     assert!(!err.is_empty());
@@ -39,7 +39,8 @@ fn a_bad_server_leaves_the_toml_alone_and_says_why() {
 fn carried_base_url_keeps_an_override_and_follows_the_default() {
     // Поля «Адрес публикации» в окне нет: умолчание идёт за каталогом
     // базы, а правка в toml переживает смену базы.
-    let mut saved = Host { base_path: "C:\\Bases\\Buh".into(), base_url: cfg::derived_base_url("C:\\Bases\\Buh"), ..Host::default() };
+    let mut saved =
+        Connection { base_path: "C:\\Bases\\Buh".into(), base_url: cfg::derived_base_url("C:\\Bases\\Buh"), ..Connection::default() };
     assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost/Torg/hs/mcp-1c");
     saved.base_url = "http://localhost:8081/InfoBase/hs/mcp-1c".into();
     assert_eq!(carried_base_url(&saved, "C:\\Bases\\Torg"), "http://localhost:8081/InfoBase/hs/mcp-1c");
@@ -53,7 +54,7 @@ fn carried_base_url_keeps_an_override_and_follows_the_default() {
 #[test]
 fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
     let new = cfg::derived_dump("C:\\proj\\Torg");
-    let mut saved = Host { project: "C:\\proj\\Buh".into(), dump: cfg::derived_dump("C:\\proj\\Buh"), ..Host::default() };
+    let mut saved = Connection { project: "C:\\proj\\Buh".into(), dump: cfg::derived_dump("C:\\proj\\Buh"), ..Connection::default() };
     assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), new);
     saved.dump = "D:\\dump".into();
     assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "D:\\dump");
@@ -62,10 +63,10 @@ fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
     assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
 }
 
-/// `moved_lines` принимает `Cfg`, а не `Host` (находка 6: порт в строке —
-/// доставшийся, а не предпочтение), а тесты ниже строят именно `Host`.
-fn as_cfg(h: &Host) -> Cfg {
-    Cfg { host: h.clone(), ..Default::default() }
+/// `moved_lines` принимает `Cfg`, а не `Connection` (находка 6: порт в строке —
+/// доставшийся, а не предпочтение), а тесты ниже строят именно `Connection`.
+fn as_cfg(h: &Connection) -> Cfg {
+    Cfg::of_one(h.clone())
 }
 
 /// Каталог состояния для тестов, которым улаживание порта
@@ -87,11 +88,11 @@ fn state_dir_for(name: &str) -> std::path::PathBuf {
 fn renaming_the_workstation_does_not_move_the_port_anymore() {
     let dir = state_dir_for("renamed-workstation");
     let mut ui = Ui::for_test();
-    ui.cfg.host.http_port = Some(cfg::derived_http_port());
-    let mut host = ui.cfg.host.clone();
+    ui.cfg.current_mut().http_port = Some(cfg::derived_http_port());
+    let mut host = ui.cfg.current().clone();
     host.workstation = "dev3".into();
     crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap();
-    assert_eq!(ui.cfg.host.http_port, Some(cfg::derived_http_port()), "предпочтение не трогает рабочее место");
+    assert_eq!(ui.cfg.current().http_port, Some(cfg::derived_http_port()), "предпочтение не трогает рабочее место");
     assert!(!ui.log.iter().any(|l| l.text.contains("порт")), "строка о переезде не должна называть портов: {:?}", ui.log);
     assert!(ui.log.iter().any(|l| l.text.contains("ветка проекта и origin")), "{:?}", ui.log);
     let _ = std::fs::remove_dir_all(&dir);
@@ -107,14 +108,14 @@ fn renaming_the_workstation_does_not_move_the_port_anymore() {
 /// ни про доставшееся.
 #[test]
 fn renaming_the_workstation_leaves_the_port_out_of_the_moved_line_even_when_the_pick_shifted() {
-    let old = Host { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port()), ..Host::default() };
+    let old = Connection { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port()), ..Connection::default() };
     let mut new = old.clone();
     new.workstation = "dev3".into();
-    let before = Cfg { host: old, ..Default::default() };
+    let before = Cfg::of_one(old);
     // Подбор этого сеанса ушёл на другой порт по причине, не связанной с
     // переименованием (например, порт занят соседом) — строка о переезде
     // рабочего места всё равно не должна называть портов.
-    let after = Cfg { host: new, resolved_http_port: Some(8084), ..Default::default() };
+    let after = Cfg { resolved_http_port: Some(8084), ..Cfg::of_one(new) };
     let line = moved_lines(&before, &after).join("\n");
     assert!(!line.contains("порт") && !line.contains("8084"), "порт не переезжает за рабочим местом: {line}");
     assert!(line.contains("ветка проекта и origin"), "{line}");
@@ -129,8 +130,8 @@ fn renaming_the_workstation_leaves_the_port_out_of_the_moved_line_even_when_the_
 fn a_refused_save_does_not_remember_a_new_port() {
     let dir = state_dir_for("refused-save");
     let mut ui = Ui::for_test();
-    ui.cfg.host.http_port = Some(cfg::derived_http_port());
-    let mut host = ui.cfg.host.clone();
+    ui.cfg.current_mut().http_port = Some(cfg::derived_http_port());
+    let mut host = ui.cfg.current().clone();
     host.workstation = "dev3".into();
     host.server = "no-port".into(); // `validate()` на этом откажет
     let err = crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap_err();
@@ -143,12 +144,12 @@ fn a_refused_save_does_not_remember_a_new_port() {
 #[test]
 fn saving_a_new_project_moves_a_derived_dump_with_it() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.project = "C:\\proj\\Buh".into();
-    ui.cfg.host.dump = cfg::derived_dump("C:\\proj\\Buh");
-    let mut host = ui.cfg.host.clone();
+    ui.cfg.current_mut().project = "C:\\proj\\Buh".into();
+    ui.cfg.current_mut().dump = cfg::derived_dump("C:\\proj\\Buh");
+    let mut host = ui.cfg.current().clone();
     host.project = "C:\\proj\\Torg".into();
     save_host(&mut ui, host).unwrap();
-    assert_eq!(ui.cfg.host.dump, cfg::derived_dump("C:\\proj\\Torg"));
+    assert_eq!(ui.cfg.current().dump, cfg::derived_dump("C:\\proj\\Torg"));
     let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(text.contains(&format!("dump = {:?}", cfg::derived_dump("C:\\proj\\Torg"))), "{text}");
     // И переезд назван, а не сделан молча.
@@ -161,12 +162,12 @@ fn saving_a_new_project_moves_a_derived_dump_with_it() {
 /// менялось — строк нет.
 #[test]
 fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
-    let old = Host {
+    let old = Connection {
         workstation: "dev1".into(),
         project: "C:\\proj\\Buh".into(),
         dump: cfg::derived_dump("C:\\proj\\Buh"),
         http_port: Some(cfg::derived_http_port()),
-        ..Host::default()
+        ..Connection::default()
     };
     assert!(moved_lines(&as_cfg(&old), &as_cfg(&old)).is_empty());
 
@@ -200,11 +201,11 @@ fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
     // "webserver": ensure_publication_now (зовётся теперь и отсюда) не
     // должна трогать настоящий httpd/1cv8 этой машины — тест про
     // перезапуск сеанса, не про публикацию.
-    ui.cfg.host.publication = "webserver".into();
+    ui.cfg.current_mut().publication = "webserver".into();
     ui.session = Some(doomed_session(&ui));
     let gen_before = ui.session_gen;
     let log_before = ui.log.len();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.base_path = "C:\\Bases\\Other".into();
     save_host(&mut ui, host).unwrap();
     assert_eq!(ui.session_gen, gen_before + 1, "сеанс перезапущен один раз");
@@ -224,12 +225,12 @@ fn saving_a_new_base_in_local_mode_keeps_the_session_and_does_not_restart() {
     // не перезапускается, следующий вызов уходит в новую базу через
     // `Session::update_cfg`.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
-    ui.cfg.host.publication = "webserver".into();
+    ui.cfg.current_mut().mode = "local".into();
+    ui.cfg.current_mut().publication = "webserver".into();
     ui.session = Some(doomed_session(&ui));
     let gen_before = ui.session_gen;
     let log_before = ui.log.len();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.base_path = "C:\\Bases\\Other".into();
     save_host(&mut ui, host).unwrap();
     assert_eq!(ui.session_gen, gen_before, "сеанс не перезапущен");
@@ -241,7 +242,7 @@ fn saving_a_new_base_in_local_mode_keeps_the_session_and_does_not_restart() {
 
 #[test]
 fn saving_unchanged_fields_does_not_restart_a_live_session() {
-    // Смена режима в трее меняет `cfg.host.mode` и зовёт `save_host`
+    // Смена режима в трее меняет `cfg.current().mode` и зовёт `save_host`
     // напрямую (не через панель), не трогая поля, которые показывает
     // окно — `tray::on_menu` перезапускает сеанс сама следом, отдельным
     // путём; лишнего перезапуска (и лишней строки «MCP перезапущены») на
@@ -250,7 +251,7 @@ fn saving_unchanged_fields_does_not_restart_a_live_session() {
     ui.session = Some(doomed_session(&ui));
     let gen_before = ui.session_gen;
     let log_before = ui.log.len();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.mode = "local".into();
     save_host(&mut ui, host).unwrap();
     assert_eq!(ui.session_gen, gen_before);
@@ -264,9 +265,9 @@ fn save_host_without_a_live_session_writes_no_restart_line() {
     // "webserver": ensure_publication_now не должна трогать настоящий
     // httpd/1cv8 этой машины.
     let mut ui = Ui::for_test();
-    ui.cfg.host.publication = "webserver".into();
+    ui.cfg.current_mut().publication = "webserver".into();
     let log_before = ui.log.len();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.base_path = "C:\\Bases\\Other".into();
     save_host(&mut ui, host).unwrap();
     assert_eq!(ui.log.len(), log_before);
@@ -296,7 +297,7 @@ fn saving_away_a_cold_condition_asks_first() {
     let tools = OpState::Done("vrunner 3.0.2".into());
     let before = crate::cfg::filled_for_test();
     let mut after = crate::cfg::filled_for_test();
-    after.host.db_user = String::new();
+    after.current_mut().db_user = String::new();
     let gate_before = cold_gate(&before, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);
     let gate_after = cold_gate(&after, true, true, &tools, Ok(v8), true, &crate::licence::State::Valid);
     assert_eq!(gate_before, None, "до правки включать было можно");
@@ -319,7 +320,7 @@ fn saving_away_a_cold_condition_asks_first() {
     let mut ui = Ui::for_test();
     ui.session = Some(doomed_session(&ui));
     ui.gate = None;
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.server = String::new();
     assert!(save_needs_confirm(&ui, &host), "туннель без адреса среды — обслуживание погаснет, вопрос обязателен");
     ui.gate = Some("в комплекте нет mcp-1c".into());
@@ -334,8 +335,8 @@ fn saving_away_a_cold_condition_asks_first() {
 #[test]
 fn saving_away_a_cold_condition_douses_the_card_too() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
-    ui.cfg.host.publication = "webserver".into();
+    ui.cfg.current_mut().mode = "local".into();
+    ui.cfg.current_mut().publication = "webserver".into();
     ui.session = Some(doomed_session(&ui));
     ui.link = State::Up { since: Instant::now() };
     // До правки замок был открыт — тот самый случай, ради которого
@@ -343,7 +344,7 @@ fn saving_away_a_cold_condition_douses_the_card_too() {
     // сам по себе, поэтому состояние задаём явно).
     ui.gate = None;
     let log_before = ui.log.len();
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.db_user = String::new();
     save_host(&mut ui, host).unwrap();
     assert!(ui.gate.is_some(), "после правки условие пропало");
@@ -366,7 +367,7 @@ fn save_needs_confirm_only_when_all_three_hold() {
     let mut ui = Ui::for_test();
     ui.session = Some(doomed_session(&ui));
     assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
-    let mut new_base = ui.cfg.host.clone();
+    let mut new_base = ui.cfg.current().clone();
     new_base.base_path = "C:\\Bases\\Other".into();
     assert!(save_needs_confirm(&ui, &new_base));
     let _ = ui.session.take().unwrap().stop();
@@ -384,10 +385,12 @@ fn save_needs_confirm_only_when_all_three_hold() {
 /// оба списка.
 #[test]
 fn descriptor_changed_ignores_credentials_but_database_changed_does_not() {
-    let base =
-        Host {
-            base_path: "C:\\Bases\\Buh".into(), db_user: "Администратор".into(), db_password: "секрет".into(), ..Host::default()
-        };
+    let base = Connection {
+        base_path: "C:\\Bases\\Buh".into(),
+        db_user: "Администратор".into(),
+        db_password: "секрет".into(),
+        ..Connection::default()
+    };
 
     let mut password_only = base.clone();
     password_only.db_password = "новый-пароль".into();
@@ -412,7 +415,7 @@ fn descriptor_changed_ignores_credentials_but_database_changed_does_not() {
 fn save_needs_confirm_fires_on_a_password_only_change_too() {
     let mut ui = Ui::for_test();
     ui.session = Some(doomed_session(&ui));
-    let mut new_password = ui.cfg.host.clone();
+    let mut new_password = ui.cfg.current().clone();
     new_password.db_password = "другой-пароль".into();
     assert!(save_needs_confirm(&ui, &new_password));
     let _ = ui.session.take().unwrap().stop();
@@ -422,7 +425,7 @@ fn save_needs_confirm_fires_on_a_password_only_change_too() {
 fn save_needs_confirm_is_false_on_each_near_miss() {
     let mut ui = Ui::for_test();
     ui.session = Some(doomed_session(&ui));
-    let mut new_base = ui.cfg.host.clone();
+    let mut new_base = ui.cfg.current().clone();
     new_base.base_path = "C:\\Bases\\Other".into();
 
     // Промах 1: MCP выключены.
@@ -432,7 +435,7 @@ fn save_needs_confirm_is_false_on_each_near_miss() {
 
     // Промах 2: база та же, поменялось другое поле — оно не входит в
     // список, что решает «изменилась ли база» (`database_changed`).
-    let mut other_field = ui.cfg.host.clone();
+    let mut other_field = ui.cfg.current().clone();
     other_field.project = "D:\\other\\proj".into();
     assert!(!save_needs_confirm(&ui, &other_field));
 
@@ -451,7 +454,7 @@ fn declining_the_confirmation_leaves_the_toml_untouched() {
     let mut ui = Ui::for_test();
     ui.session = Some(doomed_session(&ui));
     let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
-    let mut new_base = ui.cfg.host.clone();
+    let mut new_base = ui.cfg.current().clone();
     new_base.base_path = "C:\\Bases\\Other".into();
     assert!(save_needs_confirm(&ui, &new_base), "сценарий должен требовать вопрос");
     // Отказ = не позвать save_host; toml как был.
@@ -468,7 +471,7 @@ fn confirm_text_names_folders_and_keeps_full_paths_in_the_detail() {
 
 #[test]
 fn what_a_person_typed_is_what_gets_written() {
-    let saved = Host { publication: "webserver".into(), ..Host::default() };
+    let saved = Connection { publication: "webserver".into(), ..Connection::default() };
     assert_eq!(base_url_to_write(&saved, "http://localhost/Buh", "webserver", "C:\\Bases\\Buh"), "http://localhost/Buh/hs/mcp-1c");
     // Пустое поле остаётся пустым: выдуманного адреса здесь не появляется.
     assert_eq!(base_url_to_write(&saved, "   ", "webserver", "C:\\Bases\\Buh"), "");
@@ -476,29 +479,29 @@ fn what_a_person_typed_is_what_gets_written() {
 
 #[test]
 fn an_own_address_survives_a_workstation_move() {
-    let saved = Host { publication: "webserver".into(), base_url: "http://localhost/UNF/hs/mcp-1c".into(), ..Host::default() };
+    let saved = Connection { publication: "webserver".into(), base_url: "http://localhost/UNF/hs/mcp-1c".into(), ..Connection::default() };
     assert_eq!(base_url_to_write(&saved, "http://localhost/UNF", "webserver", "C:\\Bases\\Other"), "http://localhost/UNF/hs/mcp-1c");
 }
 
 #[test]
 fn a_foreign_address_waits_through_a_round_trip_to_our_own_httpd() {
     // Переключились на «публикует коннектор» и обратно — вписанное не стёрто.
-    let saved = Host {
+    let saved = Connection {
         publication: "auto".into(),
         base_url: "http://localhost/UNF/hs/mcp-1c".into(),
         base_path: "C:\\Bases\\UNF".into(),
-        ..Host::default()
+        ..Connection::default()
     };
     assert_eq!(base_url_to_write(&saved, "", "auto", "C:\\Bases\\UNF"), "http://localhost/UNF/hs/mcp-1c");
 }
 
 #[test]
 fn in_auto_mode_the_address_still_follows_the_base_folder() {
-    let saved = Host {
+    let saved = Connection {
         publication: "auto".into(),
         base_path: "C:\\Bases\\Buh".into(),
         base_url: cfg::derived_base_url("C:\\Bases\\Buh"),
-        ..Host::default()
+        ..Connection::default()
     };
     assert_eq!(base_url_to_write(&saved, "", "auto", "C:\\Bases\\UNF"), cfg::derived_base_url("C:\\Bases\\UNF"));
 }
@@ -510,12 +513,12 @@ fn a_tray_key_is_written_even_when_the_rest_is_not_filled_in() {
     // базой, и оно обязано пережить открытие окна: окно читает файл при
     // каждом показе, так что «в памяти» такое намерение не живёт вовсе.
     let mut ui = Ui::for_test();
-    ui.cfg.host = Host::default();
-    let mut host = ui.cfg.host.clone();
+    *ui.cfg.current_mut() = Connection::default();
+    let mut host = ui.cfg.current().clone();
     host.publication = "webserver".into();
-    assert!(Cfg { host: host.clone(), ..Default::default() }.validate().is_err(), "набор нарочно негодный");
+    assert!(Cfg::of_one(host.clone()).validate().is_err(), "набор нарочно негодный");
     save_tray_key(&mut ui, "publication", "webserver").unwrap();
-    assert_eq!(ui.cfg.host.publication, "webserver");
+    assert_eq!(ui.cfg.current().publication, "webserver");
     let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(text.contains("publication = \"webserver\""), "{text}");
 }
@@ -548,14 +551,14 @@ fn an_unreadable_but_existing_file_refuses_instead_of_overwriting() {
 fn a_tray_key_write_does_not_touch_an_unreadable_password() {
     let mut ui = Ui::for_test();
     let store = crate::secrets::Store::file(ui.kit.state());
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.password = "секрет с другой машины".into();
-    let rendered = Cfg { host, ..Default::default() }.render(&store).unwrap();
+    let rendered = Cfg::of_one(host).render(&store).unwrap();
     std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
     let password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
     // «Чужая машина»: `ui.cfg` несёт пустое поле, как после `load_unchecked`
     // на непрочитанном шифртексте — без настоящего похода за DPAPI в тесте.
-    ui.cfg.host.password = String::new();
+    ui.cfg.current_mut().password = String::new();
     save_tray_key(&mut ui, "mode", "local").unwrap();
     let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(after.lines().any(|l| l == password_line), "шифртекст пароля должен остаться дословно:\n{after}");
@@ -578,19 +581,19 @@ fn an_unreadable_password_survives_a_save_with_an_empty_field() {
     // (`ui.kit.state()`), эту строку не откроет, и проверка после записи
     // внутри `write_checked` увидит то же пустое поле, что и до неё.
     let store = crate::secrets::Store::file(&foreign_store_dir("survives"));
-    let mut seeded = ui.cfg.host.clone();
+    let mut seeded = ui.cfg.current().clone();
     seeded.password = "секрет с другой машины".into();
-    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    let rendered = Cfg::of_one(seeded).render(&store).unwrap();
     std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
     let password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
 
     // «Чужая машина»: поле — пустое, имя — в списке, в точности как после
     // настоящего `load_unchecked` на непрочитанном шифртексте (без похода за
     // DPAPI в тесте — та же договорённость, что у соседнего теста трея выше).
-    ui.cfg.host.password = String::new();
+    ui.cfg.current_mut().password = String::new();
     ui.cfg.undecryptable = vec!["password".to_string()];
 
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.workstation = "dev2".into();
     save_host(&mut ui, host).unwrap();
 
@@ -607,16 +610,16 @@ fn an_unreadable_password_survives_a_save_with_an_empty_field() {
 fn a_freshly_typed_password_still_overwrites_an_unreadable_one() {
     let mut ui = Ui::for_test();
     let store = crate::secrets::Store::file(ui.kit.state());
-    let mut seeded = ui.cfg.host.clone();
+    let mut seeded = ui.cfg.current().clone();
     seeded.password = "секрет с другой машины".into();
-    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    let rendered = Cfg::of_one(seeded).render(&store).unwrap();
     std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
     let old_password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
 
-    ui.cfg.host.password = String::new();
+    ui.cfg.current_mut().password = String::new();
     ui.cfg.undecryptable = vec!["password".to_string()];
 
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.password = "новый пароль рабочего места".into();
     save_host(&mut ui, host).unwrap();
 
@@ -637,9 +640,9 @@ fn a_freshly_typed_password_still_overwrites_an_unreadable_one() {
 fn a_missing_previous_ciphertext_refuses_the_save_and_touches_nothing() {
     let mut ui = Ui::for_test();
     let store = crate::secrets::Store::file(ui.kit.state());
-    let mut seeded = ui.cfg.host.clone();
+    let mut seeded = ui.cfg.current().clone();
     seeded.password = "секрет с другой машины".into();
-    let rendered = Cfg { host: seeded, ..Default::default() }.render(&store).unwrap();
+    let rendered = Cfg::of_one(seeded).render(&store).unwrap();
     // Ключа `password` в файле нет вовсе — как если бы строку стёрли руками.
     let without_password: String = rendered.lines().filter(|l| !l.starts_with("password = ")).collect::<Vec<_>>().join("\n") + "\n";
     std::fs::write(ui.kit.state_path(cfg::FILE), &without_password).unwrap();
@@ -650,10 +653,10 @@ fn a_missing_previous_ciphertext_refuses_the_save_and_touches_nothing() {
     // равно расшифровалось бы в пустую строку, не попало бы в `undecryptable`
     // само — мы доводим это условие руками, тем же приёмом, что у соседних
     // тестов, ради сценария «список говорит про поле, а в файле его нет»).
-    ui.cfg.host.password = String::new();
+    ui.cfg.current_mut().password = String::new();
     ui.cfg.undecryptable = vec!["password".to_string()];
 
-    let mut host = ui.cfg.host.clone();
+    let mut host = ui.cfg.current().clone();
     host.workstation = "dev2".into();
     let err = save_host(&mut ui, host).unwrap_err();
     assert!(err.contains("рабочего места"), "{err}");

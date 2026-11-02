@@ -10,7 +10,7 @@ use common::op::OpState;
 use common::{Phase, Runner};
 
 // Имена фактов — часть контракта (см. тесты). Общие — не зависят от режима;
-// остальные расставляет `order`/`run` по режиму из `cfg.host.mode`.
+// остальные расставляет `order`/`run` по режиму из `cfg.current().mode`.
 //
 // Шесть имён — `pub`: по ним вкладка «Инструменты» отбирает факты своего предмета
 // (`gui::panel::project_facts`) и выбирает главную кнопку
@@ -1077,7 +1077,7 @@ fn local_editor_mcp_fact(states: &[(&str, Result<editors::Found, String>)]) -> C
 /// `runner_evidence`).
 pub const SET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Факты для режима `cfg.host.mode` (`"tunnel"` или, по умолчанию при любом другом значении, тот же `"tunnel"` — валидирован раньше, здесь не перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме: это состояние сессии, а не то, что можно вычислить здесь. `ports` — занимает ли порты тот, кто просит проверку (`mcp_ports_fact`): окно (`PortUse::WeListen`) и командная строка (`PortUse::WeDont`).
+/// Факты для режима `cfg.current().mode` (`"tunnel"` или, по умолчанию при любом другом значении, тот же `"tunnel"` — валидирован раньше, здесь не перепроверяется). `tunnel_state` имеет смысл только в туннельном режиме: это состояние сессии, а не то, что можно вычислить здесь. `ports` — занимает ли порты тот, кто просит проверку (`mcp_ports_fact`): окно (`PortUse::WeListen`) и командная строка (`PortUse::WeDont`).
 ///
 /// Состояния записей MCP в контейнере набор больше не принимает (`editor_mcp`, `session::EditorMcpSeen`): факт его не читал с финального ревью задачи 7, а параметр протащили сквозь `run`/`gather`/`cheap` ради одной недостижимой ветви `editor_mcp_fact` (пункт 6 ревью целого). Записи агентов на этой машине факт читает с диска сам.
 ///
@@ -1106,7 +1106,7 @@ pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> 
 /// вердикт шёл за ним, а совет `1c-connect install` переписал бы чужой
 /// дескриптор (находка повторного ревью, Critical 1).
 fn base_descriptor(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Descriptor {
-    if cfg.host.publication == "webserver" {
+    if cfg.current().publication == "webserver" {
         return Descriptor::NotOurs;
     }
     match crate::publication::Paths::of(cfg, kit) {
@@ -1151,9 +1151,9 @@ const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
 /// отдельности, рискуя получить два разных числа между вызовами и
 /// противоречащий набор.
 pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: usize) -> Vec<Check> {
-    let env = crate::cfg::mode_needs_env(&ctx.cfg.host.mode);
+    let env = crate::cfg::mode_needs_env(&ctx.cfg.current().mode);
     let mut v = Vec::new();
-    let h = &ctx.cfg.host;
+    let h = ctx.cfg.current();
     #[cfg(feature = "licence")]
     v.push(licence_fact(&crate::licence::state_now()));
     v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.mode, &h.server));
@@ -1242,7 +1242,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     // Половина у факта ОДНА — записи MCP (решение владельца 31.10, повод 2). Навыки — не условие работы инструментов: агент без них доходит до базы и вызывает инструменты ровно так же, они лишь делают его работу лучше. Поэтому чужая папка на месте скилла, отсутствующий отпечаток или недокопированный каталог навыков больше не красят набор и не гасят галочку в трее — об этом говорит строка журнала (`gui::skill_line` при щелчке, `gui::refresh_line` при тихой доставке на запуске), и больше нигде. Прежнее правило (задача 5, склейка обеих половин через `editors::both`) отменено, и самой склейки больше нет — боевых вызывающих у неё не осталось, и она удалена вместе со своим тестом (круг исправления 31.10, пункт 3): сорок чужих каталогов в доме не давали поставить галочку вовсе, и человек оставался без инструментов из-за навыков, которые ему для инструментов не нужны.
     //
     // Ветвь выбирает `editors::agents_live_here`, а не свой `mode == "local"` (пункт 4 ревью целого): предикат один и тот же у подменю трея и у этого факта. Прежде подменю брало его, а факт считал сам — и в серверном режиме, под который предикат и назван (журнал владельца 29.10: коннектор принимает туннель, агенты всегда локальные), подменю открылось бы с живыми галочками, а карточка в окне говорила бы «в контейнере записи MCP не проверяем».
-    v.push(if editors::agents_live_here(&ctx.cfg.host.mode) {
+    v.push(if editors::agents_live_here(&ctx.cfg.current().mode) {
         match std::env::current_exe().ok() {
             Some(exe) => {
                 let states: Vec<(&str, Result<editors::Found, String>)> =
@@ -1328,8 +1328,8 @@ where
 /// места по имени (`order`): два прогона с разными по времени ответами
 /// обязаны дать одинаково выглядящий отчёт.
 pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
-    let mode = ctx.cfg.host.mode.clone();
-    let h = &ctx.cfg.host;
+    let mode = ctx.cfg.current().mode.clone();
+    let h = ctx.cfg.current();
 
     // Сеансы 1С — сведение в наборе (`open_session_fact`/`configurator_fact`)
     // и повод переспросить базу на такте (`gui::on_cheap`), но не вход
@@ -1453,7 +1453,7 @@ fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
 
 /// Прячет секреты ОДНОГО соединения — общее правило для `host` и для
 /// каждого элемента `connections` (круг починки 1, находка 2: `cfg_for_report`
-/// маскировал только `c.host.*`, а печатал `connections` как есть, то есть
+/// маскировал только `c.current().*`, а печатал `connections` как есть, то есть
 /// пароли соединений уходили в `last-check.txt` открытым текстом — отчёт,
 /// который человек прикладывает к обращению в поддержку).
 ///
@@ -1470,11 +1470,11 @@ fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
 /// (находка соседней сессии 2026-10-21). Правило читает `mode` ИЗ ТОГО ЖЕ
 /// соединения, не из `host` снаружи: у соединения, склеенного из прежнего
 /// `[host]`, `mode` ровно тот же (клон), а у настоящего `[[connection]]`
-/// своё умолчание «local» (`Host::default`) — тот же довод, что и у `[host]`,
+/// своё умолчание «local» (`Connection::default`) — тот же довод, что и у `[host]`,
 /// применённый к каждому соединению по отдельности, а не только к первому.
 /// `db_password` эта оговорка не касается ни там, ни тут: это пароль
 /// пользователя БАЗЫ, не рабочего места, и он нужен независимо от режима.
-fn redact(h: &mut crate::cfg::Host) {
+fn redact(h: &mut crate::cfg::Connection) {
     if !h.password.is_empty() {
         h.password = "…".into();
     }
@@ -1487,11 +1487,13 @@ fn redact(h: &mut crate::cfg::Host) {
     }
 }
 
-/// Параметры для отчёта без паролей — ни у `host`, ни у единого соединения
-/// в `connections` (`redact` выше решает по одному правилу за обоих).
+/// Параметры для отчёта без паролей — ни у единого соединения в
+/// `connections`. Отдельного прохода по `host` здесь больше нет: поля не
+/// стало вовсе (задача 3), и соединение в списке ровно одно место, где
+/// пароль может оказаться, — то есть проход по списку закрывает их все, а не
+/// все, кроме одного.
 pub fn cfg_for_report(cfg: &crate::cfg::Cfg) -> String {
     let mut c = cfg.clone();
-    redact(&mut c.host);
     for conn in c.connections.iter_mut() {
         redact(conn);
     }
@@ -1589,10 +1591,10 @@ mod tests {
         // Умолчание образца (`192.168.1.10:3393`) не должно попадать в отчёт
         // локального рабочего места: этого адреса никто не задавал.
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.mode = "local".into();
+        cfg.current_mut().mode = "local".into();
         let local = cfg_for_report(&cfg);
         assert!(!local.contains("192.168.1.10"), "{local}");
-        cfg.host.mode = "tunnel".into();
+        cfg.current_mut().mode = "tunnel".into();
         let tunnel = cfg_for_report(&cfg);
         assert!(tunnel.contains("192.168.1.10"), "в туннеле адрес среды нужен: {tunnel}");
     }
@@ -1601,19 +1603,19 @@ mod tests {
     #[test]
     fn an_empty_password_is_not_masked_as_if_it_were_set() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.password = String::new();
-        cfg.host.db_password = String::new();
+        cfg.current_mut().password = String::new();
+        cfg.current_mut().db_password = String::new();
         let report = cfg_for_report(&cfg);
         assert!(!report.contains("password = \"…\""), "{report}");
         assert!(!report.contains("db_password = \"…\""), "{report}");
-        cfg.host.password = "секрет".into();
-        cfg.host.db_password = "секрет базы".into();
+        cfg.current_mut().password = "секрет".into();
+        cfg.current_mut().db_password = "секрет базы".into();
         let report = cfg_for_report(&cfg);
         assert!(report.contains("password = \"…\"") && report.contains("db_password = \"…\""), "{report}");
     }
 
     /// Круг починки 1, находка 2: `cfg_for_report` маскировал только
-    /// `c.host.*`, а печатал `toml::to_string(&c)` целиком — то есть пароли
+    /// `c.current().*`, а печатал `toml::to_string(&c)` целиком — то есть пароли
     /// в `connections` уходили в отчёт (`last-check.txt`, который человек
     /// прикладывает к обращению в поддержку) открытым текстом. Правило
     /// маски обязано быть ОДНО на `host` и на каждое соединение.
@@ -1621,15 +1623,15 @@ mod tests {
     fn connections_passwords_do_not_leak_into_the_report() {
         let mut cfg = crate::cfg::filled_for_test();
         // Собственное значение, не совпадающее с `workstation = "dev1"` у
-        // того же `Host` (иначе проверка «не утекло» ловила бы законное
+        // того же `Connection` (иначе проверка «не утекло» ловила бы законное
         // совпадение строк, а не маску).
-        cfg.host.password = "секрет_host".into();
-        cfg.host.db_password = "секрет_базы_1".into();
-        let mut second = cfg.host.clone();
+        cfg.current_mut().password = "секрет_host".into();
+        cfg.current_mut().db_password = "секрет_базы_1".into();
+        let mut second = cfg.current().clone();
         second.name = "Ромашка".into();
         second.password = "секрет_2".into();
         second.db_password = "секрет_базы_2".into();
-        cfg.connections = vec![cfg.host.clone(), second];
+        cfg.connections = vec![cfg.current().clone(), second];
         let report = cfg_for_report(&cfg);
         assert!(!report.contains("секрет_host"), "пароль host.password утёк немаскированным: {report}");
         assert!(!report.contains("секрет_базы_1"), "{report}");
@@ -1639,11 +1641,11 @@ mod tests {
 
     fn test_ctx(mode: &str) -> Ctx {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.mode = mode.to_string();
+        cfg.current_mut().mode = mode.to_string();
         // Адрес среды задан полем и ведёт на закрытый локально порт: провал
         // мгновенный, как в ops_host::gitea_probe_on_a_closed_port_is_down.
-        cfg.host.server = "127.0.0.1:3".into();
-        cfg.host.gitea = "http://127.0.0.1:1".into();
+        cfg.current_mut().server = "127.0.0.1:3".into();
+        cfg.current_mut().gitea = "http://127.0.0.1:1".into();
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         Ctx {
             kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-missing-kit-{}", std::process::id()))),
@@ -1663,7 +1665,7 @@ mod tests {
         std::fs::create_dir_all(t.path().join(".git")).unwrap();
         let fact = |mode: &str| {
             let mut ctx = test_ctx(mode);
-            ctx.cfg.host.project = t.path().display().to_string();
+            ctx.cfg.current_mut().project = t.path().display().to_string();
             project_fact(&ctx, std::path::Path::new("nowhere"))
         };
         let local = fact("local");
@@ -1969,10 +1971,10 @@ mod tests {
     #[test]
     fn web_and_publication_facts_use_the_computed_address_in_auto_mode() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.server = "127.0.0.1:3".into();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(18080);
-        cfg.host.base_url = "http://localhost:9999/Buh/hs/mcp-1c".into();
+        cfg.current_mut().server = "127.0.0.1:3".into();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(18080);
+        cfg.current_mut().base_url = "http://localhost:9999/Buh/hs/mcp-1c".into();
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx {
             kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-pub-addr-{}", std::process::id()))),
@@ -2012,7 +2014,7 @@ mod tests {
         assert!(at(DB_USER) < at(PUBLICATION) && at(DB_USER) < at(WEB), "{names:?}");
 
         let mut ctx = test_ctx("local");
-        ctx.cfg.host.db_user = String::new();
+        ctx.cfg.current_mut().db_user = String::new();
         let checks = run(&ctx, None, PortUse::WeDont);
         // Причина — пустой пользователь, а не «публикация не отвечает»:
         // смотрим с его места вниз, выше него в наборе свои провалы
@@ -2218,7 +2220,7 @@ mod tests {
         let cfg = crate::cfg::filled_for_test();
         let reason = "порт 8081 занят не нами (его слушает pid 999, у нашего httpd pid 111) — пароль базы не отправлен";
         let (publication, extension, _descriptor) =
-            facts_when_the_listener_is_foreign("http://localhost:8081/hs/mcp-1c", &cfg.host.publication, &cfg, &kit, reason);
+            facts_when_the_listener_is_foreign("http://localhost:8081/hs/mcp-1c", &cfg.current().publication, &cfg, &kit, reason);
         for c in [&publication, &extension] {
             assert_eq!(c.outcome(), Outcome::Busy, "{c:?}");
             assert!(c.detail.contains("занят не нами"), "{c:?}");
@@ -2258,11 +2260,11 @@ mod tests {
     fn a_webserver_publication_leaves_the_descriptor_unjudged() {
         let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-webserver-kit-{}", std::process::id())));
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "webserver".into();
+        cfg.current_mut().publication = "webserver".into();
         assert!(matches!(base_descriptor(&cfg, &kit), Descriptor::NotOurs), "{:?}", base_descriptor(&cfg, &kit));
         // Без режима веб-сервера тот же каталог даёт другой исход — значит
         // ветку опознал режим, а не отсутствие платформы.
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         assert!(matches!(base_descriptor(&cfg, &kit), Descriptor::NoPath(_)), "{:?}", base_descriptor(&cfg, &kit));
 
         let d = descriptor_fact(Descriptor::NotOurs);
@@ -2271,7 +2273,7 @@ mod tests {
         assert!(d.detail.contains("веб-сервер"), "{d:?}");
 
         let mut ctx = test_ctx("local");
-        ctx.cfg.host.publication = "webserver".into();
+        ctx.cfg.current_mut().publication = "webserver".into();
         let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
         let d = checks.iter().find(|c| c.what == DESCRIPTOR).expect("факт дескриптора");
         assert!(d.ok && d.info, "{d:?}");
@@ -2462,7 +2464,7 @@ mod tests {
         // Режим туннельный: именно там пустое поле и есть беда — в локальном
         // факта среды нет вовсе (`facts_follow_the_mode`).
         let mut ctx = test_ctx("tunnel");
-        ctx.cfg.host.gitea = String::new();
+        ctx.cfg.current_mut().gitea = String::new();
         let v = run(&ctx, None, PortUse::WeDont);
         let g = v.iter().find(|c| c.what == GITEA).expect("факт Gitea");
         assert!(g.detail.contains("адрес среды не задан"), "{g:?}");

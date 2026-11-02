@@ -2,7 +2,7 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
-use crate::cfg::Host;
+use crate::cfg::Connection;
 use crate::session::State;
 use common::check::Check;
 use core::prelude::v1::test;
@@ -24,7 +24,7 @@ fn the_switch_going_off_drops_the_set() {
     // Пока обслуживаем — набор на месте: иначе этот тест был бы зелёным и
     // на безусловном сбросе, то есть на сломанном коде.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     assert!(serving(&ui));
     let gen = ui.facts_gen;
@@ -73,7 +73,7 @@ fn the_tab_still_has_the_kit_to_show_the_moment_the_switch_goes_off() {
     let mut ui = Ui::for_test();
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     ui.tx = tx;
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     assert!(serving(&ui));
     let gen = ui.facts_gen;
@@ -113,7 +113,7 @@ fn the_tab_still_has_the_kit_to_show_the_moment_the_switch_goes_off() {
 #[test]
 fn the_hour_belongs_to_a_full_set() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     let gen = ui.facts_gen;
     apply_facts(&mut ui, gen, vec![Check::pass("база", "есть")]);
@@ -139,7 +139,7 @@ fn the_hour_belongs_to_a_full_set() {
 
 #[test]
 fn link_lines_say_where_and_as_whom() {
-    let h = Host { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
+    let h = Connection { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
     assert_eq!(link_line(&State::Connecting, &h, "tunnel").unwrap().text, "подключаюсь к s:1 как dev2");
     assert_eq!(link_line(&State::Off, &h, "tunnel").unwrap().text, "отключено");
     assert!(link_line(&State::Up { since: Instant::now() }, &h, "tunnel").is_none());
@@ -150,7 +150,7 @@ fn local_mode_connecting_line_hides_the_environment_fields() {
     // Адрес среды, пароль и имя рабочего места скрыты в «Связи» в
     // локальном режиме и ничего не значат — журнал не должен о них
     // говорить (находка целостного ревью).
-    let h = Host { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
+    let h = Connection { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
     let text = link_line(&State::Connecting, &h, "local").unwrap().text;
     assert!(!text.contains("s:1") && !text.contains("dev2"), "{text}");
 }
@@ -181,7 +181,7 @@ fn a_stale_session_generation_is_not_current() {
 #[test]
 fn enabling_after_a_bind_failure_starts_a_fresh_session() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     with_params_file(&ui);
     ui.session = Some(ended_session(&ui));
     let why = "порт 7771 занят, кем — не видно".to_string();
@@ -200,7 +200,7 @@ fn enabling_after_a_bind_failure_starts_a_fresh_session() {
     // карточка. Отказ — следствие конца сеанса, а не его причина, и
     // спрашивать надо о конце.
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     with_params_file(&ui);
     ui.session = Some(ended_session(&ui));
     ui.link = State::Off;
@@ -221,7 +221,7 @@ fn enabling_after_a_bind_failure_starts_a_fresh_session() {
 #[test]
 fn a_live_session_is_not_restarted_but_a_shown_failure_is_reason_enough() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     with_params_file(&ui);
     let (session, quiet) = live_session(&ui);
     ui.session = Some(session);
@@ -241,7 +241,7 @@ fn a_live_session_is_not_restarted_but_a_shown_failure_is_reason_enough() {
 #[test]
 fn flip_enabled_only_touches_the_flag_and_nothing_else() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.session = Some(doomed_session(&ui));
     let gen_before = ui.session_gen;
     assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит флаг включённым");
@@ -318,7 +318,7 @@ fn the_gate_reason_reaches_the_bridge() {
 #[test]
 fn a_failed_publication_tells_the_agent_what_really_happened() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.gate = None;
     ui.enabled.store(true, Ordering::Relaxed);
 
@@ -344,7 +344,7 @@ fn a_failed_publication_tells_the_agent_what_really_happened() {
 #[test]
 fn serving_means_the_flag_the_bridge_reads() {
     let mut ui = Ui::for_test();
-    assert_eq!(ui.cfg.host.mode, "tunnel");
+    assert_eq!(ui.cfg.current().mode, "tunnel");
     ui.link = State::Up { since: Instant::now() };
     ui.enabled.store(false, Ordering::Relaxed);
     assert!(!serving(&ui), "туннель поднят, а обслуживание погашено — это не «обслуживаем»");
@@ -353,7 +353,7 @@ fn serving_means_the_flag_the_bridge_reads() {
     ui.link = State::Off;
     assert!(!serving(&ui), "в туннеле без сеанса вызову некуда ехать");
     // В локальном режиме слушатели подняты всегда — говорит только флаг.
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     assert!(serving(&ui));
     ui.enabled.store(false, Ordering::Relaxed);
     assert!(!serving(&ui));
@@ -366,7 +366,7 @@ fn serving_means_the_flag_the_bridge_reads() {
 #[test]
 fn a_failed_publication_douses_serving() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(true, Ordering::Relaxed);
     let shown = publication_failure(&mut ui, "расширение не ответило");
     match &shown {
@@ -403,7 +403,7 @@ fn a_latching_gate_reaches_the_tray_even_with_nothing_to_douse() {
 #[test]
 fn a_gate_that_latches_douses_serving_once() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.link = State::Up { since: Instant::now() };
     assert!(ui.enabled.load(Ordering::Relaxed), "фикстура заводит обслуживание включённым");
     // Замок был открыт, обслуживание шло — ровно то положение, из которого

@@ -12,7 +12,7 @@ use super::*;
 /// «Связи» (`panel::shown_fields`) и ничего не значат — печатать их в
 /// журнал всё равно было бы находкой целостного ревью (строка говорила про
 /// туннель, которого там нет).
-pub fn link_line(l: &State, host: &Host, mode: &str) -> Option<Line> {
+pub fn link_line(l: &State, host: &Connection, mode: &str) -> Option<Line> {
     match l {
         State::Connecting => {
             let text = if mode == "local" {
@@ -94,7 +94,7 @@ pub fn douse_serving(ui: &mut Ui) {
     if let Err(e) = crate::allow::write(&ui.kit, false) {
         note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
     }
-    if ui.cfg.host.mode == "local" {
+    if ui.cfg.current().mode == "local" {
         ui.link = local_display("local", false, ui.link.clone());
     } else {
         ui.session_gen += 1;
@@ -183,7 +183,7 @@ pub fn publication_failure(ui: &mut Ui, why: &str) -> State {
 /// каждому вызову, и первый щелчок по переключателю не включал обслуживание,
 /// а останавливал туннель (находка S5 итогового ревью).
 pub fn serving(ui: &Ui) -> bool {
-    ui.enabled.load(Ordering::Relaxed) && (ui.cfg.host.mode == "local" || ui.link.is_on())
+    ui.enabled.load(Ordering::Relaxed) && (ui.cfg.current().mode == "local" || ui.link.is_on())
 }
 
 /// Перезапустить сеанс после удачной записи параметров (только туннельный
@@ -228,7 +228,7 @@ pub fn off_reason(ui: &Ui) -> Option<String> {
 
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
 pub fn set_link(cx: &mut App, l: State) {
-    let host = cx.global::<Ui>().cfg.host.clone();
+    let host = cx.global::<Ui>().cfg.current().clone();
     let line = link_line(&l, &host, &host.mode);
     let ui = cx.global_mut::<Ui>();
     ui.link = l.clone();
@@ -351,7 +351,7 @@ pub fn toggle_link(cx: &mut App) {
             return;
         }
     }
-    if cx.global::<Ui>().cfg.host.mode == "local" {
+    if cx.global::<Ui>().cfg.current().mode == "local" {
         let ui = cx.global_mut::<Ui>();
         let on = flip_enabled_only(ui);
         // Набор прошлого состояния переключателя старый на экране не держим

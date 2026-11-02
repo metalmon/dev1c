@@ -50,7 +50,7 @@ fn xml_escape(s: &str) -> String {
 /// существование каталога для неё намеренно не проверяется), и публикация
 /// молча не работала (находка владельца 26.10).
 fn ib_connection(cfg: &Cfg) -> String {
-    let base = &cfg.host.base_path;
+    let base = &cfg.current().base_path;
     if crate::cfg::is_server_base(base) {
         let (srvr, rf) = base.split_once('\\').unwrap_or((base.as_str(), ""));
         return format!("Srvr=&quot;{}&quot;;Ref=&quot;{}&quot;;", xml_escape(srvr), xml_escape(rf));
@@ -777,7 +777,7 @@ fn forget_stale_pid_file(pid_file: &Path) {
 /// автоматической проверки безопасности по кругу 4). Ни `Paths::of`, ни
 /// подбора порта за этим не стоит: `kit.root` — чистое значение.
 ///
-/// Пустой `cfg.host.db_password` здесь НЕ пропуск (отменённое решение
+/// Пустой `cfg.current().db_password` здесь НЕ пропуск (отменённое решение
 /// 2.11 — круг исправления: ведущий сам отменил его как неверное). Довод
 /// отмены: страж защищает не только пароль — он защищает ВОПРОСЫ агента
 /// (в них имена контрагентов, суммы, периоды, деловые данные человека) и
@@ -796,7 +796,7 @@ fn forget_stale_pid_file(pid_file: &Path) {
 /// (отказ при любом пароле) — а пароль решает только слово в тексте
 /// отказа, не отказ сам по себе.
 pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Guard {
-    if cfg.host.publication != "auto" {
+    if cfg.current().publication != "auto" {
         // Пропуск всей проверки, не утверждение «наш»: адрес там чужой по
         // определению (человек публикует сам), и своего держателя сверять
         // не с чем — но вызывающие обязаны идти дальше как обычно, ровно
@@ -807,7 +807,7 @@ pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Guard {
         Ok(d) => d,
         Err(e) => return Guard::Refuse(e),
     };
-    refuse_unless_ours(&pid_file_in(&dir), cfg.http_port(), &OurHttpd::of(&kit.root), !cfg.host.db_password.is_empty())
+    refuse_unless_ours(&pid_file_in(&dir), cfg.http_port(), &OurHttpd::of(&kit.root), !cfg.current().db_password.is_empty())
 }
 
 /// Каталог состояния, в котором страж ищет pid-файл: тот же, что у
@@ -1299,9 +1299,9 @@ mod tests {
 
     fn cfg_for_test() -> Cfg {
         let mut c = crate::cfg::filled_for_test();
-        c.host.base_path = "C:\\Bases\\УНФ".into();
-        c.host.db_user = "Администратор".into();
-        c.host.db_password = "секрет".into();
+        c.current_mut().base_path = "C:\\Bases\\УНФ".into();
+        c.current_mut().db_user = "Администратор".into();
+        c.current_mut().db_password = "секрет".into();
         c
     }
 
@@ -1312,17 +1312,17 @@ mod tests {
     #[test]
     fn a_client_server_base_is_published_by_srvr_and_ref() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.base_path = r"srv-1c\unf".into();
+        c.current_mut().base_path = r"srv-1c\unf".into();
         let text = vrd(&c);
         assert!(text.contains("Srvr=&quot;srv-1c&quot;;Ref=&quot;unf&quot;;"), "{text}");
         assert!(!text.contains("File="), "{text}");
 
         // Файловая — прежняя форма.
-        c.host.base_path = r"C:\Bases\Buh".into();
+        c.current_mut().base_path = r"C:\Bases\Buh".into();
         assert!(vrd(&c).contains(r"File=&quot;C:\Bases\Buh&quot;;"), "{}", vrd(&c));
 
         // Сетевой путь — тоже файловая, хоть и без буквы диска.
-        c.host.base_path = r"\\nas\share\Buh".into();
+        c.current_mut().base_path = r"\\nas\share\Buh".into();
         assert!(vrd(&c).contains(r"File=&quot;\\nas\share\Buh&quot;;"), "{}", vrd(&c));
     }
 
@@ -1384,7 +1384,7 @@ mod tests {
         // экранировать осталось то, что в дескрипторе и правда осталось:
         // путь базы, в обеих его формах, файловой и клиент-серверной.
         let mut c = cfg_for_test();
-        c.host.base_path = "C:\\Bases\\p@th\"&<>'".into();
+        c.current_mut().base_path = "C:\\Bases\\p@th\"&<>'".into();
         let text = vrd(&c);
         assert!(text.contains("File=&quot;C:\\Bases\\p@th&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
         // В значении атрибута не осталось «сырых» спецсимволов — только их escape-формы.
@@ -1393,7 +1393,7 @@ mod tests {
         let raw_value = &text[file_start..file_end];
         assert!(!raw_value.contains('"') && !raw_value.contains('<') && !raw_value.contains('>'), "{raw_value:?}");
 
-        c.host.base_path = "srv\"&<>'\\base\"&<>'".into();
+        c.current_mut().base_path = "srv\"&<>'\\base\"&<>'".into();
         let text = vrd(&c);
         assert!(text.contains("Srvr=&quot;srv&quot;&amp;&lt;&gt;&apos;&quot;;Ref=&quot;base&quot;&amp;&lt;&gt;&apos;&quot;;"), "{text}");
     }
@@ -1414,7 +1414,7 @@ mod tests {
         assert!(descriptor_matches(&dir, &before));
 
         let mut after = before.clone();
-        after.host.base_path = "C:\\Bases\\Other".into();
+        after.current_mut().base_path = "C:\\Bases\\Other".into();
         assert!(!descriptor_matches(&dir, &after));
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1427,7 +1427,7 @@ mod tests {
         // ни один наш потребитель (mcp-1c, vrunner) в этой паре не нуждается.
         let text = vrd(&cfg_for_test());
         assert!(!text.contains("Usr=") && !text.contains("Pwd="), "{text}");
-        assert!(!text.contains(&cfg_for_test().host.db_password), "{text}");
+        assert!(!text.contains(&cfg_for_test().current().db_password), "{text}");
     }
 
     #[test]
@@ -1435,9 +1435,9 @@ mod tests {
         // Убрали Usr/Pwd — путь базы остаётся в тех же двух формах, что и
         // раньше: File= для файловой базы, Srvr=/Ref= для клиент-серверной.
         let mut c = cfg_for_test();
-        c.host.base_path = "/home/dev1/base".into();
+        c.current_mut().base_path = "/home/dev1/base".into();
         assert!(vrd(&c).contains("File=&quot;/home/dev1/base&quot;;"));
-        c.host.base_path = r"srv\base".into();
+        c.current_mut().base_path = r"srv\base".into();
         let t = vrd(&c);
         assert!(t.contains("Srvr=&quot;srv&quot;;") && t.contains("Ref=&quot;base&quot;;"), "{t}");
     }
@@ -1752,7 +1752,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = listener.local_addr().unwrap().port();
         std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         assert_eq!(
             resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap(),
             port,
@@ -1774,7 +1774,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         let chosen = resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap();
         assert_ne!(chosen, port, "порт держит чужой процесс — подбор обязан сдвинуться");
         drop(listener);
@@ -1797,10 +1797,10 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
-        cfg.host.publication = "webserver".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().publication = "webserver".into();
         assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ours());
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         assert!(
             matches!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)), Guard::Refuse(_)),
             "тест опирается на то, что в auto на этом же каталоге страж отказывает — порт занят чужим, а pid-файла нет"
@@ -1822,8 +1822,8 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let _ = std::fs::remove_dir_all(&dir);
         let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.db_password = String::new();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().db_password = String::new();
         assert!(
             ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_not_published(),
             "никто не слушает и pid-файла нет — публикация просто не поднята, это не отказ"
@@ -1846,9 +1846,9 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
-        cfg.host.db_password = String::new();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().db_password = String::new();
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_refuse();
         assert!(e.contains(&port.to_string()), "{e}");
         assert!(!e.contains("пароль базы не отправлен"), "пароля нет — упоминать его в отказе было бы ложью: {e}");
@@ -1865,9 +1865,9 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().db_password = "секрет-базы".into();
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_refuse();
         assert!(e.contains(&port.to_string()) && e.contains("пароль базы не отправлен"), "{e}");
         drop(listener);
@@ -1997,7 +1997,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let foreign = dir.join("httpd.exe");
         std::fs::write(&foreign, b"not a real httpd").unwrap();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         let chosen = resolve_http_port(&dir, &cfg, &ours_with_image(foreign)).unwrap();
         assert_ne!(chosen, port, "держатель совпал только номером — для подбора порт занят");
         drop(listener);
@@ -2019,7 +2019,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let port = listener.local_addr().unwrap().port();
         std::fs::write(pid_file_in(&dir), std::process::id().to_string()).unwrap();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         let ours = OurHttpd { image: our_image_for_test(), owner: Some("S-1-5-21-0-0-0-500".into()) };
         let chosen = resolve_http_port(&dir, &cfg, &ours).unwrap();
         assert_ne!(chosen, port, "владелец держателя чужой — для подбора порт занят");
@@ -2039,7 +2039,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::create_dir_all(&dir).unwrap();
         let port = crate::ports::test_port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().http_port = Some(port);
         let chosen = resolve_http_port(&dir, &cfg, &ours_for_test()).unwrap();
         assert_eq!(chosen, port, "свободный порт без pid-файла — подбор должен его оставить, не уезжать");
     }
@@ -2073,7 +2073,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         cfg.resolved_http_port = Some(port);
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_refuse();
         assert_eq!(cfg.base_url(), format!("http://127.0.0.1:{port}/hs/mcp-1c"));
@@ -2104,7 +2104,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let before = std::fs::read_to_string(dir.join("ports.state")).unwrap();
         let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
+        cfg.current_mut().publication = "auto".into();
         let _ = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit));
         assert_eq!(std::fs::read_to_string(dir.join("ports.state")).unwrap(), before, "страж не имеет права переизбирать порт");
         let _ = std::fs::remove_dir_all(&dir);

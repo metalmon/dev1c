@@ -82,7 +82,7 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
         "--base",
         &cfg.base_url(),
         "--user",
-        &cfg.host.db_user,
+        &cfg.current().db_user,
         "--profile",
         cfg.configuration().unwrap_or("auto"),
         "--toolset",
@@ -90,7 +90,7 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
         "--access",
         cfg.access(),
     ]);
-    c.env("MCP_1C_PASSWORD", &cfg.host.db_password);
+    c.env("MCP_1C_PASSWORD", &cfg.current().db_password);
     // Только свой каталог выгрузки, не записанное умолчание: см.
     // `Cfg::dump_override`.
     if let Some(dump) = cfg.dump_override() {
@@ -148,7 +148,7 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     let lib = vrunner_lib(tools);
     let mut c = tokio::process::Command::new(oscript_exe(tools));
     c.arg(lib.join("vanessa-runner").join("src").join("mcp.os"));
-    c.current_dir(&cfg.host.project);
+    c.current_dir(&cfg.current().project);
     // oscript first: vrunner-mcp runs long commands as background tasks by
     // re-executing `oscript` from PATH; then the kit's git.
     let sep = if cfg!(windows) { ";" } else { ":" };
@@ -167,10 +167,10 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     if let Ok(choice) = crate::ops_host::platform_choice(cfg) {
         c.env("VRUNNER_V8VERSION", &choice.version);
     }
-    c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.host.base_path));
-    c.env("VRUNNER_DBUSER", &cfg.host.db_user);
-    c.env("VRUNNER_DBPWD", &cfg.host.db_password);
-    c.env("NO_PROXY", cfg.host.server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.host.server));
+    c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.current().base_path));
+    c.env("VRUNNER_DBUSER", &cfg.current().db_user);
+    c.env("VRUNNER_DBPWD", &cfg.current().db_password);
+    c.env("NO_PROXY", cfg.current().server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.current().server));
     c.env("GIT_TERMINAL_PROMPT", "0");
     // Экран Конфигуратору даёт коннектор, а не вызывающий: через эту команду
     // идут `cf_decompile`/`cf_load`, а vanessa-runner поднимает ими
@@ -368,9 +368,9 @@ impl Rules {
 /// `vrunner-mcp` — `tasklist`/диспетчер задач его не видят, так что заботы
 /// задачи 5 (пароль не в командной строке) это место не касается.
 pub fn connection_args(cfg: &crate::cfg::Cfg) -> Value {
-    let mut a = serde_json::json!({"ibconnection": crate::ops_host::ib_switch(&cfg.host.base_path), "db-user": cfg.host.db_user});
-    if !cfg.host.db_password.is_empty() {
-        a["db-pwd"] = Value::String(cfg.host.db_password.clone());
+    let mut a = serde_json::json!({"ibconnection": crate::ops_host::ib_switch(&cfg.current().base_path), "db-user": cfg.current().db_user});
+    if !cfg.current().db_password.is_empty() {
+        a["db-pwd"] = Value::String(cfg.current().db_password.clone());
     }
     a
 }
@@ -621,7 +621,7 @@ pub async fn pipe_jsonrpc<S>(
                         log(Event::Warn(format!("{who}: {e} — отвечаю отказом вызовам, пока не исправится")));
                         last_logged_error = Some(e.clone());
                     }
-                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                    let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
                     if wait_and_reply_degraded(
                         &mut sr,
                         &mut buf,
@@ -658,7 +658,7 @@ pub async fn pipe_jsonrpc<S>(
                         log(Event::Warn(format!("{who}: не удалось запустить: {msg} — отвечаю отказом вызовам, пока не исправится")));
                         last_logged_error = Some(msg.clone());
                     }
-                    let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                    let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
                     if wait_and_reply_degraded(
                         &mut sr,
                         &mut buf,
@@ -700,7 +700,7 @@ pub async fn pipe_jsonrpc<S>(
             let (out, pending, log, in_flight, inject, swallow) =
                 (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
             // Режим — снимком того же `cfg`, что собрал команду этого ребёнка: описания наших инструментов идут за ним (`jsonrpc::our_tools`).
-            let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+            let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
             tokio::spawn(async move {
                 let mut f = Framer::new();
                 let mut buf = vec![0u8; 64 * 1024];
@@ -832,7 +832,7 @@ pub async fn pipe_jsonrpc<S>(
                                     // вызов запер бы канал навсегда.
                                     let fr = pending_frames.pop_front().unwrap();
                                     if let Frame::Line(l) = &fr {
-                                        let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                                        let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
                                         if let Some(reply) = degraded_reply(
                                             l,
                                             rules.inject,
@@ -934,7 +934,7 @@ pub async fn pipe_jsonrpc<S>(
                 // первым, не наступать ему на пятки гонкой.
                 in_flight.store(0, Ordering::Relaxed);
                 let _ = err_tail.await;
-                log(Event::Say(format!("{who}: параметры базы сменились, следующий вызов идёт в {}", cfg.host.base_path)));
+                log(Event::Say(format!("{who}: параметры базы сменились, следующий вызов идёт в {}", cfg.current().base_path)));
                 continue;
             }
             EpochEnd::Dormant => {
@@ -989,7 +989,7 @@ pub async fn pipe_jsonrpc<S>(
                 let (now_gen, now_cfg) = rules.live.get();
                 gen = now_gen;
                 cfg = now_cfg;
-                log(Event::Say(format!("{who}: MCP включены — поднимаю ребёнка в {}", cfg.host.base_path)));
+                log(Event::Say(format!("{who}: MCP включены — поднимаю ребёнка в {}", cfg.current().base_path)));
                 continue;
             }
         }
@@ -1000,7 +1000,7 @@ pub async fn pipe_jsonrpc<S>(
     let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, (id, _))| id).collect();
     if rules.inject {
         for id in unanswered {
-            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(!crate::cfg::mode_needs_env(&cfg.host.mode)))).await;
+            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(!crate::cfg::mode_needs_env(&cfg.current().mode)))).await;
         }
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
@@ -1160,7 +1160,7 @@ async fn handle_request(
     // ниже тут же отвечают отказом по переключателю вместо обычного текста.
     let (_, cfg) = rules.live.get();
     let empty: Vec<String> = Vec::new();
-    let tools = cfg.host.tools.clone();
+    let tools = cfg.current().tools.clone();
     // Потолок «только чтение» закрывает ровно то, что меняет ДАННЫЕ В БАЗЕ —
     // белый список `[host] tools` (`cf_load`, `infobase_delete`, сборка и
     // тесты конфигурации), точно как выключенные MCP: различать внутри
@@ -1205,7 +1205,7 @@ async fn handle_request(
             // `unanswered` ниже) — список в редакторе остаётся живым, как
             // того требует заголовок `ops_host::run_mcp`.
             None => {
-                let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+                let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
                 let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(local))).await;
                 Ok(())
             }
@@ -1633,18 +1633,18 @@ mod tests {
     /// Тем же приёмом, что `--base`/`--user`: `mcp_command` просто собирает
     /// флаг по `cfg`, не заглядывая ни на диск, ни в сеть. Имя у ребёнка —
     /// `--profile` (расхождение с `Cfg::configuration()` объяснено в её
-    /// докстроке). Пусто в `cfg.host.configuration` доходит как `auto`, не
+    /// докстроке). Пусто в `cfg.current().configuration` доходит как `auto`, не
     /// как пропущенный флаг.
     #[test]
     fn the_profile_reaches_the_child_as_a_flag() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.configuration = "buh_3_0".into();
+        cfg.current_mut().configuration = "buh_3_0".into();
         let c = mcp_command(&cfg, &kit_for_test());
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i = args.iter().position(|a| a == "--profile").expect("--profile нет среди аргументов");
         assert_eq!(args[i + 1], "buh_3_0");
 
-        cfg.host.configuration = String::new();
+        cfg.current_mut().configuration = String::new();
         let c2 = mcp_command(&cfg, &kit_for_test());
         let args2: Vec<String> = c2.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i2 = args2.iter().position(|a| a == "--profile").expect("--profile нет среди аргументов");
@@ -1656,8 +1656,8 @@ mod tests {
     #[test]
     fn the_child_gets_the_toolset_the_access_and_the_configuration() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.toolset = "business".into();
-        c.host.write = "read_only".into();
+        c.current_mut().toolset = "business".into();
+        c.current_mut().write = "read_only".into();
         let cmd = mcp_command(&c, &kit_for_test());
         let argv: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(argv.windows(2).any(|w| w == ["--toolset", "business"]), "{argv:?}");
@@ -1684,12 +1684,12 @@ mod tests {
     #[test]
     fn rebuilding_the_command_after_the_ceiling_changes_carries_the_new_access() {
         let mut c = crate::cfg::filled_for_test();
-        c.host.write = "read_only".into();
+        c.current_mut().write = "read_only".into();
         let before = mcp_command(&c, &kit_for_test());
         let args_before: Vec<String> = before.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args_before.windows(2).any(|w| w == ["--access", "read_only"]), "{args_before:?}");
 
-        c.host.write = "read_write".into();
+        c.current_mut().write = "read_write".into();
         let after = mcp_command(&c, &kit_for_test());
         let args_after: Vec<String> = after.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args_after.windows(2).any(|w| w == ["--access", "read_write"]), "{args_after:?}");
@@ -1698,7 +1698,7 @@ mod tests {
     #[test]
     fn the_db_password_never_appears_in_the_command_line() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         let c = mcp_command(&cfg, &kit_for_test());
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         assert!(!args.iter().any(|a| a.contains("секрет-базы")), "{args:?}");
@@ -1768,7 +1768,7 @@ mod tests {
         let c = mcp_command(&cfg, &kit_for_test());
         assert_eq!(flag_names(&c), expected_without_dump, "без своего каталога выгрузки");
 
-        cfg.host.dump = "C:\\own\\dump".into();
+        cfg.current_mut().dump = "C:\\own\\dump".into();
         assert!(cfg.dump_override().is_some(), "этот случай проверяет набор с --dump");
         let mut expected_with_dump = expected_without_dump.clone();
         expected_with_dump.insert("--dump".into());
@@ -1809,9 +1809,9 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().db_password = "секрет-базы".into();
         let guarded = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test()));
         assert!(guarded.is_err());
         drop(listener);
@@ -1830,11 +1830,11 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
         // Непустой пароль — этот тест про текст отказа (он называет пароль
         // только когда пароль есть, см. докстроку `refuse_unless_ours`).
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл") && err.contains("пароль базы не отправлен"), "{err}");
         drop(listener);
@@ -1852,8 +1852,8 @@ mod tests {
     #[test]
     fn mcp_command_guarded_refuses_a_bad_toolset_before_the_guard_or_the_password() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.toolset = "мусор".into();
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().toolset = "мусор".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
         assert!(err.contains("toolset") && err.contains("допустимые значения"), "{err}");
     }
@@ -1862,8 +1862,8 @@ mod tests {
     #[test]
     fn mcp_command_guarded_refuses_a_bad_configuration_before_the_guard_or_the_password() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.configuration = "мусор".into();
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().configuration = "мусор".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
         assert!(err.contains("configuration") && err.contains("допустимые значения"), "{err}");
     }
@@ -1885,11 +1885,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
         // Пароль есть — доказывает, что отказ не от него и не от обычного
         // стража (тот назвал бы "pid-файл", этот — нет).
-        cfg.host.db_password = "секрет-базы".into();
+        cfg.current_mut().db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("не поднята"), "{err}");
         assert!(!err.contains("pid-файл"), "другая причина, другой текст, чем у обычного отказа стража: {err}");
@@ -1908,10 +1908,10 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.publication = "auto".into();
-        cfg.host.http_port = Some(port);
-        cfg.host.toolset = "developer".into();
-        cfg.host.configuration = "generic".into();
+        cfg.current_mut().publication = "auto".into();
+        cfg.current_mut().http_port = Some(port);
+        cfg.current_mut().toolset = "developer".into();
+        cfg.current_mut().configuration = "generic".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл"), "{err}");
         drop(listener);
@@ -2042,14 +2042,14 @@ mod tests {
     /// просто ответить ошибкой быстро, без настоящего git).
     fn test_cfg(allowed: &[&str]) -> Cfg {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.tools = allowed.iter().map(|s| s.to_string()).collect();
-        cfg.host.project = std::env::temp_dir().to_string_lossy().into_owned();
+        cfg.current_mut().tools = allowed.iter().map(|s| s.to_string()).collect();
+        cfg.current_mut().project = std::env::temp_dir().to_string_lossy().into_owned();
         // Эти тесты писаны до потолка записи и проверяют другое (белый
         // список `tools`, переключатель, рестарт) — им нужен прежний
         // «всё разрешено по списку», не пустая строка, которая с решения
         // владельца 1.11 значит `read_only` по умолчанию. Сам потолок
         // проверяют отдельные тесты ниже, с `read_only` явно.
-        cfg.host.write = "read_write".into();
+        cfg.current_mut().write = "read_write".into();
         cfg
     }
 
@@ -2078,7 +2078,7 @@ mod tests {
     fn rules_read_only(allowed: &[&str], running: usize) -> Rules {
         let r = rules(allowed, running);
         let mut cfg = r.live.get().1;
-        cfg.host.write = "read_only".into();
+        cfg.current_mut().write = "read_only".into();
         r.live.set(cfg);
         r
     }
@@ -2147,10 +2147,10 @@ mod tests {
     #[test]
     fn connection_env_is_passed_verbatim() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.base_path = "C:\\Bases\\Бух".into();
-        cfg.host.db_password = "па\"роль".into();
-        cfg.host.project = "C:\\proj\\Бух".into();
-        cfg.host.server = "10.0.0.5:3393".into();
+        cfg.current_mut().base_path = "C:\\Bases\\Бух".into();
+        cfg.current_mut().db_password = "па\"роль".into();
+        cfg.current_mut().project = "C:\\proj\\Бух".into();
+        cfg.current_mut().server = "10.0.0.5:3393".into();
         let c = vrunner_command(&cfg, std::path::Path::new("T")).into_std();
         let env: std::collections::HashMap<_, _> =
             c.get_envs().filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().to_string(), v.to_string_lossy().to_string()))).collect();
@@ -2188,14 +2188,14 @@ mod tests {
     #[test]
     fn connection_args_carry_the_base_and_its_user() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.base_path = "C:\\Bases\\Бух".into();
-        cfg.host.db_user = "mcp".into();
-        cfg.host.db_password = "p w".into();
+        cfg.current_mut().base_path = "C:\\Bases\\Бух".into();
+        cfg.current_mut().db_user = "mcp".into();
+        cfg.current_mut().db_password = "p w".into();
         let a = connection_args(&cfg);
         assert_eq!(a["ibconnection"], "/FC:\\Bases\\Бух");
         assert_eq!(a["db-user"], "mcp");
         assert_eq!(a["db-pwd"], "p w");
-        cfg.host.db_password = String::new();
+        cfg.current_mut().db_password = String::new();
         assert!(connection_args(&cfg).get("db-pwd").is_none(), "an empty password is not sent as a value");
     }
 
@@ -2654,7 +2654,7 @@ mod tests {
     async fn the_mcp_port_ignores_the_write_ceiling_entirely() {
         let mut rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.write = "read_only".into();
+        cfg.current_mut().write = "read_only".into();
         rules.live = Live::new(cfg);
         let (replies, raw, _) = talk(
             ("BRIDGE_SCRIPT", "1"),
@@ -2819,7 +2819,7 @@ mod tests {
     #[tokio::test]
     async fn config_change_restarts_the_child_with_fresh_values() {
         let mut cfg_a = test_cfg(&["cf_load"]);
-        cfg_a.host.db_user = "UserA".into();
+        cfg_a.current_mut().db_user = "UserA".into();
         let live = Live::new(cfg_a.clone());
         // `make_cmd` — ровно то, что делает настоящий `vrunner_command`: берёт
         // параметры из `Cfg` на момент запуска ребёнка и зашивает их туда,
@@ -2827,7 +2827,7 @@ mod tests {
         // которую фальшивый ребёнок печатает один раз при старте).
         let make_cmd = |cfg: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT_RECORD", "1"));
-            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            c.env("BRIDGE_MARKER", cfg.current().db_user.clone());
             Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
@@ -2860,7 +2860,7 @@ mod tests {
         wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":1")).await;
 
         let mut cfg_b = live.get().1;
-        cfg_b.host.db_user = "UserB".into();
+        cfg_b.current_mut().db_user = "UserB".into();
         live.set(cfg_b);
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
@@ -2906,7 +2906,7 @@ mod tests {
         assert!(reply1.contains("cf_load"), "потолок «чтение-запись» — список как раньше: {reply1}");
 
         let mut cfg_b = live.get().1;
-        cfg_b.host.write = "read_only".into();
+        cfg_b.current_mut().write = "read_only".into();
         live.set(cfg_b);
         let list2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
         w.write_all(list2).await.unwrap();
@@ -2951,13 +2951,13 @@ mod tests {
     #[tokio::test]
     async fn config_change_never_mixes_old_and_new_into_one_calls_arguments() {
         let mut cfg_a = test_cfg(&["cf_load"]);
-        cfg_a.host.base_path = "C:\\Bases\\A".into();
-        cfg_a.host.db_user = "UserA".into();
-        cfg_a.host.db_password = "pwA".into();
+        cfg_a.current_mut().base_path = "C:\\Bases\\A".into();
+        cfg_a.current_mut().db_user = "UserA".into();
+        cfg_a.current_mut().db_password = "pwA".into();
         let mut cfg_b = test_cfg(&["cf_load"]);
-        cfg_b.host.base_path = "C:\\Bases\\B".into();
-        cfg_b.host.db_user = "UserB".into();
-        cfg_b.host.db_password = "pwB".into();
+        cfg_b.current_mut().base_path = "C:\\Bases\\B".into();
+        cfg_b.current_mut().db_user = "UserB".into();
+        cfg_b.current_mut().db_password = "pwB".into();
         let live = Live::new(cfg_a.clone());
         let make_cmd = |_: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT", "1"));
@@ -3051,7 +3051,7 @@ mod tests {
         // Смена базы — второй ребёнок на том же соединении, который самого
         // рукопожатия никогда не видел.
         let mut cfg_b = live.get().1;
-        cfg_b.host.base_path = "C:\\Bases\\B".into();
+        cfg_b.current_mut().base_path = "C:\\Bases\\B".into();
         live.set(cfg_b);
         w.write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#).await.unwrap();
         w.write_all(b"\n").await.unwrap();
@@ -3108,12 +3108,12 @@ mod tests {
     #[tokio::test]
     async fn a_call_stuck_in_flight_cannot_keep_new_calls_on_the_stale_child() {
         let mut cfg_a = test_cfg(&["cf_load"]);
-        cfg_a.host.db_user = "UserA".into();
+        cfg_a.current_mut().db_user = "UserA".into();
         let live = Live::new(cfg_a.clone());
         let make_cmd = |cfg: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT_HANG", "1"));
             c.env("BRIDGE_SCRIPT_RECORD", "1");
-            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            c.env("BRIDGE_MARKER", cfg.current().db_user.clone());
             Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
@@ -3151,7 +3151,7 @@ mod tests {
         );
         // Параметры сменились ПОД висящим вызовом.
         let mut cfg_b = live.get().1;
-        cfg_b.host.db_user = "UserB".into();
+        cfg_b.current_mut().db_user = "UserB".into();
         live.set(cfg_b);
         let call2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call2).await.unwrap();
@@ -3209,12 +3209,12 @@ mod tests {
     #[tokio::test]
     async fn a_pending_restart_becomes_dormant_when_mcp_is_disabled_while_waiting() {
         let mut cfg_a = test_cfg(&["cf_load"]);
-        cfg_a.host.db_user = "UserA".into();
+        cfg_a.current_mut().db_user = "UserA".into();
         let live = Live::new(cfg_a.clone());
         let make_cmd = |cfg: &Cfg| {
             let mut c = child(("BRIDGE_SCRIPT_HANG", "1"));
             c.env("BRIDGE_SCRIPT_RECORD", "1");
-            c.env("BRIDGE_MARKER", cfg.host.db_user.clone());
+            c.env("BRIDGE_MARKER", cfg.current().db_user.clone());
             Ok(c)
         };
         let cmd0 = make_cmd(&cfg_a);
@@ -3248,7 +3248,7 @@ mod tests {
             String::from_utf8_lossy(&got)
         );
         let mut cfg_b = live.get().1;
-        cfg_b.host.db_user = "UserB".into();
+        cfg_b.current_mut().db_user = "UserB".into();
         live.set(cfg_b);
         let call2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call2).await.unwrap();

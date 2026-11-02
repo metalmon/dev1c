@@ -231,10 +231,10 @@ fn run() -> Result<()> {
             // факта набора (`ops_host::env_line`/`ENV_NEARBY`). Отказ разбора
             // адреса печатается как строка, а не обрывает `status`: это
             // диагностика, за которой человек сюда и пришёл.
-            if cfg::mode_needs_env(&ctx.cfg.host.mode) {
-                println!("Рабочее место {} → среда {}", ctx.cfg.host.workstation, ctx.cfg.host.server);
+            if cfg::mode_needs_env(&ctx.cfg.current().mode) {
+                println!("Рабочее место {} → среда {}", ctx.cfg.current().workstation, ctx.cfg.current().server);
             } else {
-                println!("{}", ops_host::env_line(&ctx.cfg.host.mode, &ctx.cfg.host.server).unwrap_or_else(|e| format!("{e:#}")));
+                println!("{}", ops_host::env_line(&ctx.cfg.current().mode, &ctx.cfg.current().server).unwrap_or_else(|e| format!("{e:#}")));
             }
             // `status` смотрит и рассказывает (`Cfg::load_unchecked` выше),
             // а не отказывает на чужом шифртексте — но молчать про это тоже
@@ -370,10 +370,13 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // туннельный — то, что пойдёт среде как проброс (круг исправления
     // финального ревью, Б3; `session::start_with_enabled` выбирает ту же
     // пару тем же условием).
-    let ports = if ctx.cfg.host.mode == "local" { ctx.cfg.ports() } else { ctx.cfg.tunnel_ports() };
+    let ports = if ctx.cfg.current().mode == "local" { ctx.cfg.ports() } else { ctx.cfg.tunnel_ports() };
     println!(
         "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
-        ctx.cfg.host.server, ctx.cfg.host.workstation, ports.mcp, ports.web
+        ctx.cfg.current().server,
+        ctx.cfg.current().workstation,
+        ports.mcp,
+        ports.web
     );
     let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;

@@ -211,7 +211,9 @@ pub async fn run(
         if *stop.borrow() {
             return Ok(());
         }
-        match Tunnel::connect(&cfg.host.server, &cfg.host.workstation, &cfg.host.password, &known_hosts, &forward_ports(cfg)).await {
+        match Tunnel::connect(&cfg.current().server, &cfg.current().workstation, &cfg.current().password, &known_hosts, &forward_ports(cfg))
+            .await
+        {
             Ok(mut t) => {
                 attempt = 0;
                 forward_refusals = 0;
@@ -221,7 +223,10 @@ pub async fn run(
                 // в журнале его делает `session`.
                 on_event(common::Event::Ok(format!(
                     "туннель поднят: {} → порты {} (mcp-1c), {} (vrunner) и {} (веб-клиент)",
-                    cfg.host.server, ports.mcp, ports.vrunner, ports.web
+                    cfg.current().server,
+                    ports.mcp,
+                    ports.vrunner,
+                    ports.web
                 )));
                 // Контейнерный случай задачи 7: проброс встал — значит обслуживание включили, и серверы MCP у Zed в контейнере должны подняться сами (`"enabled": true`), а не ждать, пока человек их перезапустит руками. Ошибка правки — только предупреждение: связь важнее настройки редактора.
                 if let Err(e) = crate::session::flip_remote_servers(&t, true, &editor_mcp) {
@@ -256,7 +261,7 @@ pub async fn run(
                 // потому что это не старая сессия сервера, а чей-то ещё
                 // туннель этого рабочего места.
                 if let TunnelError::Forward(_) = te {
-                    let (n, give_up) = forward_refusal_step(&cfg.host.workstation, forward_refusals);
+                    let (n, give_up) = forward_refusal_step(&cfg.current().workstation, forward_refusals);
                     forward_refusals = n;
                     if let Some(text) = give_up {
                         return Err(anyhow::anyhow!(text));
@@ -294,7 +299,7 @@ mod loop_tests {
     fn the_forwarded_ports_are_the_tunnel_numbers_not_the_local_ones() {
         let mut cfg = crate::cfg::filled_for_test(); // mode = "tunnel", workstation = "dev1"
         assert_eq!(forward_ports(&cfg), [7771, 7781, 7791]);
-        cfg.host.workstation = "dev2".into();
+        cfg.current_mut().workstation = "dev2".into();
         assert_eq!(forward_ports(&cfg), [7772, 7782, 7792], "dev2 должен просить проброс своих номеров, не dev1");
         // Местная константа этой сменой не трогается — порты другой функции.
         assert_ne!(forward_ports(&cfg), [cfg.ports().mcp, cfg.ports().vrunner, cfg.ports().web]);

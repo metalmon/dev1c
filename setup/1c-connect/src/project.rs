@@ -171,11 +171,11 @@ pub struct Project {
 impl Project {
     /// `tools` — каталог инструментов на машине (`%LOCALAPPDATA%\dev1c`).
     pub fn from_cfg(cfg: &Cfg, tools: &Path) -> Project {
-        let dir = PathBuf::from(&cfg.host.project);
+        let dir = PathBuf::from(&cfg.current().project);
         // The last path segment by either separator: a Windows path read on
         // Linux (CI) has no separators as far as PathBuf is concerned.
         let name = cfg
-            .host
+            .current()
             .project
             .trim_end_matches(['\\', '/'])
             .rsplit(['\\', '/'])
@@ -184,7 +184,7 @@ impl Project {
             .unwrap_or("project")
             .to_string();
         let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
-        let local = !crate::cfg::mode_needs_env(&cfg.host.mode);
+        let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
         // Адреса среды нет — `remote` пуст, а не собран из пустоты: читатели
         // (`layout_state`, `ensure_origin`) говорят, чего не хватает. В
         // локальном режиме его не собирают вовсе: организации `dev1c` в чужой
@@ -193,8 +193,8 @@ impl Project {
         // Навязанной ветки в локальном режиме нет вовсе — ни из пустого
         // рабочего места, ни прочитанной заранее: кто на какой ветке стоит,
         // знает git, и спрашивать его надо в тот момент, когда ветка нужна.
-        let branch = if local { String::new() } else { cfg.host.workstation.clone() };
-        let login = if local { String::new() } else { cfg.host.workstation.clone() };
+        let branch = if local { String::new() } else { cfg.current().workstation.clone() };
+        let login = if local { String::new() } else { cfg.current().workstation.clone() };
         Project { dir, git, branch, remote, login, local }
     }
 }
@@ -1098,10 +1098,10 @@ mod tests {
         assert!(f.iter().any(|a| a == "credential.helper="));
         assert!(f.iter().any(|a| a == "gc.auto=0"), "no auto-gc from the bridge: a 90k-file commit must not repack");
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.gitea = "http://192.168.1.10:3391".into();
+        cfg.current_mut().gitea = "http://192.168.1.10:3391".into();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
-        cfg.host.project = "/home/dev/proj/Бух/".into();
+        cfg.current_mut().project = "/home/dev/proj/Бух/".into();
         assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://192.168.1.10:3391/dev1c/Бух.git");
         assert_eq!(p.branch, "dev1");
         assert!(p.git.to_string_lossy().contains("git"));
@@ -1488,19 +1488,19 @@ mod tests {
     #[test]
     fn a_local_project_imposes_neither_a_branch_nor_an_identity() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.mode = "local".into();
-        cfg.host.workstation.clear();
-        cfg.host.gitea = "http://localhost:3000".into();
+        cfg.current_mut().mode = "local".into();
+        cfg.current_mut().workstation.clear();
+        cfg.current_mut().gitea = "http://localhost:3000".into();
         let t = tempdir::Dir::new();
-        cfg.host.project = t.path().join("Бух").display().to_string();
+        cfg.current_mut().project = t.path().join("Бух").display().to_string();
         let p = Project::from_cfg(&cfg, Path::new("/tools"));
         assert!(p.branch.is_empty(), "ветку человека мы не называем заранее: её знает git");
         assert_eq!(init_branch(&p), "main");
         assert!(p.remote.is_empty(), "адрес среды в локальном режиме не собирается даже из заполненного поля");
         assert!(p.local && p.login.is_empty());
         // В туннельном режиме ветка — конвенция среды, и она же имя первой.
-        cfg.host.mode = "tunnel".into();
-        cfg.host.workstation = "dev2".into();
+        cfg.current_mut().mode = "tunnel".into();
+        cfg.current_mut().workstation = "dev2".into();
         assert_eq!(init_branch(&Project::from_cfg(&cfg, Path::new("/tools"))), "dev2");
 
         let f = git_flags("");
@@ -1601,7 +1601,7 @@ mod tests {
     #[test]
     fn the_remote_follows_the_explicit_gitea() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.host.gitea = "http://localhost:3000".into();
+        cfg.current_mut().gitea = "http://localhost:3000".into();
         assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://localhost:3000/dev1c/Buh.git");
         // Адрес поля разошёлся с тем, что в репозитории: это не «поправим», а
         // «скажем» — см. `a_foreign_origin_is_not_replaced_when_the_mode_changes`.

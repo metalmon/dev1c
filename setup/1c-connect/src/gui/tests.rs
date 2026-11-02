@@ -83,8 +83,8 @@ fn a_second_field_joining_the_list_is_noted_again() {
 #[test]
 fn adopt_cfg_rolls_back_a_live_only_tightening_to_what_is_on_disk() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
-    ui.cfg.host.write = "read_write".into();
+    ui.cfg.current_mut().mode = "local".into();
+    ui.cfg.current_mut().write = "read_write".into();
     // Настоящий `Session` — та же ячейка (`Live`), что и в работающей
     // программе; слушатели ей заводить незачем (`cfg_now`/`update_cfg` не
     // зависят от того, поднялись ли реальные порты).
@@ -141,7 +141,7 @@ fn an_operation_result_outlives_the_next_set_but_not_for_long() {
 fn a_set_that_arrives_after_the_switch_went_off_is_dropped() {
     let fact = || vec![Check::fail("проект", "не разложен", "install")];
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.enabled.store(false, Ordering::Relaxed);
     assert!(!serving(&ui), "выключено — иначе тест проверяет не то");
     let gen = ui.facts_gen;
@@ -167,7 +167,7 @@ fn a_set_that_arrives_after_the_switch_went_off_is_dropped() {
 #[test]
 fn the_tick_path_never_asks_the_cold_gate() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     assert!(gate_now(&ui.kit, &ui.cfg).is_some(), "в каталоге теста замок обязан быть заперт");
     ui.gate = None;
 
@@ -195,7 +195,7 @@ fn the_tick_path_never_asks_the_cold_gate() {
 #[test]
 fn a_stale_generation_answer_is_dropped() {
     let mut ui = Ui::for_test();
-    ui.cfg.host.mode = "local".into();
+    ui.cfg.current_mut().mode = "local".into();
     ui.facts_gen = 2;
     ui.facts_pending = true;
     assert!(!apply_facts(&mut ui, 2, vec![Check::fail("Gitea", "не отвечает", "dev1c-setup check")]));

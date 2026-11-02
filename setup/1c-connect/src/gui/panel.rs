@@ -8,7 +8,7 @@
 //! глобала `Ui` в `render`. Изменили `Ui` — `cx.refresh_windows()`.
 
 use crate::cfg;
-use crate::cfg::Host;
+use crate::cfg::Connection;
 use crate::editors;
 use crate::gui::theme;
 use crate::gui::window::hide_window;
@@ -69,7 +69,7 @@ pub struct Panel {
     /// Сколько строк журнала было на прошлой отрисовке: чтобы
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
-    original: Host,
+    original: Connection,
     /// Высота видимой области тела вкладки и высота содержимого «Связи»
     /// с последней отрисовки.
     viewport_h: Option<Pixels>,
@@ -115,7 +115,7 @@ pub struct Card {
 ///   подсказку переключателя, в левый слот подвала и в журнал.
 ///
 /// При выключенном обслуживании горячие факты цвет не меняют: вердикт в это
-/// время не считается вовсе, и точка серая. Заголовок — по `cfg.host.mode`:
+/// время не считается вовсе, и точка серая. Заголовок — по `cfg.current().mode`:
 /// в локальном режиме речь про MCP (слушатели держат порты сами, см.
 /// `session::start`), а не про связь со средой.
 ///
@@ -756,7 +756,7 @@ fn run_project_op(window: &mut Window, cx: &mut App, which: gui::Which) {
 /// зависит, какие поля показаны (`shown_fields`). Оба правятся только из
 /// меню трея, поля в окне у них нет.
 fn modes_of(cx: &App) -> (String, String) {
-    let h = &cx.global::<Ui>().cfg.host;
+    let h = cx.global::<Ui>().cfg.current();
     (h.mode.clone(), h.publication.clone())
 }
 
@@ -764,7 +764,7 @@ fn modes_of(cx: &App) -> (String, String) {
 /// (`cfg::derived_base_url`) — наша догадка про Apache на 80, и человеку она
 /// показывается пустым полем: решение владельца 26.10 «пустые поля вместо
 /// выдуманных значений». Своё значение показывается как есть.
-pub fn shown_base_url(host: &Host) -> &str {
+pub fn shown_base_url(host: &Connection) -> &str {
     if crate::cfg::is_derived_address(host) {
         ""
     } else {
@@ -830,7 +830,7 @@ pub fn profile_note(toolset: &str) -> String {
 /// `Срв\Бухгалтерия` разбирается тем же правилом, что каталог). Своё здесь
 /// только то, что делать без имени: заголовок говорит это словами, а не
 /// пустотой и не обрывком пути.
-pub fn card_title(host: &Host) -> String {
+pub fn card_title(host: &Connection) -> String {
     let name = crate::cfg::base_name(&host.base_path);
     if name.is_empty() {
         "База не указана".to_string()
@@ -839,7 +839,7 @@ pub fn card_title(host: &Host) -> String {
     }
 }
 
-fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
+fn field_value<'a>(h: &'a Connection, name: &str) -> &'a str {
     match name {
         "server" => &h.server,
         "password" => &h.password,
@@ -864,7 +864,7 @@ fn field_value<'a>(h: &'a Host, name: &str) -> &'a str {
 /// `Panel::save` сам переносит рабочее место, адрес среды и пароль рабочего
 /// места из текущих параметров, как `save_host` уже делает для
 /// `dump`/`tools`/`mode`/`publication`/`http_port`.
-pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
+pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connection {
     let shown = shown_fields(mode, publication);
     let v = |name: &str, e: &Entity<InputState>| {
         if shown.contains(&name) {
@@ -873,7 +873,7 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
             String::new()
         }
     };
-    Host {
+    Connection {
         // Список соединений и переключение — не это окно (план интерфейса).
         // Пока здесь всегда ровно одно соединение, тем же умолчанием, что
         // у прежнего `[host]`.
@@ -903,7 +903,7 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
         db_user: v("db_user", &f.db_user),
         db_password: v("db_password", &f.db_password),
         // Человек вписывает адрес, каким открывает базу в браузере, —
-        // `/hs/mcp-1c` дописываем мы (`cfg::full_base_url`), и в `Host`
+        // `/hs/mcp-1c` дописываем мы (`cfg::full_base_url`), и в `Connection`
         // адрес попадает уже полным. Пустое остаётся пустым: это «не задан».
         base_url: crate::cfg::full_base_url(&v("base_url", &f.base_url)),
         dump: String::new(),
@@ -935,7 +935,7 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Host {
 /// открытого окна без фокуса — диалога поверх или правки с другой машины.
 /// Узкий случай не стоит второй системы учёта изменений, которая будет
 /// расходиться с первой.
-pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str, publication: &str) -> bool {
+pub fn adopt_needed(file: &Connection, form: &Connection, saved: &Connection, mode: &str, publication: &str) -> bool {
     fields_differ(file, saved, mode, publication) && !fields_differ(form, saved, mode, publication)
 }
 
@@ -947,7 +947,7 @@ pub fn adopt_needed(file: &Host, form: &Host, saved: &Host, mode: &str, publicat
 /// так не входят в список; `base_url` редактируется, но только в режиме
 /// «уже опубликована», и сравнивается через `shown_base_url` — тем же, чем
 /// показывается.
-pub fn fields_differ(a: &Host, b: &Host, mode: &str, publication: &str) -> bool {
+pub fn fields_differ(a: &Connection, b: &Connection, mode: &str, publication: &str) -> bool {
     shown_fields(mode, publication).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
@@ -1019,7 +1019,7 @@ impl Panel {
         // окна — смена темы системы видна без перезапуска программы.
         let (kit, host) = {
             let ui = cx.global::<Ui>();
-            (ui.kit.clone(), ui.cfg.host.clone())
+            (ui.kit.clone(), ui.cfg.current().clone())
         };
         if theme::Choice::load(&kit) == theme::Choice::System {
             Theme::sync_system_appearance(None, cx);
@@ -1151,8 +1151,8 @@ impl Panel {
     /// `render` без него не позвать. Это единственная непокрытая проводка в
     /// задаче — сказано прямо, чтобы следующий не искал сторожа, которого
     /// нет.
-    fn adopted_host(&self, cx: &App) -> Option<Host> {
-        let host = &cx.global::<Ui>().cfg.host;
+    fn adopted_host(&self, cx: &App) -> Option<Connection> {
+        let host = cx.global::<Ui>().cfg.current();
         let (mode, publication) = (host.mode.clone(), host.publication.clone());
         let form = host_of(&self.fields, &mode, &publication, cx);
         adopt_needed(host, &form, &self.original, &mode, &publication).then(|| host.clone())
@@ -1160,7 +1160,7 @@ impl Panel {
 
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
-    fn adopt_fields(&mut self, host: &Host, window: &mut Window, cx: &mut Context<Self>) {
+    fn adopt_fields(&mut self, host: &Connection, window: &mut Window, cx: &mut Context<Self>) {
         let shown = shown_fields(&host.mode, &host.publication);
         for (name, state) in self.field_states() {
             if !shown.contains(&name) {
@@ -1192,10 +1192,10 @@ impl Panel {
     }
 
     /// Записать параметры в toml и сказать об этом в подвале. Ошибка
-    /// Поля формы как `Host`: в локальном режиме скрытые поля переносятся из
+    /// Поля формы как `Connection`: в локальном режиме скрытые поля переносятся из
     /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
     /// спросить подтверждение смены базы и только потом писать.
-    fn host_from_fields(&self, cx: &mut Context<Self>) -> Host {
+    fn host_from_fields(&self, cx: &mut Context<Self>) -> Connection {
         let (mode, publication) = modes_of(cx);
         let mut host = host_of(&self.fields, &mode, &publication, cx);
         if mode == "local" {
@@ -1207,7 +1207,7 @@ impl Panel {
             // ради туннельной половины: поле принадлежит ей (`project.rs`,
             // `gate.rs`), и переключение режима не должно стирать значение,
             // которое человек впишет, вернувшись в туннель.
-            let current = cx.global::<Ui>().cfg.host.clone();
+            let current = cx.global::<Ui>().cfg.current().clone();
             host.server = current.server;
             host.password = current.password;
             host.workstation = current.workstation;
@@ -1217,7 +1217,7 @@ impl Panel {
 
     /// Запись в toml и всё, что за ней следует: итог в подвал, обновление
     /// вкладок, перезапуск сеанса внутри `gui::save_host`.
-    fn write(&mut self, host: Host, cx: &mut Context<Self>) -> bool {
+    fn write(&mut self, host: Connection, cx: &mut Context<Self>) -> bool {
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
         let line = match &r {
@@ -1335,8 +1335,8 @@ impl Render for Panel {
         // словом, идущая проверка им не является (`run_op`/`run_check`
         // выставляют разное).
         let running_op = ui.progress.as_ref().map(|r| r.which);
-        let mode = ui.cfg.host.mode.clone();
-        let publication = ui.cfg.host.publication.clone();
+        let mode = ui.cfg.current().mode.clone();
+        let publication = ui.cfg.current().publication.clone();
         let gate = ui.gate.clone();
         let c = card(ui.progress.as_ref(), &link, &mode, &ready, gate.as_deref(), Instant::now());
         // Причина — один расчёт на весь `render`: та же строка уходит и в
@@ -1348,7 +1348,7 @@ impl Render for Panel {
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
         // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
         let busy_now = busy.is_some();
-        // Поля формы как `Host` — один раз на весь `render`: из них считаются
+        // Поля формы как `Connection` — один раз на весь `render`: из них считаются
         // и «есть ли несохранённое», и заголовок карточки ниже.
         let form = host_of(&self.fields, &mode, &publication, cx);
         let dirty = fields_differ(&form, &self.original, &mode, &publication);
@@ -1367,7 +1367,7 @@ impl Render for Panel {
         let title = card_title(&form);
         // Профиль — свойство машины (`[host] toolset`), а не поля формы:
         // карточка его показывает, но не правит, см. ведомость плана вида.
-        let toolset = cx.global::<Ui>().cfg.host.toolset.clone();
+        let toolset = cx.global::<Ui>().cfg.current().toolset.clone();
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1985,7 +1985,7 @@ mod tests {
         shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu,
         FOOT_LINE, FOOT_LINES,
     };
-    use crate::cfg::Host;
+    use crate::cfg::Connection;
     use crate::editors;
     use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
@@ -2412,14 +2412,14 @@ mod tests {
 
     #[test]
     fn dirty_ignores_dump_tools_and_base_url_but_sees_a_changed_field() {
-        let saved = Host { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Host::default() };
+        let saved = Connection { dump: "C:\\proj\\src".into(), tools: vec!["x".into()], ..Connection::default() };
         // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
-        let shown = Host { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
+        let shown = Connection { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
         assert!(!fields_differ(&shown, &saved, "tunnel", "auto"));
-        let edited = Host { server: "h:1".into(), ..shown.clone() };
+        let edited = Connection { server: "h:1".into(), ..shown.clone() };
         assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
         // Каталог проекта теперь в форме — его правка видна.
-        let moved = Host { project: "D:\\other\\Buh".into(), ..shown };
+        let moved = Connection { project: "D:\\other\\Buh".into(), ..shown };
         assert!(fields_differ(&moved, &saved, "tunnel", "auto"));
     }
 
@@ -2429,20 +2429,20 @@ mod tests {
     /// (находка S12). Но набранное человеком свежее файла и важнее его.
     #[test]
     fn a_hand_edited_file_reaches_the_form_unless_the_person_is_typing() {
-        let saved = Host { mode: "local".into(), db_user: "Администратор".into(), ..Host::default() };
+        let saved = Connection { mode: "local".into(), db_user: "Администратор".into(), ..Connection::default() };
         let form = saved.clone();
         // Файл правили руками — подхватываем.
-        let file = Host { db_user: "Иванов".into(), ..saved.clone() };
+        let file = Connection { db_user: "Иванов".into(), ..saved.clone() };
         assert!(adopt_needed(&file, &form, &saved, "local", "auto"));
         // Файл не менялся — подхватывать нечего.
         assert!(!adopt_needed(&saved, &form, &saved, "local", "auto"));
         // Человек набирает в полях — его правку не затираем, даже если файл
         // тем временем сменился.
-        let typing = Host { db_user: "Петров".into(), ..saved.clone() };
+        let typing = Connection { db_user: "Петров".into(), ..saved.clone() };
         assert!(!adopt_needed(&file, &typing, &saved, "local", "auto"));
         // Поля, которых режим не показывает, подхват не будят: в локальном
         // режиме адрес среды ни на что не влияет.
-        let hidden = Host { server: "10.0.0.5:3393".into(), ..saved.clone() };
+        let hidden = Connection { server: "10.0.0.5:3393".into(), ..saved.clone() };
         assert!(!adopt_needed(&hidden, &form, &saved, "local", "auto"));
         assert!(adopt_needed(&hidden, &form, &saved, "tunnel", "auto"));
     }
@@ -2515,7 +2515,7 @@ mod tests {
 
     #[test]
     fn a_derived_address_is_shown_as_an_empty_field() {
-        let mut h = Host { base_path: "C:\\Bases\\Buh".into(), ..Host::default() };
+        let mut h = Connection { base_path: "C:\\Bases\\Buh".into(), ..Connection::default() };
         h.base_url = crate::cfg::derived_base_url(&h.base_path);
         assert_eq!(shown_base_url(&h), "");
         h.base_url = "http://localhost/UNF/hs/mcp-1c".into();
@@ -2526,15 +2526,16 @@ mod tests {
 
     #[test]
     fn changing_a_hidden_field_does_not_enable_save() {
-        let saved = Host { mode: "local".into(), ..Host::default() };
+        let saved = Connection { mode: "local".into(), ..Connection::default() };
         // Адрес среды, пароль рабочего места и само рабочее место правятся,
         // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
-        let edited = Host { server: "10.0.0.5:3393".into(), password: "другой".into(), workstation: "dev2".into(), ..saved.clone() };
+        let edited =
+            Connection { server: "10.0.0.5:3393".into(), password: "другой".into(), workstation: "dev2".into(), ..saved.clone() };
         assert!(!fields_differ(&edited, &saved, "local", "auto"));
         // А то же самое в туннельном режиме — заметная правка.
         assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
         // Видимое поле в локальном режиме по-прежнему включает «Сохранить».
-        let moved = Host { project: "D:\\other\\Buh".into(), ..saved.clone() };
+        let moved = Connection { project: "D:\\other\\Buh".into(), ..saved.clone() };
         assert!(fields_differ(&moved, &saved, "local", "auto"));
     }
 
@@ -2591,22 +2592,22 @@ mod tests {
 
     #[test]
     fn the_card_title_names_the_base_and_survives_what_a_path_is_not() {
-        let file = Host { base_path: r"C:\bases\Ромашка".into(), ..Host::default() };
+        let file = Connection { base_path: r"C:\bases\Ромашка".into(), ..Connection::default() };
         assert_eq!(card_title(&file), "Ромашка", "файловая база — имя каталога, не весь путь");
 
-        let server = Host { base_path: r"Срв\Бухгалтерия".into(), ..Host::default() };
+        let server = Connection { base_path: r"Срв\Бухгалтерия".into(), ..Connection::default() };
         assert_eq!(card_title(&server), "Бухгалтерия", "серверная строка — имя базы после слэша");
 
-        let empty = Host { base_path: String::new(), ..Host::default() };
+        let empty = Connection { base_path: String::new(), ..Connection::default() };
         assert_eq!(card_title(&empty), "База не указана", "пусто говорит словами, а не пустой строкой");
 
-        let odd = Host { base_path: r"C:\bases\Ромашка\".into(), ..Host::default() };
+        let odd = Connection { base_path: r"C:\bases\Ромашка\".into(), ..Connection::default() };
         assert_eq!(card_title(&odd), "Ромашка", "хвостовой разделитель не делает заголовок пустым");
 
-        let unc = Host { base_path: r"\\сервер\шара\база".into(), ..Host::default() };
+        let unc = Connection { base_path: r"\\сервер\шара\база".into(), ..Connection::default() };
         assert_eq!(card_title(&unc), "база", "сетевой путь — такой же последний компонент");
 
-        let root = Host { base_path: r"C:\".into(), ..Host::default() };
+        let root = Connection { base_path: r"C:\".into(), ..Connection::default() };
         assert_eq!(card_title(&root), "База не указана", "корень диска именем соединения быть не может");
     }
 

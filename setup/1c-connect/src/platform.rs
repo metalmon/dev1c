@@ -191,7 +191,7 @@ pub fn resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Resul
         Some((v, exe)) => Ok(Choice { exe: exe.clone(), version: v.clone(), why }),
         None => Err(missing(m, source, installed)),
     };
-    let field = cfg.host.platform.trim();
+    let field = cfg.current().platform.trim();
     if !field.is_empty() {
         return pick(field, Why::Field, "поле platform в 1c-connect.toml");
     }
@@ -215,7 +215,7 @@ pub fn resolve(cfg: &Cfg, installed: &[(String, PathBuf)], pins: &Pins) -> Resul
 /// и оба `1CEStart.cfg` (пользовательский раньше общего).
 pub fn pins_on_disk(cfg: &Cfg) -> Pins {
     let v8i = starter_dirs().into_iter().map(|d| d.join("ibases.v8i")).find_map(|p| read_1c_text(&p));
-    let base = v8i.as_deref().and_then(|text| base_pin(text, &cfg.host.base_path));
+    let base = v8i.as_deref().and_then(|text| base_pin(text, &cfg.current().base_path));
     let default = starter_dirs()
         .into_iter()
         .map(|d| d.join(starter_cfg_name()))
@@ -283,8 +283,8 @@ mod tests {
 
     fn cfg_with(platform: &str, base: &str) -> Cfg {
         let mut c = crate::cfg::filled_for_test();
-        c.host.platform = platform.into();
-        c.host.base_path = base.into();
+        c.current_mut().platform = platform.into();
+        c.current_mut().base_path = base.into();
         c
     }
 

@@ -77,6 +77,10 @@ const PUBLICATIONS: [(&str, &str, &str); 2] =
 /// перенос `write` той же строкой, что `platform`/`configuration`).
 /// «Только чтение» — первым, как отмеченное по умолчанию (решение
 /// владельца 1.11, `Cfg::access()`).
+///
+/// Накрывает инструменты канала `mcp-1c` — не весь агентский доступ:
+/// канал `vrunner` этим потолком не ограничен (подробнее — докстрока
+/// `apply_access`).
 const ACCESS: [(&str, &str, &str); 2] =
     [("read_only", "access:read_only", "Только чтение"), ("read_write", "access:read_write", "Чтение и запись")];
 
@@ -663,15 +667,44 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
     cx.refresh_windows();
 }
 
+/// Клон `base` с подменённым одним полем — потолком записи. Не трогает
+/// остальные: `base` здесь — то, что уже лежит в живой ячейке сеанса
+/// (`Session::cfg_now`), заведомо годное, а толкать туда весь `ui.cfg`,
+/// который в этот момент может не пройти `validate()` целиком (поле не то
+/// правили, которое отвечает за потолок), — значило бы либо ронять
+/// работающего ребёнка на негодных данных, либо, как было до круга
+/// исправления, вовсе не донести ужесточение (находка проверки
+/// безопасности на `c22b058`: переключатель показывал «Только чтение», а
+/// ребёнок продолжал обслуживать `read_write`).
+fn access_onto(mut base: crate::cfg::Cfg, access: &str) -> crate::cfg::Cfg {
+    base.host.write = access.into();
+    base
+}
+
 /// Записать потолок записи и сообщить об этом уже работающему ребёнку — без
 /// перезапуска сеанса (в отличие от `apply_mode`/`apply_publication` выше):
-/// потолок не меняет транспорт, только флаг у `mcp_command`, а механизм
-/// донести его без разрыва соединения с агентом уже есть —
-/// `Session::update_cfg` кладёт новый `Cfg` в общую ячейку (`rules.live`), и
-/// действующий ребёнок пересобирается на ней же на следующий запрос
-/// (`Serve::dispatch`, `EpochEnd::Restart`). Вопроса человеку здесь нет: это
-/// не смена базы (`save_needs_confirm` на одном только `write` и так молчит),
-/// а независимая настройка потолка.
+/// потолок не меняет транспорт, только флаг у `mcp_command` на канале
+/// `mcp-1c`, а механизм донести его без разрыва соединения с агентом уже
+/// есть — `Session::update_cfg` кладёт новый `Cfg` в общую ячейку
+/// (`rules.live`), и действующий ребёнок пересобирается на ней же на
+/// следующий запрос (`Serve::dispatch`, `EpochEnd::Restart`). Вопроса
+/// человеку здесь нет: это не смена базы (`save_needs_confirm` на одном
+/// только `write` и так молчит), а независимая настройка потолка.
+///
+/// **Область действия — только канал `mcp-1c`.** Канал `vrunner` этим
+/// потолком не ограничен: у него свой список инструментов
+/// (`Rules::for_vrunner`), среди них есть пишущие в базу (например,
+/// загрузка конфигурации), и подпись «Запись в базу» в меню не обещает
+/// большего — решение, закрывать ли и этот канал потолком, за владельцем
+/// (находка проверки безопасности на `c22b058`: своего списка пишущих имён
+/// `vrunner` здесь нет и заводить его в этой задаче не просили).
+///
+/// **Действует на вызовы ПОСЛЕ смены, а не на уже идущий.** Пересборка
+/// происходит, когда у моста нет вызова без ответа (`bridge.rs`,
+/// `in_flight == 0` в `pipe_jsonrpc`) — начатый вызов доигрывает со старым
+/// ребёнком, как и начинался; только следующий застаёт пересобранного.
+/// Иначе быть не может: ответ ребёнка, уже начавшего работу, нельзя
+/// отозвать на середине.
 fn apply_access(cx: &mut App, access: &'static str) {
     cx.global_mut::<Ui>().cfg.host.write = access.into();
     let host = cx.global::<Ui>().cfg.host.clone();
@@ -682,7 +715,9 @@ fn apply_access(cx: &mut App, access: &'static str) {
             }
             // `update_cfg` не повредит и в туннельном режиме (её же
             // докстрока) — отдельной ветки по режиму, в отличие от
-            // `save_host`, здесь не нужно.
+            // `save_host`, здесь не нужно. Весь `ui.cfg` годен (`save_host`
+            // только что это проверил целиком) — толкаем его как есть, не
+            // через `access_onto` (та — для ветки отказа ниже, где это не так).
             if let Some(s) = &cx.global::<Ui>().session {
                 s.update_cfg(cx.global::<Ui>().cfg.clone());
             }
@@ -692,7 +727,10 @@ fn apply_access(cx: &mut App, access: &'static str) {
                     label = text;
                 }
             }
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("запись в базу: {}", label.to_lowercase()) });
+            note_line(
+                cx.global_mut::<Ui>(),
+                Line { kind: Kind::Ok, text: format!("запись в базу: {} (действует на вызовы после смены)", label.to_lowercase()) },
+            );
         }
         Err(why) => {
             // Та же развязка, что у режима и публикации, и по той же
@@ -702,6 +740,17 @@ fn apply_access(cx: &mut App, access: &'static str) {
             if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "write", access) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
+            }
+            // Остальные поля `ui.cfg` могли не пройти `validate()` — но это
+            // не повод не донести УЖЕСТОЧЕНИЕ (или ослабление) потолка до
+            // уже работающего ребёнка: берём не `ui.cfg`, а то, что сейчас
+            // лежит в живой ячейке сеанса (`Session::cfg_now` — последний
+            // годный `Cfg`), и меняем на его клоне только `write`
+            // (`access_onto`). Круг исправления задачи 3: раньше эта ветка
+            // молчала вовсе, и переключатель показывал «Только чтение»,
+            // пока ребёнок продолжал обслуживать `read_write`.
+            if let Some(s) = &cx.global::<Ui>().session {
+                s.update_cfg(access_onto(s.cfg_now(), access));
             }
             let label = ACCESS.iter().find(|(a, ..)| *a == access).map(|(_, _, t)| *t).unwrap_or(access);
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
@@ -890,9 +939,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
-        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES,
-        PUBLICATIONS, PUBLICATION_SUBMENU,
+        access_onto, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
+        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS,
+        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -990,6 +1039,27 @@ mod tests {
         assert_eq!(ui.cfg.access(), "read_write");
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
         assert!(text.contains("write = \"read_write\""), "{text}");
+    }
+
+    /// Круг исправления задачи 3 (проверка безопасности на `c22b058`):
+    /// ужесточение потолка не должно зависеть от того, годны ли остальные
+    /// поля `ui.cfg` — иначе переключатель показал бы «Только чтение», пока
+    /// работающий ребёнок остаётся на `read_write`, и это молчаливый
+    /// неверный результат, худший из возможных. `access_onto` меняет ровно
+    /// одно поле на уже годном `Cfg` (том, что лежит в живой ячейке сеанса),
+    /// не трогая остальные.
+    #[test]
+    fn a_tightened_ceiling_reaches_the_rebuilt_command_even_with_bad_fields_elsewhere() {
+        let mut live = crate::cfg::filled_for_test();
+        live.host.write = "read_write".into();
+        assert!(live.validate().is_ok(), "вводная: живая ячейка держит годный Cfg");
+        let tightened = access_onto(live.clone(), "read_only");
+        assert_eq!(tightened.host.base_path, live.host.base_path, "остальные поля не тронуты");
+        assert_eq!(tightened.host.db_user, live.host.db_user, "остальные поля не тронуты");
+        let kit = common::kit::Kit::at(std::env::temp_dir());
+        let cmd = crate::bridge::mcp_command(&tightened, &kit);
+        let args: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w == ["--access", "read_only"]), "{args:?}");
     }
 
     #[test]

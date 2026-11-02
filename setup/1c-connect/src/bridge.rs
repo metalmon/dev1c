@@ -1778,6 +1778,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
+        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
+        // тест про текст отказа стража, не про это, и ему нужен непустой.
+        cfg.host.db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл") && err.contains("пароль базы не отправлен"), "{err}");
     }
@@ -1822,6 +1825,11 @@ mod tests {
         cfg.host.publication = "auto".into();
         cfg.host.toolset = "developer".into();
         cfg.host.configuration = "generic".into();
+        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
+        // тест про то, что годные значения не стали ВТОРОЙ причиной отказа
+        // раньше стража, и ему нужен непустой пароль, чтобы страж успел
+        // отказать первым.
+        cfg.host.db_password = "секрет-базы".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл"), "{err}");
     }

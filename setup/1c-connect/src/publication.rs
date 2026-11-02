@@ -655,8 +655,22 @@ fn forget_stale_pid_file(pid_file: &Path) {
 /// чтобы сверять личность держателя, а не только его номер (находка
 /// автоматической проверки безопасности по кругу 4). Ни `Paths::of`, ни
 /// подбора порта за этим не стоит: `kit.root` — чистое значение.
+///
+/// Пустой `cfg.host.db_password` — пропуск, тем же `Ok(())` раньше похода к
+/// `guard_state_dir()` (круг исправления, журнал владельца 2.11: база без
+/// пароля получала отказ «пароль базы не отправлен» про пароль, которого
+/// нет, — страж блокировал рабочую установку и при этом врал о причине).
+/// Правило: страж существует, чтобы не отдать пароль постороннему; нет
+/// пароля — нечего отдавать, и отказывать не для чего. Цена честная: при
+/// пустом пароле посторонний слушатель на этом порту может ответить за наш
+/// httpd и соврать про версию расширения (`Extension::state` зовёт этот же
+/// страж) — риск неверного ФАКТА в окне, не утечки, и он дешевле, чем
+/// блокировка установки, у которой пароля и не было.
 pub fn guard_own_listener(cfg: &Cfg, kit: &Kit) -> Result<(), String> {
     if cfg.host.publication != "auto" {
+        return Ok(());
+    }
+    if cfg.host.db_password.is_empty() {
         return Ok(());
     }
     refuse_unless_ours(&pid_file_in(&guard_state_dir()?), cfg.http_port(), &OurHttpd::of(&kit.root))
@@ -1645,6 +1659,10 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         let _ = std::fs::remove_dir_all(&dir);
         let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
+        // Непустой пароль: тест опирается на отказ стража в режиме `auto`
+        // ниже, а пустой пароль сам по себе пропускает страж (см.
+        // `guard_skips_the_check_entirely_with_an_empty_db_password`).
+        cfg.host.db_password = "секрет-базы".into();
         cfg.host.publication = "webserver".into();
         assert!(ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ok());
         cfg.host.publication = "auto".into();
@@ -1652,6 +1670,42 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
             ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_err(),
             "тест опирается на то, что в auto на этом же каталоге страж отказывает"
         );
+    }
+
+    /// Круг исправления, журнал владельца 2.11: база без пароля получала
+    /// отказ «пароль базы не отправлен» — про пароль, которого нет, —
+    /// потому что страж не прочёл pid-файл публикации (каталог пуст,
+    /// публикации никогда не было). Правило: страж существует, чтобы не
+    /// отдать пароль постороннему; нет пароля — нечего отдавать. Доказано
+    /// красным: тот же пустой каталог, что валил бы страж с непустым
+    /// паролем (следующий тест), с пустым — пропускает работу дальше.
+    #[test]
+    fn guard_skips_the_check_entirely_with_an_empty_db_password() {
+        let dir = std::env::temp_dir().join(format!("dev1c-guard-no-password-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kit = Kit::at(dir.clone());
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.db_password = String::new();
+        assert!(
+            ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).is_ok(),
+            "пустой пароль — нечего защищать, страж не должен отказывать"
+        );
+    }
+
+    /// Обратная сторона того же утверждения — мутация красным: тот же
+    /// пустой каталог (ни разу не было публикации, pid-файла нет), но
+    /// пароль непустой — страж отказывает, как и до этой правки.
+    #[test]
+    fn guard_still_refuses_with_a_password_and_an_unreadable_pid_file() {
+        let dir = std::env::temp_dir().join(format!("dev1c-guard-with-password-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kit = Kit::at(dir.clone());
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.db_password = "секрет-базы".into();
+        let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();
+        assert!(e.contains("pid-файл") && e.contains("пароль базы не отправлен"), "{e}");
     }
 
     /// Находка автоматической проверки безопасности по кругу 4: страж верит
@@ -1830,6 +1884,7 @@ DocumentRoot \"/home/dev2/dev1c/pub\"\n\
         std::fs::create_dir_all(&dir).unwrap();
         let kit = Kit::at(dir.clone());
         let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.db_password = "секрет-базы".into(); // пустой пароль сам пропускает страж — тест не про это
         cfg.host.publication = "auto".into();
         cfg.resolved_http_port = Some(47903);
         let e = ops_host::with_state_dir_for_test(&dir, || guard_own_listener(&cfg, &kit)).unwrap_err();

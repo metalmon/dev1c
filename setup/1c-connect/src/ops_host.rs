@@ -2303,6 +2303,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut cfg = crate::cfg::filled_for_test();
         cfg.host.publication = "auto".into();
+        // Пустой пароль сам пропускает страж (решение владельца 2.11) — этот
+        // тест про то, что страж срабатывает РАНЬШЕ запроса к базе, и ему
+        // нужен непустой пароль, иначе страж пропустит и до пароля дело
+        // дойдёт настоящим (неуспешным) сетевым запросом.
+        cfg.host.db_password = "секрет-базы".into();
         let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-guard-{}", std::process::id())));
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };

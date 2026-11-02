@@ -73,7 +73,7 @@ pub struct Panel {
     /// Высота видимой области тела вкладки и высота содержимого «Связи»
     /// с последней отрисовки.
     viewport_h: Option<Pixels>,
-    params_h: Option<Pixels>,
+    link_h: Option<Pixels>,
     /// Пара (видимая область, содержимое), по которой подбирали высоту в
     /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
     /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
@@ -1048,7 +1048,7 @@ impl Panel {
             log_len: 0,
             original,
             viewport_h: None,
-            params_h: None,
+            link_h: None,
             last_fit: None,
             fit_queued: false,
         }
@@ -1064,8 +1064,8 @@ impl Panel {
     /// раскладки нельзя.
     fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.viewport_h = viewport.or(self.viewport_h);
-        self.params_h = params.or(self.params_h);
-        let (Some(v), Some(c)) = (self.viewport_h, self.params_h) else { return };
+        self.link_h = params.or(self.link_h);
+        let (Some(v), Some(c)) = (self.viewport_h, self.link_h) else { return };
         // Два обмера за кадр (видимая область и содержимое) — один подбор:
         // отложенный замыкание читает пару, какой она стала к концу кадра.
         if self.fit_queued || !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
@@ -1074,7 +1074,7 @@ impl Panel {
         self.fit_queued = true;
         cx.defer_in(window, |this, window, cx| {
             this.fit_queued = false;
-            let (Some(v), Some(c)) = (this.viewport_h, this.params_h) else { return };
+            let (Some(v), Some(c)) = (this.viewport_h, this.link_h) else { return };
             if !crate::gui::window::needs_fit(this.last_fit, (v, c)) {
                 return;
             }
@@ -1116,11 +1116,6 @@ impl Panel {
                         .thumb_active(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.)))
                 }),
             ))
-    }
-
-    fn is_dirty(&self, cx: &App) -> bool {
-        let (mode, publication) = modes_of(cx);
-        fields_differ(&host_of(&self.fields, &mode, &publication, cx), &self.original, &mode, &publication)
     }
 
     /// Нужно ли подхватить перечитанные параметры в поля — и какие именно.
@@ -1347,7 +1342,10 @@ impl Render for Panel {
         // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
         // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
         let busy_now = busy.is_some();
-        let dirty = self.is_dirty(cx);
+        // Поля формы как `Host` — один раз на весь `render`: из них считаются
+        // и «есть ли несохранённое», и заголовок карточки ниже.
+        let form = host_of(&self.fields, &mode, &publication, cx);
+        let dirty = fields_differ(&form, &self.original, &mode, &publication);
         let hint = (tab == gui::Tab::Link).then(|| save_hint(dirty, busy_now, running_op)).flatten();
         // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
         // порядок держит сама `foot_left_text`, здесь только источники.
@@ -1357,10 +1355,10 @@ impl Render for Panel {
         // себя.
         let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
         let shown = shown_fields(&mode, &publication);
-        // Заголовок карточки соединения считается из ПОЛЕЙ, а не из
-        // сохранённого: человек меняет базу и видит, какую карточку он
-        // правит, ещё до «Сохранить».
-        let title = card_title(&host_of(&self.fields, &mode, &publication, cx));
+        // Заголовок карточки — из ПОЛЕЙ (`form` выше), а не из сохранённого:
+        // человек меняет базу и видит, какую карточку он правит, ещё до
+        // «Сохранить».
+        let title = card_title(&form);
         // Профиль — свойство машины (`[host] toolset`), а не поля формы:
         // карточка его показывает, но не правит, см. ведомость плана вида.
         let toolset = cx.global::<Ui>().cfg.host.toolset.clone();
@@ -1507,7 +1505,7 @@ impl Render for Panel {
                             // `min_w_0` обязателен: без него длинное имя базы не
                             // переносится, а обрезается по краю карточки на 380
                             // точках (находка владельца 31.10).
-                            h_flex().min_w_0().child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone())),
+                            div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone()),
                         )
                         .child(
                             // Профиль показан, а не выбран: `toolset` — свойство
@@ -2598,6 +2596,12 @@ mod tests {
 
         let odd = Host { base_path: r"C:\bases\Ромашка\".into(), ..Host::default() };
         assert_eq!(card_title(&odd), "Ромашка", "хвостовой разделитель не делает заголовок пустым");
+
+        let unc = Host { base_path: r"\\сервер\шара\база".into(), ..Host::default() };
+        assert_eq!(card_title(&unc), "база", "сетевой путь — такой же последний компонент");
+
+        let root = Host { base_path: r"C:\".into(), ..Host::default() };
+        assert_eq!(card_title(&root), "База не указана", "корень диска именем соединения быть не может");
     }
 
     #[test]

@@ -93,9 +93,9 @@ fn the_tab_still_has_the_kit_to_show_the_moment_the_switch_goes_off() {
     // навсегда вместо того, чтобы его уронить.
     let deadline = Instant::now() + Duration::from_secs(20);
     let facts = loop {
-        match rx.try_next() {
-            Ok(Some(Ev::Kit(facts))) => break facts,
-            Ok(Some(_)) => continue,
+        match rx.try_recv() {
+            Ok(Ev::Kit(facts)) => break facts,
+            Ok(_) => continue,
             _ => {
                 assert!(Instant::now() < deadline, "кит-проход при выключении не завёлся — вкладке показывать нечего");
                 std::thread::sleep(Duration::from_millis(20));

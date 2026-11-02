@@ -97,7 +97,16 @@ pub const SERVICE_PATH: &str = "/hs/mcp-1c";
 /// диалог показывает путь целиком, адрес подставляет `Buh`. Поэтому здесь
 /// пустое остаётся пустым, без умолчаний за них.
 pub fn base_name(base_path: &str) -> &str {
-    base_path.trim().trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("")
+    let name = base_path.trim().trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("");
+    // Буква диска именем базы не бывает: `C:\` — корень, а не база, и
+    // «C:» в заголовке карточки или в диалоге подтверждения ничего человеку
+    // не говорит. Правило то же, что у `is_server_base` выше: ровно `X:`.
+    let drive = name.len() == 2 && name.ends_with(':') && name.starts_with(|c: char| c.is_ascii_alphabetic());
+    if drive {
+        ""
+    } else {
+        name
+    }
 }
 
 pub fn derived_base_url(base_path: &str) -> String {
@@ -1080,6 +1089,9 @@ mod tests {
         assert_eq!(base_name(""), "", "пусто — пусто, слова подбирает потребитель");
         assert_eq!(base_name("   "), "", "пробелы — то же пусто");
         assert_eq!(base_name(r"\\\\"), "", "строка из одних разделителей компонента не даёт");
+        assert_eq!(base_name(r"C:\\"), "", "корень диска — не база: имени здесь нет");
+        assert_eq!(base_name("C:"), "", "и буква диска без слэша тоже");
+        assert_eq!(base_name(r"D:\Бух"), "Бух", "а база на корне диска — это имя");
     }
 
     // Самоимпорт — ради `cfg::FILE`/`cfg::write_checked` в тестах ниже:

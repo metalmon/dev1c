@@ -140,7 +140,7 @@ pub fn capitalized(s: &str) -> String {
     // фразы, а не путь, и оставлять его строчным было бы ровно той же
     // разнобойностью, из-за которой правка и затеяна. Внутренние `:` и `.`
     // (`C:\…`, `setup.log`, `2.2.0`) обрезка не трогает.
-    let word = s.split_whitespace().next().unwrap_or("").trim_end_matches(|c: char| matches!(c, ':' | '.' | ',' | ';'));
+    let word = s.split_whitespace().next().unwrap_or("").trim_end_matches([':', '.', ',', ';']);
     let techy = LOWER_NAMES.contains(&word) || word.contains(|c: char| c.is_numeric() || matches!(c, '\\' | '/' | ':' | '.'));
     let mut cs = s.chars();
     match cs.next() {

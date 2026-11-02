@@ -232,6 +232,17 @@ script days is obsolete; the scripts are gone.
 
 ## Known traps, each cost a build or an evening
 
+- **Dropping a fresh `1c-connect.exe` into an existing kit can kill MCP
+  entirely.** The connector now passes `--profile` (and, after task 3,
+  `--toolset`/`--access`) to the `mcp-1c` child. The kit in
+  `C:\dev1c-connect-kit` still carries upstream **v1.23.0**, which knows none
+  of them: measured 2.11, it prints `flag provided but not defined: -profile`,
+  dumps its usage and exits, so the child never starts. `pack.sh` gets a guard
+  that refuses to assemble such a kit, but updating only the connector binary
+  inside an already-assembled kit goes around that guard — and that is the
+  usual way the reference kit gets refreshed. Replace `mcp-1c` in the same
+  move, or the journal will show a flag error nobody can act on.
+
 - **`httpd -k stop` does not stop a console-started httpd.** It goes looking
   for the Windows service and prints `The 'Apache2.4' service is not
   started`, changing nothing. Measured 2.11: the parent had to be killed by

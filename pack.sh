@@ -291,6 +291,12 @@ cp setup/1c-connect/1c-connect.example.toml "$CONNECT/1c-connect.toml"
 # 5 плана «тонкий срез ценности». Файл один и тот же для обеих машин, которые
 # встретит этот комплект; правит его только человек, не install/checksums.
 cp "$DIR/config/kit/БУХГАЛТЕРУ.md" "$CONNECT/"
+# Лист для службы безопасности — «часть комплекта, а не переписка»
+# (docs/superpowers/specs/2026-11-01-where-1c-and-agents-live-design.md,
+# раздел «Текст для службы безопасности»). Рядом с БУХГАЛТЕРУ.md, чтобы
+# бухгалтер мог переслать его не читая остального, и попадает в checksums.txt
+# так же, как все файлы комплекта.
+cp "$DIR/config/kit/БЕЗОПАСНОСТИ.md" "$CONNECT/"
 
 # Tools for vrunner on the developer's machine. OneScript's archive already
 # has the bin/ + lib/ layout its oscript.cfg expects (lib.system = ../lib), so

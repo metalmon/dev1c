@@ -693,6 +693,21 @@ fn facts_when_the_listener_is_foreign(base_url: &str, publication: &str, cfg: &c
     )
 }
 
+/// Факты группы «база», когда страж сказал `Guard::NotPublished`
+/// (`publication::guard_own_listener`) — круг исправления, последний по
+/// этой функции: порт свободен (прямая проба, не атрибуция), pid-файла
+/// нет, публикация просто ещё не поднималась. Не отказ и не занятость чужим
+/// (`facts_when_the_listener_is_foreign` — для НИХ своя функция): запроса
+/// не делаем вовсе, потому что отвечать некому (решение владельца), и
+/// `Check::note` — информация, а не провал, ровно как «туннель не поднят».
+fn facts_when_publication_is_not_up(base_url: &str, cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> (Check, Check, Check) {
+    (
+        Check::note(PUBLICATION, format!("{base_url}/version не спрашивали: публикация ещё не поднята")),
+        Check::note(EXTENSION, "не спрашивали: публикация ещё не поднята".to_string()),
+        descriptor_fact(base_descriptor(cfg, kit)),
+    )
+}
+
 fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str, &str)>) -> Check {
     if responds {
         return Check::pass(PUBLICATION, format!("{base_url}/version отвечает"));
@@ -1356,8 +1371,19 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             // — поэтому ЕЁ ОТКАЗ ТОЖЕ ОТКАЗ (`guard_own_listener`), не повод
             // пропустить сверку: см. докстроку там же, первая редакция этой
             // ветки рассуждала наоборот и была неверна.
-            if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
-                return facts_when_the_listener_is_foreign(&base_url, &h.publication, &ctx.cfg, &ctx.kit, &reason);
+            // Три исхода, не два (круг исправления, последний по этой
+            // функции): `NotPublished` — публикация ещё не поднята, и
+            // проба не делается вовсе (владелец: «запроса не делаем,
+            // потому что некому его слать») — факт говорит именно это, не
+            // занятость чужим и не провал.
+            match crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+                crate::publication::Guard::Refuse(reason) => {
+                    return facts_when_the_listener_is_foreign(&base_url, &h.publication, &ctx.cfg, &ctx.kit, &reason);
+                }
+                crate::publication::Guard::NotPublished => {
+                    return facts_when_publication_is_not_up(&base_url, &ctx.cfg, &ctx.kit);
+                }
+                crate::publication::Guard::Ours => {}
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             let reach = crate::ops_host::extension_reach(&base_url, &h.db_user, &h.db_password, left);
@@ -2141,6 +2167,24 @@ mod tests {
             assert_eq!(c.outcome(), Outcome::Busy, "{c:?}");
             assert!(c.detail.contains("занят не нами"), "{c:?}");
             assert!(!c.ok || c.info, "{c:?}"); // busy() — не провал и не честный проход
+        }
+    }
+
+    /// Круг исправления, последний по `publication::guard_own_listener`:
+    /// `Guard::NotPublished` не делает пробы вовсе (владелец: «запроса не
+    /// делаем, потому что некому его слать») — оба факта честно говорят
+    /// «не спрашивали», информацией (`Check::note`), не занятостью чужим
+    /// (`Outcome::Busy` тут не при чём — занятость подразумевает, что кто-то
+    /// ДЕРЖИТ порт, а здесь не держит никто) и не провалом.
+    #[test]
+    fn publication_not_up_asks_nothing_and_says_so_as_information() {
+        let kit = common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-notup-kit-{}", std::process::id())));
+        let cfg = crate::cfg::filled_for_test();
+        let (publication, extension, _descriptor) = facts_when_publication_is_not_up("http://localhost:8081/hs/mcp-1c", &cfg, &kit);
+        for c in [&publication, &extension] {
+            assert_eq!(c.outcome(), Outcome::Good, "{c:?}");
+            assert!(c.ok && c.info, "информация, не провал и не занятость: {c:?}");
+            assert!(c.detail.contains("не спрашивали"), "{c:?}");
         }
     }
 

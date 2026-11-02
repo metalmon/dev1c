@@ -2074,9 +2074,15 @@ impl Op<Ctx> for Extension {
         let url = ctx.cfg.base_url();
         // Страж перед отправкой пароля базы (круг исправления 2, находка
         // автоматической проверки безопасности, одна функция на все дороги
-        // — см. докстроку `publication::guard_own_listener`).
-        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
-            return OpState::Blocked(reason);
+        // — см. докстроку `publication::guard_own_listener`). Три исхода,
+        // не два (круг исправления, последний по этой функции):
+        // `NotPublished` — публикация ещё не поднята, и спрашивать о
+        // расширении некого; это то же «не сделано», что и молчащая база
+        // ниже, а не повод идти проверять пароль.
+        match crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+            crate::publication::Guard::Refuse(reason) => return OpState::Blocked(reason),
+            crate::publication::Guard::NotPublished => return OpState::Missing,
+            crate::publication::Guard::Ours => {}
         }
         match extension_version(&url, &ctx.cfg.host.db_user, &ctx.cfg.host.db_password) {
             Some(v) => OpState::Done(format!("расширение {v}, публикация отвечает")),
@@ -2154,13 +2160,22 @@ impl Op<Ctx> for Extension {
         // (`verify::facts_when_the_listener_is_foreign`, `Extension::state`
         // выше). Порядок тот же, что был у `&&`: отказал страж — до пароля
         // дело не доходит.
-        if let Err(reason) = crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
-            ctx.warn(reason);
-        } else if extension_version(&base_url, &h.db_user, &h.db_password).is_none() {
-            ctx.warn(format!(
-                "публикация {} не отвечает. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
+        // Три исхода, не два (круг исправления, последний по этой функции):
+        // `NotPublished` не идёт в базу вовсе — она не слушает, спрашивать
+        // нечего — а говорит словами, что сперва нужна публикация.
+        match crate::publication::guard_own_listener(&ctx.cfg, &ctx.kit) {
+            crate::publication::Guard::Refuse(reason) => ctx.warn(reason),
+            crate::publication::Guard::NotPublished => ctx.warn(format!(
+                "публикация {} не поднята. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
                 base_url
-            ));
+            )),
+            crate::publication::Guard::Ours if extension_version(&base_url, &h.db_user, &h.db_password).is_none() => {
+                ctx.warn(format!(
+                    "публикация {} не отвечает. Опубликуйте базу: Конфигуратор → Администрирование → Публикация на веб-сервере, вкладка «HTTP-сервисы» → «Публиковать HTTP-сервисы расширений по умолчанию»",
+                    base_url
+                ));
+            }
+            crate::publication::Guard::Ours => {}
         }
         Ok(())
     }
@@ -2322,6 +2337,34 @@ mod tests {
             other => panic!("ожидался Blocked с причиной стража, получено {other:?}"),
         }
         drop(listener);
+    }
+
+    /// Круг исправления, последний по `publication::guard_own_listener`:
+    /// `Guard::NotPublished` — публикация ещё не поднята, спрашивать о
+    /// расширении некого. `state()` не идёт к базе вовсе (`OpState::Missing`
+    /// — то же «не сделано», что у молчащей базы, а не `Blocked`: это не
+    /// авария, это нормальный путь до первой установки).
+    #[test]
+    fn extension_state_is_missing_not_blocked_when_publication_is_not_up() {
+        let dir = std::env::temp_dir().join(format!("dev1c-extstate-notup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Порт, который только что был свободен, и pid-файла в каталоге
+        // состояния нет и не было — ровно `NotPublished`.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
+        let kit = Kit::at(std::env::temp_dir().join(format!("dev1c-extstate-notup-kit-{}", std::process::id())));
+        let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
+        let ctx = Ctx { kit, cfg, dry_run: false, sink, prompt: Box::new(common::AlwaysDefault) };
+        let ops = host();
+        let ext = ops.iter().find(|o| o.id() == "host.extension").expect("host.extension есть в списке");
+        match with_state_dir_for_test(&dir, || ext.state(&ctx)) {
+            OpState::Missing => {}
+            other => panic!("ожидался Missing (не Blocked — это не авария), получено {other:?}"),
+        }
     }
 
     #[test]

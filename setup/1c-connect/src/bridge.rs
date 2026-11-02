@@ -126,8 +126,18 @@ pub fn mcp_command(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> tokio::proc
 pub fn mcp_command_guarded(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Result<tokio::process::Command, String> {
     cfg.configuration()?;
     cfg.toolset()?;
-    crate::publication::guard_own_listener(cfg, kit)?;
-    Ok(mcp_command(cfg, kit))
+    // Три исхода, не два (круг исправления, последний по этой функции):
+    // `NotPublished` — публикация не поднята, и ребёнку незачем стартовать
+    // с паролем к порту, на котором ничего нет. Команда не собирается, тем
+    // же `Err`, что и обычный отказ стража, но своим текстом — человек
+    // чинит другое (поднять публикацию, не искать чужой процесс).
+    match crate::publication::guard_own_listener(cfg, kit) {
+        crate::publication::Guard::Ours => Ok(mcp_command(cfg, kit)),
+        crate::publication::Guard::Refuse(reason) => Err(reason),
+        crate::publication::Guard::NotPublished => {
+            Err(format!("порт {}: публикация базы ещё не поднята — сначала опубликуйте её", cfg.http_port()))
+        }
+    }
 }
 
 /// Процесс `vrunner-mcp` из инструментов на машине: cwd — проект, библиотеки
@@ -1827,6 +1837,33 @@ mod tests {
         cfg.host.db_password = "секрет-базы".into();
         let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
         assert!(err.contains("configuration") && err.contains("допустимые значения"), "{err}");
+    }
+
+    /// Круг исправления, последний по `publication::guard_own_listener`:
+    /// третий исход стража (`Guard::NotPublished` — порт свободен по прямой
+    /// пробе, pid-файла нет) и здесь не строит команду. Ребёнку незачем
+    /// стартовать с паролем к порту, на котором ничего нет — свой текст,
+    /// другой, чем у обычного отказа стража (сосед
+    /// `mcp_command_guarded_refusal_names_the_guards_reason`): причины
+    /// разные, и человек чинит разное.
+    #[test]
+    fn mcp_command_guarded_refuses_without_building_a_command_when_publication_is_not_up() {
+        let dir = std::env::temp_dir().join(format!("dev1c-bridge-guard-not-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Порт, который только что был свободен (его выбрала сама ОС) — и
+        // pid-файла в каталоге состояния нет и не было: ровно `NotPublished`.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut cfg = crate::cfg::filled_for_test();
+        cfg.host.publication = "auto".into();
+        cfg.host.http_port = Some(port);
+        // Пароль есть — доказывает, что отказ не от него и не от обычного
+        // стража (тот назвал бы "pid-файл", этот — нет).
+        cfg.host.db_password = "секрет-базы".into();
+        let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
+        assert!(err.contains("не поднята"), "{err}");
+        assert!(!err.contains("pid-файл"), "другая причина, другой текст, чем у обычного отказа стража: {err}");
     }
 
     /// Годные значения новую проверку не задевают: отказ всё равно приходит

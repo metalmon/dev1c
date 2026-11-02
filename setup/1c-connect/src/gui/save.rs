@@ -151,6 +151,7 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
     match key {
         "mode" => ui.cfg.host.mode = value.to_string(),
         "publication" => ui.cfg.host.publication = value.to_string(),
+        "write" => ui.cfg.host.write = value.to_string(),
         _ => {}
     }
     Ok(())

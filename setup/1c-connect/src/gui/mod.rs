@@ -2038,6 +2038,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // режима в трее (`tray::on_menu`).
         tray.set_mode(&cfg.host.mode);
         tray.set_publication(&cfg.host.publication);
+        tray.set_access(cfg.access());
         // Раздел «Редакторы» ушёл из вкладки «Инструменты» в трей (замысел «Управление
         // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
         // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та

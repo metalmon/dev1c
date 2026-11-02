@@ -21,15 +21,19 @@ const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
 const AUTOSTART_TEXT: &str = "Запускать при входе";
 
 /// Трей: значок, пункт-переключатель (меняет надпись), подменю «Режим
-/// работы», «Публикация базы» и «Локальные агенты» (в первых двух отмечен
-/// ровно один, в третьем — независимые галочки по агенту), три пункта
-/// темы (отмечен ровно один) и два пункта-галочки — автозапуск и
-/// автоподключение.
+/// работы», «Публикация базы», «Запись в базу» и «Локальные агенты» (в
+/// первых трёх отмечен ровно один, в четвёртом — независимые галочки по
+/// агенту), три пункта темы (отмечен ровно один) и два пункта-галочки —
+/// автозапуск и автоподключение.
 pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
     modes: [CheckMenuItem; 2],
     publications: [CheckMenuItem; 2],
+    /// Потолок записи (`cfg.host.write`/`Cfg::access()`) — тем же приёмом,
+    /// что `modes`/`publications` выше: радио из двух пунктов, строится и
+    /// читается одинаково.
+    access: [CheckMenuItem; 2],
     agents: [CheckMenuItem; 4],
     /// Само меню и раздел агентов в нём — чтобы раздел можно было убрать и
     /// вернуть на месте, а не гасить серым (решение владельца 30.10: «может
@@ -65,6 +69,20 @@ const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через т
 /// втором положении (`panel::shown_fields`).
 const PUBLICATIONS: [(&str, &str, &str); 2] =
     [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Публикует платформа 1С")];
+
+/// Потолок записи (`cfg.host.write`, значения — те же слова, что понимает
+/// дочерний `mcp-1c`, `read_write`/`read_only`: перевод создал бы третью
+/// таблицу соответствий без всякой пользы) → id пункта меню и его подпись.
+/// Поля в окне нет — потолок пишет только этот пункт (см. `gui::save_host`,
+/// перенос `write` той же строкой, что `platform`/`configuration`).
+/// «Только чтение» — первым, как отмеченное по умолчанию (решение
+/// владельца 1.11, `Cfg::access()`).
+const ACCESS: [(&str, &str, &str); 2] =
+    [("read_only", "access:read_only", "Только чтение"), ("read_write", "access:read_write", "Чтение и запись")];
+
+/// Заголовок подменю «Запись в базу» — называет дело (может ли агент менять
+/// данные), а не механику ключа `--access`.
+const ACCESS_SUBMENU: &str = "Запись в базу";
 
 /// Заголовок подменю. Назван отдельно, потому что без слова «базы» пункты
 /// под ним говорят о механике, а не о деле: «публикация» сама по себе не
@@ -103,6 +121,8 @@ pub enum MenuAction {
     Mode(&'static str),
     /// Выбор пункта подменю «Публикация базы» — несёт "auto" или "webserver".
     Publication(&'static str),
+    /// Выбор пункта подменю «Запись в базу» — несёт "read_write" или "read_only".
+    Access(&'static str),
     /// Щелчок по галочке подменю «Локальные агенты» — несёт "zed" или "pi".
     Agent(&'static str),
     Theme(theme::Choice),
@@ -127,6 +147,11 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     for (publication, publication_id, _) in PUBLICATIONS {
         if id == publication_id {
             return Some(MenuAction::Publication(publication));
+        }
+    }
+    for (access, access_id, _) in ACCESS {
+        if id == access_id {
+            return Some(MenuAction::Access(access));
         }
     }
     for def in editors::AGENTS.iter() {
@@ -218,6 +243,12 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let publication_items = PUBLICATIONS.map(|(p, id, text)| CheckMenuItem::with_id(id, text, true, p == "auto", None));
     let publication_refs: Vec<&dyn IsMenuItem> = publication_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let publication_submenu = Submenu::with_items(PUBLICATION_SUBMENU, true, &publication_refs)?;
+    // Та же оговорка, что у режима и публикации выше: умолчание здесь
+    // «только чтение», `launch` поправляет отметку на настоящий потолок
+    // сразу после `build` (`Tray::set_access`).
+    let access_items = ACCESS.map(|(a, id, text)| CheckMenuItem::with_id(id, text, true, a == "read_only", None));
+    let access_refs: Vec<&dyn IsMenuItem> = access_items.iter().map(|i| i as &dyn IsMenuItem).collect();
+    let access_submenu = Submenu::with_items(ACCESS_SUBMENU, true, &access_refs)?;
     // Начальные галочка и доступность — оба `false`: `launch` поправляет их
     // сразу после `build` (`Tray::set_agents`), тем же приёмом, что у режима
     // и публикации выше — здесь ни `Found`, ни режим ещё не читали.
@@ -240,6 +271,7 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &PredefinedMenuItem::separator(),
         &mode_submenu,
         &publication_submenu,
+        &access_submenu,
         &agents_submenu,
         &themes_submenu,
         &autostart,
@@ -269,12 +301,14 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
     let modes = [mode_items[0].clone(), mode_items[1].clone()];
     let publications = [publication_items[0].clone(), publication_items[1].clone()];
+    let access = [access_items[0].clone(), access_items[1].clone()];
     let agents = [agent_items[0].clone(), agent_items[1].clone(), agent_items[2].clone(), agent_items[3].clone()];
     Ok(Tray {
         icon: tray,
         toggle,
         modes,
         publications,
+        access,
         agents,
         themes,
         autostart,
@@ -328,6 +362,14 @@ impl Tray {
     pub fn set_publication(&self, publication: &str) {
         for (item, (p, ..)) in self.publications.iter().zip(PUBLICATIONS) {
             item.set_checked(p == publication);
+        }
+    }
+
+    /// Отмечает ровно один пункт подменю «Запись в базу» — тот же приём, что
+    /// у режима и публикации выше.
+    pub fn set_access(&self, access: &str) {
+        for (item, (a, ..)) in self.access.iter().zip(ACCESS) {
+            item.set_checked(a == access);
         }
     }
 
@@ -621,6 +663,58 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
     cx.refresh_windows();
 }
 
+/// Записать потолок записи и сообщить об этом уже работающему ребёнку — без
+/// перезапуска сеанса (в отличие от `apply_mode`/`apply_publication` выше):
+/// потолок не меняет транспорт, только флаг у `mcp_command`, а механизм
+/// донести его без разрыва соединения с агентом уже есть —
+/// `Session::update_cfg` кладёт новый `Cfg` в общую ячейку (`rules.live`), и
+/// действующий ребёнок пересобирается на ней же на следующий запрос
+/// (`Serve::dispatch`, `EpochEnd::Restart`). Вопроса человеку здесь нет: это
+/// не смена базы (`save_needs_confirm` на одном только `write` и так молчит),
+/// а независимая настройка потолка.
+fn apply_access(cx: &mut App, access: &'static str) {
+    cx.global_mut::<Ui>().cfg.host.write = access.into();
+    let host = cx.global::<Ui>().cfg.host.clone();
+    match save_host(cx.global_mut::<Ui>(), host) {
+        Ok(()) => {
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_access(access);
+            }
+            // `update_cfg` не повредит и в туннельном режиме (её же
+            // докстрока) — отдельной ветки по режиму, в отличие от
+            // `save_host`, здесь не нужно.
+            if let Some(s) = &cx.global::<Ui>().session {
+                s.update_cfg(cx.global::<Ui>().cfg.clone());
+            }
+            let mut label = access;
+            for (a, _, text) in ACCESS {
+                if a == access {
+                    label = text;
+                }
+            }
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("запись в базу: {}", label.to_lowercase()) });
+        }
+        Err(why) => {
+            // Та же развязка, что у режима и публикации, и по той же
+            // причине: потолок — намерение человека, а не действие над
+            // базой, и на свежем комплекте с пустыми полями он обязан
+            // сработать.
+            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "write", access) {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                return;
+            }
+            let label = ACCESS.iter().find(|(a, ..)| *a == access).map(|(_, _, t)| *t).unwrap_or(access);
+            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
+            if let Some(tray) = &cx.global::<Ui>().tray {
+                tray.set_access(access);
+            }
+            cx.global_mut::<Ui>().tab = Tab::Params;
+            window::show_window(cx);
+        }
+    }
+    cx.refresh_windows();
+}
+
 /// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
 /// только по правому, сюда не попадает.
 pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
@@ -722,6 +816,20 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 confirm_database_change(window, cx, &host, move |_window, cx| apply_publication(cx, publication));
             });
         }
+        MenuAction::Access(access) => {
+            // Форма та же, что у «Публикации базы» выше, без вопроса
+            // человеку: потолок не действие над базой и не меняет
+            // транспорт (см. `apply_access`), спрашивать не о чем.
+            let ui = cx.global::<Ui>();
+            let current = ui.cfg.access().to_string();
+            if mode_change_blocked(ui) || access == current {
+                if let Some(tray) = &ui.tray {
+                    tray.set_access(&current);
+                }
+                return;
+            }
+            apply_access(cx, access);
+        }
         // Независимая галочка, не радио-группа (в отличие от режима и
         // публикации выше): нативный пункт уже переключил сам себя, и
         // `is_checked()` здесь читает то, что он только что выставил, —
@@ -783,8 +891,8 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked, raise_session_after_mode_change,
-        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, AGENTS_SUBMENU, MODES, PUBLICATIONS,
-        PUBLICATION_SUBMENU,
+        save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES,
+        PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -835,6 +943,53 @@ mod tests {
         assert_eq!(labels, vec!["Публикует коннектор", "Публикует платформа 1С"]);
         assert_eq!(PUBLICATIONS.map(|(v, ..)| v), ["auto", "webserver"]);
         assert_eq!(PUBLICATION_SUBMENU, "Публикация базы");
+    }
+
+    /// Тот же приём, что у публикации выше: значения toml — слова, что
+    /// понимает ребёнок (`read_only`/`read_write`), подписи — человеческие.
+    #[test]
+    fn the_access_submenu_speaks_in_human_words() {
+        assert_eq!(menu_action("access:read_only"), Some(MenuAction::Access("read_only")));
+        assert_eq!(menu_action("access:read_write"), Some(MenuAction::Access("read_write")));
+        assert_eq!(menu_action("access:read"), None);
+        let labels: Vec<&str> = ACCESS.iter().map(|(_, _, text)| *text).collect();
+        assert_eq!(labels, vec!["Только чтение", "Чтение и запись"]);
+        assert_eq!(ACCESS.map(|(v, ..)| v), ["read_only", "read_write"]);
+        assert_eq!(ACCESS_SUBMENU, "Запись в базу");
+    }
+
+    /// Подменю строится тем же кодом, что «Режим работы»
+    /// (`mode_submenu_has_two_checked_items`) — отмечен ровно умолчальный
+    /// пункт, «Только чтение».
+    #[test]
+    fn access_submenu_has_two_checked_items() {
+        let items = ACCESS.map(|(a, id, text)| CheckMenuItem::with_id(id, text, true, a == "read_only", None));
+        let refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
+        let submenu = Submenu::with_items(ACCESS_SUBMENU, true, &refs).unwrap();
+        assert_eq!(submenu.text(), "Запись в базу");
+        assert_eq!(submenu.items().len(), 2);
+        assert_eq!(items[0].text(), "Только чтение");
+        assert_eq!(items[1].text(), "Чтение и запись");
+        assert!(items[0].is_checked());
+        assert!(!items[1].is_checked());
+    }
+
+    /// Тот же предел, что у `choosing_a_mode_writes_the_toml_and_restarts_the_session`:
+    /// обработчик меню нуждается в `cx: &mut App` (GPUI, без headless-
+    /// гарнеса здесь) — тестируем то, что можно без него: запись потолка
+    /// через `save_host`, от которой зависит пересборка `mcp_command`
+    /// (шаг 6 брифа — там же проверено, что пересборка несёт новый
+    /// `--access`).
+    #[test]
+    fn choosing_an_access_ceiling_writes_the_toml() {
+        let mut ui = Ui::for_test();
+        assert_eq!(ui.cfg.access(), "read_only");
+        ui.cfg.host.write = "read_write".into();
+        let host = ui.cfg.host.clone();
+        save_host(&mut ui, host).unwrap();
+        assert_eq!(ui.cfg.access(), "read_write");
+        let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
+        assert!(text.contains("write = \"read_write\""), "{text}");
     }
 
     #[test]

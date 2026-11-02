@@ -287,6 +287,11 @@ fi
 [ -f "$BIN_DIR/1c-connect.exe" ] && cp "$BIN_DIR/1c-connect.exe" "$CONNECT/" || true
 cp setup/1c-connect/1c-connect.example.toml "$CONNECT/1c-connect.toml"
 
+# Дорога для бухгалтера — без прав администратора и без строки кода, задача
+# 5 плана «тонкий срез ценности». Файл один и тот же для обеих машин, которые
+# встретит этот комплект; правит его только человек, не install/checksums.
+cp "$DIR/config/kit/БУХГАЛТЕРУ.md" "$CONNECT/"
+
 # Tools for vrunner on the developer's machine. OneScript's archive already
 # has the bin/ + lib/ layout its oscript.cfg expects (lib.system = ../lib), so
 # it is unpacked as vrunner/ and the opm packages land in the same lib/:

@@ -201,24 +201,56 @@ fetch() { # $1 = url, $2 = destination; verified against the pinned hash either 
 
 if [ "$OS" = "windows" ]; then
 
-# The developer's kit: mcp-1c for the machine with the platform, the same
-# release the image was designed against. Pinned here, not in the Dockerfile:
-# the image no longer carries mcp-1c.
+# Расширение MCP_HTTPService.cfe по-прежнему тот же upstream-релиз, что и в
+# Linux-половине образа (Dockerfile.1c, ARG MCP_1C_VERSION) — согласие двух
+# держит тест pack_sh_agrees_with_dockerfile_on_mcp_1c_version, не память
+# человека. Сам бинарь mcp-1c для комплекта с этим релизом больше не едет
+# (смотри ниже) — задача 4 плана «тонкий срез ценности» переводит его на
+# сборку форка.
 MCP_1C_VERSION=v1.23.0
-# Минимальная версия расширения MCP_HTTPService.cfe, которую понимает этот
-# релиз mcp-1c — правится парой с MCP_1C_VERSION выше: описание релиза
-# называет требование к версии расширения для новых инструментов, старые
-# инструменты со старым расширением работают и дальше. Число подтверждено по
-# https://github.com/feenlace/mcp-1c/releases/tag/v1.23.0, а не переписано с
-# чужих слов. Согласие с константой в verify.rs (EXTENSION, факт готовности)
-# держит тест, не память человека — разойдутся, падает тест, а не поставка.
-MCP_EXTENSION_MIN_VERSION=0.4.10
+# Минимальная версия расширения MCP_HTTPService.cfe, которую требует
+# комплект — правится парой с MIN_EXTENSION_VERSION в verify.rs, тест
+# pack_sh_agrees_with_min_extension_version держит согласие, не память
+# человека. 0.5.0, а не 0.4.10 upstream-релиза выше: пишущие инструменты
+# форка держатся на модуле MCPBusinessFacade из профиля buh_3_0
+# (cmd/mcp-1c/main.go, expectedExtensionVersion), и база со старым
+# расширением обязана отказывать явно, а не молча считаться готовой.
+MCP_EXTENSION_MIN_VERSION=0.5.0
 # Своя папка, как у vrunner/git/httpd — поручение владельца 30.10: в корне
 # комплекта законно живёт только сам коннектор и его параметры.
 mkdir -p "$CONNECT/mcp-1c"
-for f in mcp-1c-windows-amd64.exe MCP_HTTPService.cfe; do
-    fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/$f" "$CONNECT/mcp-1c/$f"
-done
+fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/MCP_HTTPService.cfe" "$CONNECT/mcp-1c/MCP_HTTPService.cfe"
+
+# Бинарь mcp-1c для комплекта — сборка форка (feenlace/mcp-1c на
+# D:\1c\projects\mcp-1c, ветка main), не upstream-релиз: коннектор
+# (bridge.rs::mcp_command) передаёт ребёнку --profile/--toolset/--access, а
+# upstream v1.23.0 этих ключей не знает вовсе (--help, замер 2.11) — ребёнок
+# умирает на старте. pack.sh ничего не собирает (см. заголовок файла) — путь
+# к уже собранному бинарю приходит переменной, как BIN_DIR несёт
+# dev1c-setup.exe. Собрать форк умеет голый `go build -o bin/mcp-1c.exe
+# ./cmd/mcp-1c` на Go 1.26.2, версию — только через
+# -ldflags "-X main.version=$(git describe --tags)" (Makefile, VERSION ?= dev).
+MCP_1C_FORK_BIN=${MCP_1C_FORK_BIN:?путь к собранному mcp-1c.exe форка (windows-amd64), напр. D:\\1c\\projects\\mcp-1c\\bin\\mcp-1c.exe}
+[ -f "$MCP_1C_FORK_BIN" ] || { echo "pack.sh: MCP_1C_FORK_BIN=$MCP_1C_FORK_BIN не найден" >&2; exit 1; }
+# `git describe --tags` на ветке main форка на момент замера ведущего 2.11.
+# Не upstream-схема (1.23.x, выше) — и не придумана: теги до v1.9.2 в
+# репозитории форка лежат (их 77), но предками его HEAD не являются, так что
+# номер из них соврал бы о версии в бинаре. Изменился git describe на
+# момент сборки — меняется и эта строка, не наоборот.
+MCP_1C_FORK_VERSION=v1.6.0-14-g02d0fee
+cp "$MCP_1C_FORK_BIN" "$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe"
+# Сторож (шаг 1 брифа задачи 4): без --profile buh_3_0 в справке это не
+# сборка форка — а значит не тот бинарь, которого коннектор теперь требует.
+# Мимо этой проверки эталонный комплект с upstream v1.23.0 не проходит —
+# это и есть цель: находка 2.11 — положить новый 1c-connect.exe поверх уже
+# собранного комплекта со старым mcp-1c (обычный путь владельца) обходит
+# пересборку целиком, и без этого сторожа несовместимость всплыла бы только
+# у живого бухгалтера.
+mcp_help=$("$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe" --help 2>&1 || true)
+case "$mcp_help" in
+    *buh_3_0*) ;;
+    *) echo "pack.sh: $MCP_1C_FORK_BIN (-> $CONNECT/mcp-1c/mcp-1c-windows-amd64.exe) не знает профиля buh_3_0 — это не сборка форка. --help этого бинаря: $mcp_help" >&2; exit 1 ;;
+esac
 
 # Same skills the image installs to ~/.agents/skills (Dockerfile: COPY
 # config/skills/), copied as-is — one source for the image and the kit, so the
@@ -301,9 +333,12 @@ tools_row() {
     # (`ops_host::tools_state`), и без неё версию mcp-1c в чужом комплекте
     # нельзя узнать иначе как считать sha256 и сверять с этим файлом — так и
     # вышло 30.10 на комплекте владельца, где лежал mcp-1c пятью версиями
-    # старше. Одна запись на оба файла: бинарь и `MCP_HTTPService.cfe` едут
-    # из одного релиза.
-    printf 'OneScript %s; vanessa-runner %s; add %s; MinGit %s; mcp-1c %s\n' "$ONESCRIPT_VERSION" "$VRUNNER_VERSION" "$ADD_VERSION" "$MINGIT_VERSION" "$MCP_1C_VERSION" >"$CONNECT/tools.version"
+    # старше. $MCP_1C_FORK_VERSION, а не $MCP_1C_VERSION: с задачи 4 плана
+    # «тонкий срез ценности» бинарь и расширение едут из разных мест (бинарь
+    # — сборка форка, расширение — всё ещё upstream-релиз), и строка должна
+    # называть версию того, что реально запускается, не того, откуда взят
+    # .cfe.
+    printf 'OneScript %s; vanessa-runner %s; add %s; MinGit %s; mcp-1c %s\n' "$ONESCRIPT_VERSION" "$VRUNNER_VERSION" "$ADD_VERSION" "$MINGIT_VERSION" "$MCP_1C_FORK_VERSION" >"$CONNECT/tools.version"
     rm -rf "$tmp"
     echo "tools: $(du -sh "$CONNECT/vrunner" | cut -f1) vrunner, $(du -sh "$CONNECT/git" | cut -f1) git"
 }

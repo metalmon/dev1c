@@ -1085,12 +1085,12 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connectio
 /// и те поля, которых человек не касался. Чинится это только пометкой
 /// «тронуто» у каждого поля по отдельности — своя точка отсчёта на поле
 /// вместо одной на форму. Такой механики тут нет и заводить её не стоит:
-/// окно прячется по потере фокуса (`observe_window_activation`), а новый
-/// показ строит `Panel` заново и читает файл сам (`Panel::new`), так что
-/// «человек набирает в полях, пока кто-то правит toml снаружи» требует
-/// открытого окна без фокуса — диалога поверх или правки с другой машины.
-/// Узкий случай не стоит второй системы учёта изменений, которая будет
-/// расходиться с первой.
+/// «Сохранить» видно и загорается само (`adopt_needed`'s сосед
+/// `fields_differ`), так что правка toml снаружи, пока человек набирает в
+/// полях открытого окна (решение владельца 1.11 — окно теперь не прячется
+/// само и может долго стоять без фокуса), заметна по разошедшейся кнопке, а
+/// не по молчаливой перезаписи. Второй системы учёта изменений, которая
+/// будет расходиться с первой, это не стоит.
 pub fn adopt_needed(file: &Connection, form: &Connection, saved: &Connection, mode: &str, publication: &str) -> bool {
     fields_differ(file, saved, mode, publication) && !fields_differ(form, saved, mode, publication)
 }
@@ -1197,12 +1197,6 @@ impl Panel {
         if theme::Choice::load(&kit) == theme::Choice::System {
             Theme::sync_system_appearance(None, cx);
         }
-        cx.observe_window_activation(window, |_, window, cx| {
-            if !window.is_window_active() && !cx.global::<Ui>().dialog_open {
-                hide_window(window, cx);
-            }
-        })
-        .detach();
 
         let fields = Fields {
             name: field("Ромашка", &host.name, false, window, cx),
@@ -1443,8 +1437,9 @@ impl Panel {
         ok
     }
 
-    /// Выбор папки: на время диалога окно не прячется (`dialog_open`), после
-    /// — возвращается на передний план, путь ложится в поле. В toml его
+    /// Выбор папки: на время платформенного диалога `dialog_open` не даёт
+    /// открыться второму такому же (см. `save::ask_yes_no`), после —
+    /// окно возвращается на передний план, путь ложится в поле. В toml его
     /// отнесёт «Сохранить»: кнопка загорится сама, поле разошлось с
     /// сохранённым.
     fn pick_dir(&mut self, target: Entity<InputState>, cx: &mut Context<Self>) {
@@ -1590,13 +1585,21 @@ impl Render for Panel {
         let working = cx.global::<Ui>().working();
 
         // Шапка — на поверхности, без отдельной полосы: Body Strong + ✕.
+        // Позицию между запусками не запоминаем (решение владельца 1.11) —
+        // окно всегда открывается в угле у трея (`window::flyout_origin`),
+        // а перетащить его можно за свободное место шапки: решение владельца
+        // 1.11 про то, что окно больше не прячется по потере фокуса сама, и
+        // человеку нужно куда его отодвинуть руками. `window_control_area` —
+        // готовый приём GPUI (на Windows это `WM_NCHITTEST` → `HTCAPTION`,
+        // тот же, которым сама `gpui-component::TitleBar` двигает окно на
+        // всех платформах), а не самодельное отслеживание мыши.
         let header = h_flex()
             .items_center()
             .gap_2()
             .h_9()
             .child(img(icon()).size_6())
             .child(div().font_weight(FontWeight::SEMIBOLD).child("1c-connect"))
-            .child(div().flex_1())
+            .child(div().flex_1().window_control_area(WindowControlArea::Drag))
             .child(
                 KitButton::new("hide")
                     .ghost()

@@ -305,7 +305,6 @@ pub struct Ui {
     /// Высота окна, подобранная под содержимое «Связи» (`window::fit_height`);
     /// `None` — ещё не мерили, окно открывается наименьшим.
     pub height: Option<Pixels>,
-    pub hidden_at: Option<Instant>,
     pub dialog_open: bool,
     /// Когда тик в последний раз подвинул подсказку трея на фазу операции —
     /// `tick` не чаще `TOOLTIP_EVERY`, иначе Win32 моргал бы подсказкой.
@@ -2134,7 +2133,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             window: None,
             panel: None,
             height: None,
-            hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
             agent_clicks: [None; crate::editors::AGENTS.len()],
@@ -2280,7 +2278,6 @@ impl Ui {
             window: None,
             panel: None,
             height: None,
-            hidden_at: None,
             dialog_open: false,
             tooltip_at: None,
             agent_clicks: [None; crate::editors::AGENTS.len()],

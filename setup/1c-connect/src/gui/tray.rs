@@ -777,11 +777,13 @@ fn apply_access(cx: &mut App, access: &'static str) {
     cx.refresh_windows();
 }
 
-/// Левый щелчок (отжатие кнопки) по значку — показать/скрыть окно; меню —
-/// только по правому, сюда не попадает.
+/// Левый щелчок (отжатие кнопки) по значку — показать окно (открыть или
+/// поднять уже открытое на передний план); закрывает окно только явное
+/// действие человека в самом окне, не трей. Меню — только по правому, сюда
+/// не попадает.
 pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-        window::toggle_window(cx);
+        window::show_window(cx);
     }
 }
 

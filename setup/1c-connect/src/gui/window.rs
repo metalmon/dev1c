@@ -1,7 +1,7 @@
 //! Показ и прятание флайаута: размер и зазор, угол у трея на рабочей
-//! области (без наезда на панель задач), и правило «клик по значку сразу
-//! после скрытия — закрыть, а не открыть снова» (окно прячется по потере
-//! фокуса раньше, чем клик по трею успевает его поднять заново).
+//! области (без наезда на панель задач). Окном владеет человек: решение
+//! владельца 1.11 — окно больше не прячется само по потере фокуса, закрывает
+//! его только явное действие (крестик, Esc, трей).
 
 use super::panel::Panel;
 use super::{note_file, note_line, run_readiness, Kind, Line, Tab, Ui};
@@ -10,7 +10,6 @@ use crate::ops_host;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 /// Наименьший логический размер флайаута: ширина у окна постоянная, высота —
 /// начальная и нижняя граница подбора по содержимому (см. `fit_height`).
@@ -24,9 +23,6 @@ pub const GAP: Pixels = px(12.0);
 /// гоняется по кругу на высоту одной строки. Неподвижная точка подбора —
 /// содержимое на `SLACK` меньше видимой области.
 pub const SLACK: Pixels = px(4.0);
-/// Окно только что спряталось по потере фокуса — клик по трею в этом окне
-/// закрывает, а не открывает заново.
-pub const JUST_HIDDEN: Duration = Duration::from_millis(400);
 
 /// Правый нижний угол рабочей области, но не левее/выше её собственного
 /// начала — на маленькой или смещённой рабочей области окно не вылезает за
@@ -241,16 +237,6 @@ pub fn fit_height(window: &mut Window, cx: &mut App, content: Pixels, viewport: 
     move_to(window, flyout_origin(wa, s, GAP));
 }
 
-/// `false` сразу после того, как окно спряталось по потере фокуса — в этот
-/// момент клик по значку трея, который и вызвал потерю фокуса, не должен
-/// поднимать окно обратно.
-pub fn should_show(hidden_at: Option<Instant>, now: Instant) -> bool {
-    match hidden_at {
-        Some(t) => now.saturating_duration_since(t) >= JUST_HIDDEN,
-        None => true,
-    }
-}
-
 /// Показ окна — событие пересчёта готовности (спека): человек открывает
 /// флайаут именно затем, чтобы увидеть, как дела, а вердикт бывает
 /// устаревшим. Файл параметров перечитывается здесь же и до постройки панели
@@ -367,12 +353,11 @@ pub fn show_window(cx: &mut App) {
 pub fn forget_window(ui: &mut Ui) {
     ui.window = None;
     ui.panel = None;
-    ui.hidden_at = Some(Instant::now());
     // Вопрос живёт внутри этого окна: окна нет — и ждать ответа не от кого.
-    // Флаг держали, пока ответа нет, и если окно пряталось с открытым
+    // Флаг держали, пока ответа нет, и если окно закрылось с открытым
     // вопросом, он оставался поднятым навсегда: «Сохранить» после этого молча
     // ничего не делала (тот же симптом, что заказчик ловил 2026-10-21, но
-    // другая причина), а флайаут переставал прятаться при потере фокуса.
+    // другая причина).
     ui.dialog_open = false;
     // Следующий показ — уже другое окно X11, и форма ему нужна своя, даже
     // если размер совпал с прежним.
@@ -383,20 +368,11 @@ pub fn hide_window(window: &mut Window, cx: &mut App) {
     window.remove_window();
 }
 
-/// Щелчок по значку трея: показать, если это не отражение собственного
-/// только что случившегося скрытия (см. `should_show`).
-pub fn toggle_window(cx: &mut App) {
-    if should_show(cx.global::<Ui>().hidden_at, Instant::now()) {
-        show_window(cx);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{fit_height_for, flyout_origin, forget_window, needs_fit, should_show, GAP, MIN_SIZE, SLACK};
+    use super::{fit_height_for, flyout_origin, forget_window, needs_fit, GAP, MIN_SIZE, SLACK};
     use crate::gui::Ui;
     use gpui_kit::{point, px, size, Bounds};
-    use std::time::{Duration, Instant};
 
     #[test]
     fn the_height_follows_the_content_both_ways_and_stays_on_the_work_area() {
@@ -487,26 +463,16 @@ mod tests {
     }
 
     #[test]
-    fn a_click_right_after_hiding_means_close_not_reopen() {
-        let now = Instant::now();
-        assert!(should_show(None, now));
-        assert!(!should_show(Some(now - Duration::from_millis(100)), now));
-        assert!(should_show(Some(now - Duration::from_millis(900)), now));
-    }
-
-    #[test]
-    fn hiding_forgets_both_handles_and_starts_the_grace_window() {
+    fn hiding_forgets_both_handles() {
         let mut ui = Ui::for_test();
-        ui.hidden_at = None;
         forget_window(&mut ui);
         assert!(ui.window.is_none(), "ручка окна");
         assert!(ui.panel.is_none(), "сущность панели");
-        assert!(ui.hidden_at.is_some(), "щелчок по трею сразу после — закрыть, а не открыть");
     }
 
-    /// Окно пряталось с открытым вопросом — флаг не должен его пережить.
-    /// Иначе «Сохранить» потом молча ничего не делает, а флайаут перестаёт
-    /// прятаться при потере фокуса: оба отказа невидимы до перезапуска.
+    /// Окно закрылось с открытым вопросом — флаг не должен его пережить.
+    /// Иначе «Сохранить» потом молча ничего не делает: диалог считается
+    /// занятым навсегда.
     #[test]
     fn hiding_clears_a_question_that_nobody_answered() {
         let mut ui = Ui::for_test();

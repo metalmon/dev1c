@@ -325,6 +325,12 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     // осталось — находка автоматического ревью была именно про эту связку.
     // Перенос `profile` здесь не даёт этой паре полей разойтись вовсе.
     host.profile = ui.cfg.current().profile.clone();
+    // Та же причина и тот же приём, что у `profile` выше: поля для правки
+    // роли в окне пока нет (заводят будущие задачи плана «Модель
+    // соединений», задача 13 — только само поле модели), а форма собирает
+    // `Connection` с пустым `role`. Без переноса ЛЮБОЕ «Сохранить» обнуляло
+    // бы ручную правку роли в файле до умолчания `accept`.
+    host.role = ui.cfg.current().role.clone();
     host.write = ui.cfg.current().write.clone();
     host.tools = ui.cfg.current().tools.clone();
     host.mode = ui.cfg.current().mode.clone();

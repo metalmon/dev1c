@@ -647,6 +647,18 @@ pub struct Connection {
     /// назначает Default через значение всего `Connection::default()`, а не тип
     /// поля (так выглядят и прежний `[host]`, и локальный режим).
     pub base_here: bool,
+    /// Роль соединения в контракте подключения — `"accept"` (эта машина
+    /// принимает подключения) или `"dial"` (эта машина подключается сама).
+    /// Поправка владельца 3.11 (спека, раздел «Роль соединения спрашивается
+    /// прямо»): роль задаёт человек переключателем, а не выводит её окно из
+    /// обстоятельств заведения соединения — третьего случая, как и у
+    /// `base_here`, нет. Умолчание `"accept"` ставится рукописным
+    /// `impl Default` ниже, не `#[serde(default)]` на поле: отсутствующий
+    /// ключ дал бы пустую строку — та же ловушка, от которой убережён
+    /// `base_here` (см. его докстроку выше, приём и довод те же). Умолчание
+    /// совпадает с прежним поведением принимающей стороны: машина, у которой
+    /// код просят, встречается чаще, чем та, которая его вставляет.
+    pub role: String,
     /// Версия платформы 1С или её маска (`8.3`), которой работать. Пусто —
     /// версию выбирает лестница `platform::resolve` (пин базы, общий пин,
     /// самая новая). Названная, но не установленная версия — отказ со
@@ -726,6 +738,7 @@ impl std::fmt::Debug for Connection {
             .field("workstation", &self.workstation)
             .field("base_path", &self.base_path)
             .field("base_here", &self.base_here)
+            .field("role", &self.role)
             .field("platform", &self.platform)
             .field("configuration", &self.configuration)
             .field("toolset", &self.toolset)
@@ -772,6 +785,9 @@ impl Default for Connection {
             // прежним `[host]` (там топологии не было вовсе, а база всегда
             // была локальной), и с локальным режимом (решение плана, 2.11).
             base_here: true,
+            // "accept" — умолчание, совпадающее с прежним поведением
+            // принимающей стороны (см. докстроку поля `role` выше).
+            role: "accept".into(),
             platform: String::new(),
             configuration: String::new(),
             toolset: String::new(),
@@ -1305,6 +1321,13 @@ impl Connection {
             "{at}: write — неизвестный потолок записи «{}»; допустимые значения: read_write, read_only",
             self.write.trim()
         );
+        // Тот же приём, что у `configuration`/`toolset` выше: именованная,
+        // но неизвестная роль — отказ словами здесь, а не молчаливый откат
+        // на `accept` внутри того, кто решает по роли (будущие задачи
+        // плана «Модель соединений»).
+        if let Err(e) = self.role() {
+            anyhow::bail!("{at}: {e}");
+        }
         // Пустой `base_url` — не ошибка, а «не задан»: поля для него в окне
         // нет вовсе, умолчание выводится из каталога базы
         // (`derived_base_url`), и требовать его руками значило бы заставлять
@@ -1415,6 +1438,23 @@ impl Connection {
             Ok(t)
         } else {
             Err(format!("toolset — неизвестный набор инструментов «{t}»; допустимые значения: {}", ALLOWED.join(", ")))
+        }
+    }
+
+    /// Роль соединения — `accept` или `dial` (докстрока поля `role` выше).
+    /// Тот же приём, что у `toolset()`/`configuration()`: пустое — `accept`
+    /// (умолчание владельца 3.11), именованное, но неизвестное значение —
+    /// отказ словами со списком допустимых, а не молчаливый откат.
+    pub fn role(&self) -> Result<&str, String> {
+        const ALLOWED: [&str; 2] = ["accept", "dial"];
+        let r = self.role.trim();
+        if r.is_empty() {
+            return Ok("accept");
+        }
+        if ALLOWED.contains(&r) {
+            Ok(r)
+        } else {
+            Err(format!("role — неизвестная роль «{r}»; допустимые значения: {}", ALLOWED.join(", ")))
         }
     }
 }
@@ -1701,6 +1741,7 @@ impl Cfg {
                     "workstation" => format!("{:?}", h.workstation),
                     "base_path" => format!("{:?}", h.base_path),
                     "base_here" => h.base_here.to_string(),
+                    "role" => format!("{:?}", h.role),
                     "platform" => format!("{:?}", h.platform),
                     "configuration" => format!("{:?}", h.configuration),
                     "profile" => format!("{:?}", h.profile),
@@ -2899,6 +2940,25 @@ mod tests {
         c.current_mut().write = "read_write".into();
         assert!(c.validate().is_ok());
         assert_eq!(c.access(), "read_write");
+    }
+
+    /// Буквально из брифа задачи 13: прежний файл (и свежий файл без поля
+    /// `role` вовсе) обязан читаться, а не отказывать — умолчание «accept»
+    /// совпадает с прежним поведением принимающей стороны.
+    #[test]
+    fn a_connection_without_a_role_in_the_file_accepts_connections() {
+        let c: Cfg = toml::from_str("[[connection]]\nname = \"Buh\"\n").unwrap();
+        assert_eq!(c.connections[0].role().unwrap(), "accept");
+    }
+
+    /// Тот же приём, что у `configuration()`/`toolset()`: именованная, но
+    /// неизвестная роль — отказ словами со списком допустимых, который
+    /// доезжает и через `Connection::validate()` напрямую (бриф задачи 13).
+    #[test]
+    fn an_unknown_role_is_refused_with_the_allowed_values_named() {
+        let c = Connection { role: "мусор".into(), ..Default::default() };
+        let e = format!("{:#}", c.validate().unwrap_err());
+        assert!(e.contains("accept") && e.contains("dial"), "{e}");
     }
 
     /// `current` указывает именем (решение плана, 2.11) — два одинаковых

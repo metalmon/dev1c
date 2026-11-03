@@ -873,6 +873,10 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connectio
         // у прежнего `[host]`.
         name: String::new(),
         base_here: true,
+        // Поля для правки роли в окне тоже нет (её заводят будущие задачи
+        // плана «Модель соединений»): пусто, и `save_host` переносит её из
+        // текущих параметров той же строкой, что `profile`.
+        role: String::new(),
         profile: String::new(),
         server: v("server", &f.server),
         gitea: String::new(),

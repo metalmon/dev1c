@@ -2,6 +2,7 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
+use crate::cfg::cfg_with;
 use common::{Event, Phase, Progress};
 use core::prelude::v1::test;
 use std::time::{Duration, Instant};
@@ -231,4 +232,10 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
     assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
     assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, None, "C:\\kit").0, "Прервано");
+}
+
+#[test]
+fn the_httpd_queue_is_named_only_when_there_is_more_than_one_base() {
+    assert_eq!(httpd_queue_note(&cfg_with(&["Buh"])), None);
+    assert!(httpd_queue_note(&cfg_with(&["Buh", "Ромашка"])).is_some());
 }

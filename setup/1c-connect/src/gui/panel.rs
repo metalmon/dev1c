@@ -345,6 +345,25 @@ pub struct Button {
     pub act: Option<LinkAct>,
 }
 
+/// Что в открытой карточке разошлось с сохранённым: ничего, одно имя, или
+/// поля.
+///
+/// Разница не косметическая, и живёт она здесь, а не в `bool`, потому что от
+/// неё зависит, КУДА запись уедет. Имя пишется своим путём (`save::rename`) и
+/// адресуется ПО ИМЕНИ карточки — ему всё равно, текущая она или нет. Поля
+/// пишет `save_host`, а она заменяет ТЕКУЩЕЕ соединение целиком, и правка
+/// нетекущей карточки уехала бы в чужой блок toml.
+///
+/// `Fields` значит «поля разошлись» — имя при этом могло разойтись тоже:
+/// запись всё равно идёт через `save_host`, а она зовётся только у текущей
+/// карточки, где оба пути законны.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Dirty {
+    No,
+    NameOnly,
+    Fields,
+}
+
 /// Одно предложение про передачу кода — ОДНО на весь продукт.
 ///
 /// Их было два: это (подвал ждущей принимающей карточки, задача 8) и
@@ -373,7 +392,8 @@ pub const PASS_THE_CODE: &str = "Передайте код на ту сторо�
 ///    задача 11 отвечает за сам онбординг);
 /// 2. предмет НЕ текущее соединение — «Сделать текущим» (единственная
 ///    подпись, которую задача 14 к списку задачи 8 добавила; сама подпись
-///    не новая — её слово в продукте уже есть);
+///    не новая — её слово в продукте уже есть). Исключение одно: разошлось
+///    ОДНО имя (`Dirty::NameOnly`) — тогда «Сохранить», см. ниже;
 /// 3. правка важнее всего — её потеря дороже, чем недосказанное состояние
 ///    связи («Сохранить», подсказку отдаёт тот же `save_hint`, что уже
 ///    объясняет недоступность на вкладке);
@@ -401,30 +421,51 @@ pub const PASS_THE_CODE: &str = "Передайте код на ту сторо�
 /// предмет и есть текущее соединение: тогда это его состояние по
 /// построению.
 ///
-/// Правка нетекущей карточки при этом не теряется — она ждёт, и `why` это
-/// говорит словами: став текущей, карточка тут же получает «Сохранить»
-/// (поля и точка отсчёта `original` от переключения не двигаются). Это же
-/// снимает и вторую беду, которой ветка 3 грозила бы без неё: `save_host`
-/// пишет ТЕКУЩЕЕ соединение, и «Сохранить» у нетекущей карточки уехало бы
-/// в чужой блок toml.
+/// Правка полей нетекущей карточки при этом не теряется — она ждёт, и `why`
+/// говорит, чего ждёт («Поля правятся у текущего соединения»): став текущей,
+/// карточка тут же получает «Сохранить» (поля и точка отсчёта `original` от
+/// переключения не двигаются). Это же снимает и вторую беду, которой ветка 3
+/// грозила бы без неё: `save_host` пишет ТЕКУЩЕЕ соединение, и «Сохранить» у
+/// нетекущей карточки уехало бы в чужой блок toml.
+///
+/// **Имя — исключение, и ровно по этому доводу** (Important 2 круга починки
+/// 1): `save::rename` адресуется ПО ИМЕНИ карточки, в чужой блок уехать не
+/// может, и запрет записи нетекущей ему не нужен. Поэтому «Переименовать»
+/// у карточки заказчика перестало быть тупиком: переключать базу агента ради
+/// косметики больше не надо. Вместе с полями имя снова ждёт переключения —
+/// их пишет `save_host`, и разделять одну запись на две половины с разной
+/// судьбой мы не станем.
 ///
 /// Второго органа переключения это не заводит: в меню «Связи» пункта
 /// «Сделать текущим» нет (спека: «Переключение текущего — одно действие,
 /// построенное одним кодом, а не два органа управления»).
-pub fn main_button(ui: &Ui, selected: &str, dirty: bool) -> Button {
+pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     if ui.cfg.connections.is_empty() {
         return Button { subject: String::new(), label: "", why: None, act: None };
     }
     let c = resolve_selected(&ui.cfg, selected);
     let subject = c.name.clone();
+    // Подсказка, почему «Сохранить» недоступна, — одна на оба случая записи
+    // ниже: её даёт тот же `save_hint`, что объясняет недоступность кнопки
+    // на вкладке.
+    let save = |subject: String| {
+        let hint = save_hint(true, ui.busy.is_some(), ui.progress.as_ref().map(|r| r.which));
+        Button { subject, label: "Сохранить", why: hint, act: Some(LinkAct::Save) }
+    };
     if c.name != ui.cfg.current().name {
-        let why = dirty.then(|| "Правка сохранится, когда карточка станет текущей.".to_string());
+        // Отличается ОДНО имя — «Сохранить» и у нетекущей карточки
+        // (Important 2 круга починки 1): `save::rename` пишет по имени
+        // карточки и в чужой блок не уедет, то есть защита, ради которой
+        // запись нетекущей запрещена, здесь не нужна вовсе. Заставлять
+        // человека переключать базу агента ради косметики не за что.
+        if dirty == Dirty::NameOnly {
+            return save(subject);
+        }
+        let why = (dirty == Dirty::Fields).then(|| "Поля правятся у текущего соединения.".to_string());
         return Button { subject, label: "Сделать текущим", why, act: Some(LinkAct::MakeCurrent) };
     }
-    if dirty {
-        let busy = ui.busy.is_some();
-        let op = ui.progress.as_ref().map(|r| r.which);
-        return Button { subject, label: "Сохранить", why: save_hint(dirty, busy, op), act: Some(LinkAct::Save) };
+    if dirty != Dirty::No {
+        return save(subject);
     }
     if c.mode == "local" {
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
@@ -912,6 +953,27 @@ pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected:
         .collect();
     out.push(Body::Add);
     out
+}
+
+/// Вопрос перед переходом на ДРУГУЮ строку списка. `None` — спрашивать не о
+/// чем, переходим сразу.
+///
+/// Important 1 круга починки 1 задачи 14: переход зовёт `Panel::select`, а та
+/// `adopt_fields` — поля переписываются сохранёнными значениями и точка
+/// отсчёта сдвигается, то есть набранное исчезает молча, при горящей
+/// «Сохранить». Это против правила, которое этот же файл объявляет главным:
+/// «правка важнее всего — её потеря дороже, чем недосказанное состояние
+/// связи».
+///
+/// Спрашивается тем же механизмом, которым спрашивается смена базы
+/// (`save::ask_yes_no`, флаг `Ui::dialog_open`) — своего вопроса не заводим.
+/// Слова — как у соседних вопросов файла: что случится, и чем это кончится
+/// для сделанного.
+pub fn leave_question(dirty: Dirty) -> Option<(&'static str, &'static str)> {
+    (dirty != Dirty::No).then_some((
+        "Перейти на другую карточку?",
+        "Правка этой карточки не сохранена и будет потеряна. Останьтесь и нажмите «Сохранить», чтобы её записать.",
+    ))
 }
 
 /// Вопрос перед действием, которое отнимает уже сделанное. `None` — спрашивать
@@ -1637,6 +1699,26 @@ impl Panel {
         self.adopt_fields(&host, window, cx);
     }
 
+    /// Разошлись ли поля открытой карточки с сохранённым — и чем именно
+    /// (`Dirty`). Один расчёт на всех: от него зависят и подпись главной
+    /// кнопки, и вопрос при переходе на другую строку, и запертость
+    /// «Сохранить» — расходиться им нельзя.
+    ///
+    /// Ось сравнения — у `self.original`, то есть у ОТКРЫТОЙ карточки: её
+    /// режим, её публикация, её топология. Имя считается отдельно: оно вне
+    /// `shown_fields`/`host_of` и пишется своим путём.
+    fn dirty_now(&self, cx: &App) -> Dirty {
+        let (mode, publication) = (&self.original.mode, &self.original.publication);
+        let form = host_of(&self.fields, mode, publication, cx);
+        if fields_differ(&form, &self.original, mode, publication) {
+            return Dirty::Fields;
+        }
+        if self.fields.name.read(cx).value().trim() != self.original.name {
+            return Dirty::NameOnly;
+        }
+        Dirty::No
+    }
+
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
     fn adopt_fields(&mut self, host: &Connection, window: &mut Window, cx: &mut Context<Self>) {
@@ -1710,7 +1792,8 @@ impl Panel {
         // («пусто», «уже занято») останавливает всё: записывать поля под
         // именем, которого человек не получил, не за что.
         let typed = self.fields.name.read(cx).value().trim().to_string();
-        if typed != self.original.name {
+        let renamed = typed != self.original.name;
+        if renamed {
             let from = self.original.name.clone();
             if let Err(e) = gui::rename(cx.global_mut::<Ui>(), &from, &typed) {
                 gui::set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }, None);
@@ -1721,6 +1804,18 @@ impl Panel {
             // следующий кадр не нашёл бы открытую строку и откатил бы
             // карточку на текущую (`resolve_selected`).
             self.selected = typed;
+        }
+        // Поля пишет только ТЕКУЩАЯ карточка: `save_host` заменяет текущее
+        // соединение целиком, и правка нетекущей уехала бы в чужой блок
+        // toml. Нетекущей карточке «Сохранить» и предлагается ровно тогда,
+        // когда отличается одно имя (`main_button`, `Dirty::NameOnly`), —
+        // значит записывать здесь больше нечего, и имя уже записано выше.
+        if self.original.name != cx.global::<Ui>().cfg.current().name {
+            if renamed {
+                let text = "Имя карточки сохранено в 1c-connect.toml".to_string();
+                gui::set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text }, None);
+            }
+            return renamed;
         }
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
@@ -2025,19 +2120,12 @@ impl Render for Panel {
         let busy_now = busy.is_some();
         // Поля формы как `Connection` — один раз на весь `render`: из них считаются
         // и «есть ли несохранённое», и заголовок карточки ниже.
-        // Режим и топология — у ОТКРЫТОЙ карточки (`self.original` и есть
-        // она, `adopt_fields` держит её вместе с полями), а не у текущего
-        // соединения: выбранная строка может быть и не текущей, и в
-        // правленном руками файле режим у неё свой. Сравнение «изменилось
-        // ли» и показ полей ходят по одной оси — иначе «Сохранить» горела
-        // бы от поля, которого на экране нет.
-        let (card_mode, card_pub) = (self.original.mode.clone(), self.original.publication.clone());
-        let form = host_of(&self.fields, &card_mode, &card_pub, cx);
-        // Имя сравнивается отдельно: оно вне `shown_fields`/`host_of` и
-        // пишется своим путём (`save::rename` в `Panel::write`) — без него
-        // переименование не зажигало бы «Сохранить» вовсе.
-        let renamed = self.fields.name.read(cx).value().trim() != self.original.name;
-        let dirty = renamed || fields_differ(&form, &self.original, &card_mode, &card_pub);
+        // Что разошлось с сохранённым — один расчёт на весь `render` и на
+        // вопрос при переходе по строкам (`dirty_now`): ось сравнения у
+        // ОТКРЫТОЙ карточки, а имя считается отдельно от полей, потому что
+        // и пишется отдельно.
+        let dirty = self.dirty_now(cx);
+        let form = host_of(&self.fields, &self.original.mode, &self.original.publication, cx);
         // Главная кнопка «Связи» — один расчёт на весь `render`: от неё и
         // подпись, и предмет слева от кнопки, и объяснение в левом слоте
         // подвала (`why`). Подсказка «Сохранить» (`save_hint`) приходит в
@@ -2222,9 +2310,43 @@ impl Render for Panel {
                                 let click = cx.listener({
                                     let name = name.clone();
                                     move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
-                                        let cfg = cx.global::<Ui>().cfg.clone();
-                                        this.select(&cfg, &name, window, cx);
-                                        cx.notify();
+                                        // Щелчок по уже открытой строке — не
+                                        // переход: ни спрашивать, ни
+                                        // перевязывать поля не о чем (событие
+                                        // всплывает и из полей внутри её
+                                        // карточки).
+                                        if this.selected == name {
+                                            return;
+                                        }
+                                        let Some((message, detail)) = leave_question(this.dirty_now(cx)) else {
+                                            let cfg = cx.global::<Ui>().cfg.clone();
+                                            this.select(&cfg, &name, window, cx);
+                                            cx.notify();
+                                            return;
+                                        };
+                                        // Правка не пропадает молча: тот же
+                                        // вопрос, которым спрашивается смена
+                                        // базы (`save::ask_yes_no`), и «нет»
+                                        // оставляет человека на месте.
+                                        let name = name.clone();
+                                        gui::ask_yes_no(
+                                            window,
+                                            cx,
+                                            message,
+                                            detail,
+                                            "Да, перейти",
+                                            "Остаться",
+                                            true,
+                                            move |window, cx| {
+                                                let (cfg, panel) = {
+                                                    let ui = cx.global::<Ui>();
+                                                    (ui.cfg.clone(), ui.panel.clone())
+                                                };
+                                                let Some(panel) = panel else { return };
+                                                panel.update(cx, |this, cx| this.select(&cfg, &name, window, cx));
+                                                cx.refresh_windows();
+                                            },
+                                        );
                                     }
                                 });
                                 let mut row = Self::layer(card_bg, border)
@@ -2423,7 +2545,7 @@ impl Render for Panel {
                 // 2026-10-20: почему нельзя нажать, не видно. Причина живёт
                 // в левом слоте подвала (`foot_left`, один текст) и в
                 // тултипе кнопки, вторая надпись рядом не добавляется.
-                let allowed = can_save(dirty, busy_now, has_progress);
+                let allowed = can_save(dirty != Dirty::No, busy_now, has_progress);
                 let link_items = link_menu(cx.global::<Ui>(), &self.selected);
                 let (label, act) = (main.label, main.act);
                 let menu_subject = main.subject.clone();
@@ -2693,10 +2815,10 @@ impl Render for Panel {
 mod tests {
     use super::{
         act_not_yet, adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text,
-        found_text, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
-        project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
-        switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, LinkAct, ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK,
-        PASS_THE_CODE,
+        found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label,
+        project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields,
+        skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, Dirty, LinkAct, ProjectMenu,
+        FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -3526,21 +3648,21 @@ mod tests {
     fn the_main_button_names_the_one_connection_it_acts_on() {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
-        let b = main_button(&ui, "", false);
+        let b = main_button(&ui, "", Dirty::No);
         assert_eq!(b.subject, ui.cfg.current().name, "ничего не открыто — предмет текущее");
-        let b = main_button(&ui, "Василёк", false);
+        let b = main_button(&ui, "Василёк", Dirty::No);
         assert_eq!(b.subject, "Василёк", "открытая карточка перебивает текущее");
     }
 
     #[test]
     fn the_label_follows_the_subjects_role() {
-        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", false).label, "Подключиться");
-        assert_eq!(main_button(&ui_for("accept", "local", true), "", false).label, "Выключить");
-        assert_eq!(main_button(&ui_for("accept", "local", false), "", false).label, "Включить");
+        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", Dirty::No).label, "Подключиться");
+        assert_eq!(main_button(&ui_for("accept", "local", true), "", Dirty::No).label, "Выключить");
+        assert_eq!(main_button(&ui_for("accept", "local", false), "", Dirty::No).label, "Включить");
         // Правка важнее — её потеря дороже, чем недосказанное состояние связи.
-        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", true).label, "Сохранить", "правка важнее: её потеря дороже");
+        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", Dirty::Fields).label, "Сохранить", "правка важнее: её потеря дороже");
         // Принимающему подключаться не к кому — заперта, и причина названа.
-        let b = main_button(&ui_for("accept", "tunnel", false), "", false);
+        let b = main_button(&ui_for("accept", "tunnel", false), "", Dirty::No);
         assert_eq!(b.label, "");
         assert!(b.why.unwrap().contains("ту сторону"));
     }
@@ -3555,24 +3677,60 @@ mod tests {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
         ui.cfg.connections[1].role = "dial".into();
-        let b = main_button(&ui, "Василёк", false);
+        let b = main_button(&ui, "Василёк", Dirty::No);
         assert_eq!(b.label, "Сделать текущим", "связь принадлежит текущему соединению, а не открытой карточке");
         assert_eq!(b.act, Some(LinkAct::MakeCurrent));
         assert_eq!(b.why, None);
         // Правка нетекущей карточки не теряется и не уезжает в чужой блок:
         // «Сохранить» ждёт переключения, и подвал это говорит.
-        let dirty = main_button(&ui, "Василёк", true);
+        let dirty = main_button(&ui, "Василёк", Dirty::Fields);
         assert_eq!(dirty.label, "Сделать текущим", "правка важнее связи, но не важнее того, куда она запишется");
-        assert!(dirty.why.unwrap().contains("станет текущей"));
+        assert!(dirty.why.unwrap().contains("текущего соединения"));
         // У текущей карточки всё как было (задача 8).
-        assert_eq!(main_button(&ui, "Ромашка", true).act, Some(LinkAct::Save));
+        assert_eq!(main_button(&ui, "Ромашка", Dirty::Fields).act, Some(LinkAct::Save));
+    }
+
+    /// Important 2 круга починки 1: «Переименовать» предлагалось любой
+    /// карточке, а записать имя было нечем — «Сохранить» нетекущей не
+    /// предлагали, и чтобы переименовать карточку заказчика, человеку
+    /// пришлось бы сделать её текущей, то есть переключить базу агента ради
+    /// косметики. `save::rename` пишет ПО ИМЕНИ карточки и в чужой блок не
+    /// уедет — запрет, которым защищена запись полей, имени не нужен.
+    #[test]
+    fn one_changed_name_is_saveable_on_a_card_that_is_not_the_current_one() {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        let b = main_button(&ui, "Василёк", Dirty::NameOnly);
+        assert_eq!(b.label, "Сохранить", "имя пишется по имени — переключать текущую базу незачем");
+        assert_eq!(b.act, Some(LinkAct::Save));
+        assert_eq!(b.subject, "Василёк", "и пишется имя ИМЕННО открытой карточки");
+        // А вместе с полями имя снова ждёт переключения: их пишет
+        // `save_host`, и она заменяет текущее соединение.
+        assert_eq!(main_button(&ui, "Василёк", Dirty::Fields).label, "Сделать текущим");
+        // У текущей карточки обе правки — одно «Сохранить».
+        assert_eq!(main_button(&ui, "Ромашка", Dirty::NameOnly).act, Some(LinkAct::Save));
+    }
+
+    /// Important 1 круга починки 1: переход на другую строку звал
+    /// `adopt_fields`, и набранное исчезало молча при горящей «Сохранить» —
+    /// против правила самого файла «правка важнее всего». Теперь спрашиваем,
+    /// и спрашиваем тем же механизмом, что смена базы.
+    #[test]
+    fn leaving_an_edited_card_asks_before_losing_the_edit() {
+        assert_eq!(leave_question(Dirty::No), None, "нечего терять — вопроса нет");
+        for dirty in [Dirty::NameOnly, Dirty::Fields] {
+            let (message, detail) = leave_question(dirty).expect("правка есть — вопрос обязателен");
+            assert!(message.contains("другую карточку"), "{message}");
+            assert!(detail.contains("не сохранена"), "{detail}");
+            assert!(detail.contains("Сохранить"), "вопрос называет выход, а не только потерю: {detail}");
+        }
     }
 
     #[test]
     fn an_empty_list_has_no_main_button_at_all() {
         let mut ui = Ui::for_test();
         ui.cfg.connections.clear();
-        let b = main_button(&ui, "", false);
+        let b = main_button(&ui, "", Dirty::No);
         assert_eq!(b.label, "");
         assert_eq!(b.subject, "");
         assert_eq!(b.act, None);
@@ -3763,7 +3921,7 @@ mod tests {
     /// Предложение живёт константой — то же, что отдаёт подвал.
     #[test]
     fn the_sentence_about_passing_the_code_is_one() {
-        let b = main_button(&ui_link_accept_waiting(), "", false);
+        let b = main_button(&ui_link_accept_waiting(), "", Dirty::No);
         assert_eq!(b.why.as_deref(), Some(PASS_THE_CODE));
         assert_eq!(PASS_THE_CODE, "Передайте код на ту сторону — оттуда и подключатся.");
     }

@@ -451,6 +451,45 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     host.mode = ui.cfg.current().mode.clone();
     host.publication = ui.cfg.current().publication.clone();
     host.http_port = ui.cfg.current().http_port;
+    // **Топология — тем же переносом, что `role` выше** (Critical круга
+    // починки 1 задачи 14): `panel::host_of` всегда собирает форму как «база
+    // здесь» — поля для правки топологии в окне нет, — а запись ниже
+    // заменяет соединение целиком. Без этой строки карточка «база на той
+    // стороне» молча переворачивалась в «база здесь».
+    host.base_here = ui.cfg.current().base_here;
+    // И вместе с топологией — ПОЛЯ, которых карточка не показывает вовсе.
+    // Состав спрашиваем у того же `panel::shown_fields`, которым поля
+    // рисуются и сравниваются («изменилось ли»), и теперь — у настоящей
+    // топологии и настоящего режима карточки, перенесённых выше. Чего
+    // карточка не показывает, того форма не несёт: в полях окна остаётся
+    // то, что лежало там от ранее открытой карточки, и запись унесла бы
+    // чужой путь к базе в toml, а пустое поле стёрло бы адрес среды, из-за
+    // которого `validate()` потом отказывал про строку, которой на экране
+    // нет. Переносы `dump`/`platform`/`mode`/… выше — та же мысль, только
+    // про поля, которых в окне нет ни в одной топологии.
+    let shown = panel::shown_fields(&host);
+    let saved = ui.cfg.current().clone();
+    if !shown.contains(&"server") {
+        host.server = saved.server;
+    }
+    if !shown.contains(&"workstation") {
+        host.workstation = saved.workstation;
+    }
+    if !shown.contains(&"password") {
+        host.password = saved.password;
+    }
+    if !shown.contains(&"base_path") {
+        host.base_path = saved.base_path;
+    }
+    if !shown.contains(&"db_user") {
+        host.db_user = saved.db_user;
+    }
+    if !shown.contains(&"db_password") {
+        host.db_password = saved.db_password;
+    }
+    if !shown.contains(&"base_url") {
+        host.base_url = saved.base_url;
+    }
     let typed = host.base_url.clone();
     host.base_url = base_url_to_write(ui.cfg.current(), &typed, &host.publication, &host.base_path);
     // Задача 5 плана «Модель соединений», решение владельца 8: учебная

@@ -1279,3 +1279,44 @@ fn a_folder_conflict_with_a_neighbour_does_not_block_changing_the_profile() {
 
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "developer");
 }
+
+/// Critical круга починки 1 задачи 14. Форма карточки (`panel::host_of`)
+/// ВСЕГДА говорит «база здесь» и отдаёт пустыми поля, которых карточка не
+/// показывает (`panel::shown_fields`), а `save_host` заменяет соединение
+/// целиком. Без переноса топологии и непоказанных полей карточка «база на
+/// той стороне» получала одно из двух: отказ `validate()` про поле, которого
+/// на экране НЕТ, или молчаливый переворот топологии в «база здесь» вместе с
+/// путём, оставшимся в поле от ранее открытой карточки. Второе и есть
+/// молчаливо неверное: ветвление по топологии в записи не держалось.
+#[test]
+fn a_card_whose_base_is_elsewhere_keeps_its_topology_and_gets_no_base_path() {
+    let mut ui = Ui::for_test();
+    {
+        let c = ui.cfg.current_mut();
+        c.base_here = false;
+        c.base_path = String::new();
+        c.db_user = String::new();
+        c.db_password = String::new();
+    }
+    with_params_file(&ui);
+    let saved_server = ui.cfg.current().server.clone();
+    // Форма такой карточки: показана одна папка, всё прочее `host_of`
+    // отдаёт пустым — а в поле «База» лежит путь от ранее открытой карточки.
+    let form = Connection {
+        base_here: true,
+        base_path: "C:\\Bases\\Чужая".into(),
+        project: ui.cfg.current().project.clone(),
+        ..Connection::default()
+    };
+    save_host(&mut ui, form).unwrap();
+
+    let c = ui.cfg.current();
+    assert!(!c.base_here, "топология карточки записью не переворачивается");
+    assert_eq!(c.base_path, "", "чужой путь из поля в карточку не попадает");
+    assert_eq!(c.server, saved_server, "адрес среды карточка не показывает — он переносится, а не стирается");
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    let back: Cfg = toml::from_str(&text).expect("файл после записи разбирается");
+    assert!(!back.current().base_here, "и после перечитывания топология та же:\n{text}");
+    assert_eq!(back.current().base_path, "", "и пути в файле не появилось:\n{text}");
+}

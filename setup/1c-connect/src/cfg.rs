@@ -956,6 +956,19 @@ impl Cfg {
         for i in 0..self.connections.len() {
             for j in (i + 1)..self.connections.len() {
                 let (a, b) = (&self.connections[i], &self.connections[j]);
+                // Круг починки 1, Important: пустой `base_path` НЕ сравниваем
+                // вовсе — `same_base("", "")` иначе признал бы «той же базой»
+                // ЛЮБУЮ пару незаполненных блоков, и эта проверка (стоящая
+                // ДО `c.validate()?` ниже) заслонила бы собой понятное «base_path
+                // — путь к базе», подменив его сбивающим «эта же база уже
+                // занята». Достижимо только правкой toml руками (окно такую
+                // пару не даёт создать, там отдельный такой же guard в
+                // `gui::save::same_base_conflict`), но бриф прямо заботится о
+                // человеке, который правил файл руками и должен узнать, что
+                // опечатался (ревью круга 1).
+                if a.base_path.trim().is_empty() || b.base_path.trim().is_empty() {
+                    continue;
+                }
                 anyhow::ensure!(
                     !same_base(&a.base_path, &b.base_path),
                     "соединение «{}»: эта же база уже занята соединением «{}» — одна база, одна карточка",
@@ -2448,6 +2461,26 @@ mod tests {
         c.connections[1].base_path = same;
         let e = format!("{:#}", c.validate().unwrap_err());
         assert!(e.contains("Ромашка") && e.contains("Buh") && e.contains("одна база"), "{e}");
+    }
+
+    /// Круг починки 1, Important (ревью после отчёта задачи 5): пустой
+    /// `base_path` — это «путь не введён», а не «занятая база». Парное
+    /// сравнение `same_base` выше стоит ДО `c.validate()?` по каждому
+    /// соединению и, не будь этой защиты, признало бы ЛЮБУЮ пару пустых
+    /// путей «той же базой» (`same_base("", "")` истинно), заслоняя собой
+    /// понятный отказ «base_path — путь к базе» сбивающим «эта же база уже
+    /// занята». Достижимо только правкой toml руками — окно такую пару не
+    /// даёт создать (`gui::save::same_base_conflict` — тот же приём, уже
+    /// стоявший там), но бриф прямо заботится о человеке, который правил
+    /// файл руками и должен узнать, что опечатался.
+    #[test]
+    fn two_unfilled_connections_are_refused_about_the_empty_path_not_about_a_shared_base() {
+        let mut c = cfg_with(&["Buh", "Ромашка"]);
+        c.connections[0].base_path = String::new();
+        c.connections[1].base_path = String::new();
+        let e = format!("{:#}", c.validate().unwrap_err());
+        assert!(e.contains("base_path") && e.contains("путь к базе"), "{e}");
+        assert!(!e.contains("занята"), "пустая пара — не конфликт базы: {e}");
     }
 
     /// Круг починки 1, находка A: файл, в котором есть И прежняя секция

@@ -360,7 +360,6 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     host.dump = carried_dump(ui.cfg.current(), &host.project);
     host.platform = ui.cfg.current().platform.clone();
     host.configuration = ui.cfg.current().configuration.clone();
-    host.toolset = ui.cfg.current().toolset.clone();
     // Круг починки 1/5 задачи 9, находка автоматического ревью
     // безопасности: `profile` — поле карточки (решение владельца 7), а в
     // этом списке переносимых полей его не было — поля для его правки в

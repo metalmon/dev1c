@@ -928,6 +928,13 @@ impl Cfg {
     /// увидит лишний пробел перед закрывающей кавычкой и поймёт, в чём
     /// опечатка.
     pub fn switch_current(&mut self, name: &str) -> std::result::Result<(), String> {
+        // Пустой список — свежий комплект до первой настройки: `names` ниже
+        // был бы пуст, а отказ оборвался бы на «…нет — есть » без точки
+        // (долг задачи 8). Фраза та же, что уже говорит `connections_overview`
+        // для того же случая.
+        if self.connections.is_empty() {
+            return Err(format!("{FILE}: соединений пока нет — настройте первое в окне (1c-connect gui)"));
+        }
         if !self.connections.iter().any(|c| c.name == name) {
             let names: Vec<String> = self.connections.iter().map(|c| format!("«{}»", c.name)).collect();
             return Err(format!("{FILE}: соединения «{name}» нет — есть {}", names.join(", ")));
@@ -2185,6 +2192,18 @@ mod tests {
         assert_eq!(c.current, "Ромашка");
         let e = c.switch_current("Лютик").unwrap_err();
         assert!(e.contains("Лютик") && e.contains("Buh") && e.contains("Ромашка"), "отказ перечисляет, из чего выбирать: {e}");
+    }
+
+    /// Долг задачи 8: список соединений пуст (свежий комплект, команда
+    /// `use` набрана раньше первой настройки) — отказ обязан быть
+    /// человеческой фразой, той же, что уже говорит `connections_overview`,
+    /// а не обрезанным «…есть » без имён и без точки.
+    #[test]
+    fn switching_the_current_connection_on_an_empty_list_says_so_in_words() {
+        let mut c = cfg_with(&[]);
+        let e = c.switch_current("Buh").unwrap_err();
+        assert!(e.contains("пока нет") && e.contains("gui"), "{e}");
+        assert!(!e.trim_end().ends_with("есть"), "предложение не обрывается на «есть»: {e}");
     }
 
     /// Шаг 5 задачи 8: `1c-connect use` без имени — список соединений,

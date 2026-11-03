@@ -905,8 +905,6 @@ pub fn link_menu(ui: &Ui) -> Vec<ProjectMenu> {
         out.push(ProjectMenu::Item("Отозвать разрешение", UNWIRED));
     }
     out.push(ProjectMenu::Item("Переименовать", UNWIRED));
-    out.push(ProjectMenu::Sep);
-    out.push(ProjectMenu::Item("Удалить соединение", UNWIRED));
     out
 }
 

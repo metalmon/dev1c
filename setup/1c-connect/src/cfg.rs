@@ -1877,8 +1877,14 @@ pub fn mode_needs_env(mode: &str) -> bool {
 pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::result::Result<(), String> {
     let mut text = cfg.render(store)?;
     let path = kit.state_path(FILE);
+    // Файл читается ВСЕГДА, а не только ради подстановки шифртекста ниже:
+    // печатается он целиком из памяти, и соединение, дописанное рукой после
+    // того как мы прочитали настройки, исчезло бы молча (находка 3 ревью всей
+    // ветки). Файла ещё нет (первая настройка свежего комплекта) — пусто, и
+    // сверять не с чем.
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    same_connections_on_disk(&before, cfg)?;
     if !cfg.undecryptable.is_empty() {
-        let before = std::fs::read_to_string(&path).map_err(|e| format!("{FILE}: {e:#}"))?;
         for u in &cfg.undecryptable {
             let literal = previous_literal(&before, &u.connection, &u.field).ok_or_else(|| {
                 // «Карточка», не «соединение»: эту фразу читает человек в
@@ -1908,6 +1914,53 @@ pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::resul
         return Err(format!("{FILE}: запись не прошла проверку — пароль после записи читается не так, как до неё"));
     }
     Ok(())
+}
+
+/// Те же соединения на диске, что и в памяти, — или отказ СЛОВАМИ, до
+/// какой-либо записи. Находка 3 ревью всей ветки: печать идёт целиком из
+/// памяти, и блок, дописанный рукой ПОСЛЕ чтения настроек, исчезал молча,
+/// да ещё и выглядело это успехом. Шапка образца прямо приглашает такую
+/// правку («скопируйте блок целиком, дайте ему другое имя»), а у нас с
+/// момента чтения до «Сохранить» проходит столько времени, сколько человек
+/// держит окно открытым.
+///
+/// Сверяются ИМЕНА блоков: имя — то самое, чем план (решение 1) называет
+/// соединение, и то же, чем адресуют блок все писатели (`block_in`). Текстом,
+/// а не разбором toml (`common::toml_render`, то же терпимое чтение, что у
+/// `block_in`): файл, который человек правил руками, может и не разобраться
+/// целиком, а сказать ему про это обязана проверка настроек, а не отказ
+/// записи с чужими словами.
+///
+/// Блоков на диске нет вовсе — сверять нечего, и это НЕ отказ: прежний файл
+/// (`[host]` без блоков) — законный вид настроек, так выглядят все уехавшие
+/// комплекты, а пустой файл — свежий комплект до первой настройки.
+fn same_connections_on_disk(before: &str, cfg: &Cfg) -> std::result::Result<(), String> {
+    let count = common::toml_render::count(before, CONNECTION);
+    if count == 0 {
+        return Ok(());
+    }
+    let disk: Vec<String> =
+        (0..count).map(|nth| common::toml_render::get_in(before, CONNECTION, nth, "name").unwrap_or_default()).collect();
+    if let Some(twice) = disk.iter().find(|n| disk.iter().filter(|m| m == n).count() > 1) {
+        return Err(duplicate_block(twice));
+    }
+    let mine: Vec<&str> = cfg.connections.iter().map(|c| c.name.as_str()).collect();
+    if disk.len() != mine.len() || disk.iter().any(|n| !mine.contains(&n.as_str())) {
+        let names = disk.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "{FILE}: в файле не те соединения, что были прочитаны — на диске сейчас {names}. Настройки правили рядом с программой; перечитайте их и повторите"
+        ));
+    }
+    Ok(())
+}
+
+/// Два блока с одним именем в файле. Такой файл создаёт только правка руками
+/// (чтение его отвергает, `Cfg::validate`), но писателю от этого не легче:
+/// `.find()` молча взял бы ПЕРВЫЙ, а беда могла быть во втором — и
+/// подстановка прежнего шифртекста перенесла бы чужой пароль (находка 6
+/// ревью всей ветки). Отказ вместо догадки.
+fn duplicate_block(name: &str) -> String {
+    format!("{FILE}: в файле два блока соединения «{name}» — непонятно, какой из них ваш; оставьте один и повторите")
 }
 
 /// Правая часть ключа `<field>` соединения `<name>` в тексте файла, в том же
@@ -3461,6 +3514,38 @@ mod tests {
         let before = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
         let _ = Cfg::load_unchecked(&kit).unwrap();
         assert_eq!(std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap(), before);
+    }
+
+    /// Находка 3 ревью ВСЕЙ ветки (IMPORTANT): запись переписывала файл
+    /// целиком из памяти, не сверяясь с диском. Блок, дописанный рукой ПОСЛЕ
+    /// того как окно прочитало настройки, исчезал молча — и выглядело это
+    /// успехом. Достижимость выросла вместе с приглашением: шапка образца
+    /// сама предлагает «скопируйте блок целиком, дайте ему другое имя».
+    #[test]
+    fn a_block_added_by_hand_after_reading_is_not_overwritten_in_silence() {
+        let s = secrets::Store::file(&tmp("hand-added"));
+        let mut c = cfg_with(&["Buh"]);
+        let kit = kit_with(&c.render(&s).unwrap());
+        // Человек дописал второй блок руками, пока окно было открыто.
+        let read = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
+        let on_disk = format!("{read}\n[[connection]]\nname = \"Ромашка\"\n");
+        std::fs::write(kit.state_path(cfg::FILE), &on_disk).unwrap();
+        c.current_mut().db_user = "другой".into();
+        let e = cfg::write_checked(&kit, &c, &s).unwrap_err();
+        assert!(e.contains("Ромашка"), "отказ называет то, что нашлось на диске: {e}");
+        assert_eq!(std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap(), on_disk, "файл не тронут ни на байт");
+    }
+
+    /// Та же сверка на прежнем файле: `[host]` без единого блока
+    /// `[[connection]]` — законный вид настроек (так выглядят все уехавшие
+    /// комплекты), и запись обязана его пропускать, иначе сверка из находки 3
+    /// ломает уехавшее.
+    #[test]
+    fn the_check_against_the_disk_lets_an_old_host_section_through() {
+        let s = secrets::Store::file(&tmp("old-file-write"));
+        let kit = kit_with("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\n");
+        let c = cfg_with(&["Buh"]);
+        cfg::write_checked(&kit, &c, &s).expect("прежний файл сверка пропускает");
     }
 
     /// Анти-цель спеки: «шифрование, которое тихо не состоялось». Запись

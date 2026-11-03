@@ -273,10 +273,11 @@ fn saving_edits_the_current_connection_and_keeps_the_others() {
 /// Задача 5 плана «Модель соединений», решение владельца 8: учебная лицензия
 /// 1С даёт ОДИН сеанс на базу, и вторая карточка к той же базе получила бы
 /// отказ ПЛАТФОРМЫ, не нашей программы — человек не понял бы, откуда беда.
-/// `validate()` внутри `save_host` проверяет `Cfg::of_one(host)` — только
-/// ОДНО соединение, и запрет `Cfg::validate` (задача 5) соседей там не видит
-/// вовсе; отказ здесь сверяет с СОСЕДНИМИ карточками `ui.cfg` отдельно и
-/// называет имя уже СУЩЕСТВУЮЩЕЙ карточки, а не той, что сохраняют. Разница
+/// Отказ здесь сверяет правку с СОСЕДНИМИ карточками `ui.cfg` отдельно от
+/// `validate()` и называет имя уже СУЩЕСТВУЮЩЕЙ карточки, а не той, что
+/// сохраняют, — и говорит это словами ОКНА («карточка»), а не модели
+/// («соединение»): с задачи 10 `validate()` внутри `save_host` видит весь
+/// список и тот же запрет ловит сама, но на своём языке. Разница
 /// в написании — только хвостовой разделитель, без смены регистра: тест
 /// обязан проходить и на Linux.
 #[test]
@@ -723,7 +724,7 @@ fn an_unreadable_password_survives_a_save_with_an_empty_field() {
     // настоящего `load_unchecked` на непрочитанном шифртексте (без похода за
     // DPAPI в тесте — та же договорённость, что у соседнего теста трея выше).
     ui.cfg.current_mut().password = String::new();
-    ui.cfg.undecryptable = vec!["password".to_string()];
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new(&ui.cfg.current().name.clone(), "password")];
 
     let mut host = ui.cfg.current().clone();
     host.workstation = "dev2".into();
@@ -749,7 +750,7 @@ fn a_freshly_typed_password_still_overwrites_an_unreadable_one() {
     let old_password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
 
     ui.cfg.current_mut().password = String::new();
-    ui.cfg.undecryptable = vec!["password".to_string()];
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new(&ui.cfg.current().name.clone(), "password")];
 
     let mut host = ui.cfg.current().clone();
     host.password = "новый пароль рабочего места".into();
@@ -786,7 +787,7 @@ fn a_missing_previous_ciphertext_refuses_the_save_and_touches_nothing() {
     // само — мы доводим это условие руками, тем же приёмом, что у соседних
     // тестов, ради сценария «список говорит про поле, а в файле его нет»).
     ui.cfg.current_mut().password = String::new();
-    ui.cfg.undecryptable = vec!["password".to_string()];
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new(&ui.cfg.current().name.clone(), "password")];
 
     let mut host = ui.cfg.current().clone();
     host.workstation = "dev2".into();
@@ -800,4 +801,72 @@ fn a_missing_previous_ciphertext_refuses_the_save_and_touches_nothing() {
         "строка не должна звучать, если ничего не подставлено: {:?}",
         ui.log
     );
+}
+
+/// Задача 10 плана «Модель соединений»: цель плана — человек может завести
+/// второе соединение, — на практике не выполнялась, потому что единственный
+/// писатель в продукте («Сохранить») сворачивал настройки в ОДНО соединение
+/// (`Cfg::of_one`), и вторая карточка исчезала с диска при первом же
+/// сохранении. Утверждение читает ФАЙЛ, а не память: потеря данных случается
+/// на диске, и доказывать её надо байтами файла.
+#[test]
+fn saving_keeps_every_connection_on_disk_not_just_the_current_one() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    ui.cfg = cfg::cfg_with(&["Buh", "Ромашка"]);
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, ui.cfg.render(&store).unwrap()).unwrap();
+
+    // Правим ТЕКУЩЕЕ соединение — ровно то, что делает человек в окне.
+    let mut host = ui.cfg.current().clone();
+    host.workstation = "dev2".into();
+    save_host(&mut ui, host).unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 2, "на диске обязаны остаться обе карточки:\n{after}");
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 1, "name").as_deref(),
+        Some("Ромашка"),
+        "вторая карточка — на своём месте и под своим именем:\n{after}"
+    );
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 0, "workstation").as_deref(),
+        Some("dev2"),
+        "правка текущей карточки доехала до диска:\n{after}"
+    );
+}
+
+/// Та же запись, но у ЧУЖОЙ карточки пароль — шифртекст, который на этой
+/// машине не открывается (файл переехал, другая учётка). Загрузка отдаёт это
+/// поле пустым, и запись всего списка, сделанная наивно, зашифровала бы
+/// пустую строку поверх чужого шифртекста — потеря того, что ещё можно было
+/// открыть, вернувшись на свою машину. Это и есть причина, по которой задача
+/// 4 не могла записать весь список сама.
+#[test]
+fn saving_one_card_leaves_an_unreadable_password_of_another_untouched() {
+    let mut ui = Ui::for_test();
+    let local = crate::secrets::Store::file(ui.kit.state());
+    // Настоящая «другая машина» — другой каталог, другой ключ: та подложка,
+    // что возьмёт сам `save_host`, эту строку не откроет (см.
+    // `foreign_store_dir`).
+    let foreign = crate::secrets::Store::file(&foreign_store_dir("another-card"));
+    let sealed_elsewhere = foreign.seal("password", "секрет с другой машины").unwrap();
+    let text = cfg::cfg_with(&["Buh", "Ромашка"]).render(&local).unwrap();
+    let text = common::toml_render::set_in(&text, cfg::CONNECTION, 1, "password", &format!("{sealed_elsewhere:?}"))
+        .expect("во втором блоке есть пароль");
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, &text).unwrap();
+
+    // Путь чтения настоящий: окно держит ровно то, что отдала загрузка, —
+    // пустое поле у чужой карточки и её имя в списке непрочитанных.
+    ui.cfg = Cfg::load_unchecked_with(&ui.kit, &local).unwrap();
+    assert_eq!(ui.cfg.connections[1].password, "", "фикстура: пароль чужой карточки не открылся");
+    assert!(!ui.cfg.undecryptable.is_empty(), "фикстура: загрузка обязана назвать непрочитанное поле");
+
+    let mut host = ui.cfg.current().clone();
+    host.workstation = "dev2".into();
+    save_host(&mut ui, host).unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains(&sealed_elsewhere), "байты чужого шифртекста обязаны остаться в файле дословно:\n{after}");
 }

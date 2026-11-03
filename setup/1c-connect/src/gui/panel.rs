@@ -646,14 +646,30 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
 /// Строка журнала о пароле, который не открылся (задача 4; замысел — «Анти-цели», «человек остался без доступа и не понял почему»): причина — зашифрован другим пользователем или на другой машине, и что делать — ввести заново, с названием каждого такого поля словами человека (`cfg::secret_field_name` — одна формулировка с `gui::save::field_label`, ревью задачи 7, Important 4) и той же причиной, что у командной строки (`cfg::UNDECRYPTABLE_REASON`). `None` — список пуст, расшифровка прошла у обоих полей.
 ///
 /// Строку показывает `mod.rs` (`adopt_cfg`) один раз на загрузку параметров, а не на каждый показ окна: оно перечитывает файл при каждом открытии (`window::reread_and_recheck`), и без отдельной метки «уже сказано» тот же нерасшифрованный пароль сыпался бы в журнал на каждый клик по значку трея.
-pub fn undecryptable_line(fields: &[String]) -> Option<Line> {
-    if fields.is_empty() {
+pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
+    if bad.is_empty() {
         return None;
     }
-    let names: Vec<&str> = fields.iter().map(|f| cfg::secret_field_name(f)).collect();
-    Some(Line {
-        kind: Kind::Warn, text: format!("Пароль {} — введите {} заново.", cfg::UNDECRYPTABLE_REASON, names.join(" и "))
-    })
+    // Карточка называется по имени (задача 10), и предложение на карточку —
+    // одно: до неё строка перечисляла одни поля, и человек с двумя
+    // карточками читал «введите пароль рабочего места и пароль рабочего
+    // места заново» — два раза об одном и том же, ни слова о том, у кого
+    // именно беда. Находки приходят подряд по соединениям (их и собирают
+    // обходом списка), поэтому хватает склейки соседних, без сортировки.
+    let mut by_card: Vec<(&str, Vec<&str>)> = Vec::new();
+    for u in bad {
+        let field = cfg::secret_field_name(&u.field);
+        match by_card.last_mut() {
+            Some((card, fields)) if *card == u.connection => fields.push(field),
+            _ => by_card.push((&u.connection, vec![field])),
+        }
+    }
+    let text = by_card
+        .iter()
+        .map(|(card, fields)| format!("Карточка «{card}»: пароль {} — введите {} заново.", cfg::UNDECRYPTABLE_REASON, fields.join(" и ")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(Line { kind: Kind::Warn, text })
 }
 
 /// Поля вкладки «Связь», которые режим реально показывает. В локальном
@@ -2811,8 +2827,9 @@ mod tests {
 
     #[test]
     fn an_undecryptable_password_is_explained_in_words() {
-        let l = undecryptable_line(&["password".to_string()]).expect("строка есть");
+        let l = undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "password")]).expect("строка есть");
         assert_eq!(l.kind, Kind::Warn);
+        assert!(l.text.contains("Buh"), "карточка названа по имени (задача 10): {}", l.text);
         assert!(l.text.contains("другой машине") || l.text.contains("другим пользователем"), "{}", l.text);
         assert!(l.text.contains("введите"), "{}", l.text);
         assert!(l.text.contains("рабочего места"), "поле названо словами человека: {}", l.text);
@@ -2820,8 +2837,26 @@ mod tests {
 
     #[test]
     fn both_fields_are_named_in_one_line() {
-        let l = undecryptable_line(&["password".into(), "db_password".into()]).unwrap();
+        let l =
+            undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "password"), crate::cfg::Undecryptable::new("Buh", "db_password")])
+                .unwrap();
         assert!(l.text.contains("рабочего места") && l.text.contains("базы"), "{}", l.text);
+        assert_eq!(l.text.matches("Buh").count(), 1, "одна карточка — одно предложение о ней: {}", l.text);
+    }
+
+    /// Задача 10: две карточки — два предложения, каждое со своим именем.
+    /// Прежде строка перечисляла одни поля, и человек с двумя карточками
+    /// читал «введите пароль рабочего места и пароль рабочего места заново»
+    /// — дважды об одном и ни слова о том, у кого беда.
+    #[test]
+    fn two_cards_are_named_each_in_its_own_sentence() {
+        let l = undecryptable_line(&[
+            crate::cfg::Undecryptable::new("Buh", "password"),
+            crate::cfg::Undecryptable::new("Ромашка", "db_password"),
+        ])
+        .unwrap();
+        assert!(l.text.contains("Buh") && l.text.contains("Ромашка"), "{}", l.text);
+        assert_eq!(l.text.matches("Карточка").count(), 2, "по предложению на карточку: {}", l.text);
     }
 
     #[test]
@@ -2829,7 +2864,7 @@ mod tests {
         // Пара: пустой список молчит, непустой говорит — иначе тест прошёл бы и
         // у функции, которая всегда молчит.
         assert!(undecryptable_line(&[]).is_none());
-        assert!(undecryptable_line(&["db_password".into()]).is_some());
+        assert!(undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "db_password")]).is_some());
     }
 
     /// Minor ревью задачи 4: неизвестное имя поля (такого `Cfg::undecryptable`
@@ -2839,7 +2874,7 @@ mod tests {
     /// комментарием у ветки `_`.
     #[test]
     fn an_unknown_field_name_falls_back_to_the_workstation_password() {
-        let l = undecryptable_line(&["unknown".to_string()]).unwrap();
+        let l = undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "unknown")]).unwrap();
         assert!(l.text.contains("рабочего места"), "{}", l.text);
     }
 

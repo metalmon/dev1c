@@ -519,14 +519,18 @@ pub fn db_user_is_set(user: &str) -> bool {
 }
 
 /// Факт готовности (ревью задачи 7, Important 2): нерасшифрованный пароль базы (а в туннельном режиме — и пароль рабочего места) — то же условие, что держит холодный замок (`gate::cold_gate`), иначе статус зелёный, пока MCP и «Установить расширение» бесшумно едут с пустым паролем. Раньше находка печаталась мимо набора фактов (`main.rs`, `println!` в `status`/`check`) — отчёт `last-check.txt`, который человек прикладывает к обращению, о ней молчал. Чистая функция от `cfg::blocking_undecryptable` — то же сито, что у замка, одна поверхность на двоих.
-pub fn undecryptable_fact(mode: &str, undecryptable: &[String]) -> Check {
-    let blocking = crate::cfg::blocking_undecryptable(mode, undecryptable);
+pub fn undecryptable_fact(cfg: &crate::cfg::Cfg) -> Check {
+    let blocking = crate::cfg::blocking_undecryptable(cfg);
     if blocking.is_empty() {
         Check::pass(UNDECRYPTABLE, "да")
     } else {
+        // Карточка названа в каждой находке (задача 10): отчёт прикладывают к
+        // обращению, и «не расшифрован: password» без имени карточки не
+        // говорит, какую из них править.
+        let what: Vec<String> = blocking.iter().map(|u| u.label()).collect();
         Check::fail(
             UNDECRYPTABLE,
-            format!("не расшифрован: {}", blocking.join(", ")),
+            format!("не расшифрован: {}", what.join(", ")),
             "откройте окно, введите пароль заново и нажмите «Сохранить»",
         )
     }
@@ -1193,7 +1197,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     v.push(base_fact(&h.base_path, base_exists_on_disk(&h.base_path)));
     // Чистая функция от настроек, без сети и без срока.
     v.push(db_user_fact(&h.db_user));
-    v.push(undecryptable_fact(&h.mode, &ctx.cfg.undecryptable));
+    v.push(undecryptable_fact(&ctx.cfg));
     #[cfg(target_os = "linux")]
     v.push(system_web_server_fact(&ctx.cfg));
     // Сколько сеансов 1С открыто прямо сейчас — число пришло от вызывающего
@@ -1520,7 +1524,7 @@ mod tests {
             media_fact(Some("FAT32".into()), "E:\\"),
             base_fact("C:\\нет-такого-каталога-для-теста-one-truth", false),
             db_user_fact(""),
-            undecryptable_fact("tunnel", &["db_password".to_string()]),
+            undecryptable_fact(&cfg_with_undecryptable("tunnel", &["db_password"])),
             web_server_fact(None, None),
             web_fact(1818, false, false),
             publication_responds_fact("http://x", false, None),
@@ -2718,17 +2722,33 @@ mod tests {
         assert!(!c.info && c.ok);
     }
 
+    /// Настройки с непрочитанными паролями у ТЕКУЩЕГО соединения — фикстура
+    /// фактов. Имя карточки берётся у самого соединения: находку, называющую
+    /// карточку, которой в списке нет, сито считает требующей среды
+    /// (`cfg::blocking_undecryptable`), и фикстура проверяла бы не то, что
+    /// заявляет.
+    fn cfg_with_undecryptable(mode: &str, fields: &[&str]) -> crate::cfg::Cfg {
+        let mut c = crate::cfg::filled_for_test();
+        c.current_mut().mode = mode.to_string();
+        let name = c.current().name.clone();
+        c.undecryptable = fields.iter().map(|f| crate::cfg::Undecryptable::new(&name, f)).collect();
+        c
+    }
+
     /// Ревью задачи 7, Important 2: тот же замок, что держит переключатель (`gate::cold_gate`), теперь и в наборе фактов — одно сито (`cfg::blocking_undecryptable`) на обе поверхности. `db_password` проваливает факт в любом режиме, `password` — только в туннельном.
     #[test]
     fn undecryptable_fact_follows_the_same_sieve_as_the_switch() {
-        assert!(undecryptable_fact("tunnel", &[]).ok, "расшифровалось — зелёный");
-        let c = undecryptable_fact("tunnel", &["db_password".to_string()]);
+        assert!(undecryptable_fact(&cfg_with_undecryptable("tunnel", &[])).ok, "расшифровалось — зелёный");
+        let c = undecryptable_fact(&cfg_with_undecryptable("tunnel", &["db_password"]));
         assert!(!c.ok && c.detail.contains("db_password") && !c.hint.is_empty(), "{c:?}");
-        let c = undecryptable_fact("tunnel", &["password".to_string()]);
+        let c = undecryptable_fact(&cfg_with_undecryptable("tunnel", &["password"]));
         assert!(!c.ok && c.detail.contains("password"), "{c:?}");
+        // Задача 10: деталь факта называет карточку — отчёт прикладывают к
+        // обращению, и без имени он не говорит, какую из них править.
+        assert!(c.detail.contains("Buh"), "{c:?}");
         // Локальный режим: пароль рабочего места никто не читает — зелёный, то же снисхождение, что у `cfg::blocking_undecryptable`.
-        assert!(undecryptable_fact("local", &["password".to_string()]).ok, "в локальном режиме поле не в счёт");
-        assert!(!undecryptable_fact("local", &["db_password".to_string()]).ok, "db_password в счёт в любом режиме");
+        assert!(undecryptable_fact(&cfg_with_undecryptable("local", &["password"])).ok, "в локальном режиме поле не в счёт");
+        assert!(!undecryptable_fact(&cfg_with_undecryptable("local", &["db_password"])).ok, "db_password в счёт в любом режиме");
     }
 
     /// Критическая находка финального ревью: контейнерная правка настроек Zed по SSH измерена

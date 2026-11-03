@@ -356,16 +356,22 @@ pub struct Cfg {
     /// список там, где в файле соединение есть.
     #[serde(rename = "connection")]
     pub connections: Vec<Connection>,
-    /// Имена полей, которые не открылись при чтении (`"password"`,
-    /// `"db_password"`) — считается заново при каждом `load_unchecked_with`
-    /// и в файл не идёт: это не настройка, а диагноз текущего чтения.
-    /// `load` при непустом списке отказывает словами (анти-цель спеки:
-    /// «serve»/«connect»/«mcp» не имеют права уехать молча с пустым
-    /// паролем — `validate` пароли не проверяет); `load_unchecked` (её
-    /// зовёт окно) отдаёт список как есть — человек должен ввести пароль
+    /// Какие пароли не открылись при чтении — СОЕДИНЕНИЕ И ПОЛЕ у каждой
+    /// находки (`Undecryptable`), считается заново при каждом
+    /// `load_unchecked_with` и в файл не идёт: это не настройка, а диагноз
+    /// текущего чтения. `load` при непустом списке отказывает словами
+    /// (анти-цель спеки: «serve»/«connect»/«mcp» не имеют права уехать молча
+    /// с пустым паролем — `validate` пароли не проверяет); `load_unchecked`
+    /// (её зовёт окно) отдаёт список как есть — человек должен ввести пароль
     /// заново, а не прочитать отказ там, где раньше открывалось окно.
+    ///
+    /// Соединение названо в каждой находке (задача 10), а не потеряно в
+    /// плоском списке имён полей: иначе запись всего списка не знает, ЧЕЙ
+    /// шифртекст беречь, и затирает чужой пустотой; блокировку судит режим
+    /// того соединения, у которого беда, а не всегда текущего; и отказ
+    /// называет карточку, а не одно слово «пароль» дважды подряд.
     #[serde(skip)]
-    pub undecryptable: Vec<String>,
+    pub undecryptable: Vec<Undecryptable>,
     /// С чем чтению пришлось разобраться самому — готовыми фразами человеку,
     /// по одной на находку. Разведено так же, как `undecryptable` выше, и по
     /// той же причине: `load` (её зовут `serve`/`connect`/`mcp`) отказывает
@@ -398,6 +404,35 @@ pub struct Cfg {
     /// ниже предпочитает это поле, когда оно есть.
     #[serde(skip)]
     pub resolved_http_port: Option<u16>,
+}
+
+/// Пароль, который при чтении не открылся: ЧЕЙ и КАКОЙ. До задачи 10 это был
+/// плоский список имён полей по всем соединениям, и из него нельзя было
+/// узнать соединение — а знать его обязаны все трое, кто этот список читает:
+/// запись (какой шифртекст беречь, `write_checked`), отказ командной строки
+/// (`undecryptable_message`) и строка журнала окна
+/// (`gui::panel::undecryptable_line`).
+///
+/// `field` — имя поля ПРОГРАММЫ (`password`/`db_password`), не слова
+/// человеку: словами его называет `secret_field_name` там, где текст читают
+/// глазами, а здесь им адресуется ключ в toml.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Undecryptable {
+    pub connection: String,
+    pub field: String,
+}
+
+impl Undecryptable {
+    pub fn new(connection: &str, field: &str) -> Undecryptable {
+        Undecryptable { connection: connection.to_string(), field: field.to_string() }
+    }
+
+    /// Одна запись для читателя-разработчика: отказ командной строки и
+    /// диагноз `status`/`check` называют карточку и поле одинаково — своих
+    /// копий этой пары у них больше нет.
+    pub fn label(&self) -> String {
+        format!("«{}» {}", self.connection, self.field)
+    }
 }
 
 /// Файл параметров КАК ОН НАПИСАН — прежняя секция `[host]` рядом со
@@ -828,9 +863,8 @@ impl Cfg {
         // ровно то, чего эта развилка не делает (круг починки 1, находки A и
         // D).
         anyhow::ensure!(cfg.read_notes.is_empty(), "{FILE}: {}", cfg.read_notes.join(" "));
-        let blocking = blocking_undecryptable(&cfg.current().mode, &cfg.undecryptable);
+        let blocking = blocking_undecryptable(&cfg);
         if !blocking.is_empty() {
-            let blocking: Vec<String> = blocking.into_iter().map(str::to_string).collect();
             anyhow::bail!("{}", undecryptable_message(&blocking));
         }
         cfg.validate()?;
@@ -884,8 +918,9 @@ impl Cfg {
         // функции, а свойство типа, и нарушить его нечем.
         let mut bad = Vec::new();
         for c in cfg.connections.iter_mut() {
-            c.password = open_or_mark(store, "password", &c.password, &mut bad);
-            c.db_password = open_or_mark(store, "db_password", &c.db_password, &mut bad);
+            let name = c.name.clone();
+            c.password = open_or_mark(store, &name, "password", &c.password, &mut bad);
+            c.db_password = open_or_mark(store, &name, "db_password", &c.db_password, &mut bad);
         }
         // `current`, называющий то, чего нет, здесь больше не разбирается:
         // это находка разбора (`From<CfgFile>` — там и фраза человеку), а
@@ -1642,17 +1677,27 @@ pub const CONNECTION: &str = "[[connection]]";
 /// Прежний файл (`[host]` и ни одного блока) правится там, где соединение и
 /// лежит, — в самой `[host]`: дописать блок рядом с ней значило бы своей же
 /// рукой сделать файл человека отказом. Блоки в файле есть — ключ идёт в
-/// блок, который НАЗЫВАЕТ СЕБЯ текущим соединением (`current_block_in`).
+/// блок, который НАЗЫВАЕТ СЕБЯ текущим соединением (`block_in`).
 pub fn set_current(text: &str, cfg: &Cfg, key: &str, value: &str) -> std::result::Result<String, String> {
+    set_named(text, &cfg.current, key, value)
+}
+
+/// То же для соединения, названного ПО ИМЕНИ, а не «текущего»: задаче 10
+/// нужно вернуть прежний шифртекст в блок ЧУЖОЙ карточки — той, чей пароль
+/// на этой машине не открылся, — а текущая в этот момент совсем другая.
+/// Правило адресации одно на обоих (`set_current` зовёт эту же функцию):
+/// блоков в файле нет — правим прежнюю `[host]`, блоки есть — тот, что
+/// называет себя этим именем.
+pub fn set_named(text: &str, name: &str, key: &str, value: &str) -> std::result::Result<String, String> {
     if common::toml_render::count(text, CONNECTION) == 0 {
         return Ok(common::toml_render::set(text, "[host]", key, value));
     }
-    let nth = current_block_in(text, cfg)?;
-    common::toml_render::set_in(text, CONNECTION, nth, key, value).ok_or_else(|| stale_file(&cfg.current))
+    let nth = block_in(text, name)?;
+    common::toml_render::set_in(text, CONNECTION, nth, key, value).ok_or_else(|| stale_file(name))
 }
 
-/// Номер блока текущего соединения В ТЕКСТЕ файла — найденный по ключу
-/// `name` внутри блоков, а не по месту соединения в `cfg.connections`.
+/// Номер блока соединения `name` В ТЕКСТЕ файла — найденный по ключу `name`
+/// внутри блоков, а не по месту соединения в `cfg.connections`.
 ///
 /// Почему по имени (круг починки 1 задачи 4, находка 1). Текст писатель
 /// перечитывает с диска, а `cfg` у него от загрузки — между ними человек
@@ -1667,13 +1712,19 @@ pub fn set_current(text: &str, cfg: &Cfg, key: &str, value: &str) -> std::result
 /// вид файла, и текущее там первое по определению (то же правило, что у
 /// `Cfg::current()`). Имя не нашлось ни в одном блоке — отказ словами: файл
 /// на диске разошёлся с тем, что в памяти, и писать наугад нельзя.
-pub fn current_block_in(text: &str, cfg: &Cfg) -> std::result::Result<usize, String> {
-    if cfg.current.is_empty() {
+///
+/// Одно правило и для текущего соединения, и для чужого (задача 10: прежний
+/// `current_block_in`, спрашивавший имя у `cfg.current`, остался без
+/// вызывающих — текущее теперь адресуется этой же функцией через
+/// `set_current`): два понимания того, какой блок «тот самый», разошлись бы
+/// молча, а цена расхождения — ключ, записанный в блок чужой карточки.
+pub fn block_in(text: &str, name: &str) -> std::result::Result<usize, String> {
+    if name.is_empty() {
         return Ok(0);
     }
     (0..common::toml_render::count(text, CONNECTION))
-        .find(|nth| common::toml_render::get_in(text, CONNECTION, *nth, "name").as_deref() == Some(cfg.current.as_str()))
-        .ok_or_else(|| stale_file(&cfg.current))
+        .find(|nth| common::toml_render::get_in(text, CONNECTION, *nth, "name").as_deref() == Some(name))
+        .ok_or_else(|| stale_file(name))
 }
 
 /// Одна фраза на оба случая, в которых писатель не нашёл своего блока: имени
@@ -1691,11 +1742,11 @@ fn stale_file(current: &str) -> String {
 /// открылся, введите заново» (окно, задача 4), а не «файл битый, зовите
 /// админа». Пустую строку (открытый текст или незаполненное поле)
 /// `Store::open` возвращает как есть, в `bad` она не попадает.
-fn open_or_mark(store: &secrets::Store, field: &str, value: &str, bad: &mut Vec<String>) -> String {
+fn open_or_mark(store: &secrets::Store, connection: &str, field: &str, value: &str, bad: &mut Vec<Undecryptable>) -> String {
     match store.open(field, value) {
         Ok(v) => v,
         Err(_) => {
-            bad.push(field.to_string());
+            bad.push(Undecryptable::new(connection, field));
             String::new()
         }
     }
@@ -1713,14 +1764,30 @@ pub fn secret_field_name(field: &str) -> &'static str {
 /// Причина, по которой пароль читается пустым, — одна формулировка на все четыре места, что о ней говорят: отказ `load_with` ниже (команды, которым без пароля не работать), диагноз `status`/`check` (`main.rs`, не отказ — только сведение) и строка окна (`gui::panel::undecryptable_line`, другими словами то же самое). Раньше каждое место собирало фразу само, и для одной причины нашлось четыре формулировки, местами в разном порядке слов (ревью задачи 7, Important 4) — как и у имени поля выше, норма обратная (`NO_GITEA`).
 pub const UNDECRYPTABLE_REASON: &str = "зашифрован на другой машине или другим пользователем";
 
-/// Отказ/диагноз командной строки: имя файла, причина, имена полей программы (`password`, `db_password`) через запятую — этому читателю (разработчик на своей машине, не окно) незачем переводить их на слова человека.
-pub fn undecryptable_message(fields: &[String]) -> String {
-    format!("{FILE}: пароль {UNDECRYPTABLE_REASON} — откройте окно и введите заново ({})", fields.join(", "))
+/// Отказ/диагноз командной строки: имя файла, причина и находки через запятую — карточка и имя поля ПРОГРАММЫ (`password`, `db_password`) у каждой (`Undecryptable::label`). Этому читателю (разработчик на своей машине, не окно) незачем переводить имена полей на слова человека, а вот карточку назвать нужно: с задачи 10 их в файле может быть несколько, и «пароль не открылся» без имени не говорит, какую править.
+pub fn undecryptable_message(bad: &[Undecryptable]) -> String {
+    let what: Vec<String> = bad.iter().map(|u| u.label()).collect();
+    format!("{FILE}: пароль {UNDECRYPTABLE_REASON} — откройте окно и введите заново ({})", what.join(", "))
 }
 
 /// Какие из `undecryptable` и правда мешают работе — не любое непрочитанное поле подряд. Пароль рабочего места (`password`) в ЛОКАЛЬНОМ режиме не читает никто: туннеля в среду нет, коннектор слушает loopback, и `gui::panel::shown_fields` само поле там не показывает вовсе — отказывать на нём молчаливой команде незачем, тем же приёмом, что `validate` уже не спрашивает `server` в этом режиме (ревью задачи 7, Important 1). `db_password` этого снисхождения не получает ни в каком режиме: без пользователя и пароля базы работать не выйдет и локально. Общая функция — CLI (`load_with` ниже) и холодный замок окна (`gate::cold_gate`) смотрят на один и тот же список, а не на два независимо собранных (тот же ревью, Important 2). Спрашивает ровно то же, что и все остальные, — нужна ли этому режиму среда (`mode_needs_env`), а не своё сравнение строки рядом с ней (находка ревью 30.10).
-pub fn blocking_undecryptable<'a>(mode: &str, undecryptable: &'a [String]) -> Vec<&'a str> {
-    undecryptable.iter().map(String::as_str).filter(|f| mode_needs_env(mode) || *f != "password").collect()
+/// Режим судит СВОЙ (задача 10): до неё снисхождение мерилось режимом
+/// ТЕКУЩЕГО соединения, и непрочитанный пароль рабочего места чужой карточки
+/// прощался или не прощался по чужому режиму — то есть локальная карточка
+/// запирала работу из-за поля, которого в ней не читает никто, а туннельная
+/// проезжала молча, потому что текущая оказалась локальной. Соединение, чьё
+/// имя в находке не нашлось в списке (в живой программе так не бывает —
+/// находки и собираются по списку), считаем требующим среды: отказать
+/// громко безопаснее, чем простить неизвестное.
+pub fn blocking_undecryptable(cfg: &Cfg) -> Vec<Undecryptable> {
+    cfg.undecryptable
+        .iter()
+        .filter(|u| {
+            let mode = cfg.connections.iter().find(|c| c.name == u.connection).map_or("", |c| c.mode.as_str());
+            mode_needs_env(mode) || u.field != "password"
+        })
+        .cloned()
+        .collect()
 }
 
 /// Чем режимы отличаются: туннельному нужна среда разработки — контейнер с агентом на той стороне, тремя прибитыми рабочими местами (`dev1`-`dev3`) и своей Gitea, — и к ней идут адрес, логин, пароль, ветка проекта и сам туннель. Локальному не нужна: база, агенты, мост и проект на одной машине, спрашивать про среду не у кого, и всё, что про неё, в этом режиме либо пусто по замыслу, либо не существует вовсе.
@@ -1742,21 +1809,48 @@ pub fn mode_needs_env(mode: &str) -> bool {
 /// «Ловушки») — именно поэтому проверка после записи обязательна здесь, а
 /// не просто желательна.
 ///
-/// `patches` — пары «ключ ТЕКУЩЕГО соединения — готовая правая часть», которые
-/// подставляются в напечатанный текст ДО записи (`set_current`),
-/// а не после неё отдельным походом на диск (ревью задачи 4, круг 2). Это
-/// ровно то место, которым `gui::save::save_host` возвращает прежний
-/// шифртекст пароля, не расшифровавшийся на этой машине: подстановка после
-/// отдельной записи оставляла бы окно, где процесс мог умереть между двумя
-/// записями файла, и на диске навсегда осталось бы то, что ушло первой
-/// записью (здесь — пустой пароль). Один файл — одна запись — одна
-/// проверка; обычный путь (`patches` пуст) не меняется ни на шаг.
-pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&str, &str)]) -> std::result::Result<(), String> {
+/// **Пароль, помеченный непрочитанным (`Cfg::undecryptable`), пишется
+/// прежним шифртекстом, а не тем, что лежит в памяти.** Непрочитанное поле
+/// загрузка отдаёт ПУСТЫМ (`load_unchecked_with`) — значение в памяти не
+/// правда о файле, а признание «не открылось», — и обычная печать
+/// зашифровала бы эту пустоту поверх шифртекста, который ещё открывался бы
+/// на своей машине или под своей учёткой. Прежний литерал берётся из файла
+/// ДО записи и подставляется в напечатанный текст по ИМЕНИ соединения
+/// (`set_named`): с задачи 10 «Сохранить» пишет весь список, и беречь надо в
+/// том числе чужую карточку — ту, которую человек в этот момент не правил
+/// вовсе. Не нашли прежний литерал (ключа нет, текст не разобрался) — отказ
+/// СЛОВАМИ до какой-либо записи: файл не трогается ни на байт, и человек
+/// читает причину, а не теряет пароль молча.
+///
+/// Подстановка идёт ДО записи, а не отдельным походом на диск после неё
+/// (ревью задачи 4, круг 2): иначе между двумя записями оставалось бы окно,
+/// в котором смерть процесса (питание, `taskkill`, падение окна) навсегда
+/// оставляла бы на диске то, что ушло первой записью, — здесь пустой пароль.
+/// Один файл — одна запись — одна проверка; обычный путь (список пуст) не
+/// меняется ни на шаг.
+///
+/// До задачи 10 эту защиту собирал сам `gui::save::save_host` и передавал
+/// готовыми парами (`patches`) — она работала ровно для ТЕКУЩЕГО соединения
+/// и только у одного писателя. Защита переехала к единственному месту
+/// записи: ЧЕЙ секрет не прочитан, сказано в самой `Cfg`, и всякий, кто
+/// пишет `Cfg` прочитанную `load_unchecked`, защищён уже тем, что пишет
+/// через эту функцию.
+pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::result::Result<(), String> {
     let mut text = cfg.render(store)?;
-    for (key, value) in patches {
-        text = set_current(&text, cfg, key, value)?;
-    }
     let path = kit.state_path(FILE);
+    if !cfg.undecryptable.is_empty() {
+        let before = std::fs::read_to_string(&path).map_err(|e| format!("{FILE}: {e:#}"))?;
+        for u in &cfg.undecryptable {
+            let literal = previous_literal(&before, &u.connection, &u.field).ok_or_else(|| {
+                format!(
+                    "{FILE}: в файле нет прежнего шифртекста — соединение «{}», {}; сохранение отменено, пароль не тронут",
+                    u.connection,
+                    secret_field_name(&u.field)
+                )
+            })?;
+            text = set_named(&text, &u.connection, &u.field, &literal)?;
+        }
+    }
     common::kit::write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     // Проверка расшифрованного с расшифрованным (ниже) не ловит запись открытого текста без префикса: `Store::open` отдаёт значение без префикса как есть, и если оно совпало с тем, что ожидалось (например, патч по ошибке подставил сам пароль, а не его шифртекст), сравнение сойдётся на открытом тексте так же, как на честном шифртексте (ревью задачи 7, Important 5). Поэтому читаем сам ТЕКСТ файла и отдельно убеждаемся, что непустой пароль на диске начинается с `secrets::PREFIX` — это и есть факт «зашифровалось», отдельный от факта «читается как до записи».
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("{e:#}"))?;
@@ -1767,6 +1861,32 @@ pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&
         return Err(format!("{FILE}: запись не прошла проверку — пароль после записи читается не так, как до неё"));
     }
     Ok(())
+}
+
+/// Правая часть ключа `<field>` соединения `<name>` в тексте файла, в том же
+/// экранировании, что даёт `Cfg::render` (`format!("{:?}", ..)`) — не значение
+/// пароля, а сам шифртекст, в том числе чужой: эта машина его всё равно не
+/// откроет, и прогонять его через `secrets::Store` незачем и нельзя (`seal`
+/// на уже зашифрованном дал бы другой шифртекст тем же текстом — случайный
+/// nonce).
+///
+/// Соединение ищется ПО ИМЕНИ, а не по месту в списке (круг починки 1 задачи
+/// 4, находка 1): человек правит файл руками, и переставленный блок отдал бы
+/// шифртекст СОСЕДНЕЙ карточки — подстановка перенесла бы чужой пароль в
+/// чужое место молча. Прежняя секция `[host]` — когда блоков в файле нет
+/// вовсе: иначе на прежнем файле шифртекст «не нашёлся» бы всегда, и запись
+/// отказывала бы там, где пароль цел.
+///
+/// `toml::Value`, а не свой разбор строк: `common::toml_render` только пишет
+/// готовую строку, читать ею нечем, а заводить это в `common` ради одного
+/// места не стоит.
+fn previous_literal(text: &str, name: &str, field: &str) -> Option<String> {
+    let doc: toml::Value = toml::from_str(text).ok()?;
+    let block = match doc.get("connection").and_then(|v| v.as_array()) {
+        Some(blocks) => blocks.iter().find(|b| b.get("name").and_then(|v| v.as_str()) == Some(name))?,
+        None => doc.get("host")?,
+    };
+    Some(format!("{:?}", block.get(field)?.as_str()?))
 }
 
 /// Непустое значение ключа `<key>` на диске — либо пусто, либо начинается с `secrets::PREFIX`; открытый текст без префикса здесь всегда отказ, в отличие от чтения параметров (`secrets::Store::open`), где открытый текст — законный переходный случай. `write_checked` печатает сама — то, что она напечатала, обязано быть шифртекстом или пустой строкой, и ничем третьим (ревью задачи 7, Important 5).
@@ -3172,7 +3292,10 @@ mod tests {
         let kit = kit_with(&format!("[host]\npassword = \"{}\"\n", mine.seal("password", "секрет").unwrap()));
         let c = Cfg::load_unchecked_with(&kit, &theirs).expect("окно не отказывает");
         assert_eq!(c.current().password, "", "поле обязано быть пустым, а не мусором");
-        assert_eq!(c.undecryptable, vec!["password".to_string()]);
+        // Задача 10: находка называет и карточку, и поле. Имя у прежнего
+        // файла берётся из каталога базы, а его здесь нет — значит
+        // «Соединение 1».
+        assert_eq!(c.undecryptable, vec![Undecryptable::new(FIRST_CONNECTION_NAME, "password")]);
     }
 
     /// `validate` пароли НЕ проверяет (строки 350-380 выше), поэтому без
@@ -3239,7 +3362,7 @@ mod tests {
         let kit = kit_with("");
         let mut c = filled();
         c.current_mut().password = "секрет".into();
-        cfg::write_checked(&kit, &c, &s, &[]).unwrap();
+        cfg::write_checked(&kit, &c, &s).unwrap();
         // Круговой `load_unchecked_with` один (ревью задачи 2, Minor 3: он
         // не ловит ничего сам по себе — убери вызов проверки из
         // `write_checked`, и он всё равно будет зелёным, потому что обычная
@@ -3266,16 +3389,20 @@ mod tests {
         assert!(!passwords_match(&written, &reread), "пустое поле там, где был пароль, — несовпадение");
     }
 
-    /// Important 5 ревью задачи 7: `passwords_match` сравнивает расшифрованное с расшифрованным, и патч, который подставляет сам пароль ОТКРЫТЫМ ТЕКСТОМ (без префикса `enc1:`), эту проверку проходит — `Store::open` отдаёт значение без префикса как есть, и обе стороны читают одну и ту же строку. Подложка нужна самая обычная, лгущая заглушка не нужна: хватает патча с неверным (не запечатанным) литералом. Без добавленной проверки текста на диске (`sealed_or_empty`) этот тест не падает — падает он именно её удалением.
+    /// Important 5 ревью задачи 7: `passwords_match` сравнивает расшифрованное с расшифрованным, и значение, подставленное ОТКРЫТЫМ ТЕКСТОМ (без префикса `enc1:`), эту проверку проходит — `Store::open` отдаёт значение без префикса как есть, и обе стороны читают одну и ту же строку. Без добавленной проверки текста на диске (`sealed_or_empty`) этот тест не падает — падает он именно её удалением.
+    ///
+    /// Задача 10: подстановку прежнего шифртекста делает сама запись, и взять открытый текст ей есть откуда — прежний файл с незашифрованным паролем законен (переходный вид, его читает `Store::open`). Сходится всё: поле помечено непрочитанным, прежний литерал — открытый текст, и на диск он уходит как есть. Проверка на префикс — единственное, что стоит между этим и молчаливым «шифрование не состоялось».
     #[test]
-    fn write_checked_refuses_a_patch_that_writes_the_password_as_plain_text() {
+    fn write_checked_refuses_a_kept_password_that_is_not_sealed() {
         let s = secrets::Store::file(&tmp("plain-patch"));
-        let kit = kit_with("");
+        let kit = kit_with("[host]\npassword = \"дев1\"\n");
         let mut c = filled();
-        c.current_mut().password = "дев1".into();
-        // Литерал toml, тот же пароль, но без префикса `enc1:` — ровно то, что когда-либо вернул бы чужой код, перепутавший пароль с его шифртекстом.
-        let literal = format!("{:?}", c.current().password);
-        let err = cfg::write_checked(&kit, &c, &s, &[("password", &literal)]).unwrap_err();
+        // Как после `load_unchecked` на непрочитанном поле: значение пустое, а
+        // находка называет карточку и поле.
+        c.current_mut().password = String::new();
+        let name = c.current().name.clone();
+        c.undecryptable = vec![Undecryptable::new(&name, "password")];
+        let err = cfg::write_checked(&kit, &c, &s).unwrap_err();
         assert!(err.contains("не зашифрован") || err.contains(secrets::PREFIX), "{err}");
         // Файл всё равно написан (запись печатает раньше, чем отказывает проверка) — но без префикса, и дальше по нему никто не поедет молча.
         let text = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
@@ -3311,7 +3438,7 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
         let mut c = filled();
         c.current_mut().password = "секрет".into();
-        let e = cfg::write_checked(&kit, &c, &s, &[]);
+        let e = cfg::write_checked(&kit, &c, &s);
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         let e = e.unwrap_err();
         assert!(e.contains(cfg::FILE), "{e}");
@@ -3394,6 +3521,6 @@ mod tests {
         let kit = kit_with(&text);
         let c = Cfg::load_unchecked_with(&kit, &theirs).expect("окно не отказывает на чужом шифртексте");
         assert_eq!(c.connections[0].password, "", "поле обязано быть пустым, а не мусором");
-        assert!(c.undecryptable.contains(&"password".to_string()), "{:?}", c.undecryptable);
+        assert!(c.undecryptable.contains(&Undecryptable::new("Ромашка", "password")), "{:?}", c.undecryptable);
     }
 }

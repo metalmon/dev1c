@@ -28,7 +28,7 @@ fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
     let warn_count = |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && l.text.contains("рабочего места")).count();
 
     let mut broken = ui.cfg.clone();
-    broken.undecryptable = vec!["password".to_string()];
+    broken.undecryptable = vec![cfg::Undecryptable::new("Buh", "password")];
 
     adopt_cfg(&mut ui, broken.clone());
     assert_eq!(warn_count(&ui), 1, "первая загрузка с незакрытым паролем — одна строка");
@@ -50,7 +50,7 @@ fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
 
 /// Minor ревью задачи 4: список меняется не только «пусто ↔ не пусто» — ко
 /// второму полю может добавиться беда, когда первое уже не раз было
-/// показано. Сравнение в `adopt_cfg` идёт по всему списку (`Vec<String>`
+/// показано. Сравнение в `adopt_cfg` идёт по всему списку (`Vec<Undecryptable>`
 /// целиком через `!=`), и уже поэтому верно, но следующая правка могла бы
 /// незаметно сузить его до «список был/не был пуст» — этот тест сторожит
 /// именно переход «одно поле → два поля».
@@ -61,12 +61,12 @@ fn a_second_field_joining_the_list_is_noted_again() {
         |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && (l.text.contains("рабочего места") || l.text.contains("базы"))).count();
 
     let mut one = ui.cfg.clone();
-    one.undecryptable = vec!["password".to_string()];
+    one.undecryptable = vec![cfg::Undecryptable::new("Buh", "password")];
     adopt_cfg(&mut ui, one);
     assert_eq!(warn_count(&ui), 1, "одно поле — одна строка");
 
     let mut both = ui.cfg.clone();
-    both.undecryptable = vec!["password".to_string(), "db_password".to_string()];
+    both.undecryptable = vec![cfg::Undecryptable::new("Buh", "password"), cfg::Undecryptable::new("Buh", "db_password")];
     adopt_cfg(&mut ui, both);
     assert_eq!(warn_count(&ui), 2, "список стал другим — новая строка, хоть первое поле и было уже сказано");
 }

@@ -47,7 +47,7 @@ pub fn cold_gate(
         return Some("в комплекте нет mcp-1c".into());
     }
     // Нерасшифрованный пароль базы (а в туннельном режиме — и пароль рабочего места) — то же условие, что держит CLI (`Cfg::load_with`), только тот отказывает раньше, самим `Cfg::load`, а окно вместо отказа открывается и до этой правки молчало: переключатель включался, мост ехал с пустым паролем, «Установить расширение» — тоже (ревью задачи 7, Important 2). Смертельно для работы и видно без сети — ровно то, чем замок и отбирает условия; причина — короткой строкой, без упоминания окна или кнопок, которых здесь нет.
-    if !cfg::blocking_undecryptable(&cfg.current().mode, &cfg.undecryptable).is_empty() {
+    if !cfg::blocking_undecryptable(cfg).is_empty() {
         return Some("пароль не расшифрован — введите заново".into());
     }
     // «Сделано» и ничего другого. Копии инструментов на машине больше нет
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn an_unreadable_database_password_holds_the_switch() {
         let mut c = crate::cfg::filled_for_test();
-        c.undecryptable = vec!["db_password".to_string()];
+        c.undecryptable = vec![crate::cfg::Undecryptable::new("Buh", "db_password")];
         let why = open(&c).unwrap();
         assert!(why.contains("не расшифрован"), "{why}");
     }
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn an_unreadable_workstation_password_holds_the_switch_in_tunnel_mode() {
         let mut c = crate::cfg::filled_for_test();
-        c.undecryptable = vec!["password".to_string()];
+        c.undecryptable = vec![crate::cfg::Undecryptable::new("Buh", "password")];
         let why = open(&c).unwrap();
         assert!(why.contains("не расшифрован"), "{why}");
     }
@@ -228,7 +228,7 @@ mod tests {
     fn an_unreadable_workstation_password_does_not_hold_the_switch_in_local_mode() {
         let mut c = crate::cfg::filled_for_test();
         c.current_mut().mode = "local".into();
-        c.undecryptable = vec!["password".to_string()];
+        c.undecryptable = vec![crate::cfg::Undecryptable::new("Buh", "password")];
         assert_eq!(open(&c), None);
     }
 

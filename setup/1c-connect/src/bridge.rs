@@ -2977,7 +2977,7 @@ mod tests {
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
             let _ = tx.send((code, err));
         }));
-        let (mut r, mut w) = tokio::io::split(ours);
+        let (r, mut w) = tokio::io::split(ours);
         let call = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#;
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
@@ -2985,13 +2985,36 @@ mod tests {
         live.set(cfg_b.clone());
         w.write_all(call).await.unwrap();
         w.write_all(b"\n").await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Правка вне плана (не из брифа задачи 5): ждём УСЛОВИЕ (два разобравшихся
+        // ответа), а не СРОК. Прежний код спал фиксированные 500 мс и закрывал
+        // поток — секундомер, мигавший 1 раз из 20 прогонов под `taskset -c 0,1`
+        // (так гоняет CI — два ядра): на занятых ядрах дочернему процессу не
+        // всегда хватало этих 500 мс на второй ответ. Смысл теста не в скорости
+        // ответа, а в том, что старая и новая конфигурации не смешиваются в одном
+        // вызове — щедрый предел (20 с) этого не меняет, он только не рубит
+        // медленный, но верный прогон. Тот же приём, что уже лечил подобное в
+        // этом проекте (STATUS 35).
+        let mut lines = tokio::io::BufReader::new(r).lines();
+        let mut replies: Vec<Value> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        while replies.len() < 2 {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("не дождались двух ответов за 20 секунд: {replies:?}");
+            }
+            match tokio::time::timeout(remaining, lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                        replies.push(v);
+                    }
+                }
+                Ok(Ok(None)) => break, // поток закрылся раньше, чем пришли оба ответа
+                Ok(Err(e)) => panic!("ошибка чтения ответа: {e}"),
+                Err(_) => panic!("не дождались двух ответов за 20 секунд: {replies:?}"),
+            }
+        }
         w.shutdown().await.unwrap();
-
-        let mut got = String::new();
-        r.read_to_string(&mut got).await.unwrap();
-        let replies: Vec<Value> = got.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        assert_eq!(replies.len(), 2, "{got}");
+        assert_eq!(replies.len(), 2, "{replies:?}");
         let args_of = |reply: &Value| -> Value {
             let text = reply["result"]["content"][0]["text"].as_str().unwrap();
             serde_json::from_str(text.split("args=").nth(1).unwrap()).unwrap()
@@ -3007,8 +3030,8 @@ mod tests {
         assert_eq!(args2["db-user"], expected_b["db-user"]);
         assert_eq!(args2["db-pwd"], expected_b["db-pwd"]);
         // Ни строка подключения, ни пользователь одного снимка не просочились в ответ другого.
-        assert_ne!(args1["ibconnection"], args2["ibconnection"], "{got}");
-        assert_ne!(args1["db-user"], args2["db-user"], "{got}");
+        assert_ne!(args1["ibconnection"], args2["ibconnection"], "{replies:?}");
+        assert_ne!(args1["db-user"], args2["db-user"], "{replies:?}");
     }
 
     /// 6B, довершение: свежий ребёнок после рестарта — обычный MCP-сервер и

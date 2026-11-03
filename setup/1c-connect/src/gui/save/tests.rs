@@ -1320,3 +1320,78 @@ fn a_card_whose_base_is_elsewhere_keeps_its_topology_and_gets_no_base_path() {
     assert!(!back.current().base_here, "и после перечитывания топология та же:\n{text}");
     assert_eq!(back.current().base_path, "", "и пути в файле не появилось:\n{text}");
 }
+
+/// Задача 16 плана «Интерфейс»: переключатель «Это соединение» у карточки —
+/// `set_role` пишет ОДИН ключ (`role`) именованной карточки, тем же приёмом,
+/// что `set_profile`. Сосед («Ромашка») — лучшее доказательство, что правка
+/// не перерисовала файл целиком: его блок остаётся в тексте словом в слово.
+#[test]
+fn switching_the_role_writes_one_key_and_leaves_the_neighbours_alone() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+
+    set_role(&mut ui, "Buh", "dial").unwrap();
+
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().role().unwrap(), "dial");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("Ромашка"), "сосед на месте");
+}
+
+/// Неизвестное значение роли — отказ словами ДО записи, тем же приёмом, что
+/// `set_profile` проверяет `toolset()` через пробный `Connection`.
+#[test]
+fn switching_to_an_unknown_role_is_refused_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_role(&mut ui, "Buh", "мусор").unwrap_err();
+
+    assert!(e.contains("role"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+}
+
+/// `set_base_here` пишет ОДИН ключ (`base_here`) именованной карточки, и
+/// состав полей (`panel::shown_fields`) обязан поменяться сразу — брифа
+/// задачи 16: «перечитай соединение после записи, а не держи старое».
+#[test]
+fn switching_the_topology_changes_which_fields_the_card_shows() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+
+    set_base_here(&mut ui, "Buh", false).unwrap();
+
+    let c = ui.cfg.by_name("Buh").unwrap();
+    assert!(!panel::shown_fields(c).contains(&"base_path"), "база на той стороне — поля базы ушли");
+}
+
+/// Зеркало теста выше: обратное переключение возвращает поля базы, и сосед
+/// по-прежнему не тронут.
+#[test]
+fn switching_the_topology_back_restores_the_base_fields_and_leaves_the_neighbour() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        base_here: false,
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+
+    set_base_here(&mut ui, "Buh", false).unwrap();
+    set_base_here(&mut ui, "Buh", true).unwrap();
+
+    let c = ui.cfg.by_name("Buh").unwrap();
+    assert!(panel::shown_fields(c).contains(&"base_path"), "база снова здесь — поля базы вернулись");
+    assert!(!ui.cfg.by_name("Ромашка").unwrap().base_here, "соседняя карточка не тронута");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("Ромашка"), "сосед на месте");
+}

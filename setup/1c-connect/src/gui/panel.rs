@@ -1244,6 +1244,35 @@ fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
     cx.refresh_windows();
 }
 
+/// Сменить ответ «Это соединение» у открытой карточки — три ответа одного
+/// переключателя (Шаг 4 задачи 16: «один переключатель на три ответа, а не
+/// два переключателя рядом»). Первые два — роль, и уводят карточку из
+/// «одной машины» в туннельный режим, если она была там
+/// (`gui::set_role_and_leave_local`); третий ставит `mode = "local"` и роль
+/// не трогает — локальность решает категорию строки списка раньше роли
+/// (`link::row`, `link::list`).
+fn set_card_topology_kind(cx: &mut App, name: &str, answer: &'static str) {
+    let r = if answer == "local" {
+        gui::set_mode(cx.global_mut::<Ui>(), name, "local")
+    } else {
+        gui::set_role_and_leave_local(cx.global_mut::<Ui>(), name, answer)
+    };
+    if let Err(e) = r {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+    }
+    cx.refresh_windows();
+}
+
+/// Сменить ответ «Где база» у открытой карточки. Удача молчит — тот же
+/// приём, что `set_card_profile`: состав полей карточки меняется на экране
+/// сам, строка в журнал к нему ничего не добавила бы.
+fn set_card_base_here(cx: &mut App, name: &str, base_here: bool) {
+    if let Err(e) = gui::set_base_here(cx.global_mut::<Ui>(), name, base_here) {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+    }
+    cx.refresh_windows();
+}
+
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
 /// (`op_question`). Вопрос — тот же платформенный диалог, что и при смене
 /// базы; отказ не делает ничего и ничего не говорит сверх самого диалога.
@@ -1302,6 +1331,34 @@ pub fn profile_label(toolset: &str) -> &'static str {
         "Разработчик"
     } else {
         "Бизнес-пользователь"
+    }
+}
+
+/// Слово переключателя «Это соединение» — первый вопрос карточки (спека,
+/// «Вопросов в карточке два»), три ответа. `mode == "local"` решает раньше
+/// роли: это и есть третий ответ («той стороны нет вовсе»), и только когда
+/// он не подошёл, смотрим на `Connection::role()` — опечатка в файле читается
+/// как умолчание «accept», тем же приёмом, что `profile_label` у `toolset`.
+/// Слова первых двух ответов — те же, что у онбординга (`link::onboarding_answers`):
+/// один словарь на оба места, иначе они однажды разойдутся.
+pub fn role_switch_label(c: &Connection) -> &'static str {
+    if c.mode == "local" {
+        "Всё на одной машине"
+    } else if c.role().unwrap_or("accept") == "dial" {
+        "Подключаюсь сам — у меня есть код"
+    } else {
+        "Принимаю подключения — код выдаю я"
+    }
+}
+
+/// Слово переключателя «Где база» — второй вопрос карточки, виден только
+/// когда первый ответ не «Всё на одной машине» (`shown.contains(&"server")`
+/// и соседи уже решают это ветвление в `shown_fields`, здесь — только слово).
+pub fn base_here_label(base_here: bool) -> &'static str {
+    if base_here {
+        "Здесь"
+    } else {
+        "На той стороне"
     }
 }
 
@@ -1949,7 +2006,50 @@ impl Panel {
                             menu
                         },
                     )),
-            );
+            )
+            .child({
+                let name = c.name.clone();
+                v_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .child(div().text_size(px(13.)).text_color(caption).child("Это соединение"))
+                    // Первый вопрос карточки (спека, «Вопросов в карточке
+                    // два»): три ответа одного переключателя (Шаг 4 задачи
+                    // 16 — «один переключатель на три ответа, а не два
+                    // переключателя рядом»). Первые два пишут роль и уводят
+                    // карточку из «одной машины» в туннельный режим, если
+                    // она там была (`gui::set_role_and_leave_local`);
+                    // третий ставит `mode = "local"` и роль не трогает.
+                    .child(KitButton::new("role").outline().w_full().label(role_switch_label(&c)).dropdown_menu(move |mut menu, _, _| {
+                        for (label, answer) in [
+                            ("Принимаю подключения — код выдаю я", "accept"),
+                            ("Подключаюсь сам — у меня есть код", "dial"),
+                            ("Всё на одной машине", "local"),
+                        ] {
+                            let name = name.clone();
+                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)));
+                        }
+                        menu
+                    }))
+            });
+        // «Где база» — второй вопрос карточки, виден только когда первый
+        // ответ не «Всё на одной машине» (спека: «второй вопрос при нём не
+        // показывается») — топология теряет смысл там, где той стороны нет
+        // вовсе. `gui::set_base_here` пишет один ключ именованной карточки;
+        // состав полей (`shown_fields` ниже) читает уже переписанное
+        // соединение на следующей отрисовке.
+        if c.mode != "local" {
+            let name = c.name.clone();
+            col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Где база")).child(
+                KitButton::new("base-here").outline().w_full().label(base_here_label(c.base_here)).dropdown_menu(move |mut menu, _, _| {
+                    for (label, here) in [("Здесь", true), ("На той стороне", false)] {
+                        let name = name.clone();
+                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
+                    }
+                    menu
+                }),
+            ));
+        }
         // Базы здесь нет — вместо пустого места слова (спека, «Что
         // показывает карточка соединения»), тем же приёмом, что
         // `nothing_to_show` на «Инструментах».
@@ -3909,12 +4009,16 @@ mod tests {
         let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
-        assert_eq!(row_marks(&r), "ждёт разрешения · текущее · запись в базу");
+        // «не подключено», не «ждёт разрешения»: живого хранилища состояний
+        // на соединение пока нет, `no_states` честно отдаёт `None`, и это
+        // «состояния не знаем», а не «тикет выдан» (задача 16 плана
+        // `2026-11-03-interface`, см. докстроку `link::row`).
+        assert_eq!(row_marks(&r), "не подключено · текущее · запись в базу");
         cfg.connections[0].write = "read_only".into();
         let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
-        assert_eq!(row_marks(&r), "ждёт разрешения · текущее", "запрет писать — не отметка, а умолчание");
+        assert_eq!(row_marks(&r), "не подключено · текущее", "запрет писать — не отметка, а умолчание");
     }
 
     /// Указатель 4 ревью: двух формулировок одной инструкции больше нет.

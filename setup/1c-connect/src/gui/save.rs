@@ -808,6 +808,100 @@ pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Переключатель «Это соединение» у карточки (задача 16 плана «Интерфейс») —
+/// третий, после `switch_current` и `set_profile`, и тем же приёмом: один
+/// ключ (`role`) у ИМЕНОВАННОЙ карточки, не обязательно текущей (карточка,
+/// раскрытая в списке, текущей быть не обязана — `panel::link_card`).
+///
+/// Значение проверяется тем же правилом, что читает его обратно
+/// (`Connection::role` — список допустимых один, опечатка отказывает словами
+/// раньше записи, а не молчаливым откатом на умолчание).
+///
+/// `mode` этот переключатель не трогает: третий ответ того же вопроса
+/// («Всё на одной машине») — это `mode`, а не роль (ruling шага 4 брифа), и
+/// пишет его соседняя функция, `set_mode`. Один ключ на функцию — тот же
+/// довод, что у `set_profile`/`save_tray_key`: запись точечная, печати
+/// файла из памяти нет.
+pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
+    let probe = Connection { role: role.to_string(), ..Connection::default() };
+    probe.role()?;
+
+    if ui.cfg.by_name(name).is_none() {
+        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    }
+
+    let path = ui.kit.state_path(cfg::FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    let text = cfg::set_named(&text, name, "role", &format!("{role:?}"))?;
+    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+
+    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
+        c.role = role.to_string();
+    }
+    Ok(())
+}
+
+/// `mode` именованной карточки — пишет только переключатель «Это
+/// соединение» (`panel::set_card_topology_kind`) для третьего ответа и для
+/// перевода первых двух в туннельный режим, когда карточка была локальной.
+/// Своей проверки допустимых значений отдельной функцией-геттером у `mode`
+/// нет (в отличие от `role`/`toolset`) — допустимые два значения проверяет
+/// сам переключатель карточки, набор закрытый и строится не из ввода
+/// человека, а отказ здесь всё равно стоит до записи, а не после.
+pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
+    if !matches!(mode, "local" | "tunnel") {
+        return Err(format!("mode: неизвестный режим «{mode}»; допустимые значения: local, tunnel"));
+    }
+    if ui.cfg.by_name(name).is_none() {
+        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    }
+
+    let path = ui.kit.state_path(cfg::FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    let text = cfg::set_named(&text, name, "mode", &format!("{mode:?}"))?;
+    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+
+    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
+        c.mode = mode.to_string();
+    }
+    Ok(())
+}
+
+/// Переключить роль у карточки и, если тот был «на одной машине», сразу
+/// увести её в туннельный режим — одним действием человека (выбор ответа
+/// «Принимаю подключения»/«Подключаюсь сам»), а не двумя его щелчками.
+/// Второй записи, если режим уже туннельный, не делаем — лишняя правка
+/// файла ради значения, которое и так на месте.
+pub fn set_role_and_leave_local(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
+    set_role(ui, name, role)?;
+    if ui.cfg.by_name(name).map(|c| c.mode.as_str()) == Some("local") {
+        set_mode(ui, name, "tunnel")?;
+    }
+    Ok(())
+}
+
+/// Переключатель «Где база» у карточки (задача 16 плана «Интерфейс») — тем
+/// же приёмом, что `set_role`/`set_profile`: один ключ (`base_here`) у
+/// ИМЕНОВАННОЙ карточки. Состав полей карточки (`panel::shown_fields`)
+/// считается от соединения заново при каждой отрисовке — переключение
+/// обязано попасть в `ui.cfg` до следующего показа, и синхронизация ниже
+/// ровно это и делает.
+pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), String> {
+    if ui.cfg.by_name(name).is_none() {
+        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    }
+
+    let path = ui.kit.state_path(cfg::FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    let text = cfg::set_named(&text, name, "base_here", &base_here.to_string())?;
+    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+
+    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
+        c.base_here = base_here;
+    }
+    Ok(())
+}
+
 /// Чистое ядро вопроса «погасит ли „Сохранить“ обслуживание»: замок был
 /// открыт, обслуживание живо, а на новых параметрах условия не хватает.
 /// Заперто и до правки — гасить нечего, вопрос не нужен.

@@ -35,6 +35,41 @@ fn a_bad_server_leaves_the_toml_alone_and_says_why() {
     assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before);
 }
 
+/// Задача 6 плана «Модель соединений», решение владельца 1: у документов
+/// нет истории, затирание в чужой папке — молчаливая потеря файлов.
+/// Вложенность, а не только совпадение, обязана отказать, и отказ называет
+/// соединение-владельца папки, а не абстрактную «папку».
+#[test]
+fn save_host_refuses_a_project_folder_already_owned_by_another_connection() {
+    let mut ui = Ui::for_test();
+    let mut other = ui.cfg.current().clone();
+    other.name = "Ромашка".into();
+    other.base_path = "C:\\Bases\\Ромашка".into();
+    other.project = "C:\\proj\\Ромашка".into();
+    ui.cfg.connections.push(other);
+    let mut host = ui.cfg.current().clone();
+    host.project = "C:\\proj\\Ромашка\\src".into(); // внутри чужой папки
+    let err = save_host(&mut ui, host).unwrap_err();
+    assert!(err.contains("Ромашка") && err.contains("Buh") && err.contains("папка принадлежит одному соединению"), "{err}");
+}
+
+/// Симметрия с `cfg::validate` (урок задачи 5, круг починки 1 — там же её
+/// забыли перенести в модель): пустая папка не конфликтует ни с чем, её
+/// ещё не выбрали, и `folder_conflict_owner` обязан молчать так же, как
+/// правило в модели.
+#[test]
+fn save_host_with_an_empty_project_does_not_conflict_with_anyone() {
+    let mut ui = Ui::for_test();
+    let mut other = ui.cfg.current().clone();
+    other.name = "Ромашка".into();
+    other.base_path = "C:\\Bases\\Ромашка".into();
+    other.project = String::new();
+    ui.cfg.connections.push(other);
+    let mut host = ui.cfg.current().clone();
+    host.project = String::new();
+    save_host(&mut ui, host).unwrap();
+}
+
 #[test]
 fn carried_base_url_keeps_an_override_and_follows_the_default() {
     // Поля «Адрес публикации» в окне нет: умолчание идёт за каталогом

@@ -92,6 +92,20 @@ fn same_base_conflict<'a>(existing: &'a [Connection], host: &Connection) -> Opti
     existing.iter().find(|c| c.name != host.name && cfg::same_base(&c.base_path, &host.base_path))
 }
 
+/// Чужая карточка, уже держащая папку проекта той же или вложенную (по
+/// смыслу — `cfg::folder_conflict`, не по строке), если такая есть. Зеркало
+/// `same_base_conflict` выше — тот же приём, задача 6 плана «Модель
+/// соединений», решение владельца 1: у документов нет истории, затирание в
+/// чужой папке — молчаливая потеря файлов. Пустая папка не сравниваем:
+/// «путь не задан» — это отказ `Cfg::validate` своим словом, а не путаница
+/// с соседом, у которого папка тоже ещё не заполнена.
+fn folder_conflict_owner<'a>(existing: &'a [Connection], host: &Connection) -> Option<&'a Connection> {
+    if host.project.trim().is_empty() {
+        return None;
+    }
+    existing.iter().find(|c| c.name != host.name && cfg::folder_conflict(&c.project, &host.project))
+}
+
 /// Сменилась ли база, которую обслуживает агент — путь, логин или пароль.
 /// Единый список для двух потребителей, которым нужен именно этот,
 /// полный: подтверждение перед «Сохранить» (`save_question` →
@@ -371,6 +385,17 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
         // контракт и спека интерфейса), но на экране человек видит только
         // карточки — обе половины этой фразы говорят «карточка».
         return Err(format!("карточка «{}»: эта база уже занята карточкой «{}» — одна база, одна карточка", host.name, other.name));
+    }
+    // Задача 6 плана «Модель соединений», решение владельца 1: у
+    // документов нет истории, и затирание файлов в чужой папке —
+    // молчаливая их потеря, а не неудобство. Тот же приём, что у проверки
+    // базы выше, и по той же причине — `Cfg::of_one(host)` ниже соседей не
+    // видит, запрет `Cfg::validate` здесь молчал бы.
+    if let Some(other) = folder_conflict_owner(&ui.cfg.connections, &host) {
+        return Err(format!(
+            "карточка «{}»: папка проекта уже занята карточкой «{}» — папка принадлежит одному соединению",
+            host.name, other.name
+        ));
     }
     let keep = fields_to_keep(&host, &ui.cfg.undecryptable);
     let path = ui.kit.state_path(cfg::FILE);

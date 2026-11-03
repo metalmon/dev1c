@@ -1008,6 +1008,102 @@ fn renaming_sticks_on_the_old_single_host_file_shape() {
     assert!(reread.read_notes.is_empty(), "перечитанный файл не обязан жаловаться сам на себя: {:?}", reread.read_notes);
 }
 
+/// Задача 5 плана «Интерфейс»: умолчание новой карточки — профиль, выбранный
+/// для предыдущей (текущей на момент добавления).
+#[test]
+fn a_new_card_takes_the_profile_of_the_previous_one() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().profile = "developer".into();
+    let name = add_connection(&mut ui, "accept").unwrap();
+    assert_eq!(ui.cfg.by_name(&name).expect("карточка добавлена").profile, "developer");
+}
+
+/// Добавление — не переключение: агент, который прямо сейчас отвечает из
+/// своей базы, не обязан молча перескочить на пустую новую карточку.
+#[test]
+fn adding_a_card_does_not_switch_the_current_base() {
+    let mut ui = Ui::for_test();
+    let was = ui.cfg.current().name.clone();
+    add_connection(&mut ui, "accept").unwrap();
+    assert_eq!(ui.cfg.current().name, was, "переключение текущей — отдельное действие человека");
+}
+
+/// Роль приходит параметром — кнопка списка ставит `"accept"`, онбординг
+/// (задача 11) передаст свою.
+#[test]
+fn the_role_parameter_lands_on_the_new_card() {
+    let mut ui = Ui::for_test();
+    let name = add_connection(&mut ui, "dial").unwrap();
+    assert_eq!(ui.cfg.by_name(&name).unwrap().role, "dial");
+}
+
+/// Пустой путь базы у новой карточки — имя «Соединение N», тем же правилом,
+/// что у первого соединения свежего комплекта (`cfg::default_name`).
+#[test]
+fn an_empty_base_path_names_the_card_by_number() {
+    let mut ui = Ui::for_test();
+    let name = add_connection(&mut ui, "accept").unwrap();
+    assert_eq!(name, "Соединение 1");
+}
+
+/// Главная мина (Review Focus плана, тот же приём, что у `rename`): блок с
+/// именем «Соединение 1» дописан в файл руками, пока окно открыто — `ui.cfg`
+/// об этом не знает. Занятость имени смотрим и на ДИСКЕ, не только в
+/// памяти, иначе вторая карточка получила бы то же имя, что и дописанная
+/// руками, и следующее чтение отвергло бы файл целиком (`Cfg::validate`,
+/// уникальность имён).
+#[test]
+fn a_name_taken_only_on_disk_is_skipped_too() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui); // на диске — только "Buh"
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let hand = Connection { name: "Соединение 1".into(), ..Connection::default() };
+    let path = ui.kit.state_path(cfg::FILE);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&cfg::connection_block(&hand, &store).unwrap());
+    std::fs::write(&path, &text).unwrap();
+
+    let name = add_connection(&mut ui, "accept").unwrap();
+    // `cfg::default_name` считает занятое «Соединение 1» самим базовым
+    // именем, а не числом в нём, и даёт следующее в своём же ряду —
+    // «Соединение 1 2» (то же правило, что у двух одноимённых баз).
+    assert_eq!(name, "Соединение 1 2", "«Соединение 1» занято на диске, в памяти его не было вовсе");
+}
+
+/// Запись — точечная: дописывается РОВНО один новый блок, байты соседних
+/// блоков (включая уже дописанный руками) не трогаются (тот же приём, что у
+/// `rename`, не полная перерисовка через `write_checked`).
+#[test]
+fn adding_a_card_appends_one_block_and_leaves_the_rest_byte_for_byte() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let name = add_connection(&mut ui, "accept").unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.starts_with(&before), "прежний текст файла обязан остаться дословно впереди:\n{after}");
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 2, "{after}");
+    assert_eq!(common::toml_render::get_in(&after, cfg::CONNECTION, 1, "name").as_deref(), Some(name.as_str()), "{after}");
+    assert_eq!(ui.cfg.connections.len(), 2, "новая карточка попала и в память");
+}
+
+/// Свежий комплект — файла параметров ещё нет вовсе. Добавление второй
+/// карточки до первого «Сохранить» не должно отказывать: печатать список
+/// целиком из памяти здесь нечем рисковать — на диске и так пока ничего нет.
+#[test]
+fn adding_a_card_before_the_first_save_writes_a_fresh_file() {
+    let mut ui = Ui::for_test();
+    assert!(!ui.kit.state_path(cfg::FILE).exists());
+    let name = add_connection(&mut ui, "accept").unwrap();
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert_eq!(common::toml_render::count(&text, cfg::CONNECTION), 2, "{text}");
+    let back: Cfg = toml::from_str(&text).expect("файл разбирается");
+    assert!(back.connections.iter().any(|c| c.name == name));
+    assert_eq!(back.current, ui.cfg.current, "текущее соединение не сменилось");
+}
+
 /// Круг починки 1, находка Important 2 ревью: занятость имени смотрим не
 /// только по памяти (`Cfg::by_name`), но и по файлу — блок `to` мог
 /// появиться там рукой, пока окно открыто, и `ui.cfg` об этом не знает.

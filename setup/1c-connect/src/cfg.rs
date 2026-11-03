@@ -1753,47 +1753,13 @@ impl Cfg {
         if at == EXAMPLE.len() {
             return Err(format!("{FILE}: в образце нет блока {CONNECTION} — печатать соединения не по чему"));
         }
-        let (head, block) = EXAMPLE.split_at(at);
+        let (head, _) = EXAMPLE.split_at(at);
         let mut text = common::toml_render::render(head, |s, k| {
             // Корень файла: секции у `current` нет вовсе.
             (s.is_empty() && k == "current").then(|| format!("{:?}", self.current))
         });
         for h in &self.connections {
-            // Пароли сеются ДО самого рисования и у КАЖДОГО соединения:
-            // `common::toml_render::render` берёт обычный (безотказный) `Fn`,
-            // и протаскивать `Result` через его замыкание было бы сложнее,
-            // чем сосчитать два значения заранее и отказать через `?` здесь.
-            let password = store.seal("password", &h.password)?;
-            let db_password = store.seal("db_password", &h.db_password)?;
-            text.push_str(&common::toml_render::render(block, |s, k| {
-                if s != CONNECTION {
-                    return None;
-                }
-                Some(match k {
-                    "name" => format!("{:?}", h.name),
-                    "server" => format!("{:?}", h.server),
-                    "gitea" => format!("{:?}", h.gitea),
-                    "password" => format!("{:?}", password),
-                    "workstation" => format!("{:?}", h.workstation),
-                    "base_path" => format!("{:?}", h.base_path),
-                    "base_here" => h.base_here.to_string(),
-                    "role" => format!("{:?}", h.role),
-                    "platform" => format!("{:?}", h.platform),
-                    "configuration" => format!("{:?}", h.configuration),
-                    "profile" => format!("{:?}", h.profile),
-                    "write" => format!("{:?}", h.write),
-                    "db_user" => format!("{:?}", h.db_user),
-                    "db_password" => format!("{:?}", db_password),
-                    "base_url" => format!("{:?}", h.base_url),
-                    "dump" => format!("{:?}", h.dump),
-                    "project" => format!("{:?}", h.project),
-                    "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
-                    "mode" => format!("{:?}", h.mode),
-                    "publication" => format!("{:?}", h.publication),
-                    "http_port" => h.http_port.unwrap_or(0).to_string(),
-                    _ => return None,
-                })
-            }));
+            text.push_str(&connection_block(h, store)?);
         }
         Ok(text)
     }
@@ -1805,6 +1771,58 @@ impl Cfg {
 /// промах в одной из них — это ключ, записанный туда, где его никто не
 /// читает (находка безопасности задачи 4).
 pub const CONNECTION: &str = "[[connection]]";
+
+/// Текст ОДНОГО блока `[[connection]]`, готовый к печати, — то же правило,
+/// что раньше жило внутри цикла `Cfg::render`, вынесенное в свою функцию:
+/// `gui::save::add_connection` дописывает РОВНО один новый блок к уже
+/// прочитанному тексту файла, не перерисовывая его целиком (`write_checked`
+/// на расхождении «в памяти одним соединением больше, чем на диске» честно
+/// отказал бы, см. докстроку `add_connection`) — и ей нужен образец этого же
+/// блока, а не копия того же списка полей второй раз (находка задачи 5:
+/// второй список тем же текстом расходится с первым молча).
+pub(crate) fn connection_block(h: &Connection, store: &secrets::Store) -> std::result::Result<String, String> {
+    let at: usize =
+        EXAMPLE.split_inclusive('\n').take_while(|l| common::toml_render::section_of(l) != Some(CONNECTION)).map(str::len).sum();
+    if at == EXAMPLE.len() {
+        return Err(format!("{FILE}: в образце нет блока {CONNECTION} — печатать соединения не по чему"));
+    }
+    let (_, block) = EXAMPLE.split_at(at);
+    // Пароли сеются ДО самого рисования: `common::toml_render::render` берёт
+    // обычный (безотказный) `Fn`, и протаскивать `Result` через его
+    // замыкание было бы сложнее, чем сосчитать оба значения заранее и
+    // отказать через `?` здесь.
+    let password = store.seal("password", &h.password)?;
+    let db_password = store.seal("db_password", &h.db_password)?;
+    Ok(common::toml_render::render(block, |s, k| {
+        if s != CONNECTION {
+            return None;
+        }
+        Some(match k {
+            "name" => format!("{:?}", h.name),
+            "server" => format!("{:?}", h.server),
+            "gitea" => format!("{:?}", h.gitea),
+            "password" => format!("{:?}", password),
+            "workstation" => format!("{:?}", h.workstation),
+            "base_path" => format!("{:?}", h.base_path),
+            "base_here" => h.base_here.to_string(),
+            "role" => format!("{:?}", h.role),
+            "platform" => format!("{:?}", h.platform),
+            "configuration" => format!("{:?}", h.configuration),
+            "profile" => format!("{:?}", h.profile),
+            "write" => format!("{:?}", h.write),
+            "db_user" => format!("{:?}", h.db_user),
+            "db_password" => format!("{:?}", db_password),
+            "base_url" => format!("{:?}", h.base_url),
+            "dump" => format!("{:?}", h.dump),
+            "project" => format!("{:?}", h.project),
+            "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
+            "mode" => format!("{:?}", h.mode),
+            "publication" => format!("{:?}", h.publication),
+            "http_port" => h.http_port.unwrap_or(0).to_string(),
+            _ => return None,
+        })
+    }))
+}
 
 /// Правка ОДНОГО ключа ТЕКУЩЕГО соединения в тексте файла человека — один
 /// адрес на всех писателей одного ключа: переключатели меню значка

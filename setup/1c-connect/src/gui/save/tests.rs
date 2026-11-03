@@ -984,3 +984,55 @@ fn renaming_a_connection_that_is_not_current_leaves_the_root_current_alone() {
     assert!(text.contains("name = \"Василёк\""), "{text}");
     assert!(!text.contains("\"Ромашка\""), "{text}");
 }
+
+/// Круг починки 1, находка Important 1 ревью: прежний файл с одной секцией
+/// `[host]` — форма эталонного комплекта (`C:\dev1c-connect-kit`). До правки
+/// `rename` писала новое имя в `name` этой секции, а следующее чтение
+/// (`cfg.rs`, разбор `CfgFile`) немедленно затирало его выводом из каталога
+/// базы — переименование не приживалось, окно говорило «готово», а
+/// перечитанный файл называл прежнее имя, да ещё с замечанием «нет такого
+/// соединения».
+#[test]
+fn renaming_sticks_on_the_old_single_host_file_shape() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, "[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\nserver = \"192.168.1.10:3393\"\n").unwrap();
+    ui.cfg = Cfg::load_unchecked_with(&ui.kit, &store).unwrap();
+    let from = ui.cfg.current().name.clone();
+
+    rename(&mut ui, &from, "Ромашка").unwrap();
+
+    let reread = Cfg::load_unchecked_with(&ui.kit, &store).unwrap();
+    assert_eq!(reread.current().name, "Ромашка", "имя обязано прилипнуть на прежнем файле «[host]»");
+    assert!(reread.read_notes.is_empty(), "перечитанный файл не обязан жаловаться сам на себя: {:?}", reread.read_notes);
+}
+
+/// Круг починки 1, находка Important 2 ревью: занятость имени смотрим не
+/// только по памяти (`Cfg::by_name`), но и по файлу — блок `to` мог
+/// появиться там рукой, пока окно открыто, и `ui.cfg` об этом не знает.
+/// Молча разрешённая запись дописала бы в файл ВТОРОЙ блок с тем же именем
+/// — следующее чтение отвергло бы файл целиком (`Cfg::validate`), то есть
+/// окно вовсе не открылось бы.
+#[test]
+fn a_name_already_on_disk_but_not_in_memory_is_refused_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    // Рука человека: блок «Ромашка» дописан прямо в файл, пока окно открыто
+    // — ui.cfg о нём ничего не знает.
+    let mut hand = ui.cfg.clone();
+    hand.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    std::fs::write(&path, hand.render(&store).unwrap()).unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = rename(&mut ui, "Buh", "Ромашка").unwrap_err();
+    assert!(e.contains("Ромашка"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет, второй блок «Ромашка» не появляется");
+}

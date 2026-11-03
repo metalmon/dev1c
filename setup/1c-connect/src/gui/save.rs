@@ -511,6 +511,16 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
 /// `Cfg::by_name` — точное совпадение по списку в памяти, той же мерки, что
 /// уже проверяет «Сохранить» для базы и папки проекта (`same_base_conflict`,
 /// `folder_conflict_owner`).
+///
+/// **Круг починки 1, находка Important 2.** Проверки по памяти одной мало:
+/// блок `to` мог появиться в файле рукой, пока окно открыто, и `ui.cfg` об
+/// этом ещё не знает. Молча разрешить такую запись значило бы дописать в
+/// файл ВТОРОЙ блок с тем же именем — следующее чтение отвергло бы файл
+/// целиком (`Cfg::validate`, уникальность имён), то есть окно вовсе не
+/// открылось бы: хуже, чем неудобный отказ у соседних проверок
+/// (`same_base_conflict`/`folder_conflict_owner`). Поэтому занятость имени
+/// смотрим и в самом ФАЙЛЕ (`cfg::block_in`) — на том же тексте, который
+/// читаем для записи, второго чтения не заводим.
 pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
     let to = to.trim();
     if to.is_empty() {
@@ -520,6 +530,15 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
         if other.name != from {
             return Err(format!("имя «{to}» уже занято карточкой «{}» — имена карточек обязаны быть разными", other.name));
         }
+    }
+    let path = ui.kit.state_path(cfg::FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    // Находка Important 2 круга починки 1: тот же запрет, что выше, но по
+    // файлу, а не по памяти — `to != from`, иначе переименование карточки на
+    // своё же нынешнее имя (Minor, не правится этим кругом) отказывало бы
+    // само на себя.
+    if to != from && cfg::block_in(&text, to).is_ok() {
+        return Err(format!("имя «{to}» уже занято карточкой «{to}» — имена карточек обязаны быть разными"));
     }
     // Список в памяти правится первым и целиком проверяется `validate()` —
     // та же защита, что у `save_host`, до какой-либо записи на диск.
@@ -544,8 +563,6 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
     }
     after.validate().map_err(|e| format!("{e:#}"))?;
 
-    let path = ui.kit.state_path(cfg::FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
     let quoted = format!("{to:?}");
     // Адрес — ПО ИМЕНИ переименовываемой карточки, а не текущей: карточка,
     // раскрытая в списке, не всегда текущая (задача 2). `cfg::set_current`

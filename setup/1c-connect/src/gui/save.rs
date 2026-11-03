@@ -148,7 +148,13 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => cfg::EXAMPLE.to_string(),
         Err(e) => return Err(format!("{}: файл не прочитан — {e}", path.display())),
     };
-    let text = common::toml_render::set(&text, "[host]", key, &format!("{value:?}"));
+    // Ключ идёт в блок ТЕКУЩЕГО соединения, а не в прежнюю секцию `[host]`
+    // (задача 4 плана «Модель соединений», находка безопасности): `set` по
+    // `[host]` на файле с блоками `[[connection]]` ДОПИСЫВАЛА секцию в конец
+    // — записанное не читал никто, а файл с обеими половинами стал отказом
+    // при чтении, то есть один щелчок в трее делал настройки нечитаемыми.
+    // Довод и разбор прежнего вида файла — в `cfg::set_current`.
+    let text = cfg::set_current(&text, &ui.cfg, key, &format!("{value:?}"))?;
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     // Синхронизируем только то, что сами только что записали — остальные
     // поля `ui.cfg` не трогаем, они и на диске остались как были.
@@ -196,7 +202,7 @@ fn fields_to_keep(host: &Connection, undecryptable: &[String]) -> Vec<&'static s
     keep
 }
 
-/// Правая часть ключа `[host].<key>` в тексте toml, в том же экранировании,
+/// Правая часть ключа `<key>` ТЕКУЩЕГО соединения в тексте toml, в том же экранировании,
 /// что даёт `Cfg::render` (`format!("{:?}", ..)`) — не значение пароля, а
 /// сам шифртекст для чужой машины: эта машина его всё равно не откроет, и
 /// превращать его в строку и обратно через `secrets::Store` незачем и
@@ -204,9 +210,16 @@ fn fields_to_keep(host: &Connection, undecryptable: &[String]) -> Vec<&'static s
 /// текстом — случайный nonce). `toml::Value`, а не свой разбор строк:
 /// `common::toml_render` только пишет готовую строку, читать ею нечем, а
 /// заводить это в `common` ради одного места не стоит.
-fn raw_literal(text: &str, key: &str) -> Option<String> {
+/// Соединение берётся по номеру блока (`nth`), а прежняя секция `[host]` — когда
+/// блоков в файле нет вовсе (задача 4): иначе на новом файле прежний шифртекст
+/// «не нашёлся» бы всегда, и «Сохранить» отказывало бы там, где пароль цел.
+fn raw_literal(text: &str, nth: usize, key: &str) -> Option<String> {
     let doc: toml::Value = toml::from_str(text).ok()?;
-    let s = doc.get("host")?.get(key)?.as_str()?;
+    let block = match doc.get("connection").and_then(|v| v.as_array()) {
+        Some(blocks) => blocks.get(nth)?,
+        None => doc.get("host")?,
+    };
+    let s = block.get(key)?.as_str()?;
     Some(format!("{s:?}"))
 }
 
@@ -216,10 +229,10 @@ fn raw_literal(text: &str, key: &str) -> Option<String> {
 /// записи, а не подставляем пустоту: человек должен увидеть причину и не
 /// потерять ничего, а не прочитать в журнале «оставлен прежним» про пароль,
 /// которого на самом деле уже нет.
-fn resolve_patches(before: &str, keep: &[&'static str]) -> Result<Vec<(&'static str, String)>, String> {
+fn resolve_patches(before: &str, nth: usize, keep: &[&'static str]) -> Result<Vec<(&'static str, String)>, String> {
     let mut patches = Vec::new();
     for &key in keep {
-        match raw_literal(before, key) {
+        match raw_literal(before, nth, key) {
             Some(raw) => patches.push((key, raw)),
             None => {
                 return Err(format!(
@@ -315,7 +328,7 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     let before = if keep.is_empty() { String::new() } else { std::fs::read_to_string(&path).map_err(|e| format!("{e:#}"))? };
     // Нашлось не всё — отказываем здесь: до этой строки ни одной записи ещё
     // не было, файл не тронут.
-    let patches = resolve_patches(&before, &keep)?;
+    let patches = resolve_patches(&before, ui.cfg.current_block(), &keep)?;
     let mut cfg = Cfg::of_one(host);
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не

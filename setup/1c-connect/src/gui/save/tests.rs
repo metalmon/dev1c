@@ -568,6 +568,30 @@ fn an_unreadable_but_existing_file_refuses_instead_of_overwriting() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "файл не тронут ни на байт");
 }
 
+/// Находка безопасности задачи 4 плана «Модель соединений»: переключатель в
+/// трее писал ключ в `[host]`, а `toml_render::set` при отсутствии секции
+/// дописывала её в конец файла — на файле с блоками `[[connection]]`
+/// записанное не читал никто (чтение берёт список), а сам файл с обеими
+/// половинами стал с задачи 3 отказом при чтении. То есть один щелчок по
+/// «Запись в базу» делал настройки нечитаемыми, а человек видел ужесточение,
+/// которое перезапуск тихо откатывал.
+#[test]
+fn a_tray_key_lands_in_the_current_connections_block_and_keeps_the_file_readable() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut two = cfg::cfg_with(&["Buh", "Ромашка"]);
+    two.current = "Ромашка".into();
+    std::fs::write(ui.kit.state_path(cfg::FILE), two.render(&store).unwrap()).unwrap();
+    ui.cfg = two;
+    save_tray_key(&mut ui, "write", "read_write").unwrap();
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(!text.contains("[host]"), "обеих половин в файле быть не должно — такой файл чтение отвергает:\n{text}");
+    let back: Cfg = toml::from_str(&text).expect("файл после записи разбирается");
+    assert!(back.read_notes.is_empty(), "и читается без находок: {:?}", back.read_notes);
+    assert_eq!(back.current().write, "read_write", "ключ попал в блок текущего соединения");
+    assert_eq!(back.connections[0].write, "", "а соседний блок не тронут");
+}
+
 /// Important 1 ревью задачи 2: переключатель в трее правит ОДИН ключ текстом,
 /// а не перерисовывает файл через `render` — иначе шифртекст пароля, который
 /// `ui.cfg` прочитал пустым (чужая машина или чужая учётка, `load_unchecked`),

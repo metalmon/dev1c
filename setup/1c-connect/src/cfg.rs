@@ -250,9 +250,10 @@ pub fn derived_dump(project: &str) -> String {
 /// самое первое соединение, созданное правкой пустого списка
 /// (`Cfg::current_mut`). Одно слово на оба места — чтобы человек видел в окне
 /// и в списке одно и то же имя, а не два разных для одного случая «имени
-/// взять негде». В toml это имя не уезжает: `render` печатает `[host]`, где
-/// ключа `name` нет вовсе, и при следующем чтении имя снова выводится из
-/// каталога базы.
+/// взять негде». С задачи 4 это имя уезжает и в toml: `render` печатает
+/// блоки `[[connection]]` с ключом `name` и корневой `current`, то есть
+/// выведенное из каталога базы имя при следующем чтении берётся из файла, а
+/// не выводится заново.
 pub const FIRST_CONNECTION_NAME: &str = "Соединение 1";
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -367,12 +368,13 @@ impl From<CfgFile> for Cfg {
             // работают. Сказать и не читать её — не одно и то же: читать
             // обе нечем (имя текущего одно), поэтому список побеждает, а
             // человек слышит об этом и убирает лишнее сам. Такое состояние
-            // сегодня умеет создать и наш же писатель —
-            // `common::toml_render::set` ДОПИСЫВАЕТ `[host]` в конец файла,
-            // если секции нет (`gui::save::save_tray_key`,
-            // `ops_host::write_derived_fields`); писатели перестанут её
-            // трогать в задаче 4, а эта фраза — страховочная сетка на тот
-            // случай, если она где-то останется.
+            // умел создать и наш же писатель — `common::toml_render::set`
+            // ДОПИСЫВАЕТ `[host]` в конец файла, если секции нет
+            // (`gui::save::save_tray_key`, `ops_host::write_derived_fields`):
+            // с задачи 4 все писатели одного ключа адресуют блок текущего
+            // соединения (`cfg::set_current`), а эта фраза — страховочная
+            // сетка на файл, в котором обе половины свёл кто-то другой
+            // (правка руками, скрипт стенда, заплата).
             Some(_) if !connections.is_empty() => read_notes.push(
                 "Настройки несут и прежнюю секцию [host], и блоки [[connection]]. Оставьте что-то одно: пока в файле обе, работает список [[connection]], а [host] не читается вовсе.".to_string(),
             ),
@@ -628,8 +630,8 @@ pub fn filled_for_test() -> Cfg {
     // Первое обращение к `current_mut()` и создаёт это единственное
     // соединение (список был пуст) — имя ему даём сразу и ровно то, которое
     // вывелось бы из каталога базы при чтении файла (`base_name`): круговой
-    // тест «напечатали — перечитали — совпало» сравнивает `Cfg` целиком, а
-    // `render` печатает прежнюю секцию `[host]`, где ключа `name` нет вовсе.
+    // тест «напечатали — перечитали — совпало» сравнивает `Cfg` целиком, и
+    // имя в этом сравнении участвует (с задачи 4 `render` печатает и его).
     c.current_mut().name = "Buh".into();
     c.current = "Buh".into();
     c.current_mut().server = "192.168.1.10:3393".into();
@@ -838,6 +840,17 @@ impl Cfg {
         }
         let at = self.connections.iter().position(|c| c.name == self.current).unwrap_or(0);
         &mut self.connections[at]
+    }
+
+    /// Номер блока `[[connection]]` текущего соединения в тексте файла —
+    /// адрес для построчной правки и для построчного чтения одного ключа
+    /// (`set_current`, `gui::save::raw_literal`). Порядок блоков в тексте и в
+    /// `connections` один и тот же: список читается тем же разбором, который
+    /// их и выстроил. Имя не нашлось — нулевой, тем же правилом, что у
+    /// `current()`: пустой `current` при непустом списке — законный вид
+    /// файла, и выбирать там нечего, кроме первого.
+    pub fn current_block(&self) -> usize {
+        self.connections.iter().position(|c| c.name == self.current).unwrap_or(0)
     }
 
     /// `Cfg` из ОДНОГО соединения — оно же и текущее. Ровно то, что до
@@ -1330,42 +1343,113 @@ impl Cfg {
     /// случайный nonce сделал бы печать недетерминированной, и два
     /// существующих теста образца (пустые пароли, сравнение строки
     /// дословно) упали бы правильно, но об это незачем биться каждый раз.
-    /// Обе половины сеются ДО самого рисования: `common::toml_render::render`
-    /// берёт обычный (безотказный) `Fn`, и протаскивать `Result` через его
-    /// замыкание было бы сложнее, чем сосчитать два значения заранее и
-    /// отказать через `?` здесь.
+    ///
+    /// Печатается ВЕСЬ список соединений и корневой `current` (задача 4): до
+    /// неё печаталось одно текущее соединение, без имени и без `current`, —
+    /// то есть файл с двумя блоками терял второй при первом же сохранении, а
+    /// решение плана «текущее хранится именем в корне toml» на диск не
+    /// попадало вовсе.
     pub fn render(&self, store: &secrets::Store) -> std::result::Result<String, String> {
-        let h = self.current();
-        let password = store.seal("password", &h.password)?;
-        let db_password = store.seal("db_password", &h.db_password)?;
-        let text = common::toml_render::render(EXAMPLE, |s, k| {
-            if s != "[host]" {
-                return None;
-            }
-            Some(match k {
-                "server" => format!("{:?}", h.server),
-                "gitea" => format!("{:?}", h.gitea),
-                "password" => format!("{:?}", password),
-                "workstation" => format!("{:?}", h.workstation),
-                "base_path" => format!("{:?}", h.base_path),
-                "platform" => format!("{:?}", h.platform),
-                "configuration" => format!("{:?}", h.configuration),
-                "toolset" => format!("{:?}", h.toolset),
-                "write" => format!("{:?}", h.write),
-                "db_user" => format!("{:?}", h.db_user),
-                "db_password" => format!("{:?}", db_password),
-                "base_url" => format!("{:?}", h.base_url),
-                "dump" => format!("{:?}", h.dump),
-                "project" => format!("{:?}", h.project),
-                "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
-                "mode" => format!("{:?}", h.mode),
-                "publication" => format!("{:?}", h.publication),
-                "http_port" => h.http_port.unwrap_or(0).to_string(),
-                _ => return None,
-            })
+        // Образец делится на две половины ровно по первому `[[connection]]`:
+        // шапка (объяснения полей человеку и корневой `current`) печатается
+        // ОДИН раз, а всё, что ниже, — образец ОДНОГО блока, по которому
+        // печатается каждое соединение (решение плана 4: повторять
+        // объяснения в каждом блоке нельзя, а оставить их только в первом
+        // значило бы сделать первый блок особенным). Нет блока в образце —
+        // отказ словами, а не молчаливая печать файла без соединений: такой
+        // файл при следующем чтении потерял бы их все.
+        // Заголовок ищется строкой, а не подстрокой: имя блока названо и в
+        // объяснениях человеку выше него, и подстрока нашла бы сперва их —
+        // то есть разрезала бы шапку посреди предложения.
+        let at = EXAMPLE
+            .match_indices(CONNECTION)
+            .find(|(i, _)| EXAMPLE[..*i].ends_with('\n'))
+            .map(|(i, _)| i)
+            .ok_or_else(|| format!("{FILE}: в образце нет блока {CONNECTION} — печатать соединения не по чему"))?;
+        let (head, block) = EXAMPLE.split_at(at);
+        let mut text = common::toml_render::render(head, |s, k| {
+            // Корень файла: секции у `current` нет вовсе.
+            (s.is_empty() && k == "current").then(|| format!("{:?}", self.current))
         });
+        for h in &self.connections {
+            // Пароли сеются ДО самого рисования и у КАЖДОГО соединения:
+            // `common::toml_render::render` берёт обычный (безотказный) `Fn`,
+            // и протаскивать `Result` через его замыкание было бы сложнее,
+            // чем сосчитать два значения заранее и отказать через `?` здесь.
+            let password = store.seal("password", &h.password)?;
+            let db_password = store.seal("db_password", &h.db_password)?;
+            text.push_str(&common::toml_render::render(block, |s, k| {
+                if s != CONNECTION {
+                    return None;
+                }
+                Some(match k {
+                    "name" => format!("{:?}", h.name),
+                    "server" => format!("{:?}", h.server),
+                    "gitea" => format!("{:?}", h.gitea),
+                    "password" => format!("{:?}", password),
+                    "workstation" => format!("{:?}", h.workstation),
+                    "base_path" => format!("{:?}", h.base_path),
+                    "base_here" => h.base_here.to_string(),
+                    "platform" => format!("{:?}", h.platform),
+                    "configuration" => format!("{:?}", h.configuration),
+                    "toolset" => format!("{:?}", h.toolset),
+                    "profile" => format!("{:?}", h.profile),
+                    "write" => format!("{:?}", h.write),
+                    "db_user" => format!("{:?}", h.db_user),
+                    "db_password" => format!("{:?}", db_password),
+                    "base_url" => format!("{:?}", h.base_url),
+                    "dump" => format!("{:?}", h.dump),
+                    "project" => format!("{:?}", h.project),
+                    "tools" => format!("[{}]", h.tools.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>().join(", ")),
+                    "mode" => format!("{:?}", h.mode),
+                    "publication" => format!("{:?}", h.publication),
+                    "http_port" => h.http_port.unwrap_or(0).to_string(),
+                    _ => return None,
+                })
+            }));
+        }
         Ok(text)
     }
+}
+
+/// Заголовок блока соединения в файле — одно написание на печать (`render`),
+/// на адресацию правки одного ключа (`set_current`) и на узнавание нового
+/// вида файла. Три своих копии этой строки по файлам разошлись бы молча:
+/// промах в одной из них — это ключ, записанный туда, где его никто не
+/// читает (находка безопасности задачи 4).
+pub const CONNECTION: &str = "[[connection]]";
+
+/// Правка ОДНОГО ключа ТЕКУЩЕГО соединения в тексте файла человека — один
+/// адрес на всех писателей одного ключа: переключатели меню значка
+/// (`gui::save::save_tray_key` — `mode`, `publication`, `write`), дописанные
+/// при настройке выведенные поля (`ops_host::write_derived_fields` —
+/// `gitea`, `dump`, `http_port`) и подстановка прежнего шифртекста
+/// (`write_checked`).
+///
+/// Зачем он есть (находка безопасности задачи 4). Все эти писатели звали
+/// `toml_render::set(text, "[host]", ..)`, а `set` при отсутствии секции
+/// ДОПИСЫВАЕТ её в конец файла. На файле с блоками `[[connection]]` это
+/// давало сразу две беды: записанное не читал никто (чтение берёт список, а
+/// `[host]` рядом с ним не читается вовсе), и файл с обеими половинами стал
+/// с задачи 3 отказом — то есть один щелчок в трее делал настройки
+/// нечитаемыми. Хуже всего это было у потолка записи: человек видел
+/// ужесточение, а перезапуск его тихо откатывал, хотя в этом проекте правило
+/// обратное — честный отказ вместо живого ужесточения.
+///
+/// Прежний файл (`[host]` и ни одного блока) правится там, где соединение и
+/// лежит, — в самой `[host]`: дописать блок рядом с ней значило бы своей же
+/// рукой сделать файл человека отказом. Блоки в файле есть — ключ идёт в
+/// блок текущего соединения, найденный по имени из `current` (порядок блоков
+/// в тексте и в `connections` один: список читается тем же разбором).
+/// Такого блока в файле нет — отказ словами: файл на диске разошёлся с тем,
+/// что в памяти, и писать ключ наугад в чужой блок нельзя.
+pub fn set_current(text: &str, cfg: &Cfg, key: &str, value: &str) -> std::result::Result<String, String> {
+    if !text.lines().any(|l| l.trim() == CONNECTION) {
+        return Ok(common::toml_render::set(text, "[host]", key, value));
+    }
+    common::toml_render::set_in(text, CONNECTION, cfg.current_block(), key, value).ok_or_else(|| {
+        format!("{FILE}: в файле нет блока соединения «{}» — настройки на диске изменились, перечитайте их и повторите", cfg.current)
+    })
 }
 
 /// Открывает одно поле паролем; не получилось — пустая строка и имя поля в
@@ -1426,8 +1510,8 @@ pub fn mode_needs_env(mode: &str) -> bool {
 /// «Ловушки») — именно поэтому проверка после записи обязательна здесь, а
 /// не просто желательна.
 ///
-/// `patches` — пары «ключ секции `[host]` — готовая правая часть», которые
-/// подставляются в напечатанный текст ДО записи (`common::toml_render::set`),
+/// `patches` — пары «ключ ТЕКУЩЕГО соединения — готовая правая часть», которые
+/// подставляются в напечатанный текст ДО записи (`set_current`),
 /// а не после неё отдельным походом на диск (ревью задачи 4, круг 2). Это
 /// ровно то место, которым `gui::save::save_host` возвращает прежний
 /// шифртекст пароля, не расшифровавшийся на этой машине: подстановка после
@@ -1438,7 +1522,7 @@ pub fn mode_needs_env(mode: &str) -> bool {
 pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&str, &str)]) -> std::result::Result<(), String> {
     let mut text = cfg.render(store)?;
     for (key, value) in patches {
-        text = common::toml_render::set(&text, "[host]", key, value);
+        text = set_current(&text, cfg, key, value)?;
     }
     let path = kit.state_path(FILE);
     common::kit::write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
@@ -1453,19 +1537,23 @@ pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store, patches: &[(&
     Ok(())
 }
 
-/// Непустое значение ключа `[host].<key>` на диске — либо пусто, либо начинается с `secrets::PREFIX`; открытый текст без префикса здесь всегда отказ, в отличие от чтения параметров (`secrets::Store::open`), где открытый текст — законный переходный случай. `write_checked` печатает сама — то, что она напечатала, обязано быть шифртекстом или пустой строкой, и ничем третьим (ревью задачи 7, Important 5).
+/// Непустое значение ключа `<key>` на диске — либо пусто, либо начинается с `secrets::PREFIX`; открытый текст без префикса здесь всегда отказ, в отличие от чтения параметров (`secrets::Store::open`), где открытый текст — законный переходный случай. `write_checked` печатает сама — то, что она напечатала, обязано быть шифртекстом или пустой строкой, и ничем третьим (ревью задачи 7, Important 5).
+///
+/// Проверяется КАЖДОЕ соединение файла, а не одно (задача 4): раньше смотрели ровно в `[host]`, а с блоками `[[connection]]` такая проверка на новом файле не находила бы вовсе ничего и всегда говорила «сошлось» — то есть «шифрование, которое тихо не состоялось» (анти-цель спеки) прошло бы молча у всех соединений разом. Прежняя секция `[host]` проверяется рядом: наш писатель её больше не печатает, но файл человека ею и остаётся, пока он не сохранил его заново.
 fn sealed_or_empty(text: &str, key: &str) -> std::result::Result<(), String> {
     let doc: toml::Value = toml::from_str(text).map_err(|e| format!("{FILE}: {e}"))?;
-    let value = doc.get("host").and_then(|h| h.get(key)).and_then(|v| v.as_str()).unwrap_or("");
-    if value.is_empty() || value.starts_with(secrets::PREFIX) {
-        Ok(())
-    } else {
-        Err(format!(
-            "{FILE}: запись не прошла проверку — {} на диске не зашифрован (нет префикса {})",
-            secret_field_name(key),
-            secrets::PREFIX
-        ))
+    let blocks = doc.get("connection").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or(&[]);
+    for block in blocks.iter().chain(doc.get("host")) {
+        let value = block.get(key).and_then(|v| v.as_str()).unwrap_or("");
+        if !value.is_empty() && !value.starts_with(secrets::PREFIX) {
+            return Err(format!(
+                "{FILE}: запись не прошла проверку — {} на диске не зашифрован (нет префикса {})",
+                secret_field_name(key),
+                secrets::PREFIX
+            ));
+        }
     }
+    Ok(())
 }
 
 /// Сравнение, которым `write_checked` решает, сошлась ли проверка после
@@ -1476,8 +1564,14 @@ fn sealed_or_empty(text: &str, key: &str) -> std::result::Result<(), String> {
 /// Эта функция проверяется отдельно, на сконструированном несовпадении —
 /// там, где обычная запись никогда не окажется, но баг в `write_checked`
 /// (например, забытый вызов) — окажется.
+///
+/// Сравниваются ВСЕ соединения по порядку, не одно текущее (задача 4): с
+/// записью всего списка пароль второго соединения, не доехавший до диска, —
+/// такая же потеря, как пароль первого, и молча её пропускать незачем.
 fn passwords_match(written: &Cfg, reread: &Cfg) -> bool {
-    written.current().password == reread.current().password && written.current().db_password == reread.current().db_password
+    written.connections.len() == reread.connections.len()
+        && std::iter::zip(&written.connections, &reread.connections)
+            .all(|(a, b)| a.password == b.password && a.db_password == b.db_password)
 }
 
 #[cfg(test)]
@@ -1535,6 +1629,104 @@ mod tests {
         let dir = tmp(&format!("kit-{n}"));
         std::fs::write(dir.join(FILE), text).unwrap();
         Kit::at(dir)
+    }
+
+    /// Файловая подложка секретов для тестов записи — своя на каждый вызов
+    /// (счётчик, как у `kit_with`): DPAPI из тестов звать нельзя (спека), а
+    /// общий каталог на всех портили бы параллельные тесты друг другу.
+    fn store() -> secrets::Store {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        secrets::Store::file(&tmp(&format!("store-{}", N.fetch_add(1, Ordering::Relaxed))))
+    }
+
+    /// Задача 4, шаг 1: круг «прочитали — записали — прочитали» на ДВУХ
+    /// соединениях. До этой задачи `render` печатала только текущее
+    /// соединение и ни `name`, ни `current` — то есть «Сохранить» на файле с
+    /// двумя блоками теряло второй, а решение плана «текущее хранится именем
+    /// в корне toml» на диск не попадало вовсе.
+    #[test]
+    fn two_connections_survive_a_write_and_a_read() {
+        let mut c = cfg_with(&["Buh", "Ромашка"]);
+        c.current = "Ромашка".into();
+        let text = c.render(&store()).unwrap();
+        let back = Cfg::load_unchecked(&kit_with(&text)).unwrap();
+        assert_eq!(back.connections.iter().map(|x| x.name.clone()).collect::<Vec<_>>(), ["Buh", "Ромашка"]);
+        assert_eq!(back.current, "Ромашка", "текущее переживает запись");
+        assert!(text.contains("# "), "объяснения полей человеку остаются в файле");
+    }
+
+    /// Задача 4, шаг 5: прежний файл с одной секцией `[host]` после записи
+    /// приводится к новому виду и **читается** — ни отказа, ни потерянного
+    /// соединения (общее ограничение плана: прежний файл принимается всегда).
+    #[test]
+    fn an_old_single_host_file_is_written_back_in_the_new_shape_and_still_reads() {
+        let c = Cfg::load_unchecked(&kit_with("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\n")).unwrap();
+        let text = c.render(&store()).unwrap();
+        assert!(text.contains("[[connection]]"), "сохранение приводит файл к новому виду");
+        assert!(!text.contains("[host]"), "и прежней секции рядом не оставляет — файл с обеими стал бы отказом: {text}");
+        let back = Cfg::load_unchecked(&kit_with(&text)).unwrap();
+        assert_eq!(back.connections.len(), 1);
+        assert_eq!(back.current, "Buh", "имя, выведенное из каталога базы, уезжает в файл");
+    }
+
+    /// Печать не теряет ни одного поля соединения: образец блока — это и
+    /// есть всё, что `render` умеет записать, а поле структуры, строки
+    /// которого в образце нет, уедет с диска при первом же «Сохранить»
+    /// (ровно так до задачи 4 терялась названная человеком `platform`).
+    /// Сравнение с сериализацией, а не со своим списком имён: новое поле
+    /// появляется в ней само, и забыть про образец молча не выйдет.
+    #[test]
+    fn the_block_template_carries_every_field_of_a_connection() {
+        // `http_port` — `skip_serializing_if`: пустым он в сериализацию не
+        // попадает вовсе, и проверять его надо на заполненном.
+        let h = Connection { http_port: Some(8081), ..Connection::default() };
+        let value = toml::Value::try_from(&h).unwrap();
+        let block: Vec<&str> = EXAMPLE.lines().skip_while(|l| l.trim() != CONNECTION).collect();
+        for key in value.as_table().expect("соединение сериализуется таблицей").keys() {
+            assert!(
+                block.iter().any(|l| l.starts_with(&format!("{key} = "))),
+                "строки поля {key} нет в образце блока — печать его потеряет"
+            );
+        }
+    }
+
+    /// Находка безопасности задачи 4: писатели одного ключа
+    /// (`gui::save::save_tray_key`, `ops_host::write_derived_fields`,
+    /// подстановка `write_checked`) звали `toml_render::set(.., "[host]", ..)`,
+    /// а та при отсутствии секции ДОПИСЫВАЕТ её в конец файла. На файле с
+    /// блоками это давало и запись, которую чтение игнорирует, и файл с
+    /// обеими половинами — то есть отказ с задачи 3. Один адрес на всех,
+    /// `set_current`, проверяется здесь по всем трём случаям.
+    #[test]
+    fn a_one_key_write_lands_in_the_current_block_and_never_leaves_both_shapes() {
+        let mut two = cfg_with(&["Buh", "Ромашка"]);
+        two.current = "Ромашка".into();
+        let text = two.render(&store()).unwrap();
+        let after = set_current(&text, &two, "write", "\"read_write\"").unwrap();
+        assert!(!after.contains("[host]"), "прежней секции рядом с блоками быть не должно: {after}");
+        let back: Cfg = toml::from_str(&after).unwrap();
+        assert!(back.read_notes.is_empty(), "файл после записи читается без находок: {:?}", back.read_notes);
+        assert_eq!(back.current().write, "read_write", "ключ попал в блок ТЕКУЩЕГО соединения");
+        assert_eq!(back.connections[0].write, "", "а соседний блок не тронут вовсе");
+
+        // Прежний файл (`[host]` и ни одного блока) правится в самой
+        // `[host]`: дописать блок рядом с ней значило бы своей же рукой
+        // сделать настройки человека отказом.
+        let old = "[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\n";
+        let one: Cfg = toml::from_str(old).unwrap();
+        let after = set_current(old, &one, "write", "\"read_write\"").unwrap();
+        assert!(!after.contains(CONNECTION), "блок рядом с прежней секцией не дописывается: {after}");
+        let back: Cfg = toml::from_str(&after).unwrap();
+        assert!(back.read_notes.is_empty(), "{:?}", back.read_notes);
+        assert_eq!(back.current().write, "read_write");
+
+        // Блока текущего соединения в файле нет — отказ словами, а не запись
+        // наугад в чужой блок и не молчаливое «ничего не записали».
+        let mut three = cfg_with(&["Buh", "Ромашка", "Ландыш"]);
+        three.current = "Ландыш".into();
+        let e = set_current(&text, &three, "write", "\"read_write\"").unwrap_err();
+        assert!(e.contains("Ландыш"), "отказ называет соединение: {e}");
     }
 
     /// Настройки Zed из образа — рядом, не копией: имена инструментов
@@ -2210,12 +2402,25 @@ mod tests {
         assert!(c.validate().is_ok());
     }
 
+    /// Задача 4: правило поля ищется в ШАПКЕ образца, а не над строкой
+    /// ключа. Объяснения полей стоят в заголовке над блоками один раз
+    /// (решение плана 4): у каждого соединения поля одни и те же, и
+    /// объяснение над ключом первого блока сделало бы первый блок особенным.
     #[test]
     fn example_prints_gitea_with_its_rule() {
         let lines: Vec<&str> = EXAMPLE.lines().collect();
         let i = lines.iter().position(|l| l.starts_with("gitea = ")).unwrap_or_else(|| panic!("в образце нет поля gitea"));
         assert_eq!(lines[i], "gitea = \"\"", "в образце поле пустое — иначе туннельное рабочее место заметило бы правку");
-        let rule: String = lines[..i].iter().rev().take_while(|l| l.starts_with('#')).fold(String::new(), |a, l| format!("{l}\n{a}"));
+        // Шапка — всё до первого блока; правило поля — её абзац, начатый
+        // именем поля и идущий до начала следующего (строки продолжения
+        // абзаца сдвинуты отступом).
+        let head: Vec<&str> = lines.iter().take_while(|l| l.trim() != CONNECTION).copied().collect();
+        let at = head
+            .iter()
+            .position(|l| l.starts_with("# gitea —"))
+            .unwrap_or_else(|| panic!("в шапке образца нет абзаца про gitea: {head:?}"));
+        let rule =
+            head[at..].iter().take_while(|l| l.starts_with("# gitea —") || l.starts_with("#    ")).copied().collect::<Vec<_>>().join("\n");
         assert!(rule.contains("Пусто") && rule.contains("install"), "правило записи не напечатано: {rule}");
         // Заполненное поле доходит до toml через render() и читается обратно.
         let filled = EXAMPLE.replace("gitea = \"\"", "gitea = \"http://localhost:3000\"");
@@ -2351,7 +2556,9 @@ mod tests {
         assert_eq!(c.render(&store).unwrap(), EXAMPLE);
         c.current_mut().workstation = "dev2".into();
         let t = c.render(&store).unwrap();
-        assert!(t.contains("workstation = \"dev2\"") && t.contains("# Ваш логин в среде"));
+        // Объяснение поля — в шапке над блоками (решение плана 4), и
+        // печать его не теряет.
+        assert!(t.contains("workstation = \"dev2\"") && t.contains("# workstation — ваш логин в среде"));
         assert_eq!(toml::from_str::<Cfg>(&t).unwrap(), c);
     }
 
@@ -2531,7 +2738,10 @@ mod tests {
         filled_local.current_mut().db_password = "секрет базы".into();
         let mut text = filled_local.render(&mine).unwrap();
         let readable_password = theirs.seal("password", &filled_local.current().password).unwrap();
-        text = common::toml_render::set(&text, "[host]", "password", &format!("{readable_password:?}"));
+        // Подставляется в блок ТЕКУЩЕГО соединения (задача 4), а не в
+        // прежнюю `[host]`: напечатанный файл несёт блоки, и дописанная
+        // рядом `[host]` сделала бы его отказом вместо подмены пароля.
+        text = set_current(&text, &filled_local, "password", &format!("{readable_password:?}")).unwrap();
         let kit = kit_with(&text);
         let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
         assert!(e.contains("db_password"), "{e}");

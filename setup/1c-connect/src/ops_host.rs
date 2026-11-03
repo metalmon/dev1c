@@ -419,7 +419,11 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     if !dry_run {
         let mut text = std::fs::read_to_string(&path).with_context(|| format!("не прочитать {}", path.display()))?;
         for (key, value) in &fields {
-            text = common::toml_render::set(&text, "[host]", key, value);
+            // Блок ТЕКУЩЕГО соединения, а не прежняя секция `[host]` (задача 4
+            // плана «Модель соединений»): `set` по `[host]` на файле с блоками
+            // `[[connection]]` дописывала секцию в конец — выведенные поля не
+            // читал бы никто, а файл с обеими половинами стал бы отказом.
+            text = crate::cfg::set_current(&text, cfg, key, value).map_err(anyhow::Error::msg)?;
         }
         std::fs::write(&path, &text).with_context(|| format!("не записать {}", path.display()))?;
     }
@@ -822,14 +826,18 @@ pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, 
 /// Тихо подставить `generic`, как было, нельзя — это и есть расхождение,
 /// которое ловит задача 8. Мой выбор — отказ словами, а не угадывание:
 /// установка расширения бывает один раз, и человек в этот момент рядом —
-/// он может тут же дописать `[host] configuration` и повторить; а неверно
+/// он может тут же дописать `configuration` своему соединению и повторить; а неверно
 /// угаданный профиль он обнаружит только месяц спустя по неверным
 /// документам, когда это будет стоить куда дороже одной отменённой
 /// установки.
 fn install_profile(cfg: &Cfg) -> Result<&str, String> {
     match cfg.configuration()? {
         "auto" => {
-            Err("не могу выбрать профиль расширения сам: укажите вид конфигурации в [host] configuration (generic или buh_3_0)".to_string())
+            // Секцию фраза больше не называет (задача 4 плана «Модель
+            // соединений»): поле живёт в блоке соединения, и прежняя
+            // подсказка «[host] configuration» вела бы человека в секцию,
+            // которой в его файле может не быть вовсе.
+            Err("не могу выбрать профиль расширения сам: укажите вид конфигурации в поле configuration своего соединения в 1c-connect.toml (generic или buh_3_0)".to_string())
         }
         other => Ok(other),
     }
@@ -1791,8 +1799,21 @@ fn mcp_tick(kit: &Kit, user: &str) -> (bool, Result<Cfg, String>) {
 /// можно довериться, — разрешающее значение буквально, всё прочее (в т.ч.
 /// хвостовой мусор, который `unquote` не снимает, регистр, опечатка) —
 /// небезопасный случай и повод ужесточить.
+/// Задача 4: ключ `write` живёт в блоке соединения, и читать его из `[host]`
+/// на новом файле значило бы не находить его вовсе. Которое из соединений
+/// текущее, терпимым чтением не узнать (блок называет себя ключом `name`, а
+/// `current` — корневым ключом, и связать их без настоящего разбора нечем —
+/// а он здесь уже провалился), поэтому доверяем только когда разрешают ВСЕ
+/// блоки: текущее — одно из них, значит шире настоящего потолка это правило
+/// не бывает, и отказ по умолчанию остаётся отказом по умолчанию.
 fn trusts_read_write(file_text: Option<&str>) -> bool {
-    file_text.and_then(|text| common::toml_render::get(text, "[host]", "write")).as_deref() == Some("read_write")
+    let Some(text) = file_text else { return false };
+    let blocks = text.lines().filter(|l| l.trim() == crate::cfg::CONNECTION).count();
+    if blocks == 0 {
+        // Прежний файл: единственное соединение лежит секцией `[host]`.
+        return common::toml_render::get(text, "[host]", "write").as_deref() == Some("read_write");
+    }
+    (0..blocks).all(|nth| common::toml_render::get_in(text, crate::cfg::CONNECTION, nth, "write").as_deref() == Some("read_write"))
 }
 
 fn watch_mcp(kit: Kit, user: String, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
@@ -3851,5 +3872,16 @@ mod tests {
             trusts_read_write(Some("[host]\nwrite = \"read_write\" # вписал сам\n")),
             "хвостовой комментарий не должен мешать распознать точное совпадение"
         );
+        // Задача 4: потолок живёт в блоке соединения, и читать его из
+        // `[host]` на новом файле значило бы не находить его вовсе. Которое
+        // из соединений текущее, терпимым чтением не узнать, поэтому
+        // доверяем только когда разрешают все блоки.
+        let one = "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nwrite = \"read_write\"\n";
+        assert!(trusts_read_write(Some(one)), "единственный блок разрешает — доверяем");
+        let both = format!("{one}\n[[connection]]\nname = \"Ромашка\"\nwrite = \"read_write\"\n");
+        assert!(trusts_read_write(Some(&both)), "разрешают оба — доверяем");
+        let half = format!("{one}\n[[connection]]\nname = \"Ромашка\"\nwrite = \"read_only\"\n");
+        assert!(!trusts_read_write(Some(&half)), "разрешает не каждый — узнать текущее нечем, значит не доверяем");
+        assert!(!trusts_read_write(Some("[[connection]]\nname = \"Buh\"\n")), "ключа нет вовсе — не доверяем");
     }
 }

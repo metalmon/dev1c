@@ -28,27 +28,67 @@ pub fn render(example: &str, value: impl Fn(&str, &str) -> Option<String>) -> St
 /// этого ключа, всё остальное — комментарии человека, порядок ключей, пустые
 /// строки и переводы строк — остаётся как есть. Ключа в секции нет — строка
 /// дописывается в её конец (так же дописывает `seed` в скрипте стенда).
-/// `value` — готовая правая часть (строки уже в кавычках).
+/// Секции нет вовсе — дописывается она целиком, в конец файла. `value` —
+/// готовая правая часть (строки уже в кавычках).
 ///
 /// Отличие от `render`: та перерисовывает файл по образцу, и свои строки
 /// человека переживают правку только если образец — его же файл.
+///
+/// Повторяющаяся секция (`[[connection]]`) правится первым блоком — за
+/// остальными и за отказом вместо дописывания идите в `set_in` ниже: писать
+/// одному соединению ключ в чужой блок или в дописанный пустой нельзя.
 pub fn set(text: &str, section: &str, key: &str, value: &str) -> String {
+    if let Some(out) = set_in(text, section, 0, key, value) {
+        return out;
+    }
+    // Секции нет вовсе — дописываем её целиком в конец.
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    let end = lines.len().saturating_sub(1);
+    lines.insert(end, section.to_string());
+    lines.insert(end + 1, format!("{key} = {value}"));
+    lines.join("\n")
+}
+
+/// `set` для `nth`-го блока ПОВТОРЯЮЩЕЙСЯ секции (`[[connection]]`, блоки
+/// считаются от нуля) и для КОРНЯ файла (`section` пуст — всё до первой
+/// `[таблицы]`, там живёт ключ `current`).
+///
+/// Корень — пустое имя секции, а не отдельная функция: разбор здесь и так
+/// ведёт «последнюю встреченную `[...]`», и до первой таблицы это ровно
+/// пустая строка — то есть корневой случай уже описан тем же состоянием, а
+/// вторая функция держала бы вторую копию цикла. Корневой ключ, которого в
+/// файле нет, дописывается ПЕРЕД первой таблицей: в TOML корневые ключи
+/// обязаны стоять до неё, иначе ключ молча уехал бы в чужую таблицу.
+///
+/// `None` — такого блока в тексте нет, и дописывать его тут нечем: ключ
+/// одного соединения в наспех дописанный пустой блок — это молча неверная
+/// запись, а не запись. Решать, что с этим делать, — вызывающему
+/// (`cfg::set_current` отказывает словами).
+pub fn set_in(text: &str, section: &str, nth: usize, key: &str, value: &str) -> Option<String> {
     // split('\n'), а не lines(): так сохраняются и '\r' в концах строк, и
     // наличие/отсутствие перевода строки в конце файла.
     let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
     let cr = |l: &str| if l.ends_with('\r') { "\r" } else { "" };
-    let mut cur = String::new();
-    let mut tail = None; // последняя непустая строка нужной секции
+    let root = section.is_empty();
+    // Корень начинается с первой же строки файла — своего заголовка у него нет.
+    let mut inside = root;
+    let mut found = root;
+    let mut seen = 0; // сколько блоков этой секции уже прошло
+    let mut tail = None; // последняя непустая строка нужного блока
     for i in 0..lines.len() {
         let t = lines[i].trim();
         if t.starts_with('[') && t.ends_with(']') {
-            cur = t.to_string();
-            if cur == section {
+            inside = t == section && seen == nth;
+            if t == section {
+                seen += 1;
+            }
+            if inside {
+                found = true;
                 tail = Some(i);
             }
             continue;
         }
-        if cur != section {
+        if !inside {
             continue;
         }
         if !t.is_empty() {
@@ -56,19 +96,19 @@ pub fn set(text: &str, section: &str, key: &str, value: &str) -> String {
         }
         if !t.starts_with('#') && t.split_once('=').is_some_and(|(k, _)| k.trim() == key) {
             lines[i] = format!("{key} = {value}{}", cr(&lines[i]));
-            return lines.join("\n");
+            return Some(lines.join("\n"));
         }
+    }
+    if !found {
+        return None;
     }
     match tail {
         Some(i) => lines.insert(i + 1, format!("{key} = {value}{}", cr(&lines[i]))),
-        // Секции нет вовсе — дописываем её целиком в конец.
-        None => {
-            let end = lines.len().saturating_sub(1);
-            lines.insert(end, section.to_string());
-            lines.insert(end + 1, format!("{key} = {value}"));
-        }
+        // Корень без единой строки до первой таблицы — ключ идёт в самое
+        // начало файла (см. докстроку).
+        None => lines.insert(0, format!("{key} = {value}")),
     }
-    lines.join("\n")
+    Some(lines.join("\n"))
 }
 
 /// Терпимое чтение одного значения из текста самого файла — **не разборщик
@@ -89,14 +129,25 @@ pub fn set(text: &str, section: &str, key: &str, value: &str) -> String {
 /// полноценный разбор уже провалился, а не его замена — заводить здесь
 /// `toml::Value` означало бы тащить назад то, что уже не сработало.
 pub fn get(text: &str, section: &str, key: &str) -> Option<String> {
-    let mut cur = String::new();
+    get_in(text, section, 0, key)
+}
+
+/// `get` для `nth`-го блока повторяющейся секции и для корня файла — те же
+/// два случая и те же доводы, что у `set_in` выше.
+pub fn get_in(text: &str, section: &str, nth: usize, key: &str) -> Option<String> {
+    let root = section.is_empty();
+    let mut inside = root;
+    let mut seen = 0;
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with('[') && t.ends_with(']') {
-            cur = t.to_string();
+            inside = t == section && seen == nth;
+            if t == section {
+                seen += 1;
+            }
             continue;
         }
-        if cur != section || t.starts_with('#') {
+        if !inside || t.starts_with('#') {
             continue;
         }
         if let Some((k, v)) = t.split_once('=') {
@@ -175,6 +226,45 @@ mod tests {
         assert_eq!(get(text, "[host]", "write"), Some("read_only".into()));
         let text = "[host]\nwrite = read_write # без кавычек вовсе\n";
         assert_eq!(get(text, "[host]", "write"), Some("read_write".into()));
+    }
+
+    /// Блок повторяющейся секции адресуется номером: ключ правится в том
+    /// блоке, который попросили, а соседний не трогается вовсе. Это и есть
+    /// адрес, которым пишет текущее соединение (`cfg::set_current`).
+    #[test]
+    fn set_in_edits_the_asked_block_and_leaves_its_neighbours_alone() {
+        let two = "[[connection]]\nname = \"Buh\"\nwrite = \"read_only\"\n\n[[connection]]\nname = \"Ромашка\"\nwrite = \"read_only\"\n";
+        let out = set_in(two, "[[connection]]", 1, "write", "\"read_write\"").unwrap();
+        assert_eq!(
+            out,
+            "[[connection]]\nname = \"Buh\"\nwrite = \"read_only\"\n\n[[connection]]\nname = \"Ромашка\"\nwrite = \"read_write\"\n"
+        );
+        // Ключа в блоке нет — дописывается в конец СВОЕГО блока, не чужого.
+        let out = set_in(two, "[[connection]]", 0, "dump", "\"C:\\\\src\"").unwrap();
+        assert_eq!(
+            out,
+            "[[connection]]\nname = \"Buh\"\nwrite = \"read_only\"\ndump = \"C:\\\\src\"\n\n[[connection]]\nname = \"Ромашка\"\nwrite = \"read_only\"\n"
+        );
+        assert_eq!(get_in(two, "[[connection]]", 1, "name"), Some("Ромашка".into()));
+        // Блока с таким номером нет — `None`, а не дописанный пустой блок.
+        assert_eq!(set_in(two, "[[connection]]", 2, "write", "\"read_write\""), None);
+        assert_eq!(get_in(two, "[[connection]]", 2, "write"), None);
+    }
+
+    /// Корневой ключ (`current` у настроек коннектора): секции у него нет
+    /// вовсе, и адресуется он пустым именем секции. Отсутствующий —
+    /// дописывается ПЕРЕД первой таблицей, иначе он уехал бы внутрь неё.
+    #[test]
+    fn a_root_key_is_addressed_by_an_empty_section() {
+        let text = "# шапка\ncurrent = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\ncurrent = \"чужой\"\n";
+        assert_eq!(get(text, "", "current"), Some("Buh".into()), "корень читается, а не одноимённый ключ блока");
+        let out = set(text, "", "current", "\"Ромашка\"");
+        assert_eq!(out, "# шапка\ncurrent = \"Ромашка\"\n\n[[connection]]\nname = \"Buh\"\ncurrent = \"чужой\"\n");
+        // Ключа в корне нет — встаёт до первой таблицы, а не в её конец.
+        let no_root = "# шапка\n[[connection]]\nname = \"Buh\"\n";
+        assert_eq!(set(no_root, "", "current", "\"Buh\""), "# шапка\ncurrent = \"Buh\"\n[[connection]]\nname = \"Buh\"\n");
+        // Файл без таблиц вовсе — ключ просто дописывается.
+        assert_eq!(set("# шапка\n", "", "current", "\"Buh\""), "# шапка\ncurrent = \"Buh\"\n");
     }
 
     #[test]

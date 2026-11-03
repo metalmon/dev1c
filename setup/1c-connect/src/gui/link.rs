@@ -68,7 +68,7 @@ pub fn row(c: &Connection, current: bool, l: Option<&State>) -> Row {
     } else {
         None
     };
-    Row { name: c.name.clone(), state, current, write: c.write == "read_write", base }
+    Row { name: c.name.clone(), state, current, write: c.allows_write(), base }
 }
 
 /// Весь список вкладки «Связь»: подписи групп вперемешку со строками

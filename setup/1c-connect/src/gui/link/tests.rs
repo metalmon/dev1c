@@ -559,12 +559,41 @@ fn a_connection_waiting_for_permission_is_the_very_first_row() {
     }
 }
 
-/// Подпись группы остаётся на месте, даже когда единственный её член
-/// ждёт разрешения и всплыл выше: подпись решает полный список, а не то,
-/// что осталось видимым под ней (докстрока `list`, правило 2).
+/// Две карточки, по одной на accept и dial — ровно столько, чтобы подписи
+/// были нужны (`show_captions`), и ни одной лишней: третья роль (local)
+/// здесь намеренно отсутствует, иначе «Клевер» не мог бы остаться видимым
+/// под своей подписью сам по себе, без помощи третьей группы.
+fn cfg_accept_waiting_dial_connected() -> Cfg {
+    Cfg {
+        connections: vec![
+            Connection { name: "Василёк".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+            Connection { name: "Клевер".into(), mode: "tunnel".into(), role: "dial".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    }
+}
+
+/// Заглушка-поиск состояния, которая — в отличие от `none` — различает
+/// соединения по имени: «Клевер» живой, остальные молчат. Нужна ровно для
+/// того, чтобы отличить «подпись осталась, хотя её единственный член
+/// всплыл» от «обе группы всё равно ждут» (та подмена, которую нашло
+/// ревью круга починки 1 у прежнего теста).
+fn only_clover_is_connected(name: &str) -> Option<State> {
+    (name == "Клевер").then(|| State::Up { since: Instant::now() })
+}
+
+/// Подпись группы остаётся на месте, даже когда единственный её член ждёт
+/// разрешения и всплыл выше подписей: подпись решает полный список, а не
+/// то, что осталось видимым под ней (докстрока `list`, правило 2). Dial
+/// здесь живой (не ждущий), поэтому тест отличает «подпись осталась
+/// несмотря на подъём» от «обе группы ждут и подписей нет вовсе» —
+/// находка ревью круга починки 1: прежний тест `&none` красил обе группы
+/// одинаково и падал бы точно так же, как уже падает
+/// `captions_appear_only_when_the_list_holds_more_than_one_role`, то есть
+/// не добавлял покрытия.
 #[test]
-fn a_caption_survives_even_when_every_member_of_its_group_is_waiting() {
-    let l = list(&cfg_accept_dial_local_with_waiting("Василёк"), &none);
+fn a_caption_survives_even_when_its_only_member_is_waiting() {
+    let l = list(&cfg_accept_waiting_dial_connected(), &only_clover_is_connected);
     let captions: Vec<&str> = l
         .iter()
         .filter_map(|e| match e {
@@ -572,5 +601,9 @@ fn a_caption_survives_even_when_every_member_of_its_group_is_waiting() {
             _ => None,
         })
         .collect();
-    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам", "На этой машине"]);
+    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам"], "подпись accept пропала вместе со своим единственным членом");
+    match &l[0] {
+        Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
+        Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
+    }
 }

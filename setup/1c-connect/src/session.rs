@@ -308,6 +308,14 @@ pub fn flip_warning(on: bool, e: &str) -> String {
 /// рантайме — она ПАНИКУЕТ. `block_in_place` требует многопоточный `Runtime` (`tokio::test` без
 /// `flavor = "multi_thread"` поднимает однопоточный) — позвать отсюда на нём значит упасть, а не
 /// получить `Err`. Живой тест `tunnel_live.rs` уже ловил эту панику вместо честного «SSH недоступен».
+/// **Вызывающих нет с 3.11 и не будет.** По SSH рабочим местам не проходит ни одна
+/// команда (`ForceCommand /bin/false`, `config/sshd-setup.sh` — замер в STATUS,
+/// пункт 37), поэтому `tunnel::run` эту обёртку больше не зовёт: она давала
+/// гарантированное предупреждение на каждое подключение. Щель в sshd не обсуждается
+/// — в клиент-серверной архитектуре оба конца наши, и правит сторона с агентами свой
+/// собственный файл. Живым из этой цепочки остаётся `flip_with`: ему нужен канал, а
+/// не SSH, и канал у протокола будет свой. Обёртка оставлена как место, куда этот
+/// канал подставится, и как запись о том, почему здесь нельзя `block_in_place`.
 pub fn flip_remote_servers(t: &tunnel::Tunnel, on: bool, seen: &EditorMcpSeen) -> Result<(), String> {
     let r = tokio::task::block_in_place(|| {
         let exec = |cmd: &str| -> Result<String, String> { tokio::runtime::Handle::current().block_on(t.exec(cmd)) };

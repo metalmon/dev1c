@@ -32,11 +32,12 @@ async fn forwards_7771_and_remembers_the_host_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// Important 5 финального ревью: `tunnel::run` на каждом удачном коннекте зовёт
-// `session::flip_remote_servers`, а та — `tokio::task::block_in_place` (докстрока
-// `flip_remote_servers`: ПАНИКА, не отказ, вне многопоточного рантайма). По умолчанию
-// `#[tokio::test]` — однопоточный рантайм, и именно на нём эта ветка сломала тест: панику ловили
-// не как «SSH недоступен», а как настоящий крах `cargo test`.
+// Многопоточный рантайм оставлен, хотя причина, по которой он тут появился, ушла:
+// `tunnel::run` звала `session::flip_remote_servers`, а та — `block_in_place`, который
+// вне многопоточного рантайма ПАНИКУЕТ, и панику ловили не как «SSH недоступен», а
+// как настоящий крах `cargo test` (Important 5 финального ревью). Вызовов этих больше
+// нет (STATUS, пункт 37), но `flavor` менять незачем: он ничего не стоит, а туннель
+// с его задачами ближе к бою именно на многопоточном.
 #[tokio::test(flavor = "multi_thread")]
 async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     let Some((server, password)) = env() else {
@@ -82,78 +83,5 @@ async fn run_keeps_the_forward_open_and_the_container_sees_it() {
     }
     tx.send(true).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Задача 7, Important 4 ревью: доказывает именно проводку в `tunnel::run`
-/// (`tunnel.rs:221`/`236`), а не только `flip_with`/`flip_remote_servers`
-/// сами по себе — убери любой из двух вызовов оттуда, и этот тест упадёт.
-/// Второе SSH-соединение (без пробросов — `&[]`, чтобы не спорить с тем,
-/// что держит сам `run()`) сеет файл редактора своей командой и читает его
-/// независимо, пока `run()` живёт своей жизнью на отдельном соединении.
-///
-/// Important 5 финального ревью: `flip_remote_servers` зовёт `block_in_place`, который паникует
-/// вне многопоточного рантайма — `flavor = "multi_thread"` здесь обязателен, не только у соседнего
-/// теста, иначе SSH-отказ и паника рантайма неотличимы в выводе `cargo test`.
-///
-/// # Почему `ignore`, а не красный CI
-///
-/// Правка измерена неработающей и работать не может: у рабочих мест
-/// `ForceCommand /bin/false` (`config/sshd-setup.sh`, блоки `Match User dev1..3`),
-/// и по SSH этим учёткам не проходит НИ ОДНА команда — ни `cat`, ни `mv`, которыми
-/// правит `session::flip_with`. Замер 3.11 в своём контейнере: команда по ключу
-/// выходит с кодом 1, проброс `-R` при этом проходит с кодом 0 — ровно то, что
-/// видно в CI. Решение по механике (узкая щель в `ForceCommand`, наблюдатель внутри
-/// контейнера или отказ от правки вовсе) владелец отложил — записано в спеке
-/// «MCP в редакторе» от 26.10, поправка финального ревью 29.10.
-///
-/// Тест остаётся как доказательство в ожидании решения: `cargo test -- --ignored`
-/// прогонит его в тот день, когда щель появится. Красным он держать CI не может —
-/// он требует того, что отложено нарочно, а не сломано случайно.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "ForceCommand /bin/false у рабочих мест: решение о щели за владельцем, спека MCP в редакторе 29.10"]
-async fn run_flips_editor_mcp_enabled_around_the_session() {
-    let Some((server, password)) = env() else {
-        eprintln!("стенда нет: не задано DEV1C_SSH/DEV1C_SSH_PASSWORD, проверка пропущена");
-        return;
-    };
-    let dir = std::env::temp_dir().join(format!("1c-connect-flip-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let password = if std::env::var("DEV1C_DOCKER").is_ok() { "dev3".to_string() } else { password };
-
-    let control = one_c_connect::tunnel::Tunnel::connect(&server, "dev3", &password, &dir.join("known_hosts_control"), &[])
-        .await
-        .expect("control connect (no forwards)");
-    let before = r#"{"context_servers":{"1c":{"command":"nc","enabled":false},"vrunner":{"command":"nc","enabled":false}}}"#;
-    control.exec(&format!("mkdir -p ~/.config/zed && cat > ~/.config/zed/settings.json\n{before}")).await.expect("seed the file");
-
-    let mut cfg = one_c_connect::cfg::Cfg::default();
-    cfg.current_mut().server = server;
-    cfg.current_mut().workstation = "dev3".into();
-    cfg.current_mut().password = password;
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    let editor_mcp = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let kh = dir.join("known_hosts");
-    let task = tokio::spawn(async move { one_c_connect::tunnel::run(&cfg, kh, |_| {}, |_| {}, rx, editor_mcp).await });
-
-    let mut on = String::new();
-    for _ in 0..40 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if task.is_finished() {
-            panic!("run() завершился раньше, чем успел включить записи: {:?}", task.await);
-        }
-        on = control.exec("cat ~/.config/zed/settings.json").await.expect("read after connect");
-        if on.contains("\"enabled\": true") {
-            break;
-        }
-    }
-    assert!(on.contains("\"enabled\": true"), "run() обязан включить записи после удачного проброса: {on}");
-
-    tx.send(true).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), task).await.expect("run stops on request").unwrap().unwrap();
-    let off = control.exec("cat ~/.config/zed/settings.json").await.expect("read after stop");
-    assert!(off.contains("\"enabled\": false"), "run() обязан выключить записи ДО разрыва: {off}");
-
-    control.close().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

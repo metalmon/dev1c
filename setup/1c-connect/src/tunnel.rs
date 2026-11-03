@@ -195,7 +195,15 @@ pub async fn run(
     on_event: impl Fn(common::Event),
     serve: impl Fn(Incoming) + Send + Sync + 'static,
     mut stop: tokio::sync::watch::Receiver<bool>,
-    editor_mcp: crate::session::EditorMcpSeen,
+    // Правку записей MCP у Zed в контейнере здесь больше не зовём. По SSH рабочим
+    // местам не проходит НИ ОДНА команда (`ForceCommand /bin/false`, замер 3.11 —
+    // STATUS, пункт 37), так что оба вызова были гарантированным предупреждением в
+    // журнале на каждое подключение и отключение — продукт врал о том, чего не делал.
+    // Механизм возвращается не щелью в sshd, а вместе с протоколом: там оба конца
+    // наши, и сторона с агентами правит свой собственный файл, без удалённой
+    // оболочки вовсе. `session::flip_with` для этого и остаётся — ему нужен канал,
+    // а не SSH. Ячейка здесь — только ради вызывающих, которые её и так держат.
+    _editor_mcp: crate::session::EditorMcpSeen,
 ) -> Result<()> {
     let serve = Arc::new(serve);
     // `tunnel_ports()`, не `ports()`: эта тройка идёт среде как список
@@ -228,10 +236,6 @@ pub async fn run(
                     ports.vrunner,
                     ports.web
                 )));
-                // Контейнерный случай задачи 7: проброс встал — значит обслуживание включили, и серверы MCP у Zed в контейнере должны подняться сами (`"enabled": true`), а не ждать, пока человек их перезапустит руками. Ошибка правки — только предупреждение: связь важнее настройки редактора.
-                if let Err(e) = crate::session::flip_remote_servers(&t, true, &editor_mcp) {
-                    on_event(common::Event::Warn(crate::session::flip_warning(true, &e)));
-                }
                 loop {
                     tokio::select! {
                         inc = t.incoming.recv() => match inc {
@@ -239,10 +243,6 @@ pub async fn run(
                             None => break, // the session is gone
                         },
                         _ = stop.changed() => {
-                            // Та же правка в обратную сторону, и раньше отключения: иначе Zed увидит пропавший `nc` раньше, чем успеет погасить сервер сам (спека, «Факты…» — Zed не поднимает упавший сервер обратно).
-                            if let Err(e) = crate::session::flip_remote_servers(&t, false, &editor_mcp) {
-                                on_event(common::Event::Warn(crate::session::flip_warning(false, &e)));
-                            }
                             let _ = t.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
                             return Ok(());
                         }

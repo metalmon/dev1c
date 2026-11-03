@@ -2,7 +2,7 @@ use super::*;
 // `use gpui_kit::*` в `mod.rs` затаскивает в область имя `test` (атрибут
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
-use crate::cfg::Connection;
+use crate::cfg::{cfg_with, Connection};
 use crate::session::State;
 use common::check::Check;
 use core::prelude::v1::test;
@@ -606,4 +606,24 @@ fn a_caption_survives_even_when_its_only_member_is_waiting() {
         Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
         Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
     }
+}
+
+/// Задача 11 плана `2026-11-03-interface`: онбординг — пустая «Связь» с
+/// одним вопросом и двумя ответами, мастера нет. Слова те же, что у
+/// переключателя роли в карточке (задача 13): человек, ответивший здесь,
+/// обязан узнать свой ответ, открыв карточку.
+#[test]
+fn the_two_onboarding_answers_set_the_topology() {
+    let a = onboarding_answers();
+    assert_eq!(a[0], ("Подключаюсь сам — у меня есть код", "dial"));
+    assert_eq!(a[1], ("Принимаю подключения — код выдаю я", "accept"));
+}
+
+/// Онбординг кончается СОСТОЯНИЕМ, а не флагом (спека: «Кончается онбординг
+/// состоянием, а не флагом»): первое соединение заведено — значит он
+/// кончился. Ключа «онбординг пройден» в настройках не заводим.
+#[test]
+fn onboarding_ends_when_the_first_connection_exists() {
+    assert!(onboarding_shown(&cfg_with(&[])));
+    assert!(!onboarding_shown(&cfg_with(&["Buh"])), "флага «прошёл онбординг» в настройках не заводим");
 }

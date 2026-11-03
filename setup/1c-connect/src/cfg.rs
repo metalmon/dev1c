@@ -118,7 +118,11 @@ pub fn base_name(base_path: &str) -> &str {
 /// через пробел — «Buh», «Buh 2», «Buh 3», …
 pub fn default_name(base_path: &str, taken: &[&str]) -> String {
     let base = base_name(base_path);
-    let base = if base.is_empty() { "Соединение 1" } else { base };
+    // `FIRST_CONNECTION_NAME`, а не второй литерал тем же текстом (находка 5
+    // ревью всей ветки): это то самое имя, которым зовёт первое соединение и
+    // разбор прежнего файла, и правка в одном месте не вправе разойтись с
+    // другим.
+    let base = if base.is_empty() { FIRST_CONNECTION_NAME } else { base };
     if !taken.contains(&base) {
         return base.to_string();
     }
@@ -507,10 +511,13 @@ impl From<CfgFile> for Cfg {
             // есть — список из одного: так выглядят все уехавшие комплекты,
             // включая эталонный, и это законный вид файла, а не устаревший
             // (общее ограничение плана). Имя секции взять негде — его даёт
-            // каталог базы, а пустой каталог — `FIRST_CONNECTION_NAME`.
+            // каталог базы, а пустой каталог — `FIRST_CONNECTION_NAME`. Это
+            // же правило и теми же словами предлагает имя новому соединению
+            // (`default_name`), поэтому зовём его, а не держим вторую копию
+            // правила (находка 5 ревью всей ветки). Занятых имён здесь нет и
+            // быть не может: соединение в списке ровно одно.
             Some(mut only) => {
-                let derived = base_name(&only.base_path);
-                only.name = if derived.is_empty() { FIRST_CONNECTION_NAME.to_string() } else { derived.to_string() };
+                only.name = default_name(&only.base_path, &[]);
                 // Текущим склеенное соединение становится, только если
                 // `current` в файле не написан. Написанный не перебиваем
                 // здесь: не совпавшее имя разбирает одно место ниже, и оно
@@ -1137,7 +1144,13 @@ impl Cfg {
                 }
                 anyhow::ensure!(
                     !same_base(&a.base_path, &b.base_path),
-                    "соединение «{}»: эта же база уже занята соединением «{}» — одна база, одна карточка",
+                    // Хвост фразы — словом МОДЕЛИ, как и обе её первые
+                    // половины (находка 4 ревью всей ветки: он был взят из
+                    // словаря окна — «одна карточка», — и фраза называла одну
+                    // сущность двумя словами разом). Между файлами слова
+                    // законно разные: тот же запрет в окне (`gui::save`)
+                    // говорит «карточка» всеми тремя местами.
+                    "соединение «{}»: эта же база уже занята соединением «{}» — одна база, одно соединение",
                     b.name,
                     a.name
                 );
@@ -1754,9 +1767,15 @@ pub fn block_in(text: &str, name: &str) -> std::result::Result<usize, String> {
     if name.is_empty() {
         return Ok(0);
     }
-    (0..common::toml_render::count(text, CONNECTION))
-        .find(|nth| common::toml_render::get_in(text, CONNECTION, *nth, "name").as_deref() == Some(name))
-        .ok_or_else(|| stale_file(name))
+    let mut named = (0..common::toml_render::count(text, CONNECTION))
+        .filter(|nth| common::toml_render::get_in(text, CONNECTION, *nth, "name").as_deref() == Some(name));
+    let first = named.next().ok_or_else(|| stale_file(name))?;
+    // Второй блок тем же именем — отказ, а не догадка (находка 6 ревью всей
+    // ветки): `.find()` молча брал первый, а беда могла быть во втором.
+    if named.next().is_some() {
+        return Err(duplicate_block(name));
+    }
+    Ok(first)
 }
 
 /// Одна фраза на оба случая, в которых писатель не нашёл своего блока: имени
@@ -1983,7 +2002,17 @@ fn duplicate_block(name: &str) -> String {
 fn previous_literal(text: &str, name: &str, field: &str) -> Option<String> {
     let doc: toml::Value = toml::from_str(text).ok()?;
     let block = match doc.get("connection").and_then(|v| v.as_array()) {
-        Some(blocks) => blocks.iter().find(|b| b.get("name").and_then(|v| v.as_str()) == Some(name))?,
+        Some(blocks) => {
+            let mut named = blocks.iter().filter(|b| b.get("name").and_then(|v| v.as_str()) == Some(name));
+            let first = named.next()?;
+            // Два блока одним именем — чей из них шифртекст, неизвестно, и
+            // взять первый наугад значило бы перенести ЧУЖОЙ пароль (находка
+            // 6 ревью всей ветки). Пусто — и запись откажет словами выше.
+            if named.next().is_some() {
+                return None;
+            }
+            first
+        }
         None => doc.get("host")?,
     };
     Some(format!("{:?}", block.get(field)?.as_str()?))
@@ -2848,6 +2877,20 @@ mod tests {
         assert_eq!(default_name(r"C:\Bases\Buh", &["Buh"]), "Buh 2", "занятое имя получает номер, а не отказ");
     }
 
+    /// Находка 5 ревью всей ветки (MINOR): правило «имя из каталога базы,
+    /// пусто — первое соединение» было написано дважды — в `default_name` и в
+    /// разборе прежнего файла, — а рядом с живым `FIRST_CONNECTION_NAME` лежал
+    /// пятый литерал тем же текстом. Тест держит ОБОИХ производителей имени на
+    /// одном правиле: расходиться молча им больше нечем.
+    #[test]
+    fn both_places_that_name_a_nameless_connection_say_the_same_thing() {
+        assert_eq!(default_name("", &[]), FIRST_CONNECTION_NAME, "пустая база — имя первого соединения, не свой литерал");
+        let no_base = Cfg::load_unchecked(&kit_with("[host]\ndb_user = \"mcp\"\n")).unwrap();
+        assert_eq!(no_base.connections[0].name, default_name("", &[]), "прежний файл без базы — то же имя, что предлагает программа");
+        let with_base = Cfg::load_unchecked(&kit_with("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\n")).unwrap();
+        assert_eq!(with_base.connections[0].name, default_name(r"C:\Bases\Buh", &[]), "и с базой — тоже одно правило");
+    }
+
     /// Круг починки 1/5 задачи 10, решение координатора: ПОЛЯ спрашиваются у
     /// ТЕКУЩЕЙ карточки, а список — только для адресации и парных запретов.
     /// Негодная соседняя карточка (человек дописал блок руками и не заполнил
@@ -2888,6 +2931,25 @@ mod tests {
         let mut nameless = cfg_with(&["Buh", "Ромашка"]);
         nameless.connections[1].name = String::new();
         assert!(nameless.validate().is_err(), "безымянную карточку нечем показать в списке и нечем адресовать");
+    }
+
+    /// Находка 6 ревью всей ветки (MINOR): а если два одноимённых блока всё
+    /// же лежат на диске (чтение такой файл отвергает, но правка руками его
+    /// создаёт), писатель брал ПЕРВЫЙ молча — `.find()`, — а беда могла быть
+    /// во втором: на таком файле подстановка прежнего шифртекста способна
+    /// перенести ЧУЖОЙ пароль в чужое место. Отказ словами вместо догадки;
+    /// какой из двух блоков его, решает человек.
+    #[test]
+    fn two_blocks_with_one_name_are_a_refusal_not_a_guess() {
+        let text = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"второй\"\n";
+        let e = block_in(text, "Buh").unwrap_err();
+        assert!(e.contains("Buh") && e.contains("два блока"), "{e}");
+        assert!(set_named(text, "Buh", "password", "\"третий\"").is_err(), "писать наугад в один из двух нельзя");
+        assert_eq!(previous_literal(text, "Buh", "password"), None, "чей из двух это шифртекст — неизвестно");
+        // Один блок тем же именем по-прежнему находится и правится.
+        let one = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n";
+        assert_eq!(block_in(one, "Buh"), Ok(0));
+        assert_eq!(previous_literal(one, "Buh", "password").as_deref(), Some("\"первый\""));
     }
 
     /// Буквально из брифа задачи 5: хвостовой разделитель, `\.` в конце и
@@ -2965,6 +3027,10 @@ mod tests {
         c.connections[1].base_path = same;
         let e = format!("{:#}", c.validate().unwrap_err());
         assert!(e.contains("Ромашка") && e.contains("Buh") && e.contains("одна база"), "{e}");
+        // Внутри ОДНОЙ фразы человеку — одно слово про одну сущность (находка
+        // 4 ревью всей ветки: хвост этой фразы был взят из словаря окна, а
+        // модель — и обе первые половины фразы — говорит «соединение»).
+        assert!(e.contains("одна база, одно соединение"), "{e}");
     }
 
     /// Круг починки 1, Important (ревью после отчёта задачи 5): пустой

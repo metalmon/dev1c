@@ -50,7 +50,11 @@ fn save_host_refuses_a_project_folder_already_owned_by_another_connection() {
     let mut host = ui.cfg.current().clone();
     host.project = "C:\\proj\\Ромашка\\src".into(); // внутри чужой папки
     let err = save_host(&mut ui, host).unwrap_err();
-    assert!(err.contains("Ромашка") && err.contains("Buh") && err.contains("папка принадлежит одному соединению"), "{err}");
+    // Внутри ОДНОЙ фразы человеку — одно слово про одну сущность (находка 4
+    // ревью всей ветки: хвост этой фразы был взят из словаря модели, а на
+    // экране человек видит карточки, и обе половины фразы уже так его и
+    // зовут).
+    assert!(err.contains("Ромашка") && err.contains("Buh") && err.contains("папка принадлежит одной карточке"), "{err}");
 }
 
 /// Симметрия с `cfg::validate` (урок задачи 5, круг починки 1 — там же её

@@ -17,6 +17,12 @@ CONF=/etc/ssh/sshd_config.d/dev1c.conf
 
 mkdir -p /etc/ssh/sshd_config.d /run/sshd
 
+# Heredoc неэкранированный — иначе не подставился бы $SSH_PORT. Значит обратные
+# кавычки и $() внутри ИСПОЛНЯЮТСЯ от root при старте контейнера: слово
+# `workstation` в комментарии ниже уходило в оболочку как команда, и в журнале
+# стенда так и лежало «sshd-setup: 1: workstation: not found», а из конфига
+# слово пропадало. Экранируем обратной косой; новый комментарий с кавычками —
+# ниже — вне heredoc, его кавычки оболочка не читает.
 cat > "$CONF" <<EOF
 # A separate port: 22 is left free so nothing conflicts with it
 Port $SSH_PORT
@@ -54,7 +60,7 @@ TCPKeepAlive yes
 
 # The tunnel comes in under the workstation's own account (dev1, dev2, dev3 —
 # the same system users, password equal to the login). One shared account
-# with PermitListen on all nine ports would let a typo in `workstation` bind a
+# with PermitListen on all nine ports would let a typo in \`workstation\` bind a
 # neighbour's ports — and 778N runs the Configurator on that developer's
 # machine.
 AllowUsers dev1 dev2 dev3

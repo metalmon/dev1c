@@ -862,6 +862,54 @@ pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
     out
 }
 
+/// Пункты меню «…» подвала «Связь» — задача 10 плана «Интерфейс». Предмет
+/// меню ровно тот, что у главной кнопки (`main_button`, задача 8): открытая
+/// карточка, а нет открытой — текущее соединение. Второго правила
+/// разрешения предмета не заводим — но и в точности то же правило сюда
+/// дотянуть нечем: поле выбора строки живёт в `Panel` (задача 2), а не в
+/// глобале `Ui`, который получает эта функция. Поэтому предмет здесь всегда
+/// `ui.cfg.current()` — тот же откат, что у `main_button` на пустом
+/// `selected`. Из-за этого «Сделать текущим» (условие — предмет НЕ текущее)
+/// не появляется никогда: не ошибка, а честный отказ придумывать то, чего
+/// `Ui` пока не несёт.
+///
+/// Неприменимое ПРЯЧЕТСЯ, а не висит серым (решение владельца, спека
+/// «Переключателей машины в окне нет» и абзац выше неё): серый пункт без
+/// объяснения — вопрос «почему нельзя», на который в меню негде ответить.
+/// Исключение одно — запертость ИДУЩЕЙ операцией: такой пункт остаётся
+/// видимым, но серым (`disabled(busy_now)` в `render`), это другое — пункт
+/// применим, просто не сейчас.
+///
+/// Решение владельца 3.11 отменило дубль меню значка в окне: переключателей
+/// машины (MCP, потолок записи, пин, тема, автозапуск, автоподключение,
+/// «Выход») здесь нет и не будет — они только в трее.
+///
+/// Проводка самих действий — отдельная задача: второго типа под
+/// `ProjectMenu::Item` не заводим, а `gui::Which` у пункта пока пустое
+/// место (`UNWIRED`), неиспользуемое ничем до той задачи.
+pub fn link_menu(ui: &Ui) -> Vec<ProjectMenu> {
+    const UNWIRED: gui::Which = gui::Which::Export;
+    let c = ui.cfg.current();
+    let connected = ui.link.is_up();
+    let accepting = matches!(c.role(), Ok("accept"));
+    let mut out = Vec::new();
+    if connected {
+        out.push(ProjectMenu::Item("Отключиться", UNWIRED));
+    } else if matches!(c.role(), Ok("dial")) {
+        out.push(ProjectMenu::Item("Подключиться", UNWIRED));
+    }
+    if accepting && !connected {
+        out.push(ProjectMenu::Item("Показать код", UNWIRED));
+    }
+    if accepting && connected {
+        out.push(ProjectMenu::Item("Отозвать разрешение", UNWIRED));
+    }
+    out.push(ProjectMenu::Item("Переименовать", UNWIRED));
+    out.push(ProjectMenu::Sep);
+    out.push(ProjectMenu::Item("Удалить соединение", UNWIRED));
+    out
+}
+
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
 /// (`op_question`). Вопрос — тот же платформенный диалог, что и при смене
 /// базы; отказ не делает ничего и ничего не говорит сверх самого диалога.
@@ -1896,9 +1944,24 @@ impl Render for Panel {
                 // подвала (`foot_left`, один текст — заказчик 2026-10-20: «две
                 // надписи стало») и в тултипе кнопки, вторая надпись рядом не
                 // добавляется.
+                let link_items = link_menu(cx.global::<Ui>());
                 h_flex()
                     .items_center()
                     .gap_2()
+                    .child(more("more-link").dropdown_menu(move |mut menu, _, _| {
+                        for entry in link_items.iter().copied() {
+                            menu = match entry {
+                                ProjectMenu::Sep => menu.separator(),
+                                // Проводка — отдельная задача (план «Интерфейс»,
+                                // задача 10 отдаёт только список): нажатие пока
+                                // ничего не делает, запертость идущей операцией
+                                // остаётся видимой серой — тем же приёмом, что у
+                                // меню «Проекта» выше.
+                                ProjectMenu::Item(label, _) => menu.item(PopupMenuItem::new(label).disabled(busy_now)),
+                            };
+                        }
+                        menu
+                    }))
                     .child(
                         KitButton::new("save")
                             .primary()
@@ -2151,7 +2214,7 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text,
-        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
+        link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
         resolve_selected, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
         undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
@@ -3009,6 +3072,58 @@ mod tests {
         let b = main_button(&ui, "", false);
         assert_eq!(b.label, "");
         assert_eq!(b.subject, "");
+    }
+
+    /// Соединение в заданном состоянии связи — тот же `ui_for`, которым уже
+    /// живут тесты главной кнопки: роль/режим/связь `link_menu` читает ровно
+    /// так же, как `main_button`.
+    fn ui_link_connected() -> Ui {
+        ui_for("dial", "tunnel", true)
+    }
+
+    fn ui_link_accept_waiting() -> Ui {
+        ui_for("accept", "tunnel", false)
+    }
+
+    fn ui_link_current() -> Ui {
+        ui_for("dial", "tunnel", false)
+    }
+
+    #[test]
+    fn the_link_menu_follows_the_subject() {
+        let labels = |ui: &Ui| -> Vec<&'static str> {
+            link_menu(ui)
+                .iter()
+                .filter_map(|r| match r {
+                    ProjectMenu::Item(l, _) => Some(*l),
+                    _ => None,
+                })
+                .collect()
+        };
+        let up = labels(&ui_link_connected());
+        assert!(up.contains(&"Отключиться") && !up.contains(&"Подключиться"));
+        let waiting = labels(&ui_link_accept_waiting());
+        assert!(waiting.contains(&"Показать код"));
+        assert!(!waiting.contains(&"Отозвать разрешение"), "неприменимое прячется, а не висит серым");
+        assert!(!labels(&ui_link_current()).contains(&"Сделать текущим"), "предмет и есть текущее");
+    }
+
+    #[test]
+    fn the_window_menu_carries_no_machine_switches() {
+        // Решение владельца 3.11: они в трее, и только там. Тест стоит здесь,
+        // чтобы дубль не вернулся «заодно» в следующей правке подвала.
+        let ui = Ui::for_test();
+        let labels: Vec<&str> = link_menu(&ui)
+            .iter()
+            .filter_map(|r| match r {
+                ProjectMenu::Item(l, _) => Some(*l),
+                _ => None,
+            })
+            .collect();
+        for machine in ["Только чтение", "Полный", "Тема", "Выход", "Запускать при входе в систему"]
+        {
+            assert!(!labels.contains(&machine), "{machine} живёт в трее");
+        }
     }
 
     #[test]

@@ -11,6 +11,10 @@ use crate::cfg;
 use crate::cfg::Connection;
 use crate::editors;
 use crate::gui::theme;
+// `link` — приватный модуль `gui`, и зовём его по имени, а не через
+// переэкспорт `gui::*`: `list` там сталкивается с `gpui_kit::list`
+// (элемент-список GPUI), и глобальное имя стало бы неоднозначным.
+use crate::gui::link;
 use crate::gui::window::hide_window;
 use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
 use crate::session::State;
@@ -334,7 +338,29 @@ pub struct Button {
     pub subject: String,
     pub label: &'static str,
     pub why: Option<String>,
+    /// Что кнопка ДЕЛАЕТ — действием, а не подписью: разбор нажатия по
+    /// словам подписи был бы третьим мнением о том, что значит «Включить»,
+    /// и переименование кнопки молча меняло бы действие. `None` — кнопки
+    /// нет вовсе (см. `label`).
+    pub act: Option<LinkAct>,
 }
+
+/// Одно предложение про передачу кода — ОДНО на весь продукт.
+///
+/// Их было два: это (подвал ждущей принимающей карточки, задача 8) и
+/// спековское «Передайте эту строку тому, кто подключается: он вставит её у
+/// себя» для тела карточки онбординга. Указатель ревью задачи 11 требовал
+/// свести к одной формулировке, и выбрана эта — по двум причинам. Первая:
+/// «эту строку» показывает пальцем на строку кода, которой на экране нет и
+/// не будет до протокола подключения (кода и тикета в этой ветке нет
+/// вовсе), а здесь предложение объясняет ОТСУТСТВИЕ кнопки, и показывать
+/// пальцем ему не на что. Вторая: «код» — то же слово, что в пункте меню
+/// «Показать код» и в обоих ответах онбординга, а «строка» заводит второе
+/// слово для той же вещи.
+///
+/// Константа, а не литерал: когда протокол принесёт тело карточки с кодом,
+/// предложение возьмут отсюда, а не напишут третий раз своими словами.
+pub const PASS_THE_CODE: &str = "Передайте код на ту сторону — оттуда и подключатся.";
 
 /// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
 /// открытая карточка (`selected`), а нет открытой — текущее соединение
@@ -345,47 +371,74 @@ pub struct Button {
 /// 1. список пуст — предмета нет, кнопки нет (третий способ завести
 ///    соединение на первом экране — лишний орган там, где человек впервые,
 ///    задача 11 отвечает за сам онбординг);
-/// 2. правка важнее всего — её потеря дороже, чем недосказанное состояние
+/// 2. предмет НЕ текущее соединение — «Сделать текущим» (единственная
+///    подпись, которую задача 14 к списку задачи 8 добавила; сама подпись
+///    не новая — её слово в продукте уже есть);
+/// 3. правка важнее всего — её потеря дороже, чем недосказанное состояние
 ///    связи («Сохранить», подсказку отдаёт тот же `save_hint`, что уже
 ///    объясняет недоступность на вкладке);
-/// 3. локальный режим — это выключатель обслуживания MCP, а не связь
+/// 4. локальный режим — это выключатель обслуживания MCP, а не связь
 ///    («Включить»/«Выключить»);
-/// 4. соединение зовёт само (`role() == "dial"`) и не подключено —
+/// 5. соединение зовёт само (`role() == "dial"`) и не подключено —
 ///    «Подключиться»;
-/// 5. соединение принимает подключения и ждёт — набирать код там, а не
+/// 6. соединение принимает подключения и ждёт — набирать код там, а не
 ///    здесь: кнопки нет, а `why` называет, где действие («Разрешить» в
 ///    подвале не появляется вовсе, решение владельца 1.11 — оно
 ///    всплывающим окном, а упущенное возвращается кнопкой внутри карточки);
-/// 6. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
+/// 7. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
 ///    задача не касается вовсе) — кнопки нет, а объяснять нечего: левый
 ///    слот подвала это уже говорит через `reason` (`foot_left_text`),
 ///    второй копии доводов не заводим.
+///
+/// **Почему ветка 2 стоит выше ветки связи** (указатель 2 ревью: признак
+/// связи читает `ui.link.is_up()` — состояние ТЕКУЩЕГО соединения, а не
+/// открытой карточки). Связь в продукте одна на машину и принадлежит
+/// текущему соединению; живого состояния на карточку нет вовсе (`link::list`
+/// получает его заглушкой-поиском по имени). Поэтому «Подключиться» у
+/// НЕтекущей карточки нажималось бы, а подключало текущую — та же мина, что
+/// заглушка `UNWIRED` в меню, только тише. Выход не в докстроке «почему так
+/// терпимо», а в том, что ниже ветки 2 `ui.link` читается ТОЛЬКО когда
+/// предмет и есть текущее соединение: тогда это его состояние по
+/// построению.
+///
+/// Правка нетекущей карточки при этом не теряется — она ждёт, и `why` это
+/// говорит словами: став текущей, карточка тут же получает «Сохранить»
+/// (поля и точка отсчёта `original` от переключения не двигаются). Это же
+/// снимает и вторую беду, которой ветка 3 грозила бы без неё: `save_host`
+/// пишет ТЕКУЩЕЕ соединение, и «Сохранить» у нетекущей карточки уехало бы
+/// в чужой блок toml.
+///
+/// Второго органа переключения это не заводит: в меню «Связи» пункта
+/// «Сделать текущим» нет (спека: «Переключение текущего — одно действие,
+/// построенное одним кодом, а не два органа управления»).
 pub fn main_button(ui: &Ui, selected: &str, dirty: bool) -> Button {
     if ui.cfg.connections.is_empty() {
-        return Button { subject: String::new(), label: "", why: None };
+        return Button { subject: String::new(), label: "", why: None, act: None };
     }
     let c = resolve_selected(&ui.cfg, selected);
     let subject = c.name.clone();
+    if c.name != ui.cfg.current().name {
+        let why = dirty.then(|| "Правка сохранится, когда карточка станет текущей.".to_string());
+        return Button { subject, label: "Сделать текущим", why, act: Some(LinkAct::MakeCurrent) };
+    }
     if dirty {
         let busy = ui.busy.is_some();
         let op = ui.progress.as_ref().map(|r| r.which);
-        return Button { subject, label: "Сохранить", why: save_hint(dirty, busy, op) };
+        return Button { subject, label: "Сохранить", why: save_hint(dirty, busy, op), act: Some(LinkAct::Save) };
     }
     if c.mode == "local" {
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
-        return Button { subject, label, why: None };
+        return Button { subject, label, why: None, act: Some(LinkAct::Toggle) };
     }
     if ui.link.is_up() {
         // Подключено/рвётся/переподключается — не наш случай (транспорта не
         // трогаем), и причина уже сказана в левом слоте подвала (`reason`).
-        return Button { subject, label: "", why: None };
+        return Button { subject, label: "", why: None, act: None };
     }
     if matches!(c.role(), Ok("dial")) {
-        return Button { subject, label: "Подключиться", why: None };
+        return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
     }
-    Button {
-        subject, label: "", why: Some("Передайте код на ту сторону — оттуда и подключатся.".to_string())
-    }
+    Button { subject, label: "", why: Some(PASS_THE_CODE.to_string()), act: None }
 }
 
 /// Высота строки левого слота подвала при размере текста 13 и число строк,
@@ -795,6 +848,72 @@ pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
     (!c.base_here).then_some("Поля базы приходят с той стороны")
 }
 
+/// Вопрос пустой «Связи». Спека прибивает два ОТВЕТА
+/// (`link::onboarding_answers`), а слова вопроса оставляет строителю — здесь
+/// он назван так, чтобы оба ответа были на него ответами: оба про код, и оба
+/// говорят, кто кому подключается.
+pub const ONBOARDING_ASK: &str = "Соединений пока нет. Кто кому подключается?";
+
+/// Элемент тела вкладки «Связь», в порядке показа — чистый итог, без
+/// виджетов. Отрисовка по нему подставляет строки и своего не решает
+/// ничего: иначе порядок списка, место раскрытой карточки и наличие
+/// «+ Добавить» проверялись бы только глазами на живом окне.
+pub enum Body {
+    /// Пустая «Связь»: один вопрос и два ответа на него (задача 11).
+    Ask(&'static str),
+    /// Подпись ответа и `role`, с которым он заводит первую карточку.
+    Answer(&'static str, &'static str),
+    /// Подпись группы списка.
+    Caption(&'static str),
+    /// Строка соединения; `true` — под ней раскрыта карточка.
+    Row(link::Row, bool),
+    /// «+ Добавить» — у СПИСКА, а не в подвале (указатель 5 ревью): подвал
+    /// держит ровно одно главное действие над открытой карточкой, а
+    /// добавление относится к списку целиком.
+    Add,
+}
+
+/// Тело вкладки «Связь» целиком: онбординг на пустом списке, иначе список
+/// соединений (`link::list`, её порядок и группировку) с карточкой у
+/// выбранной строки и «+ Добавить» в конце.
+///
+/// **Отметка «текущее» снимается, когда соединение одно** (спека, «Одно окно
+/// на двоих»: отметка рисуется тогда и только тогда, когда выбор
+/// действительно есть; «у бухгалтера соединение одно — слово „текущее“ он не
+/// встретит никогда»). `link::row` ставит признак у текущего всегда, и это
+/// правильно — он про модель; гашение отметки — про экран, и живёт здесь.
+///
+/// **Карточка раскрывается у ОДНОЙ строки**, даже если в файле, правленном
+/// руками, два соединения с одним именем (Review Focus плана): список
+/// показывает оба, а карточка — у первого. Иначе один и тот же набор полей
+/// нарисовался бы дважды и человек правил бы наугад.
+pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected: &str) -> Vec<Body> {
+    if link::onboarding_shown(cfg) {
+        let mut out = vec![Body::Ask(ONBOARDING_ASK)];
+        out.extend(link::onboarding_answers().into_iter().map(|(label, role)| Body::Answer(label, role)));
+        return out;
+    }
+    let open = resolve_selected(cfg, selected).name.clone();
+    let alone = cfg.connections.len() < 2;
+    let mut opened = false;
+    let mut out: Vec<Body> = link::list(cfg, link)
+        .into_iter()
+        .map(|e| match e {
+            link::Entry::Caption(c) => Body::Caption(c),
+            link::Entry::Row(mut r) => {
+                let here = !opened && r.name == open;
+                opened |= here;
+                if alone {
+                    r.current = false;
+                }
+                Body::Row(r, here)
+            }
+        })
+        .collect();
+    out.push(Body::Add);
+    out
+}
+
 /// Вопрос перед действием, которое отнимает уже сделанное. `None` — спрашивать
 /// не о чем, делаем сразу.
 ///
@@ -884,28 +1003,183 @@ pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
 /// машины (MCP, потолок записи, пин, тема, автозапуск, автоподключение,
 /// «Выход») здесь нет и не будет — они только в трее.
 ///
-/// Проводка самих действий — отдельная задача: второго типа под
-/// `ProjectMenu::Item` не заводим, а `gui::Which` у пункта пока пустое
-/// место (`UNWIRED`), неиспользуемое ничем до той задачи.
-pub fn link_menu(ui: &Ui) -> Vec<ProjectMenu> {
-    const UNWIRED: gui::Which = gui::Which::Export;
-    let c = ui.cfg.current();
+/// **Предмет теперь настоящий** (задача 14): открытая карточка, а нет
+/// открытой — текущее соединение, тем же `resolve_selected`, что у
+/// `main_button`. Задача 10 брала `ui.cfg.current()` потому, что поле
+/// выбора живёт в `Panel`, а она получала только глобал `Ui`; теперь имя
+/// приходит параметром, и второго правила разрешения предмета по-прежнему
+/// нет — оно одно, в `resolve_selected`.
+///
+/// **У НЕтекущей карточки пунктов про связь нет вовсе** — ровно по той же
+/// причине, по какой `main_button` отдаёт ей «Сделать текущим»: связь одна
+/// на машину и принадлежит текущему соединению, а «Отключиться», оборвавшее
+/// чужую связь, — это и есть мина указателя 1, только под другой подписью.
+/// Остаётся «Переименовать»: оно адресуется по ИМЕНИ карточки
+/// (`save::rename`) и работает у любой.
+///
+/// Пункта «Сделать текущим» здесь нет: он на главной кнопке, и это один
+/// орган, а не два (спека, «Наверху и в списке — один и тот же выбор»).
+pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
+    // Список пуст — предмета нет, и меню тоже нет вовсе (кнопку «…» подвал
+    // при пустом списке не рисует). Без этой строки `cfg.current()` отдал бы
+    // пустышку-умолчание (`Cfg::current` так устроен нарочно), и пустая
+    // «Связь» предлагала бы «Показать код» у карточки, которой нет.
+    if ui.cfg.connections.is_empty() {
+        return Vec::new();
+    }
+    let c = resolve_selected(&ui.cfg, selected);
+    if c.name != ui.cfg.current().name {
+        return vec![("Переименовать", LinkAct::Rename)];
+    }
     let connected = ui.link.is_up();
     let accepting = matches!(c.role(), Ok("accept"));
     let mut out = Vec::new();
     if connected {
-        out.push(ProjectMenu::Item("Отключиться", UNWIRED));
+        out.push(("Отключиться", LinkAct::Toggle));
     } else if matches!(c.role(), Ok("dial")) {
-        out.push(ProjectMenu::Item("Подключиться", UNWIRED));
+        out.push(("Подключиться", LinkAct::Toggle));
     }
     if accepting && !connected {
-        out.push(ProjectMenu::Item("Показать код", UNWIRED));
+        out.push(("Показать код", LinkAct::ShowCode));
     }
     if accepting && connected {
-        out.push(ProjectMenu::Item("Отозвать разрешение", UNWIRED));
+        out.push(("Отозвать разрешение", LinkAct::Revoke));
     }
-    out.push(ProjectMenu::Item("Переименовать", UNWIRED));
+    out.push(("Переименовать", LinkAct::Rename));
     out
+}
+
+/// Что делает пункт меню «Связи» и главная кнопка подвала — СВОЙ тип, не
+/// `gui::Which`.
+///
+/// Указатель 1 ревью задачи 10, дословно: пункты несли заглушку
+/// `UNWIRED = gui::Which::Export`, а рядом, в этом же файле, живёт идиома
+/// «взять действие из пункта и выполнить» (`run_project_op` под
+/// `ProjectMenu::Item(label, w)`). Скопированная не глядя, она превратила бы
+/// «Отключиться» в настоящую ВЫГРУЗКУ конфигурации из 1С. Заглушки больше
+/// нет, и подставить её обратно некуда: `Which` в пункт «Связи» теперь не
+/// лезет по типу.
+///
+/// Запрет на второй тип был только у задачи 10 (ей нечем было его провести)
+/// и с задачи 14 снят.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkAct {
+    /// Записать открытую карточку (и переименовать её, если имя правили).
+    /// Только у главной кнопки: в меню «Сохранить» не дублируется.
+    Save,
+    /// Включить или выключить — одно действие на оба слова, как
+    /// `gui::toggle_link`: что именно случится, решает состояние, а не две
+    /// разные ветки проводки.
+    Toggle,
+    /// Сделать открытую карточку текущей (`save::switch_current`).
+    MakeCurrent,
+    /// Переименовать: щелчок ставит курсор в поле имени карточки, а пишет
+    /// имя «Сохранить» (`save::rename` внутри `Panel::write`). Отдельного
+    /// окошка с полем для этого не заводим — поле уже есть в карточке.
+    Rename,
+    /// Показать код и отозвать разрешение: придут с протоколом подключения
+    /// (его в этой ветке нет вовсе). Пункт не молчит и не врёт — говорит
+    /// словами в журнал, что этого пока нет; подпись в меню остаётся,
+    /// потому что её прибивает спека.
+    ShowCode,
+    Revoke,
+}
+
+/// Что сказать в журнал на действие, которого в продукте ещё нет. `None` —
+/// действие настоящее, делается, а не объясняется.
+///
+/// Чистая функция затем, что это ЕДИНСТВЕННОЕ, что можно проверить тестом в
+/// проводке меню: сам щелчок без гарнеса GPUI не позвать.
+pub fn act_not_yet(act: LinkAct) -> Option<&'static str> {
+    match act {
+        LinkAct::ShowCode => Some("Код подключения появится вместе с протоколом — его в программе пока нет"),
+        LinkAct::Revoke => Some("Отзыв разрешения появится вместе с протоколом — его в программе пока нет"),
+        _ => None,
+    }
+}
+
+/// Отметки строки списка одной строкой: слово состояния, отметка «текущее»,
+/// признак разрешённой записи — через « · ».
+///
+/// Одной строкой, а не тремя плашками рядом с именем: окно 380 точек, и
+/// «Ромашка», «подключено», «текущее» и «запись в базу» в одну строку не
+/// встают. Приём тот же, которым заголовок карточки состояния дописывает
+/// фазу с часами.
+///
+/// Слово про запись — «запись в базу», как в подменю трея («Запись в базу»),
+/// а не одинокое «запись»: Global Constraints плана запрещают называть
+/// одним словом разрешение на БАЗУ и права на папку.
+pub fn row_marks(r: &link::Row) -> String {
+    let mut out = vec![r.state];
+    if r.current {
+        out.push("текущее");
+    }
+    if r.write {
+        out.push("запись в базу");
+    }
+    out.join(" · ")
+}
+
+/// Щелчок по пункту меню «Связи» и по главной кнопке подвала — ОДНА
+/// проводка на оба органа: подписи решают `link_menu`/`main_button`, а что
+/// действие делает — здесь, и второго мнения об этом нет.
+///
+/// `LinkAct::Save` сюда не доходит: запись карточки держит сама панель
+/// (`Panel::save_card` — ей нужны поля, вопрос про смену базы и `original`),
+/// а в меню «Сохранить» не дублируется.
+fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) {
+    if let Some(say) = act_not_yet(act) {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Say, text: say.to_string() });
+        cx.refresh_windows();
+        return;
+    }
+    match act {
+        LinkAct::Toggle => gui::toggle_link(cx),
+        LinkAct::MakeCurrent => {
+            if let Err(e) = gui::switch_current(cx.global_mut::<Ui>(), subject) {
+                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            }
+            cx.refresh_windows();
+        }
+        // Переименование — курсор в поле «Имя» открытой карточки; имя
+        // пишет «Сохранить» (`Panel::write` зовёт `save::rename`). Своего
+        // окошка с полем для этого не заводим: поле уже на экране.
+        LinkAct::Rename => {
+            let Some(p) = cx.global::<Ui>().panel.clone() else { return };
+            let focus = p.read(cx).fields.name.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            cx.refresh_windows();
+        }
+        LinkAct::Save | LinkAct::ShowCode | LinkAct::Revoke => {}
+    }
+}
+
+/// Завести карточку и сразу открыть её: иначе человек нажал «+ Добавить»,
+/// список вырос, а поля под курсором остались от прежней карточки.
+fn add_link(window: &mut Window, cx: &mut App, role: &str) {
+    match gui::add_connection(cx.global_mut::<Ui>(), role) {
+        Ok(name) => {
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("Карточка «{name}» заведена") });
+            let (cfg, panel) = {
+                let ui = cx.global::<Ui>();
+                (ui.cfg.clone(), ui.panel.clone())
+            };
+            if let Some(p) = panel {
+                p.update(cx, |this, cx| this.select(&cfg, &name, window, cx));
+            }
+        }
+        Err(e) => gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+    }
+    cx.refresh_windows();
+}
+
+/// Сменить профиль открытой карточки. Удача молчит: подписи папки и профиля
+/// на экране меняются сами, и строка в журнал к ним ничего не добавила бы.
+fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
+    if let Err(e) = gui::set_profile(cx.global_mut::<Ui>(), name, profile) {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+    }
+    cx.refresh_windows();
 }
 
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
@@ -1323,7 +1597,11 @@ impl Panel {
     /// задаче — сказано прямо, чтобы следующий не искал сторожа, которого
     /// нет.
     fn adopted_host(&self, cx: &App) -> Option<Connection> {
-        let host = cx.global::<Ui>().cfg.current();
+        // Подхватывается ОТКРЫТАЯ карточка, а не текущая (задача 14): поля
+        // принадлежат выбранной строке, и перечитанный файл обязан попасть
+        // в них же. С `cfg.current()` подхват затирал бы поля выбранной
+        // карточки значениями текущей на первом же показе окна.
+        let host = self.selected_connection(&cx.global::<Ui>().cfg);
         let (mode, publication) = (host.mode.clone(), host.publication.clone());
         let form = host_of(&self.fields, &mode, &publication, cx);
         adopt_needed(host, &form, &self.original, &mode, &publication).then(|| host.clone())
@@ -1346,6 +1624,14 @@ impl Panel {
     /// Решение о том, НА КОГО перевязывать (откат на текущее, если строка
     /// пропала), закрыто тестом `resolve_selected` отдельно от исполнения.
     pub fn select(&mut self, cfg: &cfg::Cfg, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // Выбор той же строки — не выбор, и перевязывать поля на неё НЕЛЬЗЯ:
+        // `adopt_fields` ставит в поля сохранённые значения, то есть стёрло
+        // бы набранное человеком. А щелчок по уже открытой строке приходит
+        // сам собой — например из поля внутри её карточки (событие всплывает
+        // до строки). Задача 14.
+        if self.selected == name {
+            return;
+        }
         self.selected = name.to_string();
         let host = resolve_selected(cfg, &self.selected).clone();
         self.adopt_fields(&host, window, cx);
@@ -1417,6 +1703,25 @@ impl Panel {
     /// Запись в toml и всё, что за ней следует: итог в подвал, обновление
     /// вкладок, перезапуск сеанса внутри `gui::save_host`.
     fn write(&mut self, host: Connection, cx: &mut Context<Self>) -> bool {
+        // Имя карточки — СВОЙ путь записи (`save::rename`): оно вне
+        // `shown_fields`/`host_of`, и обычная запись полей его не несёт
+        // вовсе (`save_host` берёт имя у прежней карточки). Поэтому
+        // переименование идёт первым и отдельно, и отказ по имени
+        // («пусто», «уже занято») останавливает всё: записывать поля под
+        // именем, которого человек не получил, не за что.
+        let typed = self.fields.name.read(cx).value().trim().to_string();
+        if typed != self.original.name {
+            let from = self.original.name.clone();
+            if let Err(e) = gui::rename(cx.global_mut::<Ui>(), &from, &typed) {
+                gui::set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }, None);
+                return false;
+            }
+            self.original.name = typed.clone();
+            // Выбор держится по имени — переезжает вместе с ним, иначе
+            // следующий кадр не нашёл бы открытую строку и откатил бы
+            // карточку на текущую (`resolve_selected`).
+            self.selected = typed;
+        }
         let r = gui::save_host(cx.global_mut::<Ui>(), host.clone());
         let ok = r.is_ok();
         let line = match &r {
@@ -1427,7 +1732,12 @@ impl Panel {
         // не должна пережить его и повиснуть на этом.
         gui::set_status(cx.global_mut::<Ui>(), line, None);
         if ok {
-            self.original = host;
+            // Имя в `host` пустое — его не несёт `host_of` (оно идёт своим
+            // путём, см. переименование выше). У точки отсчёта оно обязано
+            // остаться настоящим, иначе следующий кадр принял бы набранное
+            // в поле имя за переименование и позвал бы `rename` на пустое
+            // «откуда».
+            self.original = Connection { name: self.original.name.clone(), ..host };
             // Каталог проекта мог смениться — вкладка «Инструменты» уже про другой.
             gui::refresh_project(cx);
         }
@@ -1435,6 +1745,168 @@ impl Panel {
         // попросил пересчёт набора (`run_readiness`), и вкладка «Инструменты»
         // показывает его же.
         ok
+    }
+
+    /// Главное действие «Сохранить» целиком — то, что до задачи 14 стояло
+    /// замыканием прямо в подвале. Теперь подвал зовёт действие
+    /// (`LinkAct::Save`), а не держит его тело: у кнопки стало четыре
+    /// возможных действия, и три из них живут в `run_link_act`.
+    ///
+    /// Смена базы при включённых MCP спрашивает подтверждение: агент
+    /// работает прямо сейчас и после записи перейдёт на другую базу. Во всех
+    /// прочих случаях вопроса нет и запись идёт сразу. Перезапуск сеанса и
+    /// строка в журнал — внутри `gui::save_host`, не здесь.
+    fn save_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host_from_fields(cx);
+        // Вопроса нет — пишем **прямо здесь**, из контекста самой панели.
+        // Раньше и этот случай уходил в `confirm_database_change`, а тот
+        // звал `proceed` синхронно, и запись шла через `window.update`
+        // **внутри уже идущего** обновления того же окна: повторный вход
+        // тихо не делал ничего. Кнопка «не работала» при выключённых MCP на
+        // любом поле, а при включённых работала — там запись уезжала в
+        // `cx.spawn`, то есть за пределы этого обновления (заказчик
+        // 2026-10-21).
+        if gui::save_question(cx.global::<Ui>(), &host).is_none() {
+            self.write(host, cx);
+            cx.notify();
+            return;
+        }
+        let to_write = host.clone();
+        gui::confirm_database_change(window, cx, &host, move |_window, cx| {
+            // Запись — БЕЗ `window.update` вокруг: ответ диалога приходит
+            // внутри уже идущего обновления того же окна, и повторный вход
+            // в него тихо не делает ничего. Это ровно второй тупик той же
+            // кнопки: ветвь без вопроса вылечили 21.10 тем же способом
+            // (комментарий выше), а эта осталась, и «Да, сохранить» молча
+            // не сохраняло (наблюдение владельца 30.10 — живьём, на
+            // вопросе про гашение MCP).
+            let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
+            panel.update(cx, |this, cx| {
+                this.write(to_write, cx);
+            });
+            cx.refresh_windows();
+        });
+    }
+
+    /// Раскрытая карточка выбранной строки: имя, профиль и поля по
+    /// ТОПОЛОГИИ открытой карточки (`shown_fields` — у той, чья база на той
+    /// стороне, полей базы нет вовсе, и вместо пустого места стоит
+    /// `base_fields_note`: указатель 3 ревью — подсказка никем не звалась и
+    /// до человека не доходила).
+    ///
+    /// Отдельный метод, а не кусок `render`: карточка рисуется ВНУТРИ строки
+    /// списка, то есть внутри обхода `link_body`, и собирать её там же
+    /// значило бы держать в одном выражении и список, и поля.
+    ///
+    /// Карточка берёт всё у `self.original` — это и есть открытое соединение
+    /// (`adopt_fields` держит его вместе с полями), а не `cfg.current()`:
+    /// выбранная строка может быть и не текущей, и режим с топологией у неё
+    /// свои.
+    fn link_card(&self, title: &str, caption: Hsla, accent: Hsla, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let c = self.original.clone();
+        let shown = shown_fields(&c);
+        let toolset = c.toolset().unwrap_or("business").to_string();
+        let f = &self.fields;
+        // Кнопка выбора — значок без подписи: такая кнопка сама становится
+        // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
+        // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
+        let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
+            let (label, tooltip) = pick_face();
+            KitButton::new(id)
+                .outline()
+                .when_some(label, |b, l| b.label(l))
+                .icon(Icon::default().data(FOLDER_SVG))
+                .tooltip(tooltip)
+                .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
+        };
+        let path_row = |label: String, state: &Entity<InputState>, pick: KitButton, window: &Window, cx: &App| {
+            v_flex()
+                .gap_1()
+                .child(div().text_size(px(13.)).text_color(caption).child(label))
+                .child(h_flex().gap_2().items_center().child(div().flex_1().child(Self::input(state, accent, window, cx))).child(pick))
+        };
+        let name = c.name.clone();
+        let mut col = v_flex()
+            .gap_3()
+            .pt_1()
+            // Имя — первое поле карточки: оно же первым планом в строке
+            // списка, и переименование (`save::rename`) правится здесь, а
+            // пункт меню «Переименовать» только ставит сюда курсор.
+            .child(Self::row("Имя", caption, accent, &f.name, window, cx))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .child(div().text_size(px(13.)).text_color(caption).child("Профиль"))
+                    // Профиль — поле КАРТОЧКИ (решение владельца 7 плана
+                    // «Модель соединений»), и правится он здесь же:
+                    // `save::set_profile` пишет один ключ названной
+                    // карточки, не трогая ни папку, ни соседей.
+                    .child(KitButton::new("profile").outline().w_full().label(profile_label(&toolset)).dropdown_menu(
+                        move |mut menu, _, _| {
+                            for profile in ["business", "developer"] {
+                                let name = name.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(profile_label(profile))
+                                        .on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
+                                );
+                            }
+                            menu
+                        },
+                    )),
+            );
+        // Базы здесь нет — вместо пустого места слова (спека, «Что
+        // показывает карточка соединения»), тем же приёмом, что
+        // `nothing_to_show` на «Инструментах».
+        if let Some(note) = base_fields_note(&c) {
+            col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
+        }
+        // Заголовок карточки — имя базы, и только там, где база здесь: у
+        // карточки с базой на той стороне он сказал бы «База не указана»
+        // про базу, которой здесь и не должно быть.
+        if c.base_here {
+            col = col.child(div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
+        }
+        // В локальном режиме коннектор слушает loopback, а не поднимает
+        // туннель в среду: адрес среды, рабочее место и его пароль ничего не
+        // меняют — показывать их незачем (поле без действия роняет доверие к
+        // экрану параметров). Без них ряд не рисуется вовсе — ни дыры, ни
+        // подписи без поля.
+        if shown.contains(&"server") {
+            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
+        }
+        if shown.contains(&"workstation") {
+            col = col.child(
+                h_flex()
+                    .gap_3()
+                    .items_end()
+                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
+            );
+        }
+        if shown.contains(&"base_path") {
+            let button = pick("pick-base", f.base_path.clone(), cx);
+            col = col.child(path_row("База".to_string(), &f.base_path, button, window, cx));
+        }
+        // Адрес чужой публикации — сразу под базой, к которой он и
+        // относится, и только в режиме «уже опубликована»: в обычном режиме
+        // адрес считает сама программа.
+        if shown.contains(&"base_url") {
+            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx));
+        }
+        if shown.contains(&"db_user") {
+            col = col.child(
+                h_flex()
+                    .gap_3()
+                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
+            );
+        }
+        if shown.contains(&"project") {
+            let button = pick("pick-project", f.project.clone(), cx);
+            col = col.child(path_row(folder_label(&toolset).to_string(), &f.project, button, window, cx));
+        }
+        col
     }
 
     /// Выбор папки: на время платформенного диалога `dialog_open` не даёт
@@ -1530,13 +2002,16 @@ impl Render for Panel {
         // снимок в `Ui` больше нет, разойтись им теперь нечем.
         let (unread, failed) = (ui.unread, gui::problem_count(&ui.facts));
         let has_progress = ui.progress.is_some();
-        // Какая операция идёт, если идёт — для текста под «Сохранить»
-        // (`save_hint`): экспорт, импорт и расширение называются разным
-        // словом, идущая проверка им не является (`run_op`/`run_check`
-        // выставляют разное).
-        let running_op = ui.progress.as_ref().map(|r| r.which);
+        // Какая операция идёт — для текста под «Сохранить» (`save_hint`) —
+        // спрашивает сама `main_button` ниже: подпись и объяснение
+        // запертости у главной кнопки один источник.
+        //
+        // Режим — МАШИНЫ, то есть текущего соединения: по нему говорит
+        // карточка состояния и подсказка переключателя (связь одна на
+        // машину). Режим ОТКРЫТОЙ карточки считается отдельно
+        // (`card_mode`/`card_pub` ниже) — это разные вещи, и здесь они
+        // разведены нарочно.
         let mode = ui.cfg.current().mode.clone();
-        let publication = ui.cfg.current().publication.clone();
         let gate = ui.gate.clone();
         let c = card(ui.progress.as_ref(), &link, &mode, &ready, gate.as_deref(), Instant::now());
         // Причина — один расчёт на весь `render`: та же строка уходит и в
@@ -1550,9 +2025,25 @@ impl Render for Panel {
         let busy_now = busy.is_some();
         // Поля формы как `Connection` — один раз на весь `render`: из них считаются
         // и «есть ли несохранённое», и заголовок карточки ниже.
-        let form = host_of(&self.fields, &mode, &publication, cx);
-        let dirty = fields_differ(&form, &self.original, &mode, &publication);
-        let hint = (tab == gui::Tab::Link).then(|| save_hint(dirty, busy_now, running_op)).flatten();
+        // Режим и топология — у ОТКРЫТОЙ карточки (`self.original` и есть
+        // она, `adopt_fields` держит её вместе с полями), а не у текущего
+        // соединения: выбранная строка может быть и не текущей, и в
+        // правленном руками файле режим у неё свой. Сравнение «изменилось
+        // ли» и показ полей ходят по одной оси — иначе «Сохранить» горела
+        // бы от поля, которого на экране нет.
+        let (card_mode, card_pub) = (self.original.mode.clone(), self.original.publication.clone());
+        let form = host_of(&self.fields, &card_mode, &card_pub, cx);
+        // Имя сравнивается отдельно: оно вне `shown_fields`/`host_of` и
+        // пишется своим путём (`save::rename` в `Panel::write`) — без него
+        // переименование не зажигало бы «Сохранить» вовсе.
+        let renamed = self.fields.name.read(cx).value().trim() != self.original.name;
+        let dirty = renamed || fields_differ(&form, &self.original, &card_mode, &card_pub);
+        // Главная кнопка «Связи» — один расчёт на весь `render`: от неё и
+        // подпись, и предмет слева от кнопки, и объяснение в левом слоте
+        // подвала (`why`). Подсказка «Сохранить» (`save_hint`) приходит в
+        // том же `why` — второго её расчёта в подвале больше нет.
+        let main = main_button(ui, &self.selected, dirty);
+        let hint = (tab == gui::Tab::Link).then(|| main.why.clone()).flatten();
         // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
         // порядок держит сама `foot_left_text`, здесь только источники.
         let foot_left = foot_left_text(ui.status.as_ref(), why.as_deref(), hint.as_deref(), &ui.kit.root.display().to_string());
@@ -1560,26 +2051,23 @@ impl Render for Panel {
         // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
         // себя.
         let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
-        // Топология — у сохранённой/эталонной стороны (`self.original`), той
-        // же, что уже отдаёт ось `fields_differ` выше: показ и сравнение не
-        // должны расходиться в том, что считают видимым.
-        let shown = shown_fields(&Connection {
-            mode: mode.clone(),
-            publication: publication.clone(),
-            base_here: self.original.base_here,
-            ..Connection::default()
-        });
         // Заголовок карточки — из ПОЛЕЙ (`form` выше), а не из сохранённого:
         // человек меняет базу и видит, какую карточку он правит, ещё до
-        // «Сохранить».
+        // «Сохранить». Состав полей карточки и подписи профиля с папкой
+        // решает сама `link_card` — по открытому соединению, а не по
+        // текущему.
         let title = card_title(&form);
-        // Профиль — свойство ТЕКУЩЕГО соединения (решение владельца 7,
-        // задача 9 плана «Модель соединений»), не машины: карточка его
-        // показывает, но не правит — править будет окно в плане интерфейса.
-        // `Cfg::toolset()` — тот же резолвер, что собирает ключ `--toolset`
-        // ребёнку, так подпись в окне не может разойтись с тем, что реально
-        // запущено.
-        let toolset = cx.global::<Ui>().cfg.toolset().unwrap_or("business").to_string();
+        // Тело «Связи» — из `link_body`: порядок строк, группировку, место
+        // раскрытой карточки и «+ Добавить» решает чистая функция, а
+        // отрисовка ниже только подставляет виджеты. Живого состояния на
+        // соединение в продукте нет — связь одна и принадлежит текущему
+        // (`link::list` эту заглушку и ждёт).
+        let items = {
+            let current = cx.global::<Ui>().cfg.current().name.clone();
+            let state = link.clone();
+            let cfg = cx.global::<Ui>().cfg.clone();
+            link_body(&cfg, &|name| (name == current).then(|| state.clone()), &self.selected)
+        };
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1689,20 +2177,6 @@ impl Render for Panel {
                 cx.refresh_windows();
             }));
 
-        // Кнопка выбора — значок без подписи: такая кнопка сама становится
-        // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
-        // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
-        let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
-            let (label, tooltip) = pick_face();
-            KitButton::new(id)
-                .outline()
-                .when_some(label, |b, l| b.label(l))
-                .icon(Icon::default().data(FOLDER_SVG))
-                .tooltip(tooltip)
-                .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
-        };
-        let f = &self.fields;
-
         let body: AnyElement = match tab {
             // Обмер до `.id`: `on_children_prepainted` есть у `Div`, а `.id`
             // отдаёт уже `Stateful<Div>`.
@@ -1717,100 +2191,103 @@ impl Render for Panel {
                 .id("link")
                 .size_full()
                 .overflow_y_scroll()
-                .child(
-                    // Поля базы — не форма на вкладке, а карточка соединения:
-                    // контракт подключения знает одну единицу, «соединение», и
-                    // поля принадлежат ей, а не машине. Карточка пока одна —
-                    // хранить вторую негде, это план модели.
-                    Self::layer(card_bg, border)
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .p_3()
-                        .child(
-                            // `min_w_0` обязателен: без него длинное имя базы не
-                            // переносится, а обрезается по краю карточки на 380
-                            // точках (находка владельца 31.10).
-                            div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone()),
-                        )
-                        .child(
-                            // Профиль показан, а не выбран: поле уже у карточки
-                            // (задача 9 плана «Модель соединений»), а править его
-                            // в окне будет план интерфейса. Он здесь потому, что
-                            // задаёт смысл папки ниже.
-                            v_flex()
-                                .gap_1()
-                                .min_w_0()
-                                .child(div().text_size(px(13.)).text_color(caption).child("Профиль"))
-                                .child(div().min_w_0().child(profile_label(&toolset))),
-                        )
-                        .child({
-                            // В локальном режиме коннектор слушает loopback, а не
-                            // поднимает туннель в среду: адрес среды, рабочее место и
-                            // его пароль ничего не меняют — показывать их незачем
-                            // (поле без действия роняет доверие к экрану параметров).
-                            // Без них ряд не рисуется вовсе — ни дыры, ни подписи
-                            // без поля: высота окна не прыгает между режимами, она
-                            // просто меньше.
-                            let mut col = v_flex().gap_3();
-                            if shown.contains(&"server") {
-                                col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
+                .child({
+                    // Список соединений, а не одна карточка: порядок, группы
+                    // и место раскрытой карточки решены в `link_body` — здесь
+                    // только подстановка виджетов, строка за строкой.
+                    let mut col = v_flex().gap_2();
+                    // Номер элемента — в имя строки: имена соединений в
+                    // правленном руками файле бывают одинаковыми (Review
+                    // Focus плана), а два элемента GPUI с одним именем —
+                    // это уже не про список, а про падение окна.
+                    for (i, item) in items.into_iter().enumerate() {
+                        col = col.child(match item {
+                            // Пустая «Связь»: вопрос и два ответа на него,
+                            // каждый — кнопка, заводящая первую карточку со
+                            // своей ролью (задача 11).
+                            Body::Ask(q) => div().min_w_0().text_size(px(13.)).text_color(caption).child(q).into_any_element(),
+                            Body::Answer(label, role) => KitButton::new(SharedString::from(format!("answer-{role}")))
+                                .outline()
+                                .w_full()
+                                .label(label)
+                                .on_click(move |_, window, cx| add_link(window, cx, role))
+                                .into_any_element(),
+                            Body::Caption(text) => div().pt_1().text_size(px(12.)).text_color(caption).child(text).into_any_element(),
+                            Body::Row(r, open) => {
+                                let name = r.name.clone();
+                                // Щелчок по строке зовёт `Panel::select` с
+                                // именем ИМЕННО этой строки: имя взято у
+                                // `Row`, из которой строка и нарисована, —
+                                // второго источника имени у щелчка нет.
+                                let click = cx.listener({
+                                    let name = name.clone();
+                                    move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
+                                        let cfg = cx.global::<Ui>().cfg.clone();
+                                        this.select(&cfg, &name, window, cx);
+                                        cx.notify();
+                                    }
+                                });
+                                let mut row = Self::layer(card_bg, border)
+                                    .id(SharedString::from(format!("row-{i}")))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .p_3()
+                                    .cursor_pointer()
+                                    .on_click(click)
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_baseline()
+                                            // Имя первым планом и полужирным
+                                            // (спека), состояние с отметками —
+                                            // приглушённым справа. `min_w_0` и
+                                            // многоточие: длинное имя на 380
+                                            // точках иначе обрезается по краю.
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(name.clone()),
+                                            )
+                                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r))),
+                                    )
+                                    // Вторая строка — только там, где `Row`
+                                    // принёс базу (у текущего соединения):
+                                    // двухплановые строки у десяти заказчиков
+                                    // дали бы двадцать строк в окне 380 точек.
+                                    .when_some(r.base.clone(), |d, base| {
+                                        d.child(div().min_w_0().text_size(px(13.)).text_color(caption).child(base))
+                                    });
+                                if open {
+                                    row = row.child(self.link_card(&title, caption, accent, window, cx));
+                                }
+                                row.into_any_element()
                             }
-                            if shown.contains(&"workstation") {
-                                col = col.child(
-                                    h_flex()
-                                        .gap_3()
-                                        .items_end()
-                                        .child(div().flex_1().child(Self::row(
-                                            "Рабочее место",
-                                            caption,
-                                            accent,
-                                            &f.workstation,
-                                            window,
-                                            cx,
-                                        )))
-                                        .child(div().flex_1().child(Self::row(
-                                            "Пароль рабочего места",
-                                            caption,
-                                            accent,
-                                            &f.password,
-                                            window,
-                                            cx,
-                                        ))),
-                                );
-                            }
-                            col.child(
-                                v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("База")).child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.base_path, accent, window, cx)))
-                                        .child(pick("pick-base", f.base_path.clone(), cx)),
-                                ),
-                            )
-                            // Адрес чужой публикации — сразу под базой, к которой он
-                            // и относится, и только в режиме «уже опубликована»:
-                            // в обычном режиме адрес считает сама программа.
-                            .when(shown.contains(&"base_url"), |d| {
-                                d.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx))
-                            })
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
-                                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-                            )
-                            .child(
-                                v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child(folder_label(&toolset))).child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(div().flex_1().child(Self::input(&f.project, accent, window, cx)))
-                                        .child(pick("pick-project", f.project.clone(), cx)),
-                                ),
-                            )
-                        }),
-                )
+                            // «+ Добавить» — у списка. Роль новой карточки
+                            // спрашивается теми же двумя ответами, что и на
+                            // пустой «Связи» (`link::onboarding_answers`):
+                            // третьих слов для того же выбора не заводим.
+                            Body::Add => KitButton::new("add-link")
+                                .ghost()
+                                .label("+ Добавить")
+                                .disabled(busy_now)
+                                .dropdown_menu(|mut menu, _, _| {
+                                    for (label, role) in link::onboarding_answers() {
+                                        menu =
+                                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| add_link(window, cx, role)));
+                                    }
+                                    menu
+                                })
+                                .into_any_element(),
+                        });
+                    }
+                    col
+                })
                 .into_any_element(),
             // «Инструменты» = прежние «Расширение» и «Инструменты» одной лентой:
             // сверху факты набора, ниже — каталог и состояние ветки.
@@ -1939,77 +2416,78 @@ impl Render for Panel {
 
         let foot_actions: AnyElement = match tab {
             gui::Tab::Link => {
+                // Подпись, предмет и запертость — у `main_button` (задача 8);
+                // пустая подпись значит, что кнопки НЕТ ВОВСЕ, а не серая
+                // (у принимающей стороны «Подключиться» не бывает никогда).
+                // Кнопка гаснет молча только у «Сохранить» — заказчик
+                // 2026-10-20: почему нельзя нажать, не видно. Причина живёт
+                // в левом слоте подвала (`foot_left`, один текст) и в
+                // тултипе кнопки, вторая надпись рядом не добавляется.
                 let allowed = can_save(dirty, busy_now, has_progress);
-                // Кнопка гаснет сама, но молча — заказчик 2026-10-20: почему
-                // нельзя нажать, не видно. Причина теперь живёт в левом слоте
-                // подвала (`foot_left`, один текст — заказчик 2026-10-20: «две
-                // надписи стало») и в тултипе кнопки, вторая надпись рядом не
-                // добавляется.
-                let link_items = link_menu(cx.global::<Ui>());
+                let link_items = link_menu(cx.global::<Ui>(), &self.selected);
+                let (label, act) = (main.label, main.act);
+                let menu_subject = main.subject.clone();
+                let click_subject = main.subject.clone();
+                let button = (!label.is_empty()).then(|| {
+                    KitButton::new("main")
+                        .primary()
+                        .label(label)
+                        .disabled(if act == Some(LinkAct::Save) { !allowed } else { busy_now })
+                        .when_some(hint.clone(), |b, h| b.tooltip(h))
+                        .on_click(cx.listener(move |panel, _, window, cx| match act {
+                            // Запись держит сама панель: ей нужны поля, точка
+                            // отсчёта и вопрос про смену базы. Остальные
+                            // действия — общей проводкой с меню, без второго
+                            // мнения о том, что они делают.
+                            Some(LinkAct::Save) => panel.save_card(window, cx),
+                            Some(other) => run_link_act(window, cx, other, &click_subject),
+                            None => {}
+                        }))
+                });
+                let subject = main.subject.clone();
+                let menu = (!link_items.is_empty()).then(|| {
+                    more("more-link").dropdown_menu(move |mut menu, _, _| {
+                        for (label, act) in link_items.iter().copied() {
+                            let subject = menu_subject.clone();
+                            // Запертость идущей операцией остаётся видимой
+                            // серой — тем же приёмом, что у меню «Проекта»
+                            // ниже; неприменимое не серое, а спрятано
+                            // (`link_menu` его не отдаёт вовсе).
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .disabled(busy_now)
+                                    .on_click(move |_, window, cx| run_link_act(window, cx, act, &subject)),
+                            );
+                        }
+                        menu
+                    })
+                });
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(more("more-link").dropdown_menu(move |mut menu, _, _| {
-                        for entry in link_items.iter().copied() {
-                            menu = match entry {
-                                ProjectMenu::Sep => menu.separator(),
-                                // Проводка — отдельная задача (план «Интерфейс»,
-                                // задача 10 отдаёт только список): нажатие пока
-                                // ничего не делает, запертость идущей операцией
-                                // остаётся видимой серой — тем же приёмом, что у
-                                // меню «Проекта» выше.
-                                ProjectMenu::Item(label, _) => menu.item(PopupMenuItem::new(label).disabled(busy_now)),
-                            };
-                        }
-                        menu
-                    }))
-                    .child(
-                        KitButton::new("save")
-                            .primary()
-                            .label("Сохранить")
-                            .disabled(!allowed)
-                            .when_some(hint.clone(), |b, h| b.tooltip(h))
-                            .on_click(cx.listener(|panel, _, window, cx| {
-                                // Смена базы при включённых MCP спрашивает
-                                // подтверждение: агент работает прямо сейчас и
-                                // после записи перейдёт на другую базу. Во всех
-                                // прочих случаях вопроса нет и запись идёт сразу.
-                                // Перезапуск сеанса и строка в журнал — внутри
-                                // `gui::save_host`, не здесь.
-                                let host = panel.host_from_fields(cx);
-                                // Вопроса нет — пишем **прямо здесь**, из
-                                // контекста самой панели. Раньше и этот случай
-                                // уходил в `confirm_database_change`, а тот звал
-                                // `proceed` синхронно, и запись шла через
-                                // `window.update` **внутри уже идущего**
-                                // обновления того же окна: повторный вход тихо
-                                // не делал ничего. Кнопка «не работала» при
-                                // выключённых MCP на любом поле, а при
-                                // включённых работала — там запись уезжала в
-                                // `cx.spawn`, то есть за пределы этого
-                                // обновления (заказчик 2026-10-21).
-                                if gui::save_question(cx.global::<Ui>(), &host).is_none() {
-                                    panel.write(host, cx);
-                                    cx.notify();
-                                    return;
-                                }
-                                let to_write = host.clone();
-                                gui::confirm_database_change(window, cx, &host, move |_window, cx| {
-                                    // Запись — БЕЗ `window.update` вокруг: ответ диалога приходит
-                                    // внутри уже идущего обновления того же окна, и повторный вход
-                                    // в него тихо не делает ничего. Это ровно второй тупик той же
-                                    // кнопки: ветвь без вопроса вылечили 21.10 тем же способом
-                                    // (комментарий выше), а эта осталась, и «Да, сохранить» молча
-                                    // не сохраняло (наблюдение владельца 30.10 — живьём, на
-                                    // вопросе про гашение MCP).
-                                    let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
-                                    panel.update(cx, |this, cx| {
-                                        this.write(to_write, cx);
-                                    });
-                                    cx.refresh_windows();
-                                });
-                            })),
-                    )
+                    // Предмет — СЛЕВА от кнопки: иначе «Подключиться» не
+                    // говорит, что именно подключит (замечание владельца к
+                    // первой редакции макета). Нет кнопки — нет и предмета:
+                    // называть предмет действия, которого нет, значит
+                    // вернуть в подвал вторую надпись, на которую заказчик
+                    // уже жаловался (2026-10-20). Ширина ограничена, иначе
+                    // длинное имя съедает левый слот целиком, а многоточию
+                    // не от чего считаться.
+                    .when(!subject.is_empty() && !label.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(110.))
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(13.))
+                                .text_color(caption)
+                                .child(subject),
+                        )
+                    })
+                    .when_some(menu, |d, m| d.child(m))
+                    .when_some(button, |d, b| d.child(b))
                     .into_any_element()
             }
             // Главная кнопка ведёт человека по порядку: сначала поставить
@@ -2214,10 +2692,11 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text,
-        link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
-        resolve_selected, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
-        undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        act_not_yet, adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text,
+        found_text, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
+        project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked,
+        switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, LinkAct, ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK,
+        PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -3066,6 +3545,29 @@ mod tests {
         assert!(b.why.unwrap().contains("ту сторону"));
     }
 
+    /// Указатель 2 ревью: признак связи у главной кнопки читает `ui.link` —
+    /// состояние ТЕКУЩЕГО соединения. Решение задачи 14: ниже ветки
+    /// «не текущая» `ui.link` читается только тогда, когда предмет и есть
+    /// текущее, — поэтому у нетекущей карточки «Подключиться» не
+    /// появляется, что бы ни творилось со связью, а правка не теряется.
+    #[test]
+    fn a_card_that_is_not_the_current_one_is_offered_to_become_one() {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        ui.cfg.connections[1].role = "dial".into();
+        let b = main_button(&ui, "Василёк", false);
+        assert_eq!(b.label, "Сделать текущим", "связь принадлежит текущему соединению, а не открытой карточке");
+        assert_eq!(b.act, Some(LinkAct::MakeCurrent));
+        assert_eq!(b.why, None);
+        // Правка нетекущей карточки не теряется и не уезжает в чужой блок:
+        // «Сохранить» ждёт переключения, и подвал это говорит.
+        let dirty = main_button(&ui, "Василёк", true);
+        assert_eq!(dirty.label, "Сделать текущим", "правка важнее связи, но не важнее того, куда она запишется");
+        assert!(dirty.why.unwrap().contains("станет текущей"));
+        // У текущей карточки всё как было (задача 8).
+        assert_eq!(main_button(&ui, "Ромашка", true).act, Some(LinkAct::Save));
+    }
+
     #[test]
     fn an_empty_list_has_no_main_button_at_all() {
         let mut ui = Ui::for_test();
@@ -3073,6 +3575,11 @@ mod tests {
         let b = main_button(&ui, "", false);
         assert_eq!(b.label, "");
         assert_eq!(b.subject, "");
+        assert_eq!(b.act, None);
+        // И меню тоже нет: предмета нет, а `Cfg::current()` на пустом списке
+        // отдаёт пустышку-умолчание — без отказа здесь пустая «Связь»
+        // предлагала бы действия над карточкой, которой не существует.
+        assert!(link_menu(&ui, "").is_empty());
     }
 
     /// Соединение в заданном состоянии связи — тот же `ui_for`, которым уже
@@ -3090,23 +3597,52 @@ mod tests {
         ui_for("dial", "tunnel", false)
     }
 
+    /// Подписи пунктов меню «Связи» для предмета по умолчанию (открытой
+    /// карточки нет — предмет текущее соединение).
+    fn menu_labels(ui: &Ui) -> Vec<&'static str> {
+        link_menu(ui, "").iter().map(|(l, _)| *l).collect()
+    }
+
     #[test]
     fn the_link_menu_follows_the_subject() {
-        let labels = |ui: &Ui| -> Vec<&'static str> {
-            link_menu(ui)
-                .iter()
-                .filter_map(|r| match r {
-                    ProjectMenu::Item(l, _) => Some(*l),
-                    _ => None,
-                })
-                .collect()
-        };
-        let up = labels(&ui_link_connected());
+        let up = menu_labels(&ui_link_connected());
         assert!(up.contains(&"Отключиться") && !up.contains(&"Подключиться"));
-        let waiting = labels(&ui_link_accept_waiting());
+        let waiting = menu_labels(&ui_link_accept_waiting());
         assert!(waiting.contains(&"Показать код"));
         assert!(!waiting.contains(&"Отозвать разрешение"), "неприменимое прячется, а не висит серым");
-        assert!(!labels(&ui_link_current()).contains(&"Сделать текущим"), "предмет и есть текущее");
+        assert!(!menu_labels(&ui_link_current()).contains(&"Сделать текущим"), "предмет и есть текущее");
+    }
+
+    /// Задача 14: предмет меню — ОТКРЫТАЯ карточка, и у нетекущей пунктов
+    /// про связь нет вовсе. Связь одна на машину и принадлежит текущему
+    /// соединению: «Отключиться» у чужой карточки оборвало бы не её — та же
+    /// мина, что заглушка `UNWIRED`, только под другой подписью. Остаётся
+    /// «Переименовать»: оно адресуется по имени карточки.
+    #[test]
+    fn a_card_that_is_not_the_current_one_gets_no_link_items() {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        ui.link = State::Up { since: Instant::now() };
+        assert_eq!(link_menu(&ui, "Василёк"), vec![("Переименовать", LinkAct::Rename)]);
+        assert!(menu_labels(&ui).contains(&"Отключиться"), "у текущей карточки связь своя");
+    }
+
+    /// Указатель 1 ревью задачи 10: пункты несли `gui::Which::Export`
+    /// заглушкой, и идиома «взять действие из пункта и выполнить» рядом в
+    /// том же файле превратила бы «Отключиться» в выгрузку из 1С. Тест
+    /// стоит затем, чтобы действие пункта нельзя было подменить операцией
+    /// «Проекта» снова, не заметив этого.
+    #[test]
+    fn link_items_carry_their_own_actions_not_project_operations() {
+        let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "").iter().map(|(_, a)| *a).collect();
+        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::Rename]);
+        // Того, чего в продукте ещё нет, пункт не делает молча — говорит
+        // словами; у настоящих действий объяснять нечего.
+        assert!(act_not_yet(LinkAct::ShowCode).unwrap().contains("протоколом"));
+        assert!(act_not_yet(LinkAct::Revoke).unwrap().contains("протоколом"));
+        for real in [LinkAct::Save, LinkAct::Toggle, LinkAct::MakeCurrent, LinkAct::Rename] {
+            assert_eq!(act_not_yet(real), None, "{real:?} — настоящее действие, оно делается, а не объясняется");
+        }
     }
 
     /// Круг починки 2: соседний тест проверяет лишь поимённо вспомненные
@@ -3120,10 +3656,116 @@ mod tests {
     /// бы по пять тестов вместо одного.
     #[test]
     fn the_link_menu_lists_exactly_these_items_for_one_subject() {
-        assert_eq!(
-            link_menu(&ui_link_accept_waiting()),
-            vec![ProjectMenu::Item("Показать код", Which::Export), ProjectMenu::Item("Переименовать", Which::Export)],
-        );
+        assert_eq!(link_menu(&ui_link_accept_waiting(), ""), vec![("Показать код", LinkAct::ShowCode), ("Переименовать", LinkAct::Rename)],);
+    }
+
+    /// Связи на соединение в продукте нет — `link::list` ждёт заглушки, и
+    /// тело вкладки строится ровно на ней: ни одна строка не знает своего
+    /// состояния, кроме текущей.
+    fn no_states(_: &str) -> Option<State> {
+        None
+    }
+
+    /// Тело вкладки одним словом на элемент — порядок читается глазами, а
+    /// слова строк проверяет `row_marks` отдельно.
+    fn body_shape(items: &[Body]) -> Vec<String> {
+        items
+            .iter()
+            .map(|b| match b {
+                Body::Ask(_) => "вопрос".to_string(),
+                Body::Answer(_, role) => format!("ответ:{role}"),
+                Body::Caption(c) => format!("подпись:{c}"),
+                Body::Row(r, open) => format!("строка:{}{}", r.name, if *open { "+карточка" } else { "" }),
+                Body::Add => "добавить".to_string(),
+            })
+            .collect()
+    }
+
+    /// Задача 14, шаг 4: тело вкладки строится ИЗ `link::list` — её порядок
+    /// и её группировка, своего в теле только «+ Добавить» в конце и
+    /// карточка у выбранной строки.
+    #[test]
+    fn the_tab_body_follows_the_list_and_opens_the_card_at_the_selected_row() {
+        let cfg = cfg_with(&["Ромашка", "Василёк"]);
+        let shape = body_shape(&link_body(&cfg, &no_states, "Василёк"));
+        assert_eq!(shape, vec!["строка:Ромашка", "строка:Василёк+карточка", "добавить"]);
+        // Выбора нет — карточка у текущего, тем же откатом, что
+        // `resolve_selected` (задача 2).
+        let shape = body_shape(&link_body(&cfg, &no_states, ""));
+        assert_eq!(shape, vec!["строка:Ромашка+карточка", "строка:Василёк", "добавить"]);
+        // Исчезнувшая строка — туда же.
+        let shape = body_shape(&link_body(&cfg, &no_states, "Лютик"));
+        assert_eq!(shape[0], "строка:Ромашка+карточка");
+    }
+
+    /// Пустая «Связь» — один вопрос и два ответа (задача 11), и ничего
+    /// больше: ни строк, ни «+ Добавить» — третий орган добавления там, где
+    /// человек впервые, лишний.
+    #[test]
+    fn an_empty_link_tab_is_the_question_and_its_two_answers() {
+        let mut cfg = cfg_with(&["Ромашка"]);
+        cfg.connections.clear();
+        assert_eq!(body_shape(&link_body(&cfg, &no_states, "")), vec!["вопрос", "ответ:dial", "ответ:accept"]);
+        assert_eq!(ONBOARDING_ASK, "Соединений пока нет. Кто кому подключается?");
+    }
+
+    /// Review Focus плана: два соединения с одним именем в правленном
+    /// руками файле. Список показывает ОБА, а карточка раскрывается у
+    /// первого — иначе один и тот же набор полей нарисовался бы дважды.
+    #[test]
+    fn two_cards_with_the_same_name_show_twice_but_open_once() {
+        let mut cfg = cfg_with(&["Ромашка"]);
+        let twin = cfg.connections[0].clone();
+        cfg.connections.push(twin);
+        let shape = body_shape(&link_body(&cfg, &no_states, "Ромашка"));
+        assert_eq!(shape, vec!["строка:Ромашка+карточка", "строка:Ромашка", "добавить"]);
+    }
+
+    /// Спека, «Одно окно на двоих»: отметка «текущее» рисуется тогда и
+    /// только тогда, когда выбор есть. У бухгалтера соединение одно — слова
+    /// «текущее» он не встретит никогда.
+    #[test]
+    fn the_current_mark_appears_only_where_there_is_a_choice() {
+        let alone = cfg_with(&["Ромашка"]);
+        let Some(Body::Row(r, _)) = link_body(&alone, &no_states, "").into_iter().next() else {
+            panic!("первым элементом тела обязана быть строка соединения")
+        };
+        assert!(!r.current, "выбирать не из чего — отметки нет");
+        assert!(!row_marks(&r).contains("текущее"));
+
+        let two = cfg_with(&["Ромашка", "Василёк"]);
+        let Some(Body::Row(r, _)) = link_body(&two, &no_states, "").into_iter().next() else {
+            panic!("первым элементом тела обязана быть строка соединения")
+        };
+        assert!(r.current, "соединений два — выбор есть, и отметка есть");
+    }
+
+    /// Правая часть строки — одной строкой через « · »: окно 380 точек, и
+    /// тремя плашками рядом с именем это не встаёт. Про запись — словом
+    /// трея («Запись в базу»), а не одиноким «запись»: Global Constraints
+    /// запрещают называть одним словом базу и папку.
+    #[test]
+    fn a_row_says_its_state_and_its_marks_in_one_line() {
+        let mut cfg = cfg_with(&["Ромашка", "Василёк"]);
+        cfg.connections[0].write = "read_write".into();
+        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+            panic!("первым элементом тела обязана быть строка соединения")
+        };
+        assert_eq!(row_marks(&r), "ждёт разрешения · текущее · запись в базу");
+        cfg.connections[0].write = "read_only".into();
+        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+            panic!("первым элементом тела обязана быть строка соединения")
+        };
+        assert_eq!(row_marks(&r), "ждёт разрешения · текущее", "запрет писать — не отметка, а умолчание");
+    }
+
+    /// Указатель 4 ревью: двух формулировок одной инструкции больше нет.
+    /// Предложение живёт константой — то же, что отдаёт подвал.
+    #[test]
+    fn the_sentence_about_passing_the_code_is_one() {
+        let b = main_button(&ui_link_accept_waiting(), "", false);
+        assert_eq!(b.why.as_deref(), Some(PASS_THE_CODE));
+        assert_eq!(PASS_THE_CODE, "Передайте код на ту сторону — оттуда и подключатся.");
     }
 
     #[test]
@@ -3131,13 +3773,7 @@ mod tests {
         // Решение владельца 3.11: они в трее, и только там. Тест стоит здесь,
         // чтобы дубль не вернулся «заодно» в следующей правке подвала.
         let ui = Ui::for_test();
-        let labels: Vec<&str> = link_menu(&ui)
-            .iter()
-            .filter_map(|r| match r {
-                ProjectMenu::Item(l, _) => Some(*l),
-                _ => None,
-            })
-            .collect();
+        let labels = menu_labels(&ui);
         for machine in ["Только чтение", "Полный", "Тема", "Выход", "Запускать при входе в систему"]
         {
             assert!(!labels.contains(&machine), "{machine} живёт в трее");

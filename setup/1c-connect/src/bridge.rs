@@ -1656,7 +1656,7 @@ mod tests {
     #[test]
     fn the_child_gets_the_toolset_the_access_and_the_configuration() {
         let mut c = crate::cfg::filled_for_test();
-        c.current_mut().toolset = "business".into();
+        c.current_mut().profile = "business".into();
         c.current_mut().write = "read_only".into();
         let cmd = mcp_command(&c, &kit_for_test());
         let argv: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -1852,7 +1852,7 @@ mod tests {
     #[test]
     fn mcp_command_guarded_refuses_a_bad_toolset_before_the_guard_or_the_password() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().toolset = "мусор".into();
+        cfg.current_mut().profile = "мусор".into();
         cfg.current_mut().db_password = "секрет-базы".into();
         let err = mcp_command_guarded(&cfg, &kit_for_test()).unwrap_err();
         assert!(err.contains("toolset") && err.contains("допустимые значения"), "{err}");
@@ -1910,7 +1910,7 @@ mod tests {
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().publication = "auto".into();
         cfg.current_mut().http_port = Some(port);
-        cfg.current_mut().toolset = "developer".into();
+        cfg.current_mut().profile = "developer".into();
         cfg.current_mut().configuration = "generic".into();
         let err = crate::ops_host::with_state_dir_for_test(&dir, || mcp_command_guarded(&cfg, &kit_for_test())).unwrap_err();
         assert!(err.contains("pid-файл"), "{err}");

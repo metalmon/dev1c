@@ -361,6 +361,18 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     host.platform = ui.cfg.current().platform.clone();
     host.configuration = ui.cfg.current().configuration.clone();
     host.toolset = ui.cfg.current().toolset.clone();
+    // Круг починки 1/5 задачи 9, находка автоматического ревью
+    // безопасности: `profile` — поле карточки (решение владельца 7), а в
+    // этом списке переносимых полей его не было — поля для его правки в
+    // окне нет (заводит план интерфейса), и форма всё равно собирает
+    // `Connection` с пустым `profile`. Без переноса ЛЮБОЕ «Сохранить»
+    // обнуляло бы ручную правку профиля в файле — до круга починки
+    // обнулённый `profile` читался бы как `business` ЛИШЬ если старое
+    // `toolset` тоже пусто, а иначе откатывался на него и МОЛЧА расширял
+    // или сужал действующий набор инструментов до того, что там
+    // осталось — находка автоматического ревью была именно про эту связку.
+    // Перенос `profile` здесь не даёт этой паре полей разойтись вовсе.
+    host.profile = ui.cfg.current().profile.clone();
     host.write = ui.cfg.current().write.clone();
     host.tools = ui.cfg.current().tools.clone();
     host.mode = ui.cfg.current().mode.clone();

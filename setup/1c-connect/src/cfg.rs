@@ -470,6 +470,19 @@ impl From<CfgFile> for Cfg {
             }
             None => {}
         }
+        // Перенос старого поля `toolset` в контрактное `profile` — круг
+        // починки 1/5 задачи 9, решение 3 плана («один ключ на одно
+        // понятие»). Срабатывает ОДИН раз, при разборе, для КАЖДОГО
+        // соединения (включая склеенное из прежнего `[host]` выше):
+        // непустой `profile` уже победил бы сам, трогать его незачем, а
+        // `std::mem::take` одновременно забирает значение и гасит поле —
+        // второй живой копии после этой строки не остаётся. Дальше в
+        // программе `toolset` не читает никто (см. его докстроку).
+        for c in &mut connections {
+            if c.profile.trim().is_empty() && !c.toolset.trim().is_empty() {
+                c.profile = std::mem::take(&mut c.toolset);
+            }
+        }
         // `current` называет то, чего нет среди соединений. Текущим берём
         // первое и ГОВОРИМ об этом: отказом здесь (`load` его и делает,
         // отдельно) закрылось бы окно — единственное место, где человек
@@ -567,18 +580,29 @@ pub struct Connection {
     /// почему это не `profile`, — в `Cfg::configuration()`.
     #[serde(default)]
     pub configuration: String,
-    /// Какой набор инструментов поднимает дочерний `mcp-1c` — `developer`
-    /// или `business`. Разбор, допустимые значения и довод умолчания — в
-    /// `Cfg::toolset()`.
-    #[serde(default)]
+    /// Старое имя поля `profile` ниже — машинное, не контрактное. Круг
+    /// починки 1/5 задачи 9: держать оба поля читаемыми было временным
+    /// мостом, а решение 3 плана хочет один ключ на одно понятие. Поле
+    /// ОСТАЁТСЯ в структуре только затем, чтобы `deny_unknown_fields` не
+    /// отвергал уехавшие комплекты, где `toolset` ещё записан на диске:
+    /// `From<CfgFile>` при разборе переносит непустое значение в `profile`
+    /// (если тот пуст) и гасит это поле до пустой строки — дальше в
+    /// программе его не читает никто. `#[serde(skip_serializing)]`: печать
+    /// файла (`render`, образец `1c-connect.example.toml`) эту строку
+    /// больше не рисует — живого ключа на одно понятие один, как и велит
+    /// план. Цена: файл, где значение уже переехало в `profile` и ключа
+    /// `toolset` на диске больше нет, прочитает без отказа и БИНАРЬ ДО этой
+    /// правки — но его `toolset()` читал ровно поле `toolset`, увидит
+    /// пустоту и молча вернёт умолчание `business`, не ту настройку,
+    /// которая реально стоит в `profile`. Разойтись так может только
+    /// бинарь из другого образа, чем файл, — комплект и так едет целиком,
+    /// и сказать об этом здесь нужно было, а не промолчать.
+    #[serde(default, skip_serializing)]
     pub toolset: String,
     /// Профиль соединения в контракте подключения — «Разработчик» или
-    /// «Бизнес-пользователь» (таблица полей спеки). Одно понятие — одно
-    /// имя: у прежнего `toolset` та же роль, но под машинным именем.
-    /// `Cfg::toolset()`/`Connection::toolset()` (задача 9 плана «Модель
-    /// соединений») читают это поле первым, а на пустое падают на старое
-    /// `toolset` — так старые файлы и тесты `bridge.rs` не ломаются, а
-    /// новое имя побеждает, как только оно заполнено.
+    /// «Бизнес-пользователь» (таблица полей спеки) — и единственное поле,
+    /// которое читает `Cfg::toolset()`/`Connection::toolset()`. Старое имя
+    /// `toolset` — только путь обновления, см. его докстроку.
     #[serde(default)]
     pub profile: String,
     /// Потолок записи у дочернего `mcp-1c` — `read_write` или `read_only`.
@@ -1263,22 +1287,20 @@ impl Connection {
     /// Читает `profile` — так контракт подключения называет это поле
     /// карточки (решение владельца 7, задача 9 плана «Модель соединений»):
     /// профиль действует на ТЕКУЩЕЕ соединение, не на машину целиком.
-    /// Пустой `profile` падает на старое имя `toolset` — тем же полем
-    /// соединение могло быть заполнено до этой задачи (и так его читает
-    /// `mcp_command` в тестах `bridge.rs`, которые эта задача не правит):
-    /// значение переезжает в `profile` «при обновлении» без отдельного шага
-    /// переноса, просто читая обоих местa по порядку.
+    /// Старое имя `toolset` сюда уже не заглядывает: `From<CfgFile>`
+    /// переносит его значение в `profile` при разборе файла (круг починки
+    /// 1/5 задачи 9) — одно понятие, один живой ключ, как и у
+    /// `configuration()`.
     ///
-    /// Пусто (оба поля) — `business`, а не отказ: бухгалтеров, которые
-    /// будут открывать коннектор, больше, чем 1С-разработчиков, и им
-    /// опаснее получить разработческий набор по умолчанию. Названное, но
+    /// Пусто — `business`, а не отказ: бухгалтеров, которые будут
+    /// открывать коннектор, больше, чем 1С-разработчиков, и им опаснее
+    /// получить разработческий набор по умолчанию. Названное, но
     /// неизвестное значение — отказ словами со списком допустимых: тот же
     /// приём, что у `configuration()`, и по той же причине — молчаливый
     /// откат скрыл бы опечатку человека.
     pub fn toolset(&self) -> Result<&str, String> {
         const ALLOWED: [&str; 2] = ["developer", "business"];
-        let profile = self.profile.trim();
-        let t = if profile.is_empty() { self.toolset.trim() } else { profile };
+        let t = self.profile.trim();
         if t.is_empty() {
             return Ok("business");
         }
@@ -1574,7 +1596,6 @@ impl Cfg {
                     "base_here" => h.base_here.to_string(),
                     "platform" => format!("{:?}", h.platform),
                     "configuration" => format!("{:?}", h.configuration),
-                    "toolset" => format!("{:?}", h.toolset),
                     "profile" => format!("{:?}", h.profile),
                     "write" => format!("{:?}", h.write),
                     "db_user" => format!("{:?}", h.db_user),
@@ -2535,13 +2556,30 @@ mod tests {
         assert!(c.toolset().is_err(), "негодное значение отказывает словами, как и прежде");
     }
 
+    /// Круг починки 1/5 задачи 9: доказательство переноса идёт через
+    /// настоящий `Cfg::load_unchecked` на буквально старом файле, а не
+    /// через присвоение `profile` в памяти (так делают соседний тест и
+    /// красный тест брифа — оба ничего не говорят про файл, где `profile`
+    /// вообще не записан). Прежний файл — `[host]` с `toolset`, без
+    /// единого `profile`, — обязан прочитаться так, что `toolset()`
+    /// отвечает прежним значением, оно же лежит в `profile`, а старое поле
+    /// погашено: второй живой копии после разбора не остаётся.
+    #[test]
+    fn an_old_host_file_with_toolset_migrates_into_profile_on_load() {
+        let kit = kit_with("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\ntoolset = \"developer\"\n");
+        let c = Cfg::load_unchecked(&kit).unwrap();
+        assert_eq!(c.toolset().unwrap(), "developer", "старое значение toolset продолжает действовать");
+        assert_eq!(c.current().profile, "developer", "значение переехало в profile");
+        assert_eq!(c.current().toolset, "", "старое поле погашено — второй копии не остаётся");
+    }
+
     /// Тот же приём, что у `configuration()`: именованный, но неизвестный
     /// набор инструментов — отказ со списком допустимых, а не молчаливый
     /// откат на `business`.
     #[test]
     fn an_unknown_toolset_is_refused_with_the_allowed_list_in_words() {
         let mut c = sample();
-        c.current_mut().toolset = "бухгалтер".into();
+        c.current_mut().profile = "бухгалтер".into();
         let err = c.toolset().unwrap_err();
         assert!(err.contains("developer") && err.contains("business"), "{err}");
     }
@@ -2552,10 +2590,10 @@ mod tests {
     #[test]
     fn validate_rejects_an_unknown_toolset() {
         let mut c = filled();
-        c.current_mut().toolset = "бухгалтер".into();
+        c.current_mut().profile = "бухгалтер".into();
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("toolset") && err.contains("developer"), "{err}");
-        c.current_mut().toolset = "developer".into();
+        c.current_mut().profile = "developer".into();
         assert!(c.validate().is_ok());
     }
 
@@ -2926,7 +2964,7 @@ mod tests {
     #[test]
     fn an_empty_project_is_still_refused_for_the_developer_toolset() {
         let mut c = filled();
-        c.current_mut().toolset = "developer".into();
+        c.current_mut().profile = "developer".into();
         c.current_mut().project = String::new();
         assert!(c.validate().unwrap_err().to_string().contains("project"));
     }

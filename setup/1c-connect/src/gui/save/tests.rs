@@ -70,6 +70,20 @@ fn save_host_with_an_empty_project_does_not_conflict_with_anyone() {
     save_host(&mut ui, host).unwrap();
 }
 
+/// Круг починки 1/5 задачи 9, находка автоматического ревью безопасности:
+/// поля для правки профиля в окне нет, и собранный из формы `Connection`
+/// несёт пустой `profile` (как и у всех полей, которых форма не знает) —
+/// «Сохранить» не должно обнулять то, что человек вписал руками в toml.
+#[test]
+fn save_host_keeps_the_hand_written_profile() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().profile = "developer".into();
+    let mut host = ui.cfg.current().clone();
+    host.profile = String::new(); // форма такого поля не знает
+    save_host(&mut ui, host).unwrap();
+    assert_eq!(ui.cfg.current().profile, "developer", "профиль не обязан переживать «Сохранить» обнулённым");
+}
+
 #[test]
 fn carried_base_url_keeps_an_override_and_follows_the_default() {
     // Поля «Адрес публикации» в окне нет: умолчание идёт за каталогом

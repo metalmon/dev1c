@@ -1230,3 +1230,52 @@ fn switching_to_an_unknown_name_is_refused_and_touches_nothing() {
     assert!(e.contains("Ромашка"), "{e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
+
+/// Задача 7 плана «Интерфейс»: смена профиля меняет подпись папки и набор
+/// инструментов ЭТОЙ карточки — не папку и не соседа. У соседа своя папка (не
+/// конфликтует с «Buh»), и её профиль нетронутым остаётся лучшим
+/// доказательством, что запись ушла в чужой блок, не в этот.
+#[test]
+fn changing_one_cards_profile_leaves_the_others_and_the_folders_alone() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        profile: "business".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let folder = ui.cfg.by_name("Buh").unwrap().project.clone();
+
+    set_profile(&mut ui, "Buh", "developer").unwrap();
+
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().project, folder, "меняется подпись папки, не папка");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "developer");
+    assert_eq!(ui.cfg.by_name("Ромашка").unwrap().profile, "business", "соседняя карточка не тронута");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("profile = \"developer\""), "{text}");
+}
+
+/// Review Focus плана, задача 7: папка этой карточки уже «занята» соседом по
+/// правилу конфликта папок (`folder_conflict`) — ровно то, на чём отказала
+/// бы полная `save_host` через `Cfg::validate()`. Профиль папку не трогает,
+/// поэтому отказа тут быть не должно: `set_profile` не ходит в `validate()`,
+/// он пишет один ключ тем же приёмом, что `save_tray_key`.
+#[test]
+fn a_folder_conflict_with_a_neighbour_does_not_block_changing_the_profile() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: ui.cfg.current().project.clone(), // та же папка, что у «Buh» — конфликт
+        profile: "business".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    assert!(ui.cfg.validate().is_err(), "в фикстуре действительно конфликт папок");
+
+    set_profile(&mut ui, "Buh", "developer").unwrap();
+
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "developer");
+}

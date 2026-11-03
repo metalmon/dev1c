@@ -731,6 +731,44 @@ pub fn switch_current(ui: &mut Ui, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Сменить профиль карточки по имени (задача 7 плана «Интерфейс») — второй
+/// переключатель карточки, после `switch_current`, и тем же приёмом: профиль
+/// меняет подпись папки и набор инструментов ЭТОГО соединения
+/// (`panel::folder_label`, `panel::profile_label`, `Connection::toolset`), а
+/// не папку и не соседей.
+///
+/// **Почему не `save_host`.** Полная запись карточки проверяет список
+/// целиком (`Cfg::validate`, в том числе `folder_conflict` между соседями) —
+/// а профиль чужой папки не касается вовсе (Review Focus плана): смена
+/// профиля у карточки, чья папка уже «занята» соседом по правилу конфликта,
+/// обязана пройти. Поэтому запись — ОДИН ключ (`cfg::set_named`), тем же
+/// приёмом, что `save_tray_key` пишет для текущего соединения, без похода в
+/// `validate()`.
+///
+/// Значение проверяется тем же правилом, что читает его обратно
+/// (`Connection::toolset` — список допустимых один, опечатка отказывает
+/// словами раньше записи).
+pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String> {
+    let probe = Connection { profile: profile.to_string(), ..Connection::default() };
+    probe.toolset()?;
+
+    if ui.cfg.by_name(name).is_none() {
+        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    }
+
+    let path = ui.kit.state_path(cfg::FILE);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    let text = cfg::set_named(&text, name, "profile", &format!("{profile:?}"))?;
+    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+
+    // Синхронизируем только карточку, которую сами только что записали —
+    // тот же приём, что `save_tray_key` применяет к текущей.
+    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
+        c.profile = profile.to_string();
+    }
+    Ok(())
+}
+
 /// Чистое ядро вопроса «погасит ли „Сохранить“ обслуживание»: замок был
 /// открыт, обслуживание живо, а на новых параметрах условия не хватает.
 /// Заперто и до правки — гасить нечего, вопрос не нужен.

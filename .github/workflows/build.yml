@@ -471,6 +471,10 @@ jobs:
             exit 1
           }
           git -C fork checkout -q "$sha"
+          # Теги, из которых считается версия, лежат у upstream, а не в нашем форке:
+          # форк несёт коммиты, теги в него никто не пушил. Без них `git describe`
+          # отвечает «No names found» — замер 3.11 сразу после публикации HEAD.
+          git -C fork fetch -q --tags https://github.com/feenlace/mcp-1c.git
           got=$(git -C fork describe --tags "$sha")
           [ "$got" = "$want" ]             || { echo "форк на $sha даёт версию $got, а pack.sh кладёт в комплект $want" >&2; exit 1; }
           mkdir -p fork-bin

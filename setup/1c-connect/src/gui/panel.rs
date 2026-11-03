@@ -48,6 +48,11 @@ fn icon() -> Arc<Image> {
 /// Адреса публикации в окне нет — он считается от каталога базы
 /// (`cfg::derived_base_url`).
 pub struct Fields {
+    /// Имя карточки словами человека — отдельный путь записи (`save::rename`,
+    /// задача 4), не часть обычного «Сохранить»: `field_states`/`shown_fields`/
+    /// `host_of`/`fields_differ` про него не знают, и регулярная диффовка полей
+    /// его не трогает.
+    pub name: Entity<InputState>,
     pub server: Entity<InputState>,
     pub password: Entity<InputState>,
     pub base_path: Entity<InputState>,
@@ -1081,6 +1086,7 @@ impl Panel {
         .detach();
 
         let fields = Fields {
+            name: field("Ромашка", &host.name, false, window, cx),
             server: field("192.168.1.10:3393", &host.server, false, window, cx),
             password: field("пароль рабочего места", &host.password, true, window, cx),
             base_path: field("C:\\Bases\\Buh", &host.base_path, false, window, cx),
@@ -1235,6 +1241,12 @@ impl Panel {
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
     fn adopt_fields(&mut self, host: &Connection, window: &mut Window, cx: &mut Context<Self>) {
+        // Имя — вне `shown_fields`: оно не прячется ни в одной топологии и
+        // ни в одном режиме, в отличие от остальных полей карточки.
+        if self.fields.name.read(cx).value() != host.name.as_str() {
+            let text = host.name.clone();
+            self.fields.name.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
         let shown = shown_fields(host);
         for (name, state) in self.field_states() {
             if !shown.contains(&name) {

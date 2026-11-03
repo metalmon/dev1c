@@ -916,3 +916,71 @@ fn saving_one_card_leaves_an_unreadable_password_of_another_untouched() {
     let mine = common::toml_render::get_in(&after, cfg::CONNECTION, 0, "password").expect("у текущей карточки пароль напечатан");
     assert_ne!(mine, sealed_elsewhere, "чужой шифртекст не обязан появиться в блоке текущей карточки:\n{after}");
 }
+
+/// Задача 4 плана «Интерфейс»: имя карточки — слова человека, и пустые или
+/// пробельные слова адресацию по имени (`set_current`/`previous_literal`)
+/// найдут не туда. Отказ — до какой-либо записи.
+#[test]
+fn an_empty_name_is_refused_with_words() {
+    let mut ui = Ui::for_test();
+    assert!(rename(&mut ui, "Buh", "   ").unwrap_err().contains("имя"));
+}
+
+/// Главная мина задачи (Review Focus плана): если имя уже занято другой
+/// карточкой, переименование обязано отказать, а не переписать первую,
+/// найденную адресацией по имени. Отказ не трогает файл ни на байт.
+#[test]
+fn a_name_already_taken_is_refused_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+    let e = rename(&mut ui, "Buh", "Ромашка").unwrap_err();
+    assert!(e.contains("Ромашка"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+}
+
+/// Переименование текущей карточки обязано переписать оба места, где живёт
+/// её имя: собственный блок и корневой `current` — иначе файл остался бы со
+/// ссылкой на имя, которого в списке больше нет.
+#[test]
+fn renaming_the_current_connection_rewrites_both_the_block_and_the_root_current() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    rename(&mut ui, "Buh", "Ромашка").unwrap();
+    assert_eq!(ui.cfg.current, "Ромашка");
+    assert_eq!(ui.cfg.current().name, "Ромашка");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("current = \"Ромашка\""), "{text}");
+    assert!(text.contains("name = \"Ромашка\""), "{text}");
+    assert!(!text.contains("\"Buh\""), "{text}");
+}
+
+/// Та же запись, но карточка НЕ текущая (список важен для адресации —
+/// задача 2): корневой `current` трогать не должно, а переименованная
+/// карточка переживает запись со своими полями.
+#[test]
+fn renaming_a_connection_that_is_not_current_leaves_the_root_current_alone() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    rename(&mut ui, "Ромашка", "Василёк").unwrap();
+    assert_eq!(ui.cfg.current, "Buh", "текущим осталось прежнее соединение");
+    let renamed = ui.cfg.connections.iter().find(|c| c.name == "Василёк").expect("карточка переименована в памяти");
+    assert_eq!(renamed.base_path, "C:\\Bases\\Ромашка", "поля карточки не тронуты, тронуто только имя");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("current = \"Buh\""), "{text}");
+    assert!(text.contains("name = \"Василёк\""), "{text}");
+    assert!(!text.contains("\"Ромашка\""), "{text}");
+}

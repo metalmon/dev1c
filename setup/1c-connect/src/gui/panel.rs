@@ -15,7 +15,11 @@ use crate::gui::window::hide_window;
 use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
 use crate::session::State;
 use common::check::{Check, Outcome};
-use gpui_kit::component::button::{Button, ButtonVariants};
+// `Button` из `gpui_kit` зовём `KitButton`: имя `Button` ниже занято чистым
+// результатом `main_button` (задача 8 плана «Интерфейс») — у кнопки подвала
+// теперь есть и предмет, и подпись, и объяснение запертости, а не только то,
+// что знает виджет.
+use gpui_kit::component::button::{Button as KitButton, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
@@ -313,6 +317,75 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
         None => "проверка",
     };
     Some(format!("Подождите: идёт {what}"))
+}
+
+/// Главная кнопка подвала «Связи» — чистый итог, без самого виджета:
+/// `render` решает отрисовку (задача плана «Интерфейс» после этой).
+///
+/// `label` пустой значит кнопки НЕТ ВОВСЕ, а не серая: серая кнопка с
+/// подписью обещает действие, которого у предмета не бывает (у принимающей
+/// стороны «Подключиться» не бывает никогда). Тогда `why` говорит, почему —
+/// словами в левом слоте подвала, рядом с `subject`.
+pub struct Button {
+    /// Имя соединения, на которое действует кнопка — ПОДВАЛ ПОКАЗЫВАЕТ ЕГО
+    /// СЛЕВА от кнопки: иначе на экране со свёрнутым списком «Подключиться»
+    /// не говорит, что именно подключит (замечание владельца к первой
+    /// редакции макета).
+    pub subject: String,
+    pub label: &'static str,
+    pub why: Option<String>,
+}
+
+/// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
+/// открытая карточка (`selected`), а нет открытой — текущее соединение
+/// (`resolve_selected`, тот же откат, что держит карточку при исчезнувшей
+/// строке, задача 2). Подпись решает ОДНО состояние предмета зараз, по
+/// порядку:
+///
+/// 1. список пуст — предмета нет, кнопки нет (третий способ завести
+///    соединение на первом экране — лишний орган там, где человек впервые,
+///    задача 11 отвечает за сам онбординг);
+/// 2. правка важнее всего — её потеря дороже, чем недосказанное состояние
+///    связи («Сохранить», подсказку отдаёт тот же `save_hint`, что уже
+///    объясняет недоступность на вкладке);
+/// 3. локальный режим — это выключатель обслуживания MCP, а не связь
+///    («Включить»/«Выключить»);
+/// 4. соединение зовёт само (`role() == "dial"`) и не подключено —
+///    «Подключиться»;
+/// 5. соединение принимает подключения и ждёт — набирать код там, а не
+///    здесь: кнопки нет, а `why` называет, где действие («Разрешить» в
+///    подвале не появляется вовсе, решение владельца 1.11 — оно
+///    всплывающим окном, а упущенное возвращается кнопкой внутри карточки);
+/// 6. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
+///    задача не касается вовсе) — кнопки нет, а объяснять нечего: левый
+///    слот подвала это уже говорит через `reason` (`foot_left_text`),
+///    второй копии доводов не заводим.
+pub fn main_button(ui: &Ui, selected: &str, dirty: bool) -> Button {
+    if ui.cfg.connections.is_empty() {
+        return Button { subject: String::new(), label: "", why: None };
+    }
+    let c = resolve_selected(&ui.cfg, selected);
+    let subject = c.name.clone();
+    if dirty {
+        let busy = ui.busy.is_some();
+        let op = ui.progress.as_ref().map(|r| r.which);
+        return Button { subject, label: "Сохранить", why: save_hint(dirty, busy, op) };
+    }
+    if c.mode == "local" {
+        let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
+        return Button { subject, label, why: None };
+    }
+    if ui.link.is_up() {
+        // Подключено/рвётся/переподключается — не наш случай (транспорта не
+        // трогаем), и причина уже сказана в левом слоте подвала (`reason`).
+        return Button { subject, label: "", why: None };
+    }
+    if matches!(c.role(), Ok("dial")) {
+        return Button { subject, label: "Подключиться", why: None };
+    }
+    Button {
+        subject, label: "", why: Some("Передайте код на ту сторону — оттуда и подключатся.".to_string())
+    }
 }
 
 /// Высота строки левого слота подвала при размере текста 13 и число строк,
@@ -1479,7 +1552,7 @@ impl Render for Panel {
             .child(div().font_weight(FontWeight::SEMIBOLD).child("1c-connect"))
             .child(div().flex_1())
             .child(
-                Button::new("hide")
+                KitButton::new("hide")
                     .ghost()
                     .compact()
                     .label("✕")
@@ -1516,7 +1589,7 @@ impl Render for Panel {
             })
             // «Прервать» — перед переключателем, только пока можно отменить
             // (git-обмен; cf_decompile/cf_load не прерываются).
-            .when(c.cancel, |d| d.child(Button::new("cancel").ghost().small().label("Прервать").on_click(|_, _, cx| gui::cancel_op(cx))))
+            .when(c.cancel, |d| d.child(KitButton::new("cancel").ghost().small().label("Прервать").on_click(|_, _, cx| gui::cancel_op(cx))))
             .child(
                 Switch::new("link")
                     .focus_ring(false)
@@ -1572,7 +1645,7 @@ impl Render for Panel {
         // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
         let pick = |id: &'static str, target: Entity<InputState>, cx: &mut Context<Self>| {
             let (label, tooltip) = pick_face();
-            Button::new(id)
+            KitButton::new(id)
                 .outline()
                 .when_some(label, |b, l| b.label(l))
                 .icon(Icon::default().data(FOLDER_SVG))
@@ -1813,7 +1886,7 @@ impl Render for Panel {
         // Меню закрывается само; пункты зовут те же `gui::*`, что и кнопки.
         // Своё имя на вкладку: меню помнит построенные пункты по имени
         // кнопки, и общее имя подсунуло бы «Журналу» пункты «Проекта».
-        let more = |id: &'static str| Button::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
+        let more = |id: &'static str| KitButton::new(id).ghost().icon(Icon::default().data(MENU_SVG)).tooltip("Ещё");
 
         let foot_actions: AnyElement = match tab {
             gui::Tab::Link => {
@@ -1827,7 +1900,7 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new("save")
+                        KitButton::new("save")
                             .primary()
                             .label("Сохранить")
                             .disabled(!allowed)
@@ -1914,7 +1987,7 @@ impl Render for Panel {
                         menu
                     }))
                     .child(
-                        Button::new("primary")
+                        KitButton::new("primary")
                             .primary()
                             .label(label)
                             .tooltip(hint)
@@ -1947,7 +2020,7 @@ impl Render for Panel {
                     }))
                 }))
                 .child(
-                    Button::new("check")
+                    KitButton::new("check")
                         .primary()
                         .label("Проверить")
                         .disabled(busy_now)
@@ -2078,13 +2151,13 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text,
-        nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected,
-        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line,
-        window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
+        resolve_selected, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
+        undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
-    use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Verdict, Which};
+    use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
     use crate::session::State;
     use crate::verify;
     use common::check::Check;
@@ -2892,6 +2965,50 @@ mod tests {
         assert_eq!(save_hint(true, true, Some(Which::Uninstall)).as_deref(), Some("Подождите: идёт работа с расширением"));
         // Занято, но никакая операция не идёт — значит идёт проверка.
         assert_eq!(save_hint(true, true, None).as_deref(), Some("Подождите: идёт проверка"));
+    }
+
+    /// Соединение с заданными ролью/режимом/состоянием связи, одно в списке —
+    /// хватает всем сценариям главной кнопки, кроме пустого списка (у него
+    /// свой тест).
+    fn ui_for(role: &str, mode: &str, up: bool) -> Ui {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка"]);
+        ui.cfg.current_mut().role = role.into();
+        ui.cfg.current_mut().mode = mode.into();
+        ui.link = if up { State::Up { since: Instant::now() } } else { State::Off };
+        ui
+    }
+
+    #[test]
+    fn the_main_button_names_the_one_connection_it_acts_on() {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        let b = main_button(&ui, "", false);
+        assert_eq!(b.subject, ui.cfg.current().name, "ничего не открыто — предмет текущее");
+        let b = main_button(&ui, "Василёк", false);
+        assert_eq!(b.subject, "Василёк", "открытая карточка перебивает текущее");
+    }
+
+    #[test]
+    fn the_label_follows_the_subjects_role() {
+        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", false).label, "Подключиться");
+        assert_eq!(main_button(&ui_for("accept", "local", true), "", false).label, "Выключить");
+        assert_eq!(main_button(&ui_for("accept", "local", false), "", false).label, "Включить");
+        // Правка важнее — её потеря дороже, чем недосказанное состояние связи.
+        assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", true).label, "Сохранить", "правка важнее: её потеря дороже");
+        // Принимающему подключаться не к кому — заперта, и причина названа.
+        let b = main_button(&ui_for("accept", "tunnel", false), "", false);
+        assert_eq!(b.label, "");
+        assert!(b.why.unwrap().contains("ту сторону"));
+    }
+
+    #[test]
+    fn an_empty_list_has_no_main_button_at_all() {
+        let mut ui = Ui::for_test();
+        ui.cfg.connections.clear();
+        let b = main_button(&ui, "", false);
+        assert_eq!(b.label, "");
+        assert_eq!(b.subject, "");
     }
 
     #[test]

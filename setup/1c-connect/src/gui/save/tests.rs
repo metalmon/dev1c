@@ -221,6 +221,32 @@ fn saving_edits_the_current_connection_and_keeps_the_others() {
     assert_eq!(other.base_path, "C:\\Bases\\Ромашка", "и её поля не тронуты");
 }
 
+/// Задача 5 плана «Модель соединений», решение владельца 8: учебная лицензия
+/// 1С даёт ОДИН сеанс на базу, и вторая карточка к той же базе получила бы
+/// отказ ПЛАТФОРМЫ, не нашей программы — человек не понял бы, откуда беда.
+/// `validate()` внутри `save_host` проверяет `Cfg::of_one(host)` — только
+/// ОДНО соединение, и запрет `Cfg::validate` (задача 5) соседей там не видит
+/// вовсе; отказ здесь сверяет с СОСЕДНИМИ карточками `ui.cfg` отдельно и
+/// называет имя уже СУЩЕСТВУЮЩЕЙ карточки, а не той, что сохраняют. Разница
+/// в написании — только хвостовой разделитель, без смены регистра: тест
+/// обязан проходить и на Linux.
+#[test]
+fn saving_to_a_base_another_card_already_holds_is_refused_by_its_name() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    let before = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok();
+    let mut host = ui.cfg.current().clone();
+    host.base_path = "C:\\Bases\\Ромашка\\".into();
+    let err = save_host(&mut ui, host).unwrap_err();
+    assert!(err.contains("Ромашка"), "отказ называет имя уже занявшей базу карточки: {err}");
+    assert_eq!(std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).ok(), before, "файл не тронут");
+}
+
 #[test]
 fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
     let mut ui = Ui::for_test();

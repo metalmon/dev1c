@@ -80,6 +80,18 @@ pub fn moved_lines(old: &Cfg, new: &Cfg) -> Vec<String> {
     v
 }
 
+/// Чужая карточка, уже держащая ту же базу (по смыслу — `cfg::same_base`, не
+/// по строке), если такая есть. Пустой `base_path` не сравниваем вовсе:
+/// «путь не задан» — это отказ `Cfg::validate` со своим, понятным словом
+/// («base_path — путь к базе»), а не путаница с соседом, у которого путь
+/// тоже ещё не заполнен.
+fn same_base_conflict<'a>(existing: &'a [Connection], host: &Connection) -> Option<&'a Connection> {
+    if host.base_path.trim().is_empty() {
+        return None;
+    }
+    existing.iter().find(|c| c.name != host.name && cfg::same_base(&c.base_path, &host.base_path))
+}
+
 /// Сменилась ли база, которую обслуживает агент — путь, логин или пароль.
 /// Единый список для двух потребителей, которым нужен именно этот,
 /// полный: подтверждение перед «Сохранить» (`save_question` →
@@ -342,6 +354,19 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     host.http_port = ui.cfg.current().http_port;
     let typed = host.base_url.clone();
     host.base_url = base_url_to_write(ui.cfg.current(), &typed, &host.publication, &host.base_path);
+    // Задача 5 плана «Модель соединений», решение владельца 8: учебная
+    // лицензия 1С даёт ОДИН сеанс на базу — вторая карточка к той же базе
+    // получила бы отказ ПЛАТФОРМЫ, а не нашей программы, и не поняла бы,
+    // откуда беда. `cfg.validate()` ниже проверяет `Cfg::of_one(host)` —
+    // ровно ОДНО соединение, и соседей из `ui.cfg.connections` не видит
+    // вовсе, поэтому запрет `Cfg::validate` (тот же, что ловит это при
+    // чтении файла) здесь молчал бы. Своя проверка — по смыслу
+    // (`cfg::same_base`), не по строке, и только с ЧУЖИМИ карточками: та
+    // же самая карточка (то же имя) сравнивается со своей прежней базой на
+    // каждое «Сохранить», и это не конфликт.
+    if let Some(other) = same_base_conflict(&ui.cfg.connections, &host) {
+        return Err(format!("соединение «{}»: эта база уже занята карточкой «{}» — одна база, одна карточка", host.name, other.name));
+    }
     let keep = fields_to_keep(&host, &ui.cfg.undecryptable);
     let path = ui.kit.state_path(cfg::FILE);
     // Читаем диск ДО записи — после неё поле будет пустым, прежний

@@ -70,6 +70,12 @@ pub struct Panel {
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
     original: Connection,
+    /// Имя соединения, чья карточка раскрыта в списке вкладки «Связь».
+    /// Поля (`Fields`, `original` выше) принадлежат ИМЕННО ему, не всегда
+    /// текущему — задача 2 плана «Интерфейс». Разрешает имя в соединение
+    /// `selected_connection` (с откатом на текущее, если имя из списка
+    /// исчезло); саму перекладку в поля делает `select`.
+    pub selected: String,
     /// Высота видимой области тела вкладки и высота содержимого «Связи»
     /// с последней отрисовки.
     viewport_h: Option<Pixels>,
@@ -949,6 +955,16 @@ pub fn fields_differ(a: &Connection, b: &Connection, mode: &str, publication: &s
     shown_fields(mode, publication).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
+/// Какое соединение показывает выбранная строка — `selected` по имени
+/// (точным совпадением, тем же правилом, что `cfg::Cfg::by_name`), а если
+/// его в списке больше нет (соединение удалили в файле, пока окно было
+/// открыто), то текущее. Без этого отката поля карточки остались бы от
+/// небывшего соединения, и правка в них при «Сохранить» уехала бы в чужое
+/// (Review Focus плана «Интерфейс», задача 2).
+fn resolve_selected<'a>(cfg: &'a cfg::Cfg, selected: &str) -> &'a Connection {
+    cfg.by_name(selected).unwrap_or_else(|| cfg.current())
+}
+
 /// Радиус скругления корня окна коннектора: пусто — углы прямые.
 ///
 /// На Linux прозрачности в углах добиться не удалось: при `Transparent`
@@ -1051,6 +1067,9 @@ impl Panel {
             project_scroll: ScrollHandle::new(),
             log_len: 0,
             original,
+            // Окно открывается на текущем соединении — ровно то, чьи поля
+            // только что наполнили `fields` выше.
+            selected: host.name.clone(),
             viewport_h: None,
             link_h: None,
             last_fit: None,
@@ -1154,6 +1173,28 @@ impl Panel {
         let (mode, publication) = (host.mode.clone(), host.publication.clone());
         let form = host_of(&self.fields, &mode, &publication, cx);
         adopt_needed(host, &form, &self.original, &mode, &publication).then(|| host.clone())
+    }
+
+    /// Соединение, чья карточка сейчас раскрыта: выбранное по имени, а если
+    /// оно исчезло из списка — текущее (`resolve_selected`, под тестом).
+    pub fn selected_connection<'a>(&self, cfg: &'a cfg::Cfg) -> &'a Connection {
+        resolve_selected(cfg, &self.selected)
+    }
+
+    /// Выбрать строку `name` и перевязать поля на её соединение: тот же
+    /// путь, которым поля уже наполняются при открытии окна (`adopt_fields`)
+    /// — второй копии наполнения не завели. Смена выбора — это НЕ правка
+    /// человека, и «Сохранить» от неё гореть не должна; это свойство несёт
+    /// сам `adopt_fields`, сдвигая `original` вместе с полями.
+    ///
+    /// Тестом сама перевязка не закрыта — как и `adopted_host` выше, ей
+    /// нужны живые `Window`/`Context`, а головного стенда GPUI в дереве нет.
+    /// Решение о том, НА КОГО перевязывать (откат на текущее, если строка
+    /// пропала), закрыто тестом `resolve_selected` отдельно от исполнения.
+    pub fn select(&mut self, cfg: &cfg::Cfg, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected = name.to_string();
+        let host = resolve_selected(cfg, &self.selected).clone();
+        self.adopt_fields(&host, window, cx);
     }
 
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
@@ -1982,10 +2023,11 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text, nothing_to_show,
-        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields,
-        skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
+        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, save_hint,
+        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius,
+        ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
-    use crate::cfg::Connection;
+    use crate::cfg::{cfg_with, Connection};
     use crate::editors;
     use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Verdict, Which};
     use crate::session::State;
@@ -1994,6 +2036,16 @@ mod tests {
     use common::Phase;
     use gpui_kit::px;
     use std::time::{Duration, Instant};
+
+    /// Задача 2 плана «Интерфейс», Review Focus: соединение удалили в файле,
+    /// пока окно было открыто — выбор обязан вернуться к текущему, а не
+    /// оставить поля от небывшей карточки (та правка уехала бы при
+    /// «Сохранить» в чужое соединение).
+    #[test]
+    fn a_selection_that_vanished_falls_back_to_the_current() {
+        let cfg = cfg_with(&["Buh", "Ромашка"]);
+        assert_eq!(resolve_selected(&cfg, "Василёк").name, cfg.current().name);
+    }
 
     /// Задача 7: вкладка показывает тот же набор и ничего своего — ни отбора,
     /// ни добавок, ни пересказа. Один факт — одна строка, в порядке набора.

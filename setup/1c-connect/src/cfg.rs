@@ -1370,7 +1370,13 @@ impl Connection {
                 "{at}: адрес публикации — только латиница, цифры и -._~:/ (путь без пробелов и спецсимволов)"
             );
         }
-        anyhow::ensure!(!self.base_path.is_empty(), "{at}: base_path — путь к базе или сервер\\база");
+        // Замок — только там, где человек сам сказал «база здесь»
+        // (`base_here`, задача 6 плана «Интерфейс»). У карточки, чья база на
+        // той стороне, своих полей базы нет вовсе (`panel::shown_fields`
+        // отдаёт для неё один `project`) — требовать путь, которого окно не
+        // показывает, значило бы запирать программу полем, заполнить которое
+        // нечем.
+        anyhow::ensure!(!self.base_here || !self.base_path.is_empty(), "{at}: base_path — путь к базе или сервер\\база");
         anyhow::ensure!(
             !has_parent_component(&self.base_path),
             "{at}: base_path — путь с «..» не принимаем: две карточки к одной базе 1С отказывает без объяснения причины, а «..» прячет одно и то же место под разным написанием. Впишите путь без «..»"
@@ -3518,6 +3524,19 @@ mod tests {
         c.current_mut().profile = "developer".into();
         c.current_mut().project = String::new();
         assert!(c.validate().unwrap_err().to_string().contains("project"));
+    }
+
+    /// Задача 6 плана «Интерфейс»: замок на пустом `base_path` держит много
+    /// потребителей, но смысл у него один — непустой путь нужен только там,
+    /// где человек сам сказал «база здесь» (`base_here`). У соединения, чья
+    /// база на той стороне, своих полей базы в карточке нет вовсе
+    /// (`panel::shown_fields`), и требовать от него путь, которого окно не
+    /// показывает, значило бы запирать программу на поле, заполнить которое
+    /// нечем.
+    #[test]
+    fn an_empty_base_path_is_not_a_lock_where_the_base_is_elsewhere() {
+        let c = Connection { base_here: false, base_path: String::new(), ..Default::default() };
+        assert!(c.validate().is_ok(), "{:?}", c.validate().unwrap_err());
     }
 
     #[test]

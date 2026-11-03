@@ -1172,3 +1172,61 @@ fn a_name_already_on_disk_but_not_in_memory_is_refused_and_touches_nothing() {
     assert!(e.contains("Ромашка"), "{e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет, второй блок «Ромашка» не появляется");
 }
+
+/// Задача 6 плана «Интерфейс»: переключение текущей — действие человека из
+/// окна, и о нём обязана сказать строка журнала (как и о других действиях
+/// над списком, задачи 4 и 5) — иначе человек не поймёт, почему агент вдруг
+/// отвечает из другой базы.
+#[test]
+fn switching_the_current_connection_says_so_in_the_log() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+
+    switch_current(&mut ui, "Ромашка").unwrap();
+
+    assert_eq!(ui.cfg.current, "Ромашка");
+    assert!(ui.log.iter().any(|l| l.text.contains("Ромашка")), "без строки человек не поймёт, почему агент ответил странно: {:?}", ui.log);
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("current = \"Ромашка\""), "{text}");
+}
+
+/// Review Focus плана, задача 6: переключение текущей на соединение, у
+/// которого база на той стороне (`base_here = false`), — путь к базе пустой
+/// там законно (снятый замок `Connection::validate`), и это не повод
+/// запирать окно.
+#[test]
+fn switching_to_a_connection_whose_base_is_elsewhere_is_not_locked() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_here: false,
+        base_path: String::new(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+
+    switch_current(&mut ui, "Ромашка").unwrap();
+    assert_eq!(ui.cfg.current, "Ромашка");
+}
+
+/// Неизвестное имя — отказ словами (тот же текст, что у `Cfg::switch_current`,
+/// который уже проверяет и пустой список, и опечатку в имени), файл не
+/// тронут.
+#[test]
+fn switching_to_an_unknown_name_is_refused_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = switch_current(&mut ui, "Ромашка").unwrap_err();
+    assert!(e.contains("Ромашка"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+}

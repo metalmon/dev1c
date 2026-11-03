@@ -823,6 +823,18 @@ pub(crate) fn lock_key(dir: &Path) -> String {
     single_instance::clean(&crate::cfg::normalize_base(&dir.to_string_lossy()))
 }
 
+/// Путь файла замка этой папки внутри каталога состояния — ОДНО место, где
+/// это имя строится: круг починки задачи 7, находка 2 — `hold` и
+/// `file_lock_busy` строили его по месту каждый сам, и расхождение сделало
+/// бы страж (`file_lock_busy`) слепым к объекту, который держит `hold`, а
+/// замок выглядел бы работающим, ничего не запирая. `single_instance.rs`
+/// уже требует того же для своих собственных ключей (там, где он сам
+/// называет этот урок, строка 132) — второго места в крейте, где строится
+/// это конкретное имя, быть не должно.
+pub(crate) fn lock_file_path(state: &Path, dir: &Path) -> PathBuf {
+    state.join(format!("project-{}.lock", lock_key(dir)))
+}
+
 /// Какие папки заняты прямо сейчас В ЭТОМ ПРОЦЕССЕ, и чем — ключ (`lock_key`)
 /// на имя операции; пустая строка — папка зарезервирована, но имя ещё не
 /// записано (см. `hold`). Замена одному `LOCK: Mutex<()>` на машину —
@@ -911,7 +923,7 @@ pub fn file_lock_busy(dir: &Path) -> bool {
     let target = LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match target {
         None => false,
-        Some(state) => matches!(file_lock(&state.join(format!("project-{}.lock", lock_key(dir)))), Ok(None)),
+        Some(state) => matches!(file_lock(&lock_file_path(&state, dir)), Ok(None)),
     }
 }
 
@@ -959,7 +971,7 @@ pub fn hold(what: &str, dir: &Path) -> Result<Hold, String> {
     let target = LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let file = match target {
         None => None,
-        Some(state) => match file_lock(&state.join(format!("project-{key}.lock"))) {
+        Some(state) => match file_lock(&lock_file_path(&state, dir)) {
             Ok(Some(g)) => Some(g),
             // Другой процесс держит файл — чей именно, отсюда не видно,
             // поэтому «другая операция»: готовая, не выдуманная формулировка.
@@ -1874,15 +1886,44 @@ mod tests {
 
     #[test]
     fn two_folders_do_not_wait_for_each_other() {
+        // `file_lock` — файл, не каталог: на Linux `OpenOptions::create().write(true)`
+        // на СУЩЕСТВУЮЩЕЙ папке падает `EISDIR`, а не отдаёт «занято»/«свободно»
+        // (круг починки задачи 7, находка 1 — бриф передавал сюда сам каталог,
+        // и буквальный тест был бы заведомо красным на второй платформе).
+        // Честная проверка — файл замка ВНУТРИ каждой папки, тем же путём, что
+        // строит `lock_file_path` для настоящего `hold` (находка 2 того же круга).
         let (ta, tb) = (tempdir::Dir::new(), tempdir::Dir::new());
-        let dir_a = ta.path().to_path_buf();
-        let dir_b = tb.path().to_path_buf();
-        let a = file_lock(&dir_a).unwrap().expect("первая папка свободна");
-        let b = file_lock(&dir_b).unwrap();
+        let file_a = lock_file_path(ta.path(), ta.path());
+        let file_b = lock_file_path(tb.path(), tb.path());
+        let a = file_lock(&file_a).unwrap().expect("первая папка свободна");
+        let b = file_lock(&file_b).unwrap();
         assert!(b.is_some(), "замок другой папки не должен ждать первую");
-        assert!(file_lock(&dir_a).unwrap().is_none(), "а своя папка занята, пока держат");
+        assert!(file_lock(&file_a).unwrap().is_none(), "а своя папка занята, пока держат");
         drop(a);
         drop(b);
+    }
+
+    /// Та же гарантия, но на межпроцессном слое и под настоящей целью
+    /// (`set_lock_target`): круг починки задачи 7, находка 3 — до этого оба
+    /// новых теста доказывали только слой памяти (`BUSY`, через `hold`), а
+    /// дисковый слой, тот самый, где имя строилось дважды (находка 2), не
+    /// проверял никто. Берём файл A напрямую, как бы его держал ЧУЖОЙ
+    /// процесс (не наш `hold`, у которого и так есть слой памяти) — и видим,
+    /// что `hold` на папке A честно отказывает, а на папке B проходит.
+    #[test]
+    fn two_projects_on_disk_do_not_block_each_other() {
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let state = tempdir::Dir::new();
+        set_lock_target(state.path());
+        let (_ta, pa) = fixture();
+        let (_tb, pb) = fixture();
+        let other = file_lock(&lock_file_path(state.path(), &pa.dir)).unwrap().expect("файл папки A свободен в начале теста");
+        assert!(hold("project_push", &pa.dir).is_err(), "папка A занята на диске чужим процессом");
+        let g = hold("project_push", &pb.dir).unwrap_or_else(|e| panic!("папка B не должна видеть занятость папки A: {e}"));
+        drop(g);
+        drop(other);
+        assert!(hold("project_push", &pa.dir).is_ok(), "файл отпущен — папка A снова свободна");
+        clear_lock_target_for_test();
     }
 
     /// Та же гарантия, но через настоящую поверхность (`call`, та же, что у

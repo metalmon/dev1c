@@ -3106,11 +3106,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&state);
         std::fs::create_dir_all(&state).unwrap();
         crate::project::set_lock_target(&state);
-        // Папка проекта — отдельная от каталога состояния; имя файла замка
-        // строится от неё тем же ключом, что берёт сам `hold` (`lock_key`).
+        // Папка проекта — отдельная от каталога состояния; путь файла замка
+        // строится той же `lock_file_path`, что берёт сам `hold` (круг
+        // починки задачи 7, находка 2 — одно место на имя, не вторая копия).
         let project = state.join("проект");
         assert_eq!(busy_now(&project), None, "файл свободен — не занято");
-        let path = state.join(format!("project-{}.lock", crate::project::lock_key(&project)));
+        let path = crate::project::lock_file_path(&state, &project);
         let other = crate::project::file_lock(&path).unwrap().expect("замок свободен в начале теста");
         assert_eq!(busy_now(&project).as_deref(), Some("другая операция"), "файл занят соседним процессом — должно быть видно отсюда");
         drop(other);

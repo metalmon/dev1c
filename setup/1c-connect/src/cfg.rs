@@ -227,7 +227,7 @@ pub fn same_base(a: &str, b: &str) -> bool {
 /// `C:\Bases\Buh\.` обязан снять и точку, и открывшийся за ней разделитель, а
 /// не остановиться после первого шага. Регистр — только на Windows, доводы у
 /// `same_base`.
-fn normalize_base(path: &str) -> String {
+pub(crate) fn normalize_base(path: &str) -> String {
     let mut p = path.trim();
     loop {
         if let Some(rest) = p.strip_suffix('\\').or_else(|| p.strip_suffix('/')) {

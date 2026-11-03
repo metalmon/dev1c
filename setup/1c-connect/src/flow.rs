@@ -11,6 +11,10 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 pub struct Deps<'a> {
+    /// Папка проекта — замок проекта (`lock`) считает ключ от неё, не от
+    /// машины (решение владельца 6, план «Модель соединений», задача 7):
+    /// работа по одному заказчику не отказывает четырём остальным.
+    pub dir: &'a Path,
     pub call: &'a dyn Fn(&str, Value) -> Result<Reply, String>,
     pub platform_running: &'a dyn Fn() -> usize,
     pub push: &'a dyn Fn(&str) -> Result<String, String>,
@@ -165,9 +169,10 @@ pub fn check_mark(tree_format: Option<&str>, ours: Option<&str>) -> Mark {
 /// Та же точка входа, что у агента и окна (`project::hold`) — без неё
 /// `export_with`/`import_with`, самые длинные операции, не видели бы
 /// межпроцессную часть замка вовсе, и своя формулировка отказа задвоила бы
-/// ту, что уже в `project.rs`.
-fn lock(what: &str) -> Result<crate::project::Hold, String> {
-    crate::project::hold(what)
+/// ту, что уже в `project.rs`. Ключ замка — от папки проекта (`dir`), не от
+/// машины: иначе выгрузка одного заказчика отказывала бы четырём остальным.
+fn lock(what: &str, dir: &Path) -> Result<crate::project::Hold, String> {
+    crate::project::hold(what, dir)
 }
 
 /// cf_decompile в src, затем project_push.
@@ -179,7 +184,7 @@ fn lock(what: &str) -> Result<crate::project::Hold, String> {
 /// самом деле, человек видит секундомером в карточке окна, а после —
 /// строкой «Готово за …».
 pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<String, String> {
-    let _g = lock("project_push")?;
+    let _g = lock("project_push", d.dir)?;
     if d.dry_run {
         log(format!("план: cf_decompile → src, затем {} (project_push)", d.push_plan));
         return Ok("план напечатан, на машине ничего не менялось".into());
@@ -203,7 +208,7 @@ pub fn export_with(d: &Deps, message: &str, log: &dyn Fn(String)) -> Result<Stri
 
 /// project_pull, затем cf_load инкрементом.
 pub fn import_with(d: &Deps, log: &dyn Fn(String)) -> Result<String, String> {
-    let _g = lock("project_pull")?;
+    let _g = lock("project_pull", d.dir)?;
     if d.dry_run {
         log("план: project_pull (git pull --rebase), затем cf_load --increment из src".into());
         return Ok("план напечатан, на машине ничего не менялось".into());
@@ -276,6 +281,7 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
         })
     };
     let d = Deps {
+        dir: &p.dir,
         call: &call,
         platform_running: &crate::bridge::configurator_count,
         push: &push,
@@ -330,6 +336,12 @@ mod tests {
     use std::cell::RefCell;
 
     struct Fake {
+        // Папка проекта для `Deps::dir`: фиктивная и не обязана существовать
+        // — замок (`lock_key`) строится из текста пути, на диск не смотрит.
+        // Фиксированный путь, не временный каталог: тесты этого модуля идут
+        // под общим `serial()`, так что делить его незачем, а внешним тестам
+        // занятости (`export_is_told_busy_like_any_tool`) есть что назвать.
+        dir: std::path::PathBuf,
         calls: RefCell<Vec<String>>,
         reply: RefCell<Vec<(String, bool)>>, // answers in order
         running: usize,
@@ -342,6 +354,7 @@ mod tests {
     impl Fake {
         fn new(replies: &[(&str, bool)]) -> Fake {
             Fake {
+                dir: std::env::temp_dir().join("dev1c-flow-test-project"),
                 calls: RefCell::new(vec![]),
                 reply: RefCell::new(replies.iter().map(|(t, e)| (t.to_string(), *e)).collect()),
                 running: 0,
@@ -374,6 +387,7 @@ mod tests {
             // не падает.
             let mark_check = || -> Option<Mark> { None };
             f(&Deps {
+                dir: &self.dir,
                 call: &call,
                 platform_running: &platform_running,
                 push: &push,
@@ -388,11 +402,12 @@ mod tests {
         }
     }
 
-    /// `export_with`/`import_with` take `project::LOCK` as their first line
-    /// (`lock()` above, even on the `dry_run` branch) — cargo runs this
-    /// module's tests in parallel in one binary, so any overlap makes the
-    /// loser see «занято» and panic on `.unwrap()`. One mutex serialises
-    /// them; production code is untouched.
+    /// `export_with`/`import_with` take the project lock as their first line
+    /// (`lock()` above, even on the `dry_run` branch), keyed by `Fake`'s fixed
+    /// `dir` — cargo runs this module's tests in parallel in one binary, so
+    /// any overlap on that same folder makes the loser see «занято» and
+    /// panic on `.unwrap()`. One mutex serialises them; production code is
+    /// untouched.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -480,11 +495,8 @@ mod tests {
     #[test]
     fn export_is_told_busy_like_any_tool() {
         let _s = serial();
-        let _g = crate::project::LOCK.try_lock().unwrap_or_else(|e| match e {
-            std::sync::TryLockError::Poisoned(g) => g.into_inner(),
-            e => panic!("{e}"),
-        });
         let f = Fake::new(&[]);
+        let _g = crate::project::hold("занято другим", &f.dir).unwrap();
         let e = f.run(|d| export_with(d, "x", &|_| {})).unwrap_err();
         assert!(e.contains("занято"), "{e}");
     }

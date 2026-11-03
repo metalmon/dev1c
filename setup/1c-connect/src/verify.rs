@@ -911,22 +911,21 @@ fn ago(d: std::time::Duration) -> String {
 /// и это не повод его поднимать: спека прямо запрещает холодный старт ради
 /// факта (28 с), а мост сам отмечает, что раннер отвечал агенту, — это
 /// знание бесплатно (`RunnerState::Idle`, `runner_fact`).
-pub fn runner_evidence() -> Option<RunnerState> {
-    evidence_from(busy_now(), crate::bridge::runner_answered_ago())
+pub fn runner_evidence(dir: &std::path::Path) -> Option<RunnerState> {
+    evidence_from(busy_now(dir), crate::bridge::runner_answered_ago())
 }
 
-/// Идёт ли под замком проекта долгая операция, и какая — в памяти (этот
+/// Идёт ли под замком ЭТОЙ ПАПКИ долгая операция, и какая — в памяти (этот
 /// процесс) или межпроцессно (`project::file_lock_busy`, Important 4
-/// финального ревью): до этой правки факт знал только про свой же процесс, и
+/// финального ревью): до той правки факт знал только про свой же процесс, и
 /// расходился с `project::facts_locked`, которая под тем же замком честно
-/// отказывает «занято», когда файл держит сосед. Своя `DOING` не знает
-/// имени чужой операции — в межпроцессном случае текст тот же «другая
-/// операция», что и у пустой `DOING` этого процесса.
-fn busy_now() -> Option<String> {
-    let mem_busy = matches!(crate::project::LOCK.try_lock(), Err(std::sync::TryLockError::WouldBlock));
-    if mem_busy || crate::project::file_lock_busy() {
-        let what = crate::project::doing();
-        return Some(if what.is_empty() { "другая операция".into() } else { what.to_string() });
+/// отказывает «занято», когда файл держит сосед. Папка — из `dir`, а не
+/// машина целиком (задача 7 плана «Модель соединений»): занятость чужого
+/// соединения не красит набор готовности ЭТОГО.
+fn busy_now(dir: &std::path::Path) -> Option<String> {
+    if crate::project::folder_busy(dir) || crate::project::file_lock_busy(dir) {
+        let what = crate::project::doing(dir);
+        return Some(if what.is_empty() { "другая операция".into() } else { what });
     }
     None
 }
@@ -1188,7 +1187,7 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
         // отметка моста, что раннер отвечал агенту): спека прямо запрещает
         // холодный старт (28 с) ради факта — мост отдаёт то же знание даром,
         // как только раннер хоть раз ответит агенту.
-        runner_fact(&runner_evidence().unwrap_or(RunnerState::Idle))
+        runner_fact(&runner_evidence(std::path::Path::new(&h.project)).unwrap_or(RunnerState::Idle))
     });
     v.push(project_fact(ctx, &tools));
     v.push(base_fact(&h.base_path, base_exists_on_disk(&h.base_path)));
@@ -1342,7 +1341,7 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
     // же причине, что и публикация. Открытый сеанс 1С сюда больше не входит
     // (решение владельца 26.10): к базе мы идём и спрашиваем, а откажет она
     // НАМ — чужого сеанса это не тронет.
-    let busy = busy_reason(crate::project::doing());
+    let busy = busy_reason(&crate::project::doing(std::path::Path::new(&h.project)));
     let base_url = ctx.cfg.base_url();
     let gitea_url = ctx.cfg.gitea_url().map(str::to_string);
     let web_port = ctx.cfg.http_port();
@@ -3055,14 +3054,15 @@ mod tests {
     }
 
     /// Пока идёт долгая операция, знание о раннере — «занят», и никакой
-    /// пробы: мьютекс проекта держит именно она.
+    /// пробы: замок ЭТОЙ папки держит именно она.
     #[test]
     fn evidence_reports_busy_while_the_project_lock_is_held() {
         let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let held = crate::project::LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        match runner_evidence() {
+        let dir = std::env::temp_dir().join(format!("onec-evidence-busy-{}", std::process::id()));
+        let held = crate::project::hold("project_push", &dir).unwrap_or_else(|e| panic!("{e}"));
+        match runner_evidence(&dir) {
             Some(RunnerState::Busy(_)) => {}
-            other => panic!("мьютекс проекта занят, а знание о раннере {other:?}"),
+            other => panic!("замок папки занят, а знание о раннере {other:?}"),
         }
         drop(held);
     }
@@ -3081,11 +3081,12 @@ mod tests {
     /// быть выставлена — полагаться на её чистоту здесь нечестно. Мьютекс
     /// проекта настоящий (`busy_now`): его в этом тесте никто не держит, а
     /// `TEST_SERIAL`, как у соседнего теста, не даёт двум проверкам реального
-    /// `project::LOCK` идти параллельно.
+    /// замка папки (`project::hold`/`BUSY`) идти параллельно.
     #[test]
     fn the_runner_is_never_cold_started_for_a_fact() {
         let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let ev = evidence_from(busy_now(), None);
+        let dir = std::env::temp_dir().join(format!("onec-cold-start-{}", std::process::id()));
+        let ev = evidence_from(busy_now(&dir), None);
         assert_eq!(ev, None, "мьютекс свободен, а мост «молчит» — ровно то условие, которое раньше поднимало пробу");
         let t0 = std::time::Instant::now();
         // То же выражение, что и в `gather`: знание или `Idle`, без пробы.
@@ -3094,24 +3095,28 @@ mod tests {
         assert!(c.ok && c.info && c.detail.contains("не поднимался"), "{c:?}");
     }
 
-    /// Important 4 финального ревью: `busy_now` до этой правки знал только про мьютекс в памяти —
-    /// занятый межпроцессный `project.lock` (тот же файл, что честно отказывает `project::facts_locked`)
-    /// молчал бы как свободный. Берём файл напрямую, как бы другой процесс, не трогая `project::LOCK`
-    /// в памяти этого процесса вовсе, — `busy_now` обязан увидеть занятость через межпроцессную часть.
+    /// Important 4 финального ревью: `busy_now` до той правки знал только про мьютекс в памяти —
+    /// занятый межпроцессный `project-<ключ>.lock` (тот же файл, что честно отказывает `project::facts_locked`)
+    /// молчал бы как свободный. Берём файл напрямую, как бы другой процесс, не трогая замок в
+    /// памяти этого процесса вовсе, — `busy_now` обязан увидеть занятость через межпроцессную часть.
     #[test]
     fn busy_now_sees_a_cross_process_file_lock_too() {
         let _serial = crate::project::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("onec-busy-now-file-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        crate::project::set_lock_target(&dir);
-        assert_eq!(busy_now(), None, "файл свободен — не занято");
-        let other = crate::project::file_lock(&dir.join("project.lock")).unwrap().expect("замок свободен в начале теста");
-        assert_eq!(busy_now().as_deref(), Some("другая операция"), "файл занят соседним процессом — должно быть видно отсюда");
+        let state = std::env::temp_dir().join(format!("onec-busy-now-file-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        crate::project::set_lock_target(&state);
+        // Папка проекта — отдельная от каталога состояния; имя файла замка
+        // строится от неё тем же ключом, что берёт сам `hold` (`lock_key`).
+        let project = state.join("проект");
+        assert_eq!(busy_now(&project), None, "файл свободен — не занято");
+        let path = state.join(format!("project-{}.lock", crate::project::lock_key(&project)));
+        let other = crate::project::file_lock(&path).unwrap().expect("замок свободен в начале теста");
+        assert_eq!(busy_now(&project).as_deref(), Some("другая операция"), "файл занят соседним процессом — должно быть видно отсюда");
         drop(other);
-        assert_eq!(busy_now(), None, "файл отпущен — снова свободно");
+        assert_eq!(busy_now(&project), None, "файл отпущен — снова свободно");
         crate::project::clear_lock_target_for_test();
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&state);
     }
 
     /// Развилка целиком, без глобалов: занятость старше живого ответа, а без

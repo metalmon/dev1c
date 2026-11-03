@@ -5,6 +5,7 @@
 use crate::cfg::Cfg;
 use crate::single_instance;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -811,25 +812,47 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
 /// Флаг отмены для CLI и моста: его никто не взводит — окно (Task 4) заведёт свой.
 pub static NEVER: AtomicBool = AtomicBool::new(false);
 
-/// Один проект — один процесс за раз. Межпроцессная часть этого же обещания
-/// — `LOCK_TARGET`/`hold` ниже: сам `LOCK` видит только потоки одного
-/// процесса, а у рабочего места их скоро станет несколько (окно, `serve`,
-/// `connect`, подкоманда `mcp`).
-pub static LOCK: Mutex<()> = Mutex::new(());
+/// Ключ замка папки: нормализованный путь (`cfg::normalize_base` — тот же
+/// нормализатор, что держит запрет «одна база — одна карточка», второй
+/// копии правила в крейте быть не должно), очищенный до безопасных для
+/// имени файла и именованного мьютекса символов (`single_instance::clean`,
+/// им уже строятся ключи замка рабочего места). Разное написание одной и
+/// той же папки даёт один ключ, а разные папки — разные: отсюда «ключ
+/// замка считается от папки проекта» (задача 7 плана «Модель соединений»).
+pub(crate) fn lock_key(dir: &Path) -> String {
+    single_instance::clean(&crate::cfg::normalize_base(&dir.to_string_lossy()))
+}
+
+/// Какие папки заняты прямо сейчас В ЭТОМ ПРОЦЕССЕ, и чем — ключ (`lock_key`)
+/// на имя операции; пустая строка — папка зарезервирована, но имя ещё не
+/// записано (см. `hold`). Замена одному `LOCK: Mutex<()>` на машину —
+/// решение владельца 6 (план «Модель соединений», задача 7): замок на
+/// машину значил, что работа по одному заказчику отказывала четырём
+/// остальным, а внутрипроцессный «один на машину» для нескольких папок —
+/// та же болезнь, что лечим снаружи, только внутри процесса.
+static BUSY: std::sync::LazyLock<Mutex<HashMap<String, String>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Тестовый серилизатор: cargo гоняет тесты в одном бинарнике параллельно,
-/// а `LOCK` — один глобал на процесс. Берётся первым во всех тестах этого
-/// файла и `flow.rs`, что держат или оспаривают `LOCK` — иначе сосед,
-/// попавший в то же окно, получает «занято» и падает на `.unwrap()`.
+/// а `BUSY`/`LOCK_TARGET` — глобалы на процесс. Берётся первым во всех
+/// тестах этого файла и `flow.rs`, что держат или оспаривают замок папки
+/// либо делят общую `LOCK_TARGET`, — иначе сосед получает «занято» и падает
+/// на `.unwrap()`.
 #[cfg(test)]
 pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
 
-static DOING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-const DOING_NAMES: [&str; 4] = ["", "project_status", "project_pull", "project_push"];
+/// Что сейчас идёт в этой папке под замком (пусто — ничего). Ключ тот же,
+/// что строит и берёт сам замок (`lock_key`) — иначе имя могло бы разойтись
+/// с тем, что держит занятость.
+pub fn doing(dir: &Path) -> String {
+    BUSY.lock().unwrap_or_else(|e| e.into_inner()).get(&lock_key(dir)).cloned().unwrap_or_default()
+}
 
-/// Что сейчас идёт под мьютексом (пусто — ничего).
-pub fn doing() -> &'static str {
-    DOING_NAMES[DOING.load(std::sync::atomic::Ordering::Relaxed)]
+/// Занята ли эта папка прямо сейчас в этом процессе — быстрая проба без
+/// удержания, как раньше отвечал `LOCK.try_lock()`. Нужна `verify::busy_now`
+/// отдельно от файла: до файла дело может и не дойти (разовые команды без
+/// цели, `LOCK_TARGET` не задана), а до памяти — всегда.
+pub fn folder_busy(dir: &Path) -> bool {
+    BUSY.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&lock_key(dir))
 }
 
 /// Готовая строка отказа — одна формулировка на все пути: мьютекс в памяти,
@@ -838,12 +861,15 @@ fn busy(what: &str) -> String {
     format!("занято: идёт {}", if what.is_empty() { "другая операция" } else { what })
 }
 
-/// Каталог, в котором `hold` держит файл замка (`<dir>/project.lock`).
-/// Выставляется один раз при старте долгоживущего процесса — окна, `serve`,
-/// `connect`, будущей подкоманды `mcp`. Разовые команды (`status`, `example`,
-/// `check`) её не зовут: они и так serialised через `LOCK` в своём же
-/// процессе, а межпроцессный замок им не нужен (спека, «программа не
-/// задерживает обычную работу человека»).
+/// Каталог, в котором `hold` держит файлы замка — один на папку проекта
+/// (`<dir>/project-<ключ>.lock`, `lock_key`), а не один на всех: иначе
+/// работа по одной папке снова отказывала бы четырём остальным. Сам каталог
+/// общий — состояние рабочего места (`Kit::state`), выставляется один раз
+/// при старте долгоживущего процесса (окна, `serve`, `connect`, будущей
+/// подкоманды `mcp`). Разовые команды (`status`, `example`, `check`) её не
+/// зовут: межпроцессный замок им не нужен (спека, «программа не
+/// задерживает обычную работу человека»), а в памяти их и так разделяет
+/// `BUSY` по ключу папки.
 static LOCK_TARGET: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn set_lock_target(dir: &Path) {
@@ -862,9 +888,9 @@ pub(crate) fn clear_lock_target_for_test() {
 
 /// Замок проекта, пережививший второй процесс: обёртка над тем же приёмом,
 /// что `single_instance` (именованный мьютекс на Windows, `flock` на Linux),
-/// вынесенным туда, чтобы его звали оба замка. Файл — свой
-/// (`<state>/project.lock`), не каталог состояния: тот уже держит замок
-/// рабочего места, и окно заперло бы само себя.
+/// вынесенным туда, чтобы его звали оба замка. Путь — свой у каждой папки
+/// проекта (`<state>/project-<ключ>.lock`), не каталог состояния целиком: тот
+/// уже держит замок рабочего места, и окно заперло бы само себя.
 pub type FileLock = single_instance::Guard;
 
 /// `None` — файл уже занят другим процессом.
@@ -872,72 +898,83 @@ pub fn file_lock(path: &Path) -> std::io::Result<Option<FileLock>> {
     single_instance::file_lock(path)
 }
 
-/// Держит ли межпроцессную часть замка СЕЙЧАС какой-то другой процесс — как
-/// бы спросил `hold`, но без удержания: взялся — значит свободен, и
-/// отпускаем сразу же. Important 4 финального ревью: `verify::busy_now`
-/// знал только про мьютекс в памяти, своего же процесса — с тех пор, как
-/// замок стал межпроцессным (`set_lock_target`/`project.lock`), это
-/// разошлось с `project::facts_locked`, которая под тем же замком честно
-/// отказывает «занято» на чужом файле. Две поверхности про один факт не
-/// должны расходиться молча — это расхождение завела сама эта ветка.
-/// Без цели (`set_lock_target` не звали) — занятости и спрашивать не у
-/// кого, `false`.
-pub fn file_lock_busy() -> bool {
+/// Держит ли межпроцессную часть замка этой папки СЕЙЧАС какой-то другой
+/// процесс — как бы спросил `hold`, но без удержания: взялся — значит
+/// свободен, и отпускаем сразу же. Важно 4 финального ревью задачи 2:
+/// `verify::busy_now` знал только про мьютекс в памяти, своего же процесса —
+/// с тех пор, как замок стал межпроцессным, это расходилось с
+/// `project::facts_locked`, которая под тем же замком честно отказывает
+/// «занято» на чужом файле. Две поверхности про один факт не должны
+/// расходиться молча. Без цели (`set_lock_target` не звали) — занятости и
+/// спрашивать не у кого, `false`.
+pub fn file_lock_busy(dir: &Path) -> bool {
     let target = LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match target {
         None => false,
-        Some(dir) => matches!(file_lock(&dir.join("project.lock")), Ok(None)),
+        Some(state) => matches!(file_lock(&state.join(format!("project-{}.lock", lock_key(dir)))), Ok(None)),
     }
 }
 
-/// Взятый замок проекта: мьютекс в памяти и, если задана цель, файл на
-/// диске. Держите до конца операции — ранний `drop` снимает оба раньше
-/// срока. Поля объявлены файлом первым, мьютексом последним: Rust роняет их
-/// в порядке объявления, и внутренний мьютекс обязан освободиться ПОЗЖЕ
-/// внешнего файла (Minor 6 финального ревью: прежняя прозы утверждала
-/// обратное — что внешние ворота открываются позже внутренних, хотя код
-/// всегда делал наоборот). Будь порядок перевёрнут, сосед по этому же
-/// процессу взял бы `LOCK` раньше, чем файл успел освободиться, упёрся бы в
+/// Взятый замок проекта: мьютекс в памяти (`BUSY`, по ключу папки) и, если
+/// задана цель, файл на диске. Держите до конца операции — ранний `drop`
+/// снимает оба раньше срока.
+///
+/// `Drop` снимает файл ПЕРВЫМ и только потом убирает запись из `BUSY` — явно
+/// в теле, а не порядком полей (прежняя версия полагалась на порядок
+/// объявления, и прозу под ней правили дважды, Minor 6 финального ревью
+/// задачи 2 — порядок стоит называть там, где он на самом деле решается).
+/// Будь порядок перевёрнут, сосед по этому же процессу и той же папке увидел
+/// бы её свободной в `BUSY` раньше, чем файл успел освободиться, упёрся бы в
 /// ещё не снятый файл и получил бы ложное «другая операция».
 pub struct Hold {
-    #[allow(dead_code)]
     file: Option<FileLock>,
-    #[allow(dead_code)]
-    mem: std::sync::MutexGuard<'static, ()>,
+    key: String,
 }
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        DOING.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.file = None;
+        BUSY.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
     }
 }
 
-/// Берёт замок проекта: сперва мьютекс в памяти — быстрый путь и он же
-/// ловит соседний поток этого же процесса раньше, чем дело дойдёт до файла;
-/// затем, если `set_lock_target` звали, файл на диске — межпроцессная часть.
-/// Без цели (разовые команды) замок остаётся в памяти, как и был до этой
-/// задачи.
-pub fn hold(what: &str) -> Result<Hold, String> {
-    use std::sync::atomic::Ordering::Relaxed;
-    let mem = match LOCK.try_lock() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return Err(busy(doing())),
-    };
+/// Берёт замок проекта: сперва место в `BUSY` по ключу папки — быстрый путь,
+/// и он же ловит соседний поток этого же процесса НА ТОЙ ЖЕ ПАПКЕ раньше,
+/// чем дело дойдёт до файла, а другую папку не трогает вовсе (решение
+/// владельца 6); затем, если `set_lock_target` звали, файл на диске —
+/// межпроцессная часть, тоже по ключу папки. Без цели (разовые команды)
+/// замок остаётся в памяти, как и был до этой задачи.
+pub fn hold(what: &str, dir: &Path) -> Result<Hold, String> {
+    let key = lock_key(dir);
+    {
+        let mut busy_map = BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(doing) = busy_map.get(&key) {
+            return Err(busy(doing));
+        }
+        // Резерв места сразу — имя пишется ниже, только когда оба слоя
+        // взяты (как и раньше: до этого момента соперник видит папку занятой,
+        // но не читает имя чужой операции как своё).
+        busy_map.insert(key.clone(), String::new());
+    }
     let target = LOCK_TARGET.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let file = match target {
         None => None,
-        Some(dir) => match file_lock(&dir.join("project.lock")) {
+        Some(state) => match file_lock(&state.join(format!("project-{key}.lock"))) {
             Ok(Some(g)) => Some(g),
-            // Другой процесс держит файл — чей именно, отсюда не видно
-            // (`doing()` знает только про этот процесс), поэтому «другая
-            // операция»: готовая, не выдуманная вторая формулировка.
-            Ok(None) => return Err(busy(doing())),
-            Err(e) => return Err(e.to_string()),
+            // Другой процесс держит файл — чей именно, отсюда не видно,
+            // поэтому «другая операция»: готовая, не выдуманная формулировка.
+            Ok(None) => {
+                BUSY.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+                return Err(busy(""));
+            }
+            Err(e) => {
+                BUSY.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+                return Err(e.to_string());
+            }
         },
     };
-    DOING.store(DOING_NAMES.iter().position(|n| *n == what).unwrap_or(1), Relaxed);
-    Ok(Hold { mem, file })
+    BUSY.lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone(), what.to_string());
+    Ok(Hold { file, key })
 }
 
 /// Состояние проекта для окна: те же факты и под тем же замком, что отдаёт
@@ -956,22 +993,22 @@ pub fn facts_locked(p: &Project) -> Result<Facts, String> {
     // (наблюдение владельца 30.10: «я только включил, какой project_status?»).
     // Соперник за замок по-прежнему получает отказ, просто «другая операция»,
     // и это правда: имени у чтения нет.
-    let _h = hold_read()?;
+    let _h = hold_read(&p.dir)?;
     facts(p)
 }
 
-/// Замок на время чтения — отдельной функцией, а не `hold("")` по месту:
-/// правило «чтение себя операцией не объявляет» держится тогда сигнатурой, а
-/// не внимательностью следующего читателя.
-fn hold_read() -> Result<Hold, String> {
-    hold("")
+/// Замок на время чтения — отдельной функцией, а не `hold("", dir)` по
+/// месту: правило «чтение себя операцией не объявляет» держится тогда
+/// сигнатурой, а не внимательностью следующего читателя.
+fn hold_read(dir: &Path) -> Result<Hold, String> {
+    hold("", dir)
 }
 
 /// Вызов инструмента моста: `(текст, isError)`. Занято — ответ, не очередь.
 pub fn call(p: &Project, tool: &str, args: &Value) -> (String, bool) {
     // A panic inside a tool poisons the mutex; the project is not broken by
     // that, so a poisoned lock is simply taken (see `hold`).
-    let _h = match hold(tool) {
+    let _h = match hold(tool, &p.dir) {
         Ok(h) => h,
         Err(e) => return (e, true),
     };
@@ -1261,7 +1298,7 @@ mod tests {
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_t, p) = fixture();
         let _ = std::thread::spawn(|| {
-            let _g = LOCK.lock().unwrap();
+            let _g = BUSY.lock().unwrap();
             panic!("tool blew up while holding the lock");
         })
         .join();
@@ -1775,10 +1812,7 @@ mod tests {
     fn second_caller_is_told_busy_not_queued() {
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_t, p) = fixture();
-        let guard = LOCK.try_lock().unwrap_or_else(|e| match e {
-            std::sync::TryLockError::Poisoned(g) => g.into_inner(),
-            e => panic!("{e}"),
-        });
+        let guard = hold("project_push", &p.dir).unwrap();
         let (text, err) = call(&p, "project_status", &Value::Null);
         assert!(err && text.contains("занято"), "{text}");
         drop(guard);
@@ -1802,8 +1836,9 @@ mod tests {
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let d = tempdir::Dir::new();
         set_lock_target(d.path());
-        let g = hold("project_push").unwrap();
-        assert_eq!(hold("project_status").err(), Some("занято: идёт project_push".to_string()));
+        let (_t, p) = fixture();
+        let g = hold("project_push", &p.dir).unwrap();
+        assert_eq!(hold("project_status", &p.dir).err(), Some("занято: идёт project_push".to_string()));
         drop(g);
         // Цель — глобал на процесс: следующий тест её не должен застать —
         // ставит её только сам (`without_a_target_the_lock_is_in_memory_only`).
@@ -1818,13 +1853,14 @@ mod tests {
     #[test]
     fn a_read_does_not_announce_itself_as_an_operation() {
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let g = hold_read().unwrap();
-        assert_eq!(doing(), "", "чтение не вправе объявлять себя операцией");
+        let (_t, p) = fixture();
+        let g = hold_read(&p.dir).unwrap();
+        assert_eq!(doing(&p.dir), "", "чтение не вправе объявлять себя операцией");
         drop(g);
         // А настоящая операция по-прежнему называется: отказ соперника и
         // строка набора на этом и держатся.
-        let g = hold("project_push").unwrap();
-        assert_eq!(doing(), "project_push");
+        let g = hold("project_push", &p.dir).unwrap();
+        assert_eq!(doing(&p.dir), "project_push");
         drop(g);
     }
 
@@ -1832,6 +1868,39 @@ mod tests {
     fn without_a_target_the_lock_is_in_memory_only() {
         // Разовые команды (`status`, `example`) цели не ставят: отказа быть не должно.
         let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let _g = hold("project_status").unwrap();
+        let (_t, p) = fixture();
+        let _g = hold("project_status", &p.dir).unwrap();
+    }
+
+    #[test]
+    fn two_folders_do_not_wait_for_each_other() {
+        let (ta, tb) = (tempdir::Dir::new(), tempdir::Dir::new());
+        let dir_a = ta.path().to_path_buf();
+        let dir_b = tb.path().to_path_buf();
+        let a = file_lock(&dir_a).unwrap().expect("первая папка свободна");
+        let b = file_lock(&dir_b).unwrap();
+        assert!(b.is_some(), "замок другой папки не должен ждать первую");
+        assert!(file_lock(&dir_a).unwrap().is_none(), "а своя папка занята, пока держат");
+        drop(a);
+        drop(b);
+    }
+
+    /// Та же гарантия, но через настоящую поверхность (`call`, та же, что у
+    /// агента и моста), а не через низкоуровневый `file_lock` напрямую:
+    /// решение владельца 6 — работа по одному заказчику не отказывает
+    /// четырём остальным, потому что у соединений разные папки, и замок
+    /// делит их по папке, а не по машине.
+    #[test]
+    fn two_projects_do_not_block_each_other() {
+        let _s = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_ta, pa) = fixture();
+        let (_tb, pb) = fixture();
+        let guard = hold("project_push", &pa.dir).unwrap();
+        // Папка B свободна, хотя папка A сейчас занята.
+        let (text, err) = call(&pb, "project_status", &Value::Null);
+        assert!(!err, "{text}");
+        // А своя папка всё ещё занята.
+        assert_eq!(hold("project_status", &pa.dir).err(), Some("занято: идёт project_push".to_string()));
+        drop(guard);
     }
 }

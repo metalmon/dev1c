@@ -573,7 +573,7 @@ pub async fn pipe_jsonrpc<S>(
     // не молчит, чтобы разработчик не решил, что и `project_status` исчез.
     if rules.inject && !cfg.allows_write() {
         log(Event::Say(format!(
-            "{who}: потолок записи — «только чтение», инструменты из [host] tools сняты, свои git-инструменты (project_status/pull/push) работают как раньше (переключите «Запись в базу» → «Чтение и запись», чтобы вернуть первые)"
+            "{who}: потолок записи — «только чтение», инструменты из списка tools сняты, свои git-инструменты (project_status/pull/push) работают как раньше (переключите «Запись в базу» → «Чтение и запись», чтобы вернуть первые)"
         )));
     }
     // Первый ребёнок — тем же `cmd`, что передал вызывающий; следующие (если
@@ -1219,7 +1219,7 @@ async fn handle_request(
             } else if read_only {
                 VRUNNER_CEILING_TEXT.to_string()
             } else {
-                format!("инструмент {tool} выключен в 1c-connect.toml ([host] tools)")
+                format!("инструмент {tool} выключен в 1c-connect.toml (поле tools соединения)")
             };
             let _ = out.send(jsonrpc::text_reply(&id, &text, true)).await;
             Ok(())

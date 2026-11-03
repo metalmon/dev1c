@@ -436,3 +436,141 @@ fn the_gate_never_switches_serving_back_on() {
     assert!(!ui.enabled.load(Ordering::Relaxed), "ворота обслуживание не включают");
     assert_eq!(ui.log.len(), log_before, "гасить было нечего — говорить не о чем");
 }
+
+// Задача 1 плана `2026-11-03-interface`: строка списка «Связь» — слово
+// состояния, отметка «текущее», признак записи.
+
+/// Спека, «Связь»: «нет» своей строки не имеет вовсе, «тикет выдан»
+/// показывается словом «ждёт разрешения», «разрешено» — миг без слова.
+/// Третий и четвёртый фолды («нет», «разрешено») докстрока `row` объясняет
+/// словами, а не тестом: `State` их не различает вовсе, проверять нечего.
+///
+/// Соединение нарочно НЕ локальное (`mode = "tunnel"`): умолчание
+/// `Connection::default()` — локальный режим (30.10), а у него своя пара
+/// слов, проверенная отдельным тестом ниже.
+#[test]
+fn row_folds_eight_contract_states_into_five_words() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    assert_eq!(row(&c, false, Some(&State::Up { since: Instant::now() })).state, "подключено");
+    assert_eq!(row(&c, false, Some(&State::Failed(String::new()))).state, "разорвано");
+    assert_eq!(row(&c, false, None).state, "ждёт разрешения");
+}
+
+/// Локальному соединению ни одно из пяти слов не годится: подключаться там
+/// не к кому, оба конца на этой машине. Словарь берём НЕ новый — тот, что у
+/// карточки состояния уже есть («MCP включены»/«MCP выключены»,
+/// `panel::card`), в короткой форме: имя соединения строка и так назвала.
+/// Вопрос владельца 3.11, из которого эта проверка и взялась.
+#[test]
+fn a_local_connection_speaks_about_tools_not_about_a_link() {
+    let local = Connection { mode: "local".into(), ..Default::default() };
+    assert_eq!(row(&local, true, Some(&State::Up { since: Instant::now() })).state, "включено");
+    assert_eq!(row(&local, true, None).state, "выключено");
+}
+
+/// Окно 380 точек: вторая строка (имя базы) — только у текущего
+/// соединения; у остальных её не поместить, не читая — разработчик с
+/// десятью заказчиками получил бы двадцать строк.
+#[test]
+fn only_the_current_row_carries_the_base_name() {
+    let c = Connection { base_path: r"C:\Bases\Buh".into(), ..Default::default() };
+    assert!(row(&c, true, None).base.is_some());
+    assert_eq!(row(&c, false, None).base, None, "окно 380 точек: двадцать строк не поместятся");
+}
+
+/// Review Focus брифа, задача 6: переключение текущей на соединение, у
+/// которого база на той стороне, — путь к базе пустой законно, и это не
+/// повод запирать окно. Здесь — соседний случай, что `row` на пустом пути
+/// отдаёт `None`, а не пустую строку.
+#[test]
+fn a_current_connection_with_the_base_on_the_other_side_shows_no_base_name() {
+    let c = Connection { base_path: String::new(), ..Default::default() };
+    assert_eq!(row(&c, true, None).base, None);
+}
+
+/// Заглушка-поиск состояния по имени: живого хранилища состояний на
+/// соединение в продукте пока нет (решение исполнителя задачи 1), и `list`
+/// в тестах кормят ею же.
+fn none(_: &str) -> Option<State> {
+    None
+}
+
+/// Одна роль (все соединения принимают) — подписей не бывает: список
+/// короткий специально, он проверяет только отсутствие подписей.
+fn cfg_all_accept() -> Cfg {
+    Cfg {
+        connections: vec![
+            Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+            Connection { name: "Лютик".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    }
+}
+
+/// По одному соединению на каждую из трёх групп — ровно то смешение,
+/// которое спрашивал владелец 3.11.
+fn cfg_accept_dial_local() -> Cfg {
+    Cfg {
+        connections: vec![
+            Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+            Connection { name: "Клевер".into(), mode: "tunnel".into(), role: "dial".into(), ..Default::default() },
+            Connection { name: "Эта машина".into(), mode: "local".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    }
+}
+
+/// То же смешение, но первым в файле стоит соединение с заданным именем —
+/// под заглушкой `none` оно (как и «Клевер») окажется «ждёт разрешения», и
+/// тест проверяет, что строка списка на первом месте — ЕГО строка, не
+/// подпись и не какая-то из groups.
+fn cfg_accept_dial_local_with_waiting(name: &str) -> Cfg {
+    Cfg {
+        connections: vec![
+            Connection { name: name.into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+            Connection { name: "Клевер".into(), mode: "tunnel".into(), role: "dial".into(), ..Default::default() },
+            Connection { name: "Эта машина".into(), mode: "local".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn captions_appear_only_when_the_list_holds_more_than_one_role() {
+    let one = list(&cfg_all_accept(), &none);
+    assert!(!one.iter().any(|e| matches!(e, Entry::Caption(_))), "одна роль — подписи не нужны");
+    let mixed = list(&cfg_accept_dial_local(), &none);
+    let captions: Vec<&str> = mixed
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Caption(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам", "На этой машине"]);
+}
+
+#[test]
+fn a_connection_waiting_for_permission_is_the_very_first_row() {
+    let l = list(&cfg_accept_dial_local_with_waiting("Василёк"), &none);
+    match &l[0] {
+        Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
+        Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
+    }
+}
+
+/// Подпись группы остаётся на месте, даже когда единственный её член
+/// ждёт разрешения и всплыл выше: подпись решает полный список, а не то,
+/// что осталось видимым под ней (докстрока `list`, правило 2).
+#[test]
+fn a_caption_survives_even_when_every_member_of_its_group_is_waiting() {
+    let l = list(&cfg_accept_dial_local_with_waiting("Василёк"), &none);
+    let captions: Vec<&str> = l
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Caption(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам", "На этой машине"]);
+}

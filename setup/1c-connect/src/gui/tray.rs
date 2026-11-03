@@ -1054,6 +1054,28 @@ mod tests {
         assert!(text.contains("write = \"read_write\""), "{text}");
     }
 
+    /// Окно отказывает на пути с `..` и НИЧЕГО не пишет. Своей проверки у окна для
+    /// этого нет и не нужно: «Сохранить» зовёт `cfg.validate()` (`save_host`), и
+    /// правило живёт в одном месте (`cfg::has_parent_component`). Тест стоит здесь
+    /// именно потому, что это свойство структурное: вынеси кто-нибудь `validate()` из
+    /// `save_host` — и окно начнёт молча писать путь, который обходит защиту «папка
+    /// принадлежит одному соединению». Проверено обратным ходом: со снятой проверкой
+    /// в `cfg.rs` этот тест падает.
+    #[test]
+    fn the_window_refuses_a_folder_with_a_parent_component_and_writes_nothing() {
+        let mut ui = Ui::for_test();
+        let before = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap_or_default();
+        let mut host = ui.cfg.current().clone();
+        host.project = r"C:\work\Buh\..\Buh2".into();
+        let e = save_host(&mut ui, host).unwrap_err();
+        assert!(e.contains(".."), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap_or_default(),
+            before,
+            "отказ не должен ничего записывать"
+        );
+    }
+
     /// Круг исправления задачи 3 (проверка безопасности на `c22b058`):
     /// ужесточение потолка не должно зависеть от того, годны ли остальные
     /// поля `ui.cfg` — иначе переключатель показал бы «Только чтение», пока

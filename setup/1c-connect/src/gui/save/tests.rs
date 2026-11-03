@@ -575,6 +575,25 @@ fn confirm_text_names_folders_and_keeps_full_paths_in_the_detail() {
     assert_eq!(detail, "C:\\Bases\\Buh → C:\\Bases\\УНФ");
 }
 
+/// Круг починки 3 задачи 16: прежний текст («Сохранить?») врал про кнопку,
+/// которую человек не нажимал — «Сделать текущим» получало слово
+/// «Сохранить». Текст обязан называть карточку (разработчик с десятью
+/// заказчиками должен видеть, какую выбрал), последствие (агент перестанет
+/// отвечать по прежней базе — сеанс перезапустится) и исход отказа
+/// (останется как было), и не называть переключение ошибкой или сбоем.
+#[test]
+fn confirm_switch_current_text_names_the_card_not_an_error() {
+    let (message, detail) = confirm_switch_current_text("Ромашка", "C:\\Bases\\Buh", "C:\\Bases\\Ромашка");
+    assert!(message.contains("«Ромашка»"), "{message}");
+    assert!(message.contains("перестанет отвечать по прежней базе"), "{message}");
+    assert!(message.contains("перезапустится"), "{message}");
+    assert!(message.contains("как было"), "{message}");
+    assert!(!message.to_lowercase().contains("ошиб"), "переключение — не поломка: {message}");
+    assert!(!message.to_lowercase().contains("сбо"), "переключение — не поломка: {message}");
+    assert!(!message.contains("Сохранить"), "человек нажал «Сделать текущим», не «Сохранить»: {message}");
+    assert_eq!(detail, "C:\\Bases\\Buh → C:\\Bases\\Ромашка");
+}
+
 #[test]
 fn what_a_person_typed_is_what_gets_written() {
     let saved = Connection { publication: "webserver".into(), ..Connection::default() };

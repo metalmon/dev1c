@@ -4,9 +4,9 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, note_line, quit, run_check, run_readiness, save_host, save_needs_confirm, save_tray_key,
-    start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab,
-    TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, note_line, quit, run_check,
+    run_readiness, save_host, save_needs_confirm, save_tray_key, start_session, stop_session, switch_current, tab_for_unsaved_switch,
+    theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
@@ -664,6 +664,13 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
         apply_switch_current(cx, name);
         return true;
     };
+    // Круг починки 3 задачи 16: механизм решения «спрашивать ли» —
+    // `save_needs_confirm`/`save_question`, тот же, что у «Сохранить» и у
+    // смены режима, но СЛОВА свои: человек нажал «Сделать текущим», не
+    // «Сохранить», и вопрос про сохранение здесь был бы неправдой —
+    // неправильный вопрос учит жать «да» не читая, это хуже отсутствия
+    // вопроса.
+    let old_path = ui.cfg.current().base_path.clone();
     match switch_current_outcome(blocked, save_needs_confirm(ui, &new_host)) {
         SwitchCurrentOutcome::Blocked => false,
         SwitchCurrentOutcome::Proceed => {
@@ -678,8 +685,18 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
             window::show_window(cx);
             let Some(w) = cx.global::<Ui>().window else { return true };
             let owned = name.to_string();
+            let (message, detail) = confirm_switch_current_text(name, &old_path, &new_host.base_path);
             let _ = w.update(cx, |_, window, cx| {
-                confirm_database_change(window, cx, &new_host, move |_window, cx| apply_switch_current(cx, &owned));
+                confirm_database_change_with_text(
+                    window,
+                    cx,
+                    &new_host,
+                    &message,
+                    &detail,
+                    "Да, сделать текущим",
+                    "Отмена",
+                    move |_window, cx| apply_switch_current(cx, &owned),
+                );
             });
             true
         }

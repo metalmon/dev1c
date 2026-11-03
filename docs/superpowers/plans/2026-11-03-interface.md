@@ -39,7 +39,12 @@
 
 **Интерфейсы:**
 - Потребляет: `cfg::Connection`, `session::State` (`is_up`, `Failed`), `Cfg::current()`.
-- Отдаёт: `pub fn row(c: &Connection, current: bool, l: Option<&State>) -> Row`, где `pub struct Row { pub name: String, pub state: &'static str, pub current: bool, pub write: bool, pub base: Option<String> }`. `base` заполнено только у текущего (вторая строка), у остальных `None`.
+- Отдаёт: `pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>) -> Vec<Entry>`, где `pub enum Entry { Caption(&'static str), Row(Row) }` — весь список вкладки, с подписями групп. И `pub fn row(c: &Connection, current: bool, l: Option<&State>) -> Row`, где `pub struct Row { pub name: String, pub state: &'static str, pub current: bool, pub write: bool, pub base: Option<String> }`. `base` заполнено только у текущего (вторая строка), у остальных `None`.
+
+**Список смешанный, и это его главное свойство** (вопрос владельца 3.11: «на первом экране будут же все режимы отображаться, где-то мы сервер, где-то сами подключаемся»). У аутсорсера в одном списке и те соединения, где он принимает, и те, где звонит сам, и локальное. Поэтому два правила, и оба проверяются тестами:
+
+1. **Подписи групп появляются, только когда ролей в списке больше одной.** Порядок групп неизменный: «Принимаю подключения», «Подключаюсь сам», «На этой машине». Одна роль — подписей нет вовсе: они не отвечают ни на один вопрос и съедают высоту окна 380×420.
+2. **Соединение, которое ждёт разрешения, — первая строка списка, выше всех подписей.** Это перерыв в работе, а не разряд: диалог человек мог закрыть не решив (спека, «Связь»), и возвращать его должно самое заметное место. Группа при этом его не теряет — он просто показан вне её.
 
 - [ ] **Шаг 1: красный тест на пять слов состояния**
 
@@ -77,9 +82,32 @@ fn only_the_current_row_carries_the_base_name() {
 }
 ```
 
-- [ ] **Шаг 4: реализовать `row`** в `link.rs`. Имя берётся из `Connection::name`; `base` — `cfg::base_name(&c.base_path)`, а при пустом пути (база на той стороне) — `None`; `write` — `c.write == "read_write"`.
-- [ ] **Шаг 5: прогнать оба теста** → PASS.
-- [ ] **Шаг 6: коммит** — `git add -A setup/1c-connect/src/gui/link.rs && git commit`.
+- [ ] **Шаг 4: красный тест на подписи и порядок**
+
+```rust
+#[test]
+fn captions_appear_only_when_the_list_holds_more_than_one_role() {
+    let one = list(&cfg_all_accept(), &none);
+    assert!(!one.iter().any(|e| matches!(e, Entry::Caption(_))), "одна роль — подписи не нужны");
+    let mixed = list(&cfg_accept_dial_local(), &none);
+    let captions: Vec<&str> = mixed.iter().filter_map(|e| match e { Entry::Caption(c) => Some(*c), _ => None }).collect();
+    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам", "На этой машине"]);
+}
+
+#[test]
+fn a_connection_waiting_for_permission_is_the_very_first_row() {
+    let l = list(&cfg_accept_dial_local_with_waiting("Василёк"), &none);
+    match &l[0] {
+        Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
+        Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
+    }
+}
+```
+
+- [ ] **Шаг 5: реализовать `row`** в `link.rs`. Имя берётся из `Connection::name`; `base` — `cfg::base_name(&c.base_path)`, а при пустом пути (база на той стороне) — `None`; `write` — `c.write == "read_write"`.
+- [ ] **Шаг 6: реализовать `list`** — группировка и порядок там же, вторым проходом по `cfg.connections`, без второго правила поиска.
+- [ ] **Шаг 7: прогнать все тесты задачи** → PASS.
+- [ ] **Шаг 8: коммит** — `git add -A setup/1c-connect/src/gui/link.rs && git commit`.
 
 ---
 

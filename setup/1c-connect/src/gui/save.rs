@@ -243,6 +243,23 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
 /// список печатается целиком из памяти (`Cfg::render`); блоки есть —
 /// дописывается РОВНО один новый блок (`cfg::connection_block`) в конец уже
 /// прочитанного текста, не трогая ни байта ни одного соседнего блока.
+///
+/// **Круг починки 1, Critical ревью.** Печать из памяти (`disk_count == 0`)
+/// угрожает чужому паролю ровно там, где его бережёт `write_checked`: если
+/// пароль какого-то соединения не расшифровался на этой машине
+/// (`load_unchecked`, `ui.cfg.undecryptable`), в памяти он лежит ПУСТОЙ
+/// строкой, а `store.seal("password", "")` отдаёт её пустой же — наивная
+/// печать записала бы это пустое поле на диск поверх настоящего шифртекста,
+/// безвозвратно и молча. Восстановление прежнего литерала (`previous_literal`
+/// /`set_named`) сюда не переносится: это была бы третья копия той же тонкой
+/// логики (уже дважды живёт в `write_checked`), и она разошлась бы с
+/// оригиналом на первой же его правке (ruling координатора). Вместо этого —
+/// отказ словами ДО какой-либо записи: человек и так в состоянии, где
+/// пароль на этой машине не читается, и ему нужно узнать об этом, а не
+/// получить молча испорченный файл. Пост-проверку записи (сверку
+/// расшифрованного с расшифрованным, как у `write_checked`) здесь не
+/// заводим — тот же довод: отказ до записи уже закрывает этот случай, и
+/// заводить третью такую проверку незачем.
 pub fn add_connection(ui: &mut Ui, role: &str) -> Result<String, String> {
     let path = ui.kit.state_path(cfg::FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -272,6 +289,23 @@ pub fn add_connection(ui: &mut Ui, role: &str) -> Result<String, String> {
 
     let store = store_for(&ui.kit)?;
     let written = if disk_count == 0 {
+        // Critical ревью круга починки 1: печать из памяти перезаписала бы
+        // чужой непрочитанный шифртекст пустой строкой (см. докстроку выше)
+        // — отказ словами раньше, чем `render` вообще позван.
+        if !ui.cfg.undecryptable.is_empty() {
+            let mut names: Vec<&str> = Vec::new();
+            for u in &ui.cfg.undecryptable {
+                if !names.contains(&u.connection.as_str()) {
+                    names.push(&u.connection);
+                }
+            }
+            let quoted = names.iter().map(|n| format!("«{n}»")).collect::<Vec<_>>().join(", ");
+            let (word, them) = if names.len() > 1 { ("карточек", "их") } else { ("карточки", "её") };
+            return Err(format!(
+                "добавить карточку сейчас нельзя: у {word} {quoted} пароль {} — откройте {them} в окне, введите пароль заново и повторите «Добавить»",
+                cfg::UNDECRYPTABLE_REASON
+            ));
+        }
         after.render(&store)?
     } else {
         let mut t = text;

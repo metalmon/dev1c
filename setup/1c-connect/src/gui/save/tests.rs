@@ -1104,6 +1104,46 @@ fn adding_a_card_before_the_first_save_writes_a_fresh_file() {
     assert_eq!(back.current, ui.cfg.current, "текущее соединение не сменилось");
 }
 
+/// Круг починки 1, Critical ревью: `add_connection` на файле без блоков
+/// `[[connection]]` (здесь — прежняя форма `[host]`, тот же нулевой счёт)
+/// печатает список целиком из памяти. Если пароль какого-то соединения не
+/// расшифровался на этой машине, он лежит в памяти ПУСТОЙ строкой
+/// (`ui.cfg.undecryptable` называет поле) — наивная печать записала бы это
+/// пустое поле на диск поверх настоящего шифртекста, безвозвратно и молча.
+/// Отказ обязан сработать ДО какой-либо записи, и файл обязан остаться
+/// байт в байт прежним.
+///
+/// «Обратный ход» (проверен руками при подготовке задачи, см. отчёт): без
+/// защиты (`if !ui.cfg.undecryptable.is_empty() { return Err(..) }` в
+/// `add_connection`) этот тест падает на первой строке — `unwrap_err()`
+/// паникует на `Ok("Соединение 1")`, потому что добавление молча
+/// проходит — а прежний шифртекст на диске в этот момент уже заменён
+/// пустым полем (`store.seal("password", "")` отдаёт пустую строку как
+/// есть, и она ушла на диск поверх настоящего шифртекста): ровно та потеря
+/// пароля, против которой писан круг починки.
+#[test]
+fn add_connection_refuses_instead_of_wiping_an_unreadable_password_on_the_old_file_shape() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let name = ui.cfg.current().name.clone();
+    let ciphertext = store.seal("password", "секрет с другой машины").unwrap();
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = format!("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\nserver = \"192.168.1.10:3393\"\npassword = {ciphertext:?}\n");
+    std::fs::write(&path, &before).unwrap();
+    assert_eq!(common::toml_render::count(&before, cfg::CONNECTION), 0, "фикстура: файл без блоков — прежняя форма");
+
+    // «Чужая машина»: пароль не открылся, поле пустое, имя — в списке
+    // непрочитанного, тем же приёмом, что у соседних тестов `save_host`.
+    ui.cfg.current_mut().password = String::new();
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new(&name, "password")];
+
+    let err = add_connection(&mut ui, "accept").unwrap_err();
+    assert!(err.contains(&name) && err.contains("пароль"), "{err}");
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, before, "отказ — файл не тронут ни на байт, прежний шифртекст цел");
+}
+
 /// Круг починки 1, находка Important 2 ревью: занятость имени смотрим не
 /// только по памяти (`Cfg::by_name`), но и по файлу — блок `to` мог
 /// появиться там рукой, пока окно открыто, и `ui.cfg` об этом не знает.

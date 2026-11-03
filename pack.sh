@@ -221,8 +221,9 @@ MCP_EXTENSION_MIN_VERSION=0.5.0
 mkdir -p "$CONNECT/mcp-1c"
 fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/MCP_HTTPService.cfe" "$CONNECT/mcp-1c/MCP_HTTPService.cfe"
 
-# Бинарь mcp-1c для комплекта — сборка форка (feenlace/mcp-1c на
-# D:\1c\projects\mcp-1c, ветка main), не upstream-релиз: коннектор
+# Бинарь mcp-1c для комплекта — сборка форка (metalmon/mcp-1c на
+# D:\1c\projects\mcp-1c, ветка main; feenlace/mcp-1c — это upstream, он здесь
+# заведён вторым remote и нашими правками не владеет), не upstream-релиз: коннектор
 # (bridge.rs::mcp_command) передаёт ребёнку --profile/--toolset/--access, а
 # upstream v1.23.0 этих ключей не знает вовсе (--help, замер 2.11) — ребёнок
 # умирает на старте. pack.sh ничего не собирает (см. заголовок файла) — путь
@@ -232,12 +233,46 @@ fetch "https://github.com/feenlace/mcp-1c/releases/download/$MCP_1C_VERSION/MCP_
 # -ldflags "-X main.version=$(git describe --tags)" (Makefile, VERSION ?= dev).
 MCP_1C_FORK_BIN=${MCP_1C_FORK_BIN:?путь к собранному mcp-1c.exe форка (windows-amd64), напр. D:\\1c\\projects\\mcp-1c\\bin\\mcp-1c.exe}
 [ -f "$MCP_1C_FORK_BIN" ] || { echo "pack.sh: MCP_1C_FORK_BIN=$MCP_1C_FORK_BIN не найден" >&2; exit 1; }
-# `git describe --tags` на ветке main форка на момент замера ведущего 2.11.
-# Не upstream-схема (1.23.x, выше) — и не придумана: теги до v1.9.2 в
-# репозитории форка лежат (их 77), но предками его HEAD не являются, так что
-# номер из них соврал бы о версии в бинаре. Изменился git describe на
-# момент сборки — меняется и эта строка, не наоборот.
-MCP_1C_FORK_VERSION=v1.6.0-14-g02d0fee
+# `git describe --tags` на ветке main форка. Не upstream-схема (1.23.x, выше) —
+# и не придумана: теги до v1.9.2 в репозитории форка лежат (их 77), но
+# предками его HEAD не являются, так что номер из них соврал бы о версии в
+# бинаре. Изменился git describe на момент сборки — меняется и эта строка, не
+# наоборот.
+#
+# Поправка замером 3.11: здесь стояло `v1.6.0-14-g02d0fee` — HEAD форка на
+# момент замера 2.11, — а эталонный комплект, собранный в тот же день, несёт
+# `v1.6.0-17-g34f6945` (его `tools.version`). То есть строка отстала от
+# комплекта на три коммита, и все три — наши: «Бизнес-набор получает
+# execute_query в режиме только чтения», «Бизнес-набору — спутники
+# execute_query», «Профиль generic не объявляет инструментов, которых не
+# обслуживает». Называем тот коммит, из которого собран бинарь в комплекте.
+#
+# Полный sha — рядом, и он здесь единственное место: CI собирает бинарь из
+# него (`.github/workflows/build.yml`, шаг «The fork's mcp-1c for the Windows
+# kit») и сверяет `git describe` с версией выше, чтобы комплект не врал о том,
+# что внутри. ВАЖНО: на 3.11 эти четыре коммита лежат только локально
+# (`metalmon/mcp-1c` главной веткой стоит на `741be20`), поэтому CI собрать их
+# не может и говорит об этом словами — комплект под Windows до публикации
+# собирается там, где лежит сборка.
+MCP_1C_FORK_VERSION=v1.6.0-17-g34f6945
+MCP_1C_FORK_COMMIT=34f69459184011db56f37c43182d68279c56994e
+# Сторож ровно против той беды, которой эта поправка и вызвана: бинарь собран из
+# HEAD, который ушёл вперёд объявленной версии, а комплект унёс старую строку в
+# `tools.version`. Проверяем, когда бинарь лежит ВНУТРИ проверки форка (путь
+# владельца `…\mcp-1c\bin\mcp-1c.exe`): сошёлся HEAD с объявленным коммитом —
+# молчим, разошёлся — отказ с обоими номерами. Собранный на стороне бинарь (CI
+# кладёт его рядом с деревом dev1c) проверку пропускает: сверять HEAD чужого
+# репозитория не с чем, и путать его с нашим — хуже, чем не проверить.
+fork_dir=$(dirname -- "$MCP_1C_FORK_BIN")
+if fork_top=$(git -C "$fork_dir" rev-parse --show-toplevel 2>/dev/null) \
+    && git -C "$fork_top" remote -v 2>/dev/null | grep -q 'mcp-1c'; then
+    fork_head=$(git -C "$fork_top" rev-parse HEAD)
+    [ "$fork_head" = "$MCP_1C_FORK_COMMIT" ] || {
+        echo "pack.sh: форк в $fork_top стоит на $fork_head, а pack.sh объявляет $MCP_1C_FORK_COMMIT ($MCP_1C_FORK_VERSION)." >&2
+        echo "pack.sh: это и есть расхождение, из-за которого комплект врал о версии своего mcp-1c. Либо соберите бинарь из объявленного коммита, либо обновите MCP_1C_FORK_COMMIT/MCP_1C_FORK_VERSION (их читает и CI)." >&2
+        exit 1
+    }
+fi
 cp "$MCP_1C_FORK_BIN" "$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe"
 # Сторож (шаг 1 брифа задачи 4): без --profile buh_3_0 в справке это не
 # сборка форка — а значит не тот бинарь, которого коннектор теперь требует.
@@ -246,10 +281,31 @@ cp "$MCP_1C_FORK_BIN" "$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe"
 # собранного комплекта со старым mcp-1c (обычный путь владельца) обходит
 # пересборку целиком, и без этого сторожа несовместимость всплыла бы только
 # у живого бухгалтера.
-mcp_help=$("$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe" --help 2>&1 || true)
-case "$mcp_help" in
+#
+# Два хода, и второй не прихоть: комплект под Windows собирает и CI, а там
+# упаковщик — Linux, где windows-бинарь не запускается вовсе (`--help` даёт не
+# справку, а отказ «не могу исполнить»). Поэтому: запустился — смотрим справку,
+# как раньше; не запустился — ищем то же слово в байтах бинаря. Байтовый ход
+# слабее на одну вещь, и это сказано честно: он не доказывает, что бинарь
+# СТАРТУЕТ, только что в нём есть профиль форка. Запуск windows-бинаря на
+# Linux-упаковщике всё равно недостижим, а на машине владельца работает
+# прежний, сильный ход.
+#
+# Слово выбрано замером 3.11, а не на глаз: в выпущенном
+# `mcp-1c-windows-amd64.exe` версии v1.23.0 нет ни `buh_3_0`, ни `toolset` ни в
+# справке (там флаги `-base`, `-build-index`, … и ни одного из наших), ни в
+# байтах — то есть `buh_3_0` различает сборку форка и выпуск, в обе стороны.
+mcp_bin=$CONNECT/mcp-1c/mcp-1c-windows-amd64.exe
+if mcp_help=$("$mcp_bin" --help 2>&1); then
+    mcp_probe=$mcp_help
+    mcp_how="--help"
+else
+    mcp_probe=$(LC_ALL=C grep -a -o -m1 buh_3_0 "$mcp_bin" 2>/dev/null || true)
+    mcp_how="байты (здесь windows-бинарь не запускается: $mcp_help)"
+fi
+case "$mcp_probe" in
     *buh_3_0*) ;;
-    *) echo "pack.sh: $MCP_1C_FORK_BIN (-> $CONNECT/mcp-1c/mcp-1c-windows-amd64.exe) не знает профиля buh_3_0 — это не сборка форка. --help этого бинаря: $mcp_help" >&2; exit 1 ;;
+    *) echo "pack.sh: $MCP_1C_FORK_BIN (-> $mcp_bin) не знает профиля buh_3_0 — это не сборка форка. Проверено через $mcp_how, увидено: $mcp_probe" >&2; exit 1 ;;
 esac
 
 # Same skills the image installs to ~/.agents/skills (Dockerfile: COPY

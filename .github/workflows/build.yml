@@ -438,6 +438,46 @@ jobs:
           name: 1c-connect-linux
           path: artifacts
 
+      # Бинарь mcp-1c для комплекта — сборка ФОРКА, а не выпуск: коннектор
+      # передаёт ребёнку --profile/--toolset/--access, и выпущенный v1.23.0 этих
+      # флагов не знает вовсе (замер 3.11: ни в справке, ни в байтах). До 3.11
+      # бинарь приходил только с машины владельца переменной MCP_1C_FORK_BIN,
+      # поэтому шаг Pack в CI падал на ней и комплектов из CI не выходило вовсе.
+      #
+      # Коммит и версию НЕ дублируем здесь: их объявляет pack.sh
+      # (MCP_1C_FORK_COMMIT/MCP_1C_FORK_VERSION), он же кладёт версию в
+      # tools.version комплекта — одно место, которому нечем разойтись с другим.
+      # Сверяем `git describe` собранного коммита с объявленной версией: комплект,
+      # врущий о версии своего mcp-1c, хуже отсутствующего.
+      #
+      # Коммит берётся по полному sha из metalmon/mcp-1c — и на 3.11 он там НЕ
+      # опубликован (главная ветка стоит на 741be20, наши четыре коммита лежат
+      # локально). Поэтому шаг отказывает словами, называя действие: опубликовать
+      # HEAD форка. Это нарочно громкий отказ, а не тихая сборка предыдущего
+      # коммита: три неопубликованных коммита — это ровно набор инструментов
+      # бизнес-профиля, и комплект без них собрался бы зелёным и неправильным.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: The fork's mcp-1c for the Windows kit
+        run: |
+          want=$(sed -n 's/^MCP_1C_FORK_VERSION=//p' pack.sh)
+          sha=$(sed -n 's/^MCP_1C_FORK_COMMIT=//p' pack.sh)
+          [ -n "$want" ] && [ -n "$sha" ]             || { echo "pack.sh больше не объявляет MCP_1C_FORK_VERSION/MCP_1C_FORK_COMMIT" >&2; exit 1; }
+          git clone -q --filter=blob:none https://github.com/metalmon/mcp-1c.git fork
+          git -C fork fetch -q origin "$sha" 2>/dev/null || {
+            echo "коммит форка $sha ($want) не опубликован в metalmon/mcp-1c — собрать его здесь нечем." >&2
+            echo "Опубликуйте HEAD форка (проверка форка на машине владельца, ветка main) или соберите комплект под Windows там, где лежит сборка." >&2
+            exit 1
+          }
+          git -C fork checkout -q "$sha"
+          got=$(git -C fork describe --tags "$sha")
+          [ "$got" = "$want" ]             || { echo "форк на $sha даёт версию $got, а pack.sh кладёт в комплект $want" >&2; exit 1; }
+          mkdir -p fork-bin
+          (cd fork && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=$got" -o ../fork-bin/mcp-1c.exe ./cmd/mcp-1c)
+          ls -l fork-bin/mcp-1c.exe
+          echo "MCP_1C_FORK_BIN=$PWD/fork-bin/mcp-1c.exe" >> "$GITHUB_ENV"
+
       - name: Pack
         # gzip -1: the layers are already compressed, so a higher level costs
         # minutes and saves almost nothing. pack.sh then lays out the two kits

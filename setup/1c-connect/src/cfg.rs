@@ -1893,6 +1893,10 @@ pub fn mode_needs_env(mode: &str) -> bool {
 /// записи: ЧЕЙ секрет не прочитан, сказано в самой `Cfg`, и всякий, кто
 /// пишет `Cfg` прочитанную `load_unchecked`, защищён уже тем, что пишет
 /// через эту функцию.
+///
+/// И перед всем этим — сверка с диском (`same_connections_on_disk`): печать
+/// идёт целиком из памяти, а человек правит тот же файл руками, и соединение,
+/// дописанное им после чтения, исчезло бы молча (находка 3 ревью всей ветки).
 pub fn write_checked(kit: &Kit, cfg: &Cfg, store: &secrets::Store) -> std::result::Result<(), String> {
     let mut text = cfg.render(store)?;
     let path = kit.state_path(FILE);

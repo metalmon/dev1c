@@ -678,18 +678,43 @@ pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
     Some(Line { kind: Kind::Warn, text })
 }
 
-/// Поля вкладки «Связь», которые режим реально показывает. В локальном
-/// режиме коннектор слушает loopback, а не поднимает туннель в среду —
-/// адрес среды, пароль рабочего места и имя рабочего места ничего не меняют,
-/// и показывать их незачем. Всё, что не `"local"`, — режим `tunnel`.
-/// Отрисовка рядов и сравнение «изменилось ли» ходят только через этот список.
-pub fn shown_fields(mode: &str, publication: &str) -> &'static [&'static str] {
-    match (mode == "local", publication == "webserver") {
+/// Поля карточки соединения, которые реально показывает ТОПОЛОГИЯ — не режим
+/// машины (спека, «Что показывает карточка соединения»). Ветвление по двум
+/// осям: где база (`base_here`) и локально ли соединение (`mode == "local"`).
+/// Роль (`Connection::role`) в этот список не входит: она решает, показывать
+/// код для той стороны или поле для кода, а этих блоков в карточке пока нет
+/// вовсе — они придут с протоколом (поправка 3.11 брифа задачи 3).
+///
+/// База на той стороне — своих полей базы здесь нет вовсе: ни пути, ни
+/// пользователя с паролем, ни адреса публикации (он тоже свойство конца с
+/// базой). Остаётся только папка (`project`) — она есть у каждого соединения
+/// на обеих сторонах.
+///
+/// База здесь — состав решает локальность: на одной машине адресу среды,
+/// паролю и имени рабочего места взяться неоткуда, им нужна удалённая
+/// сторона, которой в локальном случае нет вовсе. Всё, что не `"local"`, —
+/// режим `tunnel`.
+///
+/// Отрисовка рядов и сравнение «изменилось ли» (`fields_differ`) ходят только
+/// через этот список.
+pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
+    if !c.base_here {
+        return &["project"];
+    }
+    match (c.mode == "local", c.publication == "webserver") {
         (true, false) => &["base_path", "db_user", "db_password", "project"],
         (true, true) => &["base_path", "db_user", "db_password", "project", "base_url"],
         (false, false) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"],
         (false, true) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project", "base_url"],
     }
+}
+
+/// Слова вместо пустоты у карточки, чья база на той стороне — тот же приём,
+/// что у `nothing_to_show`: поверхность без полей базы обязана сказать об
+/// этом словами, а не молчать пустыми строками (спека, «Что показывает
+/// карточка соединения»). `None` — база здесь, подсказка не нужна.
+pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
+    (!c.base_here).then_some("Поля базы приходят с той стороны")
 }
 
 /// Вопрос перед действием, которое отнимает уже сделанное. `None` — спрашивать
@@ -865,7 +890,10 @@ fn field_value<'a>(h: &'a Connection, name: &str) -> &'a str {
 /// места из текущих параметров, как `save_host` уже делает для
 /// `dump`/`tools`/`mode`/`publication`/`http_port`.
 pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connection {
-    let shown = shown_fields(mode, publication);
+    // Карточка, что строит `host_of`, всегда «база здесь» (см. комментарий к
+    // `base_here` ниже) — ровно это и подаём на пробу осям `shown_fields`.
+    let probe = Connection { mode: mode.into(), publication: publication.into(), base_here: true, ..Connection::default() };
+    let shown = shown_fields(&probe);
     let v = |name: &str, e: &Entity<InputState>| {
         if shown.contains(&name) {
             e.read(cx).value().to_string()
@@ -951,8 +979,15 @@ pub fn adopt_needed(file: &Connection, form: &Connection, saved: &Connection, mo
 /// так не входят в список; `base_url` редактируется, но только в режиме
 /// «уже опубликована», и сравнивается через `shown_base_url` — тем же, чем
 /// показывается.
+///
+/// `mode`/`publication` приходят отдельно от `a`/`b`, а не из их полей: у
+/// `a` (это чаще всего `host_of` — поля формы) они нарочно пустые — та же
+/// причина, что у `dump`/`tools` выше. `base_here` от этой ловушки не
+/// страдает — `host_of` его не прячет, — поэтому ось берём у `b`: это
+/// сохранённая/эталонная сторона, и её топология верна всегда.
 pub fn fields_differ(a: &Connection, b: &Connection, mode: &str, publication: &str) -> bool {
-    shown_fields(mode, publication).iter().any(|f| field_value(a, f) != field_value(b, f))
+    let probe = Connection { mode: mode.into(), publication: publication.into(), base_here: b.base_here, ..Connection::default() };
+    shown_fields(&probe).iter().any(|f| field_value(a, f) != field_value(b, f))
 }
 
 /// Какое соединение показывает выбранная строка — `selected` по имени
@@ -1200,7 +1235,7 @@ impl Panel {
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
     fn adopt_fields(&mut self, host: &Connection, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = shown_fields(&host.mode, &host.publication);
+        let shown = shown_fields(host);
         for (name, state) in self.field_states() {
             if !shown.contains(&name) {
                 continue;
@@ -1399,7 +1434,15 @@ impl Render for Panel {
         // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
         // себя.
         let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
-        let shown = shown_fields(&mode, &publication);
+        // Топология — у сохранённой/эталонной стороны (`self.original`), той
+        // же, что уже отдаёт ось `fields_differ` выше: показ и сравнение не
+        // должны расходиться в том, что считают видимым.
+        let shown = shown_fields(&Connection {
+            mode: mode.clone(),
+            publication: publication.clone(),
+            base_here: self.original.base_here,
+            ..Connection::default()
+        });
         // Заголовок карточки — из ПОЛЕЙ (`form` выше), а не из сохранённого:
         // человек меняет базу и видит, какую карточку он правит, ещё до
         // «Сохранить».
@@ -2022,10 +2065,10 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt_needed, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text, nothing_to_show,
-        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, save_hint,
-        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius,
-        ProjectMenu, FOOT_LINE, FOOT_LINES,
+        adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text,
+        nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected,
+        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line,
+        window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -2501,10 +2544,43 @@ mod tests {
 
     #[test]
     fn local_mode_hides_the_environment_fields() {
-        assert_eq!(shown_fields("local", "auto").to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
-        assert_eq!(shown_fields("tunnel", "auto").len(), 7);
+        let local = Connection { mode: "local".into(), ..Connection::default() };
+        assert_eq!(shown_fields(&local).to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
+        let tunnel = Connection { mode: "tunnel".into(), ..Connection::default() };
+        assert_eq!(shown_fields(&tunnel).len(), 7);
         // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
-        assert_eq!(shown_fields("bogus", "auto"), shown_fields("tunnel", "auto"));
+        let bogus = Connection { mode: "bogus".into(), ..Connection::default() };
+        assert_eq!(shown_fields(&bogus), shown_fields(&tunnel));
+    }
+
+    #[test]
+    fn fields_follow_the_topology_of_the_connection() {
+        // Спека, «Что показывает карточка соединения»: база на той стороне —
+        // ни пути к базе, ни пользователя, ни пароля базы здесь нет вовсе.
+        let there = Connection { base_here: false, ..Default::default() };
+        assert_eq!(shown_fields(&there), &["project"]);
+        let here = Connection { base_here: true, ..Default::default() };
+        assert!(shown_fields(&here).contains(&"base_path"));
+        // Локальное: поля базы есть, а среды и рабочего места нет — им неоткуда взяться.
+        let local = Connection { mode: "local".into(), base_here: true, ..Default::default() };
+        assert!(shown_fields(&local).contains(&"base_path"));
+        assert!(!shown_fields(&local).contains(&"server"));
+        assert!(!shown_fields(&local).contains(&"workstation"));
+    }
+
+    #[test]
+    fn the_publication_address_shows_only_where_the_base_is() {
+        let there = Connection { base_here: false, publication: "webserver".into(), ..Default::default() };
+        assert!(!shown_fields(&there).contains(&"base_url"), "публикация — поле конца с базой");
+    }
+
+    #[test]
+    fn a_card_whose_base_is_elsewhere_says_so_instead_of_showing_emptiness() {
+        // Спека: карточка бухгалтера обязана сказать это одной строкой — тем же
+        // приёмом, каким «Инструменты» уже не молчат пустотой.
+        let there = Connection { base_here: false, ..Default::default() };
+        assert_eq!(base_fields_note(&there).unwrap(), "Поля базы приходят с той стороны");
+        assert_eq!(base_fields_note(&Connection::default()), None);
     }
 
     #[test]
@@ -2557,12 +2633,16 @@ mod tests {
 
     #[test]
     fn the_address_field_belongs_to_the_webserver_mode_only() {
-        assert!(shown_fields("tunnel", "webserver").contains(&"base_url"));
-        assert!(shown_fields("local", "webserver").contains(&"base_url"));
-        assert!(!shown_fields("tunnel", "auto").contains(&"base_url"));
-        assert!(!shown_fields("local", "auto").contains(&"base_url"));
+        let tunnel_web = Connection { mode: "tunnel".into(), publication: "webserver".into(), ..Connection::default() };
+        assert!(shown_fields(&tunnel_web).contains(&"base_url"));
+        let local_web = Connection { mode: "local".into(), publication: "webserver".into(), ..Connection::default() };
+        assert!(shown_fields(&local_web).contains(&"base_url"));
+        let tunnel_auto = Connection { mode: "tunnel".into(), ..Connection::default() };
+        assert!(!shown_fields(&tunnel_auto).contains(&"base_url"));
+        let local_auto = Connection { mode: "local".into(), ..Connection::default() };
+        assert!(!shown_fields(&local_auto).contains(&"base_url"));
         // Прежнее правило не тронуто: адрес среды прячется в локальном режиме.
-        assert!(!shown_fields("local", "auto").contains(&"server"));
+        assert!(!shown_fields(&local_auto).contains(&"server"));
     }
 
     #[test]

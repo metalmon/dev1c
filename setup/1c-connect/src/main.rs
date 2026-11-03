@@ -82,6 +82,11 @@ enum Cmd {
     Checksums,
     /// Напечатать образец 1c-connect.toml.
     Example,
+    /// Переключить текущее соединение; без имени — список, текущее отмечено.
+    Use {
+        /// Имя соединения, как оно записано в настройках.
+        name: Option<String>,
+    },
 }
 
 /// Запуск окна: без аргументов (двойной щелчок) или `--tray` (автозапуск
@@ -207,7 +212,7 @@ fn run() -> Result<()> {
     // `export`, `import`, `install`, `uninstall`) — остаются на `Cfg::load` и
     // отказывают как раньше: молчать там, где без пароля ничего не выйдет,
     // было бы хуже открытого текста.
-    let read_only = matches!(cmd, Cmd::Status | Cmd::Check | Cmd::Verify | Cmd::Checksums);
+    let read_only = matches!(cmd, Cmd::Status | Cmd::Check | Cmd::Verify | Cmd::Checksums | Cmd::Use { .. });
     let cfg = if read_only { cfg::Cfg::load_unchecked(&kit)? } else { cfg::Cfg::load(&kit)? };
     let ctx = make_ctx(kit, cfg, cli.dry_run, cli.yes);
     let ops = ops_host::host();
@@ -312,7 +317,42 @@ fn run() -> Result<()> {
             let n = common::integrity::write_list(&ctx.kit, |p| println!("  {p}"))?;
             println!("Записано {n} сумм в checksums.txt");
         }
+        Cmd::Use { name } => use_connection(&ctx, name.as_deref())?,
     }
+    Ok(())
+}
+
+/// Подкоманда `use`: без имени — список соединений (`Cfg::connections_overview`,
+/// текст человеку). С именем — переключение: `Cfg::switch_current` сперва
+/// проверяет имя В ПАМЯТИ (отказ со списком имён, если такого нет), а запись
+/// на диск идёт тем же приёмом, что `gui::save::save_tray_key` — читаем файл
+/// заново, правим ОДИН корневой ключ `current` (`common::toml_render::set` с
+/// пустым именем секции — решение задачи 1 брифа), остальной файл не трогаем.
+/// Пароли этот путь не касается вовсе: `current` не несёт секрета, и второй
+/// проверки (как у `write_checked`) здесь не нужно.
+fn use_connection(ctx: &Ctx, name: Option<&str>) -> Result<()> {
+    let Some(name) = name else {
+        println!("{}", ctx.cfg.connections_overview());
+        return Ok(());
+    };
+    // Проверка имени — на том же `Cfg`, что прочитан командой (список
+    // соединений оттуда), но запись на диск идёт по тексту файла, не по
+    // этому `Cfg` целиком — тем же доводом, что у `set_current`
+    // (`cfg.rs`): между чтением и записью человек может успеть править файл
+    // руками.
+    let mut cfg = ctx.cfg.clone();
+    cfg.switch_current(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let path = ctx.kit.state_path(cfg::FILE);
+    anyhow::ensure!(
+        path.exists(),
+        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
+        path.display(),
+        path.display()
+    );
+    let text = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: файл не прочитан — {e}", path.display()))?;
+    let text = common::toml_render::set(&text, "", "current", &format!("{name:?}"));
+    common::kit::write_text(&path, &text).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    println!("Теперь текущее соединение — «{name}».");
     Ok(())
 }
 
@@ -490,6 +530,17 @@ mod tests {
     #[test]
     fn serve_takes_no_flags_of_its_own() {
         assert!(Cli::try_parse_from(["1c-connect", "serve", "--port", "1"]).is_err());
+    }
+
+    /// `use` разбирается и с именем, и без — без имени список, с именем
+    /// переключение (`use_connection`, логика сама — в `cfg::switch_current`
+    /// и `cfg::connections_overview`, проверены там).
+    #[test]
+    fn use_takes_an_optional_connection_name() {
+        let cli = Cli::try_parse_from(["1c-connect", "use"]).expect("use без имени разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Use { name: None })));
+        let cli = Cli::try_parse_from(["1c-connect", "use", "Ромашка"]).expect("use с именем разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Use { name: Some(n) }) if n == "Ромашка"));
     }
 
     /// Ровно два сервера — те самые имена, что увидит `settings.json` Zed и

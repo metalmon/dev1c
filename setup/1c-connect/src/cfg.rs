@@ -915,6 +915,46 @@ impl Cfg {
         &mut self.connections[at]
     }
 
+    /// Переключить текущее соединение по имени (задача 8 плана «Модель
+    /// соединений»). Сравнение ТОЧНОЕ, без `trim` — тем же приёмом, что
+    /// `current()` выше и проверка повтора имён в `validate()`: там и там
+    /// имя ищется посимвольно. Если бы здесь сравнение прощало хвостовой
+    /// пробел, человек мог бы «переключиться» командой на имя, которого в
+    /// файле буквально нет («Buh» при живом «Buh »): команда отчиталась бы
+    /// успехом, а `current()` тем же точным поиском это имя не нашёл бы и
+    /// молча откатился на первое соединение списка — переключение, соврашее
+    /// об успехе. Поэтому отказ здесь говорит прямо и перечисляет имена ТАК,
+    /// как они записаны в файле (без `trim`) — на хвостовом пробеле человек
+    /// увидит лишний пробел перед закрывающей кавычкой и поймёт, в чём
+    /// опечатка.
+    pub fn switch_current(&mut self, name: &str) -> std::result::Result<(), String> {
+        if !self.connections.iter().any(|c| c.name == name) {
+            let names: Vec<String> = self.connections.iter().map(|c| format!("«{}»", c.name)).collect();
+            return Err(format!("{FILE}: соединения «{name}» нет — есть {}", names.join(", ")));
+        }
+        self.current = name.to_string();
+        Ok(())
+    }
+
+    /// Соединения для человека: `1c-connect use` без имени показывает этот
+    /// текст, текущее отмечено звёздочкой. Обращением к читателю, без
+    /// жаргона кода — ни слова про блоки toml, имена полей или индексы.
+    /// Текущее ищется тем же приёмом, что `current_mut()` (позиция по имени
+    /// `self.current`, первое — если не нашлось): список и значок в трее
+    /// обязаны отмечать то же соединение, что реально вернёт `current()`.
+    pub fn connections_overview(&self) -> String {
+        if self.connections.is_empty() {
+            return "Соединений пока нет — настройте первое в окне (1c-connect gui).".to_string();
+        }
+        let cur = self.connections.iter().position(|c| c.name == self.current).unwrap_or(0);
+        let mut lines = vec!["Соединения (звёздочкой отмечено текущее):".to_string()];
+        for (i, c) in self.connections.iter().enumerate() {
+            lines.push(format!("{} {}", if i == cur { "*" } else { " " }, c.name));
+        }
+        lines.push("Переключиться: 1c-connect use <имя>.".to_string());
+        lines.join("\n")
+    }
+
     /// `Cfg` из ОДНОГО соединения — оно же и текущее. Ровно то, что до
     /// задачи 3 писалось как `Cfg { host, ..Default::default() }`: окно
     /// собирает из полей формы одно соединение и проверяет его отдельно от
@@ -2132,6 +2172,35 @@ mod tests {
         let c = sample();
         assert_eq!(c.current(), &Connection { name: FIRST_CONNECTION_NAME.into(), ..Connection::default() });
         assert_eq!(c.current, FIRST_CONNECTION_NAME, "единственное соединение файла оно же и текущее");
+    }
+
+    /// Задача 8 плана «Модель соединений». Сравнение имён — ТОЧНОЕ, без
+    /// `trim` (тем же приёмом, что `current()` и проверка повтора имён в
+    /// `validate()`): отказ на несуществующем имени обязан перечислить, из
+    /// чего выбирать.
+    #[test]
+    fn switching_the_current_connection_names_what_it_refuses() {
+        let mut c = cfg_with(&["Buh", "Ромашка"]);
+        c.switch_current("Ромашка").unwrap();
+        assert_eq!(c.current, "Ромашка");
+        let e = c.switch_current("Лютик").unwrap_err();
+        assert!(e.contains("Лютик") && e.contains("Buh") && e.contains("Ромашка"), "отказ перечисляет, из чего выбирать: {e}");
+    }
+
+    /// Шаг 5 задачи 8: `1c-connect use` без имени — список соединений,
+    /// текущее отмечено. Текст человеку, не разбор кода — поэтому
+    /// проверяем по смыслу (оба имени на месте, текущее узнаваемо отмечено,
+    /// а не прежнее), а не побайтовым сравнением со строкой.
+    #[test]
+    fn listing_without_a_name_shows_every_connection_with_the_current_one_marked() {
+        let mut c = cfg_with(&["Buh", "Ромашка"]);
+        c.switch_current("Ромашка").unwrap();
+        let text = c.connections_overview();
+        assert!(text.contains("Buh") && text.contains("Ромашка"), "{text}");
+        let buh_line = text.lines().find(|l| l.contains("Buh")).unwrap();
+        let romashka_line = text.lines().find(|l| l.contains("Ромашка")).unwrap();
+        assert_ne!(buh_line.trim_end(), romashka_line.trim_end(), "текущее должно отличаться в тексте от остальных");
+        assert!(!cfg_with(&[]).connections_overview().contains("Buh"));
     }
 
     #[test]

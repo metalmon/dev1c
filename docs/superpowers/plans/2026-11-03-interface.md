@@ -52,6 +52,18 @@ fn row_folds_eight_contract_states_into_five_words() {
     assert_eq!(row(&c, false, Some(&State::Failed("".into()))).state, "разорвано");
     assert_eq!(row(&c, false, None).state, "ждёт разрешения");
 }
+
+/// Локальному соединению ни одно из пяти слов не годится: подключаться там
+/// не к кому, оба конца на этой машине. Словарь берём НЕ новый — тот, что у
+/// карточки состояния уже есть («MCP включены»/«MCP выключены», `panel::card`),
+/// в короткой форме: имя соединения строка и так назвала. Вопрос владельца
+/// 3.11, из которого эта проверка и взялась.
+#[test]
+fn a_local_connection_speaks_about_tools_not_about_a_link() {
+    let local = Connection { mode: "local".into(), ..Default::default() };
+    assert_eq!(row(&local, true, Some(&State::Up)).state, "включено");
+    assert_eq!(row(&local, true, None).state, "выключено");
+}
 ```
 
 - [ ] **Шаг 2: прогнать, убедиться, что падает** — `cargo test -p onec-connect --lib row_folds` → FAIL, `row` не определена.
@@ -121,7 +133,9 @@ fn selecting_a_row_rebinds_the_fields_and_clears_dirty() {
 - Тесты: `setup/1c-connect/src/gui/panel.rs`, модуль `tests`
 
 **Интерфейсы:**
-- Отдаёт: `pub fn shown_fields(c: &Connection) -> &'static [&'static str]` — подпись меняется: вместо `(mode, publication)` берётся всё соединение, потому что ветвление теперь по `base_here`.
+- Отдаёт: `pub fn shown_fields(c: &Connection) -> &'static [&'static str]` — подпись меняется: вместо `(mode, publication)` берётся всё соединение, потому что ветвление идёт по ДВУМ осям — локальное ли соединение (`mode == "local"`) и где база (`base_here`).
+
+**Ось «локально» не терять** (правка 3.11 по вопросу владельца): сегодняшняя `shown_fields` ветвится по `mode`, и первая редакция этого плана заменяла её ветвлением по одному `base_here` — локальный случай при этом терял бы свой состав полей (ему не нужны ни адрес среды, ни рабочее место) и получал бы поля туннельного. В таблице спеки локальный случай — отдельная строка: «База здесь, та сторона совпадает с этой», и в ней «кода нет, разрешения нет».
 
 - [ ] **Шаг 1: красный тест по таблице спеки**
 
@@ -134,6 +148,11 @@ fn fields_follow_the_topology_of_the_connection() {
     assert_eq!(shown_fields(&there), &["project"]);
     let here = Connection { base_here: true, ..Default::default() };
     assert!(shown_fields(&here).contains(&"base_path"));
+    // Локальное: поля базы есть, а среды и рабочего места нет — им неоткуда взяться.
+    let local = Connection { mode: "local".into(), base_here: true, ..Default::default() };
+    assert!(shown_fields(&local).contains(&"base_path"));
+    assert!(!shown_fields(&local).contains(&"server"));
+    assert!(!shown_fields(&local).contains(&"workstation"));
 }
 ```
 
@@ -338,6 +357,18 @@ fn the_main_button_resolves_in_one_order() {
     assert!(main_button(&ui_with_empty_list()).1.is_some(), "заперта и называет состояние");
     assert_eq!(main_button(&ui_with_dirty_card()).0, "Сохранить");
     assert_eq!(main_button(&ui_with_saved_card()).0, "Подключиться");
+}
+
+/// У локального соединения «Подключиться» бессмысленно — подключаться не к
+/// кому. Главное действие экрана для человека на одной машине — выключатель
+/// инструментов, и он тут не второй орган управления, а тот же, что в меню:
+/// одно состояние, два места, как и всё меню по решению владельца 1.11.
+/// Правка 3.11 по вопросу владельца про локальный режим.
+#[test]
+fn a_local_card_offers_the_tools_switch_instead_of_connecting() {
+    assert_eq!(main_button(&ui_local_on()).0, "Выключить");
+    assert_eq!(main_button(&ui_local_off()).0, "Включить");
+    assert_eq!(main_button(&ui_local_dirty()).0, "Сохранить", "правка полей важнее выключателя");
 }
 ```
 

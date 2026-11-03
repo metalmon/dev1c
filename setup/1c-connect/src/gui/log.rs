@@ -283,7 +283,11 @@ pub fn set_status(ui: &mut Ui, line: Line, tip: Option<String>) {
 /// соединений больше одного.
 pub fn httpd_queue_note(cfg: &crate::cfg::Cfg) -> Option<String> {
     if cfg.connections.len() > 1 {
-        Some("однополосный веб-сервер может отстать в очереди к запросам".to_string())
+        Some(
+            "Баз на этой машине больше одной: веб-сервер обслуживает их по очереди, \
+             и ответы могут приходить медленнее."
+                .to_string(),
+        )
     } else {
         None
     }

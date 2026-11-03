@@ -236,6 +236,14 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
 
 #[test]
 fn the_httpd_queue_is_named_only_when_there_is_more_than_one_base() {
+    // При одной базе очередь не образуется — строка не нужна
     assert_eq!(httpd_queue_note(&cfg_with(&["Buh"])), None);
-    assert!(httpd_queue_note(&cfg_with(&["Buh", "Ромашка"])).is_some());
+
+    // При нескольких базах есть сообщение про задержку
+    let note = httpd_queue_note(&cfg_with(&["Buh", "Ромашка"])).expect("сообщение должно быть при двух и более базах");
+
+    // Проверяем смысл: сообщение должно упоминать очередь или задержку,
+    // а не ошибку или поломку
+    let lower = note.to_lowercase();
+    assert!(lower.contains("очереди") || lower.contains("медленнее"), "сообщение должно упоминать очередь или задержку: {note}");
 }

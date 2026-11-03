@@ -223,6 +223,18 @@ mod tests {
         assert!(why.contains("не расшифрован"), "{why}");
     }
 
+    /// Круг починки 1/5 задачи 10, находка 3: непрочитанный пароль ЧУЖОЙ карточки запирал переключатель при исправной текущей, и выхода из окна не было — поля чужой карточки окно не показывает вовсе. Мост и команды работают с `current()`, чужой пароль не читает никто. Переключатся на ту карточку — откажет её собственная находка (вторая половина теста).
+    #[test]
+    fn an_unreadable_password_of_another_card_does_not_hold_the_switch() {
+        let mut c = crate::cfg::cfg_with(&["Buh", "Ромашка"]);
+        c.undecryptable = vec![crate::cfg::Undecryptable::new("Ромашка", "db_password")];
+        assert_eq!(open(&c), None, "чужая беда не отбирает работу у исправной текущей карточки");
+
+        c.current = "Ромашка".into();
+        let why = open(&c).unwrap();
+        assert!(why.contains("не расшифрован"), "а своя — отбирает: {why}");
+    }
+
     /// В локальном режиме то же самое поле — не повод: его не читает никто (`panel::shown_fields` его там не показывает), тем же снисхождением, что у `Cfg::load_with` (`cfg::blocking_undecryptable`).
     #[test]
     fn an_unreadable_workstation_password_does_not_hold_the_switch_in_local_mode() {

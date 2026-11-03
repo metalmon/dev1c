@@ -836,6 +836,36 @@ fn saving_keeps_every_connection_on_disk_not_just_the_current_one() {
     );
 }
 
+/// Круг починки 1/5 задачи 10, находка 1: пока «Сохранить» сворачивала
+/// настройки в одно соединение, негодная соседняя карточка ставила выбор
+/// «отказать или молча унести её с диска». Теперь есть третий исход — писать
+/// весь список, а полноту спрашивать у текущей карточки (`Cfg::validate`), —
+/// и он проверяется с двух концов: отказа нет, и соседняя карточка цела на
+/// ДИСКЕ, вместе со своим незаполненным полем.
+#[test]
+fn a_half_filled_neighbour_neither_refuses_the_save_nor_disappears() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    ui.cfg = cfg::cfg_with(&["Buh", "Ромашка"]);
+    // Так выглядит дописанный руками блок: имя есть, поля ещё не заполнены.
+    ui.cfg.connections[1].base_path = String::new();
+    ui.cfg.connections[1].project = String::new();
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, ui.cfg.render(&store).unwrap()).unwrap();
+
+    let mut host = ui.cfg.current().clone();
+    host.workstation = "dev2".into();
+    save_host(&mut ui, host).expect("чужая незаполненная карточка не запирает работу с текущей");
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 2, "соседняя карточка цела на диске:\n{after}");
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 1, "base_path").as_deref(),
+        Some(""),
+        "и её незаполненное поле осталось незаполненным, а не выдумано:\n{after}"
+    );
+}
+
 /// Та же запись, но у ЧУЖОЙ карточки пароль — шифртекст, который на этой
 /// машине не открывается (файл переехал, другая учётка). Загрузка отдаёт это
 /// поле пустым, и запись всего списка, сделанная наивно, зашифровала бы
@@ -867,6 +897,18 @@ fn saving_one_card_leaves_an_unreadable_password_of_another_untouched() {
     host.workstation = "dev2".into();
     save_host(&mut ui, host).unwrap();
 
+    // Доказательство адресное, а не «шифртекст где-то в файле есть»: такое
+    // утверждение прошло бы и в том случае, если прежний шифртекст уехал в
+    // блок ДРУГОЙ карточки — ровно тот отказ, против которого писана
+    // адресация по имени (`cfg::block_in`, `cfg::previous_literal`). Поэтому
+    // спрашиваем, что он лежит в блоке ЧУЖОЙ карточки, и отдельно — что у
+    // текущей пароль свой, а не чужой (находка 2 круга починки 1/5).
     let after = std::fs::read_to_string(&path).unwrap();
-    assert!(after.contains(&sealed_elsewhere), "байты чужого шифртекста обязаны остаться в файле дословно:\n{after}");
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 1, "password").as_deref(),
+        Some(sealed_elsewhere.as_str()),
+        "байты чужого шифртекста обязаны остаться в блоке своей карточки дословно:\n{after}"
+    );
+    let mine = common::toml_render::get_in(&after, cfg::CONNECTION, 0, "password").expect("у текущей карточки пароль напечатан");
+    assert_ne!(mine, sealed_elsewhere, "чужой шифртекст не обязан появиться в блоке текущей карточки:\n{after}");
 }

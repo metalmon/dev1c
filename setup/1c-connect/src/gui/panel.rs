@@ -798,28 +798,6 @@ pub fn profile_label(toolset: &str) -> &'static str {
     }
 }
 
-/// Строка под профилем. Говорит всегда, и говорит два разных дела.
-///
-/// Первое: профиль в карточке показан, а не выбран, — значит ряд обязан
-/// сказать, где его менять, иначе человек видит «Бизнес-пользователь» и
-/// тупик (Important 4 ревью ветки). Полем карточки профиль станет вместе с
-/// моделью соединений; до тех
-/// пор он живёт в `[host] toolset`.
-///
-/// Второе: когда в параметрах стоит значение, которого мы не знаем, —
-/// показываем умолчание И говорим, что это умолчание (общее ограничение
-/// плана вида: молчаливый неверный результат хуже честного отказа). Отказ
-/// словами на негодное значение даёт `mcp_command` (`bridge.rs`) при запуске
-/// ребёнка; здесь не отказ, а честный показ.
-pub fn profile_note(toolset: &str) -> String {
-    let t = toolset.trim();
-    if t.is_empty() || t == "developer" || t == "business" {
-        "задаётся в файле параметров".to_string()
-    } else {
-        format!("в файле параметров указано «{t}» — показано умолчание")
-    }
-}
-
 /// Заголовок карточки соединения. Контракт подключения называет заголовком имя
 /// соединения, данное человеком, но хранить такое имя сегодня негде: в `[host]`
 /// поля нет, а модель настроек этот план не трогает. Поэтому заголовок берётся
@@ -1365,9 +1343,13 @@ impl Render for Panel {
         // человек меняет базу и видит, какую карточку он правит, ещё до
         // «Сохранить».
         let title = card_title(&form);
-        // Профиль — свойство машины (`[host] toolset`), а не поля формы:
-        // карточка его показывает, но не правит, см. ведомость плана вида.
-        let toolset = cx.global::<Ui>().cfg.current().toolset.clone();
+        // Профиль — свойство ТЕКУЩЕГО соединения (решение владельца 7,
+        // задача 9 плана «Модель соединений»), не машины: карточка его
+        // показывает, но не правит — править будет окно в плане интерфейса.
+        // `Cfg::toolset()` — тот же резолвер, что собирает ключ `--toolset`
+        // ребёнку, так подпись в окне не может разойтись с тем, что реально
+        // запущено.
+        let toolset = cx.global::<Ui>().cfg.toolset().unwrap_or("business").to_string();
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
         let working = cx.global::<Ui>().working();
@@ -1514,16 +1496,15 @@ impl Render for Panel {
                             div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.clone()),
                         )
                         .child(
-                            // Профиль показан, а не выбран: `toolset` — свойство
-                            // машины, одно на все её соединения, а полем карточки
-                            // он становится вместе с моделью соединений. Он здесь
-                            // потому, что задаёт смысл папки ниже.
+                            // Профиль показан, а не выбран: поле уже у карточки
+                            // (задача 9 плана «Модель соединений»), а править его
+                            // в окне будет план интерфейса. Он здесь потому, что
+                            // задаёт смысл папки ниже.
                             v_flex()
                                 .gap_1()
                                 .min_w_0()
                                 .child(div().text_size(px(13.)).text_color(caption).child("Профиль"))
-                                .child(div().min_w_0().child(profile_label(&toolset)))
-                                .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(profile_note(&toolset))),
+                                .child(div().min_w_0().child(profile_label(&toolset))),
                         )
                         .child({
                             // В локальном режиме коннектор слушает loopback, а не
@@ -1981,9 +1962,8 @@ impl Render for Panel {
 mod tests {
     use super::{
         adopt_needed, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text, found_text, nothing_to_show,
-        op_question, pick_face, profile_label, profile_note, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url,
-        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu,
-        FOOT_LINE, FOOT_LINES,
+        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, save_hint, shown_base_url, shown_fields,
+        skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, ProjectMenu, FOOT_LINE, FOOT_LINES,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -2561,25 +2541,18 @@ mod tests {
     /// Утверждение держит обе грани: молчат оба списка — говорим; молчит
     /// только один — не мешаем второму, иначе подсказка встанет рядом с
     /// настоящими фактами и будет спорить с ними.
-    /// Профиль в карточке — показ, а не правка (ведомость плана вида), и
-    /// показывать его молча неверным нельзя: общее ограничение плана требует
-    /// показать умолчание И сказать, что оно умолчание.
+    ///
+    /// Строка-пояснение под профилем (`profile_note`, «задаётся в файле
+    /// параметров») снята задачей 9 плана «Модель соединений» вместе с этой
+    /// проверкой: с профилем как полем карточки фраза лжёт (менять его
+    /// будет окно в плане интерфейса, а не файл параметров), а сам
+    /// `profile_label` остаётся и проверяется ниже.
     #[test]
-    fn the_profile_row_says_when_it_shows_a_default_instead_of_what_is_written() {
+    fn the_profile_label_follows_the_profile() {
         assert_eq!(profile_label("developer"), "Разработчик");
         assert_eq!(profile_label("business"), "Бизнес-пользователь");
         assert_eq!(profile_label(""), "Бизнес-пользователь", "пусто — умолчание Cfg::toolset");
         assert_eq!(profile_label("мусор"), "Бизнес-пользователь", "нераспознанное показывает умолчание");
-
-        // Ряд, который человек не может изменить, обязан сказать, где он
-        // задаётся, — иначе это тупик: «Бизнес-пользователь», и ни слова о
-        // том, как стать разработчиком (Important 4 ревью ветки).
-        for good in ["developer", "business", ""] {
-            assert_eq!(profile_note(good), "задаётся в файле параметров", "профиль {good:?}");
-        }
-        let note = profile_note("мусор");
-        assert!(note.contains("мусор") && note.contains("умолчание"), "{note}");
-        assert!(note.contains("файле параметров"), "и негодное значение говорит, где его править: {note}");
     }
 
     #[test]

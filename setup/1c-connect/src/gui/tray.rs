@@ -519,6 +519,14 @@ fn raise_session_after_mode_change(mode: &str, gate: Option<&str>) -> bool {
 /// иначе переписал бы его обратно.
 fn apply_mode(cx: &mut App, mode: &'static str) {
     cx.global_mut::<Ui>().cfg.current_mut().mode = mode.into();
+    // Критическая находка круга починки 1 задачи 16, другой конец: открытая
+    // карточка держит СВОЙ снимок режима (`Panel::original`), и после
+    // записи ниже его надо перевязать — тем же `sync_card_topology`, что
+    // зовёт и переключатель «Это соединение» в карточке (`request_current_mode_change`).
+    // Имя берём один раз сейчас, не после записи: при отказе (`Err`) ниже
+    // имя текущего соединения не меняется, но брать его стоит из одного
+    // места, а не дважды по разным путям match.
+    let name = cx.global::<Ui>().cfg.current().name.clone();
     let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
@@ -565,7 +573,49 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             window::show_window(cx);
         }
     }
+    super::panel::sync_card_topology(cx, &name);
     cx.refresh_windows();
+}
+
+/// Сменить режим ТЕКУЩЕГО соединения — общая последовательность, которую
+/// проходит смена режима из ЛЮБОГО места (Important 3 ревью круга починки 1
+/// задачи 16): отказ под идущей операцией (`mode_change_blocked`), вопрос
+/// при живом обслуживании тем же диалогом, что у «Сохранить»
+/// (`save_needs_confirm`/`confirm_database_change`), запись и перецикл
+/// сеанса (`apply_mode`). До этого круга её знал только трей
+/// (`on_menu::MenuAction::Mode`), а переключатель «Это соединение» в
+/// карточке писал `mode` точечно, в обход — карточка меняла транспорт
+/// ТЕКУЩЕГО соединения, не трогая ни сеанс, ни замок, ни значок.
+///
+/// Тревный значок (отметка пункта меню) сюда не входит: у карточки его нет,
+/// и возвращать галочку на место — дело самого `on_menu`, не общее.
+///
+/// `false` — смена не состоялась из-за идущей операции; вызывающий решает,
+/// как об этом сказать (трей и так возвращает галочку меню сам, карточка —
+/// сообщает строкой в журнал).
+pub(crate) fn request_current_mode_change(cx: &mut App, mode: &'static str) -> bool {
+    let ui = cx.global::<Ui>();
+    if mode_change_blocked(ui) {
+        return false;
+    }
+    let current = ui.cfg.current().mode.clone();
+    if mode == current {
+        return true;
+    }
+    let mut host = ui.cfg.current().clone();
+    host.mode = mode.into();
+    // Спрашивать не о чем (или спросить негде — значок живёт и без окна) —
+    // пишем сразу, тем же приёмом, что `on_menu::MenuAction::Mode`.
+    if !save_needs_confirm(ui, &host) || ui.window.is_none() {
+        apply_mode(cx, mode);
+        return true;
+    }
+    window::show_window(cx);
+    let Some(w) = cx.global::<Ui>().window else { return true };
+    let _ = w.update(cx, |_, window, cx| {
+        confirm_database_change(window, cx, &host, move |_window, cx| apply_mode(cx, mode));
+    });
+    true
 }
 
 /// Строка журнала, когда режим переключён, но в файл не записан. Применить
@@ -827,27 +877,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             if let Some(tray) = &ui.tray {
                 tray.set_mode(&current);
             }
-            // Тот же вопрос, что у «Сохранить»: смена режима может погасить
-            // обслуживание — замки у режимов разные (туннелю нужны адрес
-            // среды, пароль и имя рабочего места). Параметры меняем только
-            // после согласия, а не до вопроса: иначе «было ли обслуживание
-            // живым» считалось бы уже по новому режиму, и вопрос не
-            // появлялся бы вовсе (находка ревью задачи 23).
-            let mut host = ui.cfg.current().clone();
-            host.mode = mode.into();
-            // Спрашивать не о чем (или спросить негде — значок живёт и без
-            // окна) — пишем сразу, как делали раньше.
-            if !save_needs_confirm(ui, &host) || ui.window.is_none() {
-                apply_mode(cx, mode);
-                return;
-            }
-            // Диалог платформенный и принадлежит окну: на спрятанном окне
-            // его человеку не видно, а смена режима тихо ждала бы ответа.
-            window::show_window(cx);
-            let Some(w) = cx.global::<Ui>().window else { return };
-            let _ = w.update(cx, |_, window, cx| {
-                confirm_database_change(window, cx, &host, move |_window, cx| apply_mode(cx, mode));
-            });
+            // Вопрос («погасит ли смена обслуживание»), запись и перецикл
+            // сеанса — общая последовательность с карточкой (Important 3
+            // ревью круга починки 1 задачи 16), не копия её здесь.
+            request_current_mode_change(cx, mode);
         }
         MenuAction::Publication(publication) => {
             // Форма та же, что у «Режима работы» выше, и по тем же причинам:

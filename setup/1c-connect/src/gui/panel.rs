@@ -1246,31 +1246,123 @@ fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
 
 /// Сменить ответ «Это соединение» у открытой карточки — три ответа одного
 /// переключателя (Шаг 4 задачи 16: «один переключатель на три ответа, а не
-/// два переключателя рядом»). Первые два — роль, и уводят карточку из
-/// «одной машины» в туннельный режим, если она была там
-/// (`gui::set_role_and_leave_local`); третий ставит `mode = "local"` и роль
-/// не трогает — локальность решает категорию строки списка раньше роли
-/// (`link::row`, `link::list`).
+/// два переключателя рядом»). Роль — ВСЕГДА простая точечная запись
+/// (`gui::set_role`): сама роль сегодня не держит ни сеанса, ни транспорта
+/// (поиск по `role()` в проводке и замке у круга починки 1 это подтвердил),
+/// и смены сеанса не просит ни в каком случае.
+///
+/// Режим — другая ось: третий ответ («Всё на одной машине») и уход из него
+/// у первых двух меняют ТРАНСПОРТ. Если это соединение сейчас ТЕКУЩЕЕ,
+/// смена режима обязана пройти тем же путём, что у трея (`set_card_mode`,
+/// Important 3 ревью круга починки 1: иначе карточка меняла бы транспорт
+/// под идущим сеансом, не трогая ни его, ни замок, ни значок) — у прочих
+/// карточек сеанса нет, и там остаётся простая запись одного ключа.
 fn set_card_topology_kind(cx: &mut App, name: &str, answer: &'static str) {
-    let r = if answer == "local" {
-        gui::set_mode(cx.global_mut::<Ui>(), name, "local")
+    if answer == "local" {
+        set_card_mode(cx, name, "local");
+        return;
+    }
+    if let Err(e) = gui::set_role(cx.global_mut::<Ui>(), name, answer) {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+        cx.refresh_windows();
+        return;
+    }
+    sync_card_topology(cx, name);
+    // «Код следует из первого ответа сам» (спека) — роль записана, и если
+    // карточка была «на одной машине», уходим из этого режима тем же путём,
+    // что и для прямого ответа «Всё на одной машине» (см. выше): current()
+    // перечитываем ПОСЛЕ записи роли — `set_role` её не меняет, а `by_name`
+    // уже видит обновлённую карточку.
+    let was_local = cx.global::<Ui>().cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false);
+    if was_local {
+        set_card_mode(cx, name, "tunnel");
     } else {
-        gui::set_role_and_leave_local(cx.global_mut::<Ui>(), name, answer)
-    };
-    if let Err(e) = r {
+        cx.refresh_windows();
+    }
+}
+
+/// Сменить режим именованной карточки на `mode`. Критическая развилка
+/// Important 3 ревью круга починки 1 задачи 16: у ТЕКУЩЕГО соединения смена
+/// режима — это смена транспорта под живым (или могущим быть живым)
+/// сеансом, и обязана пройти всю последовательность трея
+/// (`gui::tray::request_current_mode_change` — отказ под операцией, вопрос про
+/// гашение обслуживания, запись, перецикл сеанса, тревный значок). У
+/// прочих карточек сеанса нет и гасить нечего — там остаётся простая
+/// точечная запись (`gui::set_mode`), тем же приёмом, что у роли.
+fn set_card_mode(cx: &mut App, name: &str, mode: &'static str) {
+    let is_current = cx.global::<Ui>().cfg.current().name == name;
+    if is_current {
+        if !gui::tray::request_current_mode_change(cx, mode) {
+            gui::note_line(
+                cx.global_mut::<Ui>(),
+                Line {
+                    kind: Kind::Fail, text: "идёт операция — подождите её завершения и повторите".into()
+                },
+            );
+        }
+        // `request_current_mode_change`/`apply_mode` сами перевязывают
+        // `self.original` (`sync_card_topology`) и перерисовывают окно —
+        // здесь второй раз звать нечего.
+        return;
+    }
+    if let Err(e) = gui::set_mode(cx.global_mut::<Ui>(), name, mode) {
         gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
     }
+    sync_card_topology(cx, name);
     cx.refresh_windows();
 }
 
 /// Сменить ответ «Где база» у открытой карточки. Удача молчит — тот же
 /// приём, что `set_card_profile`: состав полей карточки меняется на экране
-/// сам, строка в журнал к нему ничего не добавила бы.
+/// сам, строка в журнал к нему ничего не добавила бы. `base_here` не несёт
+/// транспорта (в отличие от `mode`) — простая точечная запись годится и у
+/// текущей карточки.
 fn set_card_base_here(cx: &mut App, name: &str, base_here: bool) {
     if let Err(e) = gui::set_base_here(cx.global_mut::<Ui>(), name, base_here) {
         gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
     }
+    sync_card_topology(cx, name);
     cx.refresh_windows();
+}
+
+/// Перевязать `self.original` открытой карточки на ТРИ оси — `role`,
+/// `mode`, `base_here`, — после точечной (или тревной) записи у карточки
+/// `name` (Critical ревью круга починки 1 задачи 16). `adopt_needed`/
+/// `fields_differ` сравнивают только ПОКАЗАННЫЕ ТЕКСТОВЫЕ поля
+/// (`shown_fields`), и ни одна из трёх осей в этот список не входит — без
+/// прямой перевязки здесь карточка не видела бы переключения, хотя файл и
+/// `ui.cfg` уже верны (находка ревью: подпись переключателя и состав полей
+/// не меняются после щелчка).
+///
+/// Полный `adopt_fields` нарочно не зовём: он подхватил бы и текстовые поля
+/// формы, молча стирая несохранённую правку человека — ровно то, от чего
+/// бережёт вопрос перед уходом с карточки (задача 14). Три оси — это ровно
+/// то, что переключатели карточки меняют, и ничего сверх того.
+///
+/// Чужая открытая карточка (`self.original.name != name`) не трогается
+/// вовсе: запись в соседа её не касается.
+///
+/// Решение «что копировать» вынесено в чистую `adopt_topology` — здесь нет
+/// GPUI-гарнеса, чтобы прогнать саму эту функцию (ей нужны живые
+/// `Entity<Panel>`/`App`), и под тестом остаётся только она.
+pub(crate) fn sync_card_topology(cx: &mut App, name: &str) {
+    let Some(c) = cx.global::<Ui>().cfg.by_name(name).cloned() else { return };
+    let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
+    panel.update(cx, |this, cx| {
+        if this.original.name == name {
+            adopt_topology(&mut this.original, &c);
+            cx.notify();
+        }
+    });
+}
+
+/// Чистое ядро `sync_card_topology` — три оси и только они (Critical ревью
+/// круга починки 1 задачи 16, довод — в докстроке вызывающей). Под тестом:
+/// `adopt_topology_touches_only_the_three_axes_not_the_typed_fields` ниже.
+pub fn adopt_topology(original: &mut Connection, fresh: &Connection) {
+    original.role = fresh.role.clone();
+    original.mode = fresh.mode.clone();
+    original.base_here = fresh.base_here;
 }
 
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
@@ -1339,15 +1431,23 @@ pub fn profile_label(toolset: &str) -> &'static str {
 /// роли: это и есть третий ответ («той стороны нет вовсе»), и только когда
 /// он не подошёл, смотрим на `Connection::role()` — опечатка в файле читается
 /// как умолчание «accept», тем же приёмом, что `profile_label` у `toolset`.
-/// Слова первых двух ответов — те же, что у онбординга (`link::onboarding_answers`):
-/// один словарь на оба места, иначе они однажды разойдутся.
+///
+/// Слова — ИЗ `link::onboarding_answers`/`link::LOCAL_ANSWER`, не свои копии
+/// (находка Important 2 ревью круга починки 1: здесь, в отрисовке карточки
+/// и в онбординге прежде жили три независимых набора одних и тех же строк —
+/// комментарий обещал «один словарь», а правда разошлась бы на первой же
+/// правке слова). Теперь источник один, и эта функция его читает, а не
+/// пересказывает.
 pub fn role_switch_label(c: &Connection) -> &'static str {
     if c.mode == "local" {
-        "Всё на одной машине"
-    } else if c.role().unwrap_or("accept") == "dial" {
-        "Подключаюсь сам — у меня есть код"
+        link::LOCAL_ANSWER.0
     } else {
-        "Принимаю подключения — код выдаю я"
+        let [dial, accept] = link::onboarding_answers();
+        if c.role().unwrap_or("accept") == "dial" {
+            dial.0
+        } else {
+            accept.0
+        }
     }
 }
 
@@ -2014,18 +2114,21 @@ impl Panel {
                     .min_w_0()
                     .child(div().text_size(px(13.)).text_color(caption).child("Это соединение"))
                     // Первый вопрос карточки (спека, «Вопросов в карточке
-                    // два»): три ответа одного переключателя (Шаг 4 задачи
+                    // два», порядок ответов — из её же таблицы: «Всё на
+                    // одной машине» · «Принимаю подключения» · «Подключаюсь
+                    // сам»): три ответа одного переключателя (Шаг 4 задачи
                     // 16 — «один переключатель на три ответа, а не два
-                    // переключателя рядом»). Первые два пишут роль и уводят
-                    // карточку из «одной машины» в туннельный режим, если
-                    // она там была (`gui::set_role_and_leave_local`);
-                    // третий ставит `mode = "local"` и роль не трогает.
+                    // переключателя рядом»). Слова — из `link::LOCAL_ANSWER`
+                    // и `link::onboarding_answers()`, не свои копии (Important
+                    // 2 ревью круга починки 1): один словарь на карточку,
+                    // отрисовку и онбординг, иначе слова однажды разойдутся.
+                    // Первые два пишут роль (`set_card_topology_kind` — а
+                    // уход из «одной машины» для них уводит и режим, см. её
+                    // докстроку); третий ставит `mode = "local"` и роль не
+                    // трогает.
                     .child(KitButton::new("role").outline().w_full().label(role_switch_label(&c)).dropdown_menu(move |mut menu, _, _| {
-                        for (label, answer) in [
-                            ("Принимаю подключения — код выдаю я", "accept"),
-                            ("Подключаюсь сам — у меня есть код", "dial"),
-                            ("Всё на одной машине", "local"),
-                        ] {
+                        let [dial, accept] = link::onboarding_answers();
+                        for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
                             let name = name.clone();
                             menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)));
                         }
@@ -2914,11 +3017,11 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_not_yet, adopt_needed, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label, foot_left_text,
-        found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face, profile_label,
-        project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields,
-        skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, Dirty, LinkAct, ProjectMenu,
-        FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
+        act_not_yet, adopt_needed, adopt_topology, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label,
+        foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face,
+        profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url,
+        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, Dirty, LinkAct,
+        ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -3416,6 +3519,43 @@ mod tests {
         assert!(shown_fields(&local).contains(&"base_path"));
         assert!(!shown_fields(&local).contains(&"server"));
         assert!(!shown_fields(&local).contains(&"workstation"));
+    }
+
+    /// Critical ревью круга починки 1 задачи 16: `self.original` держал
+    /// переключённые роль/режим/топологию СТАРЫМИ, потому что
+    /// `adopt_needed`/`fields_differ` сравнивают только текстовые поля
+    /// (`shown_fields`), и ни одна из трёх осей в этот список не входит —
+    /// файл и `ui.cfg` уже верны, а открытая карточка переключение не
+    /// видит. `sync_card_topology` (её нельзя прогнать без гарнеса — ей
+    /// нужны живые `Entity<Panel>`/`App`) делегирует решение сюда, в
+    /// `adopt_topology`, и это ядро проверяется здесь.
+    ///
+    /// Второе, что проверяет тест: текстовые поля (здесь — `server`, оставлен
+    /// несохранённой правкой человека) НЕ подхватываются — это не
+    /// `adopt_fields`, который стёр бы набранное и тем самым воспроизвёл бы
+    /// находку задачи 14 про молчаливую потерю правки при переходе между
+    /// карточками.
+    #[test]
+    fn adopt_topology_touches_only_the_three_axes_not_the_typed_fields() {
+        let mut original = Connection {
+            mode: "tunnel".into(),
+            role: "accept".into(),
+            base_here: true,
+            server: "ещё не сохранено".into(),
+            ..Default::default()
+        };
+        let fresh =
+            Connection {
+                mode: "local".into(), role: "dial".into(), base_here: false, server: "с диска".into(), ..Default::default()
+            };
+
+        adopt_topology(&mut original, &fresh);
+
+        assert_eq!(original.mode, "local");
+        assert_eq!(original.role, "dial");
+        assert!(!original.base_here);
+        assert!(!shown_fields(&original).contains(&"server"), "режим сменился на local — поля среды ушли из состава карточки");
+        assert_eq!(original.server, "ещё не сохранено", "текстовые поля — не ось этой функции, их не трогаем");
     }
 
     #[test]

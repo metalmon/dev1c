@@ -1198,10 +1198,20 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
     match act {
         LinkAct::Toggle => gui::toggle_link(cx),
         LinkAct::MakeCurrent => {
-            if let Err(e) = gui::switch_current(cx.global_mut::<Ui>(), subject) {
-                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            // Critical ревью круга починки 2 задачи 16: `gui::switch_current`
+            // сама по себе — один ключ в toml и `ui.cfg`, не перецикл сеанса.
+            // `gui::tray::request_switch_current` несёт всё остальное (отказ
+            // под операцией, вопрос, если он уже задаётся при смене базы,
+            // гашение и подъём сеанса) — тем же путём, что смена режима.
+            if !gui::tray::request_switch_current(cx, subject) {
+                gui::note_line(
+                    cx.global_mut::<Ui>(),
+                    Line {
+                        kind: Kind::Fail, text: "идёт операция — подождите её завершения и повторите".into()
+                    },
+                );
+                cx.refresh_windows();
             }
-            cx.refresh_windows();
         }
         // Переименование — курсор в поле «Имя» открытой карточки; имя
         // пишет «Сохранить» (`Panel::write` зовёт `save::rename`). Своего

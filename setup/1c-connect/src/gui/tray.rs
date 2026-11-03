@@ -4,8 +4,9 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, note_line, quit, run_check, save_host, save_needs_confirm, save_tray_key, start_session,
-    stop_session, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, note_line, quit, run_check, run_readiness, save_host, save_needs_confirm, save_tray_key,
+    start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab,
+    TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
@@ -530,22 +531,10 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
     let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
-            if let Some(tray) = &cx.global::<Ui>().tray {
-                tray.set_mode(mode);
-                // Доступность «Локальных агентов» зависит от режима — обязана
-                // обновиться тут же, не только при запуске (задача «Управление
-                // переехало в трей»).
-                tray.set_agents(mode);
-            }
-            // Новый транспорт — сеанс поднимается заново; `stop_session`
-            // безвредна, если сеанса и не было.
-            stop_session(cx);
-            let ui = cx.global::<Ui>();
-            if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
-                if let Err(e) = start_session(cx.global_mut::<Ui>()) {
-                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                }
-            }
+            // Тревный значок, готовность/замок, гашение и подъём сеанса —
+            // общий хвост с переключением текущего соединения (Critical
+            // ревью круга починки 2 задачи 16, `recycle_session`).
+            recycle_session(cx);
             let mut label = mode;
             for (m, _, text) in MODES {
                 if m == mode {
@@ -574,6 +563,140 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
         }
     }
     super::panel::sync_card_topology(cx, &name);
+    cx.refresh_windows();
+}
+
+/// Перецикл сеанса на уже переписанных параметрах — общий хвост смены
+/// режима (`apply_mode`) и переключения текущего соединения
+/// (`apply_switch_current`, Critical ревью круга починки 2 задачи 16).
+/// Пересчёт готовности и замка (`run_readiness`) — ПЕРВЫМ: от него зависит
+/// и `ui.gate`, который читает `raise_session_after_mode_change` ниже, и
+/// сама карточка состояния. Для смены режима это второй такой пересчёт
+/// подряд (первый уже сделал `save_host` внутри себя) — цена заведомо
+/// меньше третьего пути записи, а для переключения текущего он единственный
+/// (`switch_current` сама по себе ничего не пересчитывает, это и есть
+/// находка ревью).
+///
+/// Имя `raise_session_after_mode_change` осталось от режима, а смысл шире —
+/// «можно ли обслуживать на только что записанных параметрах», и он
+/// буквально годится переключению текущего: замок один на машину, не на
+/// повод смены.
+fn recycle_session(cx: &mut App) {
+    run_readiness(cx.global_mut::<Ui>());
+    let mode = cx.global::<Ui>().cfg.current().mode.clone();
+    if let Some(tray) = &cx.global::<Ui>().tray {
+        tray.set_mode(&mode);
+        // Доступность «Локальных агентов» зависит от режима — обязана
+        // обновиться тут же (задача «Управление переехало в трей»).
+        tray.set_agents(&mode);
+    }
+    // Параметры сеанса (база, логин, пароль, транспорт) — целиком
+    // собственность ТЕКУЩЕГО соединения, и после любой правки старый сеанс
+    // недействителен; `stop_session` безвредна, если сеанса и не было.
+    stop_session(cx);
+    let ui = cx.global::<Ui>();
+    if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
+        if let Err(e) = start_session(cx.global_mut::<Ui>()) {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+        }
+    }
+}
+
+/// Три исхода нажатия «Сделать текущим» — чистое ядро `request_switch_current`,
+/// под тестом без гарнеса (Critical ревью круга починки 2 задачи 16: тест
+/// обязателен, а GPUI-гарнеса в дереве нет).
+///
+/// **Короткого пути «параметры совпали — не перецикливаем» здесь НЕТ** — в
+/// отличие от `request_current_mode_change`, которая пропускает перецикл,
+/// когда новый режим равен старому. Ровно это отсутствие и было находкой
+/// ревью: параметры сеанса берутся из текущего соединения ЦЕЛИКОМ (база,
+/// логин, пароль, папка, транспорт), и сравнивать здесь не с чем —
+/// переключение само по себе и есть смена всех их разом, даже когда режим
+/// у обеих карточек один.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SwitchCurrentOutcome {
+    /// Идёт операция (`mode_change_blocked`) — дёргать текущее соединение
+    /// посреди обмена с базой нельзя, вопрос не успевает.
+    Blocked,
+    /// То же основание, что у `save_needs_confirm` при «Сохранить» — один
+    /// диалог на оба повода, не два текста об одном и том же.
+    NeedsConfirm,
+    /// Ничего не мешает — применяем сразу.
+    Proceed,
+}
+
+pub(crate) fn switch_current_outcome(blocked: bool, needs_confirm: bool) -> SwitchCurrentOutcome {
+    if blocked {
+        SwitchCurrentOutcome::Blocked
+    } else if needs_confirm {
+        SwitchCurrentOutcome::NeedsConfirm
+    } else {
+        SwitchCurrentOutcome::Proceed
+    }
+}
+
+/// Переключить текущее соединение — тем же путём, что смена режима
+/// (Critical ревью круга починки 2 задачи 16): `gui::switch_current`
+/// (`save.rs:758`) сама по себе — ОДИН ключ в toml и `ui.cfg`, не больше
+/// (и остаётся им — см. её докстроку и тест границы в `save/tests.rs`), а
+/// сеанс в окне один и до этого круга оставался поднятым с параметрами
+/// ПРЕЖНЕГО текущего соединения: другая база, другой логин, другой
+/// транспорт — агент продолжал бы молча отвечать не из той базы, которую
+/// показывает окно.
+///
+/// Единственный вызывающий — `LinkAct::MakeCurrent`
+/// (`panel.rs`, пункт меню «Сделать текущим»): `switch_current` сама по
+/// себе больше не всё, что происходит при этом действии.
+///
+/// `false` — смена не состоялась из-за идущей операции; тем же смыслом,
+/// что `request_current_mode_change`.
+pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
+    let ui = cx.global::<Ui>();
+    let blocked = mode_change_blocked(ui);
+    // Имени может не быть в списке (опечатка, файл изменился руками, пока
+    // окно было открыто) — у `switch_current` уже есть свой осмысленный
+    // отказ словами, и спрашивать «переключить?» о карточке, которой нет,
+    // незачем: вопрос относится к базе, а не к ошибке адресации.
+    let Some(new_host) = ui.cfg.by_name(name).cloned() else {
+        if blocked {
+            return false;
+        }
+        apply_switch_current(cx, name);
+        return true;
+    };
+    match switch_current_outcome(blocked, save_needs_confirm(ui, &new_host)) {
+        SwitchCurrentOutcome::Blocked => false,
+        SwitchCurrentOutcome::Proceed => {
+            apply_switch_current(cx, name);
+            true
+        }
+        SwitchCurrentOutcome::NeedsConfirm => {
+            if cx.global::<Ui>().window.is_none() {
+                apply_switch_current(cx, name);
+                return true;
+            }
+            window::show_window(cx);
+            let Some(w) = cx.global::<Ui>().window else { return true };
+            let owned = name.to_string();
+            let _ = w.update(cx, |_, window, cx| {
+                confirm_database_change(window, cx, &new_host, move |_window, cx| apply_switch_current(cx, &owned));
+            });
+            true
+        }
+    }
+}
+
+/// Записать новое текущее соединение и перецикл сеанса (`recycle_session`) —
+/// хвост `request_switch_current`, вызванный либо сразу, либо из согласия
+/// диалога. Отказ `switch_current` (имя исчезло между вопросом и ответом) —
+/// строка в журнал, перецикл не зовём: нечего переключать.
+fn apply_switch_current(cx: &mut App, name: &str) {
+    if let Err(e) = switch_current(cx.global_mut::<Ui>(), name) {
+        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+        cx.refresh_windows();
+        return;
+    }
+    recycle_session(cx);
     cx.refresh_windows();
 }
 
@@ -988,8 +1111,8 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         access_not_applied_line, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
-        raise_session_after_mode_change, save_host, toggle_enabled, unsaved_switch_line, Kind, MenuAction, TrayState, Ui, ACCESS,
-        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        raise_session_after_mode_change, save_host, switch_current_outcome, toggle_enabled, unsaved_switch_line, Kind, MenuAction,
+        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -1282,6 +1405,21 @@ mod tests {
         assert!(raise_session_after_mode_change("tunnel", None));
         assert!(raise_session_after_mode_change("local", why), "порты в локальном режиме подняты всегда");
         assert!(raise_session_after_mode_change("local", None));
+    }
+
+    /// Critical ревью круга починки 2 задачи 16: три исхода нажатия
+    /// «Сделать текущим», чистое ядро `request_switch_current` — заблокировано
+    /// операцией, нужен вопрос (то же основание, что у «Сохранить»), или
+    /// применяем сразу. Коротышки «параметры совпали — пропустить» здесь НЕТ
+    /// нарочно: у этой функции только два параметра, и сравнивать режимы
+    /// негде — находка ревью была ровно в том, что переключение (в отличие
+    /// от смены режима) не имеет права на такой короткий путь вовсе.
+    #[test]
+    fn switch_current_outcome_blocks_first_then_asks_and_otherwise_proceeds() {
+        assert_eq!(switch_current_outcome(true, true), SwitchCurrentOutcome::Blocked, "идёт операция — вопрос не успевает");
+        assert_eq!(switch_current_outcome(true, false), SwitchCurrentOutcome::Blocked);
+        assert_eq!(switch_current_outcome(false, true), SwitchCurrentOutcome::NeedsConfirm);
+        assert_eq!(switch_current_outcome(false, false), SwitchCurrentOutcome::Proceed);
     }
 
     #[test]

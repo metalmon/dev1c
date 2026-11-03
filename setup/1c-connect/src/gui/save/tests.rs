@@ -1196,6 +1196,38 @@ fn switching_the_current_connection_says_so_in_the_log() {
     assert!(text.contains("current = \"Ромашка\""), "{text}");
 }
 
+/// Critical ревью круга починки 2 задачи 16: `switch_current` остаётся
+/// тем, что говорит её докстрока — ОДИН ключ в toml и `ui.cfg`, и не
+/// больше. Перецикл живого сеанса (гашение, пересчёт готовности и замка,
+/// значок, подъём заново) — работа ВЫЗЫВАЮЩЕГО (`gui::tray::request_switch_current`
+/// / `apply_switch_current`), а не этой функции: до круга починки 2 его не
+/// было вовсе, и сеанс оставался поднятым с параметрами ПРЕЖНЕГО текущего
+/// соединения — другая база, другой логин, другой транспорт, агент молча
+/// отвечал не из той базы, которую показывает окно. Тест фиксирует саму
+/// границу прямо здесь, а не только в комментарии: ни сеанс, ни замок
+/// `switch_current` сама не трогает.
+#[test]
+fn switch_current_alone_does_not_touch_the_session_or_the_gate() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    ui.session = Some(doomed_session(&ui));
+    let gen_before = ui.session_gen;
+    let gate_before = ui.gate.clone();
+
+    switch_current(&mut ui, "Ромашка").unwrap();
+
+    assert_eq!(ui.session_gen, gen_before, "switch_current не гасит и не перезапускает сеанс сам");
+    assert!(ui.session.is_some(), "прежний сеанс остался висеть — перецикл делает вызывающий");
+    assert_eq!(ui.gate, gate_before, "switch_current не пересчитывает замок сам");
+    let _ = ui.session.take().unwrap().stop();
+}
+
 /// Review Focus плана, задача 6: переключение текущей на соединение, у
 /// которого база на той стороне (`base_here = false`), — путь к базе пустой
 /// там законно (снятый замок `Connection::validate`), и это не повод

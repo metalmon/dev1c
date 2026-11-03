@@ -145,7 +145,19 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
     // Critical 2 ревью задачи 7: «файла нет» (`NotFound`, туда и годится образец) и «не смогли прочитать» (антивирус держит файл, нет прав, временный отказ диска) — разные причины, а прежний `unwrap_or_else` сливал их в одну и читал любой отказ как «файла нет». Следующая строка пишет текст ПОВЕРХ файла — на чужом отказе это стирало бы оба шифртекста молча, без единого слова в журнал. Любая причина кроме `NotFound` — отказ словами здесь же, до какой-либо записи.
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => cfg::EXAMPLE.to_string(),
+        // Файла нет (свежий комплект) — берём образец, но СРАЗУ называем его
+        // единственный блок текущим соединением: имя блока в образце —
+        // подстановка («Соединение 1»), а писатель ниже ищет свой блок по
+        // имени (круг починки 1 задачи 4, находка 1), и на чужом имени
+        // человек получил бы отказ там, где его намерение раньше
+        // записывалось (наблюдение владельца 28.10).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let name = if ui.cfg.current.is_empty() { cfg::FIRST_CONNECTION_NAME } else { ui.cfg.current.as_str() };
+            let quoted = format!("{name:?}");
+            let rooted = common::toml_render::set(cfg::EXAMPLE, "", "current", &quoted);
+            common::toml_render::set_in(&rooted, cfg::CONNECTION, 0, "name", &quoted)
+                .ok_or_else(|| format!("{}: в образце нет блока соединения — записывать ключ не во что", cfg::FILE))?
+        }
         Err(e) => return Err(format!("{}: файл не прочитан — {e}", path.display())),
     };
     // Ключ идёт в блок ТЕКУЩЕГО соединения, а не в прежнюю секцию `[host]`
@@ -229,7 +241,16 @@ fn raw_literal(text: &str, nth: usize, key: &str) -> Option<String> {
 /// записи, а не подставляем пустоту: человек должен увидеть причину и не
 /// потерять ничего, а не прочитать в журнале «оставлен прежним» про пароль,
 /// которого на самом деле уже нет.
-fn resolve_patches(before: &str, nth: usize, keep: &[&'static str]) -> Result<Vec<(&'static str, String)>, String> {
+fn resolve_patches(before: &str, cfg: &Cfg, keep: &[&'static str]) -> Result<Vec<(&'static str, String)>, String> {
+    if keep.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Блок ищется по ИМЕНИ текущего соединения, тем же адресом, которым в
+    // него потом и запишут (`cfg::set_current`): по номеру в списке
+    // переставленный руками блок отдал бы шифртекст СОСЕДНЕГО соединения, и
+    // подстановка перенесла бы чужой пароль в блок текущего (круг починки 1
+    // задачи 4, находка 1).
+    let nth = cfg::current_block_in(before, cfg)?;
     let mut patches = Vec::new();
     for &key in keep {
         match raw_literal(before, nth, key) {
@@ -328,7 +349,7 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     let before = if keep.is_empty() { String::new() } else { std::fs::read_to_string(&path).map_err(|e| format!("{e:#}"))? };
     // Нашлось не всё — отказываем здесь: до этой строки ни одной записи ещё
     // не было, файл не тронут.
-    let patches = resolve_patches(&before, ui.cfg.current_block(), &keep)?;
+    let patches = resolve_patches(&before, &ui.cfg, &keep)?;
     let mut cfg = Cfg::of_one(host);
     // `ui.cfg.undecryptable` должен и дальше говорить правду: поле
     // осталось тем же непрочитанным шифртекстом, что и было, запись его не

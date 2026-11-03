@@ -1,6 +1,37 @@
 //! Rewrite the values of a commented example TOML in place: `change` edits
 //! a file the person reads, so the comments must survive.
 
+/// Имя таблицы, которую открывает эта строка файла: `[host]`,
+/// `[[connection]]` — или `None`, если строка заголовком не является. ОДНО
+/// правило на всех, кто разбирает заголовок: печать (`render`), правка
+/// (`set_in`), чтение (`get_in`), счёт блоков (`count`) и писатели, которым
+/// нужно узнать вид файла (`cfg::set_current`, `ops_host::trusts_read_write`).
+/// Три копии этого правила с РАЗНЫМИ мерками уже разошлись: сравнение
+/// `trim() == "[[connection]]"` не узнавало законный заголовок с хвостовым
+/// комментарием, и писатель на таком файле уходил в ветку прежнего вида и
+/// дописывал `[host]` — то есть сам создавал состояние «обе секции», которое
+/// чтение считает отказом (круг починки 1 задачи 4, находка 2).
+///
+/// Хвостовой комментарий снимается тем же приёмом, что у `unquote`: всё от
+/// первого `#` отбрасывается без разбора. Не разборщик TOML и не
+/// притворяется им: имя таблицы в кавычках, внутри которых стоит `#`
+/// (`["a#b"]`), здесь не предусмотрено — как и везде в этом файле.
+pub fn section_of(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if !t.starts_with('[') {
+        return None;
+    }
+    let head = t.split('#').next().unwrap_or(t).trim_end();
+    head.ends_with(']').then_some(head)
+}
+
+/// Сколько раз секция открыта в тексте — тем же распознаванием заголовка
+/// (`section_of`), которым её правят и читают. Для повторяющейся секции это
+/// число блоков: `[[connection]]` считается столько раз, сколько их в файле.
+pub fn count(text: &str, section: &str) -> usize {
+    text.lines().filter(|l| section_of(l) == Some(section)).count()
+}
+
 /// `value(section, key)` returns the new right-hand side (already quoted for
 /// strings) or `None` to keep the line as it is.
 pub fn render(example: &str, value: impl Fn(&str, &str) -> Option<String>) -> String {
@@ -8,8 +39,8 @@ pub fn render(example: &str, value: impl Fn(&str, &str) -> Option<String>) -> St
     let mut out = String::new();
     for line in example.lines() {
         let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            section = t.to_string();
+        if let Some(head) = section_of(line) {
+            section = head.to_string();
             out.push_str(line);
         } else if let Some((key, _)) = t.split_once(" = ").filter(|_| !t.starts_with('#')) {
             match value(&section, key) {
@@ -77,9 +108,9 @@ pub fn set_in(text: &str, section: &str, nth: usize, key: &str, value: &str) -> 
     let mut tail = None; // последняя непустая строка нужного блока
     for i in 0..lines.len() {
         let t = lines[i].trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            inside = t == section && seen == nth;
-            if t == section {
+        if let Some(head) = section_of(&lines[i]) {
+            inside = head == section && seen == nth;
+            if head == section {
                 seen += 1;
             }
             if inside {
@@ -140,9 +171,9 @@ pub fn get_in(text: &str, section: &str, nth: usize, key: &str) -> Option<String
     let mut seen = 0;
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            inside = t == section && seen == nth;
-            if t == section {
+        if let Some(head) = section_of(line) {
+            inside = head == section && seen == nth;
+            if head == section {
                 seen += 1;
             }
             continue;
@@ -249,6 +280,33 @@ mod tests {
         // Блока с таким номером нет — `None`, а не дописанный пустой блок.
         assert_eq!(set_in(two, "[[connection]]", 2, "write", "\"read_write\""), None);
         assert_eq!(get_in(two, "[[connection]]", 2, "write"), None);
+    }
+
+    /// Хвостовой комментарий у заголовка — законная строка TOML, и узнавать
+    /// её обязаны ВСЕ: правка, чтение и счёт блоков (круг починки 1 задачи
+    /// 4, находка 2). Прежнее сравнение `trim() == "[[connection]]"` такой
+    /// заголовок не узнавало, и писатель на помеченном файле считал, что
+    /// блоков нет вовсе, — то есть дописывал `[host]` и своей же рукой делал
+    /// файл отказом при чтении.
+    #[test]
+    fn a_section_header_is_recognised_through_its_trailing_comment() {
+        assert_eq!(section_of("[host]"), Some("[host]"));
+        assert_eq!(section_of("  [[connection]] # Ромашка"), Some("[[connection]]"));
+        assert_eq!(section_of("name = \"Buh\""), None);
+        assert_eq!(section_of("# [host] в комментарии — не заголовок"), None);
+        let two = "[[connection]] # моя база\nname = \"Buh\"\n\n[[connection]] # база жены\nname = \"Ромашка\"\n";
+        assert_eq!(count(two, "[[connection]]"), 2, "помеченные блоки считаются");
+        assert_eq!(get_in(two, "[[connection]]", 1, "name"), Some("Ромашка".into()));
+        let out = set_in(two, "[[connection]]", 1, "write", "\"read_write\"").unwrap();
+        assert_eq!(
+            out, "[[connection]] # моя база\nname = \"Buh\"\n\n[[connection]] # база жены\nname = \"Ромашка\"\nwrite = \"read_write\"\n",
+            "ключ встал в помеченный блок, и пометка цела"
+        );
+        // Та же мерка у печати: `render` узнаёт секцию и не теряет пометку.
+        assert_eq!(
+            render(two, |s, k| (s == "[[connection]]" && k == "name").then(|| "\"X\"".to_string())),
+            two.replace("\"Buh\"", "\"X\"").replace("\"Ромашка\"", "\"X\"")
+        );
     }
 
     /// Корневой ключ (`current` у настроек коннектора): секции у него нет

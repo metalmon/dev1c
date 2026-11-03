@@ -1808,7 +1808,7 @@ fn mcp_tick(kit: &Kit, user: &str) -> (bool, Result<Cfg, String>) {
 /// не бывает, и отказ по умолчанию остаётся отказом по умолчанию.
 fn trusts_read_write(file_text: Option<&str>) -> bool {
     let Some(text) = file_text else { return false };
-    let blocks = text.lines().filter(|l| l.trim() == crate::cfg::CONNECTION).count();
+    let blocks = common::toml_render::count(text, crate::cfg::CONNECTION);
     if blocks == 0 {
         // Прежний файл: единственное соединение лежит секцией `[host]`.
         return common::toml_render::get(text, "[host]", "write").as_deref() == Some("read_write");

@@ -547,6 +547,13 @@ fn a_tray_key_is_written_even_when_the_rest_is_not_filled_in() {
     assert_eq!(ui.cfg.current().publication, "webserver");
     let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(text.contains("publication = \"webserver\""), "{text}");
+    // Круг починки 1 задачи 4: записанный из образца файл называет блок и
+    // `current` ТЕКУЩИМ соединением окна, а не подстановкой образца, — иначе
+    // следующая запись не нашла бы в нём своего блока и отказала бы.
+    let back: Cfg = toml::from_str(&text).expect("файл из образца разбирается");
+    assert_eq!(back.current, ui.cfg.current, "{text}");
+    assert_eq!(back.current().publication, "webserver", "ключ лёг в блок этого соединения");
+    assert!(back.read_notes.is_empty(), "{:?}", back.read_notes);
 }
 
 /// Critical 2 ревью задачи 7: `read_to_string(..).unwrap_or_else(|_| EXAMPLE)` не отличала «файла нет» от любой другой причины отказа (антивирус держит файл, нет прав, временный сбой диска) — и в обоих случаях следующая строка писала образец ПОВЕРХ существующего файла, стирая оба шифртекста молча. Права 0o200 (писать можно, читать нельзя) — ровно такой разрыв без chmod каталога: `read_to_string` откажет не `NotFound`, а старый код после этого как ни в чём не бывало писал бы образец — право на запись у файла есть. Под root права не действуют — тест бессмыслен, пропускаем, как и соседний тест `secrets::tests::a_read_only_state_dir_is_a_named_refusal`.

@@ -842,17 +842,6 @@ impl Cfg {
         &mut self.connections[at]
     }
 
-    /// Номер блока `[[connection]]` текущего соединения в тексте файла —
-    /// адрес для построчной правки и для построчного чтения одного ключа
-    /// (`set_current`, `gui::save::raw_literal`). Порядок блоков в тексте и в
-    /// `connections` один и тот же: список читается тем же разбором, который
-    /// их и выстроил. Имя не нашлось — нулевой, тем же правилом, что у
-    /// `current()`: пустой `current` при непустом списке — законный вид
-    /// файла, и выбирать там нечего, кроме первого.
-    pub fn current_block(&self) -> usize {
-        self.connections.iter().position(|c| c.name == self.current).unwrap_or(0)
-    }
-
     /// `Cfg` из ОДНОГО соединения — оно же и текущее. Ровно то, что до
     /// задачи 3 писалось как `Cfg { host, ..Default::default() }`: окно
     /// собирает из полей формы одно соединение и проверяет его отдельно от
@@ -1358,14 +1347,17 @@ impl Cfg {
         // значило бы сделать первый блок особенным). Нет блока в образце —
         // отказ словами, а не молчаливая печать файла без соединений: такой
         // файл при следующем чтении потерял бы их все.
-        // Заголовок ищется строкой, а не подстрокой: имя блока названо и в
-        // объяснениях человеку выше него, и подстрока нашла бы сперва их —
-        // то есть разрезала бы шапку посреди предложения.
-        let at = EXAMPLE
-            .match_indices(CONNECTION)
-            .find(|(i, _)| EXAMPLE[..*i].ends_with('\n'))
-            .map(|(i, _)| i)
-            .ok_or_else(|| format!("{FILE}: в образце нет блока {CONNECTION} — печатать соединения не по чему"))?;
+        // Шапка — всё до первой СТРОКИ-заголовка блока, и узнаёт её то же
+        // правило, что у правки и чтения (`toml_render::section_of`): имя
+        // блока названо и в объяснениях человеку выше него, так что поиск
+        // подстроки разрезал бы шапку посреди предложения.
+        // `split_inclusive` оставляет перевод строки на месте — сумма длин и
+        // есть граница в байтах.
+        let at: usize =
+            EXAMPLE.split_inclusive('\n').take_while(|l| common::toml_render::section_of(l) != Some(CONNECTION)).map(str::len).sum();
+        if at == EXAMPLE.len() {
+            return Err(format!("{FILE}: в образце нет блока {CONNECTION} — печатать соединения не по чему"));
+        }
         let (head, block) = EXAMPLE.split_at(at);
         let mut text = common::toml_render::render(head, |s, k| {
             // Корень файла: секции у `current` нет вовсе.
@@ -1439,17 +1431,46 @@ pub const CONNECTION: &str = "[[connection]]";
 /// Прежний файл (`[host]` и ни одного блока) правится там, где соединение и
 /// лежит, — в самой `[host]`: дописать блок рядом с ней значило бы своей же
 /// рукой сделать файл человека отказом. Блоки в файле есть — ключ идёт в
-/// блок текущего соединения, найденный по имени из `current` (порядок блоков
-/// в тексте и в `connections` один: список читается тем же разбором).
-/// Такого блока в файле нет — отказ словами: файл на диске разошёлся с тем,
-/// что в памяти, и писать ключ наугад в чужой блок нельзя.
+/// блок, который НАЗЫВАЕТ СЕБЯ текущим соединением (`current_block_in`).
 pub fn set_current(text: &str, cfg: &Cfg, key: &str, value: &str) -> std::result::Result<String, String> {
-    if !text.lines().any(|l| l.trim() == CONNECTION) {
+    if common::toml_render::count(text, CONNECTION) == 0 {
         return Ok(common::toml_render::set(text, "[host]", key, value));
     }
-    common::toml_render::set_in(text, CONNECTION, cfg.current_block(), key, value).ok_or_else(|| {
-        format!("{FILE}: в файле нет блока соединения «{}» — настройки на диске изменились, перечитайте их и повторите", cfg.current)
-    })
+    let nth = current_block_in(text, cfg)?;
+    common::toml_render::set_in(text, CONNECTION, nth, key, value).ok_or_else(|| stale_file(&cfg.current))
+}
+
+/// Номер блока текущего соединения В ТЕКСТЕ файла — найденный по ключу
+/// `name` внутри блоков, а не по месту соединения в `cfg.connections`.
+///
+/// Почему по имени (круг починки 1 задачи 4, находка 1). Текст писатель
+/// перечитывает с диска, а `cfg` у него от загрузки — между ними человек
+/// успевает правку руками, и образец теперь прямо приглашает её сделать
+/// («скопируйте блок целиком»). Вставленный или переставленный блок сдвигает
+/// номер, и потолок записи уехал бы в блок ЧУЖОГО соединения МОЛЧА: по
+/// номеру такая запись выглядит удачной, отказ срабатывал бы только если
+/// блоков стало меньше. Имя же — то самое, чем план (решение 1) и называет
+/// текущее соединение, и оно переживает перестановку блоков.
+///
+/// Пустой `current` — ноль: блоки без строки `current` в корне — законный
+/// вид файла, и текущее там первое по определению (то же правило, что у
+/// `Cfg::current()`). Имя не нашлось ни в одном блоке — отказ словами: файл
+/// на диске разошёлся с тем, что в памяти, и писать наугад нельзя.
+pub fn current_block_in(text: &str, cfg: &Cfg) -> std::result::Result<usize, String> {
+    if cfg.current.is_empty() {
+        return Ok(0);
+    }
+    (0..common::toml_render::count(text, CONNECTION))
+        .find(|nth| common::toml_render::get_in(text, CONNECTION, *nth, "name").as_deref() == Some(cfg.current.as_str()))
+        .ok_or_else(|| stale_file(&cfg.current))
+}
+
+/// Одна фраза на оба случая, в которых писатель не нашёл своего блока: имени
+/// нет ни в одном блоке и блока с таким номером нет вовсе. Причина у них
+/// одна — файл на диске не тот, из которого читали, — и слов для неё хватает
+/// одних.
+fn stale_file(current: &str) -> String {
+    format!("{FILE}: в файле нет блока соединения «{current}» — настройки на диске изменились, перечитайте их и повторите")
 }
 
 /// Открывает одно поле паролем; не получилось — пустая строка и имя поля в
@@ -1727,6 +1748,61 @@ mod tests {
         three.current = "Ландыш".into();
         let e = set_current(&text, &three, "write", "\"read_write\"").unwrap_err();
         assert!(e.contains("Ландыш"), "отказ называет соединение: {e}");
+    }
+
+    /// Круг починки 1 задачи 4, находка 1: блок адресуется ИМЕНЕМ, а не
+    /// номером в списке. Текст писатель перечитывает с диска, а `cfg` у него
+    /// от загрузки, и человек между ними успевает правку руками — образец
+    /// прямо приглашает её сделать («скопируйте блок целиком»). По номеру
+    /// переставленный блок уводил потолок записи в блок ЧУЖОГО соединения
+    /// МОЛЧА: отказ срабатывал бы только если блоков стало меньше.
+    #[test]
+    fn a_hand_reordered_file_does_not_send_the_key_to_the_neighbours_block() {
+        let mut two = cfg_with(&["Buh", "Ромашка"]);
+        two.current = "Ромашка".into();
+        let text = two.render(&store()).unwrap();
+        // Человек поменял блоки местами руками: в памяти «Ромашка» вторая, в
+        // файле стала первой. Имя её находит, номер — нет.
+        let sep = format!("\n{CONNECTION}\n");
+        let parts: Vec<&str> = text.split(sep.as_str()).collect();
+        assert_eq!(parts.len(), 3, "подготовка: шапка и два блока");
+        let swapped = format!("{}{sep}{}{sep}{}", parts[0], parts[2], parts[1]);
+        let back: Cfg = toml::from_str(&swapped).expect("переставленный файл разбирается");
+        assert_eq!(back.connections[0].name, "Ромашка", "подготовка: блоки правда переставлены");
+
+        let after = set_current(&swapped, &two, "write", "\"read_write\"").unwrap();
+        let back: Cfg = toml::from_str(&after).unwrap();
+        assert_eq!(back.current().write, "read_write", "ключ нашёл своё соединение по имени");
+        assert_eq!(
+            back.connections.iter().find(|c| c.name == "Buh").unwrap().write,
+            "",
+            "а соседнему, занявшему прежний номер, ничего не записали"
+        );
+
+        // Блока с этим именем в файле не стало вовсе — отказ словами, а не
+        // запись в того, кто оказался на его месте.
+        let gone = swapped.replace("name = \"Ромашка\"", "name = \"Ландыш\"");
+        let e = set_current(&gone, &two, "write", "\"read_write\"").unwrap_err();
+        assert!(e.contains("Ромашка"), "отказ называет соединение: {e}");
+    }
+
+    /// Круг починки 1 задачи 4, находка 2: заголовок с хвостовым
+    /// комментарием — законная строка TOML, и писатель обязан её узнавать.
+    /// Прежнее сравнение «строка равна `[[connection]]`» её не узнавало: на
+    /// таком файле писатель считал, что блоков нет вовсе, уходил в ветку
+    /// прежнего вида и ДОПИСЫВАЛ `[host]` — то есть сам создавал состояние
+    /// «обе секции», которое чтение считает отказом.
+    #[test]
+    fn a_header_marked_with_a_comment_is_still_the_connections_block() {
+        let marked = "current = \"Ромашка\"\n\n[[connection]] # моя база\nname = \"Buh\"\nbase_path = \"C:\\\\Bases\\\\Buh\"\n\n[[connection]] # база жены\nname = \"Ромашка\"\nbase_path = \"C:\\\\Bases\\\\Р\"\n";
+        let cfg: Cfg = toml::from_str(marked).unwrap();
+        let after = set_current(marked, &cfg, "write", "\"read_write\"").unwrap();
+        assert!(!after.contains("[host]"), "прежняя секция не дописывается: {after}");
+        assert!(after.contains("# база жены"), "пометка человека цела: {after}");
+        let back: Cfg = toml::from_str(&after).unwrap();
+        assert!(back.read_notes.is_empty(), "{:?}", back.read_notes);
+        assert_eq!(back.current().write, "read_write");
+        assert_eq!(back.connections[0].write, "", "соседний блок не тронут");
     }
 
     /// Настройки Zed из образа — рядом, не копией: имена инструментов
@@ -2669,11 +2745,19 @@ mod tests {
     /// Образец (`1c-connect.example.toml`) несёт оба пароля пустыми, и
     /// `render` обязан остаться детерминированным — иначе падают
     /// `example_prints_gitea_with_its_rule` и `render_keeps_comments_and_round_trips`.
+    ///
+    /// Соединение здесь непустое по составу, хоть и с пустыми паролями
+    /// (круг починки 1 задачи 4, находка 3): у `Cfg::default()` список
+    /// соединений ПУСТ, а `render` с задачи 4 печатает блок на соединение —
+    /// то есть строки `password` в выводе не было вовсе, и утверждение
+    /// проверяло отсутствие того, чего никто не печатал. Пустой тест хуже
+    /// отсутствующего: он выглядит покрытием.
     #[test]
     fn an_empty_password_stays_empty_in_the_file() {
         let s = secrets::Store::file(&tmp("renderempty"));
-        let c = Cfg::default();
+        let c = Cfg::of_one(Connection { name: "Buh".into(), ..Connection::default() });
         let text = c.render(&s).unwrap();
+        assert!(text.contains("password = \"\"") && text.contains("db_password = \"\""), "оба пустых пароля напечатаны: {text}");
         assert!(!text.contains(secrets::PREFIX), "{text}");
         assert_eq!(text, c.render(&s).unwrap(), "render обязан быть детерминированным");
     }

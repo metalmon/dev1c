@@ -1201,13 +1201,19 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             // Critical ревью круга починки 2 задачи 16: `gui::switch_current`
             // сама по себе — один ключ в toml и `ui.cfg`, не перецикл сеанса.
             // `gui::tray::request_switch_current` несёт всё остальное (отказ
-            // под операцией, вопрос, если он уже задаётся при смене базы,
-            // гашение и подъём сеанса) — тем же путём, что смена режима.
+            // под операцией/проверкой/публикацией, вопрос, если он уже
+            // задаётся при смене базы, гашение и подъём сеанса) — тем же
+            // путём, что смена режима.
             if !gui::tray::request_switch_current(cx, subject) {
+                // Круг починки 5 задачи 16, ruling а: отказ называет, что
+                // именно идёт, а не одно общее «операция» — `busy_now_word`
+                // читает тот же счёт, которым отказал `request_switch_current`
+                // (`mode_change_blocked`), другого расчёта не заводим.
+                let why = gui::tray::busy_now_word(cx.global::<Ui>());
                 gui::note_line(
                     cx.global_mut::<Ui>(),
                     Line {
-                        kind: Kind::Fail, text: "идёт операция — подождите её завершения и повторите".into()
+                        kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите «Сделать текущим».")
                     },
                 );
                 cx.refresh_windows();
@@ -1303,10 +1309,15 @@ fn set_card_mode(cx: &mut App, name: &str, mode: &'static str) {
     let is_current = cx.global::<Ui>().cfg.current().name == name;
     if is_current {
         if !gui::tray::request_current_mode_change(cx, mode) {
+            // Круг починки 5 задачи 16: тот же счёт (`mode_change_blocked`)
+            // теперь включает и публикацию — слово в отказе обязано
+            // называть её, а не всегда «операцию» (`busy_now_word`, тот же,
+            // что и у «Сделать текущим»).
+            let why = gui::tray::busy_now_word(cx.global::<Ui>());
             gui::note_line(
                 cx.global_mut::<Ui>(),
                 Line {
-                    kind: Kind::Fail, text: "идёт операция — подождите её завершения и повторите".into()
+                    kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
                 },
             );
         }

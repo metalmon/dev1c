@@ -2480,6 +2480,45 @@ mod tests {
         assert_ne!(stop_own_publication(&publication_ctx(cfg, false)).ok(), Some(false), "свой httpd выход обязан погасить");
     }
 
+    /// Круг починки 5 задачи 16 — находка двух ревьюеров одновременно: при
+    /// переключении текущего соединения гашение прежней публикации обязано
+    /// смотреть на СТАРУЮ карточку (ту, чей httpd гасим), а не на НОВУЮ,
+    /// которая уже заняла её место в `Cfg` к моменту вызова. Старая auto
+    /// (наш httpd поднят), новая webserver — `Ctx` новой карточки решил бы
+    /// «нечего гасить» (`Ok(false)`), признак `raised_publication` сбросился
+    /// бы безусловно, и процесс остался бы сиротой до перезагрузки машины.
+    ///
+    /// Этот тест трогает только `stop_own_publication` — функцию, которая
+    /// не менялась, — и показывает разницу в её решении между старым и
+    /// новым `Ctx` на одной и той же паре карточек: документирует саму
+    /// суть находки. Он остаётся зелёным независимо от того, какой `Cfg`
+    /// на самом деле собирает `tray::apply_switch_current` — за ЭТО отвечает
+    /// `gui::tray::tests::write_switch_current_builds_the_old_ctx_not_the_new_one`,
+    /// который гоняет настоящую проводку (`write_switch_current`) и падает,
+    /// если она однажды соберёт `Ctx` из новой карточки.
+    #[test]
+    fn stopping_the_previous_publication_must_see_the_old_card_not_the_new_one() {
+        let mut old = crate::cfg::filled_for_test();
+        old.current_mut().publication = "auto".into();
+        let mut new = crate::cfg::filled_for_test();
+        new.current_mut().publication = "webserver".into();
+
+        // Собрать `Ctx` из НОВОЙ карточки (находка ревью) — решение «нечего
+        // гасить», хотя прежний httpd всё ещё жив.
+        assert_eq!(
+            stop_own_publication(&publication_ctx(new, false)).ok(),
+            Some(false),
+            "Ctx новой карточки лжёт, что гасить нечего — ровно та беда, которую нашло ревью"
+        );
+        // Собрать его из СТАРОЙ — обязан попытаться (в тесте без настоящего
+        // httpd это тихий успех, `Ok(true)`, а не `Ok(false)`).
+        assert_ne!(
+            stop_own_publication(&publication_ctx(old, false)).ok(),
+            Some(false),
+            "Ctx старой карточки — то, что обязан строить apply_switch_current"
+        );
+    }
+
     #[test]
     fn gitea_probe_on_a_closed_port_is_down() {
         assert!(matches!(gitea_probe("http://127.0.0.1:1", std::time::Duration::from_secs(5)), Gitea::Down(_)));

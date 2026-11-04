@@ -493,13 +493,37 @@ fn toggle_enabled(locked: bool, on: bool) -> bool {
     on || !locked
 }
 
-/// Операция или проверка идёт — тем же критерием, что блокирует «Сохранить»
-/// (`panel::can_save`) и переключатель (`Switch::disabled`). Смена режима
-/// посреди неё переписала бы конфигурацию и перезапустила сеанс под её
-/// ногами — у подменю «Режим работы» этой защиты не было (находка целостного
-/// ревью).
+/// Операция, проверка или публикация идёт — тем же критерием, что блокирует
+/// «Сохранить» (`panel::can_save`) и переключатель (`Switch::disabled`).
+/// Смена режима посреди неё переписала бы конфигурацию и перезапустила
+/// сеанс под её ногами — у подменю «Режим работы» этой защиты не было
+/// (находка целостного ревью).
+///
+/// `ui.publishing.is_some()` — круг починки 5 задачи 16, ruling а: идущая
+/// публикация — та же гонка, что идущая операция, только над httpd, а не
+/// над toml, и дёргать текущее соединение (переключение, смена режима)
+/// посреди неё нельзя — результат публикации, пришедший уже после
+/// переключения, мог бы лечь на прежнюю базу. Один счёт на обе двери
+/// (`request_current_mode_change`, `request_switch_current`), не два
+/// похожих.
 fn mode_change_blocked(ui: &Ui) -> bool {
-    ui.busy.is_some() || ui.progress.is_some()
+    ui.busy.is_some() || ui.progress.is_some() || ui.publishing.is_some()
+}
+
+/// Слово о том, что идёт прямо сейчас — для отказа «Сделать текущим»
+/// словами (круг починки 5 задачи 16, ruling а: «отказ называет, что
+/// именно идёт»). Зовётся только когда `mode_change_blocked` уже сказала
+/// «да» — порядок проверки внутри тот же, что у неё: операция (есть
+/// карточка хода) важнее проверки (занято без карточки хода), а публикация
+/// проверяется последней — её одну можно начать и без операции/проверки.
+pub(crate) fn busy_now_word(ui: &Ui) -> &'static str {
+    if ui.progress.is_some() {
+        "операция"
+    } else if ui.busy.is_some() {
+        "проверка"
+    } else {
+        "публикация базы"
+    }
 }
 
 /// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
@@ -738,37 +762,90 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
 /// сеанса, тот же, что в `save_host`: ребёнок моста пойдёт по
 /// опубликованному адресу.
 ///
-/// Прежний свой httpd (если мы его поднимали, `ui.raised_publication`) гасим
-/// безусловно, как только база сменилась — он публикует адрес, которого
-/// больше нет у текущего соединения, и состояние публикации не должно
-/// рапортовать «готово» про него. Решение «поднимать ли новую» — через
-/// `republish_after_save`, со `was_enabled` на месте «обслуживания» (ruling:
-/// переустанавливаем только когда MCP включены, а не по наличию старого
-/// сеанса — к этому моменту `recycle_session` его ещё не трогала).
+/// **Круг починки 5 задачи 16 — два ревьюера, одна находка.** Гашение
+/// прежней публикации обязано смотреть на СТАРУЮ карточку: `ctx`, собранный
+/// ПОСЛЕ `switch_current`, несёт уже НОВУЮ (`ui.cfg` переписан), а
+/// `stop_own_publication` проверяет `publication != "webserver"` у той
+/// карточки, что лежит в `ctx.cfg.current()`. Старая auto (наш httpd),
+/// новая webserver — старым кодом `stop_own_publication` решал бы «нечего
+/// гасить» по НОВОЙ карточке, признак сбрасывался безусловно, и процесс
+/// сиротел до перезагрузки машины. Снимок — `old_cfg`, целый `Cfg` до
+/// записи (не только `Connection`: `Ctx` несёт `Cfg`, и его `.current()`
+/// должен указывать на старую карточку по имени, которое мы покидаем).
+///
+/// Признак `ui.raised_publication` сбрасывается ТОЛЬКО по удаче
+/// (`Ok(true)`) — на отказе (`Err`) или на «и так не наша публикация»
+/// (`Ok(false)`, не должно случаться при согласованном признаке, но не
+/// повод учить признак забывать) он остаётся как был, чтобы выключение и
+/// выход могли повторить попытку, а не унести забытый процесс в бессрочное
+/// сиротство.
+///
+/// Гонку результата публикации, пришедшего уже после переключения,
+/// отдельно не лечим: предусловие (`mode_change_blocked` с
+/// `ui.publishing.is_some()`, ruling а) не даёт переключиться, пока
+/// публикация идёт — значит поздний результат может прийти только от
+/// публикации, начатой уже ПОСЛЕ переключения, и это законный случай, не
+/// гонка.
+///
+/// Запись и решение «что делать с публикацией» вынесены в `write_switch_current`
+/// (берёт и возвращает только `Ui`, без `App`) — круг починки 5 задачи 16:
+/// находку «`ctx` смотрит на новую карточку» без этого нельзя было бы
+/// покрыть тестом вовсе (GPUI-гарнеса в дереве нет), а так под тестом —
+/// именно тот `Ctx`, который эта функция передаст `stop_own_publication`.
 fn apply_switch_current(cx: &mut App, name: &str) {
-    let was_enabled = cx.global::<Ui>().enabled.load(Ordering::Relaxed);
-    let old_host = cx.global::<Ui>().cfg.current().clone();
-    let raised_publication = cx.global::<Ui>().raised_publication;
-    if let Err(e) = switch_current(cx.global_mut::<Ui>(), name) {
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-        cx.refresh_windows();
-        return;
-    }
-    let base_changed = descriptor_changed(cx.global::<Ui>().cfg.current(), &old_host);
-    let what = publication_after_switch(base_changed, was_enabled, raised_publication);
-    if what.stop_old {
-        let ui = cx.global_mut::<Ui>();
-        ui.raised_publication = false;
-        let ctx = super::quiet_ctx(ui);
-        if let Err(e) = crate::ops_host::stop_own_publication(&ctx) {
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("HTTP-сервис прежней базы не остановлен: {e:#}") });
+    let written = match write_switch_current(cx.global_mut::<Ui>(), name) {
+        Ok(w) => w,
+        Err(e) => {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+            return;
+        }
+    };
+    if written.what.stop_old {
+        match crate::ops_host::stop_own_publication(&written.old_ctx) {
+            Ok(true) => cx.global_mut::<Ui>().raised_publication = false,
+            Ok(false) => {} // признак и ctx разошлись бы — не трогаем его, разберётся следующая попытка
+            Err(e) => {
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("HTTP-сервис прежней базы не остановлен: {e:#}") });
+            }
         }
     }
-    if what.raise_new {
+    if written.what.raise_new {
         ensure_publication_now(cx.global_mut::<Ui>());
     }
     recycle_session(cx);
     cx.refresh_windows();
+}
+
+/// Результат `write_switch_current`: `Ctx`, с которым обязан быть позван
+/// `stop_own_publication` (несёт СТАРЫЙ `Cfg` — снимок до записи, см. ниже),
+/// и решение, что делать с публикацией (`publication_after_switch`).
+struct SwitchCurrentWrite {
+    old_ctx: crate::ops_host::Ctx,
+    what: PublicationAfterSwitch,
+}
+
+/// Переписать `current` (`gui::switch_current`) и решить, что делать с
+/// публикацией — часть `apply_switch_current`, которой GPUI не нужен вовсе:
+/// берёт и правит только `Ui`. Выделена специально ради теста (круг починки
+/// 5 задачи 16, находка двух ревьюеров): без неё «`old_ctx` несёт СТАРУЮ
+/// карточку, не новую» было бы утверждением в докстроке, которое никто не
+/// проверяет.
+///
+/// `old_cfg` — снимок ВСЕГО `Cfg`, не только прежнего `Connection`: `Ctx`
+/// несёт `Cfg` целиком, и `stop_own_publication` читает `ctx.cfg.current()`
+/// — так что снимок обязан указывать на старую карточку по имени, которое
+/// мы сейчас покидаем, а не только нести её поля отдельно.
+fn write_switch_current(ui: &mut Ui, name: &str) -> Result<SwitchCurrentWrite, String> {
+    let was_enabled = ui.enabled.load(Ordering::Relaxed);
+    let old_cfg = ui.cfg.clone();
+    let old_host = old_cfg.current().clone();
+    let raised_publication = ui.raised_publication;
+    switch_current(ui, name)?;
+    let base_changed = descriptor_changed(ui.cfg.current(), &old_host);
+    let what = publication_after_switch(base_changed, was_enabled, raised_publication);
+    let old_ctx = super::quiet_ctx_with(ui, old_cfg);
+    Ok(SwitchCurrentWrite { old_ctx, what })
 }
 
 /// Что сделать с публикацией после переключения текущего — чистое ядро
@@ -1204,11 +1281,12 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        access_not_applied_line, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
+        access_not_applied_line, agent_available, agent_checked, agent_menu_id, busy_now_word, icon_rgba, menu_action, mode_change_blocked,
         publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled,
-        unsaved_switch_line, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU,
-        AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        unsaved_switch_line, write_switch_current, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS,
+        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
+    use crate::cfg::Connection;
     use crate::editors;
     use crate::gui::theme;
     use crate::gui::{Busy, Running, Which, TRAY_PNG};
@@ -1418,6 +1496,15 @@ mod tests {
         assert!(mode_change_blocked(&ui), "идёт операция с карточкой хода");
         ui.progress = None;
         assert!(!mode_change_blocked(&ui));
+        // Круг починки 5 задачи 16, ruling а: идущая публикация — тот же
+        // счёт, одна дверь на смену режима и на переключение текущего
+        // (`request_current_mode_change`, `request_switch_current`), а не
+        // два похожих. Без этой ветки тест прошёл бы и до правки — находка
+        // ровно в её отсутствии.
+        ui.publishing = Some(now);
+        assert!(mode_change_blocked(&ui), "идёт публикация — дёргать текущее соединение нельзя");
+        ui.publishing = None;
+        assert!(!mode_change_blocked(&ui));
     }
 
     /// Пункт трея и переключатель окна запираются одним замком и расходиться
@@ -1545,6 +1632,88 @@ mod tests {
         assert_eq!(publication_after_switch(true, false, true), PublicationAfterSwitch { stop_old: true, raise_new: false });
         // Свой httpd не поднимали (публикует веб-сервер) — гасить нечего, но новую, если включено, всё равно переустанавливаем.
         assert_eq!(publication_after_switch(true, true, false), PublicationAfterSwitch { stop_old: false, raise_new: true });
+    }
+
+    /// Круг починки 5 задачи 16 — находка двух ревьюеров одновременно, и
+    /// ровно тот случай, который оба назвали: переключение со СТАРОЙ
+    /// карточки `auto` (наш httpd поднят) на НОВУЮ `webserver`. Без снимка
+    /// `old_cfg`, взятого ДО `switch_current`, `old_ctx` нёс бы уже НОВУЮ
+    /// карточку — `stop_own_publication` решил бы по ней «нечего гасить»
+    /// (`Ok(false)`), и прежний процесс остался бы сиротой.
+    ///
+    /// Тест гоняет `write_switch_current` — часть `apply_switch_current`,
+    /// которой `App` не нужен вовсе, выделенную специально ради этого
+    /// теста, — и дальше ПРОВЕРЯЕТ не решение, а сам `Ctx`: зовёт
+    /// `stop_own_publication(&written.old_ctx)` и требует, чтобы она НЕ
+    /// сказала «нечего гасить». Если кто-нибудь однажды соберёт `old_ctx`
+    /// из `ui.cfg` ПОСЛЕ записи (как было до этого круга) — тест упадёт
+    /// именно на этой строке.
+    #[test]
+    fn write_switch_current_builds_the_old_ctx_not_the_new_one() {
+        let mut ui = Ui::for_test();
+        ui.cfg.current_mut().publication = "auto".into();
+        ui.raised_publication = true;
+        ui.cfg.connections.push(Connection {
+            name: "Ромашка".into(),
+            base_path: "C:\\Bases\\Ромашка".into(),
+            project: "C:\\proj\\Ромашка".into(),
+            publication: "webserver".into(),
+            ..ui.cfg.current().clone()
+        });
+        crate::gui::with_params_file(&ui);
+
+        let written = write_switch_current(&mut ui, "Ромашка").unwrap();
+
+        assert!(written.what.stop_old, "старая карточка auto держала свой httpd — гасить обязаны");
+        assert_ne!(
+            crate::ops_host::stop_own_publication(&written.old_ctx).ok(),
+            Some(false),
+            "old_ctx обязан нести СТАРУЮ карточку (auto) — Ok(false) означал бы, что он смотрит на новую (webserver)"
+        );
+    }
+
+    /// Круг починки 5 задачи 16, ruling в: признак `raised_publication`
+    /// сбрасывается ТОЛЬКО когда гашение решило, что оно и правда наше
+    /// (`Ok(true)`) — `write_switch_current` сама этого не делает (решение
+    /// принимает вызывающий, `apply_switch_current`, уже с реальным
+    /// результатом `stop_own_publication`), и этот тест фиксирует именно
+    /// это разделение: после переключения признак остаётся как был, пока
+    /// никто не подтвердил удачу.
+    #[test]
+    fn write_switch_current_itself_never_touches_the_flag() {
+        let mut ui = Ui::for_test();
+        ui.cfg.current_mut().publication = "auto".into();
+        ui.raised_publication = true;
+        ui.cfg.connections.push(Connection {
+            name: "Ромашка".into(),
+            base_path: "C:\\Bases\\Ромашка".into(),
+            project: "C:\\proj\\Ромашка".into(),
+            publication: "webserver".into(),
+            ..ui.cfg.current().clone()
+        });
+        crate::gui::with_params_file(&ui);
+
+        write_switch_current(&mut ui, "Ромашка").unwrap();
+
+        assert!(ui.raised_publication, "решение, сбрасывать ли признак, принимает вызывающий по результату гашения, не эта функция");
+    }
+
+    /// Круг починки 5 задачи 16, ruling а: отказ «Сделать текущим» называет,
+    /// что именно идёт, — операцию важнее проверки (у операции есть
+    /// карточка хода), публикацию последней (её одну можно начать и без
+    /// операции/проверки).
+    #[test]
+    fn busy_now_word_names_the_operation_the_check_or_the_publication() {
+        let mut ui = Ui::for_test();
+        let now = Instant::now();
+        ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
+        assert_eq!(busy_now_word(&ui), "операция");
+        ui.progress = None;
+        ui.busy = Some(Busy::Project);
+        assert_eq!(busy_now_word(&ui), "проверка");
+        ui.busy = None;
+        ui.publishing = Some(now);
+        assert_eq!(busy_now_word(&ui), "публикация базы");
     }
 
     #[test]

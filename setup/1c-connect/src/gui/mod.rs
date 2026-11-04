@@ -718,7 +718,15 @@ fn ctx_for(ui: &Ui) -> Ctx {
 /// желтеет, а журнал заполняется строками пробы). Всё прочее — то же, что у
 /// `ctx_for`.
 fn quiet_ctx(ui: &Ui) -> Ctx {
-    Ctx { kit: ui.kit.clone(), cfg: ui.cfg.clone(), dry_run: false, sink: Arc::new(|_: Event| {}), prompt: Box::new(AlwaysDefault) }
+    quiet_ctx_with(ui, ui.cfg.clone())
+}
+
+/// То же самое, но со СВОИМ `Cfg`, а не с `ui.cfg` — круг починки 5 задачи
+/// 16: гашение прежней публикации при переключении текущего соединения
+/// обязано смотреть на СТАРУЮ карточку (чей httpd гасим), а не на ту, что
+/// уже заняла её место в `ui.cfg` к моменту вызова (`tray::apply_switch_current`).
+fn quiet_ctx_with(ui: &Ui, cfg: Cfg) -> Ctx {
+    Ctx { kit: ui.kit.clone(), cfg, dry_run: false, sink: Arc::new(|_: Event| {}), prompt: Box::new(AlwaysDefault) }
 }
 
 /// Состояние значка — это точка карточки, переведённая в бейдж

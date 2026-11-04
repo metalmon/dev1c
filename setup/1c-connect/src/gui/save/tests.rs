@@ -1089,6 +1089,64 @@ fn adding_a_card_does_not_switch_the_current_base() {
     assert_eq!(ui.cfg.current().name, was, "переключение текущей — отдельное действие человека");
 }
 
+/// Первый экран продукта: список соединений ПУСТ (свежий комплект — файла
+/// настроек нет вовсе, `disk_count == 0`), человек жмёт ответ онбординга.
+/// Решение ведущего второй волны починки: это обязано заводить карточку, а
+/// не отказывать. До правки `add_connection` спрашивал полноту полей новой
+/// карточки (`Cfg::validate`), а на пустом списке она же становится ТЕКУЩЕЙ
+/// (`Cfg::current()` отдаёт первую при пустом корневом `current`) — и первое
+/// нажатие в жизни программы отвечало «base_path — путь к базе или
+/// сервер\база» про поле, которого человек ещё не видел. Карточка заводится
+/// пустой НАРОЧНО: поля вписывают в ней и жмут «Сохранить», где и стоит
+/// полная проверка.
+///
+/// Оба ответа онбординга (`link::onboarding_answers`) — и зовущий, и
+/// принимающий: роль на годность списка не влияет, но проверять надо то, что
+/// человек реально нажмёт.
+#[test]
+fn an_onboarding_answer_on_an_empty_list_creates_the_first_card() {
+    for role in ["accept", "dial"] {
+        let mut ui = Ui::for_test();
+        ui.cfg.connections.clear();
+        ui.cfg.current = String::new();
+        assert!(!ui.kit.state_path(cfg::FILE).exists(), "свежий комплект: файла настроек нет вовсе");
+
+        let name = add_connection(&mut ui, role).unwrap();
+
+        assert_eq!(ui.cfg.by_name(&name).expect("карточка в памяти").role, role);
+        let written = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).expect("и на диске");
+        assert_eq!(common::toml_render::count(&written, cfg::CONNECTION), 1, "{written}");
+        assert!(written.contains(&format!("name = {name:?}")), "{written}");
+        // Онбординг кончается СОСТОЯНИЕМ: список больше не пуст.
+        assert!(!crate::gui::link::onboarding_shown(&ui.cfg), "онбординг кончился — карточка есть");
+    }
+}
+
+/// Ослабление касается ТОЛЬКО полноты полей новой карточки: правила СПИСКА
+/// (`Cfg::validate_list`) заведение по-прежнему спрашивает целиком, и обоим
+/// парным запретам отказывает, как раньше. Проверяется руками поставленным
+/// столкновением: у новой карточки поля пустые, поэтому сталкивать её не с
+/// чем — сталкиваем вторую карточку, заполненную так же, как первая (ровно
+/// то, что человек получит, вписав в новую карточку занятую базу и папку, а
+/// потом нажав «Добавить» ещё раз).
+#[test]
+fn creating_a_card_still_obeys_the_rules_of_the_list() {
+    // Та же база у двух карточек — запрет учебной лицензии (одна база, одно
+    // соединение).
+    let mut ui = Ui::for_test();
+    let twin = Connection { name: "Ромашка".into(), project: "C:\\proj\\Ромашка".into(), ..ui.cfg.current().clone() };
+    ui.cfg.connections.push(twin);
+    let err = add_connection(&mut ui, "accept").unwrap_err();
+    assert!(err.contains("одна база, одно соединение"), "{err}");
+
+    // Та же папка — запрет про потерю файлов в чужой папке.
+    let mut ui = Ui::for_test();
+    let twin = Connection { name: "Ромашка".into(), base_path: "C:\\Bases\\Ромашка".into(), ..ui.cfg.current().clone() };
+    ui.cfg.connections.push(twin);
+    let err = add_connection(&mut ui, "accept").unwrap_err();
+    assert!(err.contains("папка принадлежит одному соединению"), "{err}");
+}
+
 /// Роль приходит параметром — кнопка списка ставит `"accept"`, онбординг
 /// (задача 11) передаст свою.
 #[test]
@@ -1954,19 +2012,15 @@ fn deleting_a_card_takes_its_unreadable_secrets_with_it() {
     delete_connection(&mut ui, "Buh").unwrap();
 
     assert!(ui.cfg.undecryptable.is_empty(), "находки удалённой карточки сняты: {:?}", ui.cfg.undecryptable);
-    // И отказ онбординга про карточку, которой больше нет, из
-    // `add_connection` ушёл: единственная причина, по которой он мог её
-    // назвать, — это снятая выше находка (`add_connection`, ветвь
-    // `disk_count == 0`).
-    let said = add_connection(&mut ui, "accept").unwrap_err();
-    assert!(!said.contains("Buh") && !said.contains("зашифрован"), "про исчезнувшую карточку больше не говорят: {said}");
-    // ВТОРОЙ барьер на том же пути (находка этой волны, НЕ её правка — см.
-    // отчёт): новая карточка заводится с пустым путём к базе и становится
-    // текущей, а `Cfg::validate` проверяет именно текущую — ответ онбординга
-    // на ПУСТОМ списке отказывает про поле, которого человек ещё не
-    // заполнял. Утверждение здесь нарочное: когда это вылечат, тест упадёт и
-    // приведёт к этому месту.
-    assert!(said.contains("base_path"), "{said}");
+    // И онбординг на опустевшем списке больше не тупик: ответ заводит
+    // карточку. Здесь лечилось ДВА барьера подряд — снятая выше находка
+    // (`add_connection`, ветвь `disk_count == 0`, отказывала словами про
+    // карточку, которой уже нет) и полнота полей новой карточки: она
+    // становится текущей на пустом списке, и `Cfg::validate` отказывал про
+    // `base_path`. Второй лечит `validate_list` (решение ведущего, вторая
+    // волна) — заведение карточки спрашивает только правила списка.
+    let fresh = add_connection(&mut ui, "accept").unwrap();
+    assert_eq!(ui.cfg.by_name(&fresh).expect("карточка заведена").role, "accept");
 }
 
 /// Находки СОСЕДНЕЙ карточки удаление не трогает — иначе оно молча сказало

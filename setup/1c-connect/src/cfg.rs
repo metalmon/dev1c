@@ -1836,6 +1836,24 @@ pub fn set_named(text: &str, name: &str, key: &str, value: &str) -> std::result:
     common::toml_render::set_in(text, CONNECTION, nth, key, value).ok_or_else(|| stale_file(name))
 }
 
+/// Текст файла без блока соединения `name` — удаление карточки из окна
+/// (задача 2 этого плана) вырезает её блок ровно так же, как правка одного
+/// ключа ищет свой: по имени, через `block_in` (он уже отказывает и на «нет
+/// такого», и на «два блока одним именем» — заводить второй поиск здесь
+/// незачем). Дальше — `toml_render::remove_at`, а не перерисовка файла по
+/// памяти: в соседних блоках `[[connection]]` лежат ЗАШИФРОВАННЫЕ пароли,
+/// которые на этой машине могли не открыться (`Cfg::undecryptable`), и
+/// перепечатка подставила бы на их место пустую строку — это уже один раз
+/// чуть не случилось и было поймано ревью как Critical.
+///
+/// Корневой ключ `current` здесь не трогается вовсе: удалённое соединение
+/// могло быть текущим, и решать, что станет текущим теперь, — дело
+/// вызывающего (задача 2); у текста файла одна забота — вырезать блок.
+pub fn remove_named(text: &str, name: &str) -> std::result::Result<String, String> {
+    let nth = block_in(text, name)?;
+    common::toml_render::remove_at(text, CONNECTION, nth).ok_or_else(|| stale_file(name))
+}
+
 /// Номер блока соединения `name` В ТЕКСТЕ файла — найденный по ключу `name`
 /// внутри блоков, а не по месту соединения в `cfg.connections`.
 ///
@@ -3077,6 +3095,40 @@ mod tests {
         let one = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n";
         assert_eq!(block_in(one, "Buh"), Ok(0));
         assert_eq!(previous_literal(one, "Buh", "password").as_deref(), Some("\"первый\""));
+    }
+
+    /// Главный тест задачи: удаление карточки — это вырезание ТЕКСТА её
+    /// блока, а не перепечатка файла по памяти. У соседнего блока лежит
+    /// ЗАШИФРОВАННЫЙ пароль, который на этой машине мог не открыться
+    /// (`Cfg::undecryptable`) — перепечатка подставила бы на его место
+    /// пустую строку (это чуть не случилось в прошлой ветке и было поймано
+    /// ревью как Critical). Поэтому байты соседнего блока обязаны остаться
+    /// ровно такими же, как были.
+    #[test]
+    fn remove_named_cuts_the_named_block_and_leaves_the_foreign_ciphertext_untouched() {
+        let text = "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"ШИФР-Buh\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = \"ШИФР-Ромашка\"\n";
+        let out = remove_named(text, "Buh").unwrap();
+        assert_eq!(out, "current = \"Buh\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = \"ШИФР-Ромашка\"\n");
+    }
+
+    /// Имени нет ни в одном блоке — отказ тем же словами, что у `block_in` на
+    /// расхождении файла с памятью (`stale_file`): заводить второе слово
+    /// отказа незачем, причина одна.
+    #[test]
+    fn remove_named_refuses_a_name_that_is_not_in_the_file() {
+        let text = "[[connection]]\nname = \"Buh\"\n";
+        let e = remove_named(text, "Ромашка").unwrap_err();
+        assert!(e.contains("Ромашка") && e.contains("настройки на диске изменились"), "{e}");
+    }
+
+    /// Два блока с одним именем — отказ, тот же `duplicate_block`, что у
+    /// `block_in`: догадка, какой из двух вырезать, стоила бы ЧУЖОГО пароля.
+    /// Текст при отказе не меняется вовсе.
+    #[test]
+    fn remove_named_refuses_two_blocks_with_the_same_name() {
+        let text = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"второй\"\n";
+        let e = remove_named(text, "Buh").unwrap_err();
+        assert!(e.contains("Buh") && e.contains("два блока"), "{e}");
     }
 
     /// Буквально из брифа задачи 5: хвостовой разделитель, `\.` в конце и

@@ -142,6 +142,64 @@ pub fn set_in(text: &str, section: &str, nth: usize, key: &str, value: &str) -> 
     Some(lines.join("\n"))
 }
 
+/// Вырезает `nth`-й блок секции из текста файла целиком — заголовок, все его
+/// строки (включая комментарии человека) и пустую строку-разделитель ПЕРЕД
+/// ним, чтобы на месте удалённого блока не осталось двух пустых строк
+/// подряд. Соседние блоки и корень файла не трогаются ни единым байтом: это
+/// и есть повод писать удаление текстом, а не перепечаткой файла по памяти
+/// (`Cfg::render`) — в соседних блоках `[[connection]]` лежат ЗАШИФРОВАННЫЕ
+/// пароли, которые на этой машине могли не открыться (`Cfg::undecryptable`),
+/// и перепечатка подставила бы на их место пустую строку.
+///
+/// Тот же разбор, что у `set_in`: `text.split('\n')` (не `lines()` — так
+/// сохраняются `\r` в концах строк и наличие/отсутствие перевода строки в
+/// конце файла), заголовки узнаются `section_of`. `None` — такого блока в
+/// тексте нет, тем же правилом, что у `set_in`.
+pub fn remove_at(text: &str, section: &str, nth: usize) -> Option<String> {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut seen = 0; // сколько блоков этой секции уже прошло
+    let mut start = None; // первая строка удаляемого блока (заголовок)
+    let mut end = lines.len(); // первая строка ПОСЛЕ удаляемого блока
+    let mut has_next = false; // после удаляемого есть ещё заголовок (любой секции)
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(head) = section_of(line) {
+            if start.is_some() {
+                // Любой следующий заголовок — конец удаляемого блока.
+                end = i;
+                has_next = true;
+                break;
+            }
+            if head == section {
+                if seen == nth {
+                    start = Some(i);
+                } else {
+                    seen += 1;
+                }
+            }
+        }
+    }
+    let start = start?;
+    // Пустая строка-разделитель перед заголовком — это разделитель с
+    // ПРЕДЫДУЩИМ блоком. Если после удаляемого есть следующий блок, его
+    // собственный разделитель (он уже внутри `[start, end)`) и останется
+    // единственным — забирать разделитель перед `start` тоже нельзя, иначе
+    // соседи слипнутся без единой пустой строки между ними. Если следующего
+    // блока нет, забирать есть кому: удаляемый блок последний, и свой
+    // разделитель оставлять не для чего.
+    let cut_from = if !has_next && start > 0 && lines[start - 1].trim().is_empty() { start - 1 } else { start };
+    // Разбор `split('\n')` даёт пустой «хвост» на конце, если файл
+    // заканчивается переводом строки, — это не пустая строка документа, а
+    // отметка конца файла, и она обязана остаться, когда удаляемый блок —
+    // последний (иначе файл потеряет свой перевод строки в конце).
+    if !has_next && lines.last() == Some(&"") {
+        end = lines.len() - 1;
+    }
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    out.extend_from_slice(&lines[..cut_from]);
+    out.extend_from_slice(&lines[end..]);
+    Some(out.join("\n"))
+}
+
 /// Терпимое чтение одного значения из текста самого файла — **не разборщик
 /// TOML**, и не притворяется им: без полного разбора, без оглядки на то,
 /// проходят ли остальные строки свою проверку, без вложенных кавычек,
@@ -333,5 +391,34 @@ mod tests {
             _ => None,
         });
         assert_eq!(out, "# top\n[a]\n# about x\nx = 2\nname = \"a\"\n\n[b]\nname = \"B\"\n");
+    }
+
+    /// Соседний блок несёт ЗАШИФРОВАННЫЙ пароль — его байты обязаны остаться
+    /// ровно такими, какими были: перепечатка файла из памяти на этом месте
+    /// подставила бы пустую строку (критическая находка прошлой ветки).
+    /// Удаление не правит текст соседа, а вырезает чужие строки целиком.
+    #[test]
+    fn remove_at_cuts_one_block_and_leaves_the_rest_byte_for_byte() {
+        let text = "current = \"a\"\n\n[[connection]]\nname = \"a\"\npassword = \"ШИФР-A\"\n\n[[connection]]\nname = \"b\"\npassword = \"ШИФР-B\"\n";
+        let out = remove_at(text, "[[connection]]", 0).unwrap();
+        assert_eq!(out, "current = \"a\"\n\n[[connection]]\nname = \"b\"\npassword = \"ШИФР-B\"\n");
+        let out = remove_at(text, "[[connection]]", 1).unwrap();
+        assert_eq!(out, "current = \"a\"\n\n[[connection]]\nname = \"a\"\npassword = \"ШИФР-A\"\n");
+    }
+
+    /// Комментарии соседних блоков и корня — не часть удаляемого блока, и
+    /// остаются на месте буква в букву.
+    #[test]
+    fn remove_at_keeps_comments_of_the_neighbours_and_the_root() {
+        let text = "# шапка\ncurrent = \"a\"\n\n[[connection]]\n# про a\nname = \"a\"\n\n[[connection]]\n# про b\nname = \"b\"\n";
+        assert_eq!(remove_at(text, "[[connection]]", 0).unwrap(), "# шапка\ncurrent = \"a\"\n\n[[connection]]\n# про b\nname = \"b\"\n");
+    }
+
+    /// Блока с таким номером нет вовсе — `None`, а не дописанный пустым или
+    /// урезанный чужой: тем же правилом, что у `set_in`.
+    #[test]
+    fn remove_at_without_such_a_block_changes_nothing() {
+        assert_eq!(remove_at("current = \"a\"\n", "[[connection]]", 0), None);
+        assert_eq!(remove_at("[[connection]]\nname = \"a\"\n", "[[connection]]", 1), None);
     }
 }

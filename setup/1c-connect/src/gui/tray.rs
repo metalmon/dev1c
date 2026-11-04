@@ -23,19 +23,22 @@ const AUTOSTART_TEXT: &str = "Запускать при входе в Windows";
 #[cfg(not(windows))]
 const AUTOSTART_TEXT: &str = "Запускать при входе";
 
-/// Трей: значок, пункт-переключатель (меняет надпись), подменю «Режим
-/// работы», «Публикация базы», «Запись в базу» и «Локальные агенты» (в
-/// первых трёх отмечен ровно один, в четвёртом — независимые галочки по
-/// агенту), три пункта темы (отмечен ровно один) и два пункта-галочки —
-/// автозапуск и автоподключение.
+/// Трей: значок, пункт-переключатель (меняет надпись), подменю «Запись в
+/// базу» и «Локальные агенты» (в первом отмечен ровно один, во втором —
+/// независимые галочки по агенту), три пункта темы (отмечен ровно один) и
+/// два пункта-галочки — автозапуск и автоподключение.
+///
+/// Режима работы и публикации базы здесь больше нет (решение владельца 1.11:
+/// «публикация — поле соединения, и пункт меню убран вовсе»; тем же доводом
+/// раньше ушёл режим) — переключатель в значке один на машину, а соединений
+/// на машине несколько; обоими правит карточка окна (`panel::set_card_mode`,
+/// `panel::set_card_publication`).
 pub struct Tray {
     icon: TrayIcon,
     toggle: MenuItem,
-    modes: [CheckMenuItem; 2],
-    publications: [CheckMenuItem; 2],
-    /// Потолок записи (`cfg.current().write`/`Cfg::access()`) — тем же приёмом,
-    /// что `modes`/`publications` выше: радио из двух пунктов, строится и
-    /// читается одинаково.
+    /// Потолок записи (`cfg.current().write`/`Cfg::access()`) — радио из
+    /// двух пунктов: нативный пункт отмечает себя сам по щелчку, вернуть
+    /// отметку на действующее значение обязаны мы.
     access: [CheckMenuItem; 2],
     agents: [CheckMenuItem; 4],
     /// Само меню и раздел агентов в нём — чтобы раздел можно было убрать и
@@ -60,25 +63,12 @@ const THEMES: [(theme::Choice, &str, &str); 3] = [
     (theme::Choice::Dark, "theme:dark", "Тёмная"),
 ];
 
-/// Режим работы (`cfg.current().mode`, "tunnel"/"local") → id пункта меню и его
-/// подпись. Поля в окне нет — режим пишет только этот пункт (см.
-/// `gui::save_host`).
-const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через туннель"), ("local", "mode:local", "Локально")];
-
-/// Кто публикует базу (`cfg.current().publication`, "auto"/"webserver") → id
-/// пункта меню и его подпись. Значения в toml прежние, подписи — человеческие:
-/// человек читает название, а не имя режима.
-///
-/// Подписи берутся из `link::publication_answers` — единственного словаря слов
-/// публикации (задача 5 плана «Карточка публикации и удаление»): с этой задачи
-/// их показывает и переключатель карточки, а два списка одних и тех же строк
-/// расходятся на первой же правке слова. Само подменю уходит следующей задачей
-/// (решение владельца 1.11: публикация — поле соединения, а переключатель в
-/// значке один на машину, и он молча правил ту базу, что оказалась текущей).
-const PUBLICATIONS: [(&str, &str, &str); 2] = [
-    ("auto", "publication:auto", link::publication_answers()[0].1),
-    ("webserver", "publication:webserver", link::publication_answers()[1].1),
-];
+/// Слова для журнальной строки о смене режима (`apply_mode`) — без
+/// идентификаторов пунктов меню: пункта «Режим работы» больше нет (решение
+/// владельца 1.11), а словами по-прежнему нужно что-то называть режим в
+/// журнале. Режим пишет карточка окна (`panel::set_card_mode` → тут же,
+/// `request_current_mode_change`).
+const MODE_WORDS: [(&str, &str); 2] = [("tunnel", "Через туннель"), ("local", "Локально")];
 
 /// Потолок записи (`cfg.current().write`, значения — те же слова, что понимает
 /// дочерний `mcp-1c`, `read_write`/`read_only`: перевод создал бы третью
@@ -97,17 +87,6 @@ const ACCESS: [(&str, &str, &str); 2] =
 /// Заголовок подменю «Запись в базу» — называет дело (может ли агент менять
 /// данные), а не механику ключа `--access`.
 const ACCESS_SUBMENU: &str = "Запись в базу";
-
-/// Заголовок подменю. Назван отдельно, потому что без слова «базы» пункты
-/// под ним говорят о механике, а не о деле: «публикация» сама по себе не
-/// отвечает, что публикуется (замечание владельца 28.10).
-///
-/// Обе строки под ним отвечают на один вопрос — кто делает публикацию:
-/// коннектор своим httpd, или платформа 1С, когда человек уже опубликовал
-/// базу диалогом Конфигуратора. Прежние «Уже опубликована» и «на
-/// веб-сервере» называли состояние и механику, а не того, кто это сделал
-/// (решение владельца 28.10).
-const PUBLICATION_SUBMENU: &str = "Публикация базы";
 
 /// Набор локальных агентов живёт одним реестром в `editors::AGENTS`
 /// (решение владельца 29.10, «Четыре локальных агента, и настраиваются они
@@ -131,10 +110,6 @@ pub enum MenuAction {
     Open,
     Toggle,
     Check,
-    /// Выбор пункта подменю «Режим работы» — несёт "tunnel" или "local".
-    Mode(&'static str),
-    /// Выбор пункта подменю «Публикация базы» — несёт "auto" или "webserver".
-    Publication(&'static str),
     /// Выбор пункта подменю «Запись в базу» — несёт "read_write" или "read_only".
     Access(&'static str),
     /// Щелчок по галочке подменю «Локальные агенты» — несёт "zed" или "pi".
@@ -151,16 +126,6 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     for (choice, theme_id, _) in THEMES {
         if id == theme_id {
             return Some(MenuAction::Theme(choice));
-        }
-    }
-    for (mode, mode_id, _) in MODES {
-        if id == mode_id {
-            return Some(MenuAction::Mode(mode));
-        }
-    }
-    for (publication, publication_id, _) in PUBLICATIONS {
-        if id == publication_id {
-            return Some(MenuAction::Publication(publication));
         }
     }
     for (access, access_id, _) in ACCESS {
@@ -242,30 +207,17 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     let open = MenuItem::with_id("open", "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
-    // Отметка при создании меню: умолчание `Connection::default()`, пока не
+    // Отметка при создании меню: умолчание «только чтение», пока не
     // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
     // (тот читает `theme::Choice::load` до вызова). `launch` поправляет её на
-    // настоящий сохранённый режим сразу после `build`, до показа окна
-    // (`Tray::set_mode`) — так что галочка никогда не достаётся человеку
-    // неверной.
-    let mode_items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "tunnel", None));
-    let mode_refs: Vec<&dyn IsMenuItem> = mode_items.iter().map(|i| i as &dyn IsMenuItem).collect();
-    let mode_submenu = Submenu::with_items("Режим работы", true, &mode_refs)?;
-    // Та же оговорка про начальную отметку, что и у режима работы: здесь
-    // умолчание «публикует коннектор», а `launch` поправляет её на
-    // сохранённую сразу после `build` (`Tray::set_publication`).
-    let publication_items = PUBLICATIONS.map(|(p, id, text)| CheckMenuItem::with_id(id, text, true, p == "auto", None));
-    let publication_refs: Vec<&dyn IsMenuItem> = publication_items.iter().map(|i| i as &dyn IsMenuItem).collect();
-    let publication_submenu = Submenu::with_items(PUBLICATION_SUBMENU, true, &publication_refs)?;
-    // Та же оговорка, что у режима и публикации выше: умолчание здесь
-    // «только чтение», `launch` поправляет отметку на настоящий потолок
-    // сразу после `build` (`Tray::set_access`).
+    // настоящий потолок сразу после `build`, до показа окна (`Tray::set_access`)
+    // — так что галочка никогда не достаётся человеку неверной.
     let access_items = ACCESS.map(|(a, id, text)| CheckMenuItem::with_id(id, text, true, a == "read_only", None));
     let access_refs: Vec<&dyn IsMenuItem> = access_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let access_submenu = Submenu::with_items(ACCESS_SUBMENU, true, &access_refs)?;
     // Начальные галочка и доступность — оба `false`: `launch` поправляет их
-    // сразу после `build` (`Tray::set_agents`), тем же приёмом, что у режима
-    // и публикации выше — здесь ни `Found`, ни режим ещё не читали.
+    // сразу после `build` (`Tray::set_agents`), тем же приёмом, что у потолка
+    // записи выше — здесь ни `Found`, ни режим ещё не читали.
     let agent_items = editors::AGENTS.map(|def| CheckMenuItem::with_id(agent_menu_id(def.id), def.label, false, false, None));
     let agent_refs: Vec<&dyn IsMenuItem> = agent_items.iter().map(|i| i as &dyn IsMenuItem).collect();
     let agents_submenu = Submenu::with_items(AGENTS_SUBMENU, true, &agent_refs)?;
@@ -283,8 +235,6 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
         &toggle,
         &check,
         &PredefinedMenuItem::separator(),
-        &mode_submenu,
-        &publication_submenu,
         &access_submenu,
         &agents_submenu,
         &themes_submenu,
@@ -313,15 +263,11 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     }));
 
     let themes = [items[0].clone(), items[1].clone(), items[2].clone()];
-    let modes = [mode_items[0].clone(), mode_items[1].clone()];
-    let publications = [publication_items[0].clone(), publication_items[1].clone()];
     let access = [access_items[0].clone(), access_items[1].clone()];
     let agents = [agent_items[0].clone(), agent_items[1].clone(), agent_items[2].clone(), agent_items[3].clone()];
     Ok(Tray {
         icon: tray,
         toggle,
-        modes,
-        publications,
         access,
         agents,
         themes,
@@ -363,24 +309,9 @@ impl Tray {
         }
     }
 
-    /// Отмечает ровно один пункт подменю «Режим работы».
-    pub fn set_mode(&self, mode: &str) {
-        for (item, (m, ..)) in self.modes.iter().zip(MODES) {
-            item.set_checked(m == mode);
-        }
-    }
-
-    /// Отмечает ровно один пункт подменю «Публикация» — тот же приём, что у
-    /// режима работы: нативный пункт отмечает себя сам по щелчку, и вернуть
-    /// отметку на действующее значение обязаны мы.
-    pub fn set_publication(&self, publication: &str) {
-        for (item, (p, ..)) in self.publications.iter().zip(PUBLICATIONS) {
-            item.set_checked(p == publication);
-        }
-    }
-
-    /// Отмечает ровно один пункт подменю «Запись в базу» — тот же приём, что
-    /// у режима и публикации выше.
+    /// Отмечает ровно один пункт подменю «Запись в базу»: нативный пункт
+    /// отмечает себя сам по щелчку, и вернуть отметку на действующее
+    /// значение обязаны мы.
     pub fn set_access(&self, access: &str) {
         for (item, (a, ..)) in self.access.iter().zip(ACCESS) {
             item.set_checked(a == access);
@@ -389,8 +320,8 @@ impl Tray {
 
     /// Галочки и доступность подменю «Локальные агенты» — зовётся при
     /// запуске и при каждой смене режима (решение владельца: доступность
-    /// обязана обновляться на ходу, а не только при старте — режим
-    /// переключается тем же меню трея, без перезапуска окна). Галочка стоит
+    /// обязана обновляться на ходу, а не только при старте — режим можно
+    /// сменить в карточке текущего соединения без перезапуска окна). Галочка стоит
     /// только на `Found::Ours` (`agent_checked`), доступность — агенты живут
     /// на этой машине (`agents_live_here`) и агент на машине вообще есть
     /// (`agent_available`): там, где агентов настраивает не наше меню (точка
@@ -419,7 +350,7 @@ impl Tray {
         if live != self.agents_shown.get() {
             let changed = if live {
                 // Вернуть на прежнее место, а не в конец: раздел стоит между
-                // «Публикацией базы» и «Темой», и переключение режима не
+                // «Запись в базу» и «Темой», и переключение режима не
                 // повод тасовать меню. Не вышло (меню короче, чем было) —
                 // лучше в конец, чем нигде.
                 self.menu.insert(&self.agents_submenu, self.agents_pos).or_else(|_| self.menu.append(&self.agents_submenu)).is_ok()
@@ -538,6 +469,18 @@ pub(crate) fn busy_now_word(ui: &Ui) -> &'static str {
     }
 }
 
+/// Отказ пункта «Запись в базу» на пустом списке соединений — чистое ядро
+/// защиты от воскрешения карточки-фантома (находка ревью задачи 3):
+/// `Cfg::current_mut()` на пустом списке заводит ПЕРВОЕ соединение по
+/// умолчанию, а пункт меню значка, правящий ТЕКУЩИЕ параметры, не имеет
+/// права создавать карточку, которой человек не заводил (`apply_access`
+/// правит именно её). Слова — те же, какими отказывает `Cfg::switch_current`
+/// на пустом списке: один текст на оба отказа, не два похожих. `None` —
+/// список не пуст, пункт работает как обычно.
+fn access_refused_on_empty_list(empty: bool) -> Option<String> {
+    empty.then(|| format!("{}: соединений пока нет — настройте первое в окне (1c-connect gui)", crate::cfg::FILE))
+}
+
 /// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
 /// пересчитан (`save_host` → `run_readiness` → `refresh_gate`), и если он
 /// защёлкнулся, обслуживание уже погашено.
@@ -585,7 +528,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // ревью круга починки 2 задачи 16, `recycle_session`).
             recycle_session(cx);
             let mut label = mode;
-            for (m, _, text) in MODES {
+            for (m, text) in MODE_WORDS {
                 if m == mode {
                     label = text;
                 }
@@ -601,10 +544,9 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }
-            let label = MODES.iter().find(|(m, ..)| *m == mode).map(|(_, _, t)| *t).unwrap_or(mode);
+            let label = MODE_WORDS.iter().find(|(m, _)| *m == mode).map(|(_, t)| *t).unwrap_or(mode);
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
-                tray.set_mode(mode);
                 tray.set_agents(mode);
             }
             cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
@@ -639,7 +581,6 @@ fn recycle_session(cx: &mut App) {
     run_readiness(cx.global_mut::<Ui>());
     let mode = cx.global::<Ui>().cfg.current().mode.clone();
     if let Some(tray) = &cx.global::<Ui>().tray {
-        tray.set_mode(&mode);
         // Доступность «Локальных агентов» зависит от режима — обязана
         // обновиться тут же (задача «Управление переехало в трей»).
         tray.set_agents(&mode);
@@ -888,17 +829,19 @@ fn publication_after_switch(base_changed: bool, was_enabled: bool, raised_public
 /// задачи 16): отказ под идущей операцией (`mode_change_blocked`), вопрос
 /// при живом обслуживании тем же диалогом, что у «Сохранить»
 /// (`save_needs_confirm`/`confirm_database_change`), запись и перецикл
-/// сеанса (`apply_mode`). До этого круга её знал только трей
-/// (`on_menu::MenuAction::Mode`), а переключатель «Это соединение» в
-/// карточке писал `mode` точечно, в обход — карточка меняла транспорт
-/// ТЕКУЩЕГО соединения, не трогая ни сеанс, ни замок, ни значок.
+/// сеанса (`apply_mode`). До этого круга её знал только трей, а
+/// переключатель «Это соединение» в карточке писал `mode` точечно, в обход —
+/// карточка меняла транспорт ТЕКУЩЕГО соединения, не трогая ни сеанс, ни
+/// замок, ни значок.
 ///
-/// Тревный значок (отметка пункта меню) сюда не входит: у карточки его нет,
-/// и возвращать галочку на место — дело самого `on_menu`, не общее.
+/// Пункт меню «Режим работы», который раньше её звал, решением владельца
+/// 1.11 убран вовсе («публикация — поле соединения, и пункт меню убран
+/// вовсе»; тем же доводом раньше ушёл режим — переключатель в значке один на
+/// машину, а соединений несколько) — единственный зовущий теперь карточка
+/// окна (`panel::set_card_mode`), и тревного значка здесь больше нет вовсе.
 ///
-/// `false` — смена не состоялась из-за идущей операции; вызывающий решает,
-/// как об этом сказать (трей и так возвращает галочку меню сам, карточка —
-/// сообщает строкой в журнал).
+/// `false` — смена не состоялась из-за идущей операции; карточка сообщает об
+/// этом строкой в журнал.
 pub(crate) fn request_current_mode_change(cx: &mut App, mode: &'static str) -> bool {
     let ui = cx.global::<Ui>();
     if mode_change_blocked(ui) {
@@ -910,8 +853,8 @@ pub(crate) fn request_current_mode_change(cx: &mut App, mode: &'static str) -> b
     }
     let mut host = ui.cfg.current().clone();
     host.mode = mode.into();
-    // Спрашивать не о чем (или спросить негде — значок живёт и без окна) —
-    // пишем сразу, тем же приёмом, что `on_menu::MenuAction::Mode`.
+    // Спрашивать не о чем (или спросить негде — окна сейчас нет) — пишем
+    // сразу.
     if !save_needs_confirm(ui, &host) || ui.window.is_none() {
         apply_mode(cx, mode);
         return true;
@@ -955,8 +898,8 @@ pub(crate) fn request_current_publication_change(cx: &mut App, publication: &'st
     }
     let mut host = ui.cfg.current().clone();
     host.publication = publication.into();
-    // Спрашивать не о чем (или спросить негде — значок живёт и без окна) —
-    // пишем сразу, тем же приёмом, что `on_menu::MenuAction::Publication`.
+    // Спрашивать не о чем (или спросить негде — окна сейчас нет) — пишем
+    // сразу, тем же приёмом, что у режима выше.
     if !save_needs_confirm(ui, &host) || ui.window.is_none() {
         apply_publication(cx, publication);
         return true;
@@ -1059,9 +1002,6 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
     let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
-            if let Some(tray) = &cx.global::<Ui>().tray {
-                tray.set_publication(publication);
-            }
             stop_session(cx);
             let ui = cx.global::<Ui>();
             if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
@@ -1105,9 +1045,6 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
                             .into(),
                     },
                 );
-            }
-            if let Some(tray) = &cx.global::<Ui>().tray {
-                tray.set_publication(publication);
             }
             // И открываем то, что человеку осталось сделать: «Связь».
             // В режиме «публикует платформа 1С» там же появляется поле
@@ -1263,76 +1200,37 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
                 cx.refresh_windows();
             }
         }
-        MenuAction::Mode(mode) => {
-            // Та же защита, что у «Сохранить» и у переключателя
-            // (`panel::can_save`, `Switch::disabled`): смена режима
-            // переписывает toml и перезапускает сеанс — под идущей
-            // операцией (например, «Выгрузить») это переписало бы
-            // конфигурацию и оборвало бы её посреди работы. Нативный пункт
-            // меню уже успел отметить себя сам — возвращаем галочку на
-            // настоящий режим, раз действие не состоялось.
-            let ui = cx.global::<Ui>();
-            let current = ui.cfg.current().mode.clone();
-            if mode_change_blocked(ui) || mode == current {
-                if let Some(tray) = &ui.tray {
-                    tray.set_mode(&current);
-                }
-                return;
-            }
-            // Галочка возвращается на действующий режим сразу: состоится ли
-            // смена, решает вопрос ниже, а пункт отметил себя сам ещё до нас.
-            // Согласие вернёт её на новый режим (`apply_mode`).
-            if let Some(tray) = &ui.tray {
-                tray.set_mode(&current);
-            }
-            // Вопрос («погасит ли смена обслуживание»), запись и перецикл
-            // сеанса — общая последовательность с карточкой (Important 3
-            // ревью круга починки 1 задачи 16), не копия её здесь.
-            request_current_mode_change(cx, mode);
-        }
-        MenuAction::Publication(publication) => {
-            // Форма та же, что у «Режима работы» выше, и по тем же причинам:
-            // под идущей операцией не переключаем, а отметку, которую пункт
-            // поставил себе сам, возвращаем на действующее значение.
-            let ui = cx.global::<Ui>();
-            let current = ui.cfg.current().publication.clone();
-            if mode_change_blocked(ui) || publication == current {
-                if let Some(tray) = &ui.tray {
-                    tray.set_publication(&current);
-                }
-                return;
-            }
-            if let Some(tray) = &ui.tray {
-                tray.set_publication(&current);
-            }
-            // Вопрос человеку, уборка своей публикации, запись и перецикл
-            // сеанса — общая последовательность с карточкой (задача 5 плана
-            // «Карточка публикации и удаление»), не вторая её копия здесь:
-            // тем же приёмом, каким «Режим работы» выше зовёт
-            // `request_current_mode_change`. Уборка своей публикации при этом
-            // идёт не до вопроса, а внутри `apply_publication`: вопрос человек
-            // может отклонить, и тогда гасить что-либо было бы прямым вредом
-            // (свой httpd убит, режим прежний).
-            request_current_publication_change(cx, publication);
-        }
         MenuAction::Access(access) => {
-            // Форма та же, что у «Публикации базы» выше, без вопроса
-            // человеку: потолок не действие над базой и не меняет
-            // транспорт (см. `apply_access`), спрашивать не о чем.
+            // Без вопроса человеку: потолок не действие над базой и не
+            // меняет транспорт (см. `apply_access`), спрашивать не о чем.
             let ui = cx.global::<Ui>();
             let current = ui.cfg.access().to_string();
+            let empty = ui.cfg.connections.is_empty();
             if mode_change_blocked(ui) || access == current {
                 if let Some(tray) = &ui.tray {
                     tray.set_access(&current);
                 }
                 return;
             }
+            // Находка ревью задачи 3: ни один пункт меню значка не имеет
+            // права воскрешать карточку-фантом через `Cfg::current_mut()`
+            // (`apply_access` правит именно ТЕКУЩЕЕ соединение). На пустом
+            // списке — свежий комплект или комплект после удаления
+            // последней карточки — пункт отказывает тем же словами, что
+            // `Cfg::switch_current`, и не трогает ничего.
+            if let Some(why) = access_refused_on_empty_list(empty) {
+                if let Some(tray) = &ui.tray {
+                    tray.set_access(&current);
+                }
+                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+                return;
+            }
             apply_access(cx, access);
         }
-        // Независимая галочка, не радио-группа (в отличие от режима и
-        // публикации выше): нативный пункт уже переключил сам себя, и
-        // `is_checked()` здесь читает то, что он только что выставил, —
-        // тот же приём, что у «Автозапуска»/«Автоподключения» ниже.
+        // Независимая галочка, не радио-группа: нативный пункт уже
+        // переключил сам себя, и `is_checked()` здесь читает то, что он
+        // только что выставил, — тот же приём, что у
+        // «Автозапуска»/«Автоподключения» ниже.
         //
         // `false` от `toggle_agent` теперь значит «щелчок не приняли вовсе»
         // (по этому агенту уже идёт работа), и только тогда галочку возвращаем
@@ -1389,10 +1287,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        access_not_applied_line, agent_available, agent_checked, agent_menu_id, busy_now_word, icon_rgba, menu_action, mode_change_blocked,
-        publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled,
-        unsaved_publication_keys, unsaved_switch_line, write_switch_current, Kind, MenuAction, PublicationAfterSwitch,
-        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id, busy_now_word, icon_rgba,
+        menu_action, mode_change_blocked, publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session,
+        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_switch_current, Kind, MenuAction,
+        PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1410,9 +1308,18 @@ mod tests {
         assert_eq!(menu_action("theme:system"), Some(MenuAction::Theme(theme::Choice::System)));
         assert_eq!(menu_action("autostart"), Some(MenuAction::Autostart));
         assert_eq!(menu_action("autoconnect"), Some(MenuAction::Autoconnect));
-        assert_eq!(menu_action("mode:tunnel"), Some(MenuAction::Mode("tunnel")));
-        assert_eq!(menu_action("mode:local"), Some(MenuAction::Mode("local")));
         assert_eq!(menu_action("nope"), None);
+    }
+
+    /// Решение владельца 1.11: публикация — поле соединения, режим — тоже
+    /// (тем же доводом раньше ушёл он), и пункт меню убран вовсе — проверяем,
+    /// что `menu_action` больше не узнаёт id этих пунктов.
+    #[test]
+    fn the_tray_knows_nothing_about_mode_and_publication_items_any_more() {
+        assert_eq!(menu_action("mode:tunnel"), None);
+        assert_eq!(menu_action("mode:local"), None);
+        assert_eq!(menu_action("publication:auto"), None);
+        assert_eq!(menu_action("publication:webserver"), None);
     }
 
     #[test]
@@ -1433,21 +1340,8 @@ mod tests {
         assert!(m.text.starts_with("режим работы: Локально. Параметры заполнены не до конца"), "{}", m.text);
     }
 
-    #[test]
-    fn the_publication_submenu_speaks_in_human_words() {
-        assert_eq!(menu_action("publication:auto"), Some(MenuAction::Publication("auto")));
-        assert_eq!(menu_action("publication:webserver"), Some(MenuAction::Publication("webserver")));
-        assert_eq!(menu_action("publication:iis"), None);
-        // Значения toml не меняются, меняются подписи. Подпись называет
-        // дело, а не механику: что публикуется (база) и кто это делает.
-        let labels: Vec<&str> = PUBLICATIONS.iter().map(|(_, _, text)| *text).collect();
-        assert_eq!(labels, vec!["Публикует коннектор", "Публикует платформа 1С"]);
-        assert_eq!(PUBLICATIONS.map(|(v, ..)| v), ["auto", "webserver"]);
-        assert_eq!(PUBLICATION_SUBMENU, "Публикация базы");
-    }
-
-    /// Тот же приём, что у публикации выше: значения toml — слова, что
-    /// понимает ребёнок (`read_only`/`read_write`), подписи — человеческие.
+    /// Значения toml — слова, что понимает ребёнок (`read_only`/`read_write`),
+    /// подписи — человеческие: человек читает название, а не имя режима.
     #[test]
     fn the_access_submenu_speaks_in_human_words() {
         assert_eq!(menu_action("access:read_only"), Some(MenuAction::Access("read_only")));
@@ -1459,9 +1353,7 @@ mod tests {
         assert_eq!(ACCESS_SUBMENU, "Запись в базу");
     }
 
-    /// Подменю строится тем же кодом, что «Режим работы»
-    /// (`mode_submenu_has_two_checked_items`) — отмечен ровно умолчальный
-    /// пункт, «Только чтение».
+    /// Отмечен ровно умолчальный пункт, «Только чтение».
     #[test]
     fn access_submenu_has_two_checked_items() {
         let items = ACCESS.map(|(a, id, text)| CheckMenuItem::with_id(id, text, true, a == "read_only", None));
@@ -1491,6 +1383,20 @@ mod tests {
         assert_eq!(ui.cfg.access(), "read_write");
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
         assert!(text.contains("write = \"read_write\""), "{text}");
+    }
+
+    /// Находка ревью задачи 3: пункт меню «Запись в базу» на пустом списке
+    /// соединений обязан отказать словами `Cfg::switch_current`, а не дойти
+    /// до `apply_access` → `Cfg::current_mut()` и завести карточку, которой
+    /// человек не заводил. `menu_action`/`on_menu` живому `App` недостижимы
+    /// без него — под тестом чистое ядро решения.
+    #[test]
+    fn access_is_refused_on_an_empty_list_with_the_same_words_as_switch_current() {
+        assert_eq!(
+            access_refused_on_empty_list(true),
+            Some("1c-connect.toml: соединений пока нет — настройте первое в окне (1c-connect gui)".to_string())
+        );
+        assert_eq!(access_refused_on_empty_list(false), None, "список не пуст — пункт работает как обычно");
     }
 
     /// Окно отказывает на пути с `..` и НИЧЕГО не пишет. Своей проверки у окна для
@@ -1549,25 +1455,8 @@ mod tests {
     }
 
     #[test]
-    fn mode_submenu_has_two_checked_items() {
-        // Тот же порядок конструирования, что в `build`: пункты подменю —
-        // данные, не требуют ни настоящего значка трея, ни (на Windows, где
-        // и крутится этот тест) инициализированного GTK.
-        let items = MODES.map(|(m, id, text)| CheckMenuItem::with_id(id, text, true, m == "local", None));
-        let refs: Vec<&dyn IsMenuItem> = items.iter().map(|i| i as &dyn IsMenuItem).collect();
-        let submenu = Submenu::with_items("Режим работы", true, &refs).unwrap();
-        assert_eq!(submenu.text(), "Режим работы");
-        assert_eq!(submenu.items().len(), 2);
-        assert_eq!(items[0].text(), "Через туннель");
-        assert_eq!(items[1].text(), "Локально");
-        // Отмечен ровно текущий — здесь «local».
-        assert!(!items[0].is_checked());
-        assert!(items[1].is_checked());
-    }
-
-    #[test]
     fn choosing_a_mode_writes_the_toml_and_restarts_the_session() {
-        // `MenuAction::Mode`'s handler in `on_menu` needs `cx: &mut App`
+        // `request_current_mode_change`/`apply_mode` need `cx: &mut App`
         // (GPUI), which has no headless test harness here — same gap as the
         // window's own save path. What's testable without it, and what the
         // name promises: the config write that `stop_session`/`start_session`

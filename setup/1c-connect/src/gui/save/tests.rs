@@ -2014,6 +2014,55 @@ fn switching_a_card_to_webserver_keeps_an_address_the_person_typed() {
     assert_eq!(ui.cfg.current().base_url, "http://localhost:8081/Buh/hs/mcp-1c");
 }
 
+/// Important 1 круга починки 1 задачи 5: когда `save_host` отказал (поля
+/// дозаполнены не до конца), в файл всё равно ложится намерение человека — и
+/// при уходе в «публикует платформа 1С» это ПАРА ключей, а не один. До правки
+/// писался только `publication`, а выведенный нами адрес снимался лишь в
+/// памяти: на диске оставалась догадка, замок про неё молчал (поле непустое), и
+/// проба уходила на чужой веб-сервер на 80, а окно при следующем показе
+/// возвращало догадку и в память.
+///
+/// Тест смотрит на оба конца, и на ОДНУ запись: оба ключа в одном тексте.
+#[test]
+fn the_tray_writer_puts_a_pair_of_keys_in_one_pass() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().base_path = "C:\\Bases\\Buh".into();
+    ui.cfg.current_mut().base_url = cfg::derived_base_url("C:\\Bases\\Buh");
+    with_params_file(&ui);
+
+    save_tray_keys(&mut ui, &[("publication", "webserver"), ("base_url", "")]).unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    let back: Cfg = toml::from_str(&text).expect("файл после записи обязан разбираться целиком");
+    assert_eq!(back.current().publication, "webserver", "{text}");
+    assert_eq!(back.current().base_url, "", "нашей догадки в файле не осталось:\n{text}");
+    // Именно строкой ключа: сам адрес-догадка упоминается ещё и в объяснениях
+    // образца, и поиск по подстроке без ключа ловил бы комментарий.
+    assert!(!text.contains("base_url = \"http://localhost/Buh/hs/mcp-1c\""), "и ни одной строкой ключа:\n{text}");
+    assert_eq!(ui.cfg.current().base_url, "", "и в памяти то же, что в тексте");
+    assert_eq!(ui.cfg.current().publication, "webserver");
+}
+
+/// Minor 3 круга починки 1 задачи 5: писатель публичный, и проверка значения —
+/// рубеж доверия, а не украшение (с нынешних вызывающих она недостижима: слова
+/// идут из словаря `'static`). Отказ — ДО какой-либо записи, тем же приёмом,
+/// каким закрыт отказ `set_keys` на неразбираемом `base_here`: файл не тронут
+/// ни байтом.
+#[test]
+fn set_publication_refuses_an_unknown_value_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_publication(&mut ui, "Buh", "iis").unwrap_err();
+
+    assert!(e.contains("publication"), "отказ называет ключ: {e}");
+    assert!(e.contains("auto") && e.contains("webserver"), "и называет допустимые значения: {e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().publication, "auto", "и в памяти прежнее значение не тронуто");
+}
+
 /// Minor 1 круга починки 1: пустой список ключей — не правка, а её
 /// отсутствие, и функция даже не обязана искать карточку по имени — для
 /// пустой правки оно ей не нужно. Лучшее доказательство — ИМЯ, которого в

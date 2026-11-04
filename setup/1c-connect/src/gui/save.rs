@@ -167,6 +167,32 @@ pub fn descriptor_changed(a: &Connection, b: &Connection) -> bool {
 /// базу, ни порты, а публикацию переключение разбирает само
 /// (`tray::apply_publication`).
 pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> {
+    save_tray_keys(ui, &[(key, value)])
+}
+
+/// То же, но ПАРОЙ ключей — одной записью на диск (Important 1 круга починки 1
+/// задачи 5 плана «Карточка публикации и удаление»).
+///
+/// **Почему понадобилось.** В ветви отказа `save_host`
+/// (`tray::apply_publication`) записывался РОВНО один ключ — публикация, — а
+/// выведенный нами адрес снимался только в памяти. На диске оставалась пара
+/// «publication = webserver» и наша же догадка в `base_url`: замок молчал
+/// (поле непустое — `Cfg::publication_address_missing`), `Cfg::base_url()`
+/// отдавал догадку, и проба уходила на ЧУЖОЙ веб-сервер на 80, а окно при
+/// следующем показе возвращало догадку и в память.
+///
+/// **Запись ОДНА, даже когда ключей два** — тот же довод, что у `set_keys`:
+/// между двумя записями файл стоял бы в половинчатом состоянии (новая
+/// публикация и прежний адрес), то есть ровно в том, от которого эта правка и
+/// лечит.
+///
+/// Проверки годности здесь нет и не нужно (см. докстроку выше): это намерение
+/// человека, а не действие над базой, и путь этот существует ровно для того
+/// случая, когда `save_host` уже отказал на незаполненных полях.
+pub fn save_tray_keys(ui: &mut Ui, keys: &[(&str, &str)]) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
     let path = ui.kit.state_path(cfg::FILE);
     // Critical 2 ревью задачи 7: «файла нет» (`NotFound`, туда и годится образец) и «не смогли прочитать» (антивирус держит файл, нет прав, временный отказ диска) — разные причины, а прежний `unwrap_or_else` сливал их в одну и читал любой отказ как «файла нет». Следующая строка пишет текст ПОВЕРХ файла — на чужом отказе это стирало бы оба шифртекста молча, без единого слова в журнал. Любая причина кроме `NotFound` — отказ словами здесь же, до какой-либо записи.
     let text = match std::fs::read_to_string(&path) {
@@ -192,15 +218,25 @@ pub fn save_tray_key(ui: &mut Ui, key: &str, value: &str) -> Result<(), String> 
     // — записанное не читал никто, а файл с обеими половинами стал отказом
     // при чтении, то есть один щелчок в трее делал настройки нечитаемыми.
     // Довод и разбор прежнего вида файла — в `cfg::set_current`.
-    let text = cfg::set_current(&text, &ui.cfg, key, &format!("{value:?}"))?;
+    let mut text = text;
+    for (key, value) in keys {
+        text = cfg::set_current(&text, &ui.cfg, key, &format!("{value:?}"))?;
+    }
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     // Синхронизируем только то, что сами только что записали — остальные
     // поля `ui.cfg` не трогаем, они и на диске остались как были.
-    match key {
-        "mode" => ui.cfg.current_mut().mode = value.to_string(),
-        "publication" => ui.cfg.current_mut().publication = value.to_string(),
-        "write" => ui.cfg.current_mut().write = value.to_string(),
-        _ => {}
+    for (key, value) in keys {
+        match *key {
+            "mode" => ui.cfg.current_mut().mode = value.to_string(),
+            "publication" => ui.cfg.current_mut().publication = value.to_string(),
+            "write" => ui.cfg.current_mut().write = value.to_string(),
+            // `base_url` — с круга починки 1 задачи 5: пустой адрес ложится в
+            // файл вместе с публикацией (см. докстроку), и не быть его здесь
+            // значило бы, что диск и память расходятся на том самом ключе,
+            // из-за которого правка и сделана.
+            "base_url" => ui.cfg.current_mut().base_url = value.to_string(),
+            _ => {}
+        }
     }
     Ok(())
 }

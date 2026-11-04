@@ -1483,10 +1483,17 @@ fn set_card_mode(cx: &mut App, name: &str, mode: &'static str) {
                     kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
                 },
             );
+            // Minor 2 круга починки 1 задачи 5: на этой ветви окно не
+            // перерисовывает никто (`apply_mode` до неё не доходит), и сказанное
+            // появлялось бы только на следующем кадре — человек щёлкнул, и по
+            // видимости ничего не произошло. Тот же дефект был у публикации
+            // (`set_card_publication`), и починен он в обоих местах, а не в том,
+            // которое заметили.
+            cx.refresh_windows();
         }
-        // `request_current_mode_change`/`apply_mode` сами перевязывают
-        // `self.original` (`sync_card_topology`) и перерисовывают окно —
-        // здесь второй раз звать нечего.
+        // На удачном пути `request_current_mode_change`/`apply_mode` сами
+        // перевязывают `self.original` (`sync_card_topology`) и перерисовывают
+        // окно — здесь второй раз звать нечего.
         return;
     }
     if let Err(e) = gui::set_mode(cx.global_mut::<Ui>(), name, mode) {
@@ -1536,10 +1543,15 @@ fn set_card_publication(cx: &mut App, name: &str, publication: &'static str) {
                     kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
                 },
             );
+            // Minor 2 круга починки 1: отказ — единственная ветвь, где НИКТО
+            // не перерисовывает окно за нас (на удачном пути это делает
+            // `apply_publication`), и без этой строки сказанное появлялось бы
+            // только на следующем кадре — то есть по видимости не появлялось
+            // бы вовсе: человек щёлкнул, и ничего не произошло.
+            cx.refresh_windows();
         }
-        // Перевязку снимка и перерисовку делает сам
-        // `apply_publication`/`request_current_publication_change` — второй раз
-        // звать нечего.
+        // На удачном пути перевязку снимка и перерисовку делает сам
+        // `apply_publication` — второй раз звать нечего.
         return;
     }
     if let Err(e) = gui::set_publication(cx.global_mut::<Ui>(), name, publication) {

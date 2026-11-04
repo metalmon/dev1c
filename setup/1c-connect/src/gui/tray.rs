@@ -6,8 +6,8 @@
 use super::{
     autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
     ensure_publication_now, link, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm,
-    save_tray_key, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind,
-    Line, Tab, TrayState, Ui, TRAY_PNG,
+    save_tray_key, save_tray_keys, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link,
+    window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
@@ -969,6 +969,29 @@ pub(crate) fn request_current_publication_change(cx: &mut App, publication: &'st
     true
 }
 
+/// Что ложится в файл, когда `save_host` отказал на смене публикации
+/// (Important 1 круга починки 1 задачи 5): публикация — всегда, а при снятом
+/// нами адресе ещё и пустой `base_url`, ОДНОЙ записью (`save::save_tray_keys`).
+///
+/// **Почему пара, а не один ключ.** Выведенный от каталога базы адрес снимается
+/// в памяти (см. `apply_publication`), и если на диск ушла бы только
+/// публикация, файл остался бы с «webserver» и нашей же догадкой в `base_url`:
+/// замок про неё молчит (поле непустое — `Cfg::publication_address_missing`),
+/// `Cfg::base_url()` отдаёт догадку, и проба уходит на ЧУЖОЙ веб-сервер на 80.
+/// Окно при следующем показе перечитывает файл и возвращает догадку в память —
+/// то есть уборка в памяти без этой пары не держалась бы и минуты.
+///
+/// Решение вынесено в чистую функцию, чтобы держать его под тестом: саму
+/// `apply_publication` без живого `App` не позвать (под тестом —
+/// `a_refused_save_writes_the_publication_together_with_the_dropped_address`).
+fn unsaved_publication_keys(publication: &'static str, dropped_address: bool) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![("publication", publication)];
+    if dropped_address {
+        keys.push(("base_url", ""));
+    }
+    keys
+}
+
 /// Строка журнала, когда режим переключён, но в файл не записан. Применить
 /// его мы вправе: это намерение человека, а не действие над базой —
 /// публикацию здесь никто не поднимает, и связь при этом выключена. А вот
@@ -1004,6 +1027,11 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
     // текущее соединение не меняется, но брать его дважды по разным ветвям
     // match не за чем.
     let name = cx.global::<Ui>().cfg.current().name.clone();
+    // Сняли ли мы выведенный нами адрес — нужно и ветви отказа ниже
+    // (Important 1 круга починки 1: там это ВТОРОЙ ключ записи, иначе догадка
+    // остаётся на диске), поэтому решение берётся здесь, до правки памяти, и
+    // живёт одним признаком, а не считается заново по уже изменённому.
+    let mut dropped_address = false;
     // Уходя в чужую публикацию, забираем своё: гасим свой httpd и убираем
     // свой дескриптор. **До** записи режима — после
     // неё уборка увидела бы «публикует веб-сервер» и не тронула бы ничего
@@ -1024,6 +1052,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
         // «адрес не задан».
         if crate::cfg::is_derived_address(ui.cfg.current()) {
             ui.cfg.current_mut().base_url = String::new();
+            dropped_address = true;
         }
     }
     cx.global_mut::<Ui>().cfg.current_mut().publication = publication.into();
@@ -1048,18 +1077,35 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
         Err(why) => {
             // Проверка всего файла не прошла — на свежем комплекте поля ещё
             // пусты. Для переключателя это не повод не сработать: он не
-            // действие над базой, а намерение человека. Пишем один ключ
-            // (`save_tray_key`), остальное в файле остаётся как было.
+            // действие над базой, а намерение человека. Пишем свои ключи
+            // (`save_tray_keys`), остальное в файле остаётся как было.
             //
             // Именно в файл, а не в память: окно перечитывает файл на каждом
             // показе, и намерение, оставленное в памяти, стирается первым же
             // открытием окна — поле «Адрес публикации» тогда не появляется
-            // вовсе (находка владельца 28.10).
-            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "publication", publication) {
+            // вовсе (находка владельца 28.10). Снятый адрес — ТОТ ЖЕ случай и
+            // тот же довод (Important 1 круга починки 1), поэтому он идёт
+            // второй половиной той же пары, а не остаётся только в памяти.
+            let keys = unsaved_publication_keys(publication, dropped_address);
+            if let Err(e) = save_tray_keys(cx.global_mut::<Ui>(), &keys) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("публикация базы", link::publication_label(publication), why));
+            // Слова про снятый адрес — отдельной строкой, и только когда он
+            // правда снят: человек обязан узнать, что в файле изменилось не
+            // одно поле, и почему (адрес писали мы, а не он).
+            if dropped_address {
+                note_line(
+                    cx.global_mut::<Ui>(),
+                    Line {
+                        kind: Kind::Warn,
+                        text: "адрес публикации снят: прежний посчитала сама программа, а не вписали вы — впишите адрес, по которому \
+                               база уже опубликована"
+                            .into(),
+                    },
+                );
+            }
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_publication(publication);
             }
@@ -1345,8 +1391,8 @@ mod tests {
     use super::{
         access_not_applied_line, agent_available, agent_checked, agent_menu_id, busy_now_word, icon_rgba, menu_action, mode_change_blocked,
         publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled,
-        unsaved_switch_line, write_switch_current, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS,
-        ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        unsaved_publication_keys, unsaved_switch_line, write_switch_current, Kind, MenuAction, PublicationAfterSwitch,
+        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1569,6 +1615,29 @@ mod tests {
         assert!(!mode_change_blocked(&ui));
     }
 
+    /// Important 1 круга починки 1 задачи 5 — мина в ветви ОТКАЗА `save_host`.
+    /// В файл там ложится намерение человека, и при уходе в «публикует
+    /// платформа 1С» со снятым адресом это ПАРА ключей: до правки писалась одна
+    /// публикация, а выведенный нами адрес снимался только в памяти — на диске
+    /// оставалась «webserver» и наша же догадка, замок про неё молчал (поле
+    /// непустое), `Cfg::base_url()` отдавал догадку, и проба уходила на ЧУЖОЙ
+    /// веб-сервер на 80; окно при следующем показе возвращало догадку и в
+    /// память.
+    ///
+    /// Решение «что писать» вынесено в чистую функцию ровно затем, чтобы
+    /// держать его под тестом: саму `apply_publication` без живого `App` не
+    /// позвать. Вторую половину — что пара ложится ОДНОЙ записью и что в файле
+    /// не остаётся догадки — держит
+    /// `save::tests::the_tray_writer_puts_a_pair_of_keys_in_one_pass`.
+    #[test]
+    fn a_refused_save_writes_the_publication_together_with_the_dropped_address() {
+        assert_eq!(unsaved_publication_keys("webserver", true), vec![("publication", "webserver"), ("base_url", "")]);
+        // Адрес человека не снимали — и писать его нечего, в файле он свой.
+        assert_eq!(unsaved_publication_keys("webserver", false), vec![("publication", "webserver")]);
+        // Обратно в «публикует коннектор» адрес считает сама программа.
+        assert_eq!(unsaved_publication_keys("auto", false), vec![("publication", "auto")]);
+    }
+
     /// Задача 5 плана «Карточка публикации и удаление»: смена публикации у
     /// ТЕКУЩЕЙ карточки идёт той же дверью, что смена режима
     /// (`request_current_publication_change` → `mode_change_blocked`), и
@@ -1577,14 +1646,16 @@ mod tests {
     /// посреди публикации (результат, пришедший уже после переключения, лёг бы
     /// на прежнюю базу).
     ///
-    /// Чего этот тест НЕ проверяет, прямо: саму последовательность
-    /// (`request_current_publication_change`) без живого `App` не позвать —
-    /// гарнеса `gpui::test` в этом ящике нет (`gpui` приходит транзитивно, с
-    /// `gpui-kit`), и по той же причине его нет и у
-    /// `request_current_mode_change`. Под тестом стоит её первая строка —
-    /// общий счёт — и слово отказа, которое карточка пишет в журнал.
+    /// Чего этот тест НЕ проверяет, прямо (Minor 1 круга починки 1, и оттуда
+    /// же имя теста — прежнее обещало покрытие самой последовательности):
+    /// `request_current_publication_change` здесь не зовётся и позвана быть не
+    /// может — без живого `App` её не вызвать, гарнеса `gpui::test` в этом
+    /// ящике нет вовсе (`gpui` приходит транзитивно, с `gpui-kit`), и по той же
+    /// причине своего теста нет и у `request_current_mode_change`. Под тестом
+    /// стоит СЧЁТ у двери публикации и слово отказа — не то, что дверь его
+    /// спрашивает.
     #[test]
-    fn a_publication_change_of_the_current_card_is_refused_while_anything_is_running() {
+    fn the_publication_door_counts_busy_with_the_same_single_count_and_word() {
         let mut ui = Ui::for_test();
         assert!(!mode_change_blocked(&ui), "в покое ничего не мешает");
         ui.publishing = Some(Instant::now());

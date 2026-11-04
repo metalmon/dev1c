@@ -1377,13 +1377,23 @@ pub(crate) fn sync_card_topology(cx: &mut App, name: &str) {
     });
 }
 
-/// Чистое ядро `sync_card_topology` — три оси и только они (Critical ревью
-/// круга починки 1 задачи 16, довод — в докстроке вызывающей). Под тестом:
-/// `adopt_topology_touches_only_the_three_axes_not_the_typed_fields` ниже.
+/// Чистое ядро `sync_card_topology` — ЧЕТЫРЕ оси и только они (Critical
+/// ревью круга починки 1 задачи 16, довод — в докстроке вызывающей). Под
+/// тестом: `adopt_topology_touches_only_the_axes_not_the_typed_fields` ниже.
+///
+/// **`publication` — четвёртая ось, и забыли её не случайно** (Critical
+/// ревью всей ветки): поля в окне у неё нет, правит её только меню значка,
+/// и оттого она не выглядела осью карточки. Но состав полей карточки зависит
+/// от неё наравне с `mode` и `base_here` (`shown_fields`), а запись считает
+/// по тому же составу, что́ переносить из сохранённого (`save::save_host`).
+/// Без этой строки карточка после смены публикации из значка не отращивала
+/// «Адрес публикации», а запись уже считала его показанным — и уносила в toml
+/// значение поля, которого карточка человеку не показывала.
 pub fn adopt_topology(original: &mut Connection, fresh: &Connection) {
     original.role = fresh.role.clone();
     original.mode = fresh.mode.clone();
     original.base_here = fresh.base_here;
+    original.publication = fresh.publication.clone();
 }
 
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
@@ -1401,12 +1411,24 @@ fn run_project_op(window: &mut Window, cx: &mut App, which: gui::Which) {
     }
 }
 
-/// Режим работы и режим публикации из текущих параметров: пара, от которой
-/// зависит, какие поля показаны (`shown_fields`). Оба правятся только из
-/// меню трея, поля в окне у них нет.
-fn modes_of(cx: &App) -> (String, String) {
-    let h = cx.global::<Ui>().cfg.current();
-    (h.mode.clone(), h.publication.clone())
+/// Ось, по которой собирается и записывается форма: режим работы и режим
+/// публикации ОТКРЫТОЙ карточки (`Panel::original`) — та же пара, от которой
+/// карточка считает состав полей (`shown_fields`) и «правлено ли»
+/// (`dirty_now`). Оба правятся только из меню значка, полей в окне у них нет.
+///
+/// **Почему чистая функция от карточки, а не чтение `cfg.current()`**
+/// (Critical ревью всей ветки). Прежде ось для записи брали у текущих
+/// параметров, а карточка рисовала себя по своему снимку — два источника
+/// одной истины. Разошлись они на смене публикации из значка: карточка
+/// «Адрес публикации» не показывала, а запись считала его показанным и
+/// уносила в toml значение поля, которого человек не видел (адрес публикации
+/// одной базы мог уехать в другую карточку). Теперь источник один — снимок
+/// карточки, который `adopt_topology` держит свежим. Функция чистая нарочно:
+/// методу с живым `App` тестом не добраться, и беда спряталась именно в этом.
+///
+/// Под тестом: `form_axis_comes_from_the_card_not_from_the_current_one`.
+pub fn axis_of(card: &Connection) -> (&str, &str) {
+    (&card.mode, &card.publication)
 }
 
 /// Что показать в поле адреса публикации. Выведенный от каталога базы адрес
@@ -1936,13 +1958,17 @@ impl Panel {
         ]
     }
 
-    /// Записать параметры в toml и сказать об этом в подвале. Ошибка
-    /// Поля формы как `Connection`: в локальном режиме скрытые поля переносятся из
-    /// текущих параметров. Отделено от записи, чтобы кнопка могла сперва
-    /// спросить подтверждение смены базы и только потом писать.
-    fn host_from_fields(&self, cx: &mut Context<Self>) -> Connection {
-        let (mode, publication) = modes_of(cx);
-        let mut host = host_of(&self.fields, &mode, &publication, cx);
+    /// Поля формы как `Connection`: в локальном режиме скрытые поля
+    /// переносятся из текущих параметров. Отделено от записи, чтобы кнопка
+    /// могла сперва спросить подтверждение смены базы и только потом писать.
+    ///
+    /// **Ось — аргументом, а не чтением изнутри** (Critical ревью всей
+    /// ветки): выбор оси решает `axis_of` — чистая функция от открытой
+    /// карточки, под тестом, — а здесь остаётся только сборка формы. Пока
+    /// ось читалась здесь же у `cfg.current()`, карточка и запись жили на
+    /// разных осях, и добраться до этого выбора тестом было нечем.
+    fn host_from_fields(&self, mode: &str, publication: &str, cx: &mut Context<Self>) -> Connection {
+        let mut host = host_of(&self.fields, mode, publication, cx);
         if mode == "local" {
             // Адрес среды, пароль рабочего места и имя рабочего места скрыты
             // в этом режиме — переносим их из текущих параметров, как
@@ -2030,7 +2056,11 @@ impl Panel {
     /// прочих случаях вопроса нет и запись идёт сразу. Перезапуск сеанса и
     /// строка в журнал — внутри `gui::save_host`, не здесь.
     fn save_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let host = self.host_from_fields(cx);
+        // Ось — у ОТКРЫТОЙ карточки (`axis_of`), той же, что рисует поля:
+        // второго источника этой пары у записи больше нет (Critical ревью
+        // всей ветки).
+        let (mode, publication) = axis_of(&self.original);
+        let host = self.host_from_fields(mode, publication, cx);
         // Вопроса нет — пишем **прямо здесь**, из контекста самой панели.
         // Раньше и этот случай уходил в `confirm_database_change`, а тот
         // звал `proceed` синхронно, и запись шла через `window.update`
@@ -3038,11 +3068,11 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_not_yet, adopt_needed, adopt_topology, base_fields_note, can_save, card, card_title, fact_rows, fields_differ, folder_label,
-        foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question, pick_face,
-        profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint, shown_base_url,
-        shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, Dirty, LinkAct,
-        ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
+        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, fact_rows, fields_differ,
+        folder_label, foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question,
+        pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint,
+        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body,
+        Dirty, LinkAct, ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -3545,7 +3575,7 @@ mod tests {
     /// Critical ревью круга починки 1 задачи 16: `self.original` держал
     /// переключённые роль/режим/топологию СТАРЫМИ, потому что
     /// `adopt_needed`/`fields_differ` сравнивают только текстовые поля
-    /// (`shown_fields`), и ни одна из трёх осей в этот список не входит —
+    /// (`shown_fields`), и ни одна из осей в этот список не входит —
     /// файл и `ui.cfg` уже верны, а открытая карточка переключение не
     /// видит. `sync_card_topology` (её нельзя прогнать без гарнеса — ей
     /// нужны живые `Entity<Panel>`/`App`) делегирует решение сюда, в
@@ -3556,27 +3586,68 @@ mod tests {
     /// `adopt_fields`, который стёр бы набранное и тем самым воспроизвёл бы
     /// находку задачи 14 про молчаливую потерю правки при переходе между
     /// карточками.
+    ///
+    /// Третье — `publication`, четвёртая ось (Critical ревью всей ветки):
+    /// без неё карточка после смены публикации из значка не отращивала
+    /// «Адрес публикации», а запись уже считала его показанным.
     #[test]
-    fn adopt_topology_touches_only_the_three_axes_not_the_typed_fields() {
+    fn adopt_topology_touches_only_the_axes_not_the_typed_fields() {
         let mut original = Connection {
             mode: "tunnel".into(),
             role: "accept".into(),
             base_here: true,
+            publication: "auto".into(),
             server: "ещё не сохранено".into(),
             ..Default::default()
         };
-        let fresh =
-            Connection {
-                mode: "local".into(), role: "dial".into(), base_here: false, server: "с диска".into(), ..Default::default()
-            };
+        let fresh = Connection {
+            mode: "local".into(),
+            role: "dial".into(),
+            base_here: false,
+            publication: "webserver".into(),
+            server: "с диска".into(),
+            ..Default::default()
+        };
 
         adopt_topology(&mut original, &fresh);
 
         assert_eq!(original.mode, "local");
         assert_eq!(original.role, "dial");
         assert!(!original.base_here);
+        assert_eq!(original.publication, "webserver", "публикация — такая же ось состава полей, как режим");
         assert!(!shown_fields(&original).contains(&"server"), "режим сменился на local — поля среды ушли из состава карточки");
         assert_eq!(original.server, "ещё не сохранено", "текстовые поля — не ось этой функции, их не трогаем");
+    }
+
+    /// Critical ревью всей ветки: ось, по которой СОБИРАЕТСЯ и ЗАПИСЫВАЕТСЯ
+    /// форма, обязана быть той же, по которой карточка себя РИСУЕТ. Прежде
+    /// запись брала её у `cfg.current()`, а карточка — у своего снимка, и на
+    /// смене публикации из значка эти два источника расходились: карточка
+    /// «Адрес публикации» не показывала, а `save_host` считал его показанным
+    /// — и уносил в toml значение поля, которого человек не видел (адрес
+    /// одной базы мог уехать в карточку другой).
+    ///
+    /// Тест держит именно ВЫБОР оси как чистую функцию (`axis_of`): метод
+    /// `host_from_fields` без живого GPUI не позвать, и беда спряталась ровно
+    /// там. Вторая половина теста показывает, почему выбор важен: на оси
+    /// текущего состав полей ДРУГОЙ.
+    #[test]
+    fn form_axis_comes_from_the_card_not_from_the_current_one() {
+        let card =
+            Connection {
+                name: "Карточка".into(), base_here: true, mode: "local".into(), publication: "auto".into(), ..Default::default()
+            };
+        let current = Connection { name: "Текущее".into(), publication: "webserver".into(), ..card.clone() };
+
+        let (mode, publication) = axis_of(&card);
+        assert_eq!((mode, publication), ("local", "auto"), "ось — у открытой карточки");
+
+        // Состав полей, собранный на этой оси, — тот же, что рисует карточка.
+        let form = Connection { mode: mode.into(), publication: publication.into(), ..card.clone() };
+        assert_eq!(shown_fields(&form), shown_fields(&card));
+        assert!(!shown_fields(&form).contains(&"base_url"), "карточка «Адрес публикации» не показывает — не несёт его и форма");
+        // А на оси текущего соединения состав другой — это и была беда.
+        assert!(shown_fields(&current).contains(&"base_url"));
     }
 
     #[test]

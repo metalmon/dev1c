@@ -1441,3 +1441,131 @@ fn switching_the_topology_back_restores_the_base_fields_and_leaves_the_neighbour
     assert!(!ui.cfg.by_name("Ромашка").unwrap().base_here, "соседняя карточка не тронута");
     assert!(std::fs::read_to_string(&path).unwrap().contains("Ромашка"), "сосед на месте");
 }
+
+/// Important 2 ревью всей ветки, случай первый: профиль «Разработчик»
+/// требует папку исходников (`Connection::validate`, ветка `developer`), а
+/// точечный писатель годности не спрашивал вовсе — карточка становилась
+/// негодной молча, в момент щелчка. Потом командная строка отвергала весь
+/// файл, а следующее «Сохранить» отказывало про поле, которого человек не
+/// трогал. Теперь отказ стоит ДО записи и говорит словами.
+#[test]
+fn the_developer_profile_without_a_sources_folder_is_refused_before_the_write() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().project = String::new();
+    with_params_file(&ui);
+    assert!(ui.cfg.validate().is_ok(), "в фикстуре карточка годна: пустая папка у бизнес-профиля законна");
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_profile(&mut ui, "Buh", "developer").unwrap_err();
+
+    assert!(e.contains("project"), "отказ называет поле: {e}");
+    assert!(e.contains("повторите"), "отказ говорит, что сделать: {e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
+}
+
+/// Important 2 ревью всей ветки, случай второй: «база здесь» при пустом пути
+/// к базе — тот же замок (`Connection::validate`), тот же молчаливый урон.
+#[test]
+fn saying_the_base_is_here_with_no_base_path_is_refused_before_the_write() {
+    let mut ui = Ui::for_test();
+    {
+        let c = ui.cfg.current_mut();
+        c.base_here = false;
+        c.base_path = String::new();
+    }
+    with_params_file(&ui);
+    assert!(ui.cfg.validate().is_ok(), "в фикстуре карточка годна: база на той стороне пути не требует");
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_base_here(&mut ui, "Buh", true).unwrap_err();
+
+    assert!(e.contains("base_path"), "отказ называет поле: {e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert!(!ui.cfg.by_name("Buh").unwrap().base_here, "и в памяти топология прежняя");
+}
+
+/// Та же проверка у `set_mode`: уход в туннель спрашивает адрес среды и
+/// номер рабочего места — у годной ЛОКАЛЬНОЙ карточки их может не быть.
+#[test]
+fn switching_a_local_card_to_tunnel_without_an_environment_address_is_refused() {
+    let mut ui = Ui::for_test();
+    {
+        let c = ui.cfg.current_mut();
+        c.mode = "local".into();
+        c.server = String::new();
+        c.workstation = String::new();
+    }
+    with_params_file(&ui);
+    assert!(ui.cfg.validate().is_ok(), "локальная карточка без адреса среды годна");
+
+    let e = set_mode(&mut ui, "Buh", "tunnel").unwrap_err();
+
+    assert!(e.contains("server") || e.contains("workstation"), "отказ называет поле: {e}");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().mode, "local", "режим не сменился");
+}
+
+/// Обратный ход той же проверки — и он важнее прямого: отказываем ТОЛЬКО за
+/// свою порчу. Свежая карточка стоит с пустым путём к базе при `base_here =
+/// true` (`Connection::default`), то есть негодна ещё до щелчка, — и
+/// безусловная проверка запирала бы на ней ВСЕ переключатели, отказывая про
+/// поле, которого человек ещё не заполнял. Выбор профиля на свежем комплекте
+/// обязан срабатывать.
+#[test]
+fn a_card_that_was_already_incomplete_still_switches() {
+    let mut ui = Ui::for_test();
+    let fresh = add_connection(&mut ui, "accept").unwrap();
+    assert!(ui.cfg.by_name(&fresh).unwrap().validate().is_err(), "свежая карточка и правда негодна: пути к базе нет");
+
+    set_profile(&mut ui, &fresh, "developer").unwrap();
+    set_base_here(&mut ui, &fresh, false).unwrap();
+    set_role(&mut ui, &fresh, "dial").unwrap();
+
+    assert_eq!(ui.cfg.by_name(&fresh).unwrap().profile, "developer");
+    assert!(!ui.cfg.by_name(&fresh).unwrap().base_here);
+    assert_eq!(ui.cfg.by_name(&fresh).unwrap().role, "dial");
+}
+
+/// Important 3 ревью всей ветки: ребёнок моста берёт набор инструментов из
+/// общей ячейки сеанса (`bridge::mcp_command` на `Session::cfg_now`), и
+/// точечный писатель туда не толкал ничего — смена профиля не сужала набор
+/// у УЖЕ РАБОТАЮЩЕГО агента. Пока окно прятало себя по потере фокуса, это
+/// пряталось за перечитыванием файла на следующем показе; задача 12
+/// автоскрытие убрала.
+#[test]
+fn a_card_switch_reaches_the_live_session_of_the_current_card() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    ui.session = Some(doomed_session(&ui));
+    assert_eq!(ui.session.as_ref().unwrap().cfg_now().toolset().unwrap(), "business", "сеанс стартовал на прежнем профиле");
+
+    set_profile(&mut ui, "Buh", "developer").unwrap();
+
+    assert_eq!(ui.session.as_ref().unwrap().cfg_now().toolset().unwrap(), "developer", "живой сеанс увидел новый набор инструментов");
+    let _ = ui.session.take().unwrap().stop();
+}
+
+/// И зеркало: правка НЕтекущей карточки сеансу не про что — он работает с
+/// текущей одной (`Cfg::current`), толкать ему нечего.
+#[test]
+fn a_switch_on_another_card_does_not_touch_the_live_session() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        profile: "business".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    ui.session = Some(doomed_session(&ui));
+
+    set_profile(&mut ui, "Ромашка", "developer").unwrap();
+
+    let live = ui.session.as_ref().unwrap().cfg_now();
+    assert_eq!(live.by_name("Ромашка").unwrap().profile, "business", "ячейка сеанса не переписана чужой правкой");
+    assert_eq!(ui.cfg.by_name("Ромашка").unwrap().profile, "developer", "а в файле и в памяти правка есть");
+    let _ = ui.session.take().unwrap().stop();
+}

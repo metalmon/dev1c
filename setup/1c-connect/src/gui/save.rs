@@ -776,6 +776,66 @@ pub fn switch_current(ui: &mut Ui, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Карточка по имени или отказ словами — общее начало четырёх точечных
+/// писателей (`set_profile`/`set_role`/`set_mode`/`set_base_here`): им нужна
+/// не только проверка «есть ли такая», но и сама карточка — на ней считается
+/// годность задуманной правки (`breaks_connection`).
+fn connection_named(ui: &Ui, name: &str) -> Result<Connection, String> {
+    ui.cfg.by_name(name).cloned().ok_or_else(|| format!("{}: в списке нет карточки «{name}»", cfg::FILE))
+}
+
+/// Отказ точечного переключателя, когда правка САМА делает соединение
+/// негодным (Important 2 ревью всей ветки). Четыре писателя ниже пишут один
+/// ключ мимо `save_host` и годности не спрашивали вовсе: профиль
+/// «Разработчик» при пустой папке исходников и «база здесь» при пустом пути
+/// к базе делали ТЕКУЩЕЕ соединение негодным молча, в момент щелчка — потом
+/// командная строка отвергала весь файл (`Cfg::validate`), а следующее
+/// «Сохранить» отказывало про поле, которого человек не трогал.
+///
+/// **Проверяется ОДНО соединение (`Connection::validate`), а не список.**
+/// `Cfg::validate` тянет за собой парный запрет по папкам, а задача 7
+/// нарочно от него ушла: смена профиля у карточки, чья папка «занята»
+/// соседом, обязана пройти.
+///
+/// **Отказ — только за СВОЮ порчу: было годно, стало негодно.** Уже негодная
+/// карточка переключателю не укор — свежая стоит с пустым путём к базе
+/// (`Connection::default`: `base_here` уже `true`), и безусловная проверка
+/// отказывала бы на ней про поле, которого человек ещё не заполнял, то есть
+/// ровно той бедой, от которой эта проверка и заводится. Выбор профиля на
+/// свежем комплекте обязан срабатывать — так же, как переключатель режима в
+/// значке (`tray::unsaved_switch_line`: пишем и говорим словами, а не
+/// запираем).
+fn breaks_connection(before: &Connection, after: &Connection) -> Option<String> {
+    if before.validate().is_err() {
+        return None;
+    }
+    after.validate().err().map(|e| format!("переключение не записано: {e:#} — впишите это поле и повторите"))
+}
+
+/// Протолкнуть новые параметры в ЖИВОЙ сеанс после удачной точечной записи
+/// (Important 3 ревью всей ветки): ребёнок моста берёт набор инструментов,
+/// вид конфигурации и потолок записи из общей ячейки сеанса
+/// (`bridge::mcp_command` на `Session::cfg_now`), и без этого толчка смена
+/// профиля не сужала набор у УЖЕ РАБОТАЮЩЕГО агента. Пока окно прятало себя
+/// по потере фокуса, это пряталось за перечитыванием файла на следующем
+/// показе (`gui::adopt_cfg`) — задача 12 автоскрытие убрала, и окно может
+/// висеть открытым сколько угодно.
+///
+/// Только ТЕКУЩАЯ карточка: сеанс работает с ней одной (`Cfg::current`), и
+/// правка соседней ему не про что. Режима не спрашиваем — `update_cfg` «не
+/// повредит и в туннельном» (её докстрока), и тем же приёмом её зовёт
+/// `tray::apply_access`. Перезапуска сеанса здесь нет и не нужно: ни один из
+/// четырёх ключей не меняет транспорт, а тот один, что меняет (`mode`
+/// текущей карточки), идёт мимо этих писателей — через `tray::apply_mode`.
+fn push_to_session(ui: &Ui, name: &str) {
+    if name != ui.cfg.current().name {
+        return;
+    }
+    if let Some(s) = &ui.session {
+        s.update_cfg(ui.cfg.clone());
+    }
+}
+
 /// Сменить профиль карточки по имени (задача 7 плана «Интерфейс») — второй
 /// переключатель карточки, после `switch_current`, и тем же приёмом: профиль
 /// меняет подпись папки и набор инструментов ЭТОГО соединения
@@ -787,8 +847,9 @@ pub fn switch_current(ui: &mut Ui, name: &str) -> Result<(), String> {
 /// а профиль чужой папки не касается вовсе (Review Focus плана): смена
 /// профиля у карточки, чья папка уже «занята» соседом по правилу конфликта,
 /// обязана пройти. Поэтому запись — ОДИН ключ (`cfg::set_named`), тем же
-/// приёмом, что `save_tray_key` пишет для текущего соединения, без похода в
-/// `validate()`.
+/// приёмом, что `save_tray_key` пишет для текущего соединения, и без похода
+/// в `Cfg::validate`: годность спрашивается у САМОГО соединения
+/// (`breaks_connection` → `Connection::validate`), а не у списка.
 ///
 /// Значение проверяется тем же правилом, что читает его обратно
 /// (`Connection::toolset` — список допустимых один, опечатка отказывает
@@ -797,8 +858,12 @@ pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String>
     let probe = Connection { profile: profile.to_string(), ..Connection::default() };
     probe.toolset()?;
 
-    if ui.cfg.by_name(name).is_none() {
-        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    let before = connection_named(ui, name)?;
+    // Годность самой карточки после задуманной правки — `breaks_connection`,
+    // её докстрока и несёт довод: «Разработчик» требует папку исходников, и
+    // узнать об этом человек обязан здесь, а не от следующего «Сохранить».
+    if let Some(why) = breaks_connection(&before, &Connection { profile: profile.to_string(), ..before.clone() }) {
+        return Err(why);
     }
 
     let path = ui.kit.state_path(cfg::FILE);
@@ -811,6 +876,10 @@ pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String>
     if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
         c.profile = profile.to_string();
     }
+    // И доносим до живого сеанса: профиль — это набор инструментов ребёнка
+    // (`Connection::toolset`), и работающий агент обязан увидеть новый набор
+    // без перезапуска окна (см. `push_to_session`).
+    push_to_session(ui, name);
     Ok(())
 }
 
@@ -836,8 +905,13 @@ pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
     let probe = Connection { role: role.to_string(), ..Connection::default() };
     probe.role()?;
 
-    if ui.cfg.by_name(name).is_none() {
-        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    let before = connection_named(ui, name)?;
+    // Роль сама по себе ничьей годности не ломает (в `Connection::validate`
+    // её нет вовсе) — проверка здесь стоит не ради неё, а ради одного правила
+    // на всех четырёх писателей: порчу карточки щелчком ловит один сторож, а
+    // не три из четырёх (`breaks_connection`).
+    if let Some(why) = breaks_connection(&before, &Connection { role: role.to_string(), ..before.clone() }) {
+        return Err(why);
     }
 
     let path = ui.kit.state_path(cfg::FILE);
@@ -848,6 +922,7 @@ pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
     if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
         c.role = role.to_string();
     }
+    push_to_session(ui, name);
     Ok(())
 }
 
@@ -868,8 +943,14 @@ pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
     if !matches!(mode, "local" | "tunnel") {
         return Err(format!("mode: неизвестный режим «{mode}»; допустимые значения: local, tunnel"));
     }
-    if ui.cfg.by_name(name).is_none() {
-        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    let before = connection_named(ui, name)?;
+    // Уход в туннель спрашивает адрес среды и номер рабочего места
+    // (`mode_needs_env` в `Connection::validate`) — у годной локальной
+    // карточки их может не быть, и тогда щелчок делал бы её негодной.
+    // `breaks_connection` отказывает словами; свежая карточка (негодная и
+    // до щелчка) переключается как прежде — довод в её докстроке.
+    if let Some(why) = breaks_connection(&before, &Connection { mode: mode.to_string(), ..before.clone() }) {
+        return Err(why);
     }
 
     let path = ui.kit.state_path(cfg::FILE);
@@ -880,6 +961,10 @@ pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
     if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
         c.mode = mode.to_string();
     }
+    // Текущей карточки здесь обычно нет (её режим идёт через
+    // `tray::apply_mode`, см. докстроку выше) — но если позвали, живой сеанс
+    // обязан узнать: `push_to_session` сама решает, его ли это карточка.
+    push_to_session(ui, name);
     Ok(())
 }
 
@@ -890,8 +975,12 @@ pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
 /// обязано попасть в `ui.cfg` до следующего показа, и синхронизация ниже
 /// ровно это и делает.
 pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), String> {
-    if ui.cfg.by_name(name).is_none() {
-        return Err(format!("{}: в списке нет карточки «{name}»", cfg::FILE));
+    let before = connection_named(ui, name)?;
+    // «База здесь» при пустом пути к базе — второй из двух случаев, которыми
+    // точечный писатель делал ТЕКУЩЕЕ соединение негодным молча (Important 2
+    // ревью всей ветки, довод — у `breaks_connection`).
+    if let Some(why) = breaks_connection(&before, &Connection { base_here, ..before.clone() }) {
+        return Err(why);
     }
 
     let path = ui.kit.state_path(cfg::FILE);
@@ -902,6 +991,7 @@ pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), Str
     if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
         c.base_here = base_here;
     }
+    push_to_session(ui, name);
     Ok(())
 }
 

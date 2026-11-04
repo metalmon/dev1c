@@ -3,8 +3,10 @@ use super::*;
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::{self, Connection};
+use crate::gui::{Running, Which};
 use crate::session::State;
 use common::op::OpState;
+use common::Phase;
 use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -1568,4 +1570,168 @@ fn a_switch_on_another_card_does_not_touch_the_live_session() {
     assert_eq!(live.by_name("Ромашка").unwrap().profile, "business", "ячейка сеанса не переписана чужой правкой");
     assert_eq!(ui.cfg.by_name("Ромашка").unwrap().profile, "developer", "а в файле и в памяти правка есть");
     let _ = ui.session.take().unwrap().stop();
+}
+
+/// Задача 2 плана «Карточка публикации и удаление», решение владельца 4.11
+/// («давать, папку не трогать»): отказ по занятой текущей карточке говорит,
+/// что сделать, а не просто «нельзя» — рядом есть кому стать текущим вместо
+/// неё.
+#[test]
+fn deleting_the_current_card_is_refused_while_other_cards_exist() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    assert!(delete_blocked_reason(&ui, "Buh").unwrap().contains("сделайте текущим другое"));
+}
+
+/// Последняя оставшаяся карточка остаётся удаляемой, даже будучи текущей —
+/// иначе список застревал бы навсегда с одной записью, которую нельзя убрать.
+#[test]
+fn deleting_the_only_card_is_allowed_even_though_it_is_current() {
+    let ui = Ui::for_test();
+    with_params_file(&ui);
+    assert_eq!(delete_blocked_reason(&ui, "Buh"), None);
+}
+
+/// Отказ во время идущей операции, проверки или публикации называет, ЧТО
+/// именно идёт, — тем же словом, что и `tray::busy_now_word` (ruling задачи
+/// 2: второй такой фразы не заводим). Карточка здесь НЕ текущая («Ромашка»),
+/// чтобы занятость сама по себе доказывала этот отказ, а не соседнюю
+/// проверку «текущая при живых соседях».
+#[test]
+fn deleting_anything_is_refused_while_an_operation_is_running() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let now = Instant::now();
+    ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
+    assert!(delete_blocked_reason(&ui, "Ромашка").unwrap().contains("операция"));
+    ui.progress = None;
+    ui.publishing = Some(now);
+    assert!(delete_blocked_reason(&ui, "Ромашка").unwrap().contains("публикация базы"));
+}
+
+/// Карточки с этим именем нет ни в списке, ни на диске — отказ называет имя,
+/// тем же приёмом, что и остальные писатели (`connection_named`).
+#[test]
+fn deleting_a_card_that_is_not_in_the_list_is_refused_by_name() {
+    let ui = Ui::for_test();
+    with_params_file(&ui);
+    let e = delete_blocked_reason(&ui, "Ромашка").unwrap();
+    assert!(e.contains("Ромашка"), "{e}");
+}
+
+/// Удаление НЕтекущей карточки при живом соседе: вырезается ровно её блок, а
+/// шифртекст соседа (ещё держащей базу карточки) не трогается ни байтом —
+/// `cfg::remove_named` режет текст хирургически (`toml_render::remove_at`),
+/// а не перерисовывает файл по памяти (той же защиты ради, что у `set_named`
+/// — см. его докстроку).
+#[test]
+fn deleting_a_card_writes_the_file_without_its_block_and_keeps_the_others() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    ui.cfg = cfg::cfg_with(&["Buh", "Ромашка"]);
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, ui.cfg.render(&store).unwrap()).unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+    let staying_password = common::toml_render::get_in(&before, cfg::CONNECTION, 0, "password").expect("у оставшейся карточки есть пароль");
+
+    delete_connection(&mut ui, "Ромашка").unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 1, "блок удалённой карточки ушёл:\n{after}");
+    assert!(!after.contains("Ромашка"), "имени удалённой карточки в файле не осталось:\n{after}");
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 0, "password").as_deref(),
+        Some(staying_password.as_str()),
+        "шифртекст оставшейся карточки не тронут ни байтом:\n{after}"
+    );
+    assert_eq!(ui.cfg.connections.len(), 1);
+    assert!(ui.cfg.by_name("Ромашка").is_none(), "и в памяти карточки больше нет");
+    assert_eq!(ui.cfg.current, "Buh", "удалили не текущую — текущее соединение не тронуто");
+    assert!(
+        ui.log.iter().any(|l| l.kind == Kind::Ok && l.text == "Соединение «Ромашка» удалено. Папка и база остались на месте"),
+        "{:?}",
+        ui.log
+    );
+}
+
+/// Последняя карточка — особый случай: в файле не остаётся ни одного блока,
+/// и корневой `current` обязан стать пустым тем же текстовым приёмом, что
+/// пишет непустое имя у `switch_current` (`toml_render::set`, секция `""`).
+/// `cfg::remove_named` корневой `current` нарочно не трогает (её докстрока) —
+/// решение, что станет текущим, за вызывающим, и здесь оно одно: «никого».
+#[test]
+fn deleting_the_only_card_leaves_a_file_with_no_connections_and_an_empty_current() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 0, "блоков не осталось:\n{after}");
+    assert!(after.contains("current = \"\""), "{after}");
+    assert!(ui.cfg.connections.is_empty(), "и в памяти список пуст");
+    assert_eq!(ui.cfg.current, "");
+}
+
+/// Удаление ПОСЛЕДНЕЙ карточки обязано сперва попытаться погасить свою
+/// публикацию (`ops_host::stop_own_publication` со снимком СТАРОГО `Cfg`,
+/// `super::quiet_ctx_with`) и только потом писать файл — тот же порядок, что
+/// у `tray::apply_switch_current`. Признак `ui.raised_publication` снимается
+/// ТОЛЬКО по настоящей удаче (`Ok(true)`): на отказе он остаётся, чтобы
+/// выключение и выход могли повторить попытку, а не унести процесс в
+/// бессрочное сиротство (рулинг задачи 2). В каталоге теста нет ни httpd, ни
+/// платформы 1С, поэтому здесь измеряется, а не угадывается, что ответит
+/// настоящая попытка на этой машине (приём, уже живущий в
+/// `ops_host::tests::leaving_stops_our_own_httpd_and_never_someone_elses`), и
+/// проверяется согласие этого ответа с решением `delete_connection`.
+#[test]
+fn deleting_the_only_card_puts_down_our_own_publication_before_writing() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    ui.raised_publication = true;
+    let old_cfg = ui.cfg.clone();
+    let would_succeed = matches!(crate::ops_host::stop_own_publication(&super::quiet_ctx_with(&ui, old_cfg)), Ok(true));
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    if would_succeed {
+        assert!(!ui.raised_publication, "настоящая удача снимает признак");
+    } else {
+        assert!(ui.raised_publication, "отказ или «не наша публикация» признак не трогают — повторит выключение или выход");
+    }
+}
+
+/// Отказанное удаление не трогает файл ни байтом — сравнение всего текста,
+/// не отдельных строк: любая случайная правка (лишний перевод строки,
+/// переставленный ключ) обязана провалить этот тест.
+#[test]
+fn a_refused_delete_leaves_the_file_byte_for_byte() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let err = delete_connection(&mut ui, "Buh").unwrap_err();
+
+    assert!(err.contains("сделайте текущим другое"), "{err}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ — файл не тронут ни байтом");
+    assert_eq!(ui.cfg.connections.len(), 2, "и в памяти ничего не исчезло");
 }

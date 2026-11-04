@@ -33,6 +33,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1272,14 +1273,11 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                 // Круг починки 5 задачи 16, ruling а: отказ называет, что
                 // именно идёт, а не одно общее «операция» — `busy_now_word`
                 // читает тот же счёт, которым отказал `request_switch_current`
-                // (`mode_change_blocked`), другого расчёта не заводим.
-                let why = gui::tray::busy_now_word(cx.global::<Ui>());
-                gui::note_line(
-                    cx.global_mut::<Ui>(),
-                    Line {
-                        kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите «Сделать текущим».")
-                    },
-                );
+                // (`mode_change_blocked`), другого расчёта не заводим. Сама
+                // фраза — одна на все двери (`tray::busy_refusal`, требование
+                // ревью всей ветки): различается только названное действие.
+                let why = gui::tray::busy_refusal(cx.global::<Ui>(), "«Сделать текущим»");
+                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
                 cx.refresh_windows();
             }
         }
@@ -1333,6 +1331,13 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                 }
                 match gui::delete_connection(cx.global_mut::<Ui>(), &name) {
                     Ok(()) => {
+                        // Minor 1 ревью всей ветки: пересчёт готовности и
+                        // замка — как у всех соседей, кто правит настройки
+                        // (`tray::apply_mode`, `tray::apply_switch_current`,
+                        // `save::save_host`). Без него `ui.gate` остаётся
+                        // вердиктом УДАЛЁННОЙ карточки, и подвал мог назвать
+                        // причиной базу, которой в настройках уже нет.
+                        gui::run_readiness(cx.global_mut::<Ui>());
                         let (cfg, panel) = {
                             let ui = cx.global::<Ui>();
                             (ui.cfg.clone(), ui.panel.clone())
@@ -1352,7 +1357,34 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                     // панели трогать нельзя: карточка осталась как была, и
                     // сбрасывать открытую строку значило бы соврать, что
                     // удаление случилось.
-                    Err(e) => gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+                    Err(e) => {
+                        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                        // Important 1 ревью всей ветки: сеанс погашен выше, а
+                        // удаление отказало — карточка на месте, настройки
+                        // целы, и обслуживать по ним снова можно. Путей
+                        // отказа после гашения четыре (два блока одним именем
+                        // в правленом руками файле, изменившийся файл, отказ
+                        // чтения, отказ записи), и на каждом из них агент
+                        // отваливался без слова. Поднимаем обратно тем же
+                        // приёмом, что перецикл (`tray::session_back_refusal`
+                        // — тот же счёт `should_raise_session`), а если
+                        // поднимать нельзя, человек слышит это словами, а не
+                        // по молчанию мёртвого сеанса.
+                        if stop_session_first {
+                            let (was_enabled, mode, gate) = {
+                                let ui = cx.global::<Ui>();
+                                (ui.enabled.load(Ordering::Relaxed), ui.cfg.current().mode.clone(), ui.gate.clone())
+                            };
+                            match gui::tray::session_back_refusal(was_enabled, &mode, gate.as_deref()) {
+                                Some(why) => gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: why }),
+                                None => {
+                                    if let Err(e) = gui::start_session(cx.global_mut::<Ui>()) {
+                                        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 cx.refresh_windows();
             });
@@ -1475,14 +1507,11 @@ fn set_card_mode(cx: &mut App, name: &str, mode: &'static str) {
             // Круг починки 5 задачи 16: тот же счёт (`mode_change_blocked`)
             // теперь включает и публикацию — слово в отказе обязано
             // называть её, а не всегда «операцию» (`busy_now_word`, тот же,
-            // что и у «Сделать текущим»).
-            let why = gui::tray::busy_now_word(cx.global::<Ui>());
-            gui::note_line(
-                cx.global_mut::<Ui>(),
-                Line {
-                    kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
-                },
-            );
+            // что и у «Сделать текущим»). Фраза — одна на все двери
+            // (`tray::busy_refusal`), и действие в ней теперь названо: до
+            // сведения здесь стояло «повторите.» без того, что повторять.
+            let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену режима");
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
             // Minor 2 круга починки 1 задачи 5: на этой ветви окно не
             // перерисовывает никто (`apply_mode` до неё не доходит), и сказанное
             // появлялось бы только на следующем кадре — человек щёлкнул, и по
@@ -1535,14 +1564,10 @@ fn set_card_publication(cx: &mut App, name: &str, publication: &'static str) {
     if is_current {
         if !gui::tray::request_current_publication_change(cx, publication) {
             // Отказ называет, что именно идёт (`busy_now_word`, тот же счёт и
-            // то же слово, что у режима и у «Сделать текущим»).
-            let why = gui::tray::busy_now_word(cx.global::<Ui>());
-            gui::note_line(
-                cx.global_mut::<Ui>(),
-                Line {
-                    kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
-                },
-            );
+            // то же слово, что у режима и у «Сделать текущим»), и одной
+            // фразой на все двери (`tray::busy_refusal`).
+            let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену публикации");
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
             // Minor 2 круга починки 1: отказ — единственная ветвь, где НИКТО
             // не перерисовывает окно за нас (на удачном пути это делает
             // `apply_publication`), и без этой строки сказанное появлялось бы
@@ -2445,7 +2470,7 @@ impl Panel {
             let name = c.name.clone();
             col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Публикация базы")).child(
                 KitButton::new("publication").outline().w_full().label(label).dropdown_menu(move |mut menu, _, _| {
-                    for (publication, words) in link::publication_answers() {
+                    for (words, publication) in link::publication_answers() {
                         let name = name.clone();
                         menu = menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
                     }
@@ -3922,10 +3947,14 @@ mod tests {
         // своя копия тех же строк здесь: два списка расходятся на первой же
         // правке слова (находка Important 2 ревью круга починки 1 задачи 16 —
         // ровно это уже случилось с ответами «Это соединение»).
-        assert_eq!(link::publication_answers().map(|(_, words)| words), ["Публикует коннектор", "Публикует платформа 1С"]);
+        //
+        // Порядок в паре — «слова, значение», как у соседей по словарю
+        // (`LOCAL_ANSWER`, `onboarding_answers`; Minor 2 ревью всей ветки):
+        // этот тест и есть то, что падёт, если его опять перевернут.
+        assert_eq!(link::publication_answers().map(|(words, _)| words), ["Публикует коннектор", "Публикует платформа 1С"]);
         // А значения в toml прежние: их читает `Cfg::base_url` и проверяет
         // `Connection::validate`.
-        assert_eq!(link::publication_answers().map(|(value, _)| value), ["auto", "webserver"]);
+        assert_eq!(link::publication_answers().map(|(_, value)| value), ["auto", "webserver"]);
     }
 
     #[test]

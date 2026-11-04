@@ -469,6 +469,45 @@ pub(crate) fn busy_now_word(ui: &Ui) -> &'static str {
     }
 }
 
+/// Отказ «сейчас занято» — ОДНА фраза на все двери, которые отказывают по
+/// этой причине (требование ревью всей ветки к отложенному: фраза разошлась
+/// по дереву в пяти местах — `panel::set_card_mode`,
+/// `panel::set_card_publication`, `save::delete_blocked_reason`,
+/// `apply_switch_current_decision` и проводка «Сделать текущим» — и хвосты у
+/// них уже не совпадали: где-то точка, где-то нет, где-то «повторите» без
+/// названного действия вовсе).
+///
+/// `retry` — ЧТО повторить, уже готовыми словами для человека («удаление»,
+/// «смену режима», «„Сделать текущим“»): различается только оно, вся
+/// остальная формулировка одна и правится в одном месте.
+pub(crate) fn busy_refusal(ui: &Ui, retry: &str) -> String {
+    format!("Сейчас идёт {} — подождите её завершения и повторите {retry}.", busy_now_word(ui))
+}
+
+/// Поднимать ли сеанс ОБРАТНО после того, как его погасили, а дело не
+/// вышло, — и слова человеку, когда поднять нельзя (Important 1 ревью всей
+/// ветки). `None` — поднимать; `Some(слова)` — не поднимать и сказать.
+///
+/// Нужна удалению карточки: проводка окна гасит сеанс ДО записи (`Ui` без
+/// `App` сеансом не управляет), а путей отказа после гашения четыре — два
+/// блока одним именем в правленом руками файле, изменившийся файл, отказ
+/// чтения, отказ записи. На любом из них карточка остаётся на месте, а
+/// обслуживание уже погашено: агент отваливается, и человеку никто не
+/// говорит, почему.
+///
+/// Счёт — тот же `should_raise_session`, что у перецикла (`recycle_session`),
+/// и по той же причине: выключенное обслуживание обязано остаться
+/// выключенным, а поднимать туннель поверх защёлкнувшегося замка значило бы
+/// показать зелёное «Подключён» при отказе каждому вызову.
+pub(crate) fn session_back_refusal(was_enabled: bool, mode: &str, gate: Option<&str>) -> Option<String> {
+    if should_raise_session(was_enabled, mode, gate) {
+        return None;
+    }
+    // Слова называют состояние, а не причину отказа: причину человек уже
+    // прочитал строкой выше (её сказал тот, кто отказал).
+    Some("Обслуживание базы погашено — включите его заново, когда разберётесь с отказом выше".to_string())
+}
+
 /// Отказ пункта «Запись в базу» на пустом списке соединений — чистое ядро
 /// защиты от воскрешения карточки-фантома (находка ревью задачи 3):
 /// `Cfg::current_mut()` на пустом списке заводит ПЕРВОЕ соединение по
@@ -776,7 +815,7 @@ fn apply_switch_current_decision(ui: &Ui, name: &str) -> ApplySwitchCurrent {
         // Те же слова, что у отказа ДО вопроса (`panel::run_link_act`,
         // `LinkAct::MakeCurrent`) — находка начала этой же задачи: один
         // повод молчать об одном и том же двумя разными фразами незачем.
-        ApplySwitchCurrent::Blocked(format!("Сейчас идёт {} — подождите её завершения и повторите «Сделать текущим».", busy_now_word(ui)))
+        ApplySwitchCurrent::Blocked(busy_refusal(ui, "«Сделать текущим»"))
     } else {
         ApplySwitchCurrent::Proceed(name.to_string())
     }
@@ -1360,10 +1399,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id,
-        apply_switch_current_decision, busy_now_word, icon_rgba, menu_action, mode_change_blocked, publication_after_switch,
-        raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled, unsaved_publication_keys,
-        unsaved_switch_line, write_switch_current, ApplySwitchCurrent, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome,
-        TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
+        apply_switch_current_decision, busy_now_word, busy_refusal, icon_rgba, menu_action, mode_change_blocked, publication_after_switch,
+        raise_session_after_mode_change, save_host, session_back_refusal, should_raise_session, switch_current_outcome, toggle_enabled,
+        unsaved_publication_keys, unsaved_switch_line, write_switch_current, ApplySwitchCurrent, Kind, MenuAction, PublicationAfterSwitch,
+        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1871,6 +1910,52 @@ mod tests {
         ui.busy = None;
         ui.publishing = Some(now);
         assert_eq!(busy_now_word(&ui), "публикация базы");
+    }
+
+    /// Требование ревью всей ветки к отложенному: фраза «Сейчас идёт <что> —
+    /// подождите её завершения и повторите <действие>» была написана в ПЯТИ
+    /// местах (`panel::set_card_mode`, `panel::set_card_publication`,
+    /// `save::delete_blocked_reason`, `apply_switch_current_decision`,
+    /// проводка «Сделать текущим»), и хвосты у них разошлись: у двоих стояло
+    /// «повторите.» без названного действия, у удаления не было точки.
+    /// Теперь источник один (`busy_refusal`), и различается только то, что
+    /// повторить.
+    ///
+    /// Под тестом стоят ДВЕ двери из пяти — те, что достижимы без живого
+    /// `App`: решение «Сделать текущим» и отказ удаления. Три остальные
+    /// (проводка карточки в `panel.rs`) зовут ту же `busy_refusal` прямо, а
+    /// GPUI-гарнеса в дереве нет (тот же довод, что у соседних тестов этого
+    /// файла).
+    #[test]
+    fn every_busy_door_speaks_one_phrase() {
+        let mut ui = Ui::for_test();
+        ui.publishing = Some(Instant::now());
+        // Хвост называет действие и кончается точкой — у ВСЕХ, какое бы
+        // действие ни подставили.
+        for retry in ["удаление", "смену режима", "смену публикации", "«Сделать текущим»"]
+        {
+            let said = busy_refusal(&ui, retry);
+            assert_eq!(said, format!("Сейчас идёт публикация базы — подождите её завершения и повторите {retry}."), "{said}");
+        }
+        // И обе достижимые двери берут фразу оттуда, а не пишут свою.
+        assert_eq!(apply_switch_current_decision(&ui, "Buh"), ApplySwitchCurrent::Blocked(busy_refusal(&ui, "«Сделать текущим»")));
+        assert_eq!(crate::gui::save::delete_blocked_reason(&ui, "Buh"), Some(busy_refusal(&ui, "удаление")));
+    }
+
+    /// Important 1 ревью всей ветки: удаление карточки гасит сеанс ДО записи,
+    /// и на отказе записи его надо поднять обратно. Счёт — тот же, что у
+    /// перецикла: выключенное обслуживание остаётся выключенным, замок
+    /// запрещает поднимать туннель, а локальные слушатели держат порты всегда.
+    /// Когда поднимать нельзя — человек слышит это словами, а не узнаёт по
+    /// молчанию отвалившегося агента.
+    #[test]
+    fn a_session_stopped_for_nothing_comes_back_or_says_it_is_down() {
+        assert_eq!(session_back_refusal(true, "tunnel", None), None, "обслуживание включено, замок открыт — поднимаем");
+        assert_eq!(session_back_refusal(true, "local", Some("не указана база")), None, "локальные слушатели держат порты и под замком");
+        let why = session_back_refusal(true, "tunnel", Some("не указана база")).expect("замок заперт — туннель не поднимаем");
+        assert!(why.contains("погашено"), "{why}");
+        let why = session_back_refusal(false, "local", None).expect("обслуживание выключено человеком — не поднимаем");
+        assert!(why.contains("погашено"), "{why}");
     }
 
     #[test]

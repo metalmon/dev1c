@@ -905,7 +905,7 @@ pub fn delete_blocked_reason(ui: &Ui, name: &str) -> Option<String> {
         return Some(e);
     }
     if tray::mode_change_blocked(ui) {
-        return Some(format!("Сейчас идёт {} — подождите её завершения и повторите удаление", tray::busy_now_word(ui)));
+        return Some(tray::busy_refusal(ui, "удаление"));
     }
     if ui.cfg.current().name == name && !is_last_connection(ui) {
         return Some(format!("«{name}» — текущее соединение: сделайте текущим другое и повторите удаление"));
@@ -1007,6 +1007,16 @@ pub fn delete_connection(ui: &mut Ui, name: &str) -> Result<(), String> {
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
 
     ui.cfg.connections.retain(|c| c.name != name);
+    // Находки про НЕПРОЧИТАННЫЙ шифртекст уходят вместе с карточкой
+    // (Important 2 ревью всей ветки) — ровно там же, где она уходит из
+    // списка, и ровно так же, как у соседей: `save_host` чистит свои
+    // (`cfg.undecryptable.retain`), `rename` везёт их за новым именем.
+    // Иначе находка про удалённую карточку оставалась бы висеть, и
+    // онбординг на опустевшем списке становился тупиком: `add_connection`
+    // отказывает словами «у карточки «Buh» пароль зашифрован — откройте её
+    // в окне и введите заново», а карточки «Buh» уже нет и открыть её
+    // негде.
+    ui.cfg.undecryptable.retain(|u| u.connection != name);
     if no_blocks_left {
         ui.cfg.current = String::new();
     }
@@ -1118,7 +1128,15 @@ fn apply_parsed(c: &mut Connection, key: &str, value: &KeyValue) {
         ("publication", KeyValue::Str(v)) => c.publication = v.clone(),
         ("base_url", KeyValue::Str(v)) => c.base_url = v.clone(),
         ("base_here", KeyValue::Bool(v)) => c.base_here = *v,
-        _ => {}
+        // Промах — ГРОМКИЙ (Minor 4 ревью всей ветки). Сегодня он
+        // недостижим (`parse_key` — единственное место, где ключ и вариант
+        // связываются), но `set_keys` стал единственным писателем шести
+        // ключей, и молчаливое `_ => {}` здесь означало бы «файл записан, а
+        // память — нет»: диск и окно расходятся, и ни одна строка об этом не
+        // говорит. Паника на седьмом ключе, добавленном в `parse_key` и
+        // забытом здесь, случится у разработчика на первом же тесте, а не у
+        // человека в окне.
+        _ => unreachable!("apply_parsed: ключ «{key}» разобран, но не применён — добавьте его сюда рядом с разбором в parse_key"),
     }
 }
 

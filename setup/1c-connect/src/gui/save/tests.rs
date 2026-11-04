@@ -1936,6 +1936,71 @@ fn deleting_the_only_card_skips_the_cleanup_when_we_never_raised_a_publication()
     assert!(!ui.log.iter().any(|l| l.text.contains("HTTP-сервис")), "гасить нечего — молчим: {:?}", ui.log);
 }
 
+/// Important 2 ревью всей ветки: находки про непрочитанный шифртекст уходят
+/// ВМЕСТЕ с карточкой — там же, где она уходит из списка, и тем же приёмом,
+/// что у соседей (`save_host` чистит свои, `rename` везёт их за новым
+/// именем). Без этого комплект с чужой машины вёл человека в тупик:
+/// пароль единственной карточки не открылся, карточку удалили, окно
+/// показало онбординг, человек нажал ответ — и `add_connection` отказал
+/// словами «у карточки «Buh» пароль зашифрован… — откройте её в окне и
+/// введите заново» про карточку, которой больше нет и открыть которую
+/// негде. Онбординг был тупиком.
+#[test]
+fn deleting_a_card_takes_its_unreadable_secrets_with_it() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new("Buh", "db_password"), cfg::Undecryptable::new("Buh", "password")];
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    assert!(ui.cfg.undecryptable.is_empty(), "находки удалённой карточки сняты: {:?}", ui.cfg.undecryptable);
+    // И отказ онбординга про карточку, которой больше нет, из
+    // `add_connection` ушёл: единственная причина, по которой он мог её
+    // назвать, — это снятая выше находка (`add_connection`, ветвь
+    // `disk_count == 0`).
+    let said = add_connection(&mut ui, "accept").unwrap_err();
+    assert!(!said.contains("Buh") && !said.contains("зашифрован"), "про исчезнувшую карточку больше не говорят: {said}");
+    // ВТОРОЙ барьер на том же пути (находка этой волны, НЕ её правка — см.
+    // отчёт): новая карточка заводится с пустым путём к базе и становится
+    // текущей, а `Cfg::validate` проверяет именно текущую — ответ онбординга
+    // на ПУСТОМ списке отказывает про поле, которого человек ещё не
+    // заполнял. Утверждение здесь нарочное: когда это вылечат, тест упадёт и
+    // приведёт к этому месту.
+    assert!(said.contains("base_path"), "{said}");
+}
+
+/// Находки СОСЕДНЕЙ карточки удаление не трогает — иначе оно молча сказало
+/// бы, что чужая беда прошла сама, и показ окна перестал бы о ней
+/// предупреждать (тот же довод, по которому `save_host` чистит только свои).
+#[test]
+fn deleting_a_card_leaves_the_neighbours_unreadable_secrets_alone() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new("Buh", "db_password"), cfg::Undecryptable::new("Ромашка", "db_password")];
+
+    delete_connection(&mut ui, "Ромашка").unwrap();
+
+    assert_eq!(ui.cfg.undecryptable, vec![cfg::Undecryptable::new("Buh", "db_password")]);
+}
+
+/// Minor 4 ревью всей ветки: `set_keys` стал единственным писателем шести
+/// ключей, и молчаливый промах в `apply_parsed` означал бы «файл записан, а
+/// память — нет». Промах громкий: ключ, разобранный `parse_key` и забытый
+/// здесь, паникует у разработчика на первом же прогоне, а не расходится с
+/// диском у человека в окне.
+#[test]
+#[should_panic(expected = "apply_parsed")]
+fn a_key_parsed_but_not_applied_panics_instead_of_silently_missing() {
+    let mut c = Connection::default();
+    apply_parsed(&mut c, "седьмой_ключ", &KeyValue::Str("что-нибудь".into()));
+}
+
 /// Minor 7 ревью круга починки 1 (решение ведущего): «последняя карточка»
 /// для правки корневого `current` в ФАЙЛЕ решается по тексту, который
 /// сейчас пишем (`toml_render::count` после `remove_named`), а не по списку

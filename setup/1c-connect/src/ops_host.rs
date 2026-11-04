@@ -381,6 +381,18 @@ pub fn gitea_to_write(host: &crate::cfg::Connection) -> Option<String> {
 /// операций показал бы картину, которой после установки не будет), а файл не
 /// пишется. Отдаёт записанные строки для журнала; пусто — писать было нечего.
 pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<Vec<String>> {
+    // Страж от воскрешения карточки-фантома, вторая дверь (Important 3 ревью
+    // всей ветки; первую, `tray::apply_access`, закрыла задача 6 тем же
+    // приёмом — страж у ЗАЩИЩАЕМОЙ функции, а не у зовущего). Ниже стоит
+    // `cfg.current_mut()`, а он на пустом списке ЗАВОДИТ первое соединение
+    // по умолчанию — «Соединение 1», которого человек не заводил. На пустом
+    // списке (свежий комплект или результат удаления последней карточки)
+    // «Инструменты» → «Установить расширение» так и делало: запись в файл
+    // отказывала, а фантом оставался в памяти — онбординг исчезал
+    // (`link::onboarding_shown` становился ложью), и «Связь» показывала
+    // карточку, которой на диске нет. Слова — у `Cfg::no_connections_refusal()`,
+    // одного источника на все двери.
+    anyhow::ensure!(!cfg.connections.is_empty(), "{}", crate::cfg::Cfg::no_connections_refusal());
     let path = kit.state_path(crate::cfg::FILE);
     if !path.exists() {
         return Ok(Vec::new());
@@ -3000,6 +3012,27 @@ mod tests {
         assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty());
         assert_eq!(cfg, crate::cfg::filled_for_test());
         assert!(!kit.state_path(crate::cfg::FILE).exists());
+    }
+
+    /// Important 3 ревью всей ветки, вторая дверь воскрешения
+    /// карточки-фантома: на ПУСТОМ списке соединений (свежий комплект или
+    /// результат удаления последней карточки) `cfg.current_mut()` ниже
+    /// завёл бы в памяти «Соединение 1», которого человек не заводил, —
+    /// запись в файл отказала бы, а фантом остался: онбординг исчезает
+    /// (`gui::link::onboarding_shown` становится ложью), «Связь» показывает
+    /// карточку, которой на диске нет. Страж стоит у ЗАЩИЩАЕМОЙ функции, а
+    /// не у зовущего («Инструменты» → «Установить расширение» и
+    /// `1c-connect install` — две двери, слова у них одни), и говорит
+    /// словами `Cfg::no_connections_refusal()`.
+    #[test]
+    fn an_empty_connection_list_refuses_instead_of_inventing_a_card() {
+        let kit = TomlKit::new("phantom");
+        kit.put("current = \"\"\n");
+        let mut cfg = Cfg::default();
+        cfg.connections.clear();
+        let e = write_derived_fields(&kit, &mut cfg, false).unwrap_err().to_string();
+        assert!(e.contains(&crate::cfg::Cfg::no_connections_refusal()), "{e}");
+        assert!(cfg.connections.is_empty(), "фантомной карточки в памяти не завелось");
     }
 
     /// Единообразие: после настройки файл — полная картина того, чем

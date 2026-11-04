@@ -197,6 +197,29 @@ mod tests {
         assert_eq!(open(&c), None);
     }
 
+    /// Critical 1 ревью всей ветки «Карточка публикации и удаление»: база на
+    /// ТОЙ стороне — своей публикации у карточки нет вовсе, и замку нечего
+    /// требовать. До правки он запирался словами «не задан адрес публикации
+    /// — впишите его», а вписать было некуда: при базе на той стороне ни
+    /// поля адреса, ни переключателя публикации карточка не показывает
+    /// (`panel::shown_fields`, `panel::publication_switch_label`), а подменю
+    /// значка, бывшее единственным выходом, эта ветка убрала.
+    ///
+    /// Записанное `publication = "webserver"` в этом состоянии оставлено
+    /// НАРОЧНО: оно ответ человека, и правка его ради удобства замка —
+    /// правка чужих данных (решение ведущего).
+    #[test]
+    fn a_base_on_the_other_side_has_no_publication_of_its_own() {
+        let mut c = crate::cfg::filled_for_test();
+        c.current_mut().publication = "webserver".into();
+        c.current_mut().base_url = String::new();
+        // Та же карточка, пока база здесь, — замок заперт (сосед выше).
+        assert!(open(&c).is_some());
+        c.current_mut().base_here = false;
+        assert_eq!(open(&c), None, "база на той стороне — адрес публикации спрашивать не у кого");
+        assert!(!c.publication_address_missing(), "и само состояние «адрес не задан» здесь не наступает");
+    }
+
     #[test]
     fn an_empty_db_user_holds_the_switch() {
         let mut c = crate::cfg::filled_for_test();

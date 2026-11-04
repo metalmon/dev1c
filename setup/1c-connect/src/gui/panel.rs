@@ -1184,6 +1184,14 @@ pub fn delete_question_text(name: &str) -> (String, String) {
     )
 }
 
+/// Подпись кнопки согласия вопроса «Удалить соединение» — отдельной
+/// константой, а не литералом внутри `run_link_act`: спека требует, чтобы
+/// кнопка называла само действие («Да, удалить»), а не говорила голое «Да»
+/// (то же правило, что у «Да, сохранить»/«Да, снять» в соседних вопросах) —
+/// это требование спеки, а не вкус, и тест обязан закрепить ровно эту
+/// подпись (круг починки 1, Minor 3).
+const DELETE_CONFIRM_YES: &str = "Да, удалить";
+
 /// Отметки строки списка одной строкой: слово состояния, отметка «текущее»,
 /// признак разрешённой записи — через « · ».
 ///
@@ -1204,6 +1212,38 @@ pub fn row_marks(r: &link::Row) -> String {
         out.push("запись в базу");
     }
     out.join(" · ")
+}
+
+/// Что сделать в согласии вопроса «Удалить соединение» — чистое решение, до
+/// похода к сеансу и к диску. Диалог не отнимает у окна фокус (спека), и
+/// между вопросом и «Да, удалить» человек успевает запустить проверку,
+/// операцию или публикацию — значит предусловие (`save::delete_blocked_reason`)
+/// обязано быть пересчитано ЗАНОВО в момент согласия, а не взято из того,
+/// что было верно до вопроса (Important 1 ревью круга починки 1): иначе
+/// сеанс гасился бы РАНЬШЕ повторной проверки, отказ про «идёт проверка»
+/// пришёл бы уже по мёртвому сеансу, и поднять его на этом пути было бы
+/// нечем.
+///
+/// Тип, а не `bool`, нарочно: `stop_session_first` синтаксически недостижим
+/// до того, как предусловие пройдено — гасить сеанс можно только изнутри
+/// `Proceed`, и сам порядок «сперва проверка, потом гашение» читается из
+/// формы функции, а не только из порядка строк в `run_link_act` (который
+/// легко переставить местами, не заметив).
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteOnConfirm {
+    /// Отказ словами — ни сеанс, ни файл не трогаем.
+    Blocked(String),
+    /// Можно удалять. `stop_session_first` — гасить ли сеанс ДО записи:
+    /// последняя карточка обслуживала его базу (`save::is_last_connection`,
+    /// та же проверка, что у предусловия — второго счёта не завожу).
+    Proceed { stop_session_first: bool },
+}
+
+fn delete_on_confirm(ui: &Ui, name: &str) -> DeleteOnConfirm {
+    if let Some(why) = gui::delete_blocked_reason(ui, name) {
+        return DeleteOnConfirm::Blocked(why);
+    }
+    DeleteOnConfirm::Proceed { stop_session_first: gui::is_last_connection(ui) }
 }
 
 /// Щелчок по пункту меню «Связи» и по главной кнопке подвала — ОДНА
@@ -1258,7 +1298,8 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         // себя повторяет `save::delete_connection`). Вопрос — тот же
         // платформенный диалог, что у смены базы (`run_project_op`,
         // `save::confirm_database_change`); кнопка согласия называет само
-        // действие («Да, удалить»), а не «Да» — человек читает её последней.
+        // действие (`DELETE_CONFIRM_YES`), а не «Да» — человек читает её
+        // последней.
         LinkAct::Delete => {
             if let Some(why) = gui::delete_blocked_reason(cx.global::<Ui>(), subject) {
                 gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
@@ -1267,21 +1308,31 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             }
             let (message, detail) = delete_question_text(subject);
             let name = subject.to_string();
-            gui::ask_yes_no(window, cx, &message, &detail, "Да, удалить", "Отмена", true, move |window, cx| {
+            gui::ask_yes_no(window, cx, &message, &detail, DELETE_CONFIRM_YES, "Отмена", true, move |window, cx| {
+                // Предусловие — ПОВТОРНО, здесь, а не взято из проверки
+                // перед вопросом: диалог не отнимает у окна фокус, и между
+                // вопросом и «Да, удалить» человек успевает запустить
+                // проверку, операцию или публикацию (Important 1 ревью
+                // круга починки 1). `delete_on_confirm` не даёт погасить
+                // сеанс до этой проверки синтаксически — `stop_session_first`
+                // достижим только изнутри `Proceed`.
+                let stop_session_first = match delete_on_confirm(cx.global::<Ui>(), &name) {
+                    DeleteOnConfirm::Blocked(why) => {
+                        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+                        cx.refresh_windows();
+                        return;
+                    }
+                    DeleteOnConfirm::Proceed { stop_session_first } => stop_session_first,
+                };
                 // Сеанс обслуживает базу ПОСЛЕДНЕЙ карточки — гасим его
                 // здесь, ДО вызова `delete_connection`: `Ui` без `App`
                 // сеансом не управляет (докстрока `delete_connection`), а
                 // проводка окна — ровно то место, которому обещан `App`.
-                if gui::is_last_connection(cx.global::<Ui>()) {
+                if stop_session_first {
                     gui::link::stop_session(cx);
                 }
                 match gui::delete_connection(cx.global_mut::<Ui>(), &name) {
                     Ok(()) => {
-                        // Отказ гашения публикации внутри `delete_connection`
-                        // не меняет настроек вовсе (её докстрока) — а значит и
-                        // выбор панели трогать нельзя: карточка осталась как
-                        // была, и сбрасывать открытую строку значило бы
-                        // соврать, что удаление случилось.
                         let (cfg, panel) = {
                             let ui = cx.global::<Ui>();
                             (ui.cfg.clone(), ui.panel.clone())
@@ -1296,6 +1347,11 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                             p.update(cx, |this, cx| this.select(&cfg, "", window, cx));
                         }
                     }
+                    // Отказ гашения публикации внутри `delete_connection` не
+                    // меняет настроек вовсе (её докстрока) — а значит и выбор
+                    // панели трогать нельзя: карточка осталась как была, и
+                    // сбрасывать открытую строку значило бы соврать, что
+                    // удаление случилось.
                     Err(e) => gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
                 }
                 cx.refresh_windows();
@@ -3141,15 +3197,16 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_question_text, fact_rows,
-        fields_differ, folder_label, foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show,
-        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint,
-        shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body,
-        Dirty, LinkAct, ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
+        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
+        delete_question_text, fact_rows, fields_differ, folder_label, foot_left_text, found_text, leave_question, link_body, link_menu,
+        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
+        resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
+        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, FOOT_LINE, FOOT_LINES,
+        ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
-    use crate::gui::{capitalized, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
+    use crate::gui::{capitalized, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
     use crate::session::State;
     use crate::verify;
     use common::check::Check;
@@ -4270,11 +4327,49 @@ mod tests {
     /// решение владельца 4.11 («давать, папку не трогать»): пропадает
     /// только запись в настройках, а папка, база и выгруженные файлы
     /// остаются на месте.
+    ///
+    /// Круг починки 1, Minor 3: `contains("папка") && contains("останут")`
+    /// держал меньше половины обещания — можно было молча вычеркнуть
+    /// «только запись в настройках» или «база», и тест бы не заметил.
+    /// Полное равенство ловит потерю любого слова обещания разом. Подпись
+    /// кнопки согласия — тем же приёмом: не литерал в коде, а константа
+    /// (`DELETE_CONFIRM_YES`), и тест закрепляет именно её, а не «Да».
     #[test]
     fn the_delete_question_names_the_card_and_promises_the_folder_stays() {
         let (message, detail) = delete_question_text("Ромашка");
-        assert!(message.contains("«Ромашка»"), "{message}");
-        assert!(detail.contains("папка") && detail.contains("останут"), "{detail}");
+        assert_eq!(message, "Удалить соединение «Ромашка»?");
+        assert_eq!(detail, "Из списка пропадёт только запись в настройках — папка, база и выгруженные файлы останутся на месте.");
+        assert_eq!(DELETE_CONFIRM_YES, "Да, удалить", "кнопка называет действие, а не говорит голое «Да»");
+    }
+
+    /// Important 1 ревью круга починки 1: диалог не отнимает у окна фокус
+    /// (спека), и между вопросом «Удалить соединение?» и ответом человек
+    /// успевает запустить проверку — предусловие пересчитывается ЗАНОВО в
+    /// момент согласия, и на отказе сеанс НЕ гасится (`Blocked` достижим
+    /// только до того, как счётчик `stop_session_first` вообще появился на
+    /// свет — гасить изнутри него синтаксически нечем).
+    #[test]
+    fn the_confirm_step_rechecks_preconditions_and_refuses_without_touching_the_session() {
+        let mut ui = ui_dial_current();
+        ui.busy = Some(Busy::Project);
+        match delete_on_confirm(&ui, "Ромашка") {
+            DeleteOnConfirm::Blocked(why) => assert!(why.contains("проверка"), "{why}"),
+            DeleteOnConfirm::Proceed { .. } => panic!("занятость обязана отказать, а не разрешить гашение сеанса"),
+        }
+    }
+
+    /// Гасить сеанс до записи нужно ТОЛЬКО для последней карточки — она и
+    /// обслуживала его базу (`save::is_last_connection`, тот же предикат,
+    /// что у предусловия). У соседей в списке сеанс переживает удаление.
+    #[test]
+    fn the_confirm_step_extinguishes_the_session_only_for_the_last_card() {
+        assert_eq!(delete_on_confirm(&ui_dial_current(), "Ромашка"), DeleteOnConfirm::Proceed { stop_session_first: true });
+        // «Василёк» — не текущая, и соседство с «Ромашкой» её не запирает
+        // (`save::delete_blocked_reason` не против чужой карточки) —
+        // предусловие проходит, и сеанс (он обслуживает текущую) не гасим.
+        let mut ui = ui_dial_current();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        assert_eq!(delete_on_confirm(&ui, "Василёк"), DeleteOnConfirm::Proceed { stop_session_first: false });
     }
 
     /// Связи на соединение в продукте нет — `link::list` ждёт заглушки, и

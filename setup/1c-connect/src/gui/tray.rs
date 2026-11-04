@@ -5,9 +5,9 @@
 
 use super::{
     autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
-    ensure_publication_now, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm, save_tray_key,
-    start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab,
-    TrayState, Ui, TRAY_PNG,
+    ensure_publication_now, link, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm,
+    save_tray_key, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind,
+    Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
@@ -67,11 +67,18 @@ const MODES: [(&str, &str, &str); 2] = [("tunnel", "mode:tunnel", "Через т
 
 /// Кто публикует базу (`cfg.current().publication`, "auto"/"webserver") → id
 /// пункта меню и его подпись. Значения в toml прежние, подписи — человеческие:
-/// человек читает название, а не имя режима. Поля в окне нет; адрес чужой
-/// публикации спрашивается отдельным полем «Связи», видимым только во
-/// втором положении (`panel::shown_fields`).
-const PUBLICATIONS: [(&str, &str, &str); 2] =
-    [("auto", "publication:auto", "Публикует коннектор"), ("webserver", "publication:webserver", "Публикует платформа 1С")];
+/// человек читает название, а не имя режима.
+///
+/// Подписи берутся из `link::publication_answers` — единственного словаря слов
+/// публикации (задача 5 плана «Карточка публикации и удаление»): с этой задачи
+/// их показывает и переключатель карточки, а два списка одних и тех же строк
+/// расходятся на первой же правке слова. Само подменю уходит следующей задачей
+/// (решение владельца 1.11: публикация — поле соединения, а переключатель в
+/// значке один на машину, и он молча правил ту базу, что оказалась текущей).
+const PUBLICATIONS: [(&str, &str, &str); 2] = [
+    ("auto", "publication:auto", link::publication_answers()[0].1),
+    ("webserver", "publication:webserver", link::publication_answers()[1].1),
+];
 
 /// Потолок записи (`cfg.current().write`, значения — те же слова, что понимает
 /// дочерний `mcp-1c`, `read_write`/`read_only`: перевод создал бы третью
@@ -917,6 +924,51 @@ pub(crate) fn request_current_mode_change(cx: &mut App, mode: &'static str) -> b
     true
 }
 
+/// Сменить публикацию ТЕКУЩЕГО соединения — та же общая последовательность и в
+/// том же порядке, что у `request_current_mode_change` (задача 5 плана
+/// «Карточка публикации и удаление»): отказ под идущей операцией
+/// (`mode_change_blocked` — ОДИН счёт на все двери, а не свой у каждой), вопрос
+/// при живом обслуживании тем же диалогом, что у «Сохранить»
+/// (`save_needs_confirm`/`confirm_database_change`), запись и перецикл сеанса
+/// (`apply_publication`).
+///
+/// **Почему у текущей карточки не точечная запись.** Публикация — такая же
+/// ось, как режим: уходя в «публикует платформа 1С», мы гасим СВОЙ httpd и
+/// убираем свой дескриптор, а это действие над живой базой, не намерение в
+/// файле. Точечная запись (`save::set_publication`) оставила бы свой httpd
+/// висеть на адресе, которого у соединения больше нет.
+///
+/// Своей второй копии уборки публикации здесь нет: её делает
+/// `apply_publication` — и делает ПОСЛЕ согласия человека (ответил «нет» на
+/// вопрос о смене базы — ничего не тронуто).
+///
+/// `false` — смена не состоялась из-за идущей операции; вызывающий решает, как
+/// об этом сказать (карточка — строкой в журнал словами `busy_now_word`).
+pub(crate) fn request_current_publication_change(cx: &mut App, publication: &'static str) -> bool {
+    let ui = cx.global::<Ui>();
+    if mode_change_blocked(ui) {
+        return false;
+    }
+    let current = ui.cfg.current().publication.clone();
+    if publication == current {
+        return true;
+    }
+    let mut host = ui.cfg.current().clone();
+    host.publication = publication.into();
+    // Спрашивать не о чем (или спросить негде — значок живёт и без окна) —
+    // пишем сразу, тем же приёмом, что `on_menu::MenuAction::Publication`.
+    if !save_needs_confirm(ui, &host) || ui.window.is_none() {
+        apply_publication(cx, publication);
+        return true;
+    }
+    window::show_window(cx);
+    let Some(w) = cx.global::<Ui>().window else { return true };
+    let _ = w.update(cx, |_, window, cx| {
+        confirm_database_change(window, cx, &host, move |_window, cx| apply_publication(cx, publication));
+    });
+    true
+}
+
 /// Строка журнала, когда режим переключён, но в файл не записан. Применить
 /// его мы вправе: это намерение человека, а не действие над базой —
 /// публикацию здесь никто не поднимает, и связь при этом выключена. А вот
@@ -988,13 +1040,10 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
                     note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 }
             }
-            let mut label = publication;
-            for (p, _, text) in PUBLICATIONS {
-                if p == publication {
-                    label = text;
-                }
-            }
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("публикация: {}", label.to_lowercase()) });
+            note_line(
+                cx.global_mut::<Ui>(),
+                Line { kind: Kind::Ok, text: format!("публикация: {}", link::publication_label(publication).to_lowercase()) },
+            );
         }
         Err(why) => {
             // Проверка всего файла не прошла — на свежем комплекте поля ещё
@@ -1010,8 +1059,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }
-            let label = PUBLICATIONS.iter().find(|(p, ..)| *p == publication).map(|(_, _, t)| *t).unwrap_or(publication);
-            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("публикация базы", label, why));
+            note_line(cx.global_mut::<Ui>(), unsaved_switch_line("публикация базы", link::publication_label(publication), why));
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_publication(publication);
             }
@@ -1211,21 +1259,15 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
             if let Some(tray) = &ui.tray {
                 tray.set_publication(&current);
             }
-            // Уборка своей публикации — не здесь, а в `apply_publication`:
-            // вопрос ниже человек может отклонить, и тогда гасить что-либо
-            // было бы прямым вредом (свой httpd убит, режим прежний).
-            let mut host = cx.global::<Ui>().cfg.current().clone();
-            host.publication = publication.into();
-            let ui = cx.global::<Ui>();
-            if !save_needs_confirm(ui, &host) || ui.window.is_none() {
-                apply_publication(cx, publication);
-                return;
-            }
-            window::show_window(cx);
-            let Some(w) = cx.global::<Ui>().window else { return };
-            let _ = w.update(cx, |_, window, cx| {
-                confirm_database_change(window, cx, &host, move |_window, cx| apply_publication(cx, publication));
-            });
+            // Вопрос человеку, уборка своей публикации, запись и перецикл
+            // сеанса — общая последовательность с карточкой (задача 5 плана
+            // «Карточка публикации и удаление»), не вторая её копия здесь:
+            // тем же приёмом, каким «Режим работы» выше зовёт
+            // `request_current_mode_change`. Уборка своей публикации при этом
+            // идёт не до вопроса, а внутри `apply_publication`: вопрос человек
+            // может отклонить, и тогда гасить что-либо было бы прямым вредом
+            // (свой httpd убит, режим прежний).
+            request_current_publication_change(cx, publication);
         }
         MenuAction::Access(access) => {
             // Форма та же, что у «Публикации базы» выше, без вопроса
@@ -1525,6 +1567,35 @@ mod tests {
         assert!(mode_change_blocked(&ui), "идёт публикация — дёргать текущее соединение нельзя");
         ui.publishing = None;
         assert!(!mode_change_blocked(&ui));
+    }
+
+    /// Задача 5 плана «Карточка публикации и удаление»: смена публикации у
+    /// ТЕКУЩЕЙ карточки идёт той же дверью, что смена режима
+    /// (`request_current_publication_change` → `mode_change_blocked`), и
+    /// ВТОРОГО счёта занятости у неё нет — иначе два похожих счёта однажды
+    /// разошлись бы, и переключатель карточки дёрнул бы текущее соединение
+    /// посреди публикации (результат, пришедший уже после переключения, лёг бы
+    /// на прежнюю базу).
+    ///
+    /// Чего этот тест НЕ проверяет, прямо: саму последовательность
+    /// (`request_current_publication_change`) без живого `App` не позвать —
+    /// гарнеса `gpui::test` в этом ящике нет (`gpui` приходит транзитивно, с
+    /// `gpui-kit`), и по той же причине его нет и у
+    /// `request_current_mode_change`. Под тестом стоит её первая строка —
+    /// общий счёт — и слово отказа, которое карточка пишет в журнал.
+    #[test]
+    fn a_publication_change_of_the_current_card_is_refused_while_anything_is_running() {
+        let mut ui = Ui::for_test();
+        assert!(!mode_change_blocked(&ui), "в покое ничего не мешает");
+        ui.publishing = Some(Instant::now());
+        assert!(mode_change_blocked(&ui), "идёт публикация — смена публикации текущей карточки не состоится");
+        // И отказ назовёт, что именно идёт, а не «операцию» вообще: то же
+        // слово берёт карточка (`panel::set_card_publication`), что и отказ
+        // «Сделать текущим».
+        assert_eq!(busy_now_word(&ui), "публикация базы");
+        ui.publishing = None;
+        ui.busy = Some(Busy::Project);
+        assert!(mode_change_blocked(&ui), "идёт проверка — тот же счёт, не второй");
     }
 
     /// Пункт трея и переключатель окна запираются одним замком и расходиться

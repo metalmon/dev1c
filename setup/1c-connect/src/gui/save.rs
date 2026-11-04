@@ -1023,7 +1023,7 @@ enum KeyValue {
 /// Неизвестный ключ — тоже отказ здесь, до какой-либо записи.
 fn parse_key(key: &str, value: &str) -> Result<KeyValue, String> {
     match key {
-        "profile" | "role" | "mode" => Ok(KeyValue::Str(value.to_string())),
+        "profile" | "role" | "mode" | "publication" | "base_url" => Ok(KeyValue::Str(value.to_string())),
         "base_here" => value
             .parse::<bool>()
             .map(KeyValue::Bool)
@@ -1042,6 +1042,8 @@ fn apply_parsed(c: &mut Connection, key: &str, value: &KeyValue) {
         ("profile", KeyValue::Str(v)) => c.profile = v.clone(),
         ("role", KeyValue::Str(v)) => c.role = v.clone(),
         ("mode", KeyValue::Str(v)) => c.mode = v.clone(),
+        ("publication", KeyValue::Str(v)) => c.publication = v.clone(),
+        ("base_url", KeyValue::Str(v)) => c.base_url = v.clone(),
         ("base_here", KeyValue::Bool(v)) => c.base_here = *v,
         _ => {}
     }
@@ -1229,6 +1231,42 @@ pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
 /// разбирает `Connection`.
 pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), String> {
     set_keys(ui, name, &[("base_here", if base_here { "true" } else { "false" })])
+}
+
+/// Кто публикует базу — точечная запись у ИМЕНОВАННОЙ карточки (задача 5
+/// плана «Карточка публикации и удаление»). Публикация стала полем карточки, а
+/// не одним переключателем на машину (решение владельца 1.11: «это поле
+/// соединения, и пункт меню убран вовсе») — переключатель в значке один, а баз
+/// на машине несколько, и он молча правил ту, что оказалась текущей.
+///
+/// **Два ключа одной правкой.** Уходя в «публикует платформа 1С», сюда же
+/// попадает пустой `base_url` — тем же доводом, что записан у
+/// `tray::apply_publication`: выведенный от каталога базы адрес
+/// (`cfg::derived_base_url`, признак — `cfg::is_derived_address`) в toml
+/// написали МЫ, а не человек, и принять нашу догадку за его ответ нельзя —
+/// проба по ней ушла бы на чужой веб-сервер. Карточка такой адрес и показывает
+/// пустым полем (`panel::shown_base_url`), значит и в файле его быть не
+/// должно. Писать их двумя записями подряд нельзя (докстрока `set_keys`):
+/// между ними файл стоял бы с новой публикацией и прежним адресом.
+///
+/// Своей уборки httpd здесь нет и не нужно: сеанс держит только ТЕКУЩЕЕ
+/// соединение, и у него тот же переключатель идёт другим путём —
+/// `tray::request_current_publication_change` (гашение своей публикации,
+/// вопрос человеку, перецикл сеанса), тем же приёмом, что `mode`.
+///
+/// Допустимые значения проверяются здесь, до записи, как у `set_mode`: тот же
+/// набор, что читает их обратно (`Connection::validate`). На `breaks_connection`
+/// одного этого не свалить — уже негодной карточке он отказа не даёт вовсе, и
+/// опечатка легла бы в файл молча.
+pub fn set_publication(ui: &mut Ui, name: &str, publication: &str) -> Result<(), String> {
+    if !matches!(publication, "auto" | "webserver") {
+        return Err(format!("publication: неизвестное значение «{publication}»; допустимые значения: auto, webserver"));
+    }
+    let mut keys: Vec<(&str, &str)> = vec![("publication", publication)];
+    if publication == "webserver" && cfg::is_derived_address(&connection_named(ui, name)?) {
+        keys.push(("base_url", ""));
+    }
+    set_keys(ui, name, &keys)
 }
 
 /// Чистое ядро вопроса «погасит ли „Сохранить“ обслуживание»: замок был

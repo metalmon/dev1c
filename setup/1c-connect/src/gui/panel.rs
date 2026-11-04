@@ -1509,6 +1509,46 @@ fn set_card_base_here(cx: &mut App, name: &str, base_here: bool) {
     cx.refresh_windows();
 }
 
+/// Сменить ответ «Публикация базы» у открытой карточки (задача 5 плана
+/// «Карточка публикации и удаление»). Развилка — та же, что у `set_card_mode`,
+/// и по той же причине: публикация у ТЕКУЩЕГО соединения — это действие над
+/// живой базой (уходя в «публикует платформа 1С», гасим свой httpd и убираем
+/// свой дескриптор), и она обязана пройти всю последовательность трея
+/// (`gui::tray::request_current_publication_change` — отказ под идущей
+/// операцией, вопрос про смену базы, запись, перецикл сеанса). У прочих
+/// карточек сеанса нет и гасить нечего — там остаётся точечная запись
+/// (`gui::set_publication`, она же снимает выведенный нами адрес).
+///
+/// Перевязка снимка карточки после точечной записи обязательна
+/// (`sync_card_topology`): публикация — такая же ось состава полей, как режим
+/// (`shown_fields`), и без неё щелчок был бы, а вид карточки не изменился бы.
+/// У текущей карточки её делает сам `tray::apply_publication`.
+fn set_card_publication(cx: &mut App, name: &str, publication: &'static str) {
+    let is_current = cx.global::<Ui>().cfg.current().name == name;
+    if is_current {
+        if !gui::tray::request_current_publication_change(cx, publication) {
+            // Отказ называет, что именно идёт (`busy_now_word`, тот же счёт и
+            // то же слово, что у режима и у «Сделать текущим»).
+            let why = gui::tray::busy_now_word(cx.global::<Ui>());
+            gui::note_line(
+                cx.global_mut::<Ui>(),
+                Line {
+                    kind: Kind::Fail, text: format!("Сейчас идёт {why} — подождите её завершения и повторите.")
+                },
+            );
+        }
+        // Перевязку снимка и перерисовку делает сам
+        // `apply_publication`/`request_current_publication_change` — второй раз
+        // звать нечего.
+        return;
+    }
+    if let Err(e) = gui::set_publication(cx.global_mut::<Ui>(), name, publication) {
+        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+    }
+    sync_card_topology(cx, name);
+    cx.refresh_windows();
+}
+
 /// Перевязать `self.original` открытой карточки на ТРИ оси — `role`,
 /// `mode`, `base_here`, — после точечной (или тревной) записи у карточки
 /// `name` (Critical ревью круга починки 1 задачи 16). `adopt_needed`/
@@ -1666,6 +1706,21 @@ pub fn base_here_label(base_here: bool) -> &'static str {
     } else {
         "На той стороне"
     }
+}
+
+/// Слово переключателя «Публикация базы» — третий вопрос карточки (задача 5
+/// плана «Карточка публикации и удаление»), и `None`, когда переключателя нет
+/// вовсе: базы здесь нет, публиковать нечего, а поля базы приходят с той
+/// стороны (`base_fields_note` говорит это словами). Пустой переключатель без
+/// действия ронял бы доверие к экрану тем же, чем поле без действия.
+///
+/// Решение «показывать ли» живёт здесь, рядом со словом, а не вторым условием
+/// в отрисовке: иначе ответ на этот вопрос существовал бы в двух местах — ровно
+/// та беда, из-за которой ось записи свели к одной `axis_of`.
+///
+/// Слова — из единственного словаря (`link::publication_label`), не свои копии.
+pub fn publication_switch_label(c: &Connection) -> Option<&'static str> {
+    c.base_here.then(|| link::publication_label(&c.publication))
 }
 
 /// Заголовок карточки соединения. Контракт подключения называет заголовком имя
@@ -2362,6 +2417,25 @@ impl Panel {
                     for (label, here) in [("Здесь", true), ("На той стороне", false)] {
                         let name = name.clone();
                         menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
+                    }
+                    menu
+                }),
+            ));
+        }
+        // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
+        // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
+        // «Где база» — спрашивать ли поля базы вовсе. Переключателя нет там,
+        // где базы здесь нет (`publication_switch_label` — одно решение и про
+        // показ, и про слово). Текущая карточка идёт тревной
+        // последовательностью, прочие — точечной записью
+        // (`set_card_publication`).
+        if let Some(label) = publication_switch_label(&c) {
+            let name = c.name.clone();
+            col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Публикация базы")).child(
+                KitButton::new("publication").outline().w_full().label(label).dropdown_menu(move |mut menu, _, _| {
+                    for (publication, words) in link::publication_answers() {
+                        let name = name.clone();
+                        menu = menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
                     }
                     menu
                 }),
@@ -3233,13 +3307,14 @@ mod tests {
     use super::{
         act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
         delete_question_text, fact_rows, fields_differ, folder_label, foot_left_text, found_text, leave_question, link_body, link_menu,
-        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason,
-        resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
-        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, FOOT_LINE, FOOT_LINES,
-        ONBOARDING_ASK, PASS_THE_CODE,
+        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
+        publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
+        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
+        DELETE_CONFIRM_YES, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
+    use crate::gui::link;
     use crate::gui::{capitalized, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
     use crate::session::State;
     use crate::verify;
@@ -3812,6 +3887,33 @@ mod tests {
         assert!(!shown_fields(&form).contains(&"base_url"), "карточка «Адрес публикации» не показывает — не несёт его и форма");
         // А на оси текущего соединения состав другой — это и была беда.
         assert!(shown_fields(&current).contains(&"base_url"));
+    }
+
+    /// Задача 5 плана «Карточка публикации и удаление»: публикация стала
+    /// третьим переключателем карточки (решение владельца 1.11 — «это поле
+    /// соединения, и пункт меню убран вовсе»: переключатель в значке один на
+    /// машину, а баз на машине несколько).
+    ///
+    /// Переключателя нет вовсе там, где базы здесь нет: публиковать нечего, и
+    /// поля базы приходят с той стороны (`base_fields_note`). Пустой
+    /// переключатель без действия ронял бы доверие к экрану параметров тем же,
+    /// чем поле без действия.
+    #[test]
+    fn the_card_shows_a_publication_switch_only_where_the_base_is_here() {
+        let there = Connection { base_here: false, ..Default::default() };
+        assert_eq!(publication_switch_label(&there), None, "базы здесь нет — публиковать нечего");
+        let here = Connection { base_here: true, publication: "webserver".into(), ..Default::default() };
+        assert_eq!(publication_switch_label(&here), Some("Публикует платформа 1С"));
+        let auto = Connection { base_here: true, publication: "auto".into(), ..Default::default() };
+        assert_eq!(publication_switch_label(&auto), Some("Публикует коннектор"));
+        // Слова — из единственного словаря (`link::publication_answers`), а не
+        // своя копия тех же строк здесь: два списка расходятся на первой же
+        // правке слова (находка Important 2 ревью круга починки 1 задачи 16 —
+        // ровно это уже случилось с ответами «Это соединение»).
+        assert_eq!(link::publication_answers().map(|(_, words)| words), ["Публикует коннектор", "Публикует платформа 1С"]);
+        // А значения в toml прежние: их читает `Cfg::base_url` и проверяет
+        // `Connection::validate`.
+        assert_eq!(link::publication_answers().map(|(value, _)| value), ["auto", "webserver"]);
     }
 
     #[test]

@@ -1933,6 +1933,87 @@ fn set_keys_refuses_an_unparsable_base_here_and_touches_nothing() {
     assert!(ui.cfg.by_name("Buh").unwrap().base_here, "и в памяти умолчание не тронуто");
 }
 
+/// Задача 5 плана «Карточка публикации и удаление»: публикация стала полем
+/// КАРТОЧКИ, а не одним переключателем на машину (решение владельца 1.11), и
+/// пишется она у ИМЕНОВАННОГО соединения — не обязательно текущего.
+///
+/// Тест смотрит на ОБА конца записи — на текст файла и на `ui.cfg` (Review
+/// Focus 4 задания): у `apply_parsed` есть немой catch-all `_ => {}`, и забудь
+/// эта задача завести свой ключ там, запись легла бы в файл, а в памяти
+/// публикация осталась бы прежней — карточка на экране не изменилась бы, зато
+/// следующее «Сохранить» унесло бы в toml старую ось.
+#[test]
+fn set_publication_writes_one_key_of_a_foreign_card() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Romashka".into(),
+        project: "C:\\proj\\Romashka".into(),
+        // Адрес, вписанный человеком: он не догадка программы
+        // (`cfg::derived_base_url` от этой папки — другая строка), и запись
+        // публикации его не касается.
+        base_url: "http://localhost:8081/Romashka/hs/mcp-1c".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+
+    set_publication(&mut ui, "Ромашка", "webserver").unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    let back: Cfg = toml::from_str(&text).expect("файл после записи обязан разбираться целиком");
+    assert_eq!(back.by_name("Ромашка").unwrap().publication, "webserver", "записано в свой блок:\n{text}");
+    assert_eq!(back.by_name("Buh").unwrap().publication, "auto", "соседний блок не тронут:\n{text}");
+    assert_eq!(
+        back.by_name("Ромашка").unwrap().base_url,
+        "http://localhost:8081/Romashka/hs/mcp-1c",
+        "свой адрес человека остался на месте:\n{text}"
+    );
+    assert_eq!(ui.cfg.by_name("Ромашка").unwrap().publication, "webserver", "и в памяти то же, что в тексте");
+}
+
+/// Выведенный от каталога базы адрес в toml написали МЫ (`carried_base_url` в
+/// обычном режиме), а не человек, — и в режиме «публикует платформа 1С»
+/// принять его за ответ нельзя: проба по нашей догадке ушла бы на чужой
+/// веб-сервер. Карточка такой адрес и показывает пустым полем
+/// (`panel::shown_base_url`), значит и в файле его быть не должно. Тот же
+/// довод уже записан у `tray::apply_publication` — здесь он для точечной
+/// записи чужой карточки.
+#[test]
+fn switching_a_card_to_webserver_drops_the_address_we_derived_ourselves() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().base_path = "C:\\Bases\\Buh".into();
+    ui.cfg.current_mut().base_url = cfg::derived_base_url("C:\\Bases\\Buh");
+    with_params_file(&ui);
+
+    set_publication(&mut ui, "Buh", "webserver").unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    let back: Cfg = toml::from_str(&text).expect("файл после записи обязан разбираться целиком");
+    assert_eq!(back.current().publication, "webserver", "{text}");
+    assert_eq!(back.current().base_url, "", "нашу догадку сняли:\n{text}");
+    assert_eq!(ui.cfg.current().base_url, "", "и в памяти то же, что в тексте");
+}
+
+/// Обратная сторона того же правила: адрес, который вписал человек, — ответ, и
+/// его не трогает никто. Сравнение строк живёт ровно в одном месте
+/// (`cfg::is_derived_address`), и этот тест стоит за тем, чтобы «уборка»
+/// однажды не стала безусловной: у человека, чья база и правда опубликована
+/// как `http://localhost/<папка>`, она стёрла бы настоящий адрес.
+#[test]
+fn switching_a_card_to_webserver_keeps_an_address_the_person_typed() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().base_path = "C:\\Bases\\Buh".into();
+    ui.cfg.current_mut().base_url = "http://localhost:8081/Buh/hs/mcp-1c".into();
+    with_params_file(&ui);
+
+    set_publication(&mut ui, "Buh", "webserver").unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    let back: Cfg = toml::from_str(&text).expect("файл после записи обязан разбираться целиком");
+    assert_eq!(back.current().base_url, "http://localhost:8081/Buh/hs/mcp-1c", "{text}");
+    assert_eq!(ui.cfg.current().base_url, "http://localhost:8081/Buh/hs/mcp-1c");
+}
+
 /// Minor 1 круга починки 1: пустой список ключей — не правка, а её
 /// отсутствие, и функция даже не обязана искать карточку по имени — для
 /// пустой правки оно ей не нужно. Лучшее доказательство — ИМЯ, которого в

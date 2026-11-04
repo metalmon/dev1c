@@ -1401,29 +1401,63 @@ fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
 /// смена режима обязана пройти тем же путём, что у трея (`set_card_mode`,
 /// Important 3 ревью круга починки 1: иначе карточка меняла бы транспорт
 /// под идущим сеансом, не трогая ни его, ни замок, ни значок) — у прочих
-/// карточек сеанса нет, и там остаётся простая запись одного ключа.
+/// карточек сеанса нет, и там остаётся простая точечная запись.
+///
+/// **Роль и режим — ОДНОЙ записью, когда это не текущая карточка** (задача 4
+/// плана «Карточка публикации и удаление»): до этой задачи уход из «одной
+/// машины» у нетекущей карточки писал их двумя записями подряд
+/// (`gui::set_role`, затем `set_card_mode` → `gui::set_mode`) — отложенная
+/// мелочь прошлой ветки, та же беда, которую задача правит и у будущего
+/// писателя публикации. `gui::set_keys` читает файл один раз и пишет оба
+/// ключа одним проходом — между ними человек больше не видит половинчатый
+/// файл.
+///
+/// **У ТЕКУЩЕЙ карточки это две разные последовательности, не одна правка,**
+/// и сливать их в одну запись нельзя (исключение из ruling'а задачи 4): роль
+/// — простая точечная запись, а режим обязан пройти тревной
+/// (`set_card_mode` → `tray::request_current_mode_change` — замок, вопрос о
+/// гашении обслуживания, запись, перецикл сеанса, значок). Запись роли здесь
+/// остаётся отдельной, своей, как и раньше.
 fn set_card_topology_kind(cx: &mut App, name: &str, answer: &'static str) {
     if answer == "local" {
         set_card_mode(cx, name, "local");
         return;
     }
-    if let Err(e) = gui::set_role(cx.global_mut::<Ui>(), name, answer) {
+    let is_current = cx.global::<Ui>().cfg.current().name == name;
+    let was_local = cx.global::<Ui>().cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false);
+    if is_current {
+        if let Err(e) = gui::set_role(cx.global_mut::<Ui>(), name, answer) {
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+            return;
+        }
+        sync_card_topology(cx, name);
+        // «Код следует из первого ответа сам» (спека) — роль записана, и
+        // если карточка была «на одной машине», уходим из этого режима тем
+        // же путём, что и для прямого ответа «Всё на одной машине» (см.
+        // выше, тревная последовательность — отдельно, она не часть этой
+        // записи).
+        if was_local {
+            set_card_mode(cx, name, "tunnel");
+        } else {
+            cx.refresh_windows();
+        }
+        return;
+    }
+    // Нетекущая карточка: сеанса нет, обе правки — просто точечная запись,
+    // и роль с режимом (если уходим из «одной машины») — одной записью.
+    let result = if was_local {
+        gui::set_keys(cx.global_mut::<Ui>(), name, &[("role", answer), ("mode", "tunnel")])
+    } else {
+        gui::set_role(cx.global_mut::<Ui>(), name, answer)
+    };
+    if let Err(e) = result {
         gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
         cx.refresh_windows();
         return;
     }
     sync_card_topology(cx, name);
-    // «Код следует из первого ответа сам» (спека) — роль записана, и если
-    // карточка была «на одной машине», уходим из этого режима тем же путём,
-    // что и для прямого ответа «Всё на одной машине» (см. выше): current()
-    // перечитываем ПОСЛЕ записи роли — `set_role` её не меняет, а `by_name`
-    // уже видит обновлённую карточку.
-    let was_local = cx.global::<Ui>().cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false);
-    if was_local {
-        set_card_mode(cx, name, "tunnel");
-    } else {
-        cx.refresh_windows();
-    }
+    cx.refresh_windows();
 }
 
 /// Сменить режим именованной карточки на `mode`. Критическая развилка

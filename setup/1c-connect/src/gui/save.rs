@@ -998,6 +998,92 @@ fn push_to_session(ui: &Ui, name: &str) {
     }
 }
 
+/// Один ключ карточки из пары `(key, value)`, которую несёт `set_keys` —
+/// словарь, общий для правки копии (годность считается ДО записи) и для
+/// синхронизации `ui.cfg` ПОСЛЕ неё: оба конца обязаны понимать одно и то же
+/// имя ключа одинаково, иначе протекшая мимо этой функции правка разошлась
+/// бы с тем, что лежит на диске. Неизвестный ключ — отказ словами до
+/// какой-либо записи, а не молчаливый пропуск правки.
+fn apply_key(c: &mut Connection, key: &str, value: &str) -> Result<(), String> {
+    match key {
+        "profile" => c.profile = value.to_string(),
+        "role" => c.role = value.to_string(),
+        "mode" => c.mode = value.to_string(),
+        "base_here" => c.base_here = value == "true",
+        _ => return Err(format!("set_keys: неизвестный ключ «{key}»")),
+    }
+    Ok(())
+}
+
+/// Значение ключа как TOML-литерал — развилка, которая раньше жила в каждом
+/// из четырёх писателей по отдельности: `base_here` — булево слово без
+/// кавычек (так его и разбирает `Connection`), остальные ключи этого набора —
+/// строки, в кавычках.
+fn toml_literal(key: &str, value: &str) -> String {
+    if key == "base_here" {
+        value.to_string()
+    } else {
+        format!("{value:?}")
+    }
+}
+
+/// Записать несколько ключей ОДНОГО соединения ОДНОЙ записью на диск — общее
+/// ядро четырёх точечных писателей ниже (`set_profile`/`set_role`/
+/// `set_mode`/`set_base_here`), каждый из которых правит только свой ключ и
+/// теперь — однострочная обёртка над этим.
+///
+/// Тело — то же, что раньше было у каждого из них по отдельности, только
+/// ключей несколько: `connection_named` → применить ВСЕ правки к копии
+/// карточки → одна проверка годности на весь результат (`breaks_connection`,
+/// а не по разу на каждый ключ) → прочитать файл ОДИН раз → `cfg::set_named`
+/// по каждому ключу подряд на одном и том же тексте → одна запись → обновить
+/// `ui.cfg` и толкнуть правку в живой сеанс (`push_to_session`).
+///
+/// **Запись — ОДНА, даже когда ключей несколько.** Без этого правка пары
+/// ключей смотрела бы на файл дважды: прочитала бы его, записала первый
+/// ключ, прочитала заново и записала второй. Между двумя записями человек
+/// успевает увидеть файл в половинчатом состоянии — записан только один из
+/// двух ключей задуманной правки, — а если он в эту же секунду правит файл
+/// руками, это уже не видимость, а настоящая несогласованность. Следующему
+/// писателю это нужно буквально (задача 5 плана «Карточка публикации и
+/// удаление»): публикация пишет `publication` и, в одном случае, пустой
+/// `base_url` — два ключа одной правки, и писать их двумя записями подряд
+/// нельзя по той же причине. Та же беда уже жила в окне до этой задачи:
+/// `panel::set_card_topology_kind`, уходя из локального режима, писала роль и
+/// режим двумя точечными записями подряд — отложенная мелочь прошлой ветки, и
+/// эта задача сводит её на один вызов `set_keys`.
+pub fn set_keys(ui: &mut Ui, name: &str, keys: &[(&str, &str)]) -> Result<(), String> {
+    let before = connection_named(ui, name)?;
+    let mut after = before.clone();
+    for &(key, value) in keys {
+        apply_key(&mut after, key, value)?;
+    }
+    // Годность считается на РЕЗУЛЬТАТ всей правки, а не на каждый ключ по
+    // отдельности — пара «роль + режим» от `panel::set_card_topology_kind`
+    // проверяется как одно целое, тем же приёмом, что было у каждого из
+    // четырёх писателей на своём одном ключе.
+    if let Some(why) = breaks_connection(&before, &after) {
+        return Err(why);
+    }
+
+    let path = ui.kit.state_path(cfg::FILE);
+    let mut text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
+    for &(key, value) in keys {
+        text = cfg::set_named(&text, name, key, &toml_literal(key, value))?;
+    }
+    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
+
+    // Синхронизируем только карточку, которую сами только что записали —
+    // тот же приём, что `save_tray_key` применяет к текущей.
+    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
+        for &(key, value) in keys {
+            apply_key(c, key, value)?;
+        }
+    }
+    push_to_session(ui, name);
+    Ok(())
+}
+
 /// Сменить профиль карточки по имени (задача 7 плана «Интерфейс») — второй
 /// переключатель карточки, после `switch_current`, и тем же приёмом: профиль
 /// меняет подпись папки и набор инструментов ЭТОГО соединения
@@ -1008,10 +1094,12 @@ fn push_to_session(ui: &Ui, name: &str) {
 /// целиком (`Cfg::validate`, в том числе `folder_conflict` между соседями) —
 /// а профиль чужой папки не касается вовсе (Review Focus плана): смена
 /// профиля у карточки, чья папка уже «занята» соседом по правилу конфликта,
-/// обязана пройти. Поэтому запись — ОДИН ключ (`cfg::set_named`), тем же
-/// приёмом, что `save_tray_key` пишет для текущего соединения, и без похода
-/// в `Cfg::validate`: годность спрашивается у САМОГО соединения
-/// (`breaks_connection` → `Connection::validate`), а не у списка.
+/// обязана пройти. Поэтому запись — ОДИН ключ, тем же приёмом, что
+/// `save_tray_key` пишет для текущего соединения, и без похода в
+/// `Cfg::validate`: годность спрашивается у САМОГО соединения
+/// (`breaks_connection` → `Connection::validate`), а не у списка. Тело — общее
+/// ядро `set_keys` (задача 4 плана «Карточка публикации и удаление»): эта
+/// функция — однострочная обёртка над ним.
 ///
 /// Значение проверяется тем же правилом, что читает его обратно
 /// (`Connection::toolset` — список допустимых один, опечатка отказывает
@@ -1019,30 +1107,7 @@ fn push_to_session(ui: &Ui, name: &str) {
 pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String> {
     let probe = Connection { profile: profile.to_string(), ..Connection::default() };
     probe.toolset()?;
-
-    let before = connection_named(ui, name)?;
-    // Годность самой карточки после задуманной правки — `breaks_connection`,
-    // её докстрока и несёт довод: «Разработчик» требует папку исходников, и
-    // узнать об этом человек обязан здесь, а не от следующего «Сохранить».
-    if let Some(why) = breaks_connection(&before, &Connection { profile: profile.to_string(), ..before.clone() }) {
-        return Err(why);
-    }
-
-    let path = ui.kit.state_path(cfg::FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
-    let text = cfg::set_named(&text, name, "profile", &format!("{profile:?}"))?;
-    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
-
-    // Синхронизируем только карточку, которую сами только что записали —
-    // тот же приём, что `save_tray_key` применяет к текущей.
-    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
-        c.profile = profile.to_string();
-    }
-    // И доносим до живого сеанса: профиль — это набор инструментов ребёнка
-    // (`Connection::toolset`), и работающий агент обязан увидеть новый набор
-    // без перезапуска окна (см. `push_to_session`).
-    push_to_session(ui, name);
-    Ok(())
+    set_keys(ui, name, &[("profile", profile)])
 }
 
 /// Переключатель «Это соединение» у карточки (задача 16 плана «Интерфейс») —
@@ -1063,29 +1128,13 @@ pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String>
 /// обязана перецикливать сеанс, а точечная запись этого не делает). Роль
 /// сама сеанса не держит — она пишется точечно всегда, независимо от
 /// того, текущая карточка или нет.
+///
+/// Тело — однострочная обёртка над общим ядром `set_keys` (задача 4 плана
+/// «Карточка публикации и удаление»).
 pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
     let probe = Connection { role: role.to_string(), ..Connection::default() };
     probe.role()?;
-
-    let before = connection_named(ui, name)?;
-    // Роль сама по себе ничьей годности не ломает (в `Connection::validate`
-    // её нет вовсе) — проверка здесь стоит не ради неё, а ради одного правила
-    // на всех четырёх писателей: порчу карточки щелчком ловит один сторож, а
-    // не три из четырёх (`breaks_connection`).
-    if let Some(why) = breaks_connection(&before, &Connection { role: role.to_string(), ..before.clone() }) {
-        return Err(why);
-    }
-
-    let path = ui.kit.state_path(cfg::FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
-    let text = cfg::set_named(&text, name, "role", &format!("{role:?}"))?;
-    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
-
-    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
-        c.role = role.to_string();
-    }
-    push_to_session(ui, name);
-    Ok(())
+    set_keys(ui, name, &[("role", role)])
 }
 
 /// `mode` именованной карточки — точечная запись для НЕТЕКУЩЕГО
@@ -1101,60 +1150,30 @@ pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
 /// нет (в отличие от `role`/`toolset`) — допустимые два значения проверяет
 /// сам переключатель карточки, набор закрытый и строится не из ввода
 /// человека, а отказ здесь всё равно стоит до записи, а не после.
+///
+/// Тело — однострочная обёртка над общим ядром `set_keys` (задача 4 плана
+/// «Карточка публикации и удаление»): ровно тем ядром, которым раньше была
+/// сама эта функция, пока остальные три не свелись на неё же.
 pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
     if !matches!(mode, "local" | "tunnel") {
         return Err(format!("mode: неизвестный режим «{mode}»; допустимые значения: local, tunnel"));
     }
-    let before = connection_named(ui, name)?;
-    // Уход в туннель спрашивает адрес среды и номер рабочего места
-    // (`mode_needs_env` в `Connection::validate`) — у годной локальной
-    // карточки их может не быть, и тогда щелчок делал бы её негодной.
-    // `breaks_connection` отказывает словами; свежая карточка (негодная и
-    // до щелчка) переключается как прежде — довод в её докстроке.
-    if let Some(why) = breaks_connection(&before, &Connection { mode: mode.to_string(), ..before.clone() }) {
-        return Err(why);
-    }
-
-    let path = ui.kit.state_path(cfg::FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
-    let text = cfg::set_named(&text, name, "mode", &format!("{mode:?}"))?;
-    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
-
-    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
-        c.mode = mode.to_string();
-    }
-    // Текущей карточки здесь обычно нет (её режим идёт через
-    // `tray::apply_mode`, см. докстроку выше) — но если позвали, живой сеанс
-    // обязан узнать: `push_to_session` сама решает, его ли это карточка.
-    push_to_session(ui, name);
-    Ok(())
+    set_keys(ui, name, &[("mode", mode)])
 }
 
 /// Переключатель «Где база» у карточки (задача 16 плана «Интерфейс») — тем
 /// же приёмом, что `set_role`/`set_profile`: один ключ (`base_here`) у
 /// ИМЕНОВАННОЙ карточки. Состав полей карточки (`panel::shown_fields`)
 /// считается от соединения заново при каждой отрисовке — переключение
-/// обязано попасть в `ui.cfg` до следующего показа, и синхронизация ниже
-/// ровно это и делает.
+/// обязано попасть в `ui.cfg` до следующего показа, и синхронизация внутри
+/// `set_keys` ровно это и делает.
+///
+/// Тело — однострочная обёртка над общим ядром `set_keys` (задача 4 плана
+/// «Карточка публикации и удаление»); `bool` здесь переводится в слово,
+/// которое `toml_literal` внутри `set_keys` пишет без кавычек — так его и
+/// разбирает `Connection`.
 pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), String> {
-    let before = connection_named(ui, name)?;
-    // «База здесь» при пустом пути к базе — второй из двух случаев, которыми
-    // точечный писатель делал ТЕКУЩЕЕ соединение негодным молча (Important 2
-    // ревью всей ветки, довод — у `breaks_connection`).
-    if let Some(why) = breaks_connection(&before, &Connection { base_here, ..before.clone() }) {
-        return Err(why);
-    }
-
-    let path = ui.kit.state_path(cfg::FILE);
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
-    let text = cfg::set_named(&text, name, "base_here", &base_here.to_string())?;
-    write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
-
-    if let Some(c) = ui.cfg.connections.iter_mut().find(|c| c.name == name) {
-        c.base_here = base_here;
-    }
-    push_to_session(ui, name);
-    Ok(())
+    set_keys(ui, name, &[("base_here", if base_here { "true" } else { "false" })])
 }
 
 /// Чистое ядро вопроса «погасит ли „Сохранить“ обслуживание»: замок был

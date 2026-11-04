@@ -1850,3 +1850,43 @@ fn a_refused_delete_leaves_the_file_byte_for_byte() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ — файл не тронут ни байтом");
     assert_eq!(ui.cfg.connections.len(), 2, "и в памяти ничего не исчезло");
 }
+
+/// Задача 4 плана «Карточка публикации и удаление»: `set_keys` — общее ядро,
+/// на которое сведены `set_profile`/`set_role`/`set_mode`/`set_base_here`, на
+/// несколько ключей зараз. Лучшее доказательство атомарности — оба ключа в
+/// одном прочитанном и одном записанном тексте, а не два похода на диск
+/// подряд (ровно та беда, которую эта задача закрывает у
+/// `panel::set_card_topology_kind`).
+#[test]
+fn set_keys_writes_every_key_in_one_pass() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+
+    set_keys(&mut ui, "Buh", &[("role", "dial"), ("mode", "tunnel")]).unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("role = \"dial\"") && text.contains("mode = \"tunnel\""), "{text}");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().role, "dial");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().mode, "tunnel");
+}
+
+/// Тот же отказ, что у `set_profile` на профиле «Разработчик» при пустой
+/// папке исходников
+/// (`the_developer_profile_without_a_sources_folder_is_refused_before_the_write`),
+/// только через общее ядро: `breaks_connection` отказывает ДО какой-либо
+/// записи, и текст файла до и после совпадает побайтово.
+#[test]
+fn set_keys_refuses_a_patch_that_breaks_the_card_and_writes_nothing() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().project = String::new();
+    with_params_file(&ui);
+    assert!(ui.cfg.validate().is_ok(), "в фикстуре карточка годна: пустая папка у бизнес-профиля законна");
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_keys(&mut ui, "Buh", &[("profile", "developer")]).unwrap_err();
+
+    assert!(e.contains("project"), "отказ называет поле: {e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
+}

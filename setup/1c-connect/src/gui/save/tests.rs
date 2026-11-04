@@ -1724,10 +1724,22 @@ fn the_developer_profile_without_a_sources_folder_is_refused_before_the_write() 
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
 }
 
-/// Important 2 ревью всей ветки, случай второй: «база здесь» при пустом пути
-/// к базе — тот же замок (`Connection::validate`), тот же молчаливый урон.
+/// Правка 2 повторного ревью волны (решение ведущего): ось «где база»
+/// переключается ВСЕГДА, даже если карточка от этого станет неполной —
+/// именно этот щелчок и открывает поля, которыми её дополняют.
+///
+/// **Этот тест — переписанный**, и прежде он держал обратное правило:
+/// назывался `saying_the_base_is_here_with_no_base_path_is_refused_before_the_write`
+/// (Important 2 ревью всей ветки, случай второй) и утверждал, что
+/// `set_base_here(…, true)` при пустом пути ОТКАЗЫВАЕТ про `base_path`, файла
+/// не пишет и топологию в памяти не меняет. Ревью волны нашло цену того
+/// правила: поля пути при базе на той стороне на экране нет вовсе
+/// (`panel::shown_fields`), оно появляется только ПОСЛЕ переключения, — то
+/// есть пара запирала себя сама, и перенести базу на свою машину из окна было
+/// нельзя. Отказ называл поле, которого экран не показывает, — тот же разряд,
+/// что Critical 1 этой волны.
 #[test]
-fn saying_the_base_is_here_with_no_base_path_is_refused_before_the_write() {
+fn saying_the_base_is_here_always_works_because_it_is_what_opens_the_base_fields() {
     let mut ui = Ui::for_test();
     {
         let c = ui.cfg.current_mut();
@@ -1735,16 +1747,27 @@ fn saying_the_base_is_here_with_no_base_path_is_refused_before_the_write() {
         c.base_path = String::new();
     }
     with_params_file(&ui);
-    assert!(ui.cfg.validate().is_ok(), "в фикстуре карточка годна: база на той стороне пути не требует");
-    let path = ui.kit.state_path(cfg::FILE);
-    let before = std::fs::read_to_string(&path).unwrap();
+    assert!(!crate::gui::panel::shown_fields(ui.cfg.current()).contains(&"base_path"), "поля пути на экране нет — его и нечем заполнить");
 
-    let e = set_base_here(&mut ui, "Buh", true).unwrap_err();
+    set_base_here(&mut ui, "Buh", true).unwrap();
 
-    assert!(e.contains("base_path"), "отказ называет поле: {e}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
-    assert!(!ui.cfg.by_name("Buh").unwrap().base_here, "и в памяти топология прежняя");
+    assert!(ui.cfg.by_name("Buh").unwrap().base_here, "топология переключилась в памяти");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("base_here = true"), "и на диске:\n{text}");
+    // И вот теперь поле есть — им карточку и дополняют.
+    assert!(crate::gui::panel::shown_fields(ui.cfg.current()).contains(&"base_path"), "щелчок открыл поле пути к базе");
+    // Карточка при этом неполна, и это законно: о нехватке говорит замок, а
+    // поля спрашивает «Сохранить».
+    assert!(ui.cfg.current().validate().is_err(), "неполнота осталась неполнотой — её просто не ставят в вину щелчку");
 }
+
+// Исключение — ТОЛЬКО для оси «где база», и своего теста ему не нужно:
+// отказы остальных писателей на той же порче уже стоят под тестами, и они
+// обязаны пройти БЕЗ правок — сосед сверху
+// (`the_developer_profile_without_a_sources_folder_is_refused_before_the_write`,
+// профиль «Разработчик» при пустой папке исходников) и сосед снизу (уход в
+// туннель без адреса среды). Ни одна из их осей полей на экране не
+// открывает — там довод `breaks_connection` прежний и верный.
 
 /// Та же проверка у `set_mode`: уход в туннель спрашивает адрес среды и
 /// номер рабочего места — у годной ЛОКАЛЬНОЙ карточки их может не быть.

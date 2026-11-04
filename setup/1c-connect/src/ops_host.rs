@@ -392,11 +392,20 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     // (`link::onboarding_shown` становился ложью), и «Связь» показывала
     // карточку, которой на диске нет. Слова — у `Cfg::no_connections_refusal()`,
     // одного источника на все двери.
-    anyhow::ensure!(!cfg.connections.is_empty(), "{}", crate::cfg::Cfg::no_connections_refusal());
+    //
+    // **Страж стоит НИЖЕ раннего выхода «файла настроек нет», и это важно**
+    // (повторное ревью волны, правка 1): комплект без toml — это свежая
+    // машина, и `1c-connect install` на ней обязан доходить до операций, а
+    // не обрываться отказом (`main.rs`, `?` на этом вызове). Ровно такой
+    // обрыв 27.10 останавливал на стенде ЛЮБУЮ установку — довод записан в
+    // докстроке `Connection::validate`. Дверь фантома от переноса не
+    // пострадала: `cfg.current_mut()` живёт ниже, и без файла до него дело
+    // не доходит вовсе — писать некуда, и в памяти ничего не правится.
     let path = kit.state_path(crate::cfg::FILE);
     if !path.exists() {
         return Ok(Vec::new());
     }
+    anyhow::ensure!(!cfg.connections.is_empty(), "{}", crate::cfg::Cfg::no_connections_refusal());
     let mut fields: Vec<(&str, String)> = Vec::new();
     if cfg.gitea_url().is_none() {
         // Выводить не из чего (локальный режим, пустой или умолчательный
@@ -3033,6 +3042,24 @@ mod tests {
         let e = write_derived_fields(&kit, &mut cfg, false).unwrap_err().to_string();
         assert!(e.contains(&crate::cfg::Cfg::no_connections_refusal()), "{e}");
         assert!(cfg.connections.is_empty(), "фантомной карточки в памяти не завелось");
+    }
+
+    /// Правка 1 повторного ревью волны: страж пустого списка НЕ смеет
+    /// обрывать установку на комплекте БЕЗ файла настроек. Это свежая
+    /// машина, `1c-connect install` на ней обязан доходить до операций, и
+    /// отказ здесь (`main.rs`, `?`) останавливал бы её целиком — ровно тот
+    /// обрыв, который 27.10 держал стенд. Дверь фантома при этом закрыта
+    /// по-прежнему: без файла до `cfg.current_mut()` дело не доходит вовсе
+    /// (писать некуда), а с файлом и пустым списком отказ на месте — сосед
+    /// выше.
+    #[test]
+    fn a_kit_without_a_parameters_file_is_not_refused_even_with_an_empty_list() {
+        let kit = TomlKit::new("phantom-nofile");
+        let mut cfg = Cfg::default();
+        cfg.connections.clear();
+        assert!(!kit.state_path(crate::cfg::FILE).exists(), "фикстура: файла настроек нет");
+        assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty(), "писать некуда — молчим, а не отказываем");
+        assert!(cfg.connections.is_empty(), "и карточки в памяти не завелось");
     }
 
     /// Единообразие: после настройки файл — полная картина того, чем

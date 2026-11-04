@@ -506,7 +506,12 @@ fn toggle_enabled(locked: bool, on: bool) -> bool {
 /// переключения, мог бы лечь на прежнюю базу. Один счёт на обе двери
 /// (`request_current_mode_change`, `request_switch_current`), не два
 /// похожих.
-fn mode_change_blocked(ui: &Ui) -> bool {
+///
+/// `pub(crate)` с круга починки 1 задачи 2 плана «Карточка публикации и
+/// удаление» (Minor 5 ревью): `save::delete_blocked_reason` зовёт её же, а
+/// не свою копию тройного `||` — второй счёт того же самого молча
+/// разошёлся бы с этим, когда здесь появится четвёртое поле занятости.
+pub(crate) fn mode_change_blocked(ui: &Ui) -> bool {
     ui.busy.is_some() || ui.progress.is_some() || ui.publishing.is_some()
 }
 

@@ -3,7 +3,7 @@ use super::*;
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::{self, Connection};
-use crate::gui::{Running, Which};
+use crate::gui::{Busy, Running, Which};
 use crate::session::State;
 use common::op::OpState;
 use common::Phase;
@@ -1617,6 +1617,12 @@ fn deleting_anything_is_refused_while_an_operation_is_running() {
     ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
     assert!(delete_blocked_reason(&ui, "Ромашка").unwrap().contains("операция"));
     ui.progress = None;
+    // Minor 8 ревью круга починки 1: третья ветвь занятости (`ui.busy`,
+    // «проверка») тоже обязана отказывать — до этой правки из трёх ветвей
+    // `tray::mode_change_blocked` проверялись только две.
+    ui.busy = Some(Busy::Project);
+    assert!(delete_blocked_reason(&ui, "Ромашка").unwrap().contains("проверка"));
+    ui.busy = None;
     ui.publishing = Some(now);
     assert!(delete_blocked_reason(&ui, "Ромашка").unwrap().contains("публикация базы"));
 }
@@ -1629,6 +1635,27 @@ fn deleting_a_card_that_is_not_in_the_list_is_refused_by_name() {
     with_params_file(&ui);
     let e = delete_blocked_reason(&ui, "Ромашка").unwrap();
     assert!(e.contains("Ромашка"), "{e}");
+}
+
+/// Important 3 ревью круга починки 1: пустой корневой `current` — законный
+/// вид файла (блоки без строки `current` в корне), и тогда текущее — первое
+/// соединение списка (`Cfg::current()`), а НЕ «карточки с именем „“». Сравнение
+/// `ui.cfg.current == name` этого не видело бы и молча пропускало бы
+/// предусловие «карточка текущая, а рядом есть другие» ровно в этом законном
+/// виде файла — удаление первой (фактически текущей, с живым сеансом)
+/// карточки проходило бы в обход отказа.
+#[test]
+fn deleting_the_first_card_is_blocked_when_the_root_current_is_legitimately_empty() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    ui.cfg.current = String::new();
+    assert_eq!(ui.cfg.current().name, "Buh", "фикстура: пустой корень — текущее первое, по правилу Cfg::current()");
+    assert!(delete_blocked_reason(&ui, "Buh").unwrap().contains("сделайте текущим другое"));
 }
 
 /// Удаление НЕтекущей карточки при живом соседе: вырезается ровно её блок, а
@@ -1687,30 +1714,118 @@ fn deleting_the_only_card_leaves_a_file_with_no_connections_and_an_empty_current
 
 /// Удаление ПОСЛЕДНЕЙ карточки обязано сперва попытаться погасить свою
 /// публикацию (`ops_host::stop_own_publication` со снимком СТАРОГО `Cfg`,
-/// `super::quiet_ctx_with`) и только потом писать файл — тот же порядок, что
-/// у `tray::apply_switch_current`. Признак `ui.raised_publication` снимается
-/// ТОЛЬКО по настоящей удаче (`Ok(true)`): на отказе он остаётся, чтобы
-/// выключение и выход могли повторить попытку, а не унести процесс в
-/// бессрочное сиротство (рулинг задачи 2). В каталоге теста нет ни httpd, ни
-/// платформы 1С, поэтому здесь измеряется, а не угадывается, что ответит
-/// настоящая попытка на этой машине (приём, уже живущий в
+/// `super::quiet_ctx_with`) ДО записи файла. Critical 1 ревью круга починки
+/// 1 (решение ведущего): на отказе гашения удаление теперь САМО отказывает
+/// и файла не трогает вовсе — удаление последней карточки уносит из
+/// `ui.cfg` путь и порт, по которым `publication::Paths::of` находит свой
+/// httpd, и без настроек ни выключение (`link.rs`), ни выход (`mod.rs::quit`)
+/// больше не смогут повторить гашение никогда; процесс осиротел бы до
+/// перезагрузки машины. В каталоге теста нет ни httpd, ни платформы 1С,
+/// поэтому здесь измеряется, а не угадывается, что ответит настоящая
+/// попытка на этой машине (приём, уже живущий в
 /// `ops_host::tests::leaving_stops_our_own_httpd_and_never_someone_elses`), и
-/// проверяется согласие этого ответа с решением `delete_connection`.
+/// проверяется согласие этого ответа с решением `delete_connection` —
+/// включая то, что отказ не меняет НИ файл, НИ память, НИ признак.
 #[test]
-fn deleting_the_only_card_puts_down_our_own_publication_before_writing() {
+fn deleting_the_only_card_refuses_when_its_own_publication_cannot_be_stopped() {
     let mut ui = Ui::for_test();
     with_params_file(&ui);
     ui.raised_publication = true;
     let old_cfg = ui.cfg.clone();
-    let would_succeed = matches!(crate::ops_host::stop_own_publication(&super::quiet_ctx_with(&ui, old_cfg)), Ok(true));
+    let probe = crate::ops_host::stop_own_publication(&super::quiet_ctx_with(&ui, old_cfg));
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let result = delete_connection(&mut ui, "Buh");
+
+    match probe {
+        Err(_) => {
+            let err = result.unwrap_err();
+            assert!(err.contains("HTTP-сервис"), "{err}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ — файл не тронут ни байтом");
+            assert_eq!(ui.cfg.connections.len(), 1, "и в памяти карточка на месте");
+            assert!(ui.raised_publication, "признак остаётся — повторит выключение или выход, пока настройки целы");
+        }
+        Ok(true) => {
+            result.unwrap();
+            assert!(!ui.raised_publication, "настоящая удача снимает признак");
+        }
+        Ok(false) => {
+            result.unwrap();
+            assert!(ui.raised_publication, "«не наша публикация» признак не трогает");
+        }
+    }
+}
+
+/// Important 4 ревью круга починки 1 — отдельный тест на УДАЧНУЮ ветвь, не
+/// зависящий от того, есть ли на машине httpd и платформа: публикация «на
+/// вашем веб-сервере» отдаёт `Ok(false)` первой же строкой
+/// `stop_own_publication`, до какого-либо похода на диск. Удаление последней
+/// карточки в этом случае обязано пройти (гасить нечего, но это НЕ отказ) —
+/// упади эта проверка в «последняя карточка всегда отказывает» по ошибке
+/// Critical 1, тест поймал бы это: `.unwrap()` ниже паникует.
+#[test]
+fn deleting_the_only_card_still_succeeds_when_the_publication_is_not_ours() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().publication = "webserver".into();
+    with_params_file(&ui);
+    ui.raised_publication = true;
 
     delete_connection(&mut ui, "Buh").unwrap();
 
-    if would_succeed {
-        assert!(!ui.raised_publication, "настоящая удача снимает признак");
-    } else {
-        assert!(ui.raised_publication, "отказ или «не наша публикация» признак не трогают — повторит выключение или выход");
-    }
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 0, "{after}");
+    assert!(ui.raised_publication, "Ok(false) — «не наша публикация» — признак не трогает");
+}
+
+/// Important 2 ревью круга починки 1: гашение зовётся ТОЛЬКО когда признак
+/// `ui.raised_publication` поднят — тем же счётом, что у обоих соседних
+/// вызывающих (`mod.rs::quit`, `tray::publication_after_switch`:
+/// `stop_old = base_changed && raised_publication`). Признак здесь ложный —
+/// мы публикацию не поднимали, — и, не будь гейта, вызов упёрся бы в
+/// отсутствующий `bin/httpd.exe` этой машины и, по Critical 1, ОТКАЗАЛ бы в
+/// удалении там, где отказывать не из чего: гасить нечего, потому что мы
+/// ничего и не поднимали.
+#[test]
+fn deleting_the_only_card_skips_the_cleanup_when_we_never_raised_a_publication() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    ui.raised_publication = false;
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    assert!(!ui.log.iter().any(|l| l.text.contains("HTTP-сервис")), "гасить нечего — молчим: {:?}", ui.log);
+}
+
+/// Minor 7 ревью круга починки 1 (решение ведущего): «последняя карточка»
+/// для правки корневого `current` в ФАЙЛЕ решается по тексту, который
+/// сейчас пишем (`toml_render::count` после `remove_named`), а не по списку
+/// в памяти (`is_last_connection` — он про предусловие, про то, что видит
+/// человек в окне). Здесь в памяти известна только «Buh» (значит,
+/// предусловие это пропускает как «последнюю»), но в файле на диске уже
+/// лежит ВТОРОЙ блок, дописанный рукой после загрузки и `ui.cfg` неизвестный
+/// — после вырезания «Buh» он остаётся, и корневой `current` не обязан
+/// стать пустым: блок, на который можно ссылаться, в тексте есть.
+#[test]
+fn deleting_the_last_known_card_does_not_blank_current_when_a_hand_added_block_remains() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let path = ui.kit.state_path(cfg::FILE);
+    let mut hand = ui.cfg.clone();
+    hand.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        ..ui.cfg.current().clone()
+    });
+    std::fs::write(&path, hand.render(&store).unwrap()).unwrap();
+    assert!(is_last_connection(&ui), "в памяти известна только «Buh» — предусловие её видит последней");
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(common::toml_render::count(&after, cfg::CONNECTION), 1, "рукописный блок остался на месте:\n{after}");
+    assert!(!after.contains("current = \"\""), "в тексте остался настоящий блок — корень не обязан стать пустым:\n{after}");
 }
 
 /// Отказанное удаление не трогает файл ни байтом — сравнение всего текста,

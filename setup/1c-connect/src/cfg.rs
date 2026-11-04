@@ -1039,10 +1039,9 @@ impl Cfg {
     pub fn switch_current(&mut self, name: &str) -> std::result::Result<(), String> {
         // Пустой список — свежий комплект до первой настройки: `names` ниже
         // был бы пуст, а отказ оборвался бы на «…нет — есть » без точки
-        // (долг задачи 8). Фраза та же, что уже говорит `connections_overview`
-        // для того же случая.
+        // (долг задачи 8).
         if self.connections.is_empty() {
-            return Err(format!("{FILE}: соединений пока нет — настройте первое в окне (1c-connect gui)"));
+            return Err(Self::no_connections_refusal());
         }
         if !self.connections.iter().any(|c| c.name == name) {
             let names: Vec<String> = self.connections.iter().map(|c| format!("«{}»", c.name)).collect();
@@ -1050,6 +1049,17 @@ impl Cfg {
         }
         self.current = name.to_string();
         Ok(())
+    }
+
+    /// Слова отказа на пустом списке соединений — ОДИН источник для каждого,
+    /// кто отказывает по этой причине: `switch_current` выше (команда и
+    /// карточка) и пункт меню значка, который правит текущие параметры
+    /// (`tray::apply_access`, находка ревью задачи 3 плана «Карточка
+    /// публикации и удаление», Minor 1 круга починки 1 задачи 6) — второй
+    /// литерал тех же слов развёлся бы с этим при первой же правке
+    /// формулировки, и ни один тест об этом не предупредил бы.
+    pub fn no_connections_refusal() -> String {
+        format!("{FILE}: соединений пока нет — настройте первое в окне (1c-connect gui)")
     }
 
     /// Соединения для человека: `1c-connect use` без имени показывает этот

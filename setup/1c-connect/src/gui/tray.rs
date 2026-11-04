@@ -434,8 +434,8 @@ fn toggle_enabled(locked: bool, on: bool) -> bool {
 /// Операция, проверка или публикация идёт — тем же критерием, что блокирует
 /// «Сохранить» (`panel::can_save`) и переключатель (`Switch::disabled`).
 /// Смена режима посреди неё переписала бы конфигурацию и перезапустила
-/// сеанс под её ногами — у подменю «Режим работы» этой защиты не было
-/// (находка целостного ревью).
+/// сеанс под её ногами — у смены режима этой защиты не было (находка
+/// целостного ревью).
 ///
 /// `ui.publishing.is_some()` — круг починки 5 задачи 16, ruling а: идущая
 /// публикация — та же гонка, что идущая операция, только над httpd, а не
@@ -474,11 +474,12 @@ pub(crate) fn busy_now_word(ui: &Ui) -> &'static str {
 /// `Cfg::current_mut()` на пустом списке заводит ПЕРВОЕ соединение по
 /// умолчанию, а пункт меню значка, правящий ТЕКУЩИЕ параметры, не имеет
 /// права создавать карточку, которой человек не заводил (`apply_access`
-/// правит именно её). Слова — те же, какими отказывает `Cfg::switch_current`
-/// на пустом списке: один текст на оба отказа, не два похожих. `None` —
-/// список не пуст, пункт работает как обычно.
+/// правит именно её). Слова — у `Cfg::no_connections_refusal()`, ОДНОГО
+/// источника на оба отказа (Minor 1 круга починки 1 задачи 6: свой литерал
+/// здесь развёлся бы с `Cfg::switch_current` при первой же правке
+/// формулировки). `None` — список не пуст, пункт работает как обычно.
 fn access_refused_on_empty_list(empty: bool) -> Option<String> {
-    empty.then(|| format!("{}: соединений пока нет — настройте первое в окне (1c-connect gui)", crate::cfg::FILE))
+    empty.then(crate::cfg::Cfg::no_connections_refusal)
 }
 
 /// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
@@ -1103,7 +1104,33 @@ fn access_not_applied_line(e: &str) -> String {
     format!("запись в базу (mcp-1c): потолок НЕ применён — запись в файл не удалась: {e}")
 }
 
+/// Записать потолок записи ТЕКУЩЕГО соединения — единственный зовущий,
+/// `on_menu::MenuAction::Access` (пункт «Запись в базу»).
+///
+/// **Страж на пустом списке соединений — находка ревью задачи 3, Important 1
+/// и Minor 2 круга починки 1 задачи 6.** `Cfg::current_mut()` ниже на
+/// пустом списке (свежий комплект или комплект после удаления последней
+/// карточки) завела бы ПЕРВОЕ соединение по умолчанию — карточку-фантом,
+/// которой человек не заводил. Страж стоит здесь, у защищаемого действия, а
+/// не в `on_menu`: сегодня у функции один зовущий, и дырки нет, но второй
+/// зовущий без стража открыл бы её снова (тот же способ, которым в
+/// соседних задачах заводились «вторые двери»). Отказ идёт журналом И
+/// показом окна (`tab_for_unsaved_switch`/`window::show_window`), тем же
+/// путём, что и ветвь отказа записи ниже: значок живёт и без окна, и без
+/// показа человек слов отказа не увидел бы вовсе.
 fn apply_access(cx: &mut App, access: &'static str) {
+    let empty = cx.global::<Ui>().cfg.connections.is_empty();
+    if let Some(why) = access_refused_on_empty_list(empty) {
+        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+        cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
+        window::show_window(cx);
+        let current = cx.global::<Ui>().cfg.access().to_string();
+        if let Some(tray) = &cx.global::<Ui>().tray {
+            tray.set_access(&current);
+        }
+        cx.refresh_windows();
+        return;
+    }
     cx.global_mut::<Ui>().cfg.current_mut().write = access.into();
     let host = cx.global::<Ui>().cfg.current().clone();
     match save_host(cx.global_mut::<Ui>(), host) {
@@ -1203,26 +1230,17 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
         MenuAction::Access(access) => {
             // Без вопроса человеку: потолок не действие над базой и не
             // меняет транспорт (см. `apply_access`), спрашивать не о чем.
+            // Отказ на пустом списке соединений (находка ревью задачи 3) —
+            // не здесь: страж стоит в самой `apply_access` (Minor 2 круга
+            // починки 1 задачи 6), у защищаемого действия, а не у
+            // вызывающего — второй вызывающий иначе открыл бы ту же дверь
+            // без присмотра.
             let ui = cx.global::<Ui>();
             let current = ui.cfg.access().to_string();
-            let empty = ui.cfg.connections.is_empty();
             if mode_change_blocked(ui) || access == current {
                 if let Some(tray) = &ui.tray {
                     tray.set_access(&current);
                 }
-                return;
-            }
-            // Находка ревью задачи 3: ни один пункт меню значка не имеет
-            // права воскрешать карточку-фантом через `Cfg::current_mut()`
-            // (`apply_access` правит именно ТЕКУЩЕЕ соединение). На пустом
-            // списке — свежий комплект или комплект после удаления
-            // последней карточки — пункт отказывает тем же словами, что
-            // `Cfg::switch_current`, и не трогает ничего.
-            if let Some(why) = access_refused_on_empty_list(empty) {
-                if let Some(tray) = &ui.tray {
-                    tray.set_access(&current);
-                }
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
                 return;
             }
             apply_access(cx, access);
@@ -1386,16 +1404,18 @@ mod tests {
     }
 
     /// Находка ревью задачи 3: пункт меню «Запись в базу» на пустом списке
-    /// соединений обязан отказать словами `Cfg::switch_current`, а не дойти
-    /// до `apply_access` → `Cfg::current_mut()` и завести карточку, которой
-    /// человек не заводил. `menu_action`/`on_menu` живому `App` недостижимы
-    /// без него — под тестом чистое ядро решения.
+    /// соединений обязан отказать словами `Cfg::no_connections_refusal()` —
+    /// тем же источником, что читает и `Cfg::switch_current` (Minor 1 круга
+    /// починки 1 задачи 6: сравниваем с живым источником, а не с
+    /// замороженной копией его слов, иначе правка формулировки там не
+    /// уронила бы этот тест здесь), — а не дойти до `Cfg::current_mut()` и
+    /// завести карточку, которой человек не заводил. Страж живёт в
+    /// `apply_access` (Minor 2), недостижимой без живого `App` (GPUI, без
+    /// headless-гарнеса здесь) — под тестом чистое ядро решения, которое она
+    /// зовёт.
     #[test]
     fn access_is_refused_on_an_empty_list_with_the_same_words_as_switch_current() {
-        assert_eq!(
-            access_refused_on_empty_list(true),
-            Some("1c-connect.toml: соединений пока нет — настройте первое в окне (1c-connect gui)".to_string())
-        );
+        assert_eq!(access_refused_on_empty_list(true), Some(crate::cfg::Cfg::no_connections_refusal()));
         assert_eq!(access_refused_on_empty_list(false), None, "список не пуст — пункт работает как обычно");
     }
 

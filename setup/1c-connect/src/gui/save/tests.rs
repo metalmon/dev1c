@@ -1004,28 +1004,14 @@ fn renaming_a_connection_that_is_not_current_leaves_the_root_current_alone() {
     assert!(!text.contains("\"Ромашка\""), "{text}");
 }
 
-/// Круг починки 1, находка Important 1 ревью: прежний файл с одной секцией
-/// `[host]` — форма эталонного комплекта (`C:\dev1c-connect-kit`). До правки
-/// `rename` писала новое имя в `name` этой секции, а следующее чтение
-/// (`cfg.rs`, разбор `CfgFile`) немедленно затирало его выводом из каталога
-/// базы — переименование не приживалось, окно говорило «готово», а
-/// перечитанный файл называл прежнее имя, да ещё с замечанием «нет такого
-/// соединения».
-#[test]
-fn renaming_sticks_on_the_old_single_host_file_shape() {
-    let mut ui = Ui::for_test();
-    let store = crate::secrets::Store::file(ui.kit.state());
-    let path = ui.kit.state_path(cfg::FILE);
-    std::fs::write(&path, "[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\nserver = \"192.168.1.10:3393\"\n").unwrap();
-    ui.cfg = Cfg::load_unchecked_with(&ui.kit, &store).unwrap();
-    let from = ui.cfg.current().name.clone();
-
-    rename(&mut ui, &from, "Ромашка").unwrap();
-
-    let reread = Cfg::load_unchecked_with(&ui.kit, &store).unwrap();
-    assert_eq!(reread.current().name, "Ромашка", "имя обязано прилипнуть на прежнем файле «[host]»");
-    assert!(reread.read_notes.is_empty(), "перечитанный файл не обязан жаловаться сам на себя: {:?}", reread.read_notes);
-}
+// Круг починки 1, находка Important 1 ревью: прежний файл с одной секцией
+// `[host]` — форма эталонного комплекта (`C:\dev1c-connect-kit`). До правки
+// `rename` писала новое имя в `name` этой секции, а следующее чтение
+// немедленно затирало его выводом из каталога базы — переименование не
+// приживалось. Тест `renaming_sticks_on_the_old_single_host_file_shape`,
+// доказывавший починку, удалён задачей 15 плана «Интерфейс» вместе с самой
+// секцией: файл такой формы теперь отказ словами ещё при разборе, и `rename`
+// на нём просто не вызвать — `ui.cfg` неоткуда взять.
 
 /// Задача 5 плана «Интерфейс»: умолчание новой карточки — профиль, выбранный
 /// для предыдущей (текущей на момент добавления).
@@ -1124,13 +1110,22 @@ fn adding_a_card_before_the_first_save_writes_a_fresh_file() {
 }
 
 /// Круг починки 1, Critical ревью: `add_connection` на файле без блоков
-/// `[[connection]]` (здесь — прежняя форма `[host]`, тот же нулевой счёт)
-/// печатает список целиком из памяти. Если пароль какого-то соединения не
-/// расшифровался на этой машине, он лежит в памяти ПУСТОЙ строкой
-/// (`ui.cfg.undecryptable` называет поле) — наивная печать записала бы это
-/// пустое поле на диск поверх настоящего шифртекста, безвозвратно и молча.
-/// Отказ обязан сработать ДО какой-либо записи, и файл обязан остаться
-/// байт в байт прежним.
+/// `[[connection]]` печатает список целиком из памяти. Если пароль
+/// какого-то соединения не расшифровался на этой машине, он лежит в памяти
+/// ПУСТОЙ строкой (`ui.cfg.undecryptable` называет поле) — наивная печать
+/// записала бы это пустое поле на диск поверх настоящего шифртекста,
+/// безвозвратно и молча. Отказ обязан сработать ДО какой-либо записи, и
+/// файл обязан остаться байт в байт прежним.
+///
+/// Задача 15 плана «Интерфейс» убрала прежнюю секцию `[host]` — до неё
+/// нулевой счёт блоков на НЕпустом файле означал либо свежий комплект, либо
+/// именно её, и фикстура этого теста держала файл старой формы с чужим
+/// шифртекстом внутри. Секция ушла, но сам путь («блоков нет — печатаем из
+/// памяти») остался нужен свежему файлу, и защита от тихой потери чужого
+/// пароля обязана остаться на месте (ровно она чуть не подвела задачу 5) —
+/// фикстура здесь держит руками написанный файл без единого блока, которым
+/// теперь и достигается `disk_count == 0`, без упоминания формы, которой
+/// больше нет.
 ///
 /// «Обратный ход» (проверен руками при подготовке задачи, см. отчёт): без
 /// защиты (`if !ui.cfg.undecryptable.is_empty() { return Err(..) }` в
@@ -1141,15 +1136,15 @@ fn adding_a_card_before_the_first_save_writes_a_fresh_file() {
 /// есть, и она ушла на диск поверх настоящего шифртекста): ровно та потеря
 /// пароля, против которой писан круг починки.
 #[test]
-fn add_connection_refuses_instead_of_wiping_an_unreadable_password_on_the_old_file_shape() {
+fn add_connection_refuses_instead_of_wiping_an_unreadable_password_when_disk_has_no_blocks_yet() {
     let mut ui = Ui::for_test();
     let store = crate::secrets::Store::file(ui.kit.state());
     let name = ui.cfg.current().name.clone();
     let ciphertext = store.seal("password", "секрет с другой машины").unwrap();
     let path = ui.kit.state_path(cfg::FILE);
-    let before = format!("[host]\nbase_path = \"C:\\\\Bases\\\\Buh\"\nserver = \"192.168.1.10:3393\"\npassword = {ciphertext:?}\n");
+    let before = format!("# правка руками, блока [[connection]] тут пока нет\npassword = {ciphertext:?}\n");
     std::fs::write(&path, &before).unwrap();
-    assert_eq!(common::toml_render::count(&before, cfg::CONNECTION), 0, "фикстура: файл без блоков — прежняя форма");
+    assert_eq!(common::toml_render::count(&before, cfg::CONNECTION), 0, "фикстура: файл без единого блока");
 
     // «Чужая машина»: пароль не открылся, поле пустое, имя — в списке
     // непрочитанного, тем же приёмом, что у соседних тестов `save_host`.

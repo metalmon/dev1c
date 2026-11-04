@@ -751,25 +751,34 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
 /// мелочь этой задачи, тот же довод, что Important 1 ревью круга починки 1
 /// нашло у удаления карточки).
 ///
-/// Тип, а не `bool`, тем же приёмом, что `DeleteOnConfirm`: запись и перецикл
-/// сеанса синтаксически недостижимы до варианта `Proceed` — их нельзя
-/// случайно выполнить раньше повторной проверки, переставив строки местами.
+/// Тип, а не `bool`, тем же приёмом, что `DeleteOnConfirm`: запись
+/// (`write_switch_current`) требует имя карточки, и это имя лежит ИМЕННО в
+/// варианте `Proceed`, а не рядом, в параметре функции-обёртки — тем же
+/// грузом, каким `DeleteOnConfirm::Proceed` несёт `stop_session_first`. Без
+/// этого груза «запись недостижима до `Proceed`» было бы утверждением
+/// докстроки, которое ничего не доказывает: `apply_switch_current` могла бы
+/// игнорировать исход и писать по своему же параметру `name` прямо из ветки
+/// `Blocked` — компилятор не возразил бы (круг починки 1 задачи 7,
+/// Minor 2).
 #[derive(Debug, PartialEq, Eq)]
 enum ApplySwitchCurrent {
     /// Отказ словами — ни запись, ни перецикл сеанса не идут, `current`
     /// остаётся прежним.
     Blocked(String),
-    Proceed,
+    /// Можно писать — имя карточки, на которую переключаемся, тем же
+    /// именем, что спросили на входе (`apply_switch_current_decision`
+    /// самой не вольно его придумать — оно только повторяет то, что дали).
+    Proceed(String),
 }
 
-fn apply_switch_current_decision(ui: &Ui) -> ApplySwitchCurrent {
+fn apply_switch_current_decision(ui: &Ui, name: &str) -> ApplySwitchCurrent {
     if mode_change_blocked(ui) {
         // Те же слова, что у отказа ДО вопроса (`panel::run_link_act`,
         // `LinkAct::MakeCurrent`) — находка начала этой же задачи: один
         // повод молчать об одном и том же двумя разными фразами незачем.
         ApplySwitchCurrent::Blocked(format!("Сейчас идёт {} — подождите её завершения и повторите «Сделать текущим».", busy_now_word(ui)))
     } else {
-        ApplySwitchCurrent::Proceed
+        ApplySwitchCurrent::Proceed(name.to_string())
     }
 }
 
@@ -781,16 +790,18 @@ fn apply_switch_current_decision(ui: &Ui) -> ApplySwitchCurrent {
 fn apply_switch_current(cx: &mut App, name: &str) {
     // Отказ (`Blocked`) кончается здесь же, в своей ветке — записи
     // (`write_switch_current`) и перецикла сеанса в ней синтаксически нет:
-    // их видно только внутри `Proceed`, ниже.
-    let name = match apply_switch_current_decision(cx.global::<Ui>()) {
+    // их видно только внутри `Proceed`, и имя, которым она пишет, приходит
+    // ИЗ НЕГО, а не из параметра этой функции — последний только донёс его
+    // до решения, второй раз его в записи не читают.
+    let name = match apply_switch_current_decision(cx.global::<Ui>(), name) {
         ApplySwitchCurrent::Blocked(why) => {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
             cx.refresh_windows();
             return;
         }
-        ApplySwitchCurrent::Proceed => name,
+        ApplySwitchCurrent::Proceed(name) => name,
     };
-    let written = match write_switch_current(cx.global_mut::<Ui>(), name) {
+    let written = match write_switch_current(cx.global_mut::<Ui>(), &name) {
         Ok(w) => w,
         Err(e) => {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
@@ -1726,7 +1737,9 @@ mod tests {
     /// довериться более раннему ответу. `current` здесь не трогаем вовсе:
     /// `apply_switch_current_decision` читает `&Ui`, не `&mut Ui`, и у
     /// заблокированного исхода нет пути к записи — это видно из одной
-    /// сигнатуры, без гарнеса GPUI.
+    /// сигнатуры, без гарнеса GPUI. `Proceed` несёт то же имя, которое
+    /// получила на входе (круг починки 1 задачи 7, Minor 2) — проверяю и
+    /// это, а не только сам факт разрешения.
     #[test]
     fn switching_current_rechecks_the_precondition_at_apply_time() {
         let mut ui = Ui::for_test();
@@ -1734,14 +1747,18 @@ mod tests {
         assert!(!mode_change_blocked(&ui), "в покое предусловие проходит — тест должен ловить именно занятость");
 
         ui.busy = Some(Busy::Project);
-        match apply_switch_current_decision(&ui) {
+        match apply_switch_current_decision(&ui, "Ромашка") {
             ApplySwitchCurrent::Blocked(why) => assert!(why.contains("проверка") && why.contains("Сделать текущим"), "{why}"),
-            ApplySwitchCurrent::Proceed => panic!("занятость обязана отказать, а не разрешить запись"),
+            ApplySwitchCurrent::Proceed(_) => panic!("занятость обязана отказать, а не разрешить запись"),
         }
         assert_eq!(ui.cfg.current, current_before, "отказ не трогает текущее соединение");
 
         ui.busy = None;
-        assert_eq!(apply_switch_current_decision(&ui), ApplySwitchCurrent::Proceed, "в покое запись разрешена");
+        assert_eq!(
+            apply_switch_current_decision(&ui, "Ромашка"),
+            ApplySwitchCurrent::Proceed("Ромашка".to_string()),
+            "в покое запись разрешена, и несёт то же имя"
+        );
     }
 
     /// MEDIUM ревью круга починки 4 задачи 16: перецикл (`recycle_session`,

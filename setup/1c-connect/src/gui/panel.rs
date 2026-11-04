@@ -821,7 +821,7 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
     (Some(Dot::Warn), bad.into(), parts.join(", "))
 }
 
-/// Строка журнала о пароле, который не открылся (задача 4; замысел — «Анти-цели», «человек остался без доступа и не понял почему»): причина — зашифрован другим пользователем или на другой машине, и что делать — ввести заново, с названием каждого такого поля словами человека (`cfg::secret_field_name` — одна формулировка с `gui::save::field_label`, ревью задачи 7, Important 4) и той же причиной, что у командной строки (`cfg::UNDECRYPTABLE_REASON`). `None` — список пуст, расшифровка прошла у обоих полей.
+/// Строка журнала о пароле, который не открылся (задача 4; замысел — «Анти-цели», «человек остался без доступа и не понял почему»): причина — зашифрован другим пользователем или на другой машине, и что делать — ввести заново, с названием каждого такого поля словами человека (`cfg::secret_field_name` — одна формулировка с `gui::save::field_label`, ревью задачи 7, Important 4) и той же причиной, что у командной строки (`cfg::undecryptable_reason`). `None` — список пуст, расшифровка прошла у обоих полей.
 ///
 /// Строку показывает `mod.rs` (`adopt_cfg`) один раз на загрузку параметров, а не на каждый показ окна: оно перечитывает файл при каждом открытии (`window::reread_and_recheck`), и без отдельной метки «уже сказано» тот же нерасшифрованный пароль сыпался бы в журнал на каждый клик по значку трея.
 pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
@@ -844,7 +844,7 @@ pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
     }
     let text = by_card
         .iter()
-        .map(|(card, fields)| format!("Карточка «{card}»: пароль {} — введите {} заново.", cfg::UNDECRYPTABLE_REASON, fields.join(" и ")))
+        .map(|(card, fields)| format!("Карточка «{card}»: {} — введите {} заново.", cfg::undecryptable_reason(false), fields.join(" и ")))
         .collect::<Vec<_>>()
         .join(" ");
     Some(Line { kind: Kind::Warn, text })

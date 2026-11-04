@@ -986,8 +986,11 @@ fn renaming_the_current_connection_rewrites_both_the_block_and_the_root_current(
 /// Переименование карточки на её же нынешнее имя — не правка, а её
 /// отсутствие (Minor круга починки 1 задачи 4, отложенная до этой задачи
 /// нарочно): до этой правки `rename` всё равно читала файл и писала его
-/// назад без единого отличия — лишняя работа и лишняя строка в историю
-/// файла, у которого нет версий.
+/// назад без единого отличия. Из окна этот случай недостижим (`Panel::write`
+/// зовёт `rename` только при изменённом имени) — но `rename` — `pub`
+/// функция, и прямой вызов с тем же именем остаётся законным входом, не
+/// ошибкой программиста; трогать диск под него незачем независимо от того,
+/// бережёт ли это сегодня какого-то конкретного вызывающего.
 ///
 /// Строка `name` в фикстуре нарочно переписана БЕЗ пробелов вокруг `=`
 /// (`toml_render::set_in` ищет ключ без оглядки на пробелы — `t.trim()`), а
@@ -1014,6 +1017,24 @@ fn renaming_a_card_to_its_own_name_touches_no_file() {
         "имя не изменилось — файл не тронут ни байтом (перепись нормализовала бы пробелы вокруг «=»)"
     );
     assert_eq!(ui.cfg.current().name, "Buh");
+}
+
+/// Круг починки 1 задачи 7, Minor 3: «нет такой карточки» отвечает на
+/// другой вопрос, чем «переименование на своё же имя», и обязан прозвучать
+/// первым. До этой правки ранний `Ok(())` (тест выше) стоял раньше проверки
+/// существования, и `rename(ui, "Нет", "Нет")` молча удавался бы — совпали
+/// имена, а не то, что карточка нашлась.
+#[test]
+fn renaming_a_card_that_does_not_exist_is_refused_even_when_the_names_match() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = rename(&mut ui, "Нет", "Нет").unwrap_err();
+
+    assert!(e.contains("в списке нет карточки «Нет»"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
 
 /// Та же запись, но карточка НЕ текущая (список важен для адресации —
@@ -1191,6 +1212,36 @@ fn add_connection_refuses_instead_of_wiping_an_unreadable_password_when_disk_has
 
     let after = std::fs::read_to_string(&path).unwrap();
     assert_eq!(after, before, "отказ — файл не тронут ни на байт, прежний шифртекст цел");
+}
+
+/// Круг починки 1 задачи 7, Important 1: та же защита, что у соседнего
+/// теста выше, но с ДВУМЯ непрочитанными карточками сразу — отказ обязан
+/// читаться во множественном числе целиком (существительное, глагол,
+/// местоимение и хвост «введите пароли заново» — Minor 1 того же круга).
+/// Причина взята из `cfg::undecryptable_reason(true)` ДИНАМИЧЕСКИ, а не
+/// переписана в тесте своим литералом: если `add_connection` однажды
+/// перестанет звать общую функцию и вернёт собственную копию слов, этот
+/// тест поймает расхождение сам, без переписывания руками — ровно то, чего
+/// не хватало до этого круга (`cfg::UNDECRYPTABLE_REASON` раньше была
+/// фразой целиком в единственном числе, и множественная ветка несла свой,
+/// отдельный литерал, за которым никто не следил).
+#[test]
+fn add_connection_refuses_with_a_number_agreeing_reason_for_several_unreadable_cards() {
+    let mut ui = Ui::for_test();
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = "# правка руками, блока [[connection]] тут пока нет\n";
+    std::fs::write(&path, before).unwrap();
+    assert_eq!(common::toml_render::count(before, cfg::CONNECTION), 0, "фикстура: файл без единого блока");
+
+    ui.cfg.current_mut().password = String::new();
+    ui.cfg.undecryptable = vec![cfg::Undecryptable::new("Buh", "password"), cfg::Undecryptable::new("Ромашка", "password")];
+
+    let err = add_connection(&mut ui, "accept").unwrap_err();
+    assert!(err.contains(&cfg::undecryptable_reason(true)), "{err}");
+    assert!(err.contains("карточек") && err.contains("их в окне"), "{err}");
+    assert!(err.contains("введите пароли заново"), "хвост рассогласован числом: {err}");
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ — файл не тронут ни на байт");
 }
 
 /// Круг починки 1, находка Important 2 ревью: занятость имени смотрим не
@@ -1389,22 +1440,31 @@ fn a_folder_conflict_with_a_neighbour_does_not_block_changing_the_profile() {
 }
 
 /// Отложенная мелочь задачи 7 прошлой ветки (`2026-11-03-interface`):
-/// опечатка в наборе инструментов — отказ словами РАНЬШЕ записи, файл не
-/// тронут ни байтом. `set_profile` проверяет значение пробной карточкой
-/// (`Connection::toolset`) до похода к `set_keys`, то есть до чтения файла —
-/// отказ обязан случиться, не дойдя до диска вовсе.
+/// опечатка в наборе инструментов — отказ словами РАНЬШЕ записи. `set_profile`
+/// проверяет значение пробной карточкой (`Connection::toolset`) до похода к
+/// `set_keys`, то есть до чтения файла — отказ обязан случиться, не дойдя до
+/// диска вовсе.
+///
+/// Круг починки 1 задачи 7, Minor 4: первая версия этого теста сравнивала
+/// файл до и после побайтно — но запись ТОГО ЖЕ значения дала бы тот же
+/// байт-в-байт файл, и такое сравнение не отличило бы «диска не касались» от
+/// «прочитали и переписали, не изменив ни байта» (та же ловушка, что чинит
+/// соседний тест переименования на своё имя). Файла на диске здесь просто
+/// НЕТ: если бы отказ случился позже, внутри `set_keys`, первым делом он
+/// наткнулся бы на непрочитанный файл, и текст отказа был бы про файл, а не
+/// про профиль — сам текст теперь и доказывает очерёдность.
 #[test]
 fn an_unknown_profile_refuses_and_leaves_the_file_alone() {
     let mut ui = Ui::for_test();
     with_params_file(&ui);
     let path = ui.kit.state_path(cfg::FILE);
-    let before = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
 
     let e = set_profile(&mut ui, "Buh", "бухгалтер").unwrap_err();
 
     assert!(e.contains("developer") && e.contains("business"), "{e}");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "профиль в памяти не тронут");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert!(!path.exists(), "отказ случился раньше любого обращения к диску — файла как не было, так и нет");
 }
 
 /// Critical круга починки 1 задачи 14. Форма карточки (`panel::host_of`)

@@ -1091,7 +1091,7 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
     }
     let c = resolve_selected(&ui.cfg, selected);
     if c.name != ui.cfg.current().name {
-        return vec![("Переименовать", LinkAct::Rename)];
+        return vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)];
     }
     let connected = ui.link.is_up();
     let accepting = matches!(c.role(), Ok("accept"));
@@ -1108,6 +1108,10 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
         out.push(("Отозвать разрешение", LinkAct::Revoke));
     }
     out.push(("Переименовать", LinkAct::Rename));
+    // Необратимое — последним: спека («Удалить соединение» ниже всех
+    // обратимых пунктов), и пустой список сюда не доходит вовсе — ранний
+    // отказ выше уже вернул пустое меню, когда удалять нечего.
+    out.push(("Удалить соединение", LinkAct::Delete));
     out
 }
 
@@ -1145,6 +1149,11 @@ pub enum LinkAct {
     /// потому что её прибивает спека.
     ShowCode,
     Revoke,
+    /// Удалить карточку из настроек — решение владельца 4.11, дословно:
+    /// «давать, папку не трогать». Последний пункт меню у обеих ветвей
+    /// `link_menu` (задача 3 плана «Карточка публикации и удаление»):
+    /// необратимое действие не встаёт выше обратимых.
+    Delete,
 }
 
 /// Что сказать в журнал на действие, которого в продукте ещё нет. `None` —
@@ -1158,6 +1167,21 @@ pub fn act_not_yet(act: LinkAct) -> Option<&'static str> {
         LinkAct::Revoke => Some("Отзыв разрешения появится вместе с протоколом — его в программе пока нет"),
         _ => None,
     }
+}
+
+/// Заголовок и подробность вопроса перед «Удалить соединение» — тем же
+/// платформенным диалогом, что уже спрашивает при смене базы
+/// (`panel::run_project_op` зовёт `gui::ask_yes_no`, `save::confirm_database_change`
+/// — тот же образец). Слова обязаны сказать человеку ровно то, что умеет
+/// `save::delete_connection` на деле (решение владельца 4.11, дословно:
+/// «давать, папку не трогать»): пропадает только запись в настройках, а
+/// папка, база и выгруженные файлы остаются на месте — иначе «удалить»
+/// прочиталось бы как «стереть всё».
+pub fn delete_question_text(name: &str) -> (String, String) {
+    (
+        format!("Удалить соединение «{name}»?"),
+        "Из списка пропадёт только запись в настройках — папка, база и выгруженные файлы останутся на месте.".to_string(),
+    )
 }
 
 /// Отметки строки списка одной строкой: слово состояния, отметка «текущее»,
@@ -1227,6 +1251,55 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             let focus = p.read(cx).fields.name.read(cx).focus_handle(cx);
             focus.focus(window, cx);
             cx.refresh_windows();
+        }
+        // Удалить — вопрос первым, отказ предусловий раньше вопроса: нет
+        // смысла спрашивать «удалить?» про то, что и так откажет
+        // (`save::delete_blocked_reason`, та же проверка, которую внутри
+        // себя повторяет `save::delete_connection`). Вопрос — тот же
+        // платформенный диалог, что у смены базы (`run_project_op`,
+        // `save::confirm_database_change`); кнопка согласия называет само
+        // действие («Да, удалить»), а не «Да» — человек читает её последней.
+        LinkAct::Delete => {
+            if let Some(why) = gui::delete_blocked_reason(cx.global::<Ui>(), subject) {
+                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+                cx.refresh_windows();
+                return;
+            }
+            let (message, detail) = delete_question_text(subject);
+            let name = subject.to_string();
+            gui::ask_yes_no(window, cx, &message, &detail, "Да, удалить", "Отмена", true, move |window, cx| {
+                // Сеанс обслуживает базу ПОСЛЕДНЕЙ карточки — гасим его
+                // здесь, ДО вызова `delete_connection`: `Ui` без `App`
+                // сеансом не управляет (докстрока `delete_connection`), а
+                // проводка окна — ровно то место, которому обещан `App`.
+                if gui::is_last_connection(cx.global::<Ui>()) {
+                    gui::link::stop_session(cx);
+                }
+                match gui::delete_connection(cx.global_mut::<Ui>(), &name) {
+                    Ok(()) => {
+                        // Отказ гашения публикации внутри `delete_connection`
+                        // не меняет настроек вовсе (её докстрока) — а значит и
+                        // выбор панели трогать нельзя: карточка осталась как
+                        // была, и сбрасывать открытую строку значило бы
+                        // соврать, что удаление случилось.
+                        let (cfg, panel) = {
+                            let ui = cx.global::<Ui>();
+                            (ui.cfg.clone(), ui.panel.clone())
+                        };
+                        if let Some(p) = panel {
+                            // Пустое имя — заведомый откат на текущее
+                            // (`resolve_selected`), а на пустом списке и это
+                            // пустышка-умолчание (`Cfg::current()`, не
+                            // `current_mut()` — фантомную карточку сюда не
+                            // заводим). Открытая карточка больше не держит
+                            // удалённую ни в выборе, ни в `original`.
+                            p.update(cx, |this, cx| this.select(&cfg, "", window, cx));
+                        }
+                    }
+                    Err(e) => gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }),
+                }
+                cx.refresh_windows();
+            });
         }
         LinkAct::Save | LinkAct::ShowCode | LinkAct::Revoke => {}
     }
@@ -3068,9 +3141,9 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, fact_rows, fields_differ,
-        folder_label, foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show, op_question,
-        pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint,
+        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_question_text, fact_rows,
+        fields_differ, folder_label, foot_left_text, found_text, leave_question, link_body, link_menu, main_button, nothing_to_show,
+        op_question, pick_face, profile_label, project_facts, project_menu, project_rows, reason, resolve_selected, row_marks, save_hint,
         shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body,
         Dirty, LinkAct, ProjectMenu, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
     };
@@ -4087,10 +4160,34 @@ mod tests {
         ui_for("dial", "tunnel", false)
     }
 
+    /// Та же карточка, что `ui_link_current` — звонящая, текущая, не
+    /// подключена. Своё имя для задачи 3 плана «Карточка публикации и
+    /// удаление»: переименовывать `ui_link_current` в это имя — работа
+    /// последней задачи плана (решение ведущего), и до неё в дереве живут
+    /// обе подписи на один и тот же помощник.
+    fn ui_dial_current() -> Ui {
+        ui_for("dial", "tunnel", false)
+    }
+
+    /// Две карточки в списке, предмет теста — ВТОРАЯ, чужая текущему
+    /// («Василёк»): у таких `link_menu` не отдаёт пунктов связи вовсе
+    /// (задача 14), и меню — это «Переименовать» и «Удалить соединение».
+    fn ui_other_card() -> Ui {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
+        ui
+    }
+
     /// Подписи пунктов меню «Связи» для предмета по умолчанию (открытой
     /// карточки нет — предмет текущее соединение).
     fn menu_labels(ui: &Ui) -> Vec<&'static str> {
         link_menu(ui, "").iter().map(|(l, _)| *l).collect()
+    }
+
+    /// То же самое, но для НАЗВАННОЙ (не по умолчанию) строки списка —
+    /// `menu_labels` не умеет чужую карточку, ей нет где взять `selected`.
+    fn menu_labels_of(ui: &Ui, selected: &str) -> Vec<&'static str> {
+        link_menu(ui, selected).iter().map(|(l, _)| *l).collect()
     }
 
     #[test]
@@ -4113,7 +4210,7 @@ mod tests {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
         ui.link = State::Up { since: Instant::now() };
-        assert_eq!(link_menu(&ui, "Василёк"), vec![("Переименовать", LinkAct::Rename)]);
+        assert_eq!(link_menu(&ui, "Василёк"), vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)]);
         assert!(menu_labels(&ui).contains(&"Отключиться"), "у текущей карточки связь своя");
     }
 
@@ -4125,28 +4222,59 @@ mod tests {
     #[test]
     fn link_items_carry_their_own_actions_not_project_operations() {
         let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "").iter().map(|(_, a)| *a).collect();
-        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::Rename]);
+        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::Rename, LinkAct::Delete]);
         // Того, чего в продукте ещё нет, пункт не делает молча — говорит
         // словами; у настоящих действий объяснять нечего.
         assert!(act_not_yet(LinkAct::ShowCode).unwrap().contains("протоколом"));
         assert!(act_not_yet(LinkAct::Revoke).unwrap().contains("протоколом"));
-        for real in [LinkAct::Save, LinkAct::Toggle, LinkAct::MakeCurrent, LinkAct::Rename] {
+        for real in [LinkAct::Save, LinkAct::Toggle, LinkAct::MakeCurrent, LinkAct::Rename, LinkAct::Delete] {
             assert_eq!(act_not_yet(real), None, "{real:?} — настоящее действие, оно делается, а не объясняется");
         }
     }
 
     /// Круг починки 2: соседний тест проверяет лишь поимённо вспомненные
-    /// подписи (`contains`/`!contains`) и не заметит ни лишнего пункта
-    /// (ровно так в список однажды попало «Удалить соединение», которого
-    /// нет ни в спеке, ни в коде), ни нового машинного переключателя под
-    /// другим именем. Здесь — равенство ВСЕГО списка для одного
-    /// представительного предмета: принимающая карточка, не подключённая.
-    /// Ловит оба класса ошибок разом, и достаточно одного такого теста —
-    /// на каждое состояние так делать не надо, иначе правка слова валила
-    /// бы по пять тестов вместо одного.
+    /// подписи (`contains`/`!contains`) и не заметит ни лишнего пункта (в
+    /// прошлой ветке в список однажды попало «Удалить соединение», которого
+    /// тогда не было ни в спеке, ни в коде), ни нового машинного
+    /// переключателя под другим именем. Здесь — равенство ВСЕГО списка для
+    /// одного представительного предмета: принимающая карточка, не
+    /// подключённая. Ловит оба класса ошибок разом, и достаточно одного
+    /// такого теста — на каждое состояние так делать не надо, иначе правка
+    /// слова валила бы по пять тестов вместо одного.
+    ///
+    /// Задача 3 добавила «Удалить соединение» ПОСЛЕДНИМ пунктом: теперь он
+    /// есть и в спеке, и в коде, и список здесь обязан называть его явно, а
+    /// не молчать о нём — иначе этот самый тест перестал бы ловить ровно
+    /// ту ошибку, ради которой он заведён.
     #[test]
     fn the_link_menu_lists_exactly_these_items_for_one_subject() {
-        assert_eq!(link_menu(&ui_link_accept_waiting(), ""), vec![("Показать код", LinkAct::ShowCode), ("Переименовать", LinkAct::Rename)],);
+        assert_eq!(
+            link_menu(&ui_link_accept_waiting(), ""),
+            vec![("Показать код", LinkAct::ShowCode), ("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)],
+        );
+    }
+
+    /// Шаг 1 задачи 3 плана «Карточка публикации и удаление»: «Удалить
+    /// соединение» стоит ПОСЛЕДНИМ в меню у обеих карточек — текущей (с
+    /// полным набором обратимых пунктов перед ним) и чужой (с одним
+    /// «Переименовать»), — и список проверен ПОЛНЫМ равенством, а не
+    /// `contains` (урок круга починки 2 выше: `contains` не заметил бы
+    /// лишний пункт).
+    #[test]
+    fn the_menu_of_a_card_ends_with_delete_and_the_whole_list_is_pinned() {
+        assert_eq!(menu_labels(&ui_dial_current()), vec!["Подключиться", "Переименовать", "Удалить соединение"]);
+        assert_eq!(menu_labels_of(&ui_other_card(), "Василёк"), vec!["Переименовать", "Удалить соединение"]);
+    }
+
+    /// Вопрос перед удалением называет карточку по имени и обещает словами
+    /// решение владельца 4.11 («давать, папку не трогать»): пропадает
+    /// только запись в настройках, а папка, база и выгруженные файлы
+    /// остаются на месте.
+    #[test]
+    fn the_delete_question_names_the_card_and_promises_the_folder_stays() {
+        let (message, detail) = delete_question_text("Ромашка");
+        assert!(message.contains("«Ромашка»"), "{message}");
+        assert!(detail.contains("папка") && detail.contains("останут"), "{detail}");
     }
 
     /// Связи на соединение в продукте нет — `link::list` ждёт заглушки, и

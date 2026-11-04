@@ -967,6 +967,66 @@ fn a_name_already_taken_is_refused_and_touches_nothing() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
 
+/// Первую карточку можно НАЗВАТЬ (решение ведущего, третья волна починки по
+/// ревью всей ветки). Только что заведённая карточка пуста — ровно такой её
+/// отдаёт ответ онбординга, — и `rename` спрашивает у списка правила списка
+/// (`Cfg::validate_list`), а не полноту полей.
+///
+/// Чем это было: `panel::Panel::write` зовёт `rename` ПЕРВЫМ и на его отказе
+/// останавливает всё («записывать поля под именем, которого человек не
+/// получил, не за что»), а `rename` проверял `ui.cfg`, куда поля из формы
+/// ещё не попали — их кладёт `save_host`, до которого дело не доходит.
+/// Человек на первом экране заводил карточку, вписывал имя И путь к базе,
+/// жал «Сохранить» — и читал отказ «base_path — путь к базе» про поле,
+/// которое только что заполнил. Назвать первую карточку было нельзя вовсе.
+#[test]
+fn a_freshly_created_card_can_be_given_a_name_before_its_fields_are_filled() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.clear();
+    ui.cfg.current = String::new();
+    let made = add_connection(&mut ui, "accept").unwrap();
+
+    rename(&mut ui, &made, "Бухгалтерия").unwrap();
+
+    assert!(ui.cfg.by_name("Бухгалтерия").is_some(), "новое имя в памяти");
+    assert!(ui.cfg.by_name(&made).is_none(), "прежнего имени в памяти больше нет");
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("name = \"Бухгалтерия\""), "и в файле:\n{text}");
+    assert!(!text.contains(&format!("{made:?}")), "прежнего имени в файле не осталось:\n{text}");
+}
+
+/// Ослаблена ТОЛЬКО полнота полей карточки: правила СПИСКА переименование
+/// держат целиком. Файл с двумя карточками к одной базе (или с вложенными
+/// папками) человек может завести руками, и смена имени в таком файле
+/// отказывает, как раньше, — иначе `rename` молча пронесла бы мимо парных
+/// запретов то, что `save_host` отвергает.
+#[test]
+fn renaming_still_obeys_the_rules_of_the_list() {
+    // Две карточки к ОДНОЙ базе — запрет учебной лицензии.
+    let mut ui = Ui::for_test();
+    ui.cfg
+        .connections
+        .push(Connection { name: "Ромашка".into(), project: "C:\\proj\\Ромашка".into(), ..ui.cfg.current().clone() });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+    let e = rename(&mut ui, "Ромашка", "Василёк").unwrap_err();
+    assert!(e.contains("одна база, одно соединение"), "{e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+
+    // Папка одной вложена в папку другой — запрет про потерю файлов.
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Buh\\inner".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let e = rename(&mut ui, "Ромашка", "Василёк").unwrap_err();
+    assert!(e.contains("папка принадлежит одному соединению"), "{e}");
+}
+
 /// Переименование текущей карточки обязано переписать оба места, где живёт
 /// её имя: собственный блок и корневой `current` — иначе файл остался бы со
 /// ссылкой на имя, которого в списке больше нет.

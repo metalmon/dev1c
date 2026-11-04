@@ -522,7 +522,7 @@ impl TryFrom<CfgFile> for Cfg {
     fn try_from(f: CfgFile) -> std::result::Result<Cfg, String> {
         if f.host.is_some() {
             return Err(format!(
-                "{FILE}: файл старой формы — секция [host] вместо списка соединений. Замените её блоком [[connection]] (образец рядом — 1c-connect.example.toml) или откройте окно (1c-connect gui) и настройте соединение там."
+                "{FILE}: файл старой формы — секция [host] вместо списка соединений. Замените её блоком [[connection]] по образцу из 1c-connect.example.toml или откройте окно (1c-connect gui) и настройте соединение там."
             ));
         }
         let mut connections = f.connection;

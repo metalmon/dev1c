@@ -4,13 +4,15 @@
 //! из задачи-читателя в `mod.rs::handle`.
 
 use super::{
-    autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, note_line, quit, run_check,
-    run_readiness, save_host, save_needs_confirm, save_tray_key, start_session, stop_session, switch_current, tab_for_unsaved_switch,
-    theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
+    ensure_publication_now, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm, save_tray_key,
+    start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link, window, Ev, Kind, Line, Tab,
+    TrayState, Ui, TRAY_PNG,
 };
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
+use std::sync::atomic::Ordering;
 use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -514,6 +516,17 @@ fn raise_session_after_mode_change(mode: &str, gate: Option<&str>) -> bool {
     mode == "local" || gate.is_none()
 }
 
+/// Поднимать ли сеанс после перецикла (`recycle_session`) — MEDIUM ревью
+/// круга починки 4 задачи 16: `raise_session_after_mode_change` одна не
+/// видит выключатель, и переключение текущего при ВЫКЛЮЧЕННЫХ MCP поднимало
+/// сеанс, обходя единственное, что человек может нажать без окна. Живой
+/// сеанс можно перезапустить; выключенный обязан остаться выключенным —
+/// `was_enabled` читается ДО перецикла (сам перецикл `enabled` не трогает,
+/// так что «до» и «во время» здесь одно и то же значение).
+fn should_raise_session(was_enabled: bool, mode: &str, gate: Option<&str>) -> bool {
+    was_enabled && raise_session_after_mode_change(mode, gate)
+}
+
 /// Записать новый режим и поднять сеанс заново. Зовётся после согласия
 /// человека (`confirm_database_change`), поэтому `ui.cfg.current().mode` правится
 /// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
@@ -581,6 +594,11 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
 /// «можно ли обслуживать на только что записанных параметрах», и он
 /// буквально годится переключению текущего: замок один на машину, не на
 /// повод смены.
+///
+/// Подъём сеанса в конце — через `should_raise_session`, а не напрямую
+/// через `raise_session_after_mode_change` (MEDIUM ревью круга починки 4):
+/// выключенное обслуживание обязано остаться выключенным, и перецикл не
+/// обходит переключатель.
 fn recycle_session(cx: &mut App) {
     run_readiness(cx.global_mut::<Ui>());
     let mode = cx.global::<Ui>().cfg.current().mode.clone();
@@ -595,7 +613,8 @@ fn recycle_session(cx: &mut App) {
     // недействителен; `stop_session` безвредна, если сеанса и не было.
     stop_session(cx);
     let ui = cx.global::<Ui>();
-    if raise_session_after_mode_change(&ui.cfg.current().mode, ui.gate.as_deref()) {
+    let was_enabled = ui.enabled.load(Ordering::Relaxed);
+    if should_raise_session(was_enabled, &ui.cfg.current().mode, ui.gate.as_deref()) {
         if let Err(e) = start_session(cx.global_mut::<Ui>()) {
             note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
         }
@@ -703,18 +722,76 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
     }
 }
 
-/// Записать новое текущее соединение и перецикл сеанса (`recycle_session`) —
-/// хвост `request_switch_current`, вызванный либо сразу, либо из согласия
-/// диалога. Отказ `switch_current` (имя исчезло между вопросом и ответом) —
-/// строка в журнал, перецикл не зовём: нечего переключать.
+/// Записать новое текущее соединение, переустановить публикацию и перецикл
+/// сеанса (`recycle_session`) — хвост `request_switch_current`, вызванный
+/// либо сразу, либо из согласия диалога. Отказ `switch_current` (имя
+/// исчезло между вопросом и ответом) — строка в журнал, дальше не идём:
+/// нечего переключать.
+///
+/// **HIGH ревью круга починки 4 задачи 16.** `recycle_session` гасит и
+/// поднимает сеанс, но публикации не касается — а httpd после переключения
+/// продолжал бы публиковать ПРЕЖНЮЮ базу: сеанс новый, публикация ещё
+/// старая, агент может получить данные не той базы, которую показывает
+/// окно. Тем же путём, что `save_host` (`descriptor_changed` →
+/// `republish_after_save` → `ensure_publication_now`), и своего второго
+/// способа публиковать не заводим. Порядок — публикация РАНЬШЕ перецикла
+/// сеанса, тот же, что в `save_host`: ребёнок моста пойдёт по
+/// опубликованному адресу.
+///
+/// Прежний свой httpd (если мы его поднимали, `ui.raised_publication`) гасим
+/// безусловно, как только база сменилась — он публикует адрес, которого
+/// больше нет у текущего соединения, и состояние публикации не должно
+/// рапортовать «готово» про него. Решение «поднимать ли новую» — через
+/// `republish_after_save`, со `was_enabled` на месте «обслуживания» (ruling:
+/// переустанавливаем только когда MCP включены, а не по наличию старого
+/// сеанса — к этому моменту `recycle_session` его ещё не трогала).
 fn apply_switch_current(cx: &mut App, name: &str) {
+    let was_enabled = cx.global::<Ui>().enabled.load(Ordering::Relaxed);
+    let old_host = cx.global::<Ui>().cfg.current().clone();
+    let raised_publication = cx.global::<Ui>().raised_publication;
     if let Err(e) = switch_current(cx.global_mut::<Ui>(), name) {
         note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
         cx.refresh_windows();
         return;
     }
+    let base_changed = descriptor_changed(cx.global::<Ui>().cfg.current(), &old_host);
+    let what = publication_after_switch(base_changed, was_enabled, raised_publication);
+    if what.stop_old {
+        let ui = cx.global_mut::<Ui>();
+        ui.raised_publication = false;
+        let ctx = super::quiet_ctx(ui);
+        if let Err(e) = crate::ops_host::stop_own_publication(&ctx) {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("HTTP-сервис прежней базы не остановлен: {e:#}") });
+        }
+    }
+    if what.raise_new {
+        ensure_publication_now(cx.global_mut::<Ui>());
+    }
     recycle_session(cx);
     cx.refresh_windows();
+}
+
+/// Что сделать с публикацией после переключения текущего — чистое ядро
+/// публикационной половины `apply_switch_current` (HIGH ревью круга
+/// починки 4 задачи 16), под тестом без гарнеса: сама обвязка
+/// (`ops_host::stop_own_publication`, `ensure_publication_now`) трогает
+/// диск и сеть, а решение «нужно ли» от них не зависит.
+///
+/// `stop_old` — гасить прежний свой httpd БЕЗУСЛОВНО, как только база
+/// сменилась (`base_changed`), независимо от `was_enabled`: он публикует
+/// адрес, которого больше нет у текущего соединения, и оставлять его
+/// висеть значило бы, что состояние публикации рапортует «готово» про
+/// прежний адрес. `raise_new` — тем же правилом, что `republish_after_save`
+/// у `save_host`, но со `was_enabled` на месте «обслуживания» (ruling круга
+/// 4: переустанавливаем публикацию только когда MCP включены).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PublicationAfterSwitch {
+    pub(crate) stop_old: bool,
+    pub(crate) raise_new: bool,
+}
+
+fn publication_after_switch(base_changed: bool, was_enabled: bool, raised_publication: bool) -> PublicationAfterSwitch {
+    PublicationAfterSwitch { stop_old: base_changed && raised_publication, raise_new: republish_after_save(base_changed, was_enabled) }
 }
 
 /// Сменить режим ТЕКУЩЕГО соединения — общая последовательность, которую
@@ -1128,8 +1205,9 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         access_not_applied_line, agent_available, agent_checked, agent_menu_id, icon_rgba, menu_action, mode_change_blocked,
-        raise_session_after_mode_change, save_host, switch_current_outcome, toggle_enabled, unsaved_switch_line, Kind, MenuAction,
-        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
+        publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled,
+        unsaved_switch_line, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU,
+        AGENTS_SUBMENU, MODES, PUBLICATIONS, PUBLICATION_SUBMENU,
     };
     use crate::editors;
     use crate::gui::theme;
@@ -1437,6 +1515,36 @@ mod tests {
         assert_eq!(switch_current_outcome(true, false), SwitchCurrentOutcome::Blocked);
         assert_eq!(switch_current_outcome(false, true), SwitchCurrentOutcome::NeedsConfirm);
         assert_eq!(switch_current_outcome(false, false), SwitchCurrentOutcome::Proceed);
+    }
+
+    /// MEDIUM ревью круга починки 4 задачи 16: перецикл (`recycle_session`,
+    /// общий для смены режима и переключения текущего) не поднимает сеанс,
+    /// если обслуживание было выключено ДО переключения — выключенный
+    /// переключатель не обходится ни одним из этих двух действий.
+    #[test]
+    fn should_raise_session_keeps_a_disabled_switch_off() {
+        assert!(!should_raise_session(false, "tunnel", None), "MCP выключены — перецикл не включает их обратно");
+        assert!(!should_raise_session(false, "local", None), "выключено значит выключено даже в локальном режиме");
+        assert!(should_raise_session(true, "tunnel", None), "живой сеанс можно перезапустить");
+        assert!(!should_raise_session(true, "tunnel", Some("замок")), "замок всё равно сильнее включённого выключателя");
+    }
+
+    /// HIGH ревью круга починки 4 задачи 16: после переключения текущего
+    /// публикация обязана переехать на новую базу, а чужой (нашей же, но
+    /// прежней) больше не висеть — независимо от того, включено ли сейчас
+    /// обслуживание (гасить прежний httpd нужно всегда, раз база сменилась;
+    /// поднимать новую публикацию — только когда включено, тем же правилом,
+    /// что у `save_host`/`republish_after_save`).
+    #[test]
+    fn publication_after_switch_stops_the_old_one_and_only_raises_the_new_when_enabled() {
+        // База не изменилась — публикация прежней базы ещё в силе, трогать нечего.
+        assert_eq!(publication_after_switch(false, true, true), PublicationAfterSwitch { stop_old: false, raise_new: false });
+        // База изменилась, свой httpd был поднят, MCP включены — гасим старый и поднимаем новый.
+        assert_eq!(publication_after_switch(true, true, true), PublicationAfterSwitch { stop_old: true, raise_new: true });
+        // MCP выключены — новую публикацию не поднимаем, но прежний свой httpd всё равно гасим: он держит адрес, которого у текущего соединения больше нет.
+        assert_eq!(publication_after_switch(true, false, true), PublicationAfterSwitch { stop_old: true, raise_new: false });
+        // Свой httpd не поднимали (публикует веб-сервер) — гасить нечего, но новую, если включено, всё равно переустанавливаем.
+        assert_eq!(publication_after_switch(true, true, false), PublicationAfterSwitch { stop_old: false, raise_new: true });
     }
 
     #[test]

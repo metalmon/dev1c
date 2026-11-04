@@ -1890,3 +1890,65 @@ fn set_keys_refuses_a_patch_that_breaks_the_card_and_writes_nothing() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
 }
+
+/// Important 1 круга починки 1: все тесты `set_base_here` до этого круга
+/// проверяли только `ui.cfg` и состав полей — ни один не смотрел на
+/// записанный ТЕКСТ. Поставь вокруг `base_here` кавычки — эти тесты остались
+/// бы зелёными, а файл стал бы негодным (`base_here` там не строка, и
+/// следующая загрузка отвергла бы его целиком). Тест смотрит на оба конца:
+/// и на написание (без кавычек), и — важнее — на то, что файл целиком
+/// разбирается `toml::from_str`, потому что это держит смысл, а не только
+/// внешний вид строки.
+#[test]
+fn set_base_here_writes_the_toml_bool_without_quotes_and_the_file_still_parses() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+
+    set_base_here(&mut ui, "Buh", false).unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("base_here = false"), "булево пишется без кавычек:\n{text}");
+    assert!(!text.contains("base_here = \"false\""), "и не строкой в кавычках:\n{text}");
+    let back: Cfg = toml::from_str(&text).expect("файл после записи обязан разбираться целиком");
+    assert!(!back.current().base_here, "и смысл тот же после перечитывания");
+}
+
+/// Important 2 круга починки 1: `base_here` разбирается строго
+/// (`str::parse::<bool>`), а не терпит произвольную строку. До починки
+/// `value == "true"` читала любое чужое значение как `false` молча, унося на
+/// диск неразбираемый токен (`base_here = yes`) и оставляя в памяти неверное
+/// булево — диск и память расходились бы без единого слова отказа. Отказ —
+/// до какой-либо записи, файл не тронут ни байтом.
+#[test]
+fn set_keys_refuses_an_unparsable_base_here_and_touches_nothing() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_keys(&mut ui, "Buh", &[("base_here", "yes")]).unwrap_err();
+
+    assert!(e.contains("base_here"), "отказ называет ключ: {e}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+    assert!(ui.cfg.by_name("Buh").unwrap().base_here, "и в памяти умолчание не тронуто");
+}
+
+/// Minor 1 круга починки 1: пустой список ключей — не правка, а её
+/// отсутствие, и функция даже не обязана искать карточку по имени — для
+/// пустой правки оно ей не нужно. Лучшее доказательство — ИМЯ, которого в
+/// списке нет: до починки `set_keys` сначала читала бы файл и искала бы
+/// карточку (`connection_named`), отказывая про опечатку в имени, хотя для
+/// пустой правки и имя, и файл не при чём. Проверка на байт файла здесь
+/// лишь подтверждает, что отказа не произошло молча вместо успеха — главное
+/// в `.unwrap()` на неизвестном имени.
+#[test]
+fn set_keys_with_no_keys_touches_nothing_not_even_for_an_unknown_name() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    set_keys(&mut ui, "Чего-то такого нет", &[]).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "пустой список — файл не тронут");
+}

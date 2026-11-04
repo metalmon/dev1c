@@ -741,12 +741,55 @@ pub(crate) fn request_switch_current(cx: &mut App, name: &str) -> bool {
 /// публикации, начатой уже ПОСЛЕ переключения, и это законный случай, не
 /// гонка.
 ///
+/// Что делать в момент ПРИМЕНЕНИЯ «Сделать текущим» — отдельно от решения
+/// `request_switch_current` (которое смотрит на предусловие ДО вопроса, а
+/// вопрос нужен не всегда). Диалог не отнимает у окна фокус (та же спека, на
+/// которой стоит `panel::delete_on_confirm`), и между вопросом и «Да,
+/// сделать текущим» человек успевает запустить проверку, операцию или
+/// публикацию — предусловие обязано быть пересчитано ЗАНОВО здесь, в момент
+/// согласия, а не взято из того, что было верно до вопроса (отложенная
+/// мелочь этой задачи, тот же довод, что Important 1 ревью круга починки 1
+/// нашло у удаления карточки).
+///
+/// Тип, а не `bool`, тем же приёмом, что `DeleteOnConfirm`: запись и перецикл
+/// сеанса синтаксически недостижимы до варианта `Proceed` — их нельзя
+/// случайно выполнить раньше повторной проверки, переставив строки местами.
+#[derive(Debug, PartialEq, Eq)]
+enum ApplySwitchCurrent {
+    /// Отказ словами — ни запись, ни перецикл сеанса не идут, `current`
+    /// остаётся прежним.
+    Blocked(String),
+    Proceed,
+}
+
+fn apply_switch_current_decision(ui: &Ui) -> ApplySwitchCurrent {
+    if mode_change_blocked(ui) {
+        // Те же слова, что у отказа ДО вопроса (`panel::run_link_act`,
+        // `LinkAct::MakeCurrent`) — находка начала этой же задачи: один
+        // повод молчать об одном и том же двумя разными фразами незачем.
+        ApplySwitchCurrent::Blocked(format!("Сейчас идёт {} — подождите её завершения и повторите «Сделать текущим».", busy_now_word(ui)))
+    } else {
+        ApplySwitchCurrent::Proceed
+    }
+}
+
 /// Запись и решение «что делать с публикацией» вынесены в `write_switch_current`
 /// (берёт и возвращает только `Ui`, без `App`) — круг починки 5 задачи 16:
 /// находку «`ctx` смотрит на новую карточку» без этого нельзя было бы
 /// покрыть тестом вовсе (GPUI-гарнеса в дереве нет), а так под тестом —
 /// именно тот `Ctx`, который эта функция передаст `stop_own_publication`.
 fn apply_switch_current(cx: &mut App, name: &str) {
+    // Отказ (`Blocked`) кончается здесь же, в своей ветке — записи
+    // (`write_switch_current`) и перецикла сеанса в ней синтаксически нет:
+    // их видно только внутри `Proceed`, ниже.
+    let name = match apply_switch_current_decision(cx.global::<Ui>()) {
+        ApplySwitchCurrent::Blocked(why) => {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+            cx.refresh_windows();
+            return;
+        }
+        ApplySwitchCurrent::Proceed => name,
+    };
     let written = match write_switch_current(cx.global_mut::<Ui>(), name) {
         Ok(w) => w,
         Err(e) => {
@@ -1305,10 +1348,11 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id, busy_now_word, icon_rgba,
-        menu_action, mode_change_blocked, publication_after_switch, raise_session_after_mode_change, save_host, should_raise_session,
-        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_switch_current, Kind, MenuAction,
-        PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
+        access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id,
+        apply_switch_current_decision, busy_now_word, icon_rgba, menu_action, mode_change_blocked, publication_after_switch,
+        raise_session_after_mode_change, save_host, should_raise_session, switch_current_outcome, toggle_enabled, unsaved_publication_keys,
+        unsaved_switch_line, write_switch_current, ApplySwitchCurrent, Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome,
+        TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1673,6 +1717,31 @@ mod tests {
         assert_eq!(switch_current_outcome(true, false), SwitchCurrentOutcome::Blocked);
         assert_eq!(switch_current_outcome(false, true), SwitchCurrentOutcome::NeedsConfirm);
         assert_eq!(switch_current_outcome(false, false), SwitchCurrentOutcome::Proceed);
+    }
+
+    /// Отложенная мелочь этой задачи: диалог «Сделать текущим» не отнимает
+    /// фокус окна, и между вопросом (где предусловие уже проверено один раз,
+    /// `switch_current_outcome` выше) и согласием человек успевает запустить
+    /// проверку — применение обязано переспросить предусловие ЗАНОВО, а не
+    /// довериться более раннему ответу. `current` здесь не трогаем вовсе:
+    /// `apply_switch_current_decision` читает `&Ui`, не `&mut Ui`, и у
+    /// заблокированного исхода нет пути к записи — это видно из одной
+    /// сигнатуры, без гарнеса GPUI.
+    #[test]
+    fn switching_current_rechecks_the_precondition_at_apply_time() {
+        let mut ui = Ui::for_test();
+        let current_before = ui.cfg.current.clone();
+        assert!(!mode_change_blocked(&ui), "в покое предусловие проходит — тест должен ловить именно занятость");
+
+        ui.busy = Some(Busy::Project);
+        match apply_switch_current_decision(&ui) {
+            ApplySwitchCurrent::Blocked(why) => assert!(why.contains("проверка") && why.contains("Сделать текущим"), "{why}"),
+            ApplySwitchCurrent::Proceed => panic!("занятость обязана отказать, а не разрешить запись"),
+        }
+        assert_eq!(ui.cfg.current, current_before, "отказ не трогает текущее соединение");
+
+        ui.busy = None;
+        assert_eq!(apply_switch_current_decision(&ui), ApplySwitchCurrent::Proceed, "в покое запись разрешена");
     }
 
     /// MEDIUM ревью круга починки 4 задачи 16: перецикл (`recycle_session`,

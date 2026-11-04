@@ -568,6 +568,50 @@ fn captions_appear_only_when_the_list_holds_more_than_one_role() {
     assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам", "На этой машине"]);
 }
 
+/// Задача 7 плана «Карточка публикации и удаление»: карточка с неизвестной
+/// ролью в файле (правка руками, опечатка) — не «принимаю подключения» по
+/// умолчанию замыкания `category`, а своя, честная группа. `role()` у такой
+/// карточки отдаёт `Err`, и прежний код читал это как «не dial», то есть
+/// молча клал её в первую группу — экран обещал бы человеку то, чего в
+/// файле нет (находка ревью: `Connection::validate` эту карточку отказом не
+/// пропустит, а значит сюда она попадает только из непрочитанного заново
+/// списка — то же окно, что уже открыто, пока файл правят руками).
+#[test]
+fn a_card_with_an_unreadable_role_does_not_stand_under_the_accepting_caption() {
+    let cfg = Cfg {
+        connections: vec![
+            Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
+            Connection { name: "Сервер".into(), mode: "tunnel".into(), role: "сервер".into(), ..Default::default() },
+        ],
+        ..Default::default()
+    };
+    let l = list(&cfg, &none);
+    let mut seen_unknown_caption = false;
+    let mut row_group: Option<&'static str> = None;
+    for e in &l {
+        match e {
+            Entry::Caption(c) => {
+                if *c == "Роль не распознана" {
+                    seen_unknown_caption = true;
+                }
+            }
+            Entry::Row(r) if r.name == "Сервер" => {
+                row_group = Some(if seen_unknown_caption { "Роль не распознана" } else { "до своей подписи" })
+            }
+            Entry::Row(_) => {}
+        }
+    }
+    assert_eq!(row_group, Some("Роль не распознана"), "строка с нераспознанной ролью стоит не под своей подписью: {l:?}");
+    let captions: Vec<&str> = l
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Caption(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captions, vec!["Принимаю подключения", "Роль не распознана"], "«Сервер» не должен считаться принимающим");
+}
+
 /// Заглушка-поиск состояния, в которой «ждёт разрешения» (`Some(State::Off)`)
 /// получает только именованное соединение — остальные молчат (`None`, то
 /// есть «не подключено», задача 16), и подъём строки выше подписей не

@@ -3011,6 +3011,21 @@ mod tests {
         assert_eq!(c.access(), "read_write");
     }
 
+    /// Тот же приём и тот же довод, что у `toolset`/`configuration` выше:
+    /// именованная, но неизвестная роль — отказ со списком допустимых значений
+    /// через `validate()`, а не молчаливый откат на `accept` у того, кто решает
+    /// по роли. Пустая роль — законное значение (умолчание `accept`), и этот
+    /// тест её не трогает: отказывает только мусорное слово «сервер».
+    #[test]
+    fn validate_rejects_an_unknown_role() {
+        let mut c = filled();
+        c.current_mut().role = "сервер".into();
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("role") && err.contains("accept") && err.contains("dial"), "{err}");
+        c.current_mut().role = "dial".into();
+        assert!(c.validate().is_ok());
+    }
+
     /// Буквально из брифа задачи 13: прежний файл (и свежий файл без поля
     /// `role` вовсе) обязан читаться, а не отказывать — умолчание «accept»
     /// совпадает с прежним поведением принимающей стороны.

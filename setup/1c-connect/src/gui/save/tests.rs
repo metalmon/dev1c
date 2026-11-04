@@ -983,6 +983,39 @@ fn renaming_the_current_connection_rewrites_both_the_block_and_the_root_current(
     assert!(!text.contains("\"Buh\""), "{text}");
 }
 
+/// Переименование карточки на её же нынешнее имя — не правка, а её
+/// отсутствие (Minor круга починки 1 задачи 4, отложенная до этой задачи
+/// нарочно): до этой правки `rename` всё равно читала файл и писала его
+/// назад без единого отличия — лишняя работа и лишняя строка в историю
+/// файла, у которого нет версий.
+///
+/// Строка `name` в фикстуре нарочно переписана БЕЗ пробелов вокруг `=`
+/// (`toml_render::set_in` ищет ключ без оглядки на пробелы — `t.trim()`), а
+/// канонический вид, который напишет перерисовка, — С пробелами. Запись
+/// значения, даже равного прежнему, нормализовала бы строку обратно —
+/// простое сравнение «после» с «до» заметило бы эту подмену там и только
+/// там, если запись и правда случилась (без неё байты не меняются вовсе, а
+/// с ней — меняется пробел, которого иначе взяться было бы неоткуда).
+#[test]
+fn renaming_a_card_to_its_own_name_touches_no_file() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let canonical = std::fs::read_to_string(&path).unwrap();
+    let before = canonical.replacen("name = \"Buh\"", "name=\"Buh\"", 1);
+    assert_ne!(before, canonical, "фикстура: строка имени и правда нашлась и была переписана");
+    std::fs::write(&path, &before).unwrap();
+
+    rename(&mut ui, "Buh", "Buh").unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "имя не изменилось — файл не тронут ни байтом (перепись нормализовала бы пробелы вокруг «=»)"
+    );
+    assert_eq!(ui.cfg.current().name, "Buh");
+}
+
 /// Та же запись, но карточка НЕ текущая (список важен для адресации —
 /// задача 2): корневой `current` трогать не должно, а переименованная
 /// карточка переживает запись со своими полями.
@@ -1279,6 +1312,33 @@ fn switching_to_an_unknown_name_is_refused_and_touches_nothing() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
 
+/// Отложенная мелочь задачи 6 прошлой ветки (`2026-11-03-interface`):
+/// карточка существует по имени, но её собственные поля не проходят
+/// `Connection::validate` (роль из тех, что опечатка руками в файле могла
+/// внести, пока окно открыто) — переключение на такую карточку обязано
+/// отказать словами, а не сделать поломанную карточку текущей. Симметрично
+/// `a_broken_neighbour_does_not_refuse_the_current_card_but_refuses_when_it_becomes_current`
+/// в `cfg.rs`: там это доказано на уровне модели, здесь — на пути окна.
+#[test]
+fn switching_to_an_invalid_card_is_refused_with_words() {
+    let mut ui = Ui::for_test();
+    ui.cfg.connections.push(Connection {
+        name: "Ромашка".into(),
+        base_path: "C:\\Bases\\Ромашка".into(),
+        project: "C:\\proj\\Ромашка".into(),
+        role: "сервер".into(),
+        ..ui.cfg.current().clone()
+    });
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = switch_current(&mut ui, "Ромашка").unwrap_err();
+    assert!(e.contains("role") && e.contains("accept") && e.contains("dial"), "{e}");
+    assert_eq!(ui.cfg.current, "Buh", "отказ не переключает текущее");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
+}
+
 /// Задача 7 плана «Интерфейс»: смена профиля меняет подпись папки и набор
 /// инструментов ЭТОЙ карточки — не папку и не соседа. У соседа своя папка (не
 /// конфликтует с «Buh»), и её профиль нетронутым остаётся лучшим
@@ -1326,6 +1386,25 @@ fn a_folder_conflict_with_a_neighbour_does_not_block_changing_the_profile() {
     set_profile(&mut ui, "Buh", "developer").unwrap();
 
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "developer");
+}
+
+/// Отложенная мелочь задачи 7 прошлой ветки (`2026-11-03-interface`):
+/// опечатка в наборе инструментов — отказ словами РАНЬШЕ записи, файл не
+/// тронут ни байтом. `set_profile` проверяет значение пробной карточкой
+/// (`Connection::toolset`) до похода к `set_keys`, то есть до чтения файла —
+/// отказ обязан случиться, не дойдя до диска вовсе.
+#[test]
+fn an_unknown_profile_refuses_and_leaves_the_file_alone() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let path = ui.kit.state_path(cfg::FILE);
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    let e = set_profile(&mut ui, "Buh", "бухгалтер").unwrap_err();
+
+    assert!(e.contains("developer") && e.contains("business"), "{e}");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "профиль в памяти не тронут");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
 
 /// Critical круга починки 1 задачи 14. Форма карточки (`panel::host_of`)

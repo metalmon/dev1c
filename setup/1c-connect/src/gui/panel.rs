@@ -4361,16 +4361,13 @@ mod tests {
         ui_for("accept", "tunnel", false)
     }
 
-    fn ui_link_current() -> Ui {
-        ui_for("dial", "tunnel", false)
-    }
-
-    /// Та же карточка, что `ui_link_current` — звонящая, текущая, не
-    /// подключена. Своё имя для задачи 3 плана «Карточка публикации и
-    /// удаление»: переименовывать `ui_link_current` в это имя — работа
-    /// последней задачи плана (решение ведущего), и до неё в дереве живут
-    /// обе подписи на один и тот же помощник.
-    fn ui_dial_current() -> Ui {
+    /// Звонящая карточка, текущая, не подключена — говорящее имя вместо
+    /// прежних `ui_link_current`/`ui_dial_current` (круг починки, задача 7
+    /// плана «Карточка публикации и удаление»): до этой правки в дереве жили
+    /// два помощника с одинаковым телом под разными подписями — находка
+    /// ведущего, отложенная до последней задачи нарочно, чтобы ревью задач
+    /// 1–6 обсуждало дело, а не имя.
+    fn ui_current_card() -> Ui {
         ui_for("dial", "tunnel", false)
     }
 
@@ -4402,7 +4399,7 @@ mod tests {
         let waiting = menu_labels(&ui_link_accept_waiting());
         assert!(waiting.contains(&"Показать код"));
         assert!(!waiting.contains(&"Отозвать разрешение"), "неприменимое прячется, а не висит серым");
-        assert!(!menu_labels(&ui_link_current()).contains(&"Сделать текущим"), "предмет и есть текущее");
+        assert!(!menu_labels(&ui_current_card()).contains(&"Сделать текущим"), "предмет и есть текущее");
     }
 
     /// Задача 14: предмет меню — ОТКРЫТАЯ карточка, и у нетекущей пунктов
@@ -4467,7 +4464,7 @@ mod tests {
     /// лишний пункт).
     #[test]
     fn the_menu_of_a_card_ends_with_delete_and_the_whole_list_is_pinned() {
-        assert_eq!(menu_labels(&ui_dial_current()), vec!["Подключиться", "Переименовать", "Удалить соединение"]);
+        assert_eq!(menu_labels(&ui_current_card()), vec!["Подключиться", "Переименовать", "Удалить соединение"]);
         assert_eq!(menu_labels_of(&ui_other_card(), "Василёк"), vec!["Переименовать", "Удалить соединение"]);
     }
 
@@ -4498,7 +4495,7 @@ mod tests {
     /// свет — гасить изнутри него синтаксически нечем).
     #[test]
     fn the_confirm_step_rechecks_preconditions_and_refuses_without_touching_the_session() {
-        let mut ui = ui_dial_current();
+        let mut ui = ui_current_card();
         ui.busy = Some(Busy::Project);
         match delete_on_confirm(&ui, "Ромашка") {
             DeleteOnConfirm::Blocked(why) => assert!(why.contains("проверка"), "{why}"),
@@ -4511,11 +4508,11 @@ mod tests {
     /// что у предусловия). У соседей в списке сеанс переживает удаление.
     #[test]
     fn the_confirm_step_extinguishes_the_session_only_for_the_last_card() {
-        assert_eq!(delete_on_confirm(&ui_dial_current(), "Ромашка"), DeleteOnConfirm::Proceed { stop_session_first: true });
+        assert_eq!(delete_on_confirm(&ui_current_card(), "Ромашка"), DeleteOnConfirm::Proceed { stop_session_first: true });
         // «Василёк» — не текущая, и соседство с «Ромашкой» её не запирает
         // (`save::delete_blocked_reason` не против чужой карточки) —
         // предусловие проходит, и сеанс (он обслуживает текущую) не гасим.
-        let mut ui = ui_dial_current();
+        let mut ui = ui_current_card();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
         assert_eq!(delete_on_confirm(&ui, "Василёк"), DeleteOnConfirm::Proceed { stop_session_first: false });
     }

@@ -164,9 +164,10 @@ pub fn onboarding_shown(cfg: &Cfg) -> bool {
 /// где-то сами подключаемся»). Два правила:
 ///
 /// 1. Подписи групп («Принимаю подключения», «Подключаюсь сам», «На этой
-///    машине», порядок неизменный) появляются, только когда ролей в списке
-///    больше одной. Одна роль ни на что не отвечает и съедает высоту окна
-///    380×420.
+///    машине», четвёртая и последняя — «Роль не распознана» для карточки с
+///    опечаткой в роли, порядок неизменный) появляются, только когда ролей в
+///    списке больше одной. Одна роль ни на что не отвечает и съедает высоту
+///    окна 380×420.
 /// 2. Соединение, ждущее разрешения, — первая строка списка, выше всех
 ///    подписей: диалог человек мог закрыть не решив, и возвращать его
 ///    должно самое заметное место. Группа при этом его не теряет — подпись
@@ -178,19 +179,30 @@ pub fn onboarding_shown(cfg: &Cfg) -> bool {
 // (Minor ревью всей ветки).
 pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>) -> Vec<Entry> {
     let current = cfg.current() as *const Connection;
+    // Четвёртая группа — карточка с ролью, которую `role()` не узнаёт
+    // (правка руками, опечатка): прежде `matches!(c.role(), Ok("dial"))` на
+    // `Err` читался как «не dial», то есть карточка молча падала в первую
+    // группу — список обещал бы человеку, что эта карточка принимает
+    // подключения, хотя в файле у неё стоит слово, которого программа не
+    // знает. `Connection::validate` такую карточку новым чтением не
+    // пропустит, но УЖЕ открытое окно её ещё помнит — отсюда и нужда в
+    // отдельной, честной группе, а не в отказе здесь (у `list` возвращаемое
+    // значение не `Result`, и спорить с файлом — дело `validate`, не её).
     let category = |c: &Connection| -> usize {
         if c.mode == "local" {
             2
-        } else if matches!(c.role(), Ok("dial")) {
-            1
         } else {
-            0
+            match c.role() {
+                Ok("dial") => 1,
+                Ok(_) => 0,
+                Err(_) => 3,
+            }
         }
     };
 
     let mut waiting = Vec::new();
-    let mut groups: [Vec<Row>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    let mut present = [false; 3];
+    let mut groups: [Vec<Row>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut present = [false; 4];
     for c in &cfg.connections {
         let cat = category(c);
         present[cat] = true;
@@ -203,7 +215,7 @@ pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>) -> Vec<Entry> {
     }
 
     let show_captions = present.iter().filter(|p| **p).count() > 1;
-    const CAPTIONS: [&str; 3] = ["Принимаю подключения", "Подключаюсь сам", "На этой машине"];
+    const CAPTIONS: [&str; 4] = ["Принимаю подключения", "Подключаюсь сам", "На этой машине", "Роль не распознана"];
 
     let mut out: Vec<Entry> = waiting.into_iter().map(Entry::Row).collect();
     for (cat, present) in present.into_iter().enumerate() {

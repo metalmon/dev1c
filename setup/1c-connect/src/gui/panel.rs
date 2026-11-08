@@ -1421,12 +1421,21 @@ fn add_link(window: &mut Window, cx: &mut App, role: &str) {
     cx.refresh_windows();
 }
 
-/// Сменить профиль открытой карточки. Удача молчит: подписи папки и профиля
-/// на экране меняются сами, и строка в журнал к ним ничего не добавила бы.
+/// Сменить профиль открытой карточки. Удача молчит: строка в журнал к
+/// смене подписей ничего не добавила бы — тот же приём, что у
+/// `set_card_base_here`.
+///
+/// **`sync_card_topology` здесь обязательна** (живой прогон 9.11, находка
+/// владельца «на разработчика нельзя переключить»): подписи папки и
+/// профиля читают `self.original`, а не `cx.global::<Ui>().cfg` — без
+/// перевязки запись в файл уходила верно, а открытая карточка эту правку
+/// не видела вовсе, хотя `cx.refresh_windows()` ниже честно перерисовывала
+/// окно — тем же самым, прежним видом.
 fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
     if let Err(e) = gui::set_profile(cx.global_mut::<Ui>(), name, profile) {
         gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
     }
+    sync_card_topology(cx, name);
     cx.refresh_windows();
 }
 
@@ -1595,18 +1604,19 @@ fn set_card_publication(cx: &mut App, name: &str, publication: &'static str) {
     cx.refresh_windows();
 }
 
-/// Перевязать `self.original` открытой карточки на ТРИ оси — `role`,
-/// `mode`, `base_here`, — после точечной (или тревной) записи у карточки
-/// `name` (Critical ревью круга починки 1 задачи 16). `adopt_needed`/
+/// Перевязать `self.original` открытой карточки на ПЯТЬ осей — `role`,
+/// `mode`, `base_here`, `publication`, `profile`, — после точечной (или
+/// тревной) записи у карточки `name` (Critical ревью круга починки 1 задачи
+/// 16; `profile` добавлен находкой живого прогона 9.11). `adopt_needed`/
 /// `fields_differ` сравнивают только ПОКАЗАННЫЕ ТЕКСТОВЫЕ поля
-/// (`shown_fields`), и ни одна из трёх осей в этот список не входит — без
+/// (`shown_fields`), и ни одна из пяти осей в этот список не входит — без
 /// прямой перевязки здесь карточка не видела бы переключения, хотя файл и
 /// `ui.cfg` уже верны (находка ревью: подпись переключателя и состав полей
 /// не меняются после щелчка).
 ///
 /// Полный `adopt_fields` нарочно не зовём: он подхватил бы и текстовые поля
 /// формы, молча стирая несохранённую правку человека — ровно то, от чего
-/// бережёт вопрос перед уходом с карточки (задача 14). Три оси — это ровно
+/// бережёт вопрос перед уходом с карточки (задача 14). Пять осей — это ровно
 /// то, что переключатели карточки меняют, и ничего сверх того.
 ///
 /// Чужая открытая карточка (`self.original.name != name`) не трогается
@@ -1626,7 +1636,7 @@ pub(crate) fn sync_card_topology(cx: &mut App, name: &str) {
     });
 }
 
-/// Чистое ядро `sync_card_topology` — ЧЕТЫРЕ оси и только они (Critical
+/// Чистое ядро `sync_card_topology` — ПЯТЬ осей и только они (Critical
 /// ревью круга починки 1 задачи 16, довод — в докстроке вызывающей). Под
 /// тестом: `adopt_topology_touches_only_the_axes_not_the_typed_fields` ниже.
 ///
@@ -1638,11 +1648,21 @@ pub(crate) fn sync_card_topology(cx: &mut App, name: &str) {
 /// Без этой строки карточка после смены публикации из значка не отращивала
 /// «Адрес публикации», а запись уже считала его показанным — и уносила в toml
 /// значение поля, которого карточка человеку не показывала.
+///
+/// **`profile` — пятая ось** (живой прогон 9.11, находка владельца: «на
+/// разработчика нельзя переключить»). Человек щёлкал «Разработчик» в
+/// выпадающем списке — в файл ложился `profile = "developer"`
+/// (`save::set_profile`), а открытая карточка продолжала показывать
+/// «Бизнес-пользователь» и «Папка документов» вместо «Папка исходников»:
+/// обе подписи читают `self.original.toolset()` (`panel::link_card`), а
+/// `self.original` без этой строки профиля не видел вовсе — той же бедой,
+/// что уже была Critical прошлого круга починки у `role`/`mode`/`base_here`.
 pub fn adopt_topology(original: &mut Connection, fresh: &Connection) {
     original.role = fresh.role.clone();
     original.mode = fresh.mode.clone();
     original.base_here = fresh.base_here;
     original.publication = fresh.publication.clone();
+    original.profile = fresh.profile.clone();
 }
 
 /// Запустить действие «Проекта», спросив, если оно отнимает уже сделанное
@@ -3897,6 +3917,13 @@ mod tests {
     /// Третье — `publication`, четвёртая ось (Critical ревью всей ветки):
     /// без неё карточка после смены публикации из значка не отращивала
     /// «Адрес публикации», а запись уже считала его показанным.
+    ///
+    /// Четвёртое — `profile`, пятая ось (живой прогон 9.11, находка
+    /// владельца): человек щёлкает «Разработчик», в файл ложится
+    /// `profile = "developer"`, а без этой строки карточка продолжала
+    /// показывать «Бизнес-пользователь» и «Папка документов» — обе подписи
+    /// (`profile_label`/`folder_label`, `panel::link_card`) читают
+    /// `self.original.toolset()`, то есть ровно эту ось.
     #[test]
     fn adopt_topology_touches_only_the_axes_not_the_typed_fields() {
         let mut original = Connection {
@@ -3904,6 +3931,7 @@ mod tests {
             role: "accept".into(),
             base_here: true,
             publication: "auto".into(),
+            profile: "business".into(),
             server: "ещё не сохранено".into(),
             ..Default::default()
         };
@@ -3912,6 +3940,7 @@ mod tests {
             role: "dial".into(),
             base_here: false,
             publication: "webserver".into(),
+            profile: "developer".into(),
             server: "с диска".into(),
             ..Default::default()
         };
@@ -3922,6 +3951,7 @@ mod tests {
         assert_eq!(original.role, "dial");
         assert!(!original.base_here);
         assert_eq!(original.publication, "webserver", "публикация — такая же ось состава полей, как режим");
+        assert_eq!(original.profile, "developer", "профиль — пятая ось: от него подпись кнопки и подпись поля папки");
         assert!(!shown_fields(&original).contains(&"server"), "режим сменился на local — поля среды ушли из состава карточки");
         assert_eq!(original.server, "ещё не сохранено", "текстовые поля — не ось этой функции, их не трогаем");
     }

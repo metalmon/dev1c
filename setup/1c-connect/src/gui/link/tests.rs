@@ -440,24 +440,37 @@ fn the_gate_never_switches_serving_back_on() {
 // Задача 1 плана `2026-11-03-interface`: строка списка «Связь» — слово
 // состояния, отметка «текущее», признак записи.
 
-/// Спека, «Связь»: «нет» своей строки не имеет вовсе, «тикет выдан»
-/// показывается словом «ждёт разрешения», «разрешено» — миг без слова.
-/// Третий и четвёртый фолды («нет», «разрешено») докстрока `row` объясняет
-/// словами, а не тестом: `State` их не различает вовсе, проверять нечего.
-/// «Тикет выдан» здесь — `Some(State::Off)`, а не `None` (задача 16 плана
-/// `2026-11-03-interface`: `None` — «состояния не знаем», своё слово, см.
-/// тест ниже) — заглушка-поиск такого значения сама не отдаёт, но слово
-/// обязано работать и тогда, когда живое хранилище состояний его принесёт.
+/// Спека, «Связь»: «нет» своей строки не имеет вовсе. «Ждёт разрешения» —
+/// слово протокола, которого в программе нет, и `row` его сейчас не отдаёт
+/// вовсе (находка живого прогона 9.11 — см. докстроку `row`); «разрешено» —
+/// докстрока `row` объясняет словами, а не тестом: `State` их не различает
+/// вовсе, проверять нечего.
 ///
 /// Соединение нарочно НЕ локальное (`mode = "tunnel"`): умолчание
 /// `Connection::default()` — локальный режим (30.10), а у него своя пара
 /// слов, проверенная отдельным тестом ниже.
 #[test]
-fn row_folds_eight_contract_states_into_five_words() {
+fn row_folds_eight_contract_states_into_four_words() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     assert_eq!(row(&c, false, Some(&State::Up { since: Instant::now() })).state, "подключено");
+    assert_eq!(row(&c, false, Some(&State::Retrying(String::new()))).state, "подключается снова");
     assert_eq!(row(&c, false, Some(&State::Failed(String::new()))).state, "разорвано");
-    assert_eq!(row(&c, false, Some(&State::Off)).state, "ждёт разрешения");
+    assert_eq!(row(&c, false, None).state, "не подключено");
+}
+
+/// Живой прогон 9.11: `State::Off`/`State::Connecting` значат «обслуживание
+/// не поднято», а не «кто-то ждёт решения человека» — слова «ждёт
+/// разрешения» принадлежат протоколу (зачисление стороны, диалог
+/// разрешения), которого в программе нет. Прежде оба состояния читались
+/// как «ждёт разрешения» у ЛЮБОЙ нелокальной карточки, которая просто не
+/// успела подключиться — владелец увидел это как «на разработчика нельзя
+/// переключить», когда карточка, которую он только открыл, улетела первой
+/// строкой наверх списка.
+#[test]
+fn a_card_that_never_connected_does_not_say_it_waits_for_permission() {
+    let c = Connection { mode: "tunnel".into(), role: "accept".into(), ..Default::default() };
+    assert_eq!(row(&c, true, Some(&State::Off)).state, "не подключено");
+    assert_eq!(row(&c, true, Some(&State::Connecting)).state, "не подключено");
 }
 
 /// Задача 16 плана `2026-11-03-interface`, «третье, оттуда же»: живого
@@ -537,22 +550,6 @@ fn cfg_accept_dial_local() -> Cfg {
     }
 }
 
-/// То же смешение, но первым в файле стоит соединение с заданным именем —
-/// под заглушкой `named_is_waiting(name)` оно единственное «ждёт
-/// разрешения» (задача 16: `None` больше не значит «ждёт», см. докстроку
-/// `row`), и тест проверяет, что строка списка на первом месте — ЕГО
-/// строка, не подпись и не какая-то из groups.
-fn cfg_accept_dial_local_with_waiting(name: &str) -> Cfg {
-    Cfg {
-        connections: vec![
-            Connection { name: name.into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
-            Connection { name: "Клевер".into(), mode: "tunnel".into(), role: "dial".into(), ..Default::default() },
-            Connection { name: "Эта машина".into(), mode: "local".into(), ..Default::default() },
-        ],
-        ..Default::default()
-    }
-}
-
 #[test]
 fn captions_appear_only_when_the_list_holds_more_than_one_role() {
     let one = list(&cfg_all_accept(), &none);
@@ -612,28 +609,9 @@ fn a_card_with_an_unreadable_role_does_not_stand_under_the_accepting_caption() {
     assert_eq!(captions, vec!["Принимаю подключения", "Роль не распознана"], "«Сервер» не должен считаться принимающим");
 }
 
-/// Заглушка-поиск состояния, в которой «ждёт разрешения» (`Some(State::Off)`)
-/// получает только именованное соединение — остальные молчат (`None`, то
-/// есть «не подключено», задача 16), и подъём строки выше подписей не
-/// красит их заодно.
-fn named_is_waiting(name: &str) -> Option<State> {
-    (name == "Василёк").then_some(State::Off)
-}
-
-#[test]
-fn a_connection_waiting_for_permission_is_the_very_first_row() {
-    let l = list(&cfg_accept_dial_local_with_waiting("Василёк"), &named_is_waiting);
-    match &l[0] {
-        Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
-        Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
-    }
-}
-
 /// Две карточки, по одной на accept и dial — ровно столько, чтобы подписи
-/// были нужны (`show_captions`), и ни одной лишней: третья роль (local)
-/// здесь намеренно отсутствует, иначе «Клевер» не мог бы остаться видимым
-/// под своей подписью сам по себе, без помощи третьей группы.
-fn cfg_accept_waiting_dial_connected() -> Cfg {
+/// были нужны (`show_captions`).
+fn cfg_accept_and_dial() -> Cfg {
     Cfg {
         connections: vec![
             Connection { name: "Василёк".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
@@ -643,43 +621,32 @@ fn cfg_accept_waiting_dial_connected() -> Cfg {
     }
 }
 
-/// Заглушка-поиск состояния, которая различает соединения по имени:
-/// «Клевер» живой, «Василёк» ждёт разрешения (`Some(State::Off)`, задача
-/// 16 — `None` больше не значит «ждёт», см. докстроку `row`). Нужна ровно
-/// для того, чтобы отличить «подпись осталась, хотя её единственный член
-/// всплыл» от «обе группы всё равно ждут» (та подмена, которую нашло
-/// ревью круга починки 1 у прежнего теста).
-fn only_clover_is_connected(name: &str) -> Option<State> {
-    match name {
-        "Клевер" => Some(State::Up { since: Instant::now() }),
-        "Василёк" => Some(State::Off),
-        _ => None,
-    }
+/// Заглушка-поиск состояния: «Василёк» просто не успел подключиться
+/// (`State::Off` — та же заглушка, что держит `gui::link_body` для текущего
+/// соединения до первого события сеанса), «Клевер» молчит (`None`, то есть
+/// «не подключено» и для него). До находки живого прогона 9.11
+/// `Some(State::Off)` читался как «ждёт разрешения» и уносил «Василёк» выше
+/// подписи его роли — ровно то, что видел владелец, впервые открыв окно
+/// глазами.
+fn accept_role_not_yet_connected(name: &str) -> Option<State> {
+    (name == "Василёк").then_some(State::Off)
 }
 
-/// Подпись группы остаётся на месте, даже когда единственный её член ждёт
-/// разрешения и всплыл выше подписей: подпись решает полный список, а не
-/// то, что осталось видимым под ней (докстрока `list`, правило 2). Dial
-/// здесь живой (не ждущий), поэтому тест отличает «подпись осталась
-/// несмотря на подъём» от «обе группы ждут и подписей нет вовсе» —
-/// находка ревью круга починки 1: прежний тест `&none` красил обе группы
-/// одинаково и падал бы точно так же, как уже падает
-/// `captions_appear_only_when_the_list_holds_more_than_one_role`, то есть
-/// не добавлял покрытия.
+/// Живой прогон 9.11, вторая половина находки: карточка, которая просто не
+/// успела подключиться, уезжала первой строкой наверх списка, а подпись её
+/// роли оставалась висеть без единой строки под собой — список обещал
+/// «Принимаю подключения» и не показывал под этими словами ничего. Правило
+/// «ждущие — первой строкой» (докстрока `list`) не виновато: виновато было
+/// ложное состояние, из-за которого оно срабатывало ВСЕГДА у нелокальной
+/// карточки.
 #[test]
-fn a_caption_survives_even_when_its_only_member_is_waiting() {
-    let l = list(&cfg_accept_waiting_dial_connected(), &only_clover_is_connected);
-    let captions: Vec<&str> = l
-        .iter()
-        .filter_map(|e| match e {
-            Entry::Caption(c) => Some(*c),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(captions, vec!["Принимаю подключения", "Подключаюсь сам"], "подпись accept пропала вместе со своим единственным членом");
-    match &l[0] {
-        Entry::Row(r) => assert_eq!(r.name, "Василёк", "выше всех подписей: диалог могли закрыть не решив"),
-        Entry::Caption(c) => panic!("первой стоит подпись «{c}», а не ждущее соединение"),
+fn two_cards_of_different_roles_stand_under_their_own_captions() {
+    let l = list(&cfg_accept_and_dial(), &accept_role_not_yet_connected);
+    assert!(matches!(l[0], Entry::Caption(_)), "строка всплыла над подписями, хотя это просто неподключённая карточка: {l:?}");
+    for (i, e) in l.iter().enumerate() {
+        if let Entry::Caption(c) = e {
+            assert!(matches!(l.get(i + 1), Some(Entry::Row(_))), "подпись «{c}» висит без единой строки под собой: {l:?}");
+        }
     }
 }
 

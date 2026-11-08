@@ -153,6 +153,15 @@ pub struct Card {
 /// про связь, и зелёный вердикт по-прежнему показывается ими (ветка `Ready`
 /// проваливается в разбор `link` ниже), а сам туннель остаётся фактом в
 /// наборе (`verify::tunnel_fact`).
+///
+/// **Выключенный выключатель — не отказ связи** (живой прогон 9.11,
+/// находка владельца). Пока обслуживание не включено (`State::Off`,
+/// холодный замок), заголовок в ОБОИХ режимах говорит про сам выключатель
+/// («MCP выключены») — связь в это время не поднимается ни в туннельном,
+/// ни в локальном, и называть её причиной значит посылать человека искать
+/// беду не там, где она есть. «Не подключён» остаётся словом настоящего
+/// отказа (`State::Failed`): там и правда разошлось обещанное с тем, что
+/// есть, и это отказ показывают выше, см. ниже.
 pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
@@ -160,7 +169,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
     let local = mode == "local";
-    let off_title = || if local { "MCP выключены".to_string() } else { "Не подключён".to_string() };
+    let off_title = || "MCP выключены".to_string();
     let card = |dot, title: String| Card { dot, title, cancel: false };
     // Отказ — выше замка: красное «не подключён» человек должен увидеть и
     // тогда, когда заодно не хватает холодного условия.
@@ -3546,9 +3555,11 @@ mod tests {
             let c = card(None, &link, "local", &Verdict::Ready, gate, now);
             assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"), "{link:?}");
         }
-        // В туннельном режиме тот же замок говорит прежним словом.
+        // В туннельном режиме замок говорит тем же словом: связь не поднята
+        // не из-за отказа, а из-за самого выключателя (находка живого
+        // прогона 9.11) — «Не подключён» здесь было бы причиной не по делу.
         let c = card(None, &State::Off, "tunnel", &Verdict::Ready, gate, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
     }
 
     /// Идущая операция — первая строка порядка разрешения: она побеждает и
@@ -3657,8 +3668,10 @@ mod tests {
     #[test]
     fn without_an_operation_the_card_is_the_link() {
         let now = Instant::now();
+        // Выключено — не отказ: «MCP выключены» и в туннеле (находка живого
+        // прогона 9.11), см. докстроку `card`.
         let c = card(None, &State::Off, "tunnel", &Verdict::Checking, None, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Не подключён"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
         assert!(!c.cancel);
         let c = card(None, &State::Connecting, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
@@ -3672,6 +3685,24 @@ mod tests {
         let c = card(None, &State::Failed("нет сети".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Down, "Не подключён"));
         assert!(!c.cancel);
+    }
+
+    /// Живой прогон 9.11: карточка выключенного обслуживания звала разрыв
+    /// связи («Не подключён»), хотя никто её не рвал — выключатель просто
+    /// выключен, и связь в этом положении не поднимается ни в каком режиме
+    /// (докстрока `card`). Настоящий отказ связи (`State::Failed`) слово не
+    /// делит с выключателем — его переключатель не выключал.
+    #[test]
+    fn the_status_line_names_the_switch_while_mcp_are_off() {
+        let now = Instant::now();
+        for mode in ["local", "tunnel"] {
+            let c = card(None, &State::Off, mode, &Verdict::Checking, None, now);
+            assert_eq!(c.title, "MCP выключены", "{mode}");
+            let c = card(None, &State::Off, mode, &Verdict::Checking, Some("не задан пользователь базы"), now);
+            assert_eq!(c.title, "MCP выключены", "{mode}: замок");
+        }
+        let c = card(None, &State::Failed("порт занят".into()), "tunnel", &Verdict::Checking, None, now);
+        assert_eq!(c.title, "Не подключён");
     }
 
     /// Зелёное — только у `Ready`. Между включением и первым набором вердикт

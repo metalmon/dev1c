@@ -109,6 +109,27 @@ pub fn base_name(base_path: &str) -> &str {
     }
 }
 
+/// Базовое имя и число, которым оно уже оканчивается (если оканчивается) —
+/// общая часть `default_name` ниже. Имя вида «Соединение 1»
+/// (`FIRST_CONNECTION_NAME`) само несёт хвостовой номер, и нумерующий дальше
+/// обязан нарастить ЕГО, а не завести второй, приписанный через пробел:
+/// «Соединение 1 2» ничего не говорит человеку, «Соединение 2» говорит всё
+/// (замер на живом окне 9.11 — ровно то имя получала вторая карточка). Имя
+/// без хвостового числа («Buh») возвращает себя же и единицу — следующий
+/// номер для него как и прежде 2.
+fn numbering_root(base: &str) -> (&str, u32) {
+    if let Some(pos) = base.rfind(' ') {
+        let head = &base[..pos];
+        let tail = &base[pos + 1..];
+        if !head.is_empty() {
+            if let Ok(n) = tail.parse::<u32>() {
+                return (head, n);
+            }
+        }
+    }
+    (base, 1)
+}
+
 /// Имя для НОВОГО соединения — то, что предлагает программа, прежде чем
 /// человек впишет своё: `base_name(base_path)`, пусто — как у прежнего
 /// `[host]` без имени (`load_raw`), «Соединение 1». Занятое среди `taken`
@@ -126,9 +147,11 @@ pub fn default_name(base_path: &str, taken: &[&str]) -> String {
     if !taken.contains(&base) {
         return base.to_string();
     }
-    let mut n = 2;
+    // Хвостовой номер занятого имени — свой, не чужой: см. `numbering_root`.
+    let (root, found) = numbering_root(base);
+    let mut n = found + 1;
     loop {
-        let candidate = format!("{base} {n}");
+        let candidate = format!("{root} {n}");
         if !taken.contains(&candidate.as_str()) {
             return candidate;
         }
@@ -3192,6 +3215,19 @@ mod tests {
 
         assert_eq!(default_name(r"C:\Bases\Buh", &[]), "Buh");
         assert_eq!(default_name(r"C:\Bases\Buh", &["Buh"]), "Buh 2", "занятое имя получает номер, а не отказ");
+    }
+
+    /// Хвостовой номер базового имени — свой, не чужой: «Соединение 1»
+    /// (`FIRST_CONNECTION_NAME`) уже оканчивается числом, и вторая карточка
+    /// обязана нарастить ЕГО, а не приписать второе число через пробел —
+    /// «Соединение 1 2» ничего не говорит человеку, «Соединение 2» говорит
+    /// всё (замер на живом окне 9.11). Имя, выведенное из каталога базы
+    /// («Buh»), числа не несёт — для него правило прежнее: «Buh 2».
+    #[test]
+    fn the_second_card_is_named_after_the_first_not_after_its_whole_name() {
+        assert_eq!(default_name("", &["Соединение 1"]), "Соединение 2");
+        assert_eq!(default_name("", &["Соединение 1", "Соединение 2"]), "Соединение 3");
+        assert_eq!(default_name(r"C:\Bases\Buh", &["Buh"]), "Buh 2");
     }
 
     /// Круг починки 1/5 задачи 10, решение координатора: ПОЛЯ спрашиваются у

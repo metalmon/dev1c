@@ -53,7 +53,8 @@ fn note_file_writes_the_file_and_not_the_window() {
 }
 
 /// Задача 6 плана «После живого прогона»: замок запуска повторяет то, что
-/// человек и так читает в подвале, а не сообщает находку, — значит, не
+/// человек и так видит на карточке (серая точка, запертый переключатель,
+/// причина в его подсказке), а не сообщает находку, — значит, не
 /// должен поднимать счётчик непрочитанного раньше первого действия
 /// человека (находка владельца 9.11: свежий комплект показывал «Журнал 1»
 /// ещё до того, как человек хоть что-то сделал).
@@ -65,6 +66,52 @@ fn a_fresh_kit_has_nothing_unread_before_the_person_does_anything() {
     assert_eq!(ui.unread, 0, "{:?}", ui.log);
     // Строка всё равно лежит в журнале — почитать её можно, просто не как находку.
     assert_eq!(ui.log.len(), 1);
+}
+
+/// Important 5 ревью всей ветки: бейдж и лента считали по-разному. Счётчик
+/// рос на КАЖДУЮ строку, а лента складывает одинаковые подряд в одну запись
+/// со счётчиком — пять щелчков по запертому выключателю давали «Журнал 5»
+/// при одной строке «… ×5» в ленте. Экран расходился сам с собой.
+///
+/// Решение ведущего: счётчик растёт по ЗАПИСЯМ ленты. Тест и сверяет два
+/// числа друг с другом, а не с литералом: вырежи правку — склеенные повторы
+/// насчитают больше, чем лента покажет записей.
+#[test]
+fn the_unread_badge_counts_feed_entries_not_lines() {
+    let mut ui = Ui::for_test();
+    let click = || Line { kind: Kind::Warn, text: "включить нельзя: платформы 1С нет".into() };
+    for _ in 0..5 {
+        note_line(&mut ui, click());
+    }
+    // Чужая строка разрывает склейку — дальше считается заново.
+    note_line(&mut ui, Line { kind: Kind::Ok, text: "сохранено".into() });
+    for _ in 0..3 {
+        note_line(&mut ui, click());
+    }
+    assert_eq!(ui.log.len(), 9, "строк в журнале столько, сколько положили");
+    let shown = entries(&ui.log, day_stamp()).iter().filter(|e| matches!(e, LogEntry::Row(..))).count();
+    assert_eq!(shown, 3, "лента показывает три записи: ×5, «сохранено», ×3");
+    assert_eq!(ui.unread, shown, "бейдж обещает ровно столько, сколько человек увидит записей");
+}
+
+/// Minor 2 ревью всей ветки: ветвь заголовка операции `count` игнорировала —
+/// два одинаковых заголовка подряд склеивались в один молча, и одно событие
+/// исчезало с экрана. Лента их склеивает так же, как обычные строки (первая
+/// половина теста), значит счётчик у них не декоративный и показ обязан его
+/// произнести (вторая половина).
+#[test]
+fn two_identical_heads_in_a_row_show_their_count() {
+    let day = Stamp { year: 2026, month: 11, day: 9, weekday: 0, hour: 9, minute: 0 };
+    let head = Stamped { line: Line { kind: Kind::Head, text: "Выгрузка · 09:00".into() }, stamp: day };
+    let out = entries(&[head.clone(), head.clone()], day);
+    assert_eq!(out.len(), 2, "{out:?}");
+    assert_eq!(out[1], LogEntry::Row(head, 2), "заголовок склеивается со счётчиком, как любая строка");
+
+    // Счётчик — к названию операции; час справа остаётся часом, без «×2».
+    assert_eq!(head_parts("Выгрузка · 09:00", 2), ("Выгрузка ×2".into(), "09:00".into()));
+    assert_eq!(head_parts("Выгрузка · 09:00", 1), ("Выгрузка".into(), "09:00".into()), "без повтора счётчик не рисуется");
+    // Текст без разделителя (не от `head_line`) не теряется и не выдумывает часа.
+    assert_eq!(head_parts("Без часа", 1), ("Без часа".into(), String::new()));
 }
 
 #[test]
@@ -243,14 +290,12 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     ui.progress = Some(Running { which: Which::Export, started: now, phase: Phase::Push, seen: now, stale_noted: false });
     let line = on_done(&mut ui, Some("прервано".into()), true);
     note_line(&mut ui, line.clone());
-    ui.status = Some(line);
-    // Главное здесь — `Warn`, а не `Fail`. Заглавную ставит только
-    // `note_line`, для журнала; `ui.status` хранит строку как есть, без
-    // заглавной — подвал с 9.11 её больше не показывает (решение владельца:
-    // левый слот подвала убран совсем), и второго места, где она печаталась
-    // бы заглавной, не осталось.
+    // Главное здесь — `Warn`, а не `Fail`. Заглавную ставит `note_line`, для
+    // журнала; у самой `line` она не поднимается — и это единственная
+    // дорога строки к человеку: `ui.status`, второго её хранилища, больше
+    // нет вовсе (Important 3 ревью всей ветки).
     assert_eq!(ui.log.last().map(|s| &s.line), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
-    assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
+    assert_eq!(line, Line { kind: Kind::Warn, text: "прервано".into() });
 }
 
 #[test]
@@ -300,16 +345,45 @@ fn the_same_line_twice_in_a_row_is_one_line_with_a_count() {
     // Подпись дня (одна, в начале) + две склеенные записи, каждая с ×2.
     assert_eq!(out.len(), 3, "{out:?}");
     assert!(matches!(&out[0], LogEntry::Caption(_)), "{out:?}");
-    assert_eq!(out[1], LogEntry::Row(Line { kind: Kind::Say, text: "Режим работы: Локально".into() }, 2));
-    assert_eq!(out[2], LogEntry::Row(Line { kind: Kind::Say, text: "base_path — путь к базе".into() }, 2));
+    assert_eq!(out[1], LogEntry::Row(say("Режим работы: Локально"), 2));
+    assert_eq!(out[2], LogEntry::Row(say("base_path — путь к базе"), 2));
 
     // Та же пара, но разделённая чужой строкой — считается заново, без склейки.
     let interrupted = vec![say("A"), Stamped { line: Line { kind: Kind::Say, text: "B".into() }, stamp: day }, say("A")];
     let out2 = entries(&interrupted, day);
     assert_eq!(out2.len(), 4, "{out2:?}"); // подпись + A + B + A
-    assert_eq!(out2[1], LogEntry::Row(Line { kind: Kind::Say, text: "A".into() }, 1));
-    assert_eq!(out2[2], LogEntry::Row(Line { kind: Kind::Say, text: "B".into() }, 1));
-    assert_eq!(out2[3], LogEntry::Row(Line { kind: Kind::Say, text: "A".into() }, 1));
+    assert_eq!(out2[1], LogEntry::Row(say("A"), 1));
+    assert_eq!(out2[2], LogEntry::Row(Stamped { line: Line { kind: Kind::Say, text: "B".into() }, stamp: day }, 1));
+    assert_eq!(out2[3], LogEntry::Row(say("A"), 1));
+}
+
+/// Important 1 ревью всей ветки: время у строки собиралось (`Stamp::hour`,
+/// `minute`) и не доходило ни до одного читателя — `LogEntry::Row` стамп не
+/// несла, и за день работы все строки стояли под одной подписью «Сегодня»,
+/// ничем не отличаясь. Запись ленты обязана нести СВОЁ время, а склеенный
+/// повтор — время ПЕРВОГО вхождения: запись стоит в ленте на его месте.
+///
+/// Тест на чистую часть: отрисовку GPUI тестом не взять, но «несёт ли запись
+/// своё время» — можно, и это ровно то, что ломалось.
+#[test]
+fn a_feed_entry_carries_the_time_of_its_own_line() {
+    let at = |hour: u32, minute: u32| Stamp { year: 2026, month: 11, day: 9, weekday: 0, hour, minute };
+    let say = |text: &str, stamp: Stamp| Stamped { line: Line { kind: Kind::Say, text: text.into() }, stamp };
+    let lines = vec![say("утренняя", at(9, 5)), say("вечерняя", at(21, 40)), say("вечерняя", at(21, 41))];
+    let out = entries(&lines, at(23, 0));
+    let times: Vec<String> = out
+        .iter()
+        .filter_map(|e| match e {
+            LogEntry::Row(s, _) => Some(s.stamp.hhmm()),
+            LogEntry::Caption(_) => None,
+        })
+        .collect();
+    // Две записи: утренняя и склеенная вечерняя ×2 — со временем первой из пары.
+    assert_eq!(times, vec!["09:05", "21:40"], "{out:?}");
+    assert!(matches!(out.last(), Some(LogEntry::Row(_, 2))), "повтор обязан склеиться: {out:?}");
+    // Ведущий нуль — тем же `HH:MM`, каким час печатает `clock()` в заголовке
+    // операции: двух начертаний часа на одном экране быть не должно.
+    assert_eq!(at(7, 3).hhmm(), "07:03");
 }
 
 /// Лента из строк двух дней — подпись у каждого дня, в том числе у первого
@@ -318,18 +392,11 @@ fn the_same_line_twice_in_a_row_is_one_line_with_a_count() {
 fn a_group_caption_stands_before_the_first_line_of_its_day() {
     let today = Stamp { year: 2026, month: 11, day: 9, weekday: 0, hour: 0, minute: 0 };
     let yesterday = Stamp { year: 2026, month: 11, day: 8, weekday: 6, hour: 0, minute: 0 };
-    let lines = vec![
-        Stamped { line: Line { kind: Kind::Ok, text: "вчерашняя строка".into() }, stamp: yesterday },
-        Stamped { line: Line { kind: Kind::Ok, text: "сегодняшняя строка".into() }, stamp: today },
-    ];
-    let out = entries(&lines, today);
+    let old = Stamped { line: Line { kind: Kind::Ok, text: "вчерашняя строка".into() }, stamp: yesterday };
+    let new = Stamped { line: Line { kind: Kind::Ok, text: "сегодняшняя строка".into() }, stamp: today };
+    let out = entries(&[old.clone(), new.clone()], today);
     assert_eq!(
         out,
-        vec![
-            LogEntry::Caption("Вчера".into()),
-            LogEntry::Row(Line { kind: Kind::Ok, text: "вчерашняя строка".into() }, 1),
-            LogEntry::Caption("Сегодня".into()),
-            LogEntry::Row(Line { kind: Kind::Ok, text: "сегодняшняя строка".into() }, 1),
-        ]
+        vec![LogEntry::Caption("Вчера".into()), LogEntry::Row(old, 1), LogEntry::Caption("Сегодня".into()), LogEntry::Row(new, 1),]
     );
 }

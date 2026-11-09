@@ -104,29 +104,13 @@ fn adopt_cfg_rolls_back_a_live_only_tightening_to_what_is_on_disk() {
     let _ = s.stop();
 }
 
-/// Итог прошлой операции не держит подвал вечно: пришёл новый набор —
-/// подвал говорит о состоянии, а «Готово за 19 с» остаётся в журнале.
-/// Прежде этот слот не снимался никем, и в покое человек читал про
-/// операцию, которой не запускал (находка владельца 26.10).
-#[test]
-fn an_operation_result_outlives_the_next_set_but_not_for_long() {
-    let mut ui = Ui::for_test();
-    let gen = ui.facts_gen;
-
-    // Свежий итог пересчёт не стирает: за операцией сразу идёт расчёт
-    // («почва могла сдвинуться»), и отказ гас бы раньше, чем прочитан.
-    set_status(&mut ui, Line { kind: Kind::Fail, text: "это ограничение по числу сеансов".into() }, None);
-    apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
-    assert!(ui.status.is_some(), "свежий отказ операции не должен гаснуть на первом же наборе");
-
-    // Отстоявший своё — уступает слот состоянию.
-    ui.status_at = Some(Instant::now() - STATUS_LINGER);
-    let gen = ui.facts_gen;
-    apply_facts(&mut ui, gen, vec![Check::fail("проект", "не разложен", "1c-connect install")]);
-    assert_eq!(ui.status, None, "итог отстоял своё и больше не закрывает причину");
-    assert_eq!(ui.status_tip, None, "подсказка слота уходит вместе с ним");
-    assert_eq!(ui.status_at, None);
-}
+// Тест «итог прошлой операции не держит подвал вечно»
+// (`an_operation_result_outlives_the_next_set_but_not_for_long`) убран
+// вместе с самими `status`/`status_tip`/`status_at` и `STATUS_LINGER`
+// (Important 3 ревью всей ветки): он сторожил срок гашения поля, которого
+// экран не читал с 9.11, — то есть был последним читателем мёртвого
+// состояния и сам же выдавал его за живое. Ответ человеку идёт строкой
+// журнала, и гасить её незачем.
 
 /// Ответ, пришедший уже после того, как обслуживание выключили, не
 /// зеленит и не красит карточку своим содержимым: `apply_facts` смотрит

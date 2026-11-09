@@ -301,19 +301,20 @@ fn readiness_reason_says_what_and_what_to_do_without_echoing_the_hint() {
 /// Дефект (заказчик 2026-10-21): в строку итога вписали полный путь
 /// отчёта, и она перестала помещаться в подвал — на снимке «Проблем: 2.
 /// Подробности — отчё…». Итог называет только числа, а путь отчёта
-/// уходит отдельной строкой журнала и подсказкой подвала.
+/// уходит отдельной строкой журнала (подсказки у подвала больше нет —
+/// слот убран 9.11).
 #[test]
 fn the_check_status_line_stays_short() {
     for failed in [1usize, 2, 99] {
         let l = check_status(failed);
         assert_eq!((l.kind, l.text.as_str()), (Kind::Fail, format!("Проблем: {failed}").as_str()));
-        assert!(!l.text.contains("last-check"), "путь отчёта вернулся в строку подвала: {}", l.text);
-        assert!(l.text.chars().count() <= 80, "строка итога не влезает в подвал: {}", l.text);
+        assert!(!l.text.contains("last-check"), "путь отчёта вернулся в строку итога: {}", l.text);
+        assert!(l.text.chars().count() <= 80, "строка итога снова не коротка: {}", l.text);
     }
     let ok = check_status(0);
     assert_eq!((ok.kind, ok.text.as_str()), (Kind::Ok, "Проверка пройдена"));
     assert!(ok.text.chars().count() <= 80, "{}", ok.text);
-    // Путь не пропал — он уехал в строку журнала (она же подсказка подвала).
+    // Путь не пропал — он уехал в отдельную строку журнала.
     let report = "/home/dev3/.local/share/dev1c/last-check.txt";
     assert_eq!(report_line(report), Line { kind: Kind::Say, text: format!("Отчёт — {report}") });
 }
@@ -359,7 +360,7 @@ fn checks_print_into_the_log_as_facts_with_a_hint_on_its_own_line() {
 /// включены», хотя агенту в эту минуту откажут; владелец 25.10:
 /// «не должно быть противоречий, когда MCP типа подключены, горит
 /// зелёный, а в статусах что-то красным горит». Четыре поверхности —
-/// карточка, подвал, подсказка значка и сам значок — обязаны сказать
+/// карточка, журнал, подсказка значка и сам значок — обязаны сказать
 /// «занято» словами факта, и ни одна из них не зелёная.
 #[test]
 fn a_busy_verdict_is_never_green_on_any_surface() {
@@ -436,7 +437,7 @@ fn nothing_is_computed_after_the_switch_went_off() {
 
 /// Дорога вторая того же Important 3: громкий показ. Нажатие «Проверить»
 /// заводило расчёт и при выключенном обслуживании, `apply_facts` набор
-/// потом ронял, и подвал говорил **«Проверка пройдена»** — на выключенном
+/// потом ронял, и окно говорило **«Проверка пройдена»** — на выключенном
 /// коннекторе, при отчёте с провалами на диске. Сторож в `run_check`
 /// (`serving`) эту дорогу закрывает, но сама ложь убита здесь, в чистом
 /// решении: без набора говорить «пройдена» нечем.
@@ -564,7 +565,7 @@ fn the_tray_says_it_is_checking_while_there_is_no_set_yet() {
     let bad = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
     let tip = tray_tooltip(None, &up, &bad, None, now);
     assert!(tip.contains("не всё готово") && tip.contains("проект"), "{tip}");
-    assert_eq!(tip, format!("1c-connect: {}", warn_reason(&bad).unwrap()), "значок и подвал говорят разными словами");
+    assert_eq!(tip, format!("1c-connect: {}", warn_reason(&bad).unwrap()), "значок и подсказка переключателя говорят разными словами");
 }
 
 /// Important 4 ревью круга 2: отчёт и строки в журнал без нажатия кнопки.

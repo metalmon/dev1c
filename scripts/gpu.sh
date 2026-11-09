@@ -41,7 +41,13 @@ sync() {
   #
   # НЕ едут: каталог сборки (33 ГБ), история, `dist` (595 МБ), `artifacts`,
   # `bins`, `nvidia-container-toolkit` — к компиляции они отношения не имеют.
-  tar czf - --exclude='setup/target' --exclude='.git' \
+  # `--format=pax` не прихоть: имена файлов комплекта кириллические
+  # (`config/kit/УСТАНОВКА.md`), и в старом формате ustar архив не ОБЪЯВЛЯЕТ
+  # кодировку имён. Windows-tar читает их тогда в однобайтовой кодировке, и на
+  # диске появляется `РЈРЎРўРђРќРћР’РљРђ.md`: `dir` показывает его верно (мусор
+  # сходится обратно в той же кодировке), а `include_str!` файла не находит, и
+  # падает только компиляция ТЕСТОВ. Pax помечает имена как UTF-8 явно.
+  tar czf - --format=pax --exclude='setup/target' --exclude='.git' \
       setup config rust-toolchain.toml pack.sh Dockerfile.1c \
     | ssh "$HOST" "cmd /c \"cd /d $WIN && tar xzf -\""
 }

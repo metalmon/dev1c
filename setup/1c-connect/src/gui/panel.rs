@@ -79,6 +79,10 @@ pub struct Panel {
     log_scroll: ScrollHandle,
     /// Полоса прокрутки «Проекта» — своя ручка, отдельная от журнала.
     project_scroll: ScrollHandle,
+    /// Полоса прокрутки «Связи»: с 9.11 высота окна считается от экрана
+    /// (`window::height_on`) и под содержимое не растёт, так что длинный
+    /// список соединений прокручивается, как «Проект» и «Журнал».
+    link_scroll: ScrollHandle,
     /// Сколько строк журнала было на прошлой отрисовке: чтобы
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
@@ -89,23 +93,6 @@ pub struct Panel {
     /// `selected_connection` (с откатом на текущее, если имя из списка
     /// исчезло); саму перекладку в поля делает `select`.
     pub selected: String,
-    /// Высота видимой области тела вкладки и высота содержимого «Связи»
-    /// с последней отрисовки.
-    viewport_h: Option<Pixels>,
-    link_h: Option<Pixels>,
-    /// Пара (видимая область, содержимое), по которой подбирали высоту в
-    /// прошлый раз — `None` до первого подбора. Новый обмер подбирает
-    /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
-    /// содержимое «Связи» меняется под окном (режим прячет три поля,
-    /// диалог выбора каталога возвращает путь), и без повторной подгонки окно
-    /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: с 9.11
-    /// в нём нет текста вовсе (решение владельца — левый слот подвала убран
-    /// совсем), высоту держит высота кнопки (`h_8`), и от содержимого она не
-    /// зависит.
-    last_fit: Option<(Pixels, Pixels)>,
-    /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
-    /// не дублирует.
-    fit_queued: bool,
 }
 
 /// Карточка состояния: кружок, заголовок, можно ли «Прервать» — всегда одна
@@ -2176,54 +2163,23 @@ impl Panel {
             fields,
             log_scroll: ScrollHandle::new(),
             project_scroll: ScrollHandle::new(),
+            link_scroll: ScrollHandle::new(),
             log_len: 0,
             original,
             // Окно открывается на текущем соединении — ровно то, чьи поля
             // только что наполнили `fields` выше.
             selected: host.name.clone(),
-            viewport_h: None,
-            link_h: None,
-            last_fit: None,
-            fit_queued: false,
         }
     }
 
-    /// Обмер на отрисовке: как только известны и видимая область, и
-    /// содержимое «Связи», окно подбирает высоту на их разницу — не
-    /// только в первый раз, а при каждом обмере, заметно отличающемся от
-    /// прошлого подбора (`window::needs_fit`). Цикла нет: после
-    /// `window.resize` новый обмер даёт пару, для которой `fit_height_for`
-    /// возвращает `None` (неподвижная точка или зажатый предел). Сам
-    /// подбор — отложенно (`defer_in`): менять размер окна прямо посреди
-    /// раскладки нельзя.
-    fn measured(&mut self, viewport: Option<Pixels>, params: Option<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        self.viewport_h = viewport.or(self.viewport_h);
-        self.link_h = params.or(self.link_h);
-        let (Some(v), Some(c)) = (self.viewport_h, self.link_h) else { return };
-        // Два обмера за кадр (видимая область и содержимое) — один подбор:
-        // отложенный замыкание читает пару, какой она стала к концу кадра.
-        if self.fit_queued || !crate::gui::window::needs_fit(self.last_fit, (v, c)) {
-            return;
-        }
-        self.fit_queued = true;
-        cx.defer_in(window, |this, window, cx| {
-            this.fit_queued = false;
-            let (Some(v), Some(c)) = (this.viewport_h, this.link_h) else { return };
-            if !crate::gui::window::needs_fit(this.last_fit, (v, c)) {
-                return;
-            }
-            this.last_fit = Some((v, c));
-            crate::gui::window::fit_height(window, cx, c, v);
-        });
-    }
-
-    /// Область прокрутки с тонкой полосой (Проект, Журнал): корень
+    /// Область прокрутки с тонкой полосой (все три вкладки): корень
     /// `relative`, дорожка-дитя `overflow_y_scroll` + `track_scroll`, полоса
     /// — поверх, абсолютным слоем (как `Scrollable::render` в
     /// `gpui-component`). Дорожка прозрачная, бегунок 3 px (5 px при
     /// наведении), цвета бегунка — из темы (`scrollbar.thumb.background`),
-    /// режим показа — из темы. «Связь» этим не зовёт: вкладка мерная,
-    /// окно подстраивается под неё, полосы там нет.
+    /// режим показа — из темы. «Связь» зовёт это с 9.11: высота окна считается
+    /// от экрана (`window::height_on`) и под вкладку больше не растёт, так что
+    /// длинный список прокручивается здесь, как «Проект» и «Журнал».
     fn scrolled(id: &'static str, handle: &ScrollHandle, content: impl IntoElement) -> impl IntoElement {
         div()
             .id(id)
@@ -3058,153 +3014,144 @@ impl Render for Panel {
         let body: AnyElement = match tab {
             // Обмер до `.id`: `on_children_prepainted` есть у `Div`, а `.id`
             // отдаёт уже `Stateful<Div>`.
-            gui::Tab::Link => div()
-                // Высота содержимого вкладки: по ней окно подбирает свою.
-                .on_children_prepainted({
-                    let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
-                        this.measured(None, b.first().map(|b| b.size.height), window, cx)
-                    });
-                    move |b, window, cx| m(&b, window, cx)
-                })
-                .id("link")
-                .size_full()
-                .overflow_y_scroll()
-                .child({
-                    // Список соединений, а не одна карточка: порядок, группы
-                    // и место раскрытой карточки решены в `link_body` — здесь
-                    // только подстановка виджетов, строка за строкой.
-                    let mut col = v_flex().gap_2();
-                    // Номер элемента — в имя строки: имена соединений в
-                    // правленном руками файле бывают одинаковыми (Review
-                    // Focus плана), а два элемента GPUI с одним именем —
-                    // это уже не про список, а про падение окна.
-                    for (i, item) in items.into_iter().enumerate() {
-                        col = col.child(match item {
-                            // Пустая «Связь»: вопрос и два ответа на него,
-                            // каждый — кнопка, заводящая первую карточку со
-                            // своей ролью (задача 11).
-                            Body::Ask(q) => div().min_w_0().text_size(px(13.)).text_color(caption).child(q).into_any_element(),
-                            Body::Answer(label, role) => KitButton::new(SharedString::from(format!("answer-{role}")))
-                                .outline()
-                                .w_full()
-                                .label(label)
-                                .on_click(move |_, window, cx| add_link(window, cx, role))
-                                .into_any_element(),
-                            Body::Caption(text) => div().pt_1().text_size(px(12.)).text_color(caption).child(text).into_any_element(),
-                            Body::Row(r, open) => {
-                                let name = r.name.clone();
-                                // Щелчок по строке зовёт `Panel::select` с
-                                // именем ИМЕННО этой строки: имя взято у
-                                // `Row`, из которой строка и нарисована, —
-                                // второго источника имени у щелчка нет.
-                                let click = cx.listener({
+            // Вкладка целиком — в прокрутку (решение владельца 9.11: «что не
+            // лезет, то в прокрутку»). Высоту окна она больше не решает:
+            // та считается от экрана при открытии (`window::height_on`).
+            gui::Tab::Link => Self::scrolled("link", &self.link_scroll, {
+                // Список соединений, а не одна карточка: порядок, группы
+                // и место раскрытой карточки решены в `link_body` — здесь
+                // только подстановка виджетов, строка за строкой.
+                let mut col = v_flex().gap_2();
+                // Номер элемента — в имя строки: имена соединений в
+                // правленном руками файле бывают одинаковыми (Review
+                // Focus плана), а два элемента GPUI с одним именем —
+                // это уже не про список, а про падение окна.
+                for (i, item) in items.into_iter().enumerate() {
+                    col = col.child(match item {
+                        // Пустая «Связь»: вопрос и два ответа на него,
+                        // каждый — кнопка, заводящая первую карточку со
+                        // своей ролью (задача 11).
+                        Body::Ask(q) => div().min_w_0().text_size(px(13.)).text_color(caption).child(q).into_any_element(),
+                        Body::Answer(label, role) => KitButton::new(SharedString::from(format!("answer-{role}")))
+                            .outline()
+                            .w_full()
+                            .label(label)
+                            .on_click(move |_, window, cx| add_link(window, cx, role))
+                            .into_any_element(),
+                        Body::Caption(text) => div().pt_1().text_size(px(12.)).text_color(caption).child(text).into_any_element(),
+                        Body::Row(r, open) => {
+                            let name = r.name.clone();
+                            // Щелчок по строке зовёт `Panel::select` с
+                            // именем ИМЕННО этой строки: имя взято у
+                            // `Row`, из которой строка и нарисована, —
+                            // второго источника имени у щелчка нет.
+                            let click = cx.listener({
+                                let name = name.clone();
+                                move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
+                                    // Щелчок по уже открытой строке — не
+                                    // переход: ни спрашивать, ни
+                                    // перевязывать поля не о чем (событие
+                                    // всплывает и из полей внутри её
+                                    // карточки).
+                                    if this.selected == name {
+                                        return;
+                                    }
+                                    let Some((message, detail)) = leave_question(this.dirty_now(cx)) else {
+                                        let cfg = cx.global::<Ui>().cfg.clone();
+                                        this.select(&cfg, &name, window, cx);
+                                        cx.notify();
+                                        return;
+                                    };
+                                    // Правка не пропадает молча: тот же
+                                    // вопрос, которым спрашивается смена
+                                    // базы (`save::ask_yes_no`), и «нет»
+                                    // оставляет человека на месте.
                                     let name = name.clone();
-                                    move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
-                                        // Щелчок по уже открытой строке — не
-                                        // переход: ни спрашивать, ни
-                                        // перевязывать поля не о чем (событие
-                                        // всплывает и из полей внутри её
-                                        // карточки).
-                                        if this.selected == name {
-                                            return;
-                                        }
-                                        let Some((message, detail)) = leave_question(this.dirty_now(cx)) else {
-                                            let cfg = cx.global::<Ui>().cfg.clone();
-                                            this.select(&cfg, &name, window, cx);
-                                            cx.notify();
-                                            return;
-                                        };
-                                        // Правка не пропадает молча: тот же
-                                        // вопрос, которым спрашивается смена
-                                        // базы (`save::ask_yes_no`), и «нет»
-                                        // оставляет человека на месте.
-                                        let name = name.clone();
-                                        gui::ask_yes_no(
-                                            window,
-                                            cx,
-                                            message,
-                                            detail,
-                                            "Да, перейти",
-                                            "Остаться",
-                                            true,
-                                            move |window, cx| {
-                                                let (cfg, panel) = {
-                                                    let ui = cx.global::<Ui>();
-                                                    (ui.cfg.clone(), ui.panel.clone())
-                                                };
-                                                let Some(panel) = panel else { return };
-                                                panel.update(cx, |this, cx| this.select(&cfg, &name, window, cx));
-                                                cx.refresh_windows();
-                                            },
-                                        );
-                                    }
-                                });
-                                let mut row = Self::layer(card_bg, border)
-                                    .id(SharedString::from(format!("row-{i}")))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .p_3()
-                                    .cursor_pointer()
-                                    .on_click(click)
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_baseline()
-                                            // Имя первым планом и полужирным
-                                            // (спека), состояние с отметками —
-                                            // приглушённым справа. `min_w_0` и
-                                            // многоточие: длинное имя на 380
-                                            // точках иначе обрезается по краю.
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .whitespace_nowrap()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(name.clone()),
-                                            )
-                                            .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r))),
-                                    )
-                                    // Вторая строка — только там, где `Row`
-                                    // принёс базу (у текущего соединения):
-                                    // двухплановые строки у десяти заказчиков
-                                    // дали бы двадцать строк в окне 380 точек.
-                                    .when_some(r.base.clone(), |d, base| {
-                                        d.child(div().min_w_0().text_size(px(13.)).text_color(caption).child(base))
-                                    });
-                                if open {
-                                    row = row.child(self.link_card(&title, caption, accent, window, cx));
+                                    gui::ask_yes_no(
+                                        window,
+                                        cx,
+                                        message,
+                                        detail,
+                                        "Да, перейти",
+                                        "Остаться",
+                                        true,
+                                        move |window, cx| {
+                                            let (cfg, panel) = {
+                                                let ui = cx.global::<Ui>();
+                                                (ui.cfg.clone(), ui.panel.clone())
+                                            };
+                                            let Some(panel) = panel else { return };
+                                            panel.update(cx, |this, cx| this.select(&cfg, &name, window, cx));
+                                            cx.refresh_windows();
+                                        },
+                                    );
                                 }
-                                row.into_any_element()
+                            });
+                            let mut row = Self::layer(card_bg, border)
+                                .id(SharedString::from(format!("row-{i}")))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_3()
+                                .cursor_pointer()
+                                .on_click(click)
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_baseline()
+                                        // Имя первым планом и полужирным
+                                        // (спека), состояние с отметками —
+                                        // приглушённым справа. `min_w_0` и
+                                        // многоточие: длинное имя на 380
+                                        // точках иначе обрезается по краю.
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .whitespace_nowrap()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(name.clone()),
+                                        )
+                                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r))),
+                                )
+                                // Вторая строка — только там, где `Row`
+                                // принёс базу (у текущего соединения):
+                                // двухплановые строки у десяти заказчиков
+                                // дали бы двадцать строк в окне 380 точек.
+                                .when_some(r.base.clone(), |d, base| {
+                                    d.child(div().min_w_0().text_size(px(13.)).text_color(caption).child(base))
+                                });
+                            if open {
+                                row = row.child(self.link_card(&title, caption, accent, window, cx));
                             }
-                            // «+ Добавить» — у списка. Роль новой карточки
-                            // спрашивается теми же двумя ответами, что и на
-                            // пустой «Связи» (`link::onboarding_answers`):
-                            // третьих слов для того же выбора не заводим.
-                            // Стрелки больше нет (поправка владельца 9.11 ко
-                            // второму снимку): это действие списка, не поле
-                            // карточки, и вид селектора ему не нужен — список
-                            // при нажатии остаётся.
-                            Body::Add => KitButton::new("add-link")
-                                .ghost()
-                                .label("+ Добавить")
-                                .disabled(busy_now)
-                                .dropdown_menu(|mut menu, _, _| {
-                                    for (label, role) in link::onboarding_answers() {
-                                        menu =
-                                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| add_link(window, cx, role)));
-                                    }
-                                    menu
-                                })
-                                .into_any_element(),
-                        });
-                    }
-                    col
-                })
-                .into_any_element(),
+                            row.into_any_element()
+                        }
+                        // «+ Добавить» — у списка. Роль новой карточки
+                        // спрашивается теми же двумя ответами, что и на
+                        // пустой «Связи» (`link::onboarding_answers`):
+                        // третьих слов для того же выбора не заводим.
+                        // Стрелки больше нет (поправка владельца 9.11 ко
+                        // второму снимку): это действие списка, не поле
+                        // карточки, и вид селектора ему не нужен — список
+                        // при нажатии остаётся.
+                        Body::Add => KitButton::new("add-link")
+                            .ghost()
+                            .label("+ Добавить")
+                            .disabled(busy_now)
+                            .dropdown_menu(|mut menu, _, _| {
+                                for (label, role) in link::onboarding_answers() {
+                                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| add_link(window, cx, role)));
+                                }
+                                menu
+                            })
+                            .into_any_element(),
+                    });
+                }
+                col
+            })
+            .into_any_element(),
             // «Инструменты» = прежние «Расширение» и «Инструменты» одной лентой:
             // сверху факты набора, ниже — каталог и состояние ветки.
             gui::Tab::Tools => {
@@ -3575,17 +3522,12 @@ impl Render for Panel {
             .child(status)
             .child(div().border_b_1().border_color(border.opacity(0.6)).child(tabs))
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    // Видимая область тела вкладки — вторая половина обмера.
-                    .on_children_prepainted({
-                        let m = cx.listener(|this: &mut Self, b: &Vec<Bounds<Pixels>>, window, cx| {
-                            this.measured(b.first().map(|b| b.size.height), None, window, cx)
-                        });
-                        move |b, window, cx| m(&b, window, cx)
-                    })
-                    .child(body),
+                // Тело вкладки забирает остаток высоты окна и прокручивается
+                // внутри себя (`min_h_0` — иначе flex-ребёнок не сжимается
+                // ниже своего содержимого и выдавливал бы подвал за край).
+                // Шапка, карточка состояния, вкладки и подвал в прокрутку не
+                // уходят: выключатель и кнопка действия всегда на виду.
+                div().flex_1().min_h_0().child(body),
             )
             .child(if working {
                 // Работа: дорожка акцентом темы, бегунок въезжает слева и
@@ -3638,7 +3580,7 @@ mod tests {
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
     use crate::gui::link;
-    use crate::gui::{capitalized, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
+    use crate::gui::{capitalized, Busy, Dot, Kind, ProjectView, Running, Ui, Verdict, Which};
     use crate::session::State;
     use crate::verify;
     use common::check::Check;

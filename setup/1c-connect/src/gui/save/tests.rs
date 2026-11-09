@@ -2573,19 +2573,19 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     let card = "Ромашка";
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
 
-    answer_request(&mut ui, card, Decision::NoAnswer);
+    answer_request(&mut ui, card, a_request().peer, Decision::NoAnswer);
     assert_eq!(ui.waiting.len(), 1, "закрытие без ответа заявку не снимает");
     assert!(ui.declined.is_empty(), "и отказом не притворяется");
     assert!(ui.log.last().unwrap().line.text.contains("ждёт ответа"), "{:?}", ui.log.last());
 
-    answer_request(&mut ui, card, Decision::Deny);
+    answer_request(&mut ui, card, a_request().peer, Decision::Deny);
     assert!(ui.waiting.is_empty(), "отказ заявку снимает");
     assert_eq!(ui.declined, vec![card.to_string()], "а исход остаётся: слово «отклонено» на строке");
 
     // Разрешение по новой заявке стирает прошлый исход: карточка больше не
     // «отклонено».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, card, Decision::Allow { write: true });
+    answer_request(&mut ui, card, a_request().peer, Decision::Allow { write: true });
     assert!(ui.waiting.is_empty());
     assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
 }
@@ -2599,22 +2599,22 @@ fn the_answer_travels_back_to_the_conversation() {
     let mut ui = Ui::for_test();
     let (tx, mut rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
-    answer_request(&mut ui, "Ромашка", Decision::Allow { write: true });
+    answer_request(&mut ui, "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }));
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, "Ромашка", Decision::Allow { write: true });
+    answer_request(&mut ui, "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
 }
 
-/// Вторая заявка по той же карточке заменяет первую: строка у карточки одна,
-/// и двух «ждёт разрешения» об одном и том же человеку нечем различить.
-/// Прошлый отказ она перебивает — иначе позванный второй раз читал бы свой
-/// прежний отказ вместо приглашения ответить.
+/// Повтор ТОГО ЖЕ ключа заменяет свою прежнюю заявку: отпечаток на экране у
+/// них один, и две записи об одном и том же человеку нечем различить.
+/// Прошлый отказ по карточке новая заявка перебивает — иначе позванный
+/// второй раз читал бы свой прежний отказ вместо приглашения ответить.
 #[test]
-fn a_second_request_for_the_same_card_replaces_the_first_and_its_refusal() {
+fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
     let mut ui = Ui::for_test();
     ui.declined.push("Ромашка".into());
     take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
@@ -2622,11 +2622,70 @@ fn a_second_request_for_the_same_card_replaces_the_first_and_its_refusal() {
     assert!(ui.declined.is_empty(), "новая заявка перебивает прошлый исход");
 
     take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
-    assert_eq!(ui.waiting.len(), 1, "двух строк «ждёт разрешения» у одной карточки не бывает");
+    assert_eq!(ui.waiting.len(), 1, "тот же ключ — та же заявка, а не вторая запись о ней");
 
     // Заявка по другой карточке соседку не трогает: отзыв и разрешение
     // адресуются карточкой, и путать их нельзя.
     let other = crate::enroll::Request { card: "Клевер".into(), ..a_request() };
     take_request(&mut ui, crate::gui::Pending { request: other, answer: None });
     assert_eq!(ui.waiting.len(), 2);
+}
+
+/// HIGH 1 проверки безопасности, дословно: «ответ человека применяется не к
+/// той заявке, которую ему показали». Последовательность из находки:
+/// человеку показан диалог с отпечатком стороны А, он снимает трубку сверить
+/// его голосом — в эти секунды приходит заявка стороны Б на ту же карточку —
+/// человек жмёт «Разрешить». Разрешение обязано уйти А и только А: Б он не
+/// видел и не сверял, а на конце этого решения доступ к базе.
+///
+/// Падал так: `take_request` вытеснял прежнюю заявку по одному имени
+/// карточки, а `answer_request` искал её тоже по имени — ответ про А
+/// доставался Б, и весь смысл диалога (решение 7 спеки: человек смотрит на
+/// отпечаток) обнулялся.
+#[test]
+fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let (a_tx, mut a_rx) = futures::channel::oneshot::channel();
+    let (b_tx, mut b_rx) = futures::channel::oneshot::channel();
+    let a = a_request();
+    let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
+    assert_ne!(a.peer, b.peer, "иначе тест проверяет не то");
+
+    // Диалог открыт по А — ключ той стороны запомнен ДО показа.
+    take_request(&mut ui, crate::gui::Pending { request: a.clone(), answer: Some(a_tx) });
+    let shown = a.peer;
+    // Пока человек сверяет отпечаток по телефону, встаёт в очередь Б.
+    take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
+    assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
+
+    answer_request(&mut ui, &a.card, shown, Decision::Allow { write: true });
+    assert_eq!(
+        a_rx.try_recv().unwrap(),
+        Some(Decision::Allow { write: true }),
+        "разрешение обязано уйти той стороне, чей отпечаток сверяли"
+    );
+    assert_eq!(b_rx.try_recv().unwrap(), None, "сторона, которую человек не видел, разрешения не получает");
+    // Б осталась ждать своей очереди — её человек увидит своим диалогом.
+    assert_eq!(ui.waiting.len(), 1);
+    assert_eq!(ui.waiting[0].request.peer, b.peer);
+}
+
+/// Та же защита с другого конца: показанной заявки уже нет (разговор
+/// кончился), а по той же карточке стоит ЧУЖАЯ. Ответ не достаётся ей и не
+/// решает вообще ничего — ни разрешения, ни отказа, ни записи «отклонено».
+#[test]
+fn an_answer_to_a_gone_request_touches_no_one_else() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let (b_tx, mut b_rx) = futures::channel::oneshot::channel();
+    let gone = a_request().peer;
+    let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
+    take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
+
+    answer_request(&mut ui, &b.card, gone, Decision::Deny);
+    assert_eq!(b_rx.try_recv().unwrap(), None, "отказ чужой заявке не адресуется");
+    assert_eq!(ui.waiting.len(), 1, "чужая заявка со списка не снимается");
+    assert!(ui.declined.is_empty(), "исхода, которого человек не выбирал про ЭТУ сторону, карточка не носит");
+    assert!(ui.log.last().unwrap().line.text.contains("отпечаток был у другой стороны"), "{:?}", ui.log.last());
 }

@@ -197,6 +197,32 @@ impl Book {
     /// умирает. Пишет на диск сразу же — без этого второй процесс (или этот
     /// же после перезапуска) не увидел бы код, который уже отдали человеку.
     pub fn issue(&mut self, connection: &str, ticket: &crate::ticket::Ticket) -> Result<(), String> {
+        self.write_ticket(connection, ticket, false)
+    }
+
+    /// Перевыпуск: новый код карточки ГАСИТ все прежние её коды, и гасит в
+    /// одной записи с появлением нового.
+    ///
+    /// Так читает «Выдать новый код» человек, и читает он верно — особенно
+    /// когда нажимает это именно потому, что прежняя строка куда-то утекла:
+    /// «новый» без «старый больше не работает» оставляет утёкший код живым
+    /// ещё на сутки (`ticket::LIFETIME`), и нажавший об этом не узнает.
+    ///
+    /// Одна `mutate`, а не «погасить, потом выдать»: между двумя записями
+    /// может оборваться питание, и карточка осталась бы либо без кода вовсе
+    /// (погасили, выдать не успели), либо с двумя живыми (выдали, погасить
+    /// не успели) — второе ровно то, от чего перевыпуск и заводится.
+    ///
+    /// Отличается от `issue` только этим. `issue` оставлена как есть: одна
+    /// карточка С ДВУМЯ живыми кодами — законное состояние хранилища (так
+    /// проверяется, что `spend` гасит ровно один), и запрещать его в самом
+    /// нижнем слое незачем. Выдаёт код человеку только окно, и оно зовёт
+    /// `reissue` всегда (`gui::panel::issue_code`).
+    pub fn reissue(&mut self, connection: &str, ticket: &crate::ticket::Ticket) -> Result<(), String> {
+        self.write_ticket(connection, ticket, true)
+    }
+
+    fn write_ticket(&mut self, connection: &str, ticket: &crate::ticket::Ticket, douse_old: bool) -> Result<(), String> {
         let now = now_secs();
         let until = ticket.until.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
         if until < now {
@@ -204,12 +230,19 @@ impl Book {
             // тикета тихо возвращала успех, а первая же запись (чистка
             // просрочки внутри `persist`) выбрасывала его обратно — человек
             // получал на руки код, которого в хранилище уже не было. Лучше
-            // отказать здесь словами, чем соврать об успехе.
+            // отказать здесь словами, чем соврать об успехе. Гашение прежних
+            // при таком отказе тоже не идёт: карточка не должна остаться без
+            // кода из-за попытки выдать негодный.
             return Err("Этот тикет уже просрочен — выдавать его некому.".to_string());
         }
         let connection = connection.to_string();
         let fingerprint = fingerprint(&ticket.secret);
-        self.mutate(move |data| data.tickets.push(IssuedTicket { connection, fingerprint, until }))
+        self.mutate(move |data| {
+            if douse_old {
+                data.tickets.retain(|t| t.connection != connection);
+            }
+            data.tickets.push(IssuedTicket { connection, fingerprint, until })
+        })
     }
 
     /// Гасит тикет по секрету и отдаёт имя карточки, к которой он выдан.
@@ -598,6 +631,62 @@ mod tests {
 
     fn a_ticket() -> Ticket {
         Ticket::issue(node_id(), None, vec![]).unwrap()
+    }
+
+    /// MEDIUM 2 проверки безопасности: «Выдать новый код» не гасил прежний.
+    /// Человек, нажимая это, думает ровно одно — старый больше не работает,
+    /// — и нажимает он это чаще всего потому, что старый куда-то утёк. Код,
+    /// оставшийся живым, живёт ещё сутки (`ticket::LIFETIME`), и нажавший об
+    /// этом не узнает.
+    ///
+    /// Падал так: `reissue` не существовало, окно звало `issue`, та только
+    /// дописывала запись — после выдачи нового ПРЕЖНИЙ код по-прежнему
+    /// опознавался `check` и гасился `spend`, то есть впускал.
+    #[test]
+    fn a_reissued_code_douses_the_previous_one_for_that_card() {
+        let d = dir("reissue");
+        let old = a_ticket();
+        let new = a_ticket();
+        let mut book = Book::open(&d).unwrap();
+        book.reissue("buh", &old).unwrap();
+        assert_eq!(book.check(&old.secret).unwrap(), "buh", "иначе тест проверяет не то");
+
+        book.reissue("buh", &new).unwrap();
+        assert!(book.check(&old.secret).is_err(), "прежний код обязан быть отвергнут — именно за этим и нажимают «Выдать новый»");
+        assert_eq!(book.check(&new.secret).unwrap(), "buh", "а новый — работать");
+
+        // Гашение дошло до файла, а не только до снимка в памяти: иначе
+        // перезапуск вернул бы утёкший код к жизни.
+        drop(book);
+        let mut again = Book::open(&d).unwrap();
+        assert!(again.spend(&old.secret).is_err(), "прежний код вернулся после перезапуска");
+        assert_eq!(again.spend(&new.secret).unwrap(), "buh");
+    }
+
+    /// Чужая карточка перевыпуском не задевается: гасятся коды ТОЙ карточки,
+    /// которой выдают новый, — у соседки свой код и своя сторона.
+    #[test]
+    fn a_reissue_does_not_touch_another_cards_code() {
+        let d = dir("reissue-neighbour");
+        let neighbour = a_ticket();
+        let mut book = Book::open(&d).unwrap();
+        book.reissue("mcp", &neighbour).unwrap();
+        book.reissue("buh", &a_ticket()).unwrap();
+        assert_eq!(book.check(&neighbour.secret).unwrap(), "mcp", "перевыпуск одной карточки погасил код другой");
+    }
+
+    /// Негодный новый код прежние не гасит: карточка не должна остаться без
+    /// кода вовсе из-за попытки выдать просроченный.
+    #[test]
+    fn a_refused_reissue_leaves_the_working_code_alone() {
+        let d = dir("reissue-refused");
+        let good = a_ticket();
+        let mut book = Book::open(&d).unwrap();
+        book.reissue("buh", &good).unwrap();
+        let mut stale = a_ticket();
+        stale.until = UNIX_EPOCH;
+        assert!(book.reissue("buh", &stale).is_err(), "просроченный код выдавать некому");
+        assert_eq!(book.check(&good.secret).unwrap(), "buh", "отказ выдачи погасил годный код");
     }
 
     #[test]

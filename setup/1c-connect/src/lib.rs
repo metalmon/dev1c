@@ -7,6 +7,7 @@ pub mod allow;
 pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
+pub mod channel;
 pub mod editors;
 pub mod enroll;
 pub mod enrolled;

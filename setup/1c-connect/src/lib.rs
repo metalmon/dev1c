@@ -8,6 +8,7 @@ pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
 pub mod editors;
+pub mod enroll;
 pub mod enrolled;
 pub mod flow;
 pub mod gate;

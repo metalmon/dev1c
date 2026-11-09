@@ -1526,6 +1526,22 @@ pub enum LinkAct {
     Delete,
 }
 
+/// Какой заявке карточки откроется диалог разрешения — и откроется ли вовсе.
+///
+/// Заявка берётся по предмету, а не «первая из списка»: предмет у кнопки один,
+/// и спросить человека о чужой карточке нельзя. И только та, которой ещё есть
+/// кому отвечать (`Pending::reachable`) — той же мерой, какой заявку считает
+/// ждущей `enroll_facts`, то есть какой кнопка «Разрешить» вообще зажигается.
+///
+/// Без оглядки на живость разговора выходило так: у карточки две заявки, у
+/// первой разговор уже кончился (связь сорвалась, вышел срок `enroll::DECISION`
+/// — а убирает такие только тик `prune_enrollment`), и человек, нажав кнопку
+/// ради живой второй, сверяет голосом отпечаток мёртвой первой, разрешает — и
+/// получает «отправить не удалось». Живая при этом ждёт ответа дальше.
+fn request_to_answer(ui: &Ui, card: &str) -> Option<crate::enroll::Request> {
+    ui.waiting.iter().find(|p| p.request.card == card && p.reachable()).map(|p| p.request.clone())
+}
+
 /// Выдать код подключения карточке и запомнить его на этот запуск.
 ///
 /// `fresh` — перевыпуск: прежняя строка этой карточки забывается и на экран
@@ -1895,10 +1911,7 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             cx.refresh_windows();
         }
         LinkAct::Allow => {
-            // Заявка берётся по предмету, а не «первая из списка»: предмет у
-            // кнопки один, и спросить человека о чужой карточке нельзя.
-            let Some(r) = cx.global::<Ui>().waiting.iter().find(|p| p.request.card == subject).map(|p| p.request.clone())
-            else {
+            let Some(r) = request_to_answer(cx.global::<Ui>(), subject) else {
                 // Заявки уже нет — успели ответить в другом окне или она
                 // ушла по сроку. Молчать нельзя: человек нажал кнопку.
                 gui::note_line(
@@ -4225,7 +4238,7 @@ mod tests {
         delete_on_confirm,
         delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question,
         link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
-        project_rows, publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url,
+        project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks, save_hint, shown_base_url,
         shown_fields,
         skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body,
         DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
@@ -6218,6 +6231,38 @@ mod tests {
         crate::gui::prune_enrollment(&mut ui, std::time::SystemTime::now());
         assert!(ui.waiting.is_empty());
         assert!(ui.log.last().unwrap().line.text.contains("больше не ждёт ответа"), "{:?}", ui.log.last());
+    }
+
+    /// Задача 3 плана «Починка ветки `channel`», пункт 5: «Разрешить» брало
+    /// ПЕРВУЮ заявку карточки, не спросив, жив ли ещё её разговор. У карточки
+    /// заявок бывает несколько (`save::take_request` ставит разные стороны в
+    /// очередь нарочно), мёртвые с неё снимает только тик `prune_enrollment`,
+    /// и между двумя тиками человек, нажавший кнопку ради живой второй, сверял
+    /// бы голосом отпечаток мёртвой первой.
+    ///
+    /// Падал так: `reachable` спрашивали слово на строке и зажигание кнопки, а
+    /// сам выбор заявки под диалог — нет.
+    #[test]
+    fn allow_passes_over_a_request_whose_talk_has_died() {
+        let mut ui = ui_for("accept", "tunnel", false);
+        let card = ui.cfg.current().name.clone();
+        // Первая в очереди — сторона 4, вторая — сторона 3 (`a_waiting_request`).
+        let (first_tx, first_rx) = futures::channel::oneshot::channel();
+        let mut first = a_waiting_request(&card);
+        first.peer = a_key(4);
+        ui.waiting.push(crate::gui::Pending { request: first, answer: Some(first_tx) });
+        let (second_tx, _second_rx) = futures::channel::oneshot::channel();
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(second_tx) });
+        assert_eq!(request_to_answer(&ui, &card).map(|r| r.peer), Some(a_key(4)), "обе живы — спрашивают про первую");
+
+        // Разговор первой кончился: приёмник её решения уронен.
+        drop(first_rx);
+        assert_eq!(
+            request_to_answer(&ui, &card).map(|r| r.peer),
+            Some(a_key(3)),
+            "диалог обязан показать отпечаток той стороны, которой ответ ещё дойдёт"
+        );
+        assert!(request_to_answer(&ui, "Другая").is_none(), "чужая карточка — не предмет этой кнопки");
     }
 
     /// Important 1 ревью задач 6 и 7: строка выданного кода не чистилась

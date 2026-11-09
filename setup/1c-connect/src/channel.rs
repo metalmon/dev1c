@@ -974,7 +974,7 @@ mod tests {
                     // предъявлять нечего, и он к тому же погашен.
                     let show = if enrolled.load(Ordering::SeqCst) { "" } else { code.as_str() };
                     let (w, r) = control.halves();
-                    match dial_side(w, r, show, "Разработчик", Ceiling::Full).await {
+                    match dial_side(w, r, crate::enroll::Call::of(show, None), "Разработчик", Ceiling::Full).await {
                         Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => {
                             enrolled.store(true, Ordering::SeqCst);
                             Round::Held(hold(control.ear(), |_| {}).await)
@@ -1055,7 +1055,7 @@ mod tests {
                         Err(why) => return Round::Failed(why),
                     };
                     let (w, r) = control.halves();
-                    match dial_side(w, r, code.as_str(), "Разработчик", Ceiling::Full).await {
+                    match dial_side(w, r, crate::enroll::Call::of(code.as_str(), None), "Разработчик", Ceiling::Full).await {
                         Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => Round::Held(hold(control.ear(), |_| {}).await),
                         Ok(Outcome::NotEnrolled(no)) => Round::NotEnrolled(no),
                         Err(why) => Round::Failed(why),

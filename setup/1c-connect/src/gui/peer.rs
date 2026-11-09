@@ -460,6 +460,27 @@ fn addr_of(p: &Partner) -> EndpointAddr {
     addr
 }
 
+/// Что у зовущей карточки на руках между кругами.
+///
+/// Две половины одной памяти, и поэтому вместе: по ним решается, чем звонить
+/// (`enroll::Call::of`), и решается один раз на круг. Раздельно они жили бы
+/// каждая под своим замком, и «есть ли код» снова стало бы второй мерой рядом
+/// с первой.
+#[derive(Clone, Default)]
+struct InHand {
+    /// Код подключения, пока он не израсходован. Пустой — зачисление уже есть.
+    code: String,
+    /// Признак базы той карточки, которой этот поток, — как его назвала та
+    /// сторона в `enroll_ok`.
+    ///
+    /// `None` — не знаем: первый звонок либо возврат после перезапуска. Тогда
+    /// та сторона отвечает всем списком своих баз, и поток числится за всеми
+    /// ними — то есть отзыв любой из них его режет. Чтобы этого не было и
+    /// после перезапуска, признак надо хранить рядом с партнёром
+    /// (`partners.toml`), а это чужой файл этой работы — долг назван в отчёте.
+    card: Option<String>,
+}
+
 /// Зовущая сторона одной карточки: круг за кругом, пока звать есть смысл
 /// (`channel::keep_calling`).
 ///
@@ -467,29 +488,39 @@ fn addr_of(p: &Partner) -> EndpointAddr {
 /// круг с тем же кодом получил бы отказ «код не найден», то есть
 /// `Stopped::NotEnrolled` — и переподключение, ради которого круги и
 /// существуют, кончилось бы на первом же обрыве. Поэтому после удачного
-/// зачисления код гасится здесь же, и следующие круги идут пустыми: зачисление
-/// уже есть, предъявлять нечего (`enroll::dial_side` на пустом коде).
+/// зачисления код гасится здесь же, а следующие круги идут возвратом по
+/// карточке, которую та сторона назвала нашей.
 ///
 /// Опустевший код — он же признак «мы уже были подключены»: первый
 /// недозвон до зачисления остаётся «подключается», а после — «подключается
 /// снова». Второго счётчика для этого не нужно.
 async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, card: String, code: String, addr: EndpointAddr) {
     flow(&tx, &card, Some(link::Flow::Calling));
-    let code = Arc::new(Mutex::new(code));
+    let hand = Arc::new(Mutex::new(InHand { code, card: None }));
     let stopped = channel::keep_calling(|| {
-        let (node, channels, kit, tx, card, addr, code) =
-            (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), code.clone());
+        let (node, channels, kit, tx, card, addr, hand) =
+            (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
         async move {
             // Замок берётся и отпускается до первого ожидания — через `await`
             // его не держим ни разу.
-            let mine = code.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let round = one_round(&node, &channels, &kit, &tx, &card, addr, &mine).await;
-            let enrolled = match &round {
-                Round::Held(_) => {
-                    code.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    true
+            let mine = hand.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let (round, agreed) =
+                one_round(&node, &channels, &kit, &tx, &card, addr, enroll::Call::of(&mine.code, mine.card.as_deref())).await;
+            let enrolled = {
+                let mut held = hand.lock().unwrap_or_else(|e| e.into_inner());
+                // Карточку, о которой договорились, запоминаем до следующего
+                // круга: со второго круга возврат называет её сам, и та
+                // сторона числит поток за ней одной.
+                if let Some(id) = agreed {
+                    held.card = Some(id);
                 }
-                _ => code.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+                match &round {
+                    Round::Held(_) => {
+                        held.code.clear();
+                        true
+                    }
+                    _ => held.code.is_empty(),
+                }
             };
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
                 flow(&tx, &card, Some(link::Flow::Retrying));
@@ -507,6 +538,13 @@ async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<E
 
 /// Один круг звонка: дозвониться, открыть управляющий поток, провести
 /// зачисление, держать поток, пока та сторона говорит.
+///
+/// Вторым значением возвращает признак базы той карточки, о которой
+/// договорились, — если он однозначен. Он и есть то, чем следующий круг
+/// назовёт свою карточку; при списке из нескольких баз (возврат, не
+/// назвавший карточку) однозначного ответа нет, и выдумывать его нельзя:
+/// угадать здесь значило бы числить поток за карточкой, о которой не
+/// договаривались.
 async fn one_round(
     node: &Node,
     channels: &Channels,
@@ -514,28 +552,35 @@ async fn one_round(
     tx: &UnboundedSender<Ev>,
     card: &str,
     addr: EndpointAddr,
-    code: &str,
-) -> Round {
+    call: enroll::Call<'_>,
+) -> (Round, Option<String>) {
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
-        Err(e) => return Round::Failed(e),
+        Err(e) => return (Round::Failed(e), None),
     };
     let mut control = match channel.call().await {
         Ok(c) => c,
-        Err(e) => return Round::Failed(e),
+        Err(e) => return (Round::Failed(e), None),
     };
     let out = {
         let (send, recv) = control.halves();
-        enroll::dial_side(send, recv, code, &says_name(), Machine::read(kit).ceiling).await
+        enroll::dial_side(send, recv, call, &says_name(), Machine::read(kit).ceiling).await
+    };
+    let agreed = match &out {
+        Ok(enroll::Outcome::Enrolled(base)) => Some(base.base_id.clone()),
+        // Ровно одна база в ответе — это та самая карточка; несколько —
+        // возврат, не назвавший карточку, и выбирать из них нечем.
+        Ok(enroll::Outcome::Already(bases)) if bases.len() == 1 => Some(bases[0].id.clone()),
+        _ => None,
     };
     match out {
         Err(e) => {
             control.end(None).await;
-            Round::Failed(e)
+            (Round::Failed(e), agreed)
         }
         Ok(enroll::Outcome::NotEnrolled(no)) => {
             control.end(None).await;
-            Round::NotEnrolled(no)
+            (Round::NotEnrolled(no), agreed)
         }
         Ok(_) => {
             // Куда возвращаться после обрыва — запоминается ТОЛЬКО здесь, и
@@ -555,7 +600,7 @@ async fn one_round(
             // тоже: сказать нам нечего (`None`), но написанное до этого
             // обязано доехать прежде, чем канал закроется.
             control.end(None).await;
-            Round::Held(gone)
+            (Round::Held(gone), agreed)
         }
     }
 }

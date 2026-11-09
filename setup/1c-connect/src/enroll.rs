@@ -60,7 +60,7 @@
 use crate::enrolled::{Book, Verdict};
 use crate::secrets::hex;
 use crate::ticket::Ticket;
-use crate::wire::{code, BaseBrief, BaseFields, CardState, Ceiling, Frame, Msg, Refuse, SaysName, Side};
+use crate::wire::{code, BaseBrief, BaseFields, CardState, Ceiling, Frame, Msg, Refuse, SaysName, Side, Why};
 use iroh::EndpointId;
 use std::future::Future;
 use std::time::Duration;
@@ -122,6 +122,51 @@ pub struct Request {
     pub says_name: SaysName,
 }
 
+/// Чем звонит зовущая сторона — и это ОДНА мера на обе стороны разговора.
+///
+/// **Чем куплено.** Прежде «придёт ли заявка» решалось дважды и по-разному:
+/// зовущая смотрела, пуста ли строка кода, а принимающая — есть ли на машине
+/// хоть один непогашенный тикет. Выдали код второй карточке — и
+/// переподключение первой, которой просить нечего, висело до срока терпения;
+/// вожжей на поток за это время нет, то есть отзыв в это окно переставал быть
+/// немедленным, а в живой поток уезжал мусорный отказ о стороне, которая
+/// ответила всё, что должна. Мера одна: эта, и уезжает она на провод
+/// (`wire::Why`).
+///
+/// Строка кода превращается в это решение РОВНО ОДИН раз — в `Call::of`.
+/// Дальше по программе ездит уже решение, и переспрашивать «а пуст ли код»
+/// больше негде.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call<'a> {
+    /// Заявка: вот код подключения, вставленный человеком.
+    Enroll(&'a str),
+    /// Возврат по уже данному допуску: вот признак базы той карточки, которой
+    /// этот поток, если мы его помним.
+    Return(Option<&'a str>),
+}
+
+impl<'a> Call<'a> {
+    /// Единственная дорога от строк: код на руках — заявка, кода нет — возврат
+    /// по карточке, которую помним.
+    pub fn of(code: &'a str, card: Option<&'a str>) -> Call<'a> {
+        let code = code.trim();
+        if code.is_empty() {
+            Call::Return(card)
+        } else {
+            Call::Enroll(code)
+        }
+    }
+
+    /// Что из этого едет на провод. Код не едет НИКОГДА: на проводе от него
+    /// бывает только секрет тикета, и то в `enroll`.
+    fn why(&self) -> Why {
+        match self {
+            Call::Enroll(_) => Why::Enroll,
+            Call::Return(card) => Why::Return(card.map(|s| s.to_string())),
+        }
+    }
+}
+
 /// Решение человека.
 ///
 /// `NoAnswer` — не вежливость, а обязательный третий ответ: человек может
@@ -153,6 +198,12 @@ pub enum Outcome {
     /// Зачисление уже было: вот базы из `hello_ok`, человека не спрашивали.
     /// Личность доказана самим iroh, и ничего сверх этого не предъявляется
     /// (спека, «Второе и дальнейшие подключения человека не спрашивают»).
+    ///
+    /// Список здесь ОДИН элемент длиной, когда вернувшаяся сторона назвала
+    /// свою карточку, и длиннее — только когда она её не помнит (возврат
+    /// после перезапуска). Разница важна тому, кто ведёт учёт живых потоков:
+    /// поток, числящийся за всеми карточками сразу, режется отзывом любой из
+    /// них.
     Already(Vec<BaseBrief>),
     /// Не зачислены, и это исход: человек отклонил (`code::DECLINED` — сама
     /// не повторяй, код сгорел), человек ушёл, не решив, или звонящий бросил
@@ -203,8 +254,8 @@ where
     Fut: Future<Output = Decision>,
 {
     // Шаг второй: та сторона открыла поток и представилась.
-    let (proto_min, proto_max, ceiling) = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::Hello { proto_min, proto_max, ceiling, .. } => (proto_min, proto_max, ceiling),
+    let (proto_min, proto_max, ceiling, why) = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+        Msg::Hello { proto_min, proto_max, ceiling, why, .. } => (proto_min, proto_max, ceiling, why),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello", &other))).await,
     };
     // Наименьший из двух максимумов (спека, «Версии») — и сверка в ОБЕ
@@ -247,41 +298,50 @@ where
             });
         }
     }
-    write_msg(w, &Msg::HelloOk { proto, side: Side::WithBase, bases: bases.clone() }).await?;
-
-    // Ждать ли заявку. Уже зачисленная сторона обычно просто
-    // переподключается и `enroll` не шлёт вовсе — а сказать «мне не о чем
-    // просить» спека ей слова не даёт. Признак, по которому это различается
-    // без нового поля на проводе, — непогашенный выданный код: нет ни одного
-    // живого, значит ничья заявка не могла бы сработать, и ждать нечего.
-    //
-    // Зачисленная сторона с ЖИВЫМ кодом на руках — это человек, заводящий
-    // ВТОРУЮ карточку тому же партнёру, и её заявку обязано разобрать как
-    // всякую другую: по той карточке, к которой выдан код, а не отбить
-    // словами про первую.
-    if !bases.is_empty() {
-        let waiting = match book.has_live_ticket() {
-            Ok(yes) => yes,
-            Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
+    // Возврат — и заявки не будет: так сказала сама зовущая сторона, и это
+    // единственная мера на обе (`wire::Why`). Прежде здесь спрашивался
+    // непогашенный тикет НА ВСЕЙ МАШИНЕ, и возврат первой карточки висел
+    // тридцать секунд, пока ждали заявку по коду, выданному для второй.
+    if let Why::Return(named) = &why {
+        // Назвала карточку — в списке остаётся ОНА ОДНА. Поток у каждой
+        // карточки свой (спека, «Потоки»), и числить его за всеми базами
+        // партнёра значит рвать отзывом одной карточки связь по остальным —
+        // прямо против `revoked`: «отзыв одной карточки не должен рвать связь
+        // по четырём остальным».
+        //
+        // Не назвала (`None`) — отвечаем всем списком, как раньше: так
+        // выглядит возврат после перезапуска, пока зовущая сторона не хранит
+        // признак базы рядом с партнёром. Это названный долг, а не умолчание
+        // на вечно.
+        let mine: Vec<BaseBrief> = match named {
+            Some(id) => bases.into_iter().filter(|b| &b.id == id).collect(),
+            None => bases,
         };
-        if !waiting {
-            // Второе и дальнейшие подключения человека не спрашивают:
-            // личность доказана самим iroh. Разговор зачисления кончен.
-            return Ok(Outcome::Already(bases));
+        if mine.is_empty() {
+            // Вернулись туда, куда больше не пускают: карточку отозвали,
+            // удалили или переименовали. Отказ СЛОВАМИ, а не пустой список:
+            // пустой список зовущая прочитала бы как «нечего предъявить» и
+            // сказала бы человеку о своей беде вместо нашей причины.
+            return said_and_not_enrolled(w, Refuse::new(code::NOT_ALLOWED, NOT_ENROLLED_TEXT)).await;
         }
+        write_msg(w, &Msg::HelloOk { proto, side: Side::WithBase, bases: mine.clone() }).await?;
+        // Второе и дальнейшие подключения человека не спрашивают: личность
+        // доказана самим iroh. Разговор зачисления кончен.
+        return Ok(Outcome::Already(mine));
     }
+    write_msg(w, &Msg::HelloOk { proto, side: Side::WithBase, bases }).await?;
 
-    // Шаг второй, конец: заявка с секретом тикета.
+    // Шаг второй, конец: заявка с секретом тикета. Ждём её безусловно — та
+    // сторона сказала, что идёт с заявкой, и молчание на этом месте уже не
+    // «ей было не о чем просить», а настоящий обрыв.
+    //
+    // Зачисленная сторона с кодом на руках — это человек, заводящий ВТОРУЮ
+    // карточку тому же партнёру, и её заявку обязано разобрать как всякую
+    // другую: по той карточке, к которой выдан код, а не отбить словами про
+    // первую.
     let (ticket_secret, says_name) = match heard(w, r, PATIENCE).await {
         Ok(Msg::Enroll { ticket_secret, says_name, .. }) => (ticket_secret, says_name),
         Ok(other) => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll", &other))).await,
-        // Зачисленная сторона молчала и закрыла поток: ей и правда было не о
-        // чем просить, живой код выдан не ей. Это не беда — это тот же
-        // `Already`, только выясненный дорогой ценой одного ожидания.
-        Err(no) if !bases.is_empty() => {
-            let _ = no;
-            return Ok(Outcome::Already(bases));
-        }
         Err(no) => return refuse_and_fail(w, no).await,
     };
 
@@ -403,12 +463,16 @@ where
 
 /// Зовущая сторона — та, что вставила код.
 ///
-/// Пустой `code` — законный случай: это переподключение уже зачисленной
-/// стороны, которой нечего предъявлять (спека: «второе и дальнейшие
-/// подключения человека не спрашивают»). Непустой уходит заявкой ВСЕГДА, даже
-/// когда зачисление к какой-то карточке уже есть, — иначе законный код второй
-/// карточки не сработал бы никогда.
-pub async fn dial_side<W, R>(w: &mut W, r: &mut R, code: &str, says_name: &str, ceiling: Ceiling) -> Result<Outcome, String>
+/// Чем она звонит — заявкой по коду или возвратом по уже данному допуску —
+/// говорит `Call`, и это же уезжает на провод (`wire::Why`): принимающая
+/// сторона не гадает об этом по своим признакам. Заявка уходит ВСЕГДА, когда
+/// код на руках, даже если зачисление к какой-то карточке уже есть, — иначе
+/// законный код второй карточки не сработал бы никогда.
+///
+/// Возврат НАЗЫВАЕТ свою карточку, если помнит её (`Call::Return(Some)`), и
+/// получает в ответ её одну: поток у каждой карточки свой, и числить его за
+/// всеми базами партнёра значит рвать отзывом одной связь по остальным.
+pub async fn dial_side<W, R>(w: &mut W, r: &mut R, call: Call<'_>, says_name: &str, ceiling: Ceiling) -> Result<Outcome, String>
 where
     W: AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
@@ -420,6 +484,7 @@ where
         kit: env!("CARGO_PKG_VERSION").to_string(),
         says_name: says_name.into(),
         ceiling,
+        why: call.why(),
     };
     write_msg(w, &hello).await?;
 
@@ -438,22 +503,28 @@ where
         Msg::Refuse(no) => return Err(no.text),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello_ok", &other))).await,
     };
-    // Решает НАЛИЧИЕ КОДА, а не список. Код на руках — заявка уходит всегда,
-    // даже если зачисление к какой-то карточке уже есть: это человек заводит
-    // ВТОРУЮ карточку тому же партнёру, и промолчать здесь значило бы, что его
-    // законный код не сработает никогда, а он увидит чужую базу вместо своей.
-    if code.trim().is_empty() {
-        if bases.is_empty() {
-            return Err("Подключиться не удалось: нечего предъявить.\nКода подключения нет, а зачисления к этой машине ещё не было.\n\
-                        Попросите код на машине с базой."
-                .to_string());
+    // Решает `Call`, а не длина строки и не список баз: решение принято один
+    // раз, при звонке, и здесь только исполняется.
+    let shown = match call {
+        Call::Return(_) => {
+            if bases.is_empty() {
+                // Сюда доходит только та сторона, которая ответила пустым
+                // списком вместо отказа: наша принимающая половина на возврат
+                // без допуска говорит словами (`NOT_ENROLLED_TEXT`). Своих
+                // слов здесь всё равно не миновать — промолчать значило бы
+                // вернуть человеку пустой исход без причины.
+                return Err("Подключиться не удалось: нечего предъявить.\nКода подключения нет, а зачисления к этой машине ещё не \
+                            было.\nПопросите код на машине с базой."
+                    .to_string());
+            }
+            // Зачисление есть, кода нет — предъявлять нечего: второе и
+            // дальнейшие подключения человека не спрашивают.
+            return Ok(Outcome::Already(bases));
         }
-        // Зачисление есть, кода нет — предъявлять нечего: второе и дальнейшие
-        // подключения человека не спрашивают.
-        return Ok(Outcome::Already(bases));
-    }
+        Call::Enroll(code) => code,
+    };
 
-    let ticket = Ticket::from_code(code)?;
+    let ticket = Ticket::from_code(shown)?;
     let enroll = Msg::Enroll {
         // Секрет уезжает hex-ом — тем же видом, в каком он лежал в коде
         // тикета. Сам `Msg::Enroll` в журнал не пишется НИКОГДА: его `Debug`
@@ -719,6 +790,13 @@ const ALREADY_TALKING: &str = "По этому коду прямо сейчас 
 const FOREIGN_TEXT: &str = "Код не от этой базы.\nОн не читается как код, выданный этой программой.\nПопросите новый код у того, кто вас \
                             подключает.";
 
+/// Вернулись по карточке, к которой эту сторону больше не пускают: разрешение
+/// отозвали, карточку удалили или переименовали (имя — ключ в книге допуска).
+/// Код просить тут бесполезно ровно до того, как человек на стороне базы
+/// разрешит снова, поэтому совет ведёт к нему, а не в мессенджер.
+const NOT_ENROLLED_TEXT: &str = "Эта машина к базе не допущена.\nРазрешения по этой карточке больше нет: его отозвали, либо карточку \
+                                 удалили или переименовали.\nПопросите разрешить эту машину в окне на стороне базы и выдать новый код.";
+
 const NO_CARD_TEXT: &str =
     "База, к которой вели, больше не заведена.\nКарточку, для которой выдали этот код, на той машине удалили.\nПопросите \
                             завести её заново и выдать новый код.";
@@ -825,7 +903,7 @@ mod tests {
 
         let conn = tokio::time::timeout(WAIT, caller.dial(by_loopback(&base))).await.expect("дозвон не уложился в срок").unwrap();
         let (mut w, mut r) = conn.open_bi().await.unwrap();
-        let mine = tokio::time::timeout(WAIT, dial_side(&mut w, &mut r, &code, "Разработчик", Ceiling::Full))
+        let mine = tokio::time::timeout(WAIT, dial_side(&mut w, &mut r, Call::of(&code, None), "Разработчик", Ceiling::Full))
             .await
             .expect("зовущая сторона не уложилась в срок");
         let (theirs, book, _held) = tokio::time::timeout(WAIT, server).await.expect("принимающая сторона не уложилась в срок").unwrap();
@@ -1205,6 +1283,8 @@ mod tests {
             kit: "тест".into(),
             says_name: says_name.into(),
             ceiling: Ceiling::Full,
+            // Эти тесты ведут разговор заявки: дальше они шлют `enroll`.
+            why: Why::Enroll,
         }
     }
 
@@ -1303,6 +1383,7 @@ mod tests {
             says_name: "Разработчик".into(),
             // Та машина у себя запретила запись.
             ceiling: Ceiling::ReadOnly,
+            why: Why::Enroll,
         };
         Frame::write(&mut talk.w, &hello).await.unwrap();
         assert!(matches!(Frame::read(&mut talk.r).await, Ok(Msg::HelloOk { .. })), "обязан прийти hello_ok");
@@ -1324,6 +1405,130 @@ mod tests {
         assert!(!book.of("Ромашка")[0].write, "и в книге");
     }
 
+    /// Вернувшаяся сторона НАЗЫВАЕТ карточку своего потока — и получает её
+    /// одну, а не все базы, к которым её когда-либо пустили.
+    ///
+    /// Падало так: `hello_ok` отдавал весь список, и у того, кто ведёт учёт
+    /// живых разговоров, поток числился за всеми карточками сразу. Отзыв
+    /// ОДНОЙ карточки резал такой поток целиком — прямо против спеки
+    /// (`revoked`: «отзыв одной карточки не должен рвать связь по четырём
+    /// остальным»), и слово состояния по тому же потоку уходило всем
+    /// карточкам разом.
+    #[tokio::test]
+    async fn a_returning_side_that_names_its_card_gets_that_one_not_all_of_them() {
+        let two = |book: &mut Book, peer: EndpointId, _state: &std::path::Path| {
+            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+            book.enroll("Василёк", peer, "Разработчик", true).unwrap();
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+        };
+
+        let mut talk = Alone::new("returns-named", Decision::Allow { write: true }, two).await;
+        Frame::write(&mut talk.w, &returning(Some("b2"))).await.unwrap();
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::HelloOk { bases, .. }) = &answered else {
+            panic!("возврату отвечают hello_ok, а не отказом: {answered:?}")
+        };
+        assert_eq!(bases.len(), 1, "названа одна карточка — в ответе одна: {bases:?}");
+        assert_eq!(bases[0].id, "b2", "и именно та, которую назвали");
+        let (out, _book, asked) = talk.done().await;
+        let Ok(Outcome::Already(mine)) = &out else { panic!("возврат — это `Already`: {out:?}") };
+        assert_eq!(mine.len(), 1, "и наружу уходит ровно та карточка, за которой поток и числится");
+        assert_eq!(asked, 0, "возврат человека не спрашивает: личность доказал iroh");
+
+        // А возврат, карточку НЕ назвавший, по-прежнему получает весь список,
+        // и поток числится за всеми. Это названный долг, а не умолчание: имя
+        // карточки местное, признак базы зовущая сторона знает только из
+        // прошлого `enroll_ok`, и хранить его рядом с партнёром — работа в
+        // чужом файле этой задачи (см. отчёт).
+        let mut talk = Alone::new("returns-unnamed", Decision::Allow { write: true }, two).await;
+        Frame::write(&mut talk.w, &returning(None)).await.unwrap();
+        let Ok(Msg::HelloOk { bases, .. }) = Frame::read(&mut talk.r).await else { panic!("ждали hello_ok") };
+        assert_eq!(bases.len(), 2, "карточку не назвали — отвечаем всем списком, как и раньше");
+        let (out, _book, _asked) = talk.done().await;
+        assert!(matches!(out, Ok(Outcome::Already(_))), "{out:?}");
+    }
+
+    /// Возврат по карточке, к которой эту сторону больше не пускают, — отказ
+    /// СЛОВАМИ.
+    ///
+    /// Молчаливый пустой список зовущая прочитала бы как свою беду («нечего
+    /// предъявить») и послала бы человека просить код, которого мало: пока
+    /// человек на стороне базы не разрешит снова, код не поможет.
+    #[tokio::test]
+    async fn a_returning_side_whose_card_is_no_longer_allowed_is_refused_in_words() {
+        let mut talk = Alone::new("returns-revoked", Decision::Allow { write: true }, |book, peer, _state| {
+            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+        })
+        .await;
+
+        // Поток называет карточку, к которой зачисления нет (его отозвали,
+        // или карточку переименовали — имя и есть ключ в книге допуска).
+        Frame::write(&mut talk.w, &returning(Some("b2"))).await.unwrap();
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::Refuse(no)) = &answered else {
+            panic!("ждали отказ словами, а не пустой список: {answered:?}")
+        };
+        assert_eq!(no.code, code::NOT_ALLOWED, "код отказа — «не разрешено»: {no:?}");
+        assert!(no.text.contains("на стороне базы"), "совет ведёт к человеку, который может разрешить: {}", no.text);
+
+        let (out, _book, asked) = talk.done().await;
+        assert!(matches!(out, Ok(Outcome::NotEnrolled(_))), "разговор состоялся, зачисления нет: {out:?}");
+        assert_eq!(asked, 0, "человека возвратом не беспокоят вовсе");
+    }
+
+    /// «Придёт ли заявка» решается ОДНОЙ мерой, и мера эта — слово зовущей
+    /// стороны.
+    ///
+    /// Падало так: зовущая смотрела, есть ли у неё код, а принимающая — есть
+    /// ли на машине ХОТЬ ОДИН живой тикет. Выдали код второй карточке — и
+    /// переподключение первой, которой просить нечего, висело до срока
+    /// терпения в тридцать секунд: вожжей на поток за это время нет, то есть
+    /// отзыв в это окно переставал быть немедленным, а в живой поток уезжал
+    /// мусорный отказ «та сторона не ответила».
+    ///
+    /// Срок в тесте — секунда, и он тут главное утверждение: тридцать секунд
+    /// ожидания от секунды отличаются надёжно, а подмена «читать `why` как
+    /// заявку» роняет его сразу.
+    #[tokio::test]
+    async fn a_return_is_not_made_to_wait_for_a_request_issued_for_another_card() {
+        let mut talk = Alone::new("returns-while-ticket", Decision::Allow { write: true }, |book, peer, _state| {
+            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+            // А для ВТОРОЙ карточки человек только что выдал код — он живой и
+            // ждёт свою сторону. К этому потоку он не имеет никакого
+            // отношения.
+            let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+            book.issue("Василёк", &ticket).unwrap();
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+        })
+        .await;
+
+        Frame::write(&mut talk.w, &returning(Some("b1"))).await.unwrap();
+        let answered = tokio::time::timeout(Duration::from_secs(1), Frame::read(&mut talk.r))
+            .await
+            .expect("возврат ждал чужую заявку: ответ не пришёл за секунду, а ждать его положено было не дольше, чем пишется hello_ok");
+        let Ok(Msg::HelloOk { bases, .. }) = &answered else { panic!("ждали hello_ok: {answered:?}") };
+        assert_eq!(bases.len(), 1, "и список — по названной карточке: {bases:?}");
+        assert_eq!(bases[0].id, "b1");
+
+        let (out, _book, asked) = talk.done().await;
+        assert!(matches!(out, Ok(Outcome::Already(_))), "{out:?}");
+        assert_eq!(asked, 0);
+    }
+
+    /// `hello` возврата, собранный руками: тесты, которые ведут разговор сами.
+    fn returning(card: Option<&str>) -> Msg {
+        Msg::Hello {
+            proto_min: PROTO,
+            proto_max: PROTO,
+            side: Side::WithAgents,
+            kit: "тест".into(),
+            says_name: "Разработчик".into(),
+            ceiling: Ceiling::Full,
+            why: Why::Return(card.map(|s| s.to_string())),
+        }
+    }
+
     /// Спека 2: сверка версий в обе стороны. Сторона, объявившая диапазон,
     /// которого не существует, получает отказ словами — а не `hello_ok` с
     /// номером, на котором мы не говорим.
@@ -1341,6 +1546,7 @@ mod tests {
             kit: "тест".into(),
             says_name: "Разработчик".into(),
             ceiling: Ceiling::Full,
+            why: Why::Enroll,
         };
         Frame::write(&mut talk.w, &hello).await.unwrap();
         let answered = Frame::read(&mut talk.r).await;
@@ -1361,7 +1567,8 @@ mod tests {
         let (mut our_r, mut our_w) = tokio::io::split(ours);
         let (mut their_r, mut their_w) = tokio::io::split(theirs);
 
-        let caller = tokio::spawn(async move { dial_side(&mut our_w, &mut our_r, "", "Разработчик", Ceiling::Full).await });
+        let caller =
+            tokio::spawn(async move { dial_side(&mut our_w, &mut our_r, Call::Return(None), "Разработчик", Ceiling::Full).await });
 
         assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::Hello { .. })), "зовущая обязана начать с hello");
         // Отвечаем номером, которого эта сборка не умеет.

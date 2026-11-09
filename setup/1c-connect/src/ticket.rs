@@ -74,7 +74,18 @@ impl Ticket {
         let mut secret: [u8; 32] = Generate::try_generate().map_err(|e| format!("не удалось получить случайный секрет тикета: {e}"))?;
         let sealed = Zeroizing::new(secret);
         secret.zeroize();
-        Ok(Self { node, relay, direct, secret: sealed, until: UNIX_EPOCH + Duration::from_secs(now_secs()) + LIFETIME })
+        // `checked_add`, а не `+`: тот паникует при переполнении внутреннего
+        // представления `SystemTime`. Здесь складываются свои значения (часы
+        // машины и константа), а не чужой ввод, но переполнение называется
+        // отказом словами везде в этом файле — делать здесь исключение из
+        // одного и того же правила было бы странно.
+        let now = UNIX_EPOCH
+            .checked_add(Duration::from_secs(now_secs()))
+            .ok_or_else(|| "не удалось завести тикет: часы этой машины вне диапазона, который умеет считать программа".to_string())?;
+        let until = now
+            .checked_add(LIFETIME)
+            .ok_or_else(|| "не удалось завести тикет: часы этой машины вне диапазона, который умеет считать программа".to_string())?;
+        Ok(Self { node, relay, direct, secret: sealed, until })
     }
 
     /// Жив ли тикет на момент `now`. Сутки — включительно: тикет, выданный
@@ -118,15 +129,33 @@ impl Ticket {
             }
         };
         secret_bytes.zeroize();
-        Ok(Ticket {
-            node: wire.node,
-            relay: wire.relay,
-            direct: wire.direct,
-            secret: Zeroizing::new(secret),
-            until: UNIX_EPOCH + Duration::from_secs(wire.until),
-        })
+        // Код — строка, которую человек ВСТАВЛЯЕТ из мессенджера: вход
+        // недоверенный целиком, и число в нём может быть чем угодно. Срок
+        // дальше `дальше_некуда` от «сейчас» — не изношенные часы, а порча
+        // или подделка (честная программа дальше `LIFETIME` не выдаёт
+        // ничего); отказываем словами раньше, чем число превратится в
+        // `SystemTime` и панику при сложении.
+        let ceiling = now_secs().saturating_add(LIFETIME.as_secs()).saturating_add(MAX_FUTURE_SLACK.as_secs());
+        if wire.until > ceiling {
+            return Err("Код повреждён: срок внутри него невозможен — так честная программа не выдаёт.".to_string());
+        }
+        let until = UNIX_EPOCH
+            .checked_add(Duration::from_secs(wire.until))
+            .ok_or_else(|| "Код повреждён: срок внутри него невозможен.".to_string())?;
+        Ok(Ticket { node: wire.node, relay: wire.relay, direct: wire.direct, secret: Zeroizing::new(secret), until })
     }
 }
+
+/// Запас сверх `LIFETIME` на разницу часов двух машин, которую протокол не
+/// синхронизирует и не обязан (спека, «Синхронизация»: часы ни во что не
+/// участвуют) — без запаса тикет, выданный на машине с чуть спешащими
+/// часами, выглядел бы подделкой на машине с чуть отстающими. Срок внутри
+/// чужого кода, уехавший дальше `LIFETIME + MAX_FUTURE_SLACK` от «сейчас»,
+/// — не изношенные часы, а порча или подделка: честная программа дальше не
+/// выдаёт ничего (`from_code` отказывает на этой границе). 10 минут —
+/// заметно больше обычного расхождения часов двух живых машин и заметно
+/// меньше суток, то есть не открывает дорогу коду с придуманным сроком.
+const MAX_FUTURE_SLACK: Duration = Duration::from_secs(10 * 60);
 
 fn now_secs() -> u64 {
     // `unwrap_or(ZERO)`, а не `expect`: отказать здесь может только часы
@@ -139,7 +168,7 @@ fn now_secs() -> u64 {
 /// сам (строкой — его собственный `Serialize`, тот же hex, что у `Display`);
 /// секрет — отдельным полем-строкой, а не массивом байт, чтобы JSON оставался
 /// компактным и читаемым в отладке до финального hex-слоя.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Wire {
     node: EndpointId,
     relay: Option<String>,
@@ -233,5 +262,24 @@ mod tests {
 
         let empty = Ticket::from_code("").unwrap_err();
         assert!(!empty.is_empty());
+    }
+
+    /// Ревью безопасности на коммит задачи 2: сложение `UNIX_EPOCH + Duration`
+    /// паникует при переполнении, а код — строка, которую человек ВСТАВЛЯЕТ
+    /// из мессенджера, то есть вход недоверенный целиком. Проверяем и само
+    /// переполнение (`u64::MAX`), и число, которое не переполняет, но уехало
+    /// далеко за `LIFETIME + MAX_FUTURE_SLACK` — оно не может быть выдано
+    /// честной программой и отвергается тем же отказом.
+    #[test]
+    fn a_code_with_an_impossible_deadline_is_refused_not_panicked() {
+        let base = Wire { node: node_id(), relay: None, direct: vec![], secret: hex::encode(&[0u8; 32]), until: 0 };
+
+        let overflowed = Wire { until: u64::MAX, ..base.clone() };
+        let no = Ticket::from_code(&hex::encode(&serde_json::to_vec(&overflowed).unwrap())).unwrap_err();
+        assert!(!no.is_empty(), "переполнение обязано отказать словами, а не паникой");
+
+        let far_future = Wire { until: now_secs() + LIFETIME.as_secs() + MAX_FUTURE_SLACK.as_secs() + 10, ..base };
+        let no = Ticket::from_code(&hex::encode(&serde_json::to_vec(&far_future).unwrap())).unwrap_err();
+        assert!(!no.is_empty(), "срок дальше суток с запасом на расхождение часов — не бывает у честной программы");
     }
 }

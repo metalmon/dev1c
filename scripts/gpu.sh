@@ -32,8 +32,17 @@ sync() {
   # он закрывает поток раньше, чем архив доедет, — tar отвечает «broken
   # pipe», и исходники молча остаются прежними.
   ssh "$HOST" "cmd /c \"if not exist $WIN mkdir $WIN\"" >/dev/null 2>&1
-  # Каталог сборки и история не едут: первый огромен, вторая не нужна.
-  tar czf - --exclude='setup/target' --exclude='.git' setup rust-toolchain.toml \
+  # Едет не только `setup/`: тесты и сборка вшивают файлы из КОРНЯ репозитория
+  # (`include_str!("../../../config/...")`, `pack.sh`, `Dockerfile.1c`), и без
+  # них компиляция тестов падает «не удаётся найти указанный путь» — а
+  # собственно библиотека при этом собирается, то есть беда видна только на
+  # прогоне. Список добыт grep-ом по `include_str!`/`include_bytes!`, а не по
+  # памяти; добавится новый — поправить здесь.
+  #
+  # НЕ едут: каталог сборки (33 ГБ), история, `dist` (595 МБ), `artifacts`,
+  # `bins`, `nvidia-container-toolkit` — к компиляции они отношения не имеют.
+  tar czf - --exclude='setup/target' --exclude='.git' \
+      setup config rust-toolchain.toml pack.sh Dockerfile.1c \
     | ssh "$HOST" "cmd /c \"cd /d $WIN && tar xzf -\""
 }
 

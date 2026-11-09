@@ -139,7 +139,7 @@ impl Store {
 /// Побочный эффект, который стоит увидеть: hex-алфавит не может содержать
 /// кириллицу, так что тест «шифртекст не содержит пароль» доказан самой
 /// кодировкой, а не только шифром.
-mod hex {
+pub(crate) mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         use std::fmt::Write;
         let mut out = String::with_capacity(bytes.len() * 2);

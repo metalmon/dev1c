@@ -360,6 +360,18 @@ pub struct Ui {
     /// словом «отклонено», а не пропадает молча. Новая заявка по той же
     /// карточке его перебивает (`link::contract_of`).
     pub declined: Vec<String>,
+    /// Взведённая просьба «довези код до глаз»: её ставит «Показать код» и
+    /// «Выдать новый код», а гасит якорь у блока кода на ближайшей отрисовке
+    /// (`panel::Panel::scroll_anchor`) — только там и известно, куда этот блок
+    /// лёг.
+    ///
+    /// Живёт в глобале, а не в `Panel`, по той же причине, по которой там же
+    /// живёт всё остальное состояние окна: действие зовут из подвала и из
+    /// меню, то есть из обработчика, который панель УЖЕ держит обновляемой, и
+    /// прочитать её оттуда нельзя — GPUI на такое чтение роняет процесс
+    /// («cannot read Panel while it is already being updated», живой прогон
+    /// 9.11).
+    pub show_code: bool,
     /// Коды подключения, выданные В ЭТОМ запуске: карточка → сам тикет.
     ///
     /// Своё поле, а не чтение книги: книга держит только sha256 от секрета
@@ -2344,6 +2356,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             book,
             waiting: Vec::new(),
             declined: Vec::new(),
+            show_code: false,
             codes: Vec::new(),
             flows: Vec::new(),
             partners: Vec::new(),
@@ -2517,6 +2530,7 @@ impl Ui {
             book: None,
             waiting: Vec::new(),
             declined: Vec::new(),
+            show_code: false,
             codes: Vec::new(),
             flows: Vec::new(),
             partners: Vec::new(),

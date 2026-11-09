@@ -922,13 +922,14 @@ pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
 /// через этот список.
 pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
     // Защита показа (задача 12 «Карточка после живого прогона», находка
-    // владельца 9.11): «Где база» в локальном режиме не спрашивают вовсе —
-    // переключателя на экране нет (комментарий ниже, «база на той стороне») —
-    // значит и застрявшее в файле `base_here = false` не вправе решать состав
-    // полей. Без этой строки ответ «Всё на одной машине» (или ручная правка
-    // файла) оставлял бы карточку без единого поля базы при включённой
+    // владельца 9.11) — через `base_is_here()`, не через сырое поле: «Где
+    // база» в локальном режиме не спрашивают вовсе — переключателя на
+    // экране нет (комментарий ниже, «база на той стороне») — значит и
+    // застрявшее в файле `base_here = false` не вправе решать состав полей.
+    // Без этой строки ответ «Всё на одной машине» (или ручная правка файла)
+    // оставлял бы карточку без единого поля базы при включённой
     // локальности — то самое противоречие, которое увидел владелец.
-    if !c.base_here && c.mode != "local" {
+    if !c.base_is_here() {
         return &["project"];
     }
     match (c.mode == "local", c.publication == "webserver") {
@@ -944,10 +945,10 @@ pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
 /// этом словами, а не молчать пустыми строками (спека, «Что показывает
 /// карточка соединения»). `None` — база здесь, подсказка не нужна.
 pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
-    // Та же защита, что у `shown_fields` выше, и тем же доводом: в локальном
-    // режиме «той стороны» не существует вовсе, и застрявшее `base_here =
-    // false` не вправе подписывать экран её словами.
-    (!c.base_here && c.mode != "local").then_some("Поля базы приходят с той стороны")
+    // Та же защита, что у `shown_fields` выше, через тот же `base_is_here()`:
+    // в локальном режиме «той стороны» не существует вовсе, и застрявшее
+    // `base_here = false` не вправе подписывать экран её словами.
+    (!c.base_is_here()).then_some("Поля базы приходят с той стороны")
 }
 
 /// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
@@ -1862,8 +1863,14 @@ pub fn base_here_label(base_here: bool) -> &'static str {
 /// та беда, из-за которой ось записи свели к одной `axis_of`.
 ///
 /// Слова — из единственного словаря (`link::publication_label`), не свои копии.
+///
+/// **Читает `base_is_here()`, не сырой `base_here`** (круг починки 1 задачи
+/// 12, Important 2): без этого застрявшая карточка (`local` + `base_here =
+/// false`) показывала бы поля базы (`shown_fields` уже защищён), но прятала
+/// бы переключатель публикации — тот же вопрос, тот же конец с базой, два
+/// разных ответа на разных читателях одной оси.
 pub fn publication_switch_label(c: &Connection) -> Option<&'static str> {
-    c.base_here.then(|| link::publication_label(&c.publication))
+    c.base_is_here().then(|| link::publication_label(&c.publication))
 }
 
 /// Заголовок карточки соединения. Контракт подключения называет заголовком имя
@@ -2676,7 +2683,12 @@ impl Panel {
         // указана» вместо имени смещены вниз, к самому полю базы (ниже), а
         // не сюда: предупреждение рядом с полем, не заголовком над средой
         // (Minor 2 круга починки 1).
-        if c.base_here && title != NO_BASE_TITLE {
+        //
+        // `base_is_here()`, не сырой `base_here` (круг починки 1 задачи 12,
+        // Important 2): застрявшая локальная карточка уже показывает поле
+        // базы (`shown_fields`) — заголовок обязан согласиться с тем же
+        // полем, а не звать его «не указана».
+        if c.base_is_here() && title != NO_BASE_TITLE {
             col = col.child(div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
         }
         // В локальном режиме коннектор слушает loopback, а не поднимает
@@ -4232,7 +4244,11 @@ mod tests {
     /// чем поле без действия.
     #[test]
     fn the_card_shows_a_publication_switch_only_where_the_base_is_here() {
-        let there = Connection { base_here: false, ..Default::default() };
+        // `mode: "tunnel"` — явно, тем же доводом, что у соседних тестов
+        // `shown_fields`/`base_fields_note`: умолчание `Connection::default()`
+        // — `mode = "local"`, и `publication_switch_label` с круга починки 1
+        // задачи 12 читает `base_is_here()`, а не сырое поле.
+        let there = Connection { base_here: false, mode: "tunnel".into(), ..Default::default() };
         assert_eq!(publication_switch_label(&there), None, "базы здесь нет — публиковать нечего");
         let here = Connection { base_here: true, publication: "webserver".into(), ..Default::default() };
         assert_eq!(publication_switch_label(&here), Some("Публикует платформа 1С"));

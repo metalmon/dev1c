@@ -9,6 +9,7 @@ use super::{
     save_tray_key, save_tray_keys, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link,
     window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
+use crate::cfg::Connection;
 use crate::editors;
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::App;
@@ -546,12 +547,50 @@ fn should_raise_session(was_enabled: bool, mode: &str, gate: Option<&str>) -> bo
     was_enabled && raise_session_after_mode_change(mode, gate)
 }
 
+/// Какой станет карточка ТЕКУЩЕГО соединения при смене режима — чистое ядро
+/// `apply_mode`, вынесенное отдельно нарочно (круг починки 1 задачи 12,
+/// Important 1): гарнеса `gpui::test` в этом ящике нет вовсе (см. докстроку
+/// `the_publication_door_counts_busy_with_the_same_single_count_and_word` в
+/// тестах ниже), и `apply_mode` (ей нужен живой `App`) без него не позвать —
+/// значит и находку владельца здесь можно закрыть тестом только вынеся
+/// решение в функцию без `App`.
+///
+/// **«Всё на одной машине» — третий ответ вопроса «Это соединение», и он
+/// задаёт ОБЕ оси сразу** — тем же правилом, которым нетекущую карточку уже
+/// лечит `panel::set_card_topology_kind` → `gui::set_keys` (задача 12). У
+/// ТЕКУЩЕЙ карточки обе оси идут в ОДНОЙ записи `save_host` — она и так
+/// пишет карточку целиком, — значит честнее всего поправить именно то, что
+/// `save_host` получает на вход: `base_here` входит в карточку ДО вызова, а
+/// не отдельной записью после него. Без этой правки владелец (у него
+/// карточка была ТЕКУЩЕЙ) видел бы находку 9.11 даже после починки
+/// нетекущей карточки — `mode` менялся бы, `base_here` оставался прежним.
+///
+/// Уход ИЗ локального режима эту ось не трогает: «Где база» — отдельный
+/// переключатель («Здесь»/«На той стороне», `set_card_base_here`), и у
+/// текущей карточки он им и остаётся — пара здесь только у входа в «одна
+/// машина», симметрично тому, что у нетекущей карточки пары нет при выходе
+/// (там парой идёт роль+режим, не база+режим).
+fn host_for_mode_change(current: &Connection, mode: &str) -> Connection {
+    let mut host = current.clone();
+    host.mode = mode.into();
+    if mode == "local" {
+        host.base_here = true;
+    }
+    host
+}
+
 /// Записать новый режим и поднять сеанс заново. Зовётся после согласия
 /// человека (`confirm_database_change`), поэтому `ui.cfg.current().mode` правится
 /// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
 /// иначе переписал бы его обратно.
+///
+/// Обе оси переносятся в `ui.cfg` ОДНОЙ правкой, через `host_for_mode_change`
+/// (см. её докстроку) — и на удачном пути записи, и на отказе: там же, где
+/// раньше писался только `mode` (`save_tray_key`), теперь пара
+/// (`save_tray_keys`), чтобы намерение человека не потерялось наполовину
+/// даже на свежем комплекте с пустыми полями.
 fn apply_mode(cx: &mut App, mode: &'static str) {
-    cx.global_mut::<Ui>().cfg.current_mut().mode = mode.into();
+    let host = host_for_mode_change(cx.global::<Ui>().cfg.current(), mode);
     // Критическая находка круга починки 1 задачи 16, другой конец: открытая
     // карточка держит СВОЙ снимок режима (`Panel::original`), и после
     // записи ниже его надо перевязать — тем же `sync_card_topology`, что
@@ -560,7 +599,11 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
     // имя текущего соединения не меняется, но брать его стоит из одного
     // места, а не дважды по разным путям match.
     let name = cx.global::<Ui>().cfg.current().name.clone();
-    let host = cx.global::<Ui>().cfg.current().clone();
+    {
+        let current = cx.global_mut::<Ui>().cfg.current_mut();
+        current.mode = host.mode.clone();
+        current.base_here = host.base_here;
+    }
     match save_host(cx.global_mut::<Ui>(), host) {
         Ok(()) => {
             // Тревный значок, готовность/замок, гашение и подъём сеанса —
@@ -580,7 +623,18 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // режима — намерение человека, а не действие над базой, и на
             // свежем комплекте с пустыми полями он обязан сработать. Память
             // тут не годится: окно перечитывает файл на каждом показе.
-            if let Err(e) = save_tray_key(cx.global_mut::<Ui>(), "mode", mode) {
+            //
+            // Пара ключей, не один (круг починки 1 задачи 12, Important 1):
+            // вход в «одна машина» — та же ось записи, что у удачного пути
+            // выше, и половинчатая запись здесь оставила бы файл в том же
+            // противоречии, которое нашёл владелец, просто на отказе вместо
+            // удачи.
+            let tray_result = if mode == "local" {
+                save_tray_keys(cx.global_mut::<Ui>(), &[("mode", mode), ("base_here", "true")])
+            } else {
+                save_tray_key(cx.global_mut::<Ui>(), "mode", mode)
+            };
+            if let Err(e) = tray_result {
                 note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return;
             }
@@ -1399,10 +1453,10 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 mod tests {
     use super::{
         access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id,
-        apply_switch_current_decision, busy_now_word, busy_refusal, icon_rgba, menu_action, mode_change_blocked, publication_after_switch,
-        raise_session_after_mode_change, save_host, session_back_refusal, should_raise_session, switch_current_outcome, toggle_enabled,
-        unsaved_publication_keys, unsaved_switch_line, write_switch_current, ApplySwitchCurrent, Kind, MenuAction, PublicationAfterSwitch,
-        SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
+        apply_switch_current_decision, busy_now_word, busy_refusal, host_for_mode_change, icon_rgba, menu_action, mode_change_blocked,
+        publication_after_switch, raise_session_after_mode_change, save_host, session_back_refusal, should_raise_session,
+        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_switch_current, ApplySwitchCurrent,
+        Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1810,6 +1864,31 @@ mod tests {
         assert!(!should_raise_session(false, "local", None), "выключено значит выключено даже в локальном режиме");
         assert!(should_raise_session(true, "tunnel", None), "живой сеанс можно перезапустить");
         assert!(!should_raise_session(true, "tunnel", Some("замок")), "замок всё равно сильнее включённого выключателя");
+    }
+
+    /// Круг починки 1 задачи 12, Important 1: владелец был на ТЕКУЩЕЙ
+    /// карточке — её смена режима идёт этим путём (`apply_mode` →
+    /// `host_for_mode_change`), не через `panel::set_card_topology_kind` →
+    /// `gui::set_keys` (та дверь — только для нетекущей, задача 12 этого же
+    /// круга). Без этой правки «Всё на одной машине» писало бы только
+    /// `mode`, а `base_here` оставался прежним — ровно та беда, которую
+    /// нашёл владелец, просто на другом пути записи. Тест падает, если
+    /// строку `if mode == "local" { host.base_here = true; }` вырезать.
+    #[test]
+    fn entering_local_mode_pulls_base_here_along_in_the_same_record() {
+        let stuck = Connection { base_here: false, mode: "tunnel".into(), ..Connection::default() };
+
+        let host = host_for_mode_change(&stuck, "local");
+
+        assert_eq!(host.mode, "local");
+        assert!(host.base_here, "входя в «одна машина», база обязана стать здешней в той же карточке");
+
+        // Уход из локального режима эту ось не трогает — это отдельный
+        // переключатель («Где база»), а не часть ответа «Это соединение».
+        let was_local = Connection { base_here: false, mode: "local".into(), ..Connection::default() };
+        let left = host_for_mode_change(&was_local, "tunnel");
+        assert_eq!(left.mode, "tunnel");
+        assert!(!left.base_here, "выход из «одна машина» не меняет «где база» сам по себе");
     }
 
     /// HIGH ревью круга починки 4 задачи 16: после переключения текущего

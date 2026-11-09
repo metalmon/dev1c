@@ -220,7 +220,15 @@ pub fn save_tray_keys(ui: &mut Ui, keys: &[(&str, &str)]) -> Result<(), String> 
     // Довод и разбор прежнего вида файла — в `cfg::set_current`.
     let mut text = text;
     for (key, value) in keys {
-        text = cfg::set_current(&text, &ui.cfg, key, &format!("{value:?}"))?;
+        // `base_here` — булево TOML, пишется словом без кавычек (круг
+        // починки 1 задачи 12, Important 1: `apply_mode` зовёт эту пару для
+        // входа в «одна машина» и на отказе `save_host`). Та же развилка,
+        // что у `toml_literal` в ядре `set_keys` выше, и по тому же доводу
+        // (Important 1 круга починки 1 задачи 4): в кавычках `base_here`
+        // ещё читался бы этой программой, но следующая загрузка
+        // `toml::from_str` отвергла бы файл целиком — поле там не строка.
+        let literal = if *key == "base_here" { value.to_string() } else { format!("{value:?}") };
+        text = cfg::set_current(&text, &ui.cfg, key, &literal)?;
     }
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     // Синхронизируем только то, что сами только что записали — остальные
@@ -235,6 +243,11 @@ pub fn save_tray_keys(ui: &mut Ui, keys: &[(&str, &str)]) -> Result<(), String> 
             // значило бы, что диск и память расходятся на том самом ключе,
             // из-за которого правка и сделана.
             "base_url" => ui.cfg.current_mut().base_url = value.to_string(),
+            // `base_here` — круг починки 1 задачи 12: без синхронизации
+            // файл и память расходились бы тут же, на отказе `save_host`,
+            // ровно тем способом, которым это уже лечили у остальных
+            // ключей (Important 1 круга починки 1 задачи 4).
+            "base_here" => ui.cfg.current_mut().base_here = *value == "true",
             _ => {}
         }
     }

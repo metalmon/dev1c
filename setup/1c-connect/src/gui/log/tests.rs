@@ -52,6 +52,21 @@ fn note_file_writes_the_file_and_not_the_window() {
     assert_eq!(ui.log.len(), 1);
 }
 
+/// Задача 6 плана «После живого прогона»: замок запуска повторяет то, что
+/// человек и так читает в подвале, а не сообщает находку, — значит, не
+/// должен поднимать счётчик непрочитанного раньше первого действия
+/// человека (находка владельца 9.11: свежий комплект показывал «Журнал 1»
+/// ещё до того, как человек хоть что-то сделал).
+#[test]
+fn a_fresh_kit_has_nothing_unread_before_the_person_does_anything() {
+    let mut ui = Ui::for_test();
+    let why = ui.gate.clone().expect("в каталоге теста замок обязан быть заперт");
+    note_line_seen(&mut ui, gate_line(&why, false));
+    assert_eq!(ui.unread, 0, "{:?}", ui.log);
+    // Строка всё равно лежит в журнале — почитать её можно, просто не как находку.
+    assert_eq!(ui.log.len(), 1);
+}
+
 #[test]
 fn note_line_appends_marks_and_head_lines_to_the_log_file() {
     let mut ui = Ui::for_test();

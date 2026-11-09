@@ -41,10 +41,12 @@
 //! окне успевает нажать «Отозвать разрешение», пока этот процесс держит
 //! книгу открытой, и отзыв обязан действовать немедленно (`Book::enrolled_to`).
 //!
-//! **Самоназвание той стороны — чужие слова.** Его показывают человеку рядом
-//! с отпечатком ключа, значит чужая строка с переводами строк и забоем
-//! нарисовала бы в диалоге поддельную строку вплотную к настоящему
-//! отпечатку. Чистится один раз и до всего (`as_said`).
+//! **Самоназвание той стороны — чужие слова, и ТИП, а не правило.** Его
+//! показывают человеку рядом с отпечатком ключа, значит чужая строка с
+//! переводами строк и забоем нарисовала бы в диалоге поддельную строку
+//! вплотную к настоящему отпечатку. Поэтому на проводе оно едет не `String`,
+//! а `wire::SaysName`, и невычищенного самоназвания в программе не
+//! существует как пути.
 //!
 //! **Свой срок у разговора.** `Frame::read` нарочно без срока (см. его
 //! докстроку): на потоке MCP молчание часами законно. Здесь — нет: разговор
@@ -55,14 +57,14 @@
 //! Спека: `docs/superpowers/specs/2026-11-01-protocol-design.md`, раздел
 //! «Зачисление», случай первый.
 
-use crate::enrolled::Book;
+use crate::enrolled::{Book, Verdict};
 use crate::secrets::hex;
 use crate::ticket::Ticket;
-use crate::wire::{code, BaseBrief, BaseFields, CardState, Ceiling, Frame, Msg, Refuse, Side};
+use crate::wire::{code, BaseBrief, BaseFields, CardState, Ceiling, Frame, Msg, Refuse, SaysName, Side};
 use iroh::EndpointId;
 use std::future::Future;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 /// Версия протокола, на которой эта сборка говорит. Диапазон пока из одного
 /// номера: `proto_min == proto_max == PROTO`. Сторона обязана уметь говорить
@@ -115,7 +117,9 @@ pub struct Request {
     pub card: String,
     pub base: BaseFields,
     pub peer: EndpointId,
-    pub says_name: String,
+    /// Чужие слова — и тип это держит: показать невычищенное нельзя, потому
+    /// что невычищенного `SaysName` не бывает (см. `wire::SaysName`).
+    pub says_name: SaysName,
 }
 
 /// Решение человека.
@@ -174,6 +178,16 @@ pub enum Outcome {
 /// Поток не закрывается здесь нарочно: на `Enrolled` он остаётся жить под
 /// `state`, а на отказе его закрывает тот, кто его открывал и кто знает, что
 /// ещё по этому соединению висит.
+///
+/// **Поле `side` из `hello` здесь не читается, и это ждёт случая второго.**
+/// Им спека различает две топологии: `with_base` в `hello` значит, что база
+/// у ЗОВУЩЕЙ стороны, и тогда зачисляет она, а не мы, — другой разговор, не
+/// этот (`enroll` приходит с полями базы как объявление, а не как просьба).
+/// Пока этот случай не написан, читать поле незачем: единственное, что мы
+/// могли бы с ним сделать, — отказать словами «такого не умею», а кода для
+/// «не та топология» в таблице спеки нет, и придумывать его раньше, чем
+/// появится вторая половина, значит придумывать наугад. Когда она появится,
+/// развилка встанет здесь, по этому полю.
 pub async fn accept_side<W, R, F, Fut>(
     w: &mut W,
     r: &mut R,
@@ -189,16 +203,19 @@ where
     Fut: Future<Output = Decision>,
 {
     // Шаг второй: та сторона открыла поток и представилась.
-    let (proto_min, proto_max) = match next(r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::Hello { proto_min, proto_max, .. } => (proto_min, proto_max),
+    let (proto_min, proto_max, ceiling) = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+        Msg::Hello { proto_min, proto_max, ceiling, .. } => (proto_min, proto_max, ceiling),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello", &other))).await,
     };
-    // Наименьший из двух максимумов (спека, «Версии»). Одна сверка на два
-    // случая: и «их минимум выше нашего максимума» (честное расхождение
-    // версий), и «их диапазон вывернут наизнанку» (ошибка в чужом коде) дают
-    // выбранный номер ниже их минимума.
+    // Наименьший из двух максимумов (спека, «Версии») — и сверка в ОБЕ
+    // стороны. Диапазон этой сборки пока из одного номера, поэтому
+    // пересечение есть ровно тогда, когда выбранное равно нашему: ниже —
+    // та сторона не доросла до единственной версии, которую мы умеем (или
+    // объявила диапазон наизнанку, или нуль, которого не существует); выше
+    // не бывает по самому `min`. Когда номеров станет два, здесь встанет
+    // сравнение с `PROTO_MIN`, а не с одним числом.
     let proto = proto_max.min(PROTO);
-    if proto < proto_min {
+    if proto != PROTO || proto < proto_min {
         return refuse_and_fail(w, Refuse::new(code::VERSION, version_gap(proto_min, proto_max))).await;
     }
 
@@ -212,7 +229,13 @@ where
     // бы действовать немедленно, как того требует спека.
     let mut bases: Vec<BaseBrief> = Vec::new();
     for c in cards {
-        if let Some(p) = book.enrolled_to(&c.name, peer)? {
+        let seen = match book.enrolled_to(&c.name, peer) {
+            Ok(seen) => seen,
+            // Книгу не прочитать — наша беда, не её: короткие слова на провод,
+            // подробность с путями остаётся нам (Important 5).
+            Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
+        };
+        if let Some(p) = seen {
             bases.push(BaseBrief {
                 id: c.base.base_id.clone(),
                 name: c.base.base_name.clone(),
@@ -224,43 +247,70 @@ where
             });
         }
     }
-    let already = !bases.is_empty();
     write_msg(w, &Msg::HelloOk { proto, side: Side::WithBase, bases: bases.clone() }).await?;
-    if already {
-        // Второе и дальнейшие подключения человека не спрашивают: личность
-        // доказана самим iroh. Разговор зачисления на этом кончен, и ждать
-        // здесь `enroll` нельзя — поток нужен следующим слоям сейчас, а не
-        // через `PATIENCE`.
-        //
-        // Потолок: ключ, УЖЕ зачисленный к одной карточке, не может этим же
-        // соединением заявиться на вторую — заявка просто не будет
-        // прочитана. Спека такого случая не описывает (у человека одна
-        // карточка на партнёра), а когда опишет, различать «пришёл с
-        // тикетом» и «пришёл работать» придётся полем в `hello`, то есть
-        // новым номером версии.
-        return Ok(Outcome::Already(bases));
+
+    // Ждать ли заявку. Уже зачисленная сторона обычно просто
+    // переподключается и `enroll` не шлёт вовсе — а сказать «мне не о чем
+    // просить» спека ей слова не даёт. Признак, по которому это различается
+    // без нового поля на проводе, — непогашенный выданный код: нет ни одного
+    // живого, значит ничья заявка не могла бы сработать, и ждать нечего.
+    //
+    // Зачисленная сторона с ЖИВЫМ кодом на руках — это человек, заводящий
+    // ВТОРУЮ карточку тому же партнёру, и её заявку обязано разобрать как
+    // всякую другую: по той карточке, к которой выдан код, а не отбить
+    // словами про первую.
+    if !bases.is_empty() {
+        let waiting = match book.has_live_ticket() {
+            Ok(yes) => yes,
+            Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
+        };
+        if !waiting {
+            // Второе и дальнейшие подключения человека не спрашивают:
+            // личность доказана самим iroh. Разговор зачисления кончен.
+            return Ok(Outcome::Already(bases));
+        }
     }
 
     // Шаг второй, конец: заявка с секретом тикета.
-    let (ticket_secret, says_name) = match next(r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::Enroll { ticket_secret, says_name, .. } => (ticket_secret, says_name),
-        other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll", &other))).await,
+    let (ticket_secret, says_name) = match heard(w, r, PATIENCE).await {
+        Ok(Msg::Enroll { ticket_secret, says_name, .. }) => (ticket_secret, says_name),
+        Ok(other) => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll", &other))).await,
+        // Зачисленная сторона молчала и закрыла поток: ей и правда было не о
+        // чем просить, живой код выдан не ей. Это не беда — это тот же
+        // `Already`, только выясненный дорогой ценой одного ожидания.
+        Err(no) if !bases.is_empty() => {
+            let _ = no;
+            return Ok(Outcome::Already(bases));
+        }
+        Err(no) => return refuse_and_fail(w, no).await,
     };
-
-    // Чужие слова чистятся сразу, одним местом на показ и на запись (см.
-    // `as_said`): дальше они идут и в диалог человека, и в книгу.
-    let says_name = as_said(&says_name);
 
     // Шаг третий: проверка МОЛЧА. Человека здесь нет и быть не должно.
     let Some(secret) = decode_secret(&ticket_secret) else {
         return said_and_not_enrolled(w, Refuse::new(code::TICKET_FOREIGN, FOREIGN_TEXT)).await;
     };
-    let card_name = match book.check(&secret) {
-        Ok(name) => name,
-        Err(why) => return said_and_not_enrolled(w, Refuse::new(ticket_code(&why), why)).await,
+    let card_name = match book.verdict(&secret) {
+        Ok(Verdict::Card(name)) => name,
+        Ok(Verdict::Expired) => return said_and_not_enrolled(w, Refuse::new(code::TICKET_EXPIRED, EXPIRED_TEXT)).await,
+        Ok(Verdict::Unknown) => return said_and_not_enrolled(w, Refuse::new(code::TICKET_SPENT, UNKNOWN_TEXT)).await,
+        // Третий случай, и он НЕ про код: книгу не удалось прочитать. Той
+        // стороне — короткие слова без путей, нам — `Err`, чтобы журнал
+        // покраснел: советовать человеку просить новый код, когда беда в
+        // нашем файле, значит послать его за тем, что не поможет.
+        Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
     };
     let Some(card) = cards.iter().find(|c| c.name == card_name) else {
         return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, NO_CARD_TEXT)).await;
+    };
+
+    // Оговорка: по одному коду идёт один разговор.
+    //
+    // Без неё «один тикет — одна заявка» держится только на гонке записи:
+    // `verdict` не портит, `spend` зовётся после решения, и два соединения с
+    // одним секретом приносят человеку ДВА диалога об одном и том же — то
+    // самое дёрганье, от которого секрет и заведён.
+    let Some(_claim) = claim(&secret) else {
+        return said_and_not_enrolled(w, Refuse::new(code::BUSY, ALREADY_TALKING)).await;
     };
 
     // Шаг четвёртый: человек. `enroll_wait` уходит ДО диалога — иначе зовущая
@@ -269,13 +319,8 @@ where
     let request = Request { card: card_name.clone(), base: card.base.clone(), peer, says_name: says_name.clone() };
     let decision = tokio::time::timeout(DECISION, async {
         tokio::select! {
-            // Та сторона молчит, пока ждёт ответа (так и делает `dial_side`),
-            // поэтому ЛЮБОЙ кадр здесь — это конец разговора, а не его
-            // продолжение: либо обрыв, либо та сторона заговорила не в свой
-            // черёд. Отменённое чтение недочитанного кадра поэтому не
-            // оставляет мусора в потоке — читать его дальше всё равно некому.
             d = decide(request) => Some(d),
-            _ = Frame::read(r) => None,
+            _ = interrupted(r) => None,
         }
     })
     .await;
@@ -315,14 +360,21 @@ where
             // собственного срока, то есть пять с лишним минут тишины вместо
             // одной строки, которую человек прочитает сразу.
             if let Err(why) = book.spend(&secret) {
-                return said_and_not_enrolled(w, Refuse::new(code::TICKET_SPENT, why)).await;
+                return ours_to_blame(w, Refuse::new(code::TICKET_SPENT, UNKNOWN_TEXT), why).await;
             }
-            // Складываем решение человека с потолком карточки: карточке
-            // только на чтение «разрешённая запись» была бы ложью, и зовущая
-            // сторона увидела бы флажок, которого нет.
-            let write = write && card.base.write;
-            if let Err(why) = book.enroll(&card_name, peer, &says_name, write) {
-                return said_and_not_enrolled(w, Refuse::new(code::NOT_ALLOWED, why)).await;
+            // Складываем ВСЕ ТРИ: решение человека, потолок карточки и
+            // потолок ТОЙ машины из `hello`. Запрет любой стороны сильнее
+            // разрешения другой (решение владельца 1.11) — иначе машина,
+            // объявившая у себя «только чтение», получает от нас
+            // `enroll_ok{write:true}`, то есть разрешение, которое сама же у
+            // себя запретила, и флажок в её окне не совпадает с правдой.
+            //
+            // Четвёртый потолок — ЭТОЙ машины — складывает тот, кто собирает
+            // `cards`: он же его и переключает, и `Card.base.write` приходит
+            // сюда уже с ним.
+            let write = write && card.base.write && matches!(ceiling, Ceiling::Full);
+            if let Err(why) = book.enroll(&card_name, peer, says_name.as_str(), write) {
+                return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
             let base = BaseFields { write, ..card.base.clone() };
             write_msg(w, &Msg::EnrollOk { base: Some(base.clone()) }).await?;
@@ -351,9 +403,11 @@ where
 
 /// Зовущая сторона — та, что вставила код.
 ///
-/// `code` разбирается ЛЕНИВО, только если зачисления ещё нет: второе
-/// подключение ничего не предъявляет, и требовать от него живой код значило
-/// бы придумать правило, которого в спеке нет.
+/// Пустой `code` — законный случай: это переподключение уже зачисленной
+/// стороны, которой нечего предъявлять (спека: «второе и дальнейшие
+/// подключения человека не спрашивают»). Непустой уходит заявкой ВСЕГДА, даже
+/// когда зачисление к какой-то карточке уже есть, — иначе законный код второй
+/// карточки не сработал бы никогда.
 pub async fn dial_side<W, R>(w: &mut W, r: &mut R, code: &str, says_name: &str, ceiling: Ceiling) -> Result<Outcome, String>
 where
     W: AsyncWrite + Unpin,
@@ -364,19 +418,38 @@ where
         proto_max: PROTO,
         side: Side::WithAgents,
         kit: env!("CARGO_PKG_VERSION").to_string(),
-        says_name: says_name.to_string(),
+        says_name: says_name.into(),
         ceiling,
     };
     write_msg(w, &hello).await?;
 
-    let bases = match next(r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::HelloOk { bases, .. } => bases,
+    let bases = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+        Msg::HelloOk { proto, bases, .. } => {
+            // Выбранную версию обязана СМОТРЕТЬ и зовущая. Та сторона
+            // выбирает её сама, и ошибиться может не только злой умысел:
+            // старая сборка с другим правилом выбора объявит номер, которого
+            // мы не умеем, и дальше весь разговор пойдёт по чужим правилам,
+            // внешне исправно.
+            if proto != PROTO {
+                return refuse_and_fail(w, Refuse::new(code::VERSION, version_chosen(proto))).await;
+            }
+            bases
+        }
         Msg::Refuse(no) => return Err(no.text),
-        other => return Err(out_of_turn("hello_ok", &other)),
+        other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello_ok", &other))).await,
     };
-    if !bases.is_empty() {
-        // Зачисление уже есть — предъявлять нечего, и код мы даже не
-        // разбирали: второе подключение человека не спрашивает.
+    // Решает НАЛИЧИЕ КОДА, а не список. Код на руках — заявка уходит всегда,
+    // даже если зачисление к какой-то карточке уже есть: это человек заводит
+    // ВТОРУЮ карточку тому же партнёру, и промолчать здесь значило бы, что его
+    // законный код не сработает никогда, а он увидит чужую базу вместо своей.
+    if code.trim().is_empty() {
+        if bases.is_empty() {
+            return Err("Подключиться не удалось: нечего предъявить.\nКода подключения нет, а зачисления к этой машине ещё не было.\n\
+                        Попросите код на машине с базой."
+                .to_string());
+        }
+        // Зачисление есть, кода нет — предъявлять нечего: второе и дальнейшие
+        // подключения человека не спрашивают.
         return Ok(Outcome::Already(bases));
     }
 
@@ -386,7 +459,7 @@ where
         // тикета. Сам `Msg::Enroll` в журнал не пишется НИКОГДА: его `Debug`
         // напечатал бы секрет целиком.
         ticket_secret: hex::encode(&*ticket.secret),
-        says_name: says_name.to_string(),
+        says_name: says_name.into(),
         // Поля базы едут от той стороны, у которой база. Здесь база на
         // принимающей (случай первый), и нам сказать нечего.
         base: None,
@@ -394,8 +467,8 @@ where
     write_msg(w, &enroll).await?;
 
     // Первый ответ: либо сразу исход, либо «ждите» — и тогда ждём человека.
-    let answered = match next(r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::EnrollWait => next(r, DECISION + PATIENCE).await.map_err(|e| e.text)?,
+    let answered = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+        Msg::EnrollWait => heard(w, r, DECISION + PATIENCE).await.map_err(|e| e.text)?,
         first => first,
     };
     match answered {
@@ -412,7 +485,7 @@ where
         // Отказ машины: код негодный, версии не сошлись. Это человеку
         // исправлять, а не нам повторять.
         Msg::Refuse(no) => Err(no.text),
-        other => Err(out_of_turn("enroll_ok", &other)),
+        other => refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll_ok", &other))).await,
     }
 }
 
@@ -428,6 +501,106 @@ async fn next<R: AsyncRead + Unpin>(r: &mut R, within: Duration) -> Result<Msg, 
         Ok(got) => got,
         Err(_) => Err(Refuse::new(code::BROKEN, silent_for(within))),
     }
+}
+
+/// `next`, но отказ чтения не проглатывается молча — он УЕЗЖАЕТ той стороне.
+///
+/// Спека прямо: «отказывает на незнакомое сообщение… проглотить молча значит
+/// соврать отправителю, что оно исполнено». Без этого зовущая сторона,
+/// прислав сообщение не из нашей версии, получала бы вместо причины свою
+/// собственную тишину и, через срок, слова «та сторона не ответила» — худший
+/// из возможных отчётов, потому что он указывает не туда.
+///
+/// Отправляется и на обрыв, и на срок: писать в мёртвый поток бесполезно, но
+/// не вредно, а отличить «мёртвый» от «живого, но непонятного» здесь нечем —
+/// и именно во втором случае слова нужны.
+async fn heard<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(w: &mut W, r: &mut R, within: Duration) -> Result<Msg, Refuse> {
+    match next(r, within).await {
+        Ok(msg) => Ok(msg),
+        Err(no) => {
+            let _ = Frame::write(w, &Msg::Refuse(no.clone())).await;
+            Err(no)
+        }
+    }
+}
+
+/// Ждёт, не прервёт ли разговор ЗВОНЯЩИЙ: скажет что-нибудь, закроет поток
+/// или оборвётся. Завершается — значит прервал.
+///
+/// **Один байт, а не `Frame::read`, и это про отменяемость.** Это ожидание
+/// живёт в `select!` против диалога человека, то есть его бросают
+/// недождавшимся — и `Frame::read` в таком месте опасен: он читает заголовок
+/// и тело по очереди, и брошенный между ними съедает четыре байта заголовка
+/// НАВСЕГДА. Дальше поток живёт под `state`, и всё, что по нему пойдёт,
+/// разберётся как мусор — человек увидит обрыв сразу после успешного
+/// зачисления, в худшую для этого минуту.
+///
+/// Чтение одного байта такого промежутка не имеет: `poll_read` либо вернул
+/// байт (и тогда ждавшая ветка `select!` завершилась, разговор кончен и
+/// съеденный байт никому не нужен), либо не вернул ничего и не тронул поток.
+/// Правило «либо не начиналось, либо довелось до конца» выполняется само.
+async fn interrupted<R: AsyncRead + Unpin>(r: &mut R) {
+    let mut one = [0u8; 1];
+    let _ = r.read(&mut one).await;
+}
+
+/// Сколько разговоров идёт прямо сейчас по каждому выданному коду.
+///
+/// Ключ — sha256 от секрета, а не сам секрет: держать секреты в глобальной
+/// памяти дольше, чем нужно, незачем, а сравнивать отпечатки так же удобно.
+///
+/// Потолок: оговорка живёт в ПАМЯТИ ПРОЦЕССА. Этого ровно хватает, потому
+/// что узел на машине один и входящие соединения принимает один процесс;
+/// второй процесс с той же книгой (окно и подкоманда `mcp`) заявок не
+/// принимает. Когда начнёт — оговорка переедет в книгу, как и всё, что
+/// обязано быть видно обоим.
+static TALKING: std::sync::Mutex<Option<std::collections::HashSet<[u8; 32]>>> = std::sync::Mutex::new(None);
+
+/// Оговорка на один разговор по одному коду, снимаемая сама (`Drop`).
+///
+/// `Drop`, а не снятие руками: путей выхода из разговора девять, и девятый
+/// забудут. Снятие на `Drop` работает и на отмене всей задачи.
+struct Claim([u8; 32]);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Ok(mut held) = TALKING.lock() {
+            if let Some(set) = held.as_mut() {
+                set.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Занимает код под разговор. `None` — по нему уже говорят.
+fn claim(secret: &[u8; 32]) -> Option<Claim> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(secret);
+    let key: [u8; 32] = h.finalize().into();
+    // Отравленный замок — беда настолько своя, что отказывать по нему
+    // человеку не за что: `unwrap_or_else` берёт данные из паники, и хуже,
+    // чем лишний диалог, уже не станет.
+    let mut held = TALKING.lock().unwrap_or_else(|e| e.into_inner());
+    if held.get_or_insert_with(Default::default).insert(key) {
+        Some(Claim(key))
+    } else {
+        None
+    }
+}
+
+/// Сказать той стороне КОРОТКО, а подробность оставить себе.
+///
+/// Для беды, которая наша, а не её: книга не прочиталась, замок не взялся,
+/// запись не удалась. Слова книги на провод отдавать нельзя — в них лежат
+/// пути вида `C:\Users\…\enrolled.toml`, то есть и утечка устройства этой
+/// машины чужой стороне, и нарушение правила трёх строк из раздела
+/// «Ошибки». А `Err` наружу нужен затем, что в нашем журнале это обязано
+/// краснеть: советовать человеку просить новый код, когда беда в нашем
+/// файле, значит послать его за тем, что не поможет.
+async fn ours_to_blame<W: AsyncWrite + Unpin>(w: &mut W, wire: Refuse, ours: String) -> Result<Outcome, String> {
+    let _ = Frame::write(w, &Msg::Refuse(wire)).await;
+    Err(ours)
 }
 
 /// Отправка в позиции `?`: слова отказа кадрирования уже написаны в
@@ -460,65 +633,12 @@ async fn said_and_not_enrolled<W: AsyncWrite + Unpin>(w: &mut W, no: Refuse) -> 
     Ok(Outcome::NotEnrolled(no))
 }
 
-/// Предел самоназвания — восемьдесят знаков.
-///
-/// Это одна строка в диалоге разрешения, рядом с отпечатком ключа.
-/// Восьмидесяти хватает на «ООО „Ромашка“, бухгалтерия» и не хватает на
-/// абзац, которым чужая сторона оттеснила бы отпечаток за край окна, —
-/// а отпечаток здесь единственное, что человек сверяет голосом.
-/// Считаем в ЗНАКАХ, а не в байтах: предел виден человеку, а он видит
-/// буквы, и русское имя не должно умещаться вдвое хуже латинского.
-const SAYS_NAME_LIMIT: usize = 80;
-
-/// Чужие слова — к показу и к записи.
-///
-/// `says_name` приходит с провода, и спека велит показывать его с пометкой
-/// «сказано той стороной, не проверено». Значит и обращаться с ним надо как
-/// с чужой строкой: выбросить то, чем рисуют, и обрезать то, чем оттесняют
-/// (круг починки 1, MEDIUM 2-бис).
-///
-/// Выбрасываются две семьи знаков, и обе — ради одного и того же обмана.
-/// Управляющие (перевод строки, возврат каретки, забой) позволяют дописать
-/// в диалоге вторую строку — например, поддельное «ПОДТВЕРЖДЕНО» вплотную к
-/// настоящему отпечатку. Невидимые разметочные (нулевой ширины, разворот
-/// направления письма, метка порядка байтов) позволяют переставить
-/// показанное местами, не меняя ни одной видимой буквы. Ни то, ни другое в
-/// имени машины не нужно никому, кроме того, кто его подделывает.
-///
-/// Чистится в ОДНОМ месте и до всего остального — чтобы показанное человеку
-/// и записанное в книгу не могли разойтись: иначе окно говорит одно, а файл
-/// хранит другое, и спор между ними разрешать нечем.
-fn as_said(raw: &str) -> String {
-    raw.chars().filter(|c| !c.is_control() && !is_invisible_mark(*c)).take(SAYS_NAME_LIMIT).collect::<String>().trim().to_string()
-}
-
-/// Невидимые разметочные знаки, которыми переставляют показанное местами, не
-/// меняя букв. `char::is_control` их не ловит — они не управляющие, а
-/// «формат».
-fn is_invisible_mark(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
-}
-
 /// Разбирает hex секрета в ровно 32 байта. `Option`, а не `Result` со
 /// словами: что именно не так с чужим секретом, человеку не рассказывают —
 /// отказ тут один на все случаи, и подсказывать подбирающему, насколько он
 /// близок, незачем.
 fn decode_secret(hexed: &str) -> Option<[u8; 32]> {
     hex::decode(hexed).ok()?.as_slice().try_into().ok()
-}
-
-/// Код провода для отказа, который `Book::check` вернул словами.
-///
-/// Книга отдаёт текст человеку, а не код для журнала, и собирать код обратно
-/// из текста — единственное, что у нас есть, пока она не отдаёт оба. Разница
-/// между «устарел» и «не найден» в журнале нужна: первое — обычная жизнь,
-/// второе — повод присмотреться.
-fn ticket_code(words: &str) -> &'static str {
-    if words.contains("устарел") {
-        code::TICKET_EXPIRED
-    } else {
-        code::TICKET_SPENT
-    }
 }
 
 /// «Пришло не то, чего ждали на этом шаге.»
@@ -560,12 +680,41 @@ fn version_gap(their_min: u32, their_max: u32) -> String {
     )
 }
 
+/// Та сторона выбрала номер, которого мы не умеем. Отдельные слова от
+/// `version_gap`: там диапазоны не пересеклись честно, здесь пересечение
+/// было, а выбор из него сделан не тот — и это чужая ошибка, а не возраст
+/// комплекта.
+fn version_chosen(theirs: u32) -> String {
+    format!(
+        "Версии не сошлись: та сторона выбрала {theirs}, а эта говорит по {PROTO}.\nВыбор версии делает сторона с базой, и этот номер нам \
+         не подходит.\nОбновите комплект на обеих машинах."
+    )
+}
+
 fn silent_for(within: Duration) -> String {
     format!(
         "Та сторона не ответила.\nЖдали {} с и не дождались ни слова.\nПроверьте, запущена ли программа там, и подключитесь заново.",
         within.as_secs()
     )
 }
+
+/// Слова на три вердикта по коду — свои, а не книжные: книга пишет для
+/// нашего журнала и кладёт в текст путь к файлу, а на провод уезжает только
+/// то, что человеку на ТОЙ машине можно прочитать и по чему можно
+/// действовать.
+const EXPIRED_TEXT: &str = "Код устарел.\nСрок у кода подключения — сутки, и он вышел.\nПопросите новый код на машине с базой.";
+
+const UNKNOWN_TEXT: &str = "По этому коду подключиться нельзя.\nЕго либо здесь не выдавали, либо по нему уже подключались: код \
+                            одноразовый.\nПопросите новый код на машине с базой.";
+
+const BOOK_UNREADABLE: &str = "Подключить не удалось: беда на стороне базы, а не с вашим кодом.\nПрограмма там не смогла прочитать свой \
+                               список допусков.\nНовый код не поможет — попросите посмотреть журнал на той машине.";
+
+const NOT_WRITTEN: &str = "Подключить не удалось: беда на стороне базы, а не с вашим кодом.\nРазрешение не записалось в список \
+                           допусков.\nПопросите посмотреть журнал на той машине и подключитесь заново.";
+
+const ALREADY_TALKING: &str = "По этому коду прямо сейчас уже идёт подключение.\nКод одноразовый, и второй заявки по нему не \
+                               будет.\nДождитесь, чем кончится первая, или попросите новый код.";
 
 const FOREIGN_TEXT: &str = "Код не от этой базы.\nОн не читается как код, выданный этой программой.\nПопросите новый код у того, кто вас \
                             подключает.";
@@ -774,18 +923,24 @@ mod tests {
         assert!(no.text.contains("устарел"), "отказ обязан назвать причину словами: {}", no.text);
     }
 
+    /// Ключ узла — это «кто стучится», а не «куда пущен»: в списке
+    /// зачисленных баз этому ключу видны только ЕГО карточки, а чужое
+    /// зачисление соседней карточки в него не попадает.
+    ///
+    /// Прежнее имя этого теста обещало больше, чем он проверял («ключ одной
+    /// карточки получает отказ у другой»), — а заявки он не касался вовсе.
+    /// То, что обещало прежнее имя, проверяет
+    /// `a_legal_code_for_a_second_card_is_taken_from_an_already_enrolled_key`.
     #[tokio::test]
-    async fn a_key_enrolled_to_one_card_is_refused_at_another() {
-        // Ключ узла — это «кто стучится», а не «куда пущен»: зачисление у
-        // «Ромашки» не пускает ту же машину к «Васильку».
+    async fn the_list_of_enrolled_bases_holds_only_this_keys_own_cards() {
         let (mine, theirs, _book, asked, _code) = talk(
             "separate",
             |book, peer, base, _state| {
                 book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
                 book.enroll("Василёк", base.id(), "Кто-то ещё", true).unwrap();
                 (
-                    // Код не понадобится вовсе: зачисление уже есть, и
-                    // второе подключение ничего не предъявляет.
+                    // Код не понадобится вовсе: зачисление есть, непогашенных
+                    // кодов нет, и предъявлять второму подключению нечего.
                     String::new(),
                     vec![
                         Card { name: "Ромашка".into(), base: fields("b1", true) },
@@ -804,6 +959,45 @@ mod tests {
         assert_eq!(bases.len(), 1, "в списке ровно та база, к которой этот ключ зачислен: {bases:?}");
         assert_eq!(bases[0].id, "b1", "чужое зачисление «Василька» в наш список не попадает");
         assert!(matches!(theirs, Ok(Outcome::Already(_))), "принимающая обязана была дойти до того же: {theirs:?}");
+    }
+
+    /// Спека 3: человек, вставивший ЗАКОННЫЙ код второй карточки, получает
+    /// зачисление к ней — а не «вы уже подключены» с базой первой.
+    ///
+    /// Прежний код отвечал `Already` на любое зачисление и заявку не читал
+    /// вовсе: код второй карточки оставался жить и не срабатывал никогда, а
+    /// человек на другом конце видел чужую базу вместо своей. Без правки этот
+    /// тест падает на первом же утверждении — человека никто не спросит.
+    #[tokio::test]
+    async fn a_legal_code_for_a_second_card_is_taken_from_an_already_enrolled_key() {
+        let (mine, theirs, book, asked, _code) = talk(
+            "second-card",
+            |book, peer, base, _state| {
+                // К первой карточке этот ключ уже зачислен.
+                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+                // А для второй человек только что выдал код.
+                let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
+                book.issue("Василёк", &ticket).unwrap();
+                (
+                    ticket.to_code(),
+                    vec![
+                        Card { name: "Ромашка".into(), base: fields("b1", true) },
+                        Card { name: "Василёк".into(), base: fields("b2", true) },
+                    ],
+                )
+            },
+            Decision::Allow { write: true },
+        )
+        .await;
+
+        assert_eq!(asked.count(), 1, "заявку по живому коду разбирают, а не отбивают словами про первую карточку");
+        let Ok(Outcome::Enrolled(base)) = &mine else {
+            panic!("зовущая обязана была получить enroll_ok второй базы: {mine:?}")
+        };
+        assert_eq!(base.base_id, "b2", "и поля именно ВТОРОЙ базы, а не первой");
+        assert!(matches!(theirs, Ok(Outcome::Enrolled(_))), "{theirs:?}");
+        assert_eq!(book.of("Василёк").len(), 1, "ключ зачислен ко второй карточке");
+        assert_eq!(book.of("Ромашка").len(), 1, "а первое зачисление не тронуто");
     }
 
     #[tokio::test]
@@ -932,7 +1126,7 @@ mod tests {
     /// провод, — две половины сведены `tokio::io::duplex`, и тест идёт
     /// мгновенно.
     #[tokio::test]
-    async fn a_self_given_name_is_cut_to_size_and_stripped_of_what_draws() {
+    async fn a_self_given_name_reaches_the_person_already_safe() {
         let d = dir("says-name");
         let node = Node::start(&d).await.unwrap();
         let peer = node.id();
@@ -941,11 +1135,19 @@ mod tests {
         book.issue("Ромашка", &ticket).unwrap();
         let cards = vec![Card { name: "Ромашка".into(), base: fields("b1", true) }];
 
-        // Чужая строка, которой рисуют: перевод строки и забой дописывают в
-        // диалоге поддельную строку вплотную к настоящему отпечатку,
-        // разворот направления письма переставляет показанное местами, а
-        // абзац вместо имени оттесняет отпечаток за край окна.
-        let nasty = format!("  Ромашка\n\r\u{8}ОТПЕЧАТОК СОВПАЛ\u{202e}\u{200b} {}", "я".repeat(300));
+        // Чужая строка, которой рисуют. Перевод строки, забой и разделители
+        // строки и абзаца (U+2028, U+2029) дописывают в диалоге поддельную
+        // строку вплотную к настоящему отпечатку; разворот направления письма
+        // (U+202E) переставляет показанное местами; мягкий перенос (U+00AD) и
+        // арабская метка (U+061C) не видны вовсе; полоса пробелов и абзац
+        // вместо имени оттесняют отпечаток за край окна.
+        //
+        // Собирается она ЗДЕСЬ как чужая, а уезжает сырым JSON (`raw_frame`),
+        // а не через `SaysName::new`: проверяется, что грязь не доезжает до
+        // человека даже разбором кадра с провода, то есть что чистка — свойство
+        // ТИПА, а не вежливость того, кто его заполняет.
+        let nasty =
+            format!("  Ромашка\n\r\u{8}\u{2028}ОТПЕЧАТОК\u{2029} СОВПАЛ\u{202e}\u{00ad}\u{061c}{}{}", " ".repeat(50), "я".repeat(300));
 
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (mut our_r, mut our_w) = tokio::io::split(ours);
@@ -964,8 +1166,7 @@ mod tests {
 
         Frame::write(&mut their_w, &hello_from("Разработчик")).await.unwrap();
         assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::HelloOk { .. })), "обязан прийти hello_ok");
-        let enroll = Msg::Enroll { ticket_secret: hex::encode(&*ticket.secret), says_name: nasty, base: None };
-        Frame::write(&mut their_w, &enroll).await.unwrap();
+        raw_enroll(&mut their_w, &hex::encode(&*ticket.secret), &nasty).await;
         assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::EnrollWait)), "обязан прийти enroll_wait");
         assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::EnrollOk { .. })), "человек разрешил, обязан прийти enroll_ok");
 
@@ -973,14 +1174,18 @@ mod tests {
         assert!(matches!(out, Ok(Outcome::Enrolled(_))), "разговор обязан был дойти до конца: {out:?}");
 
         let shown = shown.lock().unwrap().clone().expect("диалог человека обязан был получить заявку");
+        let shown = shown.as_str().to_string();
         assert!(!shown.chars().any(|c| c.is_control()), "управляющих знаков в показанном имени быть не должно: {shown:?}");
-        assert!(!shown.contains('\u{202e}') && !shown.contains('\u{200b}'), "невидимой разметки тоже: {shown:?}");
+        for bad in ['\u{2028}', '\u{2029}', '\u{202e}', '\u{00ad}', '\u{061c}'] {
+            assert!(!shown.contains(bad), "разделителей строк, разворота письма, мягкого переноса и метки быть не должно: {shown:?}");
+        }
+        assert!(!shown.contains("  "), "полоса пробелов обязана схлопнуться в один: {shown:?}");
         assert!(
-            shown.chars().count() <= SAYS_NAME_LIMIT,
+            shown.chars().count() <= crate::wire::SAYS_NAME_LIMIT,
             "имя обязано уместиться в предел, а не оттеснить отпечаток: {}",
             shown.chars().count()
         );
-        assert!(shown.starts_with("Ромашка"), "видимые буквы при этом сохраняются, а пробелы по краям срезаются: {shown:?}");
+        assert!(shown.starts_with("Ромашка"), "видимые буквы сохраняются, а пробелы по краям срезаются: {shown:?}");
         assert_eq!(
             book.of("Ромашка")[0].says_name,
             shown,
@@ -998,9 +1203,339 @@ mod tests {
             proto_max: PROTO,
             side: Side::WithAgents,
             kit: "тест".into(),
-            says_name: says_name.to_string(),
+            says_name: says_name.into(),
             ceiling: Ceiling::Full,
         }
+    }
+
+    /// Кадр, собранный руками из сырого JSON: длина старшим байтом вперёд,
+    /// затем тело.
+    ///
+    /// Нужен там, где отправить надо то, чего `Msg` собрать не может, — сырое
+    /// самоназвание в обход `SaysName` или сообщение с незнакомым именем.
+    async fn raw_frame<W: AsyncWrite + Unpin>(w: &mut W, json: &str) {
+        use tokio::io::AsyncWriteExt;
+        let body = json.as_bytes();
+        let mut frame = Vec::with_capacity(4 + body.len());
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(body);
+        w.write_all(&frame).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    /// `enroll` с НЕвычищенным самоназванием: через `Msg` такого не собрать —
+    /// поле типизировано, — а с провода прийти может что угодно.
+    async fn raw_enroll<W: AsyncWrite + Unpin>(w: &mut W, secret_hex: &str, says_name: &str) {
+        let json = serde_json::json!({ "msg": "enroll", "ticket_secret": secret_hex, "says_name": says_name });
+        raw_frame(w, &json.to_string()).await;
+    }
+
+    /// Разговор без сети: узел ради ключа, книга, карточки и две половины
+    /// `duplex` — принимающая сторона уже запущена, провод отдан тесту в руки.
+    ///
+    /// Нужна тем проверкам, где сеть ни при чём, а важен разбор сказанного:
+    /// они идут мгновенно и не поднимают на каждую по два узла iroh.
+    struct Alone {
+        node: Node,
+        r: tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        w: tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        server: tokio::task::JoinHandle<(Result<Outcome, String>, Book)>,
+        asked: Asked,
+    }
+
+    impl Alone {
+        async fn new(name: &str, answer: Decision, prepare: impl FnOnce(&mut Book, EndpointId, &std::path::Path) -> Vec<Card>) -> Alone {
+            let d = dir(name);
+            let node = Node::start(&d).await.unwrap();
+            let peer = node.id();
+            let mut book = Book::open(&d).unwrap();
+            let cards = prepare(&mut book, peer, &d);
+
+            let (ours, theirs) = tokio::io::duplex(1 << 16);
+            let (mut our_r, mut our_w) = tokio::io::split(ours);
+            let (their_r, their_w) = tokio::io::split(theirs);
+
+            let asked = Asked::default();
+            let counter = asked.clone();
+            let server = tokio::spawn(async move {
+                let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, |_req| async move {
+                    counter.0.fetch_add(1, Ordering::SeqCst);
+                    answer
+                })
+                .await;
+                (out, book)
+            });
+            Alone { node, r: their_r, w: their_w, server, asked }
+        }
+
+        async fn done(self) -> (Result<Outcome, String>, Book, usize) {
+            let asked = self.asked.count();
+            let (out, book) = tokio::time::timeout(WAIT, self.server).await.expect("принимающая сторона не уложилась в срок").unwrap();
+            self.node.close().await;
+            (out, book, asked)
+        }
+    }
+
+    /// Спека 1: потолок ТОЙ машины из `hello` складывается с решением
+    /// человека и потолком карточки.
+    ///
+    /// Запрет любой стороны сильнее разрешения другой: машина, объявившая у
+    /// себя «только чтение», не может получить от нас разрешение на запись,
+    /// как бы щедро человек ни нажал, — иначе флажок в её окне не совпадёт с
+    /// тем, что ей разрешили.
+    #[tokio::test]
+    async fn a_read_only_machine_is_not_granted_write_however_generous_the_person() {
+        let mut code = None;
+        let mut talk = Alone::new("ceiling", Decision::Allow { write: true }, |book, peer, _state| {
+            let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+            book.issue("Ромашка", &ticket).unwrap();
+            code = Some(hex::encode(&*ticket.secret));
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+        })
+        .await;
+        let secret_hex = code.unwrap();
+
+        let hello = Msg::Hello {
+            proto_min: PROTO,
+            proto_max: PROTO,
+            side: Side::WithAgents,
+            kit: "тест".into(),
+            says_name: "Разработчик".into(),
+            // Та машина у себя запретила запись.
+            ceiling: Ceiling::ReadOnly,
+        };
+        Frame::write(&mut talk.w, &hello).await.unwrap();
+        assert!(matches!(Frame::read(&mut talk.r).await, Ok(Msg::HelloOk { .. })), "обязан прийти hello_ok");
+        let enroll = Msg::Enroll { ticket_secret: secret_hex, says_name: "Разработчик".into(), base: None };
+        Frame::write(&mut talk.w, &enroll).await.unwrap();
+        assert!(matches!(Frame::read(&mut talk.r).await, Ok(Msg::EnrollWait)), "обязан прийти enroll_wait");
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::EnrollOk { base: Some(base) }) = &answered else {
+            panic!("ждали enroll_ok с полями базы: {answered:?}")
+        };
+        assert!(!base.write, "машине «только чтение» запись не разрешают, что бы ни решил человек: {base:?}");
+
+        let (out, book, asked) = talk.done().await;
+        assert_eq!(asked, 1, "человека всё равно спрашивают: потолок — не замена его решению");
+        let Ok(Outcome::Enrolled(base)) = &out else {
+            panic!("зачисление состоялось, только без записи: {out:?}")
+        };
+        assert!(!base.write, "и в исходе тоже");
+        assert!(!book.of("Ромашка")[0].write, "и в книге");
+    }
+
+    /// Спека 2: сверка версий в обе стороны. Сторона, объявившая диапазон,
+    /// которого не существует, получает отказ словами — а не `hello_ok` с
+    /// номером, на котором мы не говорим.
+    #[tokio::test]
+    async fn a_side_that_claims_a_version_we_do_not_speak_is_refused() {
+        let mut talk = Alone::new("version", Decision::Allow { write: true }, |_book, _peer, _state| {
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+        })
+        .await;
+
+        let hello = Msg::Hello {
+            proto_min: 0,
+            proto_max: 0,
+            side: Side::WithAgents,
+            kit: "тест".into(),
+            says_name: "Разработчик".into(),
+            ceiling: Ceiling::Full,
+        };
+        Frame::write(&mut talk.w, &hello).await.unwrap();
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::Refuse(no)) = &answered else { panic!("ждали отказ по версии, а не hello_ok: {answered:?}") };
+        assert_eq!(no.code, code::VERSION, "код отказа — «версия»: {no:?}");
+
+        let (out, _book, asked) = talk.done().await;
+        assert!(out.is_err(), "разговора не было: {out:?}");
+        assert_eq!(asked, 0, "человека не беспокоят расхождением версий");
+    }
+
+    /// Спека 2, вторая половина: выбранный номер обязана смотреть и ЗОВУЩАЯ.
+    /// Иначе та сторона объявляет версию, которой мы не умеем, и весь
+    /// дальнейший разговор идёт по чужим правилам, внешне исправно.
+    #[tokio::test]
+    async fn the_caller_checks_the_version_the_other_side_chose() {
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (mut our_r, mut our_w) = tokio::io::split(ours);
+        let (mut their_r, mut their_w) = tokio::io::split(theirs);
+
+        let caller = tokio::spawn(async move { dial_side(&mut our_w, &mut our_r, "", "Разработчик", Ceiling::Full).await });
+
+        assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::Hello { .. })), "зовущая обязана начать с hello");
+        // Отвечаем номером, которого эта сборка не умеет.
+        Frame::write(&mut their_w, &Msg::HelloOk { proto: PROTO + 7, side: Side::WithBase, bases: vec![] }).await.unwrap();
+
+        let out = tokio::time::timeout(WAIT, caller).await.expect("зовущая не уложилась в срок").unwrap();
+        assert!(out.is_err(), "чужой номер версии — отказ, а не молчаливое согласие: {out:?}");
+        let said = Frame::read(&mut their_r).await;
+        let Ok(Msg::Refuse(no)) = &said else {
+            panic!("зовущая обязана сказать словами, а не уйти молча: {said:?}")
+        };
+        assert_eq!(no.code, code::VERSION, "{no:?}");
+    }
+
+    /// Важно 7: незнакомое сообщение посреди разговора получает отказ НА
+    /// ПРОВОД, а не нашу тишину. Проглотить молча значит соврать
+    /// отправителю, что сообщение исполнено.
+    #[tokio::test]
+    async fn an_unknown_message_is_refused_in_words_not_in_silence() {
+        let mut talk = Alone::new("unknown-msg", Decision::Allow { write: true }, |_book, _peer, _state| {
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+        })
+        .await;
+
+        raw_frame(&mut talk.w, r#"{"msg":"enroll_please","whatever":1}"#).await;
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::Refuse(no)) = &answered else { panic!("ждали refuse словами: {answered:?}") };
+        assert_eq!(no.code, code::UNKNOWN_MESSAGE, "{no:?}");
+        assert!(no.text.contains("Обновите"), "отказ обязан сказать, что делать: {}", no.text);
+
+        let (out, _book, asked) = talk.done().await;
+        assert!(out.is_err(), "{out:?}");
+        assert_eq!(asked, 0, "человека незнакомым сообщением не беспокоят");
+    }
+
+    /// Важно 5 и 6: когда книга не прочиталась, это НАША беда — короткие
+    /// слова без путей на провод, `Err` в наш журнал, и ни слова про новый
+    /// код, который не поможет.
+    #[tokio::test]
+    async fn a_book_we_cannot_read_is_our_trouble_and_leaks_no_paths() {
+        let mut talk = Alone::new("book-broken", Decision::Allow { write: true }, |_book, _peer, state| {
+            // Книгу не прочитать: на её месте каталог. Открылась она раньше
+            // (в `Alone::new`), так что ломаются именно последующие чтения —
+            // те, по которым решается допуск.
+            //
+            // Через замок этого не добиться: на Windows он именованный
+            // мьютекс по строке пути и файловой системы не касается вовсе.
+            let _ = std::fs::remove_file(state.join("enrolled.toml"));
+            std::fs::create_dir_all(state.join("enrolled.toml")).unwrap();
+            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+        })
+        .await;
+
+        Frame::write(&mut talk.w, &hello_from("Разработчик")).await.unwrap();
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::Refuse(no)) = &answered else { panic!("ждали refuse словами: {answered:?}") };
+        assert_eq!(no.code, code::LOCK, "код отказа — «замок», а не выдумка про тикет: {no:?}");
+        assert!(!no.text.contains(".toml") && !no.text.contains('\\'), "путей нашей машины на проводе быть не должно: {}", no.text);
+        assert!(no.text.contains("не поможет"), "и не советуем просить новый код, который не поможет: {}", no.text);
+
+        let (out, _book, asked) = talk.done().await;
+        let why = out.expect_err("наша беда обязана краснеть в нашем журнале, а не прятаться в спокойный исход");
+        assert!(why.contains("enrolled.toml"), "а подробность с путём остаётся НАМ: {why}");
+        assert_eq!(asked, 0, "человека нашей бедой не беспокоят");
+    }
+
+    /// Важно 8: по одному коду идёт один разговор. Два соединения с тем же
+    /// секретом не приносят человеку два диалога об одном и том же.
+    #[tokio::test]
+    async fn one_code_means_one_talk_not_two_dialogs() {
+        let d = dir("one-talk");
+        let node = Node::start(&d).await.unwrap();
+        let peer = node.id();
+        let mut first_book = Book::open(&d).unwrap();
+        let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+        first_book.issue("Ромашка", &ticket).unwrap();
+        let secret_hex = hex::encode(&*ticket.secret);
+        let cards = vec![Card { name: "Ромашка".into(), base: fields("b1", true) }];
+
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (mut our_r, mut our_w) = tokio::io::split(ours);
+        let (mut their_r, mut their_w) = tokio::io::split(theirs);
+
+        // Первый разговор держим на полпути: человек думает, пока мы не
+        // разрешим ему ответить.
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let asked = Asked::default();
+        let counter = asked.clone();
+        let cards_there = cards.clone();
+        let first = tokio::spawn(async move {
+            let out = accept_side(&mut our_w, &mut our_r, peer, &mut first_book, &cards_there, |_req| async move {
+                counter.0.fetch_add(1, Ordering::SeqCst);
+                let _ = held.await;
+                Decision::Allow { write: true }
+            })
+            .await;
+            (out, first_book)
+        });
+
+        Frame::write(&mut their_w, &hello_from("Разработчик")).await.unwrap();
+        assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::HelloOk { .. })));
+        let enroll = Msg::Enroll { ticket_secret: secret_hex.clone(), says_name: "Разработчик".into(), base: None };
+        Frame::write(&mut their_w, &enroll).await.unwrap();
+        assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::EnrollWait)), "первый разговор дошёл до человека");
+
+        // Второй разговор тем же кодом — пока первый висит на диалоге.
+        let mut second_book = Book::open(&d).unwrap();
+        let (ours2, theirs2) = tokio::io::duplex(1 << 16);
+        let (mut our_r2, mut our_w2) = tokio::io::split(ours2);
+        let (mut their_r2, mut their_w2) = tokio::io::split(theirs2);
+        let counter2 = asked.clone();
+        let second = tokio::spawn(async move {
+            accept_side(&mut our_w2, &mut our_r2, peer, &mut second_book, &cards, |_req| async move {
+                counter2.0.fetch_add(1, Ordering::SeqCst);
+                Decision::Allow { write: true }
+            })
+            .await
+        });
+        Frame::write(&mut their_w2, &hello_from("Он же")).await.unwrap();
+        assert!(matches!(Frame::read(&mut their_r2).await, Ok(Msg::HelloOk { .. })));
+        let enroll2 = Msg::Enroll { ticket_secret: secret_hex, says_name: "Он же".into(), base: None };
+        Frame::write(&mut their_w2, &enroll2).await.unwrap();
+        let answered = Frame::read(&mut their_r2).await;
+        let Ok(Msg::Refuse(no)) = &answered else {
+            panic!("второму обязан прийти отказ, а не второй enroll_wait: {answered:?}")
+        };
+        assert_eq!(no.code, code::BUSY, "{no:?}");
+        let out2 = tokio::time::timeout(WAIT, second).await.expect("второй разговор не уложился в срок").unwrap();
+        assert!(matches!(out2, Ok(Outcome::NotEnrolled(_))), "{out2:?}");
+
+        let _ = release.send(());
+        let (out, book) = tokio::time::timeout(WAIT, first).await.expect("первый разговор не уложился в срок").unwrap();
+        assert!(matches!(out, Ok(Outcome::Enrolled(_))), "первый разговор доходит до конца как обычно: {out:?}");
+        assert_eq!(asked.count(), 1, "человека спросили РОВНО один раз на один код");
+        assert_eq!(book.of("Ромашка").len(), 1, "и зачислен ровно один");
+
+        node.close().await;
+    }
+
+    /// Critical: ожидание той стороны не бросается на полпути кадра.
+    ///
+    /// Это ожидание живёт в `select!` против диалога человека, а поток после
+    /// разрешения живёт дальше под `state`. Съеденный и брошенный заголовок
+    /// рассинхронизировал бы его — и человек увидел бы обрыв сразу после
+    /// успешного зачисления, в худшую для этого минуту.
+    ///
+    /// Проверяется ровно то свойство, которым это держится: когда в трубе
+    /// лежит ЗАГОЛОВОК БЕЗ ТЕЛА, один опрос ожидания обязан завершиться
+    /// (разговор кончен, съеденное никому не нужно), а не вернуться
+    /// «подожди», унеся с собой четыре байта. С `Frame::read` в этом месте
+    /// опрос вернул бы «подожди», и тест падает.
+    #[tokio::test]
+    async fn the_wait_for_the_other_side_never_parks_in_the_middle_of_a_frame() {
+        use std::future::Future;
+        use std::task::Poll;
+        use tokio::io::AsyncWriteExt;
+
+        let (mut ours, theirs) = tokio::io::duplex(1 << 16);
+        let (mut their_r, _their_w) = tokio::io::split(theirs);
+
+        // Заголовок, обещающий тело, которого не будет.
+        ours.write_all(&7u32.to_be_bytes()).await.unwrap();
+        ours.flush().await.unwrap();
+        // Дать байтам доехать: иначе опрос ниже честно скажет «подожди» по
+        // пустой трубе, и тест проверит не то.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut waiting = std::pin::pin!(interrupted(&mut their_r));
+        let once = std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await;
+        assert!(
+            once.is_ready(),
+            "ожидание обязано либо дождаться, либо не тронуть поток: вернув «подожди» после съеденного заголовка, оно оставило бы поток \
+             рассинхронизированным"
+        );
     }
 
     /// Состарить все выданные тикеты прямо в файле книги.

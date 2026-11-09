@@ -6261,6 +6261,7 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
  "tray-icon",
+ "unicode-properties",
  "windows-sys 0.60.2",
  "x11rb",
  "zeroize",

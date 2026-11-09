@@ -143,10 +143,53 @@ impl Book {
     /// столкнуться с чужой записью, которая в тот же миг кладёт файл на
     /// место после `rename` в `write_atomic` у другого процесса.
     pub fn check(&self, secret: &[u8; 32]) -> Result<String, String> {
+        match self.verdict(secret)? {
+            Verdict::Card(name) => Ok(name),
+            Verdict::Unknown => Err(UNKNOWN_TICKET.to_string()),
+            Verdict::Expired => Err(EXPIRED_TICKET.to_string()),
+        }
+    }
+
+    /// То же, что `check`, но ВЕРДИКТОМ, а не словами.
+    ///
+    /// Нужно тому, кто обязан различать три разных случая, а не два (круг
+    /// починки 2 задачи 5, Important 6). `check` сводит «кода нет»,
+    /// «код устарел» и «книга не прочиталась» к одному `Err` со строкой, и
+    /// разобрать их обратно можно только по тексту — то есть по совпадению
+    /// слов, которое переживёт ровно до первой правки формулировки. А разница
+    /// между ними не косметическая: первые два — обычная жизнь замка на
+    /// дверном звонке, им место в спокойном отказе той стороне; третий — НАША
+    /// беда, и он обязан краснеть в нашем журнале и не выдавать той стороне
+    /// ни путей, ни подробностей.
+    ///
+    /// Поэтому здесь `Err` значит ровно одно: книгу не удалось прочитать.
+    /// Любой вердикт по самому коду — это `Ok`.
+    pub fn verdict(&self, secret: &[u8; 32]) -> Result<Verdict, String> {
         let _guard = lock(&self.path)?;
         let data = load_raw(&self.path)?;
-        let pos = locate(&data, secret)?;
-        Ok(data.tickets[pos].connection.clone())
+        Ok(match locate(&data, secret) {
+            Found::At(pos) => Verdict::Card(data.tickets[pos].connection.clone()),
+            Found::Expired => Verdict::Expired,
+            Found::Unknown => Verdict::Unknown,
+        })
+    }
+
+    /// Есть ли вообще хоть один живой выданный код — с диска, под замком.
+    ///
+    /// Вопрос узкий, а нужен он затем, что принимающая сторона иначе не
+    /// знает, ждать ли ей заявку. Уже зачисленная сторона обычно просто
+    /// переподключается и `enroll` не шлёт вовсе — а спека не даёт ей слова
+    /// сказать «мне не о чем просить». Ждать её заявку на всякий случай
+    /// значило бы задержать разговор на весь срок ожидания при каждом
+    /// переподключении; не ждать вовсе — проглотить законную заявку на ВТОРУЮ
+    /// карточку. Выданный код и есть тот признак, по которому эти два случая
+    /// различаются без единого нового поля на проводе: нет непогашенных
+    /// кодов — ничья заявка не могла бы сработать, и ждать нечего.
+    pub fn has_live_ticket(&self) -> Result<bool, String> {
+        let _guard = lock(&self.path)?;
+        let data = load_raw(&self.path)?;
+        let now = now_secs();
+        Ok(data.tickets.iter().any(|t| t.until >= now))
     }
 
     /// Запоминает выданный тикет: отпечаток секрета (не сам секрет — см.
@@ -181,9 +224,10 @@ impl Book {
     /// спека это допускает.
     pub fn spend(&mut self, secret: &[u8; 32]) -> Result<String, String> {
         let secret = *secret;
-        self.mutate(move |data| {
-            let pos = locate(data, &secret)?;
-            Ok(data.tickets.remove(pos).connection)
+        self.mutate(move |data| match locate(data, &secret) {
+            Found::At(pos) => Ok(data.tickets.remove(pos).connection),
+            Found::Expired => Err(EXPIRED_TICKET.to_string()),
+            Found::Unknown => Err(UNKNOWN_TICKET.to_string()),
         })?
     }
 
@@ -273,19 +317,52 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
-/// Общий поиск для `check` и `spend`: по секрету — за постоянное время
-/// (`constant_time_eq`) — и по сроку. `spend` после успеха дополнительно
-/// удаляет найденную запись сам; здесь только позиция и решение, жива ли
-/// она.
-fn locate(data: &BookFile, secret: &[u8; 32]) -> Result<usize, String> {
+/// Общий поиск для `check`, `spend` и `verdict`: по секрету — за постоянное
+/// время (`constant_time_eq`) — и по сроку. `spend` после успеха
+/// дополнительно удаляет найденную запись сам; здесь только позиция и
+/// решение, жива ли она.
+///
+/// Отдаёт ВЕРДИКТ, а не `Result<usize, String>`: слова отказа — дело
+/// вызывающего (`check` их и пишет), а здесь они только мешали бы — тому,
+/// кому нужен не текст, а различие (`verdict`), пришлось бы разбирать текст
+/// обратно.
+fn locate(data: &BookFile, secret: &[u8; 32]) -> Found {
     let want = fingerprint(secret);
     let now = now_secs();
     match data.tickets.iter().position(|t| constant_time_eq(&t.fingerprint, &want)) {
-        None => Err("Код не найден или уже погашен.\nПопросите новый на той машине, которая его выдала.".to_string()),
-        Some(pos) if data.tickets[pos].until < now => Err("Код устарел.\nПопросите новый на той машине, которая его выдала.".to_string()),
-        Some(pos) => Ok(pos),
+        None => Found::Unknown,
+        Some(pos) if data.tickets[pos].until < now => Found::Expired,
+        Some(pos) => Found::At(pos),
     }
 }
+
+/// Что нашлось по секрету — внутренний вид `Verdict`, с позицией записи для
+/// `spend`. Наружу позиция не ездит: она верна только под тем же замком, под
+/// которым читалась.
+enum Found {
+    At(usize),
+    Expired,
+    Unknown,
+}
+
+/// Вердикт по предъявленному коду. Три случая, а не два, — см. `verdict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Код настоящий и жив; вот карточка, к которой он выдан.
+    Card(String),
+    /// Срок кода вышел.
+    Expired,
+    /// Такого кода в книге нет: его либо не выдавали, либо уже погасили.
+    /// Различить эти два снаружи нечем нарочно — хранить «потрачен» спека
+    /// запрещает («тикет не хранится нигде после погашения»).
+    Unknown,
+}
+
+/// Слова `check` на два вердикта из трёх. Вынесены в константы, потому что
+/// их же обязан знать `spend` — два писателя одного текста разошлись бы на
+/// первой правке.
+const UNKNOWN_TICKET: &str = "Код не найден или уже погашен.\nПопросите новый на той машине, которая его выдала.";
+const EXPIRED_TICKET: &str = "Код устарел.\nПопросите новый на той машине, которая его выдала.";
 
 /// Выбрасывает тикеты, срок которых уже прошёл. Возвращает `true`, если
 /// что-то выбросили, — `open` отличает этим «надо дописать файл» от «файл и

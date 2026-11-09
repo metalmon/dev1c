@@ -117,6 +117,143 @@ impl std::fmt::Display for Refuse {
     }
 }
 
+/// Предел самоназвания — восемьдесят ЗНАКОВ.
+///
+/// Это одна строка в диалоге разрешения, рядом с отпечатком ключа.
+/// Восьмидесяти хватает на «ООО „Ромашка“, бухгалтерия» и не хватает на
+/// абзац, которым чужая сторона оттеснила бы отпечаток за край окна, — а
+/// отпечаток здесь единственное, что человек сверяет голосом по телефону.
+///
+/// В знаках, а не в байтах: предел виден человеку, а он видит буквы, и
+/// русское имя не должно умещаться вдвое хуже латинского.
+pub const SAYS_NAME_LIMIT: usize = 80;
+
+/// Самоназвание той стороны — чужие слова, и ТИП, а не правило.
+///
+/// Спека велит показывать его с пометкой «сказано той стороной, не
+/// проверено». Значит это чужая строка на доверительной границе, и
+/// обращаться с ней надо соответственно: выбросить то, чем рисуют, и
+/// обрезать то, чем оттесняют.
+///
+/// **Почему тип, а не функция чистки.** Поле едет в двух сообщениях
+/// (`hello` и `enroll`), а показывает и хранит его третий код. Правило
+/// «не забудь вычистить» держится до первого автора, который забудет, —
+/// поэтому внутренняя строка приватна, а единственный способ получить
+/// `SaysName` из чего угодно (включая разбор JSON с провода — `serde(from =
+/// "String")`) проходит через `new`. Невычищенного самоназвания в программе
+/// не существует как пути, а не как запрета.
+///
+/// **Почему по КАТЕГОРИЯМ, а не по перечню знаков.** Перечень, собранный
+/// руками, всегда неполон: в первом же варианте этого кода не нашлось
+/// U+2028 и U+2029 (разделители строки и абзаца — ровно то, чем дорисовывают
+/// поддельную строку вплотную к отпечатку), мягкого переноса и арабской
+/// метки. Выбрасываются целые категории Unicode:
+/// * `Cc` — управляющие (перевод строки, возврат каретки, забой): ими
+///   дописывают в диалоге вторую строку, например поддельное «отпечаток
+///   совпал» вплотную к настоящему отпечатку;
+/// * `Cf` — форматирующие (нулевой ширины, разворот направления письма,
+///   метка порядка байтов): ими переставляют показанное местами, не меняя
+///   ни одной видимой буквы;
+/// * `Zl`, `Zp` — разделители строки и абзаца: то же, что `Cc`, другими
+///   кодами;
+/// * `Co`, `Cn` — частное использование и неназначенные: как они
+///   нарисуются, не знает никто, включая нас.
+///
+/// Пробельное (`Zs`) остаётся, но подряд идущее схлопывается в один пробел:
+/// имя с полусотней пробелов растянуло бы строку диалога, не потратив ни
+/// одного знака предела зря.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub struct SaysName(String);
+
+impl SaysName {
+    /// Единственная дорога внутрь: чистит категориями, схлопывает пробельное,
+    /// срезает края, обрезает по пределу.
+    ///
+    /// Предел применяется ПОСЛЕ чистки — иначе полоса невидимых знаков
+    /// выедала бы его, и в окне осталось бы три буквы из восьмидесяти.
+    pub fn new(raw: &str) -> Self {
+        use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+        let mut out = String::new();
+        let mut kept = 0usize;
+        // Пробел не пишется сразу, а запоминается: так подряд идущие
+        // схлопываются в один, а край строки не получает его вовсе.
+        let mut pending_space = false;
+        for c in raw.chars() {
+            let keep = match c.general_category() {
+                GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+                | GeneralCategory::PrivateUse
+                | GeneralCategory::Unassigned
+                | GeneralCategory::Surrogate => continue,
+                GeneralCategory::SpaceSeparator => {
+                    pending_space = true;
+                    continue;
+                }
+                _ => c,
+            };
+            if pending_space && !out.is_empty() {
+                if kept + 1 >= SAYS_NAME_LIMIT {
+                    break;
+                }
+                out.push(' ');
+                kept += 1;
+            }
+            pending_space = false;
+            if kept >= SAYS_NAME_LIMIT {
+                break;
+            }
+            out.push(keep);
+            kept += 1;
+        }
+        Self(out)
+    }
+
+    /// То, что можно показать и записать: вычищенное по построению.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<String> for SaysName {
+    fn from(raw: String) -> Self {
+        Self::new(&raw)
+    }
+}
+
+impl From<&str> for SaysName {
+    fn from(raw: &str) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<SaysName> for String {
+    fn from(name: SaysName) -> String {
+        name.0
+    }
+}
+
+impl std::fmt::Display for SaysName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Своими руками: в журнале нужна строка, а не `SaysName("строка")` — имя
+/// обёртки там только мешает читать. Печатать опасного нечего, значение
+/// вычищено по построению.
+impl std::fmt::Debug for SaysName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
 /// Какой конец соединения говорит: с базой или с агентами (контракт, «Единица»).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -192,14 +329,14 @@ pub enum Msg {
     /// Первое, что уходит по управляющему потоку. `says_name` — как сторона
     /// себя назвала; человеку показывается с пометкой «сказано той стороной»
     /// и больше ни на что не влияет.
-    Hello { proto_min: u32, proto_max: u32, side: Side, kit: String, says_name: String, ceiling: Ceiling },
+    Hello { proto_min: u32, proto_max: u32, side: Side, kit: String, says_name: SaysName, ceiling: Ceiling },
     /// Версия выбрана, вот базы, к которым этот ключ уже зачислен. Пустой
     /// список — законный ответ: пришли с тикетом, зачисления ещё нет.
     HelloOk { proto: u32, side: Side, bases: Vec<BaseBrief> },
     /// Пришёл с тикетом, прошу зачислить.
     Enroll {
         ticket_secret: String,
-        says_name: String,
+        says_name: SaysName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<BaseFields>,
     },
@@ -517,6 +654,41 @@ mod tests {
         for name in KNOWN {
             assert!(produced.contains(&name.to_string()), "имя «{name}» в списке знакомых, но Msg его не производит");
         }
+    }
+
+    /// Грязного самоназвания не существует как ПУТИ: единственная дорога
+    /// внутрь — `new`, и разбор кадра с провода идёт через неё же
+    /// (`serde(from = "String")`). Поэтому проверяем самое недоверчивое, что
+    /// можно: сырой JSON, собранный руками в обход всякого `Msg`.
+    #[test]
+    fn a_self_given_name_from_the_wire_arrives_already_clean() {
+        // Перевод строки, забой, разделители строки и абзаца, разворот
+        // направления письма, мягкий перенос, арабская метка, нулевая ширина,
+        // метка порядка байтов — и полоса пробелов на закуску.
+        let dirty = "  Ро\u{8}машка\n\r\u{2028}ОТПЕЧАТОК\u{2029}\u{202e}\u{00ad}\u{061c}\u{200b}\u{feff}  тут  ";
+        let json = serde_json::json!({ "msg": "enroll", "ticket_secret": "ab", "says_name": dirty }).to_string();
+        let Msg::Enroll { says_name, .. } = serde_json::from_str::<Msg>(&json).unwrap() else { panic!("собирали enroll") };
+
+        let shown = says_name.as_str();
+        assert_eq!(shown, "РомашкаОТПЕЧАТОК тут", "чистится по категориям, пробелы схлопываются, края срезаются: {shown:?}");
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+
+        // И обратно на провод уезжает уже вычищенное, а не исходная грязь.
+        let back = serde_json::to_value(Msg::Enroll { ticket_secret: "ab".into(), says_name, base: None }).unwrap();
+        assert_eq!(back["says_name"], "РомашкаОТПЕЧАТОК тут");
+    }
+
+    /// Длинное имя обрезается по знакам, а не по байтам: предел виден
+    /// человеку, а он видит буквы.
+    #[test]
+    fn a_long_self_given_name_is_cut_by_letters_not_bytes() {
+        let long = SaysName::new(&"я".repeat(500));
+        assert_eq!(long.as_str().chars().count(), SAYS_NAME_LIMIT, "ровно предел знаков");
+        assert_eq!(long.as_str().len(), SAYS_NAME_LIMIT * 2, "в байтах вдвое больше — и это не причина пускать меньше букв");
+        // Невидимое не выедает предел: иначе полоса разметки оставила бы в
+        // окне три буквы из восьмидесяти.
+        let padded = SaysName::new(&format!("{}Ромашка", "\u{200b}".repeat(500)));
+        assert_eq!(padded.as_str(), "Ромашка");
     }
 
     #[tokio::test]

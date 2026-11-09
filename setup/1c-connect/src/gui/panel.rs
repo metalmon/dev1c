@@ -72,6 +72,17 @@ pub struct Fields {
     /// Адрес чужой публикации. Показывается только в режиме «уже
     /// опубликована» (`shown_fields`), в обычном режиме адрес считается сам.
     pub base_url: Entity<InputState>,
+    /// Код подключения, который человек ВСТАВЛЯЕТ у зовущей карточки
+    /// (`dialling_block`).
+    ///
+    /// Не в `field_states`/`shown_fields`/`host_of` нарочно: это не поле
+    /// настроек, а разовый ввод. В `1c-connect.toml` ему места нет — код
+    /// одноразовый и живёт сутки, а после зачисления он не нужен вовсе:
+    /// возвращаются по ключу узла (`enrolled::Partners`). Попади он в обычную
+    /// диффовку полей — «Сохранить» загоралось бы от набранного кода и
+    /// записывало бы его на диск, то есть хранило бы секрет, который хранить
+    /// незачем.
+    pub code: Entity<InputState>,
 }
 
 pub struct Panel {
@@ -437,6 +448,7 @@ pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
         declined: ui.declined.iter().any(|d| d == name),
         code_issued: ui.codes.iter().any(|(card, t)| card == name && t.alive(now)),
         enrolled: ui.book.as_ref().map_or(0, |b| b.of(name).len()),
+        flow: ui.flows.iter().find(|(card, _)| card == name).map(|(_, f)| *f),
     }
 }
 
@@ -1149,6 +1161,51 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     Some(Accepting { code: code.map(str::to_string), code_note, enrolled, says_note, parties })
 }
 
+/// Зеркало `accepting_block` для ЗОВУЩЕЙ карточки: куда вставить код и что
+/// про это сказать.
+///
+/// Нужен был потому, что вставить код было некуда вовсе: у принимающей
+/// карточки блок кода есть, а у зовущей не было ни поля, ни кнопки — её
+/// главная кнопка «Подключиться» поднимает ПРЕЖНИЙ сеанс SSH, который к
+/// каналу не относится никак и живёт параллельно (он отвечает за
+/// сегодняшнюю работу). Поэтому блок свой, а `main_button` не тронута.
+///
+/// Локальность проверяется первой и отдельно от роли — тем же порядком и по
+/// тому же доводу, что у `accepting_block`: у карточки, где оба конца на
+/// этой машине, звонить некому, и застрявшая в файле роль `dial` при
+/// `mode = "local"` не вправе нарисовать поле для кода.
+///
+/// `partner` — отпечаток ключа той стороны, если зачисление уже было
+/// (`enrolled::Partners`). Он решает оба текста: пока его нет, карточка
+/// просит код; когда он есть, она говорит, что подключение возвращается само,
+/// — иначе человек, видящий поле для кода у уже зачисленной карточки, думал
+/// бы, что код нужен каждый раз, и просил бы новый после каждого перезапуска.
+pub fn dialling_block(c: &Connection, partner: Option<String>) -> Option<Dialling> {
+    if c.mode == "local" || !matches!(c.role(), Ok("dial")) {
+        return None;
+    }
+    let note = if partner.is_some() {
+        "Подключение уже заведено и возвращается само. Код нужен только затем, чтобы подключиться к ДРУГОЙ машине."
+    } else {
+        "Вставьте код, выданный на машине с базой, и нажмите «Подключиться»."
+    };
+    Some(Dialling { note, partner, button: "Подключиться" })
+}
+
+/// Блок зовущей карточки — чистый итог, без виджетов (тем же правилом, что
+/// `Accepting` и `Body`).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Dialling {
+    /// Одно предложение о том, что делать с полем, — ровно как `code_note` у
+    /// принимающей.
+    pub note: &'static str,
+    /// Отпечаток ключа той стороны целиком — тот же вид, что у зачисленных в
+    /// принимающей карточке (`PartyRow::fingerprint`) и по тому же доводу:
+    /// усечённый нельзя сверить голосом. `None` — зачисления ещё не было.
+    pub partner: Option<String>,
+    pub button: &'static str,
+}
+
 /// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
 /// Решение владельца 9.11 на живом прогоне: вопрос «Кто кому подключается?»
 /// убран совсем («так не пишут») — остаётся только факт, а отвечать на него
@@ -1499,16 +1556,44 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
         }
     }
     let id = crate::node::id_from_state(ui.kit.state())?;
-    // Релея и прямых адресов в коде нет: узел не поднят, и знать их неоткуда
-    // (см. `node::id_from_state`). Дозвониться по такому коду можно — адрес
-    // ищется по ключу через серверы n0.
-    let ticket = crate::ticket::Ticket::issue(id, None, Vec::new())?;
+    // Адреса берутся у ЖИВОГО узла (`peer::Reach`) — релей и прямые, среди
+    // прямых и своя петля (`ticket::direct_with_loopback`, там и довод,
+    // почему петля обязательна). Без них дозвон шёл бы только поиском по
+    // ключу через серверы n0, то есть требовал бы настоящего интернета, а две
+    // копии на одной машине не нашли бы друг друга вовсе.
+    //
+    // Узел ещё не поднялся или не вышел в сеть — код выдаётся без адресов,
+    // как и до этой задачи: это хуже (нужен интернет), но не отказ.
+    let reach = ui.peer.as_ref().and_then(crate::gui::peer::Peer::reach).unwrap_or_default();
+    let ticket = crate::ticket::Ticket::issue(id, reach.relay, reach.direct)?;
     let code = ticket.to_code();
     let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
     book.reissue(card, &ticket)?;
     ui.codes.retain(|(c, _)| c != card);
     ui.codes.push((card.to_string(), ticket));
     Ok(code)
+}
+
+/// Позвонить зовущей карточкой: код — в поток узла, слово — человеку.
+///
+/// Запись, а не чистое решение: просьба уезжает в другой поток. Проверяется
+/// она последствием — журналом и состоянием карточки, — а решения, которые
+/// здесь могли бы жить (что показывать, когда звонить некуда), вынесены в
+/// `dialling_block` и `peer::target`, где их и проверяют тесты.
+///
+/// Пустое поле — законный случай, а не беда: у уже зачисленной карточки код
+/// не нужен (возвращаются по ключу узла), и щелчок означает «попробуй
+/// сейчас». Разбирается это не здесь, а в потоке узла (`peer::target`):
+/// только он знает, записан ли партнёр.
+fn dial_card(ui: &mut Ui, card: &str, code: &str) {
+    let Some(peer) = ui.peer.clone() else {
+        gui::note_line(ui, Line { kind: Kind::Fail, text: "Узел не поднят — подключаться нечем.".into() });
+        return;
+    };
+    match peer.dial(card, code) {
+        Ok(()) => gui::note_line(ui, Line { kind: Kind::Say, text: format!("Подключаюсь по «{card}»") }),
+        Err(e) => gui::note_line(ui, Line { kind: Kind::Fail, text: e }),
+    }
 }
 
 /// Отозвать ОДНУ зачисленную сторону у карточки. Остальные зачисления той же
@@ -1521,6 +1606,12 @@ fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
     };
     let line = match r {
         Ok(()) => {
+            // Живой поток этой стороны снимается в ту же секунду, а не на её
+            // следующем круге: запись об отзыве уже сделана, и поток, который
+            // её переживает, отменял бы немедленность отзыва (спека).
+            if let Some(peer) = &ui.peer {
+                peer.revoked(card, key);
+            }
             Line { kind: Kind::Ok, text: format!("Разрешение отозвано: карточка «{card}», ключ {key}") }
         }
         Err(e) => Line { kind: Kind::Fail, text: e },
@@ -2460,6 +2551,7 @@ impl Panel {
             project: field("", &host.project, false, window, cx),
             workstation: field("", &host.workstation, false, window, cx),
             base_url: field("http://localhost/Buh", shown_base_url(&host), false, window, cx),
+            code: field("", "", false, window, cx),
         };
         let original = host.clone();
         // Клавиатура сразу у панели: Esc прячет окно и до того, как щёлкнули
@@ -3149,6 +3241,43 @@ impl Panel {
                             ))),
                     ),
                 );
+            }
+        }
+        // Куда вставить код — у ЗОВУЩЕЙ карточки, зеркалом блока кода у
+        // принимающей. Что показывать, решает `dialling_block`, здесь только
+        // виджеты. «Подключиться» в подвале при этом не тронута: она
+        // поднимает прежний сеанс SSH, который живёт параллельно и отвечает
+        // за сегодняшнюю работу.
+        let dialling = {
+            let ui = cx.global::<Ui>();
+            let partner = ui.partners.iter().find(|(card, _)| *card == card_name).map(|(_, key)| key.to_string());
+            dialling_block(&c, partner)
+        };
+        if let Some(block) = dialling {
+            col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
+            col = col.child(div().text_size(px(13.)).text_color(caption).child("Код подключения"));
+            let card = card_name.clone();
+            let code = self.fields.code.clone();
+            col = col.child(
+                h_flex()
+                    .gap_2()
+                    .items_end()
+                    .child(div().flex_1().min_w_0().child(Self::input(&self.fields.code, accent, window, cx)))
+                    .child(KitButton::new("dial-connect").primary().small().label(block.button).on_click(cx.listener(
+                        move |_, _, window, cx| {
+                            let typed = code.read(cx).value().to_string();
+                            dial_card(cx.global_mut::<Ui>(), &card, typed.trim());
+                            code.update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                            cx.refresh_windows();
+                        },
+                    ))),
+            );
+            col = col.child(div().text_size(px(13.)).text_color(caption).child(block.note));
+            // Отпечаток той стороны — целиком и тем же видом, что у
+            // зачисленных в принимающей карточке: он тоже сверяется голосом.
+            if let Some(partner) = block.partner {
+                col = col.child(div().text_size(px(12.)).text_color(caption).child("Подключено к ключу"));
+                col = col.child(div().min_w_0().text_size(px(12.)).child(partner));
             }
         }
         col
@@ -4000,11 +4129,11 @@ impl Render for Panel {
 mod tests {
     use super::{
         accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
-        delete_question_text, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_menu,
-        live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
-        publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
-        switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty,
-        LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
+        delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question,
+        link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
+        project_rows, publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields,
+        skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body,
+        DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -5800,6 +5929,51 @@ mod tests {
 
     fn accepting_card() -> Connection {
         Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() }
+    }
+
+    fn dialling_card() -> Connection {
+        Connection { name: "Разработчик".into(), mode: "tunnel".into(), role: "dial".into(), ..Default::default() }
+    }
+
+    /// У ЗОВУЩЕЙ карточки должно быть куда вставить код — ровно зеркало блока
+    /// кода у принимающей.
+    ///
+    /// Падал так: `dialling_block` не существовало, и у зовущей карточки не
+    /// было ни поля, ни кнопки. Код было некуда вставить ВООБЩЕ: главная
+    /// кнопка «Подключиться» в подвале поднимает прежний сеанс SSH, к каналу
+    /// отношения не имеет, и живого пути из-за этого не было ни одного.
+    #[test]
+    fn a_dialling_card_has_somewhere_to_paste_the_code() {
+        let b = dialling_block(&dialling_card(), None).expect("зовущая карточка обязана нести блок кода");
+        assert_eq!(b.button, "Подключиться");
+        assert!(b.note.contains("Вставьте код"), "{}", b.note);
+        assert!(b.partner.is_none());
+    }
+
+    /// Зачисленной карточке код не нужен: она возвращается по ключу узла
+    /// (`enrolled::Partners`). Слова обязаны это сказать — иначе человек
+    /// просил бы новый код после каждого перезапуска, думая, что код нужен
+    /// каждый раз.
+    #[test]
+    fn an_enrolled_dialling_card_says_it_comes_back_by_itself() {
+        let key = a_key(7);
+        let b = dialling_block(&dialling_card(), Some(key.to_string())).expect("блок есть и после зачисления");
+        assert!(b.note.contains("возвращается само"), "{}", b.note);
+        // Отпечаток целиком — его сверяют голосом, как и у зачисленных на той
+        // стороне.
+        assert_eq!(b.partner.as_deref(), Some(key.to_string().as_str()));
+    }
+
+    /// Блок — только у зовущей и только там, где есть кому звонить: у
+    /// принимающей карточки свой блок (`accepting_block`), а у локальной оба
+    /// конца здесь, и звонить некому. Застрявшая в файле роль `dial` при
+    /// `mode = "local"` не вправе нарисовать поле для кода — та же защита и
+    /// тем же порядком, что у `accepting_block`.
+    #[test]
+    fn only_the_dialling_card_gets_the_code_field() {
+        assert!(dialling_block(&accepting_card(), None).is_none(), "у принимающей свой блок");
+        let stuck_local = Connection { mode: "local".into(), role: "dial".into(), ..Default::default() };
+        assert!(dialling_block(&stuck_local, None).is_none(), "на одной машине звонить некому");
     }
 
     /// Спека экрана: «У соединения, которое ждёт входящих, в раскрытой

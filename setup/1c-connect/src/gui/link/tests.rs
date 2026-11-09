@@ -802,13 +802,59 @@ fn being_enrolled_is_not_a_word_on_the_row() {
     assert_eq!(contract_of(None, &enrolled), None, "зачисление само по себе не состояние контракта");
 }
 
+/// Жизнь карточки — это её управляющий поток, а не транспорт рабочего места.
+///
+/// Падал так: пятого признака у `Enroll` не было вовсе, и слово состояния
+/// читало `ui.link` — ОДИН сеанс SSH на машину. Четыре карточки с четырьмя
+/// разными судьбами (одна звонит, вторая держит поток, третья оборвалась и
+/// возвращается, четвёртая не заведена) показывали на экране одно и то же
+/// слово, то есть врали про три из четырёх.
+#[test]
+fn each_card_shows_the_life_of_its_own_stream() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let with = |f: Flow| Enroll { flow: Some(f), ..Default::default() };
+
+    assert_eq!(super::row(&c, false, None, &with(Flow::Calling)).state, "подключается");
+    assert_eq!(super::row(&c, false, None, &with(Flow::Up)).state, "подключено");
+    assert_eq!(super::row(&c, false, None, &with(Flow::Broken)).state, "разорвано");
+    assert_eq!(super::row(&c, false, None, &with(Flow::Retrying)).state, "подключается снова");
+}
+
+/// Поток карточки важнее транспорта: там, где он есть, он и есть правда о
+/// связи ЭТОЙ карточки — транспорт о ней не знает ничего.
+///
+/// И наоборот: где потока нет, слово по-прежнему берёт транспорт. Он живёт
+/// параллельно и отвечает за сегодняшнюю работу — отобрать у него слово
+/// значило бы сказать «не подключено» там, где сеанс поднят.
+#[test]
+fn the_cards_own_stream_outranks_the_machines_transport() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let up = State::Up { since: Instant::now() };
+
+    let broken_stream = Enroll { flow: Some(Flow::Broken), ..Default::default() };
+    assert_eq!(super::row(&c, false, Some(&up), &broken_stream).state, "разорвано", "поток карточки важнее поднятого транспорта");
+
+    let no_stream = Enroll::default();
+    assert_eq!(super::row(&c, false, Some(&up), &no_stream).state, "подключено", "потока нет — слово берёт транспорт");
+}
+
+/// Висящая заявка перебивает даже живой поток: от неё ждут ДЕЙСТВИЯ
+/// человека, и порядок разбора этого не меняет (вторая сторона стучится к
+/// карточке, по которой первая уже подключена).
+#[test]
+fn a_waiting_request_still_wins_over_a_live_stream() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let both = Enroll { waiting: true, flow: Some(Flow::Up), ..Default::default() };
+    assert_eq!(super::row(&c, false, None, &both).state, "ждёт разрешения");
+}
+
 /// Локальной карточке зачислять некого — её пара слов не слушает `Enroll`
 /// вовсе. Без этой защиты застрявший в файле выданный код сказал бы про
 /// соединение, у которого оба конца здесь, «ждёт разрешения».
 #[test]
 fn a_local_card_keeps_its_own_two_words_whatever_the_book_says() {
     let c = Connection { mode: "local".into(), ..Default::default() };
-    let noisy = Enroll { waiting: true, declined: true, code_issued: true, enrolled: 2 };
+    let noisy = Enroll { waiting: true, declined: true, code_issued: true, enrolled: 2, flow: Some(Flow::Up) };
     assert_eq!(super::row(&c, false, None, &noisy).state, "выключено");
     assert_eq!(super::row(&c, false, Some(&State::Up { since: Instant::now() }), &noisy).state, "включено");
 }

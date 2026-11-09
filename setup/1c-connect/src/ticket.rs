@@ -42,8 +42,9 @@
 
 use crate::secrets::hex;
 use aes_gcm::aead::Generate;
-use iroh::EndpointId;
+use iroh::{EndpointAddr, EndpointId};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -103,6 +104,32 @@ impl Ticket {
         now <= self.until
     }
 
+    /// Куда звонить по этому коду: ключ узла плюс подсказки, как его найти.
+    ///
+    /// Единственная дорога от кода к дозвону (`Node::dial` принимает
+    /// `EndpointAddr`): без неё зовущая сторона знала бы только ключ, то есть
+    /// шла бы поиском через серверы n0 — по настоящему интернету — даже тогда,
+    /// когда та машина стоит рядом и её адрес приехал в самом коде.
+    ///
+    /// Неразобравшийся адрес или релей молча отбрасывается, а не роняет
+    /// разбор: код — чужая строка, и порча одной подсказки не повод отказать
+    /// в дозвоне. Ключ узла при этом остаётся, то есть худшее последствие —
+    /// звонок пойдёт поиском, как и раньше.
+    pub fn addr(&self) -> EndpointAddr {
+        let mut addr = EndpointAddr::new(self.node);
+        for d in &self.direct {
+            if let Ok(s) = d.parse::<SocketAddr>() {
+                addr = addr.with_ip_addr(s);
+            }
+        }
+        if let Some(relay) = &self.relay {
+            if let Ok(url) = relay.parse::<iroh::RelayUrl>() {
+                addr = addr.with_relay_url(url);
+            }
+        }
+        addr
+    }
+
     /// Одна строка для пересылки — hex одного JSON-блока (см. докстроку модуля).
     ///
     /// `expect` ниже не паника на чужом вводе: сериализуется только то, что
@@ -153,6 +180,49 @@ impl Ticket {
             .ok_or_else(|| "Код повреждён: срок внутри него невозможен.".to_string())?;
         Ok(Ticket { node: wire.node, relay: wire.relay, direct: wire.direct, secret: Zeroizing::new(secret), until })
     }
+}
+
+/// Прямые адреса для кода подключения: то, что узел знает о себе, ПЛЮС своя
+/// петля.
+///
+/// **Петля здесь не мусор и не отладочный хвост — не вычищай её.** `iroh`
+/// кладёт адрес петли в адрес узла только тогда, когда других сетевых
+/// устройств нет вовсе (`iroh-1.4.1/src/socket.rs`, дословно: «Include
+/// loopback addresses only if there are no other interfaces or public
+/// addresses, this allows testing offline»). На рабочей машине устройства
+/// есть — значит в код уедет адрес локальной сети, и две копии программы,
+/// запущенные на ОДНОЙ машине из разных папок, пойдут друг к другу через её
+/// же адрес в LAN, то есть через брандмауэр Windows. Там звонок либо спросит
+/// человека, либо молча не пройдёт, и останется один путь — релей, то есть
+/// настоящий интернет.
+///
+/// Другой машине этот адрес бесполезен, и вреда от него нет: спека протокола
+/// прямо разрешает — «прямые адреса из тикета пробуются первыми как подсказка
+/// и тихо забываются, когда не сработали». А двум копиям на одной машине он
+/// даёт единственный путь, который не спрашивает ни брандмауэр, ни интернет,
+/// — ровно тот, которым проверяется готовность этой ветки.
+///
+/// Петля берётся с портов, которые узел ДЕЙСТВИТЕЛЬНО занял
+/// (`Endpoint::bound_sockets`), а не с портов из `addrs`: во втором бывает
+/// вид машины снаружи NAT, и петля на такой порт не ведёт никуда.
+///
+/// Свои адреса идут первыми, петля — последней: для чужой машины годятся
+/// только первые, и ей незачем пробовать заведомо мёртвую подсказку раньше
+/// живых. Повторы выбрасываются — на машине без других устройств `iroh`
+/// кладёт петлю в `addrs` сам, и дважды в коде она не нужна.
+pub fn direct_with_loopback(addrs: &[SocketAddr], bound: &[SocketAddr]) -> Vec<String> {
+    let loops = bound.iter().map(|b| {
+        let host: IpAddr = if b.is_ipv6() { Ipv6Addr::LOCALHOST.into() } else { Ipv4Addr::LOCALHOST.into() };
+        SocketAddr::new(host, b.port())
+    });
+    let mut out: Vec<String> = Vec::new();
+    for a in addrs.iter().copied().chain(loops) {
+        let text = a.to_string();
+        if !out.contains(&text) {
+            out.push(text);
+        }
+    }
+    out
 }
 
 /// Запас сверх `LIFETIME` на разницу часов двух машин, которую протокол не
@@ -226,6 +296,70 @@ mod tests {
         assert_eq!(back.direct, t.direct);
         assert_eq!(*back.secret, *t.secret, "секрет обязан доехать тем же");
         assert_eq!(back.until, t.until);
+    }
+
+    /// Мерка готовности ветки — две копии на ОДНОЙ машине, и путь к ней один:
+    /// в коде обязана быть петля, иначе звонок пойдёт на адрес машины в LAN,
+    /// то есть через брандмауэр Windows (см. докстроку `direct_with_loopback`).
+    #[test]
+    fn a_code_from_a_live_node_carries_its_own_loopback() {
+        let seen: Vec<SocketAddr> = vec!["192.168.1.5:7890".parse().unwrap()];
+        let bound: Vec<SocketAddr> = vec!["0.0.0.0:7890".parse().unwrap()];
+
+        let direct = direct_with_loopback(&seen, &bound);
+
+        assert_eq!(direct, vec!["192.168.1.5:7890".to_string(), "127.0.0.1:7890".to_string()]);
+    }
+
+    /// Машина без других сетевых устройств: петлю кладёт сам `iroh`, и второй
+    /// раз она в коде не нужна.
+    #[test]
+    fn the_loopback_is_not_put_into_the_code_twice() {
+        let seen: Vec<SocketAddr> = vec!["127.0.0.1:7890".parse().unwrap()];
+        let bound: Vec<SocketAddr> = vec!["0.0.0.0:7890".parse().unwrap()];
+
+        assert_eq!(direct_with_loopback(&seen, &bound), vec!["127.0.0.1:7890".to_string()]);
+    }
+
+    /// Шестая версия адреса получает свою петлю, а не чужую: `127.0.0.1` в
+    /// адресе IPv6-сокета — не петля, а мусор.
+    #[test]
+    fn a_sixth_version_socket_gets_the_sixth_version_loopback() {
+        let bound: Vec<SocketAddr> = vec!["[::]:7891".parse().unwrap()];
+
+        assert_eq!(direct_with_loopback(&[], &bound), vec!["[::1]:7891".to_string()]);
+    }
+
+    /// Код обязан превращаться обратно в то, по чему можно позвонить, — иначе
+    /// зовущая сторона знает только ключ и идёт искать адрес через интернет,
+    /// даже когда он приехал в самом коде.
+    #[test]
+    fn a_code_turns_back_into_something_dialable() {
+        let id = node_id();
+        let t =
+            Ticket::issue(id, Some("https://relay.example./".into()), vec!["192.168.1.5:7890".into(), "127.0.0.1:7890".into()]).unwrap();
+
+        let addr = Ticket::from_code(&t.to_code()).unwrap().addr();
+
+        assert_eq!(addr.id, id);
+        let ips: Vec<String> = addr.ip_addrs().map(|a| a.to_string()).collect();
+        assert!(ips.contains(&"192.168.1.5:7890".to_string()), "прямой адрес обязан доехать: {ips:?}");
+        assert!(ips.contains(&"127.0.0.1:7890".to_string()), "петля обязана доехать: {ips:?}");
+        assert_eq!(addr.relay_urls().count(), 1, "релей обязан доехать");
+    }
+
+    /// Порча одной подсказки не отнимает дозвон целиком: ключ узла на месте,
+    /// и звонок пойдёт поиском — хуже, но не никак.
+    #[test]
+    fn a_spoiled_hint_does_not_take_the_whole_address_away() {
+        let id = node_id();
+        let t = Ticket::issue(id, Some("не адрес вовсе".into()), vec!["это не адрес".into(), "192.168.1.5:7890".into()]).unwrap();
+
+        let addr = t.addr();
+
+        assert_eq!(addr.id, id);
+        assert_eq!(addr.ip_addrs().count(), 1, "годный адрес остался, негодный выброшен");
+        assert_eq!(addr.relay_urls().count(), 0, "негодный релей выброшен");
     }
 
     #[test]

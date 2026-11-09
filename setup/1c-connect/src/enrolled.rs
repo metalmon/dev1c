@@ -346,6 +346,154 @@ impl Book {
     }
 }
 
+/// Имя файла партнёров — рядом с книгой зачислений, но СВОЙ.
+const PARTNERS_FILE: &str = "partners.toml";
+
+/// Партнёр зовущей карточки: к кому эта карточка ходит и как его найти.
+///
+/// `key` — ключ узла той стороны; он и есть адресат переподключения
+/// (`Node::dial` принимает один `EndpointId`). `relay`/`direct` — подсказки
+/// того же вида, что ездят в коде подключения (`Ticket::addr`): пробуются
+/// первыми и тихо забываются, когда не сработали, — значит устареть
+/// безвредно, а польза от них та же, что от петли в коде: две копии на одной
+/// машине находят друг друга без интернета и после перезапуска.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Partner {
+    pub key: EndpointId,
+    #[serde(default)]
+    pub relay: Option<String>,
+    #[serde(default)]
+    pub direct: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PartnerRow {
+    connection: String,
+    key: EndpointId,
+    #[serde(default)]
+    relay: Option<String>,
+    #[serde(default)]
+    direct: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PartnersFile {
+    #[serde(default)]
+    partners: Vec<PartnerRow>,
+}
+
+/// Куда ходят ЗОВУЩИЕ карточки этого рабочего места — по одному партнёру на
+/// карточку.
+///
+/// **Почему это не в книге зачислений.** Книга (`Book` выше) — про тех, кого
+/// пустил Я: кому выдан код, кто предъявил секрет, кому человек разрешил
+/// доступ к МОЕЙ базе. Это — про того, к кому хожу Я: ни разрешения, ни
+/// тикета, ни решения человека здесь нет вовсе, и спрашивают это в
+/// противоположную минуту (не «пускать ли», а «куда звонить»). Сложить их в
+/// один файл значило бы, что чистка зачислений рвёт зовущей стороне
+/// переподключение, а строка «кого я пустил» и строка «к кому я хожу» идут
+/// одним списком, в котором их уже не различить глазом.
+///
+/// **Почему это не в `1c-connect.toml`.** Там настройки, которые человек
+/// заводит руками (решение, с которого начинается докстрока модуля); сюда
+/// пишет программа, сама, после зачисления. Писать в файл человека из
+/// фонового потока значило бы переписывать настройки у него под руками.
+///
+/// **Почему без этого места зовущая не вернётся никогда.** Код подключения
+/// одноразовый (`Book::spend`) и живёт сутки: второй раз он не сработает.
+/// После зачисления единственное, что связывает карточку с той машиной, —
+/// ключ её узла, и если его не записать, перезапуск программы стирает
+/// подключение насовсем, хотя человек ничего не отзывал (спека контракта,
+/// «Что хранится после»).
+pub struct Partners {
+    path: PathBuf,
+    data: PartnersFile,
+}
+
+impl Partners {
+    /// Читает файл или заводит пустой — нет файла значит зовущих карточек
+    /// ещё не зачисляли, а не беда.
+    ///
+    /// Непонятный файл откладывается рядом тем же `quarantine`, что у книги,
+    /// и список продолжает жить пустым: подсказки здесь восстановимы (человек
+    /// подключится кодом ещё раз), и терять из-за них запуск программы не за
+    /// что.
+    pub fn open(state_dir: &Path) -> Result<Partners, String> {
+        let path = state_dir.join(PARTNERS_FILE);
+        let _guard = lock(&path)?;
+        let data = match std::fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str(&text) {
+                Ok(data) => data,
+                Err(e) => {
+                    quarantine(&path, &text, &e.to_string());
+                    PartnersFile::default()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => PartnersFile::default(),
+            Err(e) => return Err(format!("не удалось прочитать {}: {e}", path.display())),
+        };
+        Ok(Partners { path, data })
+    }
+
+    /// К кому ходит эта карточка. `None` — зачисления ещё не было, и звонить
+    /// некуда: нужен код.
+    pub fn of(&self, connection: &str) -> Option<Partner> {
+        self.data.partners.iter().find(|p| p.connection == connection).map(|p| Partner {
+            key: p.key,
+            relay: p.relay.clone(),
+            direct: p.direct.clone(),
+        })
+    }
+
+    /// Все зовущие карточки с партнёрами — тем, кто поднимает звонки при
+    /// запуске: без этого списка он не знал бы, кому звонить до первого
+    /// щелчка человека.
+    pub fn all(&self) -> Vec<(String, Partner)> {
+        self.data
+            .partners
+            .iter()
+            .map(|p| (p.connection.clone(), Partner { key: p.key, relay: p.relay.clone(), direct: p.direct.clone() }))
+            .collect()
+    }
+
+    /// Запомнить партнёра карточки (или обновить его подсказки). Партнёр у
+    /// карточки один: карточка — это одно соединение с одной той стороной, и
+    /// второй партнёр у неё означал бы, что звонить надо наугад.
+    pub fn remember(&mut self, connection: &str, partner: &Partner) -> Result<(), String> {
+        self.mutate(|data| {
+            data.partners.retain(|p| p.connection != connection);
+            data.partners.push(PartnerRow {
+                connection: connection.to_string(),
+                key: partner.key,
+                relay: partner.relay.clone(),
+                direct: partner.direct.clone(),
+            });
+        })
+    }
+
+    /// Забыть партнёра: карточку удалили, или человек подключается кодом к
+    /// другой машине. Нет записи — не беда, забывать нечего.
+    pub fn forget(&mut self, connection: &str) -> Result<(), String> {
+        self.mutate(|data| data.partners.retain(|p| p.connection != connection))
+    }
+
+    /// Тем же приёмом и по тому же доводу, что `Book::mutate`: замок, свежее
+    /// чтение, запись через переименование. Снимок в памяти обновляется
+    /// только после удачной записи.
+    fn mutate<T>(&mut self, f: impl FnOnce(&mut PartnersFile) -> T) -> Result<T, String> {
+        let _guard = lock(&self.path)?;
+        let mut fresh: PartnersFile = match std::fs::read_to_string(&self.path) {
+            Ok(text) => toml::from_str(&text).unwrap_or_default(),
+            Err(_) => PartnersFile::default(),
+        };
+        let result = f(&mut fresh);
+        let text = toml::to_string_pretty(&fresh).map_err(|e| format!("партнёры не собрались в toml: {e}"))?;
+        write_atomic(&self.path, &text)?;
+        self.data = fresh;
+        Ok(result)
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
@@ -459,7 +607,7 @@ fn lock(path: &Path) -> Result<single_instance::Guard, String> {
             Ok(None) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
-                        "Файл зачислений занят другим процессом дольше полсекунды.\nПовторите действие.\nЕсли это повторяется, сообщите нам, \
+                        "Файл состояния занят другим процессом дольше полсекунды.\nПовторите действие.\nЕсли это повторяется, сообщите нам, \
                          назвав файл {}.",
                         lock_path.display()
                     ));
@@ -631,6 +779,53 @@ mod tests {
 
     fn a_ticket() -> Ticket {
         Ticket::issue(node_id(), None, vec![]).unwrap()
+    }
+
+    /// Без места для партнёра зовущая сторона после перезапуска не вернётся
+    /// НИКОГДА: код одноразовый, а ключа той машины больше нигде нет.
+    ///
+    /// Падал так: `Partners` не существовало вовсе — звонить после
+    /// перезапуска было некуда, и человек видел карточку «не подключено» без
+    /// единого способа её поднять, кроме нового кода с той стороны.
+    #[test]
+    fn a_dialling_card_remembers_where_to_come_back() {
+        let d = dir("partners");
+        let peer = node_id();
+
+        let mut p = Partners::open(&d).unwrap();
+        assert!(p.of("Ромашка").is_none(), "до зачисления звонить некуда");
+        p.remember("Ромашка", &Partner { key: peer, relay: Some("https://relay.example./".into()), direct: vec!["127.0.0.1:7890".into()] })
+            .unwrap();
+
+        // Перезапуск: та же папка, другой объект.
+        let again = Partners::open(&d).unwrap();
+        let back = again.of("Ромашка").expect("партнёр обязан пережить перезапуск");
+        assert_eq!(back.key, peer);
+        assert_eq!(back.direct, vec!["127.0.0.1:7890".to_string()]);
+        assert_eq!(again.all().len(), 1, "список для подъёма звонков при запуске");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Партнёр у карточки один: вторая запись заменяет первую, а не встаёт
+    /// рядом — иначе звонить пришлось бы наугад.
+    #[test]
+    fn a_card_has_one_partner_not_a_pile() {
+        let d = dir("partners-one");
+        let (first, second) = (node_id(), node_id());
+
+        let mut p = Partners::open(&d).unwrap();
+        p.remember("Ромашка", &Partner { key: first, relay: None, direct: vec![] }).unwrap();
+        p.remember("Ромашка", &Partner { key: second, relay: None, direct: vec![] }).unwrap();
+
+        assert_eq!(p.all().len(), 1);
+        assert_eq!(p.of("Ромашка").unwrap().key, second);
+
+        p.forget("Ромашка").unwrap();
+        assert!(p.of("Ромашка").is_none());
+        assert!(p.forget("Ромашка").is_ok(), "забывать нечего — не беда");
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// MEDIUM 2 проверки безопасности: «Выдать новый код» не гасил прежний.

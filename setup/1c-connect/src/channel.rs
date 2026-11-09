@@ -626,7 +626,7 @@ pub const WINDOW_CLOSED: &str = "Та сторона закрыла програ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enroll::{accept_side, dial_side, Card, Decision, Outcome};
+    use crate::enroll::{accept_side, dial_side, Card, Cards, Decision, Outcome};
     use crate::enrolled::Book;
     use crate::ticket::Ticket;
     use crate::wire::{BaseFields, CardState, Ceiling};
@@ -936,7 +936,7 @@ mod tests {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue("Ромашка", &ticket).unwrap();
         let code = ticket.to_code();
-        let cards = vec![Card { name: "Ромашка".into(), base: fields("b1") }];
+        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
 
         // Принимающая сторона: первый круг зачисляет и рвёт канал молча (так
         // рвёт его сеть), второй — узнаёт уже зачисленного и прощается
@@ -1035,7 +1035,7 @@ mod tests {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue("Ромашка", &ticket).unwrap();
         let code = ticket.to_code();
-        let cards = vec![Card { name: "Ромашка".into(), base: fields("b1") }];
+        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
 
         let listening = base.clone();
         let theirs = Channels::default();

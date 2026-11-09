@@ -205,7 +205,7 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
         match cmd {
             Cmd::Dial { card, code } => start_call(&node, &channels, &kit, &tx, &mut calls, card, code),
             Cmd::Revoke { card, peer } => {
-                let base_id = Machine::read(&kit).cards.into_iter().find(|(name, _)| *name == card).map(|(_, c)| c.base.base_id);
+                let base_id = Machine::read(&kit).cards.accepting().iter().find(|c| c.name == card).map(|c| c.base.base_id.clone());
                 for reins in live.cut(peer, &card) {
                     let base_id = base_id.clone().unwrap_or_default();
                     tokio::spawn(async move { reins.revoke(&base_id, REVOKED_TEXT).await });
@@ -679,7 +679,6 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
         }
     };
     let cards = Machine::read(&kit).cards;
-    let only: Vec<enroll::Card> = cards.iter().map(|(_, c)| c.clone()).collect();
     let ask = |request: enroll::Request| {
         let tx = tx.clone();
         async move {
@@ -696,7 +695,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     };
     let out = {
         let (send, recv) = control.halves();
-        enroll::accept_side(send, recv, peer, &mut book, &only, ask).await
+        enroll::accept_side(send, recv, peer, &mut book, &cards, ask).await
     };
     let out = match out {
         Ok(out) => out,
@@ -723,7 +722,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // Имена карточек по базам, о которых договорились (`serving`, там и
     // довод). Безымянный разговор учитывается как безымянный и режется любым
     // отзывом этой стороны (`cut_these`).
-    let served: Vec<String> = serving(&cards, &agreed);
+    let served: Vec<String> = serving(cards.accepting(), &agreed);
     // Имя базы для прощания — первая из тех, о которых договорились: прощание
     // называет предмет, а не перечисляет всё, к чему сторона допущена.
     let base_id = agreed.first().cloned().unwrap_or_default();
@@ -793,9 +792,10 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
 /// окне, и разговор обязан видеть то, что в файле сейчас. Цена — одно чтение
 /// toml на подключение, то есть раз в минуты.
 struct Machine {
-    /// Карточки этого рабочего места, которые ПРИНИМАЮТ подключения, вместе с
-    /// местными именами.
-    cards: Vec<(String, enroll::Card)>,
+    /// Карточки этого рабочего места, которые ПРИНИМАЮТ подключения, — или
+    /// признание, что настроек мы не прочитали (`enroll::Cards`, там и довод,
+    /// почему это тип, а не пустой список).
+    cards: enroll::Cards,
     /// Потолок записи — свойство МАШИНЫ (`wire::Ceiling`, контракт: «Чего в
     /// соединении НЕТ»): тот же переключатель, что живёт в меню значка, и он
     /// действует на все карточки разом.
@@ -806,7 +806,7 @@ impl Machine {
     fn read(kit: &Kit) -> Machine {
         match crate::secrets::Store::system(kit.state()) {
             Ok(store) => Machine::read_with(kit, &store),
-            Err(_) => Machine::silent(),
+            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: подложка секретов не открылась: {e}")),
         }
     }
 
@@ -821,7 +821,7 @@ impl Machine {
     fn read_with(kit: &Kit, store: &crate::secrets::Store) -> Machine {
         match crate::cfg::Cfg::load_unchecked_with(kit, store) {
             Ok(cfg) => Machine::of(&cfg),
-            Err(_) => Machine::silent(),
+            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: {e}")),
         }
     }
 
@@ -845,33 +845,30 @@ impl Machine {
             .connections
             .iter()
             .filter(|c| c.mode != "local" && matches!(c.role(), Ok("accept")))
-            .map(|c| {
-                (
-                    c.name.clone(),
-                    enroll::Card {
-                        name: c.name.clone(),
-                        base: BaseFields {
-                            base_id: base_id_of(c),
-                            base_name: crate::cfg::base_name(&c.base_path).to_string(),
-                            publication: c.publication.clone(),
-                            write: c.allows_write() && matches!(ceiling, Ceiling::Full),
-                        },
-                    },
-                )
+            .map(|c| enroll::Card {
+                name: c.name.clone(),
+                base: BaseFields {
+                    base_id: base_id_of(c),
+                    base_name: crate::cfg::base_name(&c.base_path).to_string(),
+                    publication: c.publication.clone(),
+                    write: c.allows_write() && matches!(ceiling, Ceiling::Full),
+                },
             })
             .collect();
-        Machine { cards, ceiling }
+        Machine { cards: enroll::Cards::here(cards), ceiling }
     }
 
-    /// Настройки не прочитались вовсе — ни одной карточки и «только чтение».
+    /// Настройки не прочитались вовсе — и так об этом и говорится, своими словами в наш журнал и тремя строками той стороне
+    /// (`enroll::Cards::Unreadable`).
     ///
-    /// Пустой список верен: настройки, которые не читаются, не вправе никого
-    /// пускать, и `accept_side` откажет словами. «Только чтение» верно по тому
-    /// же правилу: по умолчанию инструментов, пишущих в базу, нет (решение
-    /// владельца 1.11), и неизвестность не повод выдавать больше, чем
-    /// разрешено.
-    fn silent() -> Machine {
-        Machine { cards: Vec::new(), ceiling: Ceiling::ReadOnly }
+    /// Прежде здесь стоял ПУСТОЙ СПИСОК карточек, и он был неправдой дважды: той стороне уезжало «карточку удалили» про машину, где её не
+    /// удаляли, а в наш журнал не ложилось ничего. Причина берётся та, что отдал отказ чтения: по ней видно, сломан ли toml или не открылась
+    /// подложка секретов, — и это ровно то, за чем человека просят посмотреть журнал.
+    ///
+    /// «Только чтение» остаётся верным по своему правилу: по умолчанию инструментов, пишущих в базу, нет (решение владельца 1.11), и
+    /// неизвестность не повод выдавать больше, чем разрешено.
+    fn silent(why: String) -> Machine {
+        Machine { cards: enroll::Cards::Unreadable(why), ceiling: Ceiling::ReadOnly }
     }
 }
 
@@ -920,8 +917,8 @@ fn base_id_of(c: &crate::cfg::Connection) -> String {
 ///
 /// Пустой список — не сошлось ни одной; подставлять пустое имя нельзя, под
 /// ним поток не нашёлся бы при отзыве (`cut_these` знает про безымянных).
-fn serving(cards: &[(String, enroll::Card)], agreed: &[String]) -> Vec<String> {
-    cards.iter().filter(|(_, c)| agreed.contains(&c.base.base_id)).map(|(name, _)| name.clone()).collect()
+fn serving(cards: &[enroll::Card], agreed: &[String]) -> Vec<String> {
+    cards.iter().filter(|c| agreed.contains(&c.base.base_id)).map(|c| c.name.clone()).collect()
 }
 
 /// Как эта машина называет себя той стороне. Её слова, не проверенный факт, —
@@ -1324,8 +1321,9 @@ mod tests {
         // ту самую, по имени. Спрашивается та самая функция, которая читает
         // диск на каждый входящий разговор.
         let cards = super::Machine::read_with(&kit, &store).cards;
+        let cards = cards.accepting();
         assert_eq!(cards.len(), 1, "карточка на диске есть — значит, и у приёмной стороны она есть");
-        assert_eq!(cards[0].0, "Соединение 1");
+        assert_eq!(cards[0].name, "Соединение 1");
     }
 
     /// Две карточки без заполненной базы — это ДВЕ разные карточки и на
@@ -1357,20 +1355,21 @@ mod tests {
         .unwrap();
         let kit = super::Kit::at(dir.clone());
         let cards = super::Machine::read_with(&kit, &crate::secrets::Store::file(&dir)).cards;
+        let cards = cards.accepting();
         assert_eq!(cards.len(), 3, "все три принимающие карточки на месте");
 
-        let ids: Vec<&str> = cards.iter().map(|(_, c)| c.base.base_id.as_str()).collect();
+        let ids: Vec<&str> = cards.iter().map(|c| c.base.base_id.as_str()).collect();
         assert_ne!(ids[0], ids[1], "две карточки без базы обязаны отличаться: иначе отзыв одной рвёт обе");
         assert_ne!(ids[1], ids[2]);
         assert!(ids.iter().all(|id| !id.is_empty()), "признак есть у каждой: карточку без признака та сторона не назовёт никак");
 
         // И обратное сопоставление отдаёт РОВНО ту карточку, о которой
         // договорились, а не всех однопризнаковых соседей.
-        assert_eq!(super::serving(&cards, &[ids[0].to_string()]), vec!["Ромашка".to_string()]);
-        assert_eq!(super::serving(&cards, &[ids[1].to_string()]), vec!["Василёк".to_string()]);
+        assert_eq!(super::serving(cards, &[ids[0].to_string()]), vec!["Ромашка".to_string()]);
+        assert_eq!(super::serving(cards, &[ids[1].to_string()]), vec!["Василёк".to_string()]);
         // Чужой признак не находит никого — и это не пустая строка, а пустой
         // список: безымянный разговор отличается от названного.
-        assert!(super::serving(&cards, &["чужое".to_string()]).is_empty());
+        assert!(super::serving(cards, &["чужое".to_string()]).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1416,8 +1415,8 @@ mod tests {
 
         let seen = super::Machine::read_with(&kit, &store);
         assert_eq!(seen.ceiling, Ceiling::Full, "в меню «Полный» — значит и на проводе «Полный», а не молчаливое «только чтение»");
-        assert_eq!(seen.cards.len(), 2);
-        assert!(seen.cards.iter().all(|(_, c)| c.base.write), "обе карточки разрешают запись — потолок машины их не запрещает");
+        assert_eq!(seen.cards.accepting().len(), 2);
+        assert!(seen.cards.accepting().iter().all(|c| c.base.write), "обе карточки разрешают запись — потолок машины их не запрещает");
 
         // А теперь человек щёлкнул потолок машины в «только чтение». Право
         // записи обязано пропасть у ОБЕИХ карточек, не только у текущей:
@@ -1426,7 +1425,7 @@ mod tests {
         let seen = super::Machine::read_with(&kit, &store);
         assert_eq!(seen.ceiling, Ceiling::ReadOnly);
         assert!(
-            seen.cards.iter().all(|(_, c)| !c.base.write),
+            seen.cards.accepting().iter().all(|c| !c.base.write),
             "потолок машины не сложился с правом нетекущей карточки — объявленное на проводе право зависело бы от того, какая карточка \
              выбрана"
         );

@@ -26,6 +26,12 @@
 
 `iroh` — большая зависимость: она тянет QUIC, криптографию и обнаружение. Сборка и CI станут дольше, и это надо ЗАМЕРИТЬ, а не оценить на глаз: задача 4 записывает время полной сборки до и после в журнал ветки. Решение «транспорт — iroh» принято спекой и владельцем; задача плана — не обсуждать его, а показать цену числом.
 
+## Поправка 9.11 по итогам первой задачи: словарь iroh 1.4.1
+
+Спека протокола писалась 1.11 по прежнему словарю `iroh`. В версии 1.4.1 переименовано: `NodeId` → `EndpointId`, `NodeAddr` → `EndpointAddr`, `node_id()` → `id()`, discovery → `address_lookup`, а `Endpoint::builder` требует набор настроек. Читая спеку, держи это в уме: смысл тот же, имена другие. Отдельно замечено: `ticket_parts()` до `online()` не несёт адреса релея — тикет, выданный сразу после запуска, годен только внутри своей сети.
+
+**Цена зависимости, замерено:** полная сборка с нуля `cargo build --release -p onec-connect` — 1 м 10 с до `iroh`, 11 м 39 с после; +123 крейта в `Cargo.lock`. Цена разовая (дальше сборка инкрементальная), но в CI она платится каждым прогоном.
+
 ## Review Focus
 
 1. Чужой тикет, пересланный дальше, чем предполагалось: второй заявкой по тому же секрету человека дёргать нельзя (задача 3).
@@ -72,7 +78,7 @@
 - Test: там же
 
 **Interfaces:**
-- Produces: `ticket::Ticket { node: iroh::NodeId, relay: Option<String>, direct: Vec<String>, secret: [u8; 32], until: SystemTime }`.
+- Produces: `ticket::Ticket { node: iroh::EndpointId, relay: Option<String>, direct: Vec<String>, secret: [u8; 32], until: SystemTime }` — имя типа по iroh 1.4.1: прежний `NodeId` там переименован в `EndpointId` (замечено исполнителем первой задачи, спека писалась 1.11 по старому словарю).
 - Produces: `Ticket::issue(node, relay, direct) -> Ticket`, `Ticket::to_code(&self) -> String`, `Ticket::from_code(&str) -> Result<Ticket, String>`, `Ticket::alive(&self, now) -> bool`.
 
 - [ ] **Шаг 1: падающие тесты**
@@ -126,7 +132,7 @@
 - Test: там же
 
 **Interfaces:**
-- Produces: `node::Node` — `Node::start(state_dir) -> Result<Node, String>` (ключ узла берётся из состояния или заводится при первом запуске), `Node::id()`, `Node::ticket_parts()`, `Node::accept()`, `Node::dial(NodeId)`.
+- Produces: `node::Node` — `Node::start(state_dir) -> Result<Node, String>` (ключ узла берётся из состояния или заводится при первом запуске), `Node::id()`, `Node::ticket_parts()`, `Node::accept()`, `Node::dial(EndpointId)`.
 
 - [ ] **Шаг 1: замер цены**
 

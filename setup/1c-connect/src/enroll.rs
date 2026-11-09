@@ -384,8 +384,26 @@ where
             // не «разрешение отозвали»: отзыва не было, и просить разрешить
             // заново нечего — пока случай второй не написан, по этой карточке
             // не получится ничего.
-            if named.as_ref().is_some_and(|id| elsewhere.iter().any(|c| &c.base.base_id == id)) {
-                return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, BASE_ELSEWHERE)).await;
+            //
+            // Но ТОЛЬКО тому, кто к этой карточке зачислен, и допуск
+            // спрашивается у КНИГИ, а не выводится из списка, собранного мимо
+            // неё (находка проверки безопасности). Признак базы знает и
+            // отозванная сторона — она сама его называла, пока была
+            // зачислена, — и по разнице в ответах узнавала бы, что карточка
+            // жива и что человек переключил у неё базу. Отзыв обязан быть
+            // молчанием, а не источником сведений о том, что здесь
+            // происходит; незачисленному ответ тот же, что на выдуманный
+            // признак, и разницы между «такой карточки здесь нет» и «есть, но
+            // она не ваша» по нему не видно.
+            if let Some(aside) = named.as_ref().and_then(|id| elsewhere.iter().find(|c| &c.base.base_id == id)) {
+                match book.enrolled_to(&aside.name, peer) {
+                    Ok(Some(_)) => return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, BASE_ELSEWHERE)).await,
+                    Ok(None) => {}
+                    // Книгу не прочитать — наша беда, не её, и здесь по тому же
+                    // правилу, что выше: короткие слова на провод, подробность с
+                    // путями остаётся нам.
+                    Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
+                }
             }
             // Вернулись туда, куда больше не пускают: карточку отозвали,
             // удалили или переименовали. Отказ СЛОВАМИ, а не пустой список:
@@ -1630,6 +1648,46 @@ mod tests {
                 book.verdict(&decode_secret(&secret.unwrap()).unwrap()).is_ok_and(|v| matches!(v, Verdict::Card(_))),
                 "код сгорел ни за что"
             );
+        }
+    }
+
+    /// Слова «база теперь на той стороне» слышит только ЗАЧИСЛЕННЫЙ. Всем прочим — общий отказ, и по нему не видно разницы между «такой
+    /// карточки здесь нет» и «есть, но она не ваша».
+    ///
+    /// Находка проверки безопасности на предыдущий коммит: допуск выводился из списка, собранного МИМО книги. Карточки с базой на той
+    /// стороне в опрос `enrolled_to` не входят вовсе, и объяснение уезжало любому, кто назвал признак базы, — в том числе стороне, которой
+    /// разрешение УЖЕ ОТОЗВАЛИ. Признак она знает: сама его называла, пока была зачислена. То есть отзыв перестаёт быть молчанием и
+    /// становится источником сведений о том, что здесь происходит: карточка жива, человек переключил у неё базу. На этой ветке это чинили
+    /// уже дважды — решение о допуске спрашивается у КНИГИ, а не выводится из снимка.
+    #[tokio::test]
+    async fn only_an_enrolled_party_is_told_that_the_base_moved_to_the_other_side() {
+        for (name, enrolled) in [("base-there-stranger", false), ("base-there-neighbour", true)] {
+            let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
+                // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
+                book.enroll(if enrolled { "Ромашка" } else { "Василёк" }, peer, "Разработчик", true).unwrap();
+                Cards::Read {
+                    accepting: Vec::new(), base_elsewhere: vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+                }
+            })
+            .await;
+
+            Frame::write(&mut talk.w, &returning(Some("b1"))).await.unwrap();
+            let said = tokio::time::timeout(WAIT, Frame::read(&mut talk.r)).await.expect("отказ не пришёл в срок");
+            let Ok(Msg::Refuse(no)) = &said else { panic!("ждали отказ словами: {said:?}") };
+            if enrolled {
+                assert_eq!(no.code, code::NO_BASE, "{no:?}");
+                assert!(no.text.contains("базы на этой стороне нет"), "законному партнёру объясняют: {}", no.text);
+            } else {
+                assert_eq!(no.code, code::NOT_ALLOWED, "незачисленному — общий отказ: {no:?}");
+                assert!(
+                    !no.text.contains("базы на этой стороне нет"),
+                    "по отказу не должно быть видно, что карточка жива и что у неё переключили базу: {}",
+                    no.text
+                );
+            }
+            let (out, _book, asked) = talk.done().await;
+            assert_eq!(asked, 0);
+            assert!(matches!(out, Ok(Outcome::NotEnrolled(_))), "{out:?}");
         }
     }
 

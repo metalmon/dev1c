@@ -1588,15 +1588,24 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     // ключу через серверы n0, то есть требовал бы настоящего интернета, а две
     // копии на одной машине не нашли бы друг друга вовсе.
     //
-    // Узел ещё не поднялся или не вышел в сеть — код выдаётся без адресов,
-    // как и до этой задачи: это хуже (нужен интернет), но не отказ.
+    // Узел ещё не поднялся или не вышел в сеть — код выдаётся без адресов:
+    // это хуже (нужен интернет у обеих сторон), но не отказ. Молча так больше
+    // не бывает — оговорку говорит `blind_code_note` ниже.
     let reach = ui.peer.as_ref().and_then(crate::gui::peer::Peer::reach).unwrap_or_default();
+    let reach_empty = reach.relay.is_none() && reach.direct.is_empty();
     let ticket = crate::ticket::Ticket::issue(id, reach.relay, reach.direct)?;
     let code = ticket.to_code();
+    let silent = blind_code_note(reach_empty, card);
     let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
     book.reissue(card, &ticket)?;
     ui.codes.retain(|(c, _)| c != card);
     ui.codes.push((card.to_string(), ticket));
+    // Слово — ПОСЛЕ записи: кода, который не записался, и предупреждать не о
+    // чем. Ниже строкой ляжет обычное «код — в карточке» от `run_link_act`,
+    // и порядок в журнале выйдет такой: сперва оговорка, потом итог.
+    if let Some(text) = silent {
+        gui::note_line(ui, Line { kind: Kind::Warn, text });
+    }
     Ok(code)
 }
 
@@ -4234,7 +4243,7 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title,
+        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, blind_code_note, can_save, card, card_title,
         delete_on_confirm,
         delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question,
         link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
@@ -6231,6 +6240,23 @@ mod tests {
         crate::gui::prune_enrollment(&mut ui, std::time::SystemTime::now());
         assert!(ui.waiting.is_empty());
         assert!(ui.log.last().unwrap().line.text.contains("больше не ждёт ответа"), "{:?}", ui.log.last());
+    }
+
+    /// Задача 3 плана «Починка ветки `channel`», пункт 4: код, выданный без
+    /// релея и без прямых адресов, уходил человеку молча. Случай живой —
+    /// первые секунды после запуска и работа без интернета, — а строка на вид
+    /// обычная: передают её как обычную, и дозвон идёт только поиском через
+    /// серверы n0.
+    ///
+    /// Падал так: `issue_code` брала `Peer::reach` и не смотрела в неё вовсе.
+    #[test]
+    fn a_code_without_relay_and_addresses_says_so() {
+        let note = blind_code_note(true, "Соединение 1").expect("пустой reach обязан сказать о себе");
+        assert!(note.contains("Соединение 1"), "оговорка называет карточку: их в списке несколько — {note}");
+        assert!(note.contains("без адресов"), "{note}");
+        // Хоть что-то в коде есть — оговорки нет: лишнее предупреждение на
+        // обычной выдаче научило бы пропускать её и в настоящем случае.
+        assert_eq!(blind_code_note(false, "Соединение 1"), None);
     }
 
     /// Задача 3 плана «Починка ветки `channel`», пункт 5: «Разрешить» брало

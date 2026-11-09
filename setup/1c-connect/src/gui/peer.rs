@@ -203,7 +203,18 @@ struct Talk {
     /// чей прежний поток ещё не осыпался), и снимать надо СВОЙ, а не
     /// «какой-нибудь с тем же именем».
     id: u64,
-    card: Option<String>,
+    /// ВСЕ карточки, которые обслуживает этот поток, а не одна.
+    ///
+    /// Одна сторона бывает зачислена к нескольким карточкам этой машины, и
+    /// тогда `enroll::Outcome::Already` приносит несколько баз сразу. Пока
+    /// здесь лежало имя одной (первой из списка), отзыв ВТОРОЙ карточки
+    /// такой поток не находил — он оставался живым и продолжал обслуживать
+    /// карточку, разрешение по которой человек только что снял (находка
+    /// проверки безопасности на коммит `9d232f5`).
+    ///
+    /// Пустой список — карточка не опознана вовсе; такой поток режется любым
+    /// отзывом этой стороны (`cut_these`).
+    cards: Vec<String>,
     reins: Reins,
 }
 
@@ -236,9 +247,9 @@ struct Live {
 impl Live {
     /// Запомнить разговор. Возвращает его номер — им он и снимается
     /// (`forget`).
-    fn remember(&self, peer: EndpointId, card: Option<String>, reins: Reins) -> u64 {
+    fn remember(&self, peer: EndpointId, cards: Vec<String>, reins: Reins) -> u64 {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, card, reins });
+        self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, cards, reins });
         id
     }
 
@@ -267,7 +278,7 @@ impl Live {
         let Some(rows) = held.get_mut(&peer) else {
             return Vec::new();
         };
-        let doomed = cut_these(&rows.iter().map(|t| t.card.clone()).collect::<Vec<_>>(), card);
+        let doomed = cut_these(&rows.iter().map(|t| t.cards.clone()).collect::<Vec<_>>(), card);
         // С конца: удаление по месту не должно сдвигать места, которые ещё
         // предстоит удалить.
         let mut out: Vec<Reins> = doomed.into_iter().rev().map(|at| rows.remove(at).reins).collect();
@@ -291,25 +302,23 @@ impl Live {
 /// Какие разговоры одной стороны режет отзыв карточки `card` — чистое
 /// решение, и всё, что в отзыве можно решать неверно, решается здесь.
 ///
-/// Режутся два случая: разговор ЭТОЙ карточки и разговор, карточка которого
-/// неизвестна (`None`). Второй — не перестраховка: имя сопоставляется
-/// обратно по признаку базы, и не сошлось оно только там, где настройки под
-/// живым разговором изменились или не прочлись. Про такой поток нельзя
-/// доказать, что он обслуживает ДРУГУЮ карточку, а отзыв обязан действовать
-/// сразу — значит держать его после отзыва не за что.
+/// Режутся два случая: разговор, который держит ЭТУ карточку — хоть одной из
+/// нескольких, — и разговор, карточка которого неизвестна (список пуст).
+/// Второй — не перестраховка: имя сопоставляется обратно по признаку базы, и
+/// не сошлось оно только там, где настройки под живым разговором изменились
+/// или не прочлись. Про такой поток нельзя доказать, что он обслуживает
+/// ДРУГУЮ карточку, а отзыв обязан действовать сразу — значит держать его
+/// после отзыва не за что.
+///
+/// Поток, обслуживающий несколько карточек, режется отзывом ЛЮБОЙ из них
+/// целиком, а не наполовину: половины у потока нет, а оставить его живым
+/// значило бы оставить живым доступ, который человек только что снял. Сторона
+/// вернётся сама и заведёт разговор о тех карточках, что у неё остались.
 ///
 /// Разговоры соседних карточек той же стороны не трогаются вовсе: человек
 /// снял доступ к одной базе, а не ко всем.
-fn cut_these(cards: &[Option<String>], card: &str) -> Vec<usize> {
-    cards
-        .iter()
-        .enumerate()
-        .filter(|(_, held)| match held {
-            Some(name) => name == card,
-            None => true,
-        })
-        .map(|(at, _)| at)
-        .collect()
+fn cut_these(held: &[Vec<String>], card: &str) -> Vec<usize> {
+    held.iter().enumerate().filter(|(_, cards)| cards.is_empty() || cards.iter().any(|name| name == card)).map(|(at, _)| at).collect()
 }
 
 /// Держать ли только что зачисленный разговор — проверка щели между решением
@@ -326,8 +335,11 @@ fn cut_these(cards: &[Option<String>], card: &str) -> Vec<usize> {
 /// Безымянный разговор не держится: проверить его допуск нечем — `enrolled_to`
 /// спрашивают именем карточки, — а «не знаю» на вопросе о допуске значит
 /// «нет» везде в этом проекте.
-fn keep_holding(card: Option<&str>, still_enrolled: bool) -> bool {
-    card.is_some() && still_enrolled
+///
+/// Спрашивается КАЖДАЯ карточка потока, и хватает одной снятой, чтобы поток
+/// не держать: держать его наполовину нельзя, а делить нечего.
+fn keep_holding(cards: &[String], all_still_enrolled: bool) -> bool {
+    !cards.is_empty() && all_still_enrolled
 }
 
 /// Заводит звонок карточки, заменяя прежний, если он ещё идёт.
@@ -582,40 +594,51 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
             return;
         }
     };
-    let base_id = match &out {
-        enroll::Outcome::Enrolled(base) => base.base_id.clone(),
-        enroll::Outcome::Already(bases) => bases.first().map(|b| b.id.clone()).unwrap_or_default(),
+    // Базы, о которых договорились: у зачисления одна, у возврата уже
+    // зачисленной стороны — ВСЕ, к которым её когда-то пустили. Второй случай
+    // приносит несколько, и брать из них первую нельзя (находка проверки
+    // безопасности): поток обслуживал бы все, а отзыв находил бы его только
+    // по одной.
+    let agreed: Vec<String> = match &out {
+        enroll::Outcome::Enrolled(base) => vec![base.base_id.clone()],
+        enroll::Outcome::Already(bases) => bases.iter().map(|b| b.id.clone()).collect(),
         enroll::Outcome::NotEnrolled(no) => {
             say(&tx, Kind::Say, no.text.clone());
             control.end(None).await;
             return;
         }
     };
-    // Имя карточки по базе, о которой договорились: оно местное и по каналу
-    // не ездит (спека), поэтому обратно его сопоставляем здесь, по тому же
-    // `base_id`, которым карточка и представилась.
+    // Имена карточек по базам, о которых договорились: они местные и по
+    // каналу не ездят (спека), поэтому обратно сопоставляем здесь, по тем же
+    // `base_id`, которыми карточки и представились.
     //
-    // `None` — не сошлось, и подставлять пустую строку нельзя: под пустым
-    // именем поток не нашёлся бы при отзыве (находка проверки безопасности).
-    // Безымянный разговор учитывается как безымянный и режется любым отзывом
-    // этой стороны (`cut_these`).
-    let card = cards.iter().find(|(_, c)| c.base.base_id == base_id).map(|(name, _)| name.clone());
+    // Пустой список — не сошлось ни одной, и подставлять пустую строку
+    // нельзя: под пустым именем поток не нашёлся бы при отзыве (находка
+    // проверки безопасности). Безымянный разговор учитывается как
+    // безымянный и режется любым отзывом этой стороны (`cut_these`).
+    let served: Vec<String> = cards.iter().filter(|(_, c)| agreed.contains(&c.base.base_id)).map(|(name, _)| name.clone()).collect();
+    // Имя базы для прощания — первая из тех, о которых договорились: прощание
+    // называет предмет, а не перечисляет всё, к чему сторона допущена.
+    let base_id = agreed.first().cloned().unwrap_or_default();
     // Слово состояния — только там, где карточка известна: завести строку
     // состояния для имени, которого в списке нет, значило бы показать
     // человеку карточку-призрак.
-    let shown = card.clone().unwrap_or_else(|| "карточка не опознана".to_string());
-    if let Some(name) = &card {
+    let shown = if served.is_empty() { "карточка не опознана".to_string() } else { served.join("», «") };
+    for name in &served {
         flow(&tx, name, Some(link::Flow::Up));
     }
     say(&tx, Kind::Ok, format!("«{shown}»: подключено"));
     let (reins, mut recv) = channel::reins(control);
-    let id = live.remember(peer, card.clone(), reins);
+    let id = live.remember(peer, served.clone(), reins);
     // Щель между решением человека и записью вожжей: спрашиваем допуск ЕЩЁ
     // РАЗ, уже после записи. Отзыв, случившийся в эти микросекунды, либо
     // увидит наши вожжи и порвёт поток сам, либо не увидит — и тогда его
     // увидит эта проверка. Третьего порядка у двух событий нет.
-    let still = card.as_deref().is_some_and(|name| book.enrolled_to(name, peer).ok().flatten().is_some());
-    if !keep_holding(card.as_deref(), still) {
+    //
+    // Спрашивается КАЖДАЯ карточка потока: сторона, зачисленная к нескольким,
+    // держит их все одним потоком, и снятая одна значит снятый поток.
+    let still = served.iter().all(|name| book.enrolled_to(name, peer).ok().flatten().is_some());
+    if !keep_holding(&served, still) {
         // Рвём только СВОЙ разговор и только если отзыв не забрал его раньше:
         // иначе второе прощание ушло бы в поток, которого уже нет.
         if live.alive(peer, id) {
@@ -623,7 +646,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
                 reins.revoke(&base_id, REVOKED_TEXT).await;
             }
         }
-        if let Some(name) = &card {
+        for name in &served {
             flow(&tx, name, Some(link::Flow::Broken));
         }
         say(&tx, Kind::Warn, format!("«{shown}»: разрешение снято, пока шёл разговор — поток закрыт"));
@@ -634,7 +657,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // и снимет поток сама. Если отзыв успел забрать их раньше — забирать
     // нечего, и это не беда.
     drop(live.forget(peer, id));
-    if let Some(name) = &card {
+    for name in &served {
         flow(&tx, name, Some(link::Flow::Broken));
     }
     match gone {
@@ -790,8 +813,10 @@ mod tests {
     // библиотеки (тот же приём, что у тестов `panel.rs`).
     use super::{cut_these, keep_holding};
 
-    fn named(names: &[&str]) -> Vec<Option<String>> {
-        names.iter().map(|n| if n.is_empty() { None } else { Some(n.to_string()) }).collect()
+    /// Разговоры по именам карточек: пустая строка — разговор, чья карточка
+    /// не опознана; «А+Б» — разговор, обслуживающий сразу две.
+    fn named(names: &[&str]) -> Vec<Vec<String>> {
+        names.iter().map(|n| n.split('+').filter(|p| !p.is_empty()).map(|p| p.to_string()).collect()).collect()
     }
 
     /// Отзыв во время разговора обязан снять поток ЭТОЙ карточки — и только
@@ -825,6 +850,27 @@ mod tests {
         assert_eq!(cut_these(&talks, "Василёк"), vec![0, 1], "и вместе с названным — тоже");
     }
 
+    /// Поток, обслуживающий НЕСКОЛЬКО карточек, режется отзывом любой из них.
+    ///
+    /// Падал так: сторона, зачисленная к двум карточкам этой машины,
+    /// возвращается одним потоком, и `enroll::Outcome::Already` приносит обе
+    /// базы. В учёт шла первая из списка — значит отзыв ВТОРОЙ карточки такой
+    /// поток не находил: он оставался живым и продолжал обслуживать доступ,
+    /// который человек только что снял (находка проверки безопасности на
+    /// коммит 9d232f5).
+    #[test]
+    fn a_stream_serving_two_cards_is_cut_by_revoking_either() {
+        let talks = named(&["Ромашка+Василёк", "Пион"]);
+        assert_eq!(cut_these(&talks, "Ромашка"), vec![0], "отзыв первой из двух режет поток");
+        assert_eq!(cut_these(&talks, "Василёк"), vec![0], "и отзыв второй — тоже, он не «не та карточка»");
+        assert_eq!(cut_these(&talks, "Пион"), vec![1], "сосед, которого отзыв не касается, цел");
+        // И держать такой поток нельзя, если снята хотя бы одна из карточек:
+        // половины у потока нет, делить нечего.
+        let both = vec!["Ромашка".to_string(), "Василёк".to_string()];
+        assert!(keep_holding(&both, true), "обе на месте — держим");
+        assert!(!keep_holding(&both, false), "одну сняли — поток не держим");
+    }
+
     /// Щель между решением человека и записью вожжей: разговор, у которого
     /// разрешения уже нет, не держится.
     ///
@@ -834,12 +880,13 @@ mod tests {
     /// до следующего круга той стороны.
     #[test]
     fn a_talk_whose_permission_is_already_gone_is_not_held() {
-        assert!(keep_holding(Some("Ромашка"), true), "разрешение на месте — держим");
-        assert!(!keep_holding(Some("Ромашка"), false), "разрешение сняли в щель — не держим");
+        let one = vec!["Ромашка".to_string()];
+        assert!(keep_holding(&one, true), "разрешение на месте — держим");
+        assert!(!keep_holding(&one, false), "разрешение сняли в щель — не держим");
         // «Не знаю» на вопросе о допуске значит «нет»: безымянную карточку
         // `enrolled_to` спросить нечем.
-        assert!(!keep_holding(None, true));
-        assert!(!keep_holding(None, false));
+        assert!(!keep_holding(&[], true));
+        assert!(!keep_holding(&[], false));
     }
 
     /// Книга живых разговоров: разложены по стороне, снимаются по своему

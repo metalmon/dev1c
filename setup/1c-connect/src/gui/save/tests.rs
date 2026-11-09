@@ -2215,6 +2215,84 @@ fn a_refused_delete_leaves_the_file_byte_for_byte() {
     assert_eq!(ui.cfg.connections.len(), 2, "и в памяти ничего не исчезло");
 }
 
+/// Книга допуска и партнёр одной карточки — фикстура для двух тестов ниже:
+/// зачисленная сторона, живой выданный код и запомненный партнёр. Все трое
+/// ключуются ИМЕНЕМ карточки, и ровно это имя человек правит и удаляет.
+fn access_of(ui: &Ui, card: &str) -> (iroh::EndpointId, crate::ticket::Ticket) {
+    let key = iroh::SecretKey::generate().public();
+    let ticket = crate::ticket::Ticket::issue(key, None, vec![]).unwrap();
+    let mut book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
+    book.enroll(card, key, "Бухгалтер", true).unwrap();
+    book.reissue(card, &ticket).unwrap();
+    crate::enrolled::Partners::open(ui.kit.state())
+        .unwrap()
+        .remember(card, &crate::enrolled::Partner { key, relay: None, direct: vec![] })
+        .unwrap();
+    (key, ticket)
+}
+
+/// Находка 1 задачи 2 плана починки по двум ревью: допуск и возврат идут ЗА
+/// карточкой, когда человек её переименовал.
+///
+/// Падало так: `rename` не трогала ни `enrolled.toml`, ни `partners.toml`
+/// вовсе. Переименовали принимающую карточку — все её зачисления осиротели:
+/// карточка писала «никого ещё не зачислили», отозвать их было нечем
+/// (`Book::revoke` спрашивает по имени), а зачисленная сторона продолжала
+/// звонить вечно, потому что её допуск на диске цел и просто больше никем не
+/// спрашивается. Партнёр при этом оставался под прежним именем, и подъём
+/// звонков при запуске звонил карточкой-призраком.
+#[test]
+fn renaming_a_card_takes_its_enrolments_and_its_partner_with_it() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let (key, ticket) = access_of(&ui, "Buh");
+
+    rename(&mut ui, "Buh", "Ромашка").unwrap();
+
+    let book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
+    assert!(book.of("Buh").is_empty(), "под прежним именем зачислений больше нет");
+    assert_eq!(book.of("Ромашка").len(), 1, "зачисление переехало за именем — иначе отзывать его нечем");
+    assert_eq!(
+        book.verdict(&ticket.secret).unwrap(),
+        crate::enrolled::Verdict::Card("Ромашка".to_string()),
+        "и выданный код называет карточку, которая есть в настройках"
+    );
+    let partners = crate::enrolled::Partners::open(ui.kit.state()).unwrap();
+    assert!(partners.of("Buh").is_none(), "партнёра под прежним именем нет — иначе это карточка-призрак");
+    assert_eq!(partners.of("Ромашка").unwrap().key, key, "а возвращаться карточке есть куда и под новым именем");
+    assert_eq!(ui.partners.first().map(|(card, _)| card.as_str()), Some("Ромашка"), "снимок окна перечитан: {:?}", ui.partners);
+}
+
+/// Та же находка с другой стороны: удалённая карточка уносит с собой и допуск,
+/// и партнёра.
+///
+/// Падало так: `delete_connection` не трогала ни одного из двух файлов, а
+/// `Partners::forget` в продукте не звалась НИ РАЗУ. Удалили зовущую карточку —
+/// программа при следующем запуске всё равно ей звонила: подъём звонков читает
+/// `partners.toml`, а не настройки. И код, выданный удалённой карточке, по
+/// книге жил ещё сутки, называя карточку, которой в настройках нет.
+#[test]
+fn deleting_a_card_takes_its_enrolments_and_its_partner_with_it() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    let (_, ticket) = access_of(&ui, "Buh");
+
+    delete_connection(&mut ui, "Buh").unwrap();
+
+    let book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
+    assert!(book.of("Buh").is_empty(), "зачисления удалённой карточки спрашивать больше нечем — они ушли с ней");
+    assert_eq!(
+        book.verdict(&ticket.secret).unwrap(),
+        crate::enrolled::Verdict::Unknown,
+        "и код её не называет карточку, которой в настройках уже нет"
+    );
+    assert!(
+        crate::enrolled::Partners::open(ui.kit.state()).unwrap().of("Buh").is_none(),
+        "партнёр ушёл вместе с карточкой — иначе программа звонит призраком при следующем запуске"
+    );
+    assert!(ui.partners.is_empty(), "снимок окна перечитан: {:?}", ui.partners);
+}
+
 /// Задача 4 плана «Карточка публикации и удаление»: `set_keys` — общее ядро,
 /// на которое сведены `set_profile`/`set_role`/`set_mode`/`set_base_here`, на
 /// несколько ключей зараз. Лучшее доказательство атомарности — оба ключа в

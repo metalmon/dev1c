@@ -405,22 +405,31 @@ pub enum Dirty {
     Fields,
 }
 
-/// Один ответ про код подключения — ОДИН на весь продукт: и пунктом меню
-/// «Показать код» (`act_not_yet`), и подсказкой запертой главной кнопки
-/// принимающей карточки (`main_button`).
+/// Что книга зачислений и список висящих заявок знают про ОДНУ карточку —
+/// четыре признака, из которых `link::contract_of` получает слово состояния,
+/// а `accepting_block` — число в карточке.
 ///
-/// Здесь прежде стоял `PASS_THE_CODE` — «Передайте код на ту сторону —
-/// оттуда и подключатся». Ревью всей ветки (Important 2) назвало его тем
-/// же обманом, который ветка уже снимала в других местах («ждёт
-/// разрешения» убрали, потому что предмета ещё нет): подвал велел передать
-/// код, а «Показать код» в меню ТОЙ ЖЕ карточки отвечал, что кода в
-/// программе нет. Из двух разрешённых исходов (`None` либо «появится
-/// вместе с протоколом») выбран второй, потому что кнопка заперта, а
-/// запертая кнопка без объяснения — ровно тот тупик, от которого ветка
-/// избавлялась всю дорогу: человек видит серую кнопку и не знает, его ли
-/// это вина. Слова взяты у меню, а не написаны заново: одна вещь — одно
-/// предложение, и когда протокол придёт, оба места поправятся отсюда.
-pub const CODE_AWAITS_PROTOCOL: &str = "Код подключения появится вместе с протоколом — его в программе пока нет";
+/// Здесь прежде стоял `CODE_AWAITS_PROTOCOL` («Код подключения появится
+/// вместе с протоколом — его в программе пока нет»): и пункт меню «Показать
+/// код», и запертая главная кнопка принимающей карточки отвечали им на
+/// щелчок. Протокол пришёл, код настоящий (`issue_code`), объяснять больше
+/// нечего — константа снята вместе с `act_not_yet`, которая её произносила.
+///
+/// `code_issued` читается из `ui.codes`, а не из `Book::has_live_ticket`, и
+/// это не срез угла: та ходит на диск под межпроцессным замоком, а решение
+/// нужно на КАЖДУЮ отрисовку списка. Расхождение у них одно — код, выданный
+/// в прошлом запуске: книга его ещё помнит живым, а строки его нет нигде
+/// (см. `Ui::codes`), и показывать «ждёт разрешения» за код, которого
+/// человек уже не может никому передать, было бы тем же обманом, что
+/// снятая выше константа.
+pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
+    link::Enroll {
+        waiting: ui.waiting.iter().any(|p| p.request.card == name),
+        declined: ui.declined.iter().any(|d| d == name),
+        code_issued: ui.codes.iter().any(|(card, _)| card == name),
+        enrolled: ui.book.as_ref().map_or(0, |b| b.of(name).len()),
+    }
+}
 
 /// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
 /// открытая карточка (`selected`), а нет открытой — текущее соединение
@@ -494,6 +503,21 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     }
     let c = resolve_selected(&ui.cfg, selected);
     let subject = c.name.clone();
+    let e = enroll_facts(ui, &subject);
+    // «Разрешить» — первым, выше правки (спека, порядок разрешения подписи:
+    // «Разрешить» (кто-то ждёт) → «Подключиться» → «Показать код» →
+    // «Сохранить»). Правку это не роняет и роняет не может: щелчок открывает
+    // диалог, а поля карточки он не трогает вовсе — то есть довод «правка
+    // важнее всего» здесь не против, он просто не про этот случай.
+    //
+    // Заявка берётся у ПРЕДМЕТА, а не «хоть у кого-нибудь»: предмет у кнопки
+    // один (решение владельца 3.11), и «Разрешить», разрешающее не ту
+    // карточку, что названа слева от кнопки, — та же мина, что заглушка
+    // `UNWIRED` в меню. Висящую заявку человек находит первой строкой списка
+    // (`link::list`), щёлкает — и карточка становится предметом.
+    if e.waiting {
+        return Button { subject, label: gui::ALLOW, why: None, act: Some(LinkAct::Allow) };
+    }
     // Подсказка, почему «Сохранить» недоступна, — одна на оба случая записи
     // ниже: её даёт тот же `save_hint`, что объясняет недоступность кнопки
     // на вкладке.
@@ -528,7 +552,7 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // запертых ветках этой функции.
         if !ui.link.is_up() {
             if let Some(why) = ui.gate.as_deref() {
-                return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(gate_text(why)), act: None };
+                return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
             }
         }
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
@@ -540,7 +564,7 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // состояние словом `link::row` — причина уже сказана подсказкой
         // переключателя (`reason`), второй раз её здесь не произносим
         // (`why: None`).
-        return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: None, act: None };
+        return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: None, act: None };
     }
     if matches!(c.role(), Ok("dial")) {
         // Тот же замок и тот же довод, что у local-ветки выше: «Подключиться»
@@ -548,16 +572,22 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // отказывает молча, заперт ли замок в туннельном режиме или в
         // локальном (Critical 1 — приём общий для обоих режимов).
         if let Some(why) = ui.gate.as_deref() {
-            return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(gate_text(why)), act: None };
+            return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
         }
         return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
     }
-    // Принимающему подключаться не к кому — связь не его действие. Кнопка
-    // заперта и называет состояние тем же словом, что строка списка
-    // (`link::row`), а не пропадает (спека «иначе заперта и называет
-    // состояние»); `why` говорит, чего ждать, — и говорит правду
-    // (`CODE_AWAITS_PROTOCOL`, Important 2 ревью всей ветки).
-    Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(CODE_AWAITS_PROTOCOL.to_string()), act: None }
+    // Принимающему подключаться не к кому — связь не его действие. Зато
+    // код его: «Показать код» — настоящая кнопка со настоящим действием
+    // (`issue_code`), а не запертая с объяснением, почему ничего не будет.
+    // Место в порядке разрешения подписей спека называет прямо: «Разрешить»
+    // → «Подключиться» → «Показать код» → «Сохранить».
+    //
+    // Замок (`ui.gate`) сюда не заглядывает нарочно: он про обслуживание
+    // агента — платформу, комплект, поля базы, — а выдача кода ничего из
+    // этого не трогает. Ей нужен один файл, ключ этой машины
+    // (`node::id_from_state`), и запирать её за незаполненный пароль базы
+    // значило бы не дать человеку даже начать договариваться с той стороной.
+    Button { subject, label: "Показать код", why: None, act: Some(LinkAct::ShowCode) }
 }
 
 // Подвал потерял левый текстовый слот совсем (решение владельца 9.11,
@@ -981,6 +1011,99 @@ pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
     (!c.base_is_here()).then_some("Поля базы приходят с той стороны")
 }
 
+/// Одна зачисленная сторона в карточке.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PartyRow {
+    /// Отпечаток ключа ЦЕЛИКОМ — ровно тот, что человек сверял голосом,
+    /// когда нажимал «Разрешить». Усечённый здесь был бы хуже, чем
+    /// бесполезный: по нему нельзя отличить одну зачисленную сторону от
+    /// подобранной к началу другой, а отзывают именно по этой строке.
+    pub fingerprint: String,
+    /// Тот же ключ значением — им адресуется отзыв (`Book::revoke`).
+    /// Разбирать его обратно из `fingerprint` было бы вторым мнением о том,
+    /// что на экране написано.
+    pub key: iroh::EndpointId,
+    /// Как сторона себя назвала — с той же пометкой, что в диалоге
+    /// (`save::NOT_VERIFIED`): запись в книге её слова не проверила, и
+    /// время этого не изменило.
+    pub says_name: String,
+    /// Разрешена ли ей запись в базу — итог, уже сложенный с потолком при
+    /// зачислении (`enroll::Decision::Allow`).
+    pub write: bool,
+}
+
+/// Блок зачисления в карточке, которая ЖДЁТ входящих (спека экрана, «У
+/// соединения, которое ждёт входящих»): код одной строкой, одно предложение
+/// о том, что с ним делать на той стороне, число зачисленных сторон и сами
+/// стороны — у каждой отпечаток и «Отозвать».
+///
+/// `None` — блока в карточке нет вовсе: у зовущей карточки своего кода не
+/// бывает (он приходит с той стороны, и там же стоит поле для вставки), у
+/// локальной нет и той стороны. Это то самое ветвление по РОЛИ, которое
+/// `shown_fields` себе запрещает и отдаёт сюда («Роль в этот список не
+/// входит: она решает, показывать код для той стороны или поле для кода»).
+///
+/// **Предела числу зачисленных здесь нет и не появится** (решение владельца
+/// 1.11): зачислить к одной карточке можно сколько угодно сторон, предел
+/// назначает лицензия 1С, а не программа. Поэтому в блоке стоит ЧИСЛО, а не
+/// «осталось мест»: второго не существует.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Accepting {
+    /// Код подключения одной строкой, видимой глазом. `None` — кода ещё не
+    /// выдали в этом запуске программы.
+    ///
+    /// **Почему именно «в этом запуске».** Секрет кода не хранится нигде
+    /// (спека, «Тикет не хранится нигде после погашения»; книга держит лишь
+    /// sha256 от него — `enrolled::IssuedTicket`), и восстановить строку
+    /// после перезапуска нечем. Это не недоделка: строку, которую нельзя
+    /// восстановить, нельзя и украсть из файла. Человеку это ничего не
+    /// стоит — «Выдать новый код» даёт новую.
+    pub code: Option<String>,
+    /// Одно предложение о том, что с кодом делать (спека: «под ней одно
+    /// предложение о том, что с ней делать на той стороне»).
+    pub code_note: &'static str,
+    /// Сколько сторон зачислено — словами, согласованными с числом.
+    pub enrolled: String,
+    pub parties: Vec<PartyRow>,
+}
+
+pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enrolled::Party]) -> Option<Accepting> {
+    // Локальность проверяется первой и отдельно от роли: у карточки, где оба
+    // конца на этой машине, зачислять некого — та же защита, тем же
+    // `base_is_here`/`mode`-порядком, что у `shown_fields` и
+    // `publication_switch_label`. Застрявшая в файле роль `accept` при
+    // `mode = "local"` не вправе нарисовать код для стороны, которой нет.
+    if c.mode == "local" || !matches!(c.role(), Ok("accept")) {
+        return None;
+    }
+    let code_note = if code.is_some() {
+        "Передайте эту строку на ту сторону — там её вставят, и здесь появится заявка."
+    } else {
+        "Кода пока нет. Нажмите «Показать код» — и эту строку можно будет передать на ту сторону."
+    };
+    let enrolled = if parties.is_empty() {
+        // Пустота словами, а не пустым местом — то же правило, что у
+        // `base_fields_note` и `nothing_to_show`.
+        "Никого ещё не зачислили".to_string()
+    } else {
+        format!("Зачислено: {}", common::word::count(parties.len() as u64, "сторона", "стороны", "сторон"))
+    };
+    let parties = parties
+        .iter()
+        .map(|p| PartyRow {
+            fingerprint: p.key.to_string(),
+            key: p.key,
+            says_name: if p.says_name.is_empty() {
+                format!("Себя не назвала ({})", gui::NOT_VERIFIED)
+            } else {
+                format!("Назвалась «{}» — {}", p.says_name, gui::NOT_VERIFIED)
+            },
+            write: p.write,
+        })
+        .collect();
+    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, parties })
+}
+
 /// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
 /// Решение владельца 9.11 на живом прогоне: вопрос «Кто кому подключается?»
 /// убран совсем («так не пишут») — остаётся только факт, а отвечать на него
@@ -1020,7 +1143,7 @@ pub enum Body {
 /// руками, два соединения с одним именем (Review Focus плана): список
 /// показывает оба, а карточка — у первого. Иначе один и тот же набор полей
 /// нарисовался бы дважды и человек правил бы наугад.
-pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected: &str) -> Vec<Body> {
+pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&str) -> link::Enroll, selected: &str) -> Vec<Body> {
     if link::onboarding_shown(cfg) {
         let mut out = vec![Body::Ask(ONBOARDING_ASK)];
         out.extend(link::onboarding_answers().into_iter().map(|(label, role)| Body::Answer(label, role)));
@@ -1029,7 +1152,7 @@ pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected:
     let open = resolve_selected(cfg, selected).name.clone();
     let alone = cfg.connections.len() < 2;
     let mut opened = false;
-    let mut out: Vec<Body> = link::list(cfg, link)
+    let mut out: Vec<Body> = link::list(cfg, link, enroll)
         .into_iter()
         .map(|e| match e {
             link::Entry::Caption(c) => Body::Caption(c),
@@ -1173,6 +1296,16 @@ pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
 ///
 /// Пункта «Сделать текущим» здесь нет: он на главной кнопке, и это один
 /// орган, а не два (спека, «Наверху и в списке — один и тот же выбор»).
+///
+/// **«Отозвать разрешение» уехало из меню в карточку** (задача 7). Довод не
+/// в раскладке, а в адресате: зачисленных сторон у карточки бывает сколько
+/// угодно (решение владельца 1.11), и пункт меню без предмета не может
+/// сказать, КОГО отзывают. В карточке у каждой стороны своя строка с
+/// отпечатком и своя кнопка «Отозвать» (`accepting_block`, спека экрана:
+/// «Щелчок по строке раскрывает её целиком: … и „Отозвать разрешение“») —
+/// отзыв адресуется ключом, который человек видит глазами. Пункт меню
+/// пришлось бы либо спрашивать «кого?» вторым диалогом, либо отзывать
+/// первого в списке — и второе тише и хуже.
 pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
     // Список пуст — предмета нет, и меню тоже нет вовсе (кнопку «…» подвал
     // при пустом списке не рисует). Без этой строки `cfg.current()` отдал бы
@@ -1186,18 +1319,27 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
         return vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)];
     }
     let connected = ui.link.is_up();
-    let accepting = matches!(c.role(), Ok("accept"));
+    let accepting = matches!(c.role(), Ok("accept")) && c.mode != "local";
     let mut out = Vec::new();
     if connected {
         out.push(("Отключиться", LinkAct::Toggle));
     } else if matches!(c.role(), Ok("dial")) {
         out.push(("Подключиться", LinkAct::Toggle));
     }
-    if accepting && !connected {
+    // Код у принимающей карточки есть всегда, подключена она или нет: он не
+    // про текущую связь, а про то, кого ещё позвать. Прежнее условие
+    // `!connected` его прятало — и у человека, у которого уже кто-то
+    // подключён, не было способа позвать второго, хотя зачислить к одной
+    // карточке можно сколько угодно сторон (решение владельца 1.11).
+    if accepting {
+        // Два пункта, а не один с меняющейся подписью: «Показать код»
+        // показывает тот, что уже выдан (а нет такого — выдаёт первый), и
+        // ничего не отнимает; «Выдать новый код» — перевыпуск, после
+        // которого прежняя строка никому не годится. Разные разряды —
+        // разные пункты, то же правило, что развело «Установить
+        // расширение» и «Снять расширение» чертой.
         out.push(("Показать код", LinkAct::ShowCode));
-    }
-    if accepting && connected {
-        out.push(("Отозвать разрешение", LinkAct::Revoke));
+        out.push(("Выдать новый код", LinkAct::NewCode));
     }
     out.push(("Переименовать", LinkAct::Rename));
     // Необратимое — последним: спека («Удалить соединение» ниже всех
@@ -1235,12 +1377,21 @@ pub enum LinkAct {
     /// имя «Сохранить» (`save::rename` внутри `Panel::write`). Отдельного
     /// окошка с полем для этого не заводим — поле уже есть в карточке.
     Rename,
-    /// Показать код и отозвать разрешение: придут с протоколом подключения
-    /// (его в этой ветке нет вовсе). Пункт не молчит и не врёт — говорит
-    /// словами в журнал, что этого пока нет; подпись в меню остаётся,
-    /// потому что её прибивает спека.
+    /// Показать код подключения принимающей карточки: тот, что уже выдан в
+    /// этом запуске, а нет такого — выдать первый (`issue_code`). Ничего не
+    /// отнимает: прежняя строка остаётся годной.
     ShowCode,
-    Revoke,
+    /// Перевыпуск кода той же карточки (спека: «„Выдать новый код“ —
+    /// перевыпуск для существующей, а не создание новой»). Отдельное
+    /// действие, а не `ShowCode` с меняющимся смыслом: после него прежняя
+    /// строка, которую человек мог уже кому-то переслать, никому не
+    /// годится, и подпись обязана это называть.
+    NewCode,
+    /// Ответить на висящую заявку — открыть диалог разрешения
+    /// (`save::ask_permission`). Только у главной кнопки: в меню его нет,
+    /// потому что заявка либо есть и тогда она главное действие предмета,
+    /// либо её нет и пункт не о чем.
+    Allow,
     /// Удалить карточку из настроек — решение владельца 4.11, дословно:
     /// «давать, папку не трогать». Последний пункт меню у обеих ветвей
     /// `link_menu` (задача 3 плана «Карточка публикации и удаление»):
@@ -1248,17 +1399,56 @@ pub enum LinkAct {
     Delete,
 }
 
-/// Что сказать в журнал на действие, которого в продукте ещё нет. `None` —
-/// действие настоящее, делается, а не объясняется.
+/// Выдать код подключения карточке и запомнить его на этот запуск.
 ///
-/// Чистая функция затем, что это ЕДИНСТВЕННОЕ, что можно проверить тестом в
-/// проводке меню: сам щелчок без гарнеса GPUI не позвать.
-pub fn act_not_yet(act: LinkAct) -> Option<&'static str> {
-    match act {
-        LinkAct::ShowCode => Some(CODE_AWAITS_PROTOCOL),
-        LinkAct::Revoke => Some("Отзыв разрешения появится вместе с протоколом — его в программе пока нет"),
-        _ => None,
+/// `fresh` — перевыпуск: прежняя строка этой карточки забывается и на экран
+/// идёт новая. Без него уже выданная строка отдаётся как есть — «Показать
+/// код» на то и «показать», что второй раз дёргать книгу ему незачем, а
+/// человеку, который держит код в переписке, важно увидеть ТОТ ЖЕ код, а не
+/// очередной.
+///
+/// Чистого решения здесь нет и быть не может — это запись: `Ticket::issue`
+/// берёт случайный секрет, `Book::issue` пишет файл. Проверяется оно не
+/// словами, а последствием: после вызова `ui.codes` несёт строку, которую
+/// `Book::check` опознаёт (тесты `enroll.rs` ходят той же дорогой).
+///
+/// Ошибка идёт словами в журнал и не трогает `ui.codes`: человек не получит
+/// на руки строку, которой в книге нет (та же беда, от которой отказывается
+/// `Book::issue` на просроченном тикете).
+fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
+    if !fresh {
+        if let Some((_, code)) = ui.codes.iter().find(|(c, _)| c == card) {
+            return Ok(code.clone());
+        }
     }
+    let id = crate::node::id_from_state(ui.kit.state())?;
+    // Релея и прямых адресов в коде нет: узел не поднят, и знать их неоткуда
+    // (см. `node::id_from_state`). Дозвониться по такому коду можно — адрес
+    // ищется по ключу через серверы n0.
+    let ticket = crate::ticket::Ticket::issue(id, None, Vec::new())?;
+    let code = ticket.to_code();
+    let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
+    book.issue(card, &ticket)?;
+    ui.codes.retain(|(c, _)| c != card);
+    ui.codes.push((card.to_string(), code.clone()));
+    Ok(code)
+}
+
+/// Отозвать ОДНУ зачисленную сторону у карточки. Остальные зачисления той же
+/// карточки не трогаются вовсе (`Book::revoke`) — это и есть причина, по
+/// которой отзыв адресуется ключом из строки карточки, а не пунктом меню.
+fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
+    let r = match ui.book.as_mut() {
+        Some(book) => book.revoke(card, key),
+        None => Err("Книга зачислений не открылась — отзывать нечем.".to_string()),
+    };
+    let line = match r {
+        Ok(()) => {
+            Line { kind: Kind::Ok, text: format!("Разрешение отозвано: карточка «{card}», ключ {key}") }
+        }
+        Err(e) => Line { kind: Kind::Fail, text: e },
+    };
+    gui::note_line(ui, line);
 }
 
 /// Заголовок и подробность вопроса перед «Удалить соединение» — тем же
@@ -1346,11 +1536,6 @@ fn delete_on_confirm(ui: &Ui, name: &str) -> DeleteOnConfirm {
 /// (`Panel::save_card` — ей нужны поля, вопрос про смену базы и `original`),
 /// а в меню «Сохранить» не дублируется.
 fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) {
-    if let Some(say) = act_not_yet(act) {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Say, text: say.to_string() });
-        cx.refresh_windows();
-        return;
-    }
     match act {
         LinkAct::Toggle => gui::toggle_link(cx),
         LinkAct::MakeCurrent => {
@@ -1480,7 +1665,46 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                 cx.refresh_windows();
             });
         }
-        LinkAct::Save | LinkAct::ShowCode | LinkAct::Revoke => {}
+        LinkAct::ShowCode | LinkAct::NewCode => {
+            let fresh = act == LinkAct::NewCode;
+            let r = issue_code(cx.global_mut::<Ui>(), subject, fresh);
+            // Сам код в журнал не печатается — он секрет, а журнал видно
+            // через плечо и он уезжает в отчёты. Строка говорит, что код
+            // есть и где он: в карточке, одной строкой, с «Скопировать».
+            let line = match r {
+                Ok(_) if fresh => Line {
+                    kind: Kind::Ok, text: format!("Выдан новый код подключения для «{subject}» — он в карточке")
+                },
+                Ok(_) => {
+                    Line { kind: Kind::Ok, text: format!("Код подключения для «{subject}» — в карточке") }
+                }
+                Err(e) => Line { kind: Kind::Fail, text: e },
+            };
+            gui::note_line(cx.global_mut::<Ui>(), line);
+            cx.refresh_windows();
+        }
+        LinkAct::Allow => {
+            // Заявка берётся по предмету, а не «первая из списка»: предмет у
+            // кнопки один, и спросить человека о чужой карточке нельзя.
+            let Some(r) = cx.global::<Ui>().waiting.iter().find(|p| p.request.card == subject).map(|p| p.request.clone()) else {
+                // Заявки уже нет — успели ответить в другом окне или она
+                // ушла по сроку. Молчать нельзя: человек нажал кнопку.
+                gui::note_line(
+                    cx.global_mut::<Ui>(),
+                    Line { kind: Kind::Say, text: format!("Заявка по «{subject}» больше не ждёт ответа") },
+                );
+                cx.refresh_windows();
+                return;
+            };
+            let card = r.card.clone();
+            gui::ask_permission(window, cx, &r, move |d, _window, cx| {
+                gui::answer_request(cx.global_mut::<Ui>(), &card, d);
+                cx.refresh_windows();
+            });
+        }
+        // Запись карточки держит сама панель (`Panel::save_card`): ей нужны
+        // поля, вопрос про смену базы и `original`.
+        LinkAct::Save => {}
     }
 }
 
@@ -2753,6 +2977,77 @@ impl Panel {
             let button = pick("pick-project", f.project.clone(), cx);
             col = col.child(path_row(folder_label(&toolset).to_string(), &f.project, button, window, cx));
         }
+        // Код для той стороны и кто уже зачислен — последним блоком карточки:
+        // поля человек правит, а это он читает и передаёт. Что показывать,
+        // решает `accepting_block`, здесь только виджеты.
+        let card_name = c.name.clone();
+        let block = {
+            let ui = cx.global::<Ui>();
+            let code = ui.codes.iter().find(|(card, _)| *card == card_name).map(|(_, code)| code.clone());
+            let parties = ui.book.as_ref().map(|b| b.of(&card_name)).unwrap_or_default();
+            accepting_block(&c, code.as_deref(), &parties)
+        };
+        if let Some(block) = block {
+            col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
+            if let Some(code) = block.code {
+                let to_copy = code.clone();
+                col = col.child(
+                    v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Код подключения")).child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            // Код виден глазом целиком (спека: «одна
+                            // строка, видимая глазом»), поэтому строка
+                            // переносится, а не обрезается многоточием:
+                            // обрезанный код нельзя ни прочитать вслух,
+                            // ни сверить с тем, что ушло на ту сторону.
+                            .child(div().flex_1().min_w_0().text_size(px(12.)).child(code))
+                            .child(KitButton::new("copy-code").outline().small().label("Скопировать").on_click(cx.listener(
+                                move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(to_copy.clone()));
+                                    gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: "Код скопирован".into() });
+                                },
+                            ))),
+                    ),
+                );
+            }
+            col = col.child(div().text_size(px(13.)).text_color(caption).child(block.code_note));
+            {
+                let card = card_name.clone();
+                col = col.child(
+                    h_flex().gap_2().child(
+                        KitButton::new("new-code")
+                            .outline()
+                            .small()
+                            .label("Выдать новый код")
+                            .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
+                    ),
+                );
+            }
+            col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
+            for (n, p) in block.parties.into_iter().enumerate() {
+                let card = card_name.clone();
+                let key = p.key;
+                col = col.child(
+                    v_flex().gap_1().child(div().min_w_0().text_size(px(12.)).child(p.fingerprint)).child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(caption).child(p.says_name))
+                            // Отзыв — красной кнопкой: он отнимает уже
+                            // сделанное (сторона перестанет входить), то
+                            // же правило, что развело пункты меню по
+                            // разрядам.
+                            .child(KitButton::new(("revoke", n)).danger().small().label("Отозвать").on_click(cx.listener(
+                                move |_, _, _, cx| {
+                                    revoke_party(cx.global_mut::<Ui>(), &card, key);
+                                    cx.refresh_windows();
+                                },
+                            ))),
+                    ),
+                );
+            }
+        }
         col
     }
 
@@ -2915,7 +3210,15 @@ impl Render for Panel {
             let current = cx.global::<Ui>().cfg.current().name.clone();
             let state = link.clone();
             let cfg = cx.global::<Ui>().cfg.clone();
-            link_body(&cfg, &|name| (name == current).then(|| state.clone()), &self.selected)
+            // Факты зачисления, в отличие от состояния связи, заглушкой НЕ
+            // приходят: они у каждой карточки свои (своя заявка, свой код,
+            // свои зачисленные) и живут в `Ui`, а не в одном сеансе на
+            // машину. Отсюда и «ждёт разрешения» у карточки, которая не
+            // текущая, — слово, которого прежняя заглушка дать не могла.
+            let facts: Vec<(String, link::Enroll)> =
+                cfg.connections.iter().map(|c| (c.name.clone(), enroll_facts(cx.global::<Ui>(), &c.name))).collect();
+            let enroll = |name: &str| facts.iter().find(|(n, _)| n == name).map(|(_, e)| *e).unwrap_or_default();
+            link_body(&cfg, &|name| (name == current).then(|| state.clone()), &enroll, &self.selected)
         };
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -3593,12 +3896,12 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
-        delete_question_text, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_body, link_menu,
+        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
+        delete_question_text, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_menu,
         main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
         publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
         switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty,
-        LinkAct, ProjectMenu, CODE_AWAITS_PROTOCOL, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
+        LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -4674,15 +4977,14 @@ mod tests {
         assert_eq!(main_button(&ui_for("accept", "local", false), "", Dirty::No).label, "Включить");
         // Правка важнее — её потеря дороже, чем недосказанное состояние связи.
         assert_eq!(main_button(&ui_for("dial", "tunnel", false), "", Dirty::Fields).label, "Сохранить", "правка важнее: её потеря дороже");
-        // Принимающему подключаться не к кому — кнопка не пропадает, а
-        // заперта и называет состояние тем же словом, что строка списка
-        // (спека «иначе заперта и называет состояние»); причина — рядом.
+        // Принимающему подключаться не к кому, зато код — его действие
+        // (задача 7): кнопка не заперта и не объясняет, почему ничего не
+        // будет, а выдаёт настоящий код. Место подписи в порядке разрешения
+        // спека называет прямо: «Подключиться» → «Показать код».
         let b = main_button(&ui_for("accept", "tunnel", false), "", Dirty::No);
-        assert_eq!(b.label, "не подключено");
-        assert_eq!(b.act, None);
-        // Причина — ожидание протокола, а не повеление передать код, которого
-        // программа выдать не умеет (Important 2 ревью всей ветки).
-        assert_eq!(b.why.as_deref(), Some(CODE_AWAITS_PROTOCOL));
+        assert_eq!(b.label, "Показать код");
+        assert_eq!(b.act, Some(LinkAct::ShowCode));
+        assert_eq!(b.why, None, "у настоящего действия объяснять нечего");
     }
 
     /// Указатель 2 ревью: признак связи у главной кнопки читает `ui.link` —
@@ -4785,9 +5087,14 @@ mod tests {
     /// и «Журналом» проверяется глазом (см. отчёт). Замок (`ui.gate`) —
     /// отдельный случай, см. `a_locked_gate_leaves_the_same_locked_button_in_both_modes`
     /// ниже.
+    ///
+    /// **Из двух случаев остался один** (задача 7): у принимающей карточки
+    /// действие появилось — она выдаёт код, — и запирать её больше не за
+    /// что. Запертым остаётся подключённое соединение: транспорт идёт, и
+    /// кнопка называет его состояние, а не предлагает тронуть связь.
     #[test]
     fn a_connection_state_lock_leaves_one_and_the_same_button_everywhere() {
-        for ui in [ui_link_connected(), ui_link_accept_waiting()] {
+        for ui in [ui_link_connected()] {
             let b = main_button(&ui, "", Dirty::No);
             assert!(!b.label.is_empty(), "замок не исчезает, предмет: {}", b.subject);
             assert_eq!(b.act, None, "заперта значит без действия");
@@ -4898,14 +5205,13 @@ mod tests {
     #[test]
     fn link_items_carry_their_own_actions_not_project_operations() {
         let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "").iter().map(|(_, a)| *a).collect();
-        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::Rename, LinkAct::Delete]);
-        // Того, чего в продукте ещё нет, пункт не делает молча — говорит
-        // словами; у настоящих действий объяснять нечего.
-        assert!(act_not_yet(LinkAct::ShowCode).unwrap().contains("протоколом"));
-        assert!(act_not_yet(LinkAct::Revoke).unwrap().contains("протоколом"));
-        for real in [LinkAct::Save, LinkAct::Toggle, LinkAct::MakeCurrent, LinkAct::Rename, LinkAct::Delete] {
-            assert_eq!(act_not_yet(real), None, "{real:?} — настоящее действие, оно делается, а не объясняется");
-        }
+        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::NewCode, LinkAct::Rename, LinkAct::Delete]);
+        // Заглушек в меню больше нет вовсе: `act_not_yet`, которая
+        // объясняла, почему «Показать код» и «Отозвать разрешение» ничего не
+        // делают, снята вместе с ними — код настоящий (`issue_code`), а
+        // отзыв уехал в карточку, где у него есть адресат (`PartyRow`).
+        // Проверять «не делает молча» стало нечего: не делающих пунктов нет.
+        assert!(!acts.contains(&LinkAct::Save), "«Сохранить» в меню не дублируется — она на главной кнопке");
     }
 
     /// Круг починки 2: соседний тест проверяет лишь поимённо вспомненные
@@ -4926,7 +5232,15 @@ mod tests {
     fn the_link_menu_lists_exactly_these_items_for_one_subject() {
         assert_eq!(
             link_menu(&ui_link_accept_waiting(), ""),
-            vec![("Показать код", LinkAct::ShowCode), ("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)],
+            vec![
+                ("Показать код", LinkAct::ShowCode),
+                // Задача 7: перевыпуск — своё действие, а не «Показать код»
+                // с меняющимся смыслом; «Отозвать разрешение» из меню уехало
+                // в карточку, где у него есть адресат (`PartyRow`).
+                ("Выдать новый код", LinkAct::NewCode),
+                ("Переименовать", LinkAct::Rename),
+                ("Удалить соединение", LinkAct::Delete),
+            ],
         );
     }
 
@@ -4996,6 +5310,16 @@ mod tests {
     /// состояния, кроме текущей.
     fn no_states(_: &str) -> Option<State> {
         None
+    }
+
+    /// Тело вкладки БЕЗ фактов зачисления — тем же вызовом, каким оно
+    /// звалось до задачи 7. Обёртка нарочно перекрывает `link_body` из
+    /// внешнего модуля (одиночное имя сильнее глоба): тесты ниже проверяют
+    /// порядок строк, группировку и место раскрытой карточки — то, к чему
+    /// заявки и коды не относятся, — а тест самого зачисления зовёт
+    /// `super::link_body` со своими фактами.
+    fn link_body(cfg: &crate::cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected: &str) -> Vec<Body> {
+        super::link_body(cfg, link, &|_| link::Enroll::default(), selected)
     }
 
     /// Тело вкладки одним словом на элемент — порядок читается глазами, а
@@ -5107,15 +5431,21 @@ mod tests {
     /// сторону», а «Показать код» в меню ТОЙ ЖЕ карточки отвечало, что кода
     /// в программе нет.
     ///
-    /// Сторожит ровно это: подсказка и ответ меню — ОДНИ слова, и слова эти
-    /// про ожидание протокола, а не про передачу. Вырежи правку — вернётся
-    /// повелительное «Передайте», и оба утверждения упадут.
+    /// Задача 7 сняла расхождение с другого конца: код настоящий, и кнопка
+    /// его ВЫДАЁТ. Сторожить теперь надо, чтобы она не вернулась в
+    /// запертое состояние с объяснением — у принимающей карточки есть что
+    /// делать, и запертая кнопка там означала бы, что действие снова
+    /// пропало. Ни одно слово про ожидание протокола на экран больше не
+    /// возвращается: искать его в подписи и в подсказке.
     #[test]
-    fn the_locked_accept_button_does_not_demand_a_code_the_program_cannot_give() {
+    fn the_accept_button_gives_a_real_code_instead_of_explaining_its_absence() {
         let b = main_button(&ui_link_accept_waiting(), "", Dirty::No);
-        assert_eq!(b.why.as_deref(), Some(CODE_AWAITS_PROTOCOL), "подсказка кнопки обязана говорить то же, что меню");
-        assert_eq!(act_not_yet(LinkAct::ShowCode), Some(CODE_AWAITS_PROTOCOL), "у подсказки и меню один источник слов");
-        assert!(!CODE_AWAITS_PROTOCOL.contains("ередайте"), "обещать передачу кода до протокола нельзя: {CODE_AWAITS_PROTOCOL}");
+        assert_eq!(b.act, Some(LinkAct::ShowCode), "у принимающей карточки действие есть — кнопка не заперта");
+        assert_eq!(b.label, "Показать код");
+        assert_eq!(b.why, None, "объяснять нечего: кнопка делает дело");
+        for word in ["протокол", "ередайте", "пока нет"] {
+            assert!(!b.label.contains(word), "подпись обещает действие, а не ожидание: {}", b.label);
+        }
     }
 
     #[test]
@@ -5331,5 +5661,113 @@ mod tests {
         assert!(text.contains(&long_label), "{text}");
         // Длинная форма не получила вторую добавку — считаем «отпечат» ровно один раз.
         assert_eq!(text.matches("отпечат").count(), 1, "{text}");
+    }
+    // Задача 7 плана «Канал и зачисление»: код и зачисленные в карточке.
+
+    fn a_key(seed: u8) -> iroh::EndpointId {
+        // Ключ из семени, а не случайный: отпечаток попадает в утверждения, и
+        // тест, который его не знает заранее, проверял бы только своё же
+        // `to_string`.
+        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    }
+
+    fn accepting_card() -> Connection {
+        Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() }
+    }
+
+    /// Спека экрана: «У соединения, которое ждёт входящих, в раскрытой
+    /// карточке живёт код: одна строка, видимая глазом, рядом „Скопировать“,
+    /// под ней одно предложение о том, что с ней делать на той стороне, и
+    /// „Выдать новый код“», а щелчок по строке раскрывает её «целиком: … и
+    /// „Отозвать разрешение“». Плюс решение владельца 1.11: в карточке видно
+    /// ЧИСЛО зачисленных сторон, и предела у него нет.
+    ///
+    /// Падал так: `accepting_block` не существовало вовсе, кода в карточке не
+    /// было (`CODE_AWAITS_PROTOCOL` объяснял, почему), а зачисленных карточка
+    /// не показывала ни одного — книга была прочитана только тестами
+    /// `enroll.rs`.
+    #[test]
+    fn an_accepting_card_shows_its_code_and_the_parties_it_enrolled() {
+        let parties = vec![
+            crate::enrolled::Party { key: a_key(7), says_name: "Ромашка-бухгалтерия".into(), write: true },
+            crate::enrolled::Party { key: a_key(9), says_name: String::new(), write: false },
+        ];
+        let b = accepting_block(&accepting_card(), Some("КОД-СТРОКА"), &parties).expect("принимающая карточка обязана нести блок");
+        assert_eq!(b.code.as_deref(), Some("КОД-СТРОКА"));
+        assert!(b.code_note.contains("на ту сторону"), "{}", b.code_note);
+        assert_eq!(b.enrolled, "Зачислено: 2 стороны", "число согласовано со словом; предела у него нет");
+
+        // Отпечаток ЦЕЛИКОМ — тот же, что человек сверял голосом. Усечённый
+        // здесь не отличил бы одну зачисленную сторону от подобранной к
+        // началу другой, а отзывают именно по этой строке.
+        assert_eq!(b.parties[0].fingerprint, a_key(7).to_string());
+        assert_eq!(b.parties[0].key, a_key(7), "отзыв адресуется ключом, а не разбором строки с экрана");
+        assert!(b.parties[0].says_name.contains("Ромашка-бухгалтерия"));
+        // Чужие слова помечены и здесь: книга их не проверила, и время этого
+        // не изменило.
+        assert!(b.parties[0].says_name.contains(crate::gui::NOT_VERIFIED), "{}", b.parties[0].says_name);
+        assert!(b.parties[1].says_name.contains("не назвала"), "{}", b.parties[1].says_name);
+        assert!(b.parties[1].says_name.contains(crate::gui::NOT_VERIFIED), "{}", b.parties[1].says_name);
+    }
+
+    /// Пока кода не выдали, карточка не молчит пустым местом (то же правило,
+    /// что у `base_fields_note`), и не врёт, будто код есть.
+    #[test]
+    fn a_card_without_a_code_yet_says_how_to_get_one() {
+        let b = accepting_block(&accepting_card(), None, &[]).expect("блок есть и без кода");
+        assert_eq!(b.code, None);
+        assert!(b.code_note.contains("Показать код"), "{}", b.code_note);
+        assert_eq!(b.enrolled, "Никого ещё не зачислили");
+        assert!(b.parties.is_empty());
+    }
+
+    /// У зовущей карточки своего кода не бывает — он приходит с той стороны;
+    /// у локальной нет и той стороны. Застрявшая в файле роль `accept` при
+    /// `mode = "local"` блок не рисует: та же защита, что у `shown_fields`.
+    #[test]
+    fn only_a_card_that_waits_for_incoming_has_a_code_block() {
+        let dial = Connection { mode: "tunnel".into(), role: "dial".into(), ..Default::default() };
+        assert!(accepting_block(&dial, Some("КОД"), &[]).is_none());
+        let stuck_local = Connection { mode: "local".into(), role: "accept".into(), ..Default::default() };
+        assert!(accepting_block(&stuck_local, Some("КОД"), &[]).is_none(), "на одной машине зачислять некого");
+    }
+
+    /// Задача 6: закрытый без ответа диалог заявку не снимает, и человек
+    /// возвращается к ней главной кнопкой «Разрешить» — первой в порядке
+    /// разрешения подписей (спека «Интерфейс»), выше даже несохранённой
+    /// правки: щелчок открывает диалог и полей карточки не трогает.
+    ///
+    /// Падал так: `LinkAct::Allow` не существовало, и у карточки с висящей
+    /// заявкой кнопка называла состояние связи.
+    #[test]
+    fn a_hanging_request_puts_allow_on_the_main_button() {
+        let mut ui = ui_for("accept", "tunnel", false);
+        let card = ui.cfg.current().name.clone();
+        ui.waiting.push(crate::gui::Pending {
+            request: crate::enroll::Request {
+                card: card.clone(),
+                base: crate::wire::BaseFields {
+                    base_id: "b1".into(),
+                    base_name: "Бухгалтерия".into(),
+                    publication: "auto".into(),
+                    write: true,
+                },
+                peer: a_key(3),
+                says_name: "Заказчик".into(),
+            },
+            answer: None,
+        });
+        assert!(enroll_facts(&ui, &card).waiting, "факт заявки обязан дойти до слова и до кнопки");
+        for dirty in [Dirty::No, Dirty::Fields, Dirty::NameOnly] {
+            let b = main_button(&ui, "", dirty);
+            assert_eq!(b.label, crate::gui::ALLOW, "«Разрешить» стоит выше правки: диалог полей не трогает");
+            assert_eq!(b.act, Some(LinkAct::Allow));
+            assert_eq!(b.subject, card);
+        }
+        // Заявка по ДРУГОЙ карточке предмета этой кнопки не касается: предмет
+        // у неё один, и «Разрешить», разрешающее не то, что названо слева, —
+        // та же мина, что заглушка `UNWIRED` в меню.
+        ui.waiting[0].request.card = "Другая".into();
+        assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
     }
 }

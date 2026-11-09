@@ -9,6 +9,21 @@ use core::prelude::v1::test;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+/// Строка и список БЕЗ фактов зачисления — тем же вызовом, каким они
+/// звались до задачи 7. Эти две обёртки нарочно перекрывают `row`/`list` из
+/// `use super::*` (одиночное имя сильнее глоба): тесты ниже проверяют слова
+/// транспорта, группировку и порядок — всё то, к чему заявки и коды не
+/// относятся вовсе, — и дописывать им четвёртым аргументом пустой `Enroll`
+/// значило бы повторить одно и то же шестнадцать раз. Тесты САМОГО
+/// зачисления зовут `super::row` и `super::list` со своими фактами.
+fn row(c: &Connection, current: bool, l: Option<&State>) -> Row {
+    super::row(c, current, l, &Enroll::default())
+}
+
+fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>) -> Vec<Entry> {
+    super::list(cfg, link, &|_| Enroll::default())
+}
+
 /// Important 1 ревью задач 7+8: «выключено значит выключено». Набор
 /// сбрасывался в одном месте — `apply_facts`, — а при выключенном
 /// обслуживании расчёт не идёт вовсе, и прежний набор оставался живым:
@@ -685,4 +700,115 @@ fn the_two_onboarding_answers_set_the_topology() {
 fn onboarding_ends_when_the_first_connection_exists() {
     assert!(onboarding_shown(&cfg_with(&[])));
     assert!(!onboarding_shown(&cfg_with(&["Buh"])), "флага «прошёл онбординг» в настройках не заводим");
+}
+
+// Задача 7 плана «Канал и зачисление»: состояния контракта в окне.
+
+/// Спека контракта перечисляет восемь состояний
+/// (`2026-11-01-connection-contract.md`), и у каждого обязано быть решение,
+/// какое слово человек увидит. «Своё слово» здесь значит «решённое», а не
+/// «ни с кем не общее»: спека экрана (`2026-11-01-interface-design.md`,
+/// «Строка на соединение») сама называет три свёртки, и этот тест их и
+/// прибивает — иначе любая из них однажды «починится» в сторону восьми
+/// разных слов, которых спека не просила.
+///
+/// Падал он так: до правки `contract_word` не существовало вовсе, а `row`
+/// отдавала «не подключено» на всё, кроме четырёх состояний транспорта —
+/// «ждёт разрешения» и «отклонено» на экране не было ни одного.
+#[test]
+fn every_contract_state_has_its_own_word() {
+    let expect = [
+        // «Нет» своей строки не имеет вовсе: соединения без строки в списке
+        // не бывает, и слову этому негде показаться.
+        (Contract::No, None),
+        // «Тикет выдан» и «ждёт разрешения» — одно ожидание для человека.
+        (Contract::CodeIssued, Some("ждёт разрешения")),
+        (Contract::Waiting, Some("ждёт разрешения")),
+        // «Разрешено» — миг между решением и «подключено», своего слова не
+        // получает: его слово то же, что у начавшегося подключения.
+        (Contract::Allowed, Some("подключается")),
+        (Contract::Up, Some("подключено")),
+        (Contract::Broken, Some("разорвано")),
+        (Contract::Retrying, Some("подключается снова")),
+        (Contract::Declined, Some("отклонено")),
+    ];
+    assert_eq!(expect.len(), CONTRACT_STATES.len(), "в таблице обязаны стоять все состояния контракта, а не часть");
+    for (state, word) in expect {
+        assert_eq!(contract_word(state), word, "{state:?}");
+    }
+    // Свёрток ровно три, и больше их быть не должно: четвёртая — это уже
+    // два состояния, которые человек не может различить, не спросив.
+    let mut words: Vec<&str> = CONTRACT_STATES.iter().filter_map(|k| contract_word(*k)).collect();
+    words.sort_unstable();
+    words.dedup();
+    assert_eq!(words.len(), 6, "восемь состояний, три свёртки — шесть слов: {words:?}");
+}
+
+/// Висящая заявка — та, что человек закрыл не решив (`Decision::NoAnswer`):
+/// она НЕ разрешена и НЕ отклонена, и слово о ней обязано вернуться на
+/// экран. Вместе со словом оживает и правило `list` «ждущий разрешения —
+/// первой строкой», которое ждало именно этого случая.
+///
+/// Падал так: `row` слова не отдавала, `waiting` поднимать было нечего —
+/// строка стояла под своей подписью, как любая другая.
+#[test]
+fn a_hanging_request_says_it_waits_and_stands_above_every_caption() {
+    let cfg = cfg_accept_dial_local();
+    let waits = |name: &str| Enroll { waiting: name == "Клевер", ..Default::default() };
+    let l = super::list(&cfg, &none, &waits);
+    let Some(Entry::Row(first)) = l.first() else {
+        panic!("первой обязана стоять строка, а не подпись: {l:?}");
+    };
+    assert_eq!(first.name, "Клевер");
+    assert_eq!(first.state, "ждёт разрешения");
+    // Подпись своей группы при этом не исчезает: её решает полный список, а
+    // не то, что осталось под ней видимым.
+    assert!(l.iter().any(|e| matches!(e, Entry::Caption("Подключаюсь сам"))), "группа не теряет подписи: {l:?}");
+}
+
+/// Выданный код — то же ожидание, что и пришедшая заявка: человек ждёт,
+/// чтобы с той стороны подключились. Своего слова он не получает.
+#[test]
+fn an_issued_code_reads_as_waiting_for_permission_too() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let issued = Enroll { code_issued: true, ..Default::default() };
+    assert_eq!(super::row(&c, false, None, &issued).state, "ждёт разрешения");
+    // Код выдан, а связь уже поднялась — слово говорит про связь: ожидание
+    // кончилось, и напоминать о нём незачем.
+    assert_eq!(super::row(&c, false, Some(&State::Up { since: Instant::now() }), &issued).state, "подключено");
+}
+
+/// Отказ — исход, а не ошибка (спека зачисления, шаг пятый): он держится
+/// словом на строке, а не пропадает молча. Новая заявка его перебивает —
+/// иначе человек, которого позвали второй раз, читал бы прошлый свой отказ
+/// вместо приглашения ответить.
+#[test]
+fn a_refusal_is_an_outcome_and_a_new_request_overrides_it() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let declined = Enroll { declined: true, ..Default::default() };
+    assert_eq!(super::row(&c, false, None, &declined).state, "отклонено");
+    let again = Enroll { declined: true, waiting: true, ..Default::default() };
+    assert_eq!(super::row(&c, false, None, &again).state, "ждёт разрешения", "новая заявка важнее прошлого исхода");
+}
+
+/// Зачисленная, но сейчас не подключённая сторона — это «не подключено», а
+/// не «разрешено»: обещать движение там, где его нет, слово не вправе.
+/// Число зачисленных живёт в карточке, а не в строке списка.
+#[test]
+fn being_enrolled_is_not_a_word_on_the_row() {
+    let c = Connection { mode: "tunnel".into(), ..Default::default() };
+    let enrolled = Enroll { enrolled: 3, ..Default::default() };
+    assert_eq!(super::row(&c, false, None, &enrolled).state, "не подключено");
+    assert_eq!(contract_of(None, &enrolled), None, "зачисление само по себе не состояние контракта");
+}
+
+/// Локальной карточке зачислять некого — её пара слов не слушает `Enroll`
+/// вовсе. Без этой защиты застрявший в файле выданный код сказал бы про
+/// соединение, у которого оба конца здесь, «ждёт разрешения».
+#[test]
+fn a_local_card_keeps_its_own_two_words_whatever_the_book_says() {
+    let c = Connection { mode: "local".into(), ..Default::default() };
+    let noisy = Enroll { waiting: true, declined: true, code_issued: true, enrolled: 2 };
+    assert_eq!(super::row(&c, false, None, &noisy).state, "выключено");
+    assert_eq!(super::row(&c, false, Some(&State::Up { since: Instant::now() }), &noisy).state, "включено");
 }

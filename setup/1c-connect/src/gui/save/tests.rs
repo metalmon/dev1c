@@ -2475,3 +2475,158 @@ fn set_keys_with_no_keys_touches_nothing_not_even_for_an_unknown_name() {
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "пустой список — файл не тронут");
 }
+
+// Задача 6 плана «Канал и зачисление»: диалог разрешения.
+
+fn a_request() -> crate::enroll::Request {
+    crate::enroll::Request {
+        card: "Ромашка".into(),
+        base: crate::wire::BaseFields {
+            // Два поля, которые по каналу приехали и в диалог НЕ попадут:
+            // они её слова, но выглядят как факт.
+            base_id: "ИДЕНТИФИКАТОР-БАЗЫ-7731".into(),
+            base_name: "Бухгалтерия Ромашки".into(),
+            publication: "webserver".into(),
+            write: true,
+        },
+        peer: iroh::SecretKey::from_bytes(&[42u8; 32]).public(),
+        says_name: "Заказчик Ромашка".into(),
+    }
+}
+
+/// Решение 7 `2026-11-01-protocol-design.md`, дословно: диалог показывает
+/// ТРИ вещи и ни одной больше — отпечаток ключа, базу и то, как сторона себя
+/// назвала, с прямой пометкой «сказано той стороной, не проверено».
+///
+/// Тест стоит с ДВУХ сторон, и вторая важнее первой: он не только требует
+/// три вещи, но и проверяет, что остальное, приехавшее по каналу
+/// (`base_id`, `publication`), в текст не попало. Довод спеки от обратного:
+/// это тоже её слова, но рядом с проверенным отпечатком они читаются как
+/// проверенный факт.
+///
+/// Падал так: `permission_question` не существовало вовсе — диалога
+/// разрешения в программе не было ни одного.
+#[test]
+fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
+    let r = a_request();
+    let (message, detail) = permission_question(&r);
+
+    // Первая вещь: имя базы — в самом вопросе, потому что спрашивают именно
+    // про доступ к ней.
+    assert!(message.contains("Бухгалтерия Ромашки"), "{message}");
+    // Вторая: отпечаток ЦЕЛИКОМ, а не первыми байтами — усечённый
+    // приглашает подобрать коллизию к началу.
+    let fingerprint = r.peer.to_string();
+    assert!(detail.contains(&fingerprint), "{detail}");
+    assert!(detail.contains("голосом по телефону"), "сверять будут вслух, и в диалоге так и написано: {detail}");
+    assert!(detail.contains("целиком"), "обрывать сверку на первых знаках человеку нельзя предлагать: {detail}");
+    // Третья: самоназвание — и ПОМЕТКА рядом с ним, а не где-то в тексте.
+    let says = detail.lines().find(|l| l.contains("Заказчик Ромашка")).expect("самоназвание обязано быть: {detail}");
+    assert!(says.contains(NOT_VERIFIED), "пометка стоит в той же строке, что и чужие слова: {says}");
+
+    // И ни одной больше: всё прочее, что приехало по каналу, молчит.
+    let text = format!("{message}\n{detail}");
+    for leaked in [&r.base.base_id, &r.base.publication] {
+        assert!(!text.contains(leaked.as_str()), "пришло по каналу и выглядит фактом — в диалоге этому места нет: {leaked}");
+    }
+
+    // Кнопки называют ДЕЙСТВИЕ, а не «Да»/«Нет».
+    assert_eq!(ALLOW, "Разрешить");
+    assert_eq!(DENY, "Отклонить");
+}
+
+/// Самоназвания может не быть вовсе — и тогда честнее сказать это словами,
+/// чем показать кавычки вокруг пустоты. Пометка остаётся: «себя не назвала»
+/// — тоже её слова, а не наш проверенный факт.
+#[test]
+fn a_side_that_did_not_name_itself_is_said_so_in_words() {
+    let r = crate::enroll::Request { says_name: crate::wire::SaysName::new(""), ..a_request() };
+    let (_, detail) = permission_question(&r);
+    assert!(detail.contains("себя не назвала"), "{detail}");
+    assert!(detail.contains(NOT_VERIFIED), "{detail}");
+}
+
+/// Имя базы могло остаться незаполненным в карточке этого же человека —
+/// тогда вопрос спрашивает про карточку, а не про базу «». Своего слова
+/// «База не указана» диалог не придумывает: оно про поле, которое человек
+/// правит, а не про то, что у него спрашивают сейчас.
+#[test]
+fn an_empty_base_name_moves_the_question_to_the_card() {
+    let mut r = a_request();
+    r.base.base_name = String::new();
+    let (message, _) = permission_question(&r);
+    assert!(message.contains("карточке «Ромашка»"), "{message}");
+    assert!(!message.contains("«»"), "кавычки вокруг пустоты — не вопрос: {message}");
+}
+
+/// Закрытый без ответа диалог — НЕ разрешение и НЕ отказ: заявка остаётся в
+/// списке ровно как была, слово «ждёт разрешения» на месте, и строка стоит
+/// первой. Отказ её снимает и оставляет ИСХОД; разрешение снимает и исход
+/// стирает.
+///
+/// Падал так: `answer_request` не существовало, а `Ui` не держал ни заявок,
+/// ни отказов — закрыть диалог было негде и нечему.
+#[test]
+fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let card = "Ромашка";
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+
+    answer_request(&mut ui, card, Decision::NoAnswer);
+    assert_eq!(ui.waiting.len(), 1, "закрытие без ответа заявку не снимает");
+    assert!(ui.declined.is_empty(), "и отказом не притворяется");
+    assert!(ui.log.last().unwrap().line.text.contains("ждёт ответа"), "{:?}", ui.log.last());
+
+    answer_request(&mut ui, card, Decision::Deny);
+    assert!(ui.waiting.is_empty(), "отказ заявку снимает");
+    assert_eq!(ui.declined, vec![card.to_string()], "а исход остаётся: слово «отклонено» на строке");
+
+    // Разрешение по новой заявке стирает прошлый исход: карточка больше не
+    // «отклонено».
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    answer_request(&mut ui, card, Decision::Allow { write: true });
+    assert!(ui.waiting.is_empty());
+    assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
+}
+
+/// Решение человека уезжает туда, где его ждёт разговор зачисления
+/// (`enroll::accept_side` висит на `decide`). Без этого «Разрешить» было бы
+/// словом в журнале и ничем больше.
+#[test]
+fn the_answer_travels_back_to_the_conversation() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let (tx, mut rx) = futures::channel::oneshot::channel();
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+    answer_request(&mut ui, "Ромашка", Decision::Allow { write: true });
+    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }));
+
+    // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
+    // ждал бы подключения, которого не будет.
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    answer_request(&mut ui, "Ромашка", Decision::Allow { write: true });
+    assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
+}
+
+/// Вторая заявка по той же карточке заменяет первую: строка у карточки одна,
+/// и двух «ждёт разрешения» об одном и том же человеку нечем различить.
+/// Прошлый отказ она перебивает — иначе позванный второй раз читал бы свой
+/// прежний отказ вместо приглашения ответить.
+#[test]
+fn a_second_request_for_the_same_card_replaces_the_first_and_its_refusal() {
+    let mut ui = Ui::for_test();
+    ui.declined.push("Ромашка".into());
+    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    assert_eq!(ui.waiting.len(), 1);
+    assert!(ui.declined.is_empty(), "новая заявка перебивает прошлый исход");
+
+    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    assert_eq!(ui.waiting.len(), 1, "двух строк «ждёт разрешения» у одной карточки не бывает");
+
+    // Заявка по другой карточке соседку не трогает: отзыв и разрешение
+    // адресуются карточкой, и путать их нельзя.
+    let other = crate::enroll::Request { card: "Клевер".into(), ..a_request() };
+    take_request(&mut ui, crate::gui::Pending { request: other, answer: None });
+    assert_eq!(ui.waiting.len(), 2);
+}

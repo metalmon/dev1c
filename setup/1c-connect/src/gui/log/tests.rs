@@ -244,12 +244,13 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     let line = on_done(&mut ui, Some("прервано".into()), true);
     note_line(&mut ui, line.clone());
     ui.status = Some(line);
-    // Главное здесь — `Warn`, а не `Fail`. Заглавную в журнале ставит
-    // `note_line`; подвал держит строку как есть и поднимает её при показе
-    // (`panel::foot_left_text`), поэтому человек читает одно и то же.
+    // Главное здесь — `Warn`, а не `Fail`. Заглавную ставит только
+    // `note_line`, для журнала; `ui.status` хранит строку как есть, без
+    // заглавной — подвал с 9.11 её больше не показывает (решение владельца:
+    // левый слот подвала убран совсем), и второго места, где она печаталась
+    // бы заглавной, не осталось.
     assert_eq!(ui.log.last().map(|s| &s.line), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
     assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
-    assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, "C:\\kit").0, "Прервано");
 }
 
 #[test]

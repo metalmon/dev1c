@@ -29,7 +29,6 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -99,9 +98,10 @@ pub struct Panel {
     /// заново, когда отличается от неё больше чем на 1 px (`window::needs_fit`):
     /// содержимое «Связи» меняется под окном (режим прячет три поля,
     /// диалог выбора каталога возвращает путь), и без повторной подгонки окно
-    /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: его
-    /// высота закреплена двумя строками (`FOOT_LINE`/`FOOT_LINES`) и от
-    /// длины текста не зависит.
+    /// прокручивалось бы на эту разницу. Подвал сюда больше не входит: с 9.11
+    /// в нём нет текста вовсе (решение владельца — левый слот подвала убран
+    /// совсем), высоту держит высота кнопки (`h_8`), и от содержимого она не
+    /// зависит.
     last_fit: Option<(Pixels, Pixels)>,
     /// Подбор уже отложен до конца кадра: второй обмер в том же кадре его
     /// не дублирует.
@@ -533,49 +533,16 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(PASS_THE_CODE.to_string()), act: None }
 }
 
-/// Высота строки левого слота подвала при размере текста 13 и число строк,
-/// которые слот резервирует всегда — даже когда текст в одну. Две строки по
-/// 16 px — ровно высота кнопки рядом (`Button` размера Medium, `h_8` =
-/// 32 px), и подвал не растёт по тексту: подбор высоты окна
-/// (`window::needs_fit`) построен на неизменной высоте подвала, а растущая
-/// плашка заставляла окно подпрыгивать. Третья строка не переносится, а
-/// режется многоточием; полный текст — подсказкой по наведению.
-pub const FOOT_LINE: f32 = 16.;
-pub const FOOT_LINES: usize = 2;
-
-/// Левый слот подвала: ровно один текст, не два (заказчик 2026-10-20: «возле
-/// нижней кнопки почему-то две надписи стало»). Порядок, кто в нём говорит:
-///
-/// 1. настоящее сообщение (итог сохранения, ошибка) — человек только что
-///    нажал и ждёт ответа;
-/// 2. подсказка, почему «Сохранить» недоступна, — она про кнопку, и своя
-///    подсказка по наведению у кнопки есть и без слота;
-/// 3. путь комплекта — когда сказать больше нечего.
-///
-/// Причины замка и провала вердикта (`reason`) здесь больше нет (поправка
-/// владельца 9.11 ко второму снимку: «не надо наверно в выключатель новую
-/// строку. В журнале же можно показать») — подвал принадлежит действию над
-/// открытой карточкой: предмет и кнопка, и сам слот говорит только про них.
-/// Причину человек находит в журнале: щелчок по запертому переключателю сам
-/// пишет её туда непрочитанной строкой (`link::toggle_link`). У подсказки
-/// переключателя (`switch_tooltip`) `reason` остаётся — это единственное
-/// место экрана, что произносит её вслух без клика.
-///
-/// Раскладка по двум строкам, обрезка третьей и подсказка по наведению —
-/// дело `render`, здесь только выбор источника.
-///
-/// Текст уходит через `gui::capitalized` — та же заглавная, что у карточек и
-/// журнала. Путь комплекта она не трогает (первое слово с `:` и `\`).
-pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
-    let (text, bad) = if let Some(l) = status {
-        (l.text.clone(), matches!(l.kind, Kind::Fail))
-    } else if let Some(h) = hint {
-        (h.to_string(), false)
-    } else {
-        (kit_path.to_string(), false)
-    };
-    (gui::capitalized(&text), bad)
-}
+// Подвал потерял левый текстовый слот совсем (решение владельца 9.11,
+// второй снимок релизной сборки: «четыре вещи в 380 точек не лезут ни с
+// какой вёрсткой» — предмет, кнопка меню, главная кнопка и текст-подсказка
+// одновременно). `foot_left_text`, что выбирала источник этого слота
+// (итог операции → подсказка «Сохранить» → путь комплекта), отсюда ушла
+// целиком, а не потеряла ещё один параметр — вместе с ней ушли и
+// `FOOT_LINE`/`FOOT_LINES` (резервирование высоты под текст, которого
+// больше нет). В подвале остаются предмет и кнопки (`render`, блок
+// `foot_actions`); что происходило с этими источниками — в докстроке
+// `Panel::last_fit` и в отчёте задачи 11.
 
 /// Строки вкладки «Инструменты» по набору фактов — тому самому, из которого
 /// выведен вердикт карточки и который печатает «Проверить». Один факт — одна
@@ -2793,8 +2760,9 @@ impl Render for Panel {
         let why = reason(&link, &ready, gate.as_deref(), ui.facts_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Связь»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
-        // подсказке говорить не о чем). Один расчёт на весь `render`: тот же
-        // `hint` уходит и в левый слот подвала, и в тултип кнопки ниже.
+        // подсказке говорить не о чем). Один расчёт на весь `render`: `hint`
+        // уходит в тултип кнопки ниже — это единственное, что его теперь
+        // читает.
         let busy_now = busy.is_some();
         // Поля формы как `Connection` — один раз на весь `render`: из них считаются
         // и «есть ли несохранённое», и заголовок карточки ниже.
@@ -2805,18 +2773,15 @@ impl Render for Panel {
         let dirty = self.dirty_now(cx);
         let form = host_of(&self.fields, &self.original.mode, &self.original.publication, cx);
         // Главная кнопка «Связи» — один расчёт на весь `render`: от неё и
-        // подпись, и предмет слева от кнопки, и подсказка «Сохранить»
-        // (`main.why`) для левого слота подвала, когда он свободен.
+        // подпись, и предмет слева от кнопки. `main.why` — тултип САМОЙ
+        // кнопки (`.tooltip(h)` ниже), а не текст подвала: левого слота с
+        // 9.11 в подвале больше нет вовсе (решение владельца, второй снимок
+        // — «четыре вещи в 380 точек не лезут ни с какой вёрсткой»). Подпись
+        // «передайте код на ту сторону» тоже переехала туда же: пока кода
+        // нет, ей всё равно нечего показывать в подвале, а тултип кнопки её
+        // не теряет.
         let main = main_button(ui, &self.selected, dirty);
         let hint = (tab == gui::Tab::Link).then(|| main.why.clone()).flatten();
-        // Порядок источников держит сама `foot_left_text`: настоящий итог,
-        // затем подсказка «Сохранить», затем путь комплекта. Причины замка
-        // здесь нет (см. докстроку `foot_left_text`).
-        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
-        // Подсказка к итогу (путь отчёта проверки) — только пока слот занят
-        // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
-        // себя.
-        let foot_tip = ui.status.as_ref().and_then(|_| ui.status_tip.clone());
         // Заголовок карточки — из ПОЛЕЙ (`form` выше), а не из сохранённого:
         // человек меняет базу и видит, какую карточку он правит, ещё до
         // «Сохранить». Состав полей карточки и подписи профиля с папкой
@@ -3257,9 +3222,9 @@ impl Render for Panel {
                 // «Инструментах» (спека: один и тот же замок везде выглядит
                 // одинаково, задача 4 живого прогона 9.11). Кнопка гаснет
                 // молча только у «Сохранить» — заказчик 2026-10-20: почему
-                // нельзя нажать, не видно. Причина живёт в левом слоте
-                // подвала (`foot_left`, один текст) и в тултипе кнопки,
-                // вторая надпись рядом не добавляется.
+                // нельзя нажать, не видно. Причина живёт в тултипе самой
+                // кнопки (`hint`, `.tooltip(h)` ниже) — левого слота подвала
+                // с 9.11 не осталось вовсе, второй надписи рядом и подавно.
                 let allowed = can_save(dirty != Dirty::No, busy_now, has_progress);
                 let link_items = link_menu(cx.global::<Ui>(), &self.selected);
                 let (label, act) = (main.label, main.act);
@@ -3492,63 +3457,13 @@ impl Render for Panel {
                 // высота разделителя не меняется между состояниями.
                 div().w_full().h(px(2.)).child(div().w_full().h(px(1.)).mt(px(1.)).bg(border.opacity(0.6)))
             })
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .pt_3()
-                    // Один текст, но место под две строки — всегда, даже
-                    // когда текст в одну (`FOOT_LINE`/`FOOT_LINES`): высота
-                    // подвала не зависит от длины текста, иначе окно
-                    // подпрыгивает на подборе. `min_w_0` — иначе flex-ребёнок
-                    // не уже своего текста, и перенос на узком окне срабатывает
-                    // только упёршись в кнопку.
-                    // Полный текст — подсказкой по наведению, а после
-                    // проверки к нему прибавляется путь отчёта
-                    // (`Ui::status_tip`): в саму строку он не влезает.
-                    .child({
-                        let tip = match &foot_tip {
-                            Some(extra) => format!("{}\n{extra}", foot_left.0),
-                            None => foot_left.0.clone(),
-                        };
-                        // Место под две строки держит внешний блок, а текст
-                        // внутри него стоит по центру по высоте: в одну
-                        // строку он прижимался к верху, и подвал читался
-                        // съехавшим относительно кнопки рядом. Двум строкам
-                        // `justify_center` ничего не меняет — они занимают
-                        // всю высоту.
-                        v_flex()
-                            .id("foot-left")
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(FOOT_LINE * FOOT_LINES as f32))
-                            .justify_center()
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                            .child(
-                                div()
-                                    // Ширину берём у подвала целиком, а не
-                                    // по тексту: от неё зависят и перенос, и
-                                    // многоточие третьей строки.
-                                    .w_full()
-                                    .min_w_0()
-                                    .line_clamp(FOOT_LINES)
-                                    // `line_clamp` один обрезает после второй
-                                    // строки не глядя на слово — находка
-                                    // живого прогона 9.11: хвост рвался
-                                    // посередине слова. `text_ellipsis` —
-                                    // готовый приём `gpui-kit`
-                                    // (`LineWrapper::truncate_wrapped_line`):
-                                    // та же обрезка, но по границе слова и с
-                                    // «…» на конце; своего переноса не пишем.
-                                    .text_ellipsis()
-                                    .text_size(px(13.))
-                                    .line_height(px(FOOT_LINE))
-                                    .text_color(if foot_left.1 { danger } else { caption })
-                                    .child(foot_left.0),
-                            )
-                    })
-                    .child(foot_actions),
-            )
+            // Левого текстового слота здесь больше нет (решение владельца
+            // 9.11, второй снимок релизной сборки): предмет, кнопка меню и
+            // главная кнопка — четыре вещи — не влезали в 380 точек ни с
+            // каким текстом рядом, многоточие лечило симптом, а не причину.
+            // Подвал теперь — только `foot_actions`: предмет и кнопки, своей
+            // неизменной ширины, без соседа, с которым делить место.
+            .child(h_flex().items_center().justify_end().gap_2().pt_3().child(foot_actions))
     }
 }
 
@@ -3556,11 +3471,11 @@ impl Render for Panel {
 mod tests {
     use super::{
         act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
-        delete_question_text, fact_rows, fields_differ, folder_label, foot_left_text, found_text, leave_question, link_body, link_menu,
-        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
-        publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
-        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
-        DELETE_CONFIRM_YES, FOOT_LINE, FOOT_LINES, ONBOARDING_ASK, PASS_THE_CODE,
+        delete_question_text, fact_rows, fields_differ, folder_label, found_text, leave_question, link_body, link_menu, main_button,
+        nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, publication_switch_label,
+        reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip,
+        tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES,
+        ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -4952,62 +4867,46 @@ mod tests {
         }
     }
 
+    /// Решение владельца 9.11 (второй снимок релизной сборки): левый
+    /// текстовый слот подвала убран совсем — ни итога операции, ни подсказки
+    /// «Сохранить», ни пути комплекта там больше нет, ни на одной из трёх
+    /// вкладок («Связь» давала слот и `main_button`-предмету, «Инструменты»
+    /// и «Журнал» — своим кнопке и меню; слот был общим рядом с любой из
+    /// них). Само отсутствие слота доказывается отсутствием кода, который
+    /// бы его строил: `foot_left_text`, `FOOT_LINE`, `FOOT_LINES` из файла
+    /// убраны целиком, а не потеряли ещё один параметр — им больше нечего
+    /// возвращать.
+    ///
+    /// Пригодная для чистой проверки часть — предмет и кнопка, которые
+    /// подвал показывает на вкладке «Связь» в любом состоянии: `main_button`
+    /// замок (`ui.gate`) не читает вовсе — им распоряжается
+    /// `Switch::disabled`/`switch_locked` в самом `render`, отдельно от этой
+    /// функции, — так что запертый переключатель не отбирает ни предмет, ни
+    /// подпись кнопки. Карточка выбрана или список откатился на текущую
+    /// (пустое имя) — предмет и кнопка тоже на месте. Пустой список (когда
+    /// ни предмета, ни кнопки нет вовсе) — отдельный случай, уже проверен
+    /// `an_empty_list_has_no_main_button_at_all` выше.
     #[test]
-    fn the_footer_slot_picks_one_text_in_priority_order() {
-        let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
-        // Сказать нечего — путь комплекта, кнопка не красная.
-        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
-        // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
-        assert_eq!(foot_left_text(None, Some("Подождите: идёт проверка"), path), ("Подождите: идёт проверка".to_string(), false));
-        // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
-        // что слот уже занят объяснением (заказчик 2026-10-20).
-        let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
-        assert_eq!(foot_left_text(Some(&ok), Some("Подождите: идёт проверка"), path), (ok.text.clone(), false));
-        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        // Начало фразы — с заглавной (`capitalized`), а путь комплекта выше
-        // остаётся как есть: в его первом слове `:` и `\`.
-        assert_eq!(foot_left_text(Some(&err), Some("Подождите: идёт проверка"), path), ("Порт занят".to_string(), true));
-    }
+    fn the_footer_keeps_subject_and_button_however_the_lock_or_the_selection_stand() {
+        let mut ui = Ui::for_test();
+        ui.cfg = cfg_with(&["Buh"]);
 
-    /// Поправка владельца 9.11 ко второму снимку: «не надо наверно в
-    /// выключатель новую строку. В журнале же можно показать» — отменяет
-    /// план первого разбора (вторая приглушённая строка в карточке
-    /// состояния). Причина замка не живёт ни в подвале (у `foot_left_text`
-    /// больше нет для неё параметра — мёртвого входа не оставляем), ни
-    /// второй строкой карточки: `Card` как была, с одним полем `title`, и
-    /// `card()` эту причину никогда и не спрашивала. Подвал — предмет и
-    /// кнопка, а причину человек получает в журнале, щелчком по запертому
-    /// переключателю (`link::toggle_link`, который пишет её строкой через
-    /// `note_line`, не `note_line_seen`, и строка считается непрочитанной).
-    #[test]
-    fn the_footer_has_no_lock_reason_in_any_lock_state_and_the_card_stays_one_line() {
-        let path = "C:\\dev1c";
-        let why = "Не всё готово: проект: /home/dev3/project не разложен";
-        // `foot_left_text` не умеет принять причину вовсе — подсказке
-        // «Сохранить» больше ничто не мешает занять слот.
-        let hint = Some("Подождите: идёт проверка");
-        assert_eq!(foot_left_text(None, hint, path), (hint.unwrap().to_string(), false));
-        let _ = why; // причина остаётся только у подсказки переключателя (`reason`/`switch_tooltip`), не у подвала.
+        // Список не пуст, карточка не выбрана (откат на текущую) — предмет
+        // и кнопка на месте.
+        let not_selected = main_button(&ui, "", Dirty::No);
+        assert!(!not_selected.subject.is_empty());
+        assert!(!not_selected.label.is_empty());
 
-        // Карточка состояния — одна строка в любом состоянии замка: `Card`
-        // хранит ровно одно поле `title`, второго не завели.
-        let locked = card(None, &State::Off, "local", &Verdict::Ready, Some(why), Instant::now());
-        assert!(!locked.title.contains('\n'), "карточка — одна строка даже при запертом замке: {}", locked.title);
+        // Карточка выбрана по имени — тот же результат, тем же предметом.
+        let selected = main_button(&ui, "Buh", Dirty::No);
+        assert_eq!(selected.subject, "Buh");
 
-        // Предмет и кнопка подвала не зависят от замка и остаются на месте.
-        let b = main_button(&ui_link_accept_waiting(), "", Dirty::No);
-        assert!(!b.subject.is_empty(), "предмет остаётся в подвале");
-    }
-
-    /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки
-    /// рядом (`Button` Medium — `h_8`, 32 px). Поменяют межстрочный интервал
-    /// или число строк — равенство сломается здесь, а не на снимке из
-    /// образа, где высота окна начинает прыгать на подборе
-    /// (`window::needs_fit` построен на неизменной высоте подвала).
-    #[test]
-    fn the_footer_reserves_exactly_the_height_of_the_button() {
-        assert_eq!(FOOT_LINE * FOOT_LINES as f32, 32., "подвал разошёлся с высотой кнопки h_8");
-        assert_eq!(FOOT_LINES, 2, "две строки, не больше и не меньше");
+        // Замок переключателя (`ui.gate`) `main_button` не спрашивает —
+        // предмет и подпись кнопки не меняются от того, заперт он или нет.
+        ui.gate = Some("не задан пользователь базы".to_string());
+        let locked = main_button(&ui, "Buh", Dirty::No);
+        assert_eq!(locked.subject, selected.subject);
+        assert_eq!(locked.label, selected.label);
     }
 
     /// Вердикт считается по событиям, а не на таймере, значит бывает

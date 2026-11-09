@@ -18,6 +18,7 @@ pub mod jsonrpc;
 pub mod licence;
 pub mod listen;
 pub mod local;
+pub mod node;
 pub mod onec_error;
 pub mod ops_host;
 pub mod orphan;

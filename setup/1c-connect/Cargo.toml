@@ -55,6 +55,16 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 # behaviour that differs by version, and it takes the password only from a
 # keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.
 russh = { version = "0.64", default-features = false, features = ["ring"] }
+# Транспорт канала между двумя машинами: QUIC, адресуемый открытым ключом, с
+# пробиванием NAT и релеем как запасным путём. Цена замерена перед
+# объявлением (журнал ветки `channel`, задача 4): чистая сборка нашего крейта
+# 1 м 10 с до зависимости, 11 м 39 с после — разница уходит на однократную
+# компиляцию дерева iroh (+123 крейта в `Cargo.lock`), дальше оно лежит в
+# `target`.
+# Фичи — дефолтные: `tls-ring` там обязателен (без крипто-провайдера пресеты
+# `Minimal`/`N0` не существуют вовсе), и ring — тот же выбор, что уже сделан
+# для russh выше: на машине сборки не нужны ни cmake, ни nasm.
+iroh = "1.4"
 # io-std: stdin/stdout как AsyncRead/AsyncWrite — ими подкоманда `mcp` отдаёт
 # стандартные потоки в тот же `Serve::dispatch`, что принимает TCP и канал
 # туннеля (`ops_host::run_mcp`).

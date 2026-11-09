@@ -921,7 +921,14 @@ pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
 /// Отрисовка рядов и сравнение «изменилось ли» (`fields_differ`) ходят только
 /// через этот список.
 pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
-    if !c.base_here {
+    // Защита показа (задача 12 «Карточка после живого прогона», находка
+    // владельца 9.11): «Где база» в локальном режиме не спрашивают вовсе —
+    // переключателя на экране нет (комментарий ниже, «база на той стороне») —
+    // значит и застрявшее в файле `base_here = false` не вправе решать состав
+    // полей. Без этой строки ответ «Всё на одной машине» (или ручная правка
+    // файла) оставлял бы карточку без единого поля базы при включённой
+    // локальности — то самое противоречие, которое увидел владелец.
+    if !c.base_here && c.mode != "local" {
         return &["project"];
     }
     match (c.mode == "local", c.publication == "webserver") {
@@ -937,7 +944,10 @@ pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
 /// этом словами, а не молчать пустыми строками (спека, «Что показывает
 /// карточка соединения»). `None` — база здесь, подсказка не нужна.
 pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
-    (!c.base_here).then_some("Поля базы приходят с той стороны")
+    // Та же защита, что у `shown_fields` выше, и тем же доводом: в локальном
+    // режиме «той стороны» не существует вовсе, и застрявшее `base_here =
+    // false` не вправе подписывать экран её словами.
+    (!c.base_here && c.mode != "local").then_some("Поля базы приходят с той стороны")
 }
 
 /// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
@@ -1511,7 +1521,33 @@ fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
 /// остаётся отдельной, своей, как и раньше.
 fn set_card_topology_kind(cx: &mut App, name: &str, answer: &'static str) {
     if answer == "local" {
-        set_card_mode(cx, name, "local");
+        let is_current = cx.global::<Ui>().cfg.current().name == name;
+        if is_current {
+            // Текущая карточка: режим меняет транспорт под сеансом (или
+            // могущим быть живым) и обязан пройти тревную последовательность
+            // (`set_card_mode` → `tray::request_current_mode_change`), а не
+            // точечную запись — Important 3 ревью круга починки 1 задачи 16,
+            // та же развилка, что ниже у роли. `base_here` эта дверь не
+            // пишет (сливать их в одну запись здесь нельзя по тому же
+            // ruling'у задачи 4, что и у роли с режимом ниже) — от
+            // застрявшего значения экран защищён отдельно (`shown_fields`,
+            // `base_fields_note`).
+            set_card_mode(cx, name, "local");
+            return;
+        }
+        // Нетекущая карточка: сеанса нет, и ответ «Всё на одной машине» —
+        // это ответ на вопрос «Это соединение», задающий ОБЕ оси сразу,
+        // одной записью (находка владельца 9.11: до этой правки писался
+        // только `mode`, а `base_here` оставался прежним — локальный режим
+        // без переключателя «Где база» на экране продолжал молча считаться
+        // «базой на той стороне»).
+        if let Err(e) = gui::set_keys(cx.global_mut::<Ui>(), name, &[("mode", "local"), ("base_here", "true")]) {
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+            return;
+        }
+        sync_card_topology(cx, name);
+        cx.refresh_windows();
         return;
     }
     let is_current = cx.global::<Ui>().cfg.current().name == name;
@@ -4053,11 +4089,40 @@ mod tests {
         assert_eq!(shown_fields(&bogus), shown_fields(&tunnel));
     }
 
+    /// Задача 12 «Карточка после живого прогона», находка владельца 9.11:
+    /// последовательность «Где база» → «На той стороне», затем «Это
+    /// соединение» → «Всё на одной машине» оставляла в файле `base_here =
+    /// false` (застрявшее прошлым ответом значение) при `mode = "local"` —
+    /// на экране выходил локальный режим без единого поля базы и с подписью
+    /// «Поля базы приходят с той стороны», хотя в локальном режиме той
+    /// стороны не существует вовсе.
+    ///
+    /// Тест держит защиту ПОКАЗА отдельно от защиты ЗАПИСИ
+    /// (`answering_one_machine_puts_the_base_here_too` в `save::tests`):
+    /// даже если `base_here = false` всё равно долетело до `Connection` —
+    /// случайно оставленной старой записью, ручной правкой файла, путём,
+    /// который эта ветка не чинила, — `shown_fields`/`base_fields_note`
+    /// обязаны читать локальность САМИ, а не доверять чужому полю. «Где
+    /// база» в локальном режиме не спрашивают вовсе (переключателя на
+    /// экране нет), значит застрявшее значение не вправе решать состав
+    /// полей.
+    #[test]
+    fn a_local_card_never_says_the_base_fields_come_from_the_other_side() {
+        let stuck = Connection { mode: "local".into(), base_here: false, ..Connection::default() };
+        let clean = Connection { mode: "local".into(), base_here: true, ..Connection::default() };
+        assert_eq!(shown_fields(&stuck), shown_fields(&clean), "состав полей — как у «база здесь», несмотря на застрявшее значение");
+        assert!(shown_fields(&stuck).contains(&"base_path"), "поля базы показаны, а не одна «project»");
+        assert_eq!(base_fields_note(&stuck), None, "подписи про «ту сторону» нет — той стороны в локальном режиме не существует");
+    }
+
     #[test]
     fn fields_follow_the_topology_of_the_connection() {
         // Спека, «Что показывает карточка соединения»: база на той стороне —
         // ни пути к базе, ни пользователя, ни пароля базы здесь нет вовсе.
-        let there = Connection { base_here: false, ..Default::default() };
+        // `mode: "tunnel"` — явно: в локальном режиме «той стороны» не
+        // существует вовсе, и `base_here = false` там не читается буквально
+        // (задача 12, защита показа — `a_local_card_never_says_the_base_fields_come_from_the_other_side`).
+        let there = Connection { base_here: false, mode: "tunnel".into(), ..Default::default() };
         assert_eq!(shown_fields(&there), &["project"]);
         let here = Connection { base_here: true, ..Default::default() };
         assert!(shown_fields(&here).contains(&"base_path"));
@@ -4189,15 +4254,20 @@ mod tests {
 
     #[test]
     fn the_publication_address_shows_only_where_the_base_is() {
-        let there = Connection { base_here: false, publication: "webserver".into(), ..Default::default() };
+        // `mode: "tunnel"` — явно, тем же доводом, что у
+        // `fields_follow_the_topology_of_the_connection`: иначе умолчание
+        // `mode = "local"` само накладывает защиту показа задачи 12.
+        let there = Connection { base_here: false, mode: "tunnel".into(), publication: "webserver".into(), ..Default::default() };
         assert!(!shown_fields(&there).contains(&"base_url"), "публикация — поле конца с базой");
     }
 
     #[test]
     fn a_card_whose_base_is_elsewhere_says_so_instead_of_showing_emptiness() {
         // Спека: карточка бухгалтера обязана сказать это одной строкой — тем же
-        // приёмом, каким «Инструменты» уже не молчат пустотой.
-        let there = Connection { base_here: false, ..Default::default() };
+        // приёмом, каким «Инструменты» уже не молчат пустотой. `mode:
+        // "tunnel"` — явно, тем же доводом, что у соседних тестов этого
+        // блока: в локальном режиме «той стороны» не существует.
+        let there = Connection { base_here: false, mode: "tunnel".into(), ..Default::default() };
         assert_eq!(base_fields_note(&there).unwrap(), "Поля базы приходят с той стороны");
         assert_eq!(base_fields_note(&Connection::default()), None);
     }

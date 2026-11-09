@@ -2234,6 +2234,35 @@ fn set_keys_writes_every_key_in_one_pass() {
     assert_eq!(ui.cfg.by_name("Buh").unwrap().mode, "tunnel");
 }
 
+/// Задача 12 «Карточка после живого прогона», находка владельца 9.11: его
+/// последовательность была «Где база» → «На той стороне», затем «Это
+/// соединение» → «Всё на одной машине» — и вышел локальный режим без единого
+/// поля базы, с подписью «Поля базы приходят с той стороны», хотя в локальном
+/// режиме той стороны не существует. Причина — `panel::set_card_topology_kind`
+/// у ответа «Всё на одной машине» писала только `mode`, а `base_here`
+/// оставался прежним (`false`) молча.
+///
+/// Лечит ровно то же правило, что уже закрыло пару `role`+`mode` у выхода из
+/// локального режима (`set_keys_writes_every_key_in_one_pass`): обе оси
+/// ответа «Это соединение» — одна запись через `set_keys`. Тест держит
+/// именно эту пару ключей от того самого стартового состояния, в котором её
+/// застал владелец (`base_here` уже сбито на `false` отдельным ответом «Где
+/// база»), и смотрит на оба конца — файл и `ui.cfg` — тем же приёмом, что
+/// `set_keys_writes_every_key_in_one_pass`.
+#[test]
+fn answering_one_machine_puts_the_base_here_too() {
+    let mut ui = Ui::for_test();
+    with_params_file(&ui);
+    set_base_here(&mut ui, "Buh", false).unwrap();
+
+    set_keys(&mut ui, "Buh", &[("mode", "local"), ("base_here", "true")]).unwrap();
+
+    let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(text.contains("mode = \"local\"") && text.contains("base_here = true"), "{text}");
+    assert_eq!(ui.cfg.by_name("Buh").unwrap().mode, "local");
+    assert!(ui.cfg.by_name("Buh").unwrap().base_here, "файл и память согласны: база теперь здесь");
+}
+
 /// Тот же отказ, что у `set_profile` на профиле «Разработчик» при пустой
 /// папке исходников
 /// (`the_developer_profile_without_a_sources_folder_is_refused_before_the_write`),

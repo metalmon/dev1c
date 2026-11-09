@@ -1059,12 +1059,15 @@ pub struct PartyRow {
     /// Разбирать его обратно из `fingerprint` было бы вторым мнением о том,
     /// что на экране написано.
     pub key: iroh::EndpointId,
-    /// Как сторона себя назвала — без пометки: она одна на весь список
-    /// (`Accepting::says_note`). Повторять «сказано той стороной, не
-    /// проверено» у каждой из десяти сторон значило бы три переноса на
-    /// строку поверх отпечатка, который и сам занимает две (Minor ревью
-    /// задач 6 и 7); предмет пометки от этого не меняется — она
-    /// по-прежнему про все эти имена.
+    /// Как сторона себя назвала — без всякой пометки о том, что это её
+    /// собственные слова.
+    ///
+    /// Пометка была («сказано ими, не проверено») и снята решением владельца
+    /// 10.11: «первую страшилку вообще убери, просто показывай отпечаток, кто
+    /// в теме — тот поймёт». Довод принят: предупреждение, которое висит над
+    /// списком всегда, перестаёт читаться на третий раз, а доказывает
+    /// личность отпечаток — он тут же, строкой выше, и сверяют голосом
+    /// именно его.
     pub says_name: String,
     /// Что ей дано, словами: «Чтение и запись» или «Только чтение» (спека 6
     /// ревью задач 6 и 7). Без этой строки сторона, которой разрешена
@@ -1119,7 +1122,6 @@ pub struct Accepting {
     pub enrolled: String,
     /// Пометка над списком — одна на все имена сразу. `None` — зачисленных
     /// нет, и помечать нечего.
-    pub says_note: Option<&'static str>,
     pub parties: Vec<PartyRow>,
 }
 
@@ -1149,7 +1151,6 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     } else {
         format!("Зачислено: {}", common::word::count(parties.len() as u64, "сторона", "стороны", "сторон"))
     };
-    let says_note = (!parties.is_empty()).then_some("Имена ниже — как стороны назвали себя сами: сказано ими, не проверено");
     let parties = parties
         .iter()
         .map(|p| PartyRow {
@@ -1163,7 +1164,7 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
             write: p.write,
         })
         .collect();
-    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, says_note, parties })
+    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, parties })
 }
 
 /// Зеркало `accepting_block` для ЗОВУЩЕЙ карточки: куда вставить код и что
@@ -3318,13 +3319,6 @@ impl Panel {
                 );
             }
             col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
-            // Пометка про чужие слова — ОДНА над списком, а не у каждой
-            // строки: при десяти сторонах она была бы десятью переносами
-            // поверх отпечатков, которые и сами занимают по две строки
-            // (Minor ревью задач 6 и 7).
-            if let Some(note) = block.says_note {
-                col = col.child(div().text_size(px(12.)).text_color(caption).child(note));
-            }
             for (n, p) in block.parties.into_iter().enumerate() {
                 let card = card_name.clone();
                 let key = p.key;
@@ -6137,13 +6131,11 @@ mod tests {
         assert!(b.parties[0].says_name.contains("Ромашка-бухгалтерия"));
         assert!(b.parties[1].says_name.contains("не назвала"), "{}", b.parties[1].says_name);
 
-        // Чужие слова помечены ОДИН раз над списком, а не у каждой строки:
-        // при десяти сторонах пометка была бы десятью переносами поверх
-        // отпечатков, которые и сами занимают по две строки (Minor ревью).
-        let note = b.says_note.expect("зачисленные есть — пометке есть что помечать");
-        assert!(note.contains("не проверено"), "{note}");
+        // Пометки про чужие слова нет нигде — ни над списком, ни у строки
+        // (решение владельца 10.11). Личность доказывает отпечаток, он на
+        // строке выше, и предупреждение, висящее всегда, читаться перестаёт.
         for p in &b.parties {
-            assert!(!p.says_name.contains("не проверено"), "пометка не повторяется у каждой строки: {}", p.says_name);
+            assert!(!p.says_name.contains("не проверено"), "пометки о чужих словах нет: {}", p.says_name);
         }
 
         // Спека 6 ревью: что стороне ДАНО, видно словами. Без этой строки
@@ -6168,7 +6160,6 @@ mod tests {
         assert!(b.code_note.contains("Показать код"), "{}", b.code_note);
         assert_eq!(b.enrolled, "Никого ещё не зачислили");
         assert!(b.parties.is_empty());
-        assert_eq!(b.says_note, None, "помечать нечего, когда никого не зачислили");
     }
 
     /// У зовущей карточки своего кода не бывает — он приходит с той стороны;

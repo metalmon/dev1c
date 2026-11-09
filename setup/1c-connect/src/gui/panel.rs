@@ -33,6 +33,8 @@ use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme, Disableable, FocusableExt, Icon, Sizable, Theme};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -95,6 +97,14 @@ pub struct Panel {
     /// (`window::height_on`) и под содержимое не растёт, так что длинный
     /// список соединений прокручивается, как «Проект» и «Журнал».
     link_scroll: ScrollHandle,
+    /// Взведённая просьба «довези код до глаз»: «Показать код» и «Выдать
+    /// новый код» ставят её, а гасит она себя сама на ближайшей отрисовке —
+    /// в якоре у блока кода (`Panel::scroll_anchor`), где только и известно,
+    /// куда этот блок лёг.
+    ///
+    /// `Rc<Cell<_>>`, а не обычное поле: гасить просьбу надо из замыкания
+    /// якоря, которое живёт дольше одной отрисовки и `&mut Panel` не видит.
+    show_code: Rc<Cell<bool>>,
     /// Сколько строк журнала было на прошлой отрисовке: чтобы
     /// толкать полосу только на новые, иначе целиком вниз.
     log_len: usize,
@@ -1574,6 +1584,30 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     Ok(code)
 }
 
+/// Оговорка к коду, выданному БЕЗ релея и без прямых адресов. `None` — в код
+/// попало хоть что-то, по чему дозваниваются.
+///
+/// Зачем она. `Peer::reach` отдаёт пусто в двух живых случаях: в первые
+/// секунды после запуска (узел ещё не поздоровался с релеем) и без интернета
+/// вовсе. Код при этом выдаётся — и это правильно, отказывать не за что, — но
+/// несёт он один ключ узла. Дозвониться по такому коду можно только поиском
+/// через серверы n0, то есть лишь при настоящем интернете у ОБЕИХ сторон, а
+/// человек видит обычную строку и передаёт её как обычную. Молчать тут значит
+/// отдать ему заведомо худший код и не сказать об этом ни слова; цена молчания
+/// — звонок «я вставил код, ничего не происходит», на который отвечать нечем.
+///
+/// Говорится это и на «Показать код», и на «Выдать новый»: оговорка про ту
+/// строку, которую человек сейчас держит в руках, а не про действие.
+fn blind_code_note(reach_empty: bool, card: &str) -> Option<String> {
+    reach_empty.then(|| {
+        format!(
+            "Код для «{card}» выдан без адресов: узел ещё не вышел в сеть. \
+             Дозвониться по нему получится только через серверы n0 и только при интернете у обеих сторон \
+             — если та сторона не дозвонится, выдайте новый код минутой позже."
+        )
+    })
+}
+
 /// Позвонить зовущей карточкой: код — в поток узла, слово — человеку.
 ///
 /// Запись, а не чистое решение: просьба уезжает в другой поток. Проверяется
@@ -1836,6 +1870,15 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         LinkAct::ShowCode | LinkAct::NewCode => {
             let fresh = act == LinkAct::NewCode;
             let r = issue_code(cx.global_mut::<Ui>(), subject, fresh);
+            // Показать — значит довезти до глаз: код лежит последним блоком
+            // карточки, а нажимают это в подвале и в меню. Просьбу гасит сам
+            // якорь у блока кода на ближайшей отрисовке (`scroll_anchor`);
+            // отказ выдачи её не взводит — везти не к чему.
+            if r.is_ok() {
+                if let Some(p) = cx.global::<Ui>().panel.clone() {
+                    p.read(cx).show_code.set(true);
+                }
+            }
             // Сам код в журнал не печатается — он секрет, а журнал видно
             // через плечо и он уезжает в отчёты. Строка говорит, что код
             // есть и где он: в карточке, одной строкой, с «Скопировать».
@@ -1854,7 +1897,8 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         LinkAct::Allow => {
             // Заявка берётся по предмету, а не «первая из списка»: предмет у
             // кнопки один, и спросить человека о чужой карточке нельзя.
-            let Some(r) = cx.global::<Ui>().waiting.iter().find(|p| p.request.card == subject).map(|p| p.request.clone()) else {
+            let Some(r) = cx.global::<Ui>().waiting.iter().find(|p| p.request.card == subject).map(|p| p.request.clone())
+            else {
                 // Заявки уже нет — успели ответить в другом окне или она
                 // ушла по сроку. Молчать нельзя: человек нажал кнопку.
                 gui::note_line(
@@ -2564,6 +2608,7 @@ impl Panel {
             log_scroll: ScrollHandle::new(),
             project_scroll: ScrollHandle::new(),
             link_scroll: ScrollHandle::new(),
+            show_code: Rc::new(Cell::new(false)),
             log_len: 0,
             original,
             // Окно открывается на текущем соединении — ровно то, чьи поля
@@ -2606,6 +2651,50 @@ impl Panel {
                         .thumb_active(|t| t.width(px(5.)).inset(px(1.)).radius(px(3.)))
                 }),
             ))
+    }
+
+    /// Якорь прокрутки: ставится В РАЗМЕТКУ там, куда надо довезти глаза, и
+    /// на отрисовке, где взведена просьба `want`, подкручивает область так,
+    /// чтобы это место легло у верхнего края видимого.
+    ///
+    /// Зачем он вообще нужен. «Показать код» — действие подвала и меню, то
+    /// есть нажимается оно за километр от самого кода: код лежит последним
+    /// блоком карточки, ниже всех полей, и на коротком окне он просто за
+    /// сгибом. Действие называлось показом и показа не делало (находка 4
+    /// живого прогона двумя машинами).
+    ///
+    /// Почему якорь, а не `ScrollHandle::scroll_to_item`: та считает ДЕТЕЙ
+    /// области прокрутки, а у «Связи» ребёнок один — колонка со всем списком;
+    /// блок кода лежит внутри карточки внутри строки внутри этой колонки, и
+    /// номера у него нет. И не `scroll_to_bottom`: низ — это конец списка
+    /// зачисленных сторон и «+ Добавить», а их бывает сколько угодно, и код
+    /// остался бы за сгибом ровно так же.
+    ///
+    /// Высота — ноль: якорь ничего не рисует и места в колонке не занимает,
+    /// его дело — назвать точку. Бока (`bounds`) ему даёт разметка, а не мы.
+    fn scroll_anchor(want: &Rc<Cell<bool>>, handle: &ScrollHandle) -> impl IntoElement {
+        let want = want.clone();
+        let handle = handle.clone();
+        canvas(
+            move |bounds, window, _| {
+                // `replace(false)` — просьба одноразовая: иначе область
+                // переставала бы слушаться колеса, подкручиваясь обратно к
+                // коду на каждом кадре.
+                if want.replace(false) {
+                    let view = handle.bounds();
+                    let was = handle.offset();
+                    // Якорь уже нарисован со СДВИГОМ (он внутри области), и
+                    // разница «где он» и «где верх окна» — ровно то, на
+                    // сколько сдвиг надо изменить. Зажим в пределы области
+                    // делает сам GPUI на следующей раскладке.
+                    handle.set_offset(point(was.x, was.y + view.top() - bounds.top()));
+                    window.refresh();
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .w_full()
+        .h(px(0.))
     }
 
     /// Нужно ли подхватить перечитанные параметры в поля — и какие именно.
@@ -3168,6 +3257,10 @@ impl Panel {
             col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
             if let Some(code) = block.code {
                 let to_copy = code.clone();
+                // Якорь — ПЕРЕД подписью «Код подключения»: «Показать код»
+                // довозит глаза сюда, и дальше вниз сами собой оказываются
+                // «Скопировать», «Выдать новый код» и список зачисленных.
+                col = col.child(Self::scroll_anchor(&self.show_code, &self.link_scroll));
                 col = col.child(
                     v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Код подключения")).child(
                         h_flex()
@@ -4128,10 +4221,12 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
+        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title,
+        delete_on_confirm,
         delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question,
         link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu,
-        project_rows, publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields,
+        project_rows, publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url,
+        shown_fields,
         skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body,
         DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
     };

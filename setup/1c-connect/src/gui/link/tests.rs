@@ -450,27 +450,44 @@ fn the_gate_never_switches_serving_back_on() {
 /// `Connection::default()` — локальный режим (30.10), а у него своя пара
 /// слов, проверенная отдельным тестом ниже.
 #[test]
-fn row_folds_eight_contract_states_into_four_words() {
+fn row_folds_eight_contract_states_into_five_words() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     assert_eq!(row(&c, false, Some(&State::Up { since: Instant::now() })).state, "подключено");
+    assert_eq!(row(&c, false, Some(&State::Connecting)).state, "подключается");
     assert_eq!(row(&c, false, Some(&State::Retrying(String::new()))).state, "подключается снова");
     assert_eq!(row(&c, false, Some(&State::Failed(String::new()))).state, "разорвано");
     assert_eq!(row(&c, false, None).state, "не подключено");
 }
 
-/// Живой прогон 9.11: `State::Off`/`State::Connecting` значат «обслуживание
-/// не поднято», а не «кто-то ждёт решения человека» — слова «ждёт
-/// разрешения» принадлежат протоколу (зачисление стороны, диалог
-/// разрешения), которого в программе нет. Прежде оба состояния читались
-/// как «ждёт разрешения» у ЛЮБОЙ нелокальной карточки, которая просто не
-/// успела подключиться — владелец увидел это как «на разработчика нельзя
-/// переключить», когда карточка, которую он только открыл, улетела первой
-/// строкой наверх списка.
+/// Живой прогон 9.11: `State::Off` значит «обслуживание не поднято», а не
+/// «кто-то ждёт решения человека» — слова «ждёт разрешения» принадлежат
+/// протоколу (зачисление стороны, диалог разрешения), которого в программе
+/// нет. Прежде оно читалось как «ждёт разрешения» у ЛЮБОЙ нелокальной
+/// карточки, которая просто не успела подключиться — владелец увидел это
+/// как «на разработчика нельзя переключить», когда карточка, которую он
+/// только открыл, улетела первой строкой наверх списка.
 #[test]
 fn a_card_that_never_connected_does_not_say_it_waits_for_permission() {
     let c = Connection { mode: "tunnel".into(), role: "accept".into(), ..Default::default() };
     assert_eq!(row(&c, true, Some(&State::Off)).state, "не подключено");
-    assert_eq!(row(&c, true, Some(&State::Connecting)).state, "не подключено");
+}
+
+/// Круг починки 1 задачи 2, Minor 2: первый прогон правки выше слил
+/// `Off` и `Connecting` в одно слово, хотя `Connecting` — настоящее
+/// движение («подключается»), которое человек видит прямо сейчас, а не
+/// протокольный стенд-ин, как был `Off`. Три состояния — три разных слова.
+#[test]
+fn connecting_keeps_its_own_word_apart_from_off_and_retrying() {
+    let c = Connection { mode: "tunnel".into(), role: "accept".into(), ..Default::default() };
+    let off = row(&c, true, Some(&State::Off)).state;
+    let connecting = row(&c, true, Some(&State::Connecting)).state;
+    let retrying = row(&c, true, Some(&State::Retrying(String::new()))).state;
+    assert_eq!(off, "не подключено");
+    assert_eq!(connecting, "подключается");
+    assert_eq!(retrying, "подключается снова");
+    assert_ne!(off, connecting);
+    assert_ne!(connecting, retrying);
+    assert_ne!(off, retrying);
 }
 
 /// Задача 16 плана `2026-11-03-interface`, «третье, оттуда же»: живого

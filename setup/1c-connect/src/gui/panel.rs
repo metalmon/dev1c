@@ -162,6 +162,18 @@ pub struct Card {
 /// беду не там, где она есть. «Не подключён» остаётся словом настоящего
 /// отказа (`State::Failed`): там и правда разошлось обещанное с тем, что
 /// есть, и это отказ показывают выше, см. ниже.
+///
+/// **Слово `OFF_WORD` — общее для карточки и подсказки значка** (круг
+/// починки 1 задач 2+8, Important 1). Подсказка трея (`gui::tray_tooltip`)
+/// держала свой словарь («подключён»/«не подключён») и не смотрела ни на
+/// выключатель, ни на режим: выключатель выключен, окно закрыто — человек
+/// наводит мышь на значок и читает «не подключён», хотя карточка у него же
+/// на экране уже честно говорит «MCP выключены». Два ответа на один вопрос
+/// «почему не работает» расходились в ту же минуту. Константа — не функция:
+/// значение не зависит ни от чего (режим на него больше не влияет), и
+/// заводить функцию с пустым списком параметров было бы лишним.
+pub const OFF_WORD: &str = "MCP выключены";
+
 pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
@@ -169,7 +181,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
         return Card { dot: Dot::Busy, title, cancel: gui::can_cancel(r.phase) };
     }
     let local = mode == "local";
-    let off_title = || "MCP выключены".to_string();
+    let off_title = || OFF_WORD.to_string();
     let card = |dot, title: String| Card { dot, title, cancel: false };
     // Отказ — выше замка: красное «не подключён» человек должен увидеть и
     // тогда, когда заодно не хватает холодного условия.

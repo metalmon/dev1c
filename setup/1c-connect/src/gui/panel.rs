@@ -234,14 +234,19 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
 
 /// Причина того, что показывает `card`, — тем же порядком разрешения и теми
 /// же словами, что человек потом найдёт в журнале. В заголовок она не идёт
-/// (он узкий), а живёт в подсказке переключателя и в левом слоте подвала.
-/// `None` — объяснять нечего: всё в порядке, идёт операция или вердикт ещё
-/// считается.
+/// (он узкий), а живёт в подсказке переключателя — единственном месте экрана,
+/// что её произносит. В подвале её больше нет вовсе (поправка владельца 9.11
+/// ко второму снимку: «не надо наверно в выключатель новую строку. В журнале
+/// же можно показать») — туда причина попадает своим путём: щелчок по
+/// запертому переключателю сам пишет её в журнал (`link::toggle_link` зовёт
+/// `note_line`, не `note_line_seen`, и строка считается непрочитанной — счётчик
+/// на вкладке «Журнал» и есть ответ на нажатие). `None` — объяснять нечего:
+/// всё в порядке, идёт операция или вердикт ещё считается.
 ///
 /// `at` — час, на который верен набор (`Ui::facts_at`): вердикт пересчитывается по событиям,
 /// а не на таймере, значит бывает устаревшим — среда могла подняться через
-/// минуту после отказа. Поэтому рядом с причиной подвал называет, на какой
-/// момент она верна (спека, «Чем за это платим»: «проверено в 15:54»), а
+/// минуту после отказа. Поэтому подсказка переключателя называет, на какой
+/// момент причина верна (спека, «Чем за это платим»: «проверено в 15:54»), а
 /// «Проверить» остаётся способом спросить заново. Час приписывается только
 /// к причине вердикта: отказ занять порт и холодный замок — факты «прямо
 /// сейчас», им час ни к чему.
@@ -295,10 +300,13 @@ pub fn gate_text(why: &str) -> String {
 /// Подсказка переключателя. Замок — первым, даже когда есть отказ связи:
 /// запирает переключатель именно он (`switch_locked`), и человек, прочитав
 /// про занятый порт, снял бы чужой процесс и остался с запертым
-/// переключателем без объяснения (находка ревью). Отказ и провал вердикта он
-/// прочтёт в подвале, где говорит `reason`. В заголовок карточки причина не
-/// идёт ни в каком виде («не надо там прозу писать, она не лезет», заказчик
-/// 2026-10-21). Сказать нечего — подсказка объясняет сам переключатель.
+/// переключателем без объяснения (находка ревью). Отказ и провал вердикта
+/// (`reason`) она и называет — единственное место экрана, что говорит их
+/// вслух: в подвале с 9.11 причины нет (поправка владельца ко второму
+/// снимку), а щелчок по запертому переключателю пишет её в журнал. В
+/// заголовок карточки причина не идёт ни в каком виде («не надо там прозу
+/// писать, она не лезет», заказчик 2026-10-21). Сказать нечего — подсказка
+/// объясняет сам переключатель.
 pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>, mode: &str) -> String {
     match (gate, reason) {
         (Some(why), _) => gate_text(why),
@@ -436,8 +444,9 @@ pub const PASS_THE_CODE: &str = "Передайте код на ту сторо�
 ///    возвращается кнопкой внутри карточки);
 /// 7. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
 ///    задача не касается вовсе) — кнопка заперта и называет то же состояние;
-///    объяснять нечего сверх этого — левый слот подвала уже говорит причину
-///    через `reason` (`foot_left_text`), второй копии доводов не заводим.
+///    объяснять нечего сверх этого — подсказка переключателя уже говорит
+///    причину через `reason`, а в подвале у неё слота больше нет (поправка
+///    владельца 9.11).
 ///
 /// **Ветки 6 и 7 не исчезают, а запираются** (спека «Интерфейс»: «иначе
 /// заперта и называет состояние», живой прогон 9.11). Слово состояния — из
@@ -509,8 +518,9 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     if ui.link.is_up() {
         // Подключено/рвётся/переподключается — не наш случай (транспорта не
         // трогаем). Кнопка не пропадает: заперта (`act: None`) и называет
-        // состояние словом `link::row` — причина уже сказана в левом слоте
-        // подвала (`reason`), второй раз её здесь не произносим (`why: None`).
+        // состояние словом `link::row` — причина уже сказана подсказкой
+        // переключателя (`reason`), второй раз её здесь не произносим
+        // (`why: None`).
         return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: None, act: None };
     }
     if matches!(c.role(), Ok("dial")) {
@@ -538,30 +548,27 @@ pub const FOOT_LINES: usize = 2;
 ///
 /// 1. настоящее сообщение (итог сохранения, ошибка) — человек только что
 ///    нажал и ждёт ответа;
-/// 2. причина текущего состояния (`reason`: отказ, замок, провал вердикта) —
-///    она про то, почему работа не идёт;
-/// 3. подсказка, почему «Сохранить» недоступна, — она про кнопку, и своя
+/// 2. подсказка, почему «Сохранить» недоступна, — она про кнопку, и своя
 ///    подсказка по наведению у кнопки есть и без слота;
-/// 4. путь комплекта — когда сказать больше нечего.
+/// 3. путь комплекта — когда сказать больше нечего.
 ///
-/// Пункты 2 и 3 стояли наоборот, и причина не показывалась почти никогда:
-/// «Связь» — вкладка по умолчанию, поля на ней не тронуты, а `save_hint`
-/// тогда на нетронутых полях всегда говорил «Нечего сохранять». Человек
-/// видел оранжевую точку, «Не всё готово» и этот пересказ рядом — и ничего
-/// о том, что именно не готово (находка S3 итогового ревью). Саму подпись
-/// 25.10.2026 убрали, но порядок остался: подсказка про кнопку слабее
-/// причины, по которой работа не идёт.
+/// Причины замка и провала вердикта (`reason`) здесь больше нет (поправка
+/// владельца 9.11 ко второму снимку: «не надо наверно в выключатель новую
+/// строку. В журнале же можно показать») — подвал принадлежит действию над
+/// открытой карточкой: предмет и кнопка, и сам слот говорит только про них.
+/// Причину человек находит в журнале: щелчок по запертому переключателю сам
+/// пишет её туда непрочитанной строкой (`link::toggle_link`). У подсказки
+/// переключателя (`switch_tooltip`) `reason` остаётся — это единственное
+/// место экрана, что произносит её вслух без клика.
 ///
 /// Раскладка по двум строкам, обрезка третьей и подсказка по наведению —
 /// дело `render`, здесь только выбор источника.
 ///
 /// Текст уходит через `gui::capitalized` — та же заглавная, что у карточек и
 /// журнала. Путь комплекта она не трогает (первое слово с `:` и `\`).
-pub fn foot_left_text(status: Option<&Line>, reason: Option<&str>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
+pub fn foot_left_text(status: Option<&Line>, hint: Option<&str>, kit_path: &str) -> (String, bool) {
     let (text, bad) = if let Some(l) = status {
         (l.text.clone(), matches!(l.kind, Kind::Fail))
-    } else if let Some(why) = reason {
-        (why.to_string(), false)
     } else if let Some(h) = hint {
         (h.to_string(), false)
     } else {
@@ -2436,6 +2443,18 @@ impl Panel {
         let shown = shown_fields(&c);
         let toolset = c.toolset().unwrap_or("business").to_string();
         let f = &self.fields;
+        // Цвет текста поля — тот же токен, что красит `Input` (`input_style`
+        // внутри `gpui-component`: не наш, не публичный, а потому видимый
+        // только через само его поведение). У кнопки выбора без этой правки
+        // текст брался из `button_foreground` — токена, подобранного под
+        // закрашенную кнопку, а не под нейтральную коробку поля; заливка и
+        // обводка у `outline()` уже совпадали с полем (оба читают
+        // `theme.input`/`theme.radius`/`input_background()`), а текст — нет,
+        // и коробка читалась «из другого набора» (владелец 9.11, второй
+        // снимок). `Select` самого `gpui-component` решает это тем же
+        // способом — своим явным `.text_color(fg)` поверх варианта кнопки,
+        // не трогая внутренности `Button`.
+        let fg = cx.theme().foreground;
         // Кнопка выбора — значок без подписи: такая кнопка сама становится
         // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
         // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
@@ -2449,9 +2468,10 @@ impl Panel {
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
         let path_row = |label: String, state: &Entity<InputState>, pick: KitButton, window: &Window, cx: &App| {
-            v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child(label)).child(
-                h_flex().gap_2().items_center().child(div().flex_1().child(Self::input(state, accent, false, window, cx))).child(pick),
-            )
+            v_flex()
+                .gap_1()
+                .child(div().text_size(px(13.)).text_color(caption).child(label))
+                .child(h_flex().gap_2().items_center().child(div().flex_1().child(Self::input(state, accent, window, cx))).child(pick))
         };
         let name = c.name.clone();
         let mut col = v_flex()
@@ -2460,7 +2480,7 @@ impl Panel {
             // Имя — первое поле карточки: оно же первым планом в строке
             // списка, и переименование (`save::rename`) правится здесь, а
             // пункт меню «Переименовать» только ставит сюда курсор.
-            .child(Self::row("Имя", caption, accent, &f.name, true, window, cx))
+            .child(Self::row("Имя", caption, accent, &f.name, window, cx))
             .child(
                 v_flex()
                     .gap_1()
@@ -2475,19 +2495,25 @@ impl Panel {
                     // обычная, а не как раскрывающийся список (находка
                     // живого прогона). Приём — готовый у `gpui-kit`
                     // (`setting/fields/dropdown.rs`), своего рисования не
-                    // заводим.
-                    .child(KitButton::new("profile").outline().w_full().label(profile_label(&toolset)).dropdown_caret(true).dropdown_menu(
-                        move |mut menu, _, _| {
-                            for profile in ["business", "developer"] {
-                                let name = name.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(profile_label(profile))
-                                        .on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
-                                );
-                            }
-                            menu
-                        },
-                    )),
+                    // заводим; `.text_color(fg)` — см. докстроку `fg` выше.
+                    .child(
+                        KitButton::new("profile")
+                            .outline()
+                            .w_full()
+                            .text_color(fg)
+                            .label(profile_label(&toolset))
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                for profile in ["business", "developer"] {
+                                    let name = name.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(profile_label(profile))
+                                            .on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
+                                    );
+                                }
+                                menu
+                            }),
+                    ),
             )
             .child({
                 let name = c.name.clone();
@@ -2510,17 +2536,24 @@ impl Panel {
                     // трогает.
                     // Та же стрелка, что у «Профиля» выше — пять кнопок
                     // выбора в карточке и списке получают её одним приёмом.
-                    .child(KitButton::new("role").outline().w_full().label(role_switch_label(&c)).dropdown_caret(true).dropdown_menu(
-                        move |mut menu, _, _| {
-                            let [dial, accept] = link::onboarding_answers();
-                            for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
-                                let name = name.clone();
-                                menu = menu
-                                    .item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)));
-                            }
-                            menu
-                        },
-                    ))
+                    .child(
+                        KitButton::new("role")
+                            .outline()
+                            .w_full()
+                            .text_color(fg)
+                            .label(role_switch_label(&c))
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |mut menu, _, _| {
+                                let [dial, accept] = link::onboarding_answers();
+                                for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
+                                    let name = name.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)),
+                                    );
+                                }
+                                menu
+                            }),
+                    )
             });
         // «Где база» — второй вопрос карточки, виден только когда первый
         // ответ не «Всё на одной машине» (спека: «второй вопрос при нём не
@@ -2530,17 +2563,23 @@ impl Panel {
         // соединение на следующей отрисовке.
         if c.mode != "local" {
             let name = c.name.clone();
-            col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Где база")).child(
-                KitButton::new("base-here").outline().w_full().label(base_here_label(c.base_here)).dropdown_caret(true).dropdown_menu(
-                    move |mut menu, _, _| {
-                        for (label, here) in [("Здесь", true), ("На той стороне", false)] {
-                            let name = name.clone();
-                            menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
-                        }
-                        menu
-                    },
+            col = col.child(
+                v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Где база")).child(
+                    KitButton::new("base-here")
+                        .outline()
+                        .w_full()
+                        .text_color(fg)
+                        .label(base_here_label(c.base_here))
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (label, here) in [("Здесь", true), ("На той стороне", false)] {
+                                let name = name.clone();
+                                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
+                            }
+                            menu
+                        }),
                 ),
-            ));
+            );
         }
         // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
         // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
@@ -2552,13 +2591,16 @@ impl Panel {
         if let Some(label) = publication_switch_label(&c) {
             let name = c.name.clone();
             col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Публикация базы")).child(
-                KitButton::new("publication").outline().w_full().label(label).dropdown_caret(true).dropdown_menu(move |mut menu, _, _| {
-                    for (words, publication) in link::publication_answers() {
-                        let name = name.clone();
-                        menu = menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
-                    }
-                    menu
-                }),
+                KitButton::new("publication").outline().w_full().text_color(fg).label(label).dropdown_caret(true).dropdown_menu(
+                    move |mut menu, _, _| {
+                        for (words, publication) in link::publication_answers() {
+                            let name = name.clone();
+                            menu =
+                                menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
+                        }
+                        menu
+                    },
+                ),
             ));
         }
         // Базы здесь нет — вместо пустого места слова (спека, «Что
@@ -2583,15 +2625,15 @@ impl Panel {
         // экрану параметров). Без них ряд не рисуется вовсе — ни дыры, ни
         // подписи без поля.
         if shown.contains(&"server") {
-            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, false, window, cx));
+            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
         }
         if shown.contains(&"workstation") {
             col = col.child(
                 h_flex()
                     .gap_3()
                     .items_end()
-                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, false, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, false, window, cx))),
+                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
             );
         }
         if shown.contains(&"base_path") {
@@ -2612,14 +2654,14 @@ impl Panel {
         // относится, и только в режиме «уже опубликована»: в обычном режиме
         // адрес считает сама программа.
         if shown.contains(&"base_url") {
-            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, false, window, cx));
+            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx));
         }
         if shown.contains(&"db_user") {
             col = col.child(
                 h_flex()
                     .gap_3()
-                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, false, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, false, window, cx))),
+                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
             );
         }
         if shown.contains(&"project") {
@@ -2661,34 +2703,26 @@ impl Panel {
     /// Поле по Fluent: без кольца фокуса, у активного поля — акцентная линия
     /// 2 px снизу (как `input:focus` в прежнем `app.css`).
     ///
-    /// `center` — по центру, как значения в кнопках выбора (решение владельца
-    /// 9.11: «раз значения всех полей по центру, значит и название соединения
-    /// тоже»). Пути (`path_row`) зовут этот метод с `false`: их читают с
-    /// начала, и решение держать их прижатыми влево — чужое, более раннее.
-    fn input(state: &Entity<InputState>, accent: Hsla, center: bool, window: &Window, cx: &App) -> impl IntoElement {
+    /// Текст — всегда прижат влево. Центрирование было у «Имени» одного
+    /// (решение владельца 9.11: «раз значения всех полей по центру, значит и
+    /// название соединения тоже») и жило параметром `center`; второй снимок
+    /// перевернул довод — «раз всех прижал влево, то и строка имени тоже
+    /// будет слева» (значения в кнопках выбора оказались прижаты влево, и
+    /// имя равняется на них), и параметр убран совсем, а не оставлен
+    /// мёртвым.
+    fn input(state: &Entity<InputState>, accent: Hsla, window: &Window, cx: &App) -> impl IntoElement {
         let focused = state.read(cx).focus_handle(cx).is_focused(window);
         div()
             .relative()
-            .child(Input::new(state).when(center, |i| i.text_align(TextAlign::Center)).focus_bordered(false))
+            .child(Input::new(state).focus_bordered(false))
             .when(focused, |d| d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent)))
     }
 
-    /// `center` — см. `Self::input`; у «Имени» единственного `true` (вызов
-    /// ниже), у остальных полей карточки — `false`: владелец просил только
-    /// имя, по значениям в кнопках выбора равняться не всем полям сразу.
-    fn row(
-        label: &str,
-        caption: Hsla,
-        accent: Hsla,
-        input: &Entity<InputState>,
-        center: bool,
-        window: &Window,
-        cx: &App,
-    ) -> impl IntoElement {
+    fn row(label: &str, caption: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
         v_flex()
             .gap_1()
             .child(div().text_size(px(13.)).text_color(caption).child(label.to_string()))
-            .child(Self::input(input, accent, center, window, cx))
+            .child(Self::input(input, accent, window, cx))
     }
 
     /// Слой Fluent: заливка слоя, скругление 8, обводка 1 px низкой
@@ -2750,9 +2784,12 @@ impl Render for Panel {
         let mode = ui.cfg.current().mode.clone();
         let gate = ui.gate.clone();
         let c = card(ui.progress.as_ref(), &link, &mode, &ready, gate.as_deref(), Instant::now());
-        // Причина — один расчёт на весь `render`: та же строка уходит и в
-        // подсказку переключателя, и в левый слот подвала (спека: «причина
-        // идёт туда, где для неё есть место»).
+        // Причина — один расчёт на весь `render`, и уходит она только в
+        // подсказку переключателя (`switch_tooltip` ниже): в подвале для неё
+        // больше нет слота (поправка владельца 9.11 ко второму снимку — «не
+        // надо наверно в выключатель новую строку, в журнале же можно
+        // показать»). Журнал её получает своим путём, щелчком по запертому
+        // переключателю (`link::toggle_link`), а не через этот расчёт.
         let why = reason(&link, &ready, gate.as_deref(), ui.facts_at.as_deref());
         // Причина недоступности «Сохранить» — только пока вкладка «Связь»
         // её вообще показывает (на других вкладках кнопки «Сохранить» нет,
@@ -2768,14 +2805,14 @@ impl Render for Panel {
         let dirty = self.dirty_now(cx);
         let form = host_of(&self.fields, &self.original.mode, &self.original.publication, cx);
         // Главная кнопка «Связи» — один расчёт на весь `render`: от неё и
-        // подпись, и предмет слева от кнопки, и объяснение в левом слоте
-        // подвала (`why`). Подсказка «Сохранить» (`save_hint`) приходит в
-        // том же `why` — второго её расчёта в подвале больше нет.
+        // подпись, и предмет слева от кнопки, и подсказка «Сохранить»
+        // (`main.why`) для левого слота подвала, когда он свободен.
         let main = main_button(ui, &self.selected, dirty);
         let hint = (tab == gui::Tab::Link).then(|| main.why.clone()).flatten();
-        // Причина — в левом слоте подвала, и выше подсказки «Сохранить»:
-        // порядок держит сама `foot_left_text`, здесь только источники.
-        let foot_left = foot_left_text(ui.status.as_ref(), why.as_deref(), hint.as_deref(), &ui.kit.root.display().to_string());
+        // Порядок источников держит сама `foot_left_text`: настоящий итог,
+        // затем подсказка «Сохранить», затем путь комплекта. Причины замка
+        // здесь нет (см. докстроку `foot_left_text`).
+        let foot_left = foot_left_text(ui.status.as_ref(), hint.as_deref(), &ui.kit.root.display().to_string());
         // Подсказка к итогу (путь отчёта проверки) — только пока слот занят
         // самим итогом: подсказка «Сохранить» и путь комплекта говорят за
         // себя.
@@ -3035,13 +3072,13 @@ impl Render for Panel {
                             // спрашивается теми же двумя ответами, что и на
                             // пустой «Связи» (`link::onboarding_answers`):
                             // третьих слов для того же выбора не заводим.
-                            // Та же стрелка (владелец 9.11: «+ Добавить»
-                            // тоже раскрывает два ответа, и должна выглядеть
-                            // выпадающей, а не обычной кнопкой).
+                            // Стрелки больше нет (поправка владельца 9.11 ко
+                            // второму снимку): это действие списка, не поле
+                            // карточки, и вид селектора ему не нужен — список
+                            // при нажатии остаётся.
                             Body::Add => KitButton::new("add-link")
                                 .ghost()
                                 .label("+ Добавить")
-                                .dropdown_caret(true)
                                 .disabled(busy_now)
                                 .dropdown_menu(|mut menu, _, _| {
                                     for (label, role) in link::onboarding_answers() {
@@ -4919,33 +4956,47 @@ mod tests {
     fn the_footer_slot_picks_one_text_in_priority_order() {
         let path = "C:\\Users\\имя\\AppData\\Local\\dev1c";
         // Сказать нечего — путь комплекта, кнопка не красная.
-        assert_eq!(foot_left_text(None, None, None, path), (path.to_string(), false));
+        assert_eq!(foot_left_text(None, None, path), (path.to_string(), false));
         // Подсказка, почему «Сохранить» недоступна, — вместо пути, а не рядом с ним.
-        assert_eq!(foot_left_text(None, None, Some("Подождите: идёт проверка"), path), ("Подождите: идёт проверка".to_string(), false));
+        assert_eq!(foot_left_text(None, Some("Подождите: идёт проверка"), path), ("Подождите: идёт проверка".to_string(), false));
         // Настоящий итог сильнее подсказки — человек не теряет ошибку, потому
         // что слот уже занят объяснением (заказчик 2026-10-20).
         let ok = Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() };
-        assert_eq!(foot_left_text(Some(&ok), None, Some("Подождите: идёт проверка"), path), (ok.text.clone(), false));
+        assert_eq!(foot_left_text(Some(&ok), Some("Подождите: идёт проверка"), path), (ok.text.clone(), false));
         let err = Line { kind: Kind::Fail, text: "порт занят".into() };
         // Начало фразы — с заглавной (`capitalized`), а путь комплекта выше
         // остаётся как есть: в его первом слове `:` и `\`.
-        assert_eq!(foot_left_text(Some(&err), None, Some("Подождите: идёт проверка"), path), ("Порт занят".to_string(), true));
+        assert_eq!(foot_left_text(Some(&err), Some("Подождите: идёт проверка"), path), ("Порт занят".to_string(), true));
     }
 
-    /// Причина важнее подсказки про сохранение. Исторически слот был занят
-    /// вечным «Нечего сохранять», и причины было не видно почти никогда
-    /// (находка S3 итогового ревью); 25.10.2026 ту подпись убрали вовсе, но
-    /// порядок остаётся правилом: подсказка про кнопку слабее причины, по
-    /// которой работа не идёт.
+    /// Поправка владельца 9.11 ко второму снимку: «не надо наверно в
+    /// выключатель новую строку. В журнале же можно показать» — отменяет
+    /// план первого разбора (вторая приглушённая строка в карточке
+    /// состояния). Причина замка не живёт ни в подвале (у `foot_left_text`
+    /// больше нет для неё параметра — мёртвого входа не оставляем), ни
+    /// второй строкой карточки: `Card` как была, с одним полем `title`, и
+    /// `card()` эту причину никогда и не спрашивала. Подвал — предмет и
+    /// кнопка, а причину человек получает в журнале, щелчком по запертому
+    /// переключателю (`link::toggle_link`, который пишет её строкой через
+    /// `note_line`, не `note_line_seen`, и строка считается непрочитанной).
     #[test]
-    fn the_reason_outranks_the_save_hint_in_the_footer() {
+    fn the_footer_has_no_lock_reason_in_any_lock_state_and_the_card_stays_one_line() {
         let path = "C:\\dev1c";
         let why = "Не всё готово: проект: /home/dev3/project не разложен";
-        assert_eq!(foot_left_text(None, Some(why), Some("Подождите: идёт проверка"), path), (why.to_string(), false));
-        // Но настоящий итог всё ещё сильнее причины: человек только что
-        // нажал и ждёт ответа именно на своё нажатие.
-        let err = Line { kind: Kind::Fail, text: "порт занят".into() };
-        assert_eq!(foot_left_text(Some(&err), Some(why), None, path), ("Порт занят".to_string(), true));
+        // `foot_left_text` не умеет принять причину вовсе — подсказке
+        // «Сохранить» больше ничто не мешает занять слот.
+        let hint = Some("Подождите: идёт проверка");
+        assert_eq!(foot_left_text(None, hint, path), (hint.unwrap().to_string(), false));
+        let _ = why; // причина остаётся только у подсказки переключателя (`reason`/`switch_tooltip`), не у подвала.
+
+        // Карточка состояния — одна строка в любом состоянии замка: `Card`
+        // хранит ровно одно поле `title`, второго не завели.
+        let locked = card(None, &State::Off, "local", &Verdict::Ready, Some(why), Instant::now());
+        assert!(!locked.title.contains('\n'), "карточка — одна строка даже при запертом замке: {}", locked.title);
+
+        // Предмет и кнопка подвала не зависят от замка и остаются на месте.
+        let b = main_button(&ui_link_accept_waiting(), "", Dirty::No);
+        assert!(!b.subject.is_empty(), "предмет остаётся в подвале");
     }
 
     /// Подвал резервирует две строки всегда: блок ровно в высоту кнопки

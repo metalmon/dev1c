@@ -249,7 +249,7 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     // (`panel::foot_left_text`), поэтому человек читает одно и то же.
     assert_eq!(ui.log.last().map(|s| &s.line), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
     assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
-    assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, None, "C:\\kit").0, "Прервано");
+    assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, "C:\\kit").0, "Прервано");
 }
 
 #[test]

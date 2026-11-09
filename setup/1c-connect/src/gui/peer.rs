@@ -478,11 +478,11 @@ struct InHand {
     /// Признак базы той карточки, которой этот поток, — как его назвала та
     /// сторона в `enroll_ok`.
     ///
-    /// `None` — не знаем: первый звонок либо возврат после перезапуска. Тогда
-    /// та сторона отвечает всем списком своих баз, и поток числится за всеми
-    /// ними — то есть отзыв любой из них его режет. Чтобы этого не было и
-    /// после перезапуска, признак надо хранить рядом с партнёром
-    /// (`partners.toml`), а это чужой файл этой работы — долг назван в отчёте.
+    /// `None` — не знаем, и тогда та сторона отвечает всем списком своих баз,
+    /// а поток числится за всеми ними: отзыв любой из них его режет. Поэтому
+    /// признак не только помнится между кругами, но и ЖИВЁТ рядом с партнёром
+    /// (`partners.toml`) — иначе первый же перезапуск возвращал бы карточку в
+    /// это «не знаю», и отзыв соседней карточки рвал бы её связь.
     card: Option<String>,
 }
 
@@ -535,7 +535,7 @@ impl InHand {
 /// снова». Второго счётчика для этого не нужно.
 async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, card: String, code: String, addr: EndpointAddr) {
     flow(&tx, &card, Some(link::Flow::Calling));
-    let hand = Arc::new(Mutex::new(InHand { code, card: None }));
+    let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card) }));
     let stopped = channel::keep_calling(|| {
         let (node, channels, kit, tx, card, addr, hand) =
             (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
@@ -610,7 +610,7 @@ async fn one_round(
             // только после того, как та сторона признала нас своими. Ключ
             // берётся у канала (`Channel::peer`), а не у кода: это то, что
             // доказал сам iroh, а не то, что было написано в строке.
-            remember(kit, tx, card, channel.peer(), &addr);
+            remember(kit, tx, card, channel.peer(), &addr, agreed.as_deref());
             flow(tx, card, Some(link::Flow::Up));
             say(tx, Kind::Ok, format!("«{card}»: подключено"));
             // Сообщения, которые та сторона говорит по живому потоку
@@ -935,16 +935,41 @@ fn says_name() -> String {
     sysinfo::System::host_name().unwrap_or_default()
 }
 
+/// Какую карточку эта зовущая помнит с прошлого раза — признак базы, который
+/// та сторона назвала ей в прошлом разговоре.
+///
+/// Берётся с диска, а не начинается с «не знаю»: перезапуск программы — не
+/// повод забыть то, о чём уже договорились. Без этого первый круг после
+/// перезапуска шёл бы возвратом БЕЗ имени, та сторона отвечала бы всем списком
+/// своих баз, и поток числился бы за всеми ними — то есть отзыв соседней
+/// карточки рвал бы и эту связь.
+///
+/// Отказ чтения — то же «не знаю», и это верно: признак не называется наугад.
+/// Старого признака от ДРУГОЙ машины здесь быть не может — `Partners::remember`
+/// снимает его сам, когда ключ той стороны сменился.
+fn known_card(kit: &Kit, card: &str) -> Option<String> {
+    Partners::open(kit.state()).ok().and_then(|p| p.base_id_of(card))
+}
+
 /// Запоминает, куда карточке возвращаться. Отказ записи — строка в журнал, а
 /// не конец подключения: это подключение уже живёт, а потеряно будет лишь
 /// возвращение после перезапуска.
-fn remember(kit: &Kit, tx: &UnboundedSender<Ev>, card: &str, peer: EndpointId, addr: &EndpointAddr) {
+fn remember(kit: &Kit, tx: &UnboundedSender<Ev>, card: &str, peer: EndpointId, addr: &EndpointAddr, agreed: Option<&str>) {
     let partner = Partner {
         key: peer,
         relay: addr.relay_urls().next().map(|u| u.to_string()),
         direct: addr.ip_addrs().map(|a| a.to_string()).collect(),
     };
-    let wrote = Partners::open(kit.state()).and_then(|mut p| p.remember(card, &partner));
+    // Признак базы пишется ВМЕСТЕ с партнёром и в этом порядке: сперва партнёр
+    // (он сбрасывает признак, если ключ той стороны сменился), потом признак
+    // этого разговора. Обратный порядок стирал бы только что записанное.
+    let wrote = Partners::open(kit.state()).and_then(|mut p| {
+        p.remember(card, &partner)?;
+        match agreed {
+            Some(id) => p.remember_base_id(card, id),
+            None => Ok(()),
+        }
+    });
     if let Err(e) = wrote {
         say(tx, Kind::Warn, format!("Подключение живёт, но запомнить его не удалось: {e}"));
     }
@@ -1231,6 +1256,15 @@ mod tests {
         // А у СОСЕДНЕЙ карточки партнёра нет, и ей по-прежнему говорят
         // словами: запись принадлежит карточке, а не машине.
         assert!(super::target(&kit, "Василёк", "").is_err(), "запись о партнёре принадлежит карточке, а не машине");
+
+        // И карточка, о которой договорились, переживает перезапуск: её
+        // признак пишется вместе с партнёром и читается обратно.
+        assert_eq!(super::known_card(&kit, "Ромашка"), None, "пока не договаривались — не знаем, и выдумывать нельзя");
+        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        let addr = iroh::EndpointAddr::new(them);
+        super::remember(&kit, &tx, "Ромашка", them, &addr, Some("b1"));
+        assert_eq!(super::known_card(&kit, "Ромашка").as_deref(), Some("b1"), "признак базы обязан пережить перезапуск");
+        assert_eq!(super::known_card(&kit, "Василёк"), None, "признак принадлежит карточке, а не машине");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

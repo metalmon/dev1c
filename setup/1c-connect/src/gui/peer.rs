@@ -205,7 +205,7 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
         match cmd {
             Cmd::Dial { card, code } => start_call(&node, &channels, &kit, &tx, &mut calls, card, code),
             Cmd::Revoke { card, peer } => {
-                let base_id = cards_of(&kit).into_iter().find(|(name, _)| *name == card).map(|(_, c)| c.base.base_id);
+                let base_id = Machine::read(&kit).cards.into_iter().find(|(name, _)| *name == card).map(|(_, c)| c.base.base_id);
                 for reins in live.cut(peer, &card) {
                     let base_id = base_id.clone().unwrap_or_default();
                     tokio::spawn(async move { reins.revoke(&base_id, REVOKED_TEXT).await });
@@ -526,7 +526,7 @@ async fn one_round(
     };
     let out = {
         let (send, recv) = control.halves();
-        enroll::dial_side(send, recv, code, &says_name(), ceiling_of(kit)).await
+        enroll::dial_side(send, recv, code, &says_name(), Machine::read(kit).ceiling).await
     };
     match out {
         Err(e) => {
@@ -620,7 +620,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
             return;
         }
     };
-    let cards = cards_of(&kit);
+    let cards = Machine::read(&kit).cards;
     let only: Vec<enroll::Card> = cards.iter().map(|(_, c)| c.clone()).collect();
     let ask = |request: enroll::Request| {
         let tx = tx.clone();
@@ -720,66 +720,103 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     }
 }
 
-/// Карточки этого рабочего места, которые ПРИНИМАЮТ подключения, вместе с
-/// местными именами.
+/// Что эта машина объявляет той стороне: принимающие карточки и потолок
+/// записи — ОДНИМ чтением настроек и одной мерой.
 ///
-/// Читается с диска на каждый входящий разговор, а не берётся снимком при
-/// запуске: человек правит карточки в окне, и разговор обязан видеть то, что
-/// в файле сейчас. Цена — одно чтение toml на входящее подключение, то есть
-/// раз в минуты.
+/// **Почему вместе, а не двумя функциями.** Прежде карточки читались терпимо
+/// (`load_unchecked`), а потолок — строго (`load` с `validate`): та же пара
+/// разных мер на один файл, которую чинил `c32f2c4`, уцелевшая через
+/// пятьдесят строк. Цена была не теоретической: у нового человека настройки
+/// полузаполнены всегда, строгое чтение отвергало файл целиком, и на провод
+/// всегда уезжало «только чтение», пока в меню стояло «Полный», — запись
+/// молча не давалась, и причину не называл никто. Одна вещь, читающая файл
+/// один раз, делает вторую меру невыразимой: читать здесь больше нечем.
 ///
-/// Отказ чтения настроек — пустой список: тогда ни одна карточка не
-/// опознается, и `accept_side` откажет словами. Это верно: настройки, которые
-/// не читаются, не вправе никого пускать.
-///
-/// Читается ТЕРПИМО (`load_unchecked`), той же мерой, что и в окне. Строгое
-/// чтение (`load` с `validate`) отвергает полузаполненную карточку целиком —
-/// а только что заведённая карточка полузаполнена всегда: `mode` у неё
-/// `"tunnel"`, а адрес среды и рабочее место пусты, и человек их ещё не
-/// вписывал. Окно такую карточку показывает и код по ней выдаёт, а приёмная
-/// сторона её не видела вовсе и отвечала той машине «карточку удалили» —
-/// словами про чужую вину за свою строгость (живая проверка двумя машинами
-/// 9.11). Сломанный toml остаётся отказом и здесь: `load_unchecked` снимает
-/// проверку заполненности, а не проверку читаемости.
-fn cards_of(kit: &Kit) -> Vec<(String, enroll::Card)> {
-    match crate::secrets::Store::system(kit.state()) {
-        Ok(store) => cards_of_with(kit, &store),
-        Err(_) => Vec::new(),
-    }
+/// Читается с диска на каждый входящий разговор и на каждый круг звонка, а не
+/// берётся снимком при запуске: человек правит карточки и щёлкает потолок в
+/// окне, и разговор обязан видеть то, что в файле сейчас. Цена — одно чтение
+/// toml на подключение, то есть раз в минуты.
+struct Machine {
+    /// Карточки этого рабочего места, которые ПРИНИМАЮТ подключения, вместе с
+    /// местными именами.
+    cards: Vec<(String, enroll::Card)>,
+    /// Потолок записи — свойство МАШИНЫ (`wire::Ceiling`, контракт: «Чего в
+    /// соединении НЕТ»): тот же переключатель, что живёт в меню значка, и он
+    /// действует на все карточки разом.
+    ceiling: Ceiling,
 }
 
-/// То же, но подложку секретов даёт вызывающий — ей проверяются тесты (тот же
-/// приём и тот же довод, что у `Cfg::load_with`: DPAPI из тестов не зовём).
-/// Проверка висит именно здесь, на строке выбора меры чтения, а не на чистом
-/// отборе ниже: вернуть сюда строгое `load_with` — и она покраснеет.
-fn cards_of_with(kit: &Kit, store: &crate::secrets::Store) -> Vec<(String, enroll::Card)> {
-    match crate::cfg::Cfg::load_unchecked_with(kit, store) {
-        Ok(cfg) => accepting_cards(&cfg),
-        Err(_) => Vec::new(),
+impl Machine {
+    fn read(kit: &Kit) -> Machine {
+        match crate::secrets::Store::system(kit.state()) {
+            Ok(store) => Machine::read_with(kit, &store),
+            Err(_) => Machine::silent(),
+        }
     }
-}
 
-/// Отбор принимающих карточек из УЖЕ прочитанных настроек — чистая половина
-/// `cards_of`.
-fn accepting_cards(cfg: &crate::cfg::Cfg) -> Vec<(String, enroll::Card)> {
-    cfg.connections
-        .iter()
-        .filter(|c| c.mode != "local" && matches!(c.role(), Ok("accept")))
-        .map(|c| {
-            (
-                c.name.clone(),
-                enroll::Card {
-                    name: c.name.clone(),
-                    base: BaseFields {
-                        base_id: base_id_of(&c.base_path),
-                        base_name: crate::cfg::base_name(&c.base_path).to_string(),
-                        publication: c.publication.clone(),
-                        write: c.allows_write(),
+    /// То же, но подложку секретов даёт вызывающий — ей проверяются тесты (тот
+    /// же приём и тот же довод, что у `Cfg::load_with`: DPAPI из тестов не
+    /// зовём).
+    ///
+    /// Мера чтения выбирается здесь, одной строкой на обе половины: вернуть
+    /// сюда строгое `load_with` — и покраснеют оба теста, и про карточки, и
+    /// про потолок. Сломанный toml остаётся отказом и здесь: `load_unchecked`
+    /// снимает проверку заполненности, а не проверку читаемости.
+    fn read_with(kit: &Kit, store: &crate::secrets::Store) -> Machine {
+        match crate::cfg::Cfg::load_unchecked_with(kit, store) {
+            Ok(cfg) => Machine::of(&cfg),
+            Err(_) => Machine::silent(),
+        }
+    }
+
+    /// Чистая половина: из УЖЕ прочитанных настроек.
+    ///
+    /// Потолок машины складывается в поле `write` КАЖДОЙ карточки, а не одной
+    /// текущей. Прежде он не складывался вовсе: `allows_write` карточки — её
+    /// собственное поле, а потолок машины спрашивался отдельно и только у
+    /// текущей, то есть у нетекущей принимающей карточки объявленное на
+    /// проводе право записи не знало о потолке ничего. Запрет любой стороны
+    /// сильнее разрешения другой (решение владельца 1.11), и сложить их здесь
+    /// — единственное место, где это ещё можно сделать до провода.
+    fn of(cfg: &crate::cfg::Cfg) -> Machine {
+        // Без сравнения строк: вид потолка в настройках — `read_write` или
+        // `read_only`, и одно `== "full"` на этом месте уже стоило продукту
+        // всей записи (`access()` такого значения не производит никогда, то
+        // есть потолок всегда выходил «только чтение»). Один `bool` от того,
+        // кого об этом спрашивают все остальные, разойтись словарём не может.
+        let ceiling = if cfg.allows_write() { Ceiling::Full } else { Ceiling::ReadOnly };
+        let cards = cfg
+            .connections
+            .iter()
+            .filter(|c| c.mode != "local" && matches!(c.role(), Ok("accept")))
+            .map(|c| {
+                (
+                    c.name.clone(),
+                    enroll::Card {
+                        name: c.name.clone(),
+                        base: BaseFields {
+                            base_id: base_id_of(&c.base_path),
+                            base_name: crate::cfg::base_name(&c.base_path).to_string(),
+                            publication: c.publication.clone(),
+                            write: c.allows_write() && matches!(ceiling, Ceiling::Full),
+                        },
                     },
-                },
-            )
-        })
-        .collect()
+                )
+            })
+            .collect();
+        Machine { cards, ceiling }
+    }
+
+    /// Настройки не прочитались вовсе — ни одной карточки и «только чтение».
+    ///
+    /// Пустой список верен: настройки, которые не читаются, не вправе никого
+    /// пускать, и `accept_side` откажет словами. «Только чтение» верно по тому
+    /// же правилу: по умолчанию инструментов, пишущих в базу, нет (решение
+    /// владельца 1.11), и неизвестность не повод выдавать больше, чем
+    /// разрешено.
+    fn silent() -> Machine {
+        Machine { cards: Vec::new(), ceiling: Ceiling::ReadOnly }
+    }
 }
 
 /// Опознавательный знак базы для провода.
@@ -795,18 +832,6 @@ fn base_id_of(base_path: &str) -> String {
     let mut h = Sha256::new();
     h.update(base_path.as_bytes());
     crate::secrets::hex::encode(&h.finalize()[..16])
-}
-
-/// Потолок записи этой МАШИНЫ (`wire::Ceiling` — «свойство машины, не
-/// карточки»): тот же переключатель, что живёт в меню значка.
-fn ceiling_of(kit: &Kit) -> Ceiling {
-    match crate::cfg::Cfg::load(kit) {
-        Ok(cfg) if cfg.access() == "full" => Ceiling::Full,
-        // Не прочлось — «только чтение»: по умолчанию инструментов, пишущих
-        // в базу, нет (решение владельца 1.11), и неизвестность не повод
-        // выдавать больше, чем разрешено.
-        _ => Ceiling::ReadOnly,
-    }
 }
 
 /// Как эта машина называет себя той стороне. Её слова, не проверенный факт, —
@@ -1018,8 +1043,67 @@ mod tests {
         // Вторая: приёмная сторона видит ровно одну принимающую карточку —
         // ту самую, по имени. Спрашивается та самая функция, которая читает
         // диск на каждый входящий разговор.
-        let cards = super::cards_of_with(&kit, &store);
+        let cards = super::Machine::read_with(&kit, &store).cards;
         assert_eq!(cards.len(), 1, "карточка на диске есть — значит, и у приёмной стороны она есть");
         assert_eq!(cards[0].0, "Соединение 1");
+    }
+
+    /// Потолок записи меряется той же мерой, что карточки, и он — свойство
+    /// МАШИНЫ, а не выбранной карточки.
+    ///
+    /// Падало двумя способами разом. Первый: потолок читался строго (`Cfg::
+    /// load` с `validate`), а карточки терпимо — у нового человека настройки
+    /// полузаполнены всегда, значит на провод уезжало «только чтение», пока в
+    /// меню стояло «Полный». Второй, и он жил даже при терпимом чтении:
+    /// сравнение было с `"full"`, а настройки такого слова не знают вовсе
+    /// (`read_write`/`read_only`) — то есть запись не давалась НИКОГДА и
+    /// причину не называл никто. Плюс потолок не складывался с правом записи
+    /// нетекущей карточки: объявленное на проводе право зависело от того,
+    /// какая карточка выбрана.
+    #[test]
+    fn the_write_ceiling_is_read_by_the_same_measure_as_the_cards() {
+        use crate::cfg::Cfg;
+        use crate::secrets;
+        use crate::wire::Ceiling;
+        // Два полузаполненных принимающих соединения: текущее и соседнее, оба
+        // с разрешённой записью. Текущее названо нарочно — потолок машины
+        // сегодня хранится полем текущей карточки, и без `current` тест
+        // проверял бы умолчание, а не выбор человека.
+        let card = |name: &str, write: &str| {
+            format!(
+                "\n[[connection]]\nname = \"{name}\"\nserver = \"\"\ngitea = \"\"\npassword = \"\"\nworkstation = \"\"\nmode = \
+                 \"tunnel\"\nbase_path = \"\"\nbase_here = true\nrole = \"accept\"\nwrite = \"{write}\"\n"
+            )
+        };
+        let dir = std::env::temp_dir().join(format!("peer-ceiling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kit = super::Kit::at(dir.clone());
+        let store = secrets::Store::file(&dir);
+        let write_cfg = |text: String| std::fs::write(dir.join(crate::cfg::FILE), text).unwrap();
+
+        // Первая половина проверки: строгое чтение этот файл ОТВЕРГАЕТ. Без
+        // неё правка «читать терпимо» стерегла бы пустоту.
+        write_cfg(format!("current = \"Ромашка\"\n{}{}", card("Ромашка", "read_write"), card("Василёк", "read_write")));
+        assert!(Cfg::load_with(&kit, &store).is_err(), "строгое чтение обязано отвергать полузаполненные карточки");
+
+        let seen = super::Machine::read_with(&kit, &store);
+        assert_eq!(seen.ceiling, Ceiling::Full, "в меню «Полный» — значит и на проводе «Полный», а не молчаливое «только чтение»");
+        assert_eq!(seen.cards.len(), 2);
+        assert!(seen.cards.iter().all(|(_, c)| c.base.write), "обе карточки разрешают запись — потолок машины их не запрещает");
+
+        // А теперь человек щёлкнул потолок машины в «только чтение». Право
+        // записи обязано пропасть у ОБЕИХ карточек, не только у текущей:
+        // потолок — свойство машины и действует на все разом.
+        write_cfg(format!("current = \"Ромашка\"\n{}{}", card("Ромашка", "read_only"), card("Василёк", "read_write")));
+        let seen = super::Machine::read_with(&kit, &store);
+        assert_eq!(seen.ceiling, Ceiling::ReadOnly);
+        assert!(
+            seen.cards.iter().all(|(_, c)| !c.base.write),
+            "потолок машины не сложился с правом нетекущей карточки — объявленное на проводе право зависело бы от того, какая карточка \
+             выбрана"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

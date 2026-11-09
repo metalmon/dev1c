@@ -249,7 +249,7 @@ pub struct Ui {
     /// заново; поле нужно только чтобы заметить смену под открытым окном и
     /// сказать о ней один раз, а не каждый тик.
     pub licence: crate::licence::State,
-    pub log: Vec<Line>,
+    pub log: Vec<Stamped>,
     pub unread: usize,
     pub tab: Tab,
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);

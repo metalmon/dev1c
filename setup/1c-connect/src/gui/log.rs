@@ -33,6 +33,39 @@ pub struct Line {
     pub text: String,
 }
 
+/// Отметка дня и часа у строки журнала: не поле самой `Line` — её строят
+/// литералом `Line { kind, text }` в полутора сотнях мест по всему `gui/`
+/// (карточки, сохранение, трей, окно), и часы там ни при чём, — а обёртка
+/// (`Stamped`) в единственном месте, где строка входит в журнал окна
+/// (`note_line_counting`). Неделя считается с понедельника (0) — обычный
+/// порядок для лестницы `group_label` и для «в понедельник» … «в
+/// воскресенье».
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stamp {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub weekday: u32,
+    pub hour: u32,
+    pub minute: u32,
+}
+
+/// Строка журнала вместе с отметкой, когда она пришла. Это и есть элемент
+/// `Ui::log`; `Deref` до `Line` оставляет без изменений всё, что уже читает
+/// `l.kind`/`l.text` у строк журнала по всему коду и тестам.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Stamped {
+    pub line: Line,
+    pub stamp: Stamp,
+}
+
+impl std::ops::Deref for Stamped {
+    type Target = Line;
+    fn deref(&self) -> &Line {
+        &self.line
+    }
+}
+
 pub const LOG_CAP: usize = 2000;
 
 /// Файл журнала рядом с комплектом: та же дозапись, что командная строка
@@ -55,6 +88,140 @@ pub fn clock() -> String {
 pub fn clock() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
+}
+
+/// Местная дата и час:минута для отметки строки журнала — тем же приёмом,
+/// что `clock()` выше (тот же `GetLocalTime`, тот же запасной путь вне
+/// Windows), с числом, месяцем, годом и днём недели вдобавок: без них
+/// лестницу подписи дня (`group_label`) не свести. Нового зависимого пакета
+/// для времени не заводим (решение владельца 9.11) — `chrono` и подобные
+/// здесь не нужны.
+#[cfg(windows)]
+pub fn day_stamp() -> Stamp {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut t = SYSTEMTIME { wYear: 0, wMonth: 0, wDayOfWeek: 0, wDay: 0, wHour: 0, wMinute: 0, wSecond: 0, wMilliseconds: 0 };
+    unsafe { GetLocalTime(&mut t) };
+    // `wDayOfWeek`: 0 = воскресенье … 6 = суббота. У нас неделя с
+    // понедельника (0) — см. докстроку `Stamp`.
+    Stamp {
+        year: t.wYear as i32,
+        month: t.wMonth as u32,
+        day: t.wDay as u32,
+        weekday: (t.wDayOfWeek as u32 + 6) % 7,
+        hour: t.wHour as u32,
+        minute: t.wMinute as u32,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn day_stamp() -> Stamp {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let days = (secs / 86400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    Stamp {
+        year,
+        month,
+        day,
+        // Эпоха (1970-01-01) — четверг, то есть индекс 3 при неделе с
+        // понедельника (0); отсюда и смещение `+3` ниже.
+        weekday: (((days + 3) % 7 + 7) % 7) as u32,
+        hour: ((secs / 3600) % 24) as u32,
+        minute: ((secs / 60) % 60) as u32,
+    }
+}
+
+/// Число дней от 1970-01-01 (алгоритм Хауарда Хиннанта: `days_from_civil`).
+/// Новый зависимый пакет (`chrono`/`time`) под разницу двух дат не заводим —
+/// это десяток строк известной арифметики, без нового кода для часовых
+/// поясов и календарей, которые здесь и не нужны.
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y as i64 - 1 } else { y as i64 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Обратное действие — нужно только запасному пути `day_stamp` вне Windows:
+/// там нет `GetLocalTime`, который отдаёт дату сам, только секунды с эпохи.
+#[cfg(not(windows))]
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { (y + 1) as i32 } else { y as i32 }, m, d)
+}
+
+/// Названия дней недели для лестницы (владелец 9.11): «в понедельник», «во
+/// вторник», «в среду», «в четверг», «в пятницу», «в субботу», «в
+/// воскресенье» — с большой, потому что подпись стоит сама по себе, не
+/// серединой фразы. Индекс — `Stamp::weekday` (понедельник = 0).
+const WEEKDAY_NAMES: [&str; 7] = ["В понедельник", "Во вторник", "В среду", "В четверг", "В пятницу", "В субботу", "В воскресенье"];
+
+/// Месяцы в родительном падеже («3 ноября») для даты старше этой недели.
+/// Индекс — месяц минус один (`Stamp::month` от 1 до 12).
+const MONTHS_GENITIVE: [&str; 12] =
+    ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+
+/// Подпись дня по лестнице, которую ведущий предложил и владелец согласовал
+/// 9.11: «Сегодня» → «Вчера» → название дня недели для остальных дней ЭТОЙ
+/// недели («В среду») → дата для всего, что старше («3 ноября»). Чистая
+/// функция от двух дат, без обращения к живым часам: отрисовку GPUI тестом
+/// не взять, а эту лестницу можно и нужно проверить без живого окна.
+pub fn group_label(day: Stamp, today: Stamp) -> String {
+    let diff = days_from_civil(today.year, today.month, today.day) - days_from_civil(day.year, day.month, day.day);
+    match diff {
+        0 => "Сегодня".to_string(),
+        1 => "Вчера".to_string(),
+        // `today.weekday` — число дней от понедельника ЭТОЙ недели до
+        // сегодня; день попадает в эту неделю, пока он не дальше понедельника.
+        d if d >= 2 && d <= today.weekday as i64 => WEEKDAY_NAMES[day.weekday as usize].to_string(),
+        _ => format!("{} {}", day.day, MONTHS_GENITIVE[day.month.saturating_sub(1).min(11) as usize]),
+    }
+}
+
+/// Элемент готовой ленты журнала — то же разделение решения от отрисовки,
+/// что `panel::Body` у вкладки «Связь»: что показать решает чистая функция
+/// (`entries`), рисует уже готовый список, своего не решая.
+#[derive(Clone, PartialEq, Debug)]
+pub enum LogEntry {
+    /// Подпись дня (`group_label`) по центру, между строк.
+    Caption(String),
+    /// Строка журнала и сколько раз подряд она повторилась (1 — без
+    /// повтора, счётчик в хвосте строки тогда не рисуется).
+    Row(Line, usize),
+}
+
+/// Лента журнала целиком, готовая к отрисовке: повторы подряд (один вид,
+/// один текст) сложены в одну запись со счётчиком — разделённые чужой
+/// строкой НЕ складываются, — и перед первой строкой каждого дня (включая
+/// самый первый) вставлена его подпись. Чистая функция от списка и
+/// сегодняшней даты: это и единственное, что можно проверить тестом —
+/// отрисовку GPUI тестом не взять.
+pub fn entries(lines: &[Stamped], today: Stamp) -> Vec<LogEntry> {
+    let mut out: Vec<LogEntry> = Vec::new();
+    let mut last_day: Option<(i32, u32, u32)> = None;
+    for s in lines {
+        let day = (s.stamp.year, s.stamp.month, s.stamp.day);
+        if last_day != Some(day) {
+            out.push(LogEntry::Caption(group_label(s.stamp, today)));
+            last_day = Some(day);
+        }
+        match out.last_mut() {
+            Some(LogEntry::Row(prev, count)) if prev.kind == s.line.kind && prev.text == s.line.text => *count += 1,
+            _ => out.push(LogEntry::Row(s.line.clone(), 1)),
+        }
+    }
+    out
 }
 
 /// Отказ операции, меняющей машину, по истёкшему сроку: `Some` — начинать
@@ -246,7 +413,7 @@ pub fn line_of(e: &Event) -> Option<Line> {
 fn note_line_counting(ui: &mut Ui, mut line: Line, counts_as_unread: bool) {
     line.text = capitalized(&line.text);
     write_log_file(&ui.kit, &line);
-    ui.log.push(line);
+    ui.log.push(Stamped { stamp: day_stamp(), line });
     if ui.log.len() > LOG_CAP {
         let extra = ui.log.len() - LOG_CAP;
         ui.log.drain(0..extra);

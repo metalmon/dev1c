@@ -16,7 +16,7 @@ use crate::gui::theme;
 // (элемент-список GPUI), и глобальное имя стало бы неоднозначным.
 use crate::gui::link;
 use crate::gui::window::hide_window;
-use crate::gui::{self, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
+use crate::gui::{self, Busy, Dot, Kind, Line, LogEntry, ProjectView, Running, Ui, Verdict, Which};
 use crate::session::State;
 use common::check::{Check, Outcome};
 // `Button` из `gpui_kit` зовём `KitButton`: имя `Button` ниже занято чистым
@@ -3115,6 +3115,12 @@ impl Render for Panel {
                     self.log_len = lines.len();
                     self.log_scroll.scroll_to_bottom();
                 }
+                // Решение, что показать — подпись дня или строка с числом
+                // повторов, — целиком у чистой функции (`gui::entries`), по
+                // образцу `link_body` у вкладки «Связь»: отрисовка по
+                // готовому итогу своего не решает (задача 9 плана «После
+                // живого прогона»).
+                let entries = gui::entries(&lines, gui::day_stamp());
                 Self::scrolled(
                     "log",
                     &self.log_scroll,
@@ -3126,46 +3132,68 @@ impl Render for Panel {
                     // что зацепиться, где кончилась одна и началась другая.
                     // Отступ сверху у заголовка раздела остаётся больше
                     // (`mt_2`), чтобы разделы были заметнее записей внутри.
-                    v_flex().text_size(px(13.)).children(lines.into_iter().map(|l| {
-                        if l.kind == Kind::Head {
-                            // Заголовок раздела: «{операция} · {HH:MM}» из `head_line`;
-                            // на экране операция слева полужирным, время справа
-                            // мелким приглушённым (заказчик 2026-10-18).
-                            let (title, time) = l
-                                .text
-                                .rsplit_once(" · ")
-                                .map(|(t, c)| (t.to_string(), c.to_string()))
-                                .unwrap_or((l.text.clone(), String::new()));
+                    v_flex().text_size(px(13.)).children(entries.into_iter().map(|e| match e {
+                        LogEntry::Caption(label) => {
+                            // Подпись дня — по центру, между тонкими чертами,
+                            // которыми строки уже разделены (владелец 9.11,
+                            // философия Fluent): не слева полужирным, как
+                            // заголовок операции (`Kind::Head`) ниже, а
+                            // отдельной приглушённой строкой.
                             h_flex()
                                 .mt_2()
-                                .items_baseline()
-                                .justify_between()
-                                .gap_2()
                                 .pb_1()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
-                                .child(div().text_size(px(12.)).text_color(caption).child(time))
-                                .into_any_element()
-                        } else {
-                            // Цвет — только у значка: строки, окрашенные целиком,
-                            // на тёмном сливаются в пёстрый лист (заказчик
-                            // 2026-10-18). Служебные строки — приглушённые.
-                            // `min_w_0` — иначе flex-ребёнок не уже своего
-                            // текста и строка не переносится, а обрезается.
-                            let mark_color = match l.kind {
-                                Kind::Ok => success,
-                                Kind::Warn => warning,
-                                Kind::Fail => danger,
-                                Kind::Say | Kind::Head => caption,
-                            };
-                            let text_color = if l.kind == Kind::Say { caption } else { fg };
-                            h_flex()
-                                .items_start()
-                                .py_1()
                                 .border_b_1()
                                 .border_color(border.opacity(0.4))
-                                .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
-                                .child(div().flex_1().min_w_0().text_color(text_color).child(l.text))
+                                .justify_center()
+                                .child(div().text_size(px(12.)).text_color(caption).child(label))
                                 .into_any_element()
+                        }
+                        LogEntry::Row(l, count) => {
+                            if l.kind == Kind::Head {
+                                // Заголовок раздела: «{операция} · {HH:MM}» из `head_line`;
+                                // на экране операция слева полужирным, время справа
+                                // мелким приглушённым (заказчик 2026-10-18).
+                                let (title, time) = l
+                                    .text
+                                    .rsplit_once(" · ")
+                                    .map(|(t, c)| (t.to_string(), c.to_string()))
+                                    .unwrap_or((l.text.clone(), String::new()));
+                                h_flex()
+                                    .mt_2()
+                                    .items_baseline()
+                                    .justify_between()
+                                    .gap_2()
+                                    .pb_1()
+                                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(fg).child(title))
+                                    .child(div().text_size(px(12.)).text_color(caption).child(time))
+                                    .into_any_element()
+                            } else {
+                                // Цвет — только у значка: строки, окрашенные целиком,
+                                // на тёмном сливаются в пёстрый лист (заказчик
+                                // 2026-10-18). Служебные строки — приглушённые.
+                                // `min_w_0` — иначе flex-ребёнок не уже своего
+                                // текста и строка не переносится, а обрезается.
+                                let mark_color = match l.kind {
+                                    Kind::Ok => success,
+                                    Kind::Warn => warning,
+                                    Kind::Fail => danger,
+                                    Kind::Say | Kind::Head => caption,
+                                };
+                                let text_color = if l.kind == Kind::Say { caption } else { fg };
+                                // Повтор — в хвосте строки («×2»), не новой
+                                // строкой: склейка владельца 9.11 вместе с
+                                // датами («Режим работы: Локально…» дважды
+                                // подряд, `base_path` дважды подряд).
+                                let text = if count > 1 { format!("{} ×{count}", l.text) } else { l.text };
+                                h_flex()
+                                    .items_start()
+                                    .py_1()
+                                    .border_b_1()
+                                    .border_color(border.opacity(0.4))
+                                    .child(div().w(px(18.)).flex_shrink_0().text_color(mark_color).child(l.kind.mark()))
+                                    .child(div().flex_1().min_w_0().text_color(text_color).child(text))
+                                    .into_any_element()
+                            }
                         }
                     })),
                 )

@@ -460,7 +460,7 @@ fn saving_away_a_cold_condition_douses_the_card_too() {
     assert_eq!(ui.link, State::Off, "карточка и переключатель обязаны показать «выключено»");
     // Строка про гашение ровно одна (про обновлённые параметры рядом —
     // своя и законная: это другое событие).
-    let doused: Vec<&Line> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("MCP выключены:")).collect();
+    let doused: Vec<&Stamped> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("MCP выключены:")).collect();
     // Какое именно условие назовёт строка, решает порядок `cold_gate`, а в
     // каталоге теста не выполнено сразу несколько — здесь проверяется сам
     // факт гашения со строкой, а список условий стережёт `gate::tests`.

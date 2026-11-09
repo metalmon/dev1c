@@ -227,7 +227,10 @@ fn a_line_during_an_operation_reaches_the_journal_and_moves_seen() {
     let line = Line { kind: Kind::Say, text: "выгружаю конфигурацию из 1С (cf_decompile → src)".into() };
     on_line(&mut ui, line, now);
     // Та же строка, и с заглавной: дорога в журнал одна — `note_line`.
-    assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Say, text: "Выгружаю конфигурацию из 1С (cf_decompile → src)".into() }));
+    assert_eq!(
+        ui.log.last().map(|s| &s.line),
+        Some(&Line { kind: Kind::Say, text: "Выгружаю конфигурацию из 1С (cf_decompile → src)".into() })
+    );
     let r = ui.progress.as_ref().unwrap();
     assert_eq!(r.seen, now);
     assert!(ui.dirty);
@@ -244,7 +247,7 @@ fn a_cancelled_done_is_a_warning_not_a_failure() {
     // Главное здесь — `Warn`, а не `Fail`. Заглавную в журнале ставит
     // `note_line`; подвал держит строку как есть и поднимает её при показе
     // (`panel::foot_left_text`), поэтому человек читает одно и то же.
-    assert_eq!(ui.log.last(), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
+    assert_eq!(ui.log.last().map(|s| &s.line), Some(&Line { kind: Kind::Warn, text: "Прервано".into() }));
     assert_eq!(ui.status, Some(Line { kind: Kind::Warn, text: "прервано".into() }));
     assert_eq!(crate::gui::panel::foot_left_text(ui.status.as_ref(), None, None, "C:\\kit").0, "Прервано");
 }
@@ -261,4 +264,71 @@ fn the_httpd_queue_is_named_only_when_there_is_more_than_one_base() {
     // а не ошибку или поломку
     let lower = note.to_lowercase();
     assert!(lower.contains("очереди") || lower.contains("медленнее"), "сообщение должно упоминать очередь или задержку: {note}");
+}
+
+/// Лестница владельца 9.11: «Сегодня» → «Вчера» → день недели для остальных
+/// дней этой недели → дата для всего, что старше. «Сегодня» теста — суббота,
+/// 14 ноября 2026 (придумано для теста, не живые часы): понедельник этой
+/// недели — 9 ноября, поэтому среда 11-го ещё внутри недели, а 3 ноября —
+/// уже нет.
+#[test]
+fn the_group_label_climbs_the_ladder() {
+    let today = Stamp { year: 2026, month: 11, day: 14, weekday: 5, hour: 0, minute: 0 };
+    assert_eq!(group_label(today, today), "Сегодня");
+    let yesterday = Stamp { year: 2026, month: 11, day: 13, weekday: 4, hour: 0, minute: 0 };
+    assert_eq!(group_label(yesterday, today), "Вчера");
+    // Три дня назад, в пределах этой недели — падеж винительный: «в среду».
+    let wednesday = Stamp { year: 2026, month: 11, day: 11, weekday: 2, hour: 0, minute: 0 };
+    assert_eq!(group_label(wednesday, today), "В среду");
+    // Старше этой недели — дата, месяц в родительном падеже.
+    let older = Stamp { year: 2026, month: 11, day: 3, weekday: 1, hour: 0, minute: 0 };
+    assert_eq!(group_label(older, today), "3 ноября");
+}
+
+/// Склейка повторов — находка владельца 9.11 на живом снимке: «Режим
+/// работы: Локально…» и «base_path — путь к базе» стояли дважды подряд.
+/// Одинаковые подряд (один вид, один текст) — одна запись со счётчиком;
+/// разделённые чужой строкой — НЕ склеиваются.
+#[test]
+fn the_same_line_twice_in_a_row_is_one_line_with_a_count() {
+    let day = Stamp { year: 2026, month: 11, day: 9, weekday: 0, hour: 9, minute: 0 };
+    let say = |text: &str| Stamped { line: Line { kind: Kind::Say, text: text.into() }, stamp: day };
+    let lines =
+        vec![say("Режим работы: Локально"), say("Режим работы: Локально"), say("base_path — путь к базе"), say("base_path — путь к базе")];
+    let out = entries(&lines, day);
+    // Подпись дня (одна, в начале) + две склеенные записи, каждая с ×2.
+    assert_eq!(out.len(), 3, "{out:?}");
+    assert!(matches!(&out[0], LogEntry::Caption(_)), "{out:?}");
+    assert_eq!(out[1], LogEntry::Row(Line { kind: Kind::Say, text: "Режим работы: Локально".into() }, 2));
+    assert_eq!(out[2], LogEntry::Row(Line { kind: Kind::Say, text: "base_path — путь к базе".into() }, 2));
+
+    // Та же пара, но разделённая чужой строкой — считается заново, без склейки.
+    let interrupted = vec![say("A"), Stamped { line: Line { kind: Kind::Say, text: "B".into() }, stamp: day }, say("A")];
+    let out2 = entries(&interrupted, day);
+    assert_eq!(out2.len(), 4, "{out2:?}"); // подпись + A + B + A
+    assert_eq!(out2[1], LogEntry::Row(Line { kind: Kind::Say, text: "A".into() }, 1));
+    assert_eq!(out2[2], LogEntry::Row(Line { kind: Kind::Say, text: "B".into() }, 1));
+    assert_eq!(out2[3], LogEntry::Row(Line { kind: Kind::Say, text: "A".into() }, 1));
+}
+
+/// Лента из строк двух дней — подпись у каждого дня, в том числе у первого
+/// (не только у смены дня внутри ленты).
+#[test]
+fn a_group_caption_stands_before_the_first_line_of_its_day() {
+    let today = Stamp { year: 2026, month: 11, day: 9, weekday: 0, hour: 0, minute: 0 };
+    let yesterday = Stamp { year: 2026, month: 11, day: 8, weekday: 6, hour: 0, minute: 0 };
+    let lines = vec![
+        Stamped { line: Line { kind: Kind::Ok, text: "вчерашняя строка".into() }, stamp: yesterday },
+        Stamped { line: Line { kind: Kind::Ok, text: "сегодняшняя строка".into() }, stamp: today },
+    ];
+    let out = entries(&lines, today);
+    assert_eq!(
+        out,
+        vec![
+            LogEntry::Caption("Вчера".into()),
+            LogEntry::Row(Line { kind: Kind::Ok, text: "вчерашняя строка".into() }, 1),
+            LogEntry::Caption("Сегодня".into()),
+            LogEntry::Row(Line { kind: Kind::Ok, text: "сегодняшняя строка".into() }, 1),
+        ]
+    );
 }

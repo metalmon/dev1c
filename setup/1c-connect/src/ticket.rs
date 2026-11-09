@@ -28,10 +28,19 @@
 //! Hex — это только `0-9a-f`, каждый байт — два предсказуемых знака, и
 //! строка разбирается одинаково в любом регистре: если автозамена поднимет
 //! первую букву строки (так делают некоторые клавиатуры), код всё равно
-//! прочитается. Длина при этом не экономится, но тикет живут секунды между
-//! «скопировал» и «вставил», а не передаются по байту — платить за это
+//! прочитается. Длина при этом не экономится, но тикет живёт секунды между
+//! «скопировал» и «вставил», а не передаётся по байту — платить за это
 //! нечем.
+//!
+//! **Перенос строки и невидимые разделители при копировании — не порча.**
+//! Длинную строку мессенджер или почтовый клиент переносит сам, добавляя
+//! `\n`, а иногда и невидимые знаки (zero-width space `U+200B`, BOM
+//! `U+FEFF`) на месте переноса — это делает чужая программа, не человек, и
+//! отказывать на этом нечестно: человек код скопировал целиком. `from_code`
+//! поэтому вычищает все пробельные и эти невидимые символы из всей строки
+//! перед разбором — в самом коде (чистом hex) их не бывает по построению.
 
+use crate::secrets::hex;
 use aes_gcm::aead::Generate;
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
@@ -94,7 +103,7 @@ impl Ticket {
         now <= self.until
     }
 
-    /// Одна строка для пересылки — hex одного JSON-блока (см. докстрою модуля).
+    /// Одна строка для пересылки — hex одного JSON-блока (см. докстроку модуля).
     ///
     /// `expect` ниже не паника на чужом вводе: сериализуется только то, что
     /// завели сами (строки, числа, ключ узла), и `serde_json` может отказать
@@ -116,7 +125,7 @@ impl Ticket {
     /// человек, вставивший код не целиком или не туда, должен прочитать
     /// причину, а не увидеть сбой программы.
     pub fn from_code(code: &str) -> Result<Ticket, String> {
-        let json = hex::decode(code.trim())
+        let json = hex::decode(&strip_noise(code))
             .map_err(|e| format!("Код не читается: {e}.\nПроверьте, что он скопирован целиком, без пробелов и переносов строки."))?;
         let wire: Wire = serde_json::from_slice(&json)
             .map_err(|e| format!("Код не разобрался: {e}.\nЭто не тикет этой программы, или он обрезан при копировании."))?;
@@ -164,6 +173,20 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
+/// Вычищает из вставленного кода пробелы (включая перенос строки) и
+/// невидимые разделители, которые мессенджер или почтовый клиент добавляют
+/// САМИ при автоматическом переносе длинной строки — zero-width space
+/// (`U+200B`) и BOM/zero-width no-break space (`U+FEFF`). Круг починки 1,
+/// Critical 2: прежняя версия делала только `trim()` по краям, а перенос
+/// посередине строки (ровно то, что происходит с длинным кодом в реальном
+/// мессенджере) отказывал «не hex-символ». Безопасно выкинуть ЛЮБОЕ число
+/// этих символов из ЛЮБОГО места строки: в настоящем коде (чистом hex) их
+/// не бывает по построению (`to_code`), так что вычистить их — не потерять
+/// часть кода, а убрать то, что код не писал.
+fn strip_noise(code: &str) -> String {
+    code.chars().filter(|c| !c.is_whitespace() && *c != '\u{200B}' && *c != '\u{FEFF}').collect()
+}
+
 /// То, что едет внутри кода, до оборачивания в hex. `EndpointId` сериализуется
 /// сам (строкой — его собственный `Serialize`, тот же hex, что у `Display`);
 /// секрет — отдельным полем-строкой, а не массивом байт, чтобы JSON оставался
@@ -175,40 +198,6 @@ struct Wire {
     direct: Vec<String>,
     secret: String,
     until: u64,
-}
-
-/// Hex без разделителей — дублирует `secrets::hex` (тот модуль не публичный):
-/// мелкий файловый помощник в этом крейте принято не делить между модулями
-/// (тот же приём, что у `unique`/`tempdir` в тестах `allow.rs`).
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        use std::fmt::Write;
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            let _ = write!(out, "{b:02x}");
-        }
-        out
-    }
-
-    pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        let b = s.as_bytes();
-        if !b.len().is_multiple_of(2) {
-            return Err(format!("нечётная длина ({})", b.len()));
-        }
-        let digit = |c: u8| match c {
-            b'0'..=b'9' => Some(c - b'0'),
-            b'a'..=b'f' => Some(c - b'a' + 10),
-            b'A'..=b'F' => Some(c - b'A' + 10),
-            _ => None,
-        };
-        b.chunks(2)
-            .map(|pair| {
-                let hi = digit(pair[0]).ok_or_else(|| "не hex-символ".to_string())?;
-                let lo = digit(pair[1]).ok_or_else(|| "не hex-символ".to_string())?;
-                Ok(hi << 4 | lo)
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -281,5 +270,35 @@ mod tests {
         let far_future = Wire { until: now_secs() + LIFETIME.as_secs() + MAX_FUTURE_SLACK.as_secs() + 10, ..base };
         let no = Ticket::from_code(&hex::encode(&serde_json::to_vec(&far_future).unwrap())).unwrap_err();
         assert!(!no.is_empty(), "срок дальше суток с запасом на расхождение часов — не бывает у честной программы");
+    }
+
+    /// Круг починки 1, Critical 2: мессенджер переносит длинную строку сам,
+    /// добавляя `\n` и иногда невидимые символы на месте переноса — это не
+    /// порча кода, а чужая вёрстка вокруг него. Код обязан разобраться и с
+    /// переносом посередине, и с невидимыми разделителями (zero-width space,
+    /// BOM), которые некоторые клиенты вставляют туда же.
+    #[test]
+    fn a_code_broken_by_a_line_wrap_or_invisible_separators_still_decodes() {
+        let t = sample();
+        let code = t.to_code();
+        let mid = code.len() / 2;
+        let noisy = format!("{}\n\u{200B}{}\u{FEFF}\r\n", &code[..mid], &code[mid..]);
+
+        let back = Ticket::from_code(&noisy).unwrap();
+        assert_eq!(back.node, t.node);
+        assert_eq!(*back.secret, *t.secret);
+        assert_eq!(back.until, t.until);
+    }
+
+    /// Минор 6 круга 1: секрет не светится в `{:?}` только потому, что
+    /// `Zeroizing` из крейта `zeroize` печатает `Zeroizing { .. }`, а не
+    /// содержимое, — чужое поведение, не наш код. Один тест, который
+    /// сломается первым, если это когда-нибудь поменяется апгрейдом крейта.
+    #[test]
+    fn the_secret_never_shows_up_in_debug_output() {
+        let t = sample();
+        let printed = format!("{t:?}");
+        let secret_hex = hex::encode(&*t.secret);
+        assert!(!printed.contains(&secret_hex), "секрет не должен быть виден в Debug: {printed}");
     }
 }

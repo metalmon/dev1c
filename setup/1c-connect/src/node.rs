@@ -233,7 +233,7 @@ fn make(store: &crate::secrets::Store, path: &Path) -> Result<SecretKey, String>
             )
         })?;
     }
-    match std::fs::File::create_new(path) {
+    match create_new_owner_only(path) {
         Ok(mut f) => {
             use std::io::Write;
             f.write_all(format!("{sealed}\n").as_bytes()).map_err(|e| {
@@ -269,13 +269,40 @@ fn make(store: &crate::secrets::Store, path: &Path) -> Result<SecretKey, String>
 /// `editors::write_and_rename`; `sync_all` не зовём по тому же доводу, что и
 /// там — а последствие нулевого файла здесь закрыто отказом словами в
 /// `from_file`, а не молчаливой генерацией.
+///
+/// `fsperm::write_owner_only`, не голый `std::fs::write` (круг починки 1,
+/// Минор 6): карантинный файл отпечатков в `enrolled.rs` получил права 0600
+/// при создании, а файл с НАСТОЯЩИМ ключом узла — личностью машины, потеря
+/// которой стоит дороже пароля базы (докстрока `KEY_FILE` выше) — писался
+/// без них. Защита была поставлена не на том конце; этот приём уже есть, и
+/// переносить его сюда — не новая работа.
 fn replace_sealed(path: &Path, sealed: &str) -> Result<(), String> {
     let tmp = path.with_extension("key.tmp");
-    std::fs::write(&tmp, format!("{sealed}\n")).map_err(|e| format!("не удалось записать {}: {e}", tmp.display()))?;
+    common::fsperm::write_owner_only(&tmp, &format!("{sealed}\n"))?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("не удалось переименовать {} в {}: {e}", tmp.display(), path.display())
     })
+}
+
+/// Создаёт файл личности машины с правами только для владельца там, где
+/// это умеет система (Unix — `mode(0o600)` одним вызовом, без окна между
+/// появлением файла и ограничением прав), и `create_new`/O_EXCL в любом
+/// случае — тем самым, из-за которого гонка двух одновременных экземпляров
+/// в докстроке `make` разрешается в пользу того, кто успел первым. На
+/// Windows отдельного пути сузить права ФАЙЛА этот крейт не заводит ни для
+/// одного файла состояния (приватность секретов там несёт DPAPI, не ACL
+/// файла, — та же оговорка, что у `enrolled::write_atomic`): файл наследует
+/// права каталога состояния.
+#[cfg(unix)]
+fn create_new_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+}
+
+#[cfg(not(unix))]
+fn create_new_owner_only(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::create_new(path)
 }
 
 #[cfg(test)]

@@ -32,7 +32,13 @@ const FILE: &str = "enrolled.toml";
 pub struct Party {
     pub key: EndpointId,
     /// Как сторона назвала себя при заявке (протокол, `says_name`) — в окне
-    /// это помечается «её слова, не проверено», сюда кладётся как есть.
+    /// это помечается «её слова, не проверено».
+    ///
+    /// Чужая строка, и сюда она попадает уже вычищенной — без управляющих и
+    /// невидимых знаков, обрезанной по длине (`enroll::as_said`). Чистит
+    /// зачисление, а не книга: чистить надо ОДИН раз и до всего остального,
+    /// иначе показанное человеку и записанное здесь разойдутся, а спор между
+    /// ними разрешать нечем.
     pub says_name: String,
     pub write: bool,
 }
@@ -221,11 +227,11 @@ impl Book {
     pub fn enrolled_to(&self, connection: &str, key: EndpointId) -> Result<Option<Party>, String> {
         let _guard = lock(&self.path)?;
         let data = load_raw(&self.path)?;
-        Ok(data
-            .enrolled
-            .iter()
-            .find(|p| p.connection == connection && p.key == key)
-            .map(|p| Party { key: p.key, says_name: p.says_name.clone(), write: p.write }))
+        Ok(data.enrolled.iter().find(|p| p.connection == connection && p.key == key).map(|p| Party {
+            key: p.key,
+            says_name: p.says_name.clone(),
+            write: p.write,
+        }))
     }
 
     /// Кто зачислен к этой карточке прямо сейчас — из снимка, обновлённого

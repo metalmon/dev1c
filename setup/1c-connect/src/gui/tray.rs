@@ -579,45 +579,61 @@ fn host_for_mode_change(current: &Connection, mode: &str) -> Connection {
     host
 }
 
-/// Записать новый режим и поднять сеанс заново. Зовётся после согласия
-/// человека (`confirm_database_change`), поэтому `ui.cfg.current().mode` правится
-/// здесь, а не до вопроса: `save_host` берёт режим из текущих параметров и
-/// иначе переписал бы его обратно.
+/// Исход `write_mode` — три разных хвоста для `apply_mode`, не два: отказ
+/// `save_host` ещё не значит «ничего не записано» (точечный путь мог
+/// спасти намерение), и ветка, где спасти не удалось НИКАК, — третья, не
+/// то же самое, что вторая (круг починки 2 задачи 12, Minor 4).
+#[derive(Debug)]
+enum ModeWrite {
+    /// `save_host` прошла — файл и память согласны на обеих осях.
+    Saved,
+    /// `save_host` отказала (текст — `why`), но намерение всё равно легло в
+    /// файл точечной записью (`save_tray_key`/`save_tray_keys`) — то же
+    /// правило, что у публикации: выбор режима — намерение человека, а не
+    /// действие над базой, и обязан сработать даже на пустых полях свежего
+    /// комплекта.
+    Unsaved(String),
+    /// Отказала и точечная запись (текст — её собственная ошибка): файл
+    /// остался прежним, а память — уже нет (мутация ниже безусловна, тем же
+    /// приёмом, что был у одного `mode` до этой задачи).
+    Failed(String),
+}
+
+/// Пишет `mode` (и, при входе в «одна машина», `base_here`) ТЕКУЩЕГО
+/// соединения — половина `apply_mode` без `App`, вынесенная отдельно ровно
+/// затем, чтобы находку владельца здесь закрыл тест (гарнеса `gpui::test` в
+/// этом ящике нет вовсе, см. докстроку
+/// `the_publication_door_counts_busy_with_the_same_single_count_and_word`
+/// ниже, и `apply_mode` — `cx: &mut App` — без него не позвать).
 ///
-/// Обе оси переносятся в `ui.cfg` ОДНОЙ правкой, через `host_for_mode_change`
-/// (см. её докстроку) — и на удачном пути записи, и на отказе: там же, где
-/// раньше писался только `mode` (`save_tray_key`), теперь пара
-/// (`save_tray_keys`), чтобы намерение человека не потерялось наполовину
-/// даже на свежем комплекте с пустыми полями.
-fn apply_mode(cx: &mut App, mode: &'static str) {
-    let host = host_for_mode_change(cx.global::<Ui>().cfg.current(), mode);
+/// **Круг починки 2, Important 1 — настоящая находка была не в
+/// `host_for_mode_change`, а в строке `current.base_here = host.base_here`
+/// ниже.** `save_host` (`save.rs`) сама перетирает `host.base_here`
+/// значением из `ui.cfg.current().base_here` — тем же приёмом, что и
+/// `host.mode = ui.cfg.current().mode.clone()` чуть выше по её же телу
+/// (перенос «того, чего форма не несёт»): это значит, что НЕ мутация
+/// `ui.cfg` здесь, а именно то, что УЖЕ лежит в `ui.cfg.current()` к
+/// моменту вызова `save_host`, решает, что уйдёт на диск. Тест круга 1
+/// (`entering_local_mode_pulls_base_here_along_in_the_same_record`) проверял
+/// только `host_for_mode_change` — чистую функцию, боевой путь которую
+/// вообще не обязан звать напрямую, — и остался бы зелёным, если эту
+/// строку вырезать: находка владельца тихо вернулась бы. Новый тест ниже
+/// (`applying_local_mode_writes_base_here_in_cfg_and_on_disk`) гоняет
+/// `write_mode` целиком, то есть ровно ту строку.
+fn write_mode(ui: &mut Ui, mode: &str) -> ModeWrite {
+    let host = host_for_mode_change(ui.cfg.current(), mode);
     // Критическая находка круга починки 1 задачи 16, другой конец: открытая
     // карточка держит СВОЙ снимок режима (`Panel::original`), и после
     // записи ниже его надо перевязать — тем же `sync_card_topology`, что
-    // зовёт и переключатель «Это соединение» в карточке (`request_current_mode_change`).
-    // Имя берём один раз сейчас, не после записи: при отказе (`Err`) ниже
-    // имя текущего соединения не меняется, но брать его стоит из одного
-    // места, а не дважды по разным путям match.
-    let name = cx.global::<Ui>().cfg.current().name.clone();
-    {
-        let current = cx.global_mut::<Ui>().cfg.current_mut();
-        current.mode = host.mode.clone();
-        current.base_here = host.base_here;
-    }
-    match save_host(cx.global_mut::<Ui>(), host) {
-        Ok(()) => {
-            // Тревный значок, готовность/замок, гашение и подъём сеанса —
-            // общий хвост с переключением текущего соединения (Critical
-            // ревью круга починки 2 задачи 16, `recycle_session`).
-            recycle_session(cx);
-            let mut label = mode;
-            for (m, text) in MODE_WORDS {
-                if m == mode {
-                    label = text;
-                }
-            }
-            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
-        }
+    // зовёт и переключатель «Это соединение» в карточке
+    // (`request_current_mode_change`). Мутация памяти — БЕЗУСЛОВНАЯ, до
+    // попытки записи и независимо от её исхода (см. `ModeWrite::Failed`):
+    // тем же приёмом, каким до этой задачи жил один `mode` (докстрока
+    // `apply_mode` ниже).
+    ui.cfg.current_mut().mode = host.mode.clone();
+    ui.cfg.current_mut().base_here = host.base_here;
+    match save_host(ui, host) {
+        Ok(()) => ModeWrite::Saved,
         Err(why) => {
             // Та же развязка, что у публикации, и по той же причине: выбор
             // режима — намерение человека, а не действие над базой, и на
@@ -630,14 +646,61 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             // противоречии, которое нашёл владелец, просто на отказе вместо
             // удачи.
             let tray_result = if mode == "local" {
-                save_tray_keys(cx.global_mut::<Ui>(), &[("mode", mode), ("base_here", "true")])
+                save_tray_keys(ui, &[("mode", mode), ("base_here", "true")])
             } else {
-                save_tray_key(cx.global_mut::<Ui>(), "mode", mode)
+                save_tray_key(ui, "mode", mode)
             };
-            if let Err(e) = tray_result {
-                note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-                return;
+            match tray_result {
+                Ok(()) => ModeWrite::Unsaved(why),
+                Err(e) => ModeWrite::Failed(e),
             }
+        }
+    }
+}
+
+/// Записать новый режим и поднять сеанс заново. Зовётся после согласия
+/// человека (`confirm_database_change`), поэтому `ui.cfg.current().mode` правится
+/// здесь (внутри `write_mode`), а не до вопроса: `save_host` берёт режим из
+/// текущих параметров и иначе переписал бы его обратно.
+///
+/// **Три исхода `write_mode`, три разных хвоста** (круг починки 2, Minor
+/// 4): раньше у `ModeWrite::Failed` стоял досрочный `return`, пропускавший
+/// перевязку карточки (`sync_card_topology`) и перерисовку
+/// (`cx.refresh_windows()`) — ровно то, что получают оба соседних исхода.
+/// Без них открытая карточка держала бы СТАРЫЙ снимок режима, пока
+/// `ui.cfg.current()` уже новый (мутация в `write_mode` безусловна) — третье
+/// несогласованное состояние вдобавок к файлу, которого не задевает ни один
+/// из трёх путей записи. Поэтому все три исхода падают в общий хвост внизу.
+///
+/// **Перецикл сеанса (`recycle_session`) — НЕ зовём на `Failed` нарочно.**
+/// И без него карточка расходится с памятью на отрисовке, но `recycle_session`
+/// гасит и поднимает сеанс на параметрах, не записанных НИГДЕ — ни полной
+/// проверкой, ни точечным запасным путём, — а провалившаяся правка не повод
+/// рвать живое соединение. То же рассуждение верно и для соседа, `Unsaved`:
+/// там сеанс тоже не перецикливается (только `tray.set_agents`/`tab`/
+/// `show_window`), и это не упущение этого круга, а давняя граница того же
+/// рассуждения — полная готовность/замок пересчитываются только на
+/// `save_host`, прошедшей целиком.
+fn apply_mode(cx: &mut App, mode: &'static str) {
+    // Имя — ДО вызова `write_mode`: при отказе (`Unsaved`/`Failed`) имя
+    // текущего соединения не меняется, но брать его стоит из одного места,
+    // а не по разным путям match.
+    let name = cx.global::<Ui>().cfg.current().name.clone();
+    match write_mode(cx.global_mut::<Ui>(), mode) {
+        ModeWrite::Saved => {
+            // Тревный значок, готовность/замок, гашение и подъём сеанса —
+            // общий хвост с переключением текущего соединения (Critical
+            // ревью круга починки 2 задачи 16, `recycle_session`).
+            recycle_session(cx);
+            let mut label = mode;
+            for (m, text) in MODE_WORDS {
+                if m == mode {
+                    label = text;
+                }
+            }
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("режим работы: {}", label.to_lowercase()) });
+        }
+        ModeWrite::Unsaved(why) => {
             let label = MODE_WORDS.iter().find(|(m, _)| *m == mode).map(|(_, t)| *t).unwrap_or(mode);
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
@@ -645,6 +708,12 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             }
             cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
+        }
+        ModeWrite::Failed(e) => {
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            // Minor 4 круга починки 2: раньше здесь стоял `return` — падаем
+            // дальше, в общий хвост, как и два соседних исхода (докстрока
+            // выше).
         }
     }
     super::panel::sync_card_topology(cx, &name);
@@ -1455,8 +1524,9 @@ mod tests {
         access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id,
         apply_switch_current_decision, busy_now_word, busy_refusal, host_for_mode_change, icon_rgba, menu_action, mode_change_blocked,
         publication_after_switch, raise_session_after_mode_change, save_host, session_back_refusal, should_raise_session,
-        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_switch_current, ApplySwitchCurrent,
-        Kind, MenuAction, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
+        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_mode, write_switch_current,
+        ApplySwitchCurrent, Kind, MenuAction, ModeWrite, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS,
+        ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1866,14 +1936,20 @@ mod tests {
         assert!(!should_raise_session(true, "tunnel", Some("замок")), "замок всё равно сильнее включённого выключателя");
     }
 
-    /// Круг починки 1 задачи 12, Important 1: владелец был на ТЕКУЩЕЙ
-    /// карточке — её смена режима идёт этим путём (`apply_mode` →
-    /// `host_for_mode_change`), не через `panel::set_card_topology_kind` →
-    /// `gui::set_keys` (та дверь — только для нетекущей, задача 12 этого же
-    /// круга). Без этой правки «Всё на одной машине» писало бы только
-    /// `mode`, а `base_here` оставался прежним — ровно та беда, которую
-    /// нашёл владелец, просто на другом пути записи. Тест падает, если
-    /// строку `if mode == "local" { host.base_here = true; }` вырезать.
+    /// Круг починки 1 задачи 12: что ДОЛЖНА вернуть `host_for_mode_change` на
+    /// входе и выходе из «одна машина».
+    ///
+    /// **Этот тест не сторожит боевой путь (находка координатора, круг
+    /// починки 2, Important 1).** `save_host` (`save.rs`) сама перетирает
+    /// `host.base_here` значением из `ui.cfg.current().base_here` ДО того,
+    /// как результат этой функции доходит до диска — так что вырезание `if
+    /// mode == "local" { host.base_here = true; }` из `host_for_mode_change`
+    /// этот тест честно ловит, но вырезание настоящей починки
+    /// (`ui.cfg.current_mut().base_here = host.base_here;` в `write_mode`)
+    /// он пропустит: `host_for_mode_change` она не трогает, и чистая
+    /// функция как была, так и останется верной. Та находка — за
+    /// `applying_local_mode_writes_base_here_in_cfg_and_on_disk` ниже, она
+    /// гоняет `write_mode` целиком.
     #[test]
     fn entering_local_mode_pulls_base_here_along_in_the_same_record() {
         let stuck = Connection { base_here: false, mode: "tunnel".into(), ..Connection::default() };
@@ -1889,6 +1965,57 @@ mod tests {
         let left = host_for_mode_change(&was_local, "tunnel");
         assert_eq!(left.mode, "tunnel");
         assert!(!left.base_here, "выход из «одна машина» не меняет «где база» сам по себе");
+    }
+
+    /// Круг починки 2 задачи 12, Important 1 — тест, который действительно
+    /// сторожит боевой путь. Владелец был на ТЕКУЩЕЙ карточке: её смена
+    /// режима идёт `write_mode` (через `apply_mode`), не через
+    /// `panel::set_card_topology_kind` → `gui::set_keys` (та дверь — только
+    /// для нетекущей). Падает, если вырезать
+    /// `ui.cfg.current_mut().base_here = host.base_here;` из `write_mode`:
+    /// без неё `save_host` (`save.rs`, перенос «того, чего форма не несёт»)
+    /// перетрёт `host.base_here` ПРЕЖНИМ значением из `ui.cfg`, и файл
+    /// получит `mode = "local"` при застрявшем `base_here = false` — ровно
+    /// то, что увидел владелец.
+    #[test]
+    fn applying_local_mode_writes_base_here_in_cfg_and_on_disk() {
+        let mut ui = Ui::for_test();
+        assert_eq!(ui.cfg.current().mode, "tunnel");
+        ui.cfg.current_mut().base_here = false;
+
+        let outcome = write_mode(&mut ui, "local");
+
+        assert!(matches!(outcome, ModeWrite::Saved), "фикстура валидна в локальном режиме — полная запись обязана пройти");
+        assert_eq!(ui.cfg.current().mode, "local");
+        assert!(ui.cfg.current().base_here, "в памяти — обе оси");
+        let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
+        assert!(text.contains("mode = \"local\""), "{text}");
+        assert!(text.contains("base_here = true"), "{text}");
+        assert!(!text.contains("base_here = false"), "{text}");
+    }
+
+    /// Круг починки 2 задачи 12, Important 1 — та же пара, но на отказе
+    /// `save_host` (свежий комплект, пустое `base_path`): запасной путь
+    /// обязан писать `mode` и `base_here` ОДНОЙ записью (`save_tray_keys`),
+    /// не одним `mode` (`save_tray_key`) — иначе половинчатая запись на
+    /// отказе воспроизводит ту же находку владельца, просто на другой ветке.
+    #[test]
+    fn applying_local_mode_on_a_failed_save_still_writes_the_pair_through_the_fallback() {
+        let mut ui = Ui::for_test();
+        ui.cfg.current_mut().base_path = String::new();
+        ui.cfg.current_mut().base_here = false;
+
+        let outcome = write_mode(&mut ui, "local");
+
+        let why = match outcome {
+            ModeWrite::Unsaved(why) => why,
+            other => panic!("ожидали Unsaved (save_host отказывает на пустом base_path) — получили {other:?}"),
+        };
+        assert!(why.contains("base_path"), "{why}");
+        assert_eq!(ui.cfg.current().mode, "local", "намерение в памяти — даже когда полная запись отказала");
+        assert!(ui.cfg.current().base_here);
+        let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
+        assert!(text.contains("mode = \"local\"") && text.contains("base_here = true"), "{text}");
     }
 
     /// HIGH ревью круга починки 4 задачи 16: после переключения текущего

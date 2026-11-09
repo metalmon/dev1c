@@ -218,38 +218,35 @@ pub fn save_tray_keys(ui: &mut Ui, keys: &[(&str, &str)]) -> Result<(), String> 
     // — записанное не читал никто, а файл с обеими половинами стал отказом
     // при чтении, то есть один щелчок в трее делал настройки нечитаемыми.
     // Довод и разбор прежнего вида файла — в `cfg::set_current`.
+    //
+    // **Разбор — через то же `parse_key`, что у `set_keys` (круг починки 2
+    // задачи 12, Minor 3).** До этой правки здесь жила вторая, нетипизированная
+    // копия той же развилки: строковые ключи — в кавычки, `base_here` —
+    // голым словом через ручное `*value == "true"`. Эта копия не отказывала
+    // НИ НА ЧТО: любое значение кроме `true`/`false` молча читалось бы как
+    // `false`, а на диск при этом уходил бы непарсимый токен (`base_here =
+    // yes`) — та же беда, которую `parse_key` уже закрыл у `set_keys`
+    // (Important 2 круга починки 1 задачи 4), просто второй копией кода.
+    // `write` добавлен в список `parse_key` ровно затем, чтобы эта функция
+    // могла полностью переехать на разбор оттуда, не оставляя своей копии ни
+    // для одного из пяти ключей.
+    let mut parsed: Vec<(&str, KeyValue)> = Vec::with_capacity(keys.len());
+    for &(key, value) in keys {
+        parsed.push((key, parse_key(key, value)?));
+    }
     let mut text = text;
-    for (key, value) in keys {
-        // `base_here` — булево TOML, пишется словом без кавычек (круг
-        // починки 1 задачи 12, Important 1: `apply_mode` зовёт эту пару для
-        // входа в «одна машина» и на отказе `save_host`). Та же развилка,
-        // что у `toml_literal` в ядре `set_keys` выше, и по тому же доводу
-        // (Important 1 круга починки 1 задачи 4): в кавычках `base_here`
-        // ещё читался бы этой программой, но следующая загрузка
-        // `toml::from_str` отвергла бы файл целиком — поле там не строка.
-        let literal = if *key == "base_here" { value.to_string() } else { format!("{value:?}") };
-        text = cfg::set_current(&text, &ui.cfg, key, &literal)?;
+    for (key, value) in &parsed {
+        text = cfg::set_current(&text, &ui.cfg, key, &toml_literal(value))?;
     }
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     // Синхронизируем только то, что сами только что записали — остальные
     // поля `ui.cfg` не трогаем, они и на диске остались как были.
-    for (key, value) in keys {
-        match *key {
-            "mode" => ui.cfg.current_mut().mode = value.to_string(),
-            "publication" => ui.cfg.current_mut().publication = value.to_string(),
-            "write" => ui.cfg.current_mut().write = value.to_string(),
-            // `base_url` — с круга починки 1 задачи 5: пустой адрес ложится в
-            // файл вместе с публикацией (см. докстроку), и не быть его здесь
-            // значило бы, что диск и память расходятся на том самом ключе,
-            // из-за которого правка и сделана.
-            "base_url" => ui.cfg.current_mut().base_url = value.to_string(),
-            // `base_here` — круг починки 1 задачи 12: без синхронизации
-            // файл и память расходились бы тут же, на отказе `save_host`,
-            // ровно тем способом, которым это уже лечили у остальных
-            // ключей (Important 1 круга починки 1 задачи 4).
-            "base_here" => ui.cfg.current_mut().base_here = *value == "true",
-            _ => {}
-        }
+    // `apply_parsed` — то же ядро, что у `set_keys`: уже разобранное и уже
+    // провалидное применить не может отказать (Minor 2 круга починки 1
+    // задачи 4), и третьей копии правил «какой ключ — в какое поле» здесь
+    // больше нет.
+    for (key, value) in &parsed {
+        apply_parsed(ui.cfg.current_mut(), key, value);
     }
     Ok(())
 }
@@ -1198,7 +1195,16 @@ enum KeyValue {
 /// Неизвестный ключ — тоже отказ здесь, до какой-либо записи.
 fn parse_key(key: &str, value: &str) -> Result<KeyValue, String> {
     match key {
-        "profile" | "role" | "mode" | "publication" | "base_url" => Ok(KeyValue::Str(value.to_string())),
+        // `write` — круг починки 2 задачи 12, Minor 3: раньше у ключей
+        // трея (`save_tray_keys`) была СВОЯ копия этой развилки (строковые
+        // ключи — в кавычки, `base_here` — голым словом через ручное
+        // `*value == "true"`), и любое значение кроме `true`/`false`
+        // молча ложилось в память как `false`, унося на диск непарсимый
+        // токен. `write` добавлен в этот список именно затем, чтобы
+        // `save_tray_keys` могла целиком переехать на разбор отсюда, не
+        // оставляя свою копию ни для одного из пяти ключей, которые она
+        // пишет.
+        "profile" | "role" | "mode" | "publication" | "base_url" | "write" => Ok(KeyValue::Str(value.to_string())),
         "base_here" => value
             .parse::<bool>()
             .map(KeyValue::Bool)
@@ -1219,6 +1225,7 @@ fn apply_parsed(c: &mut Connection, key: &str, value: &KeyValue) {
         ("mode", KeyValue::Str(v)) => c.mode = v.clone(),
         ("publication", KeyValue::Str(v)) => c.publication = v.clone(),
         ("base_url", KeyValue::Str(v)) => c.base_url = v.clone(),
+        ("write", KeyValue::Str(v)) => c.write = v.clone(),
         ("base_here", KeyValue::Bool(v)) => c.base_here = *v,
         // Промах — ГРОМКИЙ (Minor 4 ревью всей ветки). Сегодня он
         // недостижим (`parse_key` — единственное место, где ключ и вариант

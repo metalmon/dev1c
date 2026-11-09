@@ -58,10 +58,18 @@ const CLOSED_BY_US: u32 = 0;
 /// выключен на ночь.
 pub const LONGEST_WAIT: Duration = Duration::from_secs(60);
 
-/// Сколько уходящий ждёт, пока его прощание признают доехавшим
-/// (`Control::bye`). Пять секунд — это «провод жив, просто далеко»; больше
-/// брать нечего: не доехало за них, значит той стороне и так достанется
-/// обрыв, а держать закрытие окна человека дольше незачем.
+/// Сколько уходящий ждёт, пока написанное им признают доехавшим (`settle`).
+/// Пять секунд — это «провод жив, просто далеко»; больше брать нечего: не
+/// доехало за них, значит той стороне и так достанется обрыв, а держать
+/// закрытие окна человека дольше незачем.
+///
+/// **Цена, которую надо знать: это пять секунд НА КАРТОЧКУ.** Выход
+/// (`Control::end`, `Reins::bye`) — фьючер, и у человека с пятью карточками
+/// пять таких фьючеров подряд дают двадцать пять секунд незакрывающегося
+/// окна. Прощаться надо ЗАЛПОМ (`JoinSet`, `join_all`), и делать это
+/// вызывающему: здесь неизвестно, сколько карточек он закрывает и закрывает
+/// ли их все. Своего залпа этот модуль не заводит ровно потому, что залп —
+/// свойство выхода ПРОГРАММЫ, а не одного соединения.
 const FAREWELL_PATIENCE: Duration = Duration::from_secs(5);
 
 /// Чем кончился управляющий поток.
@@ -85,44 +93,118 @@ pub enum Gone {
 
 /// Управляющий поток одного СОЕДИНЕНИЯ (карточки) внутри канала.
 ///
-/// Половины потока — поля, а не методы: читающая висит в `hold`, пока
-/// пишущая шлёт `state` и `revoked`, и занимать обе одним `&mut self`
-/// значило бы запретить это. Две разные половины одного значения компилятор
-/// отдаёт порознь сам.
+/// Половины держатся в `Option` не ради необязательности, а ради выхода:
+/// уйти из соединения — дело АСИНХРОННОЕ (дописать, закрыть свою половину,
+/// дождаться подтверждения), а `Drop` ничего ждать не умеет. Поэтому выход
+/// вынимает половины наружу — в `settle`, и `Drop` их туда же отдаёт задачей,
+/// когда про выход забыли.
 ///
-/// Пока эта вещь жива — жив и канал. Её `Drop` снимает счёт, и последний
-/// снятый закрывает канал.
+/// Пока эта вещь жива — жив и канал: последний снятый `Hold` закрывает его.
 pub struct Control {
-    pub send: SendStream,
-    pub recv: RecvStream,
-    _hold: Hold,
+    send: Option<SendStream>,
+    recv: Option<RecvStream>,
+    hold: Option<Hold>,
 }
 
+/// Половины вынимаются ровно один раз — в `end`, `reins` или `Drop`, — и
+/// после этого `Control` уже не существует как значение, которым можно
+/// что-то сделать. Паника здесь невозможна по построению, а не по
+/// соглашению.
+const TAKEN: &str = "половины управляющего потока вынимаются один раз, вместе с самим Control";
+
 impl Control {
-    /// Уйти нарочно: причина словами, потом конец своей половины потока.
+    /// Обе половины сразу — для разговора, который пишет и читает по очереди
+    /// (`enroll::accept_side`, `enroll::dial_side`).
     ///
-    /// Забирает себя целиком (`self`), а не `&mut self`: после прощания по
-    /// этому потоку говорить больше нечего, и возможность сказать ещё что-то
-    /// — это ровно та возможность, от которой `bye` и отличает обрыв. Отказ
-    /// записи проглатывается: мы уходим, и жаловаться на то, что прощание не
-    /// доехало, некому — та сторона увидит обрыв, то есть худший, но верный
-    /// исход.
-    ///
-    /// **Ждём, пока прощание признают доехавшим, и это не вежливость.** Этот
-    /// поток может быть последним в канале, и тогда `Drop` ниже закроет сам
-    /// канал — а закрытие QUIC выбрасывает всё неподтверждённое. Без этого
-    /// ожидания человек на той стороне читал бы «связь пропала» вместо
-    /// причины ровно в том случае, ради которого `bye` и заведён: выключили
-    /// обслуживание, закрыли окно, снимается машина. `stopped` после
-    /// `finish` завершается тогда, когда та сторона дочитала поток.
-    ///
-    /// Срок у ожидания свой и короткий: уходящему незачем висеть на мёртвом
-    /// проводе — прощание не доехало, значит та сторона и так увидит обрыв.
-    pub async fn bye(mut self, why: Refuse) {
-        let _ = Frame::write(&mut self.send, &Msg::Bye(why)).await;
-        let _ = self.send.finish();
-        let _ = tokio::time::timeout(FAREWELL_PATIENCE, self.send.stopped()).await;
+    /// Одним вызовом, а не двумя: второй занял бы `Control` целиком, и
+    /// компилятор не дал бы держать обе половины разом.
+    pub fn halves(&mut self) -> (&mut SendStream, &mut RecvStream) {
+        (self.send.as_mut().expect(TAKEN), self.recv.as_mut().expect(TAKEN))
     }
+
+    /// Пишущая половина — когда только говорят.
+    pub fn says(&mut self) -> &mut SendStream {
+        self.send.as_mut().expect(TAKEN)
+    }
+
+    /// Читающая половина — для присмотра (`hold`).
+    pub fn ear(&mut self) -> &mut RecvStream {
+        self.recv.as_mut().expect(TAKEN)
+    }
+
+    /// **Единственный выход из соединения.** Дописать прощание, если есть что
+    /// сказать, закрыть свою половину и ДОЖДАТЬСЯ, пока написанное признают
+    /// доехавшим.
+    ///
+    /// Через него обязаны идти ВСЕ пути — не только прощание. Довод стоил
+    /// одного найденного тупика: человек жмёт «Отклонить», `accept_side`
+    /// пишет `enroll_no` и возвращается, задача отпускает поток, канал
+    /// закрывается — и **неподтверждённый `enroll_no` выбрасывается**, потому
+    /// что закрытие QUIC выбрасывает всё, что не признано доехавшим. Зовущая
+    /// сторона получает ошибку чтения вместо исхода «отклонено», звонит
+    /// вечно и показывает «подключается снова», а код уже погашен, значит
+    /// второго диалога человек не увидит никогда: тупик без единого слова
+    /// человеку. То же самое случилось бы с `enroll_ok` и с `bye`.
+    ///
+    /// Поэтому `bye` — частный случай этого выхода, а не отдельный путь.
+    ///
+    /// Забирает себя целиком (`self`): после выхода по этому потоку говорить
+    /// нечего, и возможность сказать ещё что-то — ровно та возможность, от
+    /// которой намеренный уход и отличает обрыв.
+    pub async fn end(mut self, why: Option<Refuse>) {
+        let (Some(mut send), Some(hold)) = (self.send.take(), self.hold.take()) else { return };
+        if let Some(why) = why {
+            let _ = Frame::write(&mut send, &Msg::Bye(why)).await;
+        }
+        settle(send, hold).await;
+    }
+
+    /// Прощание — частный случай выхода: уходим нарочно и говорим почему.
+    pub async fn bye(self, why: Refuse) {
+        self.end(Some(why)).await
+    }
+}
+
+/// Про выход забыли — значит досылаем сами, задачей.
+///
+/// Это не вежливость, а последний рубеж: путей выхода из разговора много
+/// (отказ книги, отказ человека, обрыв, срок решения, паника задачи,
+/// брошенная задача при выключении обслуживания), и забыть `end` на одном из
+/// них проще всего там, где он нужнее — на отказе. Без этого рубежа правило
+/// «все пути через один выход» держалось бы на внимательности автора, а
+/// цена невнимательности — тупик из докстроки `end`.
+///
+/// **Цена рубежа: закрытие канала становится не мгновенным.** Снятие
+/// последнего потока закрывает канал не в тот же миг, а когда дошлётся
+/// написанное (или выйдет `FAREWELL_PATIENCE`). Иначе и быть не может: либо
+/// мгновенное закрытие, либо не выброшенный последний кадр, и выбор между
+/// ними очевиден. Кто ждёт закрытия, тот его и ждёт (`Channel::is_open` в
+/// опросе), а не считает случившимся сразу.
+impl Drop for Control {
+    fn drop(&mut self) {
+        let (Some(send), Some(hold)) = (self.send.take(), self.hold.take()) else { return };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(settle(send, hold));
+            }
+            // Рантайма нет — досылать нечем и некому; канал закрывается
+            // прямо здесь, снятием `Hold`.
+            Err(_) => drop(hold),
+        }
+    }
+}
+
+/// Конец своей половины потока: закрыть и дождаться, пока та сторона
+/// признает написанное доехавшим, и только ПОТОМ снять счёт — то есть
+/// позволить каналу закрыться.
+///
+/// Порядок здесь и есть вся суть: `drop(hold)` раньше ожидания выбросил бы
+/// то, чего ждали. `stopped` после `finish` завершается тогда, когда та
+/// сторона дочитала поток.
+async fn settle(mut send: SendStream, hold: Hold) {
+    let _ = send.finish();
+    let _ = tokio::time::timeout(FAREWELL_PATIENCE, send.stopped()).await;
+    drop(hold);
 }
 
 /// Счёт живых управляющих потоков канала.
@@ -186,7 +268,7 @@ impl Channel {
             .open_bi()
             .await
             .map_err(|e| format!("не удалось открыть управляющий поток: {e}. Проверьте связь и подключитесь заново."))?;
-        Ok(Control { send, recv, _hold: hold })
+        Ok(Control { send: Some(send), recv: Some(recv), hold: Some(hold) })
     }
 
     /// Принять управляющий поток, который открыла та сторона: по этой
@@ -194,7 +276,7 @@ impl Channel {
     pub async fn answer(&self) -> Result<Control, String> {
         let hold = self.hold();
         let (send, recv) = self.conn.accept_bi().await.map_err(|e| format!("входящий управляющий поток не открылся: {e}"))?;
-        Ok(Control { send, recv, _hold: hold })
+        Ok(Control { send: Some(send), recv: Some(recv), hold: Some(hold) })
     }
 
     fn hold(&self) -> Hold {
@@ -287,6 +369,106 @@ pub async fn hold<R: AsyncRead + Unpin>(r: &mut R, mut heard: impl FnMut(Msg)) -
     }
 }
 
+/// Сколько приказов окна ждут своей очереди на запись. Восьми хватает с
+/// запасом: по управляющему потоку окно говорит по событию человека
+/// (переключил обслуживание, снял разрешение), а не потоком. Предел здесь
+/// вместо «без предела» затем, что очередь без предела — это память, которую
+/// съедает тот, кто перестал читать.
+const REINS_QUEUE: usize = 8;
+
+/// Вожжи живого соединения: то, чем окно говорит в управляющий поток, не
+/// владея им.
+///
+/// Нужны затем, что присмотр за потоком (`hold`) висит в своей задаче и
+/// держит ЧИТАЮЩУЮ половину, а сказать той стороне надо по своей воле:
+/// `state` — когда человек переключил обслуживание или потолок, `revoked` —
+/// когда он снял разрешение. Спека про отзыв говорит «отправляется и тут же
+/// рвёт потоки этой базы»: отзыв, который подействует при следующем обрыве,
+/// — не отзыв вовсе, а обещание.
+///
+/// **Почему две задачи, а не один `select!`** на чтение кадра и приказ окна:
+/// `Frame::read` читает заголовок и тело по очереди, и брошенный между ними
+/// съедает заголовок НАВСЕГДА — дальше по потоку всё разберётся как мусор, и
+/// человек увидит обрыв сразу после успешного зачисления. Тот же довод, по
+/// которому `enroll::interrupted` читает один байт, а не кадр. Половины
+/// потока независимы, и двум задачам ссориться не на чем.
+///
+/// Брошенные вожжи — тоже конец соединения, и конец опрятный: отправитель
+/// закрывается, задача письма доходит до `settle`, написанное дошлётся, а
+/// канал закроется, если этот поток был последним. Отдельного «отключись»
+/// для этого не нужно.
+pub struct Reins {
+    say: tokio::sync::mpsc::Sender<Msg>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl Reins {
+    /// Сказать той стороне. `false` — поток уже кончился; это не беда и не
+    /// повод шуметь: о конце соединения окно узнаёт своим путём, от присмотра
+    /// (`Gone`), и второе сообщение об одном событии ему не нужно.
+    pub async fn say(&self, msg: Msg) -> bool {
+        self.say.send(msg).await.is_ok()
+    }
+
+    /// Отзыв: сказать словами и тут же снять поток ЭТОЙ карточки.
+    ///
+    /// Соседние карточки того же канала не трогаются вовсе — у них свои
+    /// управляющие потоки (спека, `revoked`: «рвёт потоки этой базы; если
+    /// других зачисленных баз в канале не осталось — закрывается и канал»).
+    /// Вторая половина этого правила исполняется сама: канал закрывается,
+    /// когда снят последний `Hold`, и считать зачисленные базы для этого не
+    /// нужно.
+    pub async fn revoke(self, base_id: &str, text: &str) {
+        let _ = self.say.send(Msg::Revoked { base_id: base_id.to_string(), text: text.to_string() }).await;
+        self.finish().await;
+    }
+
+    /// Уйти нарочно: прощание словами и конец соединения.
+    pub async fn bye(self, why: Refuse) {
+        let _ = self.say.send(Msg::Bye(why)).await;
+        self.finish().await;
+    }
+
+    /// Дождаться, пока задача письма дошлёт написанное и снимет поток.
+    ///
+    /// Ждать обязательно: без этого окно, закрывшись, уронило бы рантайм
+    /// раньше, чем прощание доедет, — то есть вернуло бы ровно тот дефект,
+    /// от которого заведён `settle`.
+    async fn finish(self) {
+        let Reins { say, writer } = self;
+        drop(say);
+        let _ = writer.await;
+    }
+}
+
+/// Раздать соединение надвое: вожжи — окну, читающую половину — задаче
+/// присмотра (`hold`).
+///
+/// Задача письма заводится здесь же и живёт, пока живы вожжи. Поэтому
+/// `reins` зовётся из потока с рантаймом (`tokio::spawn`), а не с главного
+/// потока окна.
+pub fn reins(mut control: Control) -> (Reins, RecvStream) {
+    let recv = control.recv.take().expect(TAKEN);
+    let send = control.send.take().expect(TAKEN);
+    let hold = control.hold.take().expect(TAKEN);
+    // `control` дальше падает пустым: его `Drop` увидит вынутые половины и не
+    // станет ни досылать, ни закрывать — поток теперь за задачей письма.
+    let (say, mut orders) = tokio::sync::mpsc::channel::<Msg>(REINS_QUEUE);
+    let writer = tokio::spawn(async move {
+        let mut send = send;
+        while let Some(msg) = orders.recv().await {
+            // Отказ записи — конец письма: поток мёртв, и говорить в него
+            // больше нечего. Жаловаться некому и незачем — присмотр на той же
+            // карточке скажет окну `Gone` сам.
+            if Frame::write(&mut send, &msg).await.is_err() {
+                break;
+            }
+        }
+        settle(send, hold).await;
+    });
+    (Reins { say, writer }, recv)
+}
+
 /// Приём входящих: на каждый канал — свой присмотр, на каждый управляющий
 /// поток в нём — свой разговор.
 ///
@@ -300,6 +482,18 @@ pub async fn hold<R: AsyncRead + Unpin>(r: &mut R, mut heard: impl FnMut(Msg)) -
 /// `note` — строка в журнал о беде, которая никому больше не достанется:
 /// входящее подключение, не состоявшееся на рукопожатии, сказать некому —
 /// того конца у нас уже нет.
+///
+/// **Своего предела на число управляющих потоков в канале здесь НЕТ**, и это
+/// решение, а не упущение: предел держит сам QUIC (`max_concurrent_bi_streams`
+/// у соединения), и второй предел поверх него дал бы два разных мнения о
+/// том, когда отказывать, — та же беда, от которой протокол отказался
+/// заводить свой пинг поверх таймера iroh. Решение 8 спеки ограничивает
+/// потоки ОБМЕНА (восемь) и прямо не ограничивает управляющие: их в канале
+/// ровно столько, сколько у человека карточек к этому партнёру, а предел
+/// числу карточек назначает лицензия 1С, не программа (решение владельца
+/// 1.11). Когда перебор управляющих потоков станет возможен не по ошибке в
+/// своём же коде, отказ на него уже назван — `code::OVERFLOW`, «слишком
+/// много потоков».
 pub async fn accept_all<T, Fut>(node: &Node, channels: &Channels, note: impl Fn(String), talk: T)
 where
     T: Fn(Control) -> Fut + Clone + Send + 'static,
@@ -468,6 +662,24 @@ mod tests {
         }
     }
 
+    /// Ждёт, пока канал закроется САМ.
+    ///
+    /// Опросом, а не проверкой на месте: закрытие после снятия последнего
+    /// потока не мгновенно и быть мгновенным не может — сперва дошлётся
+    /// написанное (`settle`), иначе последний кадр выбрасывался бы ровно так,
+    /// как это описано в докстроке `Control::end`. Утверждение от этого не
+    /// слабеет: канал, который не закрылся за `WAIT`, не закрывается вовсе, и
+    /// подмена «не закрывать никогда» этот тест роняет.
+    async fn closes_itself(channel: &Channel) -> bool {
+        tokio::time::timeout(WAIT, async {
+            while channel.is_open() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     /// Прощание и обрыв — два разных события, и человеку в них говорят
     /// разное. Проверяется на памяти, без узлов: предмет здесь — чтение
     /// потока, а не сеть.
@@ -551,18 +763,18 @@ mod tests {
         let mut second = channel.call().await.unwrap();
         // По кадру в каждый: поток, в который не написали, та сторона не
         // увидит вовсе — QUIC заводит его на первом байте.
-        Frame::write(&mut first.send, &Msg::EnrollWait).await.unwrap();
-        Frame::write(&mut second.send, &Msg::EnrollWait).await.unwrap();
+        Frame::write(first.says(), &Msg::EnrollWait).await.unwrap();
+        Frame::write(second.says(), &Msg::EnrollWait).await.unwrap();
 
         let (their_channel, mut their_first, mut their_second) =
             tokio::time::timeout(WAIT, answered).await.expect("та сторона не приняла оба потока в срок").unwrap();
-        assert_eq!(Frame::read(&mut their_first.recv).await.unwrap(), Msg::EnrollWait);
-        assert_eq!(Frame::read(&mut their_second.recv).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read(their_first.ear()).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read(their_second.ear()).await.unwrap(), Msg::EnrollWait);
         assert_eq!(their_channel.peer(), caller.id(), "у канала два конца, и оба знают, кто на том");
 
         // Первая карточка прощается и закрывает свой поток.
         first.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;
-        let end = tokio::time::timeout(WAIT, hold(&mut their_first.recv, |_| {})).await.expect("прощание не доехало в срок");
+        let end = tokio::time::timeout(WAIT, hold(their_first.ear(), |_| {})).await.expect("прощание не доехало в срок");
         assert!(matches!(end, Gone::Farewell(_)), "ушли словами: {end:?}");
         drop(their_first);
 
@@ -571,18 +783,18 @@ mod tests {
         assert!(their_channel.is_open(), "и на том конце тоже");
         let state =
             Msg::State { base_id: "b2".into(), state: CardState::Connected, write: false, serving: true, ceiling: None, text: None };
-        Frame::write(&mut their_second.send, &state).await.unwrap();
+        Frame::write(their_second.says(), &state).await.unwrap();
         assert_eq!(
-            tokio::time::timeout(WAIT, Frame::read(&mut second.recv)).await.expect("соседняя карточка замолчала").unwrap(),
+            tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
             state,
             "соседняя карточка обязана жить дальше"
         );
 
         // Ушёл последний поток — канал закрывается сам.
         drop(second);
-        assert!(!channel.is_open(), "канал обязан закрыться, когда живых управляющих потоков не осталось ни одного");
+        assert!(closes_itself(&channel).await, "канал обязан закрыться, когда живых управляющих потоков не осталось ни одного");
         drop(their_second);
-        assert!(!their_channel.is_open(), "и на том конце тоже: там тоже кончился последний поток");
+        assert!(closes_itself(&their_channel).await, "и на том конце тоже: там тоже кончился последний поток");
 
         caller.close().await;
         base.close().await;
@@ -620,19 +832,19 @@ mod tests {
         let mut two = second.call().await.unwrap();
         // По кадру в каждый: поток, в который не написали, та сторона не
         // увидит вовсе — QUIC заводит его на первом байте.
-        Frame::write(&mut one.send, &Msg::EnrollWait).await.unwrap();
-        Frame::write(&mut two.send, &Msg::EnrollWait).await.unwrap();
+        Frame::write(one.says(), &Msg::EnrollWait).await.unwrap();
+        Frame::write(two.says(), &Msg::EnrollWait).await.unwrap();
         let (mut their_one, their_two) = tokio::time::timeout(WAIT, answered)
             .await
             .expect("второй звонок завёл ВТОРОЕ соединение: та сторона не дождалась второго потока в первом")
             .unwrap();
-        assert_eq!(Frame::read(&mut their_one.recv).await.unwrap(), Msg::EnrollWait);
+        assert_eq!(Frame::read(their_one.ear()).await.unwrap(), Msg::EnrollWait);
 
-        drop(one);
+        one.end(None).await;
         assert!(first.is_open(), "канал закрылся со снятием одного потока — значит второй потоком в нём не ехал");
         assert!(second.is_open(), "и это один и тот же канал, а не два");
-        drop(two);
-        assert!(!first.is_open(), "а вот теперь живых потоков не осталось");
+        two.end(None).await;
+        assert!(closes_itself(&first).await, "а вот теперь живых потоков не осталось");
 
         drop((their_one, their_two));
         caller.close().await;
@@ -658,7 +870,7 @@ mod tests {
                 move |mut control| {
                     let said = said.clone();
                     async move {
-                        if let Ok(msg) = Frame::read(&mut control.recv).await {
+                        if let Ok(msg) = Frame::read(control.ear()).await {
                             said.lock().unwrap().push(format!("{msg:?}"));
                         }
                         control.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;
@@ -670,12 +882,12 @@ mod tests {
 
         let channel = tokio::time::timeout(WAIT, mine.to(&caller, by_loopback(&base))).await.expect("дозвон не уложился").unwrap();
         let (mut one, mut two) = (channel.call().await.unwrap(), channel.call().await.unwrap());
-        Frame::write(&mut one.send, &Msg::EnrollWait).await.unwrap();
-        Frame::write(&mut two.send, &Msg::Refuse(Refuse::new(code::BUSY, "занято"))).await.unwrap();
+        Frame::write(one.says(), &Msg::EnrollWait).await.unwrap();
+        Frame::write(two.says(), &Msg::Refuse(Refuse::new(code::BUSY, "занято"))).await.unwrap();
 
         // Оба разговора кончаются прощанием — значит оба состоялись.
         for (which, control) in [("первый", &mut one), ("второй", &mut two)] {
-            let end = tokio::time::timeout(WAIT, hold(&mut control.recv, |_| {})).await.expect("разговор не кончился в срок");
+            let end = tokio::time::timeout(WAIT, hold(control.ear(), |_| {})).await.expect("разговор не кончился в срок");
             assert!(matches!(end, Gone::Farewell(_)), "{which} поток не получил своего разговора: {end:?}");
         }
         let said = heard.lock().unwrap().clone();
@@ -723,25 +935,18 @@ mod tests {
                 let conn = listening.accept().await.unwrap().unwrap();
                 let channel = theirs.keep(conn);
                 let mut control = channel.answer().await.unwrap();
-                let out = accept_side(&mut control.send, &mut control.recv, peer, &mut book, &cards, |_| async {
-                    Decision::Allow { write: true }
-                })
-                .await;
+                let (w, r) = control.halves();
+                let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Allow { write: true } }).await;
                 seen.push(out);
                 if round == 1 {
                     control.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;
-                } else {
-                    // Круг нулевой — обрыв: ни единого слова той стороне,
-                    // поток просто кончается, и `Control` падает здесь,
-                    // закрывая последним снятым `Hold` сам канал.
-                    //
-                    // Перед этим ждём, чтобы уже НАПИСАННОЕ (`enroll_ok`)
-                    // признали доехавшим: иначе рвётся не связь, а наш
-                    // собственный ответ, и тест проверял бы гонку записи с
-                    // закрытием канала, а не возврат зовущей стороны.
-                    let _ = control.send.finish();
-                    let _ = tokio::time::timeout(WAIT, control.send.stopped()).await;
                 }
+                // Круг нулевой — обрыв: ни единого слова той стороне, поток
+                // просто кончается здесь, `Control` падает и последним снятым
+                // `Hold` закрывает сам канал. Руками досылать `enroll_ok` при
+                // этом НЕ надо, и это проверка заодно: его дошлёт `Drop`
+                // (круг починки 1, Important 1) — прежде он тут выбрасывался,
+                // и зовущая сторона получала ошибку чтения вместо исхода.
             }
             seen
         });
@@ -768,10 +973,11 @@ mod tests {
                     // Код предъявляется ОДИН раз: после зачисления
                     // предъявлять нечего, и он к тому же погашен.
                     let show = if enrolled.load(Ordering::SeqCst) { "" } else { code.as_str() };
-                    match dial_side(&mut control.send, &mut control.recv, show, "Разработчик", Ceiling::Full).await {
+                    let (w, r) = control.halves();
+                    match dial_side(w, r, show, "Разработчик", Ceiling::Full).await {
                         Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => {
                             enrolled.store(true, Ordering::SeqCst);
-                            Round::Held(hold(&mut control.recv, |_| {}).await)
+                            Round::Held(hold(control.ear(), |_| {}).await)
                         }
                         Ok(Outcome::NotEnrolled(no)) => Round::NotEnrolled(no),
                         Err(why) => Round::Failed(why),
@@ -792,6 +998,197 @@ mod tests {
         assert!(matches!(seen[0], Ok(Outcome::Enrolled(_))), "первый круг — зачисление: {:?}", seen[0]);
         assert!(matches!(seen[1], Ok(Outcome::Already(_))), "второй круг человека не спрашивает и нового кода не требует: {:?}", seen[1]);
 
+        caller.close().await;
+        base.close().await;
+    }
+
+    /// Человек нажал «Отклонить» — и зовущая сторона получает ИСХОД, а не
+    /// обрыв, и перестаёт звонить.
+    ///
+    /// Это тот самый тупик, из-за которого выход стал один (см. докстроку
+    /// `Control::end`): закрытие канала выбрасывало неподтверждённый
+    /// `enroll_no`, зовущая читала ошибку вместо отказа, `keep_calling` звонил
+    /// вечно и показывал «подключается снова», а код был уже погашен — то
+    /// есть второго диалога человек не увидел бы никогда и ни одного слова о
+    /// происходящем не получил.
+    #[tokio::test]
+    async fn a_refusal_reaches_the_dialling_side_as_an_outcome_not_a_break() {
+        let (da, db) = (dir("declined-a"), dir("declined-b"));
+        let caller = Node::start(&da).await.unwrap();
+        let base = Node::start(&db).await.unwrap();
+        let peer = caller.id();
+        let mut book = Book::open(&db).unwrap();
+        let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
+        book.issue("Ромашка", &ticket).unwrap();
+        let code = ticket.to_code();
+        let cards = vec![Card { name: "Ромашка".into(), base: fields("b1") }];
+
+        let listening = base.clone();
+        let theirs = Channels::default();
+        let server = tokio::spawn(async move {
+            let conn = listening.accept().await.unwrap().unwrap();
+            let channel = theirs.keep(conn);
+            let mut control = channel.answer().await.unwrap();
+            let (w, r) = control.halves();
+            let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Deny }).await;
+            // Тем же выходом, каким уходят откуда угодно. Прощаться тут
+            // нечем: отказ уже сказан словами в `enroll_no`.
+            control.end(None).await;
+            out
+        });
+
+        let mine = Channels::default();
+        let to = by_loopback(&base);
+        let rounds = AtomicUsize::new(0);
+        let stopped = tokio::time::timeout(
+            WAIT,
+            keep_calling(|| {
+                let (mine, caller, to, code, rounds) = (&mine, &caller, to.clone(), &code, &rounds);
+                async move {
+                    rounds.fetch_add(1, Ordering::SeqCst);
+                    let channel = match mine.to(caller, to).await {
+                        Ok(channel) => channel,
+                        Err(why) => return Round::Failed(why),
+                    };
+                    let mut control = match channel.call().await {
+                        Ok(control) => control,
+                        Err(why) => return Round::Failed(why),
+                    };
+                    let (w, r) = control.halves();
+                    match dial_side(w, r, code.as_str(), "Разработчик", Ceiling::Full).await {
+                        Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => Round::Held(hold(control.ear(), |_| {}).await),
+                        Ok(Outcome::NotEnrolled(no)) => Round::NotEnrolled(no),
+                        Err(why) => Round::Failed(why),
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("звонилка ушла в цикл: отказ человека доехал обрывом, а не исходом");
+
+        let Stopped::NotEnrolled(no) = &stopped else {
+            panic!("отказ человека — исход, а не беда связи: {stopped:?}")
+        };
+        assert_eq!(no.code, code::DECLINED, "зовущая прочитала именно отказ человека: {no:?}");
+        assert!(no.text.contains("отклонено"), "и прочитала его словами: {}", no.text);
+        assert_eq!(
+            rounds.load(Ordering::SeqCst),
+            1,
+            "по отказу человека не звонят второй раз — это и есть то дёрганье, от которого секрет"
+        );
+
+        let seen = tokio::time::timeout(WAIT, server).await.expect("принимающая сторона не уложилась в срок").unwrap();
+        assert!(matches!(seen, Ok(Outcome::NotEnrolled(_))), "принимающая дошла до того же исхода: {seen:?}");
+
+        caller.close().await;
+        base.close().await;
+    }
+
+    /// Про выход забыли — написанное всё равно доезжает.
+    ///
+    /// Последний рубеж (`Drop for Control`): без него путей потери столько же,
+    /// сколько путей выхода, и терялся бы каждый раз ПОСЛЕДНИЙ кадр — то есть
+    /// ровно тот, в котором сказано, что случилось.
+    #[tokio::test]
+    async fn what_was_written_is_not_lost_when_the_control_stream_is_dropped() {
+        let (da, db) = (dir("not-lost-a"), dir("not-lost-b"));
+        let caller = Node::start(&da).await.unwrap();
+        let base = Node::start(&db).await.unwrap();
+        let (mine, theirs) = (Channels::default(), Channels::default());
+
+        // Та сторона читает только ПОСЛЕ того, как эта бросила поток: читай
+        // она сразу — кадр успевал бы доехать сам, и рубеж остался бы
+        // непроверенным (так и вышло в первом варианте этого теста: подмена
+        // «не ждать доставки» его не роняла).
+        let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let listening = base.clone();
+        let there = theirs.clone();
+        let answered = tokio::spawn(async move {
+            let conn = listening.accept().await.unwrap().unwrap();
+            let channel = there.keep(conn);
+            let mut control = channel.answer().await.unwrap();
+            let _ = wait.await;
+            Frame::read(control.ear()).await
+        });
+
+        let channel = tokio::time::timeout(WAIT, mine.to(&caller, by_loopback(&base))).await.expect("дозвон не уложился").unwrap();
+        let mut control = channel.call().await.unwrap();
+        let said = Msg::EnrollNo(Refuse::new(code::DECLINED, "Подключение отклонено на стороне базы."));
+        Frame::write(control.says(), &said).await.unwrap();
+        // Про `end` забыли — так и выглядит возврат из разговора на отказе.
+        drop(control);
+        let _ = go.send(());
+
+        let got = tokio::time::timeout(WAIT, answered).await.expect("та сторона не ответила в срок").unwrap();
+        assert_eq!(got.unwrap(), said, "последний кадр выброшен закрытием канала — человек увидел бы обрыв вместо причины");
+        assert!(closes_itself(&channel).await, "и канал всё равно закрылся сам, просто не раньше, чем кадр доехал");
+
+        caller.close().await;
+        base.close().await;
+    }
+
+    /// Отзыв действует СРАЗУ по живому потоку и рвёт поток только ЭТОЙ
+    /// карточки: соседняя в том же канале говорит дальше.
+    ///
+    /// Спека про `revoked`: «отправляется и тут же рвёт потоки этой базы;
+    /// если других зачисленных баз в канале не осталось — закрывается и
+    /// канал». Отзыв, который подействует при следующем обрыве, — обещание, а
+    /// не отзыв.
+    #[tokio::test]
+    async fn revoking_tears_this_cards_stream_and_leaves_the_neighbour_alone() {
+        let (da, db) = (dir("revoke-a"), dir("revoke-b"));
+        let caller = Node::start(&da).await.unwrap();
+        let base = Node::start(&db).await.unwrap();
+        let (mine, theirs) = (Channels::default(), Channels::default());
+
+        // Вожжи обеих карточек — у стороны с базой: это она шлёт `state` и
+        // `revoked`.
+        let listening = base.clone();
+        let there = theirs.clone();
+        let answered = tokio::spawn(async move {
+            let conn = listening.accept().await.unwrap().unwrap();
+            let channel = there.keep(conn);
+            let one = channel.answer().await.unwrap();
+            let two = channel.answer().await.unwrap();
+            (channel, reins(one), reins(two))
+        });
+
+        let channel = tokio::time::timeout(WAIT, mine.to(&caller, by_loopback(&base))).await.expect("дозвон не уложился").unwrap();
+        let mut first = channel.call().await.unwrap();
+        let mut second = channel.call().await.unwrap();
+        Frame::write(first.says(), &Msg::EnrollWait).await.unwrap();
+        Frame::write(second.says(), &Msg::EnrollWait).await.unwrap();
+        let (their_channel, (first_reins, _ear_one), (second_reins, _ear_two)) =
+            tokio::time::timeout(WAIT, answered).await.expect("та сторона не приняла оба потока").unwrap();
+
+        // Человек снял разрешение у первой карточки.
+        first_reins.revoke("b1", "Доступ отозван на стороне базы.\nЧеловек там снял разрешение.\nПозвоните ему, если это ошибка.").await;
+        let end = tokio::time::timeout(WAIT, hold(first.ear(), |_| {})).await.expect("отзыв не доехал в срок");
+        let Gone::Farewell(why) = end else {
+            panic!("отзыв — намеренный уход со словами, а не обрыв: {end:?}")
+        };
+        assert_eq!(why.code, code::REVOKED);
+        assert!(why.text.contains("снял разрешение"), "слова человека доезжают целиком: {}", why.text);
+
+        // Соседняя карточка жива: по ней говорят, и её слышно.
+        assert!(channel.is_open(), "отзыв одной карточки закрыл канал — остальные остались бы без связи ни за что");
+        let state =
+            Msg::State { base_id: "b2".into(), state: CardState::Connected, write: false, serving: true, ceiling: None, text: None };
+        assert!(second_reins.say(state.clone()).await, "вожжи соседней карточки обязаны быть живы");
+        assert_eq!(
+            tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
+            state,
+            "соседняя карточка говорит дальше"
+        );
+
+        // А прощание по последней карточке закрывает и канал.
+        second_reins.bye(Refuse::new(code::CLOSED, WINDOW_CLOSED)).await;
+        let end = tokio::time::timeout(WAIT, hold(second.ear(), |_| {})).await.expect("прощание не доехало в срок");
+        let Gone::Farewell(why) = end else { panic!("окно закрыли нарочно, и это не обрыв: {end:?}") };
+        assert!(why.text.contains("закрыла программу"), "человек читает причину: {}", why.text);
+        assert!(closes_itself(&their_channel).await, "живых управляющих потоков не осталось — канал закрывается сам");
+
+        drop((first, second));
         caller.close().await;
         base.close().await;
     }

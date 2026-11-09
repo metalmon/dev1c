@@ -834,6 +834,26 @@ impl Machine {
     /// проводе право записи не знало о потолке ничего. Запрет любой стороны
     /// сильнее разрешения другой (решение владельца 1.11), и сложить их здесь
     /// — единственное место, где это ещё можно сделать до провода.
+    ///
+    /// **Карточки разбираются на две кучи по тому, где база.** Прежде отбор
+    /// смотрел только на вид соединения и роль, а `base_here` не спрашивал
+    /// вовсе — и карточка, у которой базы здесь НЕТ, объявляла себя базой на
+    /// проводе: уезжала в `hello_ok` со своими полями (имя базы от пустого
+    /// пути, публикация этой машины), зачисляла к себе стороны и обслуживала
+    /// их. Человек с базой на той стороне при этом отпечатка не видел и
+    /// ничего не разрешал. Это случай второй спеки (база у ЗОВУЩЕЙ стороны),
+    /// которого эта сборка не умеет; путь к нему из окна открыт (меню
+    /// «База — на той стороне»), а половины протокола нет.
+    ///
+    /// Отложены, а не выброшены: выброшенная карточка — это код, выданный в
+    /// окне по ней, который получает «карточку удалили». Той же ложью, за
+    /// которую чинится `Cards::Unreadable`, только другой дорогой. По
+    /// отложенным `accept_side` отказывает СВОИМИ словами.
+    ///
+    /// Спрашивается `base_is_here()`, а не сырой `base_here` (правило cfg.rs,
+    /// круг починки 1 задачи 12): застрявшее в файле `base_here = false` у
+    /// локальной карточки не вправе решать за человека, у которого
+    /// переключателя на экране нет.
     fn of(cfg: &crate::cfg::Cfg) -> Machine {
         // Без сравнения строк: вид потолка в настройках — `read_write` или
         // `read_only`, и одно `== "full"` на этом месте уже стоило продукту
@@ -841,21 +861,30 @@ impl Machine {
         // есть потолок всегда выходил «только чтение»). Один `bool` от того,
         // кого об этом спрашивают все остальные, разойтись словарём не может.
         let ceiling = if cfg.allows_write() { Ceiling::Full } else { Ceiling::ReadOnly };
-        let cards = cfg
+        let (here, there): (Vec<_>, Vec<_>) = cfg
             .connections
             .iter()
             .filter(|c| c.mode != "local" && matches!(c.role(), Ok("accept")))
-            .map(|c| enroll::Card {
-                name: c.name.clone(),
-                base: BaseFields {
-                    base_id: base_id_of(c),
-                    base_name: crate::cfg::base_name(&c.base_path).to_string(),
-                    publication: c.publication.clone(),
-                    write: c.allows_write() && matches!(ceiling, Ceiling::Full),
-                },
+            .map(|c| {
+                (
+                    c.base_is_here(),
+                    enroll::Card {
+                        name: c.name.clone(),
+                        base: BaseFields {
+                            base_id: base_id_of(c),
+                            base_name: crate::cfg::base_name(&c.base_path).to_string(),
+                            publication: c.publication.clone(),
+                            write: c.allows_write() && matches!(ceiling, Ceiling::Full),
+                        },
+                    },
+                )
             })
-            .collect();
-        Machine { cards: enroll::Cards::here(cards), ceiling }
+            .partition(|(base_is_here, _)| *base_is_here);
+        let cards = enroll::Cards::Read {
+            accepting: here.into_iter().map(|(_, c)| c).collect(),
+            base_elsewhere: there.into_iter().map(|(_, c)| c).collect(),
+        };
+        Machine { cards, ceiling }
     }
 
     /// Настройки не прочитались вовсе — и так об этом и говорится, своими словами в наш журнал и тремя строками той стороне
@@ -1370,6 +1399,49 @@ mod tests {
         // Чужой признак не находит никого — и это не пустая строка, а пустой
         // список: безымянный разговор отличается от названного.
         assert!(super::serving(cards, &["чужое".to_string()]).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Карточка, у которой базы здесь НЕТ, в принимающие не попадает — и не
+    /// выбрасывается.
+    ///
+    /// Падало так: отбор смотрел вид соединения и роль, а `base_here` не
+    /// спрашивал вовсе. Карточка, чья база на ТОЙ стороне, объявляла себя
+    /// базой на проводе: уезжала в `hello_ok` своими полями (имя базы от
+    /// пустого пути, публикация этой машины), зачисляла к себе стороны и
+    /// обслуживала их. Человек с базой при этом отпечатка не видел и ничего не
+    /// разрешал. Это случай второй спеки, которого эта сборка не умеет, а путь
+    /// к нему из окна открыт («База — на той стороне» в меню карточки).
+    ///
+    /// Вторая половина проверки — что карточка ОТЛОЖЕНА, а не выброшена: по
+    /// выброшенной её собственный код получил бы «карточку удалили», то есть ту
+    /// же ложь, которую чинит `Cards::Unreadable`, другой дорогой. Отложенную
+    /// `accept_side` отказывает своими словами.
+    #[test]
+    fn a_card_whose_base_is_on_the_other_side_does_not_accept_parties() {
+        let card = |name: &str, base_here: &str| {
+            format!(
+                "\n[[connection]]\nname = \"{name}\"\nserver = \"\"\ngitea = \"\"\npassword = \"\"\nworkstation = \"\"\nmode = \
+                 \"tunnel\"\nbase_path = \"\"\nbase_here = {base_here}\nrole = \"accept\"\n"
+            )
+        };
+        let dir = std::env::temp_dir().join(format!("peer-base-there-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(crate::cfg::FILE),
+            format!("current = \"Ромашка\"\n{}{}", card("Ромашка", "true"), card("Василёк", "false")),
+        )
+        .unwrap();
+        let kit = super::Kit::at(dir.clone());
+        let seen = super::Machine::read_with(&kit, &crate::secrets::Store::file(&dir));
+        let crate::enroll::Cards::Read { accepting, base_elsewhere } = &seen.cards else {
+            panic!("настройки на диске есть и читаются: {:?}", seen.cards)
+        };
+        let named = |cards: &[crate::enroll::Card]| cards.iter().map(|c| c.name.clone()).collect::<Vec<String>>();
+        assert_eq!(named(accepting), vec!["Ромашка".to_string()], "принимает только та, у которой база здесь");
+        assert_eq!(named(base_elsewhere), vec!["Василёк".to_string()], "а вторая отложена, а не выброшена: по её коду есть что сказать");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

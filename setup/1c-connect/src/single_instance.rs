@@ -34,13 +34,12 @@
 //! на учётную запись ОС, а в образе стенда у каждого рабочего места своя
 //! учётная запись (dev1, dev2, dev3), так что замок и так свой.
 //!
-//! Вторая копия не умирает молча. На Windows ищет окно первой — перебирает
-//! все верхнеуровневые окна и поднимает то, чей процесс — тот же исполняемый
-//! файл, что и наш собственный (`same_image`/`process_image`), без единого
-//! файла на диске для этого; окна не нашлось (голова `serve`, `connect`,
-//! или трей с ещё не открытым окном) — печатает причину и выходит с
-//! ошибкой. На Linux — только вторая половина: подняться дешёвым способом
-//! (без своего протокола между процессами) нечем, сразу сообщение и отказ.
+//! Вторая копия не умирает молча. На Windows она ПРОСИТ первую показать своё
+//! окно (`request_show` → `serve_show_requests`, именованное событие ядра) и
+//! уходит; просьбу некому принять (голова `serve`, `connect`, сборка без
+//! окна) — печатает причину и выходит с ошибкой. На Linux — только вторая
+//! половина: своего протокола между процессами там нет, сразу сообщение и
+//! отказ.
 
 use common::kit::Kit;
 
@@ -404,124 +403,93 @@ pub(crate) fn file_lock(path: &std::path::Path) -> std::io::Result<Option<Guard>
     acquire_flock(file)
 }
 
-/// Найти окно уже идущей копии и поднять его на передний план — без единого
-/// файла на диске: перебирает все верхнеуровневые окна (`EnumWindows`) и для
-/// каждого проверяет образ процесса-владельца против своего собственного
-/// (`same_image`/`process_image`), пропуская самого себя. По классу окна
-/// искать нельзя: GPUI (`gpui-kit`) регистрирует общий класс `Zed::Window`
-/// для любого приложения на этом тулките — на рабочем месте может оказаться
-/// настоящий Zed, и значение «нашли окно» означало бы «нашли чьё угодно
-/// окно»; по образу исполняемого файла двусмысленности нет.
+/// Имя события «покажи окно» — единственное место, где оно строится (тот же довод, что у `instance_mutex_name`: вторая формулировка имени смотрела бы не на тот объект ядра). Ключ тот же, что у замка: просят ровно ту копию, которая этот замок и держит.
 #[cfg(windows)]
-fn raise_window_of_our_other_instance(ours: &std::path::Path) -> bool {
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, SetForegroundWindow, ShowWindow, SW_RESTORE};
+fn show_event_name(key: &str) -> String {
+    format!("1c-connect-show-{key}")
+}
 
-    struct Search {
-        ours: std::path::PathBuf,
-        my_pid: u32,
-        found: HWND,
-    }
+/// Нуль-терминированная широкая строка — её хочет каждый именованный объект ядра здесь.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
 
-    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> windows_sys::core::BOOL {
-        // SAFETY: `lparam` — адрес `Search` на стеке вызывающей функции,
-        // живой на всё время `EnumWindows` (вызов синхронный, ниже на этом
-        // же стеке).
-        let search = unsafe { &mut *(lparam as *mut Search) };
-        let mut owner = 0u32;
-        // SAFETY: обычный вызов user32, `hwnd` — валидная ручка, переданная
-        // самим `EnumWindows`; указатель на локальную переменную этой функции.
-        unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
-        if owner != search.my_pid && same_image(process_image(owner).as_deref(), &search.ours) {
-            search.found = hwnd;
-            return 0; // хватит, нашли
-        }
-        1 // продолжить перечисление
-    }
-
-    let mut search = Search { ours: ours.to_path_buf(), my_pid: std::process::id(), found: std::ptr::null_mut() };
-    // SAFETY: `visit` не хранит `lparam` за пределами своего вызова, `search`
-    // переживает весь вызов `EnumWindows` (он синхронный).
-    unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
-    if search.found.is_null() {
+/// Попросить первую копию показать своё окно: `true` — просьба принята (событие есть, сигнал послан), `false` — принять её некому.
+///
+/// **Почему просьба, а не подъём чужого окна своими руками.** До этой правки вторая копия искала окно первой сама: `EnumWindows`, первое попавшееся верхнеуровневое окно процесса с тем же образом, `ShowWindow(SW_RESTORE)`. Замер 10.11 на релизной сборке: верхнеуровневых окон у процесса ЧЕТЫРЕ, и когда флайаут закрыт — а это обычное состояние программы, живущей значком в трее, — настоящего окна среди них нет вовсе, зато первым перечисление отдаёт скрытое служебное окно библиотеки значка (класс `tray_icon_app`, 1920x1010). `ShowWindow` делал его видимым: человек, запустивший программу второй раз, получал чёрный прямоугольник во весь экран вместо окна, а вторая копия уходила через `exit(0)`, считая, что окно показала.
+///
+/// Угадывать чужое окно нечем и не нужно: нарисовать его умеет только GPUI внутри первой копии, значит просить надо ПРОГРАММУ, а не Windows, — и поднимает она его тем же путём (`gui::window::show_window`), которым поднимает по щелчку значка.
+///
+/// `OpenEventW`, а не `CreateEventW`: события нет — значит просьбу никто не слушает (`serve_show_requests` не заведена: голова `serve`/`connect`, сборка без окна), и честный отказ словами лучше молчаливого выхода в никуда.
+#[cfg(windows)]
+fn request_show(key: &str) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    let name = wide(&show_event_name(key));
+    // SAFETY: обычный вызов kernel32 с нуль-терминированной строкой, живущей на стеке этого вызова.
+    let h = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+    if h.is_null() {
         return false;
     }
-    // SAFETY: `search.found` — ручка, которую только что отдал сам Windows
-    // через `EnumWindows`; оба вызова — обычные user32 без побочных эффектов
-    // на память этого процесса.
-    unsafe {
-        ShowWindow(search.found, SW_RESTORE);
-        SetForegroundWindow(search.found);
+    // SAFETY: `h` только что получен от `OpenEventW` и ещё не закрыт.
+    let ok = unsafe { SetEvent(h) };
+    unsafe { CloseHandle(h) };
+    ok != 0
+}
+
+/// Принимать просьбы «покажи окно» от вторых копий — свой поток на всё время работы, `show` зовётся на каждую просьбу. `false` — событие не завелось, и вторая копия тогда честно откажет словами, а не промолчит.
+///
+/// Событие с АВТОСБРОСОМ (`manual_reset = 0`): сигнал снимает сам ждущий, и две просьбы подряд дают два показа, а не один залипший навсегда.
+///
+/// Дескриптор заводится ЗДЕСЬ, до возврата, а не внутри потока: иначе просьба, пришедшая в ту долю секунды, пока поток ещё не завёл событие, пришла бы в пустоту — и человек прочёл бы отказ там, где должно было открыться окно. В поток он уезжает `Guard`-ом — тем же, что носит дескриптор замка, и ровно затем, что `Guard` `Send` и закрывает дескриптор за собой.
+///
+/// Полностью эту щель заводом здесь не закрыть: замок берётся раньше, чем строится значок (`gui::tray::build` — единственный зовущий), и вторая копия, запущенная между ними, получит честный отказ словами. Это и есть верный исход: окна в этот миг нет ни у кого, показывать нечего.
+#[cfg(windows)]
+pub fn serve_show_requests(show: impl Fn() + Send + 'static) -> bool {
+    serve_show_requests_with(&guard_key(&current_user()), show)
+}
+
+/// То же, но ключ даёт вызывающий — им проверяется тест: на машине может идти настоящая копия, и тест, занявший её имя события, отнимал бы у неё приём просьб.
+#[cfg(windows)]
+fn serve_show_requests_with(key: &str, show: impl Fn() + Send + 'static) -> bool {
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+    let name = show_event_name(key);
+    let w = wide(&name);
+    // SAFETY: обычный вызов kernel32 с нуль-терминированной строкой на стеке; без атрибутов безопасности — именованный объект виден только в сеансе вызывающего, ровно как мьютекс замка.
+    let h = unsafe { CreateEventW(std::ptr::null(), 0, 0, w.as_ptr()) };
+    if h.is_null() {
+        eprintln!(
+            "просьбы «покажи окно» от второй копии приниматься не будут: событие {name} не заведено — {}",
+            std::io::Error::last_os_error()
+        );
+        return false;
     }
+    let guard = Guard(h);
+    std::thread::spawn(move || {
+        // Замыкание обязано утащить `Guard` ЦЕЛИКОМ, а не поле `guard.0`: захват по частям (edition 2021) взял бы голый дескриптор, который не `Send` сам по себе, — `Send` обещан именно обёртке. Эта строка и есть то обещание, иначе сборка отказывает.
+        let guard = guard;
+        loop {
+            // SAFETY: дескриптор жив всё время потока — его держит `guard`, переехавший сюда вместе с замыканием.
+            if unsafe { WaitForSingleObject(guard.0, INFINITE) } != WAIT_OBJECT_0 {
+                return;
+            }
+            show();
+        }
+    });
     true
 }
 
-/// Решение «процесс за этим pid — правда наша первая копия», отдельно от
-/// того, как добыт путь образа — чтобы его можно было проверить без
-/// Win32-вызовов. `candidate` — что система называет образом этого pid
-/// (`None` — процесса нет, или прочитать не вышло: закрыт доступ, слишком
-/// быстро вышел); `ours` — свой образ (`std::env::current_exe`). Пустого
-/// совпадения «оба `None`» нет и не может быть — `ours` всегда `&Path`, не
-/// `Option`.
-///
-/// Только Windows: единственный, кто его зовёт, — поиск окна первой копии, а
-/// он сам под `cfg(windows)`; без этого признака на Linux осталась бы
-/// неиспользуемая функция (предупреждение сборки).
-#[cfg(windows)]
-fn same_image(candidate: Option<&std::path::Path>, ours: &std::path::Path) -> bool {
-    candidate == Some(ours)
-}
-
-/// Путь образа процесса `pid`, как его называет сама система —
-/// `QueryFullProcessImageNameW` по `OpenProcess` с минимальными правами
-/// (`PROCESS_QUERY_LIMITED_INFORMATION` хватает даже для процесса не под
-/// текущим пользователем, в отличие от `PROCESS_QUERY_INFORMATION`). `None`
-/// — процесса с таким pid уже нет, он нам недоступен, или путь не прочитать:
-/// во всех случаях вызывающему должно быть всё равно, это не наша копия.
-#[cfg(windows)]
-fn process_image(pid: u32) -> Option<std::path::PathBuf> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    // SAFETY: обычный вызов kernel32, pid — число из файла (может называть
-    // не существующий или чужой процесс — на этот случай и есть проверка
-    // `is_null`), прав запрошено по минимуму.
-    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if h.is_null() {
-        return None;
-    }
-    let mut buf = [0u16; 1024];
-    let mut len = buf.len() as u32;
-    // SAFETY: `buf` — буфер на стеке этой функции нужного размера, `len` —
-    // указатель на локальную переменную с его вместимостью в элементах;
-    // `h` только что получен от `OpenProcess` и ещё не закрыт.
-    let ok = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) };
-    unsafe { CloseHandle(h) };
-    if ok == 0 {
-        return None;
-    }
-    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
-}
-
-/// Поднять окно первой копии — но только после того, как сам процесс
-/// подтвердил, что это действительно мы, а не чужая программа: без этой
-/// проверки раньше можно было тихо (`exit(0)`, без единой строки) поднять
-/// окно случайного соседа — ровно та молчаливая смерть, которую спека
-/// запрещает; любой другой исход (процесса нет, образ не совпал, окна у
-/// подтверждённого процесса не нашлось) — это «не нашли», а не «нашли
-/// что-то».
-#[cfg(windows)]
-fn raise_other() -> bool {
-    let Ok(ours) = std::env::current_exe() else { return false };
-    raise_window_of_our_other_instance(&ours)
-}
-
-/// На Linux поднимать окно дешёвым способом нечем (ни общего протокола между
-/// процессами, ни того же GPUI-окна в headless-сборке без фичи `gui`) — вторая
-/// копия сразу получает отказ с сообщением, без попытки.
+/// На Linux просить некого: своего протокола между процессами здесь нет, а в headless-сборке без фичи `gui` нет и окна — вторая копия сразу получает отказ с сообщением.
 #[cfg(not(windows))]
-fn raise_other() -> bool {
+pub fn serve_show_requests(_show: impl Fn() + Send + 'static) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn request_show(_key: &str) -> bool {
     false
 }
 
@@ -534,16 +502,19 @@ pub fn lock_target(kit: &Kit) -> std::path::PathBuf {
 
 /// Взять замок — один коннектор на СЕАНС пользователя, не на рабочее место
 /// (задача 6) — или решить, что делать со второй копией: бесшумно уступить
-/// (нашли и подняли окно первой — Windows) либо вернуть читаемую причину
-/// отказа. Держите возвращённый `Guard` до конца процесса — ранний `drop`
-/// снимает замок раньше срока.
+/// (первая копия приняла просьбу показать окно — Windows) либо вернуть
+/// читаемую причину отказа. Держите возвращённый `Guard` до конца процесса —
+/// ранний `drop` снимает замок раньше срока.
 pub fn acquire(kit: &Kit) -> anyhow::Result<Guard> {
     let key = guard_key(&current_user());
     let lock_on = lock_target(kit);
     match try_acquire(&key, &lock_on)? {
         Some(guard) => Ok(guard),
         None => {
-            if raise_other() {
+            // Просьба идёт по ТОМУ ЖЕ ключу, по которому только что не дался
+            // замок: кого замок не пустил, ту копию и просим показать окно —
+            // второго правила «какая копия первая» в модуле нет.
+            if request_show(&key) {
                 std::process::exit(0);
             }
             anyhow::bail!("{}", taken())
@@ -627,16 +598,33 @@ mod tests {
         format!("{tag}-{}-{n}", std::process::id())
     }
 
-    /// Только Windows — вместе с самой `same_image` (на Linux окно первой
-    /// копии не ищут, и функции там нет).
+    /// Красный тест починки 10.11: просьба второй копии ДОХОДИТ до первой, и доходит ровно столько раз, сколько её послали.
+    ///
+    /// Чем куплен. Прежде вторая копия поднимала окно первой своими руками (`EnumWindows` + `ShowWindow`), и проверить это было нечем: вызовы уходили в Windows, а не в программу. Поднималось при этом служебное окно библиотеки значка — человек видел чёрный прямоугольник вместо окна. Теперь между копиями ходит просьба, и просьбу можно поймать: ловим её тем же способом, каким ловит окно, — замыканием.
+    ///
+    /// Две просьбы подряд проверяют АВТОСБРОС события: с ручным сбросом второй показ либо не пришёл бы вовсе, либо пришёл бы бесконечным потоком.
     #[cfg(windows)]
     #[test]
-    fn same_image_accepts_our_own_and_rejects_a_different_or_missing_process() {
-        let ours = std::path::Path::new(r"C:\kit\1c-connect.exe");
-        assert!(same_image(Some(ours), ours), "наш собственный образ должен совпасть");
-        let other = std::path::Path::new(r"C:\Windows\notepad.exe");
-        assert!(!same_image(Some(other), ours), "чужой образ не должен приниматься за нашу копию");
-        assert!(!same_image(None, ours), "процесса нет — не наша копия");
+    fn a_request_to_show_the_window_reaches_the_copy_that_listens() {
+        let key = unique("show");
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(
+            serve_show_requests_with(&key, move || {
+                let _ = tx.send(());
+            }),
+            "событие просьбы обязано завестись"
+        );
+        for n in 1..=2 {
+            assert!(request_show(&key), "просьба {n} обязана быть принята");
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_else(|e| panic!("просьба {n} не дошла до окна: {e}"));
+        }
+    }
+
+    /// Просить некого — это `false`, а не молчаливое «сделано»: вторая копия на этом решении печатает причину и выходит с ошибкой, а не уходит в никуда через `exit(0)`.
+    #[cfg(windows)]
+    #[test]
+    fn a_request_with_nobody_listening_is_refused_not_swallowed() {
+        assert!(!request_show(&unique("nobody")), "события нет — просьбу принять некому");
     }
 
     #[test]

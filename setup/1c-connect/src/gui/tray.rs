@@ -104,10 +104,13 @@ const AGENTS_SUBMENU: &str = "Локальные агенты";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuAction {
-    /// Показать окно. Пункт есть только на Linux: там значок не сообщает о
-    /// щелчках (бэкенд appindicator), и левая кнопка открывает то же меню,
-    /// так что иначе окно было бы не достать.
-    #[cfg(target_os = "linux")]
+    /// Показать окно. ПУНКТ меню есть только на Linux: там значок не сообщает
+    /// о щелчках (бэкенд appindicator), и левая кнопка открывает то же меню,
+    /// так что иначе окно было бы не достать. А вот само ДЕЙСТВИЕ нужно на
+    /// обеих системах: на Windows его просит вторая копия программы
+    /// (`single_instance::serve_show_requests` ниже в `build`) — и просит
+    /// именно этой дверью, чтобы окно поднималось тем же путём, что и по
+    /// щелчку значка, а не чужими руками мимо GPUI.
     Open,
     Toggle,
     Check,
@@ -120,6 +123,12 @@ pub enum MenuAction {
     Autoconnect,
     Quit,
 }
+
+/// id пункта «Открыть окно» — одно написание на троих: сам пункт меню (Linux),
+/// разбор щелчка (`menu_action`) и просьба второй копии (`build`). Три копии
+/// строки «open» разошлись бы молча, а цена промаха здесь — окно, которое не
+/// открылось, и ни слова о причине.
+const OPEN: &str = "open";
 
 /// id пункта меню → действие; незнакомый id (сепараторы под событие не
 /// попадают вовсе) — `None`.
@@ -140,8 +149,7 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
         }
     }
     match id {
-        #[cfg(target_os = "linux")]
-        "open" => Some(MenuAction::Open),
+        OPEN => Some(MenuAction::Open),
         "toggle" => Some(MenuAction::Toggle),
         "check" => Some(MenuAction::Check),
         "autostart" => Some(MenuAction::Autostart),
@@ -205,7 +213,7 @@ pub fn icon(state: TrayState) -> Icon {
 /// `autostart_on`/`autoconnect_on` — начальные галочки, читает `launch`.
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     #[cfg(target_os = "linux")]
-    let open = MenuItem::with_id("open", "Открыть окно", true, None);
+    let open = MenuItem::with_id(OPEN, "Открыть окно", true, None);
     let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     // Отметка при создании меню: умолчание «только чтение», пока не
@@ -259,6 +267,16 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     TrayIconEvent::set_event_handler(Some(move |e| {
         let _ = t2.unbounded_send(Ev::Tray(e));
     }));
+    // Просьба второй копии «покажи окно» входит той же дверью, что пункт
+    // «Открыть окно»: выдумывать для неё второй путь показа значило бы завести
+    // второе мнение о том, как окно открывается, — а прошлый «свой путь»
+    // (`ShowWindow` по чужой ручке из второй копии) и был тем дефектом,
+    // который здесь чинится: человек получал чёрный прямоугольник вместо окна.
+    // Поток живёт до конца процесса, как и сам значок.
+    let t3 = tx.clone();
+    crate::single_instance::serve_show_requests(move || {
+        let _ = t3.unbounded_send(Ev::Menu(MenuEvent { id: tray_icon::menu::MenuId(OPEN.to_string()) }));
+    });
     MenuEvent::set_event_handler(Some(move |e| {
         let _ = tx.unbounded_send(Ev::Menu(e));
     }));
@@ -1436,7 +1454,6 @@ pub fn on_tray(ev: TrayIconEvent, cx: &mut App) {
 pub fn on_menu(ev: MenuEvent, cx: &mut App) {
     let Some(action) = menu_action(ev.id.0.as_str()) else { return };
     match action {
-        #[cfg(target_os = "linux")]
         MenuAction::Open => window::show_window(cx),
         MenuAction::Toggle => toggle_link(cx),
         MenuAction::Check => {

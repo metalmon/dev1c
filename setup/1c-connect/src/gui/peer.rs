@@ -392,8 +392,13 @@ fn cut_these(held: &[Vec<String>], card: &str) -> Vec<usize> {
 ///
 /// Спрашивается КАЖДАЯ карточка потока, и хватает одной снятой, чтобы поток
 /// не держать: держать его наполовину нельзя, а делить нечего.
-fn keep_holding(cards: &[String], all_still_enrolled: bool) -> bool {
-    !cards.is_empty() && all_still_enrolled
+///
+/// На входе — карточки потока вместе с ответом книги по каждой, а не готовое
+/// «все на месте»: пока свёртка жила у вызывающего, решение «все» против
+/// «хотя бы одна» проверить было нечем — подмена одного на другое оставляла
+/// тесты зелёными, то есть проверялось не то решение, которое работает.
+fn keep_holding(seen: &[(String, bool)]) -> bool {
+    !seen.is_empty() && seen.iter().all(|(_, still)| *still)
 }
 
 /// Заводит звонок карточки, заменяя прежний, если он ещё идёт.
@@ -720,9 +725,12 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // увидит эта проверка. Третьего порядка у двух событий нет.
     //
     // Спрашивается КАЖДАЯ карточка потока: сторона, зачисленная к нескольким,
-    // держит их все одним потоком, и снятая одна значит снятый поток.
-    let still = served.iter().all(|name| book.enrolled_to(name, peer).ok().flatten().is_some());
-    if !keep_holding(&served, still) {
+    // держит их все одним потоком, и снятая одна значит снятый поток. Свёртка
+    // («все» или «хотя бы одна») живёт не здесь, а в `keep_holding`, — там её
+    // можно спросить.
+    let seen: Vec<(String, bool)> =
+        served.iter().map(|name| (name.clone(), book.enrolled_to(name, peer).ok().flatten().is_some())).collect();
+    if !keep_holding(&seen) {
         // Рвём только СВОЙ разговор и только если отзыв не забрал его раньше:
         // иначе второе прощание ушло бы в поток, которого уже нет.
         if live.alive(peer, id) {
@@ -1008,10 +1016,13 @@ mod tests {
         assert_eq!(cut_these(&talks, "Василёк"), vec![0], "и отзыв второй — тоже, он не «не та карточка»");
         assert_eq!(cut_these(&talks, "Пион"), vec![1], "сосед, которого отзыв не касается, цел");
         // И держать такой поток нельзя, если снята хотя бы одна из карточек:
-        // половины у потока нет, делить нечего.
-        let both = vec!["Ромашка".to_string(), "Василёк".to_string()];
-        assert!(keep_holding(&both, true), "обе на месте — держим");
-        assert!(!keep_holding(&both, false), "одну сняли — поток не держим");
+        // половины у потока нет, делить нечего. Спрашивается именно это
+        // решение, по карточке каждая: подмена «все» на «хотя бы одна» роняет
+        // обе строки ниже.
+        let both = |first: bool, second: bool| vec![("Ромашка".to_string(), first), ("Василёк".to_string(), second)];
+        assert!(keep_holding(&both(true, true)), "обе на месте — держим");
+        assert!(!keep_holding(&both(true, false)), "сняли вторую — поток не держим");
+        assert!(!keep_holding(&both(false, true)), "сняли первую — тоже не держим");
     }
 
     /// Щель между решением человека и записью вожжей: разговор, у которого
@@ -1023,34 +1034,152 @@ mod tests {
     /// до следующего круга той стороны.
     #[test]
     fn a_talk_whose_permission_is_already_gone_is_not_held() {
-        let one = vec!["Ромашка".to_string()];
-        assert!(keep_holding(&one, true), "разрешение на месте — держим");
-        assert!(!keep_holding(&one, false), "разрешение сняли в щель — не держим");
+        assert!(keep_holding(&[("Ромашка".to_string(), true)]), "разрешение на месте — держим");
+        assert!(!keep_holding(&[("Ромашка".to_string(), false)]), "разрешение сняли в щель — не держим");
         // «Не знаю» на вопросе о допуске значит «нет»: безымянную карточку
         // `enrolled_to` спросить нечем.
-        assert!(!keep_holding(&[], true));
-        assert!(!keep_holding(&[], false));
+        assert!(!keep_holding(&[]));
     }
 
-    /// Книга живых разговоров: разложены по стороне, снимаются по своему
+    /// Книга живых разговоров: разложены по СТОРОНЕ, снимаются по своему
     /// номеру, и отзыв уносит их с учёта — второй отзыв резать уже нечего.
     ///
-    /// Вожжи здесь не завести (за ними задача письма в рантайме), поэтому
-    /// проверяется та часть, которая от них не зависит: учёт по стороне и
-    /// выбор жертв. Сами вожжи проверены в `channel.rs`.
-    #[test]
-    fn the_live_book_keeps_talks_under_the_party_not_the_card() {
-        // Три разговора одной стороны и один — соседней, по именам карточек.
-        let mine = named(&["Ромашка", "", "Василёк"]);
-        let doomed = cut_these(&mine, "Ромашка");
-        assert_eq!(doomed, vec![0, 1], "своя карточка и безымянный");
-        // Удаление идёт с конца — иначе второе место съехало бы после
-        // первого удаления, и под нож попал бы «Василёк».
-        let mut left = mine.clone();
-        for at in doomed.into_iter().rev() {
-            left.remove(at);
+    /// Прежний тест с этим именем `Live` не трогал вовсе: он брал список имён,
+    /// сам звал `cut_these` и сам же повторял у себя удаление с конца. То
+    /// есть проверял КОПИЮ решения, а не решение — и подмена в самой книге
+    /// оставляла его зелёным. Здесь поднимаются два настоящих узла: вожжи
+    /// иначе не завести, за ними задача письма в рантайме.
+    #[tokio::test]
+    async fn the_live_book_keeps_talks_under_the_party_not_the_card() {
+        use crate::channel::{reins, Channels};
+        use crate::node::Node;
+        use crate::wire::{Frame, Msg};
+        use iroh::EndpointAddr;
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::time::Duration;
+
+        let dir = |name: &str| {
+            let d = std::env::temp_dir().join(format!("peer-live-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        };
+        let (da, db) = (dir("a"), dir("b"));
+        let caller = Node::start(&da).await.unwrap();
+        let base = Node::start(&db).await.unwrap();
+        // Звонок по петле, а не по адресу в локальной сети: иначе тест
+        // проверял бы брандмауэр Windows (тот же довод, что в `channel.rs`).
+        let port = base
+            .endpoint()
+            .bound_sockets()
+            .into_iter()
+            .find_map(|s| if s.is_ipv4() { Some(s.port()) } else { None })
+            .expect("узел обязан был занять порт IPv4");
+        let to = EndpointAddr::new(base.id()).with_ip_addr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+
+        // Та сторона принимает три управляющих потока — по одному на карточку.
+        let (listening, there) = (base.clone(), Channels::default());
+        let answered = tokio::spawn(async move {
+            let conn = listening.accept().await.unwrap().unwrap();
+            let channel = there.keep(conn);
+            let mut got = Vec::new();
+            for _ in 0..3 {
+                got.push(channel.answer().await.unwrap());
+            }
+            (channel, got)
+        });
+        let channel = tokio::time::timeout(Duration::from_secs(20), Channels::default().to(&caller, to))
+            .await
+            .expect("дозвон не уложился в срок")
+            .unwrap();
+        let mut ours = Vec::new();
+        for _ in 0..3 {
+            let mut c = channel.call().await.unwrap();
+            // Поток, в который не написали, та сторона не увидит вовсе — QUIC
+            // заводит его на первом байте.
+            Frame::write(c.says(), &Msg::EnrollWait).await.unwrap();
+            ours.push(c);
         }
-        assert_eq!(left, named(&["Василёк"]), "сосед той же стороны остался цел");
+        let (_their_channel, got) =
+            tokio::time::timeout(Duration::from_secs(20), answered).await.expect("та сторона не приняла три потока в срок").unwrap();
+
+        // Три живых разговора ОДНОЙ стороны: две названные карточки и один
+        // безымянный — тот, чью карточку сопоставить не удалось.
+        let live = super::Live::default();
+        let peer = caller.id();
+        let mut ids = Vec::new();
+        let mut ears = Vec::new();
+        for (control, cards) in got.into_iter().zip([vec!["Ромашка"], Vec::new(), vec!["Василёк"]]) {
+            let (held, ear) = reins(control);
+            ears.push(ear);
+            ids.push(live.remember(peer, cards.iter().map(|s| s.to_string()).collect(), held));
+        }
+        assert!(ids.iter().all(|id| live.alive(peer, *id)), "все три на учёте");
+
+        // Отзыв по СОСЕДНЕЙ стороне не трогает ничего: ключ стороны подделать
+        // нельзя, его доказал сам iroh.
+        assert!(live.cut(base.id(), "Ромашка").is_empty(), "отзыв у соседней стороны режет её разговоры, не наши");
+        assert!(ids.iter().all(|id| live.alive(peer, *id)));
+
+        // Отзыв «Ромашки» режет её разговор и безымянный — и уносит оба с
+        // учёта: второй отзыв той же карточки резать уже нечего.
+        assert_eq!(live.cut(peer, "Ромашка").len(), 2, "своя карточка и безымянный");
+        assert!(!live.alive(peer, ids[0]) && !live.alive(peer, ids[1]), "снятые ушли с учёта");
+        assert!(live.alive(peer, ids[2]), "сосед той же стороны остался цел");
+        assert!(live.cut(peer, "Ромашка").is_empty(), "второй отзыв резать нечего");
+
+        // Присмотр кончился — разговор снимается по СВОЕМУ номеру, и дважды
+        // не снимается.
+        assert!(live.forget(peer, ids[2]).is_some());
+        assert!(live.forget(peer, ids[2]).is_none(), "уже снятого здесь нет, и это не беда");
+        assert!(live.drain().is_empty(), "книга опустела вместе с последним разговором");
+
+        drop(ours.drain(..).collect::<Vec<_>>());
+        caller.close().await;
+        base.close().await;
+    }
+
+    /// Куда звонить этой карточкой — по вставленному коду либо по
+    /// запомненному партнёру, а без того и другого словами, а не молчаливым
+    /// бездействием кнопки.
+    ///
+    /// Продуктовая развилка звонка не была покрыта ничем, а ошибиться в ней
+    /// есть чем: пустой код без партнёра — это разговор с человеком, а не
+    /// беда программы.
+    #[test]
+    fn where_to_dial_comes_from_the_code_or_from_the_remembered_partner() {
+        use crate::enrolled::{Partner, Partners};
+        use crate::ticket::Ticket;
+        let them = iroh::SecretKey::generate().public();
+        let dir = std::env::temp_dir().join(format!("peer-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kit = super::Kit::at(dir.clone());
+
+        // Ни кода, ни партнёра: подключаться действительно некуда, и это
+        // сказано словами с советом.
+        let no = super::target(&kit, "Ромашка", "").expect_err("без кода и без партнёра звонить некуда");
+        assert!(no.contains("Вставьте код"), "человеку сказано, что сделать: {no}");
+
+        // Код на руках — звоним по нему, и ключ берётся из него же.
+        let ticket = Ticket::issue(them, Some("https://relay.example/".into()), vec!["10.0.0.1:1234".parse().unwrap()]).unwrap();
+        let addr = super::target(&kit, "Ромашка", &ticket.to_code()).expect("по коду звонить есть куда");
+        assert_eq!(addr.id, them, "ключ той стороны — из кода, а не выдуманный");
+
+        // Кода нет, зато партнёр записан: так выглядит возврат после
+        // перезапуска, и подсказки адресов берутся из записи.
+        Partners::open(kit.state())
+            .unwrap()
+            .remember("Ромашка", &Partner { key: them, relay: Some("https://relay.example/".into()), direct: vec!["10.0.0.2:4321".into()] })
+            .unwrap();
+        let addr = super::target(&kit, "Ромашка", "").expect("партнёр записан — звонить есть куда");
+        assert_eq!(addr.id, them);
+        assert!(addr.ip_addrs().any(|a| a.to_string() == "10.0.0.2:4321"), "подсказки адресов берутся из записи о партнёре");
+        // А у СОСЕДНЕЙ карточки партнёра нет, и ей по-прежнему говорят
+        // словами: запись принадлежит карточке, а не машине.
+        assert!(super::target(&kit, "Василёк", "").is_err(), "запись о партнёре принадлежит карточке, а не машине");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// «Выход» не держится прощанием, когда прощаться не с кем.

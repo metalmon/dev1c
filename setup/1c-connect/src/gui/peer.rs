@@ -40,7 +40,7 @@ use crate::channel::{self, Channels, Gone, Reins, Round, Stopped};
 use crate::enroll;
 use crate::enrolled::{Book, Partner, Partners};
 use crate::node::Node;
-use crate::wire::{BaseFields, Ceiling};
+use crate::wire::{code, BaseFields, Ceiling, Refuse};
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::HashMap;
 
@@ -89,6 +89,19 @@ enum Cmd {
     /// подключение именно затем, чтобы «Отозвать» срабатывало сразу, — и
     /// живой поток, который переживает отзыв, эту немедленность отменяет.
     Revoke { card: String, peer: EndpointId },
+    /// Попрощаться со ВСЕМИ живыми разговорами — программа уходит.
+    ///
+    /// Канал, закрытый молча, читается той стороной как ОБРЫВ (`channel::
+    /// hold` отдаёт `Gone::Broken` на любую ошибку чтения), а обрыв она
+    /// повторяет: `keep_calling` звонит снова и показывает «подключается
+    /// снова» — вечно, потому что звонить уже некуда. Прощание словами
+    /// превращает это в `Stopped::Farewell`: круги прекращаются, и человек
+    /// читает «Та сторона закрыла программу».
+    ///
+    /// `done` — обычный `std::sync::mpsc`, а не `oneshot`: ждёт его ГЛАВНЫЙ
+    /// поток окна на выходе, и ждать он умеет только по-настоящему, со
+    /// сроком.
+    ByeAll { done: std::sync::mpsc::Sender<()> },
 }
 
 impl Peer {
@@ -113,6 +126,26 @@ impl Peer {
     /// беда.
     pub fn revoked(&self, card: &str, peer: EndpointId) {
         let _ = self.cmd.send(Cmd::Revoke { card: card.to_string(), peer });
+    }
+
+    /// Попрощаться со всеми живыми разговорами и ДОЖДАТЬСЯ, пока прощания
+    /// уедут. `false` — срок вышел, а кто-то ещё не договорил.
+    ///
+    /// Ждать обязательно: прощание — это записанный кадр, а записанный кадр
+    /// выбрасывается, если процесс уйдёт раньше, чем та сторона признает его
+    /// доехавшим (`channel::settle`, и вся беда, ради которой он заведён).
+    /// Ждать НЕ бесконечно по тому же правилу, которым живут остальные
+    /// ожидания выхода: застрявшее прощание не должно держать «Выход».
+    ///
+    /// Потока узла нет (его не подняли или он кончился) — прощаться не с кем
+    /// и не чем, и это успех, а не отказ: иначе каждый выход без узла стоил
+    /// бы человеку полного срока ожидания впустую.
+    pub fn bye_all(&self, wait: Duration) -> bool {
+        let (done, waited) = std::sync::mpsc::channel();
+        if self.cmd.send(Cmd::ByeAll { done }).is_err() {
+            return true;
+        }
+        waited.recv_timeout(wait).is_ok()
     }
 }
 
@@ -177,6 +210,16 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
                     let base_id = base_id.clone().unwrap_or_default();
                     tokio::spawn(async move { reins.revoke(&base_id, REVOKED_TEXT).await });
                 }
+            }
+            // Прощания идут ВМЕСТЕ, а не одно за другим: каждое ждёт
+            // подтверждения до `channel::FAREWELL_PATIENCE`, и очередь из
+            // пяти зачисленных сторон стоила бы человеку пяти сроков на
+            // «Выходе» (минорная находка ревью задачи 8). Ответ уходит
+            // ПОСЛЕ: тот, кто ждёт, ждёт именно договорённости.
+            Cmd::ByeAll { done } => {
+                let all = live.drain();
+                futures::future::join_all(all.into_iter().map(|reins| reins.bye(Refuse::new(code::CLOSED, channel::WINDOW_CLOSED)))).await;
+                let _ = done.send(());
             }
         }
     }
@@ -287,6 +330,17 @@ impl Live {
         }
         out.reverse();
         out
+    }
+
+    /// Забрать ВСЕ живые разговоры всех сторон — программа уходит, и дальше
+    /// присмотра за ними не будет ни у кого.
+    ///
+    /// Книга пустеет тем же движением: уходя, мы прощаемся ровно один раз, а
+    /// вожжи, оставшиеся в книге после прощания, — это вожжи потока, которого
+    /// уже нет.
+    fn drain(&self) -> Vec<Reins> {
+        let mut held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
+        held.drain().flat_map(|(_, rows)| rows.into_iter().map(|t| t.reins)).collect()
     }
 
     /// Есть ли ещё живой разговор под этим номером. Нужно одному читателю —
@@ -908,6 +962,25 @@ mod tests {
             left.remove(at);
         }
         assert_eq!(left, named(&["Василёк"]), "сосед той же стороны остался цел");
+    }
+
+    /// «Выход» не держится прощанием, когда прощаться не с кем.
+    ///
+    /// Потока узла может не быть вовсе — его не подняли (нет сети, не открылся
+    /// ключ) или он кончился. Приказ тогда никуда не уходит, ответа не будет
+    /// НИКОГДА, и выход, который ждёт ответа по сроку, стоил бы человеку
+    /// полного срока ожидания на каждом закрытии программы. Поэтому мёртвый
+    /// канал приказов — это успех: прощаться не с кем.
+    #[test]
+    fn quitting_is_not_held_by_a_farewell_to_nobody() {
+        let (cmd, rx) = tokio::sync::mpsc::unbounded_channel();
+        // Поток узла кончился: получателя приказов больше нет.
+        drop(rx);
+        let peer = super::Peer { cmd, reach: std::sync::Arc::new(std::sync::Mutex::new(None)) };
+        let wait = std::time::Duration::from_secs(5);
+        let started = std::time::Instant::now();
+        assert!(peer.bye_all(wait), "прощаться не с кем — это успех, а не отказ");
+        assert!(started.elapsed() < wait / 2, "выход обязан вернуться сразу, а не выстоять срок впустую");
     }
 
     /// Только что заведённая принимающая карточка обязана быть видна приёмной

@@ -483,6 +483,13 @@ pub fn reins(mut control: Control) -> (Reins, RecvStream) {
 /// входящее подключение, не состоявшееся на рукопожатии, сказать некому —
 /// того конца у нас уже нет.
 ///
+/// **Разговору отдаётся и ключ той стороны**, а не только поток. Он нужен
+/// всякому, кто решает допуск (`enroll::accept_side`), и взять его можно
+/// только здесь: `Control` о канале не знает ничего, а то, что сторона сказала
+/// о себе в `hello`, — её слова, а не доказанный факт. Пока ключ сюда не
+/// передавался, у продукта жил второй такой же цикл (`gui::peer::accepting`),
+/// то есть два места с одним правилом — и правило пришлось бы править дважды.
+///
 /// **Своего предела на число управляющих потоков в канале здесь НЕТ**, и это
 /// решение, а не упущение: предел держит сам QUIC (`max_concurrent_bi_streams`
 /// у соединения), и второй предел поверх него дал бы два разных мнения о
@@ -496,7 +503,7 @@ pub fn reins(mut control: Control) -> (Reins, RecvStream) {
 /// много потоков».
 pub async fn accept_all<T, Fut>(node: &Node, channels: &Channels, note: impl Fn(String), talk: T)
 where
-    T: Fn(Control) -> Fut + Clone + Send + 'static,
+    T: Fn(Control, EndpointId) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     while let Some(incoming) = node.accept().await {
@@ -510,11 +517,14 @@ where
         let channel = channels.keep(conn);
         let talk = talk.clone();
         tokio::spawn(async move {
+            // Ключ берётся у КАНАЛА, а не у сообщения: это то, что доказал сам
+            // iroh.
+            let peer = channel.peer();
             // Поток за потоком, пока канал жив: `accept_bi` отказывает ровно
             // тогда, когда он закрылся, и этого отказа ждать не надо — он и
             // есть конец присмотра.
             while let Ok(control) = channel.answer().await {
-                tokio::spawn(talk(control));
+                tokio::spawn(talk(control, peer));
             }
         });
     }
@@ -861,15 +871,19 @@ mod tests {
         let (mine, theirs) = (Channels::default(), Channels::default());
 
         let heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        // Кто к нам пришёл — знаем заранее и сверяем в разговоре: ключ той
+        // стороны разговору нужен затем, что по нему решается допуск.
+        let dialled = caller.id();
         let (listening, there, said) = (base.clone(), theirs.clone(), heard.clone());
         tokio::spawn(async move {
             accept_all(
                 &listening,
                 &there,
                 |why| panic!("входящее подключение обязано было состояться: {why}"),
-                move |mut control| {
+                move |mut control, whom| {
                     let said = said.clone();
                     async move {
+                        assert_eq!(whom, dialled, "разговору отдают ключ ТОЙ стороны, иначе ему нечем решать допуск");
                         if let Ok(msg) = Frame::read(control.ear()).await {
                             said.lock().unwrap().push(format!("{msg:?}"));
                         }

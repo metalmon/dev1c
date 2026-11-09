@@ -607,34 +607,24 @@ async fn one_round(
 
 /// Приём входящих: канал → управляющий поток → разговор зачисления.
 ///
-/// **Почему не `channel::accept_all`.** Та отдаёт наружу один `Control`, а
-/// `enroll::accept_side` требует `peer` — ключ узла, который доказал сам
-/// iroh, а не то, что сказали в `hello`; из `Control` его взять нечем.
-/// Пока `accept_all` не передаёт партнёра в разговор, цикл живёт здесь: три
-/// задачи и те же правила, что у неё (канал живёт дольше любого своего
-/// потока, поток — дольше разговора по нему), и трогать чужой файл ради
-/// одного аргумента мы не станем.
+/// Сам цикл — в `channel::accept_all`: три задачи, канал живёт дольше любого
+/// своего потока, поток — дольше разговора по нему. Здесь остаётся только то,
+/// что к проводу не относится: куда писать о беде, которую той стороне
+/// сказать нечем (её конца у нас уже нет), и чем разговаривать.
+///
+/// Своей копии этого цикла здесь больше нет. Она жила тут ровно потому, что
+/// `accept_all` не отдавала разговору ключ той стороны, без которого
+/// `enroll::accept_side` не решает допуск; теперь отдаёт, и одно правило
+/// живёт в одном месте.
 async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, live: Live) {
-    while let Some(incoming) = node.accept().await {
-        let conn = match incoming {
-            Ok(conn) => conn,
-            Err(why) => {
-                // Сказать об этом той стороне нечем — её конца у нас уже нет.
-                say(&tx, Kind::Warn, why);
-                continue;
-            }
-        };
-        let channel = channels.keep(conn);
-        let (kit, tx, live) = (kit.clone(), tx.clone(), live.clone());
-        tokio::spawn(async move {
-            let peer = channel.peer();
-            // Поток за потоком, пока канал жив: `answer` отказывает ровно
-            // тогда, когда он закрылся, и этот отказ и есть конец присмотра.
-            while let Ok(control) = channel.answer().await {
-                tokio::spawn(answering(kit.clone(), tx.clone(), live.clone(), control, peer));
-            }
-        });
-    }
+    let noted = tx.clone();
+    channel::accept_all(
+        &node,
+        &channels,
+        move |why| say(&noted, Kind::Warn, why),
+        move |control, peer| answering(kit.clone(), tx.clone(), live.clone(), control, peer),
+    )
+    .await;
 }
 
 /// Один разговор зачисления на принимающей стороне: заявка в окно, решение

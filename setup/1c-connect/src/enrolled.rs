@@ -13,6 +13,7 @@
 //! «Зачисление»; `docs/superpowers/specs/2026-11-01-connection-contract.md`,
 //! раздел «Что хранится после».
 
+use crate::cfg::CardId;
 use crate::secrets::hex;
 use crate::single_instance;
 use iroh::EndpointId;
@@ -46,9 +47,12 @@ pub struct Party {
 /// Запись о зачислении внутри файла — то же, что `Party`, плюс карточка, к
 /// которой это зачисление относится: файл один на все карточки рабочего
 /// места, `Party` наружу отдаётся уже отфильтрованной по карточке (`of`).
+///
+/// **Карточка названа КЛЮЧОМ, а не именем** (решение владельца 10.11, `cfg::CardId`). Имя человек правит когда хочет, и книга, ключёванная
+/// именем, осиротляла все зачисления карточки при первом же переименовании. Ключ человек не правит — везти за ним нечего.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Enrolled {
-    connection: String,
+    card: CardId,
     key: EndpointId,
     says_name: String,
     write: bool,
@@ -72,7 +76,7 @@ struct Enrolled {
 /// лишней секунды.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssuedTicket {
-    connection: String,
+    card: CardId,
     fingerprint: String,
     until: u64,
 }
@@ -135,7 +139,7 @@ impl Book {
         let _guard = lock(&self.path)?;
         let data = load_raw(&self.path)?;
         Ok(match locate(&data, secret) {
-            Found::At(pos) => Verdict::Card(data.tickets[pos].connection.clone()),
+            Found::At(pos) => Verdict::Card(data.tickets[pos].card.clone()),
             Found::Expired => Verdict::Expired,
             Found::Unknown => Verdict::Unknown,
         })
@@ -145,8 +149,8 @@ impl Book {
     /// докстроку `IssuedTicket`), к какой карточке он относится и когда он
     /// умирает. Пишет на диск сразу же — без этого второй процесс (или этот
     /// же после перезапуска) не увидел бы код, который уже отдали человеку.
-    pub fn issue(&mut self, connection: &str, ticket: &crate::ticket::Ticket) -> Result<(), String> {
-        self.write_ticket(connection, ticket, false)
+    pub fn issue(&mut self, card: &CardId, ticket: &crate::ticket::Ticket) -> Result<(), String> {
+        self.write_ticket(card, ticket, false)
     }
 
     /// Перевыпуск: новый код карточки ГАСИТ все прежние её коды, и гасит в
@@ -167,11 +171,11 @@ impl Book {
     /// проверяется, что `spend` гасит ровно один), и запрещать его в самом
     /// нижнем слое незачем. Выдаёт код человеку только окно, и оно зовёт
     /// `reissue` всегда (`gui::panel::issue_code`).
-    pub fn reissue(&mut self, connection: &str, ticket: &crate::ticket::Ticket) -> Result<(), String> {
-        self.write_ticket(connection, ticket, true)
+    pub fn reissue(&mut self, card: &CardId, ticket: &crate::ticket::Ticket) -> Result<(), String> {
+        self.write_ticket(card, ticket, true)
     }
 
-    fn write_ticket(&mut self, connection: &str, ticket: &crate::ticket::Ticket, douse_old: bool) -> Result<(), String> {
+    fn write_ticket(&mut self, card: &CardId, ticket: &crate::ticket::Ticket, douse_old: bool) -> Result<(), String> {
         let now = now_secs();
         let until = ticket.until.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
         if until < now {
@@ -184,13 +188,13 @@ impl Book {
             // кода из-за попытки выдать негодный.
             return Err("Этот тикет уже просрочен — выдавать его некому.".to_string());
         }
-        let connection = connection.to_string();
+        let card = card.clone();
         let fingerprint = fingerprint(&ticket.secret);
         self.mutate(move |data| {
             if douse_old {
-                data.tickets.retain(|t| t.connection != connection);
+                data.tickets.retain(|t| t.card != card);
             }
-            data.tickets.push(IssuedTicket { connection, fingerprint, until })
+            data.tickets.push(IssuedTicket { card, fingerprint, until })
         })
     }
 
@@ -204,10 +208,10 @@ impl Book {
     /// отказ, что и секрет, которого никогда не было. Это сознательно: раз
     /// хранить «потрачен» запрещено, различить два случая снаружи нечем, и
     /// спека это допускает.
-    pub fn spend(&mut self, secret: &[u8; 32]) -> Result<String, String> {
+    pub fn spend(&mut self, secret: &[u8; 32]) -> Result<CardId, String> {
         let secret = *secret;
         self.mutate(move |data| match locate(data, &secret) {
-            Found::At(pos) => Ok(data.tickets.remove(pos).connection),
+            Found::At(pos) => Ok(data.tickets.remove(pos).card),
             Found::Expired => Err(EXPIRED_TICKET.to_string()),
             Found::Unknown => Err(UNKNOWN_TICKET.to_string()),
         })?
@@ -216,64 +220,27 @@ impl Book {
     /// Зачисляет ключ к карточке. Повторная заявка того же ключа заменяет
     /// старую запись, а не плодит дубликат — у ключа на карточке одно
     /// решение, а не история решений.
-    pub fn enroll(&mut self, connection: &str, key: EndpointId, says_name: &str, write: bool) -> Result<(), String> {
-        let connection = connection.to_string();
+    pub fn enroll(&mut self, card: &CardId, key: EndpointId, says_name: &str, write: bool) -> Result<(), String> {
+        let card = card.clone();
         let says_name = says_name.to_string();
         self.mutate(move |data| {
-            data.enrolled.retain(|p| !(p.connection == connection && p.key == key));
-            data.enrolled.push(Enrolled { connection, key, says_name, write });
+            data.enrolled.retain(|p| !(p.card == card && p.key == key));
+            data.enrolled.push(Enrolled { card, key, says_name, write });
         })
     }
 
     /// Отзывает ОДНУ сторону у карточки. Зачисленных сторон бывает сколько
     /// угодно (решение владельца 1.11) — отзыв стирает запись только этого
     /// ключа, остальные зачисления той же карточки не трогает вовсе.
-    pub fn revoke(&mut self, connection: &str, key: EndpointId) -> Result<(), String> {
-        let connection = connection.to_string();
-        self.mutate(move |data| data.enrolled.retain(|p| !(p.connection == connection && p.key == key)))
-    }
-
-    /// Карточку переименовали — зачисления и выданные ей коды едут за новым
-    /// именем, одной записью.
-    ///
-    /// **Почему это вообще нужно.** Имя карточки человек меняет когда хочет
-    /// (`gui::save::rename` — слова, которыми он различает карточки глазами), а
-    /// ключом и здесь, и у партнёров служит ровно оно. Без переезда
-    /// переименование принимающей карточки осиротляло ВСЕ её зачисления разом:
-    /// карточка писала «никого ещё не зачислили» и отозвать их было нечем
-    /// (`revoke` спрашивает по имени), а зачисленная сторона продолжала звонить
-    /// вечно — её-то допуск на диске цел, просто никто больше не спрашивает о
-    /// нём этим именем.
-    ///
-    /// **Сомнение, названное вслух (задача 2 плана починки по двум ревью).**
-    /// Верный корень — не переезд, а ключ, которого человек не правит: у
-    /// карточки должен быть свой неизменный признак, и книга с партнёрами
-    /// должны ключеваться им, а не именем. Такой признак — поле `Connection`,
-    /// то есть `cfg.rs`, плюс все, кто сегодня передаёт сюда имя карточки
-    /// (`enroll.rs`, `gui::peer`), — файлы соседних работ, и правка там была бы
-    /// затёрта. Поэтому здесь переезд, а перевод на неизменный ключ назван
-    /// долгом в отчёте: он убирает не только эту пару вызовов, но и всякую
-    /// следующую, которую автор забудет позвать.
-    ///
-    /// Идемпотентна: нет записей под прежним именем — нечего и везти, это не
-    /// беда (так же, как у `Partners::forget`). На том и держится повторная
-    /// попытка после неудавшейся записи настроек.
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
-        let (from, to) = (from.to_string(), to.to_string());
-        self.mutate(move |data| {
-            for p in data.enrolled.iter_mut().filter(|p| p.connection == from) {
-                p.connection = to.clone();
-            }
-            for t in data.tickets.iter_mut().filter(|t| t.connection == from) {
-                t.connection = to.clone();
-            }
-        })
+    pub fn revoke(&mut self, card: &CardId, key: EndpointId) -> Result<(), String> {
+        let card = card.clone();
+        self.mutate(move |data| data.enrolled.retain(|p| !(p.card == card && p.key == key)))
     }
 
     /// Карточку удалили — её зачисления и её непогашенные коды уходят вместе с
     /// ней, одной записью.
     ///
-    /// Остаться они не могут: спросить о них больше нечем (имени карточки в
+    /// Остаться они не могут: спросить о них больше нечем (ключа карточки в
     /// настройках нет), а код, выданный удалённой карточке, по книге живёт ещё
     /// сутки — то есть `verdict` признал бы его годным и назвал карточку,
     /// которой в настройках уже нет. Пусть и не допуск (дальше заявку некуда
@@ -281,11 +248,11 @@ impl Book {
     /// хранилище утверждает то, чего нет.
     ///
     /// Нет записей — не беда, забывать нечего (как у `Partners::forget`).
-    pub fn forget(&mut self, connection: &str) -> Result<(), String> {
-        let connection = connection.to_string();
+    pub fn forget(&mut self, card: &CardId) -> Result<(), String> {
+        let card = card.clone();
         self.mutate(move |data| {
-            data.enrolled.retain(|p| p.connection != connection);
-            data.tickets.retain(|t| t.connection != connection);
+            data.enrolled.retain(|p| p.card != card);
+            data.tickets.retain(|t| t.card != card);
         })
     }
 
@@ -306,10 +273,10 @@ impl Book {
     /// Под замком, но без перезаписи, — как и `check`: `write_atomic`
     /// заменяет файл переименованием, и читатель увидит либо целый старый,
     /// либо целый новый, никогда половину.
-    pub fn enrolled_to(&self, connection: &str, key: EndpointId) -> Result<Option<Party>, String> {
+    pub fn enrolled_to(&self, card: &CardId, key: EndpointId) -> Result<Option<Party>, String> {
         let _guard = lock(&self.path)?;
         let data = load_raw(&self.path)?;
-        Ok(data.enrolled.iter().find(|p| p.connection == connection && p.key == key).map(|p| Party {
+        Ok(data.enrolled.iter().find(|p| &p.card == card && p.key == key).map(|p| Party {
             key: p.key,
             says_name: p.says_name.clone(),
             write: p.write,
@@ -321,11 +288,11 @@ impl Book {
     ///
     /// Для ПОКАЗА. Решать по нему, пускать ли кого-то, нельзя — на это есть
     /// `enrolled_to`, читающий диск (см. его докстроку).
-    pub fn of(&self, connection: &str) -> Vec<Party> {
+    pub fn of(&self, card: &CardId) -> Vec<Party> {
         self.data
             .enrolled
             .iter()
-            .filter(|p| p.connection == connection)
+            .filter(|p| &p.card == card)
             .map(|p| Party { key: p.key, says_name: p.says_name.clone(), write: p.write })
             .collect()
     }
@@ -373,7 +340,8 @@ pub struct Partner {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PartnerRow {
-    connection: String,
+    /// Карточка — КЛЮЧОМ, не именем, по тому же доводу, что у `Enrolled` выше (`cfg::CardId`).
+    card: CardId,
     key: EndpointId,
     #[serde(default)]
     relay: Option<String>,
@@ -381,6 +349,12 @@ struct PartnerRow {
     direct: Vec<String>,
     /// Признак базы той карточки, за которой числится поток этой зовущей
     /// карточки, — как его назвала та сторона в `enroll_ok` (`BaseFields::base_id`).
+    ///
+    /// **Чей это ключ.** С 10.11 признак базы на проводе — это ключ карточки (`cfg::CardId`), но ключ ТОЙ стороны: он назван на другой
+    /// машине, в наших настройках его нет, и сравнивать его с нашими ключами не за что. Поле `card` выше — НАШ ключ, этот — ИХ, и путать
+    /// их нельзя: наш отвечает на «кому это разрешено», их — на «чем назвать себя при возврате». Тип один (разные типы на одно понятие
+    /// поставили бы преобразование строки на каждую границу, а преобразование — место, где подставляют не то), поэтому различие держат
+    /// имена полей и эта докстрока.
     ///
     /// **Зачем он на диске.** В памяти он уже живёт (`gui::peer::InHand::card`)
     /// и со второго круга возврат называет карточку сам, так что отзыв одной
@@ -403,7 +377,7 @@ struct PartnerRow {
     /// файл от прежней версии программы (`serde(default)`, старый
     /// `partners.toml` читается без отказа).
     #[serde(default)]
-    base_id: Option<String>,
+    base_id: Option<CardId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -457,8 +431,8 @@ impl Partners {
 
     /// К кому ходит эта карточка. `None` — зачисления ещё не было, и звонить
     /// некуда: нужен код.
-    pub fn of(&self, connection: &str) -> Option<Partner> {
-        self.data.partners.iter().find(|p| p.connection == connection).map(|p| Partner {
+    pub fn of(&self, card: &CardId) -> Option<Partner> {
+        self.data.partners.iter().find(|p| &p.card == card).map(|p| Partner {
             key: p.key,
             relay: p.relay.clone(),
             direct: p.direct.clone(),
@@ -468,11 +442,11 @@ impl Partners {
     /// Все зовущие карточки с партнёрами — тем, кто поднимает звонки при
     /// запуске: без этого списка он не знал бы, кому звонить до первого
     /// щелчка человека.
-    pub fn all(&self) -> Vec<(String, Partner)> {
+    pub fn all(&self) -> Vec<(CardId, Partner)> {
         self.data
             .partners
             .iter()
-            .map(|p| (p.connection.clone(), Partner { key: p.key, relay: p.relay.clone(), direct: p.direct.clone() }))
+            .map(|p| (p.card.clone(), Partner { key: p.key, relay: p.relay.clone(), direct: p.direct.clone() }))
             .collect()
     }
 
@@ -487,8 +461,8 @@ impl Partners {
     /// машине) — признак снимается: он про базы прежней машины, и на новой не
     /// значит ничего, а соврать им значило бы числить поток за карточкой, о
     /// которой с этой стороной не договаривались.
-    pub fn remember(&mut self, connection: &str, partner: &Partner) -> Result<(), String> {
-        self.mutate(|data| match data.partners.iter_mut().find(|p| p.connection == connection) {
+    pub fn remember(&mut self, card: &CardId, partner: &Partner) -> Result<(), String> {
+        self.mutate(|data| match data.partners.iter_mut().find(|p| &p.card == card) {
             Some(row) => {
                 if row.key != partner.key {
                     row.base_id = None;
@@ -498,7 +472,7 @@ impl Partners {
                 row.direct = partner.direct.clone();
             }
             None => data.partners.push(PartnerRow {
-                connection: connection.to_string(),
+                card: card.clone(),
                 key: partner.key,
                 relay: partner.relay.clone(),
                 direct: partner.direct.clone(),
@@ -515,8 +489,8 @@ impl Partners {
     /// карточки, та сторона отвечает всем списком своих баз, и так это и было
     /// до появления этого поля. Из снимка, как и `of`: решение «куда звонить»
     /// и так читает файл сам (`gui::peer::target`).
-    pub fn base_id_of(&self, connection: &str) -> Option<String> {
-        self.data.partners.iter().find(|p| p.connection == connection).and_then(|p| p.base_id.clone())
+    pub fn base_id_of(&self, card: &CardId) -> Option<CardId> {
+        self.data.partners.iter().find(|p| &p.card == card).and_then(|p| p.base_id.clone())
     }
 
     /// Запомнить, за какой карточкой та сторона числит наш поток. Зовётся,
@@ -527,40 +501,21 @@ impl Partners {
     /// к чему, и молчание об этом выглядело бы как записанный признак, который
     /// потом необъяснимо не читается. На деле этот порядок не встречается —
     /// партнёра записывает тот же круг и раньше (`gui::peer::one_round`).
-    pub fn remember_base_id(&mut self, connection: &str, base_id: &str) -> Result<(), String> {
-        let base_id = base_id.to_string();
-        self.mutate(move |data| match data.partners.iter_mut().find(|p| p.connection == connection) {
+    pub fn remember_base_id(&mut self, card: &CardId, base_id: &CardId) -> Result<(), String> {
+        let base_id = base_id.clone();
+        self.mutate(move |data| match data.partners.iter_mut().find(|p| &p.card == card) {
             Some(row) => {
                 row.base_id = Some(base_id);
                 Ok(())
             }
-            None => Err(format!("партнёра карточки «{connection}» ещё нет — признак базы цеплять не к чему")),
+            None => Err(format!("партнёра карточки {card} ещё нет — признак базы цеплять не к чему")),
         })?
     }
 
     /// Забыть партнёра: карточку удалили, или человек подключается кодом к
     /// другой машине. Нет записи — не беда, забывать нечего.
-    pub fn forget(&mut self, connection: &str) -> Result<(), String> {
-        self.mutate(|data| data.partners.retain(|p| p.connection != connection))
-    }
-
-    /// Карточку переименовали — её партнёр едет за новым именем (довод и
-    /// названное сомнение — у `Book::rename`, мера здесь та же).
-    ///
-    /// Без этого удаление было бы честнее переименования: удалённая карточка
-    /// хотя бы исчезает из настроек, а переименованная оставляла бы в
-    /// `partners.toml` строку под прежним именем — и подъём звонков при
-    /// запуске (`Partners::all`) звонил бы карточкой-призраком, которой в
-    /// настройках нет.
-    ///
-    /// Идемпотентна по той же причине и ради того же: повторить попытку после
-    /// неудавшейся записи настроек.
-    pub fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
-        self.mutate(|data| {
-            for p in data.partners.iter_mut().filter(|p| p.connection == from) {
-                p.connection = to.to_string();
-            }
-        })
+    pub fn forget(&mut self, card: &CardId) -> Result<(), String> {
+        self.mutate(|data| data.partners.retain(|p| &p.card != card))
     }
 
     /// Тем же приёмом и по тому же доводу, что `Book::mutate`: замок, свежее
@@ -624,7 +579,7 @@ enum Found {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Код настоящий и жив; вот карточка, к которой он выдан.
-    Card(String),
+    Card(CardId),
     /// Срок кода вышел.
     Expired,
     /// Такого кода в книге нет: его либо не выдавали, либо уже погасили.
@@ -915,7 +870,7 @@ mod tests {
     /// ниже, и писать `Verdict::Card("buh".to_string())` в каждой значило бы
     /// читать глазами кавычки вместо смысла.
     fn card(name: &str) -> Verdict {
-        Verdict::Card(name.to_string())
+        Verdict::Card(name.into())
     }
 
     /// Без места для партнёра зовущая сторона после перезапуска не вернётся
@@ -930,13 +885,16 @@ mod tests {
         let peer = node_id();
 
         let mut p = Partners::open(&d).unwrap();
-        assert!(p.of("Ромашка").is_none(), "до зачисления звонить некуда");
-        p.remember("Ромашка", &Partner { key: peer, relay: Some("https://relay.example./".into()), direct: vec!["127.0.0.1:7890".into()] })
-            .unwrap();
+        assert!(p.of(&"Ромашка".into()).is_none(), "до зачисления звонить некуда");
+        p.remember(
+            &"Ромашка".into(),
+            &Partner { key: peer, relay: Some("https://relay.example./".into()), direct: vec!["127.0.0.1:7890".into()] },
+        )
+        .unwrap();
 
         // Перезапуск: та же папка, другой объект.
         let again = Partners::open(&d).unwrap();
-        let back = again.of("Ромашка").expect("партнёр обязан пережить перезапуск");
+        let back = again.of(&"Ромашка".into()).expect("партнёр обязан пережить перезапуск");
         assert_eq!(back.key, peer);
         assert_eq!(back.direct, vec!["127.0.0.1:7890".to_string()]);
         assert_eq!(again.all().len(), 1, "список для подъёма звонков при запуске");
@@ -952,15 +910,15 @@ mod tests {
         let (first, second) = (node_id(), node_id());
 
         let mut p = Partners::open(&d).unwrap();
-        p.remember("Ромашка", &Partner { key: first, relay: None, direct: vec![] }).unwrap();
-        p.remember("Ромашка", &Partner { key: second, relay: None, direct: vec![] }).unwrap();
+        p.remember(&"Ромашка".into(), &Partner { key: first, relay: None, direct: vec![] }).unwrap();
+        p.remember(&"Ромашка".into(), &Partner { key: second, relay: None, direct: vec![] }).unwrap();
 
         assert_eq!(p.all().len(), 1);
-        assert_eq!(p.of("Ромашка").unwrap().key, second);
+        assert_eq!(p.of(&"Ромашка".into()).unwrap().key, second);
 
-        p.forget("Ромашка").unwrap();
-        assert!(p.of("Ромашка").is_none());
-        assert!(p.forget("Ромашка").is_ok(), "забывать нечего — не беда");
+        p.forget(&"Ромашка".into()).unwrap();
+        assert!(p.of(&"Ромашка".into()).is_none());
+        assert!(p.forget(&"Ромашка".into()).is_ok(), "забывать нечего — не беда");
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -974,30 +932,49 @@ mod tests {
     /// числился за всеми сразу, и отзыв одной карточки рвал связь по остальным
     /// — прямо против спеки контракта.
     ///
-    /// Здесь же проверяется и прежний `partners.toml` — без нового поля: он
-    /// обязан читаться без отказа и без карантина, иначе правка стоила бы
-    /// человеку всех его подключений.
+    /// Файл партнёров ПРЕЖНЕГО образца — ключёванный ИМЕНЕМ карточки — уходит в карантин со словами, а список живёт пустым.
+    ///
+    /// **Это решение владельца 10.11, а не недосмотр.** Переноса таких файлов не написано нигде: программа ещё не используется, живых
+    /// файлов, ключёванных именем, нет ни у кого, и переносящий код был бы кодом, который никогда не исполнится у человека, — а стеречь
+    /// его пришлось бы всегда. Чистый разрыв дешевле.
+    ///
+    /// Молчать при этом нельзя, и не молчим: файл откладывается рядом (`quarantine`), о нём говорится словами, а подсказки восстановимы
+    /// — человек подключается кодом ещё раз. Тот же приём и тот же довод, что у любого непонятного файла партнёров.
+    #[test]
+    fn a_partners_file_keyed_by_card_name_goes_to_quarantine() {
+        let d = dir("partners-old-shape");
+        std::fs::create_dir_all(&d).unwrap();
+        let peer = node_id();
+        let old_shape = format!("[[partners]]\nconnection = \"Ромашка\"\nkey = \"{peer}\"\ndirect = []\n");
+        std::fs::write(d.join(PARTNERS_FILE), &old_shape).unwrap();
+
+        let p = Partners::open(&d).expect("непонятный файл партнёров не повод не открыть программу");
+        assert!(p.all().is_empty(), "список живёт пустым: половине недоверенного файла верить нельзя");
+        let broken = d.join("partners.toml.broken");
+        assert!(broken.exists(), "файл отложен для разбора беды, а не стёрт молча");
+        assert_eq!(std::fs::read_to_string(&broken).unwrap().trim(), old_shape.trim(), "отложена копия как была");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Партнёра без признака базы читаем как «не знаем», а не выдумываем его.
     #[test]
     fn a_returning_card_remembers_which_base_it_agreed_on() {
         let d = dir("partners-base-id");
         std::fs::create_dir_all(&d).unwrap();
         let peer = node_id();
-        // Файл прежнего образца: поля `base_id` в нём нет вовсе.
-        let old_shape = format!("[[partners]]\nconnection = \"Ромашка\"\nkey = \"{peer}\"\ndirect = []\n");
-        std::fs::write(d.join(PARTNERS_FILE), &old_shape).unwrap();
+        let mut p = Partners::open(&d).unwrap();
+        p.remember(&"Ромашка".into(), &Partner { key: peer, relay: None, direct: vec![] }).unwrap();
+        assert_eq!(p.of(&"Ромашка".into()).expect("партнёр прочитан").key, peer);
+        assert_eq!(p.base_id_of(&"Ромашка".into()), None, "партнёр записан, а карточку ещё не называли — и выдумывать её нельзя");
 
-        let mut p = Partners::open(&d).expect("старый файл партнёров обязан читаться без отказа");
-        assert!(!d.join("partners.toml.broken").exists(), "и без карантина: поля нет — не беда, а файл прежней версии");
-        assert_eq!(p.of("Ромашка").expect("партнёр прочитан").key, peer);
-        assert_eq!(p.base_id_of("Ромашка"), None, "признака в старом файле нет — и выдумывать его нельзя");
-
-        p.remember_base_id("Ромашка", "b1").unwrap();
+        p.remember_base_id(&"Ромашка".into(), &"b1".into()).unwrap();
 
         // Перезапуск: та же папка, другой объект.
         let again = Partners::open(&d).unwrap();
-        assert_eq!(again.base_id_of("Ромашка").as_deref(), Some("b1"), "признак базы обязан пережить перезапуск");
+        assert_eq!(again.base_id_of(&"Ромашка".into()), Some("b1".into()), "признак базы обязан пережить перезапуск");
 
-        let no = Partners::open(&d).unwrap().remember_base_id("Клевер", "b2").unwrap_err();
+        let no = Partners::open(&d).unwrap().remember_base_id(&"Клевер".into(), &"b2".into()).unwrap_err();
         assert!(no.contains("Клевер"), "цеплять признак не к чему — отказ словами, а не тихое ничто: {no}");
 
         let _ = std::fs::remove_dir_all(&d);
@@ -1018,22 +995,22 @@ mod tests {
         let (first, second) = (node_id(), node_id());
 
         let mut p = Partners::open(&d).unwrap();
-        p.remember("Ромашка", &Partner { key: first, relay: None, direct: vec![] }).unwrap();
-        p.remember_base_id("Ромашка", "b1").unwrap();
+        p.remember(&"Ромашка".into(), &Partner { key: first, relay: None, direct: vec![] }).unwrap();
+        p.remember_base_id(&"Ромашка".into(), &"b1".into()).unwrap();
 
         // Переподключение к той же машине: подсказки свежие, сторона прежняя.
         p.remember(
-            "Ромашка",
+            &"Ромашка".into(),
             &Partner { key: first, relay: Some("https://relay.example./".into()), direct: vec!["127.0.0.1:7890".into()] },
         )
         .unwrap();
-        assert_eq!(p.base_id_of("Ромашка").as_deref(), Some("b1"), "переподключение не имеет права стирать признак базы");
-        assert_eq!(p.of("Ромашка").unwrap().direct, vec!["127.0.0.1:7890".to_string()], "а подсказки обязаны обновиться");
+        assert_eq!(p.base_id_of(&"Ромашка".into()), Some("b1".into()), "переподключение не имеет права стирать признак базы");
+        assert_eq!(p.of(&"Ромашка".into()).unwrap().direct, vec!["127.0.0.1:7890".to_string()], "а подсказки обязаны обновиться");
         assert_eq!(p.all().len(), 1, "и партнёр у карточки по-прежнему один");
 
         // Человек подключился кодом к ДРУГОЙ машине.
-        p.remember("Ромашка", &Partner { key: second, relay: None, direct: vec![] }).unwrap();
-        assert_eq!(p.base_id_of("Ромашка"), None, "признак был про базы прежней машины — на новой он не значит ничего");
+        p.remember(&"Ромашка".into(), &Partner { key: second, relay: None, direct: vec![] }).unwrap();
+        assert_eq!(p.base_id_of(&"Ромашка".into()), None, "признак был про базы прежней машины — на новой он не значит ничего");
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -1052,10 +1029,10 @@ mod tests {
     fn a_broken_partners_file_is_quarantined_on_write_too_not_silently_emptied() {
         let d = dir("partners-broken-on-write");
         let mut p = Partners::open(&d).unwrap();
-        p.remember("Ромашка", &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
+        p.remember(&"Ромашка".into(), &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
 
         std::fs::write(d.join(PARTNERS_FILE), "это не toml вовсе: {{{").unwrap();
-        p.remember("Василёк", &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
+        p.remember(&"Василёк".into(), &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
 
         assert!(
             d.join("partners.toml.broken").exists(),
@@ -1081,10 +1058,10 @@ mod tests {
         let old = a_ticket();
         let new = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.reissue("buh", &old).unwrap();
+        book.reissue(&"buh".into(), &old).unwrap();
         assert_eq!(verdict(&book, &old.secret), card("buh"), "иначе тест проверяет не то");
 
-        book.reissue("buh", &new).unwrap();
+        book.reissue(&"buh".into(), &new).unwrap();
         assert_eq!(
             verdict(&book, &old.secret),
             Verdict::Unknown,
@@ -1097,7 +1074,7 @@ mod tests {
         drop(book);
         let mut again = Book::open(&d).unwrap();
         assert!(again.spend(&old.secret).is_err(), "прежний код вернулся после перезапуска");
-        assert_eq!(again.spend(&new.secret).unwrap(), "buh");
+        assert_eq!(again.spend(&new.secret).unwrap(), "buh".into());
     }
 
     /// Чужая карточка перевыпуском не задевается: гасятся коды ТОЙ карточки,
@@ -1107,8 +1084,8 @@ mod tests {
         let d = dir("reissue-neighbour");
         let neighbour = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.reissue("mcp", &neighbour).unwrap();
-        book.reissue("buh", &a_ticket()).unwrap();
+        book.reissue(&"mcp".into(), &neighbour).unwrap();
+        book.reissue(&"buh".into(), &a_ticket()).unwrap();
         assert_eq!(verdict(&book, &neighbour.secret), card("mcp"), "перевыпуск одной карточки погасил код другой");
     }
 
@@ -1119,10 +1096,10 @@ mod tests {
         let d = dir("reissue-refused");
         let good = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.reissue("buh", &good).unwrap();
+        book.reissue(&"buh".into(), &good).unwrap();
         let mut stale = a_ticket();
         stale.until = UNIX_EPOCH;
-        assert!(book.reissue("buh", &stale).is_err(), "просроченный код выдавать некому");
+        assert!(book.reissue(&"buh".into(), &stale).is_err(), "просроченный код выдавать некому");
         assert_eq!(verdict(&book, &good.secret), card("buh"), "отказ выдачи погасил годный код");
     }
 
@@ -1131,10 +1108,10 @@ mod tests {
         let d = dir("spend-once");
         let ticket = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &ticket).unwrap();
+        book.issue(&"buh".into(), &ticket).unwrap();
 
         let name = book.spend(&ticket.secret).unwrap();
-        assert_eq!(name, "buh");
+        assert_eq!(name, "buh".into());
 
         let no = book.spend(&ticket.secret).unwrap_err();
         assert!(!no.is_empty(), "второй раз по тому же секрету — отказ, а не паника");
@@ -1147,14 +1124,14 @@ mod tests {
         let spent = a_ticket();
 
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &unspent).unwrap();
-        book.issue("buh", &spent).unwrap();
+        book.issue(&"buh".into(), &unspent).unwrap();
+        book.issue(&"buh".into(), &spent).unwrap();
         book.spend(&spent.secret).unwrap();
         drop(book);
 
         // Второй процесс или этот же после перезапуска — файл читается заново.
         let mut again = Book::open(&d).unwrap();
-        assert_eq!(again.spend(&unspent.secret).unwrap(), "buh", "непотраченный тикет обязан пережить перезапуск");
+        assert_eq!(again.spend(&unspent.secret).unwrap(), "buh".into(), "непотраченный тикет обязан пережить перезапуск");
         assert!(again.spend(&spent.secret).is_err(), "потраченный тикет не возвращается после перезапуска");
     }
 
@@ -1164,12 +1141,12 @@ mod tests {
         let a = node_id();
         let b = node_id();
         let mut book = Book::open(&d).unwrap();
-        book.enroll("buh", a, "Бухгалтер", true).unwrap();
-        book.enroll("buh", b, "Разработчик", false).unwrap();
+        book.enroll(&"buh".into(), a, "Бухгалтер", true).unwrap();
+        book.enroll(&"buh".into(), b, "Разработчик", false).unwrap();
 
-        book.revoke("buh", a).unwrap();
+        book.revoke(&"buh".into(), a).unwrap();
 
-        let left: Vec<EndpointId> = book.of("buh").into_iter().map(|p| p.key).collect();
+        let left: Vec<EndpointId> = book.of(&"buh".into()).into_iter().map(|p| p.key).collect();
         assert_eq!(left, vec![b], "отозванного ключа нет, второй — на месте");
     }
 
@@ -1179,7 +1156,7 @@ mod tests {
         let ticket = a_ticket();
 
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &ticket).unwrap();
+        book.issue(&"buh".into(), &ticket).unwrap();
 
         // Заявка пришла, человек ещё думает — и тут сеть рвётся. Погашение
         // не случилось: оно происходит ПОСЛЕ разрешения, а не в момент
@@ -1190,7 +1167,7 @@ mod tests {
 
         // Человек наконец разрешает — только теперь тикет гасится, и ровно
         // один раз.
-        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh");
+        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh".into());
         assert!(book.spend(&ticket.secret).is_err(), "второй раз тот же код уже не работает");
     }
 
@@ -1204,11 +1181,11 @@ mod tests {
         let d = dir("check-vs-spend");
         let ticket = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &ticket).unwrap();
+        book.issue(&"buh".into(), &ticket).unwrap();
 
         assert_eq!(verdict(&book, &ticket.secret), card("buh"), "проверка обязана узнать карточку");
         assert_eq!(verdict(&book, &ticket.secret), card("buh"), "повторная проверка — тот же результат: verdict не гасит");
-        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh", "а spend гасит");
+        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh".into(), "а spend гасит");
         assert_eq!(verdict(&book, &ticket.secret), Verdict::Unknown, "после spend проверка уже не находит тикет");
         assert!(book.spend(&ticket.secret).is_err(), "и spend повторно тоже не находит");
     }
@@ -1230,7 +1207,7 @@ mod tests {
         // Круг починки 1, Минор 6: явно просроченный тикет отказывает уже
         // при выдаче — не тихий успех с подвохом при первой же попытке
         // погасить.
-        assert!(book.issue("buh", &ticket).is_err(), "просроченный тикет выдавать нечем — отказ сразу");
+        assert!(book.issue(&"buh".into(), &ticket).is_err(), "просроченный тикет выдавать нечем — отказ сразу");
         assert!(book.spend(&ticket.secret).is_err(), "и погасить его тоже нечем — он не попал в хранилище");
     }
 
@@ -1243,11 +1220,11 @@ mod tests {
         let d = dir("wrong-secret");
         let ticket = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &ticket).unwrap();
+        book.issue(&"buh".into(), &ticket).unwrap();
 
         let wrong = [0xA5u8; 32];
         assert!(book.spend(&wrong).is_err(), "чужой секрет не должен гаситься как настоящий");
-        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh", "настоящий тикет обязан быть жив после неверной попытки");
+        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh".into(), "настоящий тикет обязан быть жив после неверной попытки");
     }
 
     /// Замечание безопасности, требование «в файле секрета нет ни в каком
@@ -1260,7 +1237,7 @@ mod tests {
         let d = dir("no-secret-on-disk");
         let ticket = a_ticket();
         let mut book = Book::open(&d).unwrap();
-        book.issue("buh", &ticket).unwrap();
+        book.issue(&"buh".into(), &ticket).unwrap();
 
         let bytes = std::fs::read(d.join(FILE)).unwrap();
         let text = String::from_utf8_lossy(&bytes);
@@ -1284,7 +1261,7 @@ mod tests {
         let d = dir("prune");
         std::fs::create_dir_all(&d).unwrap();
         let stale_fp = fingerprint(&[0x11u8; 32]);
-        let hand_written = format!("[[tickets]]\nconnection = \"buh\"\nfingerprint = \"{stale_fp}\"\nuntil = 1\n");
+        let hand_written = format!("[[tickets]]\ncard = \"buh\"\nfingerprint = \"{stale_fp}\"\nuntil = 1\n");
         std::fs::write(d.join(FILE), &hand_written).unwrap();
 
         let mut book = Book::open(&d).unwrap();
@@ -1294,7 +1271,7 @@ mod tests {
         // А если бы что-то и просочилось мимо чтения — любая следующая
         // запись (не обязательно про тикеты) подчищает её тоже.
         std::fs::write(d.join(FILE), &hand_written).unwrap();
-        book.enroll("buh", node_id(), "Кто-то", false).unwrap();
+        book.enroll(&"buh".into(), node_id(), "Кто-то", false).unwrap();
         let after_write = std::fs::read_to_string(d.join(FILE)).unwrap();
         assert!(!after_write.contains(&stale_fp), "запись обязана переписать файл без просроченной записи: {after_write}");
     }
@@ -1311,11 +1288,11 @@ mod tests {
 
         let a = a_ticket();
         let b = a_ticket();
-        window.issue("buh", &a).unwrap();
-        mcp.issue("buh", &b).unwrap();
+        window.issue(&"buh".into(), &a).unwrap();
+        mcp.issue(&"buh".into(), &b).unwrap();
 
-        assert_eq!(window.spend(&a.secret).unwrap(), "buh", "выдача первого писателя не должна стереть выдачу второго");
-        assert_eq!(mcp.spend(&b.secret).unwrap(), "buh", "и наоборот");
+        assert_eq!(window.spend(&a.secret).unwrap(), "buh".into(), "выдача первого писателя не должна стереть выдачу второго");
+        assert_eq!(mcp.spend(&b.secret).unwrap(), "buh".into(), "и наоборот");
     }
 
     /// Важно 5 круга починки 1: битый файл не должен утягивать с собой ВСЕ
@@ -1328,12 +1305,12 @@ mod tests {
         std::fs::write(d.join(FILE), "это не toml вовсе: {{{").unwrap();
 
         let mut book = Book::open(&d).expect("битый файл не должен отказывать в открытии книги");
-        assert!(book.of("buh").is_empty(), "после карантина книга пустая, а не в панике");
+        assert!(book.of(&"buh".into()).is_empty(), "после карантина книга пустая, а не в панике");
         assert!(d.join("enrolled.toml.broken").exists(), "непонятный файл обязан быть отложен рядом");
 
         let key = node_id();
-        book.enroll("buh", key, "Кто-то", false).unwrap();
-        assert_eq!(book.of("buh").len(), 1, "после карантина зачисление снова работает");
+        book.enroll(&"buh".into(), key, "Кто-то", false).unwrap();
+        assert_eq!(book.of(&"buh".into()).len(), 1, "после карантина зачисление снова работает");
     }
 
     /// Файл до перехода на отпечаток (поле `secret` вместо `fingerprint`)
@@ -1350,7 +1327,7 @@ mod tests {
         std::fs::write(d.join(FILE), legacy).unwrap();
 
         let book = Book::open(&d).expect("старый формат не должен отказывать в открытии книги");
-        assert!(book.of("buh").is_empty());
+        assert!(book.of(&"buh".into()).is_empty());
 
         let broken_text = std::fs::read_to_string(d.join("enrolled.toml.broken")).unwrap();
         assert!(

@@ -773,52 +773,25 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Допуск и возврат — ЗА карточкой: книга зачислений (`enrolled.toml`) и
-/// партнёры (`partners.toml`) ключуются именем карточки, а имя человек меняет
-/// когда хочет.
+/// Зачисления и партнёр уходят ВМЕСТЕ с удалённой карточкой, и уходят ДО записи настроек.
 ///
-/// **Почему переезд идёт ДО записи настроек и почему его отказ отказывает
-/// целиком** (задача 2 плана починки по двум ревью, находка 1). Порядок
-/// выбран по тому, какую половину беды можно починить повтором:
-/// * книга переехала, настройки записать не удалось — зачисления лежат под
-///   новым именем, карточка носит прежнее; повтор переименования делает
-///   переезд пустым (он идемпотентен) и дописывает настройки, и всё сходится;
-/// * настройки записаны, книга не переехала — чинить нечем: карточка уже
-///   носит новое имя, повторять нечего, и зачисления остаются осиротевшими
-///   навсегда, ровно как до этой правки.
+/// **Переименованию такой пары больше нет.** До 10.11 рядом стояла `access_follows_rename`: книга допуска и партнёры ключевались ИМЕНЕМ
+/// карточки, и переименование приходилось вести за собой, иначе оно осиротляло все зачисления разом. Теперь карточка названа ключом, и
+/// ключ от переименования не меняется (`cfg::CardId`) — везти нечего, и забыть позвать больше некого: это и было главной ценой прежней
+/// починки, она держалась на памяти каждого будущего писателя.
 ///
-/// Тот же довод и тот же приём, что у гашения публикации в
-/// `delete_connection`: пробуем раньше записи, пока ничего не состоялось, и на
-/// отказе не делаем НИЧЕГО.
-///
-/// Снимок книги в окне после этого устаревает (`ui.book` читался до переезда)
-/// — перечитывает его вызывающий, уже после удачной записи: до неё
-/// перечитывать нечего.
-fn access_follows_rename(ui: &Ui, from: &str, to: &str) -> Result<(), String> {
+/// **Почему удаление всё-таки чистит, и почему раньше записи настроек.** Партнёр, оставшийся после удаления карточки, — это и есть
+/// карточка-призрак: подъём звонков при запуске (`Partners::all`) читает `partners.toml`, а не настройки, и программа звонила бы по
+/// удалённой карточке до тех пор, пока кто-нибудь не вычистит файл руками. Чистим раньше записи, и на отказе не удаляем ничего — повтор
+/// удаления застанет чистку уже сделанной (она идемпотентна) и допишет настройки. Тот же довод и тот же приём, что у гашения публикации
+/// в `delete_connection`: пробуем раньше записи, пока ничего не состоялось.
+fn access_follows_delete(ui: &Ui, card: &crate::cfg::Connection) -> Result<(), String> {
+    let (key, name) = (card.id(), &card.name);
     crate::enrolled::Book::open(ui.kit.state())
-        .and_then(|mut b| b.rename(from, to))
-        .map_err(|e| format!("имя не изменено: зачисления карточки «{from}» не переехали бы за ним — {e}"))?;
-    crate::enrolled::Partners::open(ui.kit.state())
-        .and_then(|mut p| p.rename(from, to))
-        .map_err(|e| format!("имя не изменено: подключение карточки «{from}» не переехало бы за ним — {e}"))
-}
-
-/// То же для удаления: зачисления и партнёр уходят ВМЕСТЕ с карточкой, и тоже
-/// до записи настроек.
-///
-/// Порядок выбран тем же вопросом «что чинится повтором». Партнёр, оставшийся
-/// после удаления карточки, — это и есть карточка-призрак: подъём звонков при
-/// запуске (`Partners::all`) читает `partners.toml`, а не настройки, и
-/// программа звонила бы по удалённой карточке до тех пор, пока кто-нибудь не
-/// вычистит файл руками. Чистим раньше записи, и на отказе не удаляем ничего —
-/// повтор удаления застанет чистку уже сделанной (она идемпотентна) и допишет
-/// настройки.
-fn access_follows_delete(ui: &Ui, name: &str) -> Result<(), String> {
-    crate::enrolled::Book::open(ui.kit.state())
-        .and_then(|mut b| b.forget(name))
+        .and_then(|mut b| b.forget(&key))
         .map_err(|e| format!("удаление отменено: зачисления карточки «{name}» не убраны — {e}"))?;
     crate::enrolled::Partners::open(ui.kit.state())
-        .and_then(|mut p| p.forget(name))
+        .and_then(|mut p| p.forget(&key))
         .map_err(|e| format!("удаление отменено: подключение карточки «{name}» не забыто — {e}"))
 }
 
@@ -924,11 +897,23 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
     // сделать текущей негодную карточку — значит сломать командную строку и
     // сеанс, которые работают с `current()`.
     let mut after = ui.cfg.clone();
+    // Ключ карточки ЗАКРЕПЛЯЕТСЯ в памяти перед сменой имени — и это не отделка, а то, на чём держится вся работа 10.11.
+    //
+    // Пока ключа в файле нет, он ВЫВОДИТСЯ из имени (`Connection::id()`, там и довод, почему вывод, а не случайность). Переименование
+    // меняет имя — значит вывод дал бы ДРУГОЙ ключ, и зачисления, выданный код и партнёр, записанные по прежнему, осиротели бы разом:
+    // ровно та беда, которую эта работа и закрывает, только вошедшая с другой стороны. Закрепив ключ здесь, переименование перестаёт
+    // его касаться навсегда — дальше он живёт в файле сам по себе.
+    //
+    // Карточке, у которой ключ в файле уже стоит, эта строка не делает ничего: `id()` отдаёт его же.
+    let settled = ui.cfg.by_name(from).map(cfg::Connection::id).ok_or_else(|| {
+        format!("{}: в списке нет карточки «{from}» — настройки на диске изменились, перечитайте их и повторите", cfg::FILE)
+    })?;
     {
         let c = after.connections.iter_mut().find(|c| c.name == from).ok_or_else(|| {
             format!("{}: в списке нет карточки «{from}» — настройки на диске изменились, перечитайте их и повторите", cfg::FILE)
         })?;
         c.name = to.to_string();
+        c.id_in_file = settled.clone();
     }
     // Непрочитанный шифртекст адресуется по имени карточки (`Undecryptable::connection`,
     // `cfg::blocking_undecryptable`) — имя едет вместе с ним, иначе находка
@@ -951,19 +936,15 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
     // одного поля адресует её ровно туда же, куда адресует `set_named`.
     let mut addr = ui.cfg.clone();
     addr.current = from.to_string();
+    // Ключ пишется ДО имени, и порядок обязателен: адресуется блок по имени (`block_in`), и после правки `name` блока «{from}» в тексте
+    // уже нет. Одна запись на диск по-прежнему одна — правятся две строки ОДНОГО текста.
+    let text = cfg::set_current(&text, &addr, "id", &format!("{:?}", settled.as_str()))?;
     let mut text = cfg::set_current(&text, &addr, "name", &quoted)?;
     if renaming_current {
         text = common::toml_render::set(&text, "", "current", &quoted);
     }
-    // Допуск и возврат переезжают ДО записи настроек, и их отказ отказывает
-    // целиком — довод у `access_follows_rename`.
-    access_follows_rename(ui, from, to)?;
     write_text(&path, &text).map_err(|e| format!("{e:#}"))?;
     ui.cfg = after;
-    // Снимок книги и партнёров в окне называл карточку прежним именем: без
-    // перечтения список зачисленных у переименованной карточки был бы пуст на
-    // экране, хотя на диске он на месте и уже под новым именем.
-    reread_book(ui);
     Ok(())
 }
 
@@ -1141,9 +1122,13 @@ pub fn delete_connection(ui: &mut Ui, name: &str) -> Result<(), String> {
         }
     }
 
-    // Зачисления и партнёр уходят вместе с карточкой, и тоже до записи
-    // настроек — довод у `access_follows_delete`.
-    access_follows_delete(ui, name)?;
+    // Зачисления и партнёр уходят вместе с карточкой, и тоже до записи настроек — довод у `access_follows_delete`. Карточка берётся
+    // ЦЕЛИКОМ: чистка идёт по ключу, а слова отказа называют имя, и искать карточку второй раз по имени после этой строки было бы
+    // поздно — её блока в файле уже не будет.
+    let card = ui.cfg.by_name(name).cloned().ok_or_else(|| {
+        format!("{}: в списке нет карточки «{name}» — настройки на диске изменились, перечитайте их и повторите", cfg::FILE)
+    })?;
+    access_follows_delete(ui, &card)?;
 
     let path = ui.kit.state_path(cfg::FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
@@ -1824,7 +1809,7 @@ pub fn permission_question(r: &crate::enroll::Request) -> (String, String) {
     // указана» здесь не ставим: оно про поле карточки, которое человек
     // правит, а не про то, что у него спрашивают сейчас.
     let message = if r.base.base_name.is_empty() {
-        format!("Разрешить подключение к карточке «{}»?", r.card)
+        format!("Разрешить подключение к карточке «{}»?", r.card_name)
     } else {
         format!("Разрешить подключение к базе «{}»?", r.base.base_name)
     };
@@ -1840,7 +1825,7 @@ pub fn permission_question(r: &crate::enroll::Request) -> (String, String) {
     // Карточка называется один раз (Minor ревью задач 6 и 7): при пустом
     // имени базы её назвал уже сам вопрос, и строка «Карточка «X».» под ним
     // повторяла бы то же слово через полторы строки.
-    let card_line = if r.base.base_name.is_empty() { String::new() } else { format!("Карточка «{}».\n", r.card) };
+    let card_line = if r.base.base_name.is_empty() { String::new() } else { format!("Карточка «{}».\n", r.card_name) };
     let detail = format!(
         "{card_line}Отпечаток ключа той стороны:\n{}\nСверьте его голосом по телефону — целиком, до последнего знака.\n{says}",
         r.peer
@@ -1959,6 +1944,15 @@ pub fn reread_partners(ui: &mut Ui) {
     }
 }
 
+/// Имя карточки по её ключу — ТОЛЬКО для слов человеку.
+///
+/// Учёт идёт ключами (`cfg::CardId`), а читает человек имена: «Код подключения для «Ромашка» истёк» понятно, тридцать два знака hex —
+/// нет. Карточки в настройках уже нет (удалили, пока её код доживал свой срок) — называем ключом: короткая правда вместо выдуманного
+/// имени.
+fn card_name(ui: &Ui, key: &crate::cfg::CardId) -> String {
+    ui.cfg.connections.iter().find(|c| &c.id() == key).map(|c| c.name.clone()).unwrap_or_else(|| key.to_string())
+}
+
 /// Уронить то, чего человеку показывать уже нельзя: мёртвые коды и заявки,
 /// на которые некому отвечать. Зовётся тиком приложения (`tick`) — тем же,
 /// что двигает перерисовку, — и каждым событием, которое этих двоих
@@ -1975,7 +1969,7 @@ pub fn reread_partners(ui: &mut Ui) {
 /// первую строку списка и не узнал бы, почему. Слова говорят, что именно
 /// кончилось и что делать (выдать новый код; ждать, когда позвонят снова).
 pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
-    let dead: Vec<String> = ui.codes.iter().filter(|(_, t)| !t.alive(now)).map(|(card, _)| card.clone()).collect();
+    let dead: Vec<String> = ui.codes.iter().filter(|(_, t)| !t.alive(now)).map(|(card, _)| card_name(ui, card)).collect();
     ui.codes.retain(|(_, t)| t.alive(now));
     for card in dead {
         note_line(
@@ -1985,7 +1979,7 @@ pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
             },
         );
     }
-    let gone: Vec<String> = ui.waiting.iter().filter(|p| !p.reachable()).map(|p| p.request.card.clone()).collect();
+    let gone: Vec<String> = ui.waiting.iter().filter(|p| !p.reachable()).map(|p| p.request.card_name.clone()).collect();
     ui.waiting.retain(Pending::reachable);
     for card in gone {
         note_line(
@@ -2009,7 +2003,7 @@ pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
 /// теперь про то, что ждёт ответа сейчас, а не про то, что человек решил в
 /// прошлый раз (`link::contract_of`, порядок разбора).
 pub fn take_request(ui: &mut Ui, pending: Pending) {
-    let (card, peer) = (pending.request.card.clone(), pending.request.peer);
+    let (card, name, peer) = (pending.request.card().clone(), pending.request.card_name.clone(), pending.request.peer);
     // Вытесняется только заявка ТОГО ЖЕ ключа — то есть повтор, у которого
     // отпечаток на экране ровно тот же. Заявка ДРУГОЙ стороны становится в
     // очередь и ничего не вытесняет (HIGH 1 проверки безопасности, дословно:
@@ -2027,8 +2021,8 @@ pub fn take_request(ui: &mut Ui, pending: Pending) {
     // секрет кода делает заявку одноразовой, и непрошедшую проверку кода
     // заявку `Book::check` отвергает, не беспокоя человека вовсе (спека,
     // «Зачем в тикете секрет»).
-    ui.waiting.retain(|p| !(p.request.card == card && p.request.peer == peer));
-    let queued = ui.waiting.iter().any(|p| p.request.card == card);
+    ui.waiting.retain(|p| !(p.request.card() == &card && p.request.peer == peer));
+    let queued = ui.waiting.iter().any(|p| p.request.card() == &card);
     ui.waiting.push(pending);
     ui.declined.retain(|c| *c != card);
     // Новая заявка значит, что по каналу что-то произошло, — а значит книгу
@@ -2040,9 +2034,9 @@ pub fn take_request(ui: &mut Ui, pending: Pending) {
     // Про очередь человеку говорится словами: строка списка у карточки одна,
     // и по ней не видно, что за первой заявкой стоит вторая.
     let text = if queued {
-        format!("Ещё одна заявка на подключение к «{card}» ждёт своей очереди")
+        format!("Ещё одна заявка на подключение к «{name}» ждёт своей очереди")
     } else {
-        format!("Заявка на подключение к «{card}» ждёт разрешения")
+        format!("Заявка на подключение к «{name}» ждёт разрешения")
     };
     note_line(ui, Line { kind: Kind::Say, text });
 }
@@ -2072,7 +2066,7 @@ pub fn take_request(ui: &mut Ui, pending: Pending) {
 /// `declined`. Прежняя редакция искала по имени карточки, и ответ про А
 /// доставался заявке Б, успевшей прийти, пока человек сверял отпечаток по
 /// телефону.
-pub fn answer_request(ui: &mut Ui, card: &str, peer: iroh::EndpointId, d: crate::enroll::Decision) {
+pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: iroh::EndpointId, d: crate::enroll::Decision) {
     use crate::enroll::Decision;
     if d == Decision::NoAnswer {
         // Молчать нельзя — человек закрыл диалог и обязан узнать, что
@@ -2080,12 +2074,12 @@ pub fn answer_request(ui: &mut Ui, card: &str, peer: iroh::EndpointId, d: crate:
         note_line(
             ui,
             Line {
-                kind: Kind::Warn, text: format!("Заявка по «{card}» ждёт ответа — её строка первая в списке")
+                kind: Kind::Warn, text: format!("Заявка по «{name}» ждёт ответа — её строка первая в списке")
             },
         );
         return;
     }
-    let Some(pos) = ui.waiting.iter().position(|p| p.request.card == card && p.request.peer == peer) else {
+    let Some(pos) = ui.waiting.iter().position(|p| p.request.card() == card && p.request.peer == peer) else {
         // Та заявка, которую показали, ушла. Отвечать на ЧУЖУЮ, стоящую в
         // очереди по той же карточке, нельзя: отпечаток у неё другой, а
         // человек сверял этот. Он увидит её своим диалогом, когда нажмёт
@@ -2093,7 +2087,7 @@ pub fn answer_request(ui: &mut Ui, card: &str, peer: iroh::EndpointId, d: crate:
         note_line(
             ui,
             Line {
-                kind: Kind::Say, text: format!("Заявка по «{card}» больше не ждёт ответа — отпечаток был у другой стороны")
+                kind: Kind::Say, text: format!("Заявка по «{name}» больше не ждёт ответа — отпечаток был у другой стороны")
             },
         );
         return;
@@ -2134,7 +2128,7 @@ pub fn answer_request(ui: &mut Ui, card: &str, peer: iroh::EndpointId, d: crate:
         }
         Decision::Deny => {
             if !ui.declined.iter().any(|c| c == card) {
-                ui.declined.push(card.to_string());
+                ui.declined.push(card.clone());
             }
         }
         Decision::NoAnswer => unreachable!("ранний выход выше"),

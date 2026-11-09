@@ -36,6 +36,7 @@
 //! проверяется двумя машинами либо двумя учётными записями Windows.
 
 use super::*;
+use crate::cfg::CardId;
 use crate::channel::{self, Channels, Gone, Reins, Round, Stopped};
 use crate::enroll;
 use crate::enrolled::{Book, Partner, Partners};
@@ -81,14 +82,14 @@ pub struct Peer {
 enum Cmd {
     /// Позвонить зовущей карточкой. Пустой `code` — переподключение по
     /// запомненному партнёру (`Partners`), непустой — первая заявка.
-    Dial { card: String, code: String },
+    Dial { card: CardId, name: String, code: String },
     /// Снять поток зачисленной стороны ПРЯМО СЕЙЧАС, сказав ей словами.
     ///
     /// Иначе отзыв действовал бы только на следующем круге той стороны, а
     /// спека требует немедленности: `Book::enrolled_to` читает диск на каждое
     /// подключение именно затем, чтобы «Отозвать» срабатывало сразу, — и
     /// живой поток, который переживает отзыв, эту немедленность отменяет.
-    Revoke { card: String, peer: EndpointId },
+    Revoke { card: CardId, peer: EndpointId },
     /// Попрощаться со ВСЕМИ живыми разговорами — программа уходит.
     ///
     /// Канал, закрытый молча, читается той стороной как ОБРЫВ (`channel::
@@ -114,9 +115,9 @@ impl Peer {
 
     /// Позвонить карточкой. Отказ — только «поток узла кончился», то есть
     /// случай, в котором звонить нечем вовсе.
-    pub fn dial(&self, card: &str, code: &str) -> Result<(), String> {
+    pub fn dial(&self, card: &CardId, name: &str, code: &str) -> Result<(), String> {
         self.cmd
-            .send(Cmd::Dial { card: card.to_string(), code: code.to_string() })
+            .send(Cmd::Dial { card: card.clone(), name: name.to_string(), code: code.to_string() })
             .map_err(|_| "Узел не работает — подключиться нечем. Перезапустите программу.".to_string())
     }
 
@@ -124,8 +125,8 @@ impl Peer {
     /// сделана и уже сказана словами (`panel::revoke_party`), а живого потока
     /// у этой стороны могло и не быть вовсе — тогда снимать нечего, и это не
     /// беда.
-    pub fn revoked(&self, card: &str, peer: EndpointId) {
-        let _ = self.cmd.send(Cmd::Revoke { card: card.to_string(), peer });
+    pub fn revoked(&self, card: &CardId, peer: EndpointId) {
+        let _ = self.cmd.send(Cmd::Revoke { card: card.clone(), peer });
     }
 
     /// Попрощаться со всеми живыми разговорами и ДОЖДАТЬСЯ, пока прощания
@@ -188,27 +189,33 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
     let channels = Channels::default();
     let live = Live::default();
     tokio::spawn(accepting(node.clone(), channels.clone(), kit.clone(), tx.clone(), live.clone()));
-    let mut calls: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut calls: HashMap<CardId, tokio::task::JoinHandle<()>> = HashMap::new();
     // Карточки, у которых партнёр уже записан, звонят САМИ, без щелчка:
     // человек разрешил подключение однажды, и перезапуск программы не повод
     // просить его нажать «Подключиться» ещё раз (спека контракта,
     // «Что хранится после»).
     match Partners::open(kit.state()) {
         Ok(partners) => {
+            // Имя карточки берётся из настроек и нужно ТОЛЬКО для слов в журнал: сопоставляется карточка ключом, который партнёр и
+            // назвал. Карточки в настройках уже нет (её удалили, а партнёр остался) — зовём ключом вместо имени: честнее, чем молчать.
+            let names = card_names(&kit);
             for (card, _) in partners.all() {
-                start_call(&node, &channels, &kit, &tx, &mut calls, card, String::new());
+                let name = names.get(&card).cloned().unwrap_or_else(|| card.to_string());
+                start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, String::new());
             }
         }
         Err(e) => say(&tx, Kind::Fail, e),
     }
     while let Some(cmd) = cmds.recv().await {
         match cmd {
-            Cmd::Dial { card, code } => start_call(&node, &channels, &kit, &tx, &mut calls, card, code),
+            Cmd::Dial { card, name, code } => start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, code),
             Cmd::Revoke { card, peer } => {
-                let base_id = Machine::read(&kit).cards.accepting().iter().find(|c| c.name == card).map(|c| c.base.base_id.clone());
+                // Признак базы для слов отзыва — это и есть ключ отзываемой карточки (решение владельца 10.11). Прежде он искался
+                // перебором по настройкам (чтение файла плюс поиск по имени), и на непрочитанных настройках или переименованной
+                // карточке уезжал пустым. Искать больше нечего: он уже на руках.
                 for reins in live.cut(peer, &card) {
-                    let base_id = base_id.clone().unwrap_or_default();
-                    tokio::spawn(async move { reins.revoke(&base_id, REVOKED_TEXT).await });
+                    let card = card.clone();
+                    tokio::spawn(async move { reins.revoke(&card, REVOKED_TEXT).await });
                 }
             }
             // Прощания идут ВМЕСТЕ, а не одно за другим: каждое ждёт
@@ -257,7 +264,7 @@ struct Talk {
     ///
     /// Пустой список — карточка не опознана вовсе; такой поток режется любым
     /// отзывом этой стороны (`cut_these`).
-    cards: Vec<String>,
+    cards: Vec<CardId>,
     reins: Reins,
 }
 
@@ -290,7 +297,7 @@ struct Live {
 impl Live {
     /// Запомнить разговор. Возвращает его номер — им он и снимается
     /// (`forget`).
-    fn remember(&self, peer: EndpointId, cards: Vec<String>, reins: Reins) -> u64 {
+    fn remember(&self, peer: EndpointId, cards: Vec<CardId>, reins: Reins) -> u64 {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, cards, reins });
         id
@@ -316,7 +323,7 @@ impl Live {
     /// Вожжи всех разговоров этой стороны, которые отзыв карточки обязан
     /// снять (`cut_these` решает, какие именно). Снятые тут же уходят с
     /// учёта: второй отзыв той же карточки резать уже нечего.
-    fn cut(&self, peer: EndpointId, card: &str) -> Vec<Reins> {
+    fn cut(&self, peer: EndpointId, card: &CardId) -> Vec<Reins> {
         let mut held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
         let Some(rows) = held.get_mut(&peer) else {
             return Vec::new();
@@ -371,8 +378,8 @@ impl Live {
 ///
 /// Разговоры соседних карточек той же стороны не трогаются вовсе: человек
 /// снял доступ к одной базе, а не ко всем.
-fn cut_these(held: &[Vec<String>], card: &str) -> Vec<usize> {
-    held.iter().enumerate().filter(|(_, cards)| cards.is_empty() || cards.iter().any(|name| name == card)).map(|(at, _)| at).collect()
+fn cut_these(held: &[Vec<CardId>], card: &CardId) -> Vec<usize> {
+    held.iter().enumerate().filter(|(_, cards)| cards.is_empty() || cards.iter().any(|one| one == card)).map(|(at, _)| at).collect()
 }
 
 /// Держать ли только что зачисленный разговор — проверка щели между решением
@@ -397,8 +404,21 @@ fn cut_these(held: &[Vec<String>], card: &str) -> Vec<usize> {
 /// «все на месте»: пока свёртка жила у вызывающего, решение «все» против
 /// «хотя бы одна» проверить было нечем — подмена одного на другое оставляла
 /// тесты зелёными, то есть проверялось не то решение, которое работает.
-fn keep_holding(seen: &[(String, bool)]) -> bool {
+fn keep_holding(seen: &[(CardId, bool)]) -> bool {
     !seen.is_empty() && seen.iter().all(|(_, still)| *still)
+}
+
+/// Зовущая карточка для потока звонка: ключ, которым её сопоставляют, и имя, которым о ней говорят человеку.
+///
+/// Одним значением, а не двумя доводами рядом в каждой подписи: два довода на одно понятие однажды разъезжаются (передал ключ одной,
+/// имя другой — и человек читает в журнале не ту карточку), а три функции звонка от них разом перешли предел `clippy::too_many_arguments`
+/// — предел и назван затем, чтобы такое заметили.
+#[derive(Clone)]
+struct Dialling {
+    /// Ключ — им карточка сопоставляется везде: партнёр, книга, слово состояния (`cfg::CardId`).
+    id: CardId,
+    /// Имя — ТОЛЬКО для слов человеку в журнал.
+    name: String,
 }
 
 /// Заводит звонок карточки, заменяя прежний, если он ещё идёт.
@@ -413,22 +433,23 @@ fn start_call(
     channels: &Channels,
     kit: &Kit,
     tx: &UnboundedSender<Ev>,
-    calls: &mut HashMap<String, tokio::task::JoinHandle<()>>,
-    card: String,
+    calls: &mut HashMap<CardId, tokio::task::JoinHandle<()>>,
+    card: Dialling,
     code: String,
 ) {
-    let addr = match target(kit, &card, &code) {
+    let addr = match target(kit, &card.id, &code) {
         Ok(addr) => addr,
         Err(e) => {
             say(tx, Kind::Fail, e);
             return;
         }
     };
-    if let Some(old) = calls.remove(&card) {
+    if let Some(old) = calls.remove(&card.id) {
         old.abort();
     }
-    let handle = tokio::spawn(calling(node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), code, addr));
-    calls.insert(card, handle);
+    let id = card.id.clone();
+    let handle = tokio::spawn(calling(node.clone(), channels.clone(), kit.clone(), tx.clone(), card, code, addr));
+    calls.insert(id, handle);
 }
 
 /// Куда звонить этой карточкой: по вставленному коду либо по запомненному
@@ -437,7 +458,7 @@ fn start_call(
 /// Пустой код без партнёра — не беда программы, а разговор с человеком:
 /// подключаться действительно некуда, и сказать это надо словами, а не
 /// молчаливым бездействием кнопки.
-fn target(kit: &Kit, card: &str, code: &str) -> Result<EndpointAddr, String> {
+fn target(kit: &Kit, card: &CardId, code: &str) -> Result<EndpointAddr, String> {
     if !code.trim().is_empty() {
         return Ok(crate::ticket::Ticket::from_code(code)?.addr());
     }
@@ -483,14 +504,14 @@ struct InHand {
     /// признак не только помнится между кругами, но и ЖИВЁТ рядом с партнёром
     /// (`partners.toml`) — иначе первый же перезапуск возвращал бы карточку в
     /// это «не знаю», и отзыв соседней карточки рвал бы её связь.
-    card: Option<String>,
+    card: Option<CardId>,
 }
 
 impl InHand {
     /// Чем звонить на этом круге. Решение одно и живёт в `enroll::Call::of`:
     /// длину строки кода здесь никто не меряет.
     fn call(&self) -> enroll::Call<'_> {
-        enroll::Call::of(&self.code, self.card.as_deref())
+        enroll::Call::of(&self.code, self.card.as_ref())
     }
 
     /// Что остаётся на руках после круга — и были ли мы уже подключены.
@@ -503,7 +524,7 @@ impl InHand {
     /// Отдельным решением, а не строками внутри круга: оба его ответа видны
     /// человеку (опустевший код — он же признак «подключается СНОВА»), и
     /// спросить их надо без двух узлов и рантайма.
-    fn after(&mut self, round: &Round, agreed: Option<String>) -> bool {
+    fn after(&mut self, round: &Round, agreed: Option<CardId>) -> bool {
         // Карточку, о которой договорились, помним до следующего круга: со
         // второго круга возврат называет её сам, и та сторона числит поток за
         // ней одной.
@@ -533,9 +554,9 @@ impl InHand {
 /// Опустевший код — он же признак «мы уже были подключены»: первый
 /// недозвон до зачисления остаётся «подключается», а после — «подключается
 /// снова». Второго счётчика для этого не нужно.
-async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, card: String, code: String, addr: EndpointAddr) {
-    flow(&tx, &card, Some(link::Flow::Calling));
-    let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card) }));
+async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, card: Dialling, code: String, addr: EndpointAddr) {
+    flow(&tx, &card.id, Some(link::Flow::Calling));
+    let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card.id) }));
     let stopped = channel::keep_calling(|| {
         let (node, channels, kit, tx, card, addr, hand) =
             (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
@@ -546,16 +567,17 @@ async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<E
             let (round, agreed) = one_round(&node, &channels, &kit, &tx, &card, addr, mine.call()).await;
             let enrolled = hand.lock().unwrap_or_else(|e| e.into_inner()).after(&round, agreed);
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
-                flow(&tx, &card, Some(link::Flow::Retrying));
+                flow(&tx, &card.id, Some(link::Flow::Retrying));
             }
             round
         }
     })
     .await;
-    flow(&tx, &card, Some(link::Flow::Broken));
+    flow(&tx, &card.id, Some(link::Flow::Broken));
+    let name = &card.name;
     match stopped {
-        Stopped::Farewell(why) => say(&tx, Kind::Say, format!("«{card}»: {}", why.text)),
-        Stopped::NotEnrolled(no) => say(&tx, Kind::Warn, format!("«{card}»: {}", no.text)),
+        Stopped::Farewell(why) => say(&tx, Kind::Say, format!("«{name}»: {}", why.text)),
+        Stopped::NotEnrolled(no) => say(&tx, Kind::Warn, format!("«{name}»: {}", no.text)),
     }
 }
 
@@ -573,10 +595,10 @@ async fn one_round(
     channels: &Channels,
     kit: &Kit,
     tx: &UnboundedSender<Ev>,
-    card: &str,
+    card: &Dialling,
     addr: EndpointAddr,
     call: enroll::Call<'_>,
-) -> (Round, Option<String>) {
+) -> (Round, Option<CardId>) {
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
@@ -610,9 +632,9 @@ async fn one_round(
             // только после того, как та сторона признала нас своими. Ключ
             // берётся у канала (`Channel::peer`), а не у кода: это то, что
             // доказал сам iroh, а не то, что было написано в строке.
-            remember(kit, tx, card, channel.peer(), &addr, agreed.as_deref());
-            flow(tx, card, Some(link::Flow::Up));
-            say(tx, Kind::Ok, format!("«{card}»: подключено"));
+            remember(kit, tx, &card.id, channel.peer(), &addr, agreed.as_ref());
+            flow(tx, &card.id, Some(link::Flow::Up));
+            say(tx, Kind::Ok, format!("«{}»: подключено", card.name));
             // Разбирать сказанное по живому потоку здесь нечего: всё, что
             // кончает соединение, `hold` разбирает сам (`bye`, `revoked`), а
             // сообщения «что-то изменилось на стороне базы» в этой версии нет
@@ -710,7 +732,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // приносит несколько, и брать из них первую нельзя (находка проверки
     // безопасности): поток обслуживал бы все, а отзыв находил бы его только
     // по одной.
-    let agreed: Vec<String> = match &out {
+    let agreed: Vec<CardId> = match &out {
         enroll::Outcome::Enrolled(base) => vec![base.base_id.clone()],
         enroll::Outcome::Already(bases) => bases.iter().map(|b| b.id.clone()).collect(),
         enroll::Outcome::NotEnrolled(no) => {
@@ -722,20 +744,24 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // Имена карточек по базам, о которых договорились (`serving`, там и
     // довод). Безымянный разговор учитывается как безымянный и режется любым
     // отзывом этой стороны (`cut_these`).
-    let served: Vec<String> = serving(cards.accepting(), &agreed);
+    let served: Vec<enroll::Card> = serving(cards.accepting(), &agreed);
     // Имя базы для прощания — первая из тех, о которых договорились: прощание
     // называет предмет, а не перечисляет всё, к чему сторона допущена.
-    let base_id = agreed.first().cloned().unwrap_or_default();
+    let farewell_card = agreed.first().cloned();
     // Слово состояния — только там, где карточка известна: завести строку
     // состояния для имени, которого в списке нет, значило бы показать
     // человеку карточку-призрак.
-    let shown = if served.is_empty() { "карточка не опознана".to_string() } else { served.join("», «") };
-    for name in &served {
-        flow(&tx, name, Some(link::Flow::Up));
+    let shown = if served.is_empty() {
+        "карточка не опознана".to_string()
+    } else {
+        served.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join("», «")
+    };
+    for c in &served {
+        flow(&tx, c.id(), Some(link::Flow::Up));
     }
     say(&tx, Kind::Ok, format!("«{shown}»: подключено"));
     let (reins, mut recv) = channel::reins(control);
-    let id = live.remember(peer, served.clone(), reins);
+    let id = live.remember(peer, served.iter().map(|c| c.id().clone()).collect(), reins);
     // Щель между решением человека и записью вожжей: спрашиваем допуск ЕЩЁ
     // РАЗ, уже после записи. Отзыв, случившийся в эти микросекунды, либо
     // увидит наши вожжи и порвёт поток сам, либо не увидит — и тогда его
@@ -745,18 +771,18 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // держит их все одним потоком, и снятая одна значит снятый поток. Свёртка
     // («все» или «хотя бы одна») живёт не здесь, а в `keep_holding`, — там её
     // можно спросить.
-    let seen: Vec<(String, bool)> =
-        served.iter().map(|name| (name.clone(), book.enrolled_to(name, peer).ok().flatten().is_some())).collect();
+    let seen: Vec<(CardId, bool)> =
+        served.iter().map(|c| (c.id().clone(), book.enrolled_to(c.id(), peer).ok().flatten().is_some())).collect();
     if !keep_holding(&seen) {
         // Рвём только СВОЙ разговор и только если отзыв не забрал его раньше:
         // иначе второе прощание ушло бы в поток, которого уже нет.
         if live.alive(peer, id) {
-            if let Some(reins) = live.forget(peer, id) {
-                reins.revoke(&base_id, REVOKED_TEXT).await;
+            if let (Some(reins), Some(card)) = (live.forget(peer, id), farewell_card.as_ref()) {
+                reins.revoke(card, REVOKED_TEXT).await;
             }
         }
-        for name in &served {
-            flow(&tx, name, Some(link::Flow::Broken));
+        for c in &served {
+            flow(&tx, c.id(), Some(link::Flow::Broken));
         }
         say(&tx, Kind::Warn, format!("«{shown}»: разрешение снято, пока шёл разговор — поток закрыт"));
         return;
@@ -766,8 +792,8 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // и снимет поток сама. Если отзыв успел забрать их раньше — забирать
     // нечего, и это не беда.
     drop(live.forget(peer, id));
-    for name in &served {
-        flow(&tx, name, Some(link::Flow::Broken));
+    for c in &served {
+        flow(&tx, c.id(), Some(link::Flow::Broken));
     }
     match gone {
         Gone::Farewell(why) => say(&tx, Kind::Say, format!("«{shown}»: {}", why.text)),
@@ -871,7 +897,7 @@ impl Machine {
                     enroll::Card {
                         name: c.name.clone(),
                         base: BaseFields {
-                            base_id: base_id_of(c),
+                            base_id: c.id(),
                             base_name: crate::cfg::base_name(&c.base_path).to_string(),
                             publication: c.publication.clone(),
                             // Действующее право, а не своя складка половин: складывать
@@ -906,53 +932,30 @@ impl Machine {
     }
 }
 
-/// Опознавательный знак базы для провода.
+/// Имена карточек по их ключам — ТОЛЬКО для слов в журнал.
 ///
-/// Ни имя карточки, ни путь к базе сюда не годятся сами собой: первое —
-/// местное и по каналу не ездит (спека, «По каналу никогда не едут»), второе —
-/// путь на диске человека, то есть тоже его дело, а не той стороны. Отпечаток
-/// говорит ровно то, что нужно: одна и та же база после перезапуска — это она
-/// же, а разные базы — разные. Половины sha256 для этого довольно с огромным
-/// запасом, а длинная строка в каждом кадре не нужна никому.
+/// Зовущие карточки поднимают звонки по файлу партнёров, а там от карточки только ключ — и это верно: имя человек правит когда хочет.
+/// Но строка ««Ромашка»: подключено» нужна человеку именем, а не шестнадцатью байтами hex.
 ///
-/// **Пустой путь — не повод выдать один знак всем.** Две карточки с пустым
-/// путём разрешены нарочно (`Cfg::validate_list` пустые пути не сравнивает
-/// вовсе), а только что заведённая карточка пуста всегда. Пока знак считался
-/// от одного пути, обе получали ОДИН: обратное сопоставление отдавало оба
-/// имени, проверка допуска требовала зачисления по обоим — и только что
-/// разрешённый поток резался собственным «разрешение снято», при сожжённом
-/// коде, то есть тупик без второго захода. Поэтому у карточки без базы знак
-/// считается от её ИМЕНИ: имя у неё есть всегда (`validate_list` не терпит
-/// безымянных и повторяющихся), а на провод уезжает всё равно отпечаток, из
-/// которого имени не достать.
-///
-/// Берётся карточка целиком, а не строка: с одной строкой на входе любой
-/// следующий автор снова передаст сюда пустой путь и снова получит общий
-/// знак. Приставка перед материалом тоже не вежливость — без неё карточка,
-/// НАЗВАННАЯ «C:\\Buh», и карточка с базой по тому же пути получили бы один
-/// знак.
-fn base_id_of(c: &crate::cfg::Connection) -> String {
-    use sha2::{Digest, Sha256};
-    let path = c.base_path.trim();
-    let material = if path.is_empty() { format!("card:{}", c.name.trim()) } else { format!("base:{path}") };
-    let mut h = Sha256::new();
-    h.update(material.as_bytes());
-    crate::secrets::hex::encode(&h.finalize()[..16])
+/// Чтение терпимое (`load_unchecked`) и одним разом на весь подъём звонков: настройки не прочлись — имён просто нет, и звонки от этого
+/// не отменяются, допуск дала та сторона, а не наш файл.
+fn card_names(kit: &Kit) -> HashMap<CardId, String> {
+    crate::cfg::Cfg::load_unchecked(kit).map(|cfg| cfg.connections.iter().map(|c| (c.id(), c.name.clone())).collect()).unwrap_or_default()
 }
 
-/// Имена карточек по базам, о которых договорились на проводе.
+/// Какие НАШИ карточки обслуживает этот разговор — из тех ключей, о которых договорились на проводе.
 ///
-/// Имена местные и по каналу не ездят (спека), поэтому обратно они
-/// сопоставляются здесь, по тем же `base_id`, которыми карточки и
-/// представились. Отдельной функцией, а не строкой внутри разговора: это
-/// решение, у которого есть неверный ответ, и на пустом пути базы оно его
-/// однажды дало — пара карточек с одним знаком возвращала ОБА имени, и поток
-/// числился за карточкой, о которой не договаривались.
+/// Отдаёт карточки ЦЕЛИКОМ, а не их имена: вызывающему нужны оба ответа разом — ключ (по нему спрашивается допуск и кладутся вожжи) и
+/// имя (его читает человек в журнале). Собирать имя по ключу вторым проходом значило бы искать дважды то, что уже нашли.
 ///
-/// Пустой список — не сошлось ни одной; подставлять пустое имя нельзя, под
-/// ним поток не нашёлся бы при отзыве (`cut_these` знает про безымянных).
-fn serving(cards: &[enroll::Card], agreed: &[String]) -> Vec<String> {
-    cards.iter().filter(|c| agreed.contains(&c.base.base_id)).map(|c| c.name.clone()).collect()
+/// Отдельной функцией, а не строкой внутри разговора: у этого решения есть неверный ответ, и однажды оно его дало — пара карточек с
+/// одним знаком возвращала ОБЕ, и поток числился за карточкой, о которой не договаривались. С ключом карточки вместо считанного от пути
+/// к базе знака этого случая больше нет: ключи разных карточек различны всегда (`cfg::Cfg`, разводка близнецов при разборе).
+///
+/// Пустой список — не сошлось ни одной; выдумывать карточку нельзя, и такой поток режется любым отзывом этой стороны (`cut_these`
+/// знает про неопознанные).
+fn serving(cards: &[enroll::Card], agreed: &[CardId]) -> Vec<enroll::Card> {
+    cards.iter().filter(|c| agreed.contains(c.id())).cloned().collect()
 }
 
 /// Как эта машина называет себя той стороне. Её слова, не проверенный факт, —
@@ -978,14 +981,14 @@ fn says_name() -> String {
 /// Отказ чтения — то же «не знаю», и это верно: признак не называется наугад.
 /// Старого признака от ДРУГОЙ машины здесь быть не может — `Partners::remember`
 /// снимает его сам, когда ключ той стороны сменился.
-fn known_card(kit: &Kit, card: &str) -> Option<String> {
+fn known_card(kit: &Kit, card: &CardId) -> Option<CardId> {
     Partners::open(kit.state()).ok().and_then(|p| p.base_id_of(card))
 }
 
 /// Запоминает, куда карточке возвращаться. Отказ записи — строка в журнал, а
 /// не конец подключения: это подключение уже живёт, а потеряно будет лишь
 /// возвращение после перезапуска.
-fn remember(kit: &Kit, tx: &UnboundedSender<Ev>, card: &str, peer: EndpointId, addr: &EndpointAddr, agreed: Option<&str>) {
+fn remember(kit: &Kit, tx: &UnboundedSender<Ev>, card: &CardId, peer: EndpointId, addr: &EndpointAddr, agreed: Option<&CardId>) {
     let partner = Partner {
         key: peer,
         relay: addr.relay_urls().next().map(|u| u.to_string()),
@@ -1023,8 +1026,8 @@ fn say(tx: &UnboundedSender<Ev>, kind: Kind, text: impl Into<String>) {
 
 /// Новое состояние управляющего потока карточки — в окно. Слово человеку из
 /// него делает `link::contract_of`/`contract_word`, здесь только факт.
-fn flow(tx: &UnboundedSender<Ev>, card: &str, now: Option<link::Flow>) {
-    let _ = tx.unbounded_send(Ev::Flow(card.to_string(), now));
+fn flow(tx: &UnboundedSender<Ev>, card: &CardId, now: Option<link::Flow>) {
+    let _ = tx.unbounded_send(Ev::Flow(card.clone(), now));
 }
 
 /// Проверяются здесь два решения, и оба — про обход отзыва (находки
@@ -1037,11 +1040,12 @@ mod tests {
     // живёт `gpui::*`, и его `test` перебил бы `#[test]` стандартной
     // библиотеки (тот же приём, что у тестов `panel.rs`).
     use super::{cut_these, keep_holding};
+    use crate::cfg::CardId;
 
     /// Разговоры по именам карточек: пустая строка — разговор, чья карточка
     /// не опознана; «А+Б» — разговор, обслуживающий сразу две.
-    fn named(names: &[&str]) -> Vec<Vec<String>> {
-        names.iter().map(|n| n.split('+').filter(|p| !p.is_empty()).map(|p| p.to_string()).collect()).collect()
+    fn named(names: &[&str]) -> Vec<Vec<CardId>> {
+        names.iter().map(|n| n.split('+').filter(|p| !p.is_empty()).map(CardId::from).collect()).collect()
     }
 
     /// Отзыв во время разговора обязан снять поток ЭТОЙ карточки — и только
@@ -1055,12 +1059,12 @@ mod tests {
     #[test]
     fn revoking_during_a_talk_cuts_that_cards_stream() {
         let talks = named(&["Ромашка", "Василёк", "Ромашка"]);
-        assert_eq!(cut_these(&talks, "Ромашка"), vec![0, 2]);
+        assert_eq!(cut_these(&talks, &"Ромашка".into()), vec![0, 2]);
         // Соседняя карточка той же стороны не трогается: человек снял доступ
         // к одной базе, а не ко всем.
-        assert_eq!(cut_these(&talks, "Василёк"), vec![1]);
+        assert_eq!(cut_these(&talks, &"Василёк".into()), vec![1]);
         // Отзыв карточки, у которой живого разговора нет, не режет ничего.
-        assert_eq!(cut_these(&talks, "Пион"), Vec::<usize>::new());
+        assert_eq!(cut_these(&talks, &"Пион".into()), Vec::<usize>::new());
     }
 
     /// Отзыв по стороне, чья карточка не опознана, тоже обязан рвать.
@@ -1071,8 +1075,8 @@ mod tests {
     #[test]
     fn a_stream_with_no_card_name_is_cut_too() {
         let talks = named(&["", "Василёк"]);
-        assert_eq!(cut_these(&talks, "Ромашка"), vec![0], "безымянный режется любым отзывом этой стороны");
-        assert_eq!(cut_these(&talks, "Василёк"), vec![0, 1], "и вместе с названным — тоже");
+        assert_eq!(cut_these(&talks, &"Ромашка".into()), vec![0], "безымянный режется любым отзывом этой стороны");
+        assert_eq!(cut_these(&talks, &"Василёк".into()), vec![0, 1], "и вместе с названным — тоже");
     }
 
     /// Поток, обслуживающий НЕСКОЛЬКО карточек, режется отзывом любой из них.
@@ -1086,14 +1090,14 @@ mod tests {
     #[test]
     fn a_stream_serving_two_cards_is_cut_by_revoking_either() {
         let talks = named(&["Ромашка+Василёк", "Пион"]);
-        assert_eq!(cut_these(&talks, "Ромашка"), vec![0], "отзыв первой из двух режет поток");
-        assert_eq!(cut_these(&talks, "Василёк"), vec![0], "и отзыв второй — тоже, он не «не та карточка»");
-        assert_eq!(cut_these(&talks, "Пион"), vec![1], "сосед, которого отзыв не касается, цел");
+        assert_eq!(cut_these(&talks, &"Ромашка".into()), vec![0], "отзыв первой из двух режет поток");
+        assert_eq!(cut_these(&talks, &"Василёк".into()), vec![0], "и отзыв второй — тоже, он не «не та карточка»");
+        assert_eq!(cut_these(&talks, &"Пион".into()), vec![1], "сосед, которого отзыв не касается, цел");
         // И держать такой поток нельзя, если снята хотя бы одна из карточек:
         // половины у потока нет, делить нечего. Спрашивается именно это
         // решение, по карточке каждая: подмена «все» на «хотя бы одна» роняет
         // обе строки ниже.
-        let both = |first: bool, second: bool| vec![("Ромашка".to_string(), first), ("Василёк".to_string(), second)];
+        let both = |first: bool, second: bool| vec![(CardId::from("Ромашка"), first), (CardId::from("Василёк"), second)];
         assert!(keep_holding(&both(true, true)), "обе на месте — держим");
         assert!(!keep_holding(&both(true, false)), "сняли вторую — поток не держим");
         assert!(!keep_holding(&both(false, true)), "сняли первую — тоже не держим");
@@ -1108,8 +1112,8 @@ mod tests {
     /// до следующего круга той стороны.
     #[test]
     fn a_talk_whose_permission_is_already_gone_is_not_held() {
-        assert!(keep_holding(&[("Ромашка".to_string(), true)]), "разрешение на месте — держим");
-        assert!(!keep_holding(&[("Ромашка".to_string(), false)]), "разрешение сняли в щель — не держим");
+        assert!(keep_holding(&[("Ромашка".into(), true)]), "разрешение на месте — держим");
+        assert!(!keep_holding(&[("Ромашка".into(), false)]), "разрешение сняли в щель — не держим");
         // «Не знаю» на вопросе о допуске значит «нет»: безымянную карточку
         // `enrolled_to` спросить нечем.
         assert!(!keep_holding(&[]));
@@ -1186,21 +1190,21 @@ mod tests {
         for (control, cards) in got.into_iter().zip([vec!["Ромашка"], Vec::new(), vec!["Василёк"]]) {
             let (held, ear) = reins(control);
             ears.push(ear);
-            ids.push(live.remember(peer, cards.iter().map(|s| s.to_string()).collect(), held));
+            ids.push(live.remember(peer, cards.iter().copied().map(CardId::from).collect(), held));
         }
         assert!(ids.iter().all(|id| live.alive(peer, *id)), "все три на учёте");
 
         // Отзыв по СОСЕДНЕЙ стороне не трогает ничего: ключ стороны подделать
         // нельзя, его доказал сам iroh.
-        assert!(live.cut(base.id(), "Ромашка").is_empty(), "отзыв у соседней стороны режет её разговоры, не наши");
+        assert!(live.cut(base.id(), &"Ромашка".into()).is_empty(), "отзыв у соседней стороны режет её разговоры, не наши");
         assert!(ids.iter().all(|id| live.alive(peer, *id)));
 
         // Отзыв «Ромашки» режет её разговор и безымянный — и уносит оба с
         // учёта: второй отзыв той же карточки резать уже нечего.
-        assert_eq!(live.cut(peer, "Ромашка").len(), 2, "своя карточка и безымянный");
+        assert_eq!(live.cut(peer, &"Ромашка".into()).len(), 2, "своя карточка и безымянный");
         assert!(!live.alive(peer, ids[0]) && !live.alive(peer, ids[1]), "снятые ушли с учёта");
         assert!(live.alive(peer, ids[2]), "сосед той же стороны остался цел");
-        assert!(live.cut(peer, "Ромашка").is_empty(), "второй отзыв резать нечего");
+        assert!(live.cut(peer, &"Ромашка".into()).is_empty(), "второй отзыв резать нечего");
 
         // Присмотр кончился — разговор снимается по СВОЕМУ номеру, и дважды
         // не снимается.
@@ -1235,7 +1239,8 @@ mod tests {
         // Круг дошёл до «подключено» и оборвался; та сторона успела назвать
         // карточку.
         assert!(hand.after(&Round::Held(Gone::Broken(Refuse::new(code::BROKEN, "обрыв"))), Some("b1".into())));
-        assert_eq!(hand.call(), Call::Return(Some("b1")), "дальше возврат называет карточку: код одноразовый");
+        let b1 = CardId::from("b1");
+        assert_eq!(hand.call(), Call::Return(Some(&b1)), "дальше возврат называет карточку: код одноразовый");
 
         // Недозвон до зачисления код НЕ расходует: предъявить его не успели, и
         // карточка остаётся «подключается», а не «подключается снова».
@@ -1267,35 +1272,39 @@ mod tests {
 
         // Ни кода, ни партнёра: подключаться действительно некуда, и это
         // сказано словами с советом.
-        let no = super::target(&kit, "Ромашка", "").expect_err("без кода и без партнёра звонить некуда");
+        let (romashka, vasilek) = (CardId::from("Ромашка"), CardId::from("Василёк"));
+        let no = super::target(&kit, &romashka, "").expect_err("без кода и без партнёра звонить некуда");
         assert!(no.contains("Вставьте код"), "человеку сказано, что сделать: {no}");
 
         // Код на руках — звоним по нему, и ключ берётся из него же.
         let ticket = Ticket::issue(them, Some("https://relay.example/".into()), vec!["10.0.0.1:1234".parse().unwrap()]).unwrap();
-        let addr = super::target(&kit, "Ромашка", &ticket.to_code()).expect("по коду звонить есть куда");
+        let addr = super::target(&kit, &romashka, &ticket.to_code()).expect("по коду звонить есть куда");
         assert_eq!(addr.id, them, "ключ той стороны — из кода, а не выдуманный");
 
         // Кода нет, зато партнёр записан: так выглядит возврат после
         // перезапуска, и подсказки адресов берутся из записи.
         Partners::open(kit.state())
             .unwrap()
-            .remember("Ромашка", &Partner { key: them, relay: Some("https://relay.example/".into()), direct: vec!["10.0.0.2:4321".into()] })
+            .remember(
+                &"Ромашка".into(),
+                &Partner { key: them, relay: Some("https://relay.example/".into()), direct: vec!["10.0.0.2:4321".into()] },
+            )
             .unwrap();
-        let addr = super::target(&kit, "Ромашка", "").expect("партнёр записан — звонить есть куда");
+        let addr = super::target(&kit, &romashka, "").expect("партнёр записан — звонить есть куда");
         assert_eq!(addr.id, them);
         assert!(addr.ip_addrs().any(|a| a.to_string() == "10.0.0.2:4321"), "подсказки адресов берутся из записи о партнёре");
         // А у СОСЕДНЕЙ карточки партнёра нет, и ей по-прежнему говорят
         // словами: запись принадлежит карточке, а не машине.
-        assert!(super::target(&kit, "Василёк", "").is_err(), "запись о партнёре принадлежит карточке, а не машине");
+        assert!(super::target(&kit, &vasilek, "").is_err(), "запись о партнёре принадлежит карточке, а не машине");
 
         // И карточка, о которой договорились, переживает перезапуск: её
         // признак пишется вместе с партнёром и читается обратно.
-        assert_eq!(super::known_card(&kit, "Ромашка"), None, "пока не договаривались — не знаем, и выдумывать нельзя");
+        assert_eq!(super::known_card(&kit, &romashka), None, "пока не договаривались — не знаем, и выдумывать нельзя");
         let (tx, _rx) = futures::channel::mpsc::unbounded();
         let addr = iroh::EndpointAddr::new(them);
-        super::remember(&kit, &tx, "Ромашка", them, &addr, Some("b1"));
-        assert_eq!(super::known_card(&kit, "Ромашка").as_deref(), Some("b1"), "признак базы обязан пережить перезапуск");
-        assert_eq!(super::known_card(&kit, "Василёк"), None, "признак принадлежит карточке, а не машине");
+        super::remember(&kit, &tx, &romashka, them, &addr, Some(&CardId::from("b1")));
+        assert_eq!(super::known_card(&kit, &romashka), Some("b1".into()), "признак базы обязан пережить перезапуск");
+        assert_eq!(super::known_card(&kit, &vasilek), None, "признак принадлежит карточке, а не машине");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1392,18 +1401,18 @@ mod tests {
         let cards = cards.accepting();
         assert_eq!(cards.len(), 3, "все три принимающие карточки на месте");
 
-        let ids: Vec<&str> = cards.iter().map(|c| c.base.base_id.as_str()).collect();
+        let ids: Vec<CardId> = cards.iter().map(|c| c.id().clone()).collect();
         assert_ne!(ids[0], ids[1], "две карточки без базы обязаны отличаться: иначе отзыв одной рвёт обе");
         assert_ne!(ids[1], ids[2]);
-        assert!(ids.iter().all(|id| !id.is_empty()), "признак есть у каждой: карточку без признака та сторона не назовёт никак");
+        assert!(ids.iter().all(|id| !id.as_str().is_empty()), "признак есть у каждой: карточку без признака та сторона не назовёт никак");
 
         // И обратное сопоставление отдаёт РОВНО ту карточку, о которой
         // договорились, а не всех однопризнаковых соседей.
-        assert_eq!(super::serving(cards, &[ids[0].to_string()]), vec!["Ромашка".to_string()]);
-        assert_eq!(super::serving(cards, &[ids[1].to_string()]), vec!["Василёк".to_string()]);
+        assert_eq!(super::serving(cards, &[ids[0].clone()]).iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Ромашка"]);
+        assert_eq!(super::serving(cards, &[ids[1].clone()]).iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Василёк"]);
         // Чужой признак не находит никого — и это не пустая строка, а пустой
         // список: безымянный разговор отличается от названного.
-        assert!(super::serving(cards, &["чужое".to_string()]).is_empty());
+        assert!(super::serving(cards, &["чужое".into()]).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -57,6 +57,7 @@
 //! Спека: `docs/superpowers/specs/2026-11-01-protocol-design.md`, раздел
 //! «Зачисление», случай первый.
 
+use crate::cfg::CardId;
 use crate::enrolled::{Book, Verdict};
 use crate::secrets::hex;
 use crate::ticket::Ticket;
@@ -95,14 +96,26 @@ pub const DECISION: Duration = Duration::from_secs(5 * 60);
 /// которые по проводу и уедут.
 ///
 /// Имя карточки — локальное и по каналу не ездит (спека, «По каналу никогда
-/// не едут»), но тикет выдан именно к нему (`Book::check` его и возвращает),
-/// поэтому без него заявку не с чем сопоставить. Полного `cfg::Connection`
-/// здесь не берём: зачислению нужны четыре поля, а не вся карточка с
-/// паролями.
+/// не едут»); держится оно здесь ради СЛОВ человеку в наш журнал («по
+/// карточке «Ромашка» подключено»), а сопоставляется карточка ключом
+/// (`id()`). Полного `cfg::Connection` здесь не берём: зачислению нужны
+/// четыре поля, а не вся карточка с паролями.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub name: String,
     pub base: BaseFields,
+}
+
+impl Card {
+    /// Ключ карточки — тот, которым её называют книга допуска и партнёры (`cfg::CardId`).
+    ///
+    /// **Второго поля под него здесь нет нарочно.** Признак базы на проводе — это и есть ключ карточки (решение владельца 10.11,
+    /// `gui::peer::Machine::of`), и держать его дважды в одной структуре значило бы ждать, когда две копии разойдутся. Поэтому хранилище
+    /// одно — то, что уезжает на провод, — а эта функция только называет его своим именем, чтобы на месте вызова читалось «ключ
+    /// карточки», а не «признак её базы».
+    pub fn id(&self) -> &crate::cfg::CardId {
+        &self.base.base_id
+    }
 }
 
 /// Принимающие карточки этой машины — ИЛИ признание, что настроек мы не прочитали. ТИП, а не список с оговоркой.
@@ -163,12 +176,20 @@ impl Cards {
 /// показа, а не провода.
 #[derive(Debug, Clone)]
 pub struct Request {
-    pub card: String,
+    /// Имя карточки — ТОЛЬКО чтобы назвать её человеку в вопросе о разрешении. Сопоставляется заявка ключом (`card()`): имя человек правит когда хочет, и очередь заявок, ключёванная именем, теряла бы их при переименовании.
+    pub card_name: String,
     pub base: BaseFields,
     pub peer: EndpointId,
     /// Чужие слова — и тип это держит: показать невычищенное нельзя, потому
     /// что невычищенного `SaysName` не бывает (см. `wire::SaysName`).
     pub says_name: SaysName,
+}
+
+impl Request {
+    /// К какой карточке эта заявка — КЛЮЧОМ (`cfg::CardId`). Второго поля под него нет по тому же доводу, что у `Card::id()` рядом: признак базы на проводе и есть ключ карточки, и две копии одного значения однажды разойдутся.
+    pub fn card(&self) -> &CardId {
+        &self.base.base_id
+    }
 }
 
 /// Чем звонит зовущая сторона — и это ОДНА мера на обе стороны разговора.
@@ -190,14 +211,15 @@ pub enum Call<'a> {
     /// Заявка: вот код подключения, вставленный человеком.
     Enroll(&'a str),
     /// Возврат по уже данному допуску: вот признак базы той карточки, которой
-    /// этот поток, если мы его помним.
-    Return(Option<&'a str>),
+    /// этот поток, если мы его помним, — то есть КЛЮЧ той карточки на ТОЙ
+    /// машине (`cfg::CardId`, решение владельца 10.11).
+    Return(Option<&'a CardId>),
 }
 
 impl<'a> Call<'a> {
     /// Единственная дорога от строк: код на руках — заявка, кода нет — возврат
     /// по карточке, которую помним.
-    pub fn of(code: &'a str, card: Option<&'a str>) -> Call<'a> {
+    pub fn of(code: &'a str, card: Option<&'a CardId>) -> Call<'a> {
         let code = code.trim();
         if code.is_empty() {
             Call::Return(card)
@@ -211,7 +233,7 @@ impl<'a> Call<'a> {
     fn why(&self) -> Why {
         match self {
             Call::Enroll(_) => Why::Enroll,
-            Call::Return(card) => Why::Return(card.map(|s| s.to_string())),
+            Call::Return(card) => Why::Return(card.cloned()),
         }
     }
 }
@@ -341,7 +363,7 @@ where
     // бы действовать немедленно, как того требует спека.
     let mut bases: Vec<BaseBrief> = Vec::new();
     for c in cards {
-        let seen = match book.enrolled_to(&c.name, peer) {
+        let seen = match book.enrolled_to(c.id(), peer) {
             Ok(seen) => seen,
             // Книгу не прочитать — наша беда, не её: короткие слова на провод,
             // подробность с путями остаётся нам (Important 5).
@@ -349,7 +371,7 @@ where
         };
         if let Some(p) = seen {
             bases.push(BaseBrief {
-                id: c.base.base_id.clone(),
+                id: c.id().clone(),
                 name: c.base.base_name.clone(),
                 write: p.write,
                 // «Разрешено», а не «подключено»: на этом шаге доказано
@@ -397,8 +419,8 @@ where
             // происходит; незачисленному ответ тот же, что на выдуманный
             // признак, и разницы между «такой карточки здесь нет» и «есть, но
             // она не ваша» по нему не видно.
-            if let Some(aside) = named.as_ref().and_then(|id| elsewhere.iter().find(|c| &c.base.base_id == id)) {
-                match book.enrolled_to(&aside.name, peer) {
+            if let Some(aside) = named.as_ref().and_then(|id| elsewhere.iter().find(|c| c.id() == id)) {
+                match book.enrolled_to(aside.id(), peer) {
                     Ok(Some(_)) => return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, BASE_ELSEWHERE)).await,
                     Ok(None) => {}
                     // Книгу не прочитать — наша беда, не её, и здесь по тому же
@@ -438,8 +460,8 @@ where
     let Some(secret) = decode_secret(&ticket_secret) else {
         return said_and_not_enrolled(w, Refuse::new(code::TICKET_FOREIGN, FOREIGN_TEXT)).await;
     };
-    let card_name = match book.verdict(&secret) {
-        Ok(Verdict::Card(name)) => name,
+    let card_key = match book.verdict(&secret) {
+        Ok(Verdict::Card(key)) => key,
         Ok(Verdict::Expired) => return said_and_not_enrolled(w, Refuse::new(code::TICKET_EXPIRED, EXPIRED_TEXT)).await,
         Ok(Verdict::Unknown) => return said_and_not_enrolled(w, Refuse::new(code::TICKET_SPENT, UNKNOWN_TEXT)).await,
         // Третий случай, и он НЕ про код: книгу не удалось прочитать. Той
@@ -448,12 +470,12 @@ where
         // нашем файле, значит послать его за тем, что не поможет.
         Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
     };
-    let Some(card) = cards.iter().find(|c| c.name == card_name) else {
+    let Some(card) = cards.iter().find(|c| c.id() == &card_key) else {
         // Карточка на месте, а база у неё — на той стороне: случай второй
         // спеки, которого эта сборка ещё не умеет. Говорится это словами, а не
         // «карточку удалили»: карточку никто не удалял, и заводить её заново
         // незачем.
-        if elsewhere.iter().any(|c| c.name == card_name) {
+        if elsewhere.iter().any(|c| c.id() == &card_key) {
             return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, BASE_ELSEWHERE)).await;
         }
         return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, NO_CARD_TEXT)).await;
@@ -472,7 +494,7 @@ where
     // Шаг четвёртый: человек. `enroll_wait` уходит ДО диалога — иначе зовущая
     // сторона просидит минуты в тишине и сочтёт её обрывом.
     write_msg(w, &Msg::EnrollWait).await?;
-    let request = Request { card: card_name.clone(), base: card.base.clone(), peer, says_name: says_name.clone() };
+    let request = Request { card_name: card.name.clone(), base: card.base.clone(), peer, says_name: says_name.clone() };
     let decision = tokio::time::timeout(DECISION, async {
         tokio::select! {
             d = decide(request) => Some(d),
@@ -529,7 +551,7 @@ where
             // `cards`: он же его и переключает, и `Card.base.write` приходит
             // сюда уже с ним.
             let write = write && card.base.write && matches!(ceiling, Ceiling::Full);
-            if let Err(why) = book.enroll(&card_name, peer, says_name.as_str(), write) {
+            if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), write) {
                 return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
             let base = BaseFields { write, ..card.base.clone() };
@@ -966,9 +988,7 @@ mod tests {
     }
 
     fn fields(id: &str, write: bool) -> BaseFields {
-        BaseFields {
-            base_id: id.to_string(), base_name: format!("База {id}"), publication: format!("http://127.0.0.1:8080/{id}"), write
-        }
+        BaseFields { base_id: id.into(), base_name: format!("База {id}"), publication: format!("http://127.0.0.1:8080/{id}"), write }
     }
 
     /// Счётчик вызовов диалога: «человека не беспокоят вовсе» проверяется
@@ -1053,7 +1073,7 @@ mod tests {
     /// шаг первый спеки, когда человек уже выдал код и переслал его.
     fn one_live_ticket(book: &mut Book, _peer: EndpointId, base: &Node, _state: &std::path::Path) -> (String, Vec<Card>) {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-        book.issue("Ромашка", &ticket).unwrap();
+        book.issue(&"b1".into(), &ticket).unwrap();
         (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
     }
 
@@ -1064,12 +1084,12 @@ mod tests {
         let Ok(Outcome::Enrolled(base)) = &mine else {
             panic!("зовущая обязана была получить enroll_ok с полями базы: {mine:?}")
         };
-        assert_eq!(base.base_id, "b1", "поля базы едут от той стороны, у которой база");
+        assert_eq!(base.base_id, "b1".into(), "поля базы едут от той стороны, у которой база");
         assert!(base.write, "человек разрешил запись, и потолок карточки её позволяет");
         assert!(matches!(theirs, Ok(Outcome::Enrolled(_))), "принимающая обязана была дойти до того же исхода: {theirs:?}");
         assert_eq!(asked.count(), 1, "человека спрашивают ровно один раз");
 
-        let parties = book.of("Ромашка");
+        let parties = book.of(&"b1".into());
         assert_eq!(parties.len(), 1, "ключ обязан был записаться в карточку: {parties:?}");
         assert_eq!(parties[0].says_name, "Разработчик", "как сторона себя назвала — её слова, кладутся как есть");
         assert!(parties[0].write, "решение человека о записи записано вместе с ключом");
@@ -1084,7 +1104,7 @@ mod tests {
             "wrong",
             |book, _peer, base, _state| {
                 let issued = Ticket::issue(base.id(), None, vec![]).unwrap();
-                book.issue("Ромашка", &issued).unwrap();
+                book.issue(&"b1".into(), &issued).unwrap();
                 let other = Ticket::issue(base.id(), None, vec![]).unwrap();
                 (other.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
             },
@@ -1095,7 +1115,7 @@ mod tests {
         assert_eq!(asked.count(), 0, "человека при негодном коде не беспокоят ВОВСЕ — это и есть замок на дверном звонке");
         assert!(mine.is_err(), "зовущая обязана прочитать отказ словами: {mine:?}");
         assert!(matches!(theirs, Ok(Outcome::NotEnrolled(_))), "принимающая отказала и закрылась: {theirs:?}");
-        assert!(book.of("Ромашка").is_empty(), "негодный код не зачисляет никого");
+        assert!(book.of(&"b1".into()).is_empty(), "негодный код не зачисляет никого");
     }
 
     #[tokio::test]
@@ -1104,7 +1124,7 @@ mod tests {
             "expired",
             |book, _peer, base, state| {
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-                book.issue("Ромашка", &ticket).unwrap();
+                book.issue(&"b1".into(), &ticket).unwrap();
                 // Состарить тикет иначе нечем: срок — константа суток, а
                 // `issue` отказывает выдать уже просроченный. Правим срок на
                 // диске: `check` перечитывает файл сам, и путь «код устарел»
@@ -1137,8 +1157,8 @@ mod tests {
         let (mine, theirs, _book, asked, _code) = talk(
             "separate",
             |book, peer, base, _state| {
-                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
-                book.enroll("Василёк", base.id(), "Кто-то ещё", true).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
+                book.enroll(&"b2".into(), base.id(), "Кто-то ещё", true).unwrap();
                 (
                     // Код не понадобится вовсе: зачисление есть, непогашенных
                     // кодов нет, и предъявлять второму подключению нечего.
@@ -1158,7 +1178,7 @@ mod tests {
             panic!("зовущая обязана была получить список зачисленных баз: {mine:?}")
         };
         assert_eq!(bases.len(), 1, "в списке ровно та база, к которой этот ключ зачислен: {bases:?}");
-        assert_eq!(bases[0].id, "b1", "чужое зачисление «Василька» в наш список не попадает");
+        assert_eq!(bases[0].id, "b1".into(), "чужое зачисление «Василька» в наш список не попадает");
         assert!(matches!(theirs, Ok(Outcome::Already(_))), "принимающая обязана была дойти до того же: {theirs:?}");
     }
 
@@ -1175,10 +1195,10 @@ mod tests {
             "second-card",
             |book, peer, base, _state| {
                 // К первой карточке этот ключ уже зачислен.
-                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
                 // А для второй человек только что выдал код.
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-                book.issue("Василёк", &ticket).unwrap();
+                book.issue(&"b2".into(), &ticket).unwrap();
                 (
                     ticket.to_code(),
                     vec![
@@ -1195,10 +1215,10 @@ mod tests {
         let Ok(Outcome::Enrolled(base)) = &mine else {
             panic!("зовущая обязана была получить enroll_ok второй базы: {mine:?}")
         };
-        assert_eq!(base.base_id, "b2", "и поля именно ВТОРОЙ базы, а не первой");
+        assert_eq!(base.base_id, "b2".into(), "и поля именно ВТОРОЙ базы, а не первой");
         assert!(matches!(theirs, Ok(Outcome::Enrolled(_))), "{theirs:?}");
-        assert_eq!(book.of("Василёк").len(), 1, "ключ зачислен ко второй карточке");
-        assert_eq!(book.of("Ромашка").len(), 1, "а первое зачисление не тронуто");
+        assert_eq!(book.of(&"b2".into()).len(), 1, "ключ зачислен ко второй карточке");
+        assert_eq!(book.of(&"b1".into()).len(), 1, "а первое зачисление не тронуто");
     }
 
     #[tokio::test]
@@ -1209,7 +1229,7 @@ mod tests {
         let Ok(Outcome::NotEnrolled(no)) = &mine else { panic!("отклонение — исход, а не Err: {mine:?}") };
         assert_eq!(no.code, code::DECLINED, "код отказа — «отклонено», по нему зовущая и понимает, что повторять нечего");
         assert!(matches!(theirs, Ok(Outcome::NotEnrolled(_))), "принимающая дошла до того же исхода: {theirs:?}");
-        assert!(book.of("Ромашка").is_empty(), "отклонённый ключ в карточку не пишется");
+        assert!(book.of(&"b1".into()).is_empty(), "отклонённый ключ в карточку не пишется");
         assert!(
             spent(&book, &secret_of(&code)),
             "решение состоялось, значит код погашен: иначе отклонённый звонящий дёргает человека тем же кодом, пока тот не нажмёт «да»"
@@ -1224,7 +1244,7 @@ mod tests {
         let Ok(Outcome::NotEnrolled(no)) = &mine else { panic!("«не решил» — тоже исход, а не Err: {mine:?}") };
         assert_ne!(no.code, code::DECLINED, "«не решил» — это НЕ отказ: иначе зовущая перестанет пробовать, а человек ничего не выбирал");
         assert!(matches!(theirs, Ok(Outcome::NotEnrolled(_))), "принимающая дошла до того же: {theirs:?}");
-        assert!(book.of("Ромашка").is_empty(), "без решения человека ключ не зачисляется");
+        assert!(book.of(&"b1".into()).is_empty(), "без решения человека ключ не зачисляется");
         assert!(!spent(&book, &secret_of(&code)), "человек ничего не выбрал — сжигать ему код за закрытое окно незачем");
     }
 
@@ -1244,7 +1264,7 @@ mod tests {
         let peer = caller.id();
         let mut book = Book::open(&db).unwrap();
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-        book.issue("Ромашка", &ticket).unwrap();
+        book.issue(&"b1".into(), &ticket).unwrap();
         let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
 
         let listening = base.clone();
@@ -1276,7 +1296,7 @@ mod tests {
             spent(&book, &ticket.secret),
             "трубку бросил звонящий — код израсходован: иначе он показывает человеку диалог и бросает трубку, пока тот не нажмёт «да»"
         );
-        assert!(book.of("Ромашка").is_empty(), "никто не зачислен");
+        assert!(book.of(&"b1".into()).is_empty(), "никто не зачислен");
 
         caller.close().await;
         base.close().await;
@@ -1297,14 +1317,14 @@ mod tests {
         let (mine, theirs, book, asked, _code) = talk(
             "revoked",
             |book, peer, base, state| {
-                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-                book.issue("Ромашка", &ticket).unwrap();
+                book.issue(&"b1".into(), &ticket).unwrap();
                 // Окно в соседнем процессе: своя книга на тот же файл.
                 let mut window = Book::open(state).unwrap();
-                window.revoke("Ромашка", peer).unwrap();
+                window.revoke(&"b1".into(), peer).unwrap();
                 assert!(
-                    book.of("Ромашка").iter().any(|p| p.key == peer),
+                    book.of(&"b1".into()).iter().any(|p| p.key == peer),
                     "снимок в памяти обязан ещё помнить зачисление — иначе тест не про устаревший снимок"
                 );
                 (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
@@ -1316,7 +1336,7 @@ mod tests {
         assert_eq!(asked.count(), 1, "отозванная сторона проходит заново через человека, а не через устаревший снимок книги");
         assert!(!matches!(mine, Ok(Outcome::Already(_))), "отозванный ключ не получает списка зачисленных баз: {mine:?}");
         assert!(matches!(theirs, Ok(Outcome::NotEnrolled(_))), "человек отказал, значит исход — не зачислены: {theirs:?}");
-        assert!(book.of("Ромашка").is_empty(), "отзыв остался в силе");
+        assert!(book.of(&"b1".into()).is_empty(), "отзыв остался в силе");
     }
 
     /// Самоназвание — чужие слова: его показывают человеку рядом с
@@ -1333,7 +1353,7 @@ mod tests {
         let peer = node.id();
         let mut book = Book::open(&d).unwrap();
         let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-        book.issue("Ромашка", &ticket).unwrap();
+        book.issue(&"b1".into(), &ticket).unwrap();
         let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
 
         // Чужая строка, которой рисуют. Перевод строки, забой и разделители
@@ -1388,7 +1408,7 @@ mod tests {
         );
         assert!(shown.starts_with("Ромашка"), "видимые буквы сохраняются, а пробелы по краям срезаются: {shown:?}");
         assert_eq!(
-            book.of("Ромашка")[0].says_name,
+            book.of(&"b1".into())[0].says_name,
             shown,
             "храним ровно то, что показали: иначе окно говорит одно, файл другое, и спор между ними разрешать нечем"
         );
@@ -1498,7 +1518,7 @@ mod tests {
         let mut code = None;
         let mut talk = Alone::new("ceiling", Decision::Allow { write: true }, |book, peer, _state| {
             let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-            book.issue("Ромашка", &ticket).unwrap();
+            book.issue(&"b1".into(), &ticket).unwrap();
             code = Some(hex::encode(&*ticket.secret));
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
         })
@@ -1532,7 +1552,7 @@ mod tests {
             panic!("зачисление состоялось, только без записи: {out:?}")
         };
         assert!(!base.write, "и в исходе тоже");
-        assert!(!book.of("Ромашка")[0].write, "и в книге");
+        assert!(!book.of(&"b1".into())[0].write, "и в книге");
     }
 
     /// Настройки, которые не прочитались, говорят о СЕБЕ — и обеим сторонам, и ни одной из них не врут.
@@ -1553,9 +1573,9 @@ mod tests {
             let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
                 // Допуск и код — живые: отказ ниже не про них. Без этого тест
                 // нельзя было бы отличить от «кода не выдавали».
-                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-                book.issue("Ромашка", &ticket).unwrap();
+                book.issue(&"b1".into(), &ticket).unwrap();
                 Cards::Unreadable(OURS.into())
             })
             .await;
@@ -1606,9 +1626,9 @@ mod tests {
             // Код по этой карточке выдан и жив, допуск у стороны есть: отказ ниже не про них.
             let mut secret = None;
             let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
-                book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+                book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-                book.issue("Ромашка", &ticket).unwrap();
+                book.issue(&"b1".into(), &ticket).unwrap();
                 secret = Some(hex::encode(&*ticket.secret));
                 Cards::Read {
                     accepting: Vec::new(), base_elsewhere: vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
@@ -1665,7 +1685,7 @@ mod tests {
         for (name, enrolled) in [("base-there-stranger", false), ("base-there-neighbour", true)] {
             let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
                 // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
-                book.enroll(if enrolled { "Ромашка" } else { "Василёк" }, peer, "Разработчик", true).unwrap();
+                book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true).unwrap();
                 Cards::Read {
                     accepting: Vec::new(), base_elsewhere: vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
                 }
@@ -1704,8 +1724,8 @@ mod tests {
     #[tokio::test]
     async fn a_returning_side_that_names_its_card_gets_that_one_not_all_of_them() {
         let two = |book: &mut Book, peer: EndpointId, _state: &std::path::Path| {
-            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
-            book.enroll("Василёк", peer, "Разработчик", true).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
+            book.enroll(&"b2".into(), peer, "Разработчик", true).unwrap();
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         };
 
@@ -1716,7 +1736,7 @@ mod tests {
             panic!("возврату отвечают hello_ok, а не отказом: {answered:?}")
         };
         assert_eq!(bases.len(), 1, "названа одна карточка — в ответе одна: {bases:?}");
-        assert_eq!(bases[0].id, "b2", "и именно та, которую назвали");
+        assert_eq!(bases[0].id, "b2".into(), "и именно та, которую назвали");
         let (out, _book, asked) = talk.done().await;
         let Ok(Outcome::Already(mine)) = &out else { panic!("возврат — это `Already`: {out:?}") };
         assert_eq!(mine.len(), 1, "и наружу уходит ровно та карточка, за которой поток и числится");
@@ -1744,7 +1764,7 @@ mod tests {
     #[tokio::test]
     async fn a_returning_side_whose_card_is_no_longer_allowed_is_refused_in_words() {
         let mut talk = Alone::new("returns-revoked", Decision::Allow { write: true }, |book, peer, _state| {
-            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         })
         .await;
@@ -1780,12 +1800,12 @@ mod tests {
     #[tokio::test]
     async fn a_return_is_not_made_to_wait_for_a_request_issued_for_another_card() {
         let mut talk = Alone::new("returns-while-ticket", Decision::Allow { write: true }, |book, peer, _state| {
-            book.enroll("Ромашка", peer, "Разработчик", true).unwrap();
+            book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             // А для ВТОРОЙ карточки человек только что выдал код — он живой и
             // ждёт свою сторону. К этому потоку он не имеет никакого
             // отношения.
             let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-            book.issue("Василёк", &ticket).unwrap();
+            book.issue(&"b2".into(), &ticket).unwrap();
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         })
         .await;
@@ -1796,7 +1816,7 @@ mod tests {
             .expect("возврат ждал чужую заявку: ответ не пришёл за секунду, а ждать его положено было не дольше, чем пишется hello_ok");
         let Ok(Msg::HelloOk { bases, .. }) = &answered else { panic!("ждали hello_ok: {answered:?}") };
         assert_eq!(bases.len(), 1, "и список — по названной карточке: {bases:?}");
-        assert_eq!(bases[0].id, "b1");
+        assert_eq!(bases[0].id, "b1".into());
 
         let (out, _book, asked) = talk.done().await;
         assert!(matches!(out, Ok(Outcome::Already(_))), "{out:?}");
@@ -1812,7 +1832,7 @@ mod tests {
             kit: "тест".into(),
             says_name: "Разработчик".into(),
             ceiling: Ceiling::Full,
-            why: Why::Return(card.map(|s| s.to_string())),
+            why: Why::Return(card.map(CardId::from)),
         }
     }
 
@@ -1931,7 +1951,7 @@ mod tests {
         let peer = node.id();
         let mut first_book = Book::open(&d).unwrap();
         let ticket = Ticket::issue(peer, None, vec![]).unwrap();
-        first_book.issue("Ромашка", &ticket).unwrap();
+        first_book.issue(&"b1".into(), &ticket).unwrap();
         let secret_hex = hex::encode(&*ticket.secret);
         let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
 
@@ -1990,7 +2010,7 @@ mod tests {
         let (out, book) = tokio::time::timeout(WAIT, first).await.expect("первый разговор не уложился в срок").unwrap();
         assert!(matches!(out, Ok(Outcome::Enrolled(_))), "первый разговор доходит до конца как обычно: {out:?}");
         assert_eq!(asked.count(), 1, "человека спросили РОВНО один раз на один код");
-        assert_eq!(book.of("Ромашка").len(), 1, "и зачислен ровно один");
+        assert_eq!(book.of(&"b1".into()).len(), 1, "и зачислен ровно один");
 
         node.close().await;
     }

@@ -443,13 +443,29 @@ pub enum Dirty {
 /// кончился.
 pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
     let now = SystemTime::now();
+    let Some(key) = key_of(ui, name) else {
+        return link::Enroll::default();
+    };
     link::Enroll {
-        waiting: ui.waiting.iter().any(|p| p.request.card == name && p.reachable()),
-        declined: ui.declined.iter().any(|d| d == name),
-        code_issued: ui.codes.iter().any(|(card, t)| card == name && t.alive(now)),
-        enrolled: ui.book.as_ref().map_or(0, |b| b.of(name).len()),
-        flow: ui.flows.iter().find(|(card, _)| card == name).map(|(_, f)| *f),
+        waiting: ui.waiting.iter().any(|p| p.request.card() == &key && p.reachable()),
+        declined: ui.declined.iter().any(|d| d == &key),
+        code_issued: ui.codes.iter().any(|(card, t)| card == &key && t.alive(now)),
+        enrolled: ui.book.as_ref().map_or(0, |b| b.of(&key).len()),
+        flow: ui.flows.iter().find(|(card, _)| card == &key).map(|(_, f)| *f),
     }
+}
+
+/// Ключ карточки по тому имени, которым её называет ЭКРАН.
+///
+/// **Это единственное место, где имя превращается в ключ, и оно на границе с человеком** (решение владельца 10.11). Человек щёлкает по
+/// строке списка, а список подписан именами — значит перевод где-то быть обязан. Пусть он будет один и здесь: всё, что ниже (книга
+/// допуска, выданные коды, слова состояния, живые потоки), спрашивается уже ключом, и забыть про перевод по дороге негде.
+///
+/// `None` — карточки с таким именем в настройках нет: человек правил файл руками под открытым окном, либо карточку удалили. Решать, что
+/// это значит, — делу вызывающего: показу это «фактов нет», действию — отказ словами. Выдумывать ключ нельзя: по выдуманному нашлась бы
+/// чужая строка книги допуска.
+fn key_of(ui: &Ui, name: &str) -> Option<crate::cfg::CardId> {
+    ui.cfg.by_name(name).map(|c| c.id())
 }
 
 /// Код карточки, пока он ЖИВ, — строкой для показа и для буфера обмена.
@@ -459,7 +475,8 @@ pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
 /// «Скопировать» и сама выдача (`issue_code`, когда отдаёт уже выданный)
 /// спрашивают здесь, и ни одна из трёх не умеет показать мёртвый код.
 pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
-    ui.codes.iter().find(|(c, t)| c == card && t.alive(now)).map(|(_, t)| t.to_code())
+    let key = key_of(ui, card)?;
+    ui.codes.iter().find(|(c, t)| c == &key && t.alive(now)).map(|(_, t)| t.to_code())
 }
 
 /// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
@@ -1535,7 +1552,8 @@ pub enum LinkAct {
 /// ради живой второй, сверяет голосом отпечаток мёртвой первой, разрешает — и
 /// получает «отправить не удалось». Живая при этом ждёт ответа дальше.
 fn request_to_answer(ui: &Ui, card: &str) -> Option<crate::enroll::Request> {
-    ui.waiting.iter().find(|p| p.request.card == card && p.reachable()).map(|p| p.request.clone())
+    let key = key_of(ui, card)?;
+    ui.waiting.iter().find(|p| p.request.card() == &key && p.reachable()).map(|p| p.request.clone())
 }
 
 /// Выдать код подключения карточке и запомнить его на этот запуск.
@@ -1592,10 +1610,12 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     let ticket = crate::ticket::Ticket::issue(id, reach.relay, reach.direct)?;
     let code = ticket.to_code();
     let silent = blind_code_note(reach_empty, card);
+    // Ключ берётся ДО книги: код выдаётся карточке, а не имени, и карточки, которой в настройках уже нет, выдавать его некуда.
+    let key = key_of(ui, card).ok_or_else(|| format!("Карточки «{card}» в настройках нет — код выдать некому."))?;
     let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
-    book.reissue(card, &ticket)?;
-    ui.codes.retain(|(c, _)| c != card);
-    ui.codes.push((card.to_string(), ticket));
+    book.reissue(&key, &ticket)?;
+    ui.codes.retain(|(c, _)| c != &key);
+    ui.codes.push((key, ticket));
     // Слово — ПОСЛЕ записи: кода, который не записался, и предупреждать не о
     // чем. Ниже строкой ляжет обычное «код — в карточке» от `run_link_act`,
     // и порядок в журнале выйдет такой: сперва оговорка, потом итог.
@@ -1645,7 +1665,16 @@ fn dial_card(ui: &mut Ui, card: &str, code: &str) {
         gui::note_line(ui, Line { kind: Kind::Fail, text: "Узел не поднят — подключаться нечем.".into() });
         return;
     };
-    match peer.dial(card, code) {
+    let Some(key) = key_of(ui, card) else {
+        gui::note_line(
+            ui,
+            Line {
+                kind: Kind::Fail, text: format!("Карточки «{card}» в настройках нет — звонить нечем.")
+            },
+        );
+        return;
+    };
+    match peer.dial(&key, card, code) {
         Ok(()) => gui::note_line(ui, Line { kind: Kind::Say, text: format!("Подключаюсь по «{card}»") }),
         Err(e) => gui::note_line(ui, Line { kind: Kind::Fail, text: e }),
     }
@@ -1655,17 +1684,19 @@ fn dial_card(ui: &mut Ui, card: &str, code: &str) {
 /// карточки не трогаются вовсе (`Book::revoke`) — это и есть причина, по
 /// которой отзыв адресуется ключом из строки карточки, а не пунктом меню.
 fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
-    let r = match ui.book.as_mut() {
-        Some(book) => book.revoke(card, key),
-        None => Err("Книга зачислений не открылась — отзывать нечем.".to_string()),
+    let card_key = key_of(ui, card);
+    let r = match (ui.book.as_mut(), card_key.as_ref()) {
+        (Some(book), Some(card_key)) => book.revoke(card_key, key),
+        (_, None) => Err(format!("Карточки «{card}» в настройках нет — отзывать нечего.")),
+        (None, _) => Err("Книга зачислений не открылась — отзывать нечем.".to_string()),
     };
     let line = match r {
         Ok(()) => {
             // Живой поток этой стороны снимается в ту же секунду, а не на её
             // следующем круге: запись об отзыве уже сделана, и поток, который
             // её переживает, отменял бы немедленность отзыва (спека).
-            if let Some(peer) = &ui.peer {
-                peer.revoked(card, key);
+            if let (Some(peer), Some(card_key)) = (&ui.peer, card_key.as_ref()) {
+                peer.revoked(card_key, key);
             }
             Line { kind: Kind::Ok, text: format!("Разрешение отозвано: карточка «{card}», ключ {key}") }
         }
@@ -1930,9 +1961,9 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             // Карточки для адреса недостаточно — пока человек сверяет
             // отпечаток по телефону, по той же карточке может встать в
             // очередь другая сторона.
-            let (card, peer) = (r.card.clone(), r.peer);
+            let (card, name, peer) = (r.card().clone(), r.card_name.clone(), r.peer);
             gui::ask_permission(window, cx, &r, move |d, _window, cx| {
-                gui::answer_request(cx.global_mut::<Ui>(), &card, peer, d);
+                gui::answer_request(cx.global_mut::<Ui>(), &card, &name, peer, d);
                 cx.refresh_windows();
             });
         }
@@ -3278,7 +3309,7 @@ impl Panel {
             // Только ЖИВОЙ код (`live_code`): мёртвую строку показывать и
             // предлагать передать на ту сторону нельзя (Important 1 ревью).
             let code = live_code(ui, &card_name, SystemTime::now());
-            let parties = ui.book.as_ref().map(|b| b.of(&card_name)).unwrap_or_default();
+            let parties = ui.book.as_ref().map(|b| b.of(&c.id())).unwrap_or_default();
             accepting_block(&c, code.as_deref(), &parties)
         };
         if let Some(block) = block {
@@ -3364,7 +3395,7 @@ impl Panel {
         // за сегодняшнюю работу.
         let dialling = {
             let ui = cx.global::<Ui>();
-            let partner = ui.partners.iter().find(|(card, _)| *card == card_name).map(|(_, key)| key.to_string());
+            let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| key.to_string());
             dialling_block(&c, partner)
         };
         if let Some(block) = dialling {
@@ -6192,7 +6223,7 @@ mod tests {
         // отвечать, кнопку «Разрешить» не зажигает вовсе (Important 2
         // ревью) — и это проверяет сосед ниже.
         let (tx, _rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(tx) });
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(tx) });
         assert!(enroll_facts(&ui, &card).waiting, "факт заявки обязан дойти до слова и до кнопки");
         for dirty in [Dirty::No, Dirty::Fields, Dirty::NameOnly] {
             let b = main_button(&ui, "", dirty);
@@ -6203,17 +6234,16 @@ mod tests {
         // Заявка по ДРУГОЙ карточке предмета этой кнопки не касается: предмет
         // у неё один, и «Разрешить», разрешающее не то, что названо слева, —
         // та же мина, что заглушка `UNWIRED` в меню.
-        ui.waiting[0].request.card = "Другая".into();
+        ui.waiting[0].request.base.base_id = "Другая".into();
         assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
     }
-    fn a_waiting_request(card: &str) -> crate::enroll::Request {
+    /// Заявка носит КЛЮЧ той карточки, по которой её и ищут (`enroll_facts`, `request_to_answer`): имя в заявке — только для слов
+    /// человеку, и фикстура, у которой ключ взят с потолка, проверяла бы не то.
+    fn a_waiting_request(card: &crate::cfg::Connection) -> crate::enroll::Request {
         crate::enroll::Request {
-            card: card.to_string(),
+            card_name: card.name.clone(),
             base: crate::wire::BaseFields {
-                base_id: "b1".into(),
-                base_name: "Бухгалтерия".into(),
-                publication: "auto".into(),
-                write: true,
+                base_id: card.id(), base_name: "Бухгалтерия".into(), publication: "auto".into(), write: true
             },
             peer: a_key(3),
             says_name: "Заказчик".into(),
@@ -6235,7 +6265,7 @@ mod tests {
         let mut ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
         let (tx, rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(tx) });
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(tx) });
         assert!(enroll_facts(&ui, &card).waiting, "живая заявка ждёт — иначе тест проверяет не то");
         assert_eq!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
 
@@ -6283,11 +6313,11 @@ mod tests {
         let card = ui.cfg.current().name.clone();
         // Первая в очереди — сторона 4, вторая — сторона 3 (`a_waiting_request`).
         let (first_tx, first_rx) = futures::channel::oneshot::channel();
-        let mut first = a_waiting_request(&card);
+        let mut first = a_waiting_request(ui.cfg.current());
         first.peer = a_key(4);
         ui.waiting.push(crate::gui::Pending { request: first, answer: Some(first_tx) });
         let (second_tx, _second_rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(second_tx) });
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(second_tx) });
         assert_eq!(request_to_answer(&ui, &card).map(|r| r.peer), Some(a_key(4)), "обе живы — спрашивают про первую");
 
         // Разговор первой кончился: приёмник её решения уронен.
@@ -6314,7 +6344,7 @@ mod tests {
         let card = ui.cfg.current().name.clone();
         let ticket = crate::ticket::Ticket::issue(a_key(5), None, Vec::new()).unwrap();
         let until = ticket.until;
-        ui.codes.push((card.clone(), ticket));
+        ui.codes.push((ui.cfg.current().id(), ticket));
         let fresh = until - std::time::Duration::from_secs(60);
         assert!(enroll_facts(&ui, &card).code_issued, "живой код — ожидание настоящее");
         assert!(live_code(&ui, &card, fresh).is_some());

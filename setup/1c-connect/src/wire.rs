@@ -20,6 +20,7 @@
 //! Спека: `docs/superpowers/specs/2026-11-01-protocol-design.md`, разделы
 //! «Кадрирование и кодировка», «Сообщения», «Ошибки».
 
+use crate::cfg::CardId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -306,7 +307,7 @@ pub enum Why {
     /// `None` — допуск помним, а карточку нет. Так выглядит возврат после
     /// перезапуска, пока зовущая сторона не хранит признак базы рядом с
     /// партнёром; та сторона отвечает тогда всем списком, как и раньше.
-    Return(Option<String>),
+    Return(Option<CardId>),
 }
 
 /// Состояние карточки — восемь слов контракта («Что у соединения общего»).
@@ -334,7 +335,8 @@ pub enum CardState {
 /// База в списке `hello_ok`: к чему этот ключ уже зачислен.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaseBrief {
-    pub id: String,
+    /// Признак базы — он же КЛЮЧ карточки той машины, что его назвала (`cfg::CardId`, решение владельца 10.11).
+    pub id: CardId,
     pub name: String,
     pub write: bool,
     pub state: CardState,
@@ -346,7 +348,10 @@ pub struct BaseBrief {
 /// Третьего сообщения ради этого не заводится.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaseFields {
-    pub base_id: String,
+    /// Признак базы — ключ карточки (`cfg::CardId`). Единица связи по контракту — карточка, зачисление даётся к ней, и второго значения «про базу» рядом не заводится: оно разошлось бы с этим первой же правкой. Довод и цена — в докстроке `gui::peer::Machine::of`.
+    ///
+    /// Тип тот же, которым карточка названа в книге допуска, и это нарочно: иначе на каждой границе стояло бы по преобразованию строки, а преобразование — место, где подставляют не то. На проводе он пишется обычной строкой (`serde(transparent)`), то есть вид кадра не изменился.
+    pub base_id: CardId,
     pub base_name: String,
     pub publication: String,
     pub write: bool,
@@ -395,7 +400,7 @@ pub enum Msg {
     EnrollNo(Refuse),
     /// Разрешение снято. Рвёт потоки ЭТОЙ базы сразу; если других зачисленных
     /// баз в канале не осталось — закрывается и канал.
-    Revoked { base_id: String, text: String },
+    Revoked { base_id: CardId, text: String },
     /// Общий отказ управляющего потока: версия, тикет, незнакомое сообщение.
     Refuse(Refuse),
     /// Ухожу нарочно: выключили обслуживание, закрыли окно, снимается машина.

@@ -420,8 +420,8 @@ impl Reins {
     /// Вторая половина этого правила исполняется сама: канал закрывается,
     /// когда снят последний `Hold`, и считать зачисленные базы для этого не
     /// нужно.
-    pub async fn revoke(self, base_id: &str, text: &str) {
-        self.say(Msg::Revoked { base_id: base_id.to_string(), text: text.to_string() }).await;
+    pub async fn revoke(self, base_id: &crate::cfg::CardId, text: &str) {
+        self.say(Msg::Revoked { base_id: base_id.clone(), text: text.to_string() }).await;
         self.finish().await;
     }
 
@@ -667,10 +667,7 @@ mod tests {
 
     fn fields(id: &str) -> BaseFields {
         BaseFields {
-            base_id: id.to_string(),
-            base_name: format!("База {id}"),
-            publication: format!("http://127.0.0.1:8080/{id}"),
-            write: true,
+            base_id: id.into(), base_name: format!("База {id}"), publication: format!("http://127.0.0.1:8080/{id}"), write: true
         }
     }
 
@@ -937,7 +934,7 @@ mod tests {
         let peer = caller.id();
         let mut book = Book::open(&db).unwrap();
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-        book.issue("Ромашка", &ticket).unwrap();
+        book.issue(&"b1".into(), &ticket).unwrap();
         let code = ticket.to_code();
         let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
 
@@ -1036,7 +1033,7 @@ mod tests {
         let peer = caller.id();
         let mut book = Book::open(&db).unwrap();
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
-        book.issue("Ромашка", &ticket).unwrap();
+        book.issue(&"b1".into(), &ticket).unwrap();
         let code = ticket.to_code();
         let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
 
@@ -1178,7 +1175,9 @@ mod tests {
             tokio::time::timeout(WAIT, answered).await.expect("та сторона не приняла оба потока").unwrap();
 
         // Человек снял разрешение у первой карточки.
-        first_reins.revoke("b1", "Доступ отозван на стороне базы.\nЧеловек там снял разрешение.\nПозвоните ему, если это ошибка.").await;
+        first_reins
+            .revoke(&"b1".into(), "Доступ отозван на стороне базы.\nЧеловек там снял разрешение.\nПозвоните ему, если это ошибка.")
+            .await;
         let end = tokio::time::timeout(WAIT, hold(first.ear(), |_| {})).await.expect("отзыв не доехал в срок");
         let Gone::Farewell(why) = end else {
             panic!("отзыв — намеренный уход со словами, а не обрыв: {end:?}")

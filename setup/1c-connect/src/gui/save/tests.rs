@@ -2244,54 +2244,58 @@ fn a_refused_delete_leaves_the_file_byte_for_byte() {
 
 /// Книга допуска и партнёр одной карточки — фикстура для двух тестов ниже:
 /// зачисленная сторона, живой выданный код и запомненный партнёр. Все трое
-/// ключуются ИМЕНЕМ карточки, и ровно это имя человек правит и удаляет.
+/// ключуются КЛЮЧОМ карточки (`cfg::CardId`), а не именем, которое человек
+/// правит.
 fn access_of(ui: &Ui, card: &str) -> (iroh::EndpointId, crate::ticket::Ticket) {
+    let id = ui.cfg.by_name(card).expect("карточка фикстуры").id();
     let key = iroh::SecretKey::generate().public();
     let ticket = crate::ticket::Ticket::issue(key, None, vec![]).unwrap();
     let mut book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
-    book.enroll(card, key, "Бухгалтер", true).unwrap();
-    book.reissue(card, &ticket).unwrap();
+    book.enroll(&id, key, "Бухгалтер", true).unwrap();
+    book.reissue(&id, &ticket).unwrap();
     crate::enrolled::Partners::open(ui.kit.state())
         .unwrap()
-        .remember(card, &crate::enrolled::Partner { key, relay: None, direct: vec![] })
+        .remember(&id, &crate::enrolled::Partner { key, relay: None, direct: vec![] })
         .unwrap();
     (key, ticket)
 }
 
-/// Находка 1 задачи 2 плана починки по двум ревью: допуск и возврат идут ЗА
-/// карточкой, когда человек её переименовал.
+/// Переименование больше НИЧЕГО не уносит за собой — и именно это проверяется.
 ///
-/// Падало так: `rename` не трогала ни `enrolled.toml`, ни `partners.toml`
-/// вовсе. Переименовали принимающую карточку — все её зачисления осиротели:
-/// карточка писала «никого ещё не зачислили», отозвать их было нечем
-/// (`Book::revoke` спрашивает по имени), а зачисленная сторона продолжала
-/// звонить вечно, потому что её допуск на диске цел и просто больше никем не
-/// спрашивается. Партнёр при этом оставался под прежним именем, и подъём
-/// звонков при запуске звонил карточкой-призраком.
+/// **Чем куплен этот тест.** На месте него стоял обратный: он стерёг переезд книги допуска и партнёров за новым именем карточки
+/// (`access_follows_rename`), потому что оба файла ключевались ИМЕНЕМ. Переезд работал, но держался на памяти каждого будущего писателя:
+/// забыл позвать — и переименование снова осиротляет все зачисления разом. Решение владельца 10.11 закрыло корень: карточка названа
+/// ключом, которого человек не правит (`cfg::CardId`), и переименование её больше не касается.
+///
+/// Поэтому утверждение сменило знак. Прежнее («зачисления переехали под новое имя») нечем проверить: ни одно хранилище имён больше не
+/// знает. Новое сильнее: имя сменилось, а допуск, выданный код и партнёр остались на том же ключе — то есть переименование перестало
+/// быть опасным действием, а не стало аккуратно убираемым.
 #[test]
-fn renaming_a_card_takes_its_enrolments_and_its_partner_with_it() {
+fn renaming_a_card_keeps_its_access_because_the_key_does_not_change() {
     let mut ui = Ui::for_test();
     with_params_file(&ui);
+    let id = ui.cfg.by_name("Buh").unwrap().id();
     let (key, ticket) = access_of(&ui, "Buh");
 
     rename(&mut ui, "Buh", "Ромашка").unwrap();
 
+    assert_eq!(ui.cfg.by_name("Ромашка").unwrap().id(), id, "ключ карточки переименование не меняет — на этом всё и держится");
     let book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
-    assert!(book.of("Buh").is_empty(), "под прежним именем зачислений больше нет");
-    assert_eq!(book.of("Ромашка").len(), 1, "зачисление переехало за именем — иначе отзывать его нечем");
+    assert_eq!(book.of(&id).len(), 1, "зачисление осталось на своём ключе: везти его за именем больше не надо");
     assert_eq!(
         book.verdict(&ticket.secret).unwrap(),
-        crate::enrolled::Verdict::Card("Ромашка".to_string()),
-        "и выданный код называет карточку, которая есть в настройках"
+        crate::enrolled::Verdict::Card(id.clone()),
+        "и выданный код называет ту же карточку, что до переименования"
     );
     let partners = crate::enrolled::Partners::open(ui.kit.state()).unwrap();
-    assert!(partners.of("Buh").is_none(), "партнёра под прежним именем нет — иначе это карточка-призрак");
-    assert_eq!(partners.of("Ромашка").unwrap().key, key, "а возвращаться карточке есть куда и под новым именем");
-    assert_eq!(ui.partners.first().map(|(card, _)| card.as_str()), Some("Ромашка"), "снимок окна перечитан: {:?}", ui.partners);
+    assert_eq!(partners.of(&id).unwrap().key, key, "возвращаться карточке есть куда, и это не зависело от её имени");
+    // И снимок окна находит партнёра под тем же ключом — то есть «Подключиться» в переименованной карточке ведёт туда же, куда вело.
+    // Перечтение здесь своё: `rename` его больше не делает, и это правильно — менять в снимке нечего.
+    crate::gui::save::reread_partners(&mut ui);
+    assert_eq!(ui.partners.first().map(|(card, _)| card.clone()), Some(id), "снимок окна о карточке того же ключа: {:?}", ui.partners);
 }
 
-/// Та же находка с другой стороны: удалённая карточка уносит с собой и допуск,
-/// и партнёра.
+/// Удалённая карточка уносит с собой и допуск, и партнёра — теперь ПО КЛЮЧУ.
 ///
 /// Падало так: `delete_connection` не трогала ни одного из двух файлов, а
 /// `Partners::forget` в продукте не звалась НИ РАЗУ. Удалили зовущую карточку —
@@ -2302,19 +2306,20 @@ fn renaming_a_card_takes_its_enrolments_and_its_partner_with_it() {
 fn deleting_a_card_takes_its_enrolments_and_its_partner_with_it() {
     let mut ui = Ui::for_test();
     with_params_file(&ui);
+    let id = ui.cfg.by_name("Buh").unwrap().id();
     let (_, ticket) = access_of(&ui, "Buh");
 
     delete_connection(&mut ui, "Buh").unwrap();
 
     let book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
-    assert!(book.of("Buh").is_empty(), "зачисления удалённой карточки спрашивать больше нечем — они ушли с ней");
+    assert!(book.of(&id).is_empty(), "зачисления удалённой карточки спрашивать больше нечем — они ушли с ней");
     assert_eq!(
         book.verdict(&ticket.secret).unwrap(),
         crate::enrolled::Verdict::Unknown,
         "и код её не называет карточку, которой в настройках уже нет"
     );
     assert!(
-        crate::enrolled::Partners::open(ui.kit.state()).unwrap().of("Buh").is_none(),
+        crate::enrolled::Partners::open(ui.kit.state()).unwrap().of(&id).is_none(),
         "партнёр ушёл вместе с карточкой — иначе программа звонит призраком при следующем запуске"
     );
     assert!(ui.partners.is_empty(), "снимок окна перечитан: {:?}", ui.partners);
@@ -2585,7 +2590,7 @@ fn set_keys_with_no_keys_touches_nothing_not_even_for_an_unknown_name() {
 
 fn a_request() -> crate::enroll::Request {
     crate::enroll::Request {
-        card: "Ромашка".into(),
+        card_name: "Ромашка".into(),
         base: crate::wire::BaseFields {
             // Два поля, которые по каналу приехали и в диалог НЕ попадут:
             // они её слова, но выглядят как факт.
@@ -2631,8 +2636,8 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
 
     // И ни одной больше: всё прочее, что приехало по каналу, молчит.
     let text = format!("{message}\n{detail}");
-    for leaked in [&r.base.base_id, &r.base.publication] {
-        assert!(!text.contains(leaked.as_str()), "пришло по каналу и выглядит фактом — в диалоге этому места нет: {leaked}");
+    for leaked in [r.base.base_id.as_str(), r.base.publication.as_str()] {
+        assert!(!text.contains(leaked), "пришло по каналу и выглядит фактом — в диалоге этому места нет: {leaked}");
     }
 
     // Кнопки называют ДЕЙСТВИЕ, а не «Да»/«Нет».
@@ -2675,22 +2680,22 @@ fn an_empty_base_name_moves_the_question_to_the_card() {
 fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let card = "Ромашка";
+    let card = a_request().card().clone();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
 
-    answer_request(&mut ui, card, a_request().peer, Decision::NoAnswer);
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::NoAnswer);
     assert_eq!(ui.waiting.len(), 1, "закрытие без ответа заявку не снимает");
     assert!(ui.declined.is_empty(), "и отказом не притворяется");
     assert!(ui.log.last().unwrap().line.text.contains("ждёт ответа"), "{:?}", ui.log.last());
 
-    answer_request(&mut ui, card, a_request().peer, Decision::Deny);
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Deny);
     assert!(ui.waiting.is_empty(), "отказ заявку снимает");
-    assert_eq!(ui.declined, vec![card.to_string()], "а исход остаётся: слово «отклонено» на строке");
+    assert_eq!(ui.declined, vec![card.clone()], "а исход остаётся: слово «отклонено» на строке");
 
     // Разрешение по новой заявке стирает прошлый исход: карточка больше не
     // «отклонено».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, card, a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert!(ui.waiting.is_empty());
     assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
 }
@@ -2704,13 +2709,13 @@ fn the_answer_travels_back_to_the_conversation() {
     let mut ui = Ui::for_test();
     let (tx, mut rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
-    answer_request(&mut ui, "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }));
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
 }
 
@@ -2721,7 +2726,7 @@ fn the_answer_travels_back_to_the_conversation() {
 #[test]
 fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
     let mut ui = Ui::for_test();
-    ui.declined.push("Ромашка".into());
+    ui.declined.push(a_request().card().clone());
     take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
     assert_eq!(ui.waiting.len(), 1);
     assert!(ui.declined.is_empty(), "новая заявка перебивает прошлый исход");
@@ -2731,7 +2736,11 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
 
     // Заявка по другой карточке соседку не трогает: отзыв и разрешение
     // адресуются карточкой, и путать их нельзя.
-    let other = crate::enroll::Request { card: "Клевер".into(), ..a_request() };
+    let other = crate::enroll::Request {
+        card_name: "Клевер".into(),
+        base: crate::wire::BaseFields { base_id: "ДРУГОЙ-КЛЮЧ".into(), ..a_request().base },
+        ..a_request()
+    };
     take_request(&mut ui, crate::gui::Pending { request: other, answer: None });
     assert_eq!(ui.waiting.len(), 2);
 }
@@ -2764,7 +2773,7 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
     assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
 
-    answer_request(&mut ui, &a.card, shown, Decision::Allow { write: true });
+    answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow { write: true });
     assert_eq!(
         a_rx.try_recv().unwrap(),
         Some(Decision::Allow { write: true }),
@@ -2788,7 +2797,7 @@ fn an_answer_to_a_gone_request_touches_no_one_else() {
     let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
     take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
 
-    answer_request(&mut ui, &b.card, gone, Decision::Deny);
+    answer_request(&mut ui, b.card(), &b.card_name, gone, Decision::Deny);
     assert_eq!(b_rx.try_recv().unwrap(), None, "отказ чужой заявке не адресуется");
     assert_eq!(ui.waiting.len(), 1, "чужая заявка со списка не снимается");
     assert!(ui.declined.is_empty(), "исхода, которого человек не выбирал про ЭТУ сторону, карточка не носит");
@@ -2809,22 +2818,22 @@ fn the_book_is_reread_after_the_person_allows() {
     let mut ui = Ui::for_test();
     let state = ui.kit.state().to_path_buf();
     ui.book = Some(crate::enrolled::Book::open(&state).unwrap());
-    let card = "Ромашка";
-    assert_eq!(ui.book.as_ref().unwrap().of(card).len(), 0, "иначе тест проверяет не то");
+    let card = a_request().card().clone();
+    assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "иначе тест проверяет не то");
 
     // Так это и происходит на деле: зачисление пишет ДРУГОЙ `Book` на тот же
     // файл, пока окно держит свой снимок.
     let peer = a_request().peer;
     let mut conversation = crate::enrolled::Book::open(&state).unwrap();
-    conversation.enroll(card, peer, "Заказчик", true).unwrap();
-    assert_eq!(ui.book.as_ref().unwrap().of(card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
+    conversation.enroll(&card, peer, "Заказчик", true).unwrap();
+    assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
 
     let (tx, mut rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
-    answer_request(&mut ui, card, peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow { write: true });
     assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }), "решение обязано уехать — иначе перечтения и не будет");
 
-    let parties = ui.book.as_ref().unwrap().of(card);
+    let parties = ui.book.as_ref().unwrap().of(&card);
     assert_eq!(parties.len(), 1, "карточка сразу после «Разрешить» обязана показать зачисленную сторону");
     assert_eq!(parties[0].key, peer);
 }
@@ -2838,11 +2847,11 @@ fn the_book_is_reread_when_a_request_arrives() {
     let state = ui.kit.state().to_path_buf();
     ui.book = Some(crate::enrolled::Book::open(&state).unwrap());
     let peer = a_request().peer;
-    crate::enrolled::Book::open(&state).unwrap().enroll("Клевер", peer, "Сосед", false).unwrap();
-    assert_eq!(ui.book.as_ref().unwrap().of("Клевер").len(), 0, "иначе тест проверяет не то");
+    crate::enrolled::Book::open(&state).unwrap().enroll(&"Клевер".into(), peer, "Сосед", false).unwrap();
+    assert_eq!(ui.book.as_ref().unwrap().of(&"Клевер".into()).len(), 0, "иначе тест проверяет не то");
 
     take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
-    assert_eq!(ui.book.as_ref().unwrap().of("Клевер").len(), 1, "книга обязана быть перечитана на событии о заявке");
+    assert_eq!(ui.book.as_ref().unwrap().of(&"Клевер".into()).len(), 1, "книга обязана быть перечитана на событии о заявке");
 }
 
 /// Разрешение гасит код (`accept_side` зовёт `Book::spend`, шаг пятый
@@ -2853,13 +2862,13 @@ fn the_book_is_reread_when_a_request_arrives() {
 fn allowing_drops_the_code_it_spent() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let card = "Ромашка";
+    let card = a_request().card().clone();
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
-    ui.codes.push((card.to_string(), ticket));
+    ui.codes.push((card.clone(), ticket));
     let (tx, _rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
 
-    answer_request(&mut ui, card, a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
     assert!(ui.codes.is_empty(), "погашенный зачислением код в карточке не остаётся");
 }
 
@@ -2876,14 +2885,14 @@ fn allowing_drops_the_code_it_spent() {
 fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let card = "Ромашка";
+    let card = a_request().card().clone();
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
-    ui.codes.push((card.to_string(), ticket));
+    ui.codes.push((card.clone(), ticket));
     // Разговор кончился: отвечать некуда — ровно то, о чём окно и говорит
     // словами «та сторона больше не на связи».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
 
-    answer_request(&mut ui, card, a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
 
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "фикстура: ответ и правда не доехал — {:?}", ui.log.last());
     assert_eq!(ui.codes.len(), 1, "никто не гасил этот код — он обязан остаться у человека на руках");

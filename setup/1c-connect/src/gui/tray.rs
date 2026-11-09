@@ -6,8 +6,8 @@
 use super::{
     autostart, badge, confirm_database_change, confirm_database_change_with_text, confirm_switch_current_text, descriptor_changed,
     ensure_publication_now, link, note_line, quit, republish_after_save, run_check, run_readiness, save_host, save_needs_confirm,
-    save_tray_key, save_tray_keys, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme, toggle_agent, toggle_link,
-    window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
+    save_tray_ceiling, save_tray_key, save_tray_keys, start_session, stop_session, switch_current, tab_for_unsaved_switch, theme,
+    toggle_agent, toggle_link, window, Ev, Kind, Line, Tab, TrayState, Ui, TRAY_PNG,
 };
 use crate::cfg::Connection;
 use crate::editors;
@@ -525,19 +525,6 @@ pub(crate) fn session_back_refusal(was_enabled: bool, mode: &str, gate: Option<&
     // Слова называют состояние, а не причину отказа: причину человек уже
     // прочитал строкой выше (её сказал тот, кто отказал).
     Some("Обслуживание базы погашено — включите его заново, когда разберётесь с отказом выше".to_string())
-}
-
-/// Отказ пункта «Запись в базу» на пустом списке соединений — чистое ядро
-/// защиты от воскрешения карточки-фантома (находка ревью задачи 3):
-/// `Cfg::current_mut()` на пустом списке заводит ПЕРВОЕ соединение по
-/// умолчанию, а пункт меню значка, правящий ТЕКУЩИЕ параметры, не имеет
-/// права создавать карточку, которой человек не заводил (`apply_access`
-/// правит именно её). Слова — у `Cfg::no_connections_refusal()`, ОДНОГО
-/// источника на оба отказа (Minor 1 круга починки 1 задачи 6: свой литерал
-/// здесь развёлся бы с `Cfg::switch_current` при первой же правке
-/// формулировки). `None` — список не пуст, пункт работает как обычно.
-fn access_refused_on_empty_list(empty: bool) -> Option<String> {
-    empty.then(crate::cfg::Cfg::no_connections_refusal)
 }
 
 /// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
@@ -1346,46 +1333,34 @@ fn access_not_applied_line(e: &str) -> String {
     format!("запись в базу (mcp-1c): потолок НЕ применён — запись в файл не удалась: {e}")
 }
 
-/// Записать потолок записи ТЕКУЩЕГО соединения — единственный зовущий,
+/// Записать потолок записи МАШИНЫ — единственный зовущий,
 /// `on_menu::MenuAction::Access` (пункт «Запись в базу»).
 ///
-/// **Страж на пустом списке соединений — находка ревью задачи 3, Important 1
-/// и Minor 2 круга починки 1 задачи 6.** `Cfg::current_mut()` ниже на
-/// пустом списке (свежий комплект или комплект после удаления последней
-/// карточки) завела бы ПЕРВОЕ соединение по умолчанию — карточку-фантом,
-/// которой человек не заводил. Страж стоит здесь, у защищаемого действия, а
-/// не в `on_menu`: сегодня у функции один зовущий, и дырки нет, но второй
-/// зовущий без стража открыл бы её снова (тот же способ, которым в
-/// соседних задачах заводились «вторые двери»). Отказ идёт журналом И
-/// показом окна (`tab_for_unsaved_switch`/`window::show_window`), тем же
-/// путём, что и ветвь отказа записи ниже: значок живёт и без окна, и без
-/// показа человек слов отказа не увидел бы вовсе.
+/// **Чего здесь больше нет и почему.** Пока потолок был полем карточки, этой
+/// функции приходилось сохранять КАРТОЧКУ целиком (`save_host`), со всеми её
+/// полями и всей её проверкой, — а когда проверка отказывала (свежий
+/// комплект, поля ещё пустые), догонять одним ключом в блок соединения. Двух
+/// путей записи здесь больше нет: потолок — поле машины, его ключ лежит в
+/// корне файла и ни от одной карточки не зависит. Вместе с этим ушёл и страж
+/// на пустом списке соединений (находка ревью задачи 3): он стоял против
+/// `Cfg::current_mut()`, заводившей карточку-фантом, а эта функция до
+/// `current_mut()` больше не доходит — завести карточку потолком стало
+/// невозможно. Человек, у которого карточек ещё нет, выбирает потолок
+/// машины так же, как и любой другой: он про машину, а не про карточку.
 fn apply_access(cx: &mut App, access: &'static str) {
-    let empty = cx.global::<Ui>().cfg.connections.is_empty();
-    if let Some(why) = access_refused_on_empty_list(empty) {
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
-        cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
-        window::show_window(cx);
-        let current = cx.global::<Ui>().cfg.access().to_string();
-        if let Some(tray) = &cx.global::<Ui>().tray {
-            tray.set_access(&current);
-        }
-        cx.refresh_windows();
-        return;
-    }
-    cx.global_mut::<Ui>().cfg.current_mut().write = access.into();
-    let host = cx.global::<Ui>().cfg.current().clone();
-    match save_host(cx.global_mut::<Ui>(), host) {
+    match save_tray_ceiling(cx.global_mut::<Ui>(), access) {
         Ok(()) => {
             if let Some(tray) = &cx.global::<Ui>().tray {
                 tray.set_access(access);
             }
-            // `update_cfg` не повредит и в туннельном режиме (её же
-            // докстрока) — отдельной ветки по режиму, в отличие от
-            // `save_host`, здесь не нужно. Весь `ui.cfg` годен (`save_host`
-            // только что это проверил целиком) — толкаем его как есть.
+            // В сеанс едет НЕ весь `ui.cfg` (его никто не проверял: в окне
+            // могут лежать недописанные поля), а уже годный `Cfg` живой
+            // ячейки с одним подменённым полем — ровно то, ради чего
+            // `Cfg::with_access` и существует. Так ужесточение доходит до
+            // работающего ребёнка даже тогда, когда остальные поля в окне
+            // ещё негодны.
             if let Some(s) = &cx.global::<Ui>().session {
-                s.update_cfg(cx.global::<Ui>().cfg.clone());
+                s.update_cfg(s.cfg_now().with_access(access));
             }
             let mut label = access;
             for (a, _, text) in ACCESS {
@@ -1404,28 +1379,15 @@ fn apply_access(cx: &mut App, access: &'static str) {
                 },
             );
         }
-        Err(why) => {
+        Err(e) => {
             // Честный отказ, не живое ужесточение (финальное решение круга
             // исправления 4, поправка ведущего — см. докстроку
             // `access_not_applied_line`). Сеанс здесь не трогаем вовсе:
-            // показ окна ниже перечитает файл сам, и если ключ лёг
-            // (`save_tray_key` — Ok), он дойдёт до сеанса тем же путём, что
-            // и любая другая правка toml руками (`adopt_cfg`); не лёг — не
-            // дойдёт, и журнал обязан сказать это прямо, не создавая
-            // видимость защиты.
-            match save_tray_key(cx.global_mut::<Ui>(), "write", access) {
-                Ok(()) => {
-                    // Запись одного ключа — намерение человека, а не
-                    // действие над базой (та же развязка, что у режима и
-                    // публикации): на свежем комплекте с пустыми полями
-                    // она обязана сработать даже при негодных остальных.
-                    let label = ACCESS.iter().find(|(a, ..)| *a == access).map(|(_, _, t)| *t).unwrap_or(access);
-                    note_line(cx.global_mut::<Ui>(), unsaved_switch_line("запись в базу", label, why));
-                }
-                Err(e) => {
-                    note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: access_not_applied_line(&e) });
-                }
-            }
+            // показ окна ниже перечитает файл сам, и если бы ключ лёг, он
+            // дошёл бы до сеанса тем же путём, что и любая другая правка
+            // toml руками (`adopt_cfg`); не лёг — не дойдёт, и журнал обязан
+            // сказать это прямо, не создавая видимость защиты.
+            note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: access_not_applied_line(&e) });
             cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
             // Трей отражает ФАКТИЧЕСКИЙ потолок — то, что реально лежит в
@@ -1546,12 +1508,11 @@ pub fn on_menu(ev: MenuEvent, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        access_not_applied_line, access_refused_on_empty_list, agent_available, agent_checked, agent_menu_id,
-        apply_switch_current_decision, busy_now_word, busy_refusal, host_for_mode_change, icon_rgba, menu_action, mode_change_blocked,
-        publication_after_switch, raise_session_after_mode_change, save_host, session_back_refusal, should_raise_session,
-        switch_current_outcome, toggle_enabled, unsaved_publication_keys, unsaved_switch_line, write_mode, write_switch_current,
-        ApplySwitchCurrent, Kind, MenuAction, ModeWrite, PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS,
-        ACCESS_SUBMENU, AGENTS_SUBMENU,
+        access_not_applied_line, agent_available, agent_checked, agent_menu_id, apply_switch_current_decision, busy_now_word, busy_refusal,
+        host_for_mode_change, icon_rgba, menu_action, mode_change_blocked, publication_after_switch, raise_session_after_mode_change,
+        save_host, save_tray_ceiling, session_back_refusal, should_raise_session, switch_current_outcome, toggle_enabled,
+        unsaved_publication_keys, unsaved_switch_line, write_mode, write_switch_current, ApplySwitchCurrent, Kind, MenuAction, ModeWrite,
+        PublicationAfterSwitch, SwitchCurrentOutcome, TrayState, Ui, ACCESS, ACCESS_SUBMENU, AGENTS_SUBMENU,
     };
     use crate::cfg::Connection;
     use crate::editors;
@@ -1630,36 +1591,54 @@ mod tests {
 
     /// Тот же предел, что у `choosing_a_mode_writes_the_toml_and_restarts_the_session`:
     /// обработчик меню нуждается в `cx: &mut App` (GPUI, без headless-
-    /// гарнеса здесь) — тестируем то, что можно без него: запись потолка
-    /// через `save_host`, от которой зависит пересборка `mcp_command`
-    /// (шаг 6 брифа — там же проверено, что пересборка несёт новый
-    /// `--access`).
+    /// гарнеса здесь) — под тестом то, что можно без него: запись потолка,
+    /// от которой зависит пересборка `mcp_command` (шаг 6 брифа — там же
+    /// проверено, что пересборка несёт новый `--access`).
+    ///
+    /// Красный тест починки 10.11: ключ обязан лечь в КОРЕНЬ файла, а
+    /// карточка — остаться нетронутой. Прежде щелчок в меню писал
+    /// `write = "read_write"` в блок ТЕКУЩЕГО соединения, и оба `contains`
+    /// ниже проходили бы на одном и том же — поэтому карточка проверяется
+    /// отдельным чтением модели, а не поиском подстроки в тексте.
     #[test]
-    fn choosing_an_access_ceiling_writes_the_toml() {
+    fn choosing_an_access_ceiling_writes_the_machine_key_not_the_card() {
         let mut ui = Ui::for_test();
         assert_eq!(ui.cfg.access(), "read_only");
-        ui.cfg.current_mut().write = "read_write".into();
-        let host = ui.cfg.current().clone();
-        save_host(&mut ui, host).unwrap();
+        let was = ui.cfg.current().write.clone();
+        save_tray_ceiling(&mut ui, "read_write").unwrap();
         assert_eq!(ui.cfg.access(), "read_write");
+        assert_eq!(ui.cfg.current().write, was, "щелчок потолка не трогает право записи карточки");
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();
-        assert!(text.contains("write = \"read_write\""), "{text}");
+        let root: String = text.split(crate::cfg::CONNECTION).next().unwrap_or_default().into();
+        assert!(root.contains("write = \"read_write\""), "потолок обязан лежать в корне файла, до первого блока: {text}");
+        let blocks = text.split(crate::cfg::CONNECTION).skip(1).collect::<String>();
+        assert!(!blocks.contains("write = \"read_write\""), "в блок соединения потолок попадать не должен: {text}");
     }
 
-    /// Находка ревью задачи 3: пункт меню «Запись в базу» на пустом списке
-    /// соединений обязан отказать словами `Cfg::no_connections_refusal()` —
-    /// тем же источником, что читает и `Cfg::switch_current` (Minor 1 круга
-    /// починки 1 задачи 6: сравниваем с живым источником, а не с
-    /// замороженной копией его слов, иначе правка формулировки там не
-    /// уронила бы этот тест здесь), — а не дойти до `Cfg::current_mut()` и
-    /// завести карточку, которой человек не заводил. Страж живёт в
-    /// `apply_access` (Minor 2), недостижимой без живого `App` (GPUI, без
-    /// headless-гарнеса здесь) — под тестом чистое ядро решения, которое она
-    /// зовёт.
+    /// Потолок — свойство МАШИНЫ, и карточек для него не требуется: на пустом
+    /// списке соединений он пишется так же, как на непустом, и карточки при
+    /// этом не заводит. Прежде здесь стоял отказ словами (находка ревью
+    /// задачи 3) — он защищал от карточки-фантома, которую заводила
+    /// `Cfg::current_mut()`; теперь заводить её нечем, и отказывать человеку
+    /// не в чем.
     #[test]
-    fn access_is_refused_on_an_empty_list_with_the_same_words_as_switch_current() {
-        assert_eq!(access_refused_on_empty_list(true), Some(crate::cfg::Cfg::no_connections_refusal()));
-        assert_eq!(access_refused_on_empty_list(false), None, "список не пуст — пункт работает как обычно");
+    fn the_ceiling_needs_no_cards_at_all() {
+        let mut ui = Ui::for_test();
+        ui.cfg.connections.clear();
+        save_tray_ceiling(&mut ui, "read_write").unwrap();
+        assert_eq!(ui.cfg.access(), "read_write");
+        assert!(ui.cfg.connections.is_empty(), "потолок не имеет права заводить карточку");
+    }
+
+    /// Неизвестное слово в потолок не пишется вовсе — отказ словами ДО записи
+    /// на диск, тем же разбором, которым читается файл человека.
+    #[test]
+    fn an_unknown_ceiling_is_refused_before_anything_is_written() {
+        let mut ui = Ui::for_test();
+        let before = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap_or_default();
+        let e = save_tray_ceiling(&mut ui, "может быть").unwrap_err();
+        assert!(e.contains("read_write") && e.contains("read_only"), "{e}");
+        assert_eq!(std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap_or_default(), before);
     }
 
     /// Окно отказывает на пути с `..` и НИЧЕГО не пишет. Своей проверки у окна для
@@ -1693,8 +1672,7 @@ mod tests {
     /// сеанса), не трогая остальные.
     #[test]
     fn a_tightened_ceiling_reaches_the_rebuilt_command_even_with_bad_fields_elsewhere() {
-        let mut live = crate::cfg::filled_for_test();
-        live.current_mut().write = "read_write".into();
+        let live = crate::cfg::filled_for_test().with_access("read_write");
         assert!(live.validate().is_ok(), "вводная: живая ячейка держит годный Cfg");
         let tightened = live.clone().with_access("read_only");
         assert_eq!(tightened.current().base_path, live.current().base_path, "остальные поля не тронуты");

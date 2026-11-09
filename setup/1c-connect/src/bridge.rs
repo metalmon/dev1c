@@ -1657,7 +1657,8 @@ mod tests {
     fn the_child_gets_the_toolset_the_access_and_the_configuration() {
         let mut c = crate::cfg::filled_for_test();
         c.current_mut().profile = "business".into();
-        c.current_mut().write = "read_only".into();
+        // Потолок — поле МАШИНЫ (`Cfg::write`), не карточки: с 10.11 его ставит `with_access`.
+        let c = c.with_access("read_only");
         let cmd = mcp_command(&c, &kit_for_test());
         let argv: Vec<String> = cmd.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(argv.windows(2).any(|w| w == ["--toolset", "business"]), "{argv:?}");
@@ -1683,13 +1684,12 @@ mod tests {
     /// всякого GUI.
     #[test]
     fn rebuilding_the_command_after_the_ceiling_changes_carries_the_new_access() {
-        let mut c = crate::cfg::filled_for_test();
-        c.current_mut().write = "read_only".into();
+        let c = crate::cfg::filled_for_test().with_access("read_only");
         let before = mcp_command(&c, &kit_for_test());
         let args_before: Vec<String> = before.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args_before.windows(2).any(|w| w == ["--access", "read_only"]), "{args_before:?}");
 
-        c.current_mut().write = "read_write".into();
+        let c = c.with_access("read_write");
         let after = mcp_command(&c, &kit_for_test());
         let args_after: Vec<String> = after.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(args_after.windows(2).any(|w| w == ["--access", "read_write"]), "{args_after:?}");
@@ -2049,8 +2049,7 @@ mod tests {
         // «всё разрешено по списку», не пустая строка, которая с решения
         // владельца 1.11 значит `read_only` по умолчанию. Сам потолок
         // проверяют отдельные тесты ниже, с `read_only` явно.
-        cfg.current_mut().write = "read_write".into();
-        cfg
+        cfg.with_access("read_write")
     }
 
     fn rules(allowed: &[&str], running: usize) -> Rules {
@@ -2077,8 +2076,7 @@ mod tests {
     /// прежнего «читай-пиши» — см. довод у `test_cfg`.
     fn rules_read_only(allowed: &[&str], running: usize) -> Rules {
         let r = rules(allowed, running);
-        let mut cfg = r.live.get().1;
-        cfg.current_mut().write = "read_only".into();
+        let cfg = r.live.get().1.with_access("read_only");
         r.live.set(cfg);
         r
     }
@@ -2653,8 +2651,7 @@ mod tests {
     #[tokio::test]
     async fn the_mcp_port_ignores_the_write_ceiling_entirely() {
         let mut rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().write = "read_only".into();
+        let cfg = crate::cfg::filled_for_test().with_access("read_only");
         rules.live = Live::new(cfg);
         let (replies, raw, _) = talk(
             ("BRIDGE_SCRIPT", "1"),
@@ -2905,8 +2902,7 @@ mod tests {
         let reply1 = wait_line(&mut lines, |l| l.starts_with('{') && l.contains("\"id\":1")).await;
         assert!(reply1.contains("cf_load"), "потолок «чтение-запись» — список как раньше: {reply1}");
 
-        let mut cfg_b = live.get().1;
-        cfg_b.current_mut().write = "read_only".into();
+        let cfg_b = live.get().1.with_access("read_only");
         live.set(cfg_b);
         let list2 = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
         w.write_all(list2).await.unwrap();

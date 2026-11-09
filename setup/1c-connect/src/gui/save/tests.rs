@@ -691,13 +691,40 @@ fn a_tray_key_lands_in_the_current_connections_block_and_keeps_the_file_readable
     two.current = "Ромашка".into();
     std::fs::write(ui.kit.state_path(cfg::FILE), two.render(&store).unwrap()).unwrap();
     ui.cfg = two;
-    save_tray_key(&mut ui, "write", "read_write").unwrap();
+    let neighbour = ui.cfg.connections[0].base_url.clone();
+    save_tray_key(&mut ui, "base_url", "http://localhost/Buh/hs/mcp-1c").unwrap();
     let text = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
     assert!(!text.contains("[host]"), "обеих половин в файле быть не должно — такой файл чтение отвергает:\n{text}");
     let back: Cfg = toml::from_str(&text).expect("файл после записи разбирается");
     assert!(back.read_notes.is_empty(), "и читается без находок: {:?}", back.read_notes);
-    assert_eq!(back.current().write, "read_write", "ключ попал в блок текущего соединения");
-    assert_eq!(back.connections[0].write, "", "а соседний блок не тронут");
+    assert_eq!(back.current().base_url, "http://localhost/Buh/hs/mcp-1c", "ключ попал в блок текущего соединения");
+    assert_eq!(back.connections[0].base_url, neighbour, "а соседний блок не тронут");
+}
+
+/// Потолок машины ложится в КОРЕНЬ файла и не задевает ни блоки соединений,
+/// ни чужой шифртекст: он пишется тем же приёмом «правим текст файла, а не
+/// перерисовываем его» (`save_tray_ceiling`), и обе опасности у него те же,
+/// что у ключей карточки, — поэтому и проверены тем же способом.
+#[test]
+fn the_machine_ceiling_lands_in_the_root_and_keeps_the_rest_of_the_file() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    let mut host = ui.cfg.current().clone();
+    host.password = "секрет с другой машины".into();
+    let rendered = Cfg::of_one(host).render(&store).unwrap();
+    std::fs::write(ui.kit.state_path(cfg::FILE), &rendered).unwrap();
+    let password_line = rendered.lines().find(|l| l.starts_with("password = ")).unwrap().to_string();
+    ui.cfg.current_mut().password = String::new();
+
+    save_tray_ceiling(&mut ui, "read_write").unwrap();
+
+    let after = std::fs::read_to_string(ui.kit.state_path(cfg::FILE)).unwrap();
+    assert!(after.lines().any(|l| l == password_line), "шифртекст пароля должен остаться дословно:\n{after}");
+    let root = after.split(cfg::CONNECTION).next().unwrap_or_default();
+    assert!(root.contains("write = \"read_write\""), "потолок — корневой ключ, до первого блока:\n{after}");
+    let back: Cfg = toml::from_str(&after).expect("файл после записи разбирается");
+    assert_eq!(back.access(), "read_write");
+    assert_eq!(back.current().write, "", "право записи карточки щелчком потолка не меняется");
 }
 
 /// Important 1 ревью задачи 2: переключатель в трее правит ОДИН ключ текстом,

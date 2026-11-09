@@ -84,7 +84,9 @@ fn a_second_field_joining_the_list_is_noted_again() {
 fn adopt_cfg_rolls_back_a_live_only_tightening_to_what_is_on_disk() {
     let mut ui = Ui::for_test();
     ui.cfg.current_mut().mode = "local".into();
-    ui.cfg.current_mut().write = "read_write".into();
+    // Потолок — поле МАШИНЫ с 10.11 (докстрока `Cfg::write`): «в файле
+    // read_write» значит корневой ключ, а не ключ карточки.
+    ui.cfg = ui.cfg.clone().with_access("read_write");
     // Настоящий `Session` — та же ячейка (`Live`), что и в работающей
     // программе; слушатели ей заводить незачем (`cfg_now`/`update_cfg` не
     // зависят от того, поднялись ли реальные порты).

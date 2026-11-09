@@ -142,6 +142,16 @@ impl Book {
     /// порчу (`quarantine`), и без замка это переименование могло бы
     /// столкнуться с чужой записью, которая в тот же миг кладёт файл на
     /// место после `rename` в `write_atomic` у другого процесса.
+    ///
+    /// **В продукте её больше не зовёт никто: `verdict` ниже её заменил** —
+    /// принимающей стороне нужны три случая, а не два (см. его докстроку).
+    /// Поэтому она ушла из сборки целиком (`cfg(test)`), а не осталась второй
+    /// мерой того же вопроса рядом с первой. Удалить её совсем мешает ровно
+    /// одно: её ещё спрашивают тесты зачисления (`enroll.rs`) — файл соседней
+    /// работы, правка в котором была бы затёрта. Перевести их на `verdict` и
+    /// убрать эту обёртку — названный долг; свои тесты (ниже в этом файле)
+    /// спрашивают уже `verdict`.
+    #[cfg(test)]
     pub fn check(&self, secret: &[u8; 32]) -> Result<String, String> {
         match self.verdict(secret)? {
             Verdict::Card(name) => Ok(name),
@@ -150,7 +160,8 @@ impl Book {
         }
     }
 
-    /// То же, что `check`, но ВЕРДИКТОМ, а не словами.
+    /// То же, что прежняя `check`, но ВЕРДИКТОМ, а не словами, — и в продукте
+    /// спрашивается только это.
     ///
     /// Нужно тому, кто обязан различать три разных случая, а не два (круг
     /// починки 2 задачи 5, Important 6). `check` сводит «кода нет»,
@@ -172,24 +183,6 @@ impl Book {
             Found::Expired => Verdict::Expired,
             Found::Unknown => Verdict::Unknown,
         })
-    }
-
-    /// Есть ли вообще хоть один живой выданный код — с диска, под замком.
-    ///
-    /// Вопрос узкий, а нужен он затем, что принимающая сторона иначе не
-    /// знает, ждать ли ей заявку. Уже зачисленная сторона обычно просто
-    /// переподключается и `enroll` не шлёт вовсе — а спека не даёт ей слова
-    /// сказать «мне не о чем просить». Ждать её заявку на всякий случай
-    /// значило бы задержать разговор на весь срок ожидания при каждом
-    /// переподключении; не ждать вовсе — проглотить законную заявку на ВТОРУЮ
-    /// карточку. Выданный код и есть тот признак, по которому эти два случая
-    /// различаются без единого нового поля на проводе: нет непогашенных
-    /// кодов — ничья заявка не могла бы сработать, и ждать нечего.
-    pub fn has_live_ticket(&self) -> Result<bool, String> {
-        let _guard = lock(&self.path)?;
-        let data = load_raw(&self.path)?;
-        let now = now_secs();
-        Ok(data.tickets.iter().any(|t| t.until >= now))
     }
 
     /// Запоминает выданный тикет: отпечаток секрета (не сам секрет — см.
@@ -643,13 +636,13 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
-/// Общий поиск для `check`, `spend` и `verdict`: по секрету — за постоянное
+/// Общий поиск для `verdict` и `spend`: по секрету — за постоянное
 /// время (`constant_time_eq`) — и по сроку. `spend` после успеха
 /// дополнительно удаляет найденную запись сам; здесь только позиция и
 /// решение, жива ли она.
 ///
 /// Отдаёт ВЕРДИКТ, а не `Result<usize, String>`: слова отказа — дело
-/// вызывающего (`check` их и пишет), а здесь они только мешали бы — тому,
+/// вызывающего (`spend` их и пишет), а здесь они только мешали бы — тому,
 /// кому нужен не текст, а различие (`verdict`), пришлось бы разбирать текст
 /// обратно.
 fn locate(data: &BookFile, secret: &[u8; 32]) -> Found {
@@ -684,9 +677,9 @@ pub enum Verdict {
     Unknown,
 }
 
-/// Слова `check` на два вердикта из трёх. Вынесены в константы, потому что
-/// их же обязан знать `spend` — два писателя одного текста разошлись бы на
-/// первой правке.
+/// Слова `spend` на два вердикта из трёх. Вынесены в константы, потому что их
+/// же обязана знать прежняя `check` — два писателя одного текста разошлись бы
+/// на первой правке.
 const UNKNOWN_TICKET: &str = "Код не найден или уже погашен.\nПопросите новый на той машине, которая его выдала.";
 const EXPIRED_TICKET: &str = "Код устарел.\nПопросите новый на той машине, которая его выдала.";
 
@@ -953,6 +946,22 @@ mod tests {
         Ticket::issue(node_id(), None, vec![]).unwrap()
     }
 
+    /// Вердикт по коду — то, что спрашивает продукт (`enroll::accept_side`).
+    /// Тесты ниже спрашивают его же, а не прежнюю `check`: она сводила «кода
+    /// нет», «код устарел» и «книга не прочиталась» к одному `Err` со
+    /// строкой — то есть тест, написанный через неё, не различал два разных
+    /// отказа и один наш сбой (задача 2 плана починки по двум ревью).
+    fn verdict(book: &Book, secret: &[u8; 32]) -> Verdict {
+        book.verdict(secret).expect("книга обязана прочитаться")
+    }
+
+    /// Вердикт «код жив, вот карточка» — им кончается почти каждая проверка
+    /// ниже, и писать `Verdict::Card("buh".to_string())` в каждой значило бы
+    /// читать глазами кавычки вместо смысла.
+    fn card(name: &str) -> Verdict {
+        Verdict::Card(name.to_string())
+    }
+
     /// Без места для партнёра зовущая сторона после перезапуска не вернётся
     /// НИКОГДА: код одноразовый, а ключа той машины больше нигде нет.
     ///
@@ -1117,11 +1126,15 @@ mod tests {
         let new = a_ticket();
         let mut book = Book::open(&d).unwrap();
         book.reissue("buh", &old).unwrap();
-        assert_eq!(book.check(&old.secret).unwrap(), "buh", "иначе тест проверяет не то");
+        assert_eq!(verdict(&book, &old.secret), card("buh"), "иначе тест проверяет не то");
 
         book.reissue("buh", &new).unwrap();
-        assert!(book.check(&old.secret).is_err(), "прежний код обязан быть отвергнут — именно за этим и нажимают «Выдать новый»");
-        assert_eq!(book.check(&new.secret).unwrap(), "buh", "а новый — работать");
+        assert_eq!(
+            verdict(&book, &old.secret),
+            Verdict::Unknown,
+            "прежний код обязан быть отвергнут — именно за этим и нажимают «Выдать новый»"
+        );
+        assert_eq!(verdict(&book, &new.secret), card("buh"), "а новый — работать");
 
         // Гашение дошло до файла, а не только до снимка в памяти: иначе
         // перезапуск вернул бы утёкший код к жизни.
@@ -1140,7 +1153,7 @@ mod tests {
         let mut book = Book::open(&d).unwrap();
         book.reissue("mcp", &neighbour).unwrap();
         book.reissue("buh", &a_ticket()).unwrap();
-        assert_eq!(book.check(&neighbour.secret).unwrap(), "mcp", "перевыпуск одной карточки погасил код другой");
+        assert_eq!(verdict(&book, &neighbour.secret), card("mcp"), "перевыпуск одной карточки погасил код другой");
     }
 
     /// Негодный новый код прежние не гасит: карточка не должна остаться без
@@ -1154,7 +1167,7 @@ mod tests {
         let mut stale = a_ticket();
         stale.until = UNIX_EPOCH;
         assert!(book.reissue("buh", &stale).is_err(), "просроченный код выдавать некому");
-        assert_eq!(book.check(&good.secret).unwrap(), "buh", "отказ выдачи погасил годный код");
+        assert_eq!(verdict(&book, &good.secret), card("buh"), "отказ выдачи погасил годный код");
     }
 
     #[test]
@@ -1225,30 +1238,30 @@ mod tests {
         assert!(book.spend(&ticket.secret).is_err(), "второй раз тот же код уже не работает");
     }
 
-    /// Критично 1 круга починки 1: `check` — непортящая проверка (шаг
+    /// Критично 1 круга починки 1: `verdict` — непортящая проверка (шаг
     /// третий спеки), `spend` — погашение (шаг пятый, после разрешения
     /// человека). Без разделения пришлось бы выбирать между сожжённым
     /// обрывом сети кодом и диалогом на любой мусор — ровно то, от чего
     /// секрет тикета и был заведён.
     #[test]
-    fn checking_a_ticket_does_not_spend_it_but_spend_does() {
+    fn asking_about_a_ticket_does_not_spend_it_but_spend_does() {
         let d = dir("check-vs-spend");
         let ticket = a_ticket();
         let mut book = Book::open(&d).unwrap();
         book.issue("buh", &ticket).unwrap();
 
-        assert_eq!(book.check(&ticket.secret).unwrap(), "buh", "проверка обязана узнать карточку");
-        assert_eq!(book.check(&ticket.secret).unwrap(), "buh", "повторная проверка — тот же результат: check не гасит");
+        assert_eq!(verdict(&book, &ticket.secret), card("buh"), "проверка обязана узнать карточку");
+        assert_eq!(verdict(&book, &ticket.secret), card("buh"), "повторная проверка — тот же результат: verdict не гасит");
         assert_eq!(book.spend(&ticket.secret).unwrap(), "buh", "а spend гасит");
-        assert!(book.check(&ticket.secret).is_err(), "после spend проверка уже не находит тикет");
+        assert_eq!(verdict(&book, &ticket.secret), Verdict::Unknown, "после spend проверка уже не находит тикет");
         assert!(book.spend(&ticket.secret).is_err(), "и spend повторно тоже не находит");
     }
 
     #[test]
-    fn checking_an_unknown_secret_is_refused() {
+    fn an_unknown_secret_gets_no_card_from_the_book() {
         let d = dir("check-unknown");
         let book = Book::open(&d).unwrap();
-        assert!(book.check(&[0x22u8; 32]).is_err(), "неизвестный секрет не подтверждается проверкой");
+        assert_eq!(verdict(&book, &[0x22u8; 32]), Verdict::Unknown, "неизвестный секрет не подтверждается проверкой");
     }
 
     #[test]

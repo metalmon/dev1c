@@ -46,14 +46,26 @@ struct Enrolled {
     write: bool,
 }
 
-/// Выданный, но ещё не погашенный тикет. `secret` — hex, как печатает
-/// `ticket::Ticket::to_code` внутри себя; `until` — unix-секунды, та же
-/// точность, с которой тикет и был выдан (`Ticket::issue`), так что сравнение
-/// со сроком не теряет и не находит лишней секунды.
+/// Выданный, но ещё не погашенный тикет.
+///
+/// **Секрета здесь нет — есть `fingerprint`, sha256 от него (решение
+/// ведущего по замечанию проверки безопасности).** Хранящей стороне секрет
+/// самой не нужен: ей нужно уметь проверить ПРЕДЪЯВЛЕННЫЙ секрет, а не
+/// предъявить свой, — а это ровно то, что умеет отпечаток: посчитать тот же
+/// хэш от пришедшего и сравнить. Украсть файл тогда бессмысленно: из
+/// отпечатка секрет не собрать обратно никак — это сильнее, чем запечатать
+/// секрет через `secrets::Store` (как ключ узла в `node.rs`), потому что
+/// запечатанное открывается той же учётной записью, а отпечаток не
+/// открывается вообще. Это и точнее ложится на спеку: «тикет не хранится
+/// нигде после погашения» теперь верно и ДО погашения тоже.
+///
+/// `until` — unix-секунды, та же точность, с которой тикет и был выдан
+/// (`Ticket::issue`), так что сравнение со сроком не теряет и не находит
+/// лишней секунды.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IssuedTicket {
     connection: String,
-    secret: String,
+    fingerprint: String,
     until: u64,
 }
 
@@ -74,24 +86,34 @@ pub struct Book {
 impl Book {
     /// Читает файл состояния или заводит пустую книгу, если его ещё нет —
     /// нет файла значит нет истории, а не беда (первый запуск).
+    ///
+    /// Просроченные тикеты выбрасываются сразу при чтении (требование 2
+    /// замечания безопасности): держать то, что уже не сработает, незачем,
+    /// а если что-то успели выбросить — тут же перезаписываем файл, чтобы
+    /// старый хвост не пережил ещё один перезапуск без единого изменения.
     pub fn open(state_dir: &Path) -> Result<Book, String> {
         let path = state_dir.join(FILE);
-        let data = match std::fs::read_to_string(&path) {
+        let mut data: BookFile = match std::fs::read_to_string(&path) {
             Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: файл зачислений повреждён: {e}", path.display()))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BookFile::default(),
             Err(e) => return Err(format!("не удалось прочитать {}: {e}", path.display())),
         };
-        Ok(Book { path, data })
+        let pruned = prune_expired(&mut data);
+        let mut book = Book { path, data };
+        if pruned {
+            book.persist()?;
+        }
+        Ok(book)
     }
 
-    /// Запоминает выданный тикет: по какому секрету его погашать, к какой
-    /// карточке он относится и когда он умирает. Пишет на диск сразу же —
-    /// без этого второй процесс (или этот же после перезапуска) не увидел
-    /// бы код, который уже отдали человеку.
+    /// Запоминает выданный тикет: отпечаток секрета (не сам секрет — см.
+    /// докстроку `IssuedTicket`), к какой карточке он относится и когда он
+    /// умирает. Пишет на диск сразу же — без этого второй процесс (или этот
+    /// же после перезапуска) не увидел бы код, который уже отдали человеку.
     pub fn issue(&mut self, connection: &str, ticket: &crate::ticket::Ticket) -> Result<(), String> {
         self.data.tickets.push(IssuedTicket {
             connection: connection.to_string(),
-            secret: hex_encode(&*ticket.secret),
+            fingerprint: fingerprint(&ticket.secret),
             until: ticket.until.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs(),
         });
         self.persist()
@@ -113,9 +135,13 @@ impl Book {
     /// «потрачен» запрещено, различить два случая снаружи нечем, и спека это
     /// допускает.
     pub fn spend(&mut self, secret: &[u8; 32]) -> Result<String, String> {
-        let want = hex_encode(secret);
+        let want = fingerprint(secret);
         let now = now_secs();
-        let Some(pos) = self.data.tickets.iter().position(|t| t.secret == want) else {
+        // Сравнение отпечатков — за постоянное время (требование 1
+        // замечания безопасности): обычное `==` у строк способно выйти на
+        // первом несовпавшем байте, а по тому, сколько заняло времени,
+        // чужая сторона в принципе может угадывать секрет байт за байтом.
+        let Some(pos) = self.data.tickets.iter().position(|t| constant_time_eq(&t.fingerprint, &want)) else {
             return Err("Код не найден или уже погашен.\nПопросите новый на той машине, которая его выдала.".to_string());
         };
         let expired = self.data.tickets[pos].until < now;
@@ -154,7 +180,12 @@ impl Book {
             .collect()
     }
 
-    fn persist(&self) -> Result<(), String> {
+    /// Пишет книгу на диск. Просроченные тикеты выбрасываются и здесь же
+    /// (требование 2 замечания безопасности) — так каждый писатель
+    /// (`issue`, `spend`, `enroll`, `revoke`) бесплатно подчищает файл
+    /// заодно со своим изменением, без отдельной «уборки по расписанию».
+    fn persist(&mut self) -> Result<(), String> {
+        prune_expired(&mut self.data);
         let text = toml::to_string_pretty(&self.data).map_err(|e| format!("зачисления не собрались в toml: {e}"))?;
         write_atomic(&self.path, &text)
     }
@@ -164,10 +195,82 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
+/// Выбрасывает тикеты, срок которых уже прошёл. Возвращает `true`, если
+/// что-то выбросили, — `open` отличает этим «надо дописать файл» от «файл и
+/// так в порядке».
+fn prune_expired(data: &mut BookFile) -> bool {
+    let now = now_secs();
+    let before = data.tickets.len();
+    data.tickets.retain(|t| t.until >= now);
+    before != data.tickets.len()
+}
+
+/// sha256 от секрета — то, что лежит в файле вместо самого секрета (см.
+/// докстроку `IssuedTicket`). Hex, а не сырые байты: тот же вид, что у
+/// остального в этом toml, читается в журнале разбора беды без расшифровщика.
+fn fingerprint(secret: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(secret);
+    hex_encode(h.finalize().as_slice())
+}
+
+/// Сравнение двух отпечатков за постоянное время: без единого раннего
+/// выхода внутри цикла по содержимому, только по длине. Длина отпечатка не
+/// секрет (у sha256 она всегда одна), так что выход по ней ничего не выдаёт
+/// — в отличие от выхода по первому несовпавшему байту, который и выдаёт,
+/// сколько байт угадано верно.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 /// Через временный файл и переименование — тот же приём, что у `node::write_sealed`:
 /// этот файл несёт зачисления ВСЕХ карточек рабочего места, и обрыв питания
 /// посреди прямой записи стёр бы их все разом, а не только то одно
 /// изменение, ради которого шла запись.
+///
+/// На Unix временный файл создаётся с правами 0600 сразу при создании, одним
+/// системным вызовом (требование 3 замечания безопасности) — так между
+/// появлением файла на диске и ограничением прав не остаётся окна, в которое
+/// файл мог бы прочитать кто-то кроме владельца; переименование права не
+/// меняет, так что итоговый файл получает их тем же путём. На Windows
+/// отдельного пути сузить права ФАЙЛА этот крейт не заводит ни для одного
+/// файла состояния (приватность секретов там несёт DPAPI — `secrets.rs` —
+/// а не ACL файла): файл наследует права каталога состояния (`Kit::state`),
+/// и если своего пути нет — то нет, и это стоит сказать прямо, а не
+/// промолчать.
+#[cfg(unix)]
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("не удалось записать {}: {e}", tmp.display()))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("не удалось записать {}: {e}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("не удалось переименовать {} в {}: {e}", tmp.display(), path.display())
+    })
+}
+
+#[cfg(not(unix))]
 fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("не удалось создать {}: {e}", dir.display()))?;
@@ -182,8 +285,8 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
 
 /// Hex без разделителей — дублирует `ticket::hex`/`secrets::hex` (оба не
 /// публичные): мелкий файловый помощник в этом крейте принято не делить
-/// между модулями. Только кодирование: секрет сюда приходит уже байтами, а
-/// расшифровывать нечего — сравнение идёт по hex обеих сторон.
+/// между модулями. Только кодирование: нужен лишь печатаемый вид отпечатка,
+/// расшифровывать здесь нечего — отпечаток sha256 обратно не разворачивается.
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -291,5 +394,63 @@ mod tests {
 
         assert!(book.spend(&ticket.secret).is_err(), "просроченный тикет гасить нечем — отказ");
         assert!(book.spend(&ticket.secret).is_err(), "и повторно он не всплывает как живой");
+    }
+
+    /// Замечание безопасности, требование «неверный секрет отвергается»: и
+    /// попытка с чужим секретом должна провалиться, и настоящий тикет
+    /// обязан пережить такую попытку — неверная заявка не имеет права
+    /// погасить чужой код.
+    #[test]
+    fn a_wrong_secret_is_refused_and_does_not_burn_the_real_ticket() {
+        let d = dir("wrong-secret");
+        let ticket = a_ticket();
+        let mut book = Book::open(&d).unwrap();
+        book.issue("buh", &ticket).unwrap();
+
+        let wrong = [0xA5u8; 32];
+        assert!(book.spend(&wrong).is_err(), "чужой секрет не должен гаситься как настоящий");
+        assert_eq!(book.spend(&ticket.secret).unwrap(), "buh", "настоящий тикет обязан быть жив после неверной попытки");
+    }
+
+    /// Замечание безопасности, требование «в файле секрета нет ни в каком
+    /// виде»: ищем и сырой hex секрета, и байты самого секрета — файл
+    /// держит только отпечаток, из которого секрет не собрать обратно.
+    #[test]
+    fn the_file_never_holds_the_raw_secret_in_any_form() {
+        let d = dir("no-secret-on-disk");
+        let ticket = a_ticket();
+        let mut book = Book::open(&d).unwrap();
+        book.issue("buh", &ticket).unwrap();
+
+        let text = std::fs::read_to_string(d.join(FILE)).unwrap();
+        let secret_hex = hex_encode(&*ticket.secret);
+        assert!(!text.contains(&secret_hex), "секрет в hex-виде не должен попадать в файл: {text}");
+        assert!(text.contains(&fingerprint(&ticket.secret)), "а отпечаток там быть обязан — иначе spend нечем сверять: {text}");
+    }
+
+    /// Замечание безопасности, требование «просроченный тикет исчезает из
+    /// файла сам»: пруним и при записи (запись происходит уже внутри
+    /// `issue`, который вызывается с заведомо просроченным тикетом), и при
+    /// чтении (имитация файла, оставшегося от прошлой версии программы —
+    /// дописываем запись руками, минуя `issue`).
+    #[test]
+    fn an_expired_ticket_is_pruned_on_write_and_on_read() {
+        let d = dir("prune");
+        let mut expired = a_ticket();
+        expired.until = SystemTime::now() - Duration::from_secs(1);
+
+        let mut book = Book::open(&d).unwrap();
+        book.issue("buh", &expired).unwrap();
+        let text = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!text.contains(&fingerprint(&expired.secret)), "просроченная запись не должна попасть в файл самой записью: {text}");
+
+        // Имитация файла, в который просроченная запись всё же попала —
+        // например, его дописал прошлый релиз без этого исправления.
+        let hand_written = format!("[[tickets]]\nconnection = \"buh\"\nfingerprint = \"{}\"\nuntil = 1\n", fingerprint(&expired.secret));
+        std::fs::write(d.join(FILE), hand_written).unwrap();
+        let mut reopened = Book::open(&d).unwrap();
+        assert!(reopened.spend(&expired.secret).is_err(), "просроченная запись из файла не должна гаситься как живая");
+        let text_after_open = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!text_after_open.contains(&fingerprint(&expired.secret)), "чтение обязано было переписать файл без просроченной записи");
     }
 }

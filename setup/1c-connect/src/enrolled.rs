@@ -421,17 +421,7 @@ impl Partners {
     pub fn open(state_dir: &Path) -> Result<Partners, String> {
         let path = state_dir.join(PARTNERS_FILE);
         let _guard = lock(&path)?;
-        let data = match std::fs::read_to_string(&path) {
-            Ok(text) => match toml::from_str(&text) {
-                Ok(data) => data,
-                Err(e) => {
-                    quarantine(&path, &text, &e.to_string());
-                    PartnersFile::default()
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => PartnersFile::default(),
-            Err(e) => return Err(format!("не удалось прочитать {}: {e}", path.display())),
-        };
+        let data = load_partners(&path)?;
         Ok(Partners { path, data })
     }
 
@@ -480,12 +470,20 @@ impl Partners {
     /// Тем же приёмом и по тому же доводу, что `Book::mutate`: замок, свежее
     /// чтение, запись через переименование. Снимок в памяти обновляется
     /// только после удачной записи.
+    ///
+    /// Чтение — тем же `load_partners`, что у `open`, и это не отделка (задача
+    /// 2 плана починки по двум ревью, находка 2). Своё чтение здесь мерило
+    /// один файл ДВУМЯ мерами: `open` на непонятном файле кладёт его в
+    /// карантин и говорит словами, а здешнее `unwrap_or_default` считало тот
+    /// же файл пустым МОЛЧА — и следующая же запись печатала этот «пустой»
+    /// список поверх всех партнёров, то есть зовущие карточки теряли, куда им
+    /// возвращаться, без единого слова и без отложенной копии, по которой это
+    /// можно было бы разобрать. Отказ диска (не `NotFound`) тем же чтением
+    /// стал отказом СЛОВАМИ до какой-либо записи, а не тихой заменой файла на
+    /// пустой.
     fn mutate<T>(&mut self, f: impl FnOnce(&mut PartnersFile) -> T) -> Result<T, String> {
         let _guard = lock(&self.path)?;
-        let mut fresh: PartnersFile = match std::fs::read_to_string(&self.path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_default(),
-            Err(_) => PartnersFile::default(),
-        };
+        let mut fresh = load_partners(&self.path)?;
         let result = f(&mut fresh);
         let text = toml::to_string_pretty(&fresh).map_err(|e| format!("партнёры не собрались в toml: {e}"))?;
         write_atomic(&self.path, &text)?;
@@ -647,11 +645,34 @@ fn load_raw(path: &Path) -> Result<BookFile, String> {
         Ok(text) => match toml::from_str(&text) {
             Ok(data) => Ok(data),
             Err(e) => {
-                quarantine(path, &text, &e.to_string());
+                quarantine(path, &text, "зачислений", &e.to_string());
                 Ok(BookFile::default())
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BookFile::default()),
+        Err(e) => Err(format!("не удалось прочитать {}: {e}", path.display())),
+    }
+}
+
+/// То же для файла партнёров — ОДНО чтение на оба его читателя (`open` и
+/// `mutate`): две меры одного файла и были находкой 2 задачи 2 (см. докстроку
+/// `Partners::mutate`).
+///
+/// Непонятный файл откладывается рядом тем же `quarantine`, и список
+/// продолжает жить пустым: подсказки здесь восстановимы — человек подключается
+/// кодом ещё раз, — и терять из-за них запуск программы не за что. Отказ
+/// чтения, который не «файла нет», возвращается вызывающему: он значит, что
+/// файл есть и мы его не прочли, а печатать поверх непрочитанного нельзя.
+fn load_partners(path: &Path) -> Result<PartnersFile, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match toml::from_str(&text) {
+            Ok(data) => Ok(data),
+            Err(e) => {
+                quarantine(path, &text, "партнёров", &e.to_string());
+                Ok(PartnersFile::default())
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PartnersFile::default()),
         Err(e) => Err(format!("не удалось прочитать {}: {e}", path.display())),
     }
 }
@@ -669,7 +690,7 @@ fn load_raw(path: &Path) -> Result<BookFile, String> {
 /// было, и увидеть не то, что мы туда отложили, а то, что мы это ещё и
 /// переписали. Вторая строка журнала называет это прямо — что секрет
 /// прежнего образца был и его вычистили, а не просто что файл отложен.
-fn quarantine(path: &Path, text: &str, why: &str) {
+fn quarantine(path: &Path, text: &str, what: &str, why: &str) {
     let broken = path.with_extension("toml.broken");
     let safe = redact_legacy_secret(text);
     let redacted = safe != text;
@@ -677,7 +698,11 @@ fn quarantine(path: &Path, text: &str, why: &str) {
     if !renamed || redacted {
         let _ = std::fs::write(&broken, &safe);
     }
-    eprintln!("{}: файл зачислений не разобрался ({why}) — отложен как {}, начинаю с пустой книги", path.display(), broken.display());
+    // Чей это файл — словом вызывающего (`what`): в карантин ходят оба файла
+    // каталога состояния, и строка «файл зачислений не разобрался» про
+    // `partners.toml` была бы неверной ровно там, где человек читает журнал,
+    // чтобы понять, что у него сломалось.
+    eprintln!("{}: файл {what} не разобрался ({why}) — отложен как {}, начинаю с пустого", path.display(), broken.display());
     if redacted {
         eprintln!(
             "{}: в отложенной копии был секрет тикета прежнего образца (поле `secret`) — он вычищен, хранить его незачем",
@@ -824,6 +849,34 @@ mod tests {
         p.forget("Ромашка").unwrap();
         assert!(p.of("Ромашка").is_none());
         assert!(p.forget("Ромашка").is_ok(), "забывать нечего — не беда");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Находка 2 задачи 2: непонятный файл партнёров и при ЗАПИСИ меряется той
+    /// же мерой, что при чтении, — карантином со словами, а не молчаливым
+    /// «считаю пустым».
+    ///
+    /// Падал так: `Partners::mutate` читала файл своим `unwrap_or_default`, и
+    /// на непонятном файле следующая же запись печатала пустой список поверх
+    /// всех партнёров — ни строки в журнал, ни отложенной копии, по которой это
+    /// можно было бы разобрать. Ломается файл ПОСЛЕ открытия нарочно: это и
+    /// есть тот случай, который доставался только `mutate` (при открытии его
+    /// ловит `open`).
+    #[test]
+    fn a_broken_partners_file_is_quarantined_on_write_too_not_silently_emptied() {
+        let d = dir("partners-broken-on-write");
+        let mut p = Partners::open(&d).unwrap();
+        p.remember("Ромашка", &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
+
+        std::fs::write(d.join(PARTNERS_FILE), "это не toml вовсе: {{{").unwrap();
+        p.remember("Василёк", &Partner { key: node_id(), relay: None, direct: vec![] }).unwrap();
+
+        assert!(
+            d.join("partners.toml.broken").exists(),
+            "непонятный файл обязан быть отложен рядом — иначе запись стирает партнёров молча и разобрать это нечем"
+        );
+        assert_eq!(p.all().len(), 1, "после карантина список начат с чистого, и запись в него прошла");
 
         let _ = std::fs::remove_dir_all(&d);
     }

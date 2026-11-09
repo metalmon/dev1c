@@ -899,11 +899,11 @@ pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
     (!c.base_here).then_some("Поля базы приходят с той стороны")
 }
 
-/// Вопрос пустой «Связи». Спека прибивает два ОТВЕТА
-/// (`link::onboarding_answers`), а слова вопроса оставляет строителю — здесь
-/// он назван так, чтобы оба ответа были на него ответами: оба про код, и оба
-/// говорят, кто кому подключается.
-pub const ONBOARDING_ASK: &str = "Соединений пока нет. Кто кому подключается?";
+/// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
+/// Решение владельца 9.11 на живом прогоне: вопрос «Кто кому подключается?»
+/// убран совсем («так не пишут») — остаётся только факт, а отвечать на него
+/// человек решает, читая сами ответы, не вопрос над ними.
+pub const ONBOARDING_ASK: &str = "Соединений пока нет.";
 
 /// Элемент тела вкладки «Связь», в порядке показа — чистый итог, без
 /// виджетов. Отрисовка по нему подставляет строки и своего не решает
@@ -1802,11 +1802,16 @@ pub fn publication_switch_label(c: &Connection) -> Option<&'static str> {
 pub fn card_title(host: &Connection) -> String {
     let name = crate::cfg::base_name(&host.base_path);
     if name.is_empty() {
-        "База не указана".to_string()
+        NO_BASE_TITLE.to_string()
     } else {
         name.to_string()
     }
 }
+
+/// Слова карточки без базы — те же, что `card_title` отдаёт при пустом
+/// имени, вынесенные в константу, чтобы отрисовка (`link_card`) различала
+/// это состояние от настоящего заголовка без второй копии строки.
+pub const NO_BASE_TITLE: &str = "База не указана";
 
 fn field_value<'a>(h: &'a Connection, name: &str) -> &'a str {
     match name {
@@ -2018,15 +2023,21 @@ impl Panel {
             Theme::sync_system_appearance(None, cx);
         }
 
+        // Подсказки остаются только там, где неочевиден ФОРМАТ — адрес среды
+        // с портом (решение владельца 26.10: «пустые поля вместо выдуманных
+        // значений»). «Администратор», «пароль», оба пути и «dev1» были
+        // похожи на уже заполненные значения, а не на подсказку формата —
+        // разбор живого прогона 9.11 нашёл их рядом с пустым переключателем
+        // первого экрана.
         let fields = Fields {
             name: field("Ромашка", &host.name, false, window, cx),
             server: field("192.168.1.10:3393", &host.server, false, window, cx),
-            password: field("пароль рабочего места", &host.password, true, window, cx),
-            base_path: field("C:\\Bases\\Buh", &host.base_path, false, window, cx),
-            db_user: field("Администратор", &host.db_user, false, window, cx),
-            db_password: field("пароль", &host.db_password, true, window, cx),
-            project: field("C:\\proj\\Buh", &host.project, false, window, cx),
-            workstation: field("dev1", &host.workstation, false, window, cx),
+            password: field("", &host.password, true, window, cx),
+            base_path: field("", &host.base_path, false, window, cx),
+            db_user: field("", &host.db_user, false, window, cx),
+            db_password: field("", &host.db_password, true, window, cx),
+            project: field("", &host.project, false, window, cx),
+            workstation: field("", &host.workstation, false, window, cx),
             base_url: field("http://localhost/Buh", shown_base_url(&host), false, window, cx),
         };
         let original = host.clone();
@@ -2516,8 +2527,18 @@ impl Panel {
         // Заголовок карточки — имя базы, и только там, где база здесь: у
         // карточки с базой на той стороне он сказал бы «База не указана»
         // про базу, которой здесь и не должно быть.
+        //
+        // «База не указана» — не заголовок, а предупреждение у поля, в
+        // котором базу и указывают: крупная получерная строка посреди
+        // карточки читалась как заголовок раздела, а не как отказ (разбор
+        // живого прогона 9.11). Тот же приём, что у `base_fields_note`
+        // рядом — мелкая приглушённая строка, а не вторая копия стиля.
         if c.base_here {
-            col = col.child(div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
+            col = col.child(if title == NO_BASE_TITLE {
+                div().text_size(px(13.)).text_color(caption).child(title.to_string())
+            } else {
+                div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.to_string())
+            });
         }
         // В локальном режиме коннектор слушает loopback, а не поднимает
         // туннель в среду: адрес среды, рабочее место и его пароль ничего не
@@ -4646,15 +4667,21 @@ mod tests {
         assert_eq!(shape[0], "строка:Ромашка+карточка");
     }
 
-    /// Пустая «Связь» — один вопрос и два ответа (задача 11), и ничего
+    /// Пустая «Связь» — строка-пояснение и два ответа (задача 11), и ничего
     /// больше: ни строк, ни «+ Добавить» — третий орган добавления там, где
     /// человек впервые, лишний.
+    ///
+    /// Решение владельца 9.11 на живом прогоне: вопрос «Кто кому
+    /// подключается?» убирается совсем («так не пишут») — остаётся только
+    /// факт «Соединений пока нет» и два ответа на него, без вопросительного
+    /// знака и без слов «кто кому».
     #[test]
-    fn an_empty_link_tab_is_the_question_and_its_two_answers() {
+    fn the_empty_link_tab_has_no_question_only_the_two_answers() {
         let mut cfg = cfg_with(&["Ромашка"]);
         cfg.connections.clear();
         assert_eq!(body_shape(&link_body(&cfg, &no_states, "")), vec!["вопрос", "ответ:dial", "ответ:accept"]);
-        assert_eq!(ONBOARDING_ASK, "Соединений пока нет. Кто кому подключается?");
+        assert_eq!(ONBOARDING_ASK, "Соединений пока нет.");
+        assert!(!ONBOARDING_ASK.contains('?') && !ONBOARDING_ASK.contains("Кто кому"), "{ONBOARDING_ASK}");
     }
 
     /// Review Focus плана: два соединения с одним именем в правленном

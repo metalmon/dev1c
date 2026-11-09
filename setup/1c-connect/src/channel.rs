@@ -343,10 +343,10 @@ impl Channels {
 /// Возвращается ровно тогда, когда это соединение кончилось, — и говорит,
 /// кончилось оно словами или молча.
 ///
-/// `heard` зовётся на каждое сообщение, которое не кончает поток: `state`
-/// (что-то изменилось на стороне базы), `refuse` (та сторона отказала в
-/// чём-то, что мы просили), всё прочее этой версии. Своего разбора здесь
-/// нет нарочно: что делать с `state`, знает окно, а не провод.
+/// `heard` зовётся на каждое сообщение, которое не кончает поток: `refuse`
+/// (та сторона отказала в чём-то, что мы просили), всё прочее этой версии.
+/// Своего разбора здесь нет нарочно: что делать со сказанным, знает окно, а
+/// не провод.
 ///
 /// **Срока ожидания здесь НЕТ**, и это решение спеки, а не недосмотр: своего
 /// пинга протокол не держит, молчание на управляющем потоке законно часами,
@@ -381,10 +381,10 @@ const REINS_QUEUE: usize = 8;
 ///
 /// Нужны затем, что присмотр за потоком (`hold`) висит в своей задаче и
 /// держит ЧИТАЮЩУЮ половину, а сказать той стороне надо по своей воле:
-/// `state` — когда человек переключил обслуживание или потолок, `revoked` —
-/// когда он снял разрешение. Спека про отзыв говорит «отправляется и тут же
-/// рвёт потоки этой базы»: отзыв, который подействует при следующем обрыве,
-/// — не отзыв вовсе, а обещание.
+/// `revoked` — когда человек снял разрешение, `bye` — когда программа уходит
+/// нарочно. Спека про отзыв говорит «отправляется и тут же рвёт потоки этой
+/// базы»: отзыв, который подействует при следующем обрыве, — не отзыв вовсе,
+/// а обещание.
 ///
 /// **Почему две задачи, а не один `select!`** на чтение кадра и приказ окна:
 /// `Frame::read` читает заголовок и тело по очереди, и брошенный между ними
@@ -405,7 +405,9 @@ pub struct Reins {
 impl Reins {
     /// Сказать той стороне. `false` — поток уже кончился; это не беда и не
     /// повод шуметь: о конце соединения окно узнаёт своим путём, от присмотра
-    /// (`Gone`), и второе сообщение об одном событии ему не нужно.
+    /// (`Gone`), и второе сообщение об одном событии ему не нужно. Поэтому
+    /// `revoke` и `bye` ответ и не смотрят: сказать о мёртвом потоке всё равно
+    /// нечего, а уйти надо в любом случае.
     pub async fn say(&self, msg: Msg) -> bool {
         self.say.send(msg).await.is_ok()
     }
@@ -419,13 +421,13 @@ impl Reins {
     /// когда снят последний `Hold`, и считать зачисленные базы для этого не
     /// нужно.
     pub async fn revoke(self, base_id: &str, text: &str) {
-        let _ = self.say.send(Msg::Revoked { base_id: base_id.to_string(), text: text.to_string() }).await;
+        self.say(Msg::Revoked { base_id: base_id.to_string(), text: text.to_string() }).await;
         self.finish().await;
     }
 
     /// Уйти нарочно: прощание словами и конец соединения.
     pub async fn bye(self, why: Refuse) {
-        let _ = self.say.send(Msg::Bye(why)).await;
+        self.say(Msg::Bye(why)).await;
         self.finish().await;
     }
 
@@ -629,7 +631,7 @@ mod tests {
     use crate::enroll::{accept_side, dial_side, Card, Cards, Decision, Outcome};
     use crate::enrolled::Book;
     use crate::ticket::Ticket;
-    use crate::wire::{BaseFields, CardState, Ceiling};
+    use crate::wire::{BaseFields, Ceiling};
     use std::net::{Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
@@ -737,7 +739,9 @@ mod tests {
         // И сообщения, которые поток НЕ кончают, доходят до того, кто их
         // ждёт, а не глотаются здесь.
         let (mut theirs, mut ours) = tokio::io::duplex(4096);
-        let said = Msg::State { base_id: "b1".into(), state: CardState::Connected, write: true, serving: true, ceiling: None, text: None };
+        // Любое сообщение этой версии, которое поток не кончает, — здесь
+        // проверяется сам `hold`, а не разбор сказанного.
+        let said = Msg::EnrollWait;
         Frame::write(&mut theirs, &said).await.unwrap();
         Frame::write(&mut theirs, &Msg::Bye(Refuse::new(code::MCP_OFF, SERVING_OFF))).await.unwrap();
         drop(theirs);
@@ -791,12 +795,11 @@ mod tests {
         // Канал жив, и соседняя карточка по нему говорит.
         assert!(channel.is_open(), "канал закрылся вместе с ОДНОЙ карточкой — остальные остались бы без связи ни за что");
         assert!(their_channel.is_open(), "и на том конце тоже");
-        let state =
-            Msg::State { base_id: "b2".into(), state: CardState::Connected, write: false, serving: true, ceiling: None, text: None };
-        Frame::write(their_second.says(), &state).await.unwrap();
+        let said = Msg::EnrollWait;
+        Frame::write(their_second.says(), &said).await.unwrap();
         assert_eq!(
             tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
-            state,
+            said,
             "соседняя карточка обязана жить дальше"
         );
 
@@ -1155,8 +1158,7 @@ mod tests {
         let base = Node::start(&db).await.unwrap();
         let (mine, theirs) = (Channels::default(), Channels::default());
 
-        // Вожжи обеих карточек — у стороны с базой: это она шлёт `state` и
-        // `revoked`.
+        // Вожжи обеих карточек — у стороны с базой: это она шлёт `revoked`.
         let listening = base.clone();
         let there = theirs.clone();
         let answered = tokio::spawn(async move {
@@ -1186,12 +1188,11 @@ mod tests {
 
         // Соседняя карточка жива: по ней говорят, и её слышно.
         assert!(channel.is_open(), "отзыв одной карточки закрыл канал — остальные остались бы без связи ни за что");
-        let state =
-            Msg::State { base_id: "b2".into(), state: CardState::Connected, write: false, serving: true, ceiling: None, text: None };
-        assert!(second_reins.say(state.clone()).await, "вожжи соседней карточки обязаны быть живы");
+        let said = Msg::EnrollWait;
+        assert!(second_reins.say(said.clone()).await, "вожжи соседней карточки обязаны быть живы");
         assert_eq!(
             tokio::time::timeout(WAIT, Frame::read(second.ear())).await.expect("соседняя карточка замолчала").unwrap(),
-            state,
+            said,
             "соседняя карточка говорит дальше"
         );
 

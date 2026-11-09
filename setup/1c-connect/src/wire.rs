@@ -263,8 +263,9 @@ pub enum Side {
 }
 
 /// Потолок записи — свойство МАШИНЫ, не карточки (контракт, «Чего в
-/// соединении НЕТ»). Едет в `hello` и повторяется в `state`, когда человек
-/// переключил его при живом соединении.
+/// соединении НЕТ»). Едет в `hello`, и только там: переключённый при живом
+/// соединении, он доедет до той стороны следующим подключением. Сообщения,
+/// которым полагалось доносить его сразу, в этой версии нет — см. `KNOWN`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Ceiling {
@@ -392,17 +393,6 @@ pub enum Msg {
     },
     /// Человек отказал. Это исход, а не ошибка; зовущая сама не повторяет.
     EnrollNo(Refuse),
-    /// Что-то изменилось на стороне базы. Идёт сама, без спроса.
-    State {
-        base_id: String,
-        state: CardState,
-        write: bool,
-        serving: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ceiling: Option<Ceiling>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
-    },
     /// Разрешение снято. Рвёт потоки ЭТОЙ базы сразу; если других зачисленных
     /// баз в канале не осталось — закрывается и канал.
     Revoked { base_id: String, text: String },
@@ -562,7 +552,24 @@ fn unknown_or_malformed(body: &[u8], e: serde_json::Error) -> Refuse {
 /// и имя из `Msg`, не попавшее в список (отказ соврал бы «обновите комплект»
 /// на сообщение, которое мы понимаем), и имя в списке, которого `Msg` больше
 /// не производит, роняют тест.
-pub const KNOWN: [&str; 10] = ["hello", "hello_ok", "enroll", "enroll_wait", "enroll_ok", "enroll_no", "state", "revoked", "refuse", "bye"];
+///
+/// **`state` снят с таблицы спеки, и это решение, а не пропуск.** Сообщение
+/// «что-то изменилось на стороне базы» не отправлялось в продукте НИ ОТКУДА:
+/// оно жило в тестах и в разборе имён, то есть было обещанием, которого провод
+/// не держал. Всё, что по делу меняется при живом соединении, уже сказано
+/// другими: обслуживание выключили и программа уходит — `bye`, разрешение
+/// сняли — `revoked`, «подключено» каждая сторона показывает себе сама по
+/// своему живому потоку. Остаётся одно, чего теперь не донести сразу: потолок
+/// записи, переключённый при живом соединении, — та сторона узнает о нём
+/// следующим подключением (и не показывает его сегодня нигде). Когда это
+/// понадобится по-настоящему, сообщение вернётся вместе со своим отправителем
+/// и своим читателем, а не раньше: пустое обещание в таблице хуже честно
+/// снятой строки.
+///
+/// Старая сборка, которая `state` пришлёт, получает отказ СЛОВАМИ — «та
+/// сторона прислала сообщение, которого эта версия не знает, обновите
+/// комплект» (`unknown_or_malformed`), — а не молчаливое непонимание.
+pub const KNOWN: [&str; 9] = ["hello", "hello_ok", "enroll", "enroll_wait", "enroll_ok", "enroll_no", "revoked", "refuse", "bye"];
 
 fn is_known(name: &str) -> bool {
     KNOWN.contains(&name)
@@ -635,15 +642,6 @@ mod tests {
                 }),
             },
             Msg::EnrollNo(Refuse::new(code::DECLINED, "Подключение отклонено на стороне базы.")),
-            Msg::State {
-                base_id: "b1".into(),
-                state: CardState::Connected,
-                write: true,
-                serving: true,
-                ceiling: Some(Ceiling::ReadOnly),
-                text: Some("потолок переключили".into()),
-            },
-            Msg::State { base_id: "b1".into(), state: CardState::Broken, write: false, serving: false, ceiling: None, text: None },
             Msg::Revoked { base_id: "b1".into(), text: "Доступ отозван на стороне базы.".into() },
             Msg::Refuse(Refuse::new(code::VERSION, "Версии не сошлись: здесь 3, там 1.")),
             Msg::Bye(Refuse::new(code::MCP_OFF, "Обслуживание выключили в окне.")),
@@ -737,6 +735,23 @@ mod tests {
         // стерёг бы не поле, а опечатку в собранном руками JSON.
         let now = old.trim_end_matches('}').to_string() + r#","why":"enroll"}"#;
         assert!(matches!(Frame::read(&mut Cursor::new(framed(now.as_bytes()))).await, Ok(Msg::Hello { why: Why::Enroll, .. })));
+    }
+
+    /// `state` из старой сборки получает отказ СЛОВАМИ, а не молчаливое непонимание.
+    ///
+    /// Сообщение снято с таблицы спеки нарочно (см. `KNOWN`): в продукте его
+    /// не отправлял никто, и обещание, которого провод не держит, хуже честно
+    /// снятой строки. Но сборка, которая его ещё шлёт, обязана узнать, ЧТО с
+    /// ней не так, — и это ровно то правило спеки, по которому незнакомое
+    /// сообщение не глотают молча: проглотить значит соврать отправителю, что
+    /// оно исполнено.
+    #[tokio::test]
+    async fn a_state_message_from_an_older_kit_is_refused_in_words() {
+        let old = br#"{"msg":"state","base_id":"b1","state":"connected","write":true,"serving":true}"#;
+        let no = Frame::read(&mut Cursor::new(framed(old))).await.unwrap_err();
+        assert_eq!(no.code, code::UNKNOWN_MESSAGE, "снятое сообщение — незнакомое, а не неразобравшееся: {no:?}");
+        assert!(no.text.contains("state"), "отказ обязан назвать, чего не понял: {}", no.text);
+        assert!(no.text.contains("Обновите"), "и посоветовать то, что поможет: {}", no.text);
     }
 
     /// Список знакомых имён ломается, если разойдётся с `Msg`: в одну

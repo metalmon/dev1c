@@ -132,7 +132,7 @@ pub struct Card {
 /// * **в заголовке — только состояние**. Строка одна и узкая (карточка
 ///   230 точек), проза обрывается на полуслове — «не надо там прозу писать,
 ///   она не лезет» (заказчик 2026-10-21). Причина едет в `reason` ниже: в
-///   подсказку переключателя, в левый слот подвала и в журнал.
+///   подсказку переключателя и в журнал (у подвала с 9.11 слота для неё нет).
 ///
 /// При выключенном обслуживании горячие факты цвет не меняют: вердикт в это
 /// время не считается вовсе, и точка серая. Заголовок — по `cfg.current().mode`:
@@ -174,6 +174,20 @@ pub struct Card {
 /// заводить функцию с пустым списком параметров было бы лишним.
 pub const OFF_WORD: &str = "MCP выключены";
 
+/// Слово карточки при запертом холодном замке — отдельное от `OFF_WORD`,
+/// хоть и та же точка (`Dot::Off`). Прежде замок красил карточку тем же
+/// «MCP выключены», что и обычное выключение: «нельзя включить» и «просто
+/// выключено» говорили одно и то же слово, и запертый замок был неотличим
+/// от человека, который сам ничего не нажимал (Important 4, ревью круга).
+/// Владелец запретил вторую строку под переключателем — значит меняем не
+/// раскладку карточки (она остаётся одной строкой, как и была), а само
+/// слово. Подробности (какое поле не заполнено) человек находит не тут
+/// (заголовок узкий и короткий, `the_title_never_carries_the_reason`), а в
+/// подсказке переключателя (`switch_tooltip`/`reason`) и в журнале — щелчок
+/// по запертому переключателю сам пишет туда причину непрочитанной строкой
+/// (`link::toggle_link`).
+pub const GATE_WORD: &str = "Включить нельзя";
+
 pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
         let (_, clock) = gui::progress_text(r, now);
@@ -189,7 +203,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
         return card(Dot::Down, "Не подключён".into());
     }
     if gate.is_some() {
-        return card(Dot::Off, off_title());
+        return card(Dot::Off, GATE_WORD.to_string());
     }
     // Горячие факты — только у включённого обслуживания: инвариант
     // «карточка = проверка» говорит про включённое. В локальном режиме
@@ -363,8 +377,9 @@ pub fn save_hint(dirty: bool, busy: bool, op: Option<Which>) -> Option<String> {
 /// называет состояние тем же словом, что строка списка (`link::row`) — спека
 /// интерфейса «иначе заперта и называет состояние» (живой прогон 9.11: кнопка
 /// то пропадала вовсе, то была то жёлтой, то серой без видимого правила).
-/// `why` рядом говорит, почему заперто — словами в левом слоте подвала, рядом
-/// с `subject`.
+/// `why` говорит, почему заперто — тултипом самой кнопки (у подвала с 9.11
+/// нет слота для этих слов рядом с `subject`, решение владельца, второй
+/// снимок релизной сборки).
 pub struct Button {
     /// Имя соединения, на которое действует кнопка — ПОДВАЛ ПОКАЗЫВАЕТ ЕГО
     /// СЛЕВА от кнопки: иначе на экране со свёрнутым списком «Подключиться»
@@ -512,6 +527,20 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         return save(subject);
     }
     if c.mode == "local" {
+        // Замок (`ui.gate`) запирает только включение — выключить можно
+        // всегда (`switch_locked`, тот же довод у переключателя сверху).
+        // Раньше эта ветка не читала замок вовсе: кнопка оставалась жёлтой
+        // «Включить», нажимаемой, и щелчок лишь писал строку в журнал
+        // (`toggle_link` сам отказывает молча) — ровно то, что бриф задачи
+        // 4 запрещал («при запертом замке не предлагает невозможного»),
+        // находка ревью (Critical 1). Теперь кнопка запертая и называет
+        // состояние тем же словом, что строка списка, как во всех прочих
+        // запертых ветках этой функции.
+        if !ui.link.is_up() {
+            if let Some(why) = ui.gate.as_deref() {
+                return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(gate_text(why)), act: None };
+            }
+        }
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
         return Button { subject, label, why: None, act: Some(LinkAct::Toggle) };
     }
@@ -524,6 +553,13 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: None, act: None };
     }
     if matches!(c.role(), Ok("dial")) {
+        // Тот же замок и тот же довод, что у local-ветки выше: «Подключиться»
+        // заводит тот же `LinkAct::Toggle` → `toggle_link`, и он одинаково
+        // отказывает молча, заперт ли замок в туннельном режиме или в
+        // локальном (Critical 1 — приём общий для обоих режимов).
+        if let Some(why) = ui.gate.as_deref() {
+            return Button { subject, label: link::row(c, true, Some(&ui.link)).state, why: Some(gate_text(why)), act: None };
+        }
         return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
     }
     // Принимающему подключаться не к кому — связь не его действие. Кнопка
@@ -2300,7 +2336,12 @@ impl Panel {
         if renamed {
             let from = self.original.name.clone();
             if let Err(e) = gui::rename(cx.global_mut::<Ui>(), &from, &typed) {
-                gui::set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e }, None);
+                // В журнал, не в `set_status` (Important 5 ревью круга
+                // задачи 11): это ответ на нажатие «Сохранить», а подвал с
+                // 9.11 левый слот не показывает вовсе — `ui.status` без
+                // журнала был бы домом без двери. Строкой отказа, человек
+                // читает её тем же приёмом, что любой другой отказ.
+                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
                 return false;
             }
             self.original.name = typed.clone();
@@ -2317,7 +2358,7 @@ impl Panel {
         if self.original.name != cx.global::<Ui>().cfg.current().name {
             if renamed {
                 let text = "Имя карточки сохранено в 1c-connect.toml".to_string();
-                gui::set_status(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text }, None);
+                gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text });
             }
             return renamed;
         }
@@ -2327,9 +2368,14 @@ impl Panel {
             Ok(_) => Line { kind: Kind::Ok, text: "Сохранено в 1c-connect.toml".into() },
             Err(e) => Line { kind: Kind::Fail, text: e.clone() },
         };
-        // Через `set_status`: подсказка прошлого итога (путь отчёта проверки)
-        // не должна пережить его и повиснуть на этом.
-        gui::set_status(cx.global_mut::<Ui>(), line, None);
+        // В журнал (Important 5 ревью круга задачи 11): раньше шло через
+        // `set_status`, пока у подвала был левый слот, что его показывал.
+        // Слота не осталось, а это — ответ на действие человека («Сохранить»
+        // нажато, успех или отказ), и у журнала для него есть и слова, и
+        // счётчик непрочитанного. Второй сигнал удачи у человека уже есть и
+        // без журнала: «Сохранить» перестаёт предлагаться, как только поля
+        // совпали с записанным (`main_button`, `Dirty::No`).
+        gui::note_line(cx.global_mut::<Ui>(), line);
         if ok {
             // Имя в `host` пустое — его не несёт `host_of` (оно идёт своим
             // путём, см. переименование выше). У точки отсчёта оно обязано
@@ -2422,6 +2468,17 @@ impl Panel {
         // способом — своим явным `.text_color(fg)` поверх варианта кнопки,
         // не трогая внутренности `Button`.
         let fg = cx.theme().foreground;
+        // Ширина выпадающего списка — не уже самого селектора (Important 3
+        // ревью круга: список оставался на умолчании `gpui-component`,
+        // 120 px, а поле — `w_full()`, во всю ширину карточки, и список
+        // читался уже своей кнопки). `PopupMenu::min_w` — готовый приём
+        // (`src/menu/popup_menu.rs:432`), своего измерения не пишем; точного
+        // совпадения с реальной шириной поля он не даёт (поле растёт с
+        // окном, список — не слушает `on_prepaint` тригера, в отличие от
+        // настоящего `Select`), но минимум — ширина карточки при минимальном
+        // окне (`window::MIN_SIZE`, за вычетом `.p_4()` снаружи) — список
+        // уже этой ширины никогда не бывает.
+        let select_menu_min_w = crate::gui::window::MIN_SIZE.width - px(32.);
         // Кнопка выбора — значок без подписи: такая кнопка сама становится
         // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
         // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
@@ -2478,7 +2535,7 @@ impl Panel {
                                             .on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
                                     );
                                 }
-                                menu
+                                menu.min_w(select_menu_min_w)
                             }),
                     ),
             )
@@ -2518,7 +2575,7 @@ impl Panel {
                                         PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)),
                                     );
                                 }
-                                menu
+                                menu.min_w(select_menu_min_w)
                             }),
                     )
             });
@@ -2543,7 +2600,7 @@ impl Panel {
                                 let name = name.clone();
                                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
                             }
-                            menu
+                            menu.min_w(select_menu_min_w)
                         }),
                 ),
             );
@@ -2565,7 +2622,7 @@ impl Panel {
                             menu =
                                 menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
                         }
-                        menu
+                        menu.min_w(select_menu_min_w)
                     },
                 ),
             ));
@@ -3471,11 +3528,11 @@ impl Render for Panel {
 mod tests {
     use super::{
         act_not_yet, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
-        delete_question_text, fact_rows, fields_differ, folder_label, found_text, leave_question, link_body, link_menu, main_button,
-        nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows, publication_switch_label,
-        reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip,
-        tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES,
-        ONBOARDING_ASK, PASS_THE_CODE,
+        delete_question_text, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_body, link_menu,
+        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
+        publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
+        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
+        DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -3665,20 +3722,30 @@ mod tests {
     }
 
     /// Холодный замок сильнее любого спокойного состояния связи: включать
-    /// нечего, и зелёного тут быть не может.
+    /// нечего, и зелёного тут быть не может. Слово при этом — СВОЁ
+    /// (`GATE_WORD`, «Включить нельзя»), не `OFF_WORD`: Important 4 ревью —
+    /// до этой правки запертый замок и простое выключение говорили одно и
+    /// то же «MCP выключены», и человек не мог отличить «нажми и подожди»
+    /// от «нажимать нечего», не щёлкнув по переключателю.
     #[test]
     fn the_gate_wins_over_an_idle_state() {
         let now = Instant::now();
         let gate = Some("не задан пользователь базы");
         for link in [State::Off, State::Connecting, State::Up { since: now }] {
             let c = card(None, &link, "local", &Verdict::Ready, gate, now);
-            assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"), "{link:?}");
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Включить нельзя"), "{link:?}");
         }
         // В туннельном режиме замок говорит тем же словом: связь не поднята
         // не из-за отказа, а из-за самого выключателя (находка живого
         // прогона 9.11) — «Не подключён» здесь было бы причиной не по делу.
         let c = card(None, &State::Off, "tunnel", &Verdict::Ready, gate, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Включить нельзя"));
+        // Оба слова разные: без замка то же выключенное состояние говорит
+        // `OFF_WORD`, не `GATE_WORD` — иначе «нельзя» и «просто выключено»
+        // снова стали бы одним словом.
+        let unlocked = card(None, &State::Off, "local", &Verdict::Ready, None, now);
+        assert_eq!(unlocked.title, OFF_WORD);
+        assert_ne!(unlocked.title, GATE_WORD);
     }
 
     /// Идущая операция — первая строка порядка разрешения: она побеждает и
@@ -3817,8 +3884,11 @@ mod tests {
         for mode in ["local", "tunnel"] {
             let c = card(None, &State::Off, mode, &Verdict::Checking, None, now);
             assert_eq!(c.title, "MCP выключены", "{mode}");
+            // Замок — своё слово (`GATE_WORD`, Important 4 ревью круга
+            // задачи 11): «просто выключено» и «нельзя включить» больше не
+            // говорят одно и то же.
             let c = card(None, &State::Off, mode, &Verdict::Checking, Some("не задан пользователь базы"), now);
-            assert_eq!(c.title, "MCP выключены", "{mode}: замок");
+            assert_eq!(c.title, "Включить нельзя", "{mode}: замок");
         }
         let c = card(None, &State::Failed("порт занят".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!(c.title, "Не подключён");
@@ -4434,12 +4504,22 @@ mod tests {
     /// Соединение с заданными ролью/режимом/состоянием связи, одно в списке —
     /// хватает всем сценариям главной кнопки, кроме пустого списка (у него
     /// свой тест).
+    ///
+    /// Замок снят нарочно (`ui.gate = None`): `Ui::for_test()` считает его,
+    /// как в `launch`, по пустому каталогу теста — и держит заперт всегда,
+    /// иначе фикстура с `None` обещала бы «включать можно» там, где
+    /// по-настоящему нельзя (докстрока `for_test`). Эти сценарии — про
+    /// роль/режим/связь, а не про замок; замок, который `main_button` с
+    /// Critical 1 ревью теперь читает, — свой случай, со своим тестом
+    /// (`a_locked_gate_leaves_the_same_locked_button_in_both_modes`), который
+    /// ставит его явно.
     fn ui_for(role: &str, mode: &str, up: bool) -> Ui {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка"]);
         ui.cfg.current_mut().role = role.into();
         ui.cfg.current_mut().mode = mode.into();
         ui.link = if up { State::Up { since: Instant::now() } } else { State::Off };
+        ui.gate = None;
         ui
     }
 
@@ -4554,21 +4634,23 @@ mod tests {
     }
 
     /// Спека «Интерфейс»: «иначе заперта и называет состояние» — живой
-    /// прогон 9.11 нашёл обратное на соседних экранах: главная кнопка то
+    /// прогон 9.11 нашёл обратное на соседних экранах: главная кнопка
     /// пропадала вовсе (принимающая карточка, уже подключённая — ветки 6 и 7
-    /// `main_button`), то оставалась ЕДИНСТВЕННО жёлтой «Включить» там, где
-    /// её вообще нет (локальный замок не этого предмета). Эта правка не
-    /// выдумывает новое правило — приводит код к уже записанному. Тест бьёт
-    /// по чистой функции `main_button`: оба запертых случая (уже
-    /// подключённое соединение и ждущая входящих карточка) получают кнопку,
-    /// а не пустоту, кнопка заперта (`act: None`) и называет состояние тем
-    /// же словом, что строка списка (`link::row`), а не слово действия,
-    /// которого у предмета нет. Серый цвет самой кнопки в запертом
+    /// `main_button`). Эта правка не выдумывает новое правило — приводит код
+    /// к уже записанному. Тест бьёт по чистой функции `main_button`: оба
+    /// случая, запертых состоянием СВЯЗИ (а не замком — имя теста прежде
+    /// обещало замок, которого здесь не было ни разу, находка Important 2
+    /// ревью круга: уже подключённое соединение и ждущая входящих карточка),
+    /// получают кнопку, а не пустоту, кнопка заперта (`act: None`) и называет
+    /// состояние тем же словом, что строка списка (`link::row`), а не слово
+    /// действия, которого у предмета нет. Серый цвет самой кнопки в запертом
     /// состоянии — render (`panel.rs`, `.disabled(match act {...})`), у
     /// чистой функции цвета нет; визуальное совпадение вида с «Инструментами»
-    /// и «Журналом» проверяется глазом (см. отчёт).
+    /// и «Журналом» проверяется глазом (см. отчёт). Замок (`ui.gate`) —
+    /// отдельный случай, см. `a_locked_gate_leaves_the_same_locked_button_in_both_modes`
+    /// ниже.
     #[test]
-    fn a_locked_gate_leaves_one_and_the_same_button_everywhere() {
+    fn a_connection_state_lock_leaves_one_and_the_same_button_everywhere() {
         for ui in [ui_link_connected(), ui_link_accept_waiting()] {
             let b = main_button(&ui, "", Dirty::No);
             assert!(!b.label.is_empty(), "замок не исчезает, предмет: {}", b.subject);
@@ -4578,6 +4660,43 @@ mod tests {
                 assert_ne!(b.label, yellow, "жёлтой кнопки действия в запертом состоянии не бывает");
             }
         }
+    }
+
+    /// Critical 1 ревью круга: `main_button` не читала `ui.gate` вовсе, и в
+    /// локальном режиме при запертом замке кнопка оставалась ЖЁЛТОЙ
+    /// «Включить», нажимаемой — щелчок лишь писал строку в журнал
+    /// (`toggle_link` отказывает молча), и человек не видел, что действие
+    /// невозможно (бриф задачи 4: «при запертом замке не предлагает
+    /// невозможного»). Тест ставит замок (`ui.gate`) НА САМОМ ДЕЛЕ — прежний
+    /// `a_connection_state_lock_leaves_one_and_the_same_button_everywhere`
+    /// обещал это именем и не делал (Important 2 ревью), и проверяет оба
+    /// режима, которые заводят `LinkAct::Toggle` (единственное действие,
+    /// которое замок в силах запереть): локальный выключатель и туннельное
+    /// «Подключиться».
+    #[test]
+    fn a_locked_gate_leaves_the_same_locked_button_in_both_modes() {
+        let why = "не задан пользователь базы";
+        let mut local = ui_for("accept", "local", false);
+        local.gate = Some(why.to_string());
+        let b = main_button(&local, "", Dirty::No);
+        assert_eq!(b.act, None, "заперта значит без действия");
+        assert_eq!(b.label, "выключено", "называет состояние, а не предлагает действие");
+        assert_eq!(b.why.as_deref(), Some(gate_text(why).as_str()));
+
+        let mut tunnel = ui_for("dial", "tunnel", false);
+        tunnel.gate = Some(why.to_string());
+        let b = main_button(&tunnel, "", Dirty::No);
+        assert_eq!(b.act, None, "тот же замок, тот же LinkAct::Toggle — запирает и здесь");
+        assert_eq!(b.label, "не подключено");
+        assert_eq!(b.why.as_deref(), Some(gate_text(why).as_str()));
+
+        // Включено — замок не держит выключение: ветка не трогается, кнопка
+        // остаётся действием (`switch_locked`, тот же довод).
+        let mut already_on = ui_for("accept", "local", true);
+        already_on.gate = Some(why.to_string());
+        let b = main_button(&already_on, "", Dirty::No);
+        assert_eq!(b.act, Some(LinkAct::Toggle), "уже включено — выключить можно всегда");
+        assert_eq!(b.label, "Выключить");
     }
 
     /// Звонящая карточка, текущая, не подключена — говорящее имя вместо

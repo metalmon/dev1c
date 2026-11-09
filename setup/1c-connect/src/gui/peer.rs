@@ -1134,7 +1134,9 @@ mod tests {
         assert!(live.forget(peer, ids[2]).is_none(), "уже снятого здесь нет, и это не беда");
         assert!(live.drain().is_empty(), "книга опустела вместе с последним разговором");
 
-        drop(ours.drain(..).collect::<Vec<_>>());
+        // Свои половины потоков роняем раньше узлов: их `Drop` досылает
+        // написанное, а дослать его в уже закрытый узел нечем.
+        drop(ours);
         caller.close().await;
         base.close().await;
     }

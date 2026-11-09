@@ -35,7 +35,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Значок программы в шапке — тот же PNG, что у окна и у трея.
 const ICON_PNG: &[u8] = include_bytes!("../../icons/icon.png");
@@ -422,13 +422,32 @@ pub enum Dirty {
 /// (см. `Ui::codes`), и показывать «ждёт разрешения» за код, которого
 /// человек уже не может никому передать, было бы тем же обманом, что
 /// снятая выше константа.
+///
+/// **Оба ожидания спрашиваются с оглядкой на срок и на адресата** (Important
+/// 1 и 2 ревью задач 6 и 7): код считается выданным, пока он ЖИВ
+/// (`Ticket::alive`), а заявка — ждущей, пока есть кому отвечать
+/// (`Pending::reachable`). Тик роняет и то и другое со словами
+/// (`prune_enrollment`), но решение здесь от тика не зависит: между двумя
+/// тиками карточка не вправе обещать «ждёт разрешения» за код, который уже
+/// кончился.
 pub fn enroll_facts(ui: &Ui, name: &str) -> link::Enroll {
+    let now = SystemTime::now();
     link::Enroll {
-        waiting: ui.waiting.iter().any(|p| p.request.card == name),
+        waiting: ui.waiting.iter().any(|p| p.request.card == name && p.reachable()),
         declined: ui.declined.iter().any(|d| d == name),
-        code_issued: ui.codes.iter().any(|(card, _)| card == name),
+        code_issued: ui.codes.iter().any(|(card, t)| card == name && t.alive(now)),
         enrolled: ui.book.as_ref().map_or(0, |b| b.of(name).len()),
     }
+}
+
+/// Код карточки, пока он ЖИВ, — строкой для показа и для буфера обмена.
+/// `None` — кода нет вовсе либо он кончился.
+///
+/// Одна дорога к строке кода на весь продукт: карточка (`link_card`),
+/// «Скопировать» и сама выдача (`issue_code`, когда отдаёт уже выданный)
+/// спрашивают здесь, и ни одна из трёх не умеет показать мёртвый код.
+pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
+    ui.codes.iter().find(|(c, t)| c == card && t.alive(now)).map(|(_, t)| t.to_code())
 }
 
 /// Главная кнопка «Связи»: ровно один предмет (решение владельца 3.11) —
@@ -1023,14 +1042,31 @@ pub struct PartyRow {
     /// Разбирать его обратно из `fingerprint` было бы вторым мнением о том,
     /// что на экране написано.
     pub key: iroh::EndpointId,
-    /// Как сторона себя назвала — с той же пометкой, что в диалоге
-    /// (`save::NOT_VERIFIED`): запись в книге её слова не проверила, и
-    /// время этого не изменило.
+    /// Как сторона себя назвала — без пометки: она одна на весь список
+    /// (`Accepting::says_note`). Повторять «сказано той стороной, не
+    /// проверено» у каждой из десяти сторон значило бы три переноса на
+    /// строку поверх отпечатка, который и сам занимает две (Minor ревью
+    /// задач 6 и 7); предмет пометки от этого не меняется — она
+    /// по-прежнему про все эти имена.
     pub says_name: String,
-    /// Разрешена ли ей запись в базу — итог, уже сложенный с потолком при
-    /// зачислении (`enroll::Decision::Allow`).
+    /// Что ей дано, словами: «Чтение и запись» или «Только чтение» (спека 6
+    /// ревью задач 6 и 7). Без этой строки сторона, которой разрешена
+    /// запись в базу, выглядела на экране в точности как та, которой
+    /// разрешено только читать, — человек не мог увидеть, кому он что дал,
+    /// то есть не мог и заметить ошибку.
+    pub access: &'static str,
+    /// Тот же факт значением — итог, уже сложенный с потолком при зачислении
+    /// (`enroll::Decision::Allow`). Остаётся рядом со словом: слово для
+    /// глаза, факт для теста и для того, кто захочет красить строку.
     pub write: bool,
 }
+
+/// Подпись кнопки отзыва — спека интерфейса пишет её целиком, и слово
+/// «разрешение» здесь не украшение: оно говорит, ЧТО именно отзывают.
+/// Короткое «Отозвать» рядом с отпечатком читается как «отозвать сторону» —
+/// а сторону мы никуда не отзываем, мы забираем у неё данное ей право
+/// (спека 5 ревью задач 6 и 7).
+pub const REVOKE: &str = "Отозвать разрешение";
 
 /// Блок зачисления в карточке, которая ЖДЁТ входящих (спека экрана, «У
 /// соединения, которое ждёт входящих»): код одной строкой, одно предложение
@@ -1064,6 +1100,9 @@ pub struct Accepting {
     pub code_note: &'static str,
     /// Сколько сторон зачислено — словами, согласованными с числом.
     pub enrolled: String,
+    /// Пометка над списком — одна на все имена сразу. `None` — зачисленных
+    /// нет, и помечать нечего.
+    pub says_note: Option<&'static str>,
     pub parties: Vec<PartyRow>,
 }
 
@@ -1076,6 +1115,11 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     if c.mode == "local" || !matches!(c.role(), Ok("accept")) {
         return None;
     }
+    // Названная кнопка обязана существовать у ЭТОЙ карточки. «Показать код»
+    // и «Выдать новый код» теперь есть в меню у любой принимающей — и у
+    // нетекущей тоже (`link_menu`, спека 4 ревью задач 6 и 7): прежде
+    // подсказка велела нажать то, чего у нетекущей карточки не было ни в
+    // подвале («Сделать текущим»), ни в меню («Переименовать», «Удалить»).
     let code_note = if code.is_some() {
         "Передайте эту строку на ту сторону — там её вставят, и здесь появится заявка."
     } else {
@@ -1088,20 +1132,21 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     } else {
         format!("Зачислено: {}", common::word::count(parties.len() as u64, "сторона", "стороны", "сторон"))
     };
+    let says_note = (!parties.is_empty()).then_some("Имена ниже — как стороны назвали себя сами: сказано ими, не проверено");
     let parties = parties
         .iter()
         .map(|p| PartyRow {
             fingerprint: p.key.to_string(),
             key: p.key,
-            says_name: if p.says_name.is_empty() {
-                format!("Себя не назвала ({})", gui::NOT_VERIFIED)
-            } else {
-                format!("Назвалась «{}» — {}", p.says_name, gui::NOT_VERIFIED)
-            },
+            says_name: if p.says_name.is_empty() { "Себя не назвала".to_string() } else { format!("«{}»", p.says_name) },
+            // Слова, а не галочка: «Полный»/«Только чтение» — это и есть
+            // итог, которым живёт разрешение записи в карточке, и читается
+            // он без расшифровки.
+            access: if p.write { "Чтение и запись" } else { "Только чтение" },
             write: p.write,
         })
         .collect();
-    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, parties })
+    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, says_note, parties })
 }
 
 /// Строка пустой «Связи» над двумя ОТВЕТАМИ (`link::onboarding_answers`).
@@ -1287,12 +1332,27 @@ pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
 /// приходит параметром, и второго правила разрешения предмета по-прежнему
 /// нет — оно одно, в `resolve_selected`.
 ///
-/// **У НЕтекущей карточки пунктов про связь нет вовсе** — ровно по той же
+/// **У НЕтекущей карточки пунктов про СВЯЗЬ нет вовсе** — ровно по той же
 /// причине, по какой `main_button` отдаёт ей «Сделать текущим»: связь одна
 /// на машину и принадлежит текущему соединению, а «Отключиться», оборвавшее
 /// чужую связь, — это и есть мина указателя 1, только под другой подписью.
 /// Остаётся «Переименовать»: оно адресуется по ИМЕНИ карточки
 /// (`save::rename`) и работает у любой.
+///
+/// **Код — второе такое исключение, и по тому же доводу** (спека 4 ревью
+/// задач 6 и 7). `issue_code` адресуется по ИМЕНИ карточки, читает один файл
+/// (ключ этой машины) и пишет в книгу запись этой карточки — `ui.link`,
+/// сеанс и текущее соединение он не трогает вовсе, то есть защита, ради
+/// которой пункты про связь у нетекущей запрещены, здесь не нужна, как не
+/// нужна она и переименованию.
+///
+/// А цена запрета оказалась настоящим тупиком: у разработчика с десятью
+/// карточками заказчиков код выдавался бы только у текущей, и чтобы позвать
+/// одиннадцатого, пришлось бы переключать базу агента. Хуже того, карточка
+/// при этом ВЕЛЕЛА нажать «Показать код» (`accepting_block::code_note`) —
+/// кнопку, которой у неё не было ни в подвале, ни в меню. Либо убирать
+/// слова, либо давать кнопку; даём кнопку, потому что слова говорят правду
+/// о том, что человеку нужно.
 ///
 /// Пункта «Сделать текущим» здесь нет: он на главной кнопке, и это один
 /// орган, а не два (спека, «Наверху и в списке — один и тот же выбор»).
@@ -1315,15 +1375,15 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
         return Vec::new();
     }
     let c = resolve_selected(&ui.cfg, selected);
-    if c.name != ui.cfg.current().name {
-        return vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)];
-    }
-    let connected = ui.link.is_up();
+    let current = c.name == ui.cfg.current().name;
+    let connected = current && ui.link.is_up();
     let accepting = matches!(c.role(), Ok("accept")) && c.mode != "local";
     let mut out = Vec::new();
+    // Про СВЯЗЬ — только у текущей карточки: связь одна на машину и
+    // принадлежит ей (см. докстроку). Код ниже — не про связь.
     if connected {
         out.push(("Отключиться", LinkAct::Toggle));
-    } else if matches!(c.role(), Ok("dial")) {
+    } else if current && matches!(c.role(), Ok("dial")) {
         out.push(("Подключиться", LinkAct::Toggle));
     }
     // Код у принимающей карточки есть всегда, подключена она или нет: он не
@@ -1430,9 +1490,12 @@ pub enum LinkAct {
 /// `Book::reissue` на просроченном тикете — и прежние коды такой отказ не
 /// гасит, карточка не остаётся без кода из-за негодного нового).
 fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
+    // Уже выданный отдаётся только ЖИВЫМ (`live_code`): «Показать код» на
+    // мёртвый код не показывает — он выдаёт новый, как если бы кода и не
+    // было, потому что для человека это одно и то же (Important 1 ревью).
     if !fresh {
-        if let Some((_, code)) = ui.codes.iter().find(|(c, _)| c == card) {
-            return Ok(code.clone());
+        if let Some(code) = live_code(ui, card, SystemTime::now()) {
+            return Ok(code);
         }
     }
     let id = crate::node::id_from_state(ui.kit.state())?;
@@ -1444,7 +1507,7 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
     book.reissue(card, &ticket)?;
     ui.codes.retain(|(c, _)| c != card);
-    ui.codes.push((card.to_string(), code.clone()));
+    ui.codes.push((card.to_string(), ticket));
     Ok(code)
 }
 
@@ -3003,7 +3066,9 @@ impl Panel {
         let card_name = c.name.clone();
         let block = {
             let ui = cx.global::<Ui>();
-            let code = ui.codes.iter().find(|(card, _)| *card == card_name).map(|(_, code)| code.clone());
+            // Только ЖИВОЙ код (`live_code`): мёртвую строку показывать и
+            // предлагать передать на ту сторону нельзя (Important 1 ревью).
+            let code = live_code(ui, &card_name, SystemTime::now());
             let parties = ui.book.as_ref().map(|b| b.of(&card_name)).unwrap_or_default();
             accepting_block(&c, code.as_deref(), &parties)
         };
@@ -3045,6 +3110,13 @@ impl Panel {
                 );
             }
             col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
+            // Пометка про чужие слова — ОДНА над списком, а не у каждой
+            // строки: при десяти сторонах она была бы десятью переносами
+            // поверх отпечатков, которые и сами занимают по две строки
+            // (Minor ревью задач 6 и 7).
+            if let Some(note) = block.says_note {
+                col = col.child(div().text_size(px(12.)).text_color(caption).child(note));
+            }
             for (n, p) in block.parties.into_iter().enumerate() {
                 let card = card_name.clone();
                 let key = p.key;
@@ -3053,12 +3125,23 @@ impl Panel {
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(caption).child(p.says_name))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.says_name))
+                                    // Что ей дано — словами и рядом с её
+                                    // отпечатком: без этой строки сторона с
+                                    // правом записи выглядела в точности как
+                                    // та, которой разрешено только читать
+                                    // (спека 6 ревью задач 6 и 7).
+                                    .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.access)),
+                            )
                             // Отзыв — красной кнопкой: он отнимает уже
                             // сделанное (сторона перестанет входить), то
                             // же правило, что развело пункты меню по
                             // разрядам.
-                            .child(KitButton::new(("revoke", n)).danger().small().label("Отозвать").on_click(cx.listener(
+                            .child(KitButton::new(("revoke", n)).danger().small().label(REVOKE).on_click(cx.listener(
                                 move |_, _, _, cx| {
                                     revoke_party(cx.global_mut::<Ui>(), &card, key);
                                     cx.refresh_windows();
@@ -3918,7 +4001,7 @@ mod tests {
     use super::{
         accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, can_save, card, card_title, delete_on_confirm,
         delete_question_text, enroll_facts, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_menu,
-        main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
+        live_code, main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
         publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
         switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty,
         LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK,
@@ -5204,16 +5287,35 @@ mod tests {
     }
 
     /// Задача 14: предмет меню — ОТКРЫТАЯ карточка, и у нетекущей пунктов
-    /// про связь нет вовсе. Связь одна на машину и принадлежит текущему
+    /// про СВЯЗЬ нет вовсе. Связь одна на машину и принадлежит текущему
     /// соединению: «Отключиться» у чужой карточки оборвало бы не её — та же
-    /// мина, что заглушка `UNWIRED`, только под другой подписью. Остаётся
-    /// «Переименовать»: оно адресуется по имени карточки.
+    /// мина, что заглушка `UNWIRED`, только под другой подписью.
+    ///
+    /// Спека 4 ревью задач 6 и 7: КОД у нетекущей остаётся, по тому же
+    /// доводу, по какому остаётся «Переименовать» — `issue_code`
+    /// адресуется по имени карточки и чужого состояния не трогает. Прежде
+    /// его тут не было, и карточка при этом ВЕЛЕЛА нажать «Показать код»
+    /// (`accepting_block::code_note`) — кнопку, которой у неё не было ни в
+    /// подвале, ни в меню; у разработчика с десятью заказчиками код
+    /// выдавался бы только у текущей карточки.
     #[test]
-    fn a_card_that_is_not_the_current_one_gets_no_link_items() {
+    fn a_card_that_is_not_the_current_one_keeps_its_code_but_gets_no_connection_items() {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
         ui.link = State::Up { since: Instant::now() };
-        assert_eq!(link_menu(&ui, "Василёк"), vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)]);
+        let other = link_menu(&ui, "Василёк");
+        assert_eq!(
+            other,
+            vec![
+                ("Показать код", LinkAct::ShowCode),
+                ("Выдать новый код", LinkAct::NewCode),
+                ("Переименовать", LinkAct::Rename),
+                ("Удалить соединение", LinkAct::Delete),
+            ],
+        );
+        for about_the_link in [LinkAct::Toggle, LinkAct::MakeCurrent] {
+            assert!(!other.iter().any(|(_, a)| *a == about_the_link), "связь принадлежит текущей карточке: {other:?}");
+        }
         assert!(menu_labels(&ui).contains(&"Отключиться"), "у текущей карточки связь своя");
     }
 
@@ -5273,7 +5375,12 @@ mod tests {
     #[test]
     fn the_menu_of_a_card_ends_with_delete_and_the_whole_list_is_pinned() {
         assert_eq!(menu_labels(&ui_current_card()), vec!["Подключиться", "Переименовать", "Удалить соединение"]);
-        assert_eq!(menu_labels_of(&ui_other_card(), "Василёк"), vec!["Переименовать", "Удалить соединение"]);
+        // Нетекущая принимающая карточка несёт свой код и ничего про связь
+        // (спека 4 ревью задач 6 и 7).
+        assert_eq!(
+            menu_labels_of(&ui_other_card(), "Василёк"),
+            vec!["Показать код", "Выдать новый код", "Переименовать", "Удалить соединение"],
+        );
     }
 
     /// Вопрос перед удалением называет карточку по имени и обещает словами
@@ -5723,11 +5830,28 @@ mod tests {
         assert_eq!(b.parties[0].fingerprint, a_key(7).to_string());
         assert_eq!(b.parties[0].key, a_key(7), "отзыв адресуется ключом, а не разбором строки с экрана");
         assert!(b.parties[0].says_name.contains("Ромашка-бухгалтерия"));
-        // Чужие слова помечены и здесь: книга их не проверила, и время этого
-        // не изменило.
-        assert!(b.parties[0].says_name.contains(crate::gui::NOT_VERIFIED), "{}", b.parties[0].says_name);
         assert!(b.parties[1].says_name.contains("не назвала"), "{}", b.parties[1].says_name);
-        assert!(b.parties[1].says_name.contains(crate::gui::NOT_VERIFIED), "{}", b.parties[1].says_name);
+
+        // Чужие слова помечены ОДИН раз над списком, а не у каждой строки:
+        // при десяти сторонах пометка была бы десятью переносами поверх
+        // отпечатков, которые и сами занимают по две строки (Minor ревью).
+        let note = b.says_note.expect("зачисленные есть — пометке есть что помечать");
+        assert!(note.contains("не проверено"), "{note}");
+        for p in &b.parties {
+            assert!(!p.says_name.contains("не проверено"), "пометка не повторяется у каждой строки: {}", p.says_name);
+        }
+
+        // Спека 6 ревью: что стороне ДАНО, видно словами. Без этой строки
+        // сторона с правом записи выглядела в точности как та, которой
+        // разрешено только читать, — человек не мог увидеть, кому что дал.
+        assert_eq!(b.parties[0].access, "Чтение и запись");
+        assert!(b.parties[0].write);
+        assert_eq!(b.parties[1].access, "Только чтение");
+        assert!(!b.parties[1].write);
+
+        // Спека 5 ревью: подпись кнопки отзыва целиком — слово
+        // «разрешение» говорит, ЧТО именно отзывают.
+        assert_eq!(super::REVOKE, "Отозвать разрешение");
     }
 
     /// Пока кода не выдали, карточка не молчит пустым местом (то же правило,
@@ -5739,6 +5863,7 @@ mod tests {
         assert!(b.code_note.contains("Показать код"), "{}", b.code_note);
         assert_eq!(b.enrolled, "Никого ещё не зачислили");
         assert!(b.parties.is_empty());
+        assert_eq!(b.says_note, None, "помечать нечего, когда никого не зачислили");
     }
 
     /// У зовущей карточки своего кода не бывает — он приходит с той стороны;
@@ -5763,20 +5888,11 @@ mod tests {
     fn a_hanging_request_puts_allow_on_the_main_button() {
         let mut ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
-        ui.waiting.push(crate::gui::Pending {
-            request: crate::enroll::Request {
-                card: card.clone(),
-                base: crate::wire::BaseFields {
-                    base_id: "b1".into(),
-                    base_name: "Бухгалтерия".into(),
-                    publication: "auto".into(),
-                    write: true,
-                },
-                peer: a_key(3),
-                says_name: "Заказчик".into(),
-            },
-            answer: None,
-        });
+        // Приёмник держится живым до конца теста: заявка, на которую некому
+        // отвечать, кнопку «Разрешить» не зажигает вовсе (Important 2
+        // ревью) — и это проверяет сосед ниже.
+        let (tx, _rx) = futures::channel::oneshot::channel();
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(tx) });
         assert!(enroll_facts(&ui, &card).waiting, "факт заявки обязан дойти до слова и до кнопки");
         for dirty in [Dirty::No, Dirty::Fields, Dirty::NameOnly] {
             let b = main_button(&ui, "", dirty);
@@ -5789,5 +5905,82 @@ mod tests {
         // та же мина, что заглушка `UNWIRED` в меню.
         ui.waiting[0].request.card = "Другая".into();
         assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
+    }
+    fn a_waiting_request(card: &str) -> crate::enroll::Request {
+        crate::enroll::Request {
+            card: card.to_string(),
+            base: crate::wire::BaseFields {
+                base_id: "b1".into(),
+                base_name: "Бухгалтерия".into(),
+                publication: "auto".into(),
+                write: true,
+            },
+            peer: a_key(3),
+            says_name: "Заказчик".into(),
+        }
+    }
+
+    /// Important 2 ревью задач 6 и 7: заявка, на которую отвечать уже
+    /// некому, не поднимает строку первой и не зажигает «Разрешить».
+    /// Последовательность из находки: заявка пришла при закрытом окне, пять
+    /// минут срока вышли, человек открывает окно, видит первую строку,
+    /// снимает трубку, сверяет отпечаток голосом, жмёт «Разрешить» — и
+    /// получает «отправить не удалось».
+    ///
+    /// Падал так: `enroll_facts` считал ждущей любую запись в `ui.waiting`,
+    /// а `Pending::reachable` не существовало — докстрока `Pending::answer`
+    /// обещала снятие мёртвой заявки, кода за обещанием не было.
+    #[test]
+    fn a_request_nobody_can_answer_stops_waiting_on_screen() {
+        let mut ui = ui_for("accept", "tunnel", false);
+        let card = ui.cfg.current().name.clone();
+        let (tx, rx) = futures::channel::oneshot::channel();
+        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(&card), answer: Some(tx) });
+        assert!(enroll_facts(&ui, &card).waiting, "живая заявка ждёт — иначе тест проверяет не то");
+        assert_eq!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
+
+        // Разговор кончился: приёмник решения уронен.
+        drop(rx);
+        assert!(!enroll_facts(&ui, &card).waiting, "ждать некого — слово «ждёт разрешения» на экране ложь");
+        assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW, "«Разрешить», кончающееся «не удалось», предлагать нельзя");
+
+        // Тик роняет её со словами: исчезнувшую первую строку человек иначе
+        // не объяснит.
+        crate::gui::prune_enrollment(&mut ui, std::time::SystemTime::now());
+        assert!(ui.waiting.is_empty());
+        assert!(ui.log.last().unwrap().line.text.contains("больше не ждёт ответа"), "{:?}", ui.log.last());
+    }
+
+    /// Important 1 ревью задач 6 и 7: строка выданного кода не чистилась
+    /// никогда. Код давно просрочен, а карточка стоит первой строкой «ждёт
+    /// разрешения», показывает мёртвую строку и предлагает передать её на
+    /// ту сторону. Окно в трее живёт сутками, тикет — ровно сутки
+    /// (`ticket::LIFETIME`), так что это доступно без всякого канала.
+    ///
+    /// Падал так: `ui.codes` держал готовую СТРОКУ, которая о себе ничего
+    /// сказать не умеет, и `enroll_facts` считал код выданным навсегда.
+    #[test]
+    fn a_code_that_died_stops_being_shown_and_stops_meaning_waiting() {
+        let mut ui = ui_for("accept", "tunnel", false);
+        let card = ui.cfg.current().name.clone();
+        let ticket = crate::ticket::Ticket::issue(a_key(5), None, Vec::new()).unwrap();
+        let until = ticket.until;
+        ui.codes.push((card.clone(), ticket));
+        let fresh = until - std::time::Duration::from_secs(60);
+        assert!(enroll_facts(&ui, &card).code_issued, "живой код — ожидание настоящее");
+        assert!(live_code(&ui, &card, fresh).is_some());
+
+        // Сутки прошли.
+        let late = until + std::time::Duration::from_secs(1);
+        assert!(live_code(&ui, &card, late).is_none(), "мёртвую строку ни показать, ни скопировать");
+        crate::gui::prune_enrollment(&mut ui, late);
+        assert!(ui.codes.is_empty());
+        assert!(!enroll_facts(&ui, &card).code_issued, "«ждёт разрешения» за истёкший код — та же беда прошлой ветки");
+        assert!(ui.log.last().unwrap().line.text.contains("истёк"), "{:?}", ui.log.last());
+
+        // И карточка больше не велит передавать то, чего нет.
+        let b = accepting_block(&ui.cfg.current().clone(), None, &[]).expect("блок есть");
+        assert!(b.code.is_none());
+        assert!(b.code_note.contains("Кода пока нет"), "{}", b.code_note);
     }
 }

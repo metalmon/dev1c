@@ -2689,3 +2689,88 @@ fn an_answer_to_a_gone_request_touches_no_one_else() {
     assert!(ui.declined.is_empty(), "исхода, которого человек не выбирал про ЭТУ сторону, карточка не носит");
     assert!(ui.log.last().unwrap().line.text.contains("отпечаток был у другой стороны"), "{:?}", ui.log.last());
 }
+
+/// Important 3 ревью задач 6 и 7: книга в окне — снимок с момента СВОЕГО
+/// чтения (`Book::of` отдаёт его, а не диск), а зачисление пишет её другой
+/// `Book` — тот, что держит разговор, в своём потоке. Без перечтения карточка
+/// сразу после «Разрешить» говорила бы «Никого ещё не зачислили» и показывала
+/// ноль — до перезапуска окна или до собственной его записи.
+///
+/// Падал так: `reread_book` не существовало, `ui.book` заводился один раз в
+/// `launch` и больше не менялся.
+#[test]
+fn the_book_is_reread_after_the_person_allows() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let state = ui.kit.state().to_path_buf();
+    ui.book = Some(crate::enrolled::Book::open(&state).unwrap());
+    let card = "Ромашка";
+    assert_eq!(ui.book.as_ref().unwrap().of(card).len(), 0, "иначе тест проверяет не то");
+
+    // Так это и происходит на деле: зачисление пишет ДРУГОЙ `Book` на тот же
+    // файл, пока окно держит свой снимок.
+    let peer = a_request().peer;
+    let mut conversation = crate::enrolled::Book::open(&state).unwrap();
+    conversation.enroll(card, peer, "Заказчик", true).unwrap();
+    assert_eq!(ui.book.as_ref().unwrap().of(card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
+
+    let (tx, mut rx) = futures::channel::oneshot::channel();
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+    answer_request(&mut ui, card, peer, Decision::Allow { write: true });
+    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }), "решение обязано уехать — иначе перечтения и не будет");
+
+    let parties = ui.book.as_ref().unwrap().of(card);
+    assert_eq!(parties.len(), 1, "карточка сразу после «Разрешить» обязана показать зачисленную сторону");
+    assert_eq!(parties[0].key, peer);
+}
+
+/// Та же беда у второй двери: новая заявка значит, что по каналу что-то
+/// произошло, — книгу мог переписать разговор (зачисление соседней карточки,
+/// отзыв из второго процесса).
+#[test]
+fn the_book_is_reread_when_a_request_arrives() {
+    let mut ui = Ui::for_test();
+    let state = ui.kit.state().to_path_buf();
+    ui.book = Some(crate::enrolled::Book::open(&state).unwrap());
+    let peer = a_request().peer;
+    crate::enrolled::Book::open(&state).unwrap().enroll("Клевер", peer, "Сосед", false).unwrap();
+    assert_eq!(ui.book.as_ref().unwrap().of("Клевер").len(), 0, "иначе тест проверяет не то");
+
+    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    assert_eq!(ui.book.as_ref().unwrap().of("Клевер").len(), 1, "книга обязана быть перечитана на событии о заявке");
+}
+
+/// Разрешение гасит код (`accept_side` зовёт `Book::spend`, шаг пятый
+/// спеки), и строка, которую человек передавал, с этой секунды никого не
+/// впустит. Держать её в карточке значило бы предлагать передать погашенный
+/// код — тот случай, которого срок тикета не ловит: по сроку он ещё жив.
+#[test]
+fn allowing_drops_the_code_it_spent() {
+    use crate::enroll::Decision;
+    let mut ui = Ui::for_test();
+    let card = "Ромашка";
+    let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
+    ui.codes.push((card.to_string(), ticket));
+    let (tx, _rx) = futures::channel::oneshot::channel();
+    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+
+    answer_request(&mut ui, card, a_request().peer, Decision::Allow { write: true });
+    assert!(ui.codes.is_empty(), "погашенный зачислением код в карточке не остаётся");
+}
+
+/// Minor ревью задач 6 и 7: при пустом имени базы карточка называлась дважды
+/// — в вопросе и через полторы строки в подробности.
+#[test]
+fn an_empty_base_name_names_the_card_once() {
+    let mut r = a_request();
+    r.base.base_name = String::new();
+    let (message, detail) = permission_question(&r);
+    assert!(message.contains("карточке «Ромашка»"), "{message}");
+    // Ищем именно СТРОКУ про карточку, а не слово «Ромашка»: оно законно
+    // стоит в самоназвании той стороны, и это её слова, а не наша подпись.
+    assert!(!detail.contains("Карточка"), "второй раз называть её незачем: {detail}");
+    // А когда база названа — строка про карточку на месте: вопрос её тогда
+    // не называет вовсе.
+    let (_, full) = permission_question(&a_request());
+    assert!(full.contains("Карточка «Ромашка»"), "{full}");
+}

@@ -303,10 +303,12 @@ pub fn switch_locked(gate: Option<&str>, on: bool, has_progress: bool) -> bool {
     has_progress || (gate.is_some() && !on)
 }
 
-/// Причина замка человеческими словами — одна формулировка на подсказку,
-/// подвал и журнал. «Нельзя включить», а не «включать нечего»: включать как
-/// раз есть что, просто не на чем — поле не заполнено, платформы нет. Прежняя
-/// формулировка говорила человеку, что его работа никому не нужна.
+/// Причина замка человеческими словами — одна формулировка на подсказку
+/// переключателя и журнал (у подвала с 9.11 слота для неё нет — левый
+/// текстовый слот убран совсем, причина живёт тултипом самой кнопки). «Нельзя
+/// включить», а не «включать нечего»: включать как раз есть что, просто не на
+/// чем — поле не заполнено, платформы нет. Прежняя формулировка говорила
+/// человеку, что его работа никому не нужна.
 pub fn gate_text(why: &str) -> String {
     format!("Нельзя включить: {why}")
 }
@@ -757,6 +759,46 @@ const PROJECT_EMPTY: &str = "Читаю состояние проекта…";
 /// себе самой.
 fn nothing_to_show(facts_empty: bool, rows_empty: bool) -> Option<String> {
     (facts_empty && rows_empty).then(|| "Пока нечего показать: укажите базу на «Связи», затем нажмите «Проверить».".to_string())
+}
+
+/// Подпись первой строкой вкладки «Инструменты» (находка владельца 9.11):
+/// выгрузка конфигурации, загрузка и установка расширения ниже работают с
+/// ТЕКУЩИМ соединением, а вкладка никак его не называла — у разработчика с
+/// десятью заказчиками это выгрузка в чужую папку, и притом необратимая.
+/// Чистая функция от `Cfg` (как `nothing_to_show` выше): что написать,
+/// решает она, отрисовка только подставляет готовую строку.
+///
+/// Переключить соединение эта подпись не предлагает: выбор живёт в одном
+/// месте, на «Связи» (спека интерфейса, «Наверху и в списке — один и тот же
+/// выбор»), и текст лишь называет, где его менять, чтобы не искать.
+///
+/// Пустой список соединений — законный вид (свежий комплект, или итог
+/// удаления последней карточки): подпись говорит это словами и не называет
+/// действий над пустотой.
+///
+/// База на той стороне (`!Connection::base_is_here()`) — свой путь к ней
+/// здесь не называем, той же защитой, что у `shown_fields`/
+/// `base_fields_note` в карточке: локального каталога у такой базы нет.
+pub fn tools_connection_banner(cfg: &cfg::Cfg) -> String {
+    if cfg.connections.is_empty() {
+        return "Соединений пока нет — завести их можно на «Связи».".to_string();
+    }
+    let c = cfg.current();
+    let name = if c.name.trim().is_empty() { "без имени" } else { c.name.trim() };
+    let base = if !c.base_is_here() {
+        "база — на той стороне".to_string()
+    } else if c.base_path.trim().is_empty() {
+        "база не указана".to_string()
+    } else {
+        format!("база {}", c.base_path.trim())
+    };
+    let folder_word = folder_label(c.toolset().unwrap_or("business")).to_lowercase();
+    let folder = if c.project.trim().is_empty() {
+        format!("{folder_word} не указана")
+    } else {
+        format!("{folder_word} {}", c.project.trim())
+    };
+    format!("Инструменты работают с соединением «{name}»: {base}, {folder}. Сменить соединение — на «Связи».")
 }
 
 /// Строки вкладки «Инструменты»: кружок, заголовок, подробность. Чистая — вид
@@ -3167,6 +3209,11 @@ impl Render for Panel {
             // сверху факты набора, ниже — каталог и состояние ветки.
             gui::Tab::Tools => {
                 let ui = cx.global::<Ui>();
+                // Первая строка вкладки (находка владельца 9.11): с каким
+                // соединением работают выгрузка, загрузка и установка
+                // расширения ниже — решает чистая `tools_connection_banner`,
+                // отрисовка её слова не трогает.
+                let banner = tools_connection_banner(&ui.cfg);
                 let facts = fact_rows(&project_facts(tab_facts(&ui.facts, &ui.kit_facts)));
                 let mut rows = project_rows(ui.project.as_ref());
                 // Пустая вкладка — всегда наша вина, а не состояние человека
@@ -3195,6 +3242,10 @@ impl Render for Panel {
                     v_flex()
                         // 12 px между фактами набора и строками проекта: два разных списка, а не один.
                         .gap_3()
+                        // Подпись соединения — мелким приглушённым текстом, тем же
+                        // приёмом, что у подсказок без кружка ниже: `min_w_0`, иначе
+                        // длинная строка не переносится, а обрезается по краю карточки.
+                        .child(div().flex_1().min_w_0().text_size(px(13.)).text_color(caption).child(banner))
                         // `flex_1().min_w_0()` у строки без кружка — ровно по той же
                         // причине, что у строк журнала этажом ниже: flex-ребёнок не
                         // уже своего текста, и длинная подсказка не переносится, а
@@ -3377,12 +3428,13 @@ impl Render for Panel {
                     .items_center()
                     .gap_2()
                     // Предмет, кнопка и меню — своей, нерастяжимой ширины
-                    // (`flex_shrink_0`): без него при недостатке места сжимался
-                    // бы и этот блок, и левый текст подвала одновременно, и
-                    // оставшееся каждому было бы не «то, что реально осталось»,
-                    // а поровну пополам — слот обрезал бы слово ровно там, где
-                    // кончилась его половина, а не там, где кончилось место
-                    // (находка живого прогона 9.11, задача 4).
+                    // (`flex_shrink_0`): без него при недостатке места блок
+                    // сжимался бы весь, а не только предмет по своему
+                    // `max_w` ниже — слово обрезалось бы там, где кончилось
+                    // отведённое флексом место, а не там, где решил сам
+                    // предмет (находка живого прогона 9.11, задача 4; левого
+                    // текстового слота подвала, с которым тогда делилось
+                    // место, с того же 9.11 в подвале уже нет).
                     .flex_shrink_0()
                     // Предмет — СЛЕВА от кнопки: иначе «Подключиться» не
                     // говорит, что именно подключит (замечание владельца к
@@ -3434,9 +3486,10 @@ impl Render for Panel {
                 let rest = project_menu(which);
                 h_flex()
                     .gap_2()
-                    // Та же причина, что у «Связи» выше: нерастяжимая ширина,
-                    // чтобы левому слоту подвала достался именно остаток, а
-                    // не половина общей нехватки места.
+                    // Та же причина, что у «Связи» выше: нерастяжимая
+                    // ширина, иначе при недостатке места сжимался бы и этот
+                    // блок целиком (левого текстового слота подвала, с
+                    // которым было бы иначе, с 9.11 уже нет).
                     .flex_shrink_0()
                     .child(more("more-project").dropdown_menu(move |mut menu, _, _| {
                         for entry in rest.iter().copied() {
@@ -3579,8 +3632,8 @@ mod tests {
         delete_question_text, fact_rows, fields_differ, folder_label, found_text, gate_text, leave_question, link_body, link_menu,
         main_button, nothing_to_show, op_question, pick_face, profile_label, project_facts, project_menu, project_rows,
         publication_switch_label, reason, resolve_selected, row_marks, save_hint, shown_base_url, shown_fields, skill_found_text,
-        switch_locked, switch_tooltip, tab_facts, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
-        DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK, PASS_THE_CODE,
+        switch_locked, switch_tooltip, tab_facts, tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty,
+        LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK, PASS_THE_CODE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -4448,6 +4501,36 @@ mod tests {
         assert!(say.contains("Проверить"), "{say}");
         assert_eq!(nothing_to_show(false, true), None, "факты есть — подсказка лишняя");
         assert_eq!(nothing_to_show(true, false), None, "строки проекта есть — подсказка лишняя");
+    }
+
+    #[test]
+    fn the_tools_tab_names_the_current_connection_and_its_folders() {
+        let cfg = cfg_with(&["Заказчик А"]);
+        let banner = tools_connection_banner(&cfg);
+        assert!(banner.contains("Заказчик А"), "подпись обязана назвать соединение: {banner}");
+        assert!(banner.contains(&cfg.current().base_path), "подпись обязана назвать каталог базы: {banner}");
+        assert!(banner.contains(&cfg.current().project), "подпись обязана назвать папку: {banner}");
+        assert!(banner.contains("«Связи»"), "подпись обязана сказать, где менять соединение: {banner}");
+    }
+
+    #[test]
+    fn with_no_connections_the_tools_tab_says_so_instead_of_naming_one() {
+        let cfg = cfg_with(&[]);
+        let banner = tools_connection_banner(&cfg);
+        assert!(banner.to_lowercase().contains("соединени"), "подпись обязана сказать, что соединений нет: {banner}");
+        assert!(banner.contains("«Связи»"), "подпись обязана сказать, где их завести: {banner}");
+    }
+
+    #[test]
+    fn a_remote_base_does_not_claim_a_local_catalog() {
+        // Топология «база на той стороне»: показывать здесь путь к базе
+        // этой машины — соврать, ровно та защита, что уже есть у
+        // `shown_fields`/`base_fields_note` для карточки.
+        let mut cfg = cfg_with(&["Удалённый"]);
+        cfg.connections[0].base_here = false;
+        let banner = tools_connection_banner(&cfg);
+        assert!(!banner.contains(&cfg.connections[0].base_path), "база на той стороне — свой путь к ней не называем: {banner}");
+        assert!(banner.contains("той сторон"), "{banner}");
     }
 
     #[test]

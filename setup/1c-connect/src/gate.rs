@@ -190,13 +190,18 @@ mod tests {
     /// „Сохранить“» — звал туда, куда с первого экрана не попасть: ни полей,
     /// ни кнопки «Сохранить» онбординг не показывает (`panel::link_body`),
     /// он показывает факт и два ответа.
+    ///
+    /// Important 1 круга починки 1: проверка одного лишь ОТСУТСТВИЯ старых
+    /// слов не упала бы, если фраза съедет в третьи, никем не одобренные
+    /// слова, — сравниваем с самой фразой, которую видел владелец и не
+    /// оспорил.
     #[test]
     fn the_first_screen_does_not_send_the_person_after_fields_it_does_not_show() {
         let mut c = crate::cfg::filled_for_test();
         c.connections.clear();
         let why = cold_gate(&c, false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
             .expect("пустая «Связь» обязана запереть переключатель");
-        assert!(!why.contains("заполните поля") && !why.contains("Сохранить"), "{why}");
+        assert_eq!(why, "соединений нет — заведите первое");
     }
 
     #[test]

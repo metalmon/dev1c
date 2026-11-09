@@ -583,7 +583,12 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // запертых ветках этой функции.
         if !ui.link.is_up() {
             if let Some(why) = ui.gate.as_deref() {
-                return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
+                return Button {
+                    subject,
+                    label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state,
+                    why: Some(gate_text(why)),
+                    act: None,
+                };
             }
         }
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
@@ -595,7 +600,7 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // состояние словом `link::row` — причина уже сказана подсказкой
         // переключателя (`reason`), второй раз её здесь не произносим
         // (`why: None`).
-        return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: None, act: None };
+        return Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: None, act: None };
     }
     if matches!(c.role(), Ok("dial")) {
         // Тот же замок и тот же довод, что у local-ветки выше: «Подключиться»
@@ -603,7 +608,7 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // отказывает молча, заперт ли замок в туннельном режиме или в
         // локальном (Critical 1 — приём общий для обоих режимов).
         if let Some(why) = ui.gate.as_deref() {
-            return Button { subject, label: link::row(c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
+            return Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
         }
         return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
     }
@@ -5777,6 +5782,11 @@ mod tests {
     #[test]
     fn a_row_says_its_state_and_its_marks_in_one_line() {
         let mut cfg = cfg_with(&["Ромашка", "Василёк"]);
+        // Отметка «запись в базу» — ДЕЙСТВУЮЩЕЕ право, а не половина карточки:
+        // разрешают обе стороны или не разрешает никто. Потому и машине здесь
+        // задан полный потолок: без него строка обещала бы запись, которой на
+        // этой машине нет, — ровно то, что чинил круг 10.11.
+        cfg.write = crate::cfg::WriteCeiling::ReadWrite;
         cfg.connections[0].write = "read_write".into();
         let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
@@ -5791,6 +5801,15 @@ mod tests {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         assert_eq!(row_marks(&r), "не подключено · текущее", "запрет писать — не отметка, а умолчание");
+
+        // И запрет МАШИНЫ снимает отметку так же, как запрет карточки: строка
+        // показывает итог, а не мнение одной из сторон.
+        cfg.connections[0].write = "read_write".into();
+        cfg.write = crate::cfg::WriteCeiling::ReadOnly;
+        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+            panic!("первым элементом тела обязана быть строка соединения")
+        };
+        assert_eq!(row_marks(&r), "не подключено · текущее", "потолок машины сильнее разрешения карточки");
     }
 
     /// Important 2 ревью всей ветки: подсказка главной кнопки принимающей

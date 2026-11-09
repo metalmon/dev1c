@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 /// значило бы повторить одно и то же шестнадцать раз. Тесты САМОГО
 /// зачисления зовут `super::row` и `super::list` со своими фактами.
 fn row(c: &Connection, current: bool, l: Option<&State>) -> Row {
-    super::row(c, current, l, &Enroll::default())
+    super::row(&crate::cfg::Cfg::default(), c, current, l, &Enroll::default())
 }
 
 fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>) -> Vec<Entry> {
@@ -772,10 +772,10 @@ fn a_hanging_request_says_it_waits_and_stands_above_every_caption() {
 fn an_issued_code_reads_as_waiting_for_permission_too() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let issued = Enroll { code_issued: true, ..Default::default() };
-    assert_eq!(super::row(&c, false, None, &issued).state, "ждёт разрешения");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &issued).state, "ждёт разрешения");
     // Код выдан, а связь уже поднялась — слово говорит про связь: ожидание
     // кончилось, и напоминать о нём незачем.
-    assert_eq!(super::row(&c, false, Some(&State::Up { since: Instant::now() }), &issued).state, "подключено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, Some(&State::Up { since: Instant::now() }), &issued).state, "подключено");
 }
 
 /// Отказ — исход, а не ошибка (спека зачисления, шаг пятый): он держится
@@ -786,9 +786,13 @@ fn an_issued_code_reads_as_waiting_for_permission_too() {
 fn a_refusal_is_an_outcome_and_a_new_request_overrides_it() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let declined = Enroll { declined: true, ..Default::default() };
-    assert_eq!(super::row(&c, false, None, &declined).state, "отклонено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &declined).state, "отклонено");
     let again = Enroll { declined: true, waiting: true, ..Default::default() };
-    assert_eq!(super::row(&c, false, None, &again).state, "ждёт разрешения", "новая заявка важнее прошлого исхода");
+    assert_eq!(
+        super::row(&crate::cfg::Cfg::default(), &c, false, None, &again).state,
+        "ждёт разрешения",
+        "новая заявка важнее прошлого исхода"
+    );
 }
 
 /// Зачисленная, но сейчас не подключённая сторона — это «не подключено», а
@@ -798,7 +802,7 @@ fn a_refusal_is_an_outcome_and_a_new_request_overrides_it() {
 fn being_enrolled_is_not_a_word_on_the_row() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let enrolled = Enroll { enrolled: 3, ..Default::default() };
-    assert_eq!(super::row(&c, false, None, &enrolled).state, "не подключено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &enrolled).state, "не подключено");
     assert_eq!(contract_of(None, &enrolled), None, "зачисление само по себе не состояние контракта");
 }
 
@@ -814,10 +818,10 @@ fn each_card_shows_the_life_of_its_own_stream() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let with = |f: Flow| Enroll { flow: Some(f), ..Default::default() };
 
-    assert_eq!(super::row(&c, false, None, &with(Flow::Calling)).state, "подключается");
-    assert_eq!(super::row(&c, false, None, &with(Flow::Up)).state, "подключено");
-    assert_eq!(super::row(&c, false, None, &with(Flow::Broken)).state, "разорвано");
-    assert_eq!(super::row(&c, false, None, &with(Flow::Retrying)).state, "подключается снова");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &with(Flow::Calling)).state, "подключается");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &with(Flow::Up)).state, "подключено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &with(Flow::Broken)).state, "разорвано");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &with(Flow::Retrying)).state, "подключается снова");
 }
 
 /// Поток карточки важнее транспорта: там, где он есть, он и есть правда о
@@ -832,10 +836,18 @@ fn the_cards_own_stream_outranks_the_machines_transport() {
     let up = State::Up { since: Instant::now() };
 
     let broken_stream = Enroll { flow: Some(Flow::Broken), ..Default::default() };
-    assert_eq!(super::row(&c, false, Some(&up), &broken_stream).state, "разорвано", "поток карточки важнее поднятого транспорта");
+    assert_eq!(
+        super::row(&crate::cfg::Cfg::default(), &c, false, Some(&up), &broken_stream).state,
+        "разорвано",
+        "поток карточки важнее поднятого транспорта"
+    );
 
     let no_stream = Enroll::default();
-    assert_eq!(super::row(&c, false, Some(&up), &no_stream).state, "подключено", "потока нет — слово берёт транспорт");
+    assert_eq!(
+        super::row(&crate::cfg::Cfg::default(), &c, false, Some(&up), &no_stream).state,
+        "подключено",
+        "потока нет — слово берёт транспорт"
+    );
 }
 
 /// Висящая заявка перебивает даже живой поток: от неё ждут ДЕЙСТВИЯ
@@ -845,7 +857,7 @@ fn the_cards_own_stream_outranks_the_machines_transport() {
 fn a_waiting_request_still_wins_over_a_live_stream() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let both = Enroll { waiting: true, flow: Some(Flow::Up), ..Default::default() };
-    assert_eq!(super::row(&c, false, None, &both).state, "ждёт разрешения");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &both).state, "ждёт разрешения");
 }
 
 /// Локальной карточке зачислять некого — её пара слов не слушает `Enroll`
@@ -855,6 +867,6 @@ fn a_waiting_request_still_wins_over_a_live_stream() {
 fn a_local_card_keeps_its_own_two_words_whatever_the_book_says() {
     let c = Connection { mode: "local".into(), ..Default::default() };
     let noisy = Enroll { waiting: true, declined: true, code_issued: true, enrolled: 2, flow: Some(Flow::Up) };
-    assert_eq!(super::row(&c, false, None, &noisy).state, "выключено");
-    assert_eq!(super::row(&c, false, Some(&State::Up { since: Instant::now() }), &noisy).state, "включено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &noisy).state, "выключено");
+    assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, Some(&State::Up { since: Instant::now() }), &noisy).state, "включено");
 }

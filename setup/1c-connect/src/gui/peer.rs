@@ -874,7 +874,12 @@ impl Machine {
                             base_id: base_id_of(c),
                             base_name: crate::cfg::base_name(&c.base_path).to_string(),
                             publication: c.publication.clone(),
-                            write: c.allows_write() && matches!(ceiling, Ceiling::Full),
+                            // Действующее право, а не своя складка половин: складывать
+                            // их умеет ровно одна `Cfg::may_write`, и второе место сложения
+                            // — это второй словарь одного понятия, который однажды разойдётся
+                            // с первым (на этой ветке так уже было с потолком и с чтением
+                            // настроек).
+                            write: cfg.may_write(c),
                         },
                     },
                 )

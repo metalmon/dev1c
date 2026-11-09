@@ -223,7 +223,7 @@ pub fn contract_of(l: Option<&State>, e: &Enroll) -> Option<Contract> {
 /// `contract_word`), а «не подключено» остаётся единственным словом ВНЕ
 /// контракта: им говорится «обслуживание не поднято», то есть ровно тот
 /// случай, у которого состояния контракта нет.
-pub fn row(c: &Connection, current: bool, l: Option<&State>, e: &Enroll) -> Row {
+pub fn row(cfg: &crate::cfg::Cfg, c: &Connection, current: bool, l: Option<&State>, e: &Enroll) -> Row {
     let state = if c.mode == "local" {
         if l.is_some_and(State::is_up) {
             "включено"
@@ -243,7 +243,11 @@ pub fn row(c: &Connection, current: bool, l: Option<&State>, e: &Enroll) -> Row 
     } else {
         None
     };
-    Row { name: c.name.clone(), state, current, write: c.allows_write(), base }
+    // Право записи — ДЕЙСТВУЮЩЕЕ (`Cfg::may_write`), а не половина карточки:
+    // иначе при машине «Только чтение» строка списка обещала бы «запись в базу»,
+    // которой нет. Контракт и так требует здесь итог с указанием, какая сторона
+    // ограничила; половина не даёт даже итога.
+    Row { name: c.name.clone(), state, current, write: cfg.may_write(c), base }
 }
 
 /// Онбординг: мастера нет (решение владельца 1.11), вместо него пустая
@@ -384,7 +388,7 @@ pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&st
     for c in &cfg.connections {
         let cat = category(c);
         present[cat] = true;
-        let r = row(c, std::ptr::eq(c, current), link(&c.name).as_ref(), &enroll(&c.name));
+        let r = row(cfg, c, std::ptr::eq(c, current), link(&c.name).as_ref(), &enroll(&c.name));
         if r.state == "ждёт разрешения" {
             waiting.push(r);
         } else {

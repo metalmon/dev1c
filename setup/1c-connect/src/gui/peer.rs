@@ -486,6 +486,40 @@ struct InHand {
     card: Option<String>,
 }
 
+impl InHand {
+    /// Чем звонить на этом круге. Решение одно и живёт в `enroll::Call::of`:
+    /// длину строки кода здесь никто не меряет.
+    fn call(&self) -> enroll::Call<'_> {
+        enroll::Call::of(&self.code, self.card.as_deref())
+    }
+
+    /// Что остаётся на руках после круга — и были ли мы уже подключены.
+    ///
+    /// Код гасится РОВНО тогда, когда круг дошёл до «подключено»: он
+    /// одноразовый (`Book::spend`), и второй круг с тем же кодом получил бы
+    /// «код не найден», то есть переподключение кончилось бы на первом же
+    /// обрыве. Недозвон его не расходует — предъявить не успели.
+    ///
+    /// Отдельным решением, а не строками внутри круга: оба его ответа видны
+    /// человеку (опустевший код — он же признак «подключается СНОВА»), и
+    /// спросить их надо без двух узлов и рантайма.
+    fn after(&mut self, round: &Round, agreed: Option<String>) -> bool {
+        // Карточку, о которой договорились, помним до следующего круга: со
+        // второго круга возврат называет её сам, и та сторона числит поток за
+        // ней одной.
+        if let Some(id) = agreed {
+            self.card = Some(id);
+        }
+        match round {
+            Round::Held(_) => {
+                self.code.clear();
+                true
+            }
+            _ => self.code.is_empty(),
+        }
+    }
+}
+
 /// Зовущая сторона одной карточки: круг за кругом, пока звать есть смысл
 /// (`channel::keep_calling`).
 ///
@@ -509,24 +543,8 @@ async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<E
             // Замок берётся и отпускается до первого ожидания — через `await`
             // его не держим ни разу.
             let mine = hand.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let (round, agreed) =
-                one_round(&node, &channels, &kit, &tx, &card, addr, enroll::Call::of(&mine.code, mine.card.as_deref())).await;
-            let enrolled = {
-                let mut held = hand.lock().unwrap_or_else(|e| e.into_inner());
-                // Карточку, о которой договорились, запоминаем до следующего
-                // круга: со второго круга возврат называет её сам, и та
-                // сторона числит поток за ней одной.
-                if let Some(id) = agreed {
-                    held.card = Some(id);
-                }
-                match &round {
-                    Round::Held(_) => {
-                        held.code.clear();
-                        true
-                    }
-                    _ => held.code.is_empty(),
-                }
-            };
+            let (round, agreed) = one_round(&node, &channels, &kit, &tx, &card, addr, mine.call()).await;
+            let enrolled = hand.lock().unwrap_or_else(|e| e.into_inner()).after(&round, agreed);
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
                 flow(&tx, &card, Some(link::Flow::Retrying));
             }
@@ -1139,6 +1157,39 @@ mod tests {
         drop(ours);
         caller.close().await;
         base.close().await;
+    }
+
+    /// Код предъявляется ОДИН раз, и дальше карточка звонит возвратом, называя
+    /// себя.
+    ///
+    /// Обе половины решения зовущей стороны — чем звонить и что остаётся на
+    /// руках — не были покрыты ничем, а ошибиться в них есть чем: второй круг
+    /// с тем же кодом получает «код не найден», то есть переподключение
+    /// кончается на первом же обрыве, а недозвон, съевший код, оставляет
+    /// человека без второй попытки.
+    #[test]
+    fn a_card_presents_its_code_once_and_names_itself_from_then_on() {
+        use crate::channel::{Gone, Round};
+        use crate::enroll::Call;
+        use crate::wire::{code, Refuse};
+
+        let mut hand = super::InHand { code: " КОД ".into(), card: None };
+        assert_eq!(hand.call(), Call::Enroll("КОД"), "код на руках — заявка, и без краёв строки");
+
+        // Круг дошёл до «подключено» и оборвался; та сторона успела назвать
+        // карточку.
+        assert!(hand.after(&Round::Held(Gone::Broken(Refuse::new(code::BROKEN, "обрыв"))), Some("b1".into())));
+        assert_eq!(hand.call(), Call::Return(Some("b1")), "дальше возврат называет карточку: код одноразовый");
+
+        // Недозвон до зачисления код НЕ расходует: предъявить его не успели, и
+        // карточка остаётся «подключается», а не «подключается снова».
+        let mut fresh = super::InHand { code: "КОД".into(), card: None };
+        assert!(!fresh.after(&Round::Failed("не дозвонились".into()), None), "до зачисления это «подключается», а не «снова»");
+        assert_eq!(fresh.call(), Call::Enroll("КОД"), "недозвон код не расходует");
+
+        // А карточка, которой кода не давали и чья карточка не названа, идёт
+        // возвратом без имени — так выглядит первый круг после перезапуска.
+        assert_eq!(super::InHand::default().call(), Call::Return(None));
     }
 
     /// Куда звонить этой карточкой — по вставленному коду либо по

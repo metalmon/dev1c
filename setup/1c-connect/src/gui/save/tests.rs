@@ -2763,15 +2763,24 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
     // Первая вещь: имя базы — в самом вопросе, потому что спрашивают именно
     // про доступ к ней.
     assert!(message.contains("Бухгалтерия Ромашки"), "{message}");
-    // Вторая: отпечаток ЦЕЛИКОМ, а не первыми байтами — усечённый
-    // приглашает подобрать коллизию к началу.
+    // Вторая: отпечаток ЧЕТЫРЬМЯ ПОСЛЕДНИМИ знаками (решение владельца
+    // 10.11: «кто это будет сверять голосом, какой придурок-параноик?
+    // Максимум 4 знака в конце»). Утверждение сильнее прежнего: полного
+    // ключа в диалоге нет ВОВСЕ, и просьбы сверять его голосом тоже нет —
+    // ритуал, который не исполняется, защитой не был.
     let fingerprint = r.peer.to_string();
-    assert!(detail.contains(&fingerprint), "{detail}");
-    assert!(detail.contains("голосом по телефону"), "сверять будут вслух, и в диалоге так и написано: {detail}");
-    assert!(detail.contains("целиком"), "обрывать сверку на первых знаках человеку нельзя предлагать: {detail}");
+    assert!(detail.contains(&crate::gui::short_key(&fingerprint)), "{detail}");
+    assert!(!detail.contains(&fingerprint), "полного ключа на экране быть не должно: {detail}");
+    assert!(!detail.contains("голосом"), "ритуала сверки голосом больше нет: {detail}");
     // Третья: самоназвание — и ПОМЕТКА рядом с ним, а не где-то в тексте.
-    let says = detail.lines().find(|l| l.contains("Заказчик Ромашка")).expect("самоназвание обязано быть: {detail}");
-    assert!(says.contains(NOT_VERIFIED), "пометка стоит в той же строке, что и чужие слова: {says}");
+    //
+    // Пометка стоит СРАЗУ ПОД чужими словами и ничем от них не отделена.
+    // Прежде требовалась та же строка — требование по сути то же (оторвать
+    // пометку от имени нельзя), но одной строкой оно давало длинный хвост,
+    // который человек дочитывает до середины.
+    let lines: Vec<&str> = detail.lines().collect();
+    let at = lines.iter().position(|l| l.contains("Заказчик Ромашка")).expect("самоназвание обязано быть");
+    assert!(lines[at + 1].contains(NOT_VERIFIED), "пометка идёт сразу под чужими словами: {detail}");
 
     // И ни одной больше: всё прочее, что приехало по каналу, молчит.
     let text = format!("{message}\n{detail}");
@@ -2794,7 +2803,7 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
 fn a_side_that_did_not_name_itself_is_said_so_in_words() {
     let r = crate::enroll::Request { says_name: crate::wire::SaysName::new(""), ..a_request() };
     let (_, detail) = permission_question(&r);
-    assert!(detail.contains("Имя не прислали"), "отсутствие имени сказано словами: {detail}");
+    assert!(detail.contains("без имени"), "отсутствие имени сказано словами: {detail}");
     assert!(!detail.contains("«»"), "кавычки вокруг пустоты — не слова: {detail}");
     assert!(detail.contains(NOT_VERIFIED), "{detail}");
 }

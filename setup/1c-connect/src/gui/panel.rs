@@ -1320,7 +1320,10 @@ pub fn accepting_block(
         .unwrap_or_default()
         .iter()
         .map(|p| PartyRow {
-            fingerprint: p.key.to_string(),
+            // Четыре последних знака, не все шестьдесят четыре (решение владельца
+            // 10.11, довод — у `gui::short_key`): по строке в полэкрана человек всё
+            // равно никого не различал, а различает он их по имени и хвосту.
+            fingerprint: crate::gui::short_key(&p.key.to_string()),
             key: p.key,
             says_name: if p.says_name.is_empty() { "Без имени".to_string() } else { format!("«{}»", p.says_name) },
             // Слова, а не галочка, и все ТРИ меры права записи: свои две из
@@ -1373,9 +1376,9 @@ pub struct Dialling {
     /// Одно предложение о том, что делать с полем, — ровно как `code_note` у
     /// принимающей.
     pub note: &'static str,
-    /// Отпечаток ключа той стороны целиком — тот же вид, что у зачисленных в
-    /// принимающей карточке (`PartyRow::fingerprint`) и по тому же доводу:
-    /// усечённый нельзя сверить голосом. `None` — зачисления ещё не было.
+    /// Отпечаток ключа той стороны — тот же короткий вид, что у зачисленных в
+    /// принимающей карточке (`PartyRow::fingerprint`) и по тому же доводу
+    /// (`gui::short_key`). `None` — зачисления ещё не было.
     pub partner: Option<String>,
     pub button: &'static str,
 }
@@ -3585,7 +3588,7 @@ impl Panel {
         // за сегодняшнюю работу.
         let dialling = {
             let ui = cx.global::<Ui>();
-            let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| key.to_string());
+            let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| crate::gui::short_key(&key.to_string()));
             dialling_block(&c, partner)
         };
         if let Some(block) = dialling {
@@ -6366,10 +6369,12 @@ mod tests {
         assert!(b.code_note.contains("кто будет подключаться"), "{}", b.code_note);
         assert_eq!(b.enrolled, "Кому разрешено подключаться", "подпись списка, а не счёт: предела числу зачисленных нет");
 
-        // Отпечаток ЦЕЛИКОМ — тот же, что человек сверял голосом. Усечённый
-        // здесь не отличил бы одну зачисленную сторону от подобранной к
-        // началу другой, а отзывают именно по этой строке.
-        assert_eq!(b.parties[0].fingerprint, a_key(7).to_string());
+        // Отпечаток — ЧЕТЫРЬМЯ последними знаками (решение владельца 10.11).
+        // Отзыв от этого не страдает: он адресуется КЛЮЧОМ (строка ниже), а
+        // не разбором строки с экрана, и различает стороны человек по имени
+        // рядом. Полного ключа на экране нет вовсе — это и утверждается.
+        assert_eq!(b.parties[0].fingerprint, crate::gui::short_key(&a_key(7).to_string()));
+        assert!(!b.parties[0].fingerprint.contains(&a_key(7).to_string()), "полного ключа в карточке быть не должно");
         assert_eq!(b.parties[0].key, a_key(7), "отзыв адресуется ключом, а не разбором строки с экрана");
         assert!(b.parties[0].says_name.contains("Ромашка-бухгалтерия"));
         assert_eq!(b.parties[1].says_name, "Без имени", "пустое имя сказано словами, а не кавычками вокруг пустоты");

@@ -168,6 +168,13 @@ pub struct Ui {
     /// сказано» фраза про опечатку в `current` сыпалась бы в журнал на
     /// каждое открытие окна.
     pub read_notes_noted: Vec<String>,
+    /// Ключи карточек, о чьём сиротстве человеку уже сказали.
+    ///
+    /// Говорить об этом надо ОДИН раз, а не на каждом событии: книга
+    /// перечитывается после каждого, что могло её переменить, и без памяти
+    /// одна и та же строка легла бы в журнал десятки раз за вечер — тем же
+    /// правилом живут находки чтения настроек рядом.
+    pub orphans_noted: Vec<crate::cfg::CardId>,
     pub session: Option<Session>,
     /// Растёт на каждый новый сеанс и на каждую остановку: хвостовое
     /// событие от уже не текущего сеанса (умирающий поток ещё договаривает)
@@ -2333,6 +2340,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             cfg,
             undecryptable_noted: Vec::new(),
             read_notes_noted: Vec::new(),
+            orphans_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,
@@ -2503,6 +2511,7 @@ impl Ui {
             cfg,
             undecryptable_noted: Vec::new(),
             read_notes_noted: Vec::new(),
+            orphans_noted: Vec::new(),
             session: None,
             session_gen: 0,
             link: State::Off,

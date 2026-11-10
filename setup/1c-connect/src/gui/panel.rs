@@ -4558,11 +4558,10 @@ mod tests {
         accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, base_here_answers, blind_code_note, can_save, card,
         card_title, delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label,
         found_text, issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
-        project_facts, project_label, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected,
-        row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
-        tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
-        BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK,
-        ROLE_UNKNOWN_NOTE,
+        project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
+        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner,
+        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE,
+        DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;

@@ -922,18 +922,16 @@ impl Machine {
                     write: cfg.may_write(c),
                 },
             };
-            // ОДИН разбор на три кучи, и четвёртой дороги — «нигде» — у карточки
-            // нет: `else` здесь невыразим, а `push` обязателен в каждой ветке.
-            // Прежде отбор стоял фильтром перед раскладкой, и «Подключаюсь сам»
-            // вместе с «Всё на одной машине» выпадали из обеих куч молча.
-            // Спрашивается `link::waits_for_incoming` — она объявляет себя
-            // единственным местом этого вопроса, и переписанное своими руками
-            // правило здесь было четвёртой его копией.
-            let accepts = crate::gui::link::waits_for_incoming(c);
-            match (accepts, c.base_is_here()) {
-                (false, _) => not_accepting.push(card),
-                (true, true) => accepting.push(card),
-                (true, false) => base_elsewhere.push(card),
+            // ОДИН разбор на три кучи, и четвёртой дороги — «нигде» — у карточки нет: `else` здесь невыразим, а `push` обязателен в
+            // каждой ветке. Спрашивается СОЧЕТАНИЕ (`Combo`) — единственное место, где ответы карточки превращаются в «что это такое»;
+            // прежде здесь стояла своя пара условий, то есть ещё один читатель той же оси.
+            //
+            // Нераспознанная роль — в кучу «не принимает»: кода такой карточке не выдают (окно говорит об этом словами), и в зачисление
+            // она не идёт.
+            match crate::cfg::Combo::of(c) {
+                crate::cfg::Combo::AcceptBaseHere => accepting.push(card),
+                crate::cfg::Combo::AcceptBaseThere => base_elsewhere.push(card),
+                _ => not_accepting.push(card),
             }
         }
         Machine { cards: enroll::Cards::Read { accepting, base_elsewhere, not_accepting }, ceiling }

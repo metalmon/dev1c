@@ -222,7 +222,7 @@ pub fn contract_of(l: Option<&State>, e: &Enroll) -> Option<Contract> {
 /// «Принимаю подключения», а не про то, состоится ли подключение: роль человек выбрал, и карточка обязана говорить о себе тем, чем он её
 /// назвал.
 pub fn waits_for_incoming(c: &Connection) -> bool {
-    c.mode != "local" && matches!(c.role(), Ok("accept"))
+    cfg::Combo::of(c).waits_for_incoming()
 }
 /// Карточка ПРИНИМАЕТ подключения — то есть по её коду вправду можно подключиться. Одно место на весь продукт, и мера здесь ровно та, по
 /// которой ту сторону берёт в зачисление поток узла (`gui::peer::Machine::of`: `mode != "local"`, роль `accept`, и база ЗДЕСЬ).
@@ -236,7 +236,7 @@ pub fn waits_for_incoming(c: &Connection) -> bool {
 /// Спрашивается `base_is_here()`, а не сырой `base_here` — правило `cfg.rs` и тот же довод, что у `panel::shown_fields`: застрявшее в файле
 /// `base_here = false` у локальной карточки не вправе решать за человека, у которого переключателя на экране нет.
 pub fn accepts_connections(c: &Connection) -> bool {
-    waits_for_incoming(c) && c.base_is_here()
+    cfg::Combo::of(c) == cfg::Combo::AcceptBaseHere
 }
 
 /// Ждёт ли карточка, чтобы с той стороны подключились, — по СОСТОЯНИЮ, а не по показанному слову.

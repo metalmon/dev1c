@@ -435,7 +435,8 @@ pub fn start_with_enabled(
                 *s = next;
                 on_state(s.clone());
             };
-            let r = if cfg.current().mode == "local" {
+            // Транспорт выбирает СОЧЕТАНИЕ: у карточки без второй стороны слушаем свои порты, у прочих поднимаем туннель.
+            let r = if crate::cfg::Combo::of(cfg.current()) == crate::cfg::Combo::Alone {
                 crate::listen::run(serve, active_ports, on_event, stop_rx).await
             } else {
                 let dispatch = serve.clone();

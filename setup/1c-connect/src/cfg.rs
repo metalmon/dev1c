@@ -1103,6 +1103,69 @@ impl Default for Connection {
         }
     }
 }
+/// Сочетание соединения — ОДНО значение, и шестого не бывает.
+///
+/// Оси заданы владельцем 1.11 и сведены спекой `connection-combinations.md`: «это соединение» (всё на одной машине · принимаю
+/// подключения · подключаюсь сам) × «где база» (здесь · на другом компьютере). База всегда ровно на одной стороне, поэтому законных
+/// пар две: 2↔5 (звонит агент к базе) и 3↔4 (звонит база к агенту — основной способ).
+///
+/// **Зачем тип.** На вопрос «что это за карточка» отвечали порознь шесть мест: `Connection::base_is_here`, `link::waits_for_incoming`,
+/// `link::accepts_connections`, раскладка `gui::peer::Machine::of`, `cfg::shown_fields` и выбор транспорта в `session.rs`
+/// (`mode == "local"`). Шесть читателей одной оси — тот самый разряд «две меры на один вопрос», который на этой ветке ловили шесть раз.
+/// `Combo::of` — одно решение, остальные его производные.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Combo {
+    /// Всё на одной машине: той стороны нет вовсе.
+    Alone,
+    /// Принимаю подключения, база здесь. Ко мне приходит чужой агент.
+    AcceptBaseHere,
+    /// Принимаю подключения, база на другом компьютере. Жду звонка от машины с базой.
+    AcceptBaseThere,
+    /// Подключаюсь сам, база здесь. Звоню с машины, где стоит база.
+    DialBaseHere,
+    /// Подключаюсь сам, база на другом компьютере. Звоню туда, где база.
+    DialBaseThere,
+}
+
+impl Combo {
+    /// Единственная дорога от ответов карточки к сочетанию.
+    ///
+    /// Отказа нет: сочетание у карточки есть ВСЕГДА, даже когда в файле стоит слово роли, которого программа не знает. Такая карточка
+    /// читается как «подключаюсь сам» — ровно так её сегодня и ведут все, кто спрашивал роль порознь: кода ей не выдают
+    /// (`waits_for_incoming` на `Err` отвечала «нет»), в зачисление её не берут, а транспорт ей всё равно поднимают, потому что выбирал
+    /// его режим, а не роль. То, что роль непонятна, карточка говорит человеку своими словами отдельно (`panel::ROLE_UNKNOWN_NOTE`) —
+    /// это дело показа, а не сочетания.
+    ///
+    /// **Место базы берётся у `base_is_here`, а не у сырого поля:** застрявшее в файле `base_here = false` не вправе решать за карточку,
+    /// у которой оба конца на этой машине.
+    pub fn of(c: &Connection) -> Combo {
+        if c.mode == "local" {
+            return Combo::Alone;
+        }
+        match (c.role(), c.base_is_here()) {
+            (Ok("accept"), true) => Combo::AcceptBaseHere,
+            (Ok("accept"), false) => Combo::AcceptBaseThere,
+            (_, true) => Combo::DialBaseHere,
+            (_, false) => Combo::DialBaseThere,
+        }
+    }
+
+    /// Ждёт ли эта карточка входящих — то есть её ли дело выдавать код.
+    pub fn waits_for_incoming(self) -> bool {
+        matches!(self, Combo::AcceptBaseHere | Combo::AcceptBaseThere)
+    }
+
+    /// База на ЭТОЙ машине.
+    pub fn base_is_here(self) -> bool {
+        matches!(self, Combo::Alone | Combo::AcceptBaseHere | Combo::DialBaseHere)
+    }
+
+    /// Есть ли у соединения вторая сторона вовсе.
+    pub fn has_other_side(self) -> bool {
+        self != Combo::Alone
+    }
+}
+
 /// Поля карточки соединения, которые реально показывает ТОПОЛОГИЯ — не режим
 /// машины (спека, «Что показывает карточка соединения»). Ветвление по двум
 /// осям: где база (`base_here`) и локально ли соединение (`mode == "local"`).
@@ -1131,18 +1194,12 @@ impl Default for Connection {
 /// Отрисовка рядов и сравнение «изменилось ли» (`fields_differ`) ходят только
 /// через этот список.
 pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
-    // Защита показа (задача 12 «Карточка после живого прогона», находка
-    // владельца 9.11) — через `base_is_here()`, не через сырое поле: «Где
-    // база» в локальном режиме не спрашивают вовсе — переключателя на
-    // экране нет (комментарий ниже, «база на той стороне») — значит и
-    // застрявшее в файле `base_here = false` не вправе решать состав полей.
-    // Без этой строки ответ «Всё на одной машине» (или ручная правка файла)
-    // оставлял бы карточку без единого поля базы при включённой
-    // локальности — то самое противоречие, которое увидел владелец.
-    if !c.base_is_here() {
+    // Состав полей решает СОЧЕТАНИЕ (`Combo`), а не два поля порознь: прежде здесь стояла своя пара условий, седьмой читатель той же оси.
+    let combo = Combo::of(c);
+    if !combo.base_is_here() {
         return &["project"];
     }
-    match (c.mode == "local", c.publication == "webserver") {
+    match (combo == Combo::Alone, c.publication == "webserver") {
         (true, false) => &["base_path", "db_user", "db_password", "project"],
         (true, true) => &["base_path", "db_user", "db_password", "project", "base_url"],
         (false, false) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"],
@@ -2804,6 +2861,42 @@ fn passwords_match(written: &Cfg, reread: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Пять сочетаний — ОДНОЙ таблицей, и шестого не бывает. Таблица — та же, что в спеке `connection-combinations.md`: ответы карточки,
+    /// место базы, кто ждёт входящих и какие поля при этом показываются.
+    ///
+    /// Тест стоит ровно затем, чтобы правка одного читателя оси не разошлась с остальными молча: до `Combo` на вопрос «что это за
+    /// карточка» отвечали шесть мест порознь.
+    #[test]
+    fn the_five_combinations_are_one_table() {
+        let card = |mode: &str, role: &str, base_here: bool| Connection {
+            mode: mode.into(),
+            role: role.into(),
+            base_here,
+            ..Connection::default()
+        };
+        // mode, role, base_here → сочетание, ждёт ли входящих, база здесь, показано ли поле базы
+        let table = [
+            ("local", "accept", false, Combo::Alone, false, true, true),
+            ("tunnel", "accept", true, Combo::AcceptBaseHere, true, true, true),
+            ("tunnel", "accept", false, Combo::AcceptBaseThere, true, false, false),
+            ("tunnel", "dial", true, Combo::DialBaseHere, false, true, true),
+            ("tunnel", "dial", false, Combo::DialBaseThere, false, false, false),
+        ];
+        for (mode, role, base_here, combo, waits, here, shows_base) in table {
+            let c = card(mode, role, base_here);
+            assert_eq!(Combo::of(&c), combo, "{mode}/{role}/{base_here}");
+            assert_eq!(combo.waits_for_incoming(), waits, "{combo:?}");
+            assert_eq!(combo.base_is_here(), here, "{combo:?}");
+            assert_eq!(combo.has_other_side(), combo != Combo::Alone, "{combo:?}");
+            assert_eq!(shown_fields(&c).contains(&"base_path"), shows_base, "состав полей идёт от сочетания: {combo:?}");
+        }
+        // «Всё на одной машине» не спрашивает про место базы вовсе: застрявшее в файле `base_here = false` его не меняет.
+        assert_eq!(Combo::of(&card("local", "dial", false)), Combo::Alone);
+        // Нераспознанная роль читается как «подключаюсь сам»: кода ей не выдают, а транспорт ей всё равно поднимается — значит и поля
+        // туннеля у неё показаны (их же держит `the_tunnel_fields_follow_the_one_axis_that_picks_the_transport`).
+        assert_eq!(Combo::of(&card("tunnel", "белиберда", true)), Combo::DialBaseHere);
+    }
 
     /// Одно правило имени базы на всех троих потребителей: заголовок карточки
     /// (`panel::card_title`), имя в диалоге подтверждения (`save::base_label`)

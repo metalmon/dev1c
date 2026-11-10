@@ -1945,7 +1945,7 @@ pub fn ask_permission(
                     // записи не запрещал»; запрещает или разрешает её поле
                     // карточки и потолок машины, и складывает их
                     // `enroll::accept_side`, а не окно.
-                    decide(Decision::Allow { write: true }, window, cx);
+                    decide(Decision::Allow, window, cx);
                 }
                 true
             })
@@ -2215,7 +2215,7 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
     // который человек выбрал, и отменять его из-за оборванной связи значило
     // бы решить за него заново.
     match d {
-        Decision::Allow { .. } => {
+        Decision::Allow => {
             ui.declined.retain(|c| c != card);
             // Разрешение гасит код: `accept_side` на шаге пятом зовёт
             // `Book::spend`, и строка, которую человек передавал, с этой
@@ -2251,7 +2251,7 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
     // собственной записи окна (Important 3 ревью задач 6 и 7). Перечитываем
     // на СОБЫТИИ, а не на отрисовке: диск в главном потоке окна на каждую
     // перерисовку списка — то, чего этот файл избегает везде.
-    if sent && matches!(d, Decision::Allow { .. }) {
+    if sent && matches!(d, Decision::Allow) {
         reread_book(ui);
     }
     let line = if !sent {
@@ -2268,7 +2268,7 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
             kind: Kind::Warn,
             text: format!("Ответ по «{name}» отправить не удалось: там уже не ждут ответа. Попросите позвонить снова"),
         }
-    } else if matches!(d, Decision::Allow { .. }) {
+    } else if matches!(d, Decision::Allow) {
         Line { kind: Kind::Ok, text: format!("Подключение к «{name}» разрешено") }
     } else {
         Line { kind: Kind::Say, text: format!("Подключение к «{name}» отклонено") }

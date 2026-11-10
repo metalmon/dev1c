@@ -2799,7 +2799,7 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     // Разрешение по новой заявке стирает прошлый исход: карточка больше не
     // «отклонено».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.waiting.is_empty());
     assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
 }
@@ -2813,13 +2813,13 @@ fn the_answer_travels_back_to_the_conversation() {
     let mut ui = Ui::for_test();
     let (tx, mut rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
-    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow { write: true });
-    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }));
+    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
+    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow));
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
-    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
 }
 
@@ -2877,12 +2877,8 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
     assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
 
-    answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow { write: true });
-    assert_eq!(
-        a_rx.try_recv().unwrap(),
-        Some(Decision::Allow { write: true }),
-        "разрешение обязано уйти той стороне, чей отпечаток сверяли"
-    );
+    answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow);
+    assert_eq!(a_rx.try_recv().unwrap(), Some(Decision::Allow), "разрешение обязано уйти той стороне, чей отпечаток сверяли");
     assert_eq!(b_rx.try_recv().unwrap(), None, "сторона, которую человек не видел, разрешения не получает");
     // Б осталась ждать своей очереди — её человек увидит своим диалогом.
     assert_eq!(ui.waiting.len(), 1);
@@ -2938,8 +2934,8 @@ fn the_book_is_reread_after_the_person_allows() {
 
     let (tx, mut rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
-    answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow { write: true });
-    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow { write: true }), "решение обязано уехать — иначе перечтения и не будет");
+    answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow);
+    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow), "решение обязано уехать — иначе перечтения и не будет");
 
     let parties = ui.book.as_ref().unwrap().of(&card);
     assert_eq!(parties.len(), 1, "карточка сразу после «Разрешить» обязана показать зачисленную сторону");
@@ -2976,7 +2972,7 @@ fn allowing_drops_the_code_it_spent() {
     let (tx, _rx) = futures::channel::oneshot::channel();
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
 
-    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.codes.is_empty(), "погашенный зачислением код в карточке не остаётся");
 }
 
@@ -3000,7 +2996,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     // словами «там уже не ждут ответа».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
 
-    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });
+    answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
 
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "фикстура: ответ и правда не доехал — {:?}", ui.log.last());
     assert_eq!(ui.codes.len(), 1, "никто не гасил этот код — он обязан остаться у человека на руках");

@@ -272,9 +272,15 @@ impl<'a> Call<'a> {
 /// ставит карточке исход, которого человек не выбирал.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
-    /// Пускаю. `write` — разрешил ли человек запись; с потолком карточки он
-    /// складывается здесь же, и наружу уезжает уже сложенное.
-    Allow { write: bool },
+    /// Пускаю.
+    ///
+    /// **Права записи здесь нет, и это не упущение.** Поле `write` здесь стояло и было ЧЕТВЁРТОЙ мерой того же самого: на вопрос «можно ли
+    /// этой стороне писать в эту базу» отвечают потолок этой машины, слово карточки и потолок той машины, а разрешение записи по контракту
+    /// принадлежит СОЕДИНЕНИЮ («Разрешение записи в базу — у соединения, в пределах потолка каждой стороны»), не отдельной зачисленной
+    /// стороне. Диалог разрешения спрашивает не это: он показывает карточку, базу, отпечаток ключа и самоназвание, а отвечают ему «да» или
+    /// «нет» (спека протокола, шаг четвёртый). Единственный живой зовущий и передавал сюда `write: true` всегда — то есть мера была
+    /// постоянной, но выглядела решением, и первый, кто завёл бы ей флажок в окне, развёл бы право записи на четыре места вместо трёх.
+    Allow,
     /// Не пускаю. Исход, а не ошибка.
     Deny,
     /// Закрыл диалог, не решив.
@@ -400,20 +406,38 @@ where
             Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
         };
         if let Some(p) = seen {
-            bases.push(BaseBrief {
-                id: c.id().clone(),
-                // Потолок ТОЙ машины складывается здесь, на КАЖДОМ подключении,
-                // а не только при первом зачислении. Спека обещает:
-                // «переключённый потолок доедет следующим подключением», — и
-                // это единственное место, где он доезжает. Прежде поле
-                // `ceiling` из `hello` на возврате было связано и не
-                // использовалось: человек щёлкал у себя «только чтение», а мы
-                // продолжали объявлять ему запись, которую он сам себе
-                // запретил. Разрешение человека в книге (`p.write`) при этом не
-                // трогается: потолок может только СУЗИТЬ его, и когда та машина
-                // щёлкнет потолок обратно, запись вернётся сама.
-                write: p.write && matches!(ceiling, Ceiling::Full),
-            });
+            // Складываются ЖИВЫЕ половины, и обе: право этой машины по этой
+            // карточке (`c.base.write` — его положил `Cfg::may_write`, читая
+            // настройки под этот самый разговор) и потолок той машины, только
+            // что названный в `hello`. Спека обещает про это поле
+            // «складывается оно на каждом подключении» — вот здесь оно и
+            // складывается.
+            //
+            // Снимка из книги (`p.peer_write` в прежнем своём смысле — итог,
+            // замороженный в миг зачисления) в этом счёте больше нет, и это
+            // Critical повторного ревью: потолок ЭТОЙ машины в него попасть не
+            // мог, то есть человек щёлкал у себя «Только чтение», а зачисленная
+            // сторона на КАЖДОМ переподключении слышала «разрешено читать и
+            // записывать» — и получала отказ от моста. Обратная половина той же
+            // беды: зачислили при закрытом потолке, и запись не возвращалась
+            // никогда, пока не выдадут новый код.
+            let write = c.base.write && ceiling.allows();
+            // Чужой потолок — единственное, чего нам неоткуда взять заново, и
+            // книга держит его затем, что о нём спрашивает карточка в окне
+            // («итог с указанием, какая сторона ограничила» — контракт).
+            // Поэтому он обновляется здесь: карточка, говорящая о той машине
+            // то, что было месяц назад, — это та же ложь, только в окне.
+            //
+            // Запись идёт лишь когда значение переменилось: обычное
+            // переподключение книгу не трогает вовсе. Отказ записи — наша беда,
+            // и говорится она тем же порядком, что все остальные отказы книги в
+            // этой функции: короткие слова на провод, подробность с путями нам.
+            if p.peer_write != ceiling.allows() {
+                if let Err(why) = book.enroll(c.id(), peer, p.says_name.as_str(), ceiling.allows()) {
+                    return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
+                }
+            }
+            bases.push(BaseBrief { id: c.id().clone(), write });
         }
     }
     // Возврат — и заявки не будет: так сказала сама зовущая сторона, и это
@@ -570,7 +594,7 @@ where
 
     // Шаг пятый.
     match decision {
-        Decision::Allow { write } => {
+        Decision::Allow => {
             // Гасим ДО записи ключа: обратный порядок оставил бы живой код у
             // человека на руках после сбоя записи, то есть позволил бы
             // подключиться по нему второй раз. Сгоревший код при сбое — всего
@@ -583,18 +607,19 @@ where
             if let Err(why) = book.spend(&secret) {
                 return ours_to_blame(w, Refuse::new(code::TICKET_SPENT, UNKNOWN_TEXT), why).await;
             }
-            // Складываем ВСЕ ТРИ: решение человека, потолок карточки и
-            // потолок ТОЙ машины из `hello`. Запрет любой стороны сильнее
-            // разрешения другой (решение владельца 1.11) — иначе машина,
-            // объявившая у себя «только чтение», получает от нас
-            // `enroll_ok{write:true}`, то есть разрешение, которое сама же у
-            // себя запретила, и флажок в её окне не совпадает с правдой.
+            // Складываются ТРИ меры, и ровно те же, что на возврате выше:
+            // потолок этой машины и слово карточки (сложены в `card.base.write`
+            // одной `Cfg::may_write`) да потолок той машины из `hello`. Запрет
+            // любой стороны сильнее разрешения другой (решение владельца 1.11)
+            // — иначе машина, объявившая у себя «только чтение», получает от
+            // нас `enroll_ok{write:true}`, то есть разрешение, которое сама же
+            // у себя запретила.
             //
-            // Четвёртый потолок — ЭТОЙ машины — складывает тот, кто собирает
-            // `cards`: он же его и переключает, и `Card.base.write` приходит
-            // сюда уже с ним.
-            let write = write && card.base.write && matches!(ceiling, Ceiling::Full);
-            if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), write) {
+            // В книгу уходит ОДНА из трёх — чужой потолок: две свои она
+            // спросит у настроек, когда ответ понадобится (`Party::peer_write`,
+            // там и довод).
+            let write = card.base.write && ceiling.allows();
+            if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), ceiling.allows()) {
                 return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
             let base = BaseFields { write, ..card.base.clone() };
@@ -1157,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_enroll_each_other_end_to_end() {
-        let (mine, theirs, book, asked, code) = talk("e2e", one_live_ticket, Decision::Allow { write: true }).await;
+        let (mine, theirs, book, asked, code) = talk("e2e", one_live_ticket, Decision::Allow).await;
 
         let Ok(Outcome::Enrolled(base)) = &mine else {
             panic!("зовущая обязана была получить enroll_ok с полями базы: {mine:?}")
@@ -1170,7 +1195,7 @@ mod tests {
         let parties = book.of(&"b1".into());
         assert_eq!(parties.len(), 1, "ключ обязан был записаться в карточку: {parties:?}");
         assert_eq!(parties[0].says_name, "Разработчик", "как сторона себя назвала — её слова, кладутся как есть");
-        assert!(parties[0].write, "решение человека о записи записано вместе с ключом");
+        assert!(parties[0].peer_write, "вместе с ключом записан потолок ТОЙ машины — та, что звонила, объявила его полным");
         assert!(spent(&book, &secret_of(&code)), "тикет погашен: после разрешения он не хранится нигде, и второй заявки по нему нет");
     }
 
@@ -1186,7 +1211,7 @@ mod tests {
                 let other = Ticket::issue(base.id(), None, vec![]).unwrap();
                 (other.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
             },
-            Decision::Allow { write: true },
+            Decision::Allow,
         )
         .await;
 
@@ -1210,7 +1235,7 @@ mod tests {
                 expire_tickets_on_disk(state);
                 (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
             },
-            Decision::Allow { write: true },
+            Decision::Allow,
         )
         .await;
 
@@ -1247,7 +1272,7 @@ mod tests {
                     ],
                 )
             },
-            Decision::Allow { write: true },
+            Decision::Allow,
         )
         .await;
 
@@ -1284,7 +1309,7 @@ mod tests {
                     ],
                 )
             },
-            Decision::Allow { write: true },
+            Decision::Allow,
         )
         .await;
 
@@ -1456,7 +1481,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, |req| async move {
                 *slot.lock().unwrap() = Some(req.says_name.clone());
-                Decision::Allow { write: true }
+                Decision::Allow
             })
             .await;
             (out, book)
@@ -1592,7 +1617,7 @@ mod tests {
     #[tokio::test]
     async fn a_read_only_machine_is_not_granted_write_however_generous_the_person() {
         let mut code = None;
-        let mut talk = Alone::new("ceiling", Decision::Allow { write: true }, |book, peer, _state| {
+        let mut talk = Alone::new("ceiling", Decision::Allow, |book, peer, _state| {
             let ticket = Ticket::issue(peer, None, vec![]).unwrap();
             book.issue(&"b1".into(), &ticket).unwrap();
             code = Some(hex::encode(&*ticket.secret));
@@ -1627,7 +1652,7 @@ mod tests {
             panic!("зачисление состоялось, только без записи: {out:?}")
         };
         assert!(!base.write, "и в исходе тоже");
-        assert!(!book.of(&"b1".into())[0].write, "и в книге");
+        assert!(!book.of(&"b1".into())[0].peer_write, "и в книге записан потолок ТОЙ машины, а он закрыт");
     }
 
     /// Потолок ТОЙ машины, переключённый между подключениями, доезжает следующим подключением — как и обещает спека.
@@ -1638,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn a_switched_ceiling_arrives_with_the_next_connection() {
         for (name, ceiling, write) in [("ceiling-return-full", Ceiling::Full, true), ("ceiling-return-read", Ceiling::ReadOnly, false)] {
-            let mut talk = Alone::new(name, Decision::Allow { write: true }, |book, peer, _state| {
+            let mut talk = Alone::new(name, Decision::Allow, |book, peer, _state| {
                 // Разрешение на запись в книге есть: человек ЗДЕСЬ его дал, и
                 // отказ ниже — не про него.
                 book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
@@ -1656,10 +1681,41 @@ mod tests {
 
             let (out, book, _asked) = talk.done().await;
             assert!(matches!(out, Ok(Outcome::Already(_))), "{out:?}");
-            assert!(
-                book.of(&"b1".into())[0].write,
-                "решение человека потолок той машины не стирает: щёлкнет она потолок обратно — запись вернётся сама"
+            assert_eq!(
+                book.of(&"b1".into())[0].peer_write, write,
+                "книга держит потолок ТОЙ машины и обновляет его возвратом: иначе карточка в окне говорила бы о той машине то, что было, а не то, что есть"
             );
+        }
+    }
+
+    /// Возврат складывает ВСЕ ТРИ меры права записи заново, и среди них — потолок ЭТОЙ машины со словом ЭТОЙ карточки.
+    ///
+    /// Падало так (Critical повторного ревью всей ветки): на возврате складывался только потолок ТОЙ машины, а своя половина бралась
+    /// замороженным снимком из книги — тем, что сложилось в миг зачисления. Из этого выходили две беды, зеркальные друг другу, и обе
+    /// проверяются здесь. Человек щёлкнул у себя «Только чтение» — зачисленная сторона на КАЖДОМ переподключении читала «подключено,
+    /// разрешено читать и записывать», а мост ей отказывал по живому праву. И наоборот: зачислили при закрытом потолке — запись не
+    /// возвращалась никогда, сколько бы человек ни щёлкал, пока не выдадут новый код.
+    ///
+    /// Во втором живом прогоне (`2026-11-09-two-machines-live-pass.md`) оба конца стояли «только чтение», поэтому случай и не всплыл.
+    #[tokio::test]
+    async fn a_switched_ceiling_of_this_machine_arrives_on_every_return_too() {
+        // `ours` — то, что отдала `Cfg::may_write` под ЭТОТ разговор: потолок
+        // этой машины вместе со словом карточки. `stored` — что лежит в книге
+        // с зачисления. Правду говорит первое, и только оно.
+        for (name, ours, stored) in [("ours-shut-stored-open", false, true), ("ours-open-stored-shut", true, false)] {
+            let mut talk = Alone::new(name, Decision::Allow, |book, peer, _state| {
+                book.enroll(&"b1".into(), peer, "Разработчик", stored).unwrap();
+                vec![Card { name: "Ромашка".into(), base: fields("b1", ours) }]
+            })
+            .await;
+
+            // Потолок ТОЙ машины открыт в обоих заходах: спорят здесь не с ним.
+            Frame::write(&mut talk.w, &returning(Some("b1"))).await.unwrap();
+            let answered = Frame::read(&mut talk.r).await;
+            let Ok(Msg::HelloOk { bases, .. }) = &answered else { panic!("ждали hello_ok: {answered:?}") };
+            assert_eq!(bases[0].write, ours, "право берётся у настроек, прочитанных под этот разговор, а не у снимка в книге: {bases:?}");
+            let (out, _book, _asked) = talk.done().await;
+            assert!(matches!(out, Ok(Outcome::Already(_))), "{out:?}");
         }
     }
 
@@ -1678,7 +1734,7 @@ mod tests {
         // Наши слова для нашего журнала: с путём к файлу, то есть ровно то, чему на провод нельзя.
         const OURS: &str = "настройки не разобрались: C:\\Users\\Бухгалтер\\connect.toml";
         for (name, why) in [("unreadable-enroll", Why::Enroll), ("unreadable-return", Why::Return(Some("b1".into())))] {
-            let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
+            let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Допуск и код — живые: отказ ниже не про них. Без этого тест
                 // нельзя было бы отличить от «кода не выдавали».
                 book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
@@ -1749,7 +1805,7 @@ mod tests {
         ] {
             // Код по этой карточке выдан и жив, допуск у стороны есть: отказ ниже не про них.
             let mut secret = None;
-            let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
+            let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
@@ -1816,7 +1872,7 @@ mod tests {
                     Cards::Read { accepting: Vec::new(), base_elsewhere: vec![card], not_accepting: Vec::new() }
                 }
             };
-            let mut talk = Alone::with(name, Decision::Allow { write: true }, |book, peer, _state| {
+            let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
                 book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true).unwrap();
                 aside(Card { name: "Ромашка".into(), base: fields("b1", true) })
@@ -1861,7 +1917,7 @@ mod tests {
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         };
 
-        let mut talk = Alone::new("returns-named", Decision::Allow { write: true }, two).await;
+        let mut talk = Alone::new("returns-named", Decision::Allow, two).await;
         Frame::write(&mut talk.w, &returning(Some("b2"))).await.unwrap();
         let answered = Frame::read(&mut talk.r).await;
         let Ok(Msg::HelloOk { bases, .. }) = &answered else {
@@ -1879,7 +1935,7 @@ mod tests {
         // числился за всеми базами партнёра сразу: отзыв одной карточки резал
         // связь по остальным, а у человека с пятью карточками к одному партнёру
         // — все пять потоков разом, потому что каждый был «за всеми».
-        let mut talk = Alone::new("returns-unnamed", Decision::Allow { write: true }, two).await;
+        let mut talk = Alone::new("returns-unnamed", Decision::Allow, two).await;
         Frame::write(&mut talk.w, &returning(None)).await.unwrap();
         let answered = Frame::read(&mut talk.r).await;
         let Ok(Msg::Refuse(no)) = &answered else {
@@ -1895,7 +1951,7 @@ mod tests {
         // возврат получает её: зовущая сторона запомнит признак и дальше назовёт
         // карточку сама. Так эта беда и залечивается сама собой у того, у кого
         // карточка к партнёру одна.
-        let mut talk = Alone::new("returns-unnamed-one", Decision::Allow { write: true }, |book, peer, _state| {
+        let mut talk = Alone::new("returns-unnamed-one", Decision::Allow, |book, peer, _state| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         })
@@ -1917,7 +1973,7 @@ mod tests {
     /// человек на стороне базы не разрешит снова, код не поможет.
     #[tokio::test]
     async fn a_returning_side_whose_card_is_no_longer_allowed_is_refused_in_words() {
-        let mut talk = Alone::new("returns-revoked", Decision::Allow { write: true }, |book, peer, _state| {
+        let mut talk = Alone::new("returns-revoked", Decision::Allow, |book, peer, _state| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
         })
@@ -1953,7 +2009,7 @@ mod tests {
     /// заявку» роняет его сразу.
     #[tokio::test]
     async fn a_return_is_not_made_to_wait_for_a_request_issued_for_another_card() {
-        let mut talk = Alone::new("returns-while-ticket", Decision::Allow { write: true }, |book, peer, _state| {
+        let mut talk = Alone::new("returns-while-ticket", Decision::Allow, |book, peer, _state| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             // А для ВТОРОЙ карточки человек только что выдал код — он живой и
             // ждёт свою сторону. К этому потоку он не имеет никакого
@@ -1994,7 +2050,7 @@ mod tests {
     /// номером, на котором мы не говорим.
     #[tokio::test]
     async fn a_side_that_claims_a_version_we_do_not_speak_is_refused() {
-        let mut talk = Alone::new("version", Decision::Allow { write: true }, |_book, _peer, _state| {
+        let mut talk = Alone::new("version", Decision::Allow, |_book, _peer, _state| {
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
         })
         .await;
@@ -2047,7 +2103,7 @@ mod tests {
     /// отправителю, что сообщение исполнено.
     #[tokio::test]
     async fn an_unknown_message_is_refused_in_words_not_in_silence() {
-        let mut talk = Alone::new("unknown-msg", Decision::Allow { write: true }, |_book, _peer, _state| {
+        let mut talk = Alone::new("unknown-msg", Decision::Allow, |_book, _peer, _state| {
             vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
         })
         .await;
@@ -2068,7 +2124,7 @@ mod tests {
     /// код, который не поможет.
     #[tokio::test]
     async fn a_book_we_cannot_read_is_our_trouble_and_leaks_no_paths() {
-        let mut talk = Alone::new("book-broken", Decision::Allow { write: true }, |_book, _peer, state| {
+        let mut talk = Alone::new("book-broken", Decision::Allow, |_book, _peer, state| {
             // Книгу не прочитать: на её месте каталог. Открылась она раньше
             // (в `Alone::new`), так что ломаются именно последующие чтения —
             // те, по которым решается допуск.
@@ -2121,7 +2177,7 @@ mod tests {
             let out = accept_side(&mut our_w, &mut our_r, peer, &mut first_book, &cards_there, |_req| async move {
                 counter.0.fetch_add(1, Ordering::SeqCst);
                 let _ = held.await;
-                Decision::Allow { write: true }
+                Decision::Allow
             })
             .await;
             (out, first_book)
@@ -2142,7 +2198,7 @@ mod tests {
         let second = tokio::spawn(async move {
             accept_side(&mut our_w2, &mut our_r2, peer, &mut second_book, &cards, |_req| async move {
                 counter2.0.fetch_add(1, Ordering::SeqCst);
-                Decision::Allow { write: true }
+                Decision::Allow
             })
             .await
         });

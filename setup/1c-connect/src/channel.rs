@@ -963,7 +963,7 @@ mod tests {
                 let channel = theirs.keep(conn);
                 let mut control = channel.answer().await.unwrap();
                 let (w, r) = control.halves();
-                let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Allow { write: true } }).await;
+                let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Allow }).await;
                 seen.push(out);
                 if round == 1 {
                     control.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;

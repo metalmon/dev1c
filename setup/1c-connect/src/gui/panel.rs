@@ -3290,56 +3290,61 @@ impl Panel {
                 .when_some(label, |b, l| b.label(l))
                 .icon(Icon::default().data(FOLDER_SVG))
                 .tooltip(tooltip)
+                // Выбор папки пишет в то же поле, что и клавиатура: заперто
+                // поле — заперта и эта кнопка (находка 25, см. `editable`).
+                .disabled(!editable)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
         let path_row = |label: String, state: &Entity<InputState>, pick: KitButton, window: &Window, cx: &App| {
-            v_flex()
-                .gap_1()
-                .child(div().text_size(px(13.)).text_color(caption).child(label))
-                .child(h_flex().gap_2().items_center().child(div().flex_1().child(Self::input(state, accent, window, cx))).child(pick))
+            v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child(label)).child(
+                h_flex().gap_2().items_center().child(div().flex_1().child(Self::input(state, accent, editable, window, cx))).child(pick),
+            )
         };
         let name = c.name.clone();
+        // Профиль — поле КАРТОЧКИ (решение владельца 7 плана «Модель
+        // соединений»), и правится он здесь же: `save::set_profile` пишет
+        // один ключ названной карточки, не трогая ни папку, ни соседей.
+        // Стрелка справа (`dropdown_caret`) — решение владельца 9.11: без неё
+        // кнопка со словом ответа читалась как обычная, а не как
+        // раскрывающийся список (находка живого прогона). Приём — готовый у
+        // `gpui-kit` (`setting/fields/dropdown.rs`), своего рисования не
+        // заводим; `.text_color(fg)` — см. докстроку `fg` выше.
+        //
+        // Стоит он ВНИЗУ карточки, прямо над папкой, а не первым полем после
+        // имени (находка 28 осмотра 10.11: «порядок полей не совпадает с
+        // порядком решений человека»). Профиль решает ровно одно видимое
+        // дело — чем зовётся папка и что в ней лежит, — и стоять ему
+        // рядом с ней; первым же человек решает, КАК это соединение
+        // подключается.
+        let profile_field = v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Профиль")).child(
+            KitButton::new("profile").outline().w_full().text_color(fg).label(profile_label(&toolset)).dropdown_caret(true).dropdown_menu(
+                move |mut menu, _, _| {
+                    for profile in ["business", "developer"] {
+                        let name = name.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(profile_label(profile)).on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
+                        );
+                    }
+                    menu.min_w(select_menu_min_w)
+                },
+            ),
+        );
         let mut col = v_flex()
             .gap_3()
             .pt_1()
             // Имя — первое поле карточки: оно же первым планом в строке
             // списка, и переименование (`save::rename`) правится здесь, а
             // пункт меню «Переименовать» только ставит сюда курсор.
-            .child(Self::row("Имя", caption, accent, &f.name, window, cx))
-            .child(
-                v_flex()
-                    .gap_1()
-                    .min_w_0()
-                    .child(div().text_size(px(13.)).text_color(caption).child("Профиль"))
-                    // Профиль — поле КАРТОЧКИ (решение владельца 7 плана
-                    // «Модель соединений»), и правится он здесь же:
-                    // `save::set_profile` пишет один ключ названной
-                    // карточки, не трогая ни папку, ни соседей.
-                    // Стрелка справа (`dropdown_caret`) — решение владельца
-                    // 9.11: без неё кнопка со словом ответа читалась как
-                    // обычная, а не как раскрывающийся список (находка
-                    // живого прогона). Приём — готовый у `gpui-kit`
-                    // (`setting/fields/dropdown.rs`), своего рисования не
-                    // заводим; `.text_color(fg)` — см. докстроку `fg` выше.
-                    .child(
-                        KitButton::new("profile")
-                            .outline()
-                            .w_full()
-                            .text_color(fg)
-                            .label(profile_label(&toolset))
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for profile in ["business", "developer"] {
-                                    let name = name.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(profile_label(profile))
-                                            .on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
-                                    );
-                                }
-                                menu.min_w(select_menu_min_w)
-                            }),
-                    ),
-            )
+            .child(Self::row("Имя", caption, accent, &f.name, true, window, cx))
+            // Один закон записи — и он сказан словами там, где человек
+            // упирается в запертое поле (находка 25). Строка короткая и
+            // называет действие, которое его отпирает, — оно же стоит на
+            // главной кнопке подвала у этой самой карточки.
+            .when(!editable, |d| {
+                d.child(
+                    div().text_size(px(13.)).text_color(caption).child("Поля правятся у текущего соединения — нажмите «Сделать текущим»."),
+                )
+            })
             .child({
                 let name = c.name.clone();
                 v_flex()
@@ -3416,6 +3421,62 @@ impl Panel {
         // показ, и про слово). Текущая карточка идёт тревной
         // последовательностью, прочие — точечной записью
         // (`set_card_publication`).
+        // Базы здесь нет — вместо пустого места слова (спека, «Что
+        // показывает карточка соединения»), тем же приёмом, что
+        // `nothing_to_show` на «Инструментах».
+        if let Some(note) = base_fields_note(&c) {
+            col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
+        }
+        // Имени базы отдельным получерным заголовком посреди карточки больше
+        // НЕТ (находка 19 осмотра 10.11: имя базы говорилось трижды — второй
+        // строкой в списке, этим заголовком и путём в поле «База»). Карточка
+        // стоит РАСКРЫТОЙ ВНУТРИ своей строки списка, то есть прямо под
+        // именем соединения и именем базы, — и повторять их внутри себя ей
+        // незачем. Что именно правится, человек видит по пути в поле «База»
+        // ниже, а «не указана» говорит сама подпись того же поля.
+        //
+        // Поля туннеля — только у карточки, которая сама звонит в среду за
+        // базой, которой здесь нет (`cfg::needs_env`, читается через
+        // `shown_fields`): поле без действия роняет доверие к экрану
+        // параметров. Без них ряд не рисуется вовсе — ни дыры, ни подписи
+        // без поля.
+        if shown.contains(&"server") {
+            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, editable, window, cx));
+        }
+        if shown.contains(&"workstation") {
+            col = col.child(
+                h_flex()
+                    .gap_3()
+                    .items_end()
+                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, editable, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, editable, window, cx))),
+            );
+        }
+        if shown.contains(&"base_path") {
+            // «Не указана» — в САМОЙ подписи поля, в котором базу и
+            // указывают, а не отдельной строкой над ним (находка 6 осмотра
+            // 10.11: строка стояла между группами и читалась заголовком
+            // группы). Предупреждение и поле теперь одна вещь, и лишней
+            // строки на экране нет вовсе. Слова — из того же
+            // `NO_BASE_TITLE`, которым `card_title` говорит о пустой базе.
+            let label = if title == NO_BASE_TITLE { title.to_string() } else { "База".to_string() };
+            let button = pick("pick-base", f.base_path.clone(), cx);
+            col = col.child(path_row(label, &f.base_path, button, window, cx));
+        }
+        if shown.contains(&"db_user") {
+            col = col.child(
+                h_flex()
+                    .gap_3()
+                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, editable, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, editable, window, cx))),
+            );
+        }
+        // «Публикация базы» — ПОСЛЕ самой базы (находка 28 осмотра 10.11:
+        // «„Публикация базы“ спрашивается раньше, чем указана сама база»).
+        // Переключателя нет там, где базы здесь нет (`publication_switch_label`
+        // — одно решение и про показ, и про слово). Текущая карточка идёт
+        // тревной последовательностью, прочие — точечной записью
+        // (`set_card_publication`).
         if let Some(label) = publication_switch_label(&c) {
             let name = c.name.clone();
             col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Публикация базы")).child(
@@ -3431,73 +3492,17 @@ impl Panel {
                 ),
             ));
         }
-        // Базы здесь нет — вместо пустого места слова (спека, «Что
-        // показывает карточка соединения»), тем же приёмом, что
-        // `nothing_to_show` на «Инструментах».
-        if let Some(note) = base_fields_note(&c) {
-            col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
-        }
-        // Заголовок карточки — имя базы, и только там, где база здесь: у
-        // карточки с базой на той стороне он сказал бы «База не указана»
-        // про базу, которой здесь и не должно быть. Настоящее имя рисуется
-        // здесь, крупно и получерным, как и раньше — слова «База не
-        // указана» вместо имени смещены вниз, к самому полю базы (ниже), а
-        // не сюда: предупреждение рядом с полем, не заголовком над средой
-        // (Minor 2 круга починки 1).
-        //
-        // `base_is_here()`, не сырой `base_here` (круг починки 1 задачи 12,
-        // Important 2): застрявшая локальная карточка уже показывает поле
-        // базы (`shown_fields`) — заголовок обязан согласиться с тем же
-        // полем, а не звать его «не указана».
-        if c.base_is_here() && title != NO_BASE_TITLE {
-            col = col.child(div().min_w_0().font_weight(FontWeight::SEMIBOLD).child(title.to_string()));
-        }
-        // В локальном режиме коннектор слушает loopback, а не поднимает
-        // туннель в среду: адрес среды, рабочее место и его пароль ничего не
-        // меняют — показывать их незачем (поле без действия роняет доверие к
-        // экрану параметров). Без них ряд не рисуется вовсе — ни дыры, ни
-        // подписи без поля.
-        if shown.contains(&"server") {
-            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
-        }
-        if shown.contains(&"workstation") {
-            col = col.child(
-                h_flex()
-                    .gap_3()
-                    .items_end()
-                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
-            );
-        }
-        if shown.contains(&"base_path") {
-            // «База не указана» — предупреждение у ПОЛЯ, в котором базу и
-            // указывают (бриф задачи 5), не крупный заголовок посреди
-            // карточки и не строка над полями среды: человек читает отказ
-            // и тут же видит, куда вписывать (Minor 2 круга починки 1 —
-            // до этой правки строка стояла выше, над «Адрес среды» и
-            // «Рабочее место»). Тот же приём, что у `base_fields_note` —
-            // мелкая приглушённая строка, а не вторая копия крупного стиля.
-            if title == NO_BASE_TITLE {
-                col = col.child(div().text_size(px(13.)).text_color(caption).child(title.to_string()));
-            }
-            let button = pick("pick-base", f.base_path.clone(), cx);
-            col = col.child(path_row("База".to_string(), &f.base_path, button, window, cx));
-        }
-        // Адрес чужой публикации — сразу под базой, к которой он и
-        // относится, и только в режиме «уже опубликована»: в обычном режиме
+        // Адрес чужой публикации — сразу под переключателем, который его и
+        // спрашивает, и только в режиме «уже опубликована»: в обычном режиме
         // адрес считает сама программа.
         if shown.contains(&"base_url") {
-            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx));
-        }
-        if shown.contains(&"db_user") {
-            col = col.child(
-                h_flex()
-                    .gap_3()
-                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-            );
+            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, editable, window, cx));
         }
         if shown.contains(&"project") {
+            // Профиль — прямо над папкой, подпись которой он и решает
+            // (`folder_label`): порядок полей идёт за порядком решений
+            // человека (находка 28).
+            col = col.child(profile_field);
             let button = pick("pick-project", f.project.clone(), cx);
             col = col.child(path_row(folder_label(&toolset).to_string(), &f.project, button, window, cx));
         }

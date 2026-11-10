@@ -851,13 +851,16 @@ impl Machine {
     fn read_with(kit: &Kit, store: &crate::secrets::Store) -> Machine {
         match crate::cfg::Cfg::load_unchecked_with(kit, store) {
             Ok(cfg) => Machine::of(&cfg),
-            // Хвост с ключом toml снимается: эти слова идут в ЖУРНАЛ ОКНА, тот
-            // самый читатель, ради которого хвост и заводился
-            // (`cfg::said_in_window`). Сюда приезжает, среди прочего, отказ
-            // разбора потолка записи — с хвостом «[write; допустимые
-            // значения…]», то есть ровно тем, чего человек в окне не видит и
-            // что ему там говорить не о чем.
-            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: {}", crate::cfg::said_in_window(&format!("{e}")))),
+            // Печатается ЦЕПОЧКА (`{e:#}`), а не одно верхнее звено. Верхних
+            // звеньев здесь всего два — «не прочитать <путь>» и
+            // «1c-connect.toml: ошибка в файле параметров», — и человек,
+            // прочитав в журнале окна второе из них, не узнавал НИ ОДНОГО
+            // поля: причина лежит ниже, в звене от разбора toml, а `{e}` её
+            // отбрасывает. Хвост с ключом toml снимается уже с цепочки
+            // (`cfg::said_in_window`): в её последнем звене он бывает —
+            // разбор отвечает словами человеку и ключом файлу, — а в окне
+            // ключу говорить не о чем.
+            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: {}", crate::cfg::said_in_window(&format!("{e:#}")))),
         }
     }
 
@@ -1507,6 +1510,30 @@ mod tests {
         );
         let all = accepting.len() + base_elsewhere.len() + not_accepting.len();
         assert_eq!(all, 4, "сколько карточек в файле, столько и в кучах: потерянную видно только так");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Отказ чтения настроек доходит до журнала окна ПРИЧИНОЙ, а не одним верхним звеном.
+    ///
+    /// Падало так: печаталось `{e}`, то есть верхнее звено цепочки `anyhow`, а их у `load_unchecked_with` ровно два — «не прочитать <путь>» и
+    /// «1c-connect.toml: ошибка в файле параметров». Человек читал в журнале окна вторую из этих фраз и не узнавал НИ ОДНОГО поля: что именно
+    /// в файле не так, говорит звено ниже, и `{e}` его отбрасывал. Обёртка `said_in_window` при этом стояла на строке, у которой хвоста не
+    /// бывало никогда, — то есть снимала то, чего нет, а теряла то, что нужно.
+    #[test]
+    fn an_unreadable_settings_file_tells_the_window_the_reason() {
+        let dir = std::env::temp_dir().join(format!("peer-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Файл старой формы — отказ самого разбора, и слова в нём свои, человеческие (`cfg::TryFrom<CfgFile>`).
+        std::fs::write(dir.join(crate::cfg::FILE), "[host]\nbase_path = \"C:/base\"\n").unwrap();
+        let kit = super::Kit::at(dir.clone());
+        let seen = super::Machine::read_with(&kit, &crate::secrets::Store::file(&dir));
+        let crate::enroll::Cards::Unreadable(why) = &seen.cards else {
+            panic!("файл не разбирается — карточек быть не может: {:?}", seen.cards)
+        };
+        assert!(why.contains("[host]"), "человек узнаёт, ЧТО в файле не так: {why}");
+        assert!(why.contains("[[connection]]"), "и что с этим делать: {why}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

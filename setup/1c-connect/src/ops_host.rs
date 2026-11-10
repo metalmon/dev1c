@@ -541,26 +541,20 @@ const VERSION_FILE: &str = "tools.version";
 /// механизмы». Разные ОТВЕТЫ остаются законными — холодный замок
 /// останавливает мост, эта строка рассказывает про инструменты, публикация
 /// объясняет свой отказ, — но путь и вопрос «есть ли файл» теперь одни.
-fn kit_files(kit_root: &Path) -> Vec<PathBuf> {
-    let mut v = vec![oscript_exe(kit_root), git_exe(kit_root), mcp_exe_at(kit_root)];
+/// Части комплекта — именем для человека и путём для проверки. Имя здесь не украшение: по этому списку строится строка отказа, и человек читает, ЧЕГО не хватает, а не какой файл не нашёлся (находка 8 осмотра 10.11 — четыре пути со смесью слэшей и ни слова о том, что это такое).
+///
+/// `mcp-1c` в списке нет нарочно: о нём говорит свой факт набора (`verify::KIT`), и тем же путём (`mcp_exe`) — вопрос «есть ли файл» по-прежнему один, а вот ответ про один файл человек получает один раз, а не двумя карточками разными словами (находка 20).
+fn kit_files(kit_root: &Path) -> Vec<(&'static str, PathBuf)> {
+    let mut v = vec![("запуск сценариев 1С", oscript_exe(kit_root)), ("Git", git_exe(kit_root))];
     if cfg!(windows) {
-        v.push(crate::publication::kit_httpd_exe(kit_root));
+        v.push(("веб-сервер", crate::publication::kit_httpd_exe(kit_root)));
     }
     v
 }
 
-/// Чего из этого в комплекте нет — путями внутри комплекта, какими человек
-/// увидит их в проводнике: «нет `vrunner/bin/oscript.exe`» говорит, что
-/// комплект распакован наполовину, а не что его не копировали вовсе.
-fn missing_kit_files(kit_root: &Path) -> Vec<String> {
-    kit_files(kit_root)
-        .into_iter()
-        .filter(|p| !p.exists())
-        .map(|p| match p.strip_prefix(kit_root) {
-            Ok(rel) => rel.display().to_string(),
-            Err(_) => p.display().to_string(),
-        })
-        .collect()
+/// Чего из этого в комплекте нет — словами человека, не путями внутри комплекта.
+fn missing_kit_files(kit_root: &Path) -> Vec<&'static str> {
+    kit_files(kit_root).into_iter().filter(|(_, p)| !p.exists()).map(|(name, _)| name).collect()
 }
 
 /// Состояние: есть ли в комплекте то, чем работают, и запускается ли оно
@@ -580,7 +574,7 @@ fn missing_kit_files(kit_root: &Path) -> Vec<String> {
 pub fn tools_state(kit_root: &Path) -> OpState {
     let missing = missing_kit_files(kit_root);
     if !missing.is_empty() {
-        return OpState::Blocked(format!("в комплекте нет {} — скопируйте полный комплект заново", missing.join(", ")));
+        return OpState::Blocked(format!("не хватает частей: {}", missing.join(", ")));
     }
     let shipped = std::fs::read_to_string(kit_root.join(VERSION_FILE)).unwrap_or_default();
     let shipped = shipped.trim();
@@ -694,11 +688,7 @@ impl Op<Ctx> for Tools {
         tools_state(&ctx.kit.root)
     }
     fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        let what = kit_files(&ctx.kit.root)
-            .iter()
-            .filter_map(|p| p.strip_prefix(&ctx.kit.root).ok().map(|rel| rel.display().to_string()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let what = kit_files(&ctx.kit.root).iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
         let mut v =
             vec![Action::new(format!("проверить, что {what} из {} запускаются с места (ничего не копируется)", ctx.kit.root.display()))];
         if cfg!(windows) {
@@ -817,8 +807,7 @@ pub fn mcp_exe(kit: &Kit) -> std::path::PathBuf {
     mcp_exe_at(&kit.root)
 }
 
-/// То же от корня комплекта путём, а не `Kit` — этим видом его спрашивает
-/// проверка полноты комплекта (`kit_files`), у которой на руках только путь.
+/// То же от корня комплекта путём, а не `Kit` — этим видом его спрашивают тесты раскладки комплекта, у которых на руках только путь.
 fn mcp_exe_at(kit_root: &Path) -> PathBuf {
     kit_root.join(if cfg!(windows) { "mcp-1c/mcp-1c-windows-amd64.exe" } else { "mcp-1c/mcp-1c-linux-amd64" })
 }
@@ -3131,20 +3120,27 @@ mod tests {
     }
 
     /// Полнота комплекта проверяется теми же путями, которыми файлы
-    /// запускают, и в список входит mcp-1c — прежде его там не было вовсе, а
-    /// каталоги проверялись отдельно от файлов (вопрос владельца 30.10
+    /// запускают, а каталоги отдельно не проверяются (вопрос владельца 30.10
     /// «нахрена делать разные механизмы»). httpd — только на Windows.
+    ///
+    /// `mcp-1c` из списка ушёл (находка 20 осмотра 10.11): его отсутствие
+    /// называет свой факт набора (`verify::kit_facts`) и тем же путём
+    /// `mcp_exe` — механизм и вопрос остались одни, а две карточки об одном
+    /// файле разными словами стали одной.
     #[test]
     fn kit_files_are_the_very_files_we_launch() {
         let root = Path::new("X");
         let files = kit_files(root);
-        assert!(files.contains(&oscript_exe(root)), "{files:?}");
-        assert!(files.contains(&git_exe(root)), "{files:?}");
-        assert!(files.contains(&mcp_exe(&Kit::at("X"))), "{files:?}");
-        assert_eq!(files.contains(&crate::publication::kit_httpd_exe(root)), cfg!(windows), "{files:?}");
+        let paths: Vec<&PathBuf> = files.iter().map(|(_, p)| p).collect();
+        assert!(paths.contains(&&oscript_exe(root)), "{files:?}");
+        assert!(paths.contains(&&git_exe(root)), "{files:?}");
+        assert!(!paths.contains(&&mcp_exe(&Kit::at("X"))), "об mcp-1c говорит свой факт: {files:?}");
+        assert_eq!(paths.contains(&&crate::publication::kit_httpd_exe(root)), cfg!(windows), "{files:?}");
         // Ни одного каталога комплекта: каждый путь лежит ВНУТРИ своей папки
         // инструмента, а не является ею — пустой `vrunner/` прежнюю проверку проходил.
-        assert!(files.iter().all(|p| p.parent() != Some(root)), "{files:?}");
+        assert!(paths.iter().all(|p| p.parent() != Some(root)), "{files:?}");
+        // Имя для человека — у каждой части, и ни одно не похоже на путь.
+        assert!(files.iter().all(|(n, _)| !n.contains('\\') && !n.contains('/') && !n.contains(".exe")), "{files:?}");
     }
 
     #[test]
@@ -3346,16 +3342,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let kit = tmp.join("kit");
         // Кладём ФАЙЛЫ, а не каталоги: проверяется то, что запускается.
-        for f in kit_files(&kit) {
+        for (_, f) in kit_files(&kit) {
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
             std::fs::write(&f, b"x").unwrap();
         }
-        // Пустой каталог вместо файла — отказ, и он называет сам файл: так
+        // Пустой каталог вместо файла — отказ, и он называет часть СЛОВАМИ
+        // человека, а не путём к файлу (находка 8 осмотра 10.11): так
         // выглядит комплект, распакованный наполовину (прежняя проверка
         // каталогов такое пропускала).
-        let half = kit_files(&kit)[0].clone();
+        let (word, half) = kit_files(&kit)[0].clone();
         std::fs::remove_file(&half).unwrap();
-        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("oscript")));
+        let blocked = tools_state(&kit);
+        assert!(matches!(&blocked, OpState::Blocked(d) if d.contains(word)), "{blocked:?}");
+        assert!(
+            matches!(&blocked, OpState::Blocked(d) if !d.contains("oscript") && !d.contains('\\') && !d.contains('/')),
+            "путей на экране не бывает: {blocked:?}"
+        );
         std::fs::write(&half, b"x").unwrap();
         // Файлы есть, отметки нет: работать можно, но версий не назвать —
         // и это сказано словами, а не молчанием.
@@ -3369,7 +3371,7 @@ mod tests {
         assert!(matches!(tools_state(&kit), OpState::Done(d) if d.contains("3.0.2") && d.contains("из комплекта")));
         // Нет файла в самом комплекте — единственный оставшийся отказ.
         std::fs::remove_dir_all(kit.join("git")).unwrap();
-        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("git")));
+        assert!(matches!(tools_state(&kit), OpState::Blocked(d) if d.contains("Git")));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

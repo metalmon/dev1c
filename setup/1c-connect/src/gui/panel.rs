@@ -3280,6 +3280,26 @@ impl Panel {
         // окне (`window::MIN_SIZE`, за вычетом `.p_4()` снаружи) — список
         // уже этой ширины никогда не бывает.
         let select_menu_min_w = crate::gui::window::MIN_SIZE.width - px(32.);
+        // Принимает ли карточка ввод в поля — РЕШЕНИЕ по находке 25 осмотра
+        // 10.11, дословно: «у НЕтекущей карточки поля принимают ввод, но
+        // сохранить его нечем — запись разрешена только текущей, а причина
+        // спрятана в подсказке; при этом переключатели той же карточки
+        // пишутся сразу: в одной карточке два разных закона сохранения без
+        // единого видимого признака».
+        //
+        // Выбрано: нетекущая карточка ввода в поля НЕ принимает вовсе. Поля
+        // пишет `save_host`, а она заменяет ТЕКУЩЕЕ соединение целиком —
+        // правка нетекущей уехала бы в чужой блок toml, — и дать ей
+        // отдельный путь записи значило бы завести второй писатель полей
+        // рядом с первым. Переключатели и имя остаются живыми: у них СВОЙ
+        // путь записи, адресованный по имени карточки (`set_card_*`,
+        // `save::rename`), в чужой блок он уехать не может.
+        //
+        // Признак видимый и ровно один: что правится — трогается, что не
+        // правится — не трогается (`Input::disabled`), и строка под именем
+        // говорит это словами. Два закона были без признака — теперь закон
+        // один («поля правятся у текущего соединения») и он виден руками.
+        let editable = c.name == cx.global::<Ui>().cfg.current().name;
         // Кнопка выбора — значок без подписи: такая кнопка сама становится
         // квадратом своей высоты (`h_8`), и вся сэкономленная ширина уходит
         // полю пути рядом. Область нажатия — весь квадрат, а не сам значок.
@@ -3393,6 +3413,7 @@ impl Panel {
         // соединение на следующей отрисовке.
         if c.mode != "local" {
             let name = c.name.clone();
+            let answers = base_here_answers(&c);
             col = col.child(
                 v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Где база")).child(
                     KitButton::new("base-here")
@@ -3405,7 +3426,14 @@ impl Panel {
                             // Слова берутся из того же `base_here_label`, что
                             // стоит на самой кнопке: два списка одних и тех же
                             // ответов разошлись бы на первой правке слова.
-                            for here in [true, false] {
+                            //
+                            // Какие ответы вообще предлагать, решает
+                            // `base_here_answers` — неприменимого в списке
+                            // нет (находка 24 осмотра 10.11: сочетание
+                            // «Принимаю подключения» × «База на другом
+                            // компьютере» переключатели предлагали свободно,
+                            // а программа тут же объявляла его невозможным).
+                            for here in answers.iter().copied() {
                                 let (label, name) = (base_here_label(here), name.clone());
                                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
                             }
@@ -3694,19 +3722,27 @@ impl Panel {
     /// будет слева» (значения в кнопках выбора оказались прижаты влево, и
     /// имя равняется на них), и параметр убран совсем, а не оставлен
     /// мёртвым.
-    fn input(state: &Entity<InputState>, accent: Hsla, window: &Window, cx: &App) -> impl IntoElement {
-        let focused = state.read(cx).focus_handle(cx).is_focused(window);
+    fn input(state: &Entity<InputState>, accent: Hsla, editable: bool, window: &Window, cx: &App) -> impl IntoElement {
+        let focused = editable && state.read(cx).focus_handle(cx).is_focused(window);
         div()
             .relative()
-            .child(Input::new(state).focus_bordered(false))
+            .child(Input::new(state).focus_bordered(false).disabled(!editable))
             .when(focused, |d| d.child(div().absolute().bottom_0().left_1().right_1().h(px(2.)).rounded_b_sm().bg(accent)))
     }
 
-    fn row(label: &str, caption: Hsla, accent: Hsla, input: &Entity<InputState>, window: &Window, cx: &App) -> impl IntoElement {
+    fn row(
+        label: &str,
+        caption: Hsla,
+        accent: Hsla,
+        input: &Entity<InputState>,
+        editable: bool,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
         v_flex()
             .gap_1()
             .child(div().text_size(px(13.)).text_color(caption).child(label.to_string()))
-            .child(Self::input(input, accent, window, cx))
+            .child(Self::input(input, accent, editable, window, cx))
     }
 
     /// Слой Fluent: заливка слоя, скругление 8, обводка 1 px низкой

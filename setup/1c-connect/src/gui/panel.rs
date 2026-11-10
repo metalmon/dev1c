@@ -502,10 +502,11 @@ pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
 /// 6. соединение принимает подключения, и по его коду вправду можно
 ///    подключиться (`link::accepts_connections` — роль, вид и база ЗДЕСЬ) —
 ///    «Показать код»;
-/// 7. кода у соединения не будет вовсе: база на другом компьютере либо слово
-///    роли программе не знакомо — кнопка заперта, называет состояние
-///    (`link::row`), а `why` говорит, почему кода нет и что поправить
-///    (`BASE_ELSEWHERE_NOTE`, `ROLE_UNKNOWN_NOTE`). Прежде этой ветки не
+/// 7. кода у соединения не будет вовсе — кнопка заперта, называет состояние
+///    (`link::row`), а `why` говорит, почему кода нет и что поправить. Какой
+///    это случай и какими словами о нём говорить, решает ОДНО место на все
+///    три органа окна (`no_code_note`): база на другом компьютере, карточка
+///    не ждёт входящих, слово роли программе не знакомо. Прежде этой ветки не
 ///    было вовсе: «Показать код» стояло ОСТАТКОМ на всём, что не local и не
 ///    dial, то есть и на карточке, по коду которой подключиться нельзя
 ///    никогда;
@@ -656,11 +657,10 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         return Button { subject, label: "Показать код", why: None, act: Some(LinkAct::ShowCode) };
     }
     // Кода не будет — кнопка заперта и называет причину, тем же приёмом, что
-    // прочие запертые ветки выше. Случаев здесь ровно два: база на другом
-    // компьютере (роль принимающая) и слово роли, которого программа не
-    // знает, — больше в эту ветку не доходит ничего (local и dial разобраны
-    // выше).
-    let why = if link::waits_for_incoming(c) { BASE_ELSEWHERE_NOTE } else { ROLE_UNKNOWN_NOTE };
+    // прочие запертые ветки выше. Слова берутся из одного места на все три,
+    // что их произносят (`no_code_note`, там и довод): здесь, у блока кода в
+    // карточке и у самой выдачи.
+    let why = no_code_note(c).unwrap_or(ROLE_UNKNOWN_NOTE);
     Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: Some(why.to_string()), act: None }
 }
 
@@ -1217,6 +1217,35 @@ pub const BASE_ELSEWHERE_NOTE: &str = "Кода у этой карточки н�
 pub const ROLE_UNKNOWN_NOTE: &str = "Непонятно, как эта карточка подключается: в настройках у неё стоит слово, которого программа не \
                                      знает. Выберите в карточке, подключаетесь вы сами или принимаете подключения.";
 
+/// Карточка входящих не ждёт вовсе: человек выбрал «Подключаюсь сам» или «Всё на одной машине». Код таким не выдают — в первом случае его
+/// дают на той стороне и вставляют здесь, во втором подключаться не к кому.
+pub const NOT_ACCEPTING_NOTE: &str = "Кода у этой карточки не будет: она не ждёт входящих подключений. Если подключаетесь вы — код выдают \
+                                      на том компьютере, куда вы идёте, и вставляется он здесь; если всё на одной машине — подключаться не \
+                                      к кому.";
+
+/// Почему у этой карточки не будет кода — ОДНИ слова на все места, что об этом говорят. `None` — код выдать можно.
+///
+/// **Чем куплено (Important повторного ревью всей ветки).** Слова эти произносят три места: кнопка подвала (`main_button`), блок кода в
+/// карточке (`accepting_block::code_note`) и отказ у самой выдачи (`issue_code`). Каждое разбирало случаи само, и разобрали они разное:
+/// подвал знал два случая, блок кода — один, а страж у выдачи — тоже один, и мимо него проходили карточка с нераспознанной ролью и
+/// локальная. Докстрока `issue_code` при этом обещала «отказ у единственной двери». Теперь дверь и правда одна, и случаев у неё ровно
+/// столько, сколько их бывает.
+///
+/// Порядок разбора — от того, что человек выбрал сам, к тому, что он выбрал неизвестным словом: не ждёт входящих (его выбор, и слова ведут
+/// к обоим настоящим выходам), ждёт, но база не здесь (поправить «Где база» или взять код там, где база), роль не разобрана вовсе.
+pub fn no_code_note(c: &Connection) -> Option<&'static str> {
+    if link::accepts_connections(c) {
+        return None;
+    }
+    if link::waits_for_incoming(c) {
+        return Some(BASE_ELSEWHERE_NOTE);
+    }
+    // Роль разобралась — значит это «Подключаюсь сам» либо «Всё на одной
+    // машине»: человек так выбрал, и говорить ему надо про выбор, а не про
+    // непонятное слово.
+    Some(if c.role().is_ok() { NOT_ACCEPTING_NOTE } else { ROLE_UNKNOWN_NOTE })
+}
+
 /// Книга допуска не прочиталась — и так и говорится. Нуля на экране здесь быть не может: «Вы ещё никому не разрешили подключаться» в этом
 /// случае значило бы «никого не зачислили» там, где просто не прочитался файл (Important повторного ревью всей ветки; та же беда, которую
 /// у себя чинила `save::reread_book`, и провод в том же случае отвечает честно — `enroll::BOOK_UNREADABLE`).
@@ -1270,8 +1299,8 @@ pub fn accepting_block(
     // нетекущей тоже (`link_menu`, спека 4 ревью задач 6 и 7): прежде
     // подсказка велела нажать то, чего у нетекущей карточки не было ни в
     // подвале («Сделать текущим»), ни в меню («Переименовать», «Удалить»).
-    let code_note = if !can_issue {
-        BASE_ELSEWHERE_NOTE
+    let code_note = if let Some(why) = no_code_note(c) {
+        why
     } else if code.is_some() {
         "Передайте эту строку тому, кто будет подключаться: он вставит её у себя, и вы увидите здесь его просьбу."
     } else {
@@ -1721,9 +1750,14 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     // в неё стучит: окно такой карточке кода уже не предлагает (ни кнопкой,
     // ни пунктом меню), и останься решение только там — следующий вызов
     // откуда-нибудь ещё вернул бы беду целиком. Слова те же, что читает
-    // человек в самой карточке.
-    if ui.cfg.by_name(card).is_some_and(|c| link::waits_for_incoming(c) && !link::accepts_connections(c)) {
-        return Err(BASE_ELSEWHERE_NOTE.to_string());
+    // человек в самой карточке, и берутся они оттуда же (`no_code_note`).
+    //
+    // Закрыта она на ВСЕ случаи, а не на один (Important повторного ревью всей
+    // ветки): прежде страж ловил только «база на той стороне», и мимо него
+    // проходили карточка с нераспознанной ролью и локальная — то есть
+    // обещание «отказ у единственной двери» эта же строка и не исполняла.
+    if let Some(why) = ui.cfg.by_name(card).and_then(no_code_note) {
+        return Err(why.to_string());
     }
     // Уже выданный отдаётся только ЖИВЫМ (`live_code`): «Показать код» на
     // мёртвый код не показывает — он выдаёт новый, как если бы кода и не
@@ -4435,7 +4469,7 @@ mod tests {
         project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
         save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner,
         undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE,
-        DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
+        DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -6479,6 +6513,44 @@ mod tests {
         assert!(accepting_block(&ui.cfg, ui.cfg.current(), Some("КОД"), Some(&[])).is_none());
         ui.cfg.current_mut().role = "accept".into();
         assert_eq!(main_button(&ui, &name, Dirty::No).label, "Показать код", "узнанная роль возвращает кнопку");
+    }
+
+    /// Дверь к выдаче кода ОДНА, и закрыта она на все случаи, а не на один (Important повторного ревью всей ветки).
+    ///
+    /// Падало так: страж у `issue_code` ловил только «база на той стороне», и мимо него проходили карточка с нераспознанной ролью и
+    /// локальная — окно их кода не предлагает, а вызов в обход окна получал настоящую строку. Докстрока при этом обещала «отказ у
+    /// единственной двери». Слова теперь тоже из одного места (`no_code_note`): три органа окна разбирали случаи сами и разобрали разное.
+    #[test]
+    fn the_one_door_to_a_code_is_shut_for_every_card_the_window_does_not_let_through() {
+        // Каждая карточка здесь — та, которой окно кода не предлагает, и у
+        // каждой свои слова: человек должен прочитать про СВОЙ случай.
+        for (role, mode, base_here, note) in [
+            ("accept", "tunnel", false, BASE_ELSEWHERE_NOTE),
+            ("dial", "tunnel", true, NOT_ACCEPTING_NOTE),
+            ("accept", "local", true, NOT_ACCEPTING_NOTE),
+            ("сервер", "tunnel", true, ROLE_UNKNOWN_NOTE),
+        ] {
+            let mut ui = ui_for(role, mode, false);
+            ui.cfg.current_mut().base_here = base_here;
+            let name = ui.cfg.current().name.clone();
+            assert_eq!(
+                issue_code(&mut ui, &name, true),
+                Err(note.to_string()),
+                "«{role}»/«{mode}»: код выдан карточке, которой окно его не предлагает"
+            );
+        }
+
+        // И дверь не заперта наглухо: карточку, которая вправду принимает
+        // подключения, страж пропускает. Дальше выдача упирается в ключ узла,
+        // которого у тестового комплекта нет, — и это уже не её отказ, а
+        // отсутствие машины; проверяется поэтому, что отказ НЕ от стража.
+        let mut ui = ui_for("accept", "tunnel", false);
+        ui.cfg.current_mut().base_here = true;
+        let name = ui.cfg.current().name.clone();
+        let past = issue_code(&mut ui, &name, true);
+        for note in [BASE_ELSEWHERE_NOTE, NOT_ACCEPTING_NOTE, ROLE_UNKNOWN_NOTE] {
+            assert_ne!(past.as_ref().err().map(String::as_str), Some(note), "принимающую карточку с базой здесь страж пропускает");
+        }
     }
 
     /// Пока кода не выдали, карточка не молчит пустым местом (то же правило,

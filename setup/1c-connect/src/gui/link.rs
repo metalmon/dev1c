@@ -449,7 +449,14 @@ pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&st
         if !present {
             continue;
         }
-        if show_captions {
+        // Подпись — только там, где под ней ОСТАЛАСЬ хоть одна строка
+        // (находка 31 осмотра 10.11: правило «ждущий — первой строкой»
+        // уносило единственную строку группы наверх, и на экране висел
+        // заголовок пустой группы). Правило наверху при этом не меняется:
+        // ждущая строка стоит выше всех подписей, просто своей подписи она
+        // с собой больше не тянет — подпись отвечает за то, что под ней, а
+        // под ней ничего.
+        if show_captions && !groups[cat].is_empty() {
             out.push(Entry::Caption(CAPTIONS[cat]));
         }
         out.extend(std::mem::take(&mut groups[cat]).into_iter().map(Entry::Row));

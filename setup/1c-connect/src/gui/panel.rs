@@ -4260,7 +4260,10 @@ impl Render for Panel {
                                         .child(div().w(px(24.)).flex_shrink_0().child(
                                             div().invisible().group_hover(SharedString::from(format!("row-g-{i}")), |d| d.visible()).child(
                                                 {
-                                                    let items = link_menu(cx.global::<Ui>(), &name, None);
+                                                    // Что стоит на главной кнопке, из меню выбрасывается: иначе «Сделать текущим»
+                                                    // было бы и в подвале, и здесь. У невыделенной строки главной кнопки нет вовсе.
+                                                    let primary = if picked { main.act } else { None };
+                                                    let items = link_menu(cx.global::<Ui>(), &name, primary);
                                                     let subject = name.clone();
                                                     KitButton::new(SharedString::from(format!("menu-{i}")))
                                                         .ghost()
@@ -4270,9 +4273,16 @@ impl Render for Panel {
                                                         .dropdown_menu(move |mut menu, _, _| {
                                                             for (label, act) in items.iter().copied() {
                                                                 let subject = subject.clone();
+                                                                // **Действие откладывается на следующий кадр.** Пункт исполняется,
+                                                                // пока меню ещё закрывается, и диалог подтверждения, поднятый в этот
+                                                                // миг, получает «да» от того же щелчка: удаление проходило МОЛЧА, без
+                                                                // вопроса (живой прогон 10.11). `Window::defer` ждёт, пока меню уйдёт.
                                                                 menu =
                                                                     menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                                                                        run_link_act(window, cx, act, &subject)
+                                                                        let subject = subject.clone();
+                                                                        window.defer(cx, move |window, cx| {
+                                                                            run_link_act(window, cx, act, &subject)
+                                                                        });
                                                                     }));
                                                             }
                                                             menu

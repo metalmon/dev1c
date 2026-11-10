@@ -136,7 +136,7 @@ fn shown_text_starts_with_a_capital_unless_the_first_word_is_a_technical_name() 
     assert_eq!(capitalized("vrunner-mcp отвечает"), "vrunner-mcp отвечает");
     assert_eq!(capitalized("oscript 2.2.0 из комплекта"), "oscript 2.2.0 из комплекта");
     assert_eq!(capitalized(r"C:\dev1c-connect-kit"), r"C:\dev1c-connect-kit");
-    assert_eq!(capitalized("Не зафиксировано"), "Не зафиксировано");
+    assert_eq!(capitalized("Есть несохранённые изменения"), "Есть несохранённые изменения");
     assert_eq!(capitalized(""), "");
     // Имя проверяется целиком, а не по началу строки: «гитом» — слово, не `git`.
     assert_eq!(capitalized("гитом отправлено"), "Гитом отправлено");

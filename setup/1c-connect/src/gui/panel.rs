@@ -678,7 +678,7 @@ pub fn fact_rows(facts: &[Check]) -> Vec<(Option<Dot>, String, String)> {
 
 /// Строка карточки, готовая к показу: и заголовок, и подробность — с
 /// заглавной (`gui::capitalized`). Одно место на оба списка вкладки, чтобы
-/// «репозиторий» и «Не зафиксировано» не стояли рядом разной орфографией
+/// «репозиторий» и «Есть несохранённые изменения» не стояли рядом разной орфографией
 /// (снимок владельца 31.10). Имена фактов при этом остаются строчными
 /// константами: заглавная живёт только в показе.
 fn shown_row(d: Option<Dot>, title: &str, detail: &str) -> (Option<Dot>, String, String) {
@@ -852,12 +852,12 @@ fn nothing_to_show(facts_empty: bool, rows_empty: bool) -> Option<String> {
 /// `base_fields_note` в карточке: локального каталога у такой базы нет.
 pub fn tools_connection_banner(cfg: &cfg::Cfg) -> String {
     if cfg.connections.is_empty() {
-        return "Соединений пока нет — завести их можно на «Связи».".to_string();
+        return "Соединений пока нет — создать их можно на «Связи».".to_string();
     }
     let c = cfg.current();
     let name = if c.name.trim().is_empty() { "без имени" } else { c.name.trim() };
     let base = if !c.base_is_here() {
-        "база — на той стороне".to_string()
+        "база на другом компьютере".to_string()
     } else if c.base_path.trim().is_empty() {
         "база не указана".to_string()
     } else {
@@ -929,20 +929,24 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     if !f.want_branch.is_empty() && f.branch != f.want_branch {
         rows.push((
             Some(Dot::Warn),
-            "Ветка разошлась с параметрами".into(),
-            format!("в параметрах {}, отправка пойдёт туда", f.want_branch),
+            "Изменения уедут не туда, где вы работаете".into(),
+            format!("в соединении указана ветка {}, работа пойдёт в неё", f.want_branch),
         ));
     }
     // 2. Есть ли что отправлять. Точка здесь — настоящее состояние.
     rows.push(unsent_row(f));
     // 3. Последняя отправка — только когда есть что показывать.
     if !f.last.is_empty() {
-        rows.push((Some(Dot::Off), "Последний коммит".into(), f.last.clone()));
+        rows.push((Some(Dot::Off), "Последнее изменение".into(), f.last.clone()));
     }
     // Индекс выгрузки — только когда его нет: это предупреждение о том, что
     // следующая загрузка пойдёт долго, а не факт на каждый день.
     if !f.index {
-        rows.push((Some(Dot::Warn), "Первая загрузка будет полной".into(), "в выгрузке нет ConfigDumpInfo.xml".into()));
+        rows.push((
+            Some(Dot::Warn),
+            "Первая загрузка в базу будет долгой".into(),
+            "в папке проекта ещё нет отметки о прошлой загрузке — пойдёт целиком".into(),
+        ));
     }
     rows.into_iter().map(|(d, title, detail)| shown_row(d, &title, &detail)).collect()
 }
@@ -958,7 +962,7 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
     let (good, bad) = if f.exchange {
         ("Всё отправлено", "Не отправлено")
     } else {
-        ("Всё зафиксировано", "Не зафиксировано")
+        ("Все изменения сохранены", "Есть несохранённые изменения")
     };
     if !f.unsent() {
         return (Some(Dot::Up), good.into(), String::new());
@@ -970,7 +974,7 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
         "" => {}
         // Ветки на сервере ещё нет: считать нечего, и «все коммиты» честнее
         // любого числа.
-        "все" => parts.push("ветка ещё не отправлялась".to_string()),
+        "все" => parts.push("эту работу ещё ни разу не отправляли".to_string()),
         n => {
             if let Ok(k) = n.parse::<u64>() {
                 if k > 0 {
@@ -980,7 +984,7 @@ fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
         }
     }
     if f.changed > 0 {
-        parts.push(format!("{} не закоммичено", common::word::count(f.changed as u64, "файл", "файла", "файлов")));
+        parts.push(format!("не сохранено {}", common::word::count(f.changed as u64, "файл", "файла", "файлов")));
     }
     (Some(Dot::Warn), bad.into(), parts.join(", "))
 }
@@ -1061,7 +1065,7 @@ pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
     // Та же защита, что у `shown_fields` выше, через тот же `base_is_here()`:
     // в локальном режиме «той стороны» не существует вовсе, и застрявшее
     // `base_here = false` не вправе подписывать экран её словами.
-    (!c.base_is_here()).then_some("Поля базы приходят с той стороны")
+    (!c.base_is_here()).then_some("Эти поля заполняют на компьютере с базой")
 }
 
 /// Одна зачисленная сторона в карточке.
@@ -1107,8 +1111,8 @@ pub const REVOKE: &str = "Отозвать разрешение";
 
 /// Блок зачисления в карточке, которая ЖДЁТ входящих (спека экрана, «У
 /// соединения, которое ждёт входящих»): код одной строкой, одно предложение
-/// о том, что с ним делать на той стороне, число зачисленных сторон и сами
-/// стороны — у каждой отпечаток и «Отозвать».
+/// о том, что с ним делать на той стороне, подпись списка и сами зачисленные
+/// — у каждого отпечаток и «Отозвать».
 ///
 /// `None` — блока в карточке нет вовсе: у зовущей карточки своего кода не
 /// бывает (он приходит с той стороны, и там же стоит поле для вставки), у
@@ -1118,8 +1122,8 @@ pub const REVOKE: &str = "Отозвать разрешение";
 ///
 /// **Предела числу зачисленных здесь нет и не появится** (решение владельца
 /// 1.11): зачислить к одной карточке можно сколько угодно сторон, предел
-/// назначает лицензия 1С, а не программа. Поэтому в блоке стоит ЧИСЛО, а не
-/// «осталось мест»: второго не существует.
+/// назначает лицензия 1С, а не программа. Поэтому «осталось мест» в блоке нет
+/// и быть не может: такого счёта не существует.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Accepting {
     /// Код подключения одной строкой, видимой глазом. `None` — кода ещё не
@@ -1135,7 +1139,9 @@ pub struct Accepting {
     /// Одно предложение о том, что с кодом делать (спека: «под ней одно
     /// предложение о том, что с ней делать на той стороне»).
     pub code_note: &'static str,
-    /// Сколько сторон зачислено — словами, согласованными с числом.
+    /// Подпись списка зачисленных, без счёта (решение владельца 10.11):
+    /// «Кому разрешено подключаться», а пусто — «Вы ещё никому не разрешили
+    /// подключаться».
     pub enrolled: String,
     /// Пометка над списком — одна на все имена сразу. `None` — зачисленных
     /// нет, и помечать нечего.
@@ -1157,23 +1163,26 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     // подсказка велела нажать то, чего у нетекущей карточки не было ни в
     // подвале («Сделать текущим»), ни в меню («Переименовать», «Удалить»).
     let code_note = if code.is_some() {
-        "Передайте эту строку на ту сторону — там её вставят, и здесь появится заявка."
+        "Передайте эту строку тому, кто будет подключаться: он вставит её у себя, и вы увидите здесь его просьбу."
     } else {
-        "Кода пока нет. Нажмите «Показать код» — и эту строку можно будет передать на ту сторону."
+        "Кода пока нет. Нажмите «Показать код» — и его можно будет передать тому, кто будет подключаться."
     };
+    // Подпись списка — без счёта (решение владельца): число зачисленных
+    // человек и так видит по строкам, а «Зачислено: 2 стороны» он не
+    // произнесёт вслух.
     let enrolled = if parties.is_empty() {
         // Пустота словами, а не пустым местом — то же правило, что у
         // `base_fields_note` и `nothing_to_show`.
-        "Никого ещё не зачислили".to_string()
+        "Вы ещё никому не разрешили подключаться".to_string()
     } else {
-        format!("Зачислено: {}", common::word::count(parties.len() as u64, "сторона", "стороны", "сторон"))
+        "Кому разрешено подключаться".to_string()
     };
     let parties = parties
         .iter()
         .map(|p| PartyRow {
             fingerprint: p.key.to_string(),
             key: p.key,
-            says_name: if p.says_name.is_empty() { "Себя не назвала".to_string() } else { format!("«{}»", p.says_name) },
+            says_name: if p.says_name.is_empty() { "Без имени".to_string() } else { format!("«{}»", p.says_name) },
             // Слова, а не галочка: «Полный»/«Только чтение» — это и есть
             // итог, которым живёт разрешение записи в карточке, и читается
             // он без расшифровки.
@@ -1208,9 +1217,9 @@ pub fn dialling_block(c: &Connection, partner: Option<String>) -> Option<Diallin
         return None;
     }
     let note = if partner.is_some() {
-        "Подключение уже заведено и возвращается само. Код нужен только затем, чтобы подключиться к ДРУГОЙ машине."
+        "Подключение уже настроено — программа соединяется сама. Код нужен только для того, чтобы подключиться к другому компьютеру."
     } else {
-        "Вставьте код, выданный на машине с базой, и нажмите «Подключиться»."
+        "Вставьте код, выданный на компьютере с базой, и нажмите «Подключиться»."
     };
     Some(Dialling { note, partner, button: "Подключиться" })
 }
@@ -1611,8 +1620,8 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     let code = ticket.to_code();
     let silent = blind_code_note(reach_empty, card);
     // Ключ берётся ДО книги: код выдаётся карточке, а не имени, и карточки, которой в настройках уже нет, выдавать его некуда.
-    let key = key_of(ui, card).ok_or_else(|| format!("Карточки «{card}» в настройках нет — код выдать некому."))?;
-    let book = ui.book.as_mut().ok_or("Книга зачислений не открылась — код выдать некуда.")?;
+    let key = key_of(ui, card).ok_or_else(|| format!("Карточки «{card}» в настройках больше нет — код выдавать некому."))?;
+    let book = ui.book.as_mut().ok_or("Список разрешений не открылся — код выдать некуда.")?;
     book.reissue(&key, &ticket)?;
     ui.codes.retain(|(c, _)| c != &key);
     ui.codes.push((key, ticket));
@@ -1642,9 +1651,9 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
 fn blind_code_note(reach_empty: bool, card: &str) -> Option<String> {
     reach_empty.then(|| {
         format!(
-            "Код для «{card}» выдан без адресов: узел ещё не вышел в сеть. \
-             Дозвониться по нему получится только через серверы n0 и только при интернете у обеих сторон \
-             — если та сторона не дозвонится, выдайте новый код минутой позже."
+            "Код для «{card}» выдан, но программа ещё не вышла в сеть. \
+             Подключиться по нему получится только при интернете на обоих компьютерах. \
+             Если там не получится — выдайте новый код через минуту."
         )
     })
 }
@@ -1662,14 +1671,19 @@ fn blind_code_note(reach_empty: bool, card: &str) -> Option<String> {
 /// только он знает, записан ли партнёр.
 fn dial_card(ui: &mut Ui, card: &str, code: &str) {
     let Some(peer) = ui.peer.clone() else {
-        gui::note_line(ui, Line { kind: Kind::Fail, text: "Узел не поднят — подключаться нечем.".into() });
+        gui::note_line(
+            ui,
+            Line {
+                kind: Kind::Fail, text: "Программа ещё не готова подключаться — попробуйте через минуту.".into()
+            },
+        );
         return;
     };
     let Some(key) = key_of(ui, card) else {
         gui::note_line(
             ui,
             Line {
-                kind: Kind::Fail, text: format!("Карточки «{card}» в настройках нет — звонить нечем.")
+                kind: Kind::Fail, text: format!("Карточки «{card}» в настройках больше нет — подключаться некуда.")
             },
         );
         return;
@@ -1687,8 +1701,8 @@ fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
     let card_key = key_of(ui, card);
     let r = match (ui.book.as_mut(), card_key.as_ref()) {
         (Some(book), Some(card_key)) => book.revoke(card_key, key),
-        (_, None) => Err(format!("Карточки «{card}» в настройках нет — отзывать нечего.")),
-        (None, _) => Err("Книга зачислений не открылась — отзывать нечем.".to_string()),
+        (_, None) => Err(format!("Карточки «{card}» в настройках больше нет — отзывать нечего.")),
+        (None, _) => Err("Список разрешений не открылся — отзывать нечем.".to_string()),
     };
     let line = match r {
         Ok(()) => {
@@ -1698,7 +1712,7 @@ fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
             if let (Some(peer), Some(card_key)) = (&ui.peer, card_key.as_ref()) {
                 peer.revoked(card_key, key);
             }
-            Line { kind: Kind::Ok, text: format!("Разрешение отозвано: карточка «{card}», ключ {key}") }
+            Line { kind: Kind::Ok, text: format!("Разрешение отозвано: «{card}», отпечаток {key}") }
         }
         Err(e) => Line { kind: Kind::Fail, text: e },
     };
@@ -1950,7 +1964,10 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
                 // ушла по сроку. Молчать нельзя: человек нажал кнопку.
                 gui::note_line(
                     cx.global_mut::<Ui>(),
-                    Line { kind: Kind::Say, text: format!("Заявка по «{subject}» больше не ждёт ответа") },
+                    Line {
+                        kind: Kind::Say,
+                        text: format!("Просьбу подключиться к «{subject}» разрешать уже не нужно: на неё ответили или она устарела"),
+                    },
                 );
                 cx.refresh_windows();
                 return;
@@ -2367,7 +2384,7 @@ pub fn base_here_label(base_here: bool) -> &'static str {
     if base_here {
         "Здесь"
     } else {
-        "На той стороне"
+        "На другом компьютере"
     }
 }
 
@@ -3199,8 +3216,11 @@ impl Panel {
                         .label(base_here_label(c.base_here))
                         .dropdown_caret(true)
                         .dropdown_menu(move |mut menu, _, _| {
-                            for (label, here) in [("Здесь", true), ("На той стороне", false)] {
-                                let name = name.clone();
+                            // Слова берутся из того же `base_here_label`, что
+                            // стоит на самой кнопке: два списка одних и тех же
+                            // ответов разошлись бы на первой правке слова.
+                            for here in [true, false] {
+                                let (label, name) = (base_here_label(here), name.clone());
                                 menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
                             }
                             menu.min_w(select_menu_min_w)
@@ -3421,7 +3441,7 @@ impl Panel {
             // Отпечаток той стороны — целиком и тем же видом, что у
             // зачисленных в принимающей карточке: он тоже сверяется голосом.
             if let Some(partner) = block.partner {
-                col = col.child(div().text_size(px(12.)).text_color(caption).child("Подключено к ключу"));
+                col = col.child(div().text_size(px(12.)).text_color(caption).child("Отпечаток компьютера с базой"));
                 col = col.child(div().min_w_0().text_size(px(12.)).child(partner));
             }
         }
@@ -4129,7 +4149,7 @@ impl Render for Panel {
                     (Some(Which::Export), _) => ("Выгрузить", "Выгрузить из 1С"),
                     (Some(_), _) => ("Установить", "Установить расширение"),
                     (None, Verdict::Off) => ("Выключено", "Включите MCP — тогда станет видно, что уже сделано"),
-                    (None, _) => ("Проверяю…", "Жду набор фактов — что нужнее, пока неизвестно"),
+                    (None, _) => ("Проверяю…", "Проверяю, всё ли на месте…"),
                 };
                 // В меню — всё, кроме того, что на главной кнопке, и
                 // разложенное по разрядам (`project_menu`).

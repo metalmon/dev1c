@@ -524,7 +524,7 @@ pub(crate) fn session_back_refusal(was_enabled: bool, mode: &str, gate: Option<&
     }
     // Слова называют состояние, а не причину отказа: причину человек уже
     // прочитал строкой выше (её сказал тот, кто отказал).
-    Some("Обслуживание базы погашено — включите его заново, когда разберётесь с отказом выше".to_string())
+    Some("Обслуживание базы выключено — включите его заново, когда разберётесь с отказом выше".to_string())
 }
 
 /// Поднимать ли сеанс после смены режима. Замок к этому моменту уже
@@ -1330,7 +1330,7 @@ fn apply_publication(cx: &mut App, publication: &'static str) {
 /// индикатор (трей читает факт после перечитывания — см. `apply_access`).
 /// Отдельная функция — чтобы текст проверялся тестом без `cx`.
 fn access_not_applied_line(e: &str) -> String {
-    format!("запись в базу (mcp-1c): потолок НЕ применён — запись в файл не удалась: {e}")
+    format!("запись в базу (mcp-1c): ограничение НЕ применено — настройки не сохранились: {e}")
 }
 
 /// Записать потолок записи МАШИНЫ — единственный зовущий,
@@ -1373,7 +1373,7 @@ fn apply_access(cx: &mut App, access: &'static str) {
                 Line {
                     kind: Kind::Ok,
                     text: format!(
-                        "запись в базу (mcp-1c): {} — действует на вызовы mcp-1c после смены; канал vrunner этим не ограничен",
+                        "запись в базу (mcp-1c): {} — действует на вызовы mcp-1c после смены; выгрузку и загрузку через vrunner не ограничивает",
                         label.to_lowercase()
                     ),
                 },
@@ -1690,7 +1690,7 @@ mod tests {
     #[test]
     fn the_write_failure_line_says_the_ceiling_was_not_applied() {
         let line = access_not_applied_line("диск только для чтения");
-        assert!(line.contains("НЕ применён"), "{line}");
+        assert!(line.contains("НЕ применено"), "{line}");
         assert!(!line.contains("применено к работающему сеансу"), "{line}");
         assert!(line.contains("диск только для чтения"), "{line}");
     }
@@ -2162,9 +2162,9 @@ mod tests {
         assert_eq!(session_back_refusal(true, "tunnel", None), None, "обслуживание включено, замок открыт — поднимаем");
         assert_eq!(session_back_refusal(true, "local", Some("не указана база")), None, "локальные слушатели держат порты и под замком");
         let why = session_back_refusal(true, "tunnel", Some("не указана база")).expect("замок заперт — туннель не поднимаем");
-        assert!(why.contains("погашено"), "{why}");
+        assert!(why.contains("выключено"), "{why}");
         let why = session_back_refusal(false, "local", None).expect("обслуживание выключено человеком — не поднимаем");
-        assert!(why.contains("погашено"), "{why}");
+        assert!(why.contains("выключено"), "{why}");
     }
 
     #[test]

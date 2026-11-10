@@ -397,7 +397,7 @@ pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&st
     }
 
     let show_captions = present.iter().filter(|p| **p).count() > 1;
-    const CAPTIONS: [&str; 4] = ["Принимаю подключения", "Подключаюсь сам", "На этой машине", "Роль не распознана"];
+    const CAPTIONS: [&str; 4] = ["Принимаю подключения", "Подключаюсь сам", "На этой машине", "Непонятно, как подключаются"];
 
     let mut out: Vec<Entry> = waiting.into_iter().map(Entry::Row).collect();
     for (cat, present) in present.into_iter().enumerate() {
@@ -499,7 +499,13 @@ pub fn douse_serving(ui: &mut Ui) {
     ui.enabled.store(false, Ordering::Relaxed);
     // Непрошедшая запись — не тишина: она оставляет на диске «on» при уже выключенном обслуживании, то есть разрешение, которого человек не давал (минорная находка ревью задачи 2).
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn,
+                text: format!("не удалось записать, включено ли обслуживание: {e:#} — агент может считать иначе, чем показывает окно"),
+            },
+        );
     }
     if ui.cfg.current().mode == "local" {
         ui.link = local_display("local", false, ui.link.clone());
@@ -577,7 +583,13 @@ pub fn gate_line(why: &str, autoconnect_on: bool) -> Line {
 pub fn publication_failure(ui: &mut Ui, why: &str) -> State {
     ui.enabled.store(false, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn,
+                text: format!("не удалось записать, включено ли обслуживание: {e:#} — агент может считать иначе, чем показывает окно"),
+            },
+        );
     }
     State::Failed(format!("публикация: {why}"))
 }
@@ -725,7 +737,13 @@ pub fn flip_enabled_only(ui: &mut Ui) -> bool {
     let on = !ui.enabled.load(Ordering::Relaxed);
     ui.enabled.store(on, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&ui.kit, on) {
-        note_line(ui, Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            ui,
+            Line {
+                kind: Kind::Warn,
+                text: format!("не удалось записать, включено ли обслуживание: {e:#} — агент может считать иначе, чем показывает окно"),
+            },
+        );
     }
     on
 }
@@ -845,7 +863,13 @@ pub fn toggle_link(cx: &mut App) {
     // которой уже нет (находка ревью).
     cx.global::<Ui>().enabled.store(!on, Ordering::Relaxed);
     if let Err(e) = crate::allow::write(&cx.global::<Ui>().kit, !on) {
-        note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Warn, text: format!("признак разрешения не записан: {e:#}") });
+        note_line(
+            cx.global_mut::<Ui>(),
+            Line {
+                kind: Kind::Warn,
+                text: format!("не удалось записать, включено ли обслуживание: {e:#} — агент может считать иначе, чем показывает окно"),
+            },
+        );
     }
     if on {
         stop_session(cx);

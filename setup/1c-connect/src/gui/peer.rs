@@ -118,7 +118,7 @@ impl Peer {
     pub fn dial(&self, card: &CardId, name: &str, code: &str) -> Result<(), String> {
         self.cmd
             .send(Cmd::Dial { card: card.clone(), name: name.to_string(), code: code.to_string() })
-            .map_err(|_| "Узел не работает — подключиться нечем. Перезапустите программу.".to_string())
+            .map_err(|_| "Программа не вышла в сеть — подключиться нечем. Перезапустите её.".to_string())
     }
 
     /// Снять живой поток отозванной стороны. Молча: запись об отзыве уже
@@ -162,7 +162,7 @@ pub fn start(kit: &Kit, tx: UnboundedSender<Ev>) -> Peer {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                say(&tx_in, Kind::Fail, format!("Узел не поднялся: {e}"));
+                say(&tx_in, Kind::Fail, format!("Не удалось выйти в сеть: {e}"));
                 return;
             }
         };
@@ -235,8 +235,8 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
 /// Слова отзыва той стороне. Причина и совет, как велит раздел «Ошибки»
 /// спеки: без совета причина человеку не нужна.
 const REVOKED_TEXT: &str =
-    "Разрешение отозвано на стороне базы.\nЧеловек там снял доступ этому рабочему месту.\nПопросите выдать новый код, \
-                            если доступ нужен снова.";
+    "Вам больше не разрешают подключаться к этой базе.\nЧеловек за тем компьютером снял разрешение для этого рабочего места.\n\
+                            Позвоните ему и попросите новый код, если доступ нужен снова.";
 
 /// Один живой разговор принимающей стороны: вожжи его управляющего потока и
 /// карточка, которую он обслуживает.
@@ -464,7 +464,7 @@ fn target(kit: &Kit, card: &CardId, code: &str) -> Result<EndpointAddr, String> 
     }
     let partner = Partners::open(kit.state())?
         .of(card)
-        .ok_or("Кода нет, а подключений по этой карточке ещё не было.\nВставьте код, выданный на машине с базой.")?;
+        .ok_or("Кода нет, а по этой карточке ещё ни разу не подключались.\nВставьте код, выданный на компьютере с базой.")?;
     Ok(addr_of(&partner))
 }
 
@@ -784,7 +784,7 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
         for c in &served {
             flow(&tx, c.id(), Some(link::Flow::Broken));
         }
-        say(&tx, Kind::Warn, format!("«{shown}»: разрешение снято, пока шёл разговор — поток закрыт"));
+        say(&tx, Kind::Warn, format!("«{shown}»: разрешение сняли прямо во время разговора — связь закрыта"));
         return;
     }
     let gone = channel::hold(&mut recv, |_| {}).await;
@@ -832,7 +832,7 @@ impl Machine {
     fn read(kit: &Kit) -> Machine {
         match crate::secrets::Store::system(kit.state()) {
             Ok(store) => Machine::read_with(kit, &store),
-            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: подложка секретов не открылась: {e}")),
+            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: не открылось хранилище паролей: {e}")),
         }
     }
 

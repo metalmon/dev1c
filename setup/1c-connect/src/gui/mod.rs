@@ -1064,7 +1064,7 @@ pub fn refresh_project(cx: &mut App) {
                 let p = Project::from_cfg(&cfg, &kit_root);
                 let (ok, why) = match project::layout_state(&p) {
                     Layout::Ok => (true, String::new()),
-                    Layout::Missing => (false, "каталог проекта ещё не разложен".into()),
+                    Layout::Missing => (false, "в папке проекта ещё ничего нет".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
                     Layout::NoGitea => (false, cfg::NO_GITEA.into()),
                     Layout::ForeignOrigin(u) => {
@@ -1734,7 +1734,7 @@ pub fn quit(cx: &mut App) {
             note_file(
                 &kit,
                 &Line {
-                    kind: Kind::Warn, text: "прощание зачисленным сторонам не доехало за отведённый срок".into()
+                    kind: Kind::Warn, text: "предупредить подключённых о выходе не удалось — у них связь просто оборвётся".into()
                 },
             );
         }
@@ -1763,7 +1763,15 @@ pub fn quit(cx: &mut App) {
     let ui = cx.global::<Ui>();
     // Выход — владелец рабочего места уходит, и признак на диске обязан сказать «off» раньше, чем замок (`single_instance::Guard`) и правда освободится: иначе подкоманда `mcp`, успевшая прочитать файл в это же окно, увидела бы «on» при уже умирающем окне. Непрошедшая запись — не тишина (минорная находка ревью задачи 2): она оставляет на диске «on» при мёртвом владельце, то есть разрешение, которого никто не давал.
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_file(&ui.kit, &Line { kind: Kind::Warn, text: format!("признак разрешения не снят при выходе: {e:#}") });
+        note_file(
+            &ui.kit,
+            &Line {
+                kind: Kind::Warn,
+                text: format!(
+                    "при выходе не удалось записать, что обслуживание выключено: {e:#} — агент может считать, что оно ещё работает"
+                ),
+            },
+        );
     }
     // Свой httpd — тоже наш, и выход обязан забрать его с собой: он живёт в каталоге комплекта и переживал коннектор, не давая удалить папку (находка владельца 26.10). Чужой веб-сервер (`publication = "webserver"`) не трогаем — за него отвечает человек.
     //

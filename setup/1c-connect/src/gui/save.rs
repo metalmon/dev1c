@@ -373,6 +373,10 @@ pub fn add_connection(ui: &mut Ui, role: &str) -> Result<String, String> {
     // докстроку функции, «Ответ человека — ответ на вопрос «Это соединение»».
     let new = Connection {
         name: name.clone(),
+        // Ключ даётся СРАЗУ и свой, а не выводится из имени (`CardId::fresh`, там и довод): заведение карточки печатает блок на диск в
+        // этом же заходе, значит закрепить ключ есть где, — а выведенный совпал бы с ключом карточки, которую переименовали, если
+        // человек занял освободившееся имя, и новая карточка молча получила бы ЕЁ зачисления.
+        id_in_file: cfg::CardId::fresh(),
         profile: ui.cfg.current().profile.clone(),
         role: role.to_string(),
         mode: "tunnel".into(),
@@ -556,7 +560,10 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     //
     // Берётся `old_host.id()`, а не сырое поле: у карточки, ключа которой в файле ещё нет, первое же «Сохранить» обязано записать
     // выведенный ключ — тот самый, по которому её зачисления уже могли лечь в книгу допуска.
-    host.id_in_file = old_host.id();
+    // Карточки ещё не было вовсе (первая настройка свежего комплекта, `old_host` пуст) — это ЗАВЕДЕНИЕ, и ключ даётся свой, как в
+    // `add_connection`: выводить его из имени, которое эта же запись только что придумала от каталога базы, значило бы дать первой
+    // карточке ключ, который кто-то другой может вывести себе повторно.
+    host.id_in_file = if old_host.name.is_empty() { cfg::CardId::fresh() } else { old_host.id() };
     host.gitea = ui.cfg.current().gitea.clone();
     host.dump = carried_dump(ui.cfg.current(), &host.project);
     host.platform = ui.cfg.current().platform.clone();

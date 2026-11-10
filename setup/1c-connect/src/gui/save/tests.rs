@@ -1698,6 +1698,39 @@ fn switching_the_role_writes_one_key_and_leaves_the_neighbours_alone() {
     assert!(std::fs::read_to_string(&path).unwrap().contains("Ромашка"), "сосед на месте");
 }
 
+/// Critical ревью всей ветки, вторая половина: запомненный партнёр не переживает смену роли или режима — и человек об этом слышит.
+///
+/// Падало так: точечные писатели не касались `partners.toml` вовсе, и карточка, перещёлкнутая на «Принимаю подключения», звонила при
+/// следующем запуске по записанному адресу — прямо против спеки контракта («Принимающая не звонит никогда, даже зная адрес»).
+#[test]
+fn switching_the_role_or_the_mode_forgets_where_the_card_was_calling() {
+    let mut ui = Ui::for_test();
+    ui.cfg.current_mut().role = "dial".into();
+    with_params_file(&ui);
+    let id = ui.cfg.by_name("Buh").unwrap().id();
+    access_of(&ui, "Buh");
+    crate::gui::save::reread_partners(&mut ui);
+    assert!(ui.partners.iter().any(|(c, _)| c == &id), "фикстура: партнёр записан, карточке есть куда возвращаться");
+
+    set_role(&mut ui, "Buh", "accept").unwrap();
+
+    let partners = crate::enrolled::Partners::open(ui.kit.state()).unwrap();
+    assert!(partners.of(&id).is_none(), "принимающая карточка звонить не вправе — записи о партнёре больше нет");
+    assert!(ui.partners.iter().all(|(c, _)| c != &id), "и снимок окна её больше не числит");
+    assert!(ui.log.iter().any(|l| l.text.contains("больше не помнит")), "потерю возврата человек слышит словами: {:?}", ui.log);
+    let book = crate::enrolled::Book::open(ui.kit.state()).unwrap();
+    assert_eq!(book.of(&id).len(), 1, "а выданные человеком разрешения переключатель не трогает: их видно списком, и они не врут");
+
+    // То же у режима: карточка подключается уже не туда, где её помнят.
+    crate::enrolled::Partners::open(ui.kit.state())
+        .unwrap()
+        .remember(&id, &crate::enrolled::Partner { key: iroh::SecretKey::generate().public(), relay: None, direct: vec![] })
+        .unwrap();
+    set_mode(&mut ui, "Buh", "local").unwrap();
+    let partners = crate::enrolled::Partners::open(ui.kit.state()).unwrap();
+    assert!(partners.of(&id).is_none(), "смена режима — та же потеря возврата, и тоже не молчком");
+}
+
 /// Неизвестное значение роли — отказ словами ДО записи, тем же приёмом, что
 /// `set_profile` проверяет `toolset()` через пробный `Connection`.
 #[test]

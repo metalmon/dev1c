@@ -23,6 +23,8 @@ use std::time::{Duration, Instant, SystemTime};
 pub mod autostart;
 pub mod gate;
 pub mod panel;
+/// Конструктор окна: примитивы, из которых собираются экраны. Окно ничего не рисует само.
+pub mod parts;
 pub mod peer;
 pub mod theme;
 pub mod tray;

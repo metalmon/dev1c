@@ -16,6 +16,7 @@ use crate::gui::theme;
 // переэкспорт `gui::*`: `list` там сталкивается с `gpui_kit::list`
 // (элемент-список GPUI), и глобальное имя стало бы неоднозначным.
 use crate::gui::link;
+use crate::gui::parts::{self, Slot};
 use crate::gui::window::hide_window;
 use crate::gui::{self, head_parts, Busy, Dot, Kind, Line, LogEntry, ProjectView, Running, Stamped, Ui, Verdict, Which};
 use crate::session::State;
@@ -26,7 +27,7 @@ use common::check::{Check, Outcome};
 // что знает виджет.
 use gpui_kit::component::button::{Button as KitButton, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
@@ -929,26 +930,43 @@ fn nothing_to_show(facts_empty: bool, rows_empty: bool) -> Option<String> {
 /// База на той стороне (`!Connection::base_is_here()`) — свой путь к ней
 /// здесь не называем, той же защитой, что у `shown_fields`/
 /// `base_fields_note` в карточке: локального каталога у такой базы нет.
-pub fn tools_connection_banner(cfg: &cfg::Cfg) -> String {
+pub fn tools_subject(cfg: &cfg::Cfg) -> String {
     if cfg.connections.is_empty() {
-        return "Соединений пока нет — создать их можно на «Связи».".to_string();
+        return "Соединений пока нет".to_string();
     }
     let c = cfg.current();
-    let name = if c.name.trim().is_empty() { "без имени" } else { c.name.trim() };
-    let base = if !c.base_is_here() {
-        "база на другом компьютере".to_string()
-    } else if c.base_path.trim().is_empty() {
-        "база не указана".to_string()
+    let name = if c.name.trim().is_empty() { "Без имени" } else { c.name.trim() };
+    // База — ИМЕНЕМ, а не путём: путь человек видит в самой карточке, а здесь он только опознаёт, с чем работает.
+    let base = cfg::base_name(&c.base_path);
+    if c.base_is_here() && !base.is_empty() {
+        format!("{name} · {base}")
     } else {
-        format!("база {}", c.base_path.trim())
-    };
-    let folder_word = folder_label(c.toolset().unwrap_or("business")).to_lowercase();
-    let folder = if c.project.trim().is_empty() {
-        format!("{folder_word} не указана")
-    } else {
-        format!("{folder_word} {}", c.project.trim())
-    };
-    format!("Инструменты работают с соединением «{name}»: {base}, {folder}. Сменить соединение — на «Связи».")
+        name.to_string()
+    }
+}
+
+/// Действия вкладки «Инструменты» — СПИСКОМ, прямо на вкладке.
+///
+/// **Почему не в меню.** Вкладка отвечает на вопрос «что сделать с базой», а делать было нечего: на экране стояли две карточки готовности
+/// и три строки прозы, а сами действия прятались в меню подвала — на растянутом окне вкладка выглядела пустой (владелец 10.11: «там
+/// выгрузка, загрузка в базу, но она пустая на вытянутом окне»).
+///
+/// То, что стоит на главной кнопке подвала (`primary`), отсюда выбрасывается: один орган на одно действие, тот же приём, что у меню связи.
+///
+/// Расширение — ОДНО действие из двух по состоянию: нет в базе — «Установить», есть — «Снять». Предлагать оба разом значит спрашивать
+/// человека о том, что программа и так знает.
+pub fn tools_actions(facts: &[Check], primary: Option<gui::Which>) -> Vec<gui::Which> {
+    use gui::Which::{Export, Import, Install, Uninstall};
+    let installed = facts.iter().find(|c| c.what == crate::verify::EXTENSION).map(|c| c.outcome() != common::check::Outcome::Bad);
+    let mut out = vec![Export, Import];
+    match installed {
+        Some(true) => out.push(Uninstall),
+        Some(false) => out.push(Install),
+        // Про расширение ещё не знаем — и не предлагаем ни одного из двух: угадывать тут значит предложить снять то, чего нет.
+        None => {}
+    }
+    out.retain(|w| Some(*w) != primary);
+    out
 }
 
 /// Строки вкладки «Инструменты»: кружок, заголовок, подробность. Чистая — вид
@@ -2045,13 +2063,6 @@ fn deed_of(act: LinkAct) -> Option<crate::need::Deed> {
 ///
 /// Поэтому отложено ВСЁ, а не только то, что спрашивает сегодня: пункт, который завтра научится спрашивать, иначе тихо потеряет
 /// вопрос, и заметит это снова человек, а не тест.
-fn menu_item(label: &'static str, act: impl Fn(&mut Window, &mut App) + Clone + 'static) -> PopupMenuItem {
-    PopupMenuItem::new(label).on_click(move |_, window, cx| {
-        let act = act.clone();
-        window.defer(cx, move |window, cx| act(window, cx));
-    })
-}
-
 fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) {
     match act {
         LinkAct::Toggle => gui::toggle_link(cx),
@@ -2078,10 +2089,20 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         // пишет «Сохранить» (`Panel::write` зовёт `save::rename`). Своего
         // окошка с полем для этого не заводим: поле уже на экране.
         LinkAct::Rename => {
-            let Some(p) = cx.global::<Ui>().panel.clone() else { return };
+            let (cfg, panel) = {
+                let ui = cx.global::<Ui>();
+                (ui.cfg.clone(), ui.panel.clone())
+            };
+            let Some(p) = panel else { return };
+            let name = subject.to_string();
             // Поля «Имя» в карточке больше нет: имя правится НА МЕСТЕ заголовка строки, и пункт меню включает этот режим, а не ставит
             // курсор в поле, которого не существует.
+            //
+            // **Правится карточка, из чьего меню пункт вызвали** — `select` по имени предмета. Без неё правка включалась у ВЫДЕЛЕННОЙ
+            // строки: человек звал «Переименовать» у одной карточки, а поле ввода вставало у другой (живой прогон 10.11). Переход на
+            // ту же строку `select` отбрасывает сам, так что лишней перевязки полей тут нет.
             p.update(cx, |this, cx| {
+                this.select(&cfg, &name, window, cx);
                 this.renaming = true;
                 let focus = this.fields.name.read(cx).focus_handle(cx);
                 focus.focus(window, cx);
@@ -3463,17 +3484,6 @@ impl Panel {
         // способом — своим явным `.text_color(fg)` поверх варианта кнопки,
         // не трогая внутренности `Button`.
         let fg = cx.theme().foreground;
-        // Ширина выпадающего списка — не уже самого селектора (Important 3
-        // ревью круга: список оставался на умолчании `gpui-component`,
-        // 120 px, а поле — `w_full()`, во всю ширину карточки, и список
-        // читался уже своей кнопки). `PopupMenu::min_w` — готовый приём
-        // (`src/menu/popup_menu.rs:432`), своего измерения не пишем; точного
-        // совпадения с реальной шириной поля он не даёт (поле растёт с
-        // окном, список — не слушает `on_prepaint` тригера, в отличие от
-        // настоящего `Select`), но минимум — ширина карточки при минимальном
-        // окне (`window::MIN_SIZE`, за вычетом `.p_4()` снаружи) — список
-        // уже этой ширины никогда не бывает.
-        let select_menu_min_w = crate::gui::window::MIN_SIZE.width - px(32.);
         // **Поля принимает ЛЮБАЯ карточка** — находка 25 осмотра 10.11 («в одной карточке два разных закона сохранения без единого
         // видимого признака») закрыта тем, что законов больше не два, а один: и поля, и переключатели, и имя пишутся по имени карточки.
         //
@@ -3516,16 +3526,20 @@ impl Panel {
         // дело — чем зовётся папка и что в ней лежит, — и стоять ему
         // рядом с ней; первым же человек решает, КАК это соединение
         // подключается.
-        let profile_field = v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Профиль")).child(
-            KitButton::new("profile").outline().w_full().text_color(fg).label(profile_label(&toolset)).dropdown_caret(true).dropdown_menu(
-                move |mut menu, _, _| {
-                    for profile in ["business", "developer"] {
-                        let name = name.clone();
-                        menu = menu.item(menu_item(profile_label(profile), move |_, cx| set_card_profile(cx, &name, profile)));
-                    }
-                    menu.min_w(select_menu_min_w)
-                },
-            ),
+        let profile_field = parts::field_select(
+            "profile",
+            "Профиль",
+            profile_label(&toolset).into(),
+            caption,
+            fg,
+            ["business", "developer"]
+                .into_iter()
+                .map(|profile| {
+                    let name = name.clone();
+                    let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_profile(cx, &name, profile));
+                    (SharedString::from(profile_label(profile)), act)
+                })
+                .collect(),
         );
         // **Поля «Имя» в карточке НЕТ** (находка 36 обхода 10.11): имя стоит заголовком строки, и второй раз его говорить незачем.
         // Правится оно карандашом у того же заголовка — решение владельца: «на базовом имени при наведении нужна иконка редактирования
@@ -3563,9 +3577,9 @@ impl Panel {
                             let [dial, accept] = link::onboarding_answers();
                             for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
                                 let name = name.clone();
-                                menu = menu.item(menu_item(label, move |_, cx| set_card_topology_kind(cx, &name, answer)));
+                                menu = menu.item(parts::menu_item(label, move |_, cx| set_card_topology_kind(cx, &name, answer)));
                             }
-                            menu.min_w(select_menu_min_w)
+                            parts::menu(Slot::Field, menu)
                         }),
                 )
         });
@@ -3578,33 +3592,28 @@ impl Panel {
         if c.mode != "local" {
             let name = c.name.clone();
             let answers = base_here_answers(&c);
-            col = col.child(
-                v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Где база")).child(
-                    KitButton::new("base-here")
-                        .outline()
-                        .w_full()
-                        .text_color(fg)
-                        .label(base_here_label(c.base_here))
-                        .dropdown_caret(true)
-                        .dropdown_menu(move |mut menu, _, _| {
-                            // Слова берутся из того же `base_here_label`, что
-                            // стоит на самой кнопке: два списка одних и тех же
-                            // ответов разошлись бы на первой правке слова.
-                            //
-                            // Какие ответы вообще предлагать, решает
-                            // `base_here_answers` — неприменимого в списке
-                            // нет (находка 24 осмотра 10.11: сочетание
-                            // «Принимаю подключения» × «База на другом
-                            // компьютере» переключатели предлагали свободно,
-                            // а программа тут же объявляла его невозможным).
-                            for here in answers.iter().copied() {
-                                let (label, name) = (base_here_label(here), name.clone());
-                                menu = menu.item(menu_item(label, move |_, cx| set_card_base_here(cx, &name, here)));
-                            }
-                            menu.min_w(select_menu_min_w)
-                        }),
-                ),
-            );
+            // Ответов может остаться ОДИН: принимающей карточке «на другом компьютере» сегодня не предлагают — протокол такого
+            // подключения ещё не проводит (находка 33, пара B). `field_select` в этом случае рисует строку, а не список: список, в
+            // котором нечего выбрать, обещает выбор, которого нет (владелец 10.11).
+            //
+            // Слова берутся из того же `base_here_label`, что стоит и на самой кнопке: два списка одних и тех же ответов разошлись бы
+            // на первой правке слова.
+            col = col.child(parts::field_select(
+                "base-here",
+                "Где база",
+                base_here_label(c.base_here).into(),
+                caption,
+                fg,
+                answers
+                    .iter()
+                    .copied()
+                    .map(|here| {
+                        let name = name.clone();
+                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_base_here(cx, &name, here));
+                        (SharedString::from(base_here_label(here)), act)
+                    })
+                    .collect(),
+            ));
         }
         // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
         // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
@@ -3672,16 +3681,21 @@ impl Panel {
         // (`set_card_publication`).
         if let Some(label) = publication_switch_label(&c) {
             let name = c.name.clone();
-            col = col.child(v_flex().gap_1().min_w_0().child(div().text_size(px(13.)).text_color(caption).child("Публикация базы")).child(
-                KitButton::new("publication").outline().w_full().text_color(fg).label(label).dropdown_caret(true).dropdown_menu(
-                    move |mut menu, _, _| {
-                        for (words, publication) in link::publication_answers() {
-                            let name = name.clone();
-                            menu = menu.item(menu_item(words, move |_, cx| set_card_publication(cx, &name, publication)));
-                        }
-                        menu.min_w(select_menu_min_w)
-                    },
-                ),
+            col = col.child(parts::field_select(
+                "publication",
+                "Публикация базы",
+                label.into(),
+                caption,
+                fg,
+                link::publication_answers()
+                    .into_iter()
+                    .map(|(words, publication)| {
+                        let name = name.clone();
+                        let act: parts::Act =
+                            std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_publication(cx, &name, publication));
+                        (SharedString::from(words), act)
+                    })
+                    .collect(),
             ));
         }
         // Адрес чужой публикации — сразу под переключателем, который его и
@@ -3714,7 +3728,8 @@ impl Panel {
         };
         if let Some(block) = block {
             col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
-            if block.code.is_some() {
+            let had_code = block.code.is_some();
+            if had_code {
                 // **Код — ОДНОЙ строкой в поле, а не простынёй на экране** (решение владельца 10.11: «пиши его в одну строку, так, чтобы
                 // человек мог сам его скопировать из поля»). Прежде он рисовался текстом с переносом — четыреста тридцать два знака в
                 // шестнадцать строк, съедавшие карточку целиком, и выделить их мышью было нельзя: читать код незачем, его передают.
@@ -3752,21 +3767,19 @@ impl Panel {
             if let Some(why) = block.code_note {
                 col = col.child(div().text_size(px(13.)).text_color(caption).child(why));
             }
-            // Орудие выдачи — только там, где код вправду выдают
-            // (`Accepting::can_issue`): у карточки с базой на другом
-            // компьютере кнопка рядом с объяснением «кода не будет» означала
-            // бы «а всё-таки попробуйте», и человек нажимал бы её, пока не
-            // устанет.
-            if block.can_issue {
+            // Орудие выдачи — только там, где код вправду выдают (`Accepting::can_issue`): у карточки с базой на другом компьютере
+            // кнопка рядом с объяснением «кода не будет» означала бы «а всё-таки попробуйте».
+            //
+            // И только там, где код УЖЕ ЕСТЬ: это перевыпуск. Пока кода нет, выдаёт его главная кнопка подвала («Выдать код»), и
+            // вторая кнопка рядом, названная «Выдать новый код», предлагала бы то же дело вторым органом и чужим словом — найдено
+            // своим же обходом окна 10.11.
+            if block.can_issue && had_code {
                 let card = card_name.clone();
                 // Кнопка во всю ширину — одна из двух законных форм кнопки в карточке (закон окна, «Кнопки в карточке: ровно две
                 // формы»; вторая — значок справа от поля, им здесь сделано копирование). Короткая кнопка посреди строки была третьей
                 // формой, которой не бывает.
                 col = col.child(
-                    KitButton::new("new-code")
-                        .outline()
-                        .w_full()
-                        .label("Выдать новый код")
+                    parts::button_wide("new-code", "Выдать новый код")
                         .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
                 );
             }
@@ -3887,22 +3900,6 @@ impl Panel {
             .gap_1()
             .child(div().text_size(px(13.)).text_color(caption).child(label.to_string()))
             .child(Self::input(input, accent, window, cx))
-    }
-
-    /// Слой Fluent: заливка слоя, скругление 8, обводка 1 px низкой
-    /// непрозрачности, без тени.
-    fn layer(card: Hsla, border: Hsla) -> Div {
-        div().rounded_lg().bg(card).border_1().border_color(border.opacity(0.6))
-    }
-
-    fn dot(d: Dot, t: &Theme) -> Hsla {
-        match d {
-            Dot::Off => t.muted_foreground,
-            Dot::Busy => t.primary,
-            Dot::Up => t.success,
-            Dot::Down => t.danger,
-            Dot::Warn => t.warning,
-        }
     }
 }
 
@@ -4051,13 +4048,13 @@ impl Render for Panel {
         // прыгающая высота окна из-за переменного числа строк). Акцент здесь
         // только у переключателя. На ходу операции переключатель заблокирован
         // (`Switch::disabled`): дёргать туннель посреди git-обмена незачем.
-        let status = Self::layer(card_bg, border)
+        let status = parts::card(card_bg, border)
             .flex()
             .flex_row()
             .items_center()
             .gap_3()
             .p_3()
-            .child(div().size_3().flex_shrink_0().rounded_full().bg(Self::dot(c.dot, &theme)))
+            .child(div().size_3().flex_shrink_0().rounded_full().bg(parts::dot(c.dot, &theme)))
             .child({
                 // Имя базы дописывается в тот же заголовок через « · », как
                 // уже фаза с часами выше: у карточки один слот под текст,
@@ -4206,7 +4203,7 @@ impl Render for Panel {
                             // соединение говорит о себе отметкой в `row_marks` — это РАЗНЫЕ вещи: выделено то, что человек смотрит,
                             // текущее — то, с чем работают инструменты и агент.
                             // Выделение — тонкой обводкой, а не заливкой акцентом: акцент во всю рамку читался грубо (владелец 10.11).
-                            let mut row = Self::layer(card_bg, if picked { accent.opacity(0.55) } else { border })
+                            let mut row = parts::card(card_bg, if picked { accent.opacity(0.55) } else { border })
                                 .id(SharedString::from(format!("row-{i}")))
                                 .flex()
                                 .flex_col()
@@ -4214,7 +4211,6 @@ impl Render for Panel {
                                 .p_3()
                                 .cursor_pointer()
                                 .on_click(click)
-                                .group(SharedString::from(format!("row-g-{i}")))
                                 .child(
                                     h_flex()
                                         .gap_2()
@@ -4268,49 +4264,42 @@ impl Render for Panel {
                                         // другом конце окна от карточки, над которой человек работает; найти его там он не смог.
                                         // Действия принадлежат СОЕДИНЕНИЮ, а строка и есть соединение — здесь им и место.
                                         //
-                                        // Появляется по наведению, но слот под него стоит ВСЕГДА: иначе строка прыгала бы при каждом
-                                        // наведении.
-                                        .child(div().w(px(24.)).flex_shrink_0().child(
-                                            div().invisible().group_hover(SharedString::from(format!("row-g-{i}")), |d| d.visible()).child(
-                                                {
-                                                    // Что стоит на главной кнопке, из меню выбрасывается: иначе «Сделать текущим»
-                                                    // было бы и в подвале, и здесь. У невыделенной строки главной кнопки нет вовсе.
-                                                    let primary = if picked { main.act } else { None };
-                                                    let items = link_menu(cx.global::<Ui>(), &name, primary);
-                                                    let subject = name.clone();
-                                                    KitButton::new(SharedString::from(format!("menu-{i}")))
-                                                        .ghost()
-                                                        .xsmall()
-                                                        .icon(Icon::default().data(MENU_SVG))
-                                                        .tooltip("Действия с соединением")
-                                                        .dropdown_menu(move |mut menu, _, _| {
-                                                            for (label, act) in items.iter().copied() {
-                                                                let subject = subject.clone();
-                                                                menu = menu.item(menu_item(label, move |window, cx| {
-                                                                    run_link_act(window, cx, act, &subject)
-                                                                }));
-                                                            }
-                                                            menu
-                                                        })
-                                                },
-                                            ),
-                                        ))
+                                        // **Значок стоит ВСЕГДА, а не по наведению.** Пряча его, мы получали кнопку, которая исчезает
+                                        // под своим же открытым меню: курсор уходит с строки на пункт, наведение кончается, и меню
+                                        // висит само по себе (владелец 10.11: «это выглядит связно? у тебя кнопка пропадает по
+                                        // ховеру»). Один тихий значок в строке дешевле, чем орган, пропадающий в работе.
+                                        .child(div().w(px(24.)).flex_shrink_0().child({
+                                            // Что стоит на главной кнопке, из меню выбрасывается: иначе «Сделать текущим»
+                                            // было бы и в подвале, и здесь. У невыделенной строки главной кнопки нет вовсе.
+                                            let primary = if picked { main.act } else { None };
+                                            let items = link_menu(cx.global::<Ui>(), &name, primary);
+                                            let subject = name.clone();
+                                            parts::button_icon(SharedString::from(format!("menu-{i}")), MENU_SVG, "Действия с соединением")
+                                                .dropdown_menu(move |menu, _, _| {
+                                                    let mut menu = parts::menu(Slot::List, menu);
+                                                    for (label, act) in items.iter().copied() {
+                                                        let subject = subject.clone();
+                                                        menu = menu.item(parts::menu_item(label, move |window, cx| {
+                                                            run_link_act(window, cx, act, &subject)
+                                                        }));
+                                                    }
+                                                    menu
+                                                })
+                                        }))
                                         // Стрелка раскрытия — у ВЫДЕЛЕННОЙ строки, и слот под неё тоже постоянный.
                                         .child(div().w(px(24.)).flex_shrink_0().when(picked, |d| {
                                             d.child(
-                                                KitButton::new(SharedString::from(format!("open-{i}")))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(Icon::default().data(if open { CHEVRON_UP_SVG } else { CHEVRON_DOWN_SVG }))
-                                                    .tooltip(if open {
-                                                        "Свернуть"
-                                                    } else {
-                                                        "Настройки соединения"
-                                                    })
-                                                    .on_click(cx.listener(|this: &mut Self, _, _, cx: &mut Context<Self>| {
+                                                parts::button_icon(
+                                                    SharedString::from(format!("open-{i}")),
+                                                    if open { CHEVRON_UP_SVG } else { CHEVRON_DOWN_SVG },
+                                                    if open { "Свернуть" } else { "Настройки соединения" },
+                                                )
+                                                .on_click(cx.listener(
+                                                    |this: &mut Self, _, _, cx: &mut Context<Self>| {
                                                         this.expanded = !this.expanded;
                                                         cx.notify();
-                                                    })),
+                                                    },
+                                                )),
                                             )
                                         })),
                                 )
@@ -4338,9 +4327,10 @@ impl Render for Panel {
                             .ghost()
                             .label("+ Добавить")
                             .disabled(busy_now)
-                            .dropdown_menu(|mut menu, _, _| {
+                            .dropdown_menu(|menu, _, _| {
+                                let mut menu = parts::menu(Slot::List, menu);
                                 for (label, role) in link::onboarding_answers() {
-                                    menu = menu.item(menu_item(label, move |window, cx| add_link(window, cx, role)));
+                                    menu = menu.item(parts::menu_item(label, move |window, cx| add_link(window, cx, role)));
                                 }
                                 menu
                             })
@@ -4358,7 +4348,9 @@ impl Render for Panel {
                 // соединением работают выгрузка, загрузка и установка
                 // расширения ниже — решает чистая `tools_connection_banner`,
                 // отрисовка её слова не трогает.
-                let banner = tools_connection_banner(&ui.cfg);
+                let subject = tools_subject(&ui.cfg);
+                let primary = gui::project_primary(&ui.facts);
+                let actions = tools_actions(&ui.facts, primary);
                 let facts = fact_rows(&project_facts(tab_facts(&ui.facts, &ui.kit_facts)));
                 let mut rows = project_rows(ui.project.as_ref());
                 // Пустая вкладка — всегда наша вина, а не состояние человека
@@ -4371,9 +4363,9 @@ impl Render for Panel {
                 if let Some(say) = nothing_to_show(facts.is_empty(), rows.is_empty()) {
                     rows.push((None, say, String::new()));
                 }
-                let row = || Self::layer(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
+                let row = || parts::card(card_bg, border).flex().flex_row().gap_3().items_center().px_3().py_2();
                 let fact = |d: Dot, title: String, detail: String| {
-                    row().child(div().size_2().flex_shrink_0().rounded_full().bg(Self::dot(d, &theme))).child(
+                    row().child(div().size_2().flex_shrink_0().rounded_full().bg(parts::dot(d, &theme))).child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
@@ -4387,10 +4379,20 @@ impl Render for Panel {
                     v_flex()
                         // 12 px между фактами набора и строками проекта: два разных списка, а не один.
                         .gap_3()
-                        // Подпись соединения — мелким приглушённым текстом, тем же
-                        // приёмом, что у подсказок без кружка ниже: `min_w_0`, иначе
-                        // длинная строка не переносится, а обрезается по краю карточки.
-                        .child(div().flex_1().min_w_0().text_size(px(13.)).text_color(caption).child(banner))
+                        // **Предмет — одной строкой, а не тремя строками прозы** (находка 10 осмотра 10.11). Прежде здесь стояло
+                        // «Инструменты работают с соединением „Соединение 1“: база не указана, папка документов не указана. Сменить
+                        // соединение — на „Связи“» — три строки, из которых две говорили состояние полей чужой вкладки, а третья звала
+                        // туда же. Состояние полей человек видит там, где поля; здесь ему нужно одно: с чем он работает.
+                        .child(div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).child(subject))
+                        // **Действия — здесь, на вкладке, кнопками во всю ширину** (закон окна, «Кнопки в карточке: ровно две формы»).
+                        .child(v_flex().gap_2().children(actions.into_iter().map(|w| {
+                            KitButton::new(SharedString::from(format!("tool-{}", project_label(w))))
+                                .outline()
+                                .w_full()
+                                .label(project_label(w))
+                                .disabled(busy_now)
+                                .on_click(move |_, window, cx| run_project_op(window, cx, w))
+                        })))
                         // `flex_1().min_w_0()` у строки без кружка — ровно по той же
                         // причине, что у строк журнала этажом ниже: flex-ребёнок не
                         // уже своего текста, и длинная подсказка не переносится, а
@@ -4565,15 +4567,17 @@ impl Render for Panel {
                         }))
                 });
                 let menu = (!link_items.is_empty()).then(|| {
-                    more("more-link").dropdown_menu(move |mut menu, _, _| {
+                    more("more-link").dropdown_menu(move |menu, _, _| {
+                        let mut menu = parts::menu(Slot::List, menu);
                         for (label, act) in link_items.iter().copied() {
                             let subject = menu_subject.clone();
                             // Запертость идущей операцией остаётся видимой
                             // серой — тем же приёмом, что у меню «Проекта»
                             // ниже; неприменимое не серое, а спрятано
                             // (`link_menu` его не отдаёт вовсе).
-                            menu =
-                                menu.item(menu_item(label, move |window, cx| run_link_act(window, cx, act, &subject)).disabled(busy_now));
+                            menu = menu.item(
+                                parts::menu_item(label, move |window, cx| run_link_act(window, cx, act, &subject)).disabled(busy_now),
+                            );
                         }
                         menu
                     })
@@ -4622,7 +4626,11 @@ impl Render for Panel {
                 // одного дела.
                 // В меню — всё, кроме того, что на главной кнопке, и
                 // разложенное по разрядам (`project_menu`).
-                let rest = project_menu(which);
+                // **Меню подвала у «Инструментов» пусто: действия переехали на саму вкладку** (владелец 10.11, «панель пустая, надо
+                // переосмыслить»). Вкладка отвечает на вопрос «что сделать с базой», и ответ обязан быть виден, а не спрятан в меню
+                // в другом конце окна. Два органа одного действия в окне не держим — тем же решением, каким меню связи переехало в
+                // строку соединения.
+                let rest: Vec<ProjectMenu> = Vec::new();
                 h_flex()
                     .gap_2()
                     // Та же причина, что у «Связи» выше: нерастяжимая
@@ -4630,12 +4638,13 @@ impl Render for Panel {
                     // блок целиком (левого текстового слота подвала, с
                     // которым было бы иначе, с 9.11 уже нет).
                     .flex_shrink_0()
-                    .child(more("more-project").dropdown_menu(move |mut menu, _, _| {
+                    .child(more("more-project").dropdown_menu(move |menu, _, _| {
+                        let mut menu = parts::menu(Slot::List, menu);
                         for entry in rest.iter().copied() {
                             menu = match entry {
                                 ProjectMenu::Sep => menu.separator(),
                                 ProjectMenu::Item(label, w) => {
-                                    menu.item(menu_item(label, move |window, cx| run_project_op(window, cx, w)).disabled(busy_now))
+                                    menu.item(parts::menu_item(label, move |window, cx| run_project_op(window, cx, w)).disabled(busy_now))
                                 }
                             };
                         }
@@ -4658,18 +4667,19 @@ impl Render for Panel {
                 // Та же причина, что у «Связи» и «Инструментов» выше.
                 .flex_shrink_0()
                 .child(more("more-log").dropdown_menu(move |menu, _, _| {
+                    let menu = parts::menu(Slot::List, menu);
                     // «Открыть отчёт last-check.txt» убран (заказчик
                     // 2026-10-20: зачем два пункта) — файл остаётся, на него
                     // называет сама строка в журнале после проверки
                     // (`Ev::Checks` в `mod.rs`).
                     menu.item(
-                        menu_item("Открыть журнал", |_, cx| {
+                        parts::menu_item("Открыть журнал", |_, cx| {
                             let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
                             gui::open_path(cx, &path);
                         })
                         .disabled(busy_now),
                     )
-                    .item(menu_item("Очистить журнал", |_, cx| {
+                    .item(parts::menu_item("Очистить журнал", |_, cx| {
                         let ui = cx.global_mut::<Ui>();
                         ui.log.clear();
                         ui.unread = 0;
@@ -4689,10 +4699,20 @@ impl Render for Panel {
 
         v_flex()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, ev: &KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    hide_window(window, cx);
+            // **Правка имени кончается клавишей, а не только переходом на другую строку.** Без этого человек, начавший
+            // переименование, не мог его закончить ничем, кроме ухода с карточки, — и писал об этом дважды за вечер («у тебя опять нет
+            // прекращения переименования»). Enter записывает, Esc отменяет и возвращает прежнее имя; Esc при этом не прячет окно —
+            // человек гасил правку, а не уходил.
+            .on_key_down(cx.listener(|this: &mut Self, ev: &KeyDownEvent, window, cx| match ev.keystroke.key.as_str() {
+                "enter" if this.renaming => this.save_card(window, cx),
+                "escape" if this.renaming => {
+                    let was = this.original.name.clone();
+                    this.fields.name.update(cx, |s, cx| s.set_value(was, window, cx));
+                    this.renaming = false;
+                    cx.notify();
                 }
+                "escape" => hide_window(window, cx),
+                _ => {}
             }))
             .size_full()
             .bg(bg)
@@ -4764,7 +4784,7 @@ mod tests {
         delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
         issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
         project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
-        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner,
+        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
         undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE,
         DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
@@ -5647,34 +5667,50 @@ mod tests {
         assert_eq!(nothing_to_show(true, false), None, "строки проекта есть — подсказка лишняя");
     }
 
+    /// Предмет вкладки — ОДНА строка: с чем человек работает. Прежде здесь стояли три строки прозы, две из которых говорили состояние
+    /// полей чужой вкладки («база не указана, папка документов не указана»), а третья звала туда же (находка 10 осмотра 10.11).
     #[test]
-    fn the_tools_tab_names_the_current_connection_and_its_folders() {
+    fn the_tools_tab_names_what_it_works_with_in_one_line() {
         let cfg = cfg_with(&["Заказчик А"]);
-        let banner = tools_connection_banner(&cfg);
-        assert!(banner.contains("Заказчик А"), "подпись обязана назвать соединение: {banner}");
-        assert!(banner.contains(&cfg.current().base_path), "подпись обязана назвать каталог базы: {banner}");
-        assert!(banner.contains(&cfg.current().project), "подпись обязана назвать папку: {banner}");
-        assert!(banner.contains("«Связи»"), "подпись обязана сказать, где менять соединение: {banner}");
+        let subject = tools_subject(&cfg);
+        assert!(subject.contains("Заказчик А"), "предмет обязан назвать соединение: {subject}");
+        assert!(!subject.contains("не указана"), "состояние полей живёт там, где поля: {subject}");
+        assert!(!subject.contains("«Связи»"), "звать на другую вкладку подписи незачем: {subject}");
+        assert_eq!(subject.lines().count(), 1, "одна строка, а не абзац: {subject}");
     }
 
     #[test]
     fn with_no_connections_the_tools_tab_says_so_instead_of_naming_one() {
         let cfg = cfg_with(&[]);
-        let banner = tools_connection_banner(&cfg);
-        assert!(banner.to_lowercase().contains("соединени"), "подпись обязана сказать, что соединений нет: {banner}");
-        assert!(banner.contains("«Связи»"), "подпись обязана сказать, где их завести: {banner}");
+        let subject = tools_subject(&cfg);
+        assert!(subject.to_lowercase().contains("соединени"), "предмет обязан сказать, что соединений нет: {subject}");
+    }
+
+    /// Действия стоят НА ВКЛАДКЕ, а не в меню подвала: вкладка отвечает на вопрос «что сделать с базой», и ответ обязан быть виден.
+    /// То, что стоит на главной кнопке, отсюда выбрасывается — один орган на одно действие.
+    #[test]
+    fn the_tools_tab_carries_its_actions() {
+        use crate::gui::Which::{Export, Import, Install, Uninstall};
+        let bad = vec![Check::fail(crate::verify::EXTENSION, "нет", "поставьте")];
+        assert_eq!(tools_actions(&bad, None), vec![Export, Import, Install], "расширения в базе нет — предлагаем поставить");
+        assert_eq!(tools_actions(&bad, Some(Install)), vec![Export, Import], "то, что на главной кнопке, в списке не повторяется");
+        let good = vec![Check::pass(crate::verify::EXTENSION, "есть")];
+        assert_eq!(tools_actions(&good, Some(Export)), vec![Import, Uninstall], "расширение стоит — предлагаем снять, а не поставить");
+        // Про расширение ещё не знаем — ни одного из двух: угадывать значит предложить снять то, чего нет.
+        assert_eq!(tools_actions(&[], None), vec![Export, Import]);
     }
 
     #[test]
     fn a_remote_base_does_not_claim_a_local_catalog() {
+        // Предмет вкладки больше не называет каталогов вовсе — ни своих, ни чужих: он называет СОЕДИНЕНИЕ и имя базы.
         // Топология «база на той стороне»: показывать здесь путь к базе
         // этой машины — соврать, ровно та защита, что уже есть у
         // `shown_fields`/`base_fields_note` для карточки.
         let mut cfg = cfg_with(&["Удалённый"]);
         cfg.connections[0].base_here = false;
-        let banner = tools_connection_banner(&cfg);
-        assert!(!banner.contains(&cfg.connections[0].base_path), "база на той стороне — свой путь к ней не называем: {banner}");
-        assert!(banner.contains("на другом компьютере"), "{banner}");
+        let subject = tools_subject(&cfg);
+        assert!(!subject.contains(&cfg.connections[0].base_path), "база на той стороне — свой путь к ней не называем: {subject}");
+        assert_eq!(subject, "Удалённый", "осталось одно имя соединения");
     }
 
     #[test]

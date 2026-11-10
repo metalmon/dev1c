@@ -40,7 +40,7 @@ pub fn cold_gate(
     // владелец смотрел в окно вместе с исполнителем). Причина говорит про
     // то, что видно: соединений нет — первое заводится ответом на экране.
     if cfg.connections.is_empty() {
-        return Some("соединений нет — заведите первое".into());
+        return Some("соединений нет — создайте первое".into());
     }
     if !params_exists {
         return Some("нет файла параметров — заполните поля и нажмите «Сохранить»".into());
@@ -201,7 +201,7 @@ mod tests {
         c.connections.clear();
         let why = cold_gate(&c, false, true, &done(), Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
             .expect("пустая «Связь» обязана запереть переключатель");
-        assert_eq!(why, "соединений нет — заведите первое");
+        assert_eq!(why, "соединений нет — создайте первое");
     }
 
     #[test]

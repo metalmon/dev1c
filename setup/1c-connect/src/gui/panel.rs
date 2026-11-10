@@ -1995,7 +1995,7 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
 fn add_link(window: &mut Window, cx: &mut App, role: &str) {
     match gui::add_connection(cx.global_mut::<Ui>(), role) {
         Ok(name) => {
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("Карточка «{name}» заведена") });
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: format!("Карточка «{name}» создана") });
             let (cfg, panel) = {
                 let ui = cx.global::<Ui>();
                 (ui.cfg.clone(), ui.panel.clone())

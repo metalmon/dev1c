@@ -50,10 +50,10 @@ const FOLDER_SVG: &[u8] = include_bytes!("../../icons/folder.svg");
 /// «справа от поля иконка копировать, как открыть диалог выбора папки, у нас уже есть»). Своего рисования кнопки это не заводит: образец
 /// берётся готовый, меняется только глиф.
 const COPY_SVG: &[u8] = include_bytes!("../../icons/copy.svg");
-/// Значок настроек — у ВЫДЕЛЕННОЙ строки списка: он раскрывает её поля и сворачивает обратно. Разворачивать карточку нужно только ради
-/// настроек (решение владельца 10.11), поэтому и значок говорит про настройки, а не про «подробнее».
-const SETTINGS_SVG: &[u8] = include_bytes!("../../icons/settings.svg");
-/// Он же в раскрытом виде — «свернуть».
+/// Стрелки раскрытия строки списка — ПАРА одного вида, вниз и вверх (владелец 10.11: «иконки какие-то похожие наверно должны быть, типа
+/// стрелка вверх, стрелка вниз, разве нет?»). Прежде здесь стояли значок настроек и шеврон вверх — два разных глифа на одно действие,
+/// и человеку приходилось догадываться, что это одна и та же кнопка.
+const CHEVRON_DOWN_SVG: &[u8] = include_bytes!("../../icons/chevron-down.svg");
 const CHEVRON_UP_SVG: &[u8] = include_bytes!("../../icons/chevron-up.svg");
 /// Карандаш у ЗАГОЛОВКА раскрытой карточки: им правится имя соединения. Отдельного поля «Имя» в карточке больше нет — имя говорилось
 /// дважды, заголовком и полем (находка 36 обхода, решение владельца: «на базовом имени при наведении нужна иконка редактирования
@@ -3146,6 +3146,13 @@ impl Panel {
             return;
         }
         self.selected = name.to_string();
+        // Переход на другую строку ВСЕГДА возвращает список в свёрнутый вид и гасит правку имени.
+        //
+        // Без этого оба признака жили «на панели», а не «на строке», и переносились на соседа: раскрыв одну карточку, человек видел поля
+        // у каждой, на которую переходил, — переключаться между свёрнутыми было нечем; а начав переименование, получал поле ввода на
+        // каждой карточке и не мог выйти ничем («нажал переименовать и не знаю, как выключить», владелец 10.11).
+        self.expanded = false;
+        self.renaming = false;
         let host = resolve_selected(cfg, &self.selected).clone();
         self.adopt_fields(&host, window, cx);
     }
@@ -3346,6 +3353,8 @@ impl Panel {
     /// прочих случаях вопроса нет и запись идёт сразу. Перезапуск сеанса и
     /// строка в журнал — внутри `gui::save_host`, не здесь.
     fn save_card(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Запись закрывает и правку имени: человек сказал «готово», и держать поле ввода на месте заголовка больше незачем.
+        self.renaming = false;
         // Ось — у ОТКРЫТОЙ карточки (`axis_of`), той же, что рисует поля:
         // второго источника этой пары у записи больше нет (Critical ревью
         // всей ветки).
@@ -3869,6 +3878,17 @@ impl Render for Panel {
         let t = cx.theme();
         let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
         let (success, warning, danger, card_bg, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
+        // Цвета точек состояния берём ЗНАЧЕНИЯМИ, а не через `t`: тема одолжена у `cx`, а строки списка ниже зовут `cx` на запись.
+        let dot_of = {
+            let (off, busy, up, down, warn) = (t.muted_foreground, t.primary, t.success, t.danger, t.warning);
+            move |d: Dot| match d {
+                Dot::Off => off,
+                Dot::Busy => busy,
+                Dot::Up => up,
+                Dot::Down => down,
+                Dot::Warn => warn,
+            }
+        };
         let theme = t.clone();
         // `muted_foreground` отдан подсказкам в полях (его берёт placeholder
         // из темы) и в окне больше нигде не встречается: осветлённый, он не
@@ -4149,7 +4169,8 @@ impl Render for Panel {
                             // свёрнутом списке выбор иначе ничем не показан, и человек не знает, над чем работает подвал. Текущее
                             // соединение говорит о себе отметкой в `row_marks` — это РАЗНЫЕ вещи: выделено то, что человек смотрит,
                             // текущее — то, с чем работают инструменты и агент.
-                            let mut row = Self::layer(card_bg, if picked { accent } else { border })
+                            // Выделение — тонкой обводкой, а не заливкой акцентом: акцент во всю рамку читался грубо (владелец 10.11).
+                            let mut row = Self::layer(card_bg, if picked { accent.opacity(0.55) } else { border })
                                 .id(SharedString::from(format!("row-{i}")))
                                 .flex()
                                 .flex_col()
@@ -4157,18 +4178,38 @@ impl Render for Panel {
                                 .p_3()
                                 .cursor_pointer()
                                 .on_click(click)
+                                .group(SharedString::from(format!("row-g-{i}")))
                                 .child(
                                     h_flex()
                                         .gap_2()
-                                        .items_baseline()
-                                        // Имя первым планом и полужирным
-                                        // (спека), состояние с отметками —
-                                        // приглушённым справа. `min_w_0` и
-                                        // многоточие: длинное имя на 380
-                                        // точках иначе обрезается по краю.
+                                        .items_center()
+                                        // **Текущее соединение — полосой, а не словом** (владелец 10.11: «текущее подключение должно
+                                        // быть видно визуально, не словом»). Слово «текущее» стояло справа от имени и съедало его
+                                        // длину — а имя главное, что человек в строке читает.
+                                        .child(div().w(px(3.)).h(px(16.)).flex_shrink_0().rounded_full().bg(if r.current {
+                                            accent
+                                        } else {
+                                            gpui::transparent_black()
+                                        }))
+                                        // **Состояние — точкой того же цвета, что в шапке**, слово ушло в подсказку. Цвет решает та же
+                                        // `link::row`, что и слово: двух мнений о состоянии не заводим.
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("dot-{i}")))
+                                                .flex_shrink_0()
+                                                .w(px(8.))
+                                                .h(px(8.))
+                                                .rounded_full()
+                                                .bg(dot_of(r.dot))
+                                                .tooltip({
+                                                    let word = row_marks(&r);
+                                                    move |window, cx| {
+                                                        gpui_kit::component::tooltip::Tooltip::new(word.clone()).build(window, cx)
+                                                    }
+                                                }),
+                                        )
                                         .child(if picked && self.renaming {
-                                            // Имя правится ТАМ ЖЕ, где показано: поле встаёт на место заголовка, а не заводит себе
-                                            // второй строки под ним.
+                                            // Имя правится ТАМ ЖЕ, где показано: поле встаёт на место заголовка.
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
@@ -4185,34 +4226,54 @@ impl Render for Panel {
                                                 .child(name.clone())
                                                 .into_any_element()
                                         })
-                                        .when(picked && !self.renaming, |d| {
+                                        // **Карандаш — только при наведении на строку** (владелец 10.11), но слот под него стоит
+                                        // ВСЕГДА: иначе появление значка сдвигало бы всё вправо, и строка прыгала при каждом
+                                        // наведении («скачки строки статуса при переключении — это нормально?»).
+                                        .child(
+                                            div().w(px(24.)).flex_shrink_0().child(
+                                                div()
+                                                    .invisible()
+                                                    .group_hover(SharedString::from(format!("row-g-{i}")), |d| d.visible())
+                                                    .child(
+                                                        KitButton::new(SharedString::from(format!("rename-{i}")))
+                                                            .ghost()
+                                                            .xsmall()
+                                                            .icon(Icon::default().data(PENCIL_SVG))
+                                                            .tooltip(if picked && self.renaming {
+                                                                "Готово"
+                                                            } else {
+                                                                "Переименовать"
+                                                            })
+                                                            .on_click(cx.listener({
+                                                                let name = name.clone();
+                                                                move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
+                                                                    // Карандаш — ПЕРЕКЛЮЧАТЕЛЬ: им правку и начинают, и заканчивают.
+                                                                    // Без второго нажатия правка была ловушкой: включив её, человек
+                                                                    // не мог выйти ничем и видел поле ввода у каждой карточки, на
+                                                                    // которую переходил.
+                                                                    if this.selected != name {
+                                                                        let cfg = cx.global::<Ui>().cfg.clone();
+                                                                        this.select(&cfg, &name, window, cx);
+                                                                    }
+                                                                    this.renaming = !this.renaming;
+                                                                    if this.renaming {
+                                                                        this.fields.name.read(cx).focus_handle(cx).focus(window, cx);
+                                                                    }
+                                                                    cx.notify();
+                                                                }
+                                                            })),
+                                                    ),
+                                            ),
+                                        )
+                                        // Стрелка раскрытия — у ВЫДЕЛЕННОЙ строки, и слот под неё тоже постоянный.
+                                        .child(div().w(px(24.)).flex_shrink_0().when(picked, |d| {
                                             d.child(
-                                                KitButton::new(SharedString::from(format!("rename-{i}")))
+                                                KitButton::new(SharedString::from(format!("open-{i}")))
                                                     .ghost()
                                                     .xsmall()
-                                                    .icon(Icon::default().data(PENCIL_SVG))
-                                                    .tooltip("Переименовать")
-                                                    .on_click(cx.listener(
-                                                        |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
-                                                            this.renaming = true;
-                                                            this.fields.name.read(cx).focus_handle(cx).focus(window, cx);
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                            )
-                                        })
-                                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r)))
-                                        // Значок настроек — только у выделенной строки: он раскрывает её поля и сворачивает обратно.
-                                        // В свёрнутом виде поля не нужны вовсе («в обычном управлении подключениями поля не нужны»),
-                                        // и список из десяти заказчиков остаётся списком, а не десятью формами.
-                                        .when(picked, |d| {
-                                            d.child(
-                                                KitButton::new(SharedString::from(format!("gear-{i}")))
-                                                    .ghost()
-                                                    .xsmall()
-                                                    .icon(Icon::default().data(if open { CHEVRON_UP_SVG } else { SETTINGS_SVG }))
+                                                    .icon(Icon::default().data(if open { CHEVRON_UP_SVG } else { CHEVRON_DOWN_SVG }))
                                                     .tooltip(if open {
-                                                        "Скрыть настройки"
+                                                        "Свернуть"
                                                     } else {
                                                         "Настройки соединения"
                                                     })
@@ -4221,7 +4282,7 @@ impl Render for Panel {
                                                         cx.notify();
                                                     })),
                                             )
-                                        }),
+                                        })),
                                 )
                                 // Вторая строка — только там, где `Row`
                                 // принёс базу (у текущего соединения):

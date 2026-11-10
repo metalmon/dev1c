@@ -21,7 +21,14 @@ pub enum Entry {
 #[derive(Debug)]
 pub struct Row {
     pub name: String,
+    /// Состояние СЛОВОМ — для подсказки и для журнала.
+    ///
+    /// На экране строка его больше не печатает: слова «не подключено · текущее» съедали длину имени соединения, а имя — главное, что
+    /// человек в строке читает (владелец 10.11). Слово осталось там, где у него есть место: в подсказке над точкой.
     pub state: &'static str,
+    /// То же состояние ЦВЕТОМ — точкой слева от имени. Решается ЗДЕСЬ же, где слово, одним выбором: два места, решающих «какого цвета
+    /// это состояние», разошлись бы в первый же день (главный разряд дефектов проекта).
+    pub dot: crate::gui::facts::Dot,
     pub current: bool,
     pub write: bool,
     pub base: Option<String>,
@@ -255,14 +262,24 @@ pub fn waits_for_answer(c: &Connection, l: Option<&State>, e: &Enroll) -> bool {
 /// контракта: им говорится «обслуживание не поднято», то есть ровно тот
 /// случай, у которого состояния контракта нет.
 pub fn row(cfg: &crate::cfg::Cfg, c: &Connection, current: bool, l: Option<&State>, e: &Enroll) -> Row {
-    let state = if c.mode == "local" {
+    use crate::gui::facts::Dot;
+    let (state, dot) = if c.mode == "local" {
         if l.is_some_and(State::is_up) {
-            "включено"
+            ("включено", Dot::Up)
         } else {
-            "выключено"
+            ("выключено", Dot::Off)
         }
     } else {
-        contract_of(l, e).and_then(contract_word).unwrap_or("не подключено")
+        let word = contract_of(l, e).and_then(contract_word).unwrap_or("не подключено");
+        // Цвет — по тому же слову, что и показано: зелёное — связь есть; жёлтое — чего-то ждём (разрешения, кода, ответа);
+        // красное — порвалось; серое — ничего не происходит.
+        let dot = match word {
+            "подключено" => Dot::Up,
+            "разорвано" => Dot::Down,
+            "не подключено" => Dot::Off,
+            _ => Dot::Warn,
+        };
+        (word, dot)
     };
     let base = if current {
         let name = cfg::base_name(&c.base_path);
@@ -287,7 +304,7 @@ pub fn row(cfg: &crate::cfg::Cfg, c: &Connection, current: bool, l: Option<&Stat
     // зачисленную сторону (`panel::access_label`, все три меры). Строка списка
     // отвечает на свой вопрос: «на этой машине запись по этой карточке
     // разрешена или нет».
-    Row { name: c.name.clone(), state, current, write: cfg.may_write(c), base }
+    Row { name: c.name.clone(), state, dot, current, write: cfg.may_write(c), base }
 }
 
 /// Онбординг: мастера нет (решение владельца 1.11), вместо него пустая

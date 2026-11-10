@@ -55,10 +55,6 @@ const COPY_SVG: &[u8] = include_bytes!("../../icons/copy.svg");
 /// и человеку приходилось догадываться, что это одна и та же кнопка.
 const CHEVRON_DOWN_SVG: &[u8] = include_bytes!("../../icons/chevron-down.svg");
 const CHEVRON_UP_SVG: &[u8] = include_bytes!("../../icons/chevron-up.svg");
-/// Карандаш у ЗАГОЛОВКА раскрытой карточки: им правится имя соединения. Отдельного поля «Имя» в карточке больше нет — имя говорилось
-/// дважды, заголовком и полем (находка 36 обхода, решение владельца: «на базовом имени при наведении нужна иконка редактирования
-/// справа»).
-const PENCIL_SVG: &[u8] = include_bytes!("../../icons/pencil.svg");
 
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
@@ -1639,8 +1635,13 @@ pub fn project_label(w: gui::Which) -> &'static str {
 /// слова, либо давать кнопку; даём кнопку, потому что слова говорят правду
 /// о том, что человеку нужно.
 ///
-/// Пункта «Сделать текущим» здесь нет: он на главной кнопке, и это один
-/// орган, а не два (спека, «Наверху и в списке — один и тот же выбор»).
+/// **Меню живёт в СТРОКЕ соединения, а не в подвале** (решение владельца 10.11: «нет возможности удаления подключения; наверно вместо
+/// значка карандаша надо наши три линии, меню, где будет и удаление, и переименовывание, и сделать текущим»). Удаление в продукте было —
+/// в подвале, в другом конце окна от карточки, над которой человек работает, — и он его не нашёл. Действия принадлежат СОЕДИНЕНИЮ, а
+/// соединение на экране — это его строка.
+///
+/// «Сделать текущим» здесь есть, и вторым органом он не становится: `primary` выбрасывает из меню то, что сейчас стоит на главной
+/// кнопке, — то же правило и тот же приём, что у `project_menu` на соседней вкладке.
 ///
 /// **«Отозвать разрешение» уехало из меню в карточку** (задача 7). Довод не
 /// в раскладке, а в адресате: зачисленных сторон у карточки бывает сколько
@@ -1661,35 +1662,26 @@ pub fn link_menu(ui: &Ui, selected: &str, primary: Option<LinkAct>) -> Vec<(&'st
     }
     let c = resolve_selected(&ui.cfg, selected);
     let current = c.name == ui.cfg.current().name;
-    let connected = current && ui.link.is_up();
     // Та же мера, что у блока кода и у главной кнопки, и живёт она в одном
     // месте (`link::accepts_connections`): роль, вид соединения и база ЗДЕСЬ.
     // Здесь она была третьей копией правила, и про базу эта копия, как и
     // прочие две, не спрашивала — меню предлагало выдать код карточке, по
     // которому подключиться нельзя никогда.
-    let accepting = link::accepts_connections(c);
     let mut out = Vec::new();
-    // Про СВЯЗЬ — только у текущей карточки: связь одна на машину и
-    // принадлежит ей (см. докстроку). Код ниже — не про связь.
-    if connected {
-        out.push(("Отключиться", LinkAct::Toggle));
-    } else if current && matches!(c.role(), Ok("dial")) {
-        out.push(("Подключиться", LinkAct::Toggle));
-    }
-    // Код у принимающей карточки есть всегда, подключена она или нет: он не
-    // про текущую связь, а про то, кого ещё позвать. Прежнее условие
-    // `!connected` его прятало — и у человека, у которого уже кто-то
-    // подключён, не было способа позвать второго, хотя зачислить к одной
-    // карточке можно сколько угодно сторон (решение владельца 1.11).
-    if accepting {
-        // Два пункта, а не один с меняющейся подписью: «Выдать код» даёт код, которого ещё нет (а есть — отдаёт его же), и ничего не
-        // отнимает; «Выдать новый код» — перевыпуск, после которого прежняя строка никому не годится. Разные разряды — разные пункты, то
-        // же правило, что развело «Установить расширение» и «Снять расширение» чертой.
-        //
-        // Пункт звался «Показать код», пока код был простынёй на экране и его вправду надо было ПОКАЗАТЬ (а прокрутка — довезти до
-        // глаз). Код теперь лежит в поле карточки сразу по выдаче, показывать нечего, и пункт назван тем, что делает (владелец 10.11).
-        out.push(("Выдать код", LinkAct::ShowCode));
-        out.push(("Выдать новый код", LinkAct::NewCode));
+    // **Связи в меню нет** (10.11). Пункт «Подключиться» нёс `LinkAct::Toggle`, а кнопка подвала у той же карточки — `LinkAct::Dial`:
+    // одно слово на экране и два разных действия под ним. Это та же находка 14 осмотра, только переехавшая в меню. Связь — главное
+    // действие карточки, и живёт она там, где закон велит держать главное: в правом слоте подвала.
+    //
+    // **Кода в меню нет ни одним пунктом** (владелец 10.11, про «Выдать код» и «Выдать новый код» рядом: «Выдать самый самый новый
+    // код. Выдать старый код. Здравый смысл в этом проекте — ценность»). Два пункта на одно дело — это и был абсурд: разница между
+    // «дать тот, что есть» и «перевыпустить» — наша бухгалтерия, а не выбор человека.
+    //
+    // Органов осталось ровно два, и каждый на своём месте: выдать код предлагает главная кнопка подвала (`main_button`), а перевыпуск —
+    // кнопка под самим полем кода в карточке, там, где человек этот код видит. Меню не третий.
+    // «Сделать текущим» — в меню карточки (владелец 10.11: «надо наши три линии, меню, где будет и удаление, и переименовывание, и
+    // сделать текущим»). Вторым органом это не становится: `primary` ниже выбрасывает из меню то, что сейчас стоит на главной кнопке.
+    if !current {
+        out.push(("Сделать текущим", LinkAct::MakeCurrent));
     }
     out.push(("Переименовать", LinkAct::Rename));
     // Необратимое — последним: спека («Удалить соединение» ниже всех
@@ -2071,8 +2063,14 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         // окошка с полем для этого не заводим: поле уже на экране.
         LinkAct::Rename => {
             let Some(p) = cx.global::<Ui>().panel.clone() else { return };
-            let focus = p.read(cx).fields.name.read(cx).focus_handle(cx);
-            focus.focus(window, cx);
+            // Поля «Имя» в карточке больше нет: имя правится НА МЕСТЕ заголовка строки, и пункт меню включает этот режим, а не ставит
+            // курсор в поле, которого не существует.
+            p.update(cx, |this, cx| {
+                this.renaming = true;
+                let focus = this.fields.name.read(cx).focus_handle(cx);
+                focus.focus(window, cx);
+                cx.notify();
+            });
             cx.refresh_windows();
         }
         // Удалить — вопрос первым, отказ предусловий раньше вопроса: нет
@@ -4226,45 +4224,37 @@ impl Render for Panel {
                                                 .child(name.clone())
                                                 .into_any_element()
                                         })
-                                        // **Карандаш — только при наведении на строку** (владелец 10.11), но слот под него стоит
-                                        // ВСЕГДА: иначе появление значка сдвигало бы всё вправо, и строка прыгала при каждом
-                                        // наведении («скачки строки статуса при переключении — это нормально?»).
-                                        .child(
-                                            div().w(px(24.)).flex_shrink_0().child(
-                                                div()
-                                                    .invisible()
-                                                    .group_hover(SharedString::from(format!("row-g-{i}")), |d| d.visible())
-                                                    .child(
-                                                        KitButton::new(SharedString::from(format!("rename-{i}")))
-                                                            .ghost()
-                                                            .xsmall()
-                                                            .icon(Icon::default().data(PENCIL_SVG))
-                                                            .tooltip(if picked && self.renaming {
-                                                                "Готово"
-                                                            } else {
-                                                                "Переименовать"
-                                                            })
-                                                            .on_click(cx.listener({
-                                                                let name = name.clone();
-                                                                move |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
-                                                                    // Карандаш — ПЕРЕКЛЮЧАТЕЛЬ: им правку и начинают, и заканчивают.
-                                                                    // Без второго нажатия правка была ловушкой: включив её, человек
-                                                                    // не мог выйти ничем и видел поле ввода у каждой карточки, на
-                                                                    // которую переходил.
-                                                                    if this.selected != name {
-                                                                        let cfg = cx.global::<Ui>().cfg.clone();
-                                                                        this.select(&cfg, &name, window, cx);
-                                                                    }
-                                                                    this.renaming = !this.renaming;
-                                                                    if this.renaming {
-                                                                        this.fields.name.read(cx).focus_handle(cx).focus(window, cx);
-                                                                    }
-                                                                    cx.notify();
-                                                                }
-                                                            })),
-                                                    ),
+                                        // **Меню соединения — в самой строке** (владелец 10.11: «нет возможности удаления подключения;
+                                        // наверно вместо значка карандаша надо наши три линии, меню, где будет и удаление, и
+                                        // переименовывание, и сделать текущим»). Удаление в продукте было — в меню ПОДВАЛА, то есть в
+                                        // другом конце окна от карточки, над которой человек работает; найти его там он не смог.
+                                        // Действия принадлежат СОЕДИНЕНИЮ, а строка и есть соединение — здесь им и место.
+                                        //
+                                        // Появляется по наведению, но слот под него стоит ВСЕГДА: иначе строка прыгала бы при каждом
+                                        // наведении.
+                                        .child(div().w(px(24.)).flex_shrink_0().child(
+                                            div().invisible().group_hover(SharedString::from(format!("row-g-{i}")), |d| d.visible()).child(
+                                                {
+                                                    let items = link_menu(cx.global::<Ui>(), &name, None);
+                                                    let subject = name.clone();
+                                                    KitButton::new(SharedString::from(format!("menu-{i}")))
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .icon(Icon::default().data(MENU_SVG))
+                                                        .tooltip("Действия с соединением")
+                                                        .dropdown_menu(move |mut menu, _, _| {
+                                                            for (label, act) in items.iter().copied() {
+                                                                let subject = subject.clone();
+                                                                menu =
+                                                                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                                                        run_link_act(window, cx, act, &subject)
+                                                                    }));
+                                                            }
+                                                            menu
+                                                        })
+                                                },
                                             ),
-                                        )
+                                        ))
                                         // Стрелка раскрытия — у ВЫДЕЛЕННОЙ строки, и слот под неё тоже постоянный.
                                         .child(div().w(px(24.)).flex_shrink_0().when(picked, |d| {
                                             d.child(
@@ -4507,7 +4497,10 @@ impl Render for Panel {
                 // кнопки (`hint`, `.tooltip(h)` ниже) — левого слота подвала
                 // с 9.11 не осталось вовсе, второй надписи рядом и подавно.
                 let allowed = can_save(dirty != Dirty::No, busy_now, has_progress);
-                let link_items = link_menu(cx.global::<Ui>(), &self.selected, main.act);
+                // **Меню подвала у «Связи» больше нет: оно переехало в строку** (владелец 10.11). Действия принадлежат соединению, а
+                // соединение — это строка списка; держать их в другом конце окна значило прятать: удаление в продукте было, а человек
+                // его не нашёл. В подвале остаётся ровно одно главное действие, как и велит закон окна.
+                let link_items: Vec<(&'static str, LinkAct)> = Vec::new();
                 let (label, act) = (main.label, main.act);
                 let menu_subject = main.subject.clone();
                 let click_subject = main.subject.clone();
@@ -6035,14 +6028,41 @@ mod tests {
     /// и тем же приёмом.
     #[test]
     fn the_link_menu_drops_what_already_stands_on_the_main_button() {
-        let ui = ui_link_accept_waiting();
-        let primary = main_button(&ui, "", Dirty::No).act;
-        assert_eq!(primary, Some(LinkAct::ShowCode), "у принимающей карточки на кнопке код");
-        let with = link_menu(&ui, "", primary);
+        let ui = ui_other_card();
+        let primary = main_button(&ui, "Василёк", Dirty::No).act;
+        assert_eq!(primary, Some(LinkAct::MakeCurrent), "у нетекущей карточки кнопка предлагает сделать её текущей");
+        let with = link_menu(&ui, "Василёк", primary);
         assert!(!with.iter().any(|(_, a)| Some(*a) == primary), "дубля главной кнопки в меню нет: {with:?}");
-        assert!(with.iter().any(|(_, a)| *a == LinkAct::NewCode), "перевыпуск — другое действие, он остаётся");
-        let without = link_menu(&ui, "", None);
+        let without = link_menu(&ui, "Василёк", None);
         assert_eq!(without.len(), with.len() + 1, "убран ровно один пункт");
+    }
+
+    /// **Связи в меню нет ни одним пунктом.** Пункт «Подключиться» нёс `LinkAct::Toggle`, а кнопка подвала у той же карточки —
+    /// `LinkAct::Dial`: одно слово на экране и два РАЗНЫХ действия под ним (находка 14 осмотра, переехавшая в меню). Связь — главное
+    /// действие карточки, и живёт она в правом слоте подвала.
+    #[test]
+    fn the_menu_says_nothing_about_the_link() {
+        for ui in [ui_link_connected(), ui_current_card(), ui_link_accept_waiting()] {
+            let acts: Vec<LinkAct> = link_menu(&ui, "", None).iter().map(|(_, a)| *a).collect();
+            for about_the_link in [LinkAct::Toggle, LinkAct::Dial] {
+                assert!(!acts.contains(&about_the_link), "связь — дело кнопки подвала: {acts:?}");
+            }
+        }
+    }
+
+    /// **Кода в меню нет ни одним пунктом** — решение владельца 10.11 на снимок, где «Выдать код» и «Выдать новый код» стояли рядом:
+    /// «Выдать самый самый новый код. Выдать старый код. Здравый смысл в этом проекте — ценность». Разница между «дать тот, что есть» и
+    /// «перевыпустить» — наша бухгалтерия, а не выбор человека, и двумя пунктами меню она быть не может.
+    #[test]
+    fn the_menu_offers_no_code_at_all() {
+        for ui in [ui_link_accept_waiting(), ui_other_card()] {
+            let acts: Vec<LinkAct> = link_menu(&ui, "", None).iter().map(|(_, a)| *a).collect();
+            for code in [LinkAct::ShowCode, LinkAct::NewCode] {
+                assert!(!acts.contains(&code), "код живёт на кнопке подвала и в карточке, а не в меню: {acts:?}");
+            }
+        }
+        // А на кнопке подвала он остаётся: органа не лишились, лишились третьего.
+        assert_eq!(main_button(&ui_link_accept_waiting(), "", Dirty::No).act, Some(LinkAct::ShowCode));
     }
 
     /// Звонящая карточка, текущая, не подключена — говорящее имя вместо
@@ -6078,10 +6098,10 @@ mod tests {
 
     #[test]
     fn the_link_menu_follows_the_subject() {
+        // Слов про связь в меню нет вовсе — ни «Отключиться», ни «Подключиться»: это дело кнопки подвала (свой тест ниже).
         let up = menu_labels(&ui_link_connected());
-        assert!(up.contains(&"Отключиться") && !up.contains(&"Подключиться"));
+        assert!(!up.contains(&"Отключиться") && !up.contains(&"Подключиться"));
         let waiting = menu_labels(&ui_link_accept_waiting());
-        assert!(waiting.contains(&"Выдать код"));
         assert!(!waiting.contains(&"Отозвать разрешение"), "неприменимое прячется, а не висит серым");
         assert!(!menu_labels(&ui_current_card()).contains(&"Сделать текущим"), "предмет и есть текущее");
     }
@@ -6107,16 +6127,17 @@ mod tests {
         assert_eq!(
             other,
             vec![
-                ("Выдать код", LinkAct::ShowCode),
-                ("Выдать новый код", LinkAct::NewCode),
+                // «Сделать текущим» у нетекущей карточки — главное, зачем это меню открывают (решение владельца 10.11).
+                ("Сделать текущим", LinkAct::MakeCurrent),
                 ("Переименовать", LinkAct::Rename),
                 ("Удалить соединение", LinkAct::Delete),
             ],
         );
-        for about_the_link in [LinkAct::Toggle, LinkAct::MakeCurrent] {
-            assert!(!other.iter().any(|(_, a)| *a == about_the_link), "связь принадлежит текущей карточке: {other:?}");
-        }
-        assert!(menu_labels(&ui).contains(&"Отключиться"), "у текущей карточки связь своя");
+        assert!(
+            !other.iter().any(|(_, a)| *a == LinkAct::Toggle),
+            "связь принадлежит ТЕКУЩЕЙ карточке, и переключать её у чужой нечем: {other:?}"
+        );
+        assert!(!menu_labels(&ui).contains(&"Отключиться"), "связь у кнопки подвала, а не в меню, и у текущей карточки тоже");
     }
 
     /// Указатель 1 ревью задачи 10: пункты несли `gui::Which::Export`
@@ -6127,7 +6148,7 @@ mod tests {
     #[test]
     fn link_items_carry_their_own_actions_not_project_operations() {
         let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "", None).iter().map(|(_, a)| *a).collect();
-        assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::NewCode, LinkAct::Rename, LinkAct::Delete]);
+        assert_eq!(acts, vec![LinkAct::Rename, LinkAct::Delete]);
         // Заглушек в меню больше нет вовсе: `act_not_yet`, которая
         // объясняла, почему «Показать код» и «Отозвать разрешение» ничего не
         // делают, снята вместе с ними — код настоящий (`issue_code`), а
@@ -6154,15 +6175,9 @@ mod tests {
     fn the_link_menu_lists_exactly_these_items_for_one_subject() {
         assert_eq!(
             link_menu(&ui_link_accept_waiting(), "", None),
-            vec![
-                ("Выдать код", LinkAct::ShowCode),
-                // Задача 7: перевыпуск — своё действие, а не «Показать код»
-                // с меняющимся смыслом; «Отозвать разрешение» из меню уехало
-                // в карточку, где у него есть адресат (`PartyRow`).
-                ("Выдать новый код", LinkAct::NewCode),
-                ("Переименовать", LinkAct::Rename),
-                ("Удалить соединение", LinkAct::Delete),
-            ],
+            // Принимающая текущая карточка: связь ей не предлагают (звонить некому), код ушёл из меню целиком, остались правка имени и
+            // удаление — необратимое последним.
+            vec![("Переименовать", LinkAct::Rename), ("Удалить соединение", LinkAct::Delete)],
         );
     }
 
@@ -6174,13 +6189,10 @@ mod tests {
     /// лишний пункт).
     #[test]
     fn the_menu_of_a_card_ends_with_delete_and_the_whole_list_is_pinned() {
-        assert_eq!(menu_labels(&ui_current_card()), vec!["Подключиться", "Переименовать", "Удалить соединение"]);
+        assert_eq!(menu_labels(&ui_current_card()), vec!["Переименовать", "Удалить соединение"]);
         // Нетекущая принимающая карточка несёт свой код и ничего про связь
         // (спека 4 ревью задач 6 и 7).
-        assert_eq!(
-            menu_labels_of(&ui_other_card(), "Василёк"),
-            vec!["Выдать код", "Выдать новый код", "Переименовать", "Удалить соединение"],
-        );
+        assert_eq!(menu_labels_of(&ui_other_card(), "Василёк"), vec!["Сделать текущим", "Переименовать", "Удалить соединение"],);
     }
 
     /// Вопрос перед удалением называет карточку по имени и обещает словами

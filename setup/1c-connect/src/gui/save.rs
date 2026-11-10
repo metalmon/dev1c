@@ -400,7 +400,7 @@ pub fn add_connection(ui: &mut Ui, role: &str) -> Result<String, String> {
     // (`breaks_connection`): отказ — за СВОЮ порчу, а заведение карточки не
     // портит ничего. Парные запреты списка при этом целы: вторая карточка к
     // той же базе или в ту же папку отказывает, как и раньше.
-    after.validate_list().map_err(|e| format!("{e:#}"))?;
+    after.validate_list().map_err(|e| cfg::said_in_window(&format!("{e:#}")))?;
 
     let store = store_for(&ui.kit)?;
     let written = if disk_count == 0 {
@@ -692,7 +692,7 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     // находки не трогаются вовсе, и именно по ним запись (`write_checked`)
     // узнаёт, чей шифртекст беречь.
     cfg.undecryptable.retain(|u| u.connection != name || keep.contains(&u.field.as_str()));
-    cfg.validate().map_err(|e| format!("{e:#}"))?;
+    cfg.validate().map_err(|e| cfg::said_in_window(&format!("{e:#}")))?;
     let store = store_for(&ui.kit)?;
     cfg::write_checked(&ui.kit, &cfg, &store)?;
     // Улаживание порта — ПОСЛЕ записи (находка 5 ревью круга 3). Стояло до
@@ -934,7 +934,7 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
     if renaming_current {
         after.current = to.to_string();
     }
-    after.validate_list().map_err(|e| format!("{e:#}"))?;
+    after.validate_list().map_err(|e| cfg::said_in_window(&format!("{e:#}")))?;
 
     let quoted = format!("{to:?}");
     // Адрес — ПО ИМЕНИ переименовываемой карточки, а не текущей: карточка,
@@ -980,7 +980,7 @@ pub fn rename(ui: &mut Ui, from: &str, to: &str) -> Result<(), String> {
 pub fn switch_current(ui: &mut Ui, name: &str) -> Result<(), String> {
     let mut after = ui.cfg.clone();
     after.switch_current(name)?;
-    after.validate().map_err(|e| format!("{e:#}"))?;
+    after.validate().map_err(|e| cfg::said_in_window(&format!("{e:#}")))?;
 
     let path = ui.kit.state_path(cfg::FILE);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: файл не прочитан — {e}", path.display()))?;
@@ -1232,7 +1232,7 @@ fn breaks_connection(before: &Connection, after: &Connection) -> Option<String> 
     if before.validate().is_err() {
         return None;
     }
-    after.validate().err().map(|e| format!("переключение не записано: {e:#} — впишите это поле и повторите"))
+    after.validate().err().map(|e| cfg::said_in_window(&format!("переключение не записано: {e:#} — впишите это поле и повторите")))
 }
 
 /// Протолкнуть новые параметры в ЖИВОЙ сеанс после удачной точечной записи
@@ -1531,7 +1531,7 @@ pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
 /// партнёра смена режима тоже не оставляет (`partner_follows_role_and_mode`).
 pub fn set_mode(ui: &mut Ui, name: &str, mode: &str) -> Result<(), String> {
     if !matches!(mode, "local" | "tunnel") {
-        return Err(format!("mode: неизвестный режим «{mode}»; допустимые значения: local, tunnel"));
+        return Err(format!("режим работы «{mode}» не распознан — выберите в карточке: всё на одной машине или агент в среде"));
     }
     set_keys(ui, name, &[("mode", mode)])
 }
@@ -1578,7 +1578,9 @@ pub fn set_base_here(ui: &mut Ui, name: &str, base_here: bool) -> Result<(), Str
 /// опечатка легла бы в файл молча.
 pub fn set_publication(ui: &mut Ui, name: &str, publication: &str) -> Result<(), String> {
     if !matches!(publication, "auto" | "webserver") {
-        return Err(format!("publication: неизвестное значение «{publication}»; допустимые значения: auto, webserver"));
+        return Err(format!(
+            "не распознано, кто публикует базу — «{publication}»; выберите в карточке: публикует сама программа или база уже опубликована на Apache либо IIS"
+        ));
     }
     let mut keys: Vec<(&str, &str)> = vec![("publication", publication)];
     if publication == "webserver" && cfg::is_derived_address(&connection_named(ui, name)?) {

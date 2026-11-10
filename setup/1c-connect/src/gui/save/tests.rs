@@ -1801,7 +1801,8 @@ fn the_developer_profile_without_a_sources_folder_is_refused_before_the_write() 
 
     let e = set_profile(&mut ui, "Buh", "developer").unwrap_err();
 
-    assert!(e.contains("project"), "отказ называет поле: {e}");
+    assert!(e.contains("папка проекта"), "отказ называет поле словами человека: {e}");
+    assert!(!e.contains("project"), "и не ключом toml — в окне его никто не видит: {e}");
     assert!(e.contains("повторите"), "отказ говорит, что сделать: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
@@ -1868,7 +1869,8 @@ fn switching_a_local_card_to_tunnel_without_an_environment_address_is_refused() 
 
     let e = set_mode(&mut ui, "Buh", "tunnel").unwrap_err();
 
-    assert!(e.contains("server") || e.contains("workstation"), "отказ называет поле: {e}");
+    assert!(e.contains("адрес среды") || e.contains("рабочее место"), "отказ называет поле словами человека: {e}");
+    assert!(!e.contains("server") && !e.contains("workstation"), "и не ключом toml: {e}");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().mode, "local", "режим не сменился");
 }
 
@@ -2477,7 +2479,7 @@ fn set_keys_refuses_a_patch_that_breaks_the_card_and_writes_nothing() {
 
     let e = set_keys(&mut ui, "Buh", &[("profile", "developer")]).unwrap_err();
 
-    assert!(e.contains("project"), "отказ называет поле: {e}");
+    assert!(e.contains("папка проекта"), "отказ называет поле словами человека: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
 }
@@ -2648,8 +2650,9 @@ fn set_publication_refuses_an_unknown_value_and_touches_nothing() {
 
     let e = set_publication(&mut ui, "Buh", "iis").unwrap_err();
 
-    assert!(e.contains("publication"), "отказ называет ключ: {e}");
-    assert!(e.contains("auto") && e.contains("webserver"), "и называет допустимые значения: {e}");
+    assert!(e.contains("кто публикует базу"), "отказ называет поле словами человека: {e}");
+    assert!(!e.contains("publication") && !e.contains("auto") && !e.contains("webserver"), "без ключа toml и без его значений: {e}");
+    assert!(e.contains("выберите"), "и говорит, что сделать: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().publication, "auto", "и в памяти прежнее значение не тронуто");
 }

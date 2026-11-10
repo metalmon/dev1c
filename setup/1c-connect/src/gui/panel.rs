@@ -502,25 +502,27 @@ pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
 /// 6. соединение принимает подключения, и по его коду вправду можно
 ///    подключиться (`link::accepts_connections` — роль, вид и база ЗДЕСЬ) —
 ///    «Показать код»;
-/// 7. кода у соединения не будет вовсе — кнопка заперта, называет состояние
-///    (`link::row`), а `why` говорит, почему кода нет и что поправить. Какой
-///    это случай и какими словами о нём говорить, решает ОДНО место на все
-///    три органа окна (`no_code_note`): база на другом компьютере, карточка
-///    не ждёт входящих, слово роли программе не знакомо. Прежде этой ветки не
-///    было вовсе: «Показать код» стояло ОСТАТКОМ на всём, что не local и не
-///    dial, то есть и на карточке, по коду которой подключиться нельзя
-///    никогда;
-/// 8. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
-///    задача не касается вовсе) — кнопка заперта и называет то же состояние;
-///    объяснять нечего сверх этого — подсказка переключателя уже говорит
-///    причину через `reason`, а в подвале у неё слота больше нет (поправка
-///    владельца 9.11).
+/// 7. кода у соединения не будет вовсе, либо замок не даёт включить —
+///    предложить нечего, и СЛОТ ПУСТ (пустая `label`).
 ///
-/// **Ветки 7 и 8 не исчезают, а запираются** (спека «Интерфейс»: «иначе
-/// заперта и называет состояние», живой прогон 9.11). Слово состояния — из
-/// того же словаря, что уже красит строку списка (`link::row`), а не
-/// придуманное здесь заново: тот же вопрос «что сейчас происходит»,
-/// заданный кнопкой вместо строки, и второго словаря для него не заводим.
+/// **Правый слот подвала — ВСЕГДА действие** (решение владельца 10.11,
+/// корневая находка осмотра: «на „Журнале“ — настоящая кнопка, на
+/// „Инструментах“ — слово „Выключено“ в том же виде кнопки, на „Связи“ —
+/// „не подключено“; человек не может научиться этому месту»). Поэтому
+/// запертых кнопок, называющих СОСТОЯНИЕ, здесь больше нет ни одной: нечего
+/// предложить — слот пуст, а не занят надписью в рамке. Состояние живёт там,
+/// где его ждут: справа от заголовка карточки состояния и строкой в списке
+/// (`link::row`) — и говорится там ОДИН раз, а не дважды на одном экране
+/// (находка 1 того же осмотра).
+///
+/// Прежде эти ветки возвращали `link::row(...).state` подписью и `act: None`,
+/// то есть ровно то, на что владелец и показал: «на нижней штатной кнопке
+/// сейчас статус выводится — не подключено, хотя это кнопка».
+///
+/// Живой сеанс (`State::is_on` — та же мера, по которой стоит сам
+/// переключатель сверху) даёт настоящее действие «Отключиться», а не слово
+/// «подключено»: отключить можно всегда, и это то единственное, что человек
+/// в этом состоянии может сделать кнопкой.
 ///
 /// **Почему ветка 2 стоит выше ветки связи** (указатель 2 ревью: признак
 /// связи читает `ui.link.is_up()` — состояние ТЕКУЩЕГО соединения, а не
@@ -594,44 +596,36 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     if dirty != Dirty::No {
         return save(subject);
     }
+    // Нечего предложить — слот ПУСТ. Один выход на все такие случаи: замок
+    // не даёт включить, кода не будет вовсе, роль непонятна. Прежде каждый из
+    // них возвращал запертую кнопку с подписью-состоянием — то самое, из-за
+    // чего правый слот подвала говорил разными языками.
+    let nothing = || Button { subject: c.name.clone(), label: "", why: None, act: None };
     if c.mode == "local" {
         // Замок (`ui.gate`) запирает только включение — выключить можно
         // всегда (`switch_locked`, тот же довод у переключателя сверху).
-        // Раньше эта ветка не читала замок вовсе: кнопка оставалась жёлтой
-        // «Включить», нажимаемой, и щелчок лишь писал строку в журнал
-        // (`toggle_link` сам отказывает молча) — ровно то, что бриф задачи
-        // 4 запрещал («при запертом замке не предлагает невозможного»),
-        // находка ревью (Critical 1). Теперь кнопка запертая и называет
-        // состояние тем же словом, что строка списка, как во всех прочих
-        // запертых ветках этой функции.
-        if !ui.link.is_up() {
-            if let Some(why) = ui.gate.as_deref() {
-                return Button {
-                    subject,
-                    label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state,
-                    why: Some(gate_text(why)),
-                    act: None,
-                };
-            }
+        // Заперт и не включено — предлагать нечего, и слот пуст: почему
+        // нельзя, человек читает у переключателя (`switch_tooltip`) и
+        // строкой журнала по щелчку по нему (`link::toggle_link`).
+        if !ui.link.is_up() && ui.gate.is_some() {
+            return nothing();
         }
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
         return Button { subject, label, why: None, act: Some(LinkAct::Toggle) };
     }
-    if ui.link.is_up() {
-        // Подключено/рвётся/переподключается — не наш случай (транспорта не
-        // трогаем). Кнопка не пропадает: заперта (`act: None`) и называет
-        // состояние словом `link::row` — причина уже сказана подсказкой
-        // переключателя (`reason`), второй раз её здесь не произносим
-        // (`why: None`).
-        return Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: None, act: None };
+    if ui.link.is_on() {
+        // Сеанс жив (подключается, поднят, переподключается) — действие одно
+        // и настоящее: «Отключиться». Та же мера `is_on`, по которой стоит
+        // переключатель сверху, и тот же `LinkAct::Toggle`, что у меню.
+        return Button { subject, label: "Отключиться", why: None, act: Some(LinkAct::Toggle) };
     }
     if matches!(c.role(), Ok("dial")) {
         // Тот же замок и тот же довод, что у local-ветки выше: «Подключиться»
-        // заводит тот же `LinkAct::Toggle` → `toggle_link`, и он одинаково
-        // отказывает молча, заперт ли замок в туннельном режиме или в
-        // локальном (Critical 1 — приём общий для обоих режимов).
-        if let Some(why) = ui.gate.as_deref() {
-            return Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: Some(gate_text(why)), act: None };
+        // завело бы тот же `LinkAct::Toggle` → `toggle_link`, а он при
+        // запертом замке отказывает молча строкой журнала. Значит предложить
+        // нечего — слот пуст.
+        if ui.gate.is_some() {
+            return nothing();
         }
         return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
     }
@@ -656,12 +650,11 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     if link::accepts_connections(c) {
         return Button { subject, label: "Показать код", why: None, act: Some(LinkAct::ShowCode) };
     }
-    // Кода не будет — кнопка заперта и называет причину, тем же приёмом, что
-    // прочие запертые ветки выше. Слова берутся из одного места на все три,
-    // что их произносят (`no_code_note`, там и довод): здесь, у блока кода в
-    // карточке и у самой выдачи.
-    let why = no_code_note(c).unwrap_or(ROLE_UNKNOWN_NOTE);
-    Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: Some(why.to_string()), act: None }
+    // Кода не будет — предложить нечего, слот пуст. Слова о том, ПОЧЕМУ его
+    // не будет, карточка говорит у самого блока кода (`accepting_block::
+    // code_note` зовёт тот же `no_code_note`), то есть там, где человек и
+    // ищет код, — а не подсказкой у кнопки, которой нет.
+    nothing()
 }
 
 // Подвал потерял левый текстовый слот совсем (решение владельца 9.11,
@@ -1515,26 +1508,36 @@ pub enum ProjectMenu {
 /// должна остаться висеть первой или последней, и две подряд не допускаются:
 /// поэтому список собирается, а не пишется руками.
 pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
-    let groups: [&[(&'static str, gui::Which)]; 3] = [
-        &[("Выгрузить из 1С", gui::Which::Export), ("Загрузить в 1С", gui::Which::Import)],
-        &[("Установить расширение", gui::Which::Install)],
-        &[("Снять расширение", gui::Which::Uninstall)],
-    ];
+    use gui::Which::{Export, Import, Install, Uninstall};
+    let groups: [&[gui::Which]; 3] = [&[Export, Import], &[Install], &[Uninstall]];
     let mut out: Vec<ProjectMenu> = Vec::new();
     for group in groups {
         let mut any = false;
-        for (label, w) in group.iter().copied() {
+        for w in group.iter().copied() {
             if Some(w) == primary {
                 continue;
             }
             if !any && !out.is_empty() {
                 out.push(ProjectMenu::Sep);
             }
-            out.push(ProjectMenu::Item(label, w));
+            out.push(ProjectMenu::Item(project_label(w), w));
             any = true;
         }
     }
     out
+}
+
+/// Слова действия «Инструментов» — ОДНИ на главную кнопку подвала и на пункт меню.
+///
+/// Прежде кнопка держала свои, короче меню: «Выгрузить» против «Выгрузить из 1С» (находка 18 осмотра 10.11). Два имени одного дела человек
+/// читает как два дела — а решают они оба одну `gui::Which`.
+pub fn project_label(w: gui::Which) -> &'static str {
+    match w {
+        gui::Which::Export => "Выгрузить из 1С",
+        gui::Which::Import => "Загрузить в 1С",
+        gui::Which::Install => "Установить расширение",
+        gui::Which::Uninstall => "Снять расширение",
+    }
 }
 
 /// Пункты меню «…» подвала «Связь» — задача 10 плана «Интерфейс». Предмет
@@ -1603,7 +1606,7 @@ pub fn project_menu(primary: Option<gui::Which>) -> Vec<ProjectMenu> {
 /// отзыв адресуется ключом, который человек видит глазами. Пункт меню
 /// пришлось бы либо спрашивать «кого?» вторым диалогом, либо отзывать
 /// первого в списке — и второе тише и хуже.
-pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
+pub fn link_menu(ui: &Ui, selected: &str, primary: Option<LinkAct>) -> Vec<(&'static str, LinkAct)> {
     // Список пуст — предмета нет, и меню тоже нет вовсе (кнопку «…» подвал
     // при пустом списке не рисует). Без этой строки `cfg.current()` отдал бы
     // пустышку-умолчание (`Cfg::current` так устроен нарочно), и пустая
@@ -1648,6 +1651,11 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
     // обратимых пунктов), и пустой список сюда не доходит вовсе — ранний
     // отказ выше уже вернул пустое меню, когда удалять нечего.
     out.push(("Удалить соединение", LinkAct::Delete));
+    // То, что стоит на главной кнопке, из меню убирается — тем же правилом и
+    // тем же приёмом, что у `project_menu(primary)` на соседней вкладке
+    // (находка 17 осмотра 10.11: «Показать код» и «Подключиться» стояли и на
+    // кнопке, и в меню, а соседняя вкладка то же правило соблюдала).
+    out.retain(|(_, act)| Some(*act) != primary);
     out
 }
 
@@ -3764,7 +3772,16 @@ impl Render for Panel {
         // нет, ей всё равно нечего показывать в подвале, а тултип кнопки её
         // не теряет.
         let main = main_button(ui, &self.selected, dirty);
-        let hint = (tab == gui::Tab::Link).then(|| main.why.clone()).flatten();
+        // Подсказка кнопки отвечает на один вопрос — «что мне надо знать про
+        // эту кнопку сейчас»: почему её нельзя нажать, а нечего сказать —
+        // НАД ЧЕМ она действует (имя соединения). Имя переехало сюда из
+        // подвала целиком (находки 5 и 32 осмотра 10.11: имя стояло на
+        // экране трижды — строкой списка, полем «Имя» и подписью подвала,
+        // где его к тому же резало на 110 точках). Слот один и смысл в нём
+        // один; строка списка над подвалом называет то же имя полностью.
+        let hint = (tab == gui::Tab::Link)
+            .then(|| main.why.clone().or_else(|| (!main.subject.is_empty()).then(|| main.subject.clone())))
+            .flatten();
         // Заголовок карточки — из ПОЛЕЙ (`form` выше), а не из сохранённого:
         // человек меняет базу и видит, какую карточку он правит, ещё до
         // «Сохранить». Состав полей карточки и подписи профиля с папкой
@@ -4225,7 +4242,7 @@ impl Render for Panel {
                 // кнопки (`hint`, `.tooltip(h)` ниже) — левого слота подвала
                 // с 9.11 не осталось вовсе, второй надписи рядом и подавно.
                 let allowed = can_save(dirty != Dirty::No, busy_now, has_progress);
-                let link_items = link_menu(cx.global::<Ui>(), &self.selected);
+                let link_items = link_menu(cx.global::<Ui>(), &self.selected, main.act);
                 let (label, act) = (main.label, main.act);
                 let menu_subject = main.subject.clone();
                 let click_subject = main.subject.clone();
@@ -4249,7 +4266,6 @@ impl Render for Panel {
                             None => {}
                         }))
                 });
-                let subject = main.subject.clone();
                 let menu = (!link_items.is_empty()).then(|| {
                     more("more-link").dropdown_menu(move |mut menu, _, _| {
                         for (label, act) in link_items.iter().copied() {
@@ -4279,27 +4295,12 @@ impl Render for Panel {
                     // текстового слота подвала, с которым тогда делилось
                     // место, с того же 9.11 в подвале уже нет).
                     .flex_shrink_0()
-                    // Предмет — СЛЕВА от кнопки: иначе «Подключиться» не
-                    // говорит, что именно подключит (замечание владельца к
-                    // первой редакции макета). Нет кнопки — нет и предмета:
-                    // называть предмет действия, которого нет, значит
-                    // вернуть в подвал вторую надпись, на которую заказчик
-                    // уже жаловался (2026-10-20). Ширина ограничена, иначе
-                    // длинное имя съедает левый слот целиком, а многоточию
-                    // не от чего считаться.
-                    .when(!subject.is_empty() && !label.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .min_w_0()
-                                .max_w(px(110.))
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_size(px(13.))
-                                .text_color(caption)
-                                .child(subject),
-                        )
-                    })
+                    // Подписи предмета в подвале больше нет: имя соединения
+                    // говорилось на одном экране трижды, и третья копия к
+                    // тому же резалась на 110 точках (находки 5 и 32 осмотра
+                    // 10.11). Над чем действует кнопка, говорит её подсказка
+                    // (`hint` выше) и строка списка, из которой карточка и
+                    // раскрыта, — там имя стоит полностью и первым планом.
                     .when_some(menu, |d, m| d.child(m))
                     .when_some(button, |d, b| d.child(b))
                     .into_any_element()
@@ -4310,20 +4311,20 @@ impl Render for Panel {
             // работы заблокировано всё равно всё.
             gui::Tab::Tools => {
                 let which = gui::project_primary(&cx.global::<Ui>().facts);
-                // Набора ещё нет — главной кнопке сказать нечего: «Установить»
-                // на пустом наборе было бы утверждением о том, чего мы не
-                // знаем (Minor 4 ревью задач 7+8). Кнопка заперта и говорит
-                // то же, что карточка рядом, — а причин у пустого набора две,
-                // и это разные слова (Minor 4 финального ревью: «Проверяю…»
-                // рядом с «MCP выключены» — две надписи об одном, и обе не о
-                // том). Все четыре действия по-прежнему в меню «…»: человек,
-                // который знает, чего хочет, не заперт.
-                let (label, hint) = match (which, &ready) {
-                    (Some(Which::Export), _) => ("Выгрузить", "Выгрузить из 1С"),
-                    (Some(_), _) => ("Установить", "Установить расширение"),
-                    (None, Verdict::Off) => ("Выключено", "Включите MCP — тогда станет видно, что уже сделано"),
-                    (None, _) => ("Проверяю…", "Проверяю, всё ли на месте…"),
-                };
+                // Набора ещё нет — предложить нечего, и СЛОТ ПУСТ (`which`
+                // равно `None` ниже не рисует кнопку вовсе). Прежде здесь
+                // стояли «Выключено» и «Проверяю…» — надписи в виде запертой
+                // кнопки, то есть корневая находка осмотра 10.11 своими
+                // словами: «на „Инструментах“ — слово „Выключено“ в том же
+                // виде кнопки». Состояние набора говорит карточка сверху
+                // (`panel::card`: «MCP выключены», «Проверяю…») — там, где
+                // его и ждут, и один раз. Все четыре действия по-прежнему в
+                // меню «…»: человек, который знает, чего хочет, не заперт.
+                //
+                // Подпись — те же слова, что в меню (`project_label`): кнопка
+                // называла действие короче меню («Выгрузить» против
+                // «Выгрузить из 1С», находка 18), и человек читал два имени
+                // одного дела.
                 // В меню — всё, кроме того, что на главной кнопке, и
                 // разложенное по разрядам (`project_menu`).
                 let rest = project_menu(which);
@@ -4347,19 +4348,16 @@ impl Render for Panel {
                         }
                         menu
                     }))
-                    .child(
-                        KitButton::new("primary")
-                            .primary()
-                            .label(label)
-                            .tooltip(hint)
-                            .disabled(busy_now || which.is_none())
-                            .loading(matches!(busy, Some(Busy::Ext) | Some(Busy::Project)))
-                            .on_click(move |_, _, cx| {
-                                if let Some(w) = which {
-                                    gui::run_op(cx, w);
-                                }
-                            }),
-                    )
+                    .when_some(which, |d, w| {
+                        d.child(
+                            KitButton::new("primary")
+                                .primary()
+                                .label(project_label(w))
+                                .disabled(busy_now)
+                                .loading(matches!(busy, Some(Busy::Ext) | Some(Busy::Project)))
+                                .on_click(move |_, _, cx| gui::run_op(cx, w)),
+                        )
+                    })
                     .into_any_element()
             }
             gui::Tab::Log => h_flex()
@@ -5638,7 +5636,7 @@ mod tests {
         // И меню тоже нет: предмета нет, а `Cfg::current()` на пустом списке
         // отдаёт пустышку-умолчание — без отказа здесь пустая «Связь»
         // предлагала бы действия над карточкой, которой не существует.
-        assert!(link_menu(&ui, "").is_empty());
+        assert!(link_menu(&ui, "", None).is_empty());
     }
 
     /// Соединение в заданном состоянии связи — тот же `ui_for`, которым уже
@@ -5652,67 +5650,64 @@ mod tests {
         ui_for("accept", "tunnel", false)
     }
 
-    /// Спека «Интерфейс»: «иначе заперта и называет состояние» — живой
-    /// прогон 9.11 нашёл обратное на соседних экранах: главная кнопка
-    /// пропадала вовсе (принимающая карточка, уже подключённая — ветки 6 и 7
-    /// `main_button`). Эта правка не выдумывает новое правило — приводит код
-    /// к уже записанному. Тест бьёт по чистой функции `main_button`: оба
-    /// случая, запертых состоянием СВЯЗИ (а не замком — имя теста прежде
-    /// обещало замок, которого здесь не было ни разу, находка Important 2
-    /// ревью круга: уже подключённое соединение и ждущая входящих карточка),
-    /// получают кнопку, а не пустоту, кнопка заперта (`act: None`) и называет
-    /// состояние тем же словом, что строка списка (`link::row`), а не слово
-    /// действия, которого у предмета нет. Серый цвет самой кнопки в запертом
-    /// состоянии — render (`panel.rs`, `.disabled(match act {...})`), у
-    /// чистой функции цвета нет; визуальное совпадение вида с «Инструментами»
-    /// и «Журналом» проверяется глазом (см. отчёт). Замок (`ui.gate`) —
-    /// отдельный случай, см. `a_locked_gate_leaves_the_same_locked_button_in_both_modes`
-    /// ниже.
+    /// Корневая находка осмотра 10.11: правый слот подвала означал три разные
+    /// вещи — настоящую кнопку, слово «Выключено» и слово «не подключено», —
+    /// и человек не мог научиться этому месту. Решение владельца: слот ВСЕГДА
+    /// действие, а нечего предложить — слот пуст.
     ///
-    /// **Из двух случаев остался один** (задача 7): у принимающей карточки
-    /// действие появилось — она выдаёт код, — и запирать её больше не за
-    /// что. Запертым остаётся подключённое соединение: транспорт идёт, и
-    /// кнопка называет его состояние, а не предлагает тронуть связь.
+    /// Тест стережёт СМЫСЛ, а не прежние слова (прежние два теста сторожили
+    /// ровно обратное правило — «заперта и называет состояние», — и оба
+    /// переведены здесь на новое): либо подпись пуста, либо у кнопки есть
+    /// действие. Слова состояния, которыми подпись была (`link::row`), на
+    /// кнопку не попадают ни в одном состоянии, какое окно умеет показать.
     #[test]
-    fn a_connection_state_lock_leaves_one_and_the_same_button_everywhere() {
-        for ui in [ui_link_connected()] {
-            let b = main_button(&ui, "", Dirty::No);
-            assert!(!b.label.is_empty(), "замок не исчезает, предмет: {}", b.subject);
-            assert_eq!(b.act, None, "заперта значит без действия");
-            for yellow in ["Включить", "Выключить", "Подключиться", "Сохранить", "Сделать текущим"]
-            {
-                assert_ne!(b.label, yellow, "жёлтой кнопки действия в запертом состоянии не бывает");
+    fn the_right_foot_slot_is_an_action_or_nothing_never_a_state_word() {
+        let mut uis = Vec::new();
+        for role in ["dial", "accept", "белиберда"] {
+            for mode in ["local", "tunnel"] {
+                for up in [false, true] {
+                    uis.push(ui_for(role, mode, up));
+                    let mut locked = ui_for(role, mode, up);
+                    locked.gate = Some("не задан пользователь базы".to_string());
+                    uis.push(locked);
+                }
             }
+        }
+        for ui in uis {
+            let c = ui.cfg.current().clone();
+            let b = main_button(&ui, "", Dirty::No);
+            let e = enroll_facts(&ui, &c.name);
+            let state = link::row(&ui.cfg, &c, true, Some(&ui.link), &e).state;
+            if b.label.is_empty() {
+                assert_eq!(b.act, None, "кнопки нет — и действия нет");
+                continue;
+            }
+            assert!(b.act.is_some(), "подпись есть — значит это действие: {}", b.label);
+            assert_ne!(b.label, state, "слово состояния в слоте действия не стоит");
         }
     }
 
-    /// Critical 1 ревью круга: `main_button` не читала `ui.gate` вовсе, и в
-    /// локальном режиме при запертом замке кнопка оставалась ЖЁЛТОЙ
-    /// «Включить», нажимаемой — щелчок лишь писал строку в журнал
-    /// (`toggle_link` отказывает молча), и человек не видел, что действие
-    /// невозможно (бриф задачи 4: «при запертом замке не предлагает
-    /// невозможного»). Тест ставит замок (`ui.gate`) НА САМОМ ДЕЛЕ — прежний
-    /// `a_connection_state_lock_leaves_one_and_the_same_button_everywhere`
-    /// обещал это именем и не делал (Important 2 ревью), и проверяет оба
-    /// режима, которые заводят `LinkAct::Toggle` (единственное действие,
-    /// которое замок в силах запереть): локальный выключатель и туннельное
-    /// «Подключиться».
+    /// Замок (`ui.gate`) запирает только ВКЛЮЧЕНИЕ, и предложить в этот
+    /// момент нечего — слот пуст. Прежде здесь стояла запертая кнопка со
+    /// словом состояния («выключено», «не подключено»): та же корневая
+    /// находка, только в другой ветке.
+    ///
+    /// Почему слот пуст, а не заперт: Critical 1 прежнего ревью требовал не
+    /// предлагать невозможного, и это требование в силе — просто выполняется
+    /// оно теперь отсутствием кнопки, а не кнопкой-надписью. Причину человек
+    /// читает у переключателя, который этим замком и заперт
+    /// (`switch_tooltip`), и строкой журнала по щелчку по нему.
     #[test]
-    fn a_locked_gate_leaves_the_same_locked_button_in_both_modes() {
+    fn a_locked_gate_leaves_the_foot_slot_empty_in_both_modes() {
         let why = "не задан пользователь базы";
-        let mut local = ui_for("accept", "local", false);
-        local.gate = Some(why.to_string());
-        let b = main_button(&local, "", Dirty::No);
-        assert_eq!(b.act, None, "заперта значит без действия");
-        assert_eq!(b.label, "выключено", "называет состояние, а не предлагает действие");
-        assert_eq!(b.why.as_deref(), Some(gate_text(why).as_str()));
-
-        let mut tunnel = ui_for("dial", "tunnel", false);
-        tunnel.gate = Some(why.to_string());
-        let b = main_button(&tunnel, "", Dirty::No);
-        assert_eq!(b.act, None, "тот же замок, тот же LinkAct::Toggle — запирает и здесь");
-        assert_eq!(b.label, "не подключено");
-        assert_eq!(b.why.as_deref(), Some(gate_text(why).as_str()));
+        for (role, mode) in [("accept", "local"), ("dial", "tunnel")] {
+            let mut ui = ui_for(role, mode, false);
+            ui.gate = Some(why.to_string());
+            let b = main_button(&ui, "", Dirty::No);
+            assert_eq!(b.label, "", "замок не даёт включить — предлагать нечего, {mode}");
+            assert_eq!(b.act, None);
+            assert_eq!(b.subject, ui.cfg.current().name, "предмет остаётся: по нему работает меню «…»");
+        }
 
         // Включено — замок не держит выключение: ветка не трогается, кнопка
         // остаётся действием (`switch_locked`, тот же довод).
@@ -5721,6 +5716,32 @@ mod tests {
         let b = main_button(&already_on, "", Dirty::No);
         assert_eq!(b.act, Some(LinkAct::Toggle), "уже включено — выключить можно всегда");
         assert_eq!(b.label, "Выключить");
+    }
+
+    /// Живой сеанс даёт настоящее действие, а не слово «подключено» (находка
+    /// 1: статус сказан дважды на одном экране — у заголовка карточки и в
+    /// подвале).
+    #[test]
+    fn a_live_session_offers_to_disconnect_instead_of_naming_the_state() {
+        let b = main_button(&ui_link_connected(), "", Dirty::No);
+        assert_eq!(b.label, "Отключиться");
+        assert_eq!(b.act, Some(LinkAct::Toggle));
+    }
+
+    /// Находка 17: «Показать код» и «Подключиться»/«Отключиться» стояли и на
+    /// главной кнопке, и в меню «…» рядом с ней. Соседняя вкладка то же
+    /// правило соблюдала (`project_menu(primary)`) — теперь соблюдает и эта,
+    /// и тем же приёмом.
+    #[test]
+    fn the_link_menu_drops_what_already_stands_on_the_main_button() {
+        let ui = ui_link_accept_waiting();
+        let primary = main_button(&ui, "", Dirty::No).act;
+        assert_eq!(primary, Some(LinkAct::ShowCode), "у принимающей карточки на кнопке код");
+        let with = link_menu(&ui, "", primary);
+        assert!(!with.iter().any(|(_, a)| Some(*a) == primary), "дубля главной кнопки в меню нет: {with:?}");
+        assert!(with.iter().any(|(_, a)| *a == LinkAct::NewCode), "перевыпуск — другое действие, он остаётся");
+        let without = link_menu(&ui, "", None);
+        assert_eq!(without.len(), with.len() + 1, "убран ровно один пункт");
     }
 
     /// Звонящая карточка, текущая, не подключена — говорящее имя вместо
@@ -5745,13 +5766,13 @@ mod tests {
     /// Подписи пунктов меню «Связи» для предмета по умолчанию (открытой
     /// карточки нет — предмет текущее соединение).
     fn menu_labels(ui: &Ui) -> Vec<&'static str> {
-        link_menu(ui, "").iter().map(|(l, _)| *l).collect()
+        link_menu(ui, "", None).iter().map(|(l, _)| *l).collect()
     }
 
     /// То же самое, но для НАЗВАННОЙ (не по умолчанию) строки списка —
     /// `menu_labels` не умеет чужую карточку, ей нет где взять `selected`.
     fn menu_labels_of(ui: &Ui, selected: &str) -> Vec<&'static str> {
-        link_menu(ui, selected).iter().map(|(l, _)| *l).collect()
+        link_menu(ui, selected, None).iter().map(|(l, _)| *l).collect()
     }
 
     #[test]
@@ -5781,7 +5802,7 @@ mod tests {
         let mut ui = Ui::for_test();
         ui.cfg = cfg_with(&["Ромашка", "Василёк"]);
         ui.link = State::Up { since: Instant::now() };
-        let other = link_menu(&ui, "Василёк");
+        let other = link_menu(&ui, "Василёк", None);
         assert_eq!(
             other,
             vec![
@@ -5804,7 +5825,7 @@ mod tests {
     /// «Проекта» снова, не заметив этого.
     #[test]
     fn link_items_carry_their_own_actions_not_project_operations() {
-        let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "").iter().map(|(_, a)| *a).collect();
+        let acts: Vec<LinkAct> = link_menu(&ui_link_accept_waiting(), "", None).iter().map(|(_, a)| *a).collect();
         assert_eq!(acts, vec![LinkAct::ShowCode, LinkAct::NewCode, LinkAct::Rename, LinkAct::Delete]);
         // Заглушек в меню больше нет вовсе: `act_not_yet`, которая
         // объясняла, почему «Показать код» и «Отозвать разрешение» ничего не
@@ -5831,7 +5852,7 @@ mod tests {
     #[test]
     fn the_link_menu_lists_exactly_these_items_for_one_subject() {
         assert_eq!(
-            link_menu(&ui_link_accept_waiting(), ""),
+            link_menu(&ui_link_accept_waiting(), "", None),
             vec![
                 ("Показать код", LinkAct::ShowCode),
                 // Задача 7: перевыпуск — своё действие, а не «Показать код»
@@ -6113,8 +6134,10 @@ mod tests {
         let selected = main_button(&ui, "Buh", Dirty::No);
         assert_eq!(selected.subject, "Buh");
 
-        // Замок переключателя (`ui.gate`) `main_button` не спрашивает —
-        // предмет и подпись кнопки не меняются от того, заперт он или нет.
+        // Замок переключателя этой карточки не касается вовсе: она
+        // принимающая, и на кнопке у неё КОД, а выдача кода замком не
+        // запирается нарочно (`main_button`, ветка «Показать код»: замок про
+        // обслуживание агента, а не про то, кого ещё позвать).
         ui.gate = Some("не задан пользователь базы".to_string());
         let locked = main_button(&ui, "Buh", Dirty::No);
         assert_eq!(locked.subject, selected.subject);
@@ -6486,11 +6509,20 @@ mod tests {
         let mut ui = ui_for("accept", "tunnel", false);
         ui.cfg.current_mut().base_here = false;
         let name = ui.cfg.current().name.clone();
-        assert!(!link_menu(&ui, &name).iter().any(|(label, _)| label.contains("код")), "в меню кода нет: {:?}", link_menu(&ui, &name));
+        assert!(
+            !link_menu(&ui, &name, None).iter().any(|(label, _)| label.contains("код")),
+            "в меню кода нет: {:?}",
+            link_menu(&ui, &name, None)
+        );
         let button = main_button(&ui, &name, Dirty::No);
-        assert_ne!(button.label, "Показать код");
-        assert_eq!(button.act, None, "кнопка заперта, а не предлагает невозможное");
-        assert_eq!(button.why.as_deref(), Some(BASE_ELSEWHERE_NOTE), "и говорит, почему кода не будет");
+        // Слот пуст, а не занят надписью (решение владельца 10.11): кнопка
+        // не предлагает невозможного и не говорит вместо действия словами.
+        // Почему кода не будет, человек читает у самого блока кода — там, где
+        // он его и ищет (`accepting_block::code_note`, тот же
+        // `no_code_note`).
+        assert_eq!(button.label, "", "предложить нечего — слот пуст");
+        assert_eq!(button.act, None);
+        assert_eq!(button.why, None, "объясняет не кнопка, которой нет, а карточка");
 
         // Дверь к выдаче одна, и отказ стоит у неё: окно этой карточке кода
         // не предлагает, но выдать его нельзя и в обход окна.
@@ -6502,17 +6534,18 @@ mod tests {
     /// ОСТАТОЧНУЮ ветку «Показать код»: окно предлагало выдать код карточке,
     /// про которую не знает даже, что она делает.
     #[test]
-    fn a_card_with_an_unknown_role_gets_a_locked_button_that_says_so() {
+    fn a_card_with_an_unknown_role_leaves_the_foot_slot_empty() {
         let mut ui = ui_for("сервер", "tunnel", false);
         let name = ui.cfg.current().name.clone();
         assert!(ui.cfg.current().role().is_err(), "тест про нераспознанное слово роли, а оно распозналось");
         let button = main_button(&ui, &name, Dirty::No);
-        assert_ne!(button.label, "Показать код", "кода не будет: неизвестно даже, что эта карточка делает");
+        // Предложить такой карточке нечего — слот пуст (решение владельца
+        // 10.11). Прежде здесь стояла запертая кнопка со словом состояния и
+        // подсказкой `ROLE_UNKNOWN_NOTE`; слова остались, но говорит их
+        // список («Непонятно, как подключаются») и карточка, а не кнопка.
+        assert_eq!(button.label, "", "кода не будет: неизвестно даже, что эта карточка делает");
         assert_eq!(button.act, None);
-        assert_eq!(button.why.as_deref(), Some(ROLE_UNKNOWN_NOTE));
-        // Слово состояния — из того же словаря, что красит строку списка, а
-        // не придуманное кнопкой заново.
-        assert_eq!(button.label, "не подключено");
+        assert_eq!(button.why, None);
         // И блока кода у такой карточки нет вовсе — ни кода, ни объяснения
         // про базу: про роль сказано там, где человек нажимает.
         assert!(accepting_block(&ui.cfg, ui.cfg.current(), Some("КОД"), Some(&[])).is_none());

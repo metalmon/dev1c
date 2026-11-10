@@ -118,12 +118,6 @@ fn carried_dump_follows_the_project_unless_it_was_chosen_by_hand() {
     assert_eq!(carried_dump(&saved, "C:\\proj\\Torg"), "");
 }
 
-/// `moved_lines` принимает `Cfg`, а не `Connection` (находка 6: порт в строке —
-/// доставшийся, а не предпочтение), а тесты ниже строят именно `Connection`.
-fn as_cfg(h: &Connection) -> Cfg {
-    Cfg::of_one(h.clone())
-}
-
 /// Каталог состояния для тестов, которым улаживание порта
 /// (`ops_host::settle_chosen_http_port`) нужно НАСТОЯЩИМ, а не пустышкой
 /// (находка 8 ревью круга 3). Ставится потоко-локально, переменные среды не
@@ -153,28 +147,10 @@ fn renaming_the_workstation_does_not_move_the_port_anymore() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// До задачи 6 строка журнала называла доставшийся порт, а не предпочтение
-/// (находка 6 ревью круга 3) — сценарий требовал, чтобы ПЕРЕИМЕНОВАНИЕ
-/// двигало предпочтение, а подбор мог уехать дальше нового предпочтения.
-/// С задачи 6 переименование предпочтение не двигает вовсе (порт — константа,
-/// не выведенная из имени), и этого сценария больше нет: подбор всё ещё
-/// может сдвинуть `resolved_http_port` независимо от рабочего места, но
-/// `moved_lines` про порт теперь не говорит ничего — ни про предпочтение,
-/// ни про доставшееся.
-#[test]
-fn renaming_the_workstation_leaves_the_port_out_of_the_moved_line_even_when_the_pick_shifted() {
-    let old = Connection { workstation: "dev1".into(), http_port: Some(cfg::derived_http_port()), ..Connection::default() };
-    let mut new = old.clone();
-    new.workstation = "dev3".into();
-    let before = Cfg::of_one(old);
-    // Подбор этого сеанса ушёл на другой порт по причине, не связанной с
-    // переименованием (например, порт занят соседом) — строка о переезде
-    // рабочего места всё равно не должна называть портов.
-    let after = Cfg { resolved_http_port: Some(8084), ..Cfg::of_one(new) };
-    let line = moved_lines(&before, &after).join("\n");
-    assert!(!line.contains("порт") && !line.contains("8084"), "порт не переезжает за рабочим местом: {line}");
-    assert!(line.contains("ветка проекта и адрес"), "{line}");
-}
+// Теста «подбор порта сдвинулся, а строка переезда порта не называет» здесь больше нет (10.11): `moved_lines` берёт КАРТОЧКУ, а
+// доставшийся порт живёт вне карточки (`Cfg::resolved_http_port`) — подать его этой функции на вход теперь нельзя вовсе, и тест, который
+// не может стать красным, только обещал проверку. То, что строка не называет портов, стережёт
+// `every_move_gets_a_line_including_the_branch_but_not_the_port` ниже — на том же входе, какой функция и получает.
 
 /// Находка 5 ревью круга 3: неудавшееся «Сохранить» не двигает запомненный
 /// порт. Прежде улаживание стояло ДО `validate()`/`write_checked` — человек
@@ -224,11 +200,11 @@ fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
         http_port: Some(cfg::derived_http_port()),
         ..Connection::default()
     };
-    assert!(moved_lines(&as_cfg(&old), &as_cfg(&old)).is_empty());
+    assert!(moved_lines(&old, &old).is_empty());
 
     let mut new = old.clone();
     new.workstation = "dev3".into();
-    let line = moved_lines(&as_cfg(&old), &as_cfg(&new)).join("\n");
+    let line = moved_lines(&old, &new).join("\n");
     for part in ["dev1 → dev3", "ветка проекта и адрес"] {
         assert!(line.contains(part), "{part} не назван: {line}");
     }
@@ -237,7 +213,7 @@ fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
     let mut moved_project = old.clone();
     moved_project.project = "C:\\proj\\Torg".into();
     moved_project.dump = carried_dump(&old, "C:\\proj\\Torg");
-    let lines = moved_lines(&as_cfg(&old), &as_cfg(&moved_project));
+    let lines = moved_lines(&old, &moved_project);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains(&cfg::derived_dump("C:\\proj\\Torg")), "{lines:?}");
 
@@ -247,7 +223,7 @@ fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
     let mut own_new = own.clone();
     own_new.project = "C:\\proj\\Torg".into();
     own_new.dump = carried_dump(&own, "C:\\proj\\Torg");
-    assert!(moved_lines(&as_cfg(&own), &as_cfg(&own_new)).is_empty());
+    assert!(moved_lines(&own, &own_new).is_empty());
 }
 
 /// Круг починки 1, находка B: «Сохранить» правит ТЕКУЩЕЕ соединение, а не
@@ -3123,4 +3099,39 @@ fn a_crafted_name_cannot_fake_the_fingerprint_line() {
     // стоит ниже и внутри кавычек, а подделать прочитанное выше нечем.
     assert_eq!(lines[0], format!("Отпечаток {real}"), "первая строка — только подпись и наш отпечаток: {detail}");
     assert_eq!(lines.len(), 2, "лишней строки из имени не вышло: {detail}");
+}
+
+/// **Поля НЕтекущей карточки доезжают до файла, и доезжают в ЕЁ блок** — повод владельца 10.11: «Поля правятся у текущего чего-то? Мы
+/// походу никогда тут не уйдем от абсурда». До этой правки единственный писатель полей заменял `Cfg::current()`, и запись нетекущей
+/// карточки уехала бы в чужой блок toml — ради этого поля на экране гасили и объясняли человеку словами, почему они погашены.
+///
+/// Доказательство адресное, а не «в файле где-то появилось новое значение»: такое утверждение прошло бы и в том случае, когда правка легла
+/// в блок текущей карточки — ровно тот промах, против которого тест и писан. Поэтому проверяются ОБА блока и корневой `current`: правка в
+/// своём, чужой не тронут, а текущее соединение от правки полей не переезжает (его меняет только «Сделать текущим»).
+#[test]
+fn fields_of_a_card_that_is_not_the_current_one_reach_its_own_block() {
+    let mut ui = Ui::for_test();
+    let store = crate::secrets::Store::file(ui.kit.state());
+    ui.cfg = cfg::cfg_with(&["Buh", "Ромашка"]);
+    let path = ui.kit.state_path(cfg::FILE);
+    std::fs::write(&path, ui.cfg.render(&store).unwrap()).unwrap();
+    assert_eq!(ui.cfg.current().name, "Buh", "фикстура: правим НЕ текущую карточку");
+
+    let mut host = ui.cfg.connections[1].clone();
+    host.db_user = "Кассир".into();
+    save_host(&mut ui, host).unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 1, "db_user").as_deref(),
+        Some("Кассир"),
+        "правка легла в блок правленой карточки:\n{after}"
+    );
+    assert_eq!(
+        common::toml_render::get_in(&after, cfg::CONNECTION, 0, "db_user").as_deref(),
+        Some("Администратор"),
+        "и не уехала в блок текущей:\n{after}"
+    );
+    assert_eq!(ui.cfg.by_name("Ромашка").unwrap().db_user, "Кассир", "в памяти окна — то же, что на диске");
+    assert_eq!(ui.cfg.current().name, "Buh", "правка полей текущее соединение не переключает");
 }

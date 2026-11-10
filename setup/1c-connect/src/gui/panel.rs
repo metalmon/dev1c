@@ -2035,6 +2035,23 @@ fn deed_of(act: LinkAct) -> Option<crate::need::Deed> {
     }
 }
 
+/// Пункт выпадающего меню, чьё действие ОТЛОЖЕНО на следующий кадр.
+///
+/// **Все пункты меню окна строятся только им.** Пункт исполняется, пока само меню ещё закрывается, и всё, что поднимает в этот миг
+/// вопрос, получает ответ «да» от того же щелчка, которым пункт выбрали. Поймано живым прогоном на удалении карточки: вопрос не
+/// появлялся ни разу, а карточка исчезала. Разобравшись, нашли ещё два таких же пункта — и один из них страшнее первого: «Загрузить
+/// в 1С» перезаписывает конфигурацию базы, а спрашивать об этом она как раз и переставала. Третий — смена публикации у текущей
+/// карточки: там вопрос про смену базы.
+///
+/// Поэтому отложено ВСЁ, а не только то, что спрашивает сегодня: пункт, который завтра научится спрашивать, иначе тихо потеряет
+/// вопрос, и заметит это снова человек, а не тест.
+fn menu_item(label: &'static str, act: impl Fn(&mut Window, &mut App) + Clone + 'static) -> PopupMenuItem {
+    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+        let act = act.clone();
+        window.defer(cx, move |window, cx| act(window, cx));
+    })
+}
+
 fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) {
     match act {
         LinkAct::Toggle => gui::toggle_link(cx),
@@ -3504,9 +3521,7 @@ impl Panel {
                 move |mut menu, _, _| {
                     for profile in ["business", "developer"] {
                         let name = name.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(profile_label(profile)).on_click(move |_, _, cx| set_card_profile(cx, &name, profile)),
-                        );
+                        menu = menu.item(menu_item(profile_label(profile), move |_, cx| set_card_profile(cx, &name, profile)));
                     }
                     menu.min_w(select_menu_min_w)
                 },
@@ -3548,8 +3563,7 @@ impl Panel {
                             let [dial, accept] = link::onboarding_answers();
                             for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
                                 let name = name.clone();
-                                menu = menu
-                                    .item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)));
+                                menu = menu.item(menu_item(label, move |_, cx| set_card_topology_kind(cx, &name, answer)));
                             }
                             menu.min_w(select_menu_min_w)
                         }),
@@ -3585,7 +3599,7 @@ impl Panel {
                             // а программа тут же объявляла его невозможным).
                             for here in answers.iter().copied() {
                                 let (label, name) = (base_here_label(here), name.clone());
-                                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_base_here(cx, &name, here)));
+                                menu = menu.item(menu_item(label, move |_, cx| set_card_base_here(cx, &name, here)));
                             }
                             menu.min_w(select_menu_min_w)
                         }),
@@ -3663,8 +3677,7 @@ impl Panel {
                     move |mut menu, _, _| {
                         for (words, publication) in link::publication_answers() {
                             let name = name.clone();
-                            menu =
-                                menu.item(PopupMenuItem::new(words).on_click(move |_, _, cx| set_card_publication(cx, &name, publication)));
+                            menu = menu.item(menu_item(words, move |_, cx| set_card_publication(cx, &name, publication)));
                         }
                         menu.min_w(select_menu_min_w)
                     },
@@ -4273,17 +4286,9 @@ impl Render for Panel {
                                                         .dropdown_menu(move |mut menu, _, _| {
                                                             for (label, act) in items.iter().copied() {
                                                                 let subject = subject.clone();
-                                                                // **Действие откладывается на следующий кадр.** Пункт исполняется,
-                                                                // пока меню ещё закрывается, и диалог подтверждения, поднятый в этот
-                                                                // миг, получает «да» от того же щелчка: удаление проходило МОЛЧА, без
-                                                                // вопроса (живой прогон 10.11). `Window::defer` ждёт, пока меню уйдёт.
-                                                                menu =
-                                                                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                                                                        let subject = subject.clone();
-                                                                        window.defer(cx, move |window, cx| {
-                                                                            run_link_act(window, cx, act, &subject)
-                                                                        });
-                                                                    }));
+                                                                menu = menu.item(menu_item(label, move |window, cx| {
+                                                                    run_link_act(window, cx, act, &subject)
+                                                                }));
                                                             }
                                                             menu
                                                         })
@@ -4335,7 +4340,7 @@ impl Render for Panel {
                             .disabled(busy_now)
                             .dropdown_menu(|mut menu, _, _| {
                                 for (label, role) in link::onboarding_answers() {
-                                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| add_link(window, cx, role)));
+                                    menu = menu.item(menu_item(label, move |window, cx| add_link(window, cx, role)));
                                 }
                                 menu
                             })
@@ -4567,11 +4572,8 @@ impl Render for Panel {
                             // серой — тем же приёмом, что у меню «Проекта»
                             // ниже; неприменимое не серое, а спрятано
                             // (`link_menu` его не отдаёт вовсе).
-                            menu = menu.item(
-                                PopupMenuItem::new(label)
-                                    .disabled(busy_now)
-                                    .on_click(move |_, window, cx| run_link_act(window, cx, act, &subject)),
-                            );
+                            menu =
+                                menu.item(menu_item(label, move |window, cx| run_link_act(window, cx, act, &subject)).disabled(busy_now));
                         }
                         menu
                     })
@@ -4632,11 +4634,9 @@ impl Render for Panel {
                         for entry in rest.iter().copied() {
                             menu = match entry {
                                 ProjectMenu::Sep => menu.separator(),
-                                ProjectMenu::Item(label, w) => menu.item(
-                                    PopupMenuItem::new(label)
-                                        .disabled(busy_now)
-                                        .on_click(move |_, window, cx| run_project_op(window, cx, w)),
-                                ),
+                                ProjectMenu::Item(label, w) => {
+                                    menu.item(menu_item(label, move |window, cx| run_project_op(window, cx, w)).disabled(busy_now))
+                                }
                             };
                         }
                         menu
@@ -4662,11 +4662,14 @@ impl Render for Panel {
                     // 2026-10-20: зачем два пункта) — файл остаётся, на него
                     // называет сама строка в журнале после проверки
                     // (`Ev::Checks` в `mod.rs`).
-                    menu.item(PopupMenuItem::new("Открыть журнал").disabled(busy_now).on_click(|_, _, cx| {
-                        let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
-                        gui::open_path(cx, &path);
-                    }))
-                    .item(PopupMenuItem::new("Очистить журнал").disabled(busy_now).on_click(|_, _, cx| {
+                    menu.item(
+                        menu_item("Открыть журнал", |_, cx| {
+                            let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
+                            gui::open_path(cx, &path);
+                        })
+                        .disabled(busy_now),
+                    )
+                    .item(menu_item("Очистить журнал", |_, cx| {
                         let ui = cx.global_mut::<Ui>();
                         ui.log.clear();
                         ui.unread = 0;

@@ -280,32 +280,42 @@ fn tooltip_names_the_phase_and_minutes() {
         stale_noted: false,
     };
     let ok = Verdict::Ready;
-    assert_eq!(tray_tooltip(Some(&r), &State::Up { since: now }, &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+    assert_eq!(
+        tray_tooltip(Some(&r), &State::Up { since: now }, "tunnel", &ok, None, now),
+        "1c-connect: выгружаю конфигурацию из 1С, 12 мин"
+    );
     let fresh = Running { started: now, seen: now, ..r };
-    assert_eq!(tray_tooltip(Some(&fresh), &State::Off, &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
-    assert_eq!(tray_tooltip(None, &State::Up { since: now }, &ok, None, now), "1c-connect: подключён");
+    assert_eq!(tray_tooltip(Some(&fresh), &State::Off, "tunnel", &ok, None, now), "1c-connect: выгружаю конфигурацию из 1С, меньше минуты");
+    assert_eq!(tray_tooltip(None, &State::Up { since: now }, "tunnel", &ok, None, now), "1c-connect: подключён");
+    // Находка 22 осмотра 10.11: в локальном режиме подключаться не к чему —
+    // подсказка называет предмет выключателя, а не связь.
+    assert_eq!(
+        tray_tooltip(None, &State::Up { since: now }, "local", &ok, None, now),
+        format!("1c-connect: {} включён", crate::gui::SUBJECT)
+    );
+    assert_eq!(tray_tooltip(None, &State::Connecting, "local", &ok, None, now), format!("1c-connect: {} не включён", crate::gui::SUBJECT));
+    assert_eq!(tray_tooltip(None, &State::Connecting, "tunnel", &ok, None, now), "1c-connect: не подключён");
     // Выключатель выключен — то же слово, что у карточки (круг починки 1
     // задач 2+8, Important 1): «не подключён» было бы ложью про связь.
-    assert_eq!(tray_tooltip(None, &State::Off, &ok, None, now), "1c-connect: MCP выключены");
+    assert_eq!(tray_tooltip(None, &State::Off, "tunnel", &ok, None, now), format!("1c-connect: {}", panel::OFF_WORD));
     // Причина замка — в подсказке значка; идущая операция её побеждает
     // (тот же порядок разрешения, что в карточке).
     let why = Some("не задан пользователь базы");
-    assert_eq!(tray_tooltip(None, &State::Off, &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
-    assert_eq!(tray_tooltip(Some(&r), &State::Off, &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
+    assert_eq!(tray_tooltip(None, &State::Off, "local", &ok, why, now), "1c-connect: нельзя включить: не задан пользователь базы");
+    assert_eq!(tray_tooltip(Some(&r), &State::Off, "local", &ok, why, now), "1c-connect: выгружаю конфигурацию из 1С, 12 мин");
 }
 
 /// Круг починки 1 задач 2+8, Important 1: подсказка значка и карточка
 /// состояния — два ответа на один вопрос «почему не работает», и второй
 /// словарь на тот же вопрос уже однажды разошёлся (находка живого прогона
 /// 9.11). Тест держит оба читателя у одного и того же слова, в обоих
-/// режимах — `tray_tooltip` режима не спрашивает вовсе, но и без него
-/// обязана совпасть с карточкой, у которой режима тоже уже не спрашивает
-/// `OFF_WORD`.
+/// режимах — режим подсказка с находки 22 спрашивает, но на выключенном
+/// выключателе слово у неё и у карточки одно и то же (`OFF_WORD`).
 #[test]
 fn the_tray_tooltip_and_the_card_agree_while_the_switch_is_off() {
     let now = Instant::now();
-    let tip = tray_tooltip(None, &State::Off, &Verdict::Checking, None, now);
     for mode in ["local", "tunnel"] {
+        let tip = tray_tooltip(None, &State::Off, mode, &Verdict::Checking, None, now);
         let card_title = panel::card(None, &State::Off, mode, &Verdict::Checking, None, now).title;
         assert!(tip.contains(&card_title), "{mode}: подсказка «{tip}» не содержит слова карточки «{card_title}»");
     }
@@ -673,7 +683,8 @@ fn an_agent_click_is_latched_and_answers_with_its_own_event() {
     // при закрытом окне, и до 25 с человеку иначе не видно ничего.
     let started_line = ui.log.last().expect("принятый щелчок не сказал в журнал ни слова").clone();
     assert_eq!(started_line.kind, Kind::Say, "{started_line:?}");
-    assert!(started_line.text.contains("настраиваю записи MCP"), "{started_line:?}");
+    // По смыслу, а не по букве прежних слов: строка называет предмет (`gui::SUBJECT`) и говорит, что работа пошла.
+    assert!(started_line.text.contains(crate::gui::SUBJECT), "{started_line:?}");
 
     // Второй щелчок по тому же агенту не принят — и это предупреждение, а не
     // отказ работы: ничего не сломалось, надо дождаться ответа.

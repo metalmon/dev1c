@@ -216,7 +216,7 @@ pub fn icon(state: TrayState) -> Icon {
 pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool, autoconnect_on: bool) -> anyhow::Result<Tray> {
     #[cfg(target_os = "linux")]
     let open = MenuItem::with_id(OPEN, "Открыть окно", true, None);
-    let toggle = MenuItem::with_id("toggle", "Включить MCP", true, None);
+    let toggle = MenuItem::with_id("toggle", crate::gui::toggle_label(false), true, None);
     let check = MenuItem::with_id("check", "Проверить", true, None);
     // Отметка при создании меню: умолчание «только чтение», пока не
     // прочитано из toml — `build` не получает конфиг, в отличие от `choice`
@@ -256,7 +256,12 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
     ])?;
     let tray = TrayIconBuilder::new()
         .with_icon(icon(TrayState::Off))
-        .with_tooltip("1c-connect: не подключён")
+        // Голое имя, без состояния: до первого `sync_tray` не известно ни
+        // положение выключателя, ни режим, а прежнее «не подключён» обещало
+        // знание, которого нет, да ещё словами связи — в локальном режиме
+        // подключаться не к чему (находка 22 осмотра 10.11). Настоящий текст
+        // приезжает первым же тиком (`Tray::set_tooltip`).
+        .with_tooltip("1c-connect")
         .with_menu(Box::new(menu.clone()))
         .with_menu_on_left_click(false)
         .build()?;
@@ -302,18 +307,18 @@ pub fn build(tx: UnboundedSender<Ev>, choice: theme::Choice, autostart_on: bool,
 }
 
 impl Tray {
-    /// Значок badge(state) и надпись переключателя «Выключить MCP»/«Включить MCP».
+    /// Значок badge(state) и надпись переключателя (`gui::toggle_label` — предмет, а не причина отказа).
     /// Подсказку `set_state` не трогает: `TrayState` одно на троих (занят,
     /// подключён, нет связи) и само по себе не знает фазу операции — её
     /// несёт только `tray_tooltip`, и каждый зовущий (`set_link`, `run_op`,
     /// `Ev::Done`, тик) сам зовёт `set_tooltip` следом тем же текстом, иначе
     /// занятость при поднятой связи осталась бы с «не подключён».
     /// `locked` — холодный замок заперт (`gui::gate::cold_gate`): пункт
-    /// «Включить MCP» недоступен ровно тогда же, когда переключатель в окне,
+    /// включения недоступен ровно тогда же, когда переключатель в окне,
     /// а причина едет в подсказку значка (`gui::tray_tooltip`).
     pub fn set_state(&self, state: TrayState, on: bool, locked: bool) {
         let _ = self.icon.set_icon(Some(icon(state)));
-        self.toggle.set_text(if on { "Выключить MCP" } else { "Включить MCP" });
+        self.toggle.set_text(crate::gui::toggle_label(on));
         self.toggle.set_enabled(toggle_enabled(locked, on));
     }
 
@@ -443,7 +448,7 @@ pub fn tray_state_of(dot: super::Dot) -> TrayState {
     }
 }
 
-/// Доступен ли пункт «Включить MCP»: трей живёт по тем же правилам, что окно
+/// Доступен ли пункт включения: трей живёт по тем же правилам, что окно
 /// (спека, «Трей живёт по тем же правилам») — замок запирает только включение,
 /// выключить обслуживание можно всегда. Обратная сторона `panel::switch_locked`
 /// без хода операции: нативный пункт меню идущая операция не запирала и

@@ -59,8 +59,18 @@ pub enum TrayState {
     Warn,
 }
 
+/// Предмет, который включает выключатель, — одним словом на все поверхности: трей, карточка, журнал, подсказки, имена фактов. Сокращения «MCP» на экране больше нет: у 1С-разработчика оно ещё отзовётся, у бухгалтера — нет (находка 12 осмотра 10.11). И это именно ПРЕДМЕТ, а не объяснение отказа: подпись у выключателя обязана называть то, что включается, а причина живёт в подсказке и в журнале (находка 13).
+///
+/// Сокращение остаётся во внутренних именах кода (`EDITOR_MCP`, `mcp_exe`, `mcp-1c`) — там оно точнее любого перевода и человеку не показывается.
+pub const SUBJECT: &str = "доступ к 1С";
+
+/// Подпись выключателя — предметом с действием, без причины отказа. Одна на трей и на окно: разойдясь, они назвали бы одно и то же разными словами.
+pub fn toggle_label(on: bool) -> String {
+    format!("{} {SUBJECT}", if on { "Выключить" } else { "Включить" })
+}
+
 /// Что значок показывает: бейдж, положение переключателя в меню, заперт ли
-/// пункт «Включить MCP» и подсказка. Собирается в `sync_tray` одним местом —
+/// пункт включения и подсказка. Собирается в `sync_tray` одним местом —
 /// и отдаётся значку, и кладётся в `Ui`, чтобы было чем сторожить проводку.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TrayView {
@@ -717,7 +727,9 @@ fn guarded(tx: &UnboundedSender<Ev>, body: impl FnOnce() -> Ev, on_panic: impl F
 /// слова, которые карточка состояния (`panel::card`) уже не говорит сама,
 /// найдя их ложью на живом прогоне 9.11. `panel::OFF_WORD` — общий источник,
 /// второй словарь на тот же вопрос не заводим.
-pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict, gate: Option<&str>, now: Instant) -> String {
+///
+/// **Режим подсказка теперь спрашивает** (находка 22 осмотра 10.11): в локальном режиме подключаться не к чему — база, публикация и агенты на этой же машине, — а подсказка говорила «подключён»/«не подключён» про связь, которой там нет вовсе. Слово называет предмет выключателя (`SUBJECT`), тем же способом, каким карточка (`panel::card`) уже спрашивает режим.
+pub fn tray_tooltip(progress: Option<&Running>, link: &State, mode: &str, verdict: &Verdict, gate: Option<&str>, now: Instant) -> String {
     if let (None, Some(why)) = (progress, gate) {
         // Та же формулировка, что у подсказки переключателя и у тултипа
         // главной кнопки: три поверхности говорили о замке тремя разными
@@ -753,12 +765,15 @@ pub fn tray_tooltip(progress: Option<&Running>, link: &State, verdict: &Verdict,
             // что и у карточки (`panel::OFF_WORD`); остальные неподнятые
             // состояния (пытается подключиться, отказ) словом не делятся —
             // их эта подсказка и прежде не различала, и это не наша находка.
-            let word = if link.is_up() {
-                "подключён"
-            } else if matches!(link, State::Off) {
-                crate::gui::panel::OFF_WORD
+            let local = mode == "local";
+            let word = if matches!(link, State::Off) {
+                crate::gui::panel::OFF_WORD.to_string()
+            } else if local {
+                format!("{SUBJECT} {}включён", if link.is_up() { "" } else { "не " })
+            } else if link.is_up() {
+                "подключён".to_string()
             } else {
-                "не подключён"
+                "не подключён".to_string()
             };
             format!("1c-connect: {word}")
         }
@@ -970,7 +985,7 @@ fn sync_tray(ui: &mut Ui, now: Instant) {
         state: tray_state_now(ui, now),
         on: ui.link.is_on(),
         locked: ui.gate.is_some(),
-        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.verdict, ui.gate.as_deref(), now),
+        tooltip: tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.current().mode, &ui.verdict, ui.gate.as_deref(), now),
     };
     if let Some(tray) = &ui.tray {
         tray.set_state(view.state, view.on, view.locked);
@@ -1145,9 +1160,9 @@ fn setup_line(name: &str, on: bool, result: Result<crate::editors::Found, Vec<St
         Ok(found) if agent_as_expected(on, &found) => Some(Line {
             kind: Kind::Ok,
             text: if on {
-                format!("{name}: записи MCP на месте — редактор подхватит сам, перезапускать не нужно")
+                format!("{name}: {SUBJECT} открыт — редактор подхватит сам, перезапускать не нужно")
             } else {
-                format!("{name}: записи MCP убраны")
+                format!("{name}: {SUBJECT} закрыт")
             },
         }),
         Ok(other) => Some(Line {
@@ -1615,7 +1630,7 @@ fn toggle_agent_ui(ui: &mut Ui, i: usize, on: bool, now: Instant, work: impl FnO
         return false;
     }
     ui.agent_clicks[i] = Some(now);
-    let what = if on { "настраиваю записи MCP" } else { "убираю записи MCP" };
+    let what = if on { format!("открываю {SUBJECT}") } else { format!("закрываю {SUBJECT}") };
     note_line(ui, Line { kind: Kind::Say, text: format!("{label}: {what}…") });
     let tx = ui.tx.clone();
     AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
@@ -1916,7 +1931,7 @@ fn tick(cx: &mut App) {
         }
         let due = ui.tooltip_at.map(|at| now.saturating_duration_since(at) >= TOOLTIP_EVERY).unwrap_or(true);
         if due {
-            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.verdict, ui.gate.as_deref(), now);
+            let text = tray_tooltip(ui.progress.as_ref(), &ui.link, &ui.cfg.current().mode, &ui.verdict, ui.gate.as_deref(), now);
             ui.tooltip_at = Some(now);
             if let Some(tray) = &ui.tray {
                 tray.set_tooltip(&text);

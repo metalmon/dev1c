@@ -388,7 +388,7 @@ fn a_busy_verdict_is_never_green_on_any_surface() {
     assert!(why.contains(cause.fix), "{why}");
 
     // Подсказка значка — та же причина, теми же словами.
-    let tip = tray_tooltip(None, &up, &busy, None, now);
+    let tip = tray_tooltip(None, &up, "local", &busy, None, now);
     assert!(tip.contains("занято") && tip.contains(cause.what), "{tip}");
     assert_ne!(tip, "1c-connect: подключён");
 
@@ -553,17 +553,18 @@ fn the_badge_counts_only_bad_facts() {
 fn the_tray_says_it_is_checking_while_there_is_no_set_yet() {
     let now = Instant::now();
     let up = State::Up { since: now };
-    assert_eq!(tray_tooltip(None, &up, &Verdict::Checking, None, now), "1c-connect: проверяю");
+    assert_eq!(tray_tooltip(None, &up, "local", &Verdict::Checking, None, now), "1c-connect: проверяю");
     assert_eq!(panel::card(None, &up, "local", &Verdict::Checking, None, now).dot, Dot::Busy, "значок и подсказка обязаны говорить одно");
     // Посчитано и всё сошлось — прежняя подсказка про связь.
-    assert_eq!(tray_tooltip(None, &up, &Verdict::Ready, None, now), "1c-connect: подключён");
-    // Режима подсказка не спрашивает вовсе (Critical 1 финального ревью):
-    // прежде здесь стояло «в туннельном режиме вердикт не показываем», и
-    // это закрепляло дефект — значок желтел по вердикту, а подсказка
-    // говорила «подключён». Один вердикт — одни слова на всех
-    // поверхностях и в обоих режимах.
+    assert_eq!(tray_tooltip(None, &up, "tunnel", &Verdict::Ready, None, now), "1c-connect: подключён");
+    // Режим подсказка спрашивает только ради слова про связь (находка 22):
+    // вердикт она показывает в ОБОИХ режимах, и это Critical 1 финального
+    // ревью — прежде здесь стояло «в туннельном режиме вердикт не
+    // показываем», и это закрепляло дефект: значок желтел по вердикту, а
+    // подсказка говорила «подключён».
     let bad = Verdict::NotReady(Check::fail("проект", "не разложен", "1c-connect install"));
-    let tip = tray_tooltip(None, &up, &bad, None, now);
+    let tip = tray_tooltip(None, &up, "local", &bad, None, now);
+    assert_eq!(tip, tray_tooltip(None, &up, "tunnel", &bad, None, now), "вердикт говорится одними словами в обоих режимах");
     assert!(tip.contains("не всё готово") && tip.contains("проект"), "{tip}");
     assert_eq!(tip, format!("1c-connect: {}", warn_reason(&bad).unwrap()), "значок и подсказка переключателя говорят разными словами");
 }

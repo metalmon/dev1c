@@ -839,7 +839,13 @@ impl Machine {
     fn read_with(kit: &Kit, store: &crate::secrets::Store) -> Machine {
         match crate::cfg::Cfg::load_unchecked_with(kit, store) {
             Ok(cfg) => Machine::of(&cfg),
-            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: {e}")),
+            // Хвост с ключом toml снимается: эти слова идут в ЖУРНАЛ ОКНА, тот
+            // самый читатель, ради которого хвост и заводился
+            // (`cfg::said_in_window`). Сюда приезжает, среди прочего, отказ
+            // разбора потолка записи — с хвостом «[write; допустимые
+            // значения…]», то есть ровно тем, чего человек в окне не видит и
+            // что ему там говорить не о чем.
+            Err(e) => Machine::silent(format!("Настройки соединений не прочитались: {}", crate::cfg::said_in_window(&format!("{e}")))),
         }
     }
 

@@ -2778,7 +2778,7 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
     // Так сделано везде, где это считается образцом (сопряжение по Bluetooth,
     // UAC, AnyDesk), и так потребовал владелец 10.11: «что ещё напишем? что
     // любит, с кем живёт?». Подробность — ровно одна строка.
-    assert_eq!(detail.lines().count(), 1, "подробность диалога — одна строка: {detail}");
+    assert_eq!(detail.lines().count(), 2, "подробность диалога — две короткие строки: {detail}");
     assert!(detail.contains("Заказчик Ромашка"), "самоназвание обязано быть: {detail}");
     assert!(!detail.contains("сообщает о себе"), "теории о доверии в диалоге нет: {detail}");
 
@@ -3118,8 +3118,9 @@ fn a_crafted_name_cannot_fake_the_fingerprint_line() {
     let r = crate::enroll::Request { says_name: crafted, ..a_request() };
     let (_, detail) = permission_question(&r);
     let real = crate::gui::short_key(&r.peer.to_string());
-    // Подписи, которую можно было бы изобразить именем, в строке больше нет
-    // вовсе, а НАШ отпечаток стоит последним: после него подделывать нечего.
-    assert!(detail.ends_with(&real), "наш отпечаток — последнее в строке: {detail}");
-    assert_eq!(detail.lines().count(), 1, "строка одна, лишней из имени не вышло: {detail}");
+    let lines: Vec<&str> = detail.lines().collect();
+    // Наш отпечаток — ПЕРВОЙ строкой, со своей подписью: дорисованный именем
+    // стоит ниже и внутри кавычек, а подделать прочитанное выше нечем.
+    assert_eq!(lines[0], format!("Отпечаток {real}"), "первая строка — только подпись и наш отпечаток: {detail}");
+    assert_eq!(lines.len(), 2, "лишней строки из имени не вышло: {detail}");
 }

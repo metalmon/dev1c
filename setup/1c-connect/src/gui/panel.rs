@@ -1207,7 +1207,9 @@ pub struct Accepting {
     pub code: Option<String>,
     /// Одно предложение о том, что с кодом делать (спека: «под ней одно
     /// предложение о том, что с ней делать на той стороне»).
-    pub code_note: &'static str,
+    /// Причина, по которой кода у этой карточки не будет вовсе. `None` — сказать нечего, и строки нет: у группы кода пояснений не
+    /// бывает (закон окна, «Группа „Код“»).
+    pub code_note: Option<&'static str>,
     /// Можно ли по коду этой карточки вправду подключиться (`link::accepts_connections`). `false` — кода у неё не будет вовсе, и орудий
     /// выдачи карточка не показывает: ни строки кода, ни «Выдать новый код». Вместо них `code_note` говорит, почему.
     pub can_issue: bool,
@@ -1324,25 +1326,22 @@ pub fn accepting_block(
     // нетекущей тоже (`link_menu`, спека 4 ревью задач 6 и 7): прежде
     // подсказка велела нажать то, чего у нетекущей карточки не было ни в
     // подвале («Сделать текущим»), ни в меню («Переименовать», «Удалить»).
-    let code_note = if let Some(why) = no_code_note(c) {
-        why
-    } else if code.is_some() {
-        // Хвоста «и вы увидите здесь его просьбу» здесь больше нет (владелец 10.11: «Текст ниже — „и увидите его просьбу". О чём
-        // просьбу? Пиздец очередной»). Программа рассказывала будущее вместо настоящего, а слова «просьба» человек в этот момент ещё
-        // ни на чём не видел. Когда заявка придёт, он увидит её сам: в подвале появляется «Разрешить», и строка списка говорит, что
-        // кто-то ждёт.
-        "Передайте этот код тому, кто будет подключаться: он вставит его у себя."
-    } else {
-        "Кода пока нет. Нажмите «Выдать код» — и его можно будет передать тому, кто будет подключаться."
-    };
+    // **Пояснений у группы кода нет ни одного** (закон окна, «Группа „Код“»: кода одной строкой в поле, значок копирования справа,
+    // кнопка под полем — и ничего больше). Их было два, и оба рассказывали человеку то, что он и так видит или вот-вот увидит:
+    // «передайте этот код тому, кто будет подключаться» — над полем с кодом, и «кода пока нет, нажмите „Выдать код“» — над кнопкой,
+    // которая ровно так и называется. Сюда же третий раз подряд приходила правка хвоста про «просьбу», которую владелец выкидывал.
+    //
+    // Остаётся ОДНА строка и только там, где она не пояснение, а причина: кода у этой карточки не будет вовсе (`no_code_note`).
+    let code_note = no_code_note(c);
     // Подпись списка — без счёта (решение владельца): число зачисленных
     // человек и так видит по строкам, а «Зачислено: 2 стороны» он не
     // произнесёт вслух.
+    // Подпись есть ТОЛЬКО когда под ней есть строки. «Вы ещё никому не разрешили подключаться» — состояние словами на пустом месте: у
+    // свежей карточки под кодом и так ничего нет, и сообщать об этом отдельной строкой незачем. Непрочитанная книга — другое дело: это
+    // не пустота, а беда, и она говорится (`BOOK_UNREAD_NOTE`).
     let enrolled = match parties {
         None => BOOK_UNREAD_NOTE.to_string(),
-        // Пустота словами, а не пустым местом — то же правило, что у
-        // `base_fields_note` и `nothing_to_show`.
-        Some([]) => "Вы ещё никому не разрешили подключаться".to_string(),
+        Some([]) => String::new(),
         Some(_) => "Кому разрешено подключаться".to_string(),
     };
     let parties = parties
@@ -2200,16 +2199,13 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
             // карточки, а нажимают это в подвале и в меню. Просьбу гасит сам
             // якорь у блока кода на ближайшей отрисовке (`scroll_anchor`);
             // отказ выдачи её не взводит — везти не к чему.
-            if let Ok(code) = &r {
+            if r.is_ok() {
                 cx.global_mut::<Ui>().show_code = true;
-                // Код — в поле карточки, откуда человек его копирует (значком рядом или руками). Кладёт его сюда сама выдача: `adopt_fields`
-                // наполняет поле лишь при открытии карточки, а эту кнопку жмут у УЖЕ открытой.
-                if let Some(panel) = cx.global::<Ui>().panel.clone() {
-                    let code = code.clone();
-                    panel.update(cx, |this, cx| {
-                        this.fields.issued.update(cx, |s, cx| s.set_value(code, window, cx));
-                    });
-                }
+                // **Поле кода наполняет ОТРИСОВКА (`sync_issued`), а не эта ветка.** Здесь стоял `panel.update(...)`, и он ронял окно:
+                // кнопку «Выдать новый код» жмут В КАРТОЧКЕ, то есть из `cx.listener` самой панели, а значит панель уже занята — второй
+                // заход в неё падает. Та же мина, что ловили с просьбой «показать код» (коммит 17ddc19): обработчик панели не вправе
+                // читать и править панель. Выдача кладёт код в глобал (`Ui::codes`), отрисовка его оттуда и берёт — одной дорогой и для
+                // открытия карточки, и для этой кнопки.
             }
             // Сам код в журнал не печатается — он секрет, а журнал видно
             // через плечо и он уезжает в отчёты. Строка говорит, что код
@@ -3175,6 +3171,27 @@ impl Panel {
         Dirty::No
     }
 
+    /// Живой код ОТКРЫТОЙ карточки — в её поле. Зовётся отрисовкой, а не обработчиком кнопки.
+    ///
+    /// Источник один — `live_code` по глобалу (`Ui::codes`), то есть ровно то, что кладёт туда выдача. Сравнение перед записью не
+    /// украшение: без него каждая отрисовка писала бы в поле и будила следующую.
+    fn sync_issued(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Код выдан — карточка обязана быть РАСКРЫТОЙ: он лежит в ней, и закрытая карточка прячет ровно то, за чем человек нажимал.
+        // Просьбу «довезти код до глаз» несёт тот же признак, что и прокрутку к нему (`Ui::show_code`), так что второго мнения о
+        // «показать код» не заводится.
+        if cx.global::<Ui>().show_code {
+            self.expanded = true;
+        }
+        let issued = {
+            let ui = cx.global::<Ui>();
+            let card = resolve_selected(&ui.cfg, &self.selected).name.clone();
+            live_code(ui, &card, SystemTime::now()).unwrap_or_default()
+        };
+        if self.fields.issued.read(cx).value() != issued.as_str() {
+            self.fields.issued.update(cx, |s, cx| s.set_value(issued, window, cx));
+        }
+    }
+
     /// Положить перечитанные параметры в поля и сдвинуть точку отсчёта
     /// «изменилось ли»: иначе «Сохранить» загорелась бы от самого подхвата.
     fn adopt_fields(&mut self, host: &Connection, window: &mut Window, cx: &mut Context<Self>) {
@@ -3719,7 +3736,9 @@ impl Panel {
                     ),
                 );
             }
-            col = col.child(div().text_size(px(13.)).text_color(caption).child(block.code_note));
+            if let Some(why) = block.code_note {
+                col = col.child(div().text_size(px(13.)).text_color(caption).child(why));
+            }
             // Орудие выдачи — только там, где код вправду выдают
             // (`Accepting::can_issue`): у карточки с базой на другом
             // компьютере кнопка рядом с объяснением «кода не будет» означала
@@ -3727,17 +3746,20 @@ impl Panel {
             // устанет.
             if block.can_issue {
                 let card = card_name.clone();
+                // Кнопка во всю ширину — одна из двух законных форм кнопки в карточке (закон окна, «Кнопки в карточке: ровно две
+                // формы»; вторая — значок справа от поля, им здесь сделано копирование). Короткая кнопка посреди строки была третьей
+                // формой, которой не бывает.
                 col = col.child(
-                    h_flex().gap_2().child(
-                        KitButton::new("new-code")
-                            .outline()
-                            .small()
-                            .label("Выдать новый код")
-                            .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
-                    ),
+                    KitButton::new("new-code")
+                        .outline()
+                        .w_full()
+                        .label("Выдать новый код")
+                        .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
                 );
             }
-            col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
+            if !block.enrolled.is_empty() {
+                col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
+            }
             for (n, p) in block.parties.into_iter().enumerate() {
                 let card = card_name.clone();
                 let key = p.key;
@@ -3873,6 +3895,9 @@ impl Panel {
 
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Код выданный — в поле карточки. Здесь, а не в обработчике кнопки: обработчик карточки держит панель занятой, и правка полей
+        // оттуда роняет окно.
+        self.sync_issued(window, cx);
         let t = cx.theme();
         let (bg, border, fg, accent) = (t.background, t.border, t.foreground, t.primary);
         let (success, warning, danger, card_bg, window_border) = (t.success, t.warning, t.danger, t.secondary, t.window_border);
@@ -6721,7 +6746,8 @@ mod tests {
         let b = accepting_block(&cfg, &card, Some("КОД-СТРОКА"), Some(&parties)).expect("принимающая карточка обязана нести блок");
         assert_eq!(b.code.as_deref(), Some("КОД-СТРОКА"));
         assert!(b.can_issue, "база здесь, роль принимающая — код выдают");
-        assert!(b.code_note.contains("кто будет подключаться"), "{}", b.code_note);
+        // Пояснения у кода нет: код лежит в поле, и говорить про него словами незачем (закон окна).
+        assert_eq!(b.code_note, None);
         assert_eq!(b.enrolled, "Кому разрешено подключаться", "подпись списка, а не счёт: предела числу зачисленных нет");
 
         // Отпечаток — ЧЕТЫРЬМЯ последними знаками (решение владельца 10.11).
@@ -6815,7 +6841,8 @@ mod tests {
         assert_eq!(unread.enrolled, BOOK_UNREAD_NOTE);
         assert!(unread.parties.is_empty(), "показывать нечего — но и говорить «никого» нельзя");
         let empty = accepting_block(&cfg, &accepting_card(), None, Some(&[])).expect("блок есть");
-        assert_eq!(empty.enrolled, "Вы ещё никому не разрешили подключаться");
+        // Пусто — и подписи нет вовсе: «вы ещё никому не разрешили» было состоянием словами на пустом месте.
+        assert_eq!(empty.enrolled, "");
         assert_ne!(unread.enrolled, empty.enrolled, "два разных случая — два разных ответа человеку");
     }
 
@@ -6835,8 +6862,8 @@ mod tests {
         let b = accepting_block(&crate::cfg::Cfg::default(), &there, Some("КОД-СТРОКА"), Some(&[])).expect("блок есть");
         assert!(!b.can_issue, "по коду этой карточки подключиться нельзя никогда");
         assert_eq!(b.code, None, "даже уже выданный код карточка не предлагает передать");
-        assert_eq!(b.code_note, BASE_ELSEWHERE_NOTE);
-        assert!(!b.code_note.contains("Передайте"), "обещания просьбы, которой не будет, нет: {}", b.code_note);
+        // Единственный случай, когда у кода есть слова: кода не будет вовсе, и это причина, а не пояснение.
+        assert_eq!(b.code_note, Some(BASE_ELSEWHERE_NOTE));
 
         let mut ui = ui_for("accept", "tunnel", false);
         ui.cfg.current_mut().base_here = false;
@@ -6929,8 +6956,8 @@ mod tests {
     fn a_card_without_a_code_yet_says_how_to_get_one() {
         let b = accepting_block(&crate::cfg::Cfg::default(), &accepting_card(), None, Some(&[])).expect("блок есть и без кода");
         assert_eq!(b.code, None);
-        assert!(b.code_note.contains("Выдать код"), "подсказка зовёт кнопку подвала её же словами: {}", b.code_note);
-        assert_eq!(b.enrolled, "Вы ещё никому не разрешили подключаться");
+        assert_eq!(b.code_note, None, "кода ещё нет — и слов об этом тоже: кнопка подвала называет себя сама");
+        assert_eq!(b.enrolled, "");
         assert!(b.parties.is_empty());
     }
 
@@ -7096,6 +7123,6 @@ mod tests {
         // И карточка больше не велит передавать то, чего нет.
         let b = accepting_block(&ui.cfg, ui.cfg.current(), None, Some(&[])).expect("блок есть");
         assert!(b.code.is_none());
-        assert!(b.code_note.contains("Кода пока нет"), "{}", b.code_note);
+        assert_eq!(b.code_note, None, "«кода пока нет» человек видит по пустому полю и по кнопке, которая так и называется");
     }
 }

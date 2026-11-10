@@ -3965,19 +3965,19 @@ impl Render for Panel {
         // когда их нет — непрочитанные строки приглушённым слоем (акцент
         // берёт только переключатель и главная кнопка). Ширины сверх самой
         // цифры бейдж не добавляет.
-        let log_badge = if failed > 0 {
-            Some((failed, danger, bg))
-        } else if unread > 0 && tab != gui::Tab::Log {
-            Some((unread, border, fg))
-        } else {
-            None
+        // Бейджи разведены по вкладкам, и в каждом слоте один счёт (находка 29
+        // осмотра 10.11: «один слот под два разных счёта — цифра значит то
+        // одно, то другое»). Плохие факты живого набора — на «Инструментах»,
+        // красным: это ИХ вкладка, там они и перечислены построчно.
+        // Непрочитанные строки — на «Журнале», приглушённым слоем (акцент
+        // берёт только переключатель и главная кнопка). Ширины сверх самой
+        // цифры бейдж не добавляет.
+        let badge = |tab: KitTab, n: usize, colour: Hsla, on: Hsla| match n {
+            0 => tab,
+            n => tab.suffix(div().rounded_sm().bg(colour).text_color(on).child(n.to_string())),
         };
-        let log_tab = match log_badge {
-            Some((n, colour, on)) => {
-                KitTab::new().label("Журнал").suffix(div().rounded_sm().bg(colour).text_color(on).child(n.to_string()))
-            }
-            None => KitTab::new().label("Журнал"),
-        };
+        let tools_tab = badge(KitTab::new().label("Инструменты"), failed, danger, bg);
+        let log_tab = badge(KitTab::new().label("Журнал"), if tab == gui::Tab::Log { 0 } else { unread }, border, fg);
         // Трём подписям хватает обычного размера (`small`, 14 px): на пяти
         // приходилось жать до `xsmall`.
         let tabs = TabBar::new("tabs")
@@ -3987,7 +3987,7 @@ impl Render for Panel {
             // На второй вкладке — расширение в базе, выгрузка и обмен с
             // репозиторием, то есть инструменты работы с 1С, а не сведения о
             // проекте (решение владельца 30.10).
-            .children([KitTab::new().label("Связь"), KitTab::new().label("Инструменты"), log_tab])
+            .children([KitTab::new().label("Связь"), tools_tab, log_tab])
             .on_click(cx.listener(|_, i: &usize, _, cx| {
                 let Some(t) = gui::Tab::ALL.get(*i).copied() else { return };
                 let ui = cx.global_mut::<Ui>();
@@ -4550,13 +4550,14 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, blind_code_note, can_save, card, card_title,
-        delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
-        gate_text, issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
-        project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
-        save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner,
-        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE,
-        DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
+        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, base_here_answers, blind_code_note, can_save, card,
+        card_title, delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label,
+        found_text, issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
+        project_facts, project_label, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected,
+        row_marks, save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts,
+        tools_connection_banner, undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu,
+        BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE, DELETE_CONFIRM_YES, GATE_WORD, NOT_ACCEPTING_NOTE, OFF_WORD, ONBOARDING_ASK,
+        ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;

@@ -98,13 +98,148 @@ pub mod code {
 /// текста не кладётся. Держит это правило сам тип текста — `SaysWhy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refuse {
-    pub code: String,
+    pub code: RefuseCode,
     pub text: SaysWhy,
 }
 
 impl Refuse {
     pub fn new(code: &str, text: impl Into<SaysWhy>) -> Self {
-        Self { code: code.to_string(), text: text.into() }
+        Self { code: RefuseCode::new(code), text: text.into() }
+    }
+}
+
+/// Чистка ЧУЖОЙ строки — одно правило на все доверительные границы провода: самоназвание (`SaysName`), текст отказа (`SaysWhy`) и ключ
+/// карточки, названный той стороной (`cfg::CardId`).
+///
+/// **Почему одно, а не по правилу на тип.** Правил было два, написанных подряд в этом же файле, и они уже разошлись: оба выбрасывали
+/// управляющие знаки, но ни одно не считало пробельные из них РАЗДЕЛИТЕЛЕМ, — то есть «вышло\tпочему» склеивалось в «вышлопочему», а
+/// самоназвание в две строки — в одно слово. Третья копия правила приехала бы с ключом карточки. Теперь правило одно, и починка
+/// табуляции досталась всем трём разом.
+///
+/// **Что делает.** Выбрасываются целые категории Unicode: `Cc` управляющие, `Cf` форматирующие, `Zl`/`Zp` разделители строки и абзаца,
+/// `Co`/`Cn` частное использование и неназначенные, `Cs` половинки пар. Пробельное (`Zs`) и пробельное из управляющих (табуляция, возврат
+/// каретки, подача страницы) схлопываются в ОДИН пробел; перевод строки — разделитель посильнее и остаётся переводом строки, пока их не
+/// набралось `lines`, а дальше становится пробелом: так слова остаются, а абзац не отрастает. Края срезаются сами — разделитель не
+/// пишется, пока за ним не пришёл видимый знак.
+///
+/// `lines` — сколько строк разрешено оставить; `1` значит «ни одного перевода строки». Предел `limit` в ЗНАКАХ и применяется ПОСЛЕ чистки:
+/// иначе полоса невидимых знаков выедала бы его, и человеку досталось бы три буквы из восьмидесяти.
+pub(crate) fn cleaned(raw: &str, limit: usize, lines_allowed: usize) -> String {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+    let mut out = String::new();
+    let mut kept = 0usize;
+    // Разделитель не пишется сразу, а запоминается: так полоса пробелов
+    // схлопывается в один, строка не начинается с них, а перевод строки берёт
+    // верх над пробелом, оказавшимся рядом.
+    let (mut space, mut line) = (false, false);
+    let mut lines = 1usize;
+    for c in raw.chars() {
+        let keep = match c.general_category() {
+            GeneralCategory::Control if c == '\n' => {
+                line = true;
+                continue;
+            }
+            // Табуляция и прочее пробельное из управляющих — РАЗДЕЛИТЕЛЬ, а не
+            // пустое место: выброшенная без следа табуляция склеивала два слова
+            // в одно, и человек читал «вышлопочему».
+            GeneralCategory::Control if c.is_whitespace() => {
+                space = true;
+                continue;
+            }
+            GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::Surrogate => continue,
+            GeneralCategory::SpaceSeparator => {
+                space = true;
+                continue;
+            }
+            _ => c,
+        };
+        if (space || line) && !out.is_empty() {
+            let newline = line && lines < lines_allowed;
+            if kept + 1 >= limit {
+                break;
+            }
+            out.push(if newline { '\n' } else { ' ' });
+            kept += 1;
+            lines += usize::from(newline);
+        }
+        (space, line) = (false, false);
+        if kept >= limit {
+            break;
+        }
+        out.push(keep);
+        kept += 1;
+    }
+    out
+}
+
+/// Предел кода отказа — сорок знаков.
+///
+/// Наш самый длинный — `unknown_message`, пятнадцать. Сорок — запас на имена, которых эта версия ещё не знает; мегабайт чужих слов в них не
+/// умещается, и это главное, зачем предел назван.
+pub const REFUSE_CODE_LIMIT: usize = 40;
+
+/// Код отказа — ТИП, а не строка, потому что по этому полю тоже ездят ЧУЖИЕ знаки.
+///
+/// **Чем куплено.** Текст отказа этим кругом стал типом (`SaysWhy`), а код остался рядом сырой строкой — без предела, до мегабайта, с
+/// переводами строк, — и `Display for Refuse` печатает его в журнал. Живой дыры тут не было: сегодня никто не зовёт `{refuse}` на
+/// пришедшем с провода значении. Это была открытая дорога: первый, кто напишет `{e}` вместо `{e.text}`, вернул бы ровно ту беду, которую
+/// круг только что закрыл, — и ничто в коде ему не возразило бы.
+///
+/// **Правило чистки здесь СВОЁ, и это не второй словарь.** Код — не слова человеку, а имя на проводе: наши все до одного из
+/// `[a-z0-9_]` (см. `code`), и чужие обязаны быть такими же. Поэтому вместо чистки по категориям (`cleaned` — для того, что человек
+/// ЧИТАЕТ) здесь белый список знаков: что не имя, то не код. Неизвестное имя остаётся собой — по нему и видно честное расхождение версий;
+/// пустая строка на месте мусора — тоже ответ, и в журнале она читается как «отказ без кода».
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub struct RefuseCode(String);
+
+impl RefuseCode {
+    /// Единственная дорога внутрь.
+    pub fn new(raw: &str) -> Self {
+        Self(raw.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').take(REFUSE_CODE_LIMIT).collect())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for RefuseCode {
+    fn from(raw: String) -> Self {
+        Self::new(&raw)
+    }
+}
+
+impl From<RefuseCode> for String {
+    fn from(code: RefuseCode) -> String {
+        code.0
+    }
+}
+
+/// Сравнение с литералом кода (`code::VERSION` и его соседи) — чтобы читатель спрашивал `no.code == code::VERSION`, а не разбирал тип
+/// обратно в строку на каждом месте.
+impl PartialEq<&str> for RefuseCode {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::fmt::Display for RefuseCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Печатается как есть: вычищенный по построению, он и в журнале читается кодом.
+impl std::fmt::Debug for RefuseCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -154,52 +289,9 @@ const SAYS_WHY_LINES: usize = 3;
 pub struct SaysWhy(String);
 
 impl SaysWhy {
-    /// Единственная дорога внутрь.
+    /// Единственная дорога внутрь. Правило чистки общее на все чужие строки — `cleaned`, там и довод, почему оно одно.
     pub fn new(raw: &str) -> Self {
-        use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-        let mut out = String::new();
-        let mut kept = 0usize;
-        // Разделитель не пишется сразу, а запоминается: так полоса пробелов
-        // схлопывается в один, строка не начинается с них, а перевод строки
-        // берёт верх над пробелом, оказавшимся рядом.
-        let (mut space, mut line) = (false, false);
-        let mut lines = 1usize;
-        for c in raw.chars() {
-            let keep = match c.general_category() {
-                GeneralCategory::Control if c == '\n' => {
-                    line = true;
-                    continue;
-                }
-                GeneralCategory::Control
-                | GeneralCategory::Format
-                | GeneralCategory::LineSeparator
-                | GeneralCategory::ParagraphSeparator
-                | GeneralCategory::PrivateUse
-                | GeneralCategory::Unassigned
-                | GeneralCategory::Surrogate => continue,
-                GeneralCategory::SpaceSeparator => {
-                    space = true;
-                    continue;
-                }
-                _ => c,
-            };
-            if (space || line) && !out.is_empty() {
-                let newline = line && lines < SAYS_WHY_LINES;
-                if kept + 1 >= SAYS_WHY_LIMIT {
-                    break;
-                }
-                out.push(if newline { '\n' } else { ' ' });
-                kept += 1;
-                lines += usize::from(newline);
-            }
-            (space, line) = (false, false);
-            if kept >= SAYS_WHY_LIMIT {
-                break;
-            }
-            out.push(keep);
-            kept += 1;
-        }
-        Self(out)
+        Self(cleaned(raw, SAYS_WHY_LIMIT, SAYS_WHY_LINES))
     }
 
     /// То, что можно показать и записать: вычищенное по построению.
@@ -325,48 +417,9 @@ pub const SAYS_NAME_LIMIT: usize = 80;
 pub struct SaysName(String);
 
 impl SaysName {
-    /// Единственная дорога внутрь: чистит категориями, схлопывает пробельное,
-    /// срезает края, обрезает по пределу.
-    ///
-    /// Предел применяется ПОСЛЕ чистки — иначе полоса невидимых знаков
-    /// выедала бы его, и в окне осталось бы три буквы из восьмидесяти.
+    /// Единственная дорога внутрь. Правило чистки общее на все чужие строки — `cleaned`, там и довод, почему оно одно; строк здесь ровно одна, и перевод строки становится пробелом.
     pub fn new(raw: &str) -> Self {
-        use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-        let mut out = String::new();
-        let mut kept = 0usize;
-        // Пробел не пишется сразу, а запоминается: так подряд идущие
-        // схлопываются в один, а край строки не получает его вовсе.
-        let mut pending_space = false;
-        for c in raw.chars() {
-            let keep = match c.general_category() {
-                GeneralCategory::Control
-                | GeneralCategory::Format
-                | GeneralCategory::LineSeparator
-                | GeneralCategory::ParagraphSeparator
-                | GeneralCategory::PrivateUse
-                | GeneralCategory::Unassigned
-                | GeneralCategory::Surrogate => continue,
-                GeneralCategory::SpaceSeparator => {
-                    pending_space = true;
-                    continue;
-                }
-                _ => c,
-            };
-            if pending_space && !out.is_empty() {
-                if kept + 1 >= SAYS_NAME_LIMIT {
-                    break;
-                }
-                out.push(' ');
-                kept += 1;
-            }
-            pending_space = false;
-            if kept >= SAYS_NAME_LIMIT {
-                break;
-            }
-            out.push(keep);
-            kept += 1;
-        }
-        Self(out)
+        Self(cleaned(raw, SAYS_NAME_LIMIT, 1))
     }
 
     /// То, что можно показать и записать: вычищенное по построению.
@@ -969,12 +1022,19 @@ mod tests {
         let Msg::Enroll { says_name, .. } = serde_json::from_str::<Msg>(&json).unwrap() else { panic!("собирали enroll") };
 
         let shown = says_name.as_str();
-        assert_eq!(shown, "РомашкаОТПЕЧАТОК тут", "чистится по категориям, пробелы схлопываются, края срезаются: {shown:?}");
+        // «Ромашка ОТПЕЧАТОК», а не «РомашкаОТПЕЧАТОК»: перевод строки и
+        // возврат каретки — РАЗДЕЛИТЕЛИ, и выбросить их без следа значит
+        // склеить два слова в одно (находка повторного ревью всей ветки, та же
+        // беда, что с табуляцией в тексте отказа). Прежде здесь стояло склеенное
+        // — то есть ожидание закрепляло поломку.
+        assert_eq!(shown, "Ромашка ОТПЕЧАТОК тут", "чистится по категориям, пробельное схлопывается, края срезаются: {shown:?}");
         assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
+        // Табуляция — то же самое и тем же правилом: слова остаются словами.
+        assert_eq!(SaysName::new("вышло\tпочему").as_str(), "вышло почему", "табуляция — разделитель, а не пустое место");
 
         // И обратно на провод уезжает уже вычищенное, а не исходная грязь.
         let back = serde_json::to_value(Msg::Enroll { ticket_secret: "ab".into(), says_name, base: None }).unwrap();
-        assert_eq!(back["says_name"], "РомашкаОТПЕЧАТОК тут");
+        assert_eq!(back["says_name"], "Ромашка ОТПЕЧАТОК тут");
     }
 
     /// Длинное имя обрезается по знакам, а не по байтам: предел виден
@@ -1037,6 +1097,48 @@ mod tests {
         // И обратно на провод уезжает уже вычищенное, а не исходная грязь.
         let back = serde_json::to_value(Msg::Revoked { base_id: "b1".into(), text: nasty.as_str().into() }).unwrap();
         clean(back["text"].as_str().unwrap());
+
+        // Табуляция между словами — разделитель, а не пустое место: без этого
+        // «вышло\tпочему» склеивалось в «вышлопочему» (находка повторного ревью
+        // всей ветки, `wire.rs:170`).
+        assert_eq!(SaysWhy::new("вышло\tпочему").as_str(), "вышло почему");
+    }
+
+    /// Код отказа — ТИП, и мегабайт чужих знаков по этому полю не проезжает тоже.
+    ///
+    /// Живой дыры здесь не было: сегодня никто не печатает `{refuse}` на пришедшем с провода значении. Проверяется поэтому не последствие,
+    /// а сам тип: открытая дорога закрыта, и первый, кто напишет `{e}` вместо `{e.text}`, не вернёт закрытую этим кругом беду.
+    #[test]
+    fn a_refusal_code_from_the_wire_is_a_name_and_nothing_else() {
+        let nasty = format!("ОТКАЗ\n\r\u{202e}Version-2 {}", "x".repeat(100_000));
+        let json = serde_json::json!({ "msg": "refuse", "code": nasty, "text": "Что-то не вышло.\nПочему.\nЧто делать." }).to_string();
+        let Msg::Refuse(no) = serde_json::from_str::<Msg>(&json).unwrap() else { panic!("собирали refuse") };
+        assert_eq!(no.code.as_str(), "ersion2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "остаются только знаки имени, и не больше предела");
+        assert_eq!(no.code.as_str().chars().count(), REFUSE_CODE_LIMIT);
+        // Журнальная строка целиком — ровно то место, где сырой код и ждал
+        // своего первого печатающего.
+        assert!(!no.to_string().chars().any(|c| c.is_control() && c != '\n'), "{no}");
+
+        // Наши собственные имена проходят как есть: чистка не вправе портить то,
+        // по чему зовущая сторона отличает отказ версии от отказа тикета.
+        for ours in [code::VERSION, code::DECLINED, code::UNKNOWN_MESSAGE, code::NOT_ALLOWED] {
+            assert_eq!(Refuse::new(ours, "а.\nб.\nв.").code, ours);
+        }
+    }
+
+    /// Ключ карточки, названный ТОЙ стороной, — чужая строка, и у неё есть предел и чистка.
+    ///
+    /// Он едет в `hello_ok`, в `enroll_ok` и в `revoked`, а на зовущей стороне ложится в наш `partners.toml` рядом с адресом возврата.
+    /// Без предела по этому полю проезжал кадр целиком — до мегабайта, с переводами строк и невидимой разметкой.
+    #[test]
+    fn a_card_key_from_the_wire_arrives_clean_and_short() {
+        let nasty = format!("b\u{8}1\n\u{202e}{}", "9".repeat(100_000));
+        let json = serde_json::json!({ "msg": "revoked", "base_id": nasty, "text": "а.\nб.\nв." }).to_string();
+        let Msg::Revoked { base_id, .. } = serde_json::from_str::<Msg>(&json).unwrap() else { panic!("собирали revoked") };
+        let shown = base_id.as_str();
+        assert!(!shown.chars().any(char::is_control), "управляющих знаков в ключе карточки быть не может: {shown:?}");
+        assert_eq!(shown.chars().count(), crate::cfg::CARD_ID_LIMIT, "предел в знаках, и он применяется после чистки");
+        assert!(shown.starts_with("b1 9"), "видимые знаки сохраняются, перевод строки стал разделителем: {shown:?}");
     }
 
     #[tokio::test]

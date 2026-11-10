@@ -3,6 +3,7 @@
 //! зовут `start`, держат `Session` и в конце — `stop`.
 
 use crate::cfg::{Cfg, Ports};
+use crate::ops_host::McpServer;
 use crate::{bridge, editors, tunnel};
 use common::kit::Kit;
 use common::{Event, Sink};
@@ -439,7 +440,9 @@ pub fn start_with_enabled(
             } else {
                 let dispatch = serve.clone();
                 let on_incoming = move |inc: tunnel::Incoming| {
-                    dispatch.dispatch(inc.port, inc.channel.into_stream());
+                    if let Some(what) = Served::of_port(inc.port, dispatch.ports()) {
+                        dispatch.serve(what, inc.channel.into_stream());
+                    }
                 };
                 tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx, editor_mcp.clone()).await
             };
@@ -503,18 +506,24 @@ impl Serve {
         Serve { cfg, kit: kit.clone(), log, ports, web_port: cfg_now.web_port(), tools_dir, enabled }
     }
 
-    /// Разобрать одно принятое соединение: порт решает, какой процесс за ним
-    /// стоит. Неизвестный порт — `None`, ничего не запускается и `stream`
-    /// просто закрывается, когда функция вернётся. Строка подключения,
-    /// пользователь базы и каталог проекта мост берёт не отсюда (однократно
-    /// на соединение), а на каждый запрос внутри себя (`rules.live`) — Zed
-    /// держит это соединение весь сеанс и сам не переподключается, так что
-    /// однократного чтения здесь было бы недостаточно (см. `bridge::pipe_jsonrpc`).
-    pub fn dispatch<S>(&self, port: u16, stream: S) -> Option<tokio::task::JoinHandle<()>>
+    /// Порты, которые слушает этот сеанс. Нужны тому, кто переводит порт в слово (`Served::of_port`).
+    pub fn ports(&self) -> Ports {
+        self.ports
+    }
+
+    /// Обслужить одно принятое соединение: `what` говорит, какой процесс за ним стоит. Строка подключения, пользователь базы и каталог
+    /// проекта мост берёт не отсюда (однократно на соединение), а на каждый запрос внутри себя (`rules.live`) — Zed держит это
+    /// соединение весь сеанс и сам не переподключается, так что однократного чтения здесь было бы недостаточно
+    /// (см. `bridge::pipe_jsonrpc`).
+    ///
+    /// **Выбор ключуется СЛОВОМ, а не портом** (шаг 0 плана пары B). Порт — свойство местного слушателя: его знает `listen::accept_for`,
+    /// он же и переводит порт в слово (`Served::of_port`). По каналу порта нет вовсе — там вид процесса приезжает кадром, — и если бы
+    /// выбор остался на порту, у одного понятия стало бы два словаря: номер здесь и слово на проводе.
+    pub fn serve<S>(&self, what: Served, stream: S) -> tokio::task::JoinHandle<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        if port == self.ports.vrunner {
+        if what == Served::Mcp(McpServer::Vrunner) {
             let (_, cfg0) = self.cfg.get();
             let tools_dir = self.tools_dir.clone();
             let cmd0 = Ok(bridge::vrunner_command(&cfg0, &tools_dir));
@@ -531,12 +540,12 @@ impl Serve {
             );
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
+            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
                 if let Some(e) = child_exit_line("vrunner-mcp", code, by_us, &err) {
                     log_exit(e);
                 }
-            })))
-        } else if port == self.ports.mcp {
+            }))
+        } else if what == Served::Mcp(McpServer::OneC) {
             let (_, cfg0) = self.cfg.get();
             let kit = self.kit.clone();
             // Страж перед сборкой (круг исправления 2, пункт 1, находка
@@ -550,19 +559,46 @@ impl Serve {
             rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command_guarded(cfg, &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
-            Some(tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
+            tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
                 if let Some(e) = child_exit_line("mcp-1c", code, by_us, &err) {
                     log_exit(e);
                 }
-            })))
-        } else if port == self.ports.web {
+            }))
+        } else {
             let log = self.log.clone();
             let web_port = self.web_port;
-            Some(tokio::spawn(async move {
+            tokio::spawn(async move {
                 if let Err(e) = bridge::pipe_tcp(stream, web_port).await {
                     log(Event::Warn(e));
                 }
-            }))
+            })
+        }
+    }
+}
+
+/// Что стоит за принятым соединением: мост к одному из серверов инструментов или наш веб-клиент.
+///
+/// Заведено шагом 0 плана пары B. Прежде на этот вопрос отвечал НОМЕР ПОРТА прямо внутри `Serve`, и это работало ровно до тех пор, пока
+/// соединения приходили по TCP. Вызовы по каналу порта не несут вовсе: вид процесса приезжает в заголовке потока словом. Два словаря
+/// одного понятия — номер в одном месте, слово в другом — и есть та самая «две меры на один вопрос», с которой эта ветка борется.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Served {
+    /// Мост к серверу инструментов: 1С или vrunner.
+    Mcp(McpServer),
+    /// Наш веб-клиент: труба на локальный порт публикации, без моста.
+    Web,
+}
+
+impl Served {
+    /// Перевести ПОРТ в слово. Единственное место, где номер порта что-то решает, и живёт оно рядом с тем, кто порты слушает.
+    /// Неизвестный порт — `None`: ничего не запускается, соединение закрывается само.
+    pub fn of_port(port: u16, ports: Ports) -> Option<Served> {
+        if port == ports.vrunner {
+            Some(Served::Mcp(McpServer::Vrunner))
+        } else if port == ports.mcp {
+            Some(Served::Mcp(McpServer::OneC))
+        } else if port == ports.web {
+            Some(Served::Web)
         } else {
             None
         }
@@ -672,7 +708,7 @@ mod tests {
         // мост обязан ответить сам, иначе Zed сочтёт сервер упавшим.
         let (mine, theirs) = tokio::io::duplex(64 * 1024);
         let serve = Serve::new(&filled(), &kit_in(tempdir()), Arc::new(|_| {}), ports(), Arc::new(AtomicBool::new(true)));
-        let task = serve.dispatch(ports().mcp, theirs).unwrap();
+        let task = serve.serve(Served::Mcp(McpServer::OneC), theirs);
         let reply = ask(mine, br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         assert!(reply.contains("\"result\""), "{reply}");
         task.abort();
@@ -682,6 +718,20 @@ mod tests {
     fn the_server_argument_picks_the_port() {
         assert_eq!(port_of(McpServer::OneC, ports()), ports().mcp);
         assert_eq!(port_of(McpServer::Vrunner, ports()), ports().vrunner);
+    }
+
+    /// Порт переводится в слово ОДНИМ местом, и перевод обратим: что слушатель принял на порту сервера, то и обслужит его мост.
+    /// Чужой порт — `None`: ничего не запускается, соединение закрывается само.
+    #[test]
+    fn a_port_turns_into_the_word_for_what_stands_behind_it() {
+        let p = ports();
+        assert_eq!(Served::of_port(p.mcp, p), Some(Served::Mcp(McpServer::OneC)));
+        assert_eq!(Served::of_port(p.vrunner, p), Some(Served::Mcp(McpServer::Vrunner)));
+        assert_eq!(Served::of_port(p.web, p), Some(Served::Web));
+        assert_eq!(Served::of_port(1, p), None, "чужой порт мостом не обслуживается");
+        for server in [McpServer::OneC, McpServer::Vrunner] {
+            assert_eq!(Served::of_port(port_of(server, p), p), Some(Served::Mcp(server)), "перевод обратим: {server:?}");
+        }
     }
 
     /// Два смысла одного события разведены: состояние читает `Ok` как «канал

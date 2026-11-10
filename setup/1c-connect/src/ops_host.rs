@@ -1711,7 +1711,7 @@ pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
 /// `1c` — mcp-1c, `vrunner` — vrunner-mcp. Через мост идут ровно эти два
 /// (спека «MCP в редакторе», «Не цели»), третьего не бывает — отдельный флаг
 /// или строка снаружи были бы дверью туда, куда ходить не должны.
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum McpServer {
     #[value(name = "1c")]
     OneC,
@@ -1936,21 +1936,16 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // см. заголовок `orphan.rs`): `live` ему больше не нужна.
     crate::orphan::guard_owner(kit.clone(), crate::single_instance::current_user(), log.clone());
     let enabled = watch_mcp(kit.clone(), crate::single_instance::current_user(), live.clone(), log.clone());
-    // Один раз: `Ports` — `Copy`, дальше используется по значению и для
-    // выбора порта, и для самого `Serve` (ревью задачи 3, Minor 7).
+    // Порт подкоманде больше не нужен: вид сервера она знает прямо и отдаёт его словом (`session::Served`). `Ports` остаются — их
+    // берёт сам `Serve`.
     let ports = cfg.ports();
-    let port = port_of(server, ports);
     let serve = crate::session::Serve::shared(live, &cfg, &kit, log, ports, enabled);
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let stdio = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
-        // `None` не должен случаться (`port` всегда один из тех же `ports`,
-        // что и у `serve`), а паника задачи моста не должна молча кончаться
-        // `exit 0` — редактор увидел бы мгновенно умерший сервер без единого
-        // слова (ревью задачи 3, Minor 6).
-        let task = serve
-            .dispatch(port, stdio)
-            .ok_or_else(|| anyhow::anyhow!("порт {port} не обслуживается мостом — внутренняя ошибка (server и ports разошлись)"))?;
+        // Вид сервера известен подкоманде прямо (`server`), и переводить его в порт, чтобы тут же перевести обратно, больше не нужно:
+        // отсюда ушёл и прежний отказ «порт не обслуживается», который был возможен только при расхождении двух словарей.
+        let task = serve.serve(crate::session::Served::Mcp(server), stdio);
         task.await.map_err(|e| anyhow::anyhow!("мост 1c-connect упал: {e}"))?;
         Ok(())
     })

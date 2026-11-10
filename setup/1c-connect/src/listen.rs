@@ -180,7 +180,8 @@ fn accept_for(serve: &Serve, port: u16, stream: TcpStream) -> std::io::Result<Op
     let std_stream = stream.into_std()?;
     let watcher = std_stream.try_clone()?;
     let async_stream = TcpStream::from_std(std_stream)?;
-    Ok(serve.dispatch(port, async_stream).map(|h| (h, watcher)))
+    // Порт решает ЗДЕСЬ и только здесь: дальше идёт слово (`Served`).
+    Ok(crate::session::Served::of_port(port, serve.ports()).map(|what| (serve.serve(what, async_stream), watcher)))
 }
 
 #[cfg(test)]

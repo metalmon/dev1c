@@ -95,16 +95,173 @@ pub mod code {
 ///
 /// Правило текста (спека, «Ошибки»): что не вышло — одной строкой, почему —
 /// второй, что сделать — третьей, и третья не бывает пустой. Код внутрь
-/// текста не кладётся.
+/// текста не кладётся. Держит это правило сам тип текста — `SaysWhy`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refuse {
     pub code: String,
-    pub text: String,
+    pub text: SaysWhy,
 }
 
 impl Refuse {
-    pub fn new(code: &str, text: impl Into<String>) -> Self {
+    pub fn new(code: &str, text: impl Into<SaysWhy>) -> Self {
         Self { code: code.to_string(), text: text.into() }
+    }
+}
+
+/// Предел текста отказа — четыреста ЗНАКОВ.
+///
+/// Трёх строк по правилу спеки («Ошибки») в них умещается с запасом: самая
+/// длинная наша — около двухсот сорока знаков. А мегабайт чужих слов, который
+/// по этому полю проехать МОГ, в них не умещается никак — и это главное, зачем
+/// предел назван.
+///
+/// В знаках, а не в байтах, по тому же доводу, что у самоназвания: предел видит
+/// человек, а он видит буквы, и русская строка не должна умещаться вдвое хуже
+/// латинской.
+pub const SAYS_WHY_LIMIT: usize = 400;
+
+/// Строк в отказе — три: что не вышло, почему, что делать (спека, «Ошибки»).
+const SAYS_WHY_LINES: usize = 3;
+
+/// Текст отказа — ТИП, а не строка, потому что по этому полю ездят ЧУЖИЕ слова.
+///
+/// **Чем куплено.** `Msg::Revoked{text}` и `Msg::Bye` несут строку ТОЙ стороны,
+/// и доходила она до экрана и до файла журнала как есть: до мегабайта (предел
+/// кадра — единственное, что её держало), с переводами строк, с `U+2028`, с
+/// разворотом направления письма — вплотную к нашим настоящим строкам. Рядом, в
+/// этом же файле, самоназвание той стороны защищено типом (`SaysName`) с
+/// доводом «чужая строка на доверительной границе»; к тексту отказа то же
+/// правило не было применено, хотя граница та же.
+///
+/// **Почему тип, а не чистка по месту.** Чужой текст доходит до человека тремя
+/// сообщениями (`refuse`, `enroll_no`, `bye`) плюс `revoked`, а показывают и
+/// пишут его в журнал ещё три разных места. Правило «не забудь вычистить»
+/// держится до первого автора, который забудет. Здесь внутренняя строка
+/// приватна, а единственная дорога внутрь — `new`, через неё же идёт разбор
+/// кадра с провода (`serde(from = "String")`). Невычищенного текста отказа в
+/// программе не существует как ПУТИ, а не как запрета.
+///
+/// **Что делает чистка.** Выбрасываются целые категории Unicode — те же, что у
+/// `SaysName`, и по тем же доводам: `Cc` управляющие (кроме перевода строки),
+/// `Cf` форматирующие, `Zl`/`Zp` разделители строки и абзаца, `Co`/`Cn` частное
+/// использование и неназначенные. Перевод строки остаётся: без него три строки
+/// отказа склеились бы в одну. Пробельное схлопывается в один пробел, края
+/// срезаются, строк остаётся не больше трёх — четвёртый перевод строки
+/// становится пробелом, то есть слова остаются, а абзац не отрастает. Предел
+/// применяется ПОСЛЕ чистки: иначе полоса невидимых знаков выедала бы его.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub struct SaysWhy(String);
+
+impl SaysWhy {
+    /// Единственная дорога внутрь.
+    pub fn new(raw: &str) -> Self {
+        use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+        let mut out = String::new();
+        let mut kept = 0usize;
+        // Разделитель не пишется сразу, а запоминается: так полоса пробелов
+        // схлопывается в один, строка не начинается с них, а перевод строки
+        // берёт верх над пробелом, оказавшимся рядом.
+        let (mut space, mut line) = (false, false);
+        let mut lines = 1usize;
+        for c in raw.chars() {
+            let keep = match c.general_category() {
+                GeneralCategory::Control if c == '\n' => {
+                    line = true;
+                    continue;
+                }
+                GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+                | GeneralCategory::PrivateUse
+                | GeneralCategory::Unassigned
+                | GeneralCategory::Surrogate => continue,
+                GeneralCategory::SpaceSeparator => {
+                    space = true;
+                    continue;
+                }
+                _ => c,
+            };
+            if (space || line) && !out.is_empty() {
+                let newline = line && lines < SAYS_WHY_LINES;
+                if kept + 1 >= SAYS_WHY_LIMIT {
+                    break;
+                }
+                out.push(if newline { '\n' } else { ' ' });
+                kept += 1;
+                lines += usize::from(newline);
+            }
+            (space, line) = (false, false);
+            if kept >= SAYS_WHY_LIMIT {
+                break;
+            }
+            out.push(keep);
+            kept += 1;
+        }
+        Self(out)
+    }
+
+    /// То, что можно показать и записать: вычищенное по построению.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SaysWhy {
+    fn from(raw: String) -> Self {
+        Self::new(&raw)
+    }
+}
+
+impl From<&str> for SaysWhy {
+    fn from(raw: &str) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<SaysWhy> for String {
+    fn from(why: SaysWhy) -> String {
+        why.0
+    }
+}
+
+/// Читается как строка везде, где строку и ждут (`text.contains(…)`, срезы,
+/// подстановка в `format!`), — иначе тип пришлось бы разворачивать руками в
+/// сорока местах, а место, где его развернули «на минутку», и есть то место,
+/// где чужая строка выберется наружу.
+impl std::ops::Deref for SaysWhy {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SaysWhy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Своими руками: в журнале нужна строка, а не `SaysWhy("строка")`. Печатать
+/// опасного нечего — значение вычищено по построению.
+impl std::fmt::Debug for SaysWhy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+/// Сравнение со строкой — для тех, кто сверяет текст с ожидаемым (проверки).
+impl PartialEq<str> for SaysWhy {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for SaysWhy {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
     }
 }
 
@@ -400,7 +557,11 @@ pub enum Msg {
     EnrollNo(Refuse),
     /// Разрешение снято. Рвёт потоки ЭТОЙ базы сразу; если других зачисленных
     /// баз в канале не осталось — закрывается и канал.
-    Revoked { base_id: CardId, text: String },
+    ///
+    /// Текст — ЧУЖИЕ слова для нашего человека, и потому `SaysWhy`, а не
+    /// строка: по этому полю до экрана и до файла журнала доезжало всё, что
+    /// влезло в кадр.
+    Revoked { base_id: CardId, text: SaysWhy },
     /// Общий отказ управляющего потока: версия, тикет, незнакомое сообщение.
     Refuse(Refuse),
     /// Ухожу нарочно: выключили обслуживание, закрыли окно, снимается машина.
@@ -810,9 +971,61 @@ mod tests {
         assert_eq!(padded.as_str(), "Ромашка");
     }
 
+    /// Чужой текст отказа доезжает до человека уже вычищенным и по пределу — и
+    /// это свойство ТИПА, а не вежливости того, кто его заполняет.
+    ///
+    /// Поэтому кадры здесь собираются руками, сырым JSON, в обход всякого
+    /// `Msg`: ровно так они и приходят с провода. Падало это так: по полю
+    /// `text` у `revoked` и `bye` до экрана и до файла журнала доезжало всё,
+    /// что влезло в кадр, — мегабайт, переводы строк, `U+2028`, разворот
+    /// направления письма, — и ложилось вплотную к нашим настоящим строкам.
+    #[test]
+    fn a_refusal_text_from_the_wire_arrives_clean_and_short() {
+        // Забой, возврат каретки, разделители строки и абзаца, разворот
+        // направления письма, мягкий перенос, нулевая ширина — и полоса
+        // пробелов с четвёртой строкой и мегабайтом букв на закуску.
+        let nasty = format!(
+            "  Доступ отозван\u{8}\r\n\u{2028}ОТПЕЧАТОК СОВПАЛ\u{2029}\u{202e}\u{00ad}\u{200b}\nвторая\nтретья\n\n\nчетвёртая  тут{}  ",
+            "я".repeat(100_000)
+        );
+        let clean = |text: &str| {
+            assert!(
+                !text.chars().any(|c| c.is_control() && c != '\n'),
+                "управляющих знаков, кроме перевода строки, быть не должно: {text:?}"
+            );
+            for bad in ['\u{2028}', '\u{2029}', '\u{202e}', '\u{00ad}', '\u{200b}', '\r'] {
+                assert!(!text.contains(bad), "разделителей, разворота письма и невидимого быть не должно: {text:?}");
+            }
+            assert!(text.chars().count() <= SAYS_WHY_LIMIT, "предел в знаках: {}", text.chars().count());
+            assert_eq!(text.lines().count(), SAYS_WHY_LINES, "строк в отказе три — четвёртый перевод строки стал пробелом: {text:?}");
+            assert!(!text.contains("  "), "полоса пробелов обязана схлопнуться в один: {text:?}");
+            assert!(text.starts_with("Доступ отозван"), "видимые буквы сохраняются, края срезаются: {text:?}");
+        };
+
+        // `revoked` — своё поле текста.
+        let json = serde_json::json!({ "msg": "revoked", "base_id": "b1", "text": nasty }).to_string();
+        let Msg::Revoked { text, .. } = serde_json::from_str::<Msg>(&json).unwrap() else { panic!("собирали revoked") };
+        clean(&text);
+
+        // `bye`, `refuse` и `enroll_no` — текст внутри отказа, тот же тип.
+        for name in ["bye", "refuse", "enroll_no"] {
+            let json = serde_json::json!({ "msg": name, "code": code::REVOKED, "text": nasty }).to_string();
+            let got = serde_json::from_str::<Msg>(&json).unwrap();
+            let (Msg::Bye(no) | Msg::Refuse(no) | Msg::EnrollNo(no)) = got else { panic!("собирали {name}") };
+            clean(&no.text);
+        }
+
+        // И обратно на провод уезжает уже вычищенное, а не исходная грязь.
+        let back = serde_json::to_value(Msg::Revoked { base_id: "b1".into(), text: nasty.as_str().into() }).unwrap();
+        clean(back["text"].as_str().unwrap());
+    }
+
     #[tokio::test]
     async fn our_own_too_long_message_is_refused_at_the_writer() {
-        let huge = Msg::Revoked { base_id: "b1".into(), text: "я".repeat(LIMIT) };
+        // Длина берётся полем, которое НЕ чистится по пределу: текст отказа
+        // теперь тип и мегабайта в себе не держит (`SaysWhy`), а секрет тикета
+        // — обычная строка, и собственная ошибка в ней возможна.
+        let huge = Msg::Enroll { ticket_secret: "a".repeat(LIMIT + 1), says_name: "Ромашка".into(), base: None };
         let mut wire: Vec<u8> = Vec::new();
         let no = Frame::write(&mut wire, &huge).await.unwrap_err();
         assert_eq!(no.code, code::OVERFLOW);

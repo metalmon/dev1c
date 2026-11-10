@@ -418,7 +418,7 @@ impl Reins {
     /// когда снят последний `Hold`, и считать зачисленные базы для этого не
     /// нужно.
     pub async fn revoke(self, base_id: &crate::cfg::CardId, text: &str) {
-        self.say(Msg::Revoked { base_id: base_id.clone(), text: text.to_string() }).await;
+        self.say(Msg::Revoked { base_id: base_id.clone(), text: text.into() }).await;
         self.finish().await;
     }
 

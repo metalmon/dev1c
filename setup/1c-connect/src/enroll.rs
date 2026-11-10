@@ -646,7 +646,7 @@ where
             }
             bases
         }
-        Msg::Refuse(no) => return Err(no.text),
+        Msg::Refuse(no) => return Err(no.text.into()),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello_ok", &other))).await,
     };
     // Решает `Call`, а не длина строки и не список баз: решение принято один
@@ -705,7 +705,7 @@ where
         Msg::Bye(no) => Ok(Outcome::NotEnrolled(no)),
         // Отказ машины: код негодный, версии не сошлись. Это человеку
         // исправлять, а не нам повторять.
-        Msg::Refuse(no) => Err(no.text),
+        Msg::Refuse(no) => Err(no.text.into()),
         other => refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll_ok", &other))).await,
     }
 }
@@ -829,7 +829,7 @@ async fn ours_to_blame<W: AsyncWrite + Unpin>(w: &mut W, wire: Refuse, ours: Str
 /// `Display` — тот подмешивает код внутрь строки, чего раздел «Ошибки»
 /// спеки не разрешает.
 async fn write_msg<W: AsyncWrite + Unpin>(w: &mut W, msg: &Msg) -> Result<(), String> {
-    Frame::write(w, msg).await.map_err(|e| e.text)
+    Frame::write(w, msg).await.map_err(|e| e.text.into())
 }
 
 /// Сказать словами и провалиться: отказ уходит той стороне, а нам остаётся
@@ -840,7 +840,7 @@ async fn refuse_and_fail<W: AsyncWrite + Unpin>(w: &mut W, no: Refuse) -> Result
     // Отказ отправки проглатываем: сказать о ней всё равно нечем, а нести
     // наружу надо ту беду, из-за которой мы отказали, а не вторичную.
     let _ = Frame::write(w, &Msg::Refuse(no.clone())).await;
-    Err(no.text)
+    Err(no.text.into())
 }
 
 /// Сказать словами и вернуть ИСХОД: разговор состоялся, зачисления нет.

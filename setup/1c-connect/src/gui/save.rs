@@ -69,7 +69,7 @@ pub fn moved_lines(old: &Cfg, new: &Cfg) -> Vec<String> {
     let mut v = Vec::new();
     if old.current().workstation != new.current().workstation {
         v.push(format!(
-            "за рабочим местом {} → {} переехали: ветка проекта и origin",
+            "рабочее место сменилось: {} → {}. За ним переехали ветка проекта и адрес, куда он отправляется",
             old.current().workstation,
             new.current().workstation
         ));
@@ -796,7 +796,7 @@ fn access_follows_delete(ui: &Ui, card: &crate::cfg::Connection) -> Result<(), S
     let (key, name) = (card.id(), &card.name);
     crate::enrolled::Book::open(ui.kit.state())
         .and_then(|mut b| b.forget(&key))
-        .map_err(|e| format!("удаление отменено: зачисления карточки «{name}» не убраны — {e}"))?;
+        .map_err(|e| format!("удаление отменено: разрешения на подключение к «{name}» не убраны — {e}"))?;
     crate::enrolled::Partners::open(ui.kit.state())
         .and_then(|mut p| p.forget(&key))
         .map_err(|e| format!("удаление отменено: подключение карточки «{name}» не забыто — {e}"))
@@ -1777,11 +1777,15 @@ pub fn ask_yes_no(
 pub const ALLOW: &str = "Разрешить";
 pub const DENY: &str = "Отклонить";
 
-/// Пометка на чужих словах — одна на весь продукт: её ставит и диалог
-/// разрешения, и список зачисленных сторон в карточке
-/// (`panel::accepting_block`). Один предмет — одно предложение: разойдись
-/// эти две формулировки, человек решил бы, что речь о разных вещах.
-pub const NOT_VERIFIED: &str = "сказано той стороной, не проверено";
+/// Пометка на чужом имени в диалоге разрешения. Стоит одним предложением и
+/// годится в обе строки ниже — и когда имя прислали, и когда нет: прежняя
+/// пометка («сказано той стороной, не проверено») была оговоркой автора кода,
+/// а не речью, и при пустом имени читалась как «не назвала, не проверено» —
+/// про что, человеку приходилось догадываться.
+///
+/// Над списком зачисленных такой пометки больше нет: она висела там всегда и
+/// потому переставала читаться (решение владельца, коммит `114b973`).
+pub const NOT_VERIFIED: &str = "Кто это на самом деле, доказывает только отпечаток — имя может быть любым";
 
 /// Что показывает диалог разрешения — ТРИ вещи и ни одной больше (решение 7
 /// `2026-11-01-protocol-design.md`): отпечаток ключа целиком, имя базы и то,
@@ -1825,16 +1829,16 @@ pub fn permission_question(r: &crate::enroll::Request) -> (String, String) {
     // существует как пути. Пустое — тоже ответ, и он честнее кавычек вокруг
     // пустоты: сторона себя не назвала.
     let says = if r.says_name.is_empty() {
-        format!("Та сторона себя не назвала ({NOT_VERIFIED}).")
+        format!("Имя не прислали. {NOT_VERIFIED}.")
     } else {
-        format!("Та сторона назвалась «{}» — {NOT_VERIFIED}.", r.says_name)
+        format!("Называют себя «{}». {NOT_VERIFIED}.", r.says_name)
     };
     // Карточка называется один раз (Minor ревью задач 6 и 7): при пустом
     // имени базы её назвал уже сам вопрос, и строка «Карточка «X».» под ним
     // повторяла бы то же слово через полторы строки.
     let card_line = if r.base.base_name.is_empty() { String::new() } else { format!("Карточка «{}».\n", r.card_name) };
     let detail = format!(
-        "{card_line}Отпечаток ключа той стороны:\n{}\nСверьте его голосом по телефону — целиком, до последнего знака.\n{says}",
+        "{card_line}Отпечаток того, кто подключается:\n{}\nСверьте его голосом по телефону — целиком, до последнего знака.\n{says}",
         r.peer
     );
     (message, detail)
@@ -1931,7 +1935,7 @@ pub fn ask_permission(
 pub fn reread_book(ui: &mut Ui) {
     match crate::enrolled::Book::open(ui.kit.state()) {
         Ok(book) => ui.book = Some(book),
-        Err(e) => note_line(ui, Line { kind: Kind::Warn, text: format!("Список зачисленных сторон не перечитался: {e}") }),
+        Err(e) => note_line(ui, Line { kind: Kind::Warn, text: format!("Список разрешений не перечитался: {e}") }),
     }
     reread_partners(ui);
 }
@@ -1992,7 +1996,7 @@ pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
         note_line(
             ui,
             Line {
-                kind: Kind::Say, text: format!("Заявка по «{card}» больше не ждёт ответа: та сторона не на связи")
+                kind: Kind::Say, text: format!("Просьба подключиться к «{card}» отменилась: тот компьютер больше не на связи")
             },
         );
     }
@@ -2041,9 +2045,9 @@ pub fn take_request(ui: &mut Ui, pending: Pending) {
     // Про очередь человеку говорится словами: строка списка у карточки одна,
     // и по ней не видно, что за первой заявкой стоит вторая.
     let text = if queued {
-        format!("Ещё одна заявка на подключение к «{name}» ждёт своей очереди")
+        format!("К «{name}» просят разрешить подключение ещё с одного компьютера — ответите по очереди")
     } else {
-        format!("Заявка на подключение к «{name}» ждёт разрешения")
+        format!("Вас просят разрешить подключение к «{name}»")
     };
     note_line(ui, Line { kind: Kind::Say, text });
 }
@@ -2081,7 +2085,7 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
         note_line(
             ui,
             Line {
-                kind: Kind::Warn, text: format!("Заявка по «{name}» ждёт ответа — её строка первая в списке")
+                kind: Kind::Warn, text: format!("Просьба подключиться к «{name}» никуда не делась — ответить можно в любой момент")
             },
         );
         return;
@@ -2094,7 +2098,8 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
         note_line(
             ui,
             Line {
-                kind: Kind::Say, text: format!("Заявка по «{name}» больше не ждёт ответа — отпечаток был у другой стороны")
+                kind: Kind::Say,
+                text: format!("Той просьбы по «{name}» больше нет — нажмите «Разрешить» снова, если просят с другого компьютера"),
             },
         );
         return;
@@ -2154,13 +2159,16 @@ pub fn answer_request(ui: &mut Ui, card: &crate::cfg::CardId, name: &str, peer: 
         // Ответить некуда — разговор уже кончился. Молчать об этом нельзя:
         // человек нажал «Разрешить», и тишина заставила бы его ждать
         // подключения, которого не будет.
+        // Имя, а не ключ: ключ карточки человеку не показывается нигде
+        // (`cfg::CardId`, «Чем он не является»), а эти три строки печатали в
+        // журнал тридцать два знака hex — найдено текстовым проходом 10.11.
         Line {
-            kind: Kind::Warn, text: format!("Ответ по «{card}» отправить не удалось: та сторона больше не на связи")
+            kind: Kind::Warn, text: format!("Ответ по «{name}» отправить не удалось: тот компьютер больше не на связи")
         }
     } else if matches!(d, Decision::Allow { .. }) {
-        Line { kind: Kind::Ok, text: format!("Подключение к «{card}» разрешено") }
+        Line { kind: Kind::Ok, text: format!("Подключение к «{name}» разрешено") }
     } else {
-        Line { kind: Kind::Say, text: format!("Заявка по «{card}» отклонена") }
+        Line { kind: Kind::Say, text: format!("Подключение к «{name}» отклонено") }
     };
     note_line(ui, line);
 }

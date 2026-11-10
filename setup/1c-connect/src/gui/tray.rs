@@ -2020,7 +2020,10 @@ mod tests {
             ModeWrite::Unsaved(why) => why,
             other => panic!("ожидали Unsaved (save_host отказывает на пустом base_path) — получили {other:?}"),
         };
-        assert!(why.contains("base_path"), "{why}");
+        // Слова отказа — для ОКНА (их читает журнал): величина названа так, как она подписана на экране, а имя ключа `base_path`
+        // остаётся читателю файла — его снимает `cfg::said_in_window` (задача 6 плана, её докстрока).
+        assert!(why.contains("путь к базе"), "отказ называет поле словами человека: {why}");
+        assert!(!why.contains("base_path"), "и не ключом toml: {why}");
         assert_eq!(ui.cfg.current().mode, "local", "намерение в памяти — даже когда полная запись отказала");
         assert!(ui.cfg.current().base_here);
         let text = std::fs::read_to_string(ui.kit.state_path(crate::cfg::FILE)).unwrap();

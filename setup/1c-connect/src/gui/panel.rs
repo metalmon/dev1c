@@ -117,6 +117,17 @@ pub struct Panel {
     /// `selected_connection` (с откатом на текущее, если имя из списка
     /// исчезло); саму перекладку в поля делает `select`.
     pub selected: String,
+    /// Действие, которое человек ПОПРОСИЛ, а полей ему не хватило. Пока оно
+    /// здесь — незаполненные поля этого действия подсвечены.
+    ///
+    /// Хранится ДЕЙСТВИЕ, а не список полей, и это не мелочь: список
+    /// протух бы в ту же секунду, когда человек заполнит поле, — подсветка
+    /// осталась бы висеть на заполненном. Действие же пересчитывается
+    /// каждой отрисовкой (`need::missing`), и подсветка гаснет сама, поле за
+    /// полем, по мере заполнения. Решение владельца 10.11: кнопка остаётся
+    /// живой, а нажатие ВЕДЁТ к незаполненному, вместо запертой кнопки или
+    /// молчаливого отказа строкой журнала.
+    asked: Option<crate::need::Deed>,
 }
 
 /// Карточка состояния: кружок, заголовок, можно ли «Прервать» — всегда одна
@@ -614,6 +625,13 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // нельзя, человек читает у переключателя (`switch_tooltip`) и
         // строкой журнала по щелчку по нему (`link::toggle_link`).
         if !ui.link.is_up() && ui.gate.is_some() {
+            // **Нехватка полей — не повод прятать действие.** Замок запирает по разным причинам, и они разного рода: комплект, платформа,
+            // срок человек с этого экрана не исправит — тогда слот пуст. А незаполненное поле он исправит прямо здесь, и кнопка остаётся
+            // живой: нажатие подсветит поля и поставит курсор в первое (решение владельца 10.11). Подсказка называет недостающее ещё до
+            // щелчка — чтобы живая кнопка не оказалась ловушкой.
+            if let Some(why) = crate::need::said(crate::need::Deed::Serve, c) {
+                return Button { subject, label: "Включить", why: Some(why), act: Some(LinkAct::Toggle) };
+            }
             return nothing();
         }
         let label = if ui.link.is_up() { "Выключить" } else { "Включить" };
@@ -640,6 +658,11 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
         // local-ветки выше: `LinkAct::Toggle` → `toggle_link` при запертом замке отказывает молча строкой журнала, значит предложить
         // нечего — слот пуст.
         if ui.gate.is_some() {
+            // Тот же разбор, что у локальной ветки выше: поля человек исправит здесь, и кнопка остаётся живой; прочие причины замка — нет,
+            // и тогда слот пуст.
+            if let Some(why) = crate::need::said(crate::need::Deed::Serve, c) {
+                return Button { subject, label: "Подключиться", why: Some(why), act: Some(LinkAct::Toggle) };
+            }
             return nothing();
         }
         return Button { subject, label: "Подключиться", why: None, act: Some(LinkAct::Toggle) };
@@ -1981,6 +2004,20 @@ fn delete_on_confirm(ui: &Ui, name: &str) -> DeleteOnConfirm {
 /// `LinkAct::Save` сюда не доходит: запись карточки держит сама панель
 /// (`Panel::save_card` — ей нужны поля, вопрос про смену базы и `original`),
 /// а в меню «Сохранить» не дублируется.
+/// Какое ДЕЛО стоит за действием подвала — чтобы спросить у единственной меры (`need::missing`), хватает ли ему полей.
+///
+/// Отображение полное нарочно, включая дела, которым не нужно ничего: иначе «а это действие мы не спрашиваем» решалось бы молчанием, и
+/// новое действие тихо проскочило бы мимо проверки. `None` — у действия нет дела с базой вовсе (запись, переименование, разрешение).
+fn deed_of(act: LinkAct) -> Option<crate::need::Deed> {
+    use crate::need::Deed;
+    match act {
+        LinkAct::Toggle => Some(Deed::Serve),
+        LinkAct::ShowCode | LinkAct::NewCode => Some(Deed::IssueCode),
+        LinkAct::Dial => Some(Deed::Connect),
+        LinkAct::Save | LinkAct::MakeCurrent | LinkAct::Rename | LinkAct::Allow | LinkAct::Delete => None,
+    }
+}
+
 fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) {
     match act {
         LinkAct::Toggle => gui::toggle_link(cx),
@@ -2887,7 +2924,44 @@ impl Panel {
             // Окно открывается на текущем соединении — ровно то, чьи поля
             // только что наполнили `fields` выше.
             selected: host.name.clone(),
+            // Человек ещё ничего не просил — подсвечивать нечего.
+            asked: None,
         }
+    }
+
+    /// Нажатие на главную кнопку: сперва спрашиваем, хватает ли полей, и только потом делаем.
+    ///
+    /// Решение владельца 10.11 из двух предложенных им: **не запирать кнопку, а подсвечивать незаполненное при нажатии**. Довод — его же
+    /// правило того же дня: правый слот подвала ВСЕГДА действие, и запертая кнопка возвращала бы в подвал предмет, который не действие, а
+    /// сообщение «нельзя». Нажатие при нехватке не наказывает и не уходит отказом в журнал (находка 15 осмотра — «Подключиться» горит при
+    /// пустом поле и молча отказывает): оно ВЕДЁТ — подсвечивает поля и ставит курсор в первое.
+    ///
+    /// Чего не хватает, знает одна мера на продукт (`need::missing`) — та же, что отвечает замку.
+    fn ask(&mut self, act: LinkAct, subject: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(deed) = deed_of(act) {
+            if let Some(first) = crate::need::missing(deed, &self.original).first().copied() {
+                self.asked = Some(deed);
+                self.focus_field(first, window, cx);
+                cx.notify();
+                return;
+            }
+            // Хватило — подсветка снимается: она принадлежала просьбе, а просьба исполнена.
+            self.asked = None;
+        }
+        run_link_act(window, cx, act, subject);
+    }
+
+    /// Курсор в поле, которого не хватило. Поля адресуются тем же ключом, каким их зовёт состав сочетания (`cfg::shown_fields`), — второго
+    /// списка имён не заводим.
+    fn focus_field(&self, f: crate::need::Field, window: &mut Window, cx: &mut App) {
+        use crate::need::Field;
+        let state = match f {
+            Field::BasePath => &self.fields.base_path,
+            Field::DbUser => &self.fields.db_user,
+            Field::BaseUrl => &self.fields.base_url,
+            Field::Project => &self.fields.project,
+        };
+        state.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     /// Область прокрутки с тонкой полосой (все три вкладки): корень
@@ -3295,6 +3369,16 @@ impl Panel {
     fn link_card(&self, caption: Hsla, accent: Hsla, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let c = self.original.clone();
         let shown = shown_fields(&c);
+        // **Подсветка незаполненного** (решение владельца 10.11: «либо делать недоступной кнопку действия, либо подсвечивать обязательные
+        // поля при нажатии» — выбрано второе). Считается от ДЕЙСТВИЯ, которого человек попросил, а не от списка полей: список протух бы в
+        // ту же секунду, когда поле заполнят, и подсветка висела бы на заполненном. Здесь она гаснет сама, поле за полем.
+        //
+        // Чего не хватает — спрашиваем у единственной меры (`need::missing`), той же, что отвечает замку: двух мнений о заполненности в
+        // продукте нет.
+        let wanted = self.asked.map(|d| crate::need::missing(d, &c)).unwrap_or_default();
+        // Цвет берётся ДО замыкания: само замыкание не держит `cx`, иначе кнопка выбора папки рядом не смогла бы его одолжить.
+        let danger = cx.theme().danger;
+        let mark = |key: &str| if wanted.iter().any(|f| f.key() == key) { danger } else { caption };
         let toolset = c.toolset().unwrap_or("business").to_string();
         let f = &self.fields;
         // Цвет текста поля — тот же токен, что красит `Input` (`input_style`
@@ -3340,7 +3424,7 @@ impl Panel {
                 .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| this.pick_dir(target.clone(), cx)))
         };
-        let path_row = |label: String, state: &Entity<InputState>, pick: KitButton, window: &Window, cx: &App| {
+        let path_row = |label: String, caption: Hsla, state: &Entity<InputState>, pick: KitButton, window: &Window, cx: &App| {
             v_flex()
                 .gap_1()
                 .child(div().text_size(px(13.)).text_color(caption).child(label))
@@ -3507,13 +3591,13 @@ impl Panel {
             // Отдельного предупреждения карточка не заводит и не теряет: пустое обязательное поле говорит это само, а что без базы не
             // работает обслуживание — говорит замок своими словами (`gui::gate`), там, где живут состояния карточки.
             let button = pick("pick-base", f.base_path.clone(), cx);
-            col = col.child(path_row("База".to_string(), &f.base_path, button, window, cx));
+            col = col.child(path_row("База".to_string(), mark("base_path"), &f.base_path, button, window, cx));
         }
         if shown.contains(&"db_user") {
             col = col.child(
                 h_flex()
                     .gap_3()
-                    .child(div().flex_1().child(Self::row("Пользователь базы", caption, accent, &f.db_user, window, cx)))
+                    .child(div().flex_1().child(Self::row("Пользователь базы", mark("db_user"), accent, &f.db_user, window, cx)))
                     .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
             );
         }
@@ -3542,7 +3626,7 @@ impl Panel {
         // спрашивает, и только в режиме «уже опубликована»: в обычном режиме
         // адрес считает сама программа.
         if shown.contains(&"base_url") {
-            col = col.child(Self::row("Адрес публикации", caption, accent, &f.base_url, window, cx));
+            col = col.child(Self::row("Адрес публикации", mark("base_url"), accent, &f.base_url, window, cx));
         }
         if shown.contains(&"project") {
             // Профиль — прямо над папкой, подпись которой он и решает
@@ -3550,7 +3634,7 @@ impl Panel {
             // человека (находка 28).
             col = col.child(profile_field);
             let button = pick("pick-project", f.project.clone(), cx);
-            col = col.child(path_row(folder_label(&toolset).to_string(), &f.project, button, window, cx));
+            col = col.child(path_row(folder_label(&toolset).to_string(), mark("project"), &f.project, button, window, cx));
         }
         // Код для той стороны и кто уже зачислен — последним блоком карточки:
         // поля человек правит, а это он читает и передаёт. Что показывать,
@@ -4307,7 +4391,7 @@ impl Render for Panel {
                             // действия — общей проводкой с меню, без второго
                             // мнения о том, что они делают.
                             Some(LinkAct::Save) => panel.save_card(window, cx),
-                            Some(other) => run_link_act(window, cx, other, &click_subject),
+                            Some(other) => panel.ask(other, &click_subject, window, cx),
                             None => {}
                         }))
                 });
@@ -5593,6 +5677,26 @@ mod tests {
         ui.link = if up { State::Up { since: Instant::now() } } else { State::Off };
         ui.gate = None;
         ui
+    }
+
+    /// Решение владельца 10.11: кнопка не запирается и не прячется из-за незаполненного поля — она ведёт к нему. Слот пустеет только
+    /// тогда, когда причина не правится полем с этого экрана (комплект, платформа, срок).
+    #[test]
+    fn a_missing_field_keeps_the_button_alive_and_names_what_is_missing() {
+        let mut ui = ui_for("accept", "local", false);
+        ui.cfg.current_mut().base_path = String::new();
+        // Замок заперт — но заперт ИМЕННО полем.
+        ui.gate = Some("не указана база".into());
+        let b = main_button(&ui, "", Dirty::No);
+        assert_eq!(b.label, "Включить", "поле человек заполнит здесь же — действие остаётся");
+        assert_eq!(b.act, Some(LinkAct::Toggle));
+        assert_eq!(b.why.as_deref(), Some("не указана база"), "подсказка называет недостающее ДО щелчка — живая кнопка не ловушка");
+        // Причина не из полей — предложить нечего, слот пуст.
+        ui.cfg.current_mut().base_path = r"C:\Bases\Buh".into();
+        ui.gate = Some("в комплекте нет mcp-1c".into());
+        let b = main_button(&ui, "", Dirty::No);
+        assert_eq!(b.label, "", "комплект человек с этого экрана не исправит");
+        assert_eq!(b.act, None);
     }
 
     #[test]

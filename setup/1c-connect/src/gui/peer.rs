@@ -861,7 +861,14 @@ impl Machine {
     /// сильнее разрешения другой (решение владельца 1.11), и сложить их здесь
     /// — единственное место, где это ещё можно сделать до провода.
     ///
-    /// **Карточки разбираются на две кучи по тому, где база.** Прежде отбор
+    /// **Карточки раскладываются на ТРИ кучи, и выпасть из всех карточка не может.** Прежде отбор принимающих стоял ФИЛЬТРОМ перед
+    /// раскладкой, и карточка, переключённая человеком в «Подключаюсь сам» (`role = "dial"`) или в «Всё на одной машине» (`mode =
+    /// "local"`), выпадала из обеих куч молча. По её живому коду та сторона слышала «карточку, для которой выдали этот код, на том
+    /// компьютере удалили» — третья дорога к той же лжи, которую на этой ветке чинили уже дважды, и корнем снова была не строка, а
+    /// потерянная карточка. Третья куча (`Cards::not_accepting`) эту дорогу закрывает: о каждой карточке есть что сказать словами, а
+    /// фильтра, который молча теряет, в этом месте больше нет.
+    ///
+    /// **Вторая куча — по тому, где база.** Прежде отбор
     /// смотрел только на вид соединения и роль, а `base_here` не спрашивал
     /// вовсе — и карточка, у которой базы здесь НЕТ, объявляла себя базой на
     /// проводе: уезжала в `hello_ok` со своими полями (имя базы от пустого
@@ -887,35 +894,34 @@ impl Machine {
         // есть потолок всегда выходил «только чтение»). Один `bool` от того,
         // кого об этом спрашивают все остальные, разойтись словарём не может.
         let ceiling = if cfg.allows_write() { Ceiling::Full } else { Ceiling::ReadOnly };
-        let (here, there): (Vec<_>, Vec<_>) = cfg
-            .connections
-            .iter()
-            .filter(|c| c.mode != "local" && matches!(c.role(), Ok("accept")))
-            .map(|c| {
-                (
-                    c.base_is_here(),
-                    enroll::Card {
-                        name: c.name.clone(),
-                        base: BaseFields {
-                            base_id: c.id(),
-                            base_name: crate::cfg::base_name(&c.base_path).to_string(),
-                            publication: c.publication.clone(),
-                            // Действующее право, а не своя складка половин: складывать
-                            // их умеет ровно одна `Cfg::may_write`, и второе место сложения
-                            // — это второй словарь одного понятия, который однажды разойдётся
-                            // с первым (на этой ветке так уже было с потолком и с чтением
-                            // настроек).
-                            write: cfg.may_write(c),
-                        },
-                    },
-                )
-            })
-            .partition(|(base_is_here, _)| *base_is_here);
-        let cards = enroll::Cards::Read {
-            accepting: here.into_iter().map(|(_, c)| c).collect(),
-            base_elsewhere: there.into_iter().map(|(_, c)| c).collect(),
-        };
-        Machine { cards, ceiling }
+        let (mut accepting, mut base_elsewhere, mut not_accepting) = (Vec::new(), Vec::new(), Vec::new());
+        for c in &cfg.connections {
+            let card = enroll::Card {
+                name: c.name.clone(),
+                base: BaseFields {
+                    base_id: c.id(),
+                    base_name: crate::cfg::base_name(&c.base_path).to_string(),
+                    publication: c.publication.clone(),
+                    // Действующее право, а не своя складка половин: складывать их
+                    // умеет ровно одна `Cfg::may_write`, и второе место сложения —
+                    // это второй словарь одного понятия, который однажды разойдётся
+                    // с первым (на этой ветке так уже было с потолком и с чтением
+                    // настроек).
+                    write: cfg.may_write(c),
+                },
+            };
+            // ОДИН разбор на три кучи, и четвёртой дороги — «нигде» — у карточки
+            // нет: `else` здесь невыразим, а `push` обязателен в каждой ветке.
+            // Прежде отбор стоял фильтром перед раскладкой, и «Подключаюсь сам»
+            // вместе с «Всё на одной машине» выпадали из обеих куч молча.
+            let accepts = c.mode != "local" && matches!(c.role(), Ok("accept"));
+            match (accepts, c.base_is_here()) {
+                (false, _) => not_accepting.push(card),
+                (true, true) => accepting.push(card),
+                (true, false) => base_elsewhere.push(card),
+            }
+        }
+        Machine { cards: enroll::Cards::Read { accepting, base_elsewhere, not_accepting }, ceiling }
     }
 
     /// Настройки не прочитались вовсе — и так об этом и говорится, своими словами в наш журнал и тремя строками той стороне
@@ -1417,45 +1423,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Карточка, у которой базы здесь НЕТ, в принимающие не попадает — и не
-    /// выбрасывается.
+    /// Выпасть из ВСЕХ куч карточка не может: каждая либо принимает, либо
+    /// отложена с объяснением.
     ///
-    /// Падало так: отбор смотрел вид соединения и роль, а `base_here` не
-    /// спрашивал вовсе. Карточка, чья база на ТОЙ стороне, объявляла себя
-    /// базой на проводе: уезжала в `hello_ok` своими полями (имя базы от
-    /// пустого пути, публикация этой машины), зачисляла к себе стороны и
-    /// обслуживала их. Человек с базой при этом отпечатка не видел и ничего не
-    /// разрешал. Это случай второй спеки, которого эта сборка не умеет, а путь
-    /// к нему из окна открыт («База — на той стороне» в меню карточки).
+    /// Падало тремя дорогами, и все три кончались одной ложью — «карточку, для
+    /// которой выдали этот код, на том компьютере удалили» про карточку, которая
+    /// лежит на диске.
     ///
-    /// Вторая половина проверки — что карточка ОТЛОЖЕНА, а не выброшена: по
-    /// выброшенной её собственный код получил бы «карточку удалили», то есть ту
-    /// же ложь, которую чинит `Cards::Unreadable`, другой дорогой. Отложенную
-    /// `accept_side` отказывает своими словами.
+    /// Первая: отбор смотрел вид соединения и роль, а `base_here` не спрашивал
+    /// вовсе — карточка, чья база на ТОЙ стороне, объявляла себя базой на
+    /// проводе (уезжала в `hello_ok` своими полями, зачисляла к себе стороны и
+    /// обслуживала их), а человек с базой отпечатка не видел и ничего не
+    /// разрешал. Это случай второй спеки, которого эта сборка не умеет.
+    ///
+    /// Вторая и третья: отбор принимающих стоял ФИЛЬТРОМ перед раскладкой, и
+    /// карточка, переключённая в «Подключаюсь сам» (`role = "dial"`) или в «Всё
+    /// на одной машине» (`mode = "local"`), выпадала молча — в том числе
+    /// карточка, по которой человек минуту назад выдал код. Зачисления по ней
+    /// при этом оставались в книге, но назвать их было нечем.
+    ///
+    /// Поэтому проверяются все три кучи целиком, а не одна: пропавшую карточку
+    /// видно только по тому, что её нет НИ В ОДНОЙ.
     #[test]
-    fn a_card_whose_base_is_on_the_other_side_does_not_accept_parties() {
-        let card = |name: &str, base_here: &str| {
+    fn every_card_lands_in_a_pile_and_none_is_lost() {
+        let card = |name: &str, mode: &str, role: &str, base_here: &str| {
             format!(
                 "\n[[connection]]\nname = \"{name}\"\nserver = \"\"\ngitea = \"\"\npassword = \"\"\nworkstation = \"\"\nmode = \
-                 \"tunnel\"\nbase_path = \"\"\nbase_here = {base_here}\nrole = \"accept\"\n"
+                 \"{mode}\"\nbase_path = \"\"\nbase_here = {base_here}\nrole = \"{role}\"\n"
             )
         };
-        let dir = std::env::temp_dir().join(format!("peer-base-there-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("peer-piles-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(crate::cfg::FILE),
-            format!("current = \"Ромашка\"\n{}{}", card("Ромашка", "true"), card("Василёк", "false")),
+            format!(
+                "current = \"Ромашка\"\n{}{}{}{}",
+                card("Ромашка", "tunnel", "accept", "true"),
+                // Принимающая карточка с базой на ДРУГОМ компьютере: сегодня все
+                // прочие заготовки идут с `base_here = true`, и дыра жила именно
+                // поэтому.
+                card("Василёк", "tunnel", "accept", "false"),
+                card("Пион", "tunnel", "dial", "true"),
+                card("Лютик", "local", "accept", "true")
+            ),
         )
         .unwrap();
         let kit = super::Kit::at(dir.clone());
         let seen = super::Machine::read_with(&kit, &crate::secrets::Store::file(&dir));
-        let crate::enroll::Cards::Read { accepting, base_elsewhere } = &seen.cards else {
+        let crate::enroll::Cards::Read { accepting, base_elsewhere, not_accepting } = &seen.cards else {
             panic!("настройки на диске есть и читаются: {:?}", seen.cards)
         };
         let named = |cards: &[crate::enroll::Card]| cards.iter().map(|c| c.name.clone()).collect::<Vec<String>>();
-        assert_eq!(named(accepting), vec!["Ромашка".to_string()], "принимает только та, у которой база здесь");
-        assert_eq!(named(base_elsewhere), vec!["Василёк".to_string()], "а вторая отложена, а не выброшена: по её коду есть что сказать");
+        assert_eq!(named(accepting), vec!["Ромашка".to_string()], "принимает только та, у которой база здесь и роль принимающая");
+        assert_eq!(named(base_elsewhere), vec!["Василёк".to_string()], "эта отложена, а не выброшена: по её коду есть что сказать");
+        assert_eq!(
+            named(not_accepting),
+            vec!["Пион".to_string(), "Лютик".to_string()],
+            "и эти две тоже отложены: «Подключаюсь сам» и «Всё на одной машине» — не повод терять карточку молча"
+        );
+        let all = accepting.len() + base_elsewhere.len() + not_accepting.len();
+        assert_eq!(all, 4, "сколько карточек в файле, столько и в кучах: потерянную видно только так");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

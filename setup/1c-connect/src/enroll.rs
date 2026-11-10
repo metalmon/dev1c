@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     fn fields(id: &str, write: bool) -> BaseFields {
-        BaseFields { base_id: id.into(), base_name: format!("База {id}"), publication: format!("http://127.0.0.1:8080/{id}"), write }
+        BaseFields { base_id: id.into(), base_name: format!("База {id}").into(), write }
     }
 
     /// Счётчик вызовов диалога: «человека не беспокоят вовсе» проверяется

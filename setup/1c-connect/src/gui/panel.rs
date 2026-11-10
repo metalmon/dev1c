@@ -6610,9 +6610,7 @@ mod tests {
     fn a_waiting_request(card: &crate::cfg::Connection) -> crate::enroll::Request {
         crate::enroll::Request {
             card_name: card.name.clone(),
-            base: crate::wire::BaseFields {
-                base_id: card.id(), base_name: "Бухгалтерия".into(), publication: "auto".into(), write: true
-            },
+            base: crate::wire::BaseFields { base_id: card.id(), base_name: "Бухгалтерия".into(), write: true },
             peer: a_key(3),
             says_name: "Заказчик".into(),
         }

@@ -2732,11 +2732,10 @@ fn a_request() -> crate::enroll::Request {
     crate::enroll::Request {
         card_name: "Ромашка".into(),
         base: crate::wire::BaseFields {
-            // Два поля, которые по каналу приехали и в диалог НЕ попадут:
-            // они её слова, но выглядят как факт.
+            // Поле, которое по каналу приехало и в диалог НЕ попадёт: оно
+            // её слово, но выглядит как факт.
             base_id: "ИДЕНТИФИКАТОР-БАЗЫ-7731".into(),
             base_name: "Бухгалтерия Ромашки".into(),
-            publication: "webserver".into(),
             write: true,
         },
         peer: iroh::SecretKey::from_bytes(&[42u8; 32]).public(),
@@ -2750,7 +2749,7 @@ fn a_request() -> crate::enroll::Request {
 ///
 /// Тест стоит с ДВУХ сторон, и вторая важнее первой: он не только требует
 /// три вещи, но и проверяет, что остальное, приехавшее по каналу
-/// (`base_id`, `publication`), в текст не попало. Довод спеки от обратного:
+/// (`base_id`), в текст не попало. Довод спеки от обратного:
 /// это тоже её слова, но рядом с проверенным отпечатком они читаются как
 /// проверенный факт.
 ///
@@ -2776,9 +2775,8 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
 
     // И ни одной больше: всё прочее, что приехало по каналу, молчит.
     let text = format!("{message}\n{detail}");
-    for leaked in [r.base.base_id.as_str(), r.base.publication.as_str()] {
-        assert!(!text.contains(leaked), "пришло по каналу и выглядит фактом — в диалоге этому места нет: {leaked}");
-    }
+    let leaked = r.base.base_id.as_str();
+    assert!(!text.contains(leaked), "пришло по каналу и выглядит фактом — в диалоге этому места нет: {leaked}");
 
     // Кнопки называют ДЕЙСТВИЕ, а не «Да»/«Нет».
     assert_eq!(ALLOW, "Разрешить");
@@ -2808,7 +2806,7 @@ fn a_side_that_did_not_name_itself_is_said_so_in_words() {
 #[test]
 fn an_empty_base_name_moves_the_question_to_the_card() {
     let mut r = a_request();
-    r.base.base_name = String::new();
+    r.base.base_name = "".into();
     let (message, _) = permission_question(&r);
     assert!(message.contains("карточке «Ромашка»"), "{message}");
     assert!(!message.contains("«»"), "кавычки вокруг пустоты — не вопрос: {message}");
@@ -3053,7 +3051,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
 #[test]
 fn an_empty_base_name_names_the_card_once() {
     let mut r = a_request();
-    r.base.base_name = String::new();
+    r.base.base_name = "".into();
     let (message, detail) = permission_question(&r);
     assert!(message.contains("карточке «Ромашка»"), "{message}");
     // Ищем именно СТРОКУ про карточку, а не слово «Ромашка»: оно законно

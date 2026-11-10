@@ -910,8 +910,7 @@ impl Machine {
                 name: c.name.clone(),
                 base: BaseFields {
                     base_id: c.id(),
-                    base_name: crate::cfg::base_name(&c.base_path).to_string(),
-                    publication: c.publication.clone(),
+                    base_name: crate::cfg::base_name(&c.base_path).into(),
                     // Действующее право, а не своя складка половин: складывать их
                     // умеет ровно одна `Cfg::may_write`, и второе место сложения —
                     // это второй словарь одного понятия, который однажды разойдётся

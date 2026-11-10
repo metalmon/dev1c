@@ -50,6 +50,15 @@ const FOLDER_SVG: &[u8] = include_bytes!("../../icons/folder.svg");
 /// «справа от поля иконка копировать, как открыть диалог выбора папки, у нас уже есть»). Своего рисования кнопки это не заводит: образец
 /// берётся готовый, меняется только глиф.
 const COPY_SVG: &[u8] = include_bytes!("../../icons/copy.svg");
+/// Значок настроек — у ВЫДЕЛЕННОЙ строки списка: он раскрывает её поля и сворачивает обратно. Разворачивать карточку нужно только ради
+/// настроек (решение владельца 10.11), поэтому и значок говорит про настройки, а не про «подробнее».
+const SETTINGS_SVG: &[u8] = include_bytes!("../../icons/settings.svg");
+/// Он же в раскрытом виде — «свернуть».
+const CHEVRON_UP_SVG: &[u8] = include_bytes!("../../icons/chevron-up.svg");
+/// Карандаш у ЗАГОЛОВКА раскрытой карточки: им правится имя соединения. Отдельного поля «Имя» в карточке больше нет — имя говорилось
+/// дважды, заголовком и полем (находка 36 обхода, решение владельца: «на базовом имени при наведении нужна иконка редактирования
+/// справа»).
+const PENCIL_SVG: &[u8] = include_bytes!("../../icons/pencil.svg");
 
 fn icon() -> Arc<Image> {
     static I: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
@@ -128,6 +137,18 @@ pub struct Panel {
     /// живой, а нажатие ВЕДЁТ к незаполненному, вместо запертой кнопки или
     /// молчаливого отказа строкой журнала.
     asked: Option<crate::need::Deed>,
+    /// Правится ли сейчас имя выделенной строки: заголовок подменяется полем ввода.
+    ///
+    /// Отдельного поля «Имя» в карточке больше нет — имя говорилось дважды, заголовком строки и полем под ним (находка 36 обхода
+    /// 10.11). Правится оно там же, где и показано: карандашом справа от заголовка.
+    renaming: bool,
+    /// Раскрыта ли карточка ВЫДЕЛЕННОЙ строки, то есть видны ли её поля.
+    ///
+    /// Выделение и раскрытие — РАЗНЫЕ вещи (решение владельца 10.11: «нужна возможность переключения между карточками в свёрнутом
+    /// состоянии с наглядным визуалом выделенной и текущей; разворачивать надо только для изменения настроек; в обычном управлении
+    /// подключениями поля не нужны»). Прежде щелчок по строке раскрывал её карточку, и десять заказчиков превращались в десять форм:
+    /// переключаться между связями было нечем, кроме как листая поля.
+    expanded: bool,
 }
 
 /// Карточка состояния: кружок, заголовок, можно ли «Прервать» — всегда одна
@@ -1407,8 +1428,11 @@ pub enum Body {
     Answer(&'static str, &'static str),
     /// Подпись группы списка.
     Caption(&'static str),
-    /// Строка соединения; `true` — под ней раскрыта карточка.
-    Row(link::Row, bool),
+    /// Строка соединения: выделена ли она и раскрыта ли под ней карточка с полями.
+    ///
+    /// Два признака, а не один: выделение — это выбор предмета, раскрытие — просьба показать настройки. Прежде был один, и щелчок по
+    /// строке разворачивал форму; переключаться между десятью связями приходилось сквозь поля.
+    Row(link::Row, bool, bool),
     /// «+ Добавить» — у СПИСКА, а не в подвале (указатель 5 ревью): подвал
     /// держит ровно одно главное действие над открытой карточкой, а
     /// добавление относится к списку целиком.
@@ -1429,7 +1453,13 @@ pub enum Body {
 /// руками, два соединения с одним именем (Review Focus плана): список
 /// показывает оба, а карточка — у первого. Иначе один и тот же набор полей
 /// нарисовался бы дважды и человек правил бы наугад.
-pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&str) -> link::Enroll, selected: &str) -> Vec<Body> {
+pub fn link_body(
+    cfg: &cfg::Cfg,
+    link: &dyn Fn(&str) -> Option<State>,
+    enroll: &dyn Fn(&str) -> link::Enroll,
+    selected: &str,
+    expanded: bool,
+) -> Vec<Body> {
     if link::onboarding_shown(cfg) {
         let mut out = vec![Body::Ask(ONBOARDING_ASK)];
         out.extend(link::onboarding_answers().into_iter().map(|(label, role)| Body::Answer(label, role)));
@@ -1448,7 +1478,8 @@ pub fn link_body(cfg: &cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &
                 if alone {
                     r.current = false;
                 }
-                Body::Row(r, here)
+                // Выделена — ещё не значит раскрыта: поля показываются только по просьбе (значок настроек в строке).
+                Body::Row(r, here, here && expanded)
             }
         })
         .collect();
@@ -2921,6 +2952,9 @@ impl Panel {
             selected: host.name.clone(),
             // Человек ещё ничего не просил — подсвечивать нечего.
             asked: None,
+            renaming: false,
+            // Список открывается СВЁРНУТЫМ: обычное управление подключениями — это выбор строки, а не правка полей.
+            expanded: false,
         }
     }
 
@@ -3454,53 +3488,49 @@ impl Panel {
                 },
             ),
         );
-        let mut col = v_flex()
-            .gap_3()
-            .pt_1()
-            // Имя — первое поле карточки: оно же первым планом в строке
-            // списка, и переименование (`save::rename`) правится здесь, а
-            // пункт меню «Переименовать» только ставит сюда курсор.
-            .child(Self::row("Имя", caption, accent, &f.name, window, cx))
-            .child({
-                let name = c.name.clone();
-                v_flex()
-                    .gap_1()
-                    .min_w_0()
-                    .child(div().text_size(px(13.)).text_color(caption).child("Это соединение"))
-                    // Первый вопрос карточки (спека, «Вопросов в карточке
-                    // два», порядок ответов — из её же таблицы: «Всё на
-                    // одной машине» · «Принимаю подключения» · «Подключаюсь
-                    // сам»): три ответа одного переключателя (Шаг 4 задачи
-                    // 16 — «один переключатель на три ответа, а не два
-                    // переключателя рядом»). Слова — из `link::LOCAL_ANSWER`
-                    // и `link::onboarding_answers()`, не свои копии (Important
-                    // 2 ревью круга починки 1): один словарь на карточку,
-                    // отрисовку и онбординг, иначе слова однажды разойдутся.
-                    // Первые два пишут роль (`set_card_topology_kind` — а
-                    // уход из «одной машины» для них уводит и режим, см. её
-                    // докстроку); третий ставит `mode = "local"` и роль не
-                    // трогает.
-                    // Та же стрелка, что у «Профиля» выше — пять кнопок
-                    // выбора в карточке и списке получают её одним приёмом.
-                    .child(
-                        KitButton::new("role")
-                            .outline()
-                            .w_full()
-                            .text_color(fg)
-                            .label(role_switch_label(&c))
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |mut menu, _, _| {
-                                let [dial, accept] = link::onboarding_answers();
-                                for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
-                                    let name = name.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)),
-                                    );
-                                }
-                                menu.min_w(select_menu_min_w)
-                            }),
-                    )
-            });
+        // **Поля «Имя» в карточке НЕТ** (находка 36 обхода 10.11): имя стоит заголовком строки, и второй раз его говорить незачем.
+        // Правится оно карандашом у того же заголовка — решение владельца: «на базовом имени при наведении нужна иконка редактирования
+        // справа». Поле ввода (`fields.name`) никуда не делось: по карандашу оно встаёт НА МЕСТО заголовка, и пишет его та же
+        // `save::rename`.
+        let mut col = v_flex().gap_3().pt_1().child({
+            let name = c.name.clone();
+            v_flex()
+                .gap_1()
+                .min_w_0()
+                .child(div().text_size(px(13.)).text_color(caption).child("Это соединение"))
+                // Первый вопрос карточки (спека, «Вопросов в карточке
+                // два», порядок ответов — из её же таблицы: «Всё на
+                // одной машине» · «Принимаю подключения» · «Подключаюсь
+                // сам»): три ответа одного переключателя (Шаг 4 задачи
+                // 16 — «один переключатель на три ответа, а не два
+                // переключателя рядом»). Слова — из `link::LOCAL_ANSWER`
+                // и `link::onboarding_answers()`, не свои копии (Important
+                // 2 ревью круга починки 1): один словарь на карточку,
+                // отрисовку и онбординг, иначе слова однажды разойдутся.
+                // Первые два пишут роль (`set_card_topology_kind` — а
+                // уход из «одной машины» для них уводит и режим, см. её
+                // докстроку); третий ставит `mode = "local"` и роль не
+                // трогает.
+                // Та же стрелка, что у «Профиля» выше — пять кнопок
+                // выбора в карточке и списке получают её одним приёмом.
+                .child(
+                    KitButton::new("role")
+                        .outline()
+                        .w_full()
+                        .text_color(fg)
+                        .label(role_switch_label(&c))
+                        .dropdown_caret(true)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            let [dial, accept] = link::onboarding_answers();
+                            for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
+                                let name = name.clone();
+                                menu = menu
+                                    .item(PopupMenuItem::new(label).on_click(move |_, _, cx| set_card_topology_kind(cx, &name, answer)));
+                            }
+                            menu.min_w(select_menu_min_w)
+                        }),
+                )
+        });
         // «Где база» — второй вопрос карточки, виден только когда первый
         // ответ не «Всё на одной машине» (спека: «второй вопрос при нём не
         // показывается») — топология теряет смысл там, где той стороны нет
@@ -3930,7 +3960,7 @@ impl Render for Panel {
             let facts: Vec<(String, link::Enroll)> =
                 cfg.connections.iter().map(|c| (c.name.clone(), enroll_facts(cx.global::<Ui>(), &c.name))).collect();
             let enroll = |name: &str| facts.iter().find(|(n, _)| n == name).map(|(_, e)| *e).unwrap_or_default();
-            link_body(&cfg, &|name| (name == current).then(|| state.clone()), &enroll, &self.selected)
+            link_body(&cfg, &|name| (name == current).then(|| state.clone()), &enroll, &self.selected, self.expanded)
         };
         // Полоса хода в разделителе над подвалом: что-то идёт — операция,
         // подключение туннеля или фоновое обновление состояния.
@@ -4067,7 +4097,7 @@ impl Render for Panel {
                             .on_click(move |_, window, cx| add_link(window, cx, role))
                             .into_any_element(),
                         Body::Caption(text) => div().pt_1().text_size(px(12.)).text_color(caption).child(text).into_any_element(),
-                        Body::Row(r, open) => {
+                        Body::Row(r, picked, open) => {
                             let name = r.name.clone();
                             // Щелчок по строке зовёт `Panel::select` с
                             // именем ИМЕННО этой строки: имя взято у
@@ -4115,7 +4145,11 @@ impl Render for Panel {
                                     );
                                 }
                             });
-                            let mut row = Self::layer(card_bg, border)
+                            // **Выделенная строка видна рамкой**, а не только раскрытой формой под ней (решение владельца 10.11): в
+                            // свёрнутом списке выбор иначе ничем не показан, и человек не знает, над чем работает подвал. Текущее
+                            // соединение говорит о себе отметкой в `row_marks` — это РАЗНЫЕ вещи: выделено то, что человек смотрит,
+                            // текущее — то, с чем работают инструменты и агент.
+                            let mut row = Self::layer(card_bg, if picked { accent } else { border })
                                 .id(SharedString::from(format!("row-{i}")))
                                 .flex()
                                 .flex_col()
@@ -4132,7 +4166,15 @@ impl Render for Panel {
                                         // приглушённым справа. `min_w_0` и
                                         // многоточие: длинное имя на 380
                                         // точках иначе обрезается по краю.
-                                        .child(
+                                        .child(if picked && self.renaming {
+                                            // Имя правится ТАМ ЖЕ, где показано: поле встаёт на место заголовка, а не заводит себе
+                                            // второй строки под ним.
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(Self::input(&self.fields.name, accent, window, cx))
+                                                .into_any_element()
+                                        } else {
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
@@ -4140,9 +4182,46 @@ impl Render for Panel {
                                                 .overflow_hidden()
                                                 .text_ellipsis()
                                                 .font_weight(FontWeight::SEMIBOLD)
-                                                .child(name.clone()),
-                                        )
-                                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r))),
+                                                .child(name.clone())
+                                                .into_any_element()
+                                        })
+                                        .when(picked && !self.renaming, |d| {
+                                            d.child(
+                                                KitButton::new(SharedString::from(format!("rename-{i}")))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(Icon::default().data(PENCIL_SVG))
+                                                    .tooltip("Переименовать")
+                                                    .on_click(cx.listener(
+                                                        |this: &mut Self, _, window: &mut Window, cx: &mut Context<Self>| {
+                                                            this.renaming = true;
+                                                            this.fields.name.read(cx).focus_handle(cx).focus(window, cx);
+                                                            cx.notify();
+                                                        },
+                                                    )),
+                                            )
+                                        })
+                                        .child(div().flex_shrink_0().text_size(px(12.)).text_color(caption).child(row_marks(&r)))
+                                        // Значок настроек — только у выделенной строки: он раскрывает её поля и сворачивает обратно.
+                                        // В свёрнутом виде поля не нужны вовсе («в обычном управлении подключениями поля не нужны»),
+                                        // и список из десяти заказчиков остаётся списком, а не десятью формами.
+                                        .when(picked, |d| {
+                                            d.child(
+                                                KitButton::new(SharedString::from(format!("gear-{i}")))
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(Icon::default().data(if open { CHEVRON_UP_SVG } else { SETTINGS_SVG }))
+                                                    .tooltip(if open {
+                                                        "Скрыть настройки"
+                                                    } else {
+                                                        "Настройки соединения"
+                                                    })
+                                                    .on_click(cx.listener(|this: &mut Self, _, _, cx: &mut Context<Self>| {
+                                                        this.expanded = !this.expanded;
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                        }),
                                 )
                                 // Вторая строка — только там, где `Row`
                                 // принёс базу (у текущего соединения):
@@ -6105,8 +6184,10 @@ mod tests {
     /// порядок строк, группировку и место раскрытой карточки — то, к чему
     /// заявки и коды не относятся, — а тест самого зачисления зовёт
     /// `super::link_body` со своими фактами.
+    /// Тело вкладки с РАСКРЫТОЙ карточкой выделенной строки: прежние проверки писались до того, как выделение и раскрытие разошлись,
+    /// и говорят они именно про раскрытое. Свёрнутый вид проверяет свой тест ниже.
     fn link_body(cfg: &crate::cfg::Cfg, link: &dyn Fn(&str) -> Option<State>, selected: &str) -> Vec<Body> {
-        super::link_body(cfg, link, &|_| link::Enroll::default(), selected)
+        super::link_body(cfg, link, &|_| link::Enroll::default(), selected, true)
     }
 
     /// Тело вкладки одним словом на элемент — порядок читается глазами, а
@@ -6118,7 +6199,7 @@ mod tests {
                 Body::Ask(_) => "вопрос".to_string(),
                 Body::Answer(_, role) => format!("ответ:{role}"),
                 Body::Caption(c) => format!("подпись:{c}"),
-                Body::Row(r, open) => format!("строка:{}{}", r.name, if *open { "+карточка" } else { "" }),
+                Body::Row(r, _, open) => format!("строка:{}{}", r.name, if *open { "+карточка" } else { "" }),
                 Body::Add => "добавить".to_string(),
             })
             .collect()
@@ -6139,6 +6220,23 @@ mod tests {
         // Исчезнувшая строка — туда же.
         let shape = body_shape(&link_body(&cfg, &no_states, "Лютик"));
         assert_eq!(shape[0], "строка:Ромашка+карточка");
+    }
+
+    /// Решение владельца 10.11: список живёт СВЁРНУТЫМ, щелчок по строке выделяет её, а поля показываются только по просьбе. Прежде
+    /// щелчок разворачивал форму, и переключаться между десятью связями приходилось сквозь поля.
+    #[test]
+    fn a_collapsed_list_selects_without_showing_any_fields() {
+        let cfg = cfg_with(&["Ромашка", "Василёк"]);
+        let body = super::link_body(&cfg, &no_states, &|_| link::Enroll::default(), "Василёк", false);
+        assert_eq!(body_shape(&body), vec!["строка:Ромашка", "строка:Василёк", "добавить"], "ни одной раскрытой карточки");
+        let picked: Vec<bool> = body
+            .iter()
+            .filter_map(|b| match b {
+                Body::Row(_, picked, _) => Some(*picked),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(picked, vec![false, true], "выделена ровно одна строка — та, что выбрана");
     }
 
     /// Пустая «Связь» — строка-пояснение и два ответа (задача 11), и ничего
@@ -6176,14 +6274,14 @@ mod tests {
     #[test]
     fn the_current_mark_appears_only_where_there_is_a_choice() {
         let alone = cfg_with(&["Ромашка"]);
-        let Some(Body::Row(r, _)) = link_body(&alone, &no_states, "").into_iter().next() else {
+        let Some(Body::Row(r, _, _)) = link_body(&alone, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         assert!(!r.current, "выбирать не из чего — отметки нет");
         assert!(!row_marks(&r).contains("текущее"));
 
         let two = cfg_with(&["Ромашка", "Василёк"]);
-        let Some(Body::Row(r, _)) = link_body(&two, &no_states, "").into_iter().next() else {
+        let Some(Body::Row(r, _, _)) = link_body(&two, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         assert!(r.current, "соединений два — выбор есть, и отметка есть");
@@ -6202,7 +6300,7 @@ mod tests {
         // этой машине нет, — ровно то, что чинил круг 10.11.
         cfg.write = crate::cfg::WriteCeiling::ReadWrite;
         cfg.connections[0].write = "read_write".into();
-        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+        let Some(Body::Row(r, _, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         // «не подключено», не «ждёт разрешения»: живого хранилища состояний
@@ -6211,7 +6309,7 @@ mod tests {
         // `2026-11-03-interface`, см. докстроку `link::row`).
         assert_eq!(row_marks(&r), "не подключено · текущее · запись в базу");
         cfg.connections[0].write = "read_only".into();
-        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+        let Some(Body::Row(r, _, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         assert_eq!(row_marks(&r), "не подключено · текущее", "запрет писать — не отметка, а умолчание");
@@ -6220,7 +6318,7 @@ mod tests {
         // показывает итог, а не мнение одной из сторон.
         cfg.connections[0].write = "read_write".into();
         cfg.write = crate::cfg::WriteCeiling::ReadOnly;
-        let Some(Body::Row(r, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
+        let Some(Body::Row(r, _, _)) = link_body(&cfg, &no_states, "").into_iter().next() else {
             panic!("первым элементом тела обязана быть строка соединения")
         };
         assert_eq!(row_marks(&r), "не подключено · текущее", "потолок машины сильнее разрешения карточки");

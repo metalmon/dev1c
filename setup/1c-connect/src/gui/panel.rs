@@ -499,18 +499,23 @@ pub fn live_code(ui: &Ui, card: &str, now: SystemTime) -> Option<String> {
 ///    («Включить»/«Выключить»);
 /// 5. соединение зовёт само (`role() == "dial"`) и не подключено —
 ///    «Подключиться»;
-/// 6. соединение принимает подключения и ждёт — набирать код там, а не
-///    здесь: кнопка заперта и называет состояние (`link::row`), а `why`
-///    говорит, где действие («Разрешить» в подвале не появляется вовсе,
-///    решение владельца 1.11 — оно всплывающим окном, а упущенное
-///    возвращается кнопкой внутри карточки);
-/// 7. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
+/// 6. соединение принимает подключения, и по его коду вправду можно
+///    подключиться (`link::accepts_connections` — роль, вид и база ЗДЕСЬ) —
+///    «Показать код»;
+/// 7. кода у соединения не будет вовсе: база на другом компьютере либо слово
+///    роли программе не знакомо — кнопка заперта, называет состояние
+///    (`link::row`), а `why` говорит, почему кода нет и что поправить
+///    (`BASE_ELSEWHERE_NOTE`, `ROLE_UNKNOWN_NOTE`). Прежде этой ветки не
+///    было вовсе: «Показать код» стояло ОСТАТКОМ на всём, что не local и не
+///    dial, то есть и на карточке, по коду которой подключиться нельзя
+///    никогда;
+/// 8. всё прочее (уже подключено, рвётся, переподключается — транспорта эта
 ///    задача не касается вовсе) — кнопка заперта и называет то же состояние;
 ///    объяснять нечего сверх этого — подсказка переключателя уже говорит
 ///    причину через `reason`, а в подвале у неё слота больше нет (поправка
 ///    владельца 9.11).
 ///
-/// **Ветки 6 и 7 не исчезают, а запираются** (спека «Интерфейс»: «иначе
+/// **Ветки 7 и 8 не исчезают, а запираются** (спека «Интерфейс»: «иначе
 /// заперта и называет состояние», живой прогон 9.11). Слово состояния — из
 /// того же словаря, что уже красит строку списка (`link::row`), а не
 /// придуманное здесь заново: тот же вопрос «что сейчас происходит»,
@@ -640,7 +645,23 @@ pub fn main_button(ui: &Ui, selected: &str, dirty: Dirty) -> Button {
     // этого не трогает. Ей нужен один файл, ключ этой машины
     // (`node::id_from_state`), и запирать её за незаполненный пароль базы
     // значило бы не дать человеку даже начать договариваться с той стороной.
-    Button { subject, label: "Показать код", why: None, act: Some(LinkAct::ShowCode) }
+    //
+    // «Принимает подключения» спрашивается в одном месте
+    // (`link::accepts_connections`) — там и довод, почему про базу спросить
+    // обязательно: прежде эта ветка была ОСТАТКОМ («не local и не dial —
+    // значит принимает»), и карточке с базой на другом компьютере самая
+    // видная кнопка экрана предлагала код, по которому подключиться нельзя
+    // никогда.
+    if link::accepts_connections(c) {
+        return Button { subject, label: "Показать код", why: None, act: Some(LinkAct::ShowCode) };
+    }
+    // Кода не будет — кнопка заперта и называет причину, тем же приёмом, что
+    // прочие запертые ветки выше. Случаев здесь ровно два: база на другом
+    // компьютере (роль принимающая) и слово роли, которого программа не
+    // знает, — больше в эту ветку не доходит ничего (local и dial разобраны
+    // выше).
+    let why = if link::waits_for_incoming(c) { BASE_ELSEWHERE_NOTE } else { ROLE_UNKNOWN_NOTE };
+    Button { subject, label: link::row(&ui.cfg, c, true, Some(&ui.link), &e).state, why: Some(why.to_string()), act: None }
 }
 
 // Подвал потерял левый текстовый слот совсем (решение владельца 9.11,
@@ -1090,15 +1111,18 @@ pub struct PartyRow {
     /// личность отпечаток — он тут же, строкой выше, и сверяют голосом
     /// именно его.
     pub says_name: String,
-    /// Что ей дано, словами: «Чтение и запись» или «Только чтение» (спека 6
-    /// ревью задач 6 и 7). Без этой строки сторона, которой разрешена
-    /// запись в базу, выглядела на экране в точности как та, которой
-    /// разрешено только читать, — человек не мог увидеть, кому он что дал,
-    /// то есть не мог и заметить ошибку.
+    /// Что ей дано, словами: «Чтение и запись» или «Только чтение» с указанием, какая сторона ограничила (спека контракта, «Разрешение
+    /// записи в базу»). Без этой строки сторона, которой разрешена запись в базу, выглядела на экране в точности как та, которой разрешено
+    /// только читать, — человек не мог увидеть, кому он что дал, то есть не мог и заметить ошибку.
+    ///
+    /// **Право ДЕЙСТВУЮЩЕЕ, а не записанное в миг зачисления** (повторное ревью всей ветки). Прежде здесь стояло `Party::write` из книги
+    /// допуска — снимок того, что было разрешено тогда: человек щёлкал «Только чтение», строка списка и мост уже запрещали, а карточка
+    /// по-прежнему писала «Чтение и запись» про ту же сторону. Складывается это право ровно в одном месте (`Cfg::may_write`), и спрашивать
+    /// надо его.
     pub access: &'static str,
-    /// Тот же факт значением — итог, уже сложенный с потолком при зачислении
-    /// (`enroll::Decision::Allow`). Остаётся рядом со словом: слово для
-    /// глаза, факт для теста и для того, кто захочет красить строку.
+    /// Тот же факт значением — ДЕЙСТВУЮЩИЙ итог (`Cfg::may_write`). Остаётся
+    /// рядом со словом: слово для глаза, факт для теста и для того, кто
+    /// захочет красить строку.
     pub write: bool,
 }
 
@@ -1120,6 +1144,9 @@ pub const REVOKE: &str = "Отозвать разрешение";
 /// `shown_fields` себе запрещает и отдаёт сюда («Роль в этот список не
 /// входит: она решает, показывать код для той стороны или поле для кода»).
 ///
+/// Блок есть и у принимающей карточки, база которой на ДРУГОМ компьютере, — только кода в нём не будет (`can_issue`): такая карточка ждёт
+/// входящих по роли, которую выбрал человек, и сказать ей надо не пустым местом, а словами (`BASE_ELSEWHERE_NOTE`).
+///
 /// **Предела числу зачисленных здесь нет и не появится** (решение владельца
 /// 1.11): зачислить к одной карточке можно сколько угодно сторон, предел
 /// назначает лицензия 1С, а не программа. Поэтому «осталось мест» в блоке нет
@@ -1139,30 +1166,90 @@ pub struct Accepting {
     /// Одно предложение о том, что с кодом делать (спека: «под ней одно
     /// предложение о том, что с ней делать на той стороне»).
     pub code_note: &'static str,
+    /// Можно ли по коду этой карточки вправду подключиться (`link::accepts_connections`). `false` — кода у неё не будет вовсе, и орудий
+    /// выдачи карточка не показывает: ни строки кода, ни «Выдать новый код». Вместо них `code_note` говорит, почему.
+    pub can_issue: bool,
     /// Подпись списка зачисленных, без счёта (решение владельца 10.11):
     /// «Кому разрешено подключаться», а пусто — «Вы ещё никому не разрешили
     /// подключаться».
     pub enrolled: String,
-    /// Пометка над списком — одна на все имена сразу. `None` — зачисленных
-    /// нет, и помечать нечего.
+    /// Сами зачисленные стороны, в порядке показа — у каждой отпечаток, её собственные слова о себе, действующее право и «Отозвать
+    /// разрешение». Пусто — ни одной: об этом говорит `enrolled` выше, а не пустое место.
+    ///
+    /// (Прежняя докстрока описывала пометку «сказано ими, не проверено» и `None` на её месте — пометки нет с коммита `114b973`, решение
+    /// владельца 10.11: личность доказывает отпечаток, а предупреждение, висящее всегда, читаться перестаёт. Поля с таким смыслом здесь
+    /// никогда и не было.)
     pub parties: Vec<PartyRow>,
 }
 
-pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enrolled::Party]) -> Option<Accepting> {
-    // Локальность проверяется первой и отдельно от роли: у карточки, где оба
-    // конца на этой машине, зачислять некого — та же защита, тем же
-    // `base_is_here`/`mode`-порядком, что у `shown_fields` и
-    // `publication_switch_label`. Застрявшая в файле роль `accept` при
-    // `mode = "local"` не вправе нарисовать код для стороны, которой нет.
-    if c.mode == "local" || !matches!(c.role(), Ok("accept")) {
+/// Почему принимающая карточка с базой на ДРУГОМ компьютере кода не получает (Critical повторного ревью всей ветки).
+///
+/// Код ей выдавался, а подключиться по нему было нельзя никогда: поток узла такую карточку в зачисление не берёт вовсе и отвечает той
+/// стороне, что подключения такого вида эта версия ещё не проводит (`enroll.rs`, `BASE_ELSEWHERE`). Человек при этом читал в той же
+/// карточке «Передайте эту строку… и вы увидите здесь его просьбу» — просьбы не было бы никогда.
+///
+/// Слова ведут к двум настоящим выходам, а не к нашему устройству: поправить «Где база», если база всё-таки здесь, либо взять код там, где
+/// база, и подключаться самому.
+pub const BASE_ELSEWHERE_NOTE: &str = "Кода у этой карточки не будет: база, к которой подключаются, — на другом компьютере, а такое \
+                                       подключение программа пока не проводит. Если база всё-таки здесь, поправьте «Где база»; если нет — \
+                                       код выдают на том компьютере, где база.";
+
+/// Карточка, в которой написано слово, которого программа не знает (`Connection::role()` отдаёт отказ: правка файла руками, опечатка).
+/// Выдавать ей код нельзя — неизвестно, что она вообще делает, — и молчать нельзя: в списке она стоит под подписью «Непонятно, как
+/// подключаются», и это единственное место, где можно сказать, чем это кончается и что нажать.
+pub const ROLE_UNKNOWN_NOTE: &str = "Непонятно, как эта карточка подключается: в настройках у неё стоит слово, которого программа не \
+                                     знает. Выберите в карточке, подключаетесь вы сами или принимаете подключения.";
+
+/// Книга допуска не прочиталась — и так и говорится. Нуля на экране здесь быть не может: «Вы ещё никому не разрешили подключаться» в этом
+/// случае значило бы «никого не зачислили» там, где просто не прочитался файл (Important повторного ревью всей ветки; та же беда, которую
+/// у себя чинила `save::reread_book`, и провод в том же случае отвечает честно — `enroll::BOOK_UNREADABLE`).
+pub const BOOK_UNREAD_NOTE: &str = "Список разрешений не прочитался — кому разрешено подключаться, здесь не видно. Что случилось, сказано \
+                                    в «Журнале».";
+
+/// Что ДЕЙСТВУЮЩЕ дано зачисленной стороне — итог с указанием, какая сторона ограничила (спека контракта: «в карточке видно не „мой
+/// флажок“, а итог с указанием, какая сторона ограничила — иначе человек чинит не то»).
+///
+/// Складывается право в одном месте (`Cfg::may_write`), здесь только слова к его половинам: запрет машины называется запретом машины,
+/// запрет карточки — запретом карточки. Порядок разбора — машина первой: её запрет сильнее и чинится в другом месте (меню значка), и
+/// отправлять человека править карточку, когда закрыта машина, значило бы отправить его не туда.
+pub fn access_label(cfg: &cfg::Cfg, c: &Connection) -> &'static str {
+    if cfg.may_write(c) {
+        "Чтение и запись"
+    } else if !cfg.allows_write() {
+        "Только чтение: на этом компьютере запись в базу запрещена"
+    } else {
+        "Только чтение: в этой карточке запись в базу не разрешена"
+    }
+}
+
+/// `parties` — `None`, если книга допуска не прочиталась (`Ui::book`): это НЕ «никого не зачислили», и говорится это разными словами.
+pub fn accepting_block(
+    cfg: &cfg::Cfg,
+    c: &Connection,
+    code: Option<&str>,
+    parties: Option<&[crate::enrolled::Party]>,
+) -> Option<Accepting> {
+    // Блок — у карточки, которая ждёт входящих, и вопрос этот решается в
+    // одном месте (`link::waits_for_incoming`): роль и вид соединения. У
+    // карточки, где оба конца на этой машине, зачислять некого, и застрявшая
+    // в файле роль `accept` при `mode = "local"` не вправе нарисовать код
+    // для стороны, которой нет.
+    if !link::waits_for_incoming(c) {
         return None;
     }
+    // А вот выдавать ли код — вопрос другой, и мера у него та же, что у
+    // приёмной стороны (`link::accepts_connections`): база обязана быть
+    // ЗДЕСЬ. Иначе карточка предлагала бы строку, по которой подключиться
+    // нельзя никогда.
+    let can_issue = link::accepts_connections(c);
     // Названная кнопка обязана существовать у ЭТОЙ карточки. «Показать код»
     // и «Выдать новый код» теперь есть в меню у любой принимающей — и у
     // нетекущей тоже (`link_menu`, спека 4 ревью задач 6 и 7): прежде
     // подсказка велела нажать то, чего у нетекущей карточки не было ни в
     // подвале («Сделать текущим»), ни в меню («Переименовать», «Удалить»).
-    let code_note = if code.is_some() {
+    let code_note = if !can_issue {
+        BASE_ELSEWHERE_NOTE
+    } else if code.is_some() {
         "Передайте эту строку тому, кто будет подключаться: он вставит её у себя, и вы увидите здесь его просьбу."
     } else {
         "Кода пока нет. Нажмите «Показать код» — и его можно будет передать тому, кто будет подключаться."
@@ -1170,27 +1257,28 @@ pub fn accepting_block(c: &Connection, code: Option<&str>, parties: &[crate::enr
     // Подпись списка — без счёта (решение владельца): число зачисленных
     // человек и так видит по строкам, а «Зачислено: 2 стороны» он не
     // произнесёт вслух.
-    let enrolled = if parties.is_empty() {
+    let enrolled = match parties {
+        None => BOOK_UNREAD_NOTE.to_string(),
         // Пустота словами, а не пустым местом — то же правило, что у
         // `base_fields_note` и `nothing_to_show`.
-        "Вы ещё никому не разрешили подключаться".to_string()
-    } else {
-        "Кому разрешено подключаться".to_string()
+        Some([]) => "Вы ещё никому не разрешили подключаться".to_string(),
+        Some(_) => "Кому разрешено подключаться".to_string(),
     };
     let parties = parties
+        .unwrap_or_default()
         .iter()
         .map(|p| PartyRow {
             fingerprint: p.key.to_string(),
             key: p.key,
             says_name: if p.says_name.is_empty() { "Без имени".to_string() } else { format!("«{}»", p.says_name) },
-            // Слова, а не галочка: «Полный»/«Только чтение» — это и есть
-            // итог, которым живёт разрешение записи в карточке, и читается
-            // он без расшифровки.
-            access: if p.write { "Чтение и запись" } else { "Только чтение" },
-            write: p.write,
+            // Слова, а не галочка, и ДЕЙСТВУЮЩЕЕ право, а не записанное при
+            // зачислении: `Party::write` — снимок того мига, и карточка с ним
+            // спорила со строкой списка и с мостом (см. `PartyRow::access`).
+            access: access_label(cfg, c),
+            write: cfg.may_write(c),
         })
         .collect();
-    Some(Accepting { code: code.map(str::to_string), code_note, enrolled, parties })
+    Some(Accepting { code: can_issue.then(|| code.map(str::to_string)).flatten(), code_note, can_issue, enrolled, parties })
 }
 
 /// Зеркало `accepting_block` для ЗОВУЩЕЙ карточки: куда вставить код и что
@@ -1466,7 +1554,12 @@ pub fn link_menu(ui: &Ui, selected: &str) -> Vec<(&'static str, LinkAct)> {
     let c = resolve_selected(&ui.cfg, selected);
     let current = c.name == ui.cfg.current().name;
     let connected = current && ui.link.is_up();
-    let accepting = matches!(c.role(), Ok("accept")) && c.mode != "local";
+    // Та же мера, что у блока кода и у главной кнопки, и живёт она в одном
+    // месте (`link::accepts_connections`): роль, вид соединения и база ЗДЕСЬ.
+    // Здесь она была третьей копией правила, и про базу эта копия, как и
+    // прочие две, не спрашивала — меню предлагало выдать код карточке, по
+    // которому подключиться нельзя никогда.
+    let accepting = link::accepts_connections(c);
     let mut out = Vec::new();
     // Про СВЯЗЬ — только у текущей карточки: связь одна на машину и
     // принадлежит ей (см. докстроку). Код ниже — не про связь.
@@ -1596,6 +1689,14 @@ fn request_to_answer(ui: &Ui, card: &str) -> Option<crate::enroll::Request> {
 /// `Book::reissue` на просроченном тикете — и прежние коды такой отказ не
 /// гасит, карточка не остаётся без кода из-за негодного нового).
 fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
+    // Отказ стоит ЗДЕСЬ, у единственной двери к выдаче, а не у каждого, кто
+    // в неё стучит: окно такой карточке кода уже не предлагает (ни кнопкой,
+    // ни пунктом меню), и останься решение только там — следующий вызов
+    // откуда-нибудь ещё вернул бы беду целиком. Слова те же, что читает
+    // человек в самой карточке.
+    if ui.cfg.by_name(card).is_some_and(|c| link::waits_for_incoming(c) && !link::accepts_connections(c)) {
+        return Err(BASE_ELSEWHERE_NOTE.to_string());
+    }
     // Уже выданный отдаётся только ЖИВЫМ (`live_code`): «Показать код» на
     // мёртвый код не показывает — он выдаёт новый, как если бы кода и не
     // было, потому что для человека это одно и то же (Important 1 ревью).
@@ -3329,8 +3430,10 @@ impl Panel {
             // Только ЖИВОЙ код (`live_code`): мёртвую строку показывать и
             // предлагать передать на ту сторону нельзя (Important 1 ревью).
             let code = live_code(ui, &card_name, SystemTime::now());
-            let parties = ui.book.as_ref().map(|b| b.of(&c.id())).unwrap_or_default();
-            accepting_block(&c, code.as_deref(), &parties)
+            // `None` — книга не прочиталась, и это НЕ «никого не зачислили»:
+            // `accepting_block` говорит про такой случай своими словами.
+            let parties = ui.book.as_ref().map(|b| b.of(&c.id()));
+            accepting_block(&ui.cfg, &c, code.as_deref(), parties.as_deref())
         };
         if let Some(block) = block {
             col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
@@ -3361,7 +3464,12 @@ impl Panel {
                 );
             }
             col = col.child(div().text_size(px(13.)).text_color(caption).child(block.code_note));
-            {
+            // Орудие выдачи — только там, где код вправду выдают
+            // (`Accepting::can_issue`): у карточки с базой на другом
+            // компьютере кнопка рядом с объяснением «кода не будет» означала
+            // бы «а всё-таки попробуйте», и человек нажимал бы её, пока не
+            // устанет.
+            if block.can_issue {
                 let card = card_name.clone();
                 col = col.child(
                     h_flex().gap_2().child(
@@ -4295,11 +4403,11 @@ mod tests {
     use super::{
         accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, blind_code_note, can_save, card, card_title,
         delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
-        gate_text, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
+        gate_text, issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
         project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
         save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_connection_banner,
-        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD,
-        ONBOARDING_ASK,
+        undecryptable_line, window_radius, Body, DeleteOnConfirm, Dirty, LinkAct, ProjectMenu, BASE_ELSEWHERE_NOTE, BOOK_UNREAD_NOTE,
+        DELETE_CONFIRM_YES, GATE_WORD, OFF_WORD, ONBOARDING_ASK, ROLE_UNKNOWN_NOTE,
     };
     use crate::cfg::{cfg_with, Connection};
     use crate::editors;
@@ -6175,8 +6283,15 @@ mod tests {
             crate::enrolled::Party { key: a_key(7), says_name: "Ромашка-бухгалтерия".into(), write: true },
             crate::enrolled::Party { key: a_key(9), says_name: String::new(), write: false },
         ];
-        let b = accepting_block(&accepting_card(), Some("КОД-СТРОКА"), &parties).expect("принимающая карточка обязана нести блок");
+        // Машине задан полный потолок, карточке — разрешение: без них
+        // ДЕЙСТВУЮЩЕЕ право вышло бы запретом, и слова о записи ниже
+        // проверяли бы не то (`Cfg::may_write` — запрет любой стороны
+        // сильнее разрешения другой).
+        let cfg = crate::cfg::Cfg { write: crate::cfg::WriteCeiling::ReadWrite, ..Default::default() };
+        let card = Connection { write: "read_write".into(), ..accepting_card() };
+        let b = accepting_block(&cfg, &card, Some("КОД-СТРОКА"), Some(&parties)).expect("принимающая карточка обязана нести блок");
         assert_eq!(b.code.as_deref(), Some("КОД-СТРОКА"));
+        assert!(b.can_issue, "база здесь, роль принимающая — код выдают");
         assert!(b.code_note.contains("кто будет подключаться"), "{}", b.code_note);
         assert_eq!(b.enrolled, "Кому разрешено подключаться", "подпись списка, а не счёт: предела числу зачисленных нет");
 
@@ -6198,21 +6313,124 @@ mod tests {
         // Спека 6 ревью: что стороне ДАНО, видно словами. Без этой строки
         // сторона с правом записи выглядела в точности как та, которой
         // разрешено только читать, — человек не мог увидеть, кому что дал.
-        assert_eq!(b.parties[0].access, "Чтение и запись");
-        assert!(b.parties[0].write);
-        assert_eq!(b.parties[1].access, "Только чтение");
-        assert!(!b.parties[1].write);
+        for p in &b.parties {
+            assert_eq!(p.access, "Чтение и запись");
+            assert!(p.write);
+        }
 
         // Спека 5 ревью: подпись кнопки отзыва целиком — слово
         // «разрешение» говорит, ЧТО именно отзывают.
         assert_eq!(super::REVOKE, "Отозвать разрешение");
     }
 
+    /// Право зачисленной стороны в карточке ДЕЙСТВУЮЩЕЕ, а не замороженное в
+    /// миг зачисления, и названо так, чтобы человек знал, какую сторону
+    /// править (спека контракта: «итог с указанием, какая сторона
+    /// ограничила»).
+    ///
+    /// Падал так (Important повторного ревью всей ветки): слова брались из
+    /// `Party::write` — снимка книги допуска. Человек щёлкал «Только чтение»,
+    /// строка списка и мост уже запрещали запись, а карточка про ту же
+    /// сторону по-прежнему писала «Чтение и запись».
+    #[test]
+    fn the_card_shows_the_right_that_holds_now_and_names_who_limited_it() {
+        let party = vec![crate::enrolled::Party { key: a_key(7), says_name: "Ромашка".into(), write: true }];
+        // Книга помнит разрешённую запись — и это единственное, что в этом
+        // тесте не меняется: правду про право говорят настройки.
+        let said =
+            |cfg: &crate::cfg::Cfg, c: &Connection| accepting_block(cfg, c, None, Some(&party)).expect("блок есть").parties[0].access;
+
+        let open = crate::cfg::Cfg { write: crate::cfg::WriteCeiling::ReadWrite, ..Default::default() };
+        let shut = crate::cfg::Cfg { write: crate::cfg::WriteCeiling::ReadOnly, ..Default::default() };
+        let allowed = Connection { write: "read_write".into(), ..accepting_card() };
+        let forbidden = Connection { write: "read_only".into(), ..accepting_card() };
+
+        assert_eq!(said(&open, &allowed), "Чтение и запись", "разрешили обе стороны — запись есть");
+        assert_eq!(said(&shut, &allowed), "Только чтение: на этом компьютере запись в базу запрещена");
+        assert_eq!(said(&open, &forbidden), "Только чтение: в этой карточке запись в базу не разрешена");
+        // Закрыты обе — названа машина: её запрет сильнее и чинится в другом
+        // месте, и посылать человека править карточку значило бы послать не
+        // туда.
+        assert_eq!(said(&shut, &forbidden), "Только чтение: на этом компьютере запись в базу запрещена");
+    }
+
+    /// Непрочитанная книга допуска — это НЕ «вы ещё никому не разрешили
+    /// подключаться»: ноль на экране означал бы «никого не зачислили» там,
+    /// где просто не прочитался файл (своя же починка этой ветки,
+    /// `save::reread_book`; провод в том же случае отвечает честно —
+    /// `enroll::BOOK_UNREADABLE`).
+    #[test]
+    fn an_unread_book_is_not_an_empty_one() {
+        let cfg = crate::cfg::Cfg::default();
+        let unread = accepting_block(&cfg, &accepting_card(), None, None).expect("блок есть");
+        assert_eq!(unread.enrolled, BOOK_UNREAD_NOTE);
+        assert!(unread.parties.is_empty(), "показывать нечего — но и говорить «никого» нельзя");
+        let empty = accepting_block(&cfg, &accepting_card(), None, Some(&[])).expect("блок есть");
+        assert_eq!(empty.enrolled, "Вы ещё никому не разрешили подключаться");
+        assert_ne!(unread.enrolled, empty.enrolled, "два разных случая — два разных ответа человеку");
+    }
+
+    /// Critical повторного ревью всей ветки: карточка «принимаю подключения»,
+    /// база которой на ДРУГОМ компьютере, выдавала код, по которому
+    /// подключиться нельзя никогда — приёмная сторона такую карточку в
+    /// зачисление не берёт вовсе (`gui::peer::Machine::of` откладывает её, а
+    /// `enroll` отвечает словами про подключение, которого эта версия не
+    /// проводит). Человек при этом читал в карточке «Передайте эту строку…
+    /// и вы увидите здесь его просьбу».
+    ///
+    /// Окно такого кода не предлагает ни одним из трёх органов — блоком
+    /// карточки, пунктом меню и главной кнопкой, — и говорит, почему.
+    #[test]
+    fn a_card_whose_base_is_elsewhere_is_never_offered_a_code() {
+        let there = Connection { base_here: false, ..accepting_card() };
+        let b = accepting_block(&crate::cfg::Cfg::default(), &there, Some("КОД-СТРОКА"), Some(&[])).expect("блок есть");
+        assert!(!b.can_issue, "по коду этой карточки подключиться нельзя никогда");
+        assert_eq!(b.code, None, "даже уже выданный код карточка не предлагает передать");
+        assert_eq!(b.code_note, BASE_ELSEWHERE_NOTE);
+        assert!(!b.code_note.contains("Передайте"), "обещания просьбы, которой не будет, нет: {}", b.code_note);
+
+        let mut ui = ui_for("accept", "tunnel", false);
+        ui.cfg.current_mut().base_here = false;
+        let name = ui.cfg.current().name.clone();
+        assert!(!link_menu(&ui, &name).iter().any(|(label, _)| label.contains("код")), "в меню кода нет: {:?}", link_menu(&ui, &name));
+        let button = main_button(&ui, &name, Dirty::No);
+        assert_ne!(button.label, "Показать код");
+        assert_eq!(button.act, None, "кнопка заперта, а не предлагает невозможное");
+        assert_eq!(button.why.as_deref(), Some(BASE_ELSEWHERE_NOTE), "и говорит, почему кода не будет");
+
+        // Дверь к выдаче одна, и отказ стоит у неё: окно этой карточке кода
+        // не предлагает, но выдать его нельзя и в обход окна.
+        assert_eq!(issue_code(&mut ui, &name, true), Err(BASE_ELSEWHERE_NOTE.to_string()));
+    }
+
+    /// Задача: тест на `role() == Err` в главной кнопке. Слово роли, которого
+    /// программа не знает (правка файла руками, опечатка), прежде падало в
+    /// ОСТАТОЧНУЮ ветку «Показать код»: окно предлагало выдать код карточке,
+    /// про которую не знает даже, что она делает.
+    #[test]
+    fn a_card_with_an_unknown_role_gets_a_locked_button_that_says_so() {
+        let mut ui = ui_for("сервер", "tunnel", false);
+        let name = ui.cfg.current().name.clone();
+        assert!(ui.cfg.current().role().is_err(), "тест про нераспознанное слово роли, а оно распозналось");
+        let button = main_button(&ui, &name, Dirty::No);
+        assert_ne!(button.label, "Показать код", "кода не будет: неизвестно даже, что эта карточка делает");
+        assert_eq!(button.act, None);
+        assert_eq!(button.why.as_deref(), Some(ROLE_UNKNOWN_NOTE));
+        // Слово состояния — из того же словаря, что красит строку списка, а
+        // не придуманное кнопкой заново.
+        assert_eq!(button.label, "не подключено");
+        // И блока кода у такой карточки нет вовсе — ни кода, ни объяснения
+        // про базу: про роль сказано там, где человек нажимает.
+        assert!(accepting_block(&ui.cfg, ui.cfg.current(), Some("КОД"), Some(&[])).is_none());
+        ui.cfg.current_mut().role = "accept".into();
+        assert_eq!(main_button(&ui, &name, Dirty::No).label, "Показать код", "узнанная роль возвращает кнопку");
+    }
+
     /// Пока кода не выдали, карточка не молчит пустым местом (то же правило,
     /// что у `base_fields_note`), и не врёт, будто код есть.
     #[test]
     fn a_card_without_a_code_yet_says_how_to_get_one() {
-        let b = accepting_block(&accepting_card(), None, &[]).expect("блок есть и без кода");
+        let b = accepting_block(&crate::cfg::Cfg::default(), &accepting_card(), None, Some(&[])).expect("блок есть и без кода");
         assert_eq!(b.code, None);
         assert!(b.code_note.contains("Показать код"), "{}", b.code_note);
         assert_eq!(b.enrolled, "Вы ещё никому не разрешили подключаться");
@@ -6224,10 +6442,11 @@ mod tests {
     /// `mode = "local"` блок не рисует: та же защита, что у `shown_fields`.
     #[test]
     fn only_a_card_that_waits_for_incoming_has_a_code_block() {
+        let cfg = crate::cfg::Cfg::default();
         let dial = Connection { mode: "tunnel".into(), role: "dial".into(), ..Default::default() };
-        assert!(accepting_block(&dial, Some("КОД"), &[]).is_none());
+        assert!(accepting_block(&cfg, &dial, Some("КОД"), Some(&[])).is_none());
         let stuck_local = Connection { mode: "local".into(), role: "accept".into(), ..Default::default() };
-        assert!(accepting_block(&stuck_local, Some("КОД"), &[]).is_none(), "на одной машине зачислять некого");
+        assert!(accepting_block(&cfg, &stuck_local, Some("КОД"), Some(&[])).is_none(), "на одной машине зачислять некого");
     }
 
     /// Задача 6: закрытый без ответа диалог заявку не снимает, и человек
@@ -6380,7 +6599,7 @@ mod tests {
         assert!(ui.log.last().unwrap().line.text.contains("истёк"), "{:?}", ui.log.last());
 
         // И карточка больше не велит передавать то, чего нет.
-        let b = accepting_block(&ui.cfg.current().clone(), None, &[]).expect("блок есть");
+        let b = accepting_block(&ui.cfg, ui.cfg.current(), None, Some(&[])).expect("блок есть");
         assert!(b.code.is_none());
         assert!(b.code_note.contains("Кода пока нет"), "{}", b.code_note);
     }

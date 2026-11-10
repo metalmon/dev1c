@@ -1553,7 +1553,10 @@ fn switching_to_an_invalid_card_is_refused_with_words() {
     let before = std::fs::read_to_string(&path).unwrap();
 
     let e = switch_current(&mut ui, "Ромашка").unwrap_err();
-    assert!(e.contains("role") && e.contains("accept") && e.contains("dial"), "{e}");
+    // Слова — для ОКНА: оно называет величину так, как она подписана на экране, и выбор предлагает щелчком. Имя ключа `role` и его
+    // годные значения остаются читателю файла — их снимает `cfg::said_in_window` (её докстрока, задача 6 плана).
+    assert!(e.contains("как подключается это соединение"), "отказ называет величину словами человека: {e}");
+    assert!(!e.contains("role") && !e.contains("accept") && !e.contains("dial"), "и ни ключа toml, ни его значений: {e}");
     assert_eq!(ui.cfg.current, "Buh", "отказ не переключает текущее");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }

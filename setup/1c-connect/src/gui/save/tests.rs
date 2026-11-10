@@ -2707,6 +2707,8 @@ fn set_keys_with_no_keys_touches_nothing_not_even_for_an_unknown_name() {
 fn a_request() -> crate::enroll::Request {
     crate::enroll::Request {
         card_name: "Ромашка".into(),
+        // Ключ карточки у заявки — НАШ: отвечает на неё наша книга допуска.
+        card: "ИДЕНТИФИКАТОР-БАЗЫ-7731".into(),
         base: crate::wire::BaseFields {
             // Поле, которое по каналу приехало и в диалог НЕ попадёт: оно
             // её слово, но выглядит как факт.
@@ -2870,6 +2872,8 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
     // адресуются карточкой, и путать их нельзя.
     let other = crate::enroll::Request {
         card_name: "Клевер".into(),
+        // Адресуется заявка НАШИМ ключом (`Request::card`): проводный вид рядом — это то, что показывают человеку.
+        card: "ДРУГОЙ-КЛЮЧ".into(),
         base: crate::wire::BaseFields { base_id: "ДРУГОЙ-КЛЮЧ".into(), ..a_request().base },
         ..a_request()
     };

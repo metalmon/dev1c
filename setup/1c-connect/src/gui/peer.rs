@@ -41,7 +41,7 @@ use crate::channel::{self, Channels, Gone, Reins, Round, Stopped};
 use crate::enroll;
 use crate::enrolled::{Book, Partner, Partners};
 use crate::node::Node;
-use crate::wire::{code, BaseFields, Ceiling, Refuse};
+use crate::wire::{code, Ceiling, Refuse};
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::HashMap;
 
@@ -215,7 +215,7 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
                 // карточке уезжал пустым. Искать больше нечего: он уже на руках.
                 for reins in live.cut(peer, &card) {
                     let card = card.clone();
-                    tokio::spawn(async move { reins.revoke(&card, REVOKED_TEXT).await });
+                    tokio::spawn(async move { reins.revoke(&card.on_wire(), REVOKED_TEXT).await });
                 }
             }
             // Прощания идут ВМЕСТЕ, а не одно за другим: каждое ждёт
@@ -267,10 +267,10 @@ struct Talk {
     ///
     /// **Сегодня этого значения здесь НЕ БЫВАЕТ, и сказано это прямо** (Important повторного ревью всей ветки: мёртвая защита, описанная
     /// как живая, — хуже, чем снятая). Ключ карточки приходит из исхода зачисления (`enroll::Outcome`), а тот собирается по тому же самому
-    /// списку принимающих карточек, в котором его потом и ищут (`serving`): один снимок, одно чтение настроек, и промахнуться нечем.
+    /// списку принимающих карточек, в котором его потом и ищут (`enroll::Cards::mine_named`): один снимок, одно чтение настроек, и промахнуться нечем.
     ///
     /// Остаётся он не на всякий случай, а потому, что ТИПОМ это не выражено: чтобы `None` стало невыразимым, исход зачисления должен нести
-    /// саму карточку, а не её ключ, — и до тех пор `serving` возвращает `Option`, который кто-то обязан разобрать. Разобран он так, как
+    /// саму карточку, а не её ключ, — и до тех пор `mine_named` возвращает `Option`, который кто-то обязан разобрать. Разобран он так, как
     /// разбирается всякое «не знаю» на вопросе о допуске в этом проекте: поток, про который нельзя доказать, что он обслуживает ДРУГУЮ
     /// карточку, держать после отзыва не за что (`cut_these`, `keep_holding`). То есть защита мёртвая, но не бесплатная ошибка: оживи этот
     /// путь — и он пойдёт в сторону запрета.
@@ -512,7 +512,8 @@ struct InHand {
     /// признак не только помнится между кругами, но и ЖИВЁТ рядом с партнёром
     /// (`partners.toml`) — иначе первый же перезапуск возвращал бы карточку в
     /// это «не знаю», и отзыв соседней карточки рвал бы её связь.
-    card: Option<CardId>,
+    /// Ключ ТОЙ стороны — проводный (`wire::CardRef`): он из её пространства имён, и в наше не переводится.
+    card: Option<crate::wire::CardRef>,
 }
 
 impl InHand {
@@ -532,7 +533,7 @@ impl InHand {
     /// Отдельным решением, а не строками внутри круга: оба его ответа видны
     /// человеку (опустевший код — он же признак «подключается СНОВА»), и
     /// спросить их надо без двух узлов и рантайма.
-    fn after(&mut self, round: &Round, agreed: Option<CardId>) -> bool {
+    fn after(&mut self, round: &Round, agreed: Option<crate::wire::CardRef>) -> bool {
         // Карточку, о которой договорились, помним до следующего круга: со
         // второго круга возврат называет её сам, и та сторона числит поток за
         // ней одной.
@@ -604,7 +605,7 @@ async fn one_round(
     card: &Dialling,
     addr: EndpointAddr,
     call: enroll::Call<'_>,
-) -> (Round, Option<CardId>) {
+) -> (Round, Option<crate::wire::CardRef>) {
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
@@ -622,6 +623,8 @@ async fn one_round(
     // при нескольких базах приходилось отвечать «не знаю» — поток числился за
     // всеми ними сразу.
     let (agreed, write) = match &out {
+        // Ключ базы приехал ОТ ТОЙ СТОРОНЫ: он в её пространстве имён, и переводить его в наше нечем и незачем — рядом с партнёром
+        // он так и лежит (`wire::CardRef`, там довод целиком).
         Ok(enroll::Outcome::Enrolled(base)) => (Some(base.base_id.clone()), base.write),
         Ok(enroll::Outcome::Already(base)) => (Some(base.id.clone()), base.write),
         _ => (None, false),
@@ -746,7 +749,10 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
     // База, о которой договорились, — ОДНА и у зачисления, и у возврата
     // (`enroll::Outcome`, там и довод): поток у карточки свой, и числить его за
     // всеми базами партнёра значит рвать отзывом одной связь по остальным.
-    let (agreed, write): (CardId, bool) = match &out {
+    // Ключ в исходе ПРОВОДНЫЙ (`wire::CardRef`): таким он и уехал той стороне, таким и вернётся в отзыве. Наша карточка достаётся из
+    // него одной названной дверью (`Cards::mine_named`) — прямого перевода «проводный ключ → наш» нет вовсе, иначе чужой ключ,
+    // совпавший с нашим по одинаковому имени карточки, молча сошёл бы за свой (шаг 2 плана пары B).
+    let (agreed, write): (crate::wire::CardRef, bool) = match &out {
         enroll::Outcome::Enrolled(base) => (base.base_id.clone(), base.write),
         enroll::Outcome::Already(base) => (base.id.clone(), base.write),
         enroll::Outcome::NotEnrolled(no) => {
@@ -755,10 +761,10 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
             return;
         }
     };
-    // Наша карточка по ключу, о котором договорились (`serving`, там и довод).
+    // Наша карточка по ключу, о котором договорились (`Cards::mine_named`, там и довод).
     // Неопознанный разговор учитывается как неопознанный и режется любым
     // отзывом этой стороны (`cut_these`).
-    let served = serving(cards.accepting(), &agreed);
+    let served = cards.mine_named(&agreed).cloned();
     // Слово состояния — только там, где карточка известна: завести строку
     // состояния для карточки, которой в списке нет, значило бы показать
     // человеку карточку-призрак.
@@ -911,16 +917,13 @@ impl Machine {
         for c in &cfg.connections {
             let card = enroll::Card {
                 name: c.name.clone(),
-                base: BaseFields {
-                    base_id: c.id(),
-                    base_name: crate::cfg::base_name(&c.base_path).into(),
-                    // Действующее право, а не своя складка половин: складывать их
-                    // умеет ровно одна `Cfg::may_write`, и второе место сложения —
-                    // это второй словарь одного понятия, который однажды разойдётся
-                    // с первым (на этой ветке так уже было с потолком и с чтением
-                    // настроек).
-                    write: cfg.may_write(c),
-                },
+                // Ключ — НАШ (`cfg::CardId`). В проводный вид он переводится только на отправку (`Card::on_wire`).
+                id: c.id().clone(),
+                base_name: crate::cfg::base_name(&c.base_path).into(),
+                // Действующее право, а не своя складка половин: складывать их умеет ровно одна `Cfg::may_write`, и второе место
+                // сложения — это второй словарь одного понятия, который однажды разойдётся с первым (на этой ветке так уже было с
+                // потолком и с чтением настроек).
+                write: cfg.may_write(c),
             };
             // ОДИН разбор на три кучи, и четвёртой дороги — «нигде» — у карточки нет: `else` здесь невыразим, а `push` обязателен в
             // каждой ветке. Спрашивается СОЧЕТАНИЕ (`Combo`) — единственное место, где ответы карточки превращаются в «что это такое»;
@@ -962,21 +965,6 @@ fn card_names(kit: &Kit) -> HashMap<CardId, String> {
     crate::cfg::Cfg::load_unchecked(kit).map(|cfg| cfg.connections.iter().map(|c| (c.id(), c.name.clone())).collect()).unwrap_or_default()
 }
 
-/// Какую НАШУ карточку обслуживает этот разговор — по ключу, о котором договорились на проводе.
-///
-/// Отдаёт карточку ЦЕЛИКОМ, а не её имя: вызывающему нужны оба ответа разом — ключ (по нему спрашивается допуск и кладутся вожжи) и имя
-/// (его читает человек в журнале). Собирать имя по ключу вторым проходом значило бы искать дважды то, что уже нашли.
-///
-/// Отдельной функцией, а не строкой внутри разговора: у этого решения есть неверный ответ, и однажды оно его дало — пара карточек с
-/// одним знаком возвращала ОБЕ, и поток числился за карточкой, о которой не договаривались. С ключом карточки вместо считанного от пути
-/// к базе знака этого случая больше нет: ключи разных карточек различны всегда (`cfg::Cfg`, разводка близнецов при разборе).
-///
-/// `None` — не сошлась ни одна; выдумывать карточку нельзя, и такой поток режется любым отзывом этой стороны (`cut_these` знает про
-/// неопознанные).
-fn serving(cards: &[enroll::Card], agreed: &CardId) -> Option<enroll::Card> {
-    cards.iter().find(|c| c.id() == agreed).cloned()
-}
-
 /// Право записи — словами человека, а не флажком.
 ///
 /// «Разрешено только читать» человек может прочитать коллеге по телефону, а
@@ -1015,14 +1003,21 @@ fn says_name() -> String {
 /// Отказ чтения — то же «не знаю», и это верно: признак не называется наугад.
 /// Старого признака от ДРУГОЙ машины здесь быть не может — `Partners::remember`
 /// снимает его сам, когда ключ той стороны сменился.
-fn known_card(kit: &Kit, card: &CardId) -> Option<CardId> {
+fn known_card(kit: &Kit, card: &CardId) -> Option<crate::wire::CardRef> {
     Partners::open(kit.state()).ok().and_then(|p| p.base_id_of(card))
 }
 
 /// Запоминает, куда карточке возвращаться. Отказ записи — строка в журнал, а
 /// не конец подключения: это подключение уже живёт, а потеряно будет лишь
 /// возвращение после перезапуска.
-fn remember(kit: &Kit, tx: &UnboundedSender<Ev>, card: &CardId, peer: EndpointId, addr: &EndpointAddr, agreed: Option<&CardId>) {
+fn remember(
+    kit: &Kit,
+    tx: &UnboundedSender<Ev>,
+    card: &CardId,
+    peer: EndpointId,
+    addr: &EndpointAddr,
+    agreed: Option<&crate::wire::CardRef>,
+) {
     let partner = Partner {
         key: peer,
         relay: addr.relay_urls().next().map(|u| u.to_string()),
@@ -1268,7 +1263,7 @@ mod tests {
         // Круг дошёл до «подключено» и оборвался; та сторона успела назвать
         // карточку.
         assert!(hand.after(&Round::Held(Gone::Broken(Refuse::new(code::BROKEN, "обрыв"))), Some("b1".into())));
-        let b1 = CardId::from("b1");
+        let b1 = crate::wire::CardRef::from("b1");
         assert_eq!(hand.call(), Call::Return(Some(&b1)), "дальше возврат называет карточку: код одноразовый");
 
         // Недозвон до зачисления код НЕ расходует: предъявить его не успели, и
@@ -1331,7 +1326,7 @@ mod tests {
         assert_eq!(super::known_card(&kit, &romashka), None, "пока не договаривались — не знаем, и выдумывать нельзя");
         let (tx, _rx) = futures::channel::mpsc::unbounded();
         let addr = iroh::EndpointAddr::new(them);
-        super::remember(&kit, &tx, &romashka, them, &addr, Some(&CardId::from("b1")));
+        super::remember(&kit, &tx, &romashka, them, &addr, Some(&crate::wire::CardRef::from("b1")));
         assert_eq!(super::known_card(&kit, &romashka), Some("b1".into()), "признак базы обязан пережить перезапуск");
         assert_eq!(super::known_card(&kit, &vasilek), None, "признак принадлежит карточке, а не машине");
 
@@ -1437,7 +1432,9 @@ mod tests {
 
         // И обратное сопоставление отдаёт РОВНО ту карточку, о которой
         // договорились, а не всех однопризнаковых соседей.
-        let name_of = |agreed: &CardId| super::serving(cards, agreed).map(|c| c.name);
+        // Сопоставление идёт ТОЙ ЖЕ дверью, какой им пользуется разговор, — `Cards::mine_named` по проводному ключу.
+        let all = crate::enroll::Cards::here(cards.to_vec());
+        let name_of = |agreed: &CardId| all.mine_named(&agreed.on_wire()).map(|c| c.name.clone());
         assert_eq!(name_of(&ids[0]).as_deref(), Some("Ромашка"));
         assert_eq!(name_of(&ids[1]).as_deref(), Some("Василёк"));
         // Чужой признак не находит никого — и это не пустое имя, а `None`:
@@ -1578,7 +1575,7 @@ mod tests {
         let seen = super::Machine::read_with(&kit, &store);
         assert_eq!(seen.ceiling, Ceiling::Full, "в меню «Полный» — значит и на проводе «Полный», а не молчаливое «только чтение»");
         assert_eq!(seen.cards.accepting().len(), 2);
-        assert!(seen.cards.accepting().iter().all(|c| c.base.write), "обе карточки разрешают запись — потолок машины их не запрещает");
+        assert!(seen.cards.accepting().iter().all(|c| c.write), "обе карточки разрешают запись — потолок машины их не запрещает");
 
         // А теперь человек щёлкнул потолок машины в «только чтение». Право
         // записи обязано пропасть у ОБЕИХ карточек, не только у текущей:
@@ -1587,7 +1584,7 @@ mod tests {
         let seen = super::Machine::read_with(&kit, &store);
         assert_eq!(seen.ceiling, Ceiling::ReadOnly);
         assert!(
-            seen.cards.accepting().iter().all(|c| !c.base.write),
+            seen.cards.accepting().iter().all(|c| !c.write),
             "потолок машины не сложился с правом нетекущей карточки — объявленное на проводе право зависело бы от того, какая карточка \
              выбрана"
         );

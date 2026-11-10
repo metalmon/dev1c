@@ -425,7 +425,7 @@ impl Reins {
     /// к одному партнёру отзыв одной резал все пять. Правда держится не здесь, а
     /// типом: `enroll::Outcome::Already` несёт ОДНУ базу, то есть у потока её
     /// больше одной не бывает (`gui::peer::Talk`).
-    pub async fn revoke(self, base_id: &crate::cfg::CardId, text: &str) {
+    pub async fn revoke(self, base_id: &crate::wire::CardRef, text: &str) {
         self.say(Msg::Revoked { base_id: base_id.clone(), text: text.into() }).await;
         self.finish().await;
     }
@@ -641,10 +641,10 @@ pub const WINDOW_CLOSED: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::enroll::{accept_side, dial_side, Card, Cards, Decision, Outcome};
+    use crate::enroll::{accept_side, dial_side, Cards, Decision, Outcome};
     use crate::enrolled::Book;
     use crate::ticket::Ticket;
-    use crate::wire::{BaseFields, Ceiling};
+    use crate::wire::Ceiling;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
@@ -678,8 +678,9 @@ mod tests {
         EndpointAddr::new(node.id()).with_ip_addr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
     }
 
-    fn fields(id: &str) -> BaseFields {
-        BaseFields { base_id: id.into(), base_name: format!("База {id}").into(), write: true }
+    /// Карточка машины для тестов: ключ НАШ, на провод переводится сам.
+    fn a_card(name: &str, id: &str) -> crate::enroll::Card {
+        crate::enroll::Card { name: name.into(), id: id.into(), base_name: format!("База {id}").into(), write: true }
     }
 
     /// Ждёт, пока канал закроется САМ.
@@ -947,7 +948,7 @@ mod tests {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue(&"b1".into(), &ticket).unwrap();
         let code = ticket.to_code();
-        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
+        let cards = Cards::here(vec![a_card("Ромашка", "b1")]);
 
         // Принимающая сторона: первый круг зачисляет и рвёт канал молча (так
         // рвёт его сеть), второй — узнаёт уже зачисленного и прощается
@@ -1046,7 +1047,7 @@ mod tests {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue(&"b1".into(), &ticket).unwrap();
         let code = ticket.to_code();
-        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1") }]);
+        let cards = Cards::here(vec![a_card("Ромашка", "b1")]);
 
         let listening = base.clone();
         let theirs = Channels::default();

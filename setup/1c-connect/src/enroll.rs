@@ -103,18 +103,27 @@ pub const DECISION: Duration = Duration::from_secs(5 * 60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub name: String,
-    pub base: BaseFields,
+    /// Ключ карточки в НАШЕМ пространстве имён — тот, которым её называют книга допуска и партнёры.
+    ///
+    /// **Хранится именно он, а не проводный вид** (шаг 2 плана пары B). Прежде здесь лежали готовые `BaseFields`, то есть кадр, и ключ
+    /// карточки брался из него же. Пока ключ был один на оба пространства имён, это экономило поле; с расколом (`wire::CardRef`) оно
+    /// стало бы местом, где наш ключ незаметно подменяется чужим. Проводный вид строится на отправку (`on_wire`) и нигде не хранится.
+    pub id: crate::cfg::CardId,
+    /// Имя базы — как эта сторона называет её той: чужие слова для неё, свои для нас.
+    pub base_name: crate::wire::SaysName,
+    /// ДЕЙСТВУЮЩЕЕ право записи этой карточки на этой машине (`cfg::Cfg::may_write`).
+    pub write: bool,
 }
 
 impl Card {
     /// Ключ карточки — тот, которым её называют книга допуска и партнёры (`cfg::CardId`).
-    ///
-    /// **Второго поля под него здесь нет нарочно.** Признак базы на проводе — это и есть ключ карточки (решение владельца 10.11,
-    /// `gui::peer::Machine::of`), и держать его дважды в одной структуре значило бы ждать, когда две копии разойдутся. Поэтому хранилище
-    /// одно — то, что уезжает на провод, — а эта функция только называет его своим именем, чтобы на месте вызова читалось «ключ
-    /// карточки», а не «признак её базы».
     pub fn id(&self) -> &crate::cfg::CardId {
-        &self.base.base_id
+        &self.id
+    }
+
+    /// Как эта карточка выглядит НА ПРОВОДЕ. Единственное место, где наш ключ превращается в проводный (`CardId::on_wire`).
+    pub fn on_wire(&self) -> BaseFields {
+        BaseFields { base_id: self.id.on_wire(), base_name: self.base_name.clone(), write: self.write }
     }
 }
 
@@ -183,6 +192,16 @@ impl Cards {
     /// Одним местом на оба случая отказа — заявку по коду и возврат по названной карточке: прежде случай «база на той стороне» был расписан
     /// в двух ветках по отдельности, и третий случай («не принимает») добавился бы третьей парой. Отбор по куче — решение, а не поиск, и
     /// жить ему положено там, где лежат сами кучи.
+    /// НАША карточка, названную которой та сторона повторила нам (эхо `Why::Return`).
+    ///
+    /// Единственная дорога от проводного ключа к нашей карточке, и она названа по-своему нарочно: перевода `CardRef → CardId` нет
+    /// вовсе (довод в докстроке `wire::CardRef`), а есть поиск среди СВОИХ. Законно это только там, где список уже сужен допуском той
+    /// стороны: совпадение ключей, выведенных из одинаковых имён карточек на разных машинах, доступа тогда не даёт.
+    pub fn mine_named(&self, r: &crate::wire::CardRef) -> Option<&Card> {
+        let Cards::Read { accepting, base_elsewhere, not_accepting } = self else { return None };
+        accepting.iter().chain(base_elsewhere).chain(not_accepting).find(|c| &c.id().on_wire() == r)
+    }
+
     fn aside(&self, id: &CardId) -> Option<&'static str> {
         let Cards::Read { base_elsewhere, not_accepting, .. } = self else { return None };
         if base_elsewhere.iter().any(|c| c.id() == id) {
@@ -203,6 +222,9 @@ impl Cards {
 pub struct Request {
     /// Имя карточки — ТОЛЬКО чтобы назвать её человеку в вопросе о разрешении. Сопоставляется заявка ключом (`card()`): имя человек правит когда хочет, и очередь заявок, ключёванная именем, теряла бы их при переименовании.
     pub card_name: String,
+    /// Ключ карточки в НАШЕМ пространстве имён: заявка пришла к нам, и отвечает на неё наша книга допуска.
+    pub card: crate::cfg::CardId,
+    /// Как эта карточка выглядела на проводе — то, что мы показываем человеку в вопросе о разрешении.
     pub base: BaseFields,
     pub peer: EndpointId,
     /// Чужие слова — и тип это держит: показать невычищенное нельзя, потому
@@ -211,9 +233,12 @@ pub struct Request {
 }
 
 impl Request {
-    /// К какой карточке эта заявка — КЛЮЧОМ (`cfg::CardId`). Второго поля под него нет по тому же доводу, что у `Card::id()` рядом: признак базы на проводе и есть ключ карточки, и две копии одного значения однажды разойдутся.
+    /// К какой карточке эта заявка — КЛЮЧОМ в нашем пространстве имён.
+    ///
+    /// Своё поле под него появилось с расколом ключа (шаг 2 плана пары B): прежде он брался из `base.base_id`, а тот стал проводным
+    /// (`wire::CardRef`). Книга допуска ключуется нашим ключом, и подставить в неё проводный больше не выходит по типу.
     pub fn card(&self) -> &CardId {
-        &self.base.base_id
+        &self.card
     }
 }
 
@@ -238,13 +263,13 @@ pub enum Call<'a> {
     /// Возврат по уже данному допуску: вот признак базы той карточки, которой
     /// этот поток, если мы его помним, — то есть КЛЮЧ той карточки на ТОЙ
     /// машине (`cfg::CardId`, решение владельца 10.11).
-    Return(Option<&'a CardId>),
+    Return(Option<&'a crate::wire::CardRef>),
 }
 
 impl<'a> Call<'a> {
     /// Единственная дорога от строк: код на руках — заявка, кода нет — возврат
     /// по карточке, которую помним.
-    pub fn of(code: &'a str, card: Option<&'a CardId>) -> Call<'a> {
+    pub fn of(code: &'a str, card: Option<&'a crate::wire::CardRef>) -> Call<'a> {
         let code = code.trim();
         if code.is_empty() {
             Call::Return(card)
@@ -421,7 +446,7 @@ where
             // записывать» — и получала отказ от моста. Обратная половина той же
             // беды: зачислили при закрытом потолке, и запись не возвращалась
             // никогда, пока не выдадут новый код.
-            let write = c.base.write && ceiling.allows();
+            let write = c.write && ceiling.allows();
             // Чужой потолок — единственное, чего нам неоткуда взять заново, и
             // книга держит его затем, что о нём спрашивает карточка в окне
             // («итог с указанием, какая сторона ограничила» — контракт).
@@ -448,7 +473,7 @@ where
                     Err(why) => return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await,
                 }
             }
-            bases.push(BaseBrief { id: c.id().clone(), write });
+            bases.push(BaseBrief { id: c.id().on_wire(), write });
         }
     }
     // Возврат — и заявки не будет: так сказала сама зовущая сторона, и это
@@ -495,9 +520,14 @@ where
             // происходит; незачисленному ответ тот же, что на выдуманный
             // признак, и разницы между «такой карточки здесь нет» и «есть, но
             // она не ваша» по нему не видно.
-            let aside = named.as_ref().and_then(|id| cards.aside(id).map(|words| (id, words)));
+            // От проводного ключа — к НАШЕЙ карточке (`mine_named`), и только потом к книге: книга ключуется нашим ключом, и чужой
+            // в неё не попадает даже по совпадению.
+            let aside = named
+                .as_ref()
+                .and_then(|r| cards.mine_named(r))
+                .and_then(|card| cards.aside(card.id()).map(|words| (card.id().clone(), words)));
             if let Some((id, words)) = aside {
-                match book.enrolled_to(id, peer) {
+                match book.enrolled_to(&id, peer) {
                     Ok(Some(_)) => return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, words)).await,
                     Ok(None) => {}
                     // Книгу не прочитать — наша беда, не её, и здесь по тому же
@@ -572,7 +602,8 @@ where
     // Шаг четвёртый: человек. `enroll_wait` уходит ДО диалога — иначе зовущая
     // сторона просидит минуты в тишине и сочтёт её обрывом.
     write_msg(w, &Msg::EnrollWait).await?;
-    let request = Request { card_name: card.name.clone(), base: card.base.clone(), peer, says_name: says_name.clone() };
+    let request =
+        Request { card_name: card.name.clone(), card: card.id().clone(), base: card.on_wire(), peer, says_name: says_name.clone() };
     let decision = tokio::time::timeout(DECISION, async {
         tokio::select! {
             d = decide(request) => Some(d),
@@ -629,11 +660,11 @@ where
             // В книгу уходит ОДНА из трёх — чужой потолок: две свои она
             // спросит у настроек, когда ответ понадобится (`Party::peer_write`,
             // там и довод).
-            let write = card.base.write && ceiling.allows();
+            let write = card.write && ceiling.allows();
             if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), ceiling.allows()) {
                 return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
-            let base = BaseFields { write, ..card.base.clone() };
+            let base = BaseFields { write, ..card.on_wire() };
             write_msg(w, &Msg::EnrollOk { base: Some(base.clone()) }).await?;
             Ok(Outcome::Enrolled(base))
         }
@@ -1105,8 +1136,26 @@ mod tests {
         EndpointAddr::new(node.id()).with_ip_addr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port))
     }
 
-    fn fields(id: &str, write: bool) -> BaseFields {
-        BaseFields { base_id: id.into(), base_name: format!("База {id}").into(), write }
+    /// Шаг 2 плана пары B: ключ карточки раскололся надвое, и дорога от проводного к нашему — одна, названная.
+    ///
+    /// **Чего тест не может показать, а тип может.** `Book::enrolled_to` и `Cards::aside` берут `&cfg::CardId`, а с провода приезжает
+    /// `wire::CardRef` — подставить одно вместо другого больше не компилируется. Отрицательного теста на это не заводим: проверять
+    /// непрохождение сборки пришлось бы отдельным крейтом, а польза та же, что от самой подписи.
+    #[test]
+    fn a_wire_key_reaches_our_card_only_through_the_named_door() {
+        let cards = Cards::here(vec![a_card("Ромашка", "b1", true)]);
+        let ours = crate::cfg::CardId::from("b1");
+        assert_eq!(cards.mine_named(&ours.on_wire()).map(|c| c.name.clone()), Some("Ромашка".to_string()));
+        // Чужой ключ нашей карточкой не становится — и промолчать об этом нельзя: именно на таком совпадении и держалась опасность
+        // (две машины с карточкой одного имени дают один и тот же выведенный ключ).
+        assert!(cards.mine_named(&crate::wire::CardRef::from("b2")).is_none());
+        // Перевода обратно нет вовсе: наш ключ уезжает на провод и там остаётся строкой той же чистки.
+        assert_eq!(ours.on_wire().as_str(), "b1");
+    }
+
+    /// Карточка машины для тестов: ключ здесь НАШ (`cfg::CardId`), на провод он переводится сам (`Card::on_wire`).
+    fn a_card(name: &str, id: &str, write: bool) -> Card {
+        Card { name: name.into(), id: id.into(), base_name: format!("База {id}").into(), write }
     }
 
     /// Счётчик вызовов диалога: «человека не беспокоят вовсе» проверяется
@@ -1192,7 +1241,7 @@ mod tests {
     fn one_live_ticket(book: &mut Book, _peer: EndpointId, base: &Node, _state: &std::path::Path) -> (String, Vec<Card>) {
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue(&"b1".into(), &ticket).unwrap();
-        (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
+        (ticket.to_code(), vec![a_card("Ромашка", "b1", true)])
     }
 
     #[tokio::test]
@@ -1224,7 +1273,7 @@ mod tests {
                 let issued = Ticket::issue(base.id(), None, vec![]).unwrap();
                 book.issue(&"b1".into(), &issued).unwrap();
                 let other = Ticket::issue(base.id(), None, vec![]).unwrap();
-                (other.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
+                (other.to_code(), vec![a_card("Ромашка", "b1", true)])
             },
             Decision::Allow,
         )
@@ -1248,7 +1297,7 @@ mod tests {
                 // диске: `check` перечитывает файл сам, и путь «код устарел»
                 // проверяется настоящий, а не притворный.
                 expire_tickets_on_disk(state);
-                (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
+                (ticket.to_code(), vec![a_card("Ромашка", "b1", true)])
             },
             Decision::Allow,
         )
@@ -1281,10 +1330,7 @@ mod tests {
                     // Код не понадобится вовсе: зачисление есть, непогашенных
                     // кодов нет, и предъявлять второму подключению нечего.
                     String::new(),
-                    vec![
-                        Card { name: "Ромашка".into(), base: fields("b1", true) },
-                        Card { name: "Василёк".into(), base: fields("b2", true) },
-                    ],
+                    vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)],
                 )
             },
             Decision::Allow,
@@ -1316,13 +1362,7 @@ mod tests {
                 // А для второй человек только что выдал код.
                 let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
                 book.issue(&"b2".into(), &ticket).unwrap();
-                (
-                    ticket.to_code(),
-                    vec![
-                        Card { name: "Ромашка".into(), base: fields("b1", true) },
-                        Card { name: "Василёк".into(), base: fields("b2", true) },
-                    ],
-                )
+                (ticket.to_code(), vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)])
             },
             Decision::Allow,
         )
@@ -1382,7 +1422,7 @@ mod tests {
         let mut book = Book::open(&db).unwrap();
         let ticket = Ticket::issue(base.id(), None, vec![]).unwrap();
         book.issue(&"b1".into(), &ticket).unwrap();
-        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
+        let cards = Cards::here(vec![a_card("Ромашка", "b1", true)]);
 
         let listening = base.clone();
         let server = tokio::spawn(async move {
@@ -1444,7 +1484,7 @@ mod tests {
                     book.of(&"b1".into()).iter().any(|p| p.key == peer),
                     "снимок в памяти обязан ещё помнить зачисление — иначе тест не про устаревший снимок"
                 );
-                (ticket.to_code(), vec![Card { name: "Ромашка".into(), base: fields("b1", true) }])
+                (ticket.to_code(), vec![a_card("Ромашка", "b1", true)])
             },
             Decision::Deny,
         )
@@ -1471,7 +1511,7 @@ mod tests {
         let mut book = Book::open(&d).unwrap();
         let ticket = Ticket::issue(peer, None, vec![]).unwrap();
         book.issue(&"b1".into(), &ticket).unwrap();
-        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
+        let cards = Cards::here(vec![a_card("Ромашка", "b1", true)]);
 
         // Чужая строка, которой рисуют. Перевод строки, забой и разделители
         // строки и абзаца (U+2028, U+2029) дописывают в диалоге поддельную
@@ -1636,7 +1676,7 @@ mod tests {
             let ticket = Ticket::issue(peer, None, vec![]).unwrap();
             book.issue(&"b1".into(), &ticket).unwrap();
             code = Some(hex::encode(&*ticket.secret));
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+            vec![a_card("Ромашка", "b1", true)]
         })
         .await;
         let secret_hex = code.unwrap();
@@ -1689,7 +1729,7 @@ mod tests {
                 // если обновления потолка не было вовсе. Теперь переменилось
                 // оба раза, и каждое направление доказано своим заходом.
                 book.enroll(&"b1".into(), peer, "Разработчик", !write).unwrap();
-                vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+                vec![a_card("Ромашка", "b1", true)]
             })
             .await;
 
@@ -1727,7 +1767,7 @@ mod tests {
         for (name, ours, stored) in [("ours-shut-stored-open", false, true), ("ours-open-stored-shut", true, false)] {
             let mut talk = Alone::new(name, Decision::Allow, |book, peer, _state| {
                 book.enroll(&"b1".into(), peer, "Разработчик", stored).unwrap();
-                vec![Card { name: "Ромашка".into(), base: fields("b1", ours) }]
+                vec![a_card("Ромашка", "b1", ours)]
             })
             .await;
 
@@ -1832,7 +1872,7 @@ mod tests {
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
                 secret = Some(hex::encode(&*ticket.secret));
-                aside(Card { name: "Ромашка".into(), base: fields("b1", true) }, base_here)
+                aside(a_card("Ромашка", "b1", true), base_here)
             })
             .await;
 
@@ -1897,7 +1937,7 @@ mod tests {
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
                 book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true).unwrap();
-                aside(Card { name: "Ромашка".into(), base: fields("b1", true) })
+                aside(a_card("Ромашка", "b1", true))
             })
             .await;
 
@@ -1936,7 +1976,7 @@ mod tests {
         let two = |book: &mut Book, peer: EndpointId, _state: &std::path::Path| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
             book.enroll(&"b2".into(), peer, "Разработчик", true).unwrap();
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+            vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         };
 
         let mut talk = Alone::new("returns-named", Decision::Allow, two).await;
@@ -1975,7 +2015,7 @@ mod tests {
         // карточка к партнёру одна.
         let mut talk = Alone::new("returns-unnamed-one", Decision::Allow, |book, peer, _state| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+            vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         })
         .await;
         Frame::write(&mut talk.w, &returning(None)).await.unwrap();
@@ -1997,7 +2037,7 @@ mod tests {
     async fn a_returning_side_whose_card_is_no_longer_allowed_is_refused_in_words() {
         let mut talk = Alone::new("returns-revoked", Decision::Allow, |book, peer, _state| {
             book.enroll(&"b1".into(), peer, "Разработчик", true).unwrap();
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+            vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         })
         .await;
 
@@ -2042,7 +2082,7 @@ mod tests {
             // отношения.
             let ticket = Ticket::issue(peer, None, vec![]).unwrap();
             book.issue(&"b2".into(), &ticket).unwrap();
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }, Card { name: "Василёк".into(), base: fields("b2", true) }]
+            vec![a_card("Ромашка", "b1", true), a_card("Василёк", "b2", true)]
         })
         .await;
 
@@ -2067,7 +2107,7 @@ mod tests {
             side: Side::WithAgents,
             says_name: "Разработчик".into(),
             ceiling: Ceiling::Full,
-            why: Why::Return(card.map(CardId::from)),
+            why: Why::Return(card.map(crate::wire::CardRef::from)),
         }
     }
 
@@ -2076,10 +2116,7 @@ mod tests {
     /// номером, на котором мы не говорим.
     #[tokio::test]
     async fn a_side_that_claims_a_version_we_do_not_speak_is_refused() {
-        let mut talk = Alone::new("version", Decision::Allow, |_book, _peer, _state| {
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
-        })
-        .await;
+        let mut talk = Alone::new("version", Decision::Allow, |_book, _peer, _state| vec![a_card("Ромашка", "b1", true)]).await;
 
         let hello = Msg::Hello {
             proto_min: 0,
@@ -2129,10 +2166,7 @@ mod tests {
     /// отправителю, что сообщение исполнено.
     #[tokio::test]
     async fn an_unknown_message_is_refused_in_words_not_in_silence() {
-        let mut talk = Alone::new("unknown-msg", Decision::Allow, |_book, _peer, _state| {
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
-        })
-        .await;
+        let mut talk = Alone::new("unknown-msg", Decision::Allow, |_book, _peer, _state| vec![a_card("Ромашка", "b1", true)]).await;
 
         raw_frame(&mut talk.w, r#"{"msg":"enroll_please","whatever":1}"#).await;
         let answered = Frame::read(&mut talk.r).await;
@@ -2159,7 +2193,7 @@ mod tests {
             // мьютекс по строке пути и файловой системы не касается вовсе.
             let _ = std::fs::remove_file(state.join("enrolled.toml"));
             std::fs::create_dir_all(state.join("enrolled.toml")).unwrap();
-            vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]
+            vec![a_card("Ромашка", "b1", true)]
         })
         .await;
 
@@ -2187,7 +2221,7 @@ mod tests {
         let ticket = Ticket::issue(peer, None, vec![]).unwrap();
         first_book.issue(&"b1".into(), &ticket).unwrap();
         let secret_hex = hex::encode(&*ticket.secret);
-        let cards = Cards::here(vec![Card { name: "Ромашка".into(), base: fields("b1", true) }]);
+        let cards = Cards::here(vec![a_card("Ромашка", "b1", true)]);
 
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (mut our_r, mut our_w) = tokio::io::split(ours);

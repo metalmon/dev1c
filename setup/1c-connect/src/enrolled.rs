@@ -433,7 +433,9 @@ struct PartnerRow {
     /// файл от прежней версии программы (`serde(default)`, старый
     /// `partners.toml` читается без отказа).
     #[serde(default)]
-    base_id: Option<CardId>,
+    /// Ключ карточки ТОЙ машины — проводный (`wire::CardRef`): в наше пространство имён он не переводится никогда, у нас он только
+    /// хранится и уезжает обратно при возврате.
+    base_id: Option<crate::wire::CardRef>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -545,7 +547,7 @@ impl Partners {
     /// карточки, та сторона отвечает всем списком своих баз, и так это и было
     /// до появления этого поля. Из снимка, как и `of`: решение «куда звонить»
     /// и так читает файл сам (`gui::peer::target`).
-    pub fn base_id_of(&self, card: &CardId) -> Option<CardId> {
+    pub fn base_id_of(&self, card: &CardId) -> Option<crate::wire::CardRef> {
         self.data.partners.iter().find(|p| &p.card == card).and_then(|p| p.base_id.clone())
     }
 
@@ -557,7 +559,7 @@ impl Partners {
     /// к чему, и молчание об этом выглядело бы как записанный признак, который
     /// потом необъяснимо не читается. На деле этот порядок не встречается —
     /// партнёра записывает тот же круг и раньше (`gui::peer::one_round`).
-    pub fn remember_base_id(&mut self, card: &CardId, base_id: &CardId) -> Result<(), String> {
+    pub fn remember_base_id(&mut self, card: &CardId, base_id: &crate::wire::CardRef) -> Result<(), String> {
         let base_id = base_id.clone();
         self.mutate(move |data| match data.partners.iter_mut().find(|p| &p.card == card) {
             Some(row) => {

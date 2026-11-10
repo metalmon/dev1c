@@ -7048,15 +7048,18 @@ mod tests {
         // Заявка по ДРУГОЙ карточке предмета этой кнопки не касается: предмет
         // у неё один, и «Разрешить», разрешающее не то, что названо слева, —
         // та же мина, что заглушка `UNWIRED` в меню.
-        ui.waiting[0].request.base.base_id = "Другая".into();
+        // Ключ заявки — НАШ (`Request::card`), и подменять надо именно его: `base.base_id` с расколом ключа стал проводным видом и
+        // заявку больше не ключует.
+        ui.waiting[0].request.card = "Другая".into();
         assert_ne!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
     }
     /// Заявка носит КЛЮЧ той карточки, по которой её и ищут (`enroll_facts`, `request_to_answer`): имя в заявке — только для слов
     /// человеку, и фикстура, у которой ключ взят с потолка, проверяла бы не то.
     fn a_waiting_request(card: &crate::cfg::Connection) -> crate::enroll::Request {
         crate::enroll::Request {
+            card: card.id().clone(),
             card_name: card.name.clone(),
-            base: crate::wire::BaseFields { base_id: card.id(), base_name: "Бухгалтерия".into(), write: true },
+            base: crate::wire::BaseFields { base_id: card.id().on_wire(), base_name: "Бухгалтерия".into(), write: true },
             peer: a_key(3),
             says_name: "Заказчик".into(),
         }

@@ -2391,7 +2391,8 @@ mod tests {
         // советовать установку нечего: публикацию поднимает сам коннектор.
         let free = publication_responds_fact("http://x", false, None);
         assert!(!free.hint.contains("install"), "{free:?}");
-        assert!(free.hint.contains("обслуживание"), "{free:?}");
+        // По смыслу, а не по букве: совет говорит про предмет, который надо включить (`gui::SUBJECT`).
+        assert!(free.hint.contains(crate::gui::SUBJECT), "{free:?}");
     }
 
     /// Истёкший срок — провал: человек обязан увидеть красное и дату, до
@@ -2635,7 +2636,7 @@ mod tests {
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
         // До базы не достучались — совет про обслуживание, не про установку.
         let fail = publication_responds_fact("http://x", false, None);
-        assert!(!fail.ok && fail.hint.contains("обслуживание") && !fail.hint.contains("install"), "{fail:?}");
+        assert!(!fail.ok && fail.hint.contains(crate::gui::SUBJECT) && !fail.hint.contains("install"), "{fail:?}");
         // А вот когда база ОТВЕТИЛА, что расширения нет, установка и есть ответ.
         let absent = extension_fact(Some(&Reach::Absent), None, "auto");
         assert!(!absent.ok && absent.hint.contains("install"), "{absent:?}");

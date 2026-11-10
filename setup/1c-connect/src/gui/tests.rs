@@ -433,11 +433,12 @@ fn done_clears_progress_and_renews_cancel() {
 fn success_is_silent_and_a_mismatch_speaks() {
     let done_on = setup_line("Zed", true, Ok(crate::editors::Found::Ours)).unwrap();
     assert_eq!(done_on.kind, Kind::Ok, "{done_on:?}");
-    assert!(done_on.text.contains("на месте"), "{done_on:?}");
+    // По смыслу, а не по букве прежних слов: строка называет предмет и говорит, что он открыт.
+    assert!(done_on.text.contains(crate::gui::SUBJECT) && done_on.text.contains("открыт"), "{done_on:?}");
     for off in [crate::editors::Found::Absent, crate::editors::Found::Missing] {
         let done_off = setup_line("Zed", false, Ok(off)).unwrap();
         assert_eq!(done_off.kind, Kind::Ok, "{done_off:?}");
-        assert!(done_off.text.contains("убраны"), "{done_off:?}");
+        assert!(done_off.text.contains(crate::gui::SUBJECT) && done_off.text.contains("закрыт"), "{done_off:?}");
     }
 
     let still_absent = setup_line("Zed", true, Ok(crate::editors::Found::Absent)).unwrap();

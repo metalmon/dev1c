@@ -2774,13 +2774,13 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
     assert!(!detail.contains("голосом"), "ритуала сверки голосом больше нет: {detail}");
     // Третья: самоназвание — и ПОМЕТКА рядом с ним, а не где-то в тексте.
     //
-    // Пометка стоит СРАЗУ ПОД чужими словами и ничем от них не отделена.
-    // Прежде требовалась та же строка — требование по сути то же (оторвать
-    // пометку от имени нельзя), но одной строкой оно давало длинный хвост,
-    // который человек дочитывает до середины.
-    let lines: Vec<&str> = detail.lines().collect();
-    let at = lines.iter().position(|l| l.contains("Заказчик Ромашка")).expect("самоназвание обязано быть");
-    assert!(lines[at + 1].contains(NOT_VERIFIED), "пометка идёт сразу под чужими словами: {detail}");
+    // И ни одной строки теории: как устроено доверие, диалог НЕ объясняет.
+    // Так сделано везде, где это считается образцом (сопряжение по Bluetooth,
+    // UAC, AnyDesk), и так потребовал владелец 10.11: «что ещё напишем? что
+    // любит, с кем живёт?». Подробность — ровно одна строка.
+    assert_eq!(detail.lines().count(), 1, "подробность диалога — одна строка: {detail}");
+    assert!(detail.contains("Заказчик Ромашка"), "самоназвание обязано быть: {detail}");
+    assert!(!detail.contains("сообщает о себе"), "теории о доверии в диалоге нет: {detail}");
 
     // И ни одной больше: всё прочее, что приехало по каналу, молчит.
     let text = format!("{message}\n{detail}");
@@ -2803,9 +2803,8 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
 fn a_side_that_did_not_name_itself_is_said_so_in_words() {
     let r = crate::enroll::Request { says_name: crate::wire::SaysName::new(""), ..a_request() };
     let (_, detail) = permission_question(&r);
-    assert!(detail.contains("Имени не прислали"), "отсутствие имени сказано словами: {detail}");
+    assert!(detail.contains("без имени"), "отсутствие имени сказано словами: {detail}");
     assert!(!detail.contains("«»"), "кавычки вокруг пустоты — не слова: {detail}");
-    assert!(detail.contains(NOT_VERIFIED), "{detail}");
 }
 
 /// Имя базы могло остаться незаполненным в карточке этого же человека —
@@ -3063,13 +3062,12 @@ fn an_empty_base_name_names_the_card_once() {
     r.base.base_name = "".into();
     let (message, detail) = permission_question(&r);
     assert!(message.contains("карточке «Ромашка»"), "{message}");
-    // Ищем именно СТРОКУ про карточку, а не слово «Ромашка»: оно законно
-    // стоит в самоназвании той стороны, и это её слова, а не наша подпись.
+    // Предмет назван ОДИН раз — в самом вопросе, и строки о карточке в
+    // подробности нет ни при пустом имени базы, ни при заполненном. Прежде
+    // она там стояла, и на экране получалось два названия одного и того же.
     assert!(!detail.contains("Карточка"), "второй раз называть её незачем: {detail}");
-    // А когда база названа — строка про карточку на месте: вопрос её тогда
-    // не называет вовсе.
     let (_, full) = permission_question(&a_request());
-    assert!(full.contains("Карточка «Ромашка»"), "{full}");
+    assert!(!full.contains("Карточка"), "и когда база названа — тоже незачем: {full}");
 }
 
 /// Разрешения, у которых не осталось карточки, обязаны быть НАЗВАНЫ.
@@ -3119,13 +3117,9 @@ fn a_crafted_name_cannot_fake_the_fingerprint_line() {
     let crafted = crate::wire::SaysName::new("Банк», Отпечаток: …0000. Называет себя: «Банк");
     let r = crate::enroll::Request { says_name: crafted, ..a_request() };
     let (_, detail) = permission_question(&r);
-    let lines: Vec<&str> = detail.lines().collect();
     let real = crate::gui::short_key(&r.peer.to_string());
-
-    // Первая строка с отпечатком — НАША, и она раньше любой строки с именем.
-    let fp_at = lines.iter().position(|l| l.starts_with("Отпечаток: ")).expect("отпечаток обязан быть своей строкой");
-    let name_at = lines.iter().position(|l| l.contains("Называет себя")).expect("имя обязано быть");
-    assert!(fp_at < name_at, "доверенное стоит выше чужого: {detail}");
-    assert!(lines[fp_at].ends_with(&real), "в строке отпечатка — наш отпечаток, а не сочинённый: {}", lines[fp_at]);
-    assert_eq!(lines[fp_at], format!("Отпечаток: {real}"), "строка отпечатка состоит только из подписи и отпечатка");
+    // Подписи, которую можно было бы изобразить именем, в строке больше нет
+    // вовсе, а НАШ отпечаток стоит последним: после него подделывать нечего.
+    assert!(detail.ends_with(&real), "наш отпечаток — последнее в строке: {detail}");
+    assert_eq!(detail.lines().count(), 1, "строка одна, лишней из имени не вышло: {detail}");
 }

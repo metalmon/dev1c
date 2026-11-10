@@ -922,14 +922,17 @@ mod tests {
     /// пропущенный вариант, а разъехавшееся переименование (`serde(rename)`).
     #[test]
     fn the_list_of_known_names_comes_from_the_messages_themselves() {
-        let no = serde_json::from_str::<Msg>(r#"{"msg":"dance"}"#).expect_err("сообщения «dance» в Msg нет");
+        let no = serde_json::from_str::<Msg>(r#"{"msg":"такого-сообщения-нет"}"#)
+            .expect_err("этот тег выбран затем, чтобы вариантом Msg он не стал никогда");
         let said = no.to_string();
         // Всё, что serde взял в обратные кавычки: сперва непонятый тег, за ним
         // перечень вариантов самого `Msg`. Разбор по кавычкам, а не по словам
         // сообщения: слова serde однажды перепишет, кавычки — вряд ли.
         let quoted: Vec<&str> = said.split('`').skip(1).step_by(2).collect();
-        let (unknown, from_msg) = quoted.split_first().expect(&format!("serde обязан назвать непонятый тег и варианты: {said}"));
-        assert_eq!(*unknown, "dance", "первым в кавычках идёт непонятый тег: {said}");
+        let Some((unknown, from_msg)) = quoted.split_first() else {
+            panic!("serde обязан назвать непонятый тег и варианты: {said}")
+        };
+        assert_eq!(*unknown, "такого-сообщения-нет", "первым в кавычках идёт непонятый тег: {said}");
         let (mut from_msg, mut known) = (from_msg.to_vec(), KNOWN.to_vec());
         from_msg.sort_unstable();
         known.sort_unstable();

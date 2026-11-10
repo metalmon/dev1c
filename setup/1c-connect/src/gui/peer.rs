@@ -690,10 +690,12 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
 /// поток сами (`channel::settle`).
 ///
 /// **Чего здесь ещё нет.** Прощание при выключении обслуживания
-/// (`channel::SERVING_OFF`) и при закрытии окна (`WINDOW_CLOSED`): слова и
-/// вожжи для них готовы, не хватает только зова из переключателя
-/// (`link::toggle_link`) и с «Выхода». Пока его нет, та сторона читает обрыв
-/// вместо причины.
+/// (`channel::SERVING_OFF`). Слова и вожжи для него готовы, не хватает зова из
+/// переключателя обслуживания (`gui::link`) — а он в чужом файле, и этой
+/// задачей не правится. Пока зова нет, та сторона читает обрыв вместо
+/// причины, и это единственное, что в `bye` ещё не доехало: прощание при
+/// закрытии окна (`channel::WINDOW_CLOSED`) уходит залпом с «Выхода»
+/// (`Cmd::ByeAll`).
 async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: crate::channel::Control, peer: EndpointId) {
     let mut book = match Book::open(kit.state()) {
         Ok(book) => book,

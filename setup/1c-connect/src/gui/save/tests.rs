@@ -1826,7 +1826,7 @@ fn the_developer_profile_without_a_sources_folder_is_refused_before_the_write() 
 
     let e = set_profile(&mut ui, "Buh", "developer").unwrap_err();
 
-    assert!(e.contains("папка проекта"), "отказ называет поле словами человека: {e}");
+    assert!(e.contains("папка документов"), "отказ называет поле словами человека: {e}");
     assert!(!e.contains("project"), "и не ключом toml — в окне его никто не видит: {e}");
     assert!(e.contains("повторите"), "отказ говорит, что сделать: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
@@ -2504,7 +2504,7 @@ fn set_keys_refuses_a_patch_that_breaks_the_card_and_writes_nothing() {
 
     let e = set_keys(&mut ui, "Buh", &[("profile", "developer")]).unwrap_err();
 
-    assert!(e.contains("папка проекта"), "отказ называет поле словами человека: {e}");
+    assert!(e.contains("папка документов"), "отказ называет поле словами человека: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "и в памяти профиль не сменился");
 }

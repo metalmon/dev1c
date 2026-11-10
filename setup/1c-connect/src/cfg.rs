@@ -1577,7 +1577,7 @@ impl Cfg {
                 }
                 anyhow::ensure!(
                     !folder_conflict(&a.project, &b.project),
-                    "соединение «{}»: папка проекта уже занята соединением «{}» — папка принадлежит одному соединению",
+                    "соединение «{}»: папка документов уже занята соединением «{}» — папка принадлежит одному соединению",
                     b.name,
                     a.name
                 );
@@ -1789,7 +1789,7 @@ impl Connection {
             let full = p.len() > 2 && (p.as_bytes()[1] == b':' || p.starts_with('/') || p.starts_with("\\\\"));
             anyhow::ensure!(
                 full && !p.contains('"') && !p.contains('%'),
-                "{at}: папка проекта — впишите полный путь без кавычек и %, например C:\\proj\\Buh [project]"
+                "{at}: папка документов — впишите полный путь без кавычек и %, например C:\\proj\\Buh [project]"
             );
             anyhow::ensure!(
                 !has_parent_component(p),

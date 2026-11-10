@@ -183,7 +183,9 @@ pub struct Card {
 /// «почему не работает» расходились в ту же минуту. Константа — не функция:
 /// значение не зависит ни от чего (режим на него больше не влияет), и
 /// заводить функцию с пустым списком параметров было бы лишним.
-pub const OFF_WORD: &str = "MCP выключены";
+// Слово — из словаря закона окна (`docs/superpowers/specs/interface-blocks.md`): «доступ к 1С», а не «MCP». Сокращение разработчика на
+// экране не живёт (закон 6), а имя предмета одно во всех блоках — его же читает подсказка значка.
+pub const OFF_WORD: &str = "Доступ к 1С выключен";
 
 /// Слово карточки при запертом холодном замке — отдельное от `OFF_WORD`,
 /// хоть и та же точка (`Dot::Off`). Прежде замок красил карточку тем же
@@ -197,7 +199,10 @@ pub const OFF_WORD: &str = "MCP выключены";
 /// подсказке переключателя (`switch_tooltip`/`reason`) и в журнале — щелчок
 /// по запертому переключателю сам пишет туда причину непрочитанной строкой
 /// (`link::toggle_link`).
-pub const GATE_WORD: &str = "Включить нельзя";
+// Слово называет ПРЕДМЕТ и его состояние, а не отказ (закон 4 закона окна: «„Включить доступ к 1С“, а не „Включить нельзя“»). Прежнее
+// «Включить нельзя» было отказом, поставленным в заголовок, и человек читал запрет вместо того, что перед ним. Чего не хватает — в
+// подсказке переключателя (`switch_tooltip`) и в журнале, как и раньше.
+pub const GATE_WORD: &str = "Доступ к 1С не готов";
 
 pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdict, gate: Option<&str>, now: Instant) -> Card {
     if let Some(r) = progress {
@@ -338,7 +343,9 @@ pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>, mode: &str) -> S
     match (gate, reason) {
         (Some(why), _) => gate_text(why),
         (None, Some(why)) => why.to_string(),
-        (None, None) if mode == "local" => "Обслуживание вызовов агента (MCP)".into(),
+        // Словарь закона окна: «доступ к 1С». Прежде здесь стояло «Обслуживание вызовов агента (MCP)» — два слова разработчика в одной
+        // подсказке, и ни одного из них нет больше нигде на экране.
+        (None, None) if mode == "local" => "Доступ к 1С".into(),
         (None, None) => "Туннель в среду разработки".into(),
     }
 }
@@ -1920,7 +1927,11 @@ fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
             if let (Some(peer), Some(card_key)) = (&ui.peer, card_key.as_ref()) {
                 peer.revoked(card_key, key);
             }
-            Line { kind: Kind::Ok, text: format!("Разрешение отозвано: «{card}», отпечаток {key}") }
+            // Отпечаток — КОРОТКИЙ, тем же приёмом, что в строке зачисленного (`gui::short_key`): отпечаток в 64 знака сплошной строкой
+            // журнал не носит (закон окна, «Журнал»), и сверяют его голосом по коротким знакам.
+            Line {
+                kind: Kind::Ok, text: format!("Разрешение отозвано: «{card}», отпечаток {}", crate::gui::short_key(&key.to_string()))
+            }
         }
         Err(e) => Line { kind: Kind::Fail, text: e },
     };
@@ -2146,8 +2157,19 @@ fn run_link_act(window: &mut Window, cx: &mut App, act: LinkAct, subject: &str) 
         LinkAct::Dial => {
             let Some(panel) = cx.global::<Ui>().panel.clone() else { return };
             let code = panel.read(cx).fields.code.clone();
-            let typed = code.read(cx).value().to_string();
-            dial_card(cx.global_mut::<Ui>(), subject, typed.trim());
+            let typed = code.read(cx).value().trim().to_string();
+            // **Поле пусто — ведём к полю, а не запираем кнопку и не пишем отказ в журнал** (закон окна 7: «Действие живое, нажатие ведёт.
+            // Кнопка не запирается и не отказывает в журнал: не хватает полей — подсвечивает их и ставит курсор в первое»). Находка 15
+            // осмотра 10.11 («кнопка горела всегда, и нажатие уходило в отказ строкой журнала») этим и закрыта: отказа нет, курсор стоит
+            // там, где человеку набирать. Запертой кнопки в подвале не бывает вовсе — закон перечисляет её среди того, чего там нет
+            // никогда.
+            if typed.is_empty() {
+                let focus = code.read(cx).focus_handle(cx);
+                focus.focus(window, cx);
+                cx.refresh_windows();
+                return;
+            }
+            dial_card(cx.global_mut::<Ui>(), subject, &typed);
             code.update(cx, |s, cx| s.set_value(String::new(), window, cx));
             cx.refresh_windows();
         }
@@ -4316,9 +4338,6 @@ impl Render for Panel {
                         .label(label)
                         .disabled(match act {
                             Some(LinkAct::Save) => !allowed,
-                            // Пустое поле кода — нажимать не на что (находка 15 осмотра 10.11: кнопка горела всегда, и нажатие уходило в
-                            // отказ строкой журнала). Решается это здесь, а не в `main_button`: набранное в поле знает только панель.
-                            Some(LinkAct::Dial) => self.fields.code.read(cx).value().trim().is_empty(),
                             None => true,
                             _ => busy_now,
                         })
@@ -4691,10 +4710,10 @@ mod tests {
         let text = reason(&State::Off, &Verdict::Checking, why, None);
         assert_eq!(text.as_deref(), Some("Нельзя включить: не задан пользователь базы"));
         assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Нельзя включить: не задан пользователь базы");
-        assert_eq!(switch_tooltip(None, None, "local"), "Обслуживание вызовов агента (MCP)");
+        assert_eq!(switch_tooltip(None, None, "local"), "Доступ к 1С");
         assert_eq!(switch_tooltip(None, None, "tunnel"), "Туннель в среду разработки");
         let c = card(None, &State::Off, "local", &Verdict::Checking, None, Instant::now());
-        assert_eq!(c.title, "MCP выключены", "причина в заголовок не идёт — она туда не влезает");
+        assert_eq!(c.title, OFF_WORD, "причина в заголовок не идёт — она туда не влезает");
     }
 
     /// Подсказка запертого переключателя называет причину замка, а не отказ
@@ -4728,7 +4747,7 @@ mod tests {
 
     /// Холодный замок сильнее любого спокойного состояния связи: включать
     /// нечего, и зелёного тут быть не может. Слово при этом — СВОЁ
-    /// (`GATE_WORD`, «Включить нельзя»), не `OFF_WORD`: Important 4 ревью —
+    /// (`GATE_WORD`, «Доступ к 1С не готов»), не `OFF_WORD`: Important 4 ревью —
     /// до этой правки запертый замок и простое выключение говорили одно и
     /// то же «MCP выключены», и человек не мог отличить «нажми и подожди»
     /// от «нажимать нечего», не щёлкнув по переключателю.
@@ -4738,13 +4757,13 @@ mod tests {
         let gate = Some("не задан пользователь базы");
         for link in [State::Off, State::Connecting, State::Up { since: now }] {
             let c = card(None, &link, "local", &Verdict::Ready, gate, now);
-            assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Включить нельзя"), "{link:?}");
+            assert_eq!((c.dot, c.title.as_str()), (Dot::Off, GATE_WORD), "{link:?}");
         }
         // В туннельном режиме замок говорит тем же словом: связь не поднята
         // не из-за отказа, а из-за самого выключателя (находка живого
         // прогона 9.11) — «Не подключён» здесь было бы причиной не по делу.
         let c = card(None, &State::Off, "tunnel", &Verdict::Ready, gate, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "Включить нельзя"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, GATE_WORD));
         // Оба слова разные: без замка то же выключенное состояние говорит
         // `OFF_WORD`, не `GATE_WORD` — иначе «нельзя» и «просто выключено»
         // снова стали бы одним словом.
@@ -4816,7 +4835,7 @@ mod tests {
         let now = Instant::now();
         let fail = Check::fail("проект", "/home/dev3/project не разложен", "1c-connect install");
         let c = card(None, &State::Off, "local", &Verdict::NotReady(fail.clone()), None, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, OFF_WORD));
         assert_eq!(reason(&State::Off, &Verdict::NotReady(fail), None, None), None);
     }
 
@@ -4862,7 +4881,7 @@ mod tests {
         // Выключено — не отказ: «MCP выключены» и в туннеле (находка живого
         // прогона 9.11), см. докстроку `card`.
         let c = card(None, &State::Off, "tunnel", &Verdict::Checking, None, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, "MCP выключены"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Off, OFF_WORD));
         assert!(!c.cancel);
         let c = card(None, &State::Connecting, "tunnel", &Verdict::Checking, None, now);
         assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Подключаюсь…"));
@@ -4888,12 +4907,12 @@ mod tests {
         let now = Instant::now();
         for mode in ["local", "tunnel"] {
             let c = card(None, &State::Off, mode, &Verdict::Checking, None, now);
-            assert_eq!(c.title, "MCP выключены", "{mode}");
+            assert_eq!(c.title, OFF_WORD, "{mode}");
             // Замок — своё слово (`GATE_WORD`, Important 4 ревью круга
             // задачи 11): «просто выключено» и «нельзя включить» больше не
             // говорят одно и то же.
             let c = card(None, &State::Off, mode, &Verdict::Checking, Some("не задан пользователь базы"), now);
-            assert_eq!(c.title, "Включить нельзя", "{mode}: замок");
+            assert_eq!(c.title, GATE_WORD, "{mode}: замок");
         }
         let c = card(None, &State::Failed("порт занят".into()), "tunnel", &Verdict::Checking, None, now);
         assert_eq!(c.title, "Не подключён");
@@ -4922,7 +4941,7 @@ mod tests {
     #[test]
     fn card_titles_speak_about_mcp_not_the_tunnel() {
         let now = Instant::now();
-        assert_eq!(card(None, &State::Off, "local", &Verdict::Checking, None, now).title, "MCP выключены");
+        assert_eq!(card(None, &State::Off, "local", &Verdict::Checking, None, now).title, OFF_WORD);
         assert_eq!(card(None, &State::Connecting, "local", &Verdict::Checking, None, now).title, "Включаю…");
         assert_eq!(card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now).title, "MCP включены");
         // Отказ называет состояние, а не причину: причина («порт 7771 занят

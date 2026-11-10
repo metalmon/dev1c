@@ -4143,14 +4143,30 @@ mod tests {
         assert!(c.read_notes.is_empty(), "и без находок: {:?}", c.read_notes);
         assert_eq!(c.access(), "read_write", "потолок взят из текущей карточки");
 
-        let mut swapped = old.replacen("current = \"Ромашка\"", "current = \"Buh\"", 1);
+        let swapped = old.replacen("current = \"Ромашка\"", "current = \"Buh\"", 1);
         let c: Cfg = toml::from_str(&swapped).unwrap();
         assert_eq!(c.access(), "read_only", "текущая другая — и потолок её");
+    }
 
-        // А корневой ключ, если он уже есть, карточки не спрашивает вовсе.
-        swapped.insert_str(0, "write = \"read_write\"\n");
-        let c: Cfg = toml::from_str(&swapped).unwrap();
-        assert_eq!(c.access(), "read_write", "корневой ключ сильнее переноса");
+    /// Потолок записи СЕГОДНЯ — корневой ключ файла, и стережёт его этот тест, а не перенос старого файла рядом.
+    ///
+    /// **Почему отдельным тестом** (Important второго ревью всей ветки). До этой правки «корневой ключ сильнее переноса» проверялось
+    /// третьим утверждением внутри теста про СТАРЫЙ файл — то есть на заготовке, у которой потолок лежит в блоках карточек. Такая
+    /// заготовка зеленеет и у продукта, который корневого ключа не умеет вовсе: достаточно, чтобы работал перенос. Здесь наоборот —
+    /// ключ есть ТОЛЬКО в корне, и ни одна карточка потолка не называет: мера та самая, которой продукт сегодня и пишет
+    /// (`gui::save::save_tray_ceiling` правит корень, `render` его печатает).
+    #[test]
+    fn the_write_ceiling_lives_in_the_root_key_and_asks_no_card() {
+        let root = "write = \"read_write\"\ncurrent = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\n\n[[connection]]\nname = \"Ромашка\"\n";
+        let c: Cfg = toml::from_str(root).expect("файл с корневым потолком читается без отказа");
+        assert_eq!(c.access(), "read_write", "потолок прочитан из корня: карточки о нём не сказали ничего");
+        assert!(c.allows_write());
+        assert!(c.connections.iter().all(|c| c.write.is_empty()), "заготовка нарочно без потолков в карточках");
+        // И корень сильнее переноса там, где сказали оба: карточка себе запрещает, машина разрешает — и потолок МАШИНЫ не сужается.
+        let both = root.replace("name = \"Buh\"\n", "name = \"Buh\"\nwrite = \"read_only\"\n");
+        let c: Cfg = toml::from_str(&both).unwrap();
+        assert_eq!(c.access(), "read_write", "корневой ключ переноса из карточки не спрашивает вовсе");
+        assert!(!c.may_write(c.current()), "а своей базе карточка запись запретила — и это другой вопрос, не потолок машины");
     }
 
     /// Файла без ключа `write` вовсе (ни в корне, ни в карточках) бояться

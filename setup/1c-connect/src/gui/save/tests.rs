@@ -1633,7 +1633,12 @@ fn an_unknown_profile_refuses_and_leaves_the_file_alone() {
 
     let e = set_profile(&mut ui, "Buh", "бухгалтер").unwrap_err();
 
-    assert!(e.contains("developer") && e.contains("business"), "{e}");
+    // Словами человека, и БЕЗ хвоста для файла: читатель здесь — журнал окна
+    // (`cfg::said_in_window`, Important повторного ревью всей ветки). Прежде
+    // здесь ждали `developer` и `business` — годные значения ключа toml, то
+    // есть ровно то, чего человек в окне не видит.
+    assert!(e.contains("набор инструментов агента не распознан"), "{e}");
+    assert!(!e.contains("profile") && !e.contains("developer"), "ни ключа toml, ни его значений: {e}");
     assert_eq!(ui.cfg.by_name("Buh").unwrap().profile, "", "профиль в памяти не тронут");
     assert!(!path.exists(), "отказ случился раньше любого обращения к диску — файла как не было, так и нет");
 }
@@ -1734,6 +1739,45 @@ fn switching_the_role_or_the_mode_forgets_where_the_card_was_calling() {
     assert!(partners.of(&id).is_none(), "смена режима — та же потеря возврата, и тоже не молчком");
 }
 
+/// Переключатель, поставленный туда, где он и стоял, ничего не теряет и ничего не говорит — даже когда в файле на этом месте ПУСТО.
+///
+/// Падало так (Important повторного ревью всей ветки): забывание шло по СЫРОМУ полю. Роль во всём продукте читают через `role()`, где
+/// пустое значит «принимаю» (умолчание владельца 3.11), — значит карточка без ключа `role` плюс щелчок «Принимаю подключения» это тот же
+/// самый выбор. А по строкам «» и «accept» выглядели переменой: партнёр забывался, и человеку ГРОМКОЙ строкой говорилось, что возврат
+/// потерян, при том что он ничего не менял и терять было нечего. У режима тот же случай: вопрос у него один — всё на одной машине или нет,
+/// — и «» с «tunnel» для всех его читателей одно и то же.
+#[test]
+fn a_switch_put_back_where_it_already_stood_loses_nothing_and_says_nothing() {
+    for (field, from, to) in [("role", "", "accept"), ("mode", "", "tunnel")] {
+        let mut ui = Ui::for_test();
+        match field {
+            "role" => ui.cfg.current_mut().role = from.into(),
+            _ => ui.cfg.current_mut().mode = from.into(),
+        }
+        with_params_file(&ui);
+        let id = ui.cfg.by_name("Buh").unwrap().id();
+        crate::enrolled::Partners::open(ui.kit.state())
+            .unwrap()
+            .remember(&id, &crate::enrolled::Partner { key: iroh::SecretKey::generate().public(), relay: None, direct: vec![] })
+            .unwrap();
+        crate::gui::save::reread_partners(&mut ui);
+
+        match field {
+            "role" => set_role(&mut ui, "Buh", to).unwrap(),
+            _ => set_mode(&mut ui, "Buh", to).unwrap(),
+        }
+
+        let partners = crate::enrolled::Partners::open(ui.kit.state()).unwrap();
+        assert!(partners.of(&id).is_some(), "«{field}»: выбор тот же — партнёру незачем уходить");
+        assert!(ui.partners.iter().any(|(c, _)| c == &id), "«{field}»: и снимок окна его числит");
+        assert!(
+            !ui.log.iter().any(|l| l.text.contains("больше не помнит")),
+            "«{field}»: человеку не говорят о потере, которой не было: {:?}",
+            ui.log
+        );
+    }
+}
+
 /// Неизвестное значение роли — отказ словами ДО записи, тем же приёмом, что
 /// `set_profile` проверяет `toolset()` через пробный `Connection`.
 #[test]
@@ -1745,7 +1789,9 @@ fn switching_to_an_unknown_role_is_refused_and_touches_nothing() {
 
     let e = set_role(&mut ui, "Buh", "мусор").unwrap_err();
 
-    assert!(e.contains("role"), "{e}");
+    // Тот же снимок хвоста и по тому же доводу, что у профиля выше.
+    assert!(e.contains("не распознано, как подключается это соединение"), "{e}");
+    assert!(!e.contains("role") && !e.contains("accept"), "ни ключа toml, ни его значений: {e}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "отказ не пишет");
 }
 

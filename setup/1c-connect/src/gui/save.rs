@@ -1232,7 +1232,13 @@ fn breaks_connection(before: &Connection, after: &Connection) -> Option<String> 
     if before.validate().is_err() {
         return None;
     }
-    after.validate().err().map(|e| cfg::said_in_window(&format!("переключение не записано: {e:#} — впишите это поле и повторите")))
+    // Хвост снимается с САМОГО отказа, а наши слова приписываются после:
+    // `said_in_window` снимает один хвост с конца строки (её докстрока), и
+    // обёртка вокруг отказа раньше уводила этот конец от хвоста.
+    after
+        .validate()
+        .err()
+        .map(|e| format!("переключение не записано: {} — впишите это поле и повторите", cfg::said_in_window(&format!("{e:#}"))))
 }
 
 /// Протолкнуть новые параметры в ЖИВОЙ сеанс после удачной точечной записи
@@ -1430,7 +1436,20 @@ pub fn set_keys(ui: &mut Ui, name: &str, keys: &[(&str, &str)]) -> Result<(), St
 ///
 /// **Чистим раньше записи настроек, и на отказе не пишем ничего** — тот же порядок и тот же довод, что у `access_follows_delete`: повтор переключения застанет чистку уже сделанной (`Partners::forget` идемпотентна) и допишет настройки.
 fn partner_follows_role_and_mode(ui: &mut Ui, before: &Connection, after: &Connection) -> Result<(), String> {
-    if before.role == after.role && before.mode == after.mode {
+    // Спрашивается ВЫБОР человека, а не строка файла (Important повторного
+    // ревью всей ветки). Роль во всём продукте читается через `role()`, где
+    // пустое значит «принимаю» (умолчание владельца 3.11), — и карточка без
+    // ключа `role` плюс щелчок «Принимаю подключения» это тот же самый выбор,
+    // ничего не переменивший. По сырым строкам он выглядел переменой: партнёр
+    // забывался, а человеку ГРОМКОЙ строкой сообщалось, что возврат потерян, —
+    // при том что терять было нечего и он ничего не менял.
+    //
+    // У режима тот же случай и та же мера: вопрос у него один — всё на одной
+    // машине или нет, — и «» с «tunnel» для всех его читателей одно и то же.
+    // Сравнивать здесь надо ответ на этот вопрос, а не написание.
+    let same_role = before.role().ok() == after.role().ok();
+    let same_mode = (before.mode == "local") == (after.mode == "local");
+    if same_role && same_mode {
         return Ok(());
     }
     let (key, name) = (after.id(), after.name.clone());
@@ -1478,7 +1497,9 @@ fn partner_follows_role_and_mode(ui: &mut Ui, before: &Connection, after: &Conne
 /// словами раньше записи).
 pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String> {
     let probe = Connection { profile: profile.to_string(), ..Connection::default() };
-    probe.toolset()?;
+    // Хвост с ключом toml снимается: читатель здесь — ЖУРНАЛ ОКНА, тот самый,
+    // ради которого хвост и заводился (`cfg::said_in_window`).
+    probe.toolset().map_err(|e| cfg::said_in_window(&e))?;
     set_keys(ui, name, &[("profile", profile)])
 }
 
@@ -1507,7 +1528,8 @@ pub fn set_profile(ui: &mut Ui, name: &str, profile: &str) -> Result<(), String>
 /// принимающей, звонить не вправе, и помнить ей адрес больше незачем.
 pub fn set_role(ui: &mut Ui, name: &str, role: &str) -> Result<(), String> {
     let probe = Connection { role: role.to_string(), ..Connection::default() };
-    probe.role()?;
+    // Тот же снимок хвоста и по тому же доводу, что у `set_profile` выше.
+    probe.role().map_err(|e| cfg::said_in_window(&e))?;
     set_keys(ui, name, &[("role", role)])
 }
 

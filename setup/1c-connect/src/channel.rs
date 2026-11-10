@@ -263,11 +263,8 @@ impl Channel {
     /// кончившийся в этот самый миг, закрыл бы канал у нас под руками.
     pub async fn call(&self) -> Result<Control, String> {
         let hold = self.hold();
-        let (send, recv) = self
-            .conn
-            .open_bi()
-            .await
-            .map_err(|e| format!("не удалось открыть управляющий поток: {e}. Проверьте связь и подключитесь заново."))?;
+        let (send, recv) =
+            self.conn.open_bi().await.map_err(|e| format!("не удалось начать разговор: {e}. Проверьте связь и подключитесь заново."))?;
         Ok(Control { send: Some(send), recv: Some(recv), hold: Some(hold) })
     }
 
@@ -275,7 +272,7 @@ impl Channel {
     /// карточке зовущая — она.
     pub async fn answer(&self) -> Result<Control, String> {
         let hold = self.hold();
-        let (send, recv) = self.conn.accept_bi().await.map_err(|e| format!("входящий управляющий поток не открылся: {e}"))?;
+        let (send, recv) = self.conn.accept_bi().await.map_err(|e| format!("входящий разговор не начался: {e}"))?;
         Ok(Control { send: Some(send), recv: Some(recv), hold: Some(hold) })
     }
 
@@ -618,11 +615,12 @@ where
 
 /// Слова прощания на три случая, в которых уходим МЫ. Третья строка — совет,
 /// как велит раздел «Ошибки» спеки: причина без совета человеку не нужна.
-pub const SERVING_OFF: &str = "Та сторона выключила обслуживание.\nЧеловек там снял галочку, и вызовы агента больше не \
+pub const SERVING_OFF: &str = "На том компьютере выключили обслуживание.\nЧеловек там снял галочку, и вызовы агента больше не \
                                обслуживаются.\nПопросите включить её снова — подключение восстановится само.";
 
 /// Окно закрыли: программа на той стороне больше не работает.
-pub const WINDOW_CLOSED: &str = "Та сторона закрыла программу.\nСоединение закончилось нарочно, а не оборвалось.\nПопросите запустить её \
+pub const WINDOW_CLOSED: &str =
+    "На том компьютере закрыли программу.\nСоединение закончилось нарочно, а не оборвалось.\nПопросите запустить её \
                                  снова — подключение восстановится само.";
 
 #[cfg(test)]
@@ -703,7 +701,7 @@ mod tests {
             panic!("намеренный уход обязан отличаться от обрыва: {end:?}")
         };
         assert_eq!(why.code, code::MCP_OFF, "причина ухода — её, а не наша придуманная");
-        assert!(why.text.contains("выключила обслуживание"), "человек читает причину, а не «связь пропала»: {}", why.text);
+        assert!(why.text.contains("выключили обслуживание"), "человек читает причину, а не «связь пропала»: {}", why.text);
 
         // Поток кончился молча — это обрыв, и совет человеку другой.
         let (theirs, mut ours) = tokio::io::duplex(4096);
@@ -1199,7 +1197,7 @@ mod tests {
         second_reins.bye(Refuse::new(code::CLOSED, WINDOW_CLOSED)).await;
         let end = tokio::time::timeout(WAIT, hold(second.ear(), |_| {})).await.expect("прощание не доехало в срок");
         let Gone::Farewell(why) = end else { panic!("окно закрыли нарочно, и это не обрыв: {end:?}") };
-        assert!(why.text.contains("закрыла программу"), "человек читает причину: {}", why.text);
+        assert!(why.text.contains("закрыли программу"), "человек читает причину: {}", why.text);
         assert!(closes_itself(&their_channel).await, "живых управляющих потоков не осталось — канал закрывается сам");
 
         drop((first, second));

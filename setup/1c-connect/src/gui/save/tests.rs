@@ -137,7 +137,7 @@ fn state_dir_for(name: &str) -> std::path::PathBuf {
 /// С задачи 6 плана «тонкий срез ценности» переименование рабочего места
 /// порт публикации не трогает вовсе: предпочтение (`host.http_port`)
 /// переносится как есть, а строка журнала о переезде называет только ветку
-/// проекта и `origin` — ни числа портов, ни слова «порт» в ней больше нет
+/// проекта и адрес отправки — ни числа портов, ни слова «порт» в ней больше нет
 /// (до задачи 6 здесь проверялось обратное — что порт едет за именем).
 #[test]
 fn renaming_the_workstation_does_not_move_the_port_anymore() {
@@ -149,7 +149,7 @@ fn renaming_the_workstation_does_not_move_the_port_anymore() {
     crate::ops_host::with_state_dir_for_test(&dir, || save_host(&mut ui, host)).unwrap();
     assert_eq!(ui.cfg.current().http_port, Some(cfg::derived_http_port()), "предпочтение не трогает рабочее место");
     assert!(!ui.log.iter().any(|l| l.text.contains("порт")), "строка о переезде не должна называть портов: {:?}", ui.log);
-    assert!(ui.log.iter().any(|l| l.text.contains("ветка проекта и origin")), "{:?}", ui.log);
+    assert!(ui.log.iter().any(|l| l.text.contains("ветка проекта и адрес")), "{:?}", ui.log);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -173,7 +173,7 @@ fn renaming_the_workstation_leaves_the_port_out_of_the_moved_line_even_when_the_
     let after = Cfg { resolved_http_port: Some(8084), ..Cfg::of_one(new) };
     let line = moved_lines(&before, &after).join("\n");
     assert!(!line.contains("порт") && !line.contains("8084"), "порт не переезжает за рабочим местом: {line}");
-    assert!(line.contains("ветка проекта и origin"), "{line}");
+    assert!(line.contains("ветка проекта и адрес"), "{line}");
 }
 
 /// Находка 5 ревью круга 3: неудавшееся «Сохранить» не двигает запомненный
@@ -229,7 +229,7 @@ fn every_move_gets_a_line_including_the_branch_but_not_the_port() {
     let mut new = old.clone();
     new.workstation = "dev3".into();
     let line = moved_lines(&as_cfg(&old), &as_cfg(&new)).join("\n");
-    for part in ["dev1 → dev3", "ветка проекта и origin"] {
+    for part in ["dev1 → dev3", "ветка проекта и адрес"] {
         assert!(line.contains(part), "{part} не назван: {line}");
     }
     assert!(!line.contains("порт"), "порт больше не едет за рабочим местом: {line}");

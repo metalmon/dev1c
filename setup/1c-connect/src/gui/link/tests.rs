@@ -607,6 +607,10 @@ fn captions_appear_only_when_the_list_holds_more_than_one_role() {
 /// списка — то же окно, что уже открыто, пока файл правят руками).
 #[test]
 fn a_card_with_an_unreadable_role_does_not_stand_under_the_accepting_caption() {
+    // Четвёртая подпись `list` — та же строка, что видит человек. Названа
+    // здесь один раз, чтобы правка слова не требовала трёх правок в тесте:
+    // стережётся ГРУППА, а не формулировка.
+    const UNKNOWN_CAPTION: &str = "Непонятно, как подключаются";
     let cfg = Cfg {
         connections: vec![
             Connection { name: "Ромашка".into(), mode: "tunnel".into(), role: "accept".into(), ..Default::default() },
@@ -620,17 +624,17 @@ fn a_card_with_an_unreadable_role_does_not_stand_under_the_accepting_caption() {
     for e in &l {
         match e {
             Entry::Caption(c) => {
-                if *c == "Роль не распознана" {
+                if *c == UNKNOWN_CAPTION {
                     seen_unknown_caption = true;
                 }
             }
             Entry::Row(r) if r.name == "Сервер" => {
-                row_group = Some(if seen_unknown_caption { "Роль не распознана" } else { "до своей подписи" })
+                row_group = Some(if seen_unknown_caption { UNKNOWN_CAPTION } else { "до своей подписи" })
             }
             Entry::Row(_) => {}
         }
     }
-    assert_eq!(row_group, Some("Роль не распознана"), "строка с нераспознанной ролью стоит не под своей подписью: {l:?}");
+    assert_eq!(row_group, Some(UNKNOWN_CAPTION), "строка с нераспознанной ролью стоит не под своей подписью: {l:?}");
     let captions: Vec<&str> = l
         .iter()
         .filter_map(|e| match e {
@@ -638,7 +642,7 @@ fn a_card_with_an_unreadable_role_does_not_stand_under_the_accepting_caption() {
             _ => None,
         })
         .collect();
-    assert_eq!(captions, vec!["Принимаю подключения", "Роль не распознана"], "«Сервер» не должен считаться принимающим");
+    assert_eq!(captions, vec!["Принимаю подключения", UNKNOWN_CAPTION], "«Сервер» не должен считаться принимающим");
 }
 
 /// Две карточки, по одной на accept и dial — ровно столько, чтобы подписи

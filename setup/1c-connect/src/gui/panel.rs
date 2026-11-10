@@ -5196,7 +5196,7 @@ mod tests {
         cfg.connections[0].base_here = false;
         let banner = tools_connection_banner(&cfg);
         assert!(!banner.contains(&cfg.connections[0].base_path), "база на той стороне — свой путь к ней не называем: {banner}");
-        assert!(banner.contains("той сторон"), "{banner}");
+        assert!(banner.contains("на другом компьютере"), "{banner}");
     }
 
     #[test]
@@ -5221,20 +5221,20 @@ mod tests {
     }
 
     /// Чистый проект: две карточки, и ни одной лишней. Ни про совпадающие
-    /// ветки, ни про `ConfigDumpInfo.xml` на месте человеку читать нечего.
+    /// ветки, ни про отметку о прошлой загрузке человеку читать нечего.
     #[test]
     fn a_clean_project_is_two_cards() {
         let rows = project_rows(Some(&view(Some(facts("0", 0)))));
         assert_eq!(rows.len(), 3, "{rows:?}");
         // Каталог и ветку здесь не повторяем — их сказал факт «проект» из
         // набора; вкладка добавляет только то, чего в наборе нет.
-        // «Репозиторий» с заглавной — рядом с «Не зафиксировано» ниже это и
+        // «Репозиторий» с заглавной — рядом с «Есть несохранённые изменения» это и
         // резало глаз владельцу (снимок 31.10); адрес `dev1c/Buh` трогать
         // нельзя, и `capitalized` его не трогает (в первом слове `/`).
         assert_eq!(rows[0], (Some(Dot::Up), "Репозиторий".into(), "dev1c/Buh".into()));
         assert!(!rows.iter().any(|r| r.1.contains("proj") || r.2.contains("ветка dev1")), "повтор каталога или ветки: {rows:?}");
         assert_eq!(rows[1], (Some(Dot::Up), "Всё отправлено".into(), String::new()));
-        assert_eq!(rows[2], (Some(Dot::Off), "Последний коммит".into(), "a1b2c3 выгрузка (2 часа назад)".into()));
+        assert_eq!(rows[2], (Some(Dot::Off), "Последнее изменение".into(), "a1b2c3 выгрузка (2 часа назад)".into()));
     }
 
     /// Неотправленное считается словами с правильным склонением, а точка
@@ -5242,14 +5242,14 @@ mod tests {
     #[test]
     fn unsent_work_is_counted_in_words() {
         let rows = project_rows(Some(&view(Some(facts("3", 5)))));
-        assert_eq!(rows[1], (Some(Dot::Warn), "Не отправлено".into(), "3 коммита, 5 файлов не закоммичено".into()));
+        assert_eq!(rows[1], (Some(Dot::Warn), "Не отправлено".into(), "3 коммита, не сохранено 5 файлов".into()));
         let rows = project_rows(Some(&view(Some(facts("1", 0)))));
         assert_eq!(rows[1].2, "1 коммит");
         let rows = project_rows(Some(&view(Some(facts("0", 1)))));
-        assert_eq!(rows[1].2, "1 файл не закоммичено");
+        assert_eq!(rows[1].2, "Не сохранено 1 файл");
         // Ветки на сервере ещё нет — считать нечего.
         let rows = project_rows(Some(&view(Some(facts("все", 0)))));
-        assert_eq!(rows[1].2, "Ветка ещё не отправлялась");
+        assert_eq!(rows[1].2, "Эту работу ещё ни разу не отправляли");
     }
 
     /// Локальный репозиторий без origin: отправлять некуда, и вкладка не
@@ -5270,9 +5270,9 @@ mod tests {
         let rows = project_rows(Some(&view(Some(mine(0)))));
         assert!(!rows.iter().any(|r| r.1 == "Репозиторий"), "{rows:?}");
         assert!(!rows.iter().any(|r| r.1.contains("отправлен")), "{rows:?}");
-        assert_eq!(rows[0], (Some(Dot::Up), "Всё зафиксировано".into(), String::new()));
+        assert_eq!(rows[0], (Some(Dot::Up), "Все изменения сохранены".into(), String::new()));
         let rows = project_rows(Some(&view(Some(mine(2)))));
-        assert_eq!(rows[0], (Some(Dot::Warn), "Не зафиксировано".into(), "2 файла не закоммичено".into()));
+        assert_eq!(rows[0], (Some(Dot::Warn), "Есть несохранённые изменения".into(), "Не сохранено 2 файла".into()));
     }
 
     /// Две ветки показываются ровно тогда, когда они разные: в этом и был
@@ -5280,12 +5280,13 @@ mod tests {
     /// двумя одинаковыми карточками.
     #[test]
     fn the_two_branches_are_shown_only_when_they_differ() {
+        let drift = |r: &(Option<Dot>, String, String)| r.1.contains("уедут не туда");
         let same = project_rows(Some(&view(Some(facts("0", 0)))));
-        assert!(!same.iter().any(|r| r.1.contains("разошлась")), "{same:?}");
+        assert!(!same.iter().any(drift), "{same:?}");
 
         let drifted = crate::project::Facts { branch: "dev2".into(), ..facts("0", 0) };
         let rows = project_rows(Some(&view(Some(drifted))));
-        let warn = rows.iter().find(|r| r.1.contains("разошлась")).expect("расхождение обязано быть видно");
+        let warn = rows.iter().find(|r| drift(r)).expect("расхождение обязано быть видно");
         assert_eq!(warn.0, Some(Dot::Warn));
         assert!(warn.2.contains("dev1"), "{warn:?}");
     }
@@ -5295,19 +5296,19 @@ mod tests {
     #[test]
     fn the_dump_index_is_mentioned_only_when_it_is_missing() {
         let with = project_rows(Some(&view(Some(facts("0", 0)))));
-        assert!(!with.iter().any(|r| r.2.contains("ConfigDumpInfo")), "{with:?}");
+        assert!(!with.iter().any(|r| r.2.contains("отметк")), "{with:?}");
         let without = crate::project::Facts { index: false, ..facts("0", 0) };
         let rows = project_rows(Some(&view(Some(without))));
         assert!(rows.last().unwrap().1.contains("Первая загрузка"), "{rows:?}");
     }
 
-    /// Коммитов ещё нет — карточки «Последний коммит» нет вовсе, а не
+    /// Коммитов ещё нет — карточки «Последнее изменение» нет вовсе, а не
     /// карточка со словом «нет».
     #[test]
     fn a_project_without_commits_shows_no_last_commit_card() {
         let fresh = crate::project::Facts { last: String::new(), ..facts("все", 0) };
         let rows = project_rows(Some(&view(Some(fresh))));
-        assert!(!rows.iter().any(|r| r.1.contains("Последний")), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.1.contains("Последнее")), "{rows:?}");
     }
 
     #[test]
@@ -6138,7 +6139,7 @@ mod tests {
     fn an_enrolled_dialling_card_says_it_comes_back_by_itself() {
         let key = a_key(7);
         let b = dialling_block(&dialling_card(), Some(key.to_string())).expect("блок есть и после зачисления");
-        assert!(b.note.contains("возвращается само"), "{}", b.note);
+        assert!(b.note.contains("соединяется сама"), "{}", b.note);
         // Отпечаток целиком — его сверяют голосом, как и у зачисленных на той
         // стороне.
         assert_eq!(b.partner.as_deref(), Some(key.to_string().as_str()));
@@ -6299,7 +6300,7 @@ mod tests {
         // не объяснит.
         crate::gui::prune_enrollment(&mut ui, std::time::SystemTime::now());
         assert!(ui.waiting.is_empty());
-        assert!(ui.log.last().unwrap().line.text.contains("больше не ждёт ответа"), "{:?}", ui.log.last());
+        assert!(ui.log.last().unwrap().line.text.contains("отменилась"), "{:?}", ui.log.last());
     }
 
     /// Задача 3 плана «Починка ветки `channel`», пункт 4: код, выданный без
@@ -6313,7 +6314,7 @@ mod tests {
     fn a_code_without_relay_and_addresses_says_so() {
         let note = blind_code_note(true, "Соединение 1").expect("пустой reach обязан сказать о себе");
         assert!(note.contains("Соединение 1"), "оговорка называет карточку: их в списке несколько — {note}");
-        assert!(note.contains("без адресов"), "{note}");
+        assert!(note.contains("не вышла в сеть") && note.contains("на обоих компьютерах"), "{note}");
         // Хоть что-то в коде есть — оговорки нет: лишнее предупреждение на
         // обычной выдаче научило бы пропускать её и в настоящем случае.
         assert_eq!(blind_code_note(false, "Соединение 1"), None);

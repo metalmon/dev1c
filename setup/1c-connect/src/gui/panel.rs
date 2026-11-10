@@ -1357,9 +1357,9 @@ pub fn dialling_block(c: &Connection, partner: Option<String>) -> Option<Diallin
     let note = if partner.is_some() {
         "Подключение уже настроено — программа соединяется сама. Код нужен только для того, чтобы подключиться к другому компьютеру."
     } else {
-        "Вставьте код, выданный на компьютере с базой, и нажмите «Подключиться»."
+        "Вставьте код, выданный на компьютере с базой, и нажмите «Подключиться по коду»."
     };
-    Some(Dialling { note, partner, button: "Подключиться" })
+    Some(Dialling { note, partner, button: "Подключиться по коду" })
 }
 
 /// Блок зовущей карточки — чистый итог, без виджетов (тем же правилом, что
@@ -1369,6 +1369,13 @@ pub struct Dialling {
     /// Одно предложение о том, что делать с полем, — ровно как `code_note` у
     /// принимающей.
     pub note: &'static str,
+    // `button` ниже — «Подключиться по коду», а не «Подключиться» (находка 14
+    // осмотра 10.11): на одном экране слово «Подключиться» стояло трижды и
+    // значило два РАЗНЫХ действия — зачислить по каналу (эта кнопка) и
+    // поднять сеанс SSH (кнопка подвала и пункт меню, одно действие на оба).
+    // Третий орган убран (меню больше не дублирует кнопку подвала,
+    // `link_menu(primary)`), а два оставшихся теперь называются по-разному:
+    // это слово про КОД, и слово «код» в нём есть.
     /// Отпечаток ключа той стороны — тот же короткий вид, что у зачисленных в
     /// принимающей карточке (`PartyRow::fingerprint`) и по тому же доводу
     /// (`gui::short_key`). `None` — зачисления ещё не было.
@@ -3604,19 +3611,33 @@ impl Panel {
             col = col.child(div().text_size(px(13.)).text_color(caption).child("Код подключения"));
             let card = card_name.clone();
             let code = self.fields.code.clone();
+            // Пустое поле — нажимать не на что (находка 15 осмотра 10.11:
+            // кнопка горела всегда, и нажатие уходило в отказ строкой
+            // журнала). Соседняя кнопка того же блока («Выдать новый код»)
+            // себе такое уже запрещала — теперь запрет общий.
+            let nothing_typed = self.fields.code.read(cx).value().trim().is_empty();
+            // Подключение уже настроено — главной кнопкой экрана это быть не
+            // может (находка 2: наверху «подключено», внизу жёлтая
+            // «Подключиться», и рядом её же текст объясняет, что кнопка не
+            // нужна). Акцент остаётся только там, где код вправду ждут.
+            let settled = block.partner.is_some();
+            let dial = KitButton::new("dial-connect");
+            // `.small()` снято (находки 3 и 16): маленькая кнопка — 24 точки
+            // против 32 у поля рядом, и в одной строке с полем она выбивалась
+            // по высоте. Обычный размер совпадает с полем точно, тем же
+            // приёмом, что кнопка выбора папки.
+            let dial = if settled { dial.outline() } else { dial.primary() };
             col = col.child(
                 h_flex()
                     .gap_2()
                     .items_end()
-                    .child(div().flex_1().min_w_0().child(Self::input(&self.fields.code, accent, window, cx)))
-                    .child(KitButton::new("dial-connect").primary().small().label(block.button).on_click(cx.listener(
-                        move |_, _, window, cx| {
-                            let typed = code.read(cx).value().to_string();
-                            dial_card(cx.global_mut::<Ui>(), &card, typed.trim());
-                            code.update(cx, |s, cx| s.set_value(String::new(), window, cx));
-                            cx.refresh_windows();
-                        },
-                    ))),
+                    .child(div().flex_1().min_w_0().child(Self::input(&self.fields.code, accent, true, window, cx)))
+                    .child(dial.label(block.button).disabled(nothing_typed).on_click(cx.listener(move |_, _, window, cx| {
+                        let typed = code.read(cx).value().to_string();
+                        dial_card(cx.global_mut::<Ui>(), &card, typed.trim());
+                        code.update(cx, |s, cx| s.set_value(String::new(), window, cx));
+                        cx.refresh_windows();
+                    }))),
             );
             col = col.child(div().text_size(px(13.)).text_color(caption).child(block.note));
             // Отпечаток той стороны — целиком и тем же видом, что у
@@ -6331,7 +6352,13 @@ mod tests {
     #[test]
     fn a_dialling_card_has_somewhere_to_paste_the_code() {
         let b = dialling_block(&dialling_card(), None).expect("зовущая карточка обязана нести блок кода");
-        assert_eq!(b.button, "Подключиться");
+        // Подпись называет СВОЁ действие и отличается от «Подключиться» в
+        // подвале, которое поднимает сеанс SSH (находка 14 осмотра 10.11:
+        // одно слово — два разных действия). Проверяется смысл, а не буква:
+        // кнопка говорит про код и не равна слову подвала.
+        assert!(b.button.contains("код"), "подпись называет то, чем подключаются: {}", b.button);
+        assert_ne!(b.button, "Подключиться", "это другое действие, чем кнопка подвала");
+        assert!(b.note.contains(b.button), "подсказка зовёт кнопку её же словами: {}", b.note);
         assert!(b.note.contains("Вставьте код"), "{}", b.note);
         assert!(b.partner.is_none());
     }

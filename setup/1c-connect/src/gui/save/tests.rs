@@ -2980,7 +2980,7 @@ fn allowing_drops_the_code_it_spent() {
 /// Падало так: `answer_request` чистила строку выданного кода ДО того, как
 /// узнавала, доехал ли ответ. `Book::spend` зовёт не окно, а разговор, получив
 /// этот самый ответ: разговор кончился — тикет в книге жив ещё сутки, человеку
-/// сказано словами «та сторона больше не на связи», а строки кода, который у
+/// сказано словами, что там уже не ждут ответа, а строки кода, который у
 /// него всё ещё работает, в карточке больше нет. Вернуть её оттуда нечем,
 /// кроме «Выдать новый» — то есть погасив годный код.
 #[test]
@@ -2991,7 +2991,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
     ui.codes.push((card.clone(), ticket));
     // Разговор кончился: отвечать некуда — ровно то, о чём окно и говорит
-    // словами «та сторона больше не на связи».
+    // словами «там уже не ждут ответа».
     ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow { write: true });

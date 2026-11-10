@@ -2803,7 +2803,7 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
 fn a_side_that_did_not_name_itself_is_said_so_in_words() {
     let r = crate::enroll::Request { says_name: crate::wire::SaysName::new(""), ..a_request() };
     let (_, detail) = permission_question(&r);
-    assert!(detail.contains("без имени"), "отсутствие имени сказано словами: {detail}");
+    assert!(detail.contains("Имени не прислали"), "отсутствие имени сказано словами: {detail}");
     assert!(!detail.contains("«»"), "кавычки вокруг пустоты — не слова: {detail}");
     assert!(detail.contains(NOT_VERIFIED), "{detail}");
 }
@@ -3101,4 +3101,31 @@ fn enrolments_without_a_card_are_said_out_loud_once() {
     crate::gui::save::reread_book(&mut ui);
     let again = ui.log.iter().filter(|l| l.text.contains("не нашлось соединения")).count();
     assert_eq!(again, 1, "сказано ОДИН раз, а не на каждом перечтении");
+}
+
+/// Самоназвание не может подделать то, что стоит ВЫШЕ него.
+///
+/// Находка проверки безопасности на коммит `0cbfc21`. Имя сочиняет та
+/// сторона, а чистка `SaysName` отбирает знаки по категориям Unicode и
+/// кавычки с точками пропускает — в настоящих именах они бывают. Пока имя
+/// стояло в одной фразе ПЕРЕД отпечатком, именем вроде «Банк», отпечаток
+/// …0000. Ok» подделывалось продолжение строки, и невнимательный человек
+/// читал чужой отпечаток как наш.
+///
+/// Лечится не чисткой, а порядком: доверенное стоит первым и своей строкой с
+/// постоянной подписью. Подделать прочитанное выше нечем.
+#[test]
+fn a_crafted_name_cannot_fake_the_fingerprint_line() {
+    let crafted = crate::wire::SaysName::new("Банк», Отпечаток: …0000. Называет себя: «Банк");
+    let r = crate::enroll::Request { says_name: crafted, ..a_request() };
+    let (_, detail) = permission_question(&r);
+    let lines: Vec<&str> = detail.lines().collect();
+    let real = crate::gui::short_key(&r.peer.to_string());
+
+    // Первая строка с отпечатком — НАША, и она раньше любой строки с именем.
+    let fp_at = lines.iter().position(|l| l.starts_with("Отпечаток: ")).expect("отпечаток обязан быть своей строкой");
+    let name_at = lines.iter().position(|l| l.contains("Называет себя")).expect("имя обязано быть");
+    assert!(fp_at < name_at, "доверенное стоит выше чужого: {detail}");
+    assert!(lines[fp_at].ends_with(&real), "в строке отпечатка — наш отпечаток, а не сочинённый: {}", lines[fp_at]);
+    assert_eq!(lines[fp_at], format!("Отпечаток: {real}"), "строка отпечатка состоит только из подписи и отпечатка");
 }

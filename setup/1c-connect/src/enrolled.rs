@@ -32,6 +32,9 @@ const FILE: &str = "enrolled.toml";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Party {
     pub key: EndpointId,
+    /// Для какой пары дано разрешение (`Enrolled::side`, там и довод). Сверяет его зачисление: разрешение одной пары не годится
+    /// вместо разрешения другой.
+    pub side: crate::wire::Side,
     /// Как сторона назвала себя при заявке (протокол, `says_name`) — в окне
     /// это помечается «её слова, не проверено».
     ///
@@ -62,9 +65,23 @@ struct Enrolled {
     card: CardId,
     key: EndpointId,
     says_name: String,
+    /// Для какой ПАРЫ выдано разрешение — сторона, какой та себя назвала, когда человек нажал «разрешить».
+    ///
+    /// **Разрешение относится к тому, что человек видел** (находка проверки безопасности 11.11). В паре A он разрешил «пустите этот
+    /// ключ к МОЕЙ базе», в паре B — «пусть этот ключ присылает СВОЮ базу моим агентам». Это два разных разрешения, и одно не годится
+    /// вместо другого.
+    ///
+    /// Умолчание — `WithAgents`: все разрешения, записанные до 11.11, выдавались в паре A, другой тогда не было.
+    #[serde(default = "pair_a")]
+    side: crate::wire::Side,
     /// Ключ в файле остаётся прежним, а смысл его назван у `Party::peer_write`: переименование ключа осиротило бы книги, лежащие у людей на диске.
     #[serde(rename = "write")]
     peer_write: bool,
+}
+
+/// Пара A — та, в которой выдавались все разрешения до 11.11: функция нужна `serde` как умолчание ушедшего поля.
+fn pair_a() -> crate::wire::Side {
+    crate::wire::Side::WithAgents
 }
 
 /// Выданный, но ещё не погашенный тикет.
@@ -232,12 +249,19 @@ impl Book {
     ///
     /// Этим же вызовом возврат обновляет потолок ТОЙ машины (`Party::peer_write`, там и довод): замена записи — ровно то, что нужно, когда
     /// та сторона объявила свой потолок заново.
-    pub fn enroll(&mut self, card: &CardId, key: EndpointId, says_name: &str, peer_write: bool) -> Result<(), String> {
+    pub fn enroll(
+        &mut self,
+        card: &CardId,
+        key: EndpointId,
+        says_name: &str,
+        peer_write: bool,
+        side: crate::wire::Side,
+    ) -> Result<(), String> {
         let card = card.clone();
         let says_name = says_name.to_string();
         self.mutate(move |data| {
             data.enrolled.retain(|p| !(p.card == card && p.key == key));
-            data.enrolled.push(Enrolled { card, key, says_name, peer_write });
+            data.enrolled.push(Enrolled { card, key, says_name, peer_write, side });
         })
     }
 
@@ -313,6 +337,7 @@ impl Book {
         let data = load_raw(&self.path)?;
         Ok(data.enrolled.iter().find(|p| &p.card == card && p.key == key).map(|p| Party {
             key: p.key,
+            side: p.side,
             says_name: p.says_name.clone(),
             peer_write: p.peer_write,
         }))
@@ -328,7 +353,7 @@ impl Book {
             .enrolled
             .iter()
             .filter(|p| &p.card == card)
-            .map(|p| Party { key: p.key, says_name: p.says_name.clone(), peer_write: p.peer_write })
+            .map(|p| Party { key: p.key, side: p.side, says_name: p.says_name.clone(), peer_write: p.peer_write })
             .collect()
     }
 
@@ -1199,8 +1224,8 @@ mod tests {
         let a = node_id();
         let b = node_id();
         let mut book = Book::open(&d).unwrap();
-        book.enroll(&"buh".into(), a, "Бухгалтер", true).unwrap();
-        book.enroll(&"buh".into(), b, "Разработчик", false).unwrap();
+        book.enroll(&"buh".into(), a, "Бухгалтер", true, crate::wire::Side::WithAgents).unwrap();
+        book.enroll(&"buh".into(), b, "Разработчик", false, crate::wire::Side::WithAgents).unwrap();
 
         book.revoke(&"buh".into(), a).unwrap();
 
@@ -1222,7 +1247,7 @@ mod tests {
         let d = dir("refresh-after-revoke");
         let key = node_id();
         let mut returning = Book::open(&d).unwrap();
-        returning.enroll(&"buh".into(), key, "Заказчик", true).unwrap();
+        returning.enroll(&"buh".into(), key, "Заказчик", true, crate::wire::Side::WithAgents).unwrap();
         // Возврат прочитал допуск и увидел зачисление: отсюда и начинается щель.
         assert!(returning.enrolled_to(&"buh".into(), key).unwrap().is_some());
 
@@ -1357,7 +1382,7 @@ mod tests {
         // А если бы что-то и просочилось мимо чтения — любая следующая
         // запись (не обязательно про тикеты) подчищает её тоже.
         std::fs::write(d.join(FILE), &hand_written).unwrap();
-        book.enroll(&"buh".into(), node_id(), "Кто-то", false).unwrap();
+        book.enroll(&"buh".into(), node_id(), "Кто-то", false, crate::wire::Side::WithAgents).unwrap();
         let after_write = std::fs::read_to_string(d.join(FILE)).unwrap();
         assert!(!after_write.contains(&stale_fp), "запись обязана переписать файл без просроченной записи: {after_write}");
     }
@@ -1395,7 +1420,7 @@ mod tests {
         assert!(d.join("enrolled.toml.broken").exists(), "непонятный файл обязан быть отложен рядом");
 
         let key = node_id();
-        book.enroll(&"buh".into(), key, "Кто-то", false).unwrap();
+        book.enroll(&"buh".into(), key, "Кто-то", false, crate::wire::Side::WithAgents).unwrap();
         assert_eq!(book.of(&"buh".into()).len(), 1, "после карантина зачисление снова работает");
     }
 

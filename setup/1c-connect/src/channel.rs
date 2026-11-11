@@ -697,7 +697,7 @@ mod tests {
 
     /// Карточка машины для тестов: ключ НАШ, на провод переводится сам.
     fn a_card(name: &str, id: &str) -> crate::enroll::Card {
-        crate::enroll::Card { name: name.into(), id: id.into(), base_name: format!("База {id}").into(), write: true }
+        crate::enroll::Card { name: name.into(), id: id.into(), base_name: format!("База {id}").into(), write: true, base_here: true }
     }
 
     /// Ждёт, пока канал закроется САМ.

@@ -6620,8 +6620,13 @@ mod tests {
     #[test]
     fn an_accepting_card_shows_its_code_and_the_parties_it_enrolled() {
         let parties = vec![
-            crate::enrolled::Party { key: a_key(7), says_name: "Ромашка-бухгалтерия".into(), peer_write: true },
-            crate::enrolled::Party { key: a_key(9), says_name: String::new(), peer_write: false },
+            crate::enrolled::Party {
+                side: crate::wire::Side::WithAgents,
+                key: a_key(7),
+                says_name: "Ромашка-бухгалтерия".into(),
+                peer_write: true,
+            },
+            crate::enrolled::Party { side: crate::wire::Side::WithAgents, key: a_key(9), says_name: String::new(), peer_write: false },
         ];
         // Машине задан полный потолок, карточке — разрешение: без них
         // ДЕЙСТВУЮЩЕЕ право вышло бы запретом, и слова о записи ниже
@@ -6689,7 +6694,12 @@ mod tests {
         // Чужой потолок — третья мера, и она приходит из книги; две свои
         // спрашиваются у настроек в тот же миг, когда ответ нужен.
         let said = |cfg: &crate::cfg::Cfg, c: &Connection, peer_write: bool| {
-            let party = vec![crate::enrolled::Party { key: a_key(7), says_name: "Ромашка".into(), peer_write }];
+            let party = vec![crate::enrolled::Party {
+                side: crate::wire::Side::WithAgents,
+                key: a_key(7),
+                says_name: "Ромашка".into(),
+                peer_write,
+            }];
             accepting_block(cfg, c, None, Some(&party)).expect("блок есть").parties[0].access
         };
 

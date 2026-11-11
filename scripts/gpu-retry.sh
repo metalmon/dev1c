@@ -26,7 +26,7 @@ while [ "$i" -le "$TRIES" ]; do
   # команды дело не дошло): у `sync` код теряется в конвейере, у `run`/`cargo`
   # он доходит, а текст бывает разным — поэтому признаков два.
   case "$out$code" in
-    *kex_exchange_identification*|*"banner exchange"*|*"Broken pipe"*|*"Connection closed"*|*"Connection reset"*)
+    *kex_exchange_identification*|*"banner exchange"*|*"Broken pipe"*|*"Connection closed"*|*"Connection reset"*|*"tar: Error"*|*"Unexpected EOF"*)
       i=$((i + 1))
       sleep "$PAUSE"
       continue

@@ -842,7 +842,10 @@ async fn serve_calls(
         let no = crate::wire::Refuse::new(code, text);
         async move { control.end(Some(no)).await }
     };
-    let Some(card) = cards.mine_named(base_id).cloned() else {
+    // **Дорога к обслуживанию одна, и она узкая** (`Cards::serving_named`): карточка, чья база ЗДЕСЬ. Разрешение у карточки без
+    // базы значит «присылайте свою базу моим агентам» — права отдать СВОЮ базу оно не даёт, и путать их нельзя (находка проверки
+    // безопасности 11.11, вторая волна).
+    let Some(card) = cards.serving_named(base_id).cloned() else {
         refuse(control, crate::wire::code::NO_BASE, NO_SUCH_BASE).await;
         return;
     };
@@ -1156,6 +1159,8 @@ impl Machine {
         for c in &cfg.connections {
             let card = enroll::Card {
                 name: c.name.clone(),
+                // Где база — то, от чего зависит, может ли эта машина обслуживать по карточке вызовы (`Cards::serving_named`).
+                base_here: crate::cfg::Combo::of(c).base_is_here(),
                 // Ключ — НАШ (`cfg::CardId`). В проводный вид он переводится только на отправку (`Card::on_wire`).
                 id: c.id().clone(),
                 base_name: crate::cfg::base_name(&c.base_path).into(),

@@ -1105,7 +1105,7 @@ pub fn refresh_project(cx: &mut App) {
                 let p = Project::from_cfg(&cfg, &kit_root);
                 let (ok, why) = match project::layout_state(&p) {
                     Layout::Ok => (true, String::new()),
-                    Layout::Missing => (false, "в папке проекта ещё ничего нет".into()),
+                    Layout::Missing => (false, "в папке документов ещё ничего нет".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
                     Layout::Drifted(d) => (false, d),
                 };

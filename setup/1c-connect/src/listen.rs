@@ -98,7 +98,8 @@ pub enum Toward {
 }
 
 /// Увести соединение в канал к той стороне, где база. Отказ — словами в журнал сеанса.
-pub type ToChannel = std::sync::Arc<dyn Fn(crate::ops_host::McpServer, TcpStream) -> Result<(), String> + Send + Sync>;
+pub type ToChannel =
+    std::sync::Arc<dyn Fn(crate::ops_host::McpServer, TcpStream) -> Result<tokio::sync::oneshot::Receiver<()>, String> + Send + Sync>;
 
 pub async fn run(
     serve: Arc<Serve>,
@@ -129,7 +130,9 @@ pub async fn run(
     // день реконнектов.
     let mut open: Vec<(JoinHandle<()>, std::net::TcpStream)> = Vec::new();
     // Вторые дескрипторы тех соединений, что уехали трубой в канал: своей задачи у них здесь нет, а закрывать их на остановке надо.
-    let mut piped: Vec<std::net::TcpStream> = Vec::new();
+    // Убираются они тем же приёмом, что и задачи своих мостов, и по тому же доводу: без уборки список и число открытых дескрипторов
+    // растут без предела за долгий рабочий день реконнектов (вторая проверка безопасности 11.11).
+    let mut piped: Vec<(tokio::sync::oneshot::Receiver<()>, std::net::TcpStream)> = Vec::new();
     let mut mcp_errors = 0u32;
     let mut vrunner_errors = 0u32;
     loop {
@@ -151,7 +154,7 @@ pub async fn run(
                     for (_, w) in &open {
                         let _ = w.shutdown(Shutdown::Both);
                     }
-                    for w in &piped {
+                    for (_, w) in &piped {
                         let _ = w.shutdown(Shutdown::Both);
                     }
                     return Ok(());
@@ -175,13 +178,15 @@ async fn handle_accept(
     port: u16,
     on_event: &impl Fn(Event),
     open: &mut Vec<(JoinHandle<()>, std::net::TcpStream)>,
-    piped: &mut Vec<std::net::TcpStream>,
+    piped: &mut Vec<(tokio::sync::oneshot::Receiver<()>, std::net::TcpStream)>,
     errors: &mut u32,
 ) -> anyhow::Result<()> {
     match r {
         Ok((stream, _)) => {
             *errors = 0;
             open.retain(|(h, _)| !h.is_finished());
+            // Труба кончилась — её конец `done` уронен, и `try_recv` отвечает `Closed`: держать второй дескриптор больше незачем.
+            piped.retain_mut(|(ended, _)| !matches!(ended.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed)));
             // База на другом компьютере — соединение уходит трубой в канал, и своего ребёнка здесь не поднимают вовсе.
             if let Toward::Channel(to_channel) = toward {
                 if let Some(crate::session::Served::Mcp(kind)) = crate::session::Served::of_port(port, ports) {
@@ -190,13 +195,10 @@ async fn handle_accept(
                     // выключилось и то, что уже идёт (находка проверки безопасности 11.11).
                     match stream.into_std().and_then(|s| s.try_clone().map(|w| (s, w))) {
                         Ok((s, watcher)) => match TcpStream::from_std(s) {
-                            Ok(stream) => {
-                                if let Err(why) = to_channel(kind, stream) {
-                                    on_event(Event::Warn(why));
-                                } else {
-                                    piped.push(watcher);
-                                }
-                            }
+                            Ok(stream) => match to_channel(kind, stream) {
+                                Ok(ended) => piped.push((ended, watcher)),
+                                Err(why) => on_event(Event::Warn(why)),
+                            },
                             Err(e) => on_event(Event::Warn(e.to_string())),
                         },
                         Err(e) => on_event(Event::Warn(e.to_string())),

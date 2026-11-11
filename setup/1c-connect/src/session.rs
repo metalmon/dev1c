@@ -423,13 +423,6 @@ pub struct Serving(Arc<Mutex<Option<Open>>>);
 #[derive(Clone)]
 pub struct Open {
     serve: Arc<Serve>,
-    /// Карточка, ПО КОТОРОЙ построен мост: его база, пользователь и пароль — её.
-    ///
-    /// **Хранится она затем, что без неё вызов уехал бы в чужую базу.** Допуск спрашивается по карточке из заголовка потока, а мост
-    /// поднимается по ТЕКУЩЕМУ соединению машины: у человека с двумя карточками сторона, зачисленная ко второй, получила бы базу
-    /// первой. Находка проверки безопасности 11.11, и внесена она была вместе с вызовами по каналу: прежде на том конце провода стояла
-    /// среда разработки, а теперь — произвольный партнёр.
-    card: crate::cfg::CardId,
     /// Жив ли ещё сеанс. Рвёт потоки вызовов вместе с собой: «выключил — значит выключено», а не «выключено для новых».
     stop: tokio::sync::watch::Receiver<bool>,
 }
@@ -439,9 +432,16 @@ impl Open {
         &self.serve
     }
 
-    /// Та ли это карточка, по которой построен мост.
+    /// Та ли это карточка, по которой мост поднимает базу ПРЯМО СЕЙЧАС.
+    ///
+    /// **Без этого вопроса вызов уехал бы в чужую базу:** допуск спрашивается по карточке из заголовка потока, а мост работает с
+    /// текущим соединением машины — у человека с двумя карточками сторона, зачисленная ко второй, получила бы базу первой (находка
+    /// проверки безопасности 11.11, пришедшая вместе с вызовами по каналу: прежде на том конце провода стояла среда разработки).
+    ///
+    /// Спрашивается она у `Serve`, а не у снимка, сделанного при подъёме сеанса: снимок был бы ВТОРОЙ мерой того же — мост читает
+    /// соединение из живой ячейки на каждую просьбу, и расхождение жило бы ровно между ними (вторая проверка безопасности 11.11).
     pub fn is_for(&self, card: &crate::cfg::CardId) -> bool {
-        &self.card == card
+        &self.serve.current_card() == card
     }
 
     /// Ждать конца сеанса. Возвращается, когда обслуживание выключили.
@@ -456,9 +456,9 @@ impl Open {
 }
 
 impl Serving {
-    /// Сеанс поднялся и готов обслуживать карточку `card`, пока не скажут `stop`.
-    pub fn put(&self, serve: Arc<Serve>, card: crate::cfg::CardId, stop: tokio::sync::watch::Receiver<bool>) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Open { serve, card, stop });
+    /// Сеанс поднялся и готов обслуживать, пока не скажут `stop`.
+    pub fn put(&self, serve: Arc<Serve>, stop: tokio::sync::watch::Receiver<bool>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Open { serve, stop });
     }
 
     /// Сеанс кончился: обслуживать больше нечем.
@@ -509,7 +509,7 @@ pub fn start_with_enabled(
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             // Объявляем себя: с этой минуты поток узла знает, чем обслуживать вызовы, пришедшие по каналу. Снимается объявление
             // внизу, когда сеанс кончился, — и тем же самым снимается допуск к вызовам.
-            wiring.serving.put(serve.clone(), cfg.current().id().clone(), stop_rx.clone());
+            wiring.serving.put(serve.clone(), stop_rx.clone());
             let on_event = |e: Event| {
                 let mut s = state.lock().unwrap();
                 let next = s.clone().next(&e);
@@ -616,6 +616,11 @@ impl Serve {
     /// **Выбор ключуется СЛОВОМ, а не портом** (шаг 0 плана пары B). Порт — свойство местного слушателя: его знает `listen::accept_for`,
     /// он же и переводит порт в слово (`Served::of_port`). По каналу порта нет вовсе — там вид процесса приезжает кадром, — и если бы
     /// выбор остался на порту, у одного понятия стало бы два словаря: номер здесь и слово на проводе.
+    /// Карточка, чью базу мост поднимает ПРЯМО СЕЙЧАС — из той же живой ячейки, откуда её берёт сам мост.
+    pub fn current_card(&self) -> crate::cfg::CardId {
+        self.cfg.get().1.current().id()
+    }
+
     pub fn serve<S>(&self, what: Served, stream: S) -> tokio::task::JoinHandle<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -708,6 +713,36 @@ mod tests {
     use crate::ops_host::{port_of, McpServer};
     use std::path::Path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Карточка, по которой обслуживаются вызовы, читается у ЖИВОГО `Serve`, а не хранится снимком со времени подъёма сеанса.
+    ///
+    /// Вопрос «та ли это база» задаёт `Open::is_for` (`gui::peer::serve_calls`), а базу мост берёт из живой ячейки параметров на
+    /// каждую просьбу. Снимок рядом с ней был бы второй мерой того же: человек переключил текущее соединение, сеанс в эту секунду
+    /// ещё не перецикли́лся — и вызов, допущенный по прежней карточке, уехал бы в базу новой (вторая проверка безопасности 11.11).
+    #[test]
+    fn the_card_calls_are_served_for_is_read_live() {
+        let cfg = crate::cfg::cfg_with(&["Buh", "Zup"]);
+        let dir = std::env::temp_dir().join(format!("onec-serving-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = Live::new(cfg.clone());
+        let ports = Ports { mcp: 0, vrunner: 0, web: 0 };
+        let log: Sink = Arc::new(|_: Event| {});
+        let serve = Serve::shared(live.clone(), &cfg, &Kit::at(&dir), log, ports, Arc::new(AtomicBool::new(true)));
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        let serving = Serving::default();
+        serving.put(Arc::new(serve), stop_rx);
+        let open = serving.now().expect("сеанс положил, чем обслуживать");
+
+        let first = cfg.current().id();
+        assert!(open.is_for(&first), "подняли сеанс на «Buh» — его вызовы и обслуживаются");
+
+        let mut after = cfg.clone();
+        after.switch_current("Zup").unwrap();
+        let second = after.current().id();
+        live.set(after);
+        assert!(!open.is_for(&first), "вызов по прежней карточке получил бы базу новой");
+        assert!(open.is_for(&second), "а вызов по новой текущей — обслуживается");
+    }
 
     /// Канал подменён: проверяем, что мы читаем файл, правим своей же
     /// функцией и пишем обратно — ни одного `sed` со стороны (задача 7).

@@ -91,7 +91,13 @@ enum Cmd {
     ///
     /// Соединение едет сюда целиком, потому что канал живёт в этом потоке и больше нигде: второй держатель того же канала был бы
     /// вторым проходом пробивания NAT и вторым разговором с релеем.
-    Calls { card: CardId, kind: crate::ops_host::McpServer, stream: tokio::net::TcpStream },
+    Calls {
+        card: CardId,
+        kind: crate::ops_host::McpServer,
+        stream: tokio::net::TcpStream,
+        /// Роняется вместе с концом трубы — по нему слушатель узнаёт, что второй дескриптор этого соединения держать больше незачем.
+        done: tokio::sync::oneshot::Sender<()>,
+    },
     /// Снять поток зачисленной стороны ПРЯМО СЕЙЧАС, сказав ей словами.
     ///
     /// Иначе отзыв действовал бы только на следующем круге той стороны, а
@@ -138,9 +144,16 @@ impl Peer {
     ///
     /// Зовёт местный слушатель (`listen::run`), когда база не на этой машине. Отказ здесь один и тот же: потока узла нет — значит и
     /// вести некуда.
-    pub fn calls(&self, card: &CardId, kind: crate::ops_host::McpServer, stream: tokio::net::TcpStream) -> Result<(), String> {
+    pub fn calls(
+        &self,
+        card: &CardId,
+        kind: crate::ops_host::McpServer,
+        stream: tokio::net::TcpStream,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, String> {
+        let (done, ended) = tokio::sync::oneshot::channel();
         self.cmd
-            .send(Cmd::Calls { card: card.clone(), kind, stream })
+            .send(Cmd::Calls { card: card.clone(), kind, stream, done })
+            .map(|()| ended)
             .map_err(|_| "поток узла не работает — вызовы агента вести некуда".to_string())
     }
 
@@ -236,9 +249,13 @@ async fn serve(
     while let Some(cmd) = cmds.recv().await {
         match cmd {
             Cmd::Dial { card, name, code } => start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, code),
-            Cmd::Calls { card, kind, stream } => {
+            Cmd::Calls { card, kind, stream, done } => {
                 let (kit, tx, channels) = (kit.clone(), tx.clone(), channels.clone());
-                tokio::spawn(async move { pipe_calls(&kit, &tx, &channels, &card, kind, stream).await });
+                tokio::spawn(async move {
+                    pipe_calls(&kit, &tx, &channels, &card, kind, stream).await;
+                    // Конец трубы виден слушателю по `drop` этого конца — сказать словами нечего, важен сам факт.
+                    drop(done);
+                });
             }
             Cmd::Revoke { card, peer } => {
                 // Признак базы для слов отзыва — это и есть ключ отзываемой карточки (решение владельца 10.11). Прежде он искался
@@ -850,13 +867,20 @@ async fn serve_calls(
     say(tx, Kind::Say, format!("«{}»: агент той стороны открыл вызовы", card.name));
     // Половины уезжают в мост вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
     let (send, recv, hold) = crate::channel::into_pipe(control);
-    let task = open.serve().serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send));
+    let mut task = open.serve().serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send));
     // **Труба живёт не дольше сеанса.** Мост поднят в потоке узла, а не в потоке сеанса, и уронить его `drop(rt)` сеанса не может:
     // без этого «выключил доступ к 1С» значило бы «выключил для новых», а уже идущие вызовы доживали бы с живым ребёнком под ними
     // (находка проверки безопасности 11.11).
     tokio::select! {
-        _ = task => {}
-        () = open.until_stopped() => {}
+        _ = &mut task => {}
+        () = open.until_stopped() => {
+            // **`abort`, а не просто перестать ждать.** Брошенная `JoinHandle` задачу не роняет, а ОТВЯЗЫВАЕТ: без этой строки
+            // выключение лишь переставало её слушать, а мост с ребёнком под ним работал дальше — то самое «выключено для новых»,
+            // от которого и уходили (вторая проверка безопасности 11.11). Ребёнок уходит за ним сам: `Job` моста лежит на стеке
+            // этой задачи, а `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` гасит его на `drop` (`job::Job`).
+            task.abort();
+            let _ = task.await;
+        }
     }
     drop(hold);
     say(tx, Kind::Say, format!("«{}»: вызовы закончились", card.name));

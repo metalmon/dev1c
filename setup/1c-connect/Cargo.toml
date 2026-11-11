@@ -38,16 +38,15 @@ common = { path = "../common" }
 # безопасности, сильнее, чем запечатывание `secrets::Store` — запечатанное
 # открывается той же учётной записью, отпечаток не открывается никак).
 sha2.workspace = true
-# Уже в Cargo.lock транзитивно через russh (pkcs5←pkcs8←…), но без фичи
-# `getrandom` — замер задачи 0: объявление прямой зависимости с дефолтными
-# фичами промотирует её в прямую и включает настоящий источник случайности
-# ОС (`aead`/`crypto-common`/`getrandom` 0.4) для nonce и ключа, а новой
-# библиотеки в сборку не добавляет.
+# Шифрование паролей в настройках (`secrets.rs`): ключ и nonce — от настоящего
+# источника случайности ОС (`aead`/`crypto-common`/`getrandom` 0.4), который
+# включается дефолтными фичами. Прежде здесь стояла оговорка «уже в Cargo.lock
+# транзитивно через russh» — russh из сборки ушёл (ssh уехал из коннектора
+# 11.11), и обе эти библиотеки теперь просто свои.
 aes-gcm = "0.11"
-# Тем же ходом, что aes-gcm — уже в Cargo.lock транзитивно (его тянет pkcs5
-# через aes-gcm). Затираем материал ключа и расшифрованные значения, которые
-# держим в памяти дольше, чем они нужны (ревью задачи 1, Important 4): это
-# модуль секретов, и там это дороже, чем где-либо ещё в проекте.
+# Затираем материал ключа и расшифрованные значения, которые держим в памяти
+# дольше, чем они нужны (ревью задачи 1, Important 4): это модуль секретов, и
+# там это дороже, чем где-либо ещё в проекте.
 zeroize = "1.9"
 anyhow.workspace = true
 clap.workspace = true
@@ -58,10 +57,6 @@ gpui-kit = { version = "=0.7.3", optional = true }
 tray-icon = { version = "=0.26.1", default-features = false, optional = true }
 futures = { version = "0.3", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-# The SSH client is embedded: ssh.exe is an optional Windows component with
-# behaviour that differs by version, and it takes the password only from a
-# keyboard. ring, not aws-lc-rs: no cmake/nasm needed on a Windows build box.
-russh = { version = "0.64", default-features = false, features = ["ring"] }
 # Транспорт канала между двумя машинами: QUIC, адресуемый открытым ключом, с
 # пробиванием NAT и релеем как запасным путём. Цена замерена перед
 # объявлением (журнал ветки `channel`, задача 4): чистая сборка нашего крейта

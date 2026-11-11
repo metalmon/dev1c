@@ -21,7 +21,7 @@ Last updated: 2026-10-25.
 | test base | Бухгалтерия 3.0.190.11, file base `C:\Users\bucher\Documents\InfoBase`, platform 8.3.27.1786 (the Windows machine with the Configurator — not the stand) |
 | its HTTP service | Apache 2.4 (`C:\Apache24`), publication `/InfoBase`, service user `mcp` / `mcp` |
 | mcp-1c | upstream `feenlace/mcp-1c` v1.22.3 in the developer's kit (not in the image); the fork `D:\1c\projects\mcp-1c` is 340 commits behind it, merge in branch `merge-upstream` |
-| installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary: window without arguments (GPUI (gpui-kit 0.7.3), `gui` feature on by default), CLI with arguments; `1c-connect` lives in the tray (release `1c-connect.exe` ≈ 23.9 MB) |
+| installers | `setup/` — Cargo workspace `common` + `dev1c-setup` + `1c-connect`; each is one binary. `1c-connect`: window without arguments (GPUI, gpui-kit 0.7.3), CLI with arguments, lives in the tray. `dev1c-setup`: CLI only — its window was removed on 2026-11-12 (release `1c-connect.exe` ≈ 23.9 MB) |
 
 Parameters live in `dev1c.toml` of the kit (never in the repository). On this
 machine the kit is `dist/dev1c-kit`, pointed at a remote model with the local

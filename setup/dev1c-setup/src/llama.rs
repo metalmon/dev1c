@@ -369,8 +369,8 @@ pub fn parse_nvidia_smi(csv: &str) -> Option<Gpu> {
 use crate::cfg::Form;
 use crate::ops::Ctx;
 use anyhow::Result;
-use common::docker;
 use common::Runner;
+use common::{docker, proc};
 use std::path::PathBuf;
 
 pub const SERVICE: &str = "dev1c-llama";
@@ -433,24 +433,24 @@ pub fn ensure_dir(ctx: &Ctx) -> Result<()> {
             paths.insert(0, parent.to_string_lossy().to_string());
         }
         for path in &paths {
-            let o = docker::exec(ctx, "takeown", &["/F", path, "/A", "/R", "/D", "Y"])?;
+            let o = proc::exec(ctx, "takeown", &["/F", path, "/A", "/R", "/D", "Y"])?;
             anyhow::ensure!(o.ok(), "не забрать {path} во владение администраторов: {}", o.tail(2).join(" "));
             // Права — каталогу, без /T: наследуемые записи (OI)(CI), прописанные
             // файлам напрямую, на файл не действуют, и он остаётся без единой
             // записи — недоступен даже администратору (проверено: nssm.exe не
             // запускался, токен не читался). Детям — /reset: они наследуют.
             let o =
-                docker::exec(ctx, "icacls", &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"])?;
+                proc::exec(ctx, "icacls", &[path, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "/Q"])?;
             anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
             let children = format!("{path}\\*");
-            let o = docker::exec(ctx, "icacls", &[&children, "/reset", "/T", "/Q"])?;
+            let o = proc::exec(ctx, "icacls", &[&children, "/reset", "/T", "/Q"])?;
             anyhow::ensure!(o.ok(), "не передать права файлам в {path}: {}", o.tail(2).join(" "));
         }
     } else {
         let path = d.to_string_lossy().to_string();
-        let o = docker::exec(ctx, "chown", &["-R", "root:root", &path])?;
+        let o = proc::exec(ctx, "chown", &["-R", "root:root", &path])?;
         anyhow::ensure!(o.ok(), "не сменить владельца {path}: {}", o.tail(2).join(" "));
-        let o = docker::exec(ctx, "chmod", &["755", &path])?;
+        let o = proc::exec(ctx, "chmod", &["755", &path])?;
         anyhow::ensure!(o.ok(), "не закрыть права на {path}: {}", o.tail(2).join(" "));
     }
     Ok(())
@@ -480,8 +480,7 @@ fn os_random(buf: &mut [u8]) -> Result<()> {
 }
 
 pub fn gpu(ctx: &Ctx) -> Option<Gpu> {
-    let o =
-        docker::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
+    let o = proc::probe(ctx, "nvidia-smi", &["--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"]).ok()?;
     if !o.ok() {
         return None;
     }
@@ -500,7 +499,7 @@ fn meminfo_mb(key: &str) -> Option<u64> {
 pub fn total_ram_mb(ctx: &Ctx) -> u64 {
     #[cfg(windows)]
     {
-        docker::probe(ctx, "powershell", &["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"])
+        proc::probe(ctx, "powershell", &["-NoProfile", "-Command", "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize"])
             .ok()
             .and_then(|o| o.text.trim().lines().next()?.trim().parse::<u64>().ok())
             .map(|kb| kb / 1024)
@@ -571,7 +570,7 @@ pub fn server_log(ctx: &Ctx) -> String {
     if !file.is_empty() || cfg!(windows) {
         return file;
     }
-    docker::probe(ctx, "journalctl", &["-u", SERVICE, "-n", "400", "--no-pager"]).map(|o| o.text).unwrap_or_default()
+    proc::probe(ctx, "journalctl", &["-u", SERVICE, "-n", "400", "--no-pager"]).map(|o| o.text).unwrap_or_default()
 }
 
 /// Движок — Docker Desktop? Он отличается от обычного Docker тем, что
@@ -580,7 +579,7 @@ pub fn server_log(ctx: &Ctx) -> String {
 /// «Docker Desktop». Неответ движка считаем «обычный Docker»: так ведёт себя
 /// сервер заказчика, и ошибаться в эту сторону безопаснее.
 fn docker_desktop(ctx: &Ctx) -> bool {
-    docker::probe(ctx, &ctx.engine(), &["info", "-f", "{{.OperatingSystem}}"])
+    proc::probe(ctx, &ctx.engine(), &["info", "-f", "{{.OperatingSystem}}"])
         .ok()
         .filter(|o| o.ok())
         .map(|o| o.text.to_lowercase().contains("docker desktop"))
@@ -601,7 +600,7 @@ pub fn bind_host(ctx: &Ctx) -> String {
     if docker_desktop(ctx) {
         return "127.0.0.1".into();
     }
-    docker::probe(ctx, &ctx.engine(), &["network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"])
+    proc::probe(ctx, &ctx.engine(), &["network", "inspect", "bridge", "-f", "{{(index .IPAM.Config 0).Gateway}}"])
         .ok()
         .filter(|o| o.ok())
         .map(|o| o.text.trim().to_string())
@@ -618,9 +617,9 @@ pub fn port_busy(host: &str, port: u16) -> bool {
 /// без них не зарегистрировать службу и не закрыть каталог.
 pub fn is_admin(ctx: &Ctx) -> bool {
     if cfg!(windows) {
-        docker::probe(ctx, "net", &["session"]).map(|o| o.ok()).unwrap_or(false)
+        proc::probe(ctx, "net", &["session"]).map(|o| o.ok()).unwrap_or(false)
     } else {
-        docker::probe(ctx, "id", &["-u"]).map(|o| o.ok() && o.text.trim() == "0").unwrap_or(false)
+        proc::probe(ctx, "id", &["-u"]).map(|o| o.ok() && o.text.trim() == "0").unwrap_or(false)
     }
 }
 
@@ -637,14 +636,13 @@ pub struct Installed {
 
 pub fn installed(ctx: &Ctx) -> Installed {
     if cfg!(windows) {
-        match docker::probe(ctx, "sc", &["query", SERVICE]) {
+        match proc::probe(ctx, "sc", &["query", SERVICE]) {
             Ok(o) if o.ok() => Installed { present: true, running: o.text.contains("RUNNING") },
             _ => Installed { present: false, running: false },
         }
     } else {
-        let present = docker::probe(ctx, "systemctl", &["cat", SERVICE]).map(|o| o.ok()).unwrap_or(false);
-        let running =
-            present && docker::probe(ctx, "systemctl", &["is-active", SERVICE]).map(|o| o.text.trim() == "active").unwrap_or(false);
+        let present = proc::probe(ctx, "systemctl", &["cat", SERVICE]).map(|o| o.ok()).unwrap_or(false);
+        let running = present && proc::probe(ctx, "systemctl", &["is-active", SERVICE]).map(|o| o.text.trim() == "active").unwrap_or(false);
         Installed { present, running }
     }
 }
@@ -653,7 +651,7 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
     let exe = server_exe().to_string_lossy().to_string();
     if cfg!(windows) {
         let nssm = nssm_exe()?;
-        let o = docker::exec(ctx, &nssm, &["install", SERVICE, &exe])?;
+        let o = proc::exec(ctx, &nssm, &["install", SERVICE, &exe])?;
         anyhow::ensure!(o.ok(), "служба не зарегистрирована: {}", o.tail(3).join(" "));
         let d = dir().to_string_lossy().to_string();
         let log = log_file().to_string_lossy().to_string();
@@ -673,7 +671,7 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
             vec!["set", SERVICE, "Start", "SERVICE_AUTO_START"],
             vec!["set", SERVICE, "DisplayName", "dev1c — сервер модели"],
         ] {
-            let o = docker::exec(ctx, &nssm, &pair)?;
+            let o = proc::exec(ctx, &nssm, &pair)?;
             anyhow::ensure!(o.ok(), "не настроить службу: {}", o.tail(2).join(" "));
         }
     } else {
@@ -683,20 +681,20 @@ pub fn service_install(ctx: &Ctx, args: &[String]) -> Result<()> {
             dir().display()
         );
         common::kit::write_text(std::path::Path::new(&format!("/etc/systemd/system/{SERVICE}.service")), &unit)?;
-        let o = docker::exec(ctx, "systemctl", &["daemon-reload"])?;
+        let o = proc::exec(ctx, "systemctl", &["daemon-reload"])?;
         anyhow::ensure!(o.ok(), "systemd не перечитал юниты: {}", o.tail(2).join(" "));
-        let o = docker::exec(ctx, "systemctl", &["enable", SERVICE])?;
+        let o = proc::exec(ctx, "systemctl", &["enable", SERVICE])?;
         anyhow::ensure!(o.ok(), "служба не включена: {}", o.tail(2).join(" "));
     }
     Ok(())
 }
 
-fn service_cmd(ctx: &Ctx, verb: &str) -> Result<docker::Out> {
+fn service_cmd(ctx: &Ctx, verb: &str) -> Result<proc::Out> {
     if cfg!(windows) {
         let nssm = nssm_exe()?;
-        docker::exec(ctx, &nssm, &[verb, SERVICE])
+        proc::exec(ctx, &nssm, &[verb, SERVICE])
     } else {
-        docker::exec(ctx, "systemctl", &[verb, SERVICE])
+        proc::exec(ctx, "systemctl", &[verb, SERVICE])
     }
 }
 pub fn service_stop(ctx: &Ctx) -> Result<()> {
@@ -713,12 +711,12 @@ pub fn service_remove(ctx: &Ctx) -> Result<()> {
     let _ = service_cmd(ctx, "stop");
     if cfg!(windows) {
         if let Ok(n) = nssm_exe() {
-            let _ = docker::exec(ctx, &n, &["remove", SERVICE, "confirm"]);
+            let _ = proc::exec(ctx, &n, &["remove", SERVICE, "confirm"]);
         }
     } else {
-        let _ = docker::exec(ctx, "systemctl", &["disable", SERVICE]);
+        let _ = proc::exec(ctx, "systemctl", &["disable", SERVICE]);
         let _ = std::fs::remove_file(format!("/etc/systemd/system/{SERVICE}.service"));
-        let _ = docker::exec(ctx, "systemctl", &["daemon-reload"]);
+        let _ = proc::exec(ctx, "systemctl", &["daemon-reload"]);
     }
     Ok(())
 }

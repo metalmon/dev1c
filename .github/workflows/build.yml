@@ -124,12 +124,11 @@ jobs:
       # where it runs in local mode with a tray icon in the XFCE panel. GPUI
       # and tray-icon need the libraries below; the panel speaks
       # StatusNotifier, which is libayatana-appindicator on the runtime side.
-      # dev1c-setup is a CLI on both systems now: since 2026-10-25 its `gui`
-      # feature is off by default. A window-subsystem binary is not awaited by
-      # PowerShell — the prompt comes back at once, the install output lands on
-      # top of it and the exit code never reaches the caller. The window code
-      # stays behind the feature and is still compiled by the Test step below,
-      # so it cannot rot while it waits.
+      # dev1c-setup is a CLI on both systems: a window-subsystem binary is not
+      # awaited by PowerShell — the prompt comes back at once, the install
+      # output lands on top of it and the exit code never reaches the caller.
+      # Its window was parked behind a `gui` feature from 2026-10-25 and
+      # removed on 2026-11-12: parked code only stays fresh in git.
       - name: Libraries for the Linux window
         if: matrix.name == 'linux'
         run: |
@@ -149,7 +148,7 @@ jobs:
         # только разбирается, а не собирается.
         run: |
           cargo fmt --all --check --manifest-path setup/Cargo.toml
-          cargo clippy --workspace --all-targets --features dev1c-setup/gui --manifest-path setup/Cargo.toml -- -D warnings
+          cargo clippy --workspace --all-targets --manifest-path setup/Cargo.toml -- -D warnings
           # Вторая конфигурация коннектора — со сроком действия
           # (`--features licence`, по умолчанию выключен). Только `check`, а не
           # второй проход clippy: фича добавляет четыре строки, и ловить в них
@@ -163,11 +162,7 @@ jobs:
         # окна X11, и всё это на Linux не компилировалось в тестах ни разу:
         # проверяли Windows, а правили Linux. Библиотеки окна ставит шаг выше.
         #
-        # `dev1c-setup/gui` — явно: у самой программы окно выключено по
-        # умолчанию (см. её Cargo.toml), а компилировать его здесь всё равно
-        # надо, иначе отложенный код тихо развалится к тому дню, когда окно
-        # решат вернуть.
-        run: cargo test --workspace --features dev1c-setup/gui --manifest-path setup/Cargo.toml
+        run: cargo test --workspace --manifest-path setup/Cargo.toml
       - name: Test (DPAPI round trip)
         # Единственный `#[ignore]` в наборе (`secrets::tests::the_system_store_on_windows_round_trips_through_dpapi`) не зовётся в шаге выше — спека прямо запрещает звать DPAPI из обычных тестов (он привязан к пользователю, под которым идёт прогон). Этот шаг гоняет ровно его, и только на Windows (DPAPI — Windows-специфика, `#[cfg(windows)]`): проверка кругового шифрования (`seal`+`open`) под ОДНИМ пользователем в ОДНОМ процессе CI-агента, а не заявление о переносе шифртекста между учётками или машинами — того спека и не обещает (ревью задачи 7, Important 6).
         if: matrix.name == 'windows'

@@ -892,7 +892,7 @@ static WINDOWS_HTTPD: Mutex<Option<WindowsHttpd>> = Mutex::new(None);
 
 /// Запуск без консольного окна: httpd — обычное консольное приложение, и
 /// без этого флага каждый его запуск и остановка открывают человеку чёрное
-/// окно поверх всего. Тот же приём, что у `common::docker::quiet`.
+/// окно поверх всего. Тот же приём, что у `common::proc::quiet`.
 #[cfg(windows)]
 fn no_window(cmd: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;

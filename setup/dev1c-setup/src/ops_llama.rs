@@ -7,9 +7,9 @@ use crate::cfg::{Facts, Form};
 use crate::llama;
 use crate::ops::Ctx;
 use anyhow::Result;
-use common::docker;
 use common::op::{Action, CleanLevel, Op, OpState};
 use common::Runner;
+use common::{docker, proc};
 
 pub fn ops(form: Form) -> Vec<Box<dyn Op<Ctx>>> {
     match form {
@@ -219,7 +219,7 @@ impl Op<Ctx> for Bin {
         // Сверяем сборку: иначе ряд из комплекта никогда не доедет до машины,
         // на которой сервер уже лежит.
         let ver = |p: &std::path::Path| {
-            docker::probe(ctx, &p.to_string_lossy(), &["--version"]).map(|o| o.text.trim().to_string()).unwrap_or_default()
+            proc::probe(ctx, &p.to_string_lossy(), &["--version"]).map(|o| o.text.trim().to_string()).unwrap_or_default()
         };
         let have = ver(&llama::server_exe());
         let want = ver(&src.join(llama::server_exe().file_name().unwrap_or_default()));

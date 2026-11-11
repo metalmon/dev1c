@@ -3,9 +3,9 @@
 
 use crate::cfg::Cfg;
 use anyhow::{Context, Result};
-use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
+use common::proc;
 use common::{Event, Phase, Prompt, Runner, Sink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -670,10 +670,10 @@ impl Op<Ctx> for Tools {
         if ctx.dry_run {
             return Ok(());
         }
-        let o = docker::probe(ctx, &oscript_exe(&from).to_string_lossy(), &["-version"])?;
+        let o = proc::probe(ctx, &oscript_exe(&from).to_string_lossy(), &["-version"])?;
         anyhow::ensure!(o.ok(), "oscript не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(format!("oscript {}", o.text.trim()));
-        let o = docker::probe(ctx, &git_exe(&from).to_string_lossy(), &["--version"])?;
+        let o = proc::probe(ctx, &git_exe(&from).to_string_lossy(), &["--version"])?;
         anyhow::ensure!(o.ok(), "git не запускается из {}: {}", from.display(), o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
         if cfg!(windows) {
@@ -770,7 +770,7 @@ fn mcp_exe_at(kit_root: &Path) -> PathBuf {
 
 /// Команда `mcp-1c --install`, какой её собирает `Extension::apply`: пароль базы — ключом `--db-password`, а не переменной `MCP_1C_PASSWORD`. Это второе честное исключение задачи 5, рядом с `/P` Конфигуратору (`revert_apply` ниже) — не выбор удобства, а то, что установщик умеет читать: ветка `if *installDB != "" { installer.Install(…) }` в `cmd/mcp-1c/main.go` тега `v1.23.0` стоит ВЫШЕ `cfg := config.Load()`, и ни в `main.go`, ни в `installer/installer.go` нет ни одного `os.Getenv` — переменная окружения до установки просто не доходит (замер 30.10, по исходнику тега; найдено ревью задачи 7, Critical 1: установка расширения на базе с непустым паролем молча уезжала с пустым).
 ///
-/// Переменной `MCP_1C_PASSWORD` пароль передаёт только мост (`bridge::mcp_command`) — другой запуск того же бинаря, читающий `config.Load()` по-настоящему; командная строка процесса на Windows видна любому процессу пользователя (`tasklist`, диспетчер задач) ровно так же, как и у `/P`, но дольше, чем секунды, она здесь не живёт, а в журнал и план значение после `--db-password` прячет `docker::redact`/`redact_text` тем же приёмом, что `/P…`. `--db-user` остаётся ключом открыто — он не секрет.
+/// Переменной `MCP_1C_PASSWORD` пароль передаёт только мост (`bridge::mcp_command`) — другой запуск того же бинаря, читающий `config.Load()` по-настоящему; командная строка процесса на Windows видна любому процессу пользователя (`tasklist`, диспетчер задач) ровно так же, как и у `/P`, но дольше, чем секунды, она здесь не живёт, а в журнал и план значение после `--db-password` прячет `proc::redact`/`redact_text` тем же приёмом, что `/P…`. `--db-user` остаётся ключом открыто — он не секрет.
 pub fn install_command(cfg: &Cfg, kit: &Kit) -> Result<tokio::process::Command, String> {
     let h = cfg.current();
     let profile = install_profile(cfg)?;
@@ -1074,7 +1074,7 @@ pub fn with_display(cmd: std::process::Command) -> std::process::Command {
     }
 }
 
-/// То же для `docker::exec`, который берёт программу и аргументы строками, а
+/// То же для `proc::exec`, который берёт программу и аргументы строками, а
 /// не `Command`: отдаёт пару «программа, аргументы» уже с обёрткой. Обёртку
 /// называет вызывающий (`display_wrapper()`), а не функция — так порядок
 /// аргументов проверяется тестом на любой машине.
@@ -1498,7 +1498,7 @@ impl Op<Ctx> for Env {
         }
         let exe = mcp_exe(&ctx.kit);
         anyhow::ensure!(exe.exists(), "в комплекте нет {} — комплект неполный", exe.display());
-        let o = docker::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
+        let o = proc::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
         anyhow::ensure!(o.ok(), "mcp-1c не запускается: {}", o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
         Ok(())
@@ -2074,7 +2074,7 @@ impl Op<Ctx> for Extension {
             screen_check().map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         let h = ctx.cfg.current();
-        // Программа и аргументы — все из `install_command`: пароль в них уже есть ключом `--db-password` (второе честное исключение задачи 5, см. докстроку `install_command`), набирать его второй раз отдельной строкой незачем — иначе кто-то однажды поправит `install_command`, глядя на неё как на источник правды, а установка продолжит слать старые аргументы. Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует. Окружение у `install_command` теперь пусто — `docker::exec_env` берёт его тем же путём, что и раньше, просто со списком без пар; собственной сигнатуры у неё это не меняет.
+        // Программа и аргументы — все из `install_command`: пароль в них уже есть ключом `--db-password` (второе честное исключение задачи 5, см. докстроку `install_command`), набирать его второй раз отдельной строкой незачем — иначе кто-то однажды поправит `install_command`, глядя на неё как на источник правды, а установка продолжит слать старые аргументы. Экран Конфигуратору даём здесь же (см. `display_prefix`): иначе на Linux без `DISPLAY` он не стартует. Окружение у `install_command` теперь пусто — `proc::exec_env` берёт его тем же путём, что и раньше, просто со списком без пар; собственной сигнатуры у неё это не меняет.
         let install = install_command(&ctx.cfg, &ctx.kit).map_err(|e| anyhow::anyhow!("{e}"))?;
         let exe = install.as_std().get_program().to_string_lossy().into_owned();
         let install_args: Vec<String> = install.as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -2085,10 +2085,10 @@ impl Op<Ctx> for Extension {
             .collect();
         let (prog, args) = display_argv(&exe, &install_args.iter().map(String::as_str).collect::<Vec<_>>(), display_wrapper().as_deref());
         let env: Vec<(&str, &str)> = install_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let o = docker::exec_env(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>(), &env)?;
+        let o = proc::exec_env(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>(), &env)?;
         // Хвост вывода идёт в журнал окна и в 1c-connect.log: пароль базы из
         // аргументов, если команда его эхом вернула, затирается.
-        anyhow::ensure!(o.ok(), "расширение не установилось: {}", docker::redact_text(&o.tail(4).join(" ")));
+        anyhow::ensure!(o.ok(), "расширение не установилось: {}", proc::redact_text(&o.tail(4).join(" ")));
         ctx.ok("расширение установлено");
         if ctx.dry_run {
             return Ok(());
@@ -2143,13 +2143,13 @@ impl Op<Ctx> for Extension {
         let h = ctx.cfg.current();
         let ib = ib_switch(&h.base_path);
         let n = format!("/N{}", h.db_user);
-        // `/P` остаётся ключом Конфигуратору — у платформы 1С другого способа отдать ей пароль нет (ни переменной окружения, ни файла); это первое из двух честных исключений задачи 5 — второе у `install_command` (установщик `mcp-1c`, по той же причине: не выбор удобства, а единственный способ, которым он умеет принимать пароль). Сама строка в журнал не идёт как есть: `docker::redact_text` затирает `/P…` построчно, прежде чем что-то попадёт в лог.
+        // `/P` остаётся ключом Конфигуратору — у платформы 1С другого способа отдать ей пароль нет (ни переменной окружения, ни файла); это первое из двух честных исключений задачи 5 — второе у `install_command` (установщик `mcp-1c`, по той же причине: не выбор удобства, а единственный способ, которым он умеет принимать пароль). Сама строка в журнал не идёт как есть: `proc::redact_text` затирает `/P…` построчно, прежде чем что-то попадёт в лог.
         let p = format!("/P{}", h.db_password);
         let args = ["DESIGNER", &ib, "/DisableStartupDialogs", "/DeleteCfg", "-Extension", "MCP_HTTPService", &n, &p];
         // Снятие расширения — тот же Конфигуратор, та же нужда в экране.
         let (prog, args) = display_argv(&v8.to_string_lossy(), &args, display_wrapper().as_deref());
-        let o = docker::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", docker::redact_text(&o.tail(3).join(" ")));
+        let o = proc::exec(ctx, &prog, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        anyhow::ensure!(o.ok(), "конфигуратор не снял расширение: {}", proc::redact_text(&o.tail(3).join(" ")));
         let _ = std::fs::remove_file(ctx.kit.state_path("known_hosts"));
         ctx.ok("расширение снято, отпечаток сервера забыт");
         Ok(())
@@ -2170,7 +2170,7 @@ mod tests {
         Kit::at(".")
     }
 
-    /// Critical 1 ревью задачи 7: прежний тест закреплял сам дефект — ждал пароль переменной `MCP_1C_PASSWORD`, хотя ветка установки комплектного `mcp-1c` (`cmd/mcp-1c/main.go` тега `v1.23.0`) вызывается ДО `config.Load()` и окружения не читает вовсе; установка расширения на любой базе с непустым паролем молча уезжала с пустым. Пароль обязан быть ключом `--db-password` — вторым честным исключением задачи 5, см. докстроку `install_command`, — и журнал/план его прячут тем же приёмом, что `/P…` (`docker::redact`/`redact_text` знают про `--db-password` уже сегодня).
+    /// Critical 1 ревью задачи 7: прежний тест закреплял сам дефект — ждал пароль переменной `MCP_1C_PASSWORD`, хотя ветка установки комплектного `mcp-1c` (`cmd/mcp-1c/main.go` тега `v1.23.0`) вызывается ДО `config.Load()` и окружения не читает вовсе; установка расширения на любой базе с непустым паролем молча уезжала с пустым. Пароль обязан быть ключом `--db-password` — вторым честным исключением задачи 5, см. докстроку `install_command`, — и журнал/план его прячут тем же приёмом, что `/P…` (`proc::redact`/`redact_text` знают про `--db-password` уже сегодня).
     #[test]
     fn the_install_command_passes_the_password_as_a_flag() {
         let mut cfg = crate::cfg::filled_for_test();
@@ -2182,7 +2182,7 @@ mod tests {
         let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().into()).collect();
         let i = args.iter().position(|a| a == "--db-password").unwrap_or_else(|| panic!("--db-password нет в аргументах: {args:?}"));
         assert_eq!(args[i + 1], "секрет-базы", "{args:?}");
-        let masked = docker::redact(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        let masked = proc::redact(&args.iter().map(String::as_str).collect::<Vec<_>>());
         assert!(!masked.contains("секрет-базы") && masked.contains("--db-password …"), "{masked}");
         // Окружение `install_command` больше не несёт пароль — установщик его там не ищет (см. докстроку), и держать его там было бы просто лишней, никому не нужной копией.
         assert_eq!(c.as_std().get_envs().count(), 0);
@@ -3391,7 +3391,7 @@ mod tests {
     }
 
     /// Второе, руками собранное место с тем же порядком — и единственное, где
-    /// программа и аргументы разъезжаются по разным значениям (`docker::exec`
+    /// программа и аргументы разъезжаются по разным значениям (`proc::exec`
     /// берёт их строками, а не `Command`).
     #[test]
     fn display_argv_puts_xvfb_first_and_leaves_the_rest_in_order() {

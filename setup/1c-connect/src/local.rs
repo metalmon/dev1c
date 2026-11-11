@@ -155,7 +155,7 @@ pub fn call(
             }
             if v.get("method").and_then(Value::as_str) == Some("notifications/message") {
                 if let Some(d) = v.pointer("/params/data").and_then(Value::as_str) {
-                    on_log(common::docker::redact_text(d));
+                    on_log(common::proc::redact_text(d));
                 }
             }
         }
@@ -177,9 +177,9 @@ pub fn call(
     drop(job);
     let tail = err_tail.join().unwrap_or_default();
     match result {
-        Ok(r) => Ok(Reply { text: common::docker::redact_text(&r.text), is_error: r.is_error }),
+        Ok(r) => Ok(Reply { text: common::proc::redact_text(&r.text), is_error: r.is_error }),
         Err(e) if tail.is_empty() => Err(e),
-        Err(e) => Err(format!("{e}: {}", common::docker::redact_text(&tail))),
+        Err(e) => Err(format!("{e}: {}", common::proc::redact_text(&tail))),
     }
 }
 

@@ -991,7 +991,7 @@ pub async fn pipe_jsonrpc<S>(
     }
     drop(out_tx);
     let _ = writer.await;
-    on_exit(code, by_us, common::docker::redact_text(&tail));
+    on_exit(code, by_us, common::proc::redact_text(&tail));
 }
 
 /// Одна строка от агента: кому она. `Err` — ребёнок закрыл stdin.
@@ -1592,7 +1592,7 @@ fn warn_on_session_limit(fr: &Frame, log: &Sink) {
     // Текст платформы может нести строку подключения целиком (File=…;Usr=…;
     // Pwd=…) — в журнал она идёт без пароля, тем же способом, что и хвост
     // stderr дочернего процесса.
-    let text = common::docker::redact_text(text);
+    let text = common::proc::redact_text(text);
     log(Event::Warn(format!("агент не вошёл в базу: {text}; если 1С открыта у вас — закройте её")));
 }
 

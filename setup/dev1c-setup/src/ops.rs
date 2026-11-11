@@ -4,9 +4,9 @@
 use crate::barrier;
 use crate::cfg::Cfg;
 use anyhow::Result;
-use common::docker;
 use common::kit::Kit;
 use common::op::{Action, CleanLevel, Op, OpState};
+use common::{docker, proc};
 use common::{Prompt, Runner, Sink};
 
 pub struct Ctx {
@@ -594,7 +594,7 @@ impl Op<Ctx> for Container {
         }
         let args = run_args(&ctx.cfg, crate::llama::facts_load(ctx).as_ref());
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        v.push(Action::new(format!("{} {}", ctx.engine(), docker::redact(&refs))));
+        v.push(Action::new(format!("{} {}", ctx.engine(), proc::redact(&refs))));
         v
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {

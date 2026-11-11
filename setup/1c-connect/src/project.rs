@@ -185,7 +185,7 @@ fn git(p: &Project, args: &[&str]) -> Result<Out, String> {
         git_cmd(p, args).output().map_err(|e| format!("git не запускается ({}): {e} — выполните 1c-connect install", p.git.display()))?;
     let mut text = String::from_utf8_lossy(&o.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&o.stderr));
-    Ok(Out { ok: o.status.success(), text: common::docker::redact_text(text.trim()) })
+    Ok(Out { ok: o.status.success(), text: common::proc::redact_text(text.trim()) })
 }
 
 fn must(p: &Project, args: &[&str]) -> Result<String, String> {
@@ -243,7 +243,7 @@ fn git_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<Out, Stri
     let status = child.wait().map_err(|e| e.to_string())?;
     let mut text = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).to_string();
     text.push_str(&String::from_utf8_lossy(&err_thread.join().unwrap_or_default()));
-    Ok(Out { ok: status.success(), text: common::docker::redact_text(text.trim()) })
+    Ok(Out { ok: status.success(), text: common::proc::redact_text(text.trim()) })
 }
 
 fn must_wait(p: &Project, args: &[&str], cancel: &AtomicBool) -> Result<String, String> {
@@ -334,11 +334,11 @@ fn origin_url(p: &Project) -> Result<Option<String>, String> {
 }
 
 /// Адрес без учётных данных — для показа, не для вызова git: берём общую
-/// чистку журнала (`common::docker::without_credentials`), а не заводим
+/// чистку журнала (`common::proc::without_credentials`), а не заводим
 /// вторую такую же здесь. Человек вправе держать в origin токен
 /// (`https://имя:токен@host/путь.git`), а этот адрес мы печатаем в журнал
 /// окна и отдаём инструментом агенту — то есть модели на той стороне.
-use common::docker::without_credentials;
+use common::proc::without_credentials;
 
 /// Состояние проекта разобранным, а не текстом.
 ///

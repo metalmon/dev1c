@@ -14,6 +14,8 @@ pub mod gui;
 pub mod integrity;
 pub mod kit;
 pub mod op;
+/// Запуск чужих программ и затирание секретов — общее для обеих программ (прежде жило в `docker`).
+pub mod proc;
 pub mod run;
 pub mod toml_render;
 pub mod word;

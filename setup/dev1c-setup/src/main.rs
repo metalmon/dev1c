@@ -1,15 +1,13 @@
-// Оконная сборка: двойной щелчок не должен открывать чёрное окно консоли.
-// Для команд консоль возвращает common::console::attach; в отладочной сборке
-// она остаётся всегда.
-#![cfg_attr(all(not(debug_assertions), feature = "gui"), windows_subsystem = "windows")]
-
-//! Установка среды разработки 1С. Без аргументов — окно, с аргументами —
-//! команды. У любой есть `--dry-run`: печатает план и ничего не делает.
+//! Установка среды разработки 1С — командами. У любой есть `--dry-run`:
+//! печатает план и ничего не делает.
+//!
+//! Окна у этой программы нет. Оно жило здесь за флагом `gui`, выключенным по
+//! умолчанию, и в поставку не уходило ни разу: оконная сборка на Windows
+//! помечается `windows_subsystem = "windows"`, а такую программу PowerShell не
+//! ждёт. Снято 12.11 — отложенный код не стареет только в git.
 
 mod barrier;
 mod cfg;
-#[cfg(feature = "gui")]
-mod gui;
 mod llama;
 mod ops;
 mod ops_llama;
@@ -216,13 +214,6 @@ fn make_ctx(kit: Kit, dry_run: bool, yes: bool, commands: bool) -> Result<Ctx> {
 }
 
 fn run() -> Result<bool> {
-    // Без аргументов — окно: так программу запускают двойным щелчком.
-    // Сборка без окна показывает состояние — самое безобидное из возможного.
-    #[cfg(feature = "gui")]
-    if std::env::args().len() == 1 {
-        gui::launch(Kit::discover("DEV1C_KIT")?)?;
-        return Ok(true);
-    }
     let cli = Cli::parse();
     let kit = match &cli.kit {
         Some(p) => Kit::at(p),

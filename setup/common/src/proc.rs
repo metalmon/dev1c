@@ -1,0 +1,430 @@
+//! Запуск чужих программ и затирание секретов в том, что от них остаётся на бумаге.
+//!
+//! Жил внутри `docker.rs`, пока движок контейнеров был единственным, кого эта программа запускала. Сегодня коннектор не зовёт ни одного
+//! глагола движка, а `probe`, `exec` и `redact_text` зовёт постоянно — и ввозил их из модуля с именем про контейнеры. Имя, которое лжёт
+//! о предмете, — та же беда, что и слово не из словаря на экране.
+//!
+//! Запуск всегда через `Command` с отдельными аргументами: нет строки оболочки — нет её правил цитирования.
+
+use crate::{Event, Runner};
+use anyhow::{Context, Result};
+use std::process::Command;
+pub struct Out {
+    pub code: i32,
+    pub text: String,
+}
+
+impl Out {
+    pub fn ok(&self) -> bool {
+        self.code == 0
+    }
+    /// Последние непустые строки вывода — для сообщений об ошибке.
+    pub fn tail(&self, n: usize) -> Vec<String> {
+        let lines: Vec<&str> = self.text.lines().map(|l| l.trim_end()).filter(|l| !l.is_empty()).collect();
+        lines[lines.len().saturating_sub(n)..].iter().map(|s| s.to_string()).collect()
+    }
+}
+
+/// Запуск без своего окна консоли: без этого Windows рисует чёрное окно на
+/// каждый вызов из оконной программы.
+#[cfg_attr(not(windows), allow(unused_mut))]
+pub fn quiet(mut cmd: Command) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Запустить произвольную программу и собрать её вывод (stdout и stderr вместе).
+pub fn exec<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
+    exec_inner(ctx, program, args, &[], false)
+}
+
+/// Как `exec`, но с довеском переменных окружения дочернему процессу — тем,
+/// что секрету нельзя ехать аргументом (командная строка процесса на Windows
+/// видна любому процессу пользователя), а брать его из окружения ЭТОГО
+/// процесса, подменяя своё на время вызова, — путь к гонке между потоками
+/// этой же программы (другой спавн тем же именем переменной попал бы в
+/// процесс неправильным значением).
+pub fn exec_env<X: Runner>(ctx: &X, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<Out> {
+    exec_inner(ctx, program, args, env, false)
+}
+
+/// Спросить машину о состоянии. Выполняется ВСЕГДА, в том числе в режиме
+/// показа: иначе `--dry-run` докладывал бы, что ничего не установлено.
+pub fn probe<X: Runner>(ctx: &X, program: &str, args: &[&str]) -> Result<Out> {
+    exec_inner(ctx, program, args, &[], true)
+}
+
+/// Командная строка для журнала и плана: значения ключей и паролей скрыты.
+/// Журнал лежит в комплекте, а комплект копируют и пересылают; ключ в нём —
+/// утечка, даже если тот же ключ лежит в соседнем toml.
+/// Вывод команд тоже идёт в журнал: `docker inspect` отдаёт переменные
+/// контейнера, среди них ключ модели. Значения ключей, токенов и паролей
+/// заменяются многоточием построчно.
+pub fn redact_text(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            let name = l.split('=').next().unwrap_or("");
+            let upper = name.to_ascii_uppercase();
+            if l.contains('=') && (upper.contains("KEY") || upper.contains("TOKEN") || upper.contains("PASSWORD")) {
+                format!("{}=…", blot_words(name))
+            } else {
+                blot_words(l)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Секреты внутри строки: `Basic <base64>`, `/P<пароль>`, `--db-pwd=…`,
+/// `--password <…>` — значение заменяется многоточием, остальное остаётся.
+/// `/P…` задевает и `/Path` — это строки журнала, не команды; цена принята.
+fn blot_words(line: &str) -> String {
+    let mut out = Vec::new();
+    let mut blot_next = false;
+    for w in split_respecting_quotes(line) {
+        let blotted = if blot_next {
+            blot_next = false;
+            "…".to_string()
+        } else if w == "Basic" || w == "--password" || w == "--db-pwd" || w == "--db-password" {
+            blot_next = true;
+            w.to_string()
+        } else if w.starts_with("/P") && w.len() > 2 {
+            "/P…".to_string()
+        } else {
+            blot_secrets_in_word(&without_credentials(w))
+        };
+        out.push(blotted);
+    }
+    out.join(" ")
+}
+
+/// Текст без учётных данных в адресах: `https://имя:токен@host/путь` →
+/// `https://host/путь`, сколько бы адресов в строке ни было.
+///
+/// Нужна там же, где прочая чистка, и по той же причине: origin человека
+/// вправе носить токен (обычная форма для GitHub и корпоративных серверов), а
+/// мы печатаем адреса в журнал, в план и отдаём их инструментом агенту — то
+/// есть модели на той стороне. Один случай приходит не из нашей команды, а из
+/// чужого текста: git, отказав в доступе, сам печатает адрес целиком, и ни
+/// один из прежних образцов (`Basic`, `--password`, `…pwd=`) такую строку не
+/// ловил (находка проверки безопасности 30.10).
+///
+/// Проход по ВСЕМ вхождениям, а не по первому: в одном слове может стоять два
+/// адреса (`from=https://…,to=https://…`), и у первой редакции второй уезжал
+/// нетронутым — вторая находка той же проверки. Авторитет кончается на первом
+/// из `/?#`, кавычке или пробеле; всё до последней `@` внутри него и есть
+/// учётные данные. Форма `git@host:путь` паролей не носит и `://` не
+/// содержит — её проход не задевает.
+pub fn without_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        // Где кончается авторитет — только по тем символам, которых в
+        // учётных данных не бывает: `/?#`, кавычка, пробел, и не дальше
+        // следующего `://`. Запятую, точку с запятой и скобки в этот список
+        // добавлять НЕЛЬЗЯ, хотя так и подмывает: пароль вправе их содержать,
+        // и на `https://u:pa,ss@h/x` обрыв по запятой оставлял половину
+        // пароля в тексте (четвёртая находка проверки 30.10 — мой же регресс
+        // от третьей). Следующий адрес вместо них стережёт `://`.
+        let hard = tail.find(|c: char| matches!(c, '/' | '?' | '#' | '"' | '\'') || c.is_whitespace()).unwrap_or(tail.len());
+        let end = tail.find("://").map_or(hard, |next| hard.min(next));
+        let (authority, after) = tail.split_at(end);
+        // Учётные данные — всё до ПОСЛЕДНЕЙ `@` внутри авторитета: `@` в
+        // пароле обязана быть закодирована, а вот в имени встречается
+        // (учётка-почта). Нет `@` — отдаём как есть, резать нечего.
+        out.push_str(authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Разбивает строку на «слова» как `split(' ')`, но кавычки защищают от
+/// разбиения: строка подключения 1С кладёт пароль в кавычки
+/// (`Pwd="p w";`), и пробел внутри них — часть значения, а не разделитель
+/// между словами. Без этого слово обрывается на первом пробеле, и хвост
+/// пароля после него остаётся незатёртым словом без `=` в начале.
+fn split_respecting_quotes(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes => {
+                out.push(&line[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&line[start..]);
+    out
+}
+
+/// Внутри одного «слова» секрет может быть не единственной парой
+/// `ключ=значение`: строка подключения 1С пишет несколько через `;`
+/// (`File="…";Usr="…";Pwd="…";`), без пробелов. Каждый сегмент между `;`
+/// проверяется отдельно, ключ — без учёта регистра (`Pwd`, `PWD`, `pwd`).
+fn blot_secrets_in_word(word: &str) -> String {
+    if !word.contains('=') {
+        return word.to_string();
+    }
+    word.split(';')
+        .map(|seg| match seg.split_once('=') {
+            Some((k, _)) if is_secret_key(k) => format!("{k}=…"),
+            _ => seg.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn is_secret_key(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    k.ends_with("pwd") || k.ends_with("password")
+}
+
+pub fn redact(args: &[&str]) -> String {
+    let secret_name = |s: &str| {
+        let l = s.to_ascii_lowercase();
+        l.contains("key") || l.contains("password")
+    };
+    let mut out = Vec::with_capacity(args.len());
+    let mut hide_next = false;
+    for a in args {
+        if hide_next {
+            out.push("…".to_string());
+            hide_next = false;
+            continue;
+        }
+        match a.split_once('=') {
+            // NAME=value and --flag=value
+            Some((k, _)) if secret_name(k) => out.push(format!("{k}=…")),
+            // --flag value: the value is the next argument
+            None if a.starts_with('-') && secret_name(a) => {
+                hide_next = true;
+                out.push(a.to_string());
+            }
+            // The configurator's /P<password>
+            None if a.starts_with("/P") && a.len() > 2 => out.push("/P…".to_string()),
+            _ => out.push(a.to_string()),
+        }
+    }
+    out.join(" ")
+}
+
+fn exec_inner<X: Runner>(ctx: &X, program: &str, args: &[&str], env: &[(&str, &str)], read_only: bool) -> Result<Out> {
+    let shown = format!("{program} {}", redact(args));
+    // Вопрос машине — не изменение: в журнале он остаётся строкой вывода
+    // (`# <команда>` и ответ), а событие Command несёт только изменяющие
+    // команды. Из них собирается ручной путь в инструкции администратора, и
+    // `docker inspect` рядом с `docker run` там был бы указанием зря.
+    if !read_only {
+        ctx.emit(Event::Command(shown.clone()));
+    }
+    if ctx.dry_run() && !read_only {
+        return Ok(Out { code: 0, text: String::new() });
+    }
+    // `env` — довесок к окружению, которое дочерний и так наследует целиком;
+    // имена переменных в журнал не идут (как и раньше у обычного `exec`,
+    // значения которого программа передаёт аргументом, а не окружением).
+    let output = quiet(Command::new(program))
+        .args(args)
+        .envs(env.iter().copied())
+        .output()
+        .with_context(|| format!("не удалось запустить {program}"))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    ctx.emit(Event::Output { command: shown, text: redact_text(&text) });
+    Ok(Out { code: output.status.code().unwrap_or(-1), text })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kit::Kit;
+    use crate::Sink;
+
+    /// Чужой текст с адресом внутри: git, отказав в доступе, печатает origin
+    /// целиком, а он вправе нести токен. Прежние образцы (`Basic`,
+    /// `--password`, `…pwd=`) такую строку не ловили (находка проверки
+    /// безопасности 30.10), и она шла в журнал и агенту как есть.
+    #[test]
+    fn a_url_in_someone_elses_text_loses_its_credentials() {
+        let line = "remote: Invalid username or password for https://bucher:ghp_SECRET@github.com/me/repo.git";
+        let out = redact_text(line);
+        assert!(!out.contains("ghp_SECRET"), "{out}");
+        assert!(out.contains("https://github.com/me/repo.git"), "{out}");
+        // Адрес без учётных данных остаётся собой — чистка не портит обычный текст.
+        assert_eq!(redact_text("fatal: https://github.com/me/repo.git not found"), "fatal: https://github.com/me/repo.git not found");
+        // Два адреса в ОДНОМ слове: у первой редакции второй уезжал нетронутым.
+        let pair = "from=https://a:T1@h/one.git,to=https://b:T2@h/two.git";
+        let out = redact_text(pair);
+        assert!(!out.contains("T1") && !out.contains("T2"), "{out}");
+        assert!(out.contains("https://h/one.git") && out.contains("https://h/two.git"), "{out}");
+        // Адрес в кавычках — одно слово целиком, и кавычка закрывает авторитет.
+        let quoted = "remote: repository 'https://u:T3@h/p.git/' not found";
+        assert!(!redact_text(quoted).contains("T3"), "{}", redact_text(quoted));
+        // Формы, на которых чистка спотыкалась по очереди: без запятой в
+        // стоп-списке авторитет проглатывал следующий адрес, и его токен
+        // выживал. Проверяем не форму ответа, а то, что секрета в нём нет.
+        for nasty in [
+            "https://a:T1@h,https://b:T2@h/x",
+            "https://a:T1@h;https://b:T2@h/x",
+            "см. https://a:T1@h и https://b:T2@h/x",
+            "(https://a:T1@h/p) https://b:T2@h",
+            "url=\"https://a:T1@h/p\" url2=\"https://b:T2@h/p\"",
+        ] {
+            let out = redact_text(nasty);
+            assert!(!out.contains("T1") && !out.contains("T2"), "{nasty} → {out}");
+        }
+        // Пароль со знаками препинания внутри: обрыв авторитета по запятой
+        // или скобке оставлял его половину в тексте.
+        for nasty in ["https://u:pa,ssT1@h/x", "https://u:p;w(1)T1@h", "https://u:T1<>@h/x"] {
+            let out = redact_text(nasty);
+            assert!(!out.contains("T1"), "{nasty} → {out}");
+            assert!(out.contains("https://h"), "{nasty} → {out}");
+        }
+    }
+    use std::sync::Arc;
+
+    struct T {
+        sink: Sink,
+    }
+    impl Runner for T {
+        fn dry_run(&self) -> bool {
+            false
+        }
+        fn sink(&self) -> &Sink {
+            &self.sink
+        }
+        fn kit(&self) -> &Kit {
+            unimplemented!("не нужен exec_env")
+        }
+    }
+
+    /// Ребёнок, которым `exec_env_hands_the_pair_to_the_real_child` проверяет
+    /// доставку: не обычный тест, а печатает одну переменную окружения и
+    /// выходит — портативный «чужой процесс» без вынесенного бинаря, тем же
+    /// приёмом, что `bridge.rs` (`__echo_child`).
+    #[test]
+    fn __echo_env_child() {
+        if let Ok(v) = std::env::var("DOCKER_EXEC_ENV_TEST") {
+            println!("{v}");
+        }
+    }
+
+    #[test]
+    fn exec_env_hands_the_pair_to_the_real_child() {
+        // Довод Important 1 ревью: секрет обязан дойти до РЕБЁНКА переменной
+        // окружения, а не до текущего процесса — здесь это проверяется не
+        // чтением своего же `std::env`, а тем, что сказал настоящий дочерний
+        // процесс на стандартный вывод.
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let ctx = T { sink: Arc::new(|_: Event| {}) };
+        let o = exec_env(
+            &ctx,
+            &exe,
+            &["--exact", "proc::tests::__echo_env_child", "--nocapture", "--quiet"],
+            &[("DOCKER_EXEC_ENV_TEST", "секрет-базы")],
+        )
+        .unwrap();
+        assert!(o.text.contains("секрет-базы"), "{}", o.text);
+    }
+
+    #[test]
+    fn git_and_platform_secrets_are_blotted_out() {
+        let t = "fatal: Authorization: Basic ZGV2MTpkZXYx rejected\n1cv8 DESIGNER /F C:\\b /N Admin /Pqwerty /DumpCfg\nvrunner --db-pwd=secret --db-user=Admin";
+        let r = redact_text(t);
+        assert!(!r.contains("ZGV2MTpkZXYx") && r.contains("Basic …"), "{r}");
+        assert!(!r.contains("qwerty") && r.contains("/P…"), "{r}");
+        assert!(!r.contains("secret") && r.contains("--db-pwd=…") && r.contains("--db-user=Admin"), "{r}");
+        assert_eq!(redact_text("API_KEY=abc"), "API_KEY=…");
+        // mcp-1c --install echoes its argv in an error: the password after
+        // --db-password is blotted the same way as after --db-pwd.
+        assert_eq!(
+            redact_text("mcp-1c --install C:\\b --db-user mcp --db-password hunter2 failed"),
+            "mcp-1c --install C:\\b --db-user mcp --db-password … failed"
+        );
+        // docker inspect prints env as indented JSON strings: still blotted.
+        let r = redact_text(
+            "            \"CUSTOM_API_KEY=f5b8bc7e\",
+            \"PATH=/bin\",",
+        );
+        assert!(!r.contains("f5b8bc7e") && r.contains("PATH=/bin"), "{r}");
+        // A secret before the first '=' on a KEY line is not printed either.
+        let r = redact_text("Authorization: Basic ZGV2 API_KEY=abc");
+        assert!(!r.contains("ZGV2") && !r.contains("abc"), "{r}");
+    }
+
+    #[test]
+    fn a_1c_connection_string_hides_only_the_password() {
+        // 1С пишет несколько key=value через ';' в одном слове, без
+        // пробелов, и сам ключ может быть в любом регистре (`Pwd`, не
+        // только `pwd`) — оба случая должны находить и прятать пароль.
+        let r = redact_text(r#"File="C:\Bases\UNF";Usr="mcp";Pwd="secret";"#);
+        assert!(!r.contains("secret"), "{r}");
+        assert!(r.contains("Pwd=…"), "{r}");
+        assert!(r.contains(r#"File="C:\Bases\UNF""#), "{r}");
+    }
+
+    #[test]
+    fn a_quoted_password_with_a_space_inside_is_hidden_whole() {
+        // Пароль в кавычках со своим пробелом внутри — ровно случай, на
+        // котором наивный split(' ') резал кавычку пополам и оставлял
+        // второе слово пароля незатёртым.
+        let r = redact_text(r#"File="C:\Bases\UNF";Usr="mcp";Pwd="p w";"#);
+        assert!(!r.contains("p w") && !r.contains(" w"), "{r}");
+        assert!(r.contains("Pwd=…"), "{r}");
+        assert!(r.contains(r#"File="C:\Bases\UNF""#) && r.contains(r#"Usr="mcp""#), "{r}");
+    }
+
+    #[test]
+    fn a_semicolon_right_after_the_closing_quote_still_separates_segments() {
+        let r = redact_text(r#"Usr="mcp";Pwd="p w";Next="n""#);
+        assert!(!r.contains("p w"), "{r}");
+        assert!(r.contains("Pwd=…") && r.contains(r#"Usr="mcp""#) && r.contains(r#"Next="n""#), "{r}");
+    }
+
+    #[test]
+    fn the_previously_covered_unquoted_forms_still_hide_the_password_and_keep_path_and_user() {
+        // Регрессия: тот же набор форм, что покрывали до правки — путь и
+        // имя пользователя должны пережить затирку, а пароль — никогда.
+        let r = redact_text(r#"path=C:\Bases\UNF --db-user mcp --db-password hunter2 Usr="mcp";Pwd="secret";"#);
+        assert!(!r.contains("hunter2") && !r.contains("secret"), "{r}");
+        assert!(r.contains(r#"path=C:\Bases\UNF"#) && r.contains("--db-user mcp") && r.contains(r#"Usr="mcp""#), "{r}");
+        assert!(r.contains("--db-password …") && r.contains("Pwd=…"), "{r}");
+    }
+
+    #[test]
+    fn command_output_hides_secret_values_before_the_journal() {
+        let text = "CUSTOM_API_URL=http://h/v1\nCUSTOM_API_KEY=f5b8bc7e\nLLAMA_API_KEY=abc\nPATH=/bin\n";
+        let r = redact_text(text);
+        assert!(r.contains("CUSTOM_API_URL=http://h/v1") && r.contains("PATH=/bin"));
+        assert!(r.contains("CUSTOM_API_KEY=…") && r.contains("LLAMA_API_KEY=…"), "{r}");
+        assert!(!r.contains("f5b8bc7e") && !r.contains("abc"));
+    }
+
+    #[test]
+    fn secrets_are_masked_before_anything_is_logged() {
+        let args = ["run", "-e", "CUSTOM_API_KEY=sk-secret", "-e", "CUSTOM_MODEL=Q", "--db-password=hunter2"];
+        let shown = redact(&args);
+        assert_eq!(shown, "run -e CUSTOM_API_KEY=… -e CUSTOM_MODEL=Q --db-password=…");
+        // Flag followed by its value, and the configurator's /P<password> switch.
+        let args = ["--install", "C:\\b", "--db-user", "mcp", "--db-password", "mcp", "DESIGNER", "/Nmcp", "/Phunter2"];
+        assert_eq!(redact(&args), "--install C:\\b --db-user mcp --db-password … DESIGNER /Nmcp /P…");
+    }
+
+    #[test]
+    fn tail_skips_blank_lines() {
+        let o = Out { code: 1, text: "a\n\nb\n  \nc\n".into() };
+        assert_eq!(o.tail(2), vec!["b".to_string(), "c".to_string()]);
+        assert!(!o.ok());
+    }
+}

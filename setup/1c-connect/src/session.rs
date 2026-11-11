@@ -2,9 +2,9 @@
 //! и мост на проброшенные порты. Общая часть команды `connect` и окна: обе
 //! зовут `start`, держат `Session` и в конце — `stop`.
 
+use crate::bridge;
 use crate::cfg::{Cfg, Ports};
 use crate::ops_host::McpServer;
-use crate::{bridge, editors, tunnel};
 use common::kit::Kit;
 use common::{Event, Sink};
 use std::sync::atomic::AtomicBool;
@@ -258,74 +258,6 @@ impl Session {
     }
 }
 
-/// Контейнерный случай задачи 7: выключили связь в окне — туннель ложится, порт рабочего места перестаёт слушать, `nc` на стороне Zed выходит, и Zed показывает упавший сервер MCP, который сам уже никогда не поднимет (спека «MCP в редакторе», «Факты…»). Вместо этого — правим `"enabled"` в `settings.json` Zed внутри контейнера по тому же SSH, что держит туннель: `false` при выключении, `true` при включении, и Zed гасит/поднимает серверы сам, человек видит «выключен» вместо «упал».
-///
-/// Вся логика здесь — читаем файл (`exec` — первый вызов), правим его `editors::set_enabled_zed` (`exe: None` — имя `1c`/`vrunner` в контейнере наше по построению, положила его только наша же правка). Нечего менять — старый образ без наших записей, нечитаемый JSONC, повторное подключение на уже верном состоянии — выходим без второго вызова (Important 3 ревью задачи: лишняя перезапись чужого файла не нужна и опасна). Есть что менять — пишем во временный файл рядом (`exec` — второй вызов) и переименовываем его поверх настоящего (`exec` — третий вызов): `cat > PATH` сам усекает файл ДО приёма данных, и обрыв посередине (сеть легла на полпути) оставил бы человека с пустыми настройками, а `mv` — одна атомарная операция файловой системы. Канал подставляется параметром, поэтому вся цепочка проверяется без настоящего SSH. Своего скрипта в образе не заводим и `sed` не посылаем: правка живёт в одном месте, и путь временного файла — константа рядом с настоящим, никакой интерполяции.
-///
-/// ponytail: правка без блокировки чужого файла — человек, правящий `settings.json` в Zed ровно в этот момент, потеряет свою правку. Цена read-modify-write без замка на чужой файл; поднять до блокировки, если это окажется больше, чем теоретической неприятностью.
-///
-/// `Ok` несёт не только успех, но и то, что увидело чтение (`editors::found_by_name` по тексту, который всё равно пришлось прочитать ради правки) — решение владельца 29.10: это и материал для факта набора готовности (`verify::editor_mcp_fact`), и второго похода по SSH ради одного факта быть не должно.
-pub fn flip_with(exec: &dyn Fn(&str) -> Result<String, String>, on: bool) -> Result<editors::Found, String> {
-    const PATH: &str = "~/.config/zed/settings.json";
-    const TMP: &str = "~/.config/zed/settings.json.tmp-1c-connect";
-    let text = exec(&format!("cat {PATH}"))?;
-    let found = editors::found_by_name(&text);
-    let edited = editors::set_enabled_zed(&text, on, None);
-    if edited == text {
-        return Ok(found);
-    }
-    // Содержимое — после первого перевода строки, байтами на stdin команды
-    // `cat > …`, а не подстановкой в саму команду (решение владельца №2):
-    // `Tunnel::exec` делит по первому `\n` и шлёт хвост отдельным кадром.
-    exec(&format!("cat > {TMP}\n{edited}"))?;
-    exec(&format!("mv {TMP} {PATH}"))?;
-    Ok(found)
-}
-
-/// Последнее увиденное по SSH состояние записей `1c`/`vrunner` в настройках Zed в контейнере — материал факта набора готовности (`verify::editor_mcp_fact`). Живёт дольше одного сеанса (у окна, рядом с `enabled`), потому что расчёт готовности идёт своим тактом, независимо от того, подключается туннель прямо сейчас или нет. `None` — ещё не читали (до первого удачного подключения) либо последнее чтение отказало.
-pub type EditorMcpSeen = Arc<Mutex<Option<editors::Found>>>;
-
-/// Текущее значение `EditorMcpSeen` для расчёта готовности — без паники на отравленном мьютексе (Minor 7 ревью): расчёт важнее одной утерянной записи, и `.lock().ok()` молча отвечает «не знаем», а не валит поток такта.
-pub fn seen(cell: &EditorMcpSeen) -> Option<editors::Found> {
-    cell.lock().ok().and_then(|g| g.clone())
-}
-
-/// Поглощает результат `flip_with` в `seen` — единое место, которое не разойдётся с тем, что реально делает `flip_remote_servers` (Important 4 ревью задачи: тест на «старое значение не переживает отказ» зовёт эту же функцию, а не копирует её строку себе). Ошибка стирает прежнее значение на `None`, а не хранит старую оценку: раз читать не вышло СЕЙЧАС, выдавать за свежую правду старое — врать о том, что мы знаем прямо сейчас (решение владельца 29.10, третье состояние факта — «не смог проверить», а не старая оценка). Отравленный мьютекс (Minor 7 ревью) — не повод валить расчёт сеанса: `.lock().ok()` молча пропускает обновление, а не паникует.
-fn remember(seen: &EditorMcpSeen, r: &Result<editors::Found, String>) {
-    if let Ok(mut g) = seen.lock() {
-        *g = r.as_ref().ok().cloned();
-    }
-}
-
-/// Текст предупреждения для отказа правки — решение владельца №3: связь важнее настройки редактора, и вызывающий (`tunnel::run`) зовёт этим текстом `Event::Warn`, никогда не оборачивая отказ правки в отказ подключения (Important 4 ревью задачи: тест, что это именно предупреждение, а не отказ сеанса, зовёт этот же текст, а не только `flip_with::is_err()`).
-pub fn flip_warning(on: bool, e: &str) -> String {
-    let what = if on { "включены" } else { "выключены" };
-    format!("серверы MCP у Zed в среде не {what}: {e}")
-}
-
-/// Обёртка `flip_with`, подставляющая настоящий канал — `Tunnel::exec` по уже поднятому туннелю. `Tunnel::exec` асинхронный, а канал `flip_with` ждёт обычный (синхронный) — `block_in_place` уводит текущую задачу туннеля на отдельный поток рантайма ровно на время этих команд, не блокируя остальных (рантайм здесь многопоточный — `tunnel::run` зовётся из потока, поднявшего его `Runtime::new()`, см. `start_with_enabled`).
-///
-/// Важное свойство (Important 5 финального ревью): эта функция не отказывает на однопоточном
-/// рантайме — она ПАНИКУЕТ. `block_in_place` требует многопоточный `Runtime` (`tokio::test` без
-/// `flavor = "multi_thread"` поднимает однопоточный) — позвать отсюда на нём значит упасть, а не
-/// получить `Err`. Живой тест `tunnel_live.rs` уже ловил эту панику вместо честного «SSH недоступен».
-/// **Вызывающих нет с 3.11 и не будет.** По SSH рабочим местам не проходит ни одна
-/// команда (`ForceCommand /bin/false`, `config/sshd-setup.sh` — замер в STATUS,
-/// пункт 37), поэтому `tunnel::run` эту обёртку больше не зовёт: она давала
-/// гарантированное предупреждение на каждое подключение. Щель в sshd не обсуждается
-/// — в клиент-серверной архитектуре оба конца наши, и правит сторона с агентами свой
-/// собственный файл. Живым из этой цепочки остаётся `flip_with`: ему нужен канал, а
-/// не SSH, и канал у протокола будет свой. Обёртка оставлена как место, куда этот
-/// канал подставится, и как запись о том, почему здесь нельзя `block_in_place`.
-pub fn flip_remote_servers(t: &tunnel::Tunnel, on: bool, seen: &EditorMcpSeen) -> Result<(), String> {
-    let r = tokio::task::block_in_place(|| {
-        let exec = |cmd: &str| -> Result<String, String> { tokio::runtime::Handle::current().block_on(t.exec(cmd)) };
-        flip_with(&exec, on)
-    });
-    remember(seen, &r);
-    r.map(|_| ())
-}
-
 /// Как `start_with_enabled`, но с MCP всегда включённым — для CLI
 /// (`main.rs`: `connect`/`serve`), у которого нет окна и некому держать
 /// переключатель дольше одного сеанса.
@@ -379,7 +311,7 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
 }
 
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
-    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Arc::new(Mutex::new(None)), Wiring::default(), on_state)
+    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Wiring::default(), on_state)
 }
 
 /// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
@@ -387,15 +319,35 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// «обслуживаются ли вызовы агента»: заводит и держит его окно (`gui::Ui`),
 /// он живёт дольше любого одного сеанса (переживает «Сохранить» и
 /// переключатель в локальном режиме), сюда только передаётся, а не
-/// создаётся заново на каждый перезапуск. Транспорт — по `cfg.current().mode`:
-/// `tunnel` держит SSH с переподключением, `local` слушает оба порта на
-/// петле сам (всё на одной машине — переподключаться там не от чего,
-/// `Retrying` в этом режиме не бывает). `editor_mcp` — та же ячейка, тем же
-/// правилом: заводит и держит окно, сюда только передаётся, и расчёт
-/// готовности (`verify.rs`) читает её независимо от того, идёт сеанс прямо
-/// сейчас или нет (решение владельца 29.10).
+/// создаётся заново на каждый перезапуск. Транспорт — по одной оси, где
+/// база: здесь — свой мост, на другом компьютере — труба в канал (`Toward`).
+/// Переподключаться сеансу не от чего: `Retrying` остался словом состояния,
+/// которое с уходом ssh никто больше не присылает.
 /// Чем увести местное соединение агента в канал — то же, что `listen::ToChannel`, названное здесь, чтобы звать сеанс одним именем.
 pub type ToChannel = crate::listen::ToChannel;
+
+/// Чем сеанс обслуживает соединение, принятое на свои порты.
+///
+/// **Ось одна — где база** (спека сочетаний). Третьим ходом здесь был ssh в среду разработки, и с 11.11 его нет: среда уехала из
+/// программы целиком, а выбирать транспорт по режиму стало невыразимо (план `2026-11-11-env-removal.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    /// База здесь (сочетания 1, 2, 4) — свой мост со своим ребёнком.
+    Child,
+    /// База на другом компьютере (сочетания 3, 5) — трубой в канал, к той стороне, где база.
+    Channel,
+    /// База на другом компьютере, а канал держать некому: подкоманда без окна. Вести вызовы некуда, и слушать порты незачем.
+    Nowhere,
+}
+
+/// Решение о транспорте — ОДНИМ местом, по сочетанию и по тому, есть ли кому держать канал.
+pub fn transport_of(combo: crate::cfg::Combo, has_channel: bool) -> Transport {
+    match (combo.base_is_here(), has_channel) {
+        (true, _) => Transport::Child,
+        (false, true) => Transport::Channel,
+        (false, false) => Transport::Nowhere,
+    }
+}
 
 /// Чем сеанс связан с потоком узла. Обе ручки про одно — вызовы агента по каналу, — и ездят поэтому вместе.
 ///
@@ -477,7 +429,6 @@ pub fn start_with_enabled(
     kit: Kit,
     log: Sink,
     enabled: Arc<AtomicBool>,
-    editor_mcp: EditorMcpSeen,
     wiring: Wiring,
     on_state: impl Fn(State) + Send + Sync + 'static,
 ) -> Session {
@@ -501,11 +452,9 @@ pub fn start_with_enabled(
         let r = rt.block_on(async {
             on_state(State::Connecting);
             let state = Mutex::new(State::Connecting);
-            // Те же порты, что ниже выбирает транспорт: местный слушатель
-            // слушает `ports()`, туннель просит форвард на `tunnel_ports()`
-            // (круг исправления финального ревью, Б3) — `Serve` обязан
-            // знать то же число, иначе `dispatch` не узнаёт свой же порт.
-            let active_ports = if cfg.current().mode == "local" { cfg.ports() } else { cfg.tunnel_ports() };
+            // Порты у всех одни (`ports()`): слушает их местный слушатель, и то же число знает `Serve`. Тройка, считавшаяся от
+            // номера рабочего места (`tunnel_ports()`), уехала вместе со средой — пробрасывать её больше некому.
+            let active_ports = cfg.ports();
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             // Объявляем себя: с этой минуты поток узла знает, чем обслуживать вызовы, пришедшие по каналу. Снимается объявление
             // внизу, когда сеанс кончился, — и тем же самым снимается допуск к вызовам.
@@ -517,29 +466,29 @@ pub fn start_with_enabled(
                 *s = next;
                 on_state(s.clone());
             };
-            // **Транспорт выбирает СОЧЕТАНИЕ** (`cfg::Combo`), и исходов теперь три.
+            // **Транспорт выбирает ОДНА ОСЬ — где база** (спека сочетаний, «Что показывается в каждом сочетании»). Слушаем свои
+            // порты всегда: агент приходит на них в любом сочетании. Разница в том, что отвечает принятому соединению.
             //
-            // «Всё на одной машине» — слушаем свои порты и поднимаем своего ребёнка, как было.
+            // База ЗДЕСЬ (сочетания 1, 2, 4) — свой мост со своим ребёнком. Вызовы, пришедшие к этой машине ПО КАНАЛУ, обслуживает не
+            // сеанс напрямую, а поток узла через `Serving`, и трогать здесь нечего.
             //
-            // База на ДРУГОМ компьютере (сторона агентов пары A) — тоже слушаем свои порты, но каждое принятое соединение уводим
-            // трубой в канал: мост стоит у базы, здесь его нет и быть не должно. Это и есть шаг 4 плана пары B. Уводить некуда, если
-            // потока узла нет вовсе (подкоманда `serve` без окна) — тогда остаётся прежний путь.
+            // База на ДРУГОМ компьютере (сочетания 3, 5) — трубой в канал: мост стоит у базы, здесь его нет и быть не должно.
             //
-            // База ЗДЕСЬ и сторона не одна — прежний туннель: вызовы по каналу к этой машине обслуживает не сеанс напрямую, а поток
-            // узла через `Serving`, и трогать здесь нечего.
+            // Третьего хода нет с 11.11: им был ssh в среду разработки, и среда уехала из программы целиком (план
+            // `2026-11-11-env-removal.md`). Поднять туннель этой развилкой стало невыразимо, а не запрещено условием.
             let combo = crate::cfg::Combo::of(cfg.current());
-            let r = if combo == crate::cfg::Combo::Alone {
-                crate::listen::run(serve, active_ports, crate::listen::Toward::Child, on_event, stop_rx).await
-            } else if let (false, Some(to_channel)) = (combo.base_is_here(), wiring.to_channel.clone()) {
-                crate::listen::run(serve, active_ports, crate::listen::Toward::Channel(to_channel), on_event, stop_rx).await
-            } else {
-                let dispatch = serve.clone();
-                let on_incoming = move |inc: tunnel::Incoming| {
-                    if let Some(what) = Served::of_port(inc.port, dispatch.ports()) {
-                        dispatch.serve(what, inc.channel.into_stream());
-                    }
-                };
-                tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx, editor_mcp.clone()).await
+            let to_channel = wiring.to_channel.clone();
+            let r = match (transport_of(combo, to_channel.is_some()), to_channel) {
+                (Transport::Child, _) => crate::listen::run(serve, active_ports, crate::listen::Toward::Child, on_event, stop_rx).await,
+                (Transport::Channel, Some(to_channel)) => {
+                    let toward = crate::listen::Toward::Channel(to_channel);
+                    crate::listen::run(serve, active_ports, toward, on_event, stop_rx).await
+                }
+                // `Channel` без ручки канала не отвечается вовсе (`has_channel` — это она и есть), и своего ребёнка над ЧУЖОЙ базой
+                // мы не поднимаем ни в одном из двух случаев: отказ у них один и тот же.
+                (Transport::Channel, None) | (Transport::Nowhere, _) => Err(anyhow::anyhow!(
+                    "база этого соединения на другом компьютере, а связь с ним держит окно программы — без окна вызовы вести некуда"
+                )),
             };
             // Сеанс кончился — снимаем объявление: обслуживать вызовы по каналу больше нечем, и отказ скажет об этом словами.
             wiring.serving.clear();
@@ -711,8 +660,25 @@ impl Served {
 mod tests {
     use super::*;
     use crate::ops_host::{port_of, McpServer};
-    use std::path::Path;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Транспорт выбирает ОДНА ось — где база, и у всех пяти сочетаний ответ назван здесь целиком.
+    ///
+    /// Этот тест и есть то, чего не было 11.11: сторона с базой в парах A и B уходила в ssh-ветку и сеанса не поднимала вовсе
+    /// (замер в плане `2026-11-11-env-removal.md`, раздел 1). Таблица названа по сочетаниям, а не по режиму: режим на этот вопрос
+    /// больше не отвечает.
+    #[test]
+    fn the_transport_follows_the_one_axis_that_says_where_the_base_is() {
+        use crate::cfg::Combo::*;
+        for combo in [Alone, AcceptBaseHere, DialBaseHere] {
+            assert_eq!(transport_of(combo, true), Transport::Child, "{combo:?}: база здесь — свой мост");
+            assert_eq!(transport_of(combo, false), Transport::Child, "{combo:?}: и канал для этого не нужен");
+        }
+        for combo in [AcceptBaseThere, DialBaseThere] {
+            assert_eq!(transport_of(combo, true), Transport::Channel, "{combo:?}: база на другом компьютере — труба в канал");
+            assert_eq!(transport_of(combo, false), Transport::Nowhere, "{combo:?}: без окна вести вызовы некуда");
+        }
+    }
 
     /// Карточка, по которой обслуживаются вызовы, читается у ЖИВОГО `Serve`, а не хранится снимком со времени подъёма сеанса.
     ///
@@ -742,50 +708,6 @@ mod tests {
         live.set(after);
         assert!(!open.is_for(&first), "вызов по прежней карточке получил бы базу новой");
         assert!(open.is_for(&second), "а вызов по новой текущей — обслуживается");
-    }
-
-    /// Канал подменён: проверяем, что мы читаем файл, правим своей же
-    /// функцией и пишем обратно — ни одного `sed` со стороны (задача 7).
-    #[test]
-    fn flipping_the_remote_file_reads_modifies_writes() {
-        let seen = std::sync::Mutex::new(Vec::new());
-        let exec = |cmd: &str| -> Result<String, String> {
-            seen.lock().unwrap().push(cmd.to_string());
-            Ok(crate::editors::merge_zed("", Path::new("/opt/1c-connect")).unwrap())
-        };
-        // Решение владельца 29.10: то же чтение, что правит `enabled`, несёт и материал факта набора готовности — обе наши записи на месте.
-        assert_eq!(flip_with(&exec, false).unwrap(), crate::editors::Found::Ours);
-        let seen = seen.lock().unwrap();
-        assert!(seen[0].contains("cat") && seen[0].contains(".config/zed/settings.json"), "{:?}", seen[0]);
-        assert!(seen[1].contains("\"enabled\": false"), "{:?}", seen[1]);
-    }
-
-    /// Файла нет (или `cat` отказал) — отказ `flip_with`, но сеанс от этого не падает: проверяем сам текст, который `tunnel::run` кладёт в `Event::Warn` (`flip_warning`) — именно он превращает отказ правки в предупреждение журнала, а не в отказ подключения (Important 4 ревью: именем теста обещано ровно это, а не только `is_err()`).
-    #[test]
-    fn a_missing_remote_file_is_not_an_error_for_the_session() {
-        let exec = |_: &str| -> Result<String, String> { Err("No such file".into()) };
-        let e = flip_with(&exec, true).unwrap_err();
-        let warn = flip_warning(true, &e);
-        assert!(warn.contains("No such file"), "{warn}");
-        // Слово о подключении здесь не звучит вовсе — это и есть разница
-        // между предупреждением и отказом сеанса.
-        assert!(!warn.contains("подключ"), "{warn}");
-    }
-
-    /// Старый образ без наших записей — факт обязан увидеть именно это, а не молча считать «настроено» (решение владельца 29.10).
-    #[test]
-    fn flip_with_reports_missing_records_too() {
-        let exec = |_: &str| -> Result<String, String> { Ok("{}".to_string()) };
-        assert_eq!(flip_with(&exec, true).unwrap(), crate::editors::Found::Absent);
-    }
-
-    /// `flip_remote_servers` стирает прежнее `seen` на `None` при отказе, а не оставляет старую оценку — «не смог проверить», а не «опять как в прошлый раз» (решение владельца 29.10). Зовёт `remember` — ровно то, что `flip_remote_servers` зовёт сама (Important 4 ревью: тест не копирует её строку себе, иначе остался бы зелёным при регрессии обёртки).
-    #[test]
-    fn a_stale_seen_value_is_not_kept_on_a_fresh_failure() {
-        let seen: EditorMcpSeen = Arc::new(Mutex::new(Some(crate::editors::Found::Ours)));
-        let r: Result<crate::editors::Found, String> = Err("связь оборвалась".into());
-        remember(&seen, &r);
-        assert_eq!(*seen.lock().unwrap(), None, "старое «настроено» не должно переживать отказ чтения");
     }
 
     /// Набор, который `Serve::new` принимает без лишних вопросов: сервер

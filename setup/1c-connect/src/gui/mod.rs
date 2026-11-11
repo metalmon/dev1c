@@ -212,7 +212,6 @@ pub struct Ui {
     /// опускает сеанс целиком.
     pub enabled: Arc<AtomicBool>,
     /// Последнее увиденное по SSH состояние записей `1c`/`vrunner` в настройках Zed в контейнере (решение владельца 29.10) — заводится один раз в `launch`, тем же правилом, что `enabled`, и читает его расчёт готовности (`verify::cheap`) своим тактом, независимо от того, идёт сеанс прямо сейчас или нет. В локальном режиме не используется — там факт читает `editors::look` прямо с диска.
-    pub editor_mcp: session::EditorMcpSeen,
     /// Обслуживающая половина этой машины, пока сеанс жив (`session::Serving`).
     ///
     /// Канал живёт в потоке узла и принимает знакомство, прощание и отзыв всегда; мост живёт в сеансе и ЕСТЬ обслуживание. Поток
@@ -2396,7 +2395,6 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(serve_on_start)),
-            editor_mcp: Arc::new(Mutex::new(None)),
             serving: session::Serving::default(),
             gate: gate.clone(),
             facts: Vec::new(),
@@ -2568,7 +2566,6 @@ impl Ui {
             link: State::Off,
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
-            editor_mcp: Arc::new(Mutex::new(None)),
             serving: session::Serving::default(),
             gate,
             facts: Vec::new(),
@@ -2635,7 +2632,6 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        ui.editor_mcp.clone(),
         session::Wiring { serving: ui.serving.clone(), to_channel: None },
         |_| {},
     )
@@ -2657,7 +2653,6 @@ fn ended_session(ui: &Ui) -> crate::session::Session {
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        ui.editor_mcp.clone(),
         session::Wiring { serving: ui.serving.clone(), to_channel: None },
         |_| {},
     );
@@ -2685,7 +2680,6 @@ fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
             ui.kit.clone(),
             Arc::new(|_| {}),
             ui.enabled.clone(),
-            ui.editor_mcp.clone(),
             session::Wiring { serving: ui.serving.clone(), to_channel: None },
             |_| {},
         ),

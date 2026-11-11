@@ -35,6 +35,5 @@ pub mod session;
 pub mod single_instance;
 pub mod skills;
 pub mod ticket;
-pub mod tunnel;
 pub mod verify;
 pub mod wire;

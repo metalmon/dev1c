@@ -69,7 +69,7 @@ const THEMES: [(theme::Choice, &str, &str); 3] = [
 /// владельца 1.11), а словами по-прежнему нужно что-то называть режим в
 /// журнале. Режим пишет карточка окна (`panel::set_card_mode` → тут же,
 /// `request_current_mode_change`).
-const MODE_WORDS: [(&str, &str); 2] = [("tunnel", "Через туннель"), ("local", "Локально")];
+const MODE_WORDS: [(&str, &str); 2] = [("tunnel", "Со второй стороной"), ("local", "Всё на одной машине")];
 
 /// Потолок записи (`Cfg::access()`, значения — те же слова, что понимает
 /// дочерний `mcp-1c`, `read_write`/`read_only`: перевод создал бы третью
@@ -364,7 +364,7 @@ impl Tray {
     /// называется строкой журнала (`gui::skill_line`, `gui::refresh_line`), а
     /// не снятой галочкой. Та же половина, что у факта набора
     /// (`verify::cheap` → `local_editor_mcp_fact`): расходиться им нельзя.
-    pub fn set_agents(&self, mode: &str) {
+    pub fn set_agents(&self) {
         // Раздел не гаснет серым, а исчезает — решение владельца 30.10,
         // увидевшего четыре серых пункта и спросившего «может скрывать это
         // меню в туннельном режиме?»; оно же было его изначальным «раздела
@@ -372,7 +372,7 @@ impl Tray {
         // ними делать, — а вопрос «почему серо» задавал каждому, кто его
         // открыл. Диск при этом не читаем вовсе: лишний поход за знанием,
         // которого всё равно не покажем.
-        let live = editors::agents_live_here(mode);
+        let live = true;
         if live != self.agents_shown.get() {
             let changed = if live {
                 // Вернуть на прежнее место, а не в конец: раздел стоит между
@@ -398,7 +398,7 @@ impl Tray {
                 None => Ok(editors::Found::Missing),
             };
             item.set_checked(agent_checked(&found));
-            item.set_enabled(agent_available(mode, present));
+            item.set_enabled(agent_available(present));
         }
     }
 }
@@ -424,8 +424,8 @@ fn agent_checked(found: &Result<editors::Found, String>) -> bool {
 /// агент на машине вообще есть — отсутствующего агента показываем
 /// недоступным, а не прячем вовсе: набор агентов расширяется, и серый пункт —
 /// единственный способ человеку узнать, что агент вообще поддерживается.
-fn agent_available(mode: &str, present: bool) -> bool {
-    editors::agents_live_here(mode) && present
+fn agent_available(present: bool) -> bool {
+    present
 }
 
 /// Состояние значка по точке карточки: трей следует тому же порядку
@@ -716,7 +716,7 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
             let label = MODE_WORDS.iter().find(|(m, _)| *m == mode).map(|(_, t)| *t).unwrap_or(mode);
             note_line(cx.global_mut::<Ui>(), unsaved_switch_line("режим работы", label, why));
             if let Some(tray) = &cx.global::<Ui>().tray {
-                tray.set_agents(mode);
+                tray.set_agents();
             }
             cx.global_mut::<Ui>().tab = tab_for_unsaved_switch();
             window::show_window(cx);
@@ -754,11 +754,9 @@ fn apply_mode(cx: &mut App, mode: &'static str) {
 /// обходит переключатель.
 fn recycle_session(cx: &mut App) {
     run_readiness(cx.global_mut::<Ui>());
-    let mode = cx.global::<Ui>().cfg.current().mode.clone();
     if let Some(tray) = &cx.global::<Ui>().tray {
-        // Доступность «Локальных агентов» зависит от режима — обязана
-        // обновиться тут же (задача «Управление переехало в трей»).
-        tray.set_agents(&mode);
+        // Раздел «Локальные агенты» обновляется тут же (задача «Управление переехало в трей»).
+        tray.set_agents();
     }
     // Параметры сеанса (база, логин, пароль, транспорт) — целиком
     // собственность ТЕКУЩЕГО соединения, и после любой правки старый сеанс
@@ -2222,10 +2220,8 @@ mod tests {
     /// если агент на машине вообще есть — любое из двух условий само по
     /// себе не хватает.
     #[test]
-    fn an_agent_item_needs_agents_here_and_the_agent_present() {
-        assert!(agent_available("local", true));
-        assert!(!agent_available("local", false), "агента нет — нечего включать галочкой");
-        assert!(!agent_available("tunnel", true), "в туннеле агентов настраивает образ, не мы");
-        assert!(!agent_available("tunnel", false));
+    fn an_agent_item_needs_the_agent_present() {
+        assert!(agent_available(true));
+        assert!(!agent_available(false), "агента нет — нечего включать галочкой");
     }
 }

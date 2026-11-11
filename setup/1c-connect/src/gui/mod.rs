@@ -1451,8 +1451,8 @@ fn allowed(looks: &[Result<crate::editors::Found, String>]) -> Vec<usize> {
 /// набора и на эту доставку, третьего счёта режима в программе нет) и в
 /// комплекте есть что доставлять. Не сошлось — ни опроса агентов, ни похода
 /// за каталогом отпечатков, ни строки в журнал.
-fn delivery_needed(mode: &str, kit_has_skills: bool) -> bool {
-    crate::editors::agents_live_here(mode) && kit_has_skills
+fn delivery_needed(kit_has_skills: bool) -> bool {
+    kit_has_skills
 }
 
 /// Тихая доставка при запуске окна (задача 6) — без всякого щелчка: скиллы
@@ -1495,10 +1495,11 @@ fn delivery_needed(mode: &str, kit_has_skills: bool) -> bool {
 /// (`verify::cheap`): в туннельном режиме на машине, которая раньше была
 /// локальной (переключение штатное, `apply_mode`), запуск окна опрашивал всех
 /// четырёх агентов и МОЛЧА обновлял каталоги навыков в доме человека — в
-/// режиме, где раздела «Локальные агенты» нет вовсе и отменить это галочкой
-/// нельзя. Спека, строка 60: «В туннельном режиме делать не нужно ничего».
-fn refresh_skills(kit: &Kit, exe: &std::path::Path, mode: &str) -> Vec<Line> {
-    if !delivery_needed(mode, kit.path(crate::skills::KIT_DIR).exists()) {
+/// Условие осталось одно: есть ли в комплекте что доставлять. Прежде вторым
+/// был режим — «в туннельном режиме делать не нужно ничего», — и уехал он
+/// вместе со средой (11.11): агенты живут там, где человек.
+fn refresh_skills(kit: &Kit, exe: &std::path::Path) -> Vec<Line> {
+    if !delivery_needed(kit.path(crate::skills::KIT_DIR).exists()) {
         return Vec::new();
     }
     // Причину отказа состояния несём словами, как и щелчок (`skills_plan`):
@@ -1588,11 +1589,11 @@ fn refresh_line(label: &str, done: &crate::skills::Done) -> Option<Line> {
 /// первого показа трея; названо здесь, чтобы не считалось невозможным.
 fn start_skill_refresh(cx: &mut App) {
     let ui = cx.global::<Ui>();
-    let (kit, tx, mode) = (ui.kit.clone(), ui.tx.clone(), ui.cfg.current().mode.clone());
+    let (kit, tx) = (ui.kit.clone(), ui.tx.clone());
     AGENT_CLICKS.fetch_add(1, Ordering::Relaxed);
     std::thread::spawn(move || {
         let lines = match std::env::current_exe() {
-            Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe, &mode)))
+            Ok(exe) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| refresh_skills(&kit, &exe)))
                 .unwrap_or_else(|_| vec![Line { kind: Kind::Fail, text: PANIC_TEXT.into() }]),
             Err(e) => {
                 vec![Line {
@@ -2048,7 +2049,7 @@ fn handle(ev: Ev, cx: &mut App) {
             // что правда лежит в файле агента — щелчок её только попросил.
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
-                tray.set_agents(&ui.cfg.current().mode);
+                tray.set_agents();
             }
             cx.refresh_windows();
             // Почва сдвинулась — тем же порядком, что у `Ev::Done`: факт
@@ -2245,7 +2246,7 @@ fn handle(ev: Ev, cx: &mut App) {
             let ui = cx.global::<Ui>();
             if let Some(tray) = &ui.tray {
                 if !ui.agent_clicks.iter().any(|&t| agent_click_busy(t, now)) {
-                    tray.set_agents(&ui.cfg.current().mode);
+                    tray.set_agents();
                 }
             }
         }
@@ -2370,7 +2371,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // переехало в трей») — те же два факта (`zed_present`/`pi_present`, поставлены ли
         // наши записи) теперь живут галочками подменю «Локальные агенты», и им нужна та
         // же первичная поправка, что у потолка записи выше.
-        tray.set_agents(&cfg.current().mode);
+        tray.set_agents();
         // Начальное значение признака на диске — то же, с чем рождается `ui.enabled` строкой ниже: подкоманда `mcp`, стартовавшая раньше первого щелчка по переключателю, должна увидеть то же решение, что уже посчитал замок (`serve_on_start`), а не вчерашний файл. Журнала для этой ошибки здесь ещё нет — `Ui` не выставлен ни строкой ниже; первый же щелчок переключателем перезапишет файл и громко скажет, если он и тогда не пишется.
         let _ = crate::allow::write(&kit, serve_on_start);
         // Книга открывается один раз, на запуске, и до того, как `kit` уедет

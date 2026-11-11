@@ -365,14 +365,15 @@ pub fn gate_text(why: &str) -> String {
 /// заголовок карточки причина не идёт ни в каком виде («не надо там прозу
 /// писать, она не лезет», заказчик 2026-10-21). Сказать нечего — подсказка
 /// объясняет сам переключатель.
-pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>, mode: &str) -> String {
+pub fn switch_tooltip(gate: Option<&str>, reason: Option<&str>) -> String {
     match (gate, reason) {
         (Some(why), _) => gate_text(why),
         (None, Some(why)) => why.to_string(),
-        // Словарь закона окна: «доступ к 1С». Прежде здесь стояло «Обслуживание вызовов агента (MCP)» — два слова разработчика в одной
-        // подсказке, и ни одного из них нет больше нигде на экране.
-        (None, None) if mode == "local" => "Доступ к 1С".into(),
-        (None, None) => "Туннель в среду разработки".into(),
+        // Словарь закона окна: «доступ к 1С», и он один на все сочетания.
+        // Прежде здесь стояло «Обслуживание» в одном месте и «Туннель в
+        // среду разработки» в подсказке; среда уехала 11.11, а второго
+        // слова на экране нет больше нигде.
+        (None, None) => "Доступ к 1С".into(),
     }
 }
 
@@ -4015,7 +4016,7 @@ impl Render for Panel {
                     .focus_ring(false)
                     .checked(link.is_on())
                     .disabled(switch_locked(gate.as_deref(), link.is_on(), has_progress))
-                    .tooltip(switch_tooltip(gate.as_deref(), why.as_deref(), &mode))
+                    .tooltip(switch_tooltip(gate.as_deref(), why.as_deref()))
                     .on_change(|_, _, cx| gui::toggle_link(cx)),
             );
 
@@ -4875,9 +4876,8 @@ mod tests {
         // Причина живёт в подсказке, а не в заголовке карточки.
         let text = reason(&State::Off, &Verdict::Checking, why, None);
         assert_eq!(text.as_deref(), Some("Нельзя включить: не задан пользователь базы"));
-        assert_eq!(switch_tooltip(why, text.as_deref(), "local"), "Нельзя включить: не задан пользователь базы");
-        assert_eq!(switch_tooltip(None, None, "local"), "Доступ к 1С");
-        assert_eq!(switch_tooltip(None, None, "tunnel"), "Туннель в среду разработки");
+        assert_eq!(switch_tooltip(why, text.as_deref()), "Нельзя включить: не задан пользователь базы");
+        assert_eq!(switch_tooltip(None, None), "Доступ к 1С");
         let c = card(None, &State::Off, "local", &Verdict::Checking, None, Instant::now());
         assert_eq!(c.title, OFF_WORD, "причина в заголовок не идёт — она туда не влезает");
     }
@@ -4895,9 +4895,9 @@ mod tests {
         assert_eq!(why.as_deref(), Some("порт 7771 занят процессом 1234"));
         // А переключатель заперт замком — и говорит про замок.
         assert!(switch_locked(Some(gate), link.is_on(), false));
-        assert_eq!(switch_tooltip(Some(gate), why.as_deref(), "local"), "Нельзя включить: не задан пользователь базы");
+        assert_eq!(switch_tooltip(Some(gate), why.as_deref()), "Нельзя включить: не задан пользователь базы");
         // Замка нет — подсказка отдаёт ту же причину, что и карточка.
-        assert_eq!(switch_tooltip(None, why.as_deref(), "local"), "порт 7771 занят процессом 1234");
+        assert_eq!(switch_tooltip(None, why.as_deref()), "порт 7771 занят процессом 1234");
     }
 
     /// Зелёной точки до вердикта не бывает: пока готовность считается, точка
@@ -6464,21 +6464,12 @@ mod tests {
 
     #[test]
     fn an_undecryptable_password_is_explained_in_words() {
-        let l = undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "password")]).expect("строка есть");
+        let l = undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "db_password")]).expect("строка есть");
         assert_eq!(l.kind, Kind::Warn);
         assert!(l.text.contains("Buh"), "карточка названа по имени (задача 10): {}", l.text);
         assert!(l.text.contains("другой машине") || l.text.contains("другим пользователем"), "{}", l.text);
         assert!(l.text.contains("введите"), "{}", l.text);
-        assert!(l.text.contains("рабочего места"), "поле названо словами человека: {}", l.text);
-    }
-
-    #[test]
-    fn both_fields_are_named_in_one_line() {
-        let l =
-            undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "password"), crate::cfg::Undecryptable::new("Buh", "db_password")])
-                .unwrap();
-        assert!(l.text.contains("рабочего места") && l.text.contains("базы"), "{}", l.text);
-        assert_eq!(l.text.matches("Buh").count(), 1, "одна карточка — одно предложение о ней: {}", l.text);
+        assert!(l.text.contains("пользователя базы"), "поле названо словами человека: {}", l.text);
     }
 
     /// Задача 10: две карточки — два предложения, каждое со своим именем.
@@ -6510,9 +6501,9 @@ mod tests {
     /// вполне точным словом. Решение закреплено тестом, а не только
     /// комментарием у ветки `_`.
     #[test]
-    fn an_unknown_field_name_falls_back_to_the_workstation_password() {
+    fn an_unknown_field_name_is_still_named_in_words() {
         let l = undecryptable_line(&[crate::cfg::Undecryptable::new("Buh", "unknown")]).unwrap();
-        assert!(l.text.contains("рабочего места"), "{}", l.text);
+        assert!(l.text.contains("пользователя базы"), "{}", l.text);
     }
 
     /// Minor 1 кругового ревью задачи 5: прежний тест требовал только имени

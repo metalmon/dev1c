@@ -25,10 +25,10 @@ fn a_fresh_ui_has_not_run_the_readiness_check_yet() {
 #[test]
 fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
     let mut ui = Ui::for_test();
-    let warn_count = |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && l.text.contains("рабочего места")).count();
+    let warn_count = |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && l.text.contains("пользователя базы")).count();
 
     let mut broken = ui.cfg.clone();
-    broken.undecryptable = vec![cfg::Undecryptable::new("Buh", "password")];
+    broken.undecryptable = vec![cfg::Undecryptable::new("Buh", "db_password")];
 
     adopt_cfg(&mut ui, broken.clone());
     assert_eq!(warn_count(&ui), 1, "первая загрузка с незакрытым паролем — одна строка");
@@ -57,16 +57,17 @@ fn an_undecryptable_password_is_noted_once_per_load_not_per_show() {
 #[test]
 fn a_second_field_joining_the_list_is_noted_again() {
     let mut ui = Ui::for_test();
-    let warn_count =
-        |ui: &Ui| ui.log.iter().filter(|l| l.kind == Kind::Warn && (l.text.contains("рабочего места") || l.text.contains("базы"))).count();
+    let warn_count = |ui: &Ui| {
+        ui.log.iter().filter(|l| l.kind == Kind::Warn && (l.text.contains("пользователя базы") || l.text.contains("базы"))).count()
+    };
 
     let mut one = ui.cfg.clone();
-    one.undecryptable = vec![cfg::Undecryptable::new("Buh", "password")];
+    one.undecryptable = vec![cfg::Undecryptable::new("Buh", "db_password")];
     adopt_cfg(&mut ui, one);
     assert_eq!(warn_count(&ui), 1, "одно поле — одна строка");
 
     let mut both = ui.cfg.clone();
-    both.undecryptable = vec![cfg::Undecryptable::new("Buh", "password"), cfg::Undecryptable::new("Buh", "db_password")];
+    both.undecryptable = vec![cfg::Undecryptable::new("Buh", "db_password"), cfg::Undecryptable::new("Buh", "db_password")];
     adopt_cfg(&mut ui, both);
     assert_eq!(warn_count(&ui), 2, "список стал другим — новая строка, хоть первое поле и было уже сказано");
 }
@@ -606,33 +607,13 @@ fn the_startup_delivery_speaks_whenever_there_is_something_to_say() {
     assert!(line.text.contains("beta"), "правленый обязан быть назван: {line:?}");
 }
 
-/// Пункт 1 ревью целого (дефект режима): в туннельном режиме тихой доставки
-/// нет вовсе — ни опроса агентов, ни раскладки в доме человека, ни строки в
-/// журнал. Решение держим на чистой функции (`delivery_needed`), а не на
-/// живом проходе: в локальном режиме настоящий проход полез бы в настоящий
-/// дом человека и в CLI агентов, что правила задачи запрещают прямо.
-///
-/// Падает на обеих подменах, от которых стоит: выкинуть режим из условия —
-/// падает строка про `tunnel`; выкинуть проверку комплекта — падает строка
-/// про комплект без скиллов. Строка `refresh_skills` ниже сторожит, что
-/// решение и правда стоит на входе доставки, а не осталось функцией, которую
-/// никто не зовёт.
+/// Доставка навыков при запуске окна решается одним условием — есть ли в
+/// комплекте что доставлять. Прежде вторым был режим, и он уехал со средой
+/// (11.11): агенты живут там, где человек.
 #[test]
-fn the_startup_delivery_does_nothing_at_all_in_tunnel_mode() {
-    assert!(delivery_needed("local", true), "локальный режим с комплектом — доставка нужна");
-    assert!(!delivery_needed("tunnel", true), "в туннельном режиме делать не нужно ничего");
-    assert!(!delivery_needed("something-else", true), "незнакомый режим локальным не считаем");
-    assert!(!delivery_needed("local", false), "в комплекте нечего доставлять");
-
-    // И сама доставка молчит, не сходив ни к агентам, ни за каталогом
-    // отпечатков: комплект здесь со скиллами, то есть пустой ответ может
-    // дать только режим.
-    let root = crate::project::tempdir::Dir::new();
-    std::fs::create_dir_all(root.path().join(crate::skills::KIT_DIR).join("1c")).unwrap();
-    std::fs::write(root.path().join(crate::skills::KIT_DIR).join("1c/SKILL.md"), "текст скилла").unwrap();
-    let kit = Kit::at(root.path());
-    let lines = refresh_skills(&kit, std::path::Path::new("c:/нет-такого/1c-connect.exe"), "tunnel");
-    assert!(lines.is_empty(), "в туннельном режиме говорить нечего: {lines:?}");
+fn the_startup_delivery_asks_only_whether_the_kit_has_anything() {
+    assert!(delivery_needed(true), "комплект со скиллами — доставка нужна");
+    assert!(!delivery_needed(false), "в комплекте нечего доставлять");
 }
 
 /// Круг исправления задачи 6, пункт 3: `allowed` таблицей — тем же приёмом,

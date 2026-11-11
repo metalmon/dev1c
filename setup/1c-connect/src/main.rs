@@ -20,7 +20,7 @@ use std::sync::Arc;
 #[command(
     name = "1c-connect",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Подключение машины с 1С к среде разработки",
+    about = "Доступ агента к 1С: мост к инструментам и связь со второй стороной",
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -54,7 +54,7 @@ enum Cmd {
     Install,
     /// Снять расширение из базы и забыть отпечаток сервера.
     Uninstall,
-    /// Поднять туннель и мост; работает, пока не нажать Ctrl+C.
+    /// Поднять мост к инструментам; работает, пока не нажать Ctrl+C.
     Connect,
     /// Без окна: поднять сеанс и держать его до Ctrl+C/SIGTERM. Для стенда и
     /// другого автозапуска без рабочего стола.

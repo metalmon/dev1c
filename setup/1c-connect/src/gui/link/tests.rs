@@ -156,7 +156,7 @@ fn the_hour_belongs_to_a_full_set() {
 fn link_lines_say_what_happened_without_naming_an_environment() {
     // Ни адреса, ни рабочего места: среда уехала (11.11), и строка журнала
     // говорит только о том, что включается и что выключено.
-    assert_eq!(link_line(&State::Connecting).unwrap().text, "включаю MCP");
+    assert_eq!(link_line(&State::Connecting).unwrap().text, "включаю доступ к 1С");
     assert_eq!(link_line(&State::Off).unwrap().text, "отключено");
     assert!(link_line(&State::Up { since: Instant::now() }).is_none());
 }

@@ -255,7 +255,7 @@ fn saving_a_new_base_restarts_the_session_and_writes_one_journal_line() {
     assert_eq!(ui.session_gen, gen_before + 1, "сеанс перезапущен один раз");
     let new_lines = &ui.log[log_before..];
     assert_eq!(new_lines.len(), 1, "{new_lines:?}");
-    assert_eq!(new_lines[0].text, "MCP перезапущены: база C:\\Bases\\Other");
+    assert_eq!(new_lines[0].text, "Доступ к 1С перезапущен: база C:\\Bases\\Other");
     assert!(ui.session.is_some());
     let _ = ui.session.take().unwrap().stop();
 }
@@ -280,7 +280,7 @@ fn saving_a_new_base_in_local_mode_keeps_the_session_and_does_not_restart() {
     assert_eq!(ui.session_gen, gen_before, "сеанс не перезапущен");
     let new_lines = &ui.log[log_before..];
     assert_eq!(new_lines.len(), 1, "{new_lines:?}");
-    assert_eq!(new_lines[0].text, "MCP: параметры обновлены, база C:\\Bases\\Other");
+    assert_eq!(new_lines[0].text, "Доступ к 1С: параметры обновлены, база C:\\Bases\\Other");
     let _ = ui.session.take().unwrap().stop();
 }
 
@@ -355,7 +355,7 @@ fn saving_away_a_cold_condition_asks_first() {
     assert_eq!(locks_gate(gate_before.as_deref(), None, true), None);
     // Диалог называет последствие, а не одно «Сохранить?».
     let (message, detail) = confirm_gate_text(&why);
-    assert!(message.contains("MCP выключатся"), "{message}");
+    assert!(message.contains("доступ к 1С выключится"), "{message}");
     assert!(detail.contains("пользователь базы"), "{detail}");
 
     // И то же через настоящий вход окна. Поле берём такое, которого нет в
@@ -395,7 +395,7 @@ fn saving_away_a_cold_condition_douses_the_card_too() {
     assert_eq!(ui.link, State::Off, "карточка и переключатель обязаны показать «выключено»");
     // Строка про гашение ровно одна (про обновлённые параметры рядом —
     // своя и законная: это другое событие).
-    let doused: Vec<&Stamped> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("MCP выключены:")).collect();
+    let doused: Vec<&Stamped> = ui.log[log_before..].iter().filter(|l| l.text.starts_with("Доступ к 1С выключен:")).collect();
     // Какое именно условие назовёт строка, решает порядок `cold_gate`, а в
     // каталоге теста не выполнено сразу несколько — здесь проверяется сам
     // факт гашения со строкой, а список условий стережёт `gate::tests`.

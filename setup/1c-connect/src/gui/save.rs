@@ -760,7 +760,7 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
             if let Some(s) = &ui.session {
                 s.update_cfg(ui.cfg.clone());
             }
-            note_line(ui, Line { kind: Kind::Say, text: format!("MCP: параметры обновлены, база {base_path}") });
+            note_line(ui, Line { kind: Kind::Say, text: format!("Доступ к 1С: параметры обновлены, база {base_path}") });
         } else {
             restart_session(ui, base_path);
         }
@@ -1691,7 +1691,7 @@ pub fn confirm_text(old_path: &str, new_path: &str) -> (String, String) {
 /// Текст того же диалога, когда правка не меняет базу, а гасит обслуживание:
 /// называем последствие и причину, а не одно «Сохранить?».
 pub fn confirm_gate_text(why: &str) -> (String, String) {
-    ("После сохранения MCP выключатся — агент перестанет отвечать. Сохранить?".to_string(), format!("включать будет нечего: {why}"))
+    ("После сохранения доступ к 1С выключится — агент перестанет отвечать. Сохранить?".to_string(), format!("включать будет нечего: {why}"))
 }
 
 /// Текст своего диалога у «Сделать текущим» (круг починки 3 задачи 16) —

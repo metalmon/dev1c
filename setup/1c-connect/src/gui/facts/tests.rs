@@ -379,7 +379,7 @@ fn a_busy_verdict_is_never_green_on_any_surface() {
     let c = panel::card(None, &up, "local", &busy, None, now);
     assert_ne!(c.dot, Dot::Up, "«занято» показано зелёным: {:?}", c.title);
     assert_eq!((c.dot, c.title.as_str()), (Dot::Busy, "Занято"));
-    assert_ne!(c.title, "MCP включены");
+    assert_ne!(c.title, "Доступ к 1С включён");
 
     // Подвал: причина — словами факта.
     let why = panel::reason(&up, &busy, None, Some("15:54")).expect("причина занятости названа");

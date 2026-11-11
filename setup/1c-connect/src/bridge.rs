@@ -192,7 +192,7 @@ use tokio::sync::mpsc;
 /// Общее начало обоих отказов «MCP выключены» — с советом включить и с
 /// причиной замка. Тестам гейта важен сам отказ, а не его хвост, и смотрят они
 /// сюда: иначе каждый из них зависел бы от того, заперт ли сейчас замок.
-pub const DISABLED_PREFIX: &str = "MCP выключены в 1c-connect";
+pub const DISABLED_PREFIX: &str = "Доступ к 1С выключен в 1c-connect";
 
 /// Когда свой раннер последний раз что-то сказал, в секундах эпохи (0 — ни
 /// разу за этот запуск программы).
@@ -227,7 +227,7 @@ pub fn runner_answered_ago() -> Option<std::time::Duration> {
 }
 
 /// Текст отказа на вызов инструмента, пока переключатель «MCP» в окне выключен.
-pub const DISABLED_TEXT: &str = "MCP выключены в 1c-connect: включите переключатель в окне";
+pub const DISABLED_TEXT: &str = "Доступ к 1С выключен в 1c-connect: включите переключатель в окне";
 
 /// Почему обслуживание не идёт, пока оно не идёт: причина холодного замка
 /// (`gui::gate::cold_gate`) или отказ, который его погасил (занят порт, не
@@ -926,7 +926,7 @@ pub async fn pipe_jsonrpc<S>(
                 in_flight.store(0, Ordering::Relaxed);
                 let _ = err_tail.await;
                 drop(job);
-                log(Event::Say(format!("{who}: MCP выключены — ребёнок освобождён, соединение остаётся")));
+                log(Event::Say(format!("{who}: доступ к 1С выключен — ребёнок освобождён, соединение остаётся")));
                 // Без ребёнка, пока не включат снова: та же `handle_request`,
                 // которой отвечается и живой ребёнок, со `stdin: None` —
                 // второй механизм ответа без ребёнка заводить незачем,
@@ -958,10 +958,10 @@ pub async fn pipe_jsonrpc<S>(
                     }
                     tokio::select! {
                         n = sr.read(&mut buf) => match n {
-                            Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока MCP были выключены".to_string()),
+                            Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока доступ к 1С был выключен".to_string()),
                             Ok(n) => pending_frames.extend(f.push(&buf[..n])),
                         },
-                        () = crate::orphan::launcher_gone() => break 'connection (-1, true, "агент отключился, пока MCP были выключены".to_string()),
+                        () = crate::orphan::launcher_gone() => break 'connection (-1, true, "агент отключился, пока доступ к 1С был выключен".to_string()),
                         _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                     }
                 }
@@ -970,7 +970,7 @@ pub async fn pipe_jsonrpc<S>(
                 let (now_gen, now_cfg) = rules.live.get();
                 gen = now_gen;
                 cfg = now_cfg;
-                log(Event::Say(format!("{who}: MCP включены — поднимаю ребёнка в {}", cfg.current().base_path)));
+                log(Event::Say(format!("{who}: доступ к 1С включён — поднимаю ребёнка в {}", cfg.current().base_path)));
                 continue;
             }
         }
@@ -2318,7 +2318,7 @@ mod tests {
     #[test]
     fn the_refusal_carries_the_off_reason() {
         assert_eq!(disabled_text(None), DISABLED_TEXT);
-        assert_eq!(disabled_text(Some("не задан пользователь базы")), "MCP выключены в 1c-connect: не задан пользователь базы");
+        assert_eq!(disabled_text(Some("не задан пользователь базы")), "Доступ к 1С выключен в 1c-connect: не задан пользователь базы");
     }
 
     #[tokio::test]

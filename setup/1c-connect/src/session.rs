@@ -125,7 +125,7 @@ impl State {
         match self {
             State::Off => {
                 if local {
-                    "MCP выключены".into()
+                    "Доступ к 1С выключен".into()
                 } else {
                     "не подключён".into()
                 }
@@ -139,7 +139,7 @@ impl State {
             }
             State::Up { since } => {
                 let m = since.elapsed().as_secs() / 60;
-                let verb = if local { "MCP включены" } else { "подключён" };
+                let verb = if local { "доступ к 1С включён" } else { "подключён" };
                 if m < 60 {
                     format!("{verb} {m} мин")
                 } else {
@@ -838,9 +838,9 @@ mod tests {
     /// первое, и карточка навсегда застряла на «Включаю…».
     #[test]
     fn the_rise_of_the_channel_is_a_state_signal_and_a_quiet_journal_line() {
-        let up = State::Connecting.next(&Event::Ok("MCP включены: порты 7771 и 7781".into()));
+        let up = State::Connecting.next(&Event::Ok("Доступ к 1С включён: порты 7771 и 7781".into()));
         assert!(up.is_up(), "по `Ok` связь обязана стать поднятой");
-        match for_log(&Event::Ok("MCP включены: порты 7771 и 7781".into()), up.is_up()) {
+        match for_log(&Event::Ok("Доступ к 1С включён: порты 7771 и 7781".into()), up.is_up()) {
             Event::Say(t) => assert!(t.contains("7771"), "{t}"),
             other => panic!("подъём канала в журнале обязан быть нейтральным, а не зелёным: {other:?}"),
         }
@@ -873,9 +873,9 @@ mod tests {
 
     #[test]
     fn local_mode_labels_speak_about_mcp() {
-        assert_eq!(State::Off.label("local"), "MCP выключены");
+        assert_eq!(State::Off.label("local"), "Доступ к 1С выключен");
         assert_eq!(State::Connecting.label("local"), "включаю…");
-        assert_eq!(State::Up { since: Instant::now() }.label("local"), "MCP включены 0 мин");
+        assert_eq!(State::Up { since: Instant::now() }.label("local"), "доступ к 1С включён 0 мин");
         // Отказ — сама причина, без слова «подключён»: в локальном режиме
         // связи со средой нет, есть только слушатели на петле.
         assert_eq!(State::Failed("порт занят".into()).label("local"), "порт занят");

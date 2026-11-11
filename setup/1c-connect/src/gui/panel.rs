@@ -280,7 +280,7 @@ pub fn card(progress: Option<&Running>, link: &State, mode: &str, ready: &Verdic
     let (dot, title): (Dot, String) = match link {
         State::Off => (Dot::Off, off_title()),
         State::Connecting => (Dot::Busy, if local { "Включаю…".into() } else { "Подключаюсь…".into() }),
-        State::Up { .. } => (Dot::Up, if local { "MCP включены".into() } else { "Подключён".into() }),
+        State::Up { .. } => (Dot::Up, if local { "Доступ к 1С включён".into() } else { "Подключён".into() }),
         State::Retrying(_) => (Dot::Busy, "Переподключаюсь".into()),
         // Сюда не доходит — отказ разобран выше; арм остаётся ради полноты.
         State::Failed(_) => (Dot::Down, "Не подключён".into()),
@@ -5081,7 +5081,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(card(None, &State::Off, "local", &Verdict::Checking, None, now).title, OFF_WORD);
         assert_eq!(card(None, &State::Connecting, "local", &Verdict::Checking, None, now).title, "Включаю…");
-        assert_eq!(card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now).title, "MCP включены");
+        assert_eq!(card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now).title, "Доступ к 1С включён");
         // Отказ называет состояние, а не причину: причина («порт 7771 занят
         // процессом 1234») длиннее строки карточки и живёт в подсказке
         // переключателя и в журнале (заказчик 2026-10-21).
@@ -5127,7 +5127,7 @@ mod tests {
     fn passed_readiness_keeps_the_green_card() {
         let now = Instant::now();
         let c = card(None, &State::Up { since: now }, "local", &Verdict::Ready, None, now);
-        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "MCP включены"));
+        assert_eq!((c.dot, c.title.as_str()), (Dot::Up, "Доступ к 1С включён"));
     }
 
     /// Critical 1 финального ревью ветки: исключения по режиму нет. Прежний
@@ -5163,7 +5163,7 @@ mod tests {
         // А состояние туннеля не потеряно: зелёный вердикт называется словами
         // про связь, и они разные в разных режимах.
         assert_eq!(card(None, &up, "tunnel", &Verdict::Ready, None, now).title, "Подключён");
-        assert_eq!(card(None, &up, "local", &Verdict::Ready, None, now).title, "MCP включены");
+        assert_eq!(card(None, &up, "local", &Verdict::Ready, None, now).title, "Доступ к 1С включён");
         assert_eq!(reason(&up, &Verdict::Ready, None, Some("15:54")), None, "о зелёном объяснять нечего");
     }
 

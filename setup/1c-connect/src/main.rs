@@ -243,6 +243,10 @@ fn run() -> Result<()> {
             for note in &ctx.cfg.read_notes {
                 println!("  [ !! ] {note}");
             }
+            // Ушедшие ключи — сведение, а не находка: программа работает, а строки в файле просто больше никто не читает.
+            for note in &ctx.cfg.gone_keys() {
+                println!("  [info] {note}");
+            }
             println!();
             for (id, title, st) in common::run::status(&ctx, &ops) {
                 println!("  {:<16} {:<26} {}", id, title, st.label());

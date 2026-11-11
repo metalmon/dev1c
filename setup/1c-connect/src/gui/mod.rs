@@ -180,6 +180,9 @@ pub struct Ui {
     /// сказано» фраза про опечатку в `current` сыпалась бы в журнал на
     /// каждое открытие окна.
     pub read_notes_noted: Vec<String>,
+    /// То же «уже сказано» для ушедших ключей файла (`cfg::Cfg::gone_keys`): фраза о них — сведение, и звучать ей положено один раз
+    /// на загрузку, а не на каждый показ.
+    pub gone_keys_noted: Vec<String>,
     /// Ключи карточек, о чьём сиротстве человеку уже сказали.
     ///
     /// Говорить об этом надо ОДИН раз, а не на каждом событии: книга
@@ -868,6 +871,15 @@ pub fn adopt_cfg(ui: &mut Ui, cfg: Cfg) {
         ui.read_notes_noted = cfg.read_notes.clone();
         for text in cfg.read_notes.iter() {
             note_line(ui, Line { kind: Kind::Warn, text: text.clone() });
+        }
+    }
+    // Ушедшие ключи файла — тем же приёмом «уже сказано», но СВЕДЕНИЕМ: исправлять их не нужно, они просто больше не читаются, и
+    // первое же «Сохранить» уносит их с диска само (`cfg::Cfg::gone_keys`).
+    let gone = cfg.gone_keys();
+    if gone != ui.gone_keys_noted {
+        ui.gone_keys_noted = gone.clone();
+        for text in gone {
+            note_line(ui, Line { kind: Kind::Say, text });
         }
     }
     ui.cfg = cfg;
@@ -2386,6 +2398,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             cfg,
             undecryptable_noted: Vec::new(),
             read_notes_noted: Vec::new(),
+            gone_keys_noted: Vec::new(),
             orphans_noted: Vec::new(),
             session: None,
             session_gen: 0,
@@ -2557,6 +2570,7 @@ impl Ui {
             cfg,
             undecryptable_noted: Vec::new(),
             read_notes_noted: Vec::new(),
+            gone_keys_noted: Vec::new(),
             orphans_noted: Vec::new(),
             session: None,
             session_gen: 0,

@@ -1126,6 +1126,40 @@ impl Combo {
     }
 }
 
+impl Cfg {
+    /// Ушедшие ключи файла — по карточкам, где они нашлись, уже готовой для человека фразой.
+    ///
+    /// **Это не находка разбора** (`read_notes`): те отказывают командной строке, а здесь отказывать не за что — программа работает,
+    /// просто перестала читать четыре ключа. Поэтому и слова другие: не «исправьте», а «можете убрать».
+    ///
+    /// С диска ключи уходят сами первым же «Сохранить»: печать блока берёт поля у структуры, а в ней их нет.
+    pub fn gone_keys(&self) -> Vec<String> {
+        self.connections
+            .iter()
+            .filter_map(|c| {
+                let found: Vec<&str> = [
+                    ("server", &c.gone_server),
+                    ("gitea", &c.gone_gitea),
+                    ("password", &c.gone_password),
+                    ("workstation", &c.gone_workstation),
+                ]
+                .into_iter()
+                .filter(|(_, v)| v.is_some())
+                .map(|(k, _)| k)
+                .collect();
+                (!found.is_empty()).then(|| {
+                    format!(
+                        "«{}»: {} в файле больше не читаются — среда разработки удалена из программы, связь со второй стороной \
+                         держит канал. Можете убрать эти строки из 1c-connect.toml.",
+                        c.name,
+                        found.join(", ")
+                    )
+                })
+            })
+            .collect()
+    }
+}
+
 /// Поля карточки соединения, которые реально показывает ТОПОЛОГИЯ — не режим
 /// машины (спека, «Что показывает карточка соединения»). Ветвление по двум
 /// осям: где база (`base_here`) и локально ли соединение (`mode == "local"`).
@@ -2734,6 +2768,33 @@ fn passwords_match(written: &Cfg, reread: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Файл, написанный до удаления среды, читается и работает — а про четыре ушедших ключа говорит словами.
+    ///
+    /// Без этого `deny_unknown_fields` отказал бы файлу, который вчера работал, и человек прочёл бы `unknown field \`server\``
+    /// вместо объяснения (план `2026-11-11-env-removal.md`, раздел 2.3).
+    #[test]
+    fn a_file_from_before_the_environment_was_removed_still_loads_and_says_which_keys_are_gone() {
+        let text = "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nserver = \"192.168.1.10:3393\"\ngitea = \
+                    \"http://localhost:3000\"\npassword = \"dev1\"\nworkstation = \"dev1\"\nbase_path = \"C:\\\\Bases\\\\Buh\"\n";
+        let c: Cfg = toml::from_str(text).expect("старый файл обязан читаться, а не отказывать");
+        assert_eq!(c.current().base_path, "C:\\Bases\\Buh", "и прочее в карточке на месте");
+        let said = c.gone_keys();
+        assert_eq!(said.len(), 1, "{said:?}");
+        for key in ["server", "gitea", "password", "workstation"] {
+            assert!(said[0].contains(key), "{key} не назван: {}", said[0]);
+        }
+        assert!(said[0].contains("Buh"), "карточка названа по имени: {}", said[0]);
+        // И ни одной находки разбора: отказывать тут не за что.
+        assert!(c.read_notes.is_empty(), "{:?}", c.read_notes);
+        // Напечатанный заново файл этих ключей уже не несёт.
+        let out = c.render(&secrets::Store::file(&tmp("gone"))).unwrap();
+        for key in ["server = ", "gitea = ", "workstation = "] {
+            assert!(!out.contains(key), "{key} уехал с диска первым же сохранением:\n{out}");
+        }
+        let back: Cfg = toml::from_str(&out).expect("напечатанный файл разбирается");
+        assert!(back.gone_keys().is_empty(), "перечитанный файл о них молчит");
+    }
 
     /// Пять сочетаний — ОДНОЙ таблицей, и шестого не бывает. Таблица — та же, что в спеке `connection-combinations.md`: ответы карточки,
     /// место базы, кто ждёт входящих и какие поля при этом показываются.

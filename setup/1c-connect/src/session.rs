@@ -417,12 +417,48 @@ pub struct Wiring {
 /// **Пустота здесь — это ответ, а не беда.** Сеанса нет — доступ к 1С выключен, и поток вызовов получает отказ словами. Второго места,
 /// где этот вопрос решался бы, не заводим: «включено ли» спрашивается тем, что ручка полна.
 #[derive(Clone, Default)]
-pub struct Serving(Arc<Mutex<Option<Arc<Serve>>>>);
+pub struct Serving(Arc<Mutex<Option<Open>>>);
+
+/// Чем именно обслуживает этот сеанс — и до каких пор.
+#[derive(Clone)]
+pub struct Open {
+    serve: Arc<Serve>,
+    /// Карточка, ПО КОТОРОЙ построен мост: его база, пользователь и пароль — её.
+    ///
+    /// **Хранится она затем, что без неё вызов уехал бы в чужую базу.** Допуск спрашивается по карточке из заголовка потока, а мост
+    /// поднимается по ТЕКУЩЕМУ соединению машины: у человека с двумя карточками сторона, зачисленная ко второй, получила бы базу
+    /// первой. Находка проверки безопасности 11.11, и внесена она была вместе с вызовами по каналу: прежде на том конце провода стояла
+    /// среда разработки, а теперь — произвольный партнёр.
+    card: crate::cfg::CardId,
+    /// Жив ли ещё сеанс. Рвёт потоки вызовов вместе с собой: «выключил — значит выключено», а не «выключено для новых».
+    stop: tokio::sync::watch::Receiver<bool>,
+}
+
+impl Open {
+    pub fn serve(&self) -> &Arc<Serve> {
+        &self.serve
+    }
+
+    /// Та ли это карточка, по которой построен мост.
+    pub fn is_for(&self, card: &crate::cfg::CardId) -> bool {
+        &self.card == card
+    }
+
+    /// Ждать конца сеанса. Возвращается, когда обслуживание выключили.
+    pub async fn until_stopped(&self) {
+        let mut stop = self.stop.clone();
+        while !*stop.borrow() {
+            if stop.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
 
 impl Serving {
-    /// Сеанс поднялся и готов обслуживать.
-    pub fn put(&self, serve: Arc<Serve>) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(serve);
+    /// Сеанс поднялся и готов обслуживать карточку `card`, пока не скажут `stop`.
+    pub fn put(&self, serve: Arc<Serve>, card: crate::cfg::CardId, stop: tokio::sync::watch::Receiver<bool>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Open { serve, card, stop });
     }
 
     /// Сеанс кончился: обслуживать больше нечем.
@@ -431,7 +467,7 @@ impl Serving {
     }
 
     /// Чем обслуживать прямо сейчас. `None` — доступ к 1С выключен.
-    pub fn now(&self) -> Option<Arc<Serve>> {
+    pub fn now(&self) -> Option<Open> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
@@ -473,7 +509,7 @@ pub fn start_with_enabled(
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             // Объявляем себя: с этой минуты поток узла знает, чем обслуживать вызовы, пришедшие по каналу. Снимается объявление
             // внизу, когда сеанс кончился, — и тем же самым снимается допуск к вызовам.
-            wiring.serving.put(serve.clone());
+            wiring.serving.put(serve.clone(), cfg.current().id().clone(), stop_rx.clone());
             let on_event = |e: Event| {
                 let mut s = state.lock().unwrap();
                 let next = s.clone().next(&e);

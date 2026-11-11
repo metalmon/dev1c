@@ -128,25 +128,30 @@ pub async fn run(
     // и число открытых дескрипторов растут без предела за долгий рабочий
     // день реконнектов.
     let mut open: Vec<(JoinHandle<()>, std::net::TcpStream)> = Vec::new();
+    // Вторые дескрипторы тех соединений, что уехали трубой в канал: своей задачи у них здесь нет, а закрывать их на остановке надо.
+    let mut piped: Vec<std::net::TcpStream> = Vec::new();
     let mut mcp_errors = 0u32;
     let mut vrunner_errors = 0u32;
     loop {
         tokio::select! {
             r = mcp_listener.accept() => {
-                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut piped, &mut mcp_errors).await?;
             }
             r = vrunner_listener.accept() => {
-                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut piped, &mut vrunner_errors).await?;
             }
             r = accept_maybe(&mcp6) => {
-                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut piped, &mut mcp_errors).await?;
             }
             r = accept_maybe(&vrunner6) => {
-                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut piped, &mut vrunner_errors).await?;
             }
             _ = stop.changed() => {
                 if *stop.borrow() {
                     for (_, w) in &open {
+                        let _ = w.shutdown(Shutdown::Both);
+                    }
+                    for w in &piped {
                         let _ = w.shutdown(Shutdown::Both);
                     }
                     return Ok(());
@@ -170,6 +175,7 @@ async fn handle_accept(
     port: u16,
     on_event: &impl Fn(Event),
     open: &mut Vec<(JoinHandle<()>, std::net::TcpStream)>,
+    piped: &mut Vec<std::net::TcpStream>,
     errors: &mut u32,
 ) -> anyhow::Result<()> {
     match r {
@@ -179,8 +185,21 @@ async fn handle_accept(
             // База на другом компьютере — соединение уходит трубой в канал, и своего ребёнка здесь не поднимают вовсе.
             if let Toward::Channel(to_channel) = toward {
                 if let Some(crate::session::Served::Mcp(kind)) = crate::session::Served::of_port(port, ports) {
-                    if let Err(why) = to_channel(kind, stream) {
-                        on_event(Event::Warn(why));
+                    // Второй дескриптор остаётся ЗДЕСЬ — тем же приёмом и по тому же доводу, что у своих мостов (`accept_for`):
+                    // труба уезжает в поток узла и нашей остановки не слышит, а человек, выключивший доступ к 1С, вправе ждать, что
+                    // выключилось и то, что уже идёт (находка проверки безопасности 11.11).
+                    match stream.into_std().and_then(|s| s.try_clone().map(|w| (s, w))) {
+                        Ok((s, watcher)) => match TcpStream::from_std(s) {
+                            Ok(stream) => {
+                                if let Err(why) = to_channel(kind, stream) {
+                                    on_event(Event::Warn(why));
+                                } else {
+                                    piped.push(watcher);
+                                }
+                            }
+                            Err(e) => on_event(Event::Warn(e.to_string())),
+                        },
+                        Err(e) => on_event(Event::Warn(e.to_string())),
                     }
                     return Ok(());
                 }

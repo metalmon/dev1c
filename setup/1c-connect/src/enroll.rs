@@ -975,6 +975,8 @@ fn named(msg: &Msg) -> &'static str {
         Msg::Revoked { .. } => "revoked",
         Msg::Refuse(_) => "refuse",
         Msg::Bye(_) => "bye",
+        Msg::McpOpen { .. } => "mcp_open",
+        Msg::McpOk => "mcp_ok",
     }
 }
 
@@ -2159,6 +2161,27 @@ mod tests {
             panic!("зовущая обязана сказать словами, а не уйти молча: {said:?}")
         };
         assert_eq!(no.code, code::VERSION, "{no:?}");
+    }
+
+    /// Заголовок потока ВЫЗОВОВ на управляющем потоке — не в свою очередь, и это говорится словами.
+    ///
+    /// Шаг 3 плана пары B: `mcp_open` уехал в общий словарь сообщений нарочно, и машинерия «кадр не в свою очередь» принимает его как
+    /// своего — отказывает по имени, а не глотает молча и не разваливает разбор кадра. Отдельное перечисление сообщений дало бы здесь
+    /// второй `KNOWN` и второе такое правило.
+    #[tokio::test]
+    async fn a_call_stream_header_on_the_control_stream_is_refused_by_name() {
+        let mut talk = Alone::new("mcp-open-here", Decision::Allow, |_book, _peer, _state| vec![a_card("Ромашка", "b1", true)]).await;
+
+        Frame::write(&mut talk.w, &Msg::McpOpen { base_id: "b1".into(), kind: crate::ops_host::McpServer::OneC }).await.unwrap();
+        let answered = Frame::read(&mut talk.r).await;
+        let Ok(Msg::Refuse(no)) = &answered else { panic!("ждали refuse словами: {answered:?}") };
+        assert_eq!(no.code, code::UNKNOWN_MESSAGE, "{no:?}");
+        assert!(no.text.contains("mcp_open"), "отказ называет то, что пришло, его же именем на проводе: {}", no.text);
+        assert!(no.text.contains("hello"), "и то, чего ждали: {}", no.text);
+
+        let (out, _book, asked) = talk.done().await;
+        assert!(out.is_err(), "{out:?}");
+        assert_eq!(asked, 0, "человека таким кадром не беспокоят");
     }
 
     /// Важно 7: незнакомое сообщение посреди разговора получает отказ НА

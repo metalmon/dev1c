@@ -1228,6 +1228,7 @@ mod tests {
         assert_eq!(live.cut(peer, &"Ромашка".into()).len(), 2, "своя карточка и безымянный");
         assert!(!live.alive(peer, ids[0]) && !live.alive(peer, ids[1]), "снятые ушли с учёта");
         assert!(live.alive(peer, ids[2]), "сосед той же стороны остался цел");
+
         assert!(live.cut(peer, &"Ромашка".into()).is_empty(), "второй отзыв резать нечего");
 
         // Присмотр кончился — разговор снимается по СВОЕМУ номеру, и дважды

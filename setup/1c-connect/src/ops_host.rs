@@ -1711,9 +1711,13 @@ pub fn ensure_publication(ctx: &Ctx) -> Result<()> {
 /// `1c` — mcp-1c, `vrunner` — vrunner-mcp. Через мост идут ровно эти два
 /// (спека «MCP в редакторе», «Не цели»), третьего не бывает — отдельный флаг
 /// или строка снаружи были бы дверью туда, куда ходить не должны.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+/// Имена на проводе — те же, что у флага командной строки («1c», «vrunner»): одно слово на оба применения, чтобы в кадре и в
+/// подсказке CLI человек видел одно и то же.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
 pub enum McpServer {
     #[value(name = "1c")]
+    #[serde(rename = "1c")]
     OneC,
     Vrunner,
 }

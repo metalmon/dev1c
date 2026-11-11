@@ -1137,6 +1137,80 @@ impl Combo {
     }
 }
 
+/// Законная пара сторон — одна из двух, какие бывают (спека сочетаний, «Как они складываются в пары»).
+///
+/// Пара A — звонит агент к базе (**2** ↔ **5**), пара B — звонит база к агенту (**3** ↔ **4**, основной способ по решению 1.11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pair {
+    A,
+    B,
+}
+
+/// Почему эти две стороны пары не образуют.
+///
+/// Невозможностей в законе четыре, а здесь их две — и это не недостача. Две другие («обе принимают» и «обе звонят») связью не
+/// лечатся вовсе: при них соединение не устанавливается, и никакой кадр ни до кого не доезжает — сказать о них может только
+/// догадка, а догадки в подсказках сняты решением владельца 10.11. Остаются те две, что по связи проходят, и у них впервые
+/// появляются свои слова вместо общего отказа «подходящей карточки нет».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mismatch {
+    /// База и здесь, и на той стороне — соединение не знает, с какой работать.
+    BothHaveBase,
+    /// Базы нет ни здесь, ни там — работать не с чем вовсе.
+    NeitherHasBase,
+    /// У этой стороны второй стороны нет вовсе: сочетание **1**, всё на одной машине.
+    Alone,
+}
+
+impl Mismatch {
+    /// Несовпадение по ОДНОЙ оси — где база. Одно место на обоих потребителей: закон пары (`Pair::of`) и машина, которой нечего
+    /// предложить этой стороне (`enroll::Cards::mismatch_for`). Второе место счёта стало бы вторым словарём того же понятия — тот
+    /// самый разряд дефектов, который на этой ветке ловили шесть раз.
+    pub fn of_sides(mine: crate::wire::Side, theirs: crate::wire::Side) -> Option<Mismatch> {
+        (mine == theirs).then_some(match theirs {
+            crate::wire::Side::WithBase => Mismatch::BothHaveBase,
+            crate::wire::Side::WithAgents => Mismatch::NeitherHasBase,
+        })
+    }
+
+    /// Слова человеку. Говорятся ТОЙ стороне, которая услышала несовпадение, — значит «у вас» в них про собеседника.
+    pub fn text(self) -> &'static str {
+        match self {
+            Mismatch::BothHaveBase => {
+                "База есть и здесь, и у вас — соединение не знает, с какой из них работать.\nНа одной из сторон выберите «База на \
+                 другом компьютере»."
+            }
+            Mismatch::NeitherHasBase => {
+                "Базы нет ни здесь, ни у вас — работать не с чем.\nНа той стороне, где стоит база, выберите «База здесь»."
+            }
+            Mismatch::Alone => "Это соединение настроено как «всё на одной машине»: второй стороны у него нет.",
+        }
+    }
+}
+
+impl Pair {
+    /// Складываются ли эти две стороны в законную пару — ОДНО место, где живёт таблица «пять сочетаний, две пары».
+    ///
+    /// Прежде закон жил только в спеке и в головах: `Side` на проводе есть, `Combo` в настройках есть, а соединить их и сказать
+    /// «эта пара законна» было негде. Несовпадение всплывало дальше по течению — общим отказом про подходящую карточку, то есть
+    /// симптомом вместо причины, — и проверить закон можно было только живым прогоном на двух машинах.
+    ///
+    /// Судит ОДНА ось — где база: роль добавочного знания не даёт, потому что соединение вообще существует лишь тогда, когда одна
+    /// сторона позвонила, а другая приняла. Отсюда и две невозможности вместо четырёх (см. `Mismatch`).
+    pub fn of(mine: Combo, theirs: crate::wire::Side) -> Result<Pair, Mismatch> {
+        let my_side = mine.side().ok_or(Mismatch::Alone)?;
+        if let Some(no) = Mismatch::of_sides(my_side, theirs) {
+            return Err(no);
+        }
+        Ok(match mine {
+            Combo::AcceptBaseHere | Combo::DialBaseThere => Pair::A,
+            Combo::AcceptBaseThere | Combo::DialBaseHere => Pair::B,
+            // Сюда не дойти: у `Alone` нет стороны, и `?` выше уже вернул отказ.
+            Combo::Alone => return Err(Mismatch::Alone),
+        })
+    }
+}
+
 impl Cfg {
     /// Ушедшие ключи файла — по карточкам, где они нашлись, уже готовой для человека фразой.
     ///
@@ -2841,6 +2915,43 @@ mod tests {
         // Нераспознанная роль читается как «подключаюсь сам»: кода ей не выдают, а транспорт ей всё равно поднимается — значит и поля
         // туннеля у неё показаны (их же держит `the_tunnel_fields_follow_the_one_axis_that_picks_the_transport`).
         assert_eq!(Combo::of(&card("tunnel", "белиберда", true)), Combo::DialBaseHere);
+    }
+
+    /// Закон о парах целиком: пять сочетаний × две стороны, какими может назваться собеседник, — десять клеток и ни одной мимо.
+    ///
+    /// До 12.11 этого теста не было и быть не могло: закон жил в спеке, а соединить своё сочетание с названной стороной
+    /// собеседника было негде. Несовпадение всплывало дальше по течению общим отказом про подходящую карточку — симптомом вместо
+    /// причины, — и доказать закон можно было только живым прогоном на двух машинах с кликом человека.
+    #[test]
+    fn the_pair_law_is_one_table_and_the_impossible_pairs_are_named() {
+        use crate::wire::Side::{WithAgents, WithBase};
+        // своё сочетание, сторона собеседника → пара или названное несовпадение
+        let table = [
+            (Combo::AcceptBaseHere, WithAgents, Ok(Pair::A)),
+            (Combo::DialBaseThere, WithBase, Ok(Pair::A)),
+            (Combo::AcceptBaseThere, WithBase, Ok(Pair::B)),
+            (Combo::DialBaseHere, WithAgents, Ok(Pair::B)),
+            // База у обоих: сочетания 2 и 4 друг против друга.
+            (Combo::AcceptBaseHere, WithBase, Err(Mismatch::BothHaveBase)),
+            (Combo::DialBaseHere, WithBase, Err(Mismatch::BothHaveBase)),
+            // Базы нет ни у кого: 3 и 5 друг против друга.
+            (Combo::AcceptBaseThere, WithAgents, Err(Mismatch::NeitherHasBase)),
+            (Combo::DialBaseThere, WithAgents, Err(Mismatch::NeitherHasBase)),
+            // Сочетание 1 второй стороны не имеет вовсе.
+            (Combo::Alone, WithBase, Err(Mismatch::Alone)),
+            (Combo::Alone, WithAgents, Err(Mismatch::Alone)),
+        ];
+        for (mine, theirs, want) in table {
+            assert_eq!(Pair::of(mine, theirs), want, "{mine:?} против стороны {theirs:?}");
+        }
+        // Пара A — это 2 и 5, пара B — 3 и 4, и ничья сторона не угадывается по роли: судит одна ось, где база.
+        for (mine, theirs) in [(Combo::AcceptBaseHere, WithAgents), (Combo::DialBaseThere, WithBase)] {
+            assert_eq!(Pair::of(mine, theirs), Ok(Pair::A), "звонит агент к базе");
+        }
+        // У каждого несовпадения свои слова, и они не пустые.
+        for no in [Mismatch::BothHaveBase, Mismatch::NeitherHasBase, Mismatch::Alone] {
+            assert!(no.text().len() > 20, "{no:?}: отказ говорится словами");
+        }
     }
 
     /// Одно правило имени базы на всех троих потребителей: заголовок карточки

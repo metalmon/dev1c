@@ -236,6 +236,28 @@ impl Cards {
         }
     }
 
+    /// Эта карточка у нас есть, но она на ОДНОЙ стороне с собеседником — значит база либо у обоих, либо ни у кого.
+    ///
+    /// **Пары проверяются на стыке** (спека сочетаний, «что из этого следует для кода», пункт 3). Прежде оба случая отвечались
+    /// общими словами «подходящей карточки нет» — симптомом вместо причины, и человеку некуда было идти чинить. Спрашивается это
+    /// ПОСЛЕ годного тикета: причину слышит тот, кто предъявил код, а не всякий, кто дозвонился.
+    ///
+    /// Две другие невозможности закона — «обе принимают» и «обе звонят» — сюда не доходят вовсе: при них соединение не
+    /// устанавливается, и этого разговора не бывает. Их не лечит ничто, кроме догадки, а догадки сняты решением владельца 10.11.
+    pub fn mismatch_of(&self, id: &CardId, theirs: Side) -> Option<crate::cfg::Mismatch> {
+        // Кому эта карточка годится — спрашивается у `pile`, и только у него: раскладка по кучам и есть ответ на «где её база», а
+        // второе место счёта (признак у самой карточки) однажды с ним разойдётся. На этом и поймано: прибор теста кладёт карточку
+        // в кучу «база на той стороне», оставив ей признак «база здесь», — две меры дали разные ответы.
+        let suits = [Side::WithBase, Side::WithAgents]
+            .into_iter()
+            .find(|s| self.pile(*s).map(|p| p.iter().any(|c| c.id() == id)).unwrap_or(false))?;
+        // Годится той стороне, которой мы не отвечаем, — значит мы с собеседником на ОДНОЙ стороне.
+        if suits == theirs {
+            return None;
+        }
+        crate::cfg::Mismatch::of_sides(theirs, theirs)
+    }
+
     fn aside(&self, id: &CardId) -> Option<&'static str> {
         let Cards::Read { not_accepting, .. } = self else { return None };
         not_accepting.iter().any(|c| c.id() == id).then_some(NOT_ACCEPTING)
@@ -657,6 +679,11 @@ where
         // удалили»: карточку никто не удалял, и заводить её заново незачем.
         if let Some(words) = cards.aside(&card_key) {
             return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, words)).await;
+        }
+        // Карточка есть, но она на одной стороне с собеседником: база у обоих либо ни у кого. Это разные беды с разными словами,
+        // и обе чинятся одним щелчком у человека — а общий отказ «подходящей карточки нет» не говорил, у кого и каким.
+        if let Some(no) = cards.mismatch_of(&card_key, side) {
+            return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, no.text())).await;
         }
         return said_and_not_enrolled(w, Refuse::new(code::NO_BASE, NO_CARD_TEXT)).await;
     };
@@ -1963,6 +1990,11 @@ mod tests {
     /// `WithAgents`, а не остатком.
     #[tokio::test]
     async fn the_pile_follows_the_side_and_the_other_pair_is_not_offered() {
+        // Несовпадение названо своими словами: сторона собеседника совпала с нашей, значит база либо у обоих, либо ни у кого.
+        let named = |side| match side {
+            Side::WithBase => crate::cfg::Mismatch::BothHaveBase.text(),
+            Side::WithAgents => crate::cfg::Mismatch::NeitherHasBase.text(),
+        };
         for (name, side, pile_has_base_here) in [("pair-mix-agents", Side::WithAgents, false), ("pair-mix-base", Side::WithBase, true)] {
             let mut code = None;
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
@@ -1999,6 +2031,7 @@ mod tests {
             let heard = tokio::time::timeout(WAIT, Frame::read(&mut talk.r)).await.expect("отказ не пришёл в срок");
             let Ok(Msg::Refuse(no)) = &heard else { panic!("{name}: ждали отказ словами: {heard:?}") };
             assert_eq!(no.code, code::NO_BASE, "{name}: {no:?}");
+            assert_eq!(no.text, named(side), "{name}: отказ называет причину, а не «подходящей карточки нет»");
             let (out, _book, asked) = talk.done().await;
             assert_eq!(asked, 0, "{name}: человека не беспокоят");
             assert!(matches!(out, Ok(Outcome::NotEnrolled(_))), "{name}: {out:?}");

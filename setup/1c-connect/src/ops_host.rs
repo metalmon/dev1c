@@ -1861,7 +1861,7 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
         let stdio = tokio::io::join(tokio::io::stdin(), tokio::io::stdout());
         // Вид сервера известен подкоманде прямо (`server`), и переводить его в порт, чтобы тут же перевести обратно, больше не нужно:
         // отсюда ушёл и прежний отказ «порт не обслуживается», который был возможен только при расхождении двух словарей.
-        let task = serve.serve(crate::session::Served::Mcp(server), stdio, crate::wire::Ceiling::Full);
+        let task = serve.serve(crate::session::Served::Mcp(server), crate::session::Incoming::Local(stdio));
         task.await.map_err(|e| anyhow::anyhow!("мост 1c-connect упал: {e}"))?;
         Ok(())
     })

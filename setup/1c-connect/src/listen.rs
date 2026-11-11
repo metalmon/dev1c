@@ -97,6 +97,32 @@ pub enum Toward {
     Channel(ToChannel),
 }
 
+/// Слова отказа, когда база на другом компьютере, а канал держать некому: подкоманда без окна.
+///
+/// Отказ ОДИН на оба случая, которые прежде считались по отдельности («канал нужен, а ручки нет» и «ручки нет, и канала не
+/// будет»): своего ребёнка над ЧУЖОЙ базой мы не поднимаем ни там, ни там, и человеку в обоих случаях говорится одно и то же.
+pub const NO_WINDOW: &str =
+    "база этого соединения на другом компьютере, а связь с ним держит окно программы — без окна вызовы вести некуда";
+
+impl Toward {
+    /// Куда вести принятое соединение — ОДНИМ решением, по сочетанию и по тому, есть ли чем держать канал.
+    ///
+    /// Конструктор стоит здесь, рядом с типом и с тем, кто его потребляет, а не у сеанса: прежде сеанс считал развилку своим
+    /// трёхзначным `Transport` и тут же пересобирал её в этот двузначный `Toward`, схлопывая два своих варианта в один отказ.
+    /// Два слова на одну развилку — та же беда, что «две меры на один вопрос», только в словаре: читающий обязан держать в
+    /// голове оба перечисления и помнить, какой вариант одного во что превращается у другого.
+    ///
+    /// **Ось одна — где база** (спека сочетаний). Третьим ходом здесь был ssh в среду разработки, и с 11.11 его нет: среда
+    /// уехала из программы целиком (план `2026-11-11-env-removal.md`), а выбирать транспорт по режиму стало невыразимо.
+    pub fn of(combo: crate::cfg::Combo, to_channel: Option<ToChannel>) -> Result<Toward, &'static str> {
+        match (combo.base_is_here(), to_channel) {
+            (true, _) => Ok(Toward::Child),
+            (false, Some(to_channel)) => Ok(Toward::Channel(to_channel)),
+            (false, None) => Err(NO_WINDOW),
+        }
+    }
+}
+
 /// Увести соединение в канал к той стороне, где база. Отказ — словами в журнал сеанса.
 pub type ToChannel =
     std::sync::Arc<dyn Fn(crate::ops_host::McpServer, TcpStream) -> Result<tokio::sync::oneshot::Receiver<()>, String> + Send + Sync>;
@@ -239,7 +265,7 @@ fn accept_for(serve: &Serve, port: u16, stream: TcpStream) -> std::io::Result<Op
     let async_stream = TcpStream::from_std(std_stream)?;
     // Порт решает ЗДЕСЬ и только здесь: дальше идёт слово (`Served`).
     Ok(crate::session::Served::of_port(port, serve.ports())
-        .map(|what| (serve.serve(what, async_stream, crate::wire::Ceiling::Full), watcher)))
+        .map(|what| (serve.serve(what, crate::session::Incoming::Local(async_stream)), watcher)))
 }
 
 #[cfg(test)]
@@ -250,6 +276,34 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Куда вести соединение, выбирает ОДНА ось — где база, и у всех пяти сочетаний ответ назван здесь целиком.
+    ///
+    /// Этот тест и есть то, чего не было 11.11: сторона с базой в парах A и B уходила в ssh-ветку и сеанса не поднимала вовсе
+    /// (замер в плане `2026-11-11-env-removal.md`, раздел 1). Таблица названа по сочетаниям, а не по режиму: режим на этот вопрос
+    /// больше не отвечает.
+    ///
+    /// Переехал сюда 12.11 вместе с решением: прежде он сверял промежуточный `session::Transport`, то есть ПЕРВУЮ половину
+    /// развилки, а то, во что сеанс пересобирал её дальше, не сверял никто. Теперь сверяется сам ответ — и слова отказа тоже:
+    /// человек без окна читает именно их.
+    #[test]
+    fn where_a_connection_is_led_follows_the_one_axis_that_says_where_the_base_is() {
+        use crate::cfg::Combo::*;
+        let channel: ToChannel = std::sync::Arc::new(|_, _| Err("в тесте канал не зовут".to_string()));
+        for combo in [Alone, AcceptBaseHere, DialBaseHere] {
+            assert!(matches!(Toward::of(combo, Some(channel.clone())), Ok(Toward::Child)), "{combo:?}: база здесь — свой мост");
+            assert!(matches!(Toward::of(combo, None), Ok(Toward::Child)), "{combo:?}: и канал для этого не нужен");
+        }
+        for combo in [AcceptBaseThere, DialBaseThere] {
+            let led = Toward::of(combo, Some(channel.clone()));
+            assert!(matches!(led, Ok(Toward::Channel(_))), "{combo:?}: база на другом компьютере — труба в канал");
+            // Не `unwrap_err`: он требует `Debug` у удачного исхода, а `Toward::Channel` несёт замыкание, которое его не имеет.
+            match Toward::of(combo, None) {
+                Err(why) => assert_eq!(why, NO_WINDOW, "{combo:?}: отказ говорится этими словами"),
+                Ok(_) => panic!("{combo:?}: без окна вызовы вести некуда — должен быть отказ"),
+            }
+        }
+    }
 
     /// Порт 0 — пусть ОС выберет сама и тут же вернёт выбранный номер;
     /// короткий зонд-и-отпустить не трогает 777x/778x вовсе и не привязан к
@@ -522,7 +576,7 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let (log, _seen) = recording_sink();
-        let rules = bridge::Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let rules = bridge::Rules::for_mcp(Arc::new(AtomicBool::new(true)), crate::wire::Ceiling::Full);
         let mut cmd = tokio::process::Command::new(std::env::current_exe().unwrap());
         cmd.args(["--exact", "listen::tests::__lingering_child", "--nocapture", "--quiet"]);
         cmd.env("LISTEN_LINGER", "1");

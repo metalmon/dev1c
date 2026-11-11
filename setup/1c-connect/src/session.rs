@@ -326,18 +326,30 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// Чем увести местное соединение агента в канал — то же, что `listen::ToChannel`, названное здесь, чтобы звать сеанс одним именем.
 pub type ToChannel = crate::listen::ToChannel;
 
-/// Чем сеанс обслуживает соединение, принятое на свои порты.
+/// Поток, пришедший на обслуживание, ВМЕСТЕ с тем, что известно о второй стороне.
 ///
-/// **Ось одна — где база** (спека сочетаний). Третьим ходом здесь был ssh в среду разработки, и с 11.11 его нет: среда уехала из
-/// программы целиком, а выбирать транспорт по режиму стало невыразимо (план `2026-11-11-env-removal.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    /// База здесь (сочетания 1, 2, 4) — свой мост со своим ребёнком.
-    Child,
-    /// База на другом компьютере (сочетания 3, 5) — трубой в канал, к той стороне, где база.
-    Channel,
-    /// База на другом компьютере, а канал держать некому: подкоманда без окна. Вести вызовы некуда, и слушать порты незачем.
-    Nowhere,
+/// Потолок записи той машины — свойство ЭТОГО потока, а не машины: он услышан в её `hello` и кончается вместе с разговором. Прежде
+/// он ехал в `Serve::serve` отдельным доводом, и три зовущих из четырёх писали `Ceiling::Full` рукой. Довод, у которого есть
+/// «безобидное» значение, рано или поздно получает его по умолчанию: новый зовущий напишет `Full`, соберётся и молча отдаст
+/// пишущие инструменты стороне, объявившей у себя «только чтение». Ровно эта дыра и была найдена 11.11 (`f36f5cb`).
+///
+/// Здесь разрешающего ЗНАЧЕНИЯ нет вовсе — есть названный СЛУЧАЙ. `Local` читается как утверждение «второй стороны нет», и
+/// написать его про поток из канала нельзя не заметив.
+pub enum Incoming<S> {
+    /// Местный агент пришёл на петлю: второй стороны у этого потока нет вовсе, запрещать некому.
+    Local(S),
+    /// Поток вызовов по каналу: потолок ТОЙ машины приехал сюда вместе с потоком, из того же кадра `hello`, что и допуск.
+    FromPeer(S, crate::wire::Ceiling),
+}
+
+impl<S> Incoming<S> {
+    /// Поток и потолок порознь — для тех, кому нужно то и другое.
+    fn split(self) -> (S, crate::wire::Ceiling) {
+        match self {
+            Incoming::Local(s) => (s, crate::wire::Ceiling::Full),
+            Incoming::FromPeer(s, theirs) => (s, theirs),
+        }
+    }
 }
 
 /// Параметры, в которых потолок ТОЙ машины уже сложен со своим: `read_only`, когда та сторона у себя запретила запись.
@@ -349,15 +361,6 @@ pub(crate) fn tightened(cfg: &Cfg, theirs: crate::wire::Ceiling) -> Cfg {
     match theirs {
         crate::wire::Ceiling::Full => cfg.clone(),
         crate::wire::Ceiling::ReadOnly => cfg.clone().with_access("read_only"),
-    }
-}
-
-/// Решение о транспорте — ОДНИМ местом, по сочетанию и по тому, есть ли кому держать канал.
-pub fn transport_of(combo: crate::cfg::Combo, has_channel: bool) -> Transport {
-    match (combo.base_is_here(), has_channel) {
-        (true, _) => Transport::Child,
-        (false, true) => Transport::Channel,
-        (false, false) => Transport::Nowhere,
     }
 }
 
@@ -494,18 +497,9 @@ pub fn start_with_enabled(
             // Третьего хода нет с 11.11: им был ssh в среду разработки, и среда уехала из программы целиком (план
             // `2026-11-11-env-removal.md`). Поднять туннель этой развилкой стало невыразимо, а не запрещено условием.
             let combo = crate::cfg::Combo::of(cfg.current());
-            let to_channel = wiring.to_channel.clone();
-            let r = match (transport_of(combo, to_channel.is_some()), to_channel) {
-                (Transport::Child, _) => crate::listen::run(serve, active_ports, crate::listen::Toward::Child, on_event, stop_rx).await,
-                (Transport::Channel, Some(to_channel)) => {
-                    let toward = crate::listen::Toward::Channel(to_channel);
-                    crate::listen::run(serve, active_ports, toward, on_event, stop_rx).await
-                }
-                // `Channel` без ручки канала не отвечается вовсе (`has_channel` — это она и есть), и своего ребёнка над ЧУЖОЙ базой
-                // мы не поднимаем ни в одном из двух случаев: отказ у них один и тот же.
-                (Transport::Channel, None) | (Transport::Nowhere, _) => Err(anyhow::anyhow!(
-                    "база этого соединения на другом компьютере, а связь с ним держит окно программы — без окна вызовы вести некуда"
-                )),
+            let r = match crate::listen::Toward::of(combo, wiring.to_channel.clone()) {
+                Ok(toward) => crate::listen::run(serve, active_ports, toward, on_event, stop_rx).await,
+                Err(why) => Err(anyhow::anyhow!(why)),
             };
             // Сеанс кончился — снимаем объявление: обслуживать вызовы по каналу больше нечем, и отказ скажет об этом словами.
             wiring.serving.clear();
@@ -587,15 +581,15 @@ impl Serve {
         self.cfg.get().1.current().id()
     }
 
-    pub fn serve<S>(&self, what: Served, stream: S, theirs: crate::wire::Ceiling) -> tokio::task::JoinHandle<()>
+    pub fn serve<S>(&self, what: Served, incoming: Incoming<S>) -> tokio::task::JoinHandle<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        // Потолок ТОЙ машины — свойство этого соединения, а не машины: он услышан в её `hello` и дальше живёт здесь. Местный агент
-        // второй стороны не имеет вовсе, и `Ceiling::Full` у него значит «запрещать некому» (`bridge::Rules::peer`).
+        // Потолок ТОЙ машины приехал вместе с потоком (`Incoming`), а не отдельным доводом: забыть его стало невыразимо.
         //
         // Ребёнку mcp-1c он доезжает ключом `--access`, то есть попадает в команду при сборке; vrunner-mcp спрашивает его на каждый
         // вызов через `Rules`. Разные дороги у одного правила — потому что разные у самих серверов инструментов.
+        let (stream, theirs) = incoming.split();
         let tighten = move |cfg: &Cfg| tightened(cfg, theirs);
         if what == Served::Mcp(McpServer::Vrunner) {
             let (_, cfg0) = self.cfg.get();
@@ -605,14 +599,14 @@ impl Serve {
                 let tools_dir = tools_dir.clone();
                 Arc::new(move |cfg: &Cfg| Ok(bridge::vrunner_command(cfg, &tools_dir)))
             };
-            let mut rules = bridge::Rules::for_vrunner(
+            let rules = bridge::Rules::for_vrunner(
                 self.cfg.clone(),
                 tools_dir,
                 rebuild,
                 Arc::new(bridge::configurator_count),
                 self.enabled.clone(),
+                theirs,
             );
-            rules.peer = theirs;
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
             tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
@@ -629,9 +623,8 @@ impl Serve {
             // окружение), когда владелец локального порта публикации —
             // не наш httpd.
             let cmd0 = bridge::mcp_command_guarded(&tighten(&cfg0), &kit);
-            let mut rules = bridge::Rules::for_mcp(self.enabled.clone());
+            let mut rules = bridge::Rules::for_mcp(self.enabled.clone(), theirs);
             rules.live = self.cfg.clone();
-            rules.peer = theirs;
             rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command_guarded(&tighten(cfg), &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
@@ -701,22 +694,25 @@ mod tests {
         assert_eq!(tightened(&locked, crate::wire::Ceiling::Full).access(), "read_only", "чужое «можно» своего запрета не отменяет");
     }
 
-    /// Транспорт выбирает ОДНА ось — где база, и у всех пяти сочетаний ответ назван здесь целиком.
+    /// Потолок едет ВМЕСТЕ с потоком, и местный агент не получает его по умолчанию, а объявляет себя местным.
     ///
-    /// Этот тест и есть то, чего не было 11.11: сторона с базой в парах A и B уходила в ssh-ветку и сеанса не поднимала вовсе
-    /// (замер в плане `2026-11-11-env-removal.md`, раздел 1). Таблица названа по сочетаниям, а не по режиму: режим на этот вопрос
-    /// больше не отвечает.
+    /// Прежний тест выше сверяет `tightened` — чистую функцию, которую боевой путь звать не обязан. Дыра 11.11 была ровно в этом
+    /// промежутке: функция считала верно, а до ребёнка её ответ не доезжал. Здесь сверяется то самое звено, через которое `serve`
+    /// и получает потолок: разрешающего значения, которое можно подставить случайно, у него больше нет — есть названный случай.
     #[test]
-    fn the_transport_follows_the_one_axis_that_says_where_the_base_is() {
-        use crate::cfg::Combo::*;
-        for combo in [Alone, AcceptBaseHere, DialBaseHere] {
-            assert_eq!(transport_of(combo, true), Transport::Child, "{combo:?}: база здесь — свой мост");
-            assert_eq!(transport_of(combo, false), Transport::Child, "{combo:?}: и канал для этого не нужен");
-        }
-        for combo in [AcceptBaseThere, DialBaseThere] {
-            assert_eq!(transport_of(combo, true), Transport::Channel, "{combo:?}: база на другом компьютере — труба в канал");
-            assert_eq!(transport_of(combo, false), Transport::Nowhere, "{combo:?}: без окна вести вызовы некуда");
-        }
+    fn the_ceiling_travels_with_the_stream_and_the_local_agent_says_so_by_name() {
+        let mine = crate::cfg::filled_for_test().with_access("read_write");
+        let through = |incoming: Incoming<&str>| {
+            let (_, theirs) = incoming.split();
+            tightened(&mine, theirs).access().to_string()
+        };
+        assert_eq!(through(Incoming::Local("поток агента")), "read_write", "второй стороны нет — запрещать некому");
+        assert_eq!(through(Incoming::FromPeer("поток канала", crate::wire::Ceiling::Full)), "read_write", "та сторона не запрещает");
+        assert_eq!(
+            through(Incoming::FromPeer("поток канала", crate::wire::Ceiling::ReadOnly)),
+            "read_only",
+            "та сторона запретила — запрет доезжает до ребёнка, а не теряется по дороге"
+        );
     }
 
     /// Карточка, по которой обслуживаются вызовы, читается у ЖИВОГО `Serve`, а не хранится снимком со времени подъёма сеанса.
@@ -806,7 +802,7 @@ mod tests {
         // мост обязан ответить сам, иначе Zed сочтёт сервер упавшим.
         let (mine, theirs) = tokio::io::duplex(64 * 1024);
         let serve = Serve::new(&filled(), &kit_in(tempdir()), Arc::new(|_| {}), ports(), Arc::new(AtomicBool::new(true)));
-        let task = serve.serve(Served::Mcp(McpServer::OneC), theirs, crate::wire::Ceiling::Full);
+        let task = serve.serve(Served::Mcp(McpServer::OneC), Incoming::Local(theirs));
         let reply = ask(mine, br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         assert!(reply.contains("\"result\""), "{reply}");
         task.abort();
@@ -965,8 +961,8 @@ mod tests {
 
     #[test]
     fn a_session_that_cannot_dial_ends_by_itself_and_stop_is_still_fine() {
-        // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому (окна нет) — это `Transport::Nowhere`,
-        // отказ словами. Прежде тем же самым был ssh в несуществующую среду.
+        // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому (окна нет) — отказ `listen::NO_WINDOW`
+        // словами. Прежде тем же самым был ssh в несуществующую среду.
         let mut cfg = crate::cfg::filled_for_test();
         cfg.current_mut().base_here = false;
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));

@@ -2638,7 +2638,7 @@ impl Ui {
 #[cfg(test)]
 fn doomed_session(ui: &Ui) -> crate::session::Session {
     let mut cfg = ui.cfg.clone();
-    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому — `Transport::Nowhere`.
+    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому — отказ `listen::NO_WINDOW`.
     cfg.current_mut().base_here = false;
     session::start_with_enabled(
         cfg,

@@ -333,7 +333,11 @@ pub struct Rules {
     /// не гасились, то есть машина, объявившая у себя «только чтение», получала их и могла писать.
     ///
     /// `Ceiling::Full` — «та сторона ничего не запрещает»: так выглядит и МЕСТНЫЙ агент, у которого второй стороны нет вовсе.
-    pub peer: crate::wire::Ceiling,
+    ///
+    /// Кладётся КОНСТРУКТОРОМ и дальше не правится. Прежде правила собирались разрешающими, а потолок дописывался присваиванием
+    /// следом (`rules.peer = theirs`) — то есть между сборкой и починкой существовало значение, которое никто не собирался
+    /// применять. Довод конструктора этого промежутка не оставляет.
+    pub(crate) peer: crate::wire::Ceiling,
 }
 
 impl Rules {
@@ -345,8 +349,9 @@ impl Rules {
         rebuild: Rebuild,
         configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
         enabled: Arc<AtomicBool>,
+        peer: crate::wire::Ceiling,
     ) -> Rules {
-        Rules { live, rebuild: Some(rebuild), tools_dir, configurator_running, enabled, inject: true, peer: crate::wire::Ceiling::Full }
+        Rules { live, rebuild: Some(rebuild), tools_dir, configurator_running, enabled, inject: true, peer }
     }
 
     /// Мост 777N: `mcp-1c`. Голый проброс — ни белого списка инструментов,
@@ -354,7 +359,7 @@ impl Rules {
     /// параметров по умолчанию — вызывающий, которому они нужны (`Serve::dispatch`),
     /// подставляет свои `live`/`rebuild` в уже созданное значение, поля для
     /// этого публичные.
-    pub fn for_mcp(enabled: Arc<AtomicBool>) -> Rules {
+    pub fn for_mcp(enabled: Arc<AtomicBool>, peer: crate::wire::Ceiling) -> Rules {
         Rules {
             live: Live::new(crate::cfg::Cfg::default()),
             rebuild: None,
@@ -362,7 +367,7 @@ impl Rules {
             configurator_running: Arc::new(|| 0),
             enabled,
             inject: false,
-            peer: crate::wire::Ceiling::Full,
+            peer,
         }
     }
 }
@@ -2046,12 +2051,19 @@ mod tests {
     /// тесты не меняют `live` после создания, так что рестарт никогда не
     /// срабатывает и пересборщик не зовётся.
     fn rules_with(allowed: &[&str], running: usize, enabled: Arc<AtomicBool>) -> Rules {
+        peer_rules(allowed, running, enabled, crate::wire::Ceiling::Full)
+    }
+
+    /// Как `rules_with`, но с названным потолком ТОЙ машины: «второй стороны нет» и «вторая сторона запретила» — разные случаи,
+    /// и тест обязан уметь сказать который.
+    fn peer_rules(allowed: &[&str], running: usize, enabled: Arc<AtomicBool>, peer: crate::wire::Ceiling) -> Rules {
         Rules::for_vrunner(
             Live::new(test_cfg(allowed)),
             std::path::PathBuf::new(),
             std::sync::Arc::new(|_: &Cfg| Ok(tokio::process::Command::new("rebuild-unused"))),
             std::sync::Arc::new(move || running),
             enabled,
+            peer,
         )
     }
 
@@ -2230,8 +2242,7 @@ mod tests {
     #[tokio::test]
     async fn the_other_machines_ceiling_refuses_a_writing_tool_too() {
         // Машина СВОЯ разрешает: потолок read_write, карточка не запрещает.
-        let mut rules = rules(&["cf_load"], 0);
-        rules.peer = crate::wire::Ceiling::ReadOnly;
+        let rules = peer_rules(&["cf_load"], 0, Arc::new(AtomicBool::new(true)), crate::wire::Ceiling::ReadOnly);
         let (replies, raw, _) = talk(
             ("BRIDGE_SCRIPT", "1"),
             rules,
@@ -2329,7 +2340,7 @@ mod tests {
         // pipe_process, и ответ на tools/call — только отказ, который
         // никогда не превращается в Forward/PlatformCall (их тут вообще
         // нет: этот путь не вызывает route_request_with).
-        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
+        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)), crate::wire::Ceiling::Full);
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, no_log(), move |code, _by_us, err| {
@@ -2377,7 +2388,7 @@ mod tests {
         // наоборот: вперёд уходит только уверенно безопасное, остальное —
         // закрыто по умолчанию. Включено — труба прозрачна, как и была.
         async fn drive(on: bool) -> String {
-            let rules = Rules::for_mcp(Arc::new(AtomicBool::new(on)));
+            let rules = Rules::for_mcp(Arc::new(AtomicBool::new(on)), crate::wire::Ceiling::Full);
             let (ours, theirs) = tokio::io::duplex(1 << 16);
             let (tx, _rx) = tokio::sync::oneshot::channel();
             tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, no_log(), move |code, _by_us, err| {
@@ -2415,7 +2426,7 @@ mod tests {
                 seen2.lock().unwrap().push(w);
             }
         });
-        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)));
+        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(false)), crate::wire::Ceiling::Full);
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, Ok(child(("BRIDGE_SCRIPT_RECORD", "1"))), rules, log, move |code, _by_us, err| {
@@ -2475,6 +2486,7 @@ mod tests {
             Arc::new(make_cmd),
             Arc::new(|| 0),
             Arc::new(AtomicBool::new(true)),
+            crate::wire::Ceiling::Full,
         );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -2513,8 +2525,14 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(false));
         let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT", "1")));
         let cfg = test_cfg(&["cf_load"]);
-        let rules =
-            Rules::for_vrunner(Live::new(cfg.clone()), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let rules = Rules::for_vrunner(
+            Live::new(cfg.clone()),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            enabled.clone(),
+            crate::wire::Ceiling::Full,
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, make_cmd(&cfg), rules, no_log(), move |code, _by_us, err| {
@@ -2548,7 +2566,14 @@ mod tests {
         let live = Live::new(cfg.clone());
         let make_cmd = |_: &Cfg| Ok(child(("BRIDGE_SCRIPT_RECORD", "1")));
         let cmd0 = make_cmd(&cfg);
-        let rules = Rules::for_vrunner(live, std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let rules = Rules::for_vrunner(
+            live,
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            enabled.clone(),
+            crate::wire::Ceiling::Full,
+        );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, cmd0, rules, no_log(), move |code, _by_us, err| {
@@ -2618,7 +2643,7 @@ mod tests {
     async fn the_mcp_port_does_not_get_our_tools_injected() {
         let mut cmd = child(("BRIDGE_SCRIPT", "1"));
         cmd.env("BRIDGE_SCRIPT_ARGS", "1");
-        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)), crate::wire::Ceiling::Full);
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
         tokio::spawn(pipe_jsonrpc(theirs, Ok(cmd), rules, no_log(), move |code, _by_us, err| {
@@ -2655,7 +2680,7 @@ mod tests {
     /// есть — правка этого места не задела.
     #[tokio::test]
     async fn the_mcp_port_ignores_the_write_ceiling_entirely() {
-        let mut rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)));
+        let mut rules = Rules::for_mcp(Arc::new(AtomicBool::new(true)), crate::wire::Ceiling::Full);
         let cfg = crate::cfg::filled_for_test().with_access("read_only");
         rules.live = Live::new(cfg);
         let (replies, raw, _) = talk(
@@ -2839,6 +2864,7 @@ mod tests {
             Arc::new(make_cmd),
             Arc::new(|| 0),
             Arc::new(AtomicBool::new(true)),
+            crate::wire::Ceiling::Full,
         );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -2893,6 +2919,7 @@ mod tests {
             Arc::new(make_cmd),
             Arc::new(|| 0),
             Arc::new(AtomicBool::new(true)),
+            crate::wire::Ceiling::Full,
         );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -2972,6 +2999,7 @@ mod tests {
             Arc::new(make_cmd),
             Arc::new(|| 0),
             Arc::new(AtomicBool::new(true)),
+            crate::wire::Ceiling::Full,
         );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -3051,6 +3079,7 @@ mod tests {
             Arc::new(make_cmd),
             Arc::new(|| 0),
             Arc::new(AtomicBool::new(true)),
+            crate::wire::Ceiling::Full,
         );
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -3142,7 +3171,14 @@ mod tests {
         };
         let cmd0 = make_cmd(&cfg_a);
         let enabled = Arc::new(AtomicBool::new(true));
-        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            enabled.clone(),
+            crate::wire::Ceiling::Full,
+        );
         // Не `no_log()`: довершение теста (ниже) следит именно за строкой
         // журнала, которой `EpochEnd::Dormant` отмечает освобождённого
         // ребёнка — отдельно от ответа агенту, который дают независимо.
@@ -3243,7 +3279,14 @@ mod tests {
         };
         let cmd0 = make_cmd(&cfg_a);
         let enabled = Arc::new(AtomicBool::new(true));
-        let rules = Rules::for_vrunner(live.clone(), std::path::PathBuf::new(), Arc::new(make_cmd), Arc::new(|| 0), enabled.clone());
+        let rules = Rules::for_vrunner(
+            live.clone(),
+            std::path::PathBuf::new(),
+            Arc::new(make_cmd),
+            Arc::new(|| 0),
+            enabled.clone(),
+            crate::wire::Ceiling::Full,
+        );
         let said: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let said2 = said.clone();
         let log: Sink = Arc::new(move |e: Event| {

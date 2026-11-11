@@ -1032,7 +1032,9 @@ async fn serve_calls(
     // `drop(rt)` сеанса не может: без этого «выключил доступ к 1С» значило бы «выключил для новых», а уже идущие вызовы доживали бы
     // с живым ребёнком под ними. Снятие самого потока вызовов — то же самое с другой стороны: `Falls` роняет задачу своим `Drop`,
     // куда бы эта функция ни вышла, включая `abort` снаружи (находка проверки безопасности 11.11, вторая и четвёртая волны).
-    let mut task = Falls(open.serve().serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send), theirs));
+    let mut task = Falls(
+        open.serve().serve(crate::session::Served::Mcp(kind), crate::session::Incoming::FromPeer(tokio::io::join(recv, send), theirs)),
+    );
     tokio::select! {
         _ = &mut task.0 => {}
         () = open.until_stopped() => {}

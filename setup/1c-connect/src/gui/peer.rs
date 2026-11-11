@@ -241,14 +241,16 @@ async fn serve(
             let names = card_names(&kit);
             for (card, _) in partners.all() {
                 let name = names.get(&card).cloned().unwrap_or_else(|| card.to_string());
-                start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, String::new());
+                start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, String::new());
             }
         }
         Err(e) => say(&tx, Kind::Fail, e),
     }
     while let Some(cmd) = cmds.recv().await {
         match cmd {
-            Cmd::Dial { card, name, code } => start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, code),
+            Cmd::Dial { card, name, code } => {
+                start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, code)
+            }
             Cmd::Calls { card, kind, stream, done } => {
                 let (kit, tx, channels) = (kit.clone(), tx.clone(), channels.clone());
                 tokio::spawn(async move {
@@ -323,7 +325,9 @@ struct Talk {
     /// карточку, держать после отзыва не за что (`cut_these`, `keep_holding`). То есть защита мёртвая, но не бесплатная ошибка: оживи этот
     /// путь — и он пойдёт в сторону запрета.
     card: Option<CardId>,
-    reins: Reins,
+    /// Вожжи — только у ПРИНИМАЮЩЕЙ стороны: ими отзыв рвёт поток, который держит та. У звонящей стороны поток свой, и рвёт
+    /// она его сама, когда кончает круг, — здесь `None`, и `cut` такой разговор не трогает.
+    reins: Option<Reins>,
 }
 
 /// Живые разговоры принимающей стороны — по СТОРОНЕ, а не по карточке.
@@ -355,7 +359,7 @@ struct Live {
 impl Live {
     /// Запомнить разговор. Возвращает его номер — им он и снимается
     /// (`forget`).
-    fn remember(&self, peer: EndpointId, card: Option<CardId>, reins: Reins) -> u64 {
+    fn remember(&self, peer: EndpointId, card: Option<CardId>, reins: Option<Reins>) -> u64 {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, card, reins });
         id
@@ -385,6 +389,8 @@ impl Live {
     /// замка — их `Drop` ничего не ждёт, но держать чужой замок дольше
     /// нужного незачем.
     fn forget(&self, peer: EndpointId, id: u64) -> Option<Reins> {
+        // Два `Option` здесь означают разное: внешний — «такого разговора в учёте нет» (его снял отзыв), внутренний — «вожжей у
+        // этого разговора не бывает» (звонящая сторона держит поток сама, рвать его отзывом нам нечем).
         let mut held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
         let rows = held.get_mut(&peer)?;
         let at = rows.iter().position(|t| t.id == id)?;
@@ -392,7 +398,7 @@ impl Live {
         if rows.is_empty() {
             held.remove(&peer);
         }
-        Some(gone.reins)
+        gone.reins
     }
 
     /// Вожжи всех разговоров этой стороны, которые отзыв карточки обязан
@@ -406,7 +412,7 @@ impl Live {
         let doomed = cut_these(&rows.iter().map(|t| t.card.clone()).collect::<Vec<_>>(), card);
         // С конца: удаление по месту не должно сдвигать места, которые ещё
         // предстоит удалить.
-        let mut out: Vec<Reins> = doomed.into_iter().rev().map(|at| rows.remove(at).reins).collect();
+        let mut out: Vec<Reins> = doomed.into_iter().rev().filter_map(|at| rows.remove(at).reins).collect();
         if rows.is_empty() {
             held.remove(&peer);
         }
@@ -422,7 +428,7 @@ impl Live {
     /// уже нет.
     fn drain(&self) -> Vec<Reins> {
         let mut held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
-        held.drain().flat_map(|(_, rows)| rows.into_iter().map(|t| t.reins)).collect()
+        held.drain().flat_map(|(_, rows)| rows.into_iter().filter_map(|t| t.reins)).collect()
     }
 
     /// Есть ли ещё живой разговор под этим номером. Нужно одному читателю —
@@ -501,11 +507,14 @@ struct Dialling {
 /// бы случайный. Прежняя задача снимается (`abort`), а вместе с ней роняются
 /// `Control` и `Hold` — канал закрывается тем же `Drop`, которым он
 /// закрывается всегда (`channel::Hold`).
+#[allow(clippy::too_many_arguments)]
 fn start_call(
     node: &Node,
     channels: &Channels,
     kit: &Kit,
     tx: &UnboundedSender<Ev>,
+    live: &Live,
+    serves: &crate::session::Serving,
     calls: &mut HashMap<CardId, tokio::task::JoinHandle<()>>,
     card: Dialling,
     code: String,
@@ -521,7 +530,8 @@ fn start_call(
         old.abort();
     }
     let id = card.id.clone();
-    let handle = tokio::spawn(calling(node.clone(), channels.clone(), kit.clone(), tx.clone(), card, code, addr));
+    let handle =
+        tokio::spawn(calling(node.clone(), channels.clone(), kit.clone(), tx.clone(), live.clone(), serves.clone(), card, code, addr));
     calls.insert(id, handle);
 }
 
@@ -628,17 +638,29 @@ impl InHand {
 /// Опустевший код — он же признак «мы уже были подключены»: первый
 /// недозвон до зачисления остаётся «подключается», а после — «подключается
 /// снова». Второго счётчика для этого не нужно.
-async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, card: Dialling, code: String, addr: EndpointAddr) {
+#[allow(clippy::too_many_arguments)]
+async fn calling(
+    node: Node,
+    channels: Channels,
+    kit: Kit,
+    tx: UnboundedSender<Ev>,
+    live: Live,
+    serves: crate::session::Serving,
+    card: Dialling,
+    code: String,
+    addr: EndpointAddr,
+) {
     flow(&tx, &card.id, Some(link::Flow::Calling));
     let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card.id) }));
     let stopped = channel::keep_calling(|| {
         let (node, channels, kit, tx, card, addr, hand) =
             (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
+        let (live, serves) = (live.clone(), serves.clone());
         async move {
             // Замок берётся и отпускается до первого ожидания — через `await`
             // его не держим ни разу.
             let mine = hand.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let (round, agreed) = one_round(&node, &channels, &kit, &tx, &card, addr, mine.call()).await;
+            let (round, agreed) = one_round(&node, &channels, &kit, &tx, &live, &serves, &card, addr, mine.call()).await;
             let enrolled = hand.lock().unwrap_or_else(|e| e.into_inner()).after(&round, agreed);
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
                 flow(&tx, &card.id, Some(link::Flow::Retrying));
@@ -662,11 +684,14 @@ async fn calling(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<E
 /// договорились. Он и есть то, чем следующий круг назовёт свою карточку.
 /// `None` — договориться не вышло вовсе (недозвон, отказ): выдумывать признак
 /// нельзя, иначе поток числился бы за карточкой, о которой не договаривались.
+#[allow(clippy::too_many_arguments)]
 async fn one_round(
     node: &Node,
     channels: &Channels,
     kit: &Kit,
     tx: &UnboundedSender<Ev>,
+    live: &Live,
+    serves: &crate::session::Serving,
     card: &Dialling,
     addr: EndpointAddr,
     call: enroll::Call<'_>,
@@ -724,13 +749,69 @@ async fn one_round(
             // сообщения «что-то изменилось на стороне базы» в этой версии нет
             // — оно было в таблице спеки и не отправлялось ниоткуда, и честно
             // снятая строка лучше пустого обещания (`wire::KNOWN`).
+            // **Пока поток держится, вызовы обслуживает ЭТА сторона** — в паре B база здесь, у звонящего (шаг 6 плана пары B).
+            //
+            // Допуск у потоков вызовов один на обе пары: «есть живой управляющий поток этой карточки к этому ключу» (`Live::admits`).
+            // Поэтому карточка кладётся в тот же учёт, что у принимающей стороны, — вожжей у неё нет (поток держим мы сами), и
+            // снимается запись вместе с кругом: кончился круг — кончился и допуск, без второго читателя книги.
+            let held = live.remember(channel.peer(), Some(card.id.clone()), None);
+            let answering =
+                tokio::spawn(answer_calls(channel.clone(), tx.clone(), live.clone(), serves.clone(), kit.clone(), channel.peer()));
             let gone = channel::hold(control.ear(), |_| {}).await;
+            // Круг кончился — кончается и обслуживание: задача снимается (брошенная `JoinHandle` её бы ОТВЯЗАЛА, находка второй
+            // проверки безопасности 11.11), а запись уходит из учёта, и следующий `McpOpen` получит отказ словами.
+            answering.abort();
+            let _ = answering.await;
+            live.forget(channel.peer(), held);
             // Единственный выход из соединения — через `end`, и на этом пути
             // тоже: сказать нам нечего (`None`), но написанное до этого
             // обязано доехать прежде, чем канал закроется.
             control.end(None).await;
             (Round::Held(gone), agreed)
         }
+    }
+}
+
+/// Приём входящих потоков на канале, который открыли МЫ (пара B, шаг 6).
+///
+/// **Законное начало здесь ровно одно — `McpOpen`.** Зачисление по этому каналу уже состоялось, и состоялось оно в другую сторону:
+/// код выдала та сторона, книга допуска её, а у нас база. Поэтому `Hello` сюда приехать может только по ошибке сборки, и отвечаем мы
+/// на него тем же отказом словами, каким `enroll` отвечает на кадр не в свою очередь.
+///
+/// Канал держится потоком, который мы и так держим (`Control`), поэтому ожидание входящего ничего лишнего не продлевает: кончился
+/// круг — задачу снимают, и незавершённый `answer` уходит с ней.
+async fn answer_calls(
+    channel: channel::Channel,
+    tx: UnboundedSender<Ev>,
+    live: Live,
+    serves: crate::session::Serving,
+    kit: Kit,
+    peer: EndpointId,
+) {
+    while let Ok(mut control) = channel.answer().await {
+        let (tx, live, serves, kit) = (tx.clone(), live.clone(), serves.clone(), kit.clone());
+        tokio::spawn(async move {
+            let first = {
+                let (send, recv) = control.halves();
+                match enroll::first_frame(send, recv).await {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        say(&tx, Kind::Warn, e);
+                        control.end(None).await;
+                        return;
+                    }
+                }
+            };
+            match first {
+                crate::wire::Msg::McpOpen { base_id, kind } => {
+                    serve_calls(&tx, &live, &serves, &kit, control, peer, &base_id, kind).await;
+                }
+                other => {
+                    let no = crate::wire::Refuse::new(crate::wire::code::UNKNOWN_MESSAGE, enroll::out_of_turn("mcp_open", &other));
+                    control.end(Some(no)).await;
+                }
+            }
+        });
     }
 }
 
@@ -832,7 +913,7 @@ async fn serve_calls(
     tx: &UnboundedSender<Ev>,
     live: &Live,
     serving: &crate::session::Serving,
-    cards: &enroll::Cards,
+    kit: &Kit,
     mut control: crate::channel::Control,
     peer: EndpointId,
     base_id: &crate::wire::CardRef,
@@ -845,6 +926,11 @@ async fn serve_calls(
     // **Дорога к обслуживанию одна, и она узкая** (`Cards::serving_named`): карточка, чья база ЗДЕСЬ. Разрешение у карточки без
     // базы значит «присылайте свою базу моим агентам» — права отдать СВОЮ базу оно не даёт, и путать их нельзя (находка проверки
     // безопасности 11.11, вторая волна).
+    // **Карточки читаются ЗДЕСЬ И СЕЙЧАС, а не снимком начала разговора** (третья волна той же проверки). Управляющий поток живёт
+    // часами: человек успевает переключить у карточки «Где база», и снимок, снятый при его открытии, продолжал бы отдавать базу,
+    // которой у этой карточки больше нет. Поэтому сюда приезжает комплект, а не `Cards`: передать устаревший набор стало
+    // невыразимо — тем же приёмом, которым чинили `session::Open::is_for`.
+    let cards = Machine::read(kit).cards;
     let Some(card) = cards.serving_named(base_id).cloned() else {
         refuse(control, crate::wire::code::NO_BASE, NO_SUCH_BASE).await;
         return;
@@ -973,7 +1059,7 @@ async fn answering(
         }
     };
     if let crate::wire::Msg::McpOpen { base_id, kind } = first {
-        serve_calls(&tx, &live, &serves, &cards, control, peer, &base_id, kind).await;
+        serve_calls(&tx, &live, &serves, &kit, control, peer, &base_id, kind).await;
         return;
     }
     let out = {
@@ -1019,7 +1105,7 @@ async fn answering(
     // когда-то разрешили.
     say(&tx, Kind::Ok, format!("«{shown}»: подключено, {}", access_word(write)));
     let (reins, mut recv) = channel::reins(control);
-    let id = live.remember(peer, served.as_ref().map(|c| c.id().clone()), reins);
+    let id = live.remember(peer, served.as_ref().map(|c| c.id().clone()), Some(reins));
     // Щель между решением человека и записью вожжей: спрашиваем допуск ЕЩЁ
     // РАЗ, уже после записи. Отзыв, случившийся в эти микросекунды, либо
     // увидит наши вожжи и порвёт поток сам, либо не увидит — и тогда его
@@ -1312,7 +1398,7 @@ mod tests {
     // Именованный список, а не `super::*`: в области видимости этого модуля
     // живёт `gpui::*`, и его `test` перебил бы `#[test]` стандартной
     // библиотеки (тот же приём, что у тестов `panel.rs`).
-    use super::{cut_these, keep_holding};
+    use super::{cut_these, keep_holding, Live};
     use crate::cfg::CardId;
 
     /// Разговоры по карточкам: пустая строка — разговор, чья карточка не
@@ -1391,6 +1477,31 @@ mod tests {
     /// номеру, и отзыв уносит их с учёта — второй отзыв резать уже нечего.
     ///
     /// Прежний тест с этим именем `Live` не трогал вовсе: он брал список имён,
+    /// **Присмотр ЗВОНЯЩЕЙ стороны: допуск такой же, а вожжей нет** (шаг 6 плана пары B).
+    ///
+    /// В паре B база у звонящего, и вызовы обслуживает он. Правило допуска одно на обе пары — «есть живой управляющий поток этой
+    /// карточки к этому ключу», — поэтому карточка ложится в тот же учёт. Рвать этот поток отзывом нам нечем и незачем: держим его мы
+    /// сами, и кончается он вместе с кругом звонка. Отсюда `None` вместо вожжей — и `cut` такой разговор не трогает.
+    #[test]
+    fn the_dialling_side_is_admitted_without_reins_and_is_not_cut() {
+        let live = Live::default();
+        // Ключ из семени, а не случайный: тесту нужен только различимый ключ.
+        let peer = iroh::SecretKey::from_bytes(&[3u8; 32]).public();
+        let card: CardId = "b1".into();
+        let held = live.remember(peer, Some(card.clone()), None);
+
+        assert!(live.admits(peer, &card), "поток держится — вызовы по этой карточке обслуживаются");
+        assert!(live.alive(peer, held), "и сам разговор на учёте");
+        // Отзыв этой карточки резать нечего: вожжей у разговора нет, и в список на снятие он не попадает.
+        assert!(live.cut(peer, &card).is_empty(), "рвать нечем — поток держит сама звонящая сторона");
+        assert!(!live.admits(peer, &card), "а с учёта он при этом снят: допуск кончился вместе с присмотром");
+
+        // Круг кончился — звонящая снимает запись сама, и второй раз снимать нечего.
+        let again = live.remember(peer, Some(card.clone()), None);
+        assert!(live.forget(peer, again).is_none(), "вожжей не было — и возвращать нечего");
+        assert!(!live.admits(peer, &card), "после круга допуска нет");
+    }
+
     /// сам звал `cut_these` и сам же повторял у себя удаление с конца. То
     /// есть проверял КОПИЮ решения, а не решение — и подмена в самой книге
     /// оставляла его зелёным. Здесь поднимаются два настоящих узла: вожжи
@@ -1458,7 +1569,7 @@ mod tests {
         for (control, card) in got.into_iter().zip([Some("Ромашка"), None, Some("Василёк")]) {
             let (held, ear) = reins(control);
             ears.push(ear);
-            ids.push(live.remember(peer, card.map(CardId::from), held));
+            ids.push(live.remember(peer, card.map(CardId::from), Some(held)));
         }
         assert!(ids.iter().all(|id| live.alive(peer, *id)), "все три на учёте");
 

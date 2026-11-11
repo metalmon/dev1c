@@ -439,6 +439,28 @@ pub fn write_log_file(kit: &Kit, line: &Line) {
     let _ = f.write_all(text.as_bytes());
 }
 
+/// Паника — в журнал на диске, а не в никуда.
+///
+/// Релиз окна собран `windows_subsystem = "windows"` (`main.rs`): консоли нет, и всё, что паника печатает в `stderr`, пропадает. Для
+/// человека это выглядит как «окно замерло и вылетело», а для нас — как пустое место там, где должна быть причина: обвал 12.11 на
+/// home-gpu пришлось доставать из системного журнала Windows по коду `c0000409`, и имени виноватой строки там нет вовсе.
+///
+/// Прежний обработчик зовётся следом, а не заменяется: он печатает то же самое в `stderr`, и под консолью (отладка, `--console`) человек
+/// по-прежнему видит привычное сообщение.
+pub fn record_panics(kit: &Kit) {
+    let path = kit.state_path(LOG_FILE);
+    let was = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let trace = std::backtrace::Backtrace::force_capture();
+        let text = format!("\n!! обвал {} — {info}\n{trace}\n", clock());
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
+            let _ = f.write_all(text.as_bytes());
+        }
+        was(info);
+    }));
+}
+
 /// `Command`/`Output` — в журнал команд на диске (см. `ctx_for`), не в окно.
 pub fn line_of(e: &Event) -> Option<Line> {
     let (kind, text) = match e {

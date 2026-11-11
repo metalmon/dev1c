@@ -2326,6 +2326,8 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
         let _ = std::fs::remove_file(&log_path);
     }
+    // Сразу после усечения, до первого окна: обвал должен доставаться из журнала, а не из системных записей Windows.
+    log::record_panics(&kit);
     let autostart_on = autostart::is_on();
     // «Подключаться при запуске»: в туннельном режиме — решает, поднимать ли
     // сеанс при старте, как раньше; в локальном — сеанс поднимается всегда

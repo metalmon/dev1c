@@ -1120,6 +1120,17 @@ impl Combo {
         matches!(self, Combo::Alone | Combo::AcceptBaseHere | Combo::DialBaseHere)
     }
 
+    /// Кем эта карточка называет себя той стороне (`wire::Side`) — по тому, где её база.
+    ///
+    /// **Слово это НАЗЫВАЕТ звонящая, а не выводит принимающая по своим признакам**: от него зависит, к какой куче карточек пойдёт
+    /// зачисление на той стороне (`enroll::Cards::pile`). Сочетание `Alone` второй стороны не имеет вовсе — ему и называться некому.
+    pub fn side(self) -> Option<crate::wire::Side> {
+        if !self.has_other_side() {
+            return None;
+        }
+        Some(if self.base_is_here() { crate::wire::Side::WithBase } else { crate::wire::Side::WithAgents })
+    }
+
     /// Есть ли у соединения вторая сторона вовсе.
     pub fn has_other_side(self) -> bool {
         self != Combo::Alone

@@ -704,11 +704,26 @@ async fn one_round(
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
     };
+    // **Кем выходим на провод и есть ли что сказать о базе** — решает сочетание этой карточки (`cfg::Combo::side`), а не
+    // привычка: в паре A здесь агенты и база у принимающей, в паре B база ЗДЕСЬ, и её поля — единственное, откуда та сторона их
+    // узнает. Карточка берётся у того же разбора, что отвечает на проводе (`Machine::of`), чтобы признак базы и поля базы приезжали
+    // из одного места.
+    let machine = Machine::read(kit);
+    let mine = machine.cards.mine_named(&card.id.on_wire()).cloned();
+    let side = mine.as_ref().map_or(crate::wire::Side::WithAgents, |c| {
+        if c.base_here {
+            crate::wire::Side::WithBase
+        } else {
+            crate::wire::Side::WithAgents
+        }
+    });
+    let base = match (side, &mine) {
+        (crate::wire::Side::WithBase, Some(c)) => Some(c.on_wire()),
+        _ => None,
+    };
     let out = {
         let (send, recv) = control.halves();
-        // Сторона и поля базы — пары A: здесь агенты, база на принимающей. Пару B назовёт шаг 6 плана: пока вызовы по каналу
-        // обслуживает только принимающая сторона, звонящему с базой нечего было бы делать с зачислением.
-        enroll::dial_side(send, recv, call, &says_name(), Machine::read(kit).ceiling, crate::wire::Side::WithAgents, None).await
+        enroll::dial_side(send, recv, call, &says_name(), machine.ceiling, side, base).await
     };
     // База в ответе одна и у зачисления, и у возврата (`Outcome::Already`), то
     // есть угадывать здесь больше нечего: прежде на возврат приезжал список, и

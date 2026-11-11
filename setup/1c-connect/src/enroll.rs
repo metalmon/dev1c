@@ -813,8 +813,8 @@ where
     let hello = Msg::Hello { proto_min: PROTO, proto_max: PROTO, side, says_name: says_name.into(), ceiling, why: call.why() };
     write_msg(w, &hello).await?;
 
-    let bases = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
-        Msg::HelloOk { proto, bases, .. } => {
+    let (bases, theirs) = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+        Msg::HelloOk { proto, bases, ceiling: theirs } => {
             // Выбранную версию обязана СМОТРЕТЬ и зовущая. Та сторона
             // выбирает её сама, и ошибиться может не только злой умысел:
             // старая сборка с другим правилом выбора объявит номер, которого
@@ -823,7 +823,7 @@ where
             if proto != PROTO {
                 return refuse_and_fail(w, Refuse::new(code::VERSION, version_chosen(proto))).await;
             }
-            bases
+            (bases, theirs)
         }
         Msg::Refuse(no) => return Err(no.text.into()),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello_ok", &other))).await,
@@ -868,7 +868,10 @@ where
         says_name: says_name.into(),
         // Поля базы едут от той стороны, у которой база: в паре A это принимающая, и сказать нам нечего (`None`); в паре B база
         // здесь, и её поля — единственное, откуда та сторона их узнает (`Cards::pile`, ветка `WithBase`).
-        base,
+        //
+        // Право записи складывается ЗДЕСЬ, потому что складывать его может только сторона с базой: свои две меры уже сложены в
+        // поле (`Cfg::may_write`), третья — потолок той машины из `hello_ok`. Выражение одно на обе пары (`wire::folded_write`).
+        base: base.map(|b| BaseFields { write: crate::wire::folded_write(b.write, theirs), ..b }),
     };
     write_msg(w, &enroll).await?;
 

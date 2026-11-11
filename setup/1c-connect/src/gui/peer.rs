@@ -681,7 +681,9 @@ async fn one_round(
     };
     let out = {
         let (send, recv) = control.halves();
-        enroll::dial_side(send, recv, call, &says_name(), Machine::read(kit).ceiling).await
+        // Сторона и поля базы — пары A: здесь агенты, база на принимающей. Пару B назовёт шаг 6 плана: пока вызовы по каналу
+        // обслуживает только принимающая сторона, звонящему с базой нечего было бы делать с зачислением.
+        enroll::dial_side(send, recv, call, &says_name(), Machine::read(kit).ceiling, crate::wire::Side::WithAgents, None).await
     };
     // База в ответе одна и у зачисления, и у возврата (`Outcome::Already`), то
     // есть угадывать здесь больше нечего: прежде на возврат приезжал список, и
@@ -937,7 +939,9 @@ async fn answering(
             return;
         }
     };
-    let cards = Machine::read(&kit).cards;
+    // Потолок машины объявляется той стороне в `hello_ok`: в паре B складывать право записи будет она, и своего слова о нашем
+    // потолке ей взять больше негде (план пары B, раздел 4).
+    let Machine { cards, ceiling: ours } = Machine::read(&kit);
     let ask = |request: enroll::Request| {
         let tx = tx.clone();
         async move {
@@ -971,7 +975,7 @@ async fn answering(
     }
     let out = {
         let (send, recv) = control.halves();
-        enroll::accept_side_with(first, send, recv, peer, &mut book, &cards, ask).await
+        enroll::accept_side_with(first, send, recv, peer, &mut book, &cards, ours, ask).await
     };
     let out = match out {
         Ok(out) => out,

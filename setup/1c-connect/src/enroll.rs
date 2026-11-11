@@ -202,11 +202,26 @@ impl Cards {
         accepting.iter().chain(base_elsewhere).chain(not_accepting).find(|c| &c.id().on_wire() == r)
     }
 
-    fn aside(&self, id: &CardId) -> Option<&'static str> {
-        let Cards::Read { base_elsewhere, not_accepting, .. } = self else { return None };
-        if base_elsewhere.iter().any(|c| c.id() == id) {
-            return Some(BASE_ELSEWHERE);
+    /// Куча карточек, к которым этот разговор может зачислить, — по той стороне, какой она себя назвала в `hello`.
+    ///
+    /// **Это и есть вся разница пар в зачислении.** `WithAgents` — у той стороны агенты, база здесь: зачисляем к карточкам, которые
+    /// принимают (пара A). `WithBase` — база у ТОЙ стороны, здесь агенты: зачисляем к карточкам, у которых база на другом компьютере
+    /// (пара B). Разрешение у такой карточки значит «этому ключу разрешено прислать сюда свою базу и получить от моих агентов вызовы
+    /// её инструментов» — пускают не к данным этой машины, их тут нет, а к агентам.
+    ///
+    /// `Err` — настройки не прочитались, и внутри НАШИ слова для нашего журнала: той стороне из них не уходит ничего.
+    pub fn pile(&self, side: Side) -> Result<&[Card], &str> {
+        match self {
+            Cards::Read { accepting, base_elsewhere, .. } => Ok(match side {
+                Side::WithAgents => accepting,
+                Side::WithBase => base_elsewhere,
+            }),
+            Cards::Unreadable(ours) => Err(ours),
         }
+    }
+
+    fn aside(&self, id: &CardId) -> Option<&'static str> {
+        let Cards::Read { not_accepting, .. } = self else { return None };
         not_accepting.iter().any(|c| c.id() == id).then_some(NOT_ACCEPTING)
     }
 }
@@ -385,12 +400,14 @@ pub async fn first_frame<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(w: &mut W,
 ///
 /// Остаётся ради тестов и ради тех мест, где у потока одно законное начало: разбор первого кадра живёт в `first_frame`, а всё, что
 /// дальше, — в `accept_side_with`.
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_side<W, R, F, Fut>(
     w: &mut W,
     r: &mut R,
     peer: EndpointId,
     book: &mut Book,
     cards: &Cards,
+    ours: Ceiling,
     decide: F,
 ) -> Result<Outcome, String>
 where
@@ -400,10 +417,11 @@ where
     Fut: Future<Output = Decision>,
 {
     let first = first_frame(w, r).await?;
-    accept_side_with(first, w, r, peer, book, cards, decide).await
+    accept_side_with(first, w, r, peer, book, cards, ours, decide).await
 }
 
 /// То же, но первый кадр уже на руках.
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_side_with<W, R, F, Fut>(
     first: Msg,
     w: &mut W,
@@ -411,6 +429,7 @@ pub async fn accept_side_with<W, R, F, Fut>(
     peer: EndpointId,
     book: &mut Book,
     cards: &Cards,
+    ours: Ceiling,
     decide: F,
 ) -> Result<Outcome, String>
 where
@@ -420,8 +439,8 @@ where
     Fut: Future<Output = Decision>,
 {
     // Шаг второй: та сторона открыла поток и представилась. Кадр уже прочитан тем, кто различает два законных начала потока.
-    let (proto_min, proto_max, ceiling, why) = match first {
-        Msg::Hello { proto_min, proto_max, ceiling, why, .. } => (proto_min, proto_max, ceiling, why),
+    let (proto_min, proto_max, ceiling, why, side) = match first {
+        Msg::Hello { proto_min, proto_max, ceiling, why, side, .. } => (proto_min, proto_max, ceiling, why, side),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello", &other))).await,
     };
     // Наименьший из двух максимумов (спека, «Версии») — и сверка в ОБЕ
@@ -443,9 +462,9 @@ where
     // и ниже их ждал отказ «карточку удалили» — ложь про ту машину вместо
     // правды про эту, и ни строки себе (находка 2 живого прогона 9.11 — ровно
     // эта беда, только с мерой чтения).
-    let accepting = match cards {
-        Cards::Read { accepting, .. } => accepting.as_slice(),
-        Cards::Unreadable(ours) => return ours_to_blame(w, Refuse::new(code::LOCK, SETTINGS_UNREADABLE), ours.clone()).await,
+    let pile = match cards.pile(side) {
+        Ok(pile) => pile,
+        Err(ours) => return ours_to_blame(w, Refuse::new(code::LOCK, SETTINGS_UNREADABLE), ours.to_string()).await,
     };
 
     // Что этот ключ уже может: список считается ДО заявки, потому что он же и
@@ -457,7 +476,7 @@ where
     // отозванная сторона вошла бы как зачисленная — то есть отзыв перестал
     // бы действовать немедленно, как того требует спека.
     let mut bases: Vec<BaseBrief> = Vec::new();
-    for c in accepting {
+    for c in pile {
         let seen = match book.enrolled_to(c.id(), peer) {
             Ok(seen) => seen,
             // Книгу не прочитать — наша беда, не её: короткие слова на провод,
@@ -480,7 +499,7 @@ where
             // записывать» — и получала отказ от моста. Обратная половина той же
             // беды: зачислили при закрытом потолке, и запись не возвращалась
             // никогда, пока не выдадут новый код.
-            let write = c.write && ceiling.allows();
+            let write = crate::wire::folded_write(c.write, ceiling);
             // Чужой потолок — единственное, чего нам неоткуда взять заново, и
             // книга держит его затем, что о нём спрашивает карточка в окне
             // («итог с указанием, какая сторона ограничила» — контракт).
@@ -576,12 +595,12 @@ where
             // сказала бы человеку о своей беде вместо нашей причины.
             return said_and_not_enrolled(w, Refuse::new(code::NOT_ALLOWED, NOT_ENROLLED_TEXT)).await;
         };
-        write_msg(w, &Msg::HelloOk { proto, bases: vec![mine.clone()] }).await?;
+        write_msg(w, &Msg::HelloOk { proto, bases: vec![mine.clone()], ceiling: ours }).await?;
         // Второе и дальнейшие подключения человека не спрашивают: личность
         // доказана самим iroh. Разговор зачисления кончен.
         return Ok(Outcome::Already(mine));
     }
-    write_msg(w, &Msg::HelloOk { proto, bases }).await?;
+    write_msg(w, &Msg::HelloOk { proto, bases, ceiling: ours }).await?;
 
     // Шаг второй, конец: заявка с секретом тикета. Ждём её безусловно — та
     // сторона сказала, что идёт с заявкой, и молчание на этом месте уже не
@@ -591,8 +610,8 @@ where
     // карточку тому же партнёру, и её заявку обязано разобрать как всякую
     // другую: по той карточке, к которой выдан код, а не отбить словами про
     // первую.
-    let (ticket_secret, says_name) = match heard(w, r, PATIENCE).await {
-        Ok(Msg::Enroll { ticket_secret, says_name, .. }) => (ticket_secret, says_name),
+    let (ticket_secret, says_name, their_base) = match heard(w, r, PATIENCE).await {
+        Ok(Msg::Enroll { ticket_secret, says_name, base }) => (ticket_secret, says_name, base),
         Ok(other) => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("enroll", &other))).await,
         Err(no) => return refuse_and_fail(w, no).await,
     };
@@ -611,7 +630,7 @@ where
         // нашем файле, значит послать его за тем, что не поможет.
         Err(why) => return ours_to_blame(w, Refuse::new(code::LOCK, BOOK_UNREADABLE), why).await,
     };
-    let Some(card) = accepting.iter().find(|c| c.id() == &card_key) else {
+    let Some(card) = pile.iter().find(|c| c.id() == &card_key) else {
         // Карточка на месте, а подключений по ней не будет: база у неё на той
         // стороне (случай второй спеки, которого эта сборка ещё не умеет) либо
         // её переключили в «Подключаюсь сам» или «Всё на одной машине» уже
@@ -633,11 +652,21 @@ where
         return said_and_not_enrolled(w, Refuse::new(code::BUSY, ALREADY_TALKING)).await;
     };
 
+    // **Чья база в вопросе о разрешении** — та же ось, что выбрала кучу выше. В паре A база наша, её держит сама карточка. В паре B
+    // база у ТОЙ стороны, и приехать её поля обязаны в заявке: без них человеку нечего показать, и это отказ словами, а не пустая
+    // строка в диалоге.
+    let shown_base = match side {
+        Side::WithAgents => card.on_wire(),
+        Side::WithBase => match their_base {
+            Some(base) => base,
+            None => return said_and_not_enrolled(w, Refuse::new(code::MALFORMED, BASE_NOT_SAID)).await,
+        },
+    };
+
     // Шаг четвёртый: человек. `enroll_wait` уходит ДО диалога — иначе зовущая
     // сторона просидит минуты в тишине и сочтёт её обрывом.
     write_msg(w, &Msg::EnrollWait).await?;
-    let request =
-        Request { card_name: card.name.clone(), card: card.id().clone(), base: card.on_wire(), peer, says_name: says_name.clone() };
+    let request = Request { card_name: card.name.clone(), card: card.id().clone(), base: shown_base, peer, says_name: says_name.clone() };
     let decision = tokio::time::timeout(DECISION, async {
         tokio::select! {
             d = decide(request) => Some(d),
@@ -694,12 +723,20 @@ where
             // В книгу уходит ОДНА из трёх — чужой потолок: две свои она
             // спросит у настроек, когда ответ понадобится (`Party::peer_write`,
             // там и довод).
-            let write = card.write && ceiling.allows();
+            let write = crate::wire::folded_write(card.write, ceiling);
             if let Err(why) = book.enroll(card.id(), peer, says_name.as_str(), ceiling.allows()) {
                 return ours_to_blame(w, Refuse::new(code::NOT_ALLOWED, NOT_WRITTEN), why).await;
             }
+            // Исход несёт НАШУ карточку проводным ключом в обеих парах: по нему принимающая сторона числит поток за карточкой
+            // (`gui::peer::answering` → `Cards::mine_named`), и отзыв этой карточки рвёт именно его.
             let base = BaseFields { write, ..card.on_wire() };
-            write_msg(w, &Msg::EnrollOk { base: Some(base.clone()) }).await?;
+            // А на провод наша база уезжает только там, где она у нас есть: в паре B её тут нет вовсе, и поле пустое — той стороне
+            // неоткуда узнать о базе, которой не бывает.
+            let said = match side {
+                Side::WithAgents => Some(base.clone()),
+                Side::WithBase => None,
+            };
+            write_msg(w, &Msg::EnrollOk { base: said }).await?;
             Ok(Outcome::Enrolled(base))
         }
         Decision::Deny => {
@@ -736,13 +773,23 @@ where
 /// всеми базами партнёра значит рвать отзывом одной связь по остальным.
 /// Безымянный возврат получает одну базу, если выбора нет вовсе, и отказ
 /// словами, если баз несколько, — выдумывать за него карточку нельзя.
-pub async fn dial_side<W, R>(w: &mut W, r: &mut R, call: Call<'_>, says_name: &str, ceiling: Ceiling) -> Result<Outcome, String>
+#[allow(clippy::too_many_arguments)]
+pub async fn dial_side<W, R>(
+    w: &mut W,
+    r: &mut R,
+    call: Call<'_>,
+    says_name: &str,
+    ceiling: Ceiling,
+    side: Side,
+    base: Option<BaseFields>,
+) -> Result<Outcome, String>
 where
     W: AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
 {
-    let hello =
-        Msg::Hello { proto_min: PROTO, proto_max: PROTO, side: Side::WithAgents, says_name: says_name.into(), ceiling, why: call.why() };
+    // Сторону звонящая НАЗЫВАЕТ, а не выводит её принимающая по своим признакам: от этого слова зависит, к какой куче карточек
+    // пойдёт зачисление на той стороне (`Cards::pile`). Поля базы едут с заявкой там, где база у звонящего (пара B).
+    let hello = Msg::Hello { proto_min: PROTO, proto_max: PROTO, side, says_name: says_name.into(), ceiling, why: call.why() };
     write_msg(w, &hello).await?;
 
     let bases = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
@@ -798,9 +845,9 @@ where
         // напечатал бы секрет целиком.
         ticket_secret: hex::encode(&*ticket.secret),
         says_name: says_name.into(),
-        // Поля базы едут от той стороны, у которой база. Здесь база на
-        // принимающей (случай первый), и нам сказать нечего.
-        base: None,
+        // Поля базы едут от той стороны, у которой база: в паре A это принимающая, и сказать нам нечего (`None`); в паре B база
+        // здесь, и её поля — единственное, откуда та сторона их узнает (`Cards::pile`, ветка `WithBase`).
+        base,
     };
     write_msg(w, &enroll).await?;
 
@@ -1105,9 +1152,8 @@ const NO_CARD_TEXT: &str =
 ///
 /// Совет ведёт к ЧЕЛОВЕКУ, а не к кнопке: нового кода просить бесполезно (беда не в коде), а решить, у кого же база, могут только двое по
 /// телефону.
-const BASE_ELSEWHERE: &str = "Подключить не удалось: базы на этом компьютере нет.\nВ карточке, для которой выдали этот код, сказано, \
-                              что база — на вашем компьютере, а подключения такого вида эта версия ещё не проводит.\nНовый код не \
-                              поможет — позвоните тому, кто вас подключает.";
+const BASE_NOT_SAID: &str = "Подключить не удалось: та сторона не назвала свою базу.\nПопросите обновить программу на компьютере с \
+                                  базой — эта версия ждёт поля базы в заявке.";
 
 /// Карточка есть, но подключений по ней не принимают: её переключили в «Подключаюсь сам» (зовёт она, а не её зовут) или в «Всё на одной
 /// машине» (соединения нет вовсе). Человек на этом компьютере мог сделать это уже ПОСЛЕ того, как выдал код.
@@ -1228,7 +1274,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let conn = listening.accept().await.unwrap().unwrap();
             let (mut w, mut r) = conn.accept_bi().await.unwrap();
-            let out = accept_side(&mut w, &mut r, peer, &mut book, &cards_there, |_req| async move {
+            let out = accept_side(&mut w, &mut r, peer, &mut book, &cards_there, Ceiling::Full, |_req| async move {
                 counter.0.fetch_add(1, Ordering::SeqCst);
                 answer
             })
@@ -1240,9 +1286,12 @@ mod tests {
 
         let conn = tokio::time::timeout(WAIT, caller.dial(by_loopback(&base))).await.expect("дозвон не уложился в срок").unwrap();
         let (mut w, mut r) = conn.open_bi().await.unwrap();
-        let mine = tokio::time::timeout(WAIT, dial_side(&mut w, &mut r, Call::of(&code, None), "Разработчик", Ceiling::Full))
-            .await
-            .expect("зовущая сторона не уложилась в срок");
+        let mine = tokio::time::timeout(
+            WAIT,
+            dial_side(&mut w, &mut r, Call::of(&code, None), "Разработчик", Ceiling::Full, Side::WithAgents, None),
+        )
+        .await
+        .expect("зовущая сторона не уложилась в срок");
         let (theirs, book, _held) = tokio::time::timeout(WAIT, server).await.expect("принимающая сторона не уложилась в срок").unwrap();
 
         caller.close().await;
@@ -1466,7 +1515,7 @@ mod tests {
             let (mut w, mut r) = conn.accept_bi().await.unwrap();
             // Человек не отвечает никогда: диалог открыт, а тот конец
             // исчезает. Ответить вместо него должен сам разговор.
-            let out = accept_side(&mut w, &mut r, peer, &mut book, &cards, |_req| std::future::pending()).await;
+            let out = accept_side(&mut w, &mut r, peer, &mut book, &cards, Ceiling::Full, |_req| std::future::pending()).await;
             (out, book)
         });
 
@@ -1570,7 +1619,7 @@ mod tests {
         let shown = Arc::new(std::sync::Mutex::new(None));
         let slot = shown.clone();
         let server = tokio::spawn(async move {
-            let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, |req| async move {
+            let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, Ceiling::Full, |req| async move {
                 *slot.lock().unwrap() = Some(req.says_name.clone());
                 Decision::Allow
             })
@@ -1680,7 +1729,7 @@ mod tests {
             let asked = Asked::default();
             let counter = asked.clone();
             let server = tokio::spawn(async move {
-                let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, |_req| async move {
+                let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, Ceiling::Full, |_req| async move {
                     counter.0.fetch_add(1, Ordering::SeqCst);
                     answer
                 })
@@ -1695,6 +1744,171 @@ mod tests {
             let (out, book) = tokio::time::timeout(WAIT, self.server).await.expect("принимающая сторона не уложилась в срок").unwrap();
             self.node.close().await;
             (out, book, asked)
+        }
+    }
+
+    /// Карточки, чья база на ДРУГОМ компьютере, — вторая куча зачисления.
+    fn there(card: Card) -> Cards {
+        Cards::Read { accepting: Vec::new(), base_elsewhere: vec![card], not_accepting: Vec::new() }
+    }
+
+    /// Поля базы, какими их присылает сторона, у которой база (пара B).
+    fn their_base(id: &str, write: bool) -> BaseFields {
+        BaseFields { base_id: id.into(), base_name: "База заказчика".into(), write }
+    }
+
+    /// **Пара B: зачисление к карточке, у которой базы нет.** Разрешение здесь значит не «пустите к моим данным» (их тут нет), а
+    /// «присылайте сюда свою базу — мои агенты будут звать её инструменты».
+    ///
+    /// Проверяется ровно то, что инвертировано: кучу карточек выбрало слово `side` из `hello`, поля базы человеку показаны ЧУЖИЕ (из
+    /// заявки — больше их взять негде), а `enroll_ok` своей базы не несёт вовсе, потому что её у нас нет.
+    #[tokio::test]
+    async fn pair_b_enrolls_a_card_whose_base_is_on_the_other_machine() {
+        let code;
+        let shown = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = shown.clone();
+        let d = dir("pair-b-enroll");
+        let node = Node::start(&d).await.unwrap();
+        let peer = node.id();
+        let mut book = Book::open(&d).unwrap();
+        {
+            let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+            book.issue(&"mine".into(), &ticket).unwrap();
+            code = hex::encode(&*ticket.secret);
+        }
+        let cards = there(a_card("Заказчик", "mine", true));
+        let (ours, theirs) = tokio::io::duplex(1 << 16);
+        let (mut our_r, mut our_w) = tokio::io::split(ours);
+        let (mut their_r, mut their_w) = tokio::io::split(theirs);
+        let server = tokio::spawn(async move {
+            let out = accept_side(&mut our_w, &mut our_r, peer, &mut book, &cards, Ceiling::Full, |req| {
+                let seen = seen.clone();
+                async move {
+                    *seen.lock().unwrap() = Some(req);
+                    Decision::Allow
+                }
+            })
+            .await;
+            (out, book)
+        });
+
+        let hello = Msg::Hello {
+            proto_min: PROTO,
+            proto_max: PROTO,
+            // Вот оно, слово, от которого зависит всё остальное.
+            side: Side::WithBase,
+            says_name: "Заказчик".into(),
+            ceiling: Ceiling::Full,
+            why: Why::Enroll,
+        };
+        Frame::write(&mut their_w, &hello).await.unwrap();
+        let heard = Frame::read(&mut their_r).await;
+        let Ok(Msg::HelloOk { bases, ceiling, .. }) = &heard else { panic!("ждали hello_ok: {heard:?}") };
+        assert!(bases.is_empty(), "зачислений по этой карточке ещё нет: {bases:?}");
+        assert_eq!(*ceiling, Ceiling::Full, "своё слово о потолке принимающая объявляет — в паре B складывать будет звонящий");
+
+        let enroll = Msg::Enroll { ticket_secret: code, says_name: "Заказчик".into(), base: Some(their_base("theirs", true)) };
+        Frame::write(&mut their_w, &enroll).await.unwrap();
+        assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::EnrollWait)), "обязан прийти enroll_wait");
+        let answered = Frame::read(&mut their_r).await;
+        match &answered {
+            Ok(Msg::EnrollOk { base: None }) => {}
+            other => panic!("в паре B нашей базы в ответе нет вовсе: {other:?}"),
+        }
+
+        let (out, book) = tokio::time::timeout(WAIT, server).await.expect("принимающая сторона не уложилась в срок").unwrap();
+        node.close().await;
+        let request = shown.lock().unwrap().take().expect("человека спросили");
+        assert_eq!(request.card_name, "Заказчик", "названа НАША карточка — к ней пускают");
+        assert_eq!(request.base.base_name.as_str(), "База заказчика", "а база в вопросе — ЧУЖАЯ, из заявки");
+        assert_eq!(request.base.base_id, "theirs".into(), "и ключ базы тоже её");
+        let Ok(Outcome::Enrolled(base)) = &out else { panic!("зачисление состоялось: {out:?}") };
+        assert_eq!(base.base_id, crate::wire::CardRef::from("mine"), "исход несёт НАШУ карточку: по ней принимающая числит поток");
+        assert_eq!(book.of(&"mine".into()).len(), 1, "и книга записала разрешение по нашей карточке");
+    }
+
+    /// Пара B без полей базы в заявке — отказ СЛОВАМИ, и человека не беспокоят: показывать ему в диалоге нечего, а выдумывать базу
+    /// за ту сторону нельзя. Код при этом не гаснет: разговор не состоялся не по вине человека и не по решению той стороны.
+    #[tokio::test]
+    async fn pair_b_without_the_base_in_the_enroll_is_refused_in_words() {
+        let mut code = None;
+        let mut talk = Alone::with("pair-b-no-base", Decision::Allow, |book, peer, _state| {
+            let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+            book.issue(&"mine".into(), &ticket).unwrap();
+            code = Some(hex::encode(&*ticket.secret));
+            there(a_card("Заказчик", "mine", true))
+        })
+        .await;
+        let secret_hex = code.unwrap();
+
+        let hello = Msg::Hello {
+            proto_min: PROTO,
+            proto_max: PROTO,
+            side: Side::WithBase,
+            says_name: "Заказчик".into(),
+            ceiling: Ceiling::Full,
+            why: Why::Enroll,
+        };
+        Frame::write(&mut talk.w, &hello).await.unwrap();
+        assert!(matches!(Frame::read(&mut talk.r).await, Ok(Msg::HelloOk { .. })), "обязан прийти hello_ok");
+        // Заявка без базы — то, что присылает сборка, не знающая пары B.
+        let enroll = Msg::Enroll { ticket_secret: secret_hex.clone(), says_name: "Заказчик".into(), base: None };
+        Frame::write(&mut talk.w, &enroll).await.unwrap();
+        let heard = tokio::time::timeout(WAIT, Frame::read(&mut talk.r)).await.expect("отказ не пришёл в срок");
+        let Ok(Msg::Refuse(no)) = &heard else { panic!("ждали отказ словами: {heard:?}") };
+        assert_eq!(no.code, code::MALFORMED, "{no:?}");
+        assert!(no.text.contains("не назвала свою базу"), "сказано, чего не хватило: {}", no.text);
+
+        let (out, book, asked) = talk.done().await;
+        assert_eq!(asked, 0, "человека не беспокоят: в диалоге нечего показать");
+        assert!(matches!(out, Ok(Outcome::NotEnrolled(_))), "это исход разговора, а не наша поломка: {out:?}");
+        assert!(book.verdict(&decode_secret(&secret_hex).unwrap()).is_ok_and(|v| matches!(v, Verdict::Card(_))), "код сгорел ни за что");
+    }
+
+    /// **Пары не путаются.** Куча выбирается словом `side`, и выбор этот строгий: сторона с агентами, пришедшая к карточке без базы,
+    /// получает тот же отказ, что на выдуманную карточку, — и наоборот. Пара A этим не ломается: её ветка выбирается явным
+    /// `WithAgents`, а не остатком.
+    #[tokio::test]
+    async fn the_pile_follows_the_side_and_the_other_pair_is_not_offered() {
+        for (name, side, pile_has_base_here) in [("pair-mix-agents", Side::WithAgents, false), ("pair-mix-base", Side::WithBase, true)] {
+            let mut code = None;
+            let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
+                let ticket = Ticket::issue(peer, None, vec![]).unwrap();
+                book.issue(&"mine".into(), &ticket).unwrap();
+                code = Some(hex::encode(&*ticket.secret));
+                let card = a_card("Ромашка", "mine", true);
+                // Карточка на машине ОДНА, и лежит она в куче, которой эта сторона не касается.
+                if pile_has_base_here {
+                    Cards::here(vec![card])
+                } else {
+                    there(card)
+                }
+            })
+            .await;
+
+            let hello = Msg::Hello {
+                proto_min: PROTO,
+                proto_max: PROTO,
+                side,
+                says_name: "Та сторона".into(),
+                ceiling: Ceiling::Full,
+                why: Why::Enroll,
+            };
+            Frame::write(&mut talk.w, &hello).await.unwrap();
+            let heard = Frame::read(&mut talk.r).await;
+            let Ok(Msg::HelloOk { bases, .. }) = &heard else { panic!("{name}: ждали hello_ok: {heard:?}") };
+            assert!(bases.is_empty(), "{name}: чужая куча в список баз не попадает: {bases:?}");
+            let enroll =
+                Msg::Enroll {
+                    ticket_secret: code.unwrap(), says_name: "Та сторона".into(), base: Some(their_base("theirs", true))
+                };
+            Frame::write(&mut talk.w, &enroll).await.unwrap();
+            let heard = tokio::time::timeout(WAIT, Frame::read(&mut talk.r)).await.expect("отказ не пришёл в срок");
+            let Ok(Msg::Refuse(no)) = &heard else { panic!("{name}: ждали отказ словами: {heard:?}") };
+            assert_eq!(no.code, code::NO_BASE, "{name}: {no:?}");
+            let (out, _book, asked) = talk.done().await;
+            assert_eq!(asked, 0, "{name}: человека не беспокоят");
+            assert!(matches!(out, Ok(Outcome::NotEnrolled(_))), "{name}: {out:?}");
         }
     }
 
@@ -1888,19 +2102,12 @@ mod tests {
     /// Оба вида потока на каждую кучу: заявка по живому коду и возврат по названной карточке.
     #[tokio::test]
     async fn a_card_put_aside_is_refused_in_its_own_words() {
-        let aside = |card: Card, base_here: bool| {
-            if base_here {
-                Cards::Read { accepting: Vec::new(), base_elsewhere: Vec::new(), not_accepting: vec![card] }
-            } else {
-                Cards::Read { accepting: Vec::new(), base_elsewhere: vec![card], not_accepting: Vec::new() }
-            }
-        };
-        for (name, enrolling, base_here, said) in [
-            ("base-there-enroll", true, false, "базы на этом компьютере нет"),
-            ("base-there-return", false, false, "базы на этом компьютере нет"),
-            ("no-parties-enroll", true, true, "подключений не принимают"),
-            ("no-parties-return", false, true, "подключений не принимают"),
-        ] {
+        // Отложенная карточка осталась одна: «подключений не принимают». Карточка с базой на другом компьютере отложенной быть
+        // перестала — к ней зачисляет пара B (`Cards::pile`, ветка `WithBase`).
+        let aside = |card: Card| Cards::Read { accepting: Vec::new(), base_elsewhere: Vec::new(), not_accepting: vec![card] };
+        for (name, enrolling, said) in
+            [("no-parties-enroll", true, "подключений не принимают"), ("no-parties-return", false, "подключений не принимают")]
+        {
             // Код по этой карточке выдан и жив, допуск у стороны есть: отказ ниже не про них.
             let mut secret = None;
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
@@ -1908,7 +2115,7 @@ mod tests {
                 let ticket = Ticket::issue(peer, None, vec![]).unwrap();
                 book.issue(&"b1".into(), &ticket).unwrap();
                 secret = Some(hex::encode(&*ticket.secret));
-                aside(a_card("Ромашка", "b1", true), base_here)
+                aside(a_card("Ромашка", "b1", true))
             })
             .await;
 
@@ -1957,19 +2164,10 @@ mod tests {
     /// уже дважды — решение о допуске спрашивается у КНИГИ, а не выводится из снимка.
     #[tokio::test]
     async fn only_an_enrolled_party_is_told_why_the_card_was_put_aside() {
-        for (name, enrolled, base_here, said) in [
-            ("base-there-stranger", false, false, "базы на этом компьютере нет"),
-            ("base-there-neighbour", true, false, "базы на этом компьютере нет"),
-            ("no-parties-stranger", false, true, "подключений не принимают"),
-            ("no-parties-neighbour", true, true, "подключений не принимают"),
-        ] {
-            let aside = |card: Card| {
-                if base_here {
-                    Cards::Read { accepting: Vec::new(), base_elsewhere: Vec::new(), not_accepting: vec![card] }
-                } else {
-                    Cards::Read { accepting: Vec::new(), base_elsewhere: vec![card], not_accepting: Vec::new() }
-                }
-            };
+        for (name, enrolled, said) in
+            [("no-parties-stranger", false, "подключений не принимают"), ("no-parties-neighbour", true, "подключений не принимают")]
+        {
+            let aside = |card: Card| Cards::Read { accepting: Vec::new(), base_elsewhere: Vec::new(), not_accepting: vec![card] };
             let mut talk = Alone::with(name, Decision::Allow, |book, peer, _state| {
                 // Незачисленный к ЭТОЙ карточке — но зачисленный к соседней: книга непуста, и отказ не от того, что в ней нет ничего.
                 book.enroll(&if enrolled { "b1".into() } else { "b2".into() }, peer, "Разработчик", true).unwrap();
@@ -2181,12 +2379,13 @@ mod tests {
         let (mut our_r, mut our_w) = tokio::io::split(ours);
         let (mut their_r, mut their_w) = tokio::io::split(theirs);
 
-        let caller =
-            tokio::spawn(async move { dial_side(&mut our_w, &mut our_r, Call::Return(None), "Разработчик", Ceiling::Full).await });
+        let caller = tokio::spawn(async move {
+            dial_side(&mut our_w, &mut our_r, Call::Return(None), "Разработчик", Ceiling::Full, Side::WithAgents, None).await
+        });
 
         assert!(matches!(Frame::read(&mut their_r).await, Ok(Msg::Hello { .. })), "зовущая обязана начать с hello");
         // Отвечаем номером, которого эта сборка не умеет.
-        Frame::write(&mut their_w, &Msg::HelloOk { proto: PROTO + 7, bases: vec![] }).await.unwrap();
+        Frame::write(&mut their_w, &Msg::HelloOk { proto: PROTO + 7, bases: vec![], ceiling: Ceiling::Full }).await.unwrap();
 
         let out = tokio::time::timeout(WAIT, caller).await.expect("зовущая не уложилась в срок").unwrap();
         assert!(out.is_err(), "чужой номер версии — отказ, а не молчаливое согласие: {out:?}");
@@ -2291,7 +2490,7 @@ mod tests {
         let counter = asked.clone();
         let cards_there = cards.clone();
         let first = tokio::spawn(async move {
-            let out = accept_side(&mut our_w, &mut our_r, peer, &mut first_book, &cards_there, |_req| async move {
+            let out = accept_side(&mut our_w, &mut our_r, peer, &mut first_book, &cards_there, Ceiling::Full, |_req| async move {
                 counter.0.fetch_add(1, Ordering::SeqCst);
                 let _ = held.await;
                 Decision::Allow
@@ -2313,7 +2512,7 @@ mod tests {
         let (mut their_r2, mut their_w2) = tokio::io::split(theirs2);
         let counter2 = asked.clone();
         let second = tokio::spawn(async move {
-            accept_side(&mut our_w2, &mut our_r2, peer, &mut second_book, &cards, |_req| async move {
+            accept_side(&mut our_w2, &mut our_r2, peer, &mut second_book, &cards, Ceiling::Full, |_req| async move {
                 counter2.0.fetch_add(1, Ordering::SeqCst);
                 Decision::Allow
             })

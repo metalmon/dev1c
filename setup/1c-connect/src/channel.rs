@@ -979,7 +979,7 @@ mod tests {
                 let channel = theirs.keep(conn);
                 let mut control = channel.answer().await.unwrap();
                 let (w, r) = control.halves();
-                let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Allow }).await;
+                let out = accept_side(w, r, peer, &mut book, &cards, Ceiling::Full, |_| async { Decision::Allow }).await;
                 seen.push(out);
                 if round == 1 {
                     control.bye(Refuse::new(code::MCP_OFF, SERVING_OFF)).await;
@@ -1017,7 +1017,17 @@ mod tests {
                     // предъявлять нечего, и он к тому же погашен.
                     let show = if enrolled.load(Ordering::SeqCst) { "" } else { code.as_str() };
                     let (w, r) = control.halves();
-                    match dial_side(w, r, crate::enroll::Call::of(show, None), "Разработчик", Ceiling::Full).await {
+                    match dial_side(
+                        w,
+                        r,
+                        crate::enroll::Call::of(show, None),
+                        "Разработчик",
+                        Ceiling::Full,
+                        crate::wire::Side::WithAgents,
+                        None,
+                    )
+                    .await
+                    {
                         Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => {
                             enrolled.store(true, Ordering::SeqCst);
                             Round::Held(hold(control.ear(), |_| {}).await)
@@ -1073,7 +1083,7 @@ mod tests {
             let channel = theirs.keep(conn);
             let mut control = channel.answer().await.unwrap();
             let (w, r) = control.halves();
-            let out = accept_side(w, r, peer, &mut book, &cards, |_| async { Decision::Deny }).await;
+            let out = accept_side(w, r, peer, &mut book, &cards, Ceiling::Full, |_| async { Decision::Deny }).await;
             // Тем же выходом, каким уходят откуда угодно. Прощаться тут
             // нечем: отказ уже сказан словами в `enroll_no`.
             control.end(None).await;
@@ -1098,7 +1108,17 @@ mod tests {
                         Err(why) => return Round::Failed(why),
                     };
                     let (w, r) = control.halves();
-                    match dial_side(w, r, crate::enroll::Call::of(code.as_str(), None), "Разработчик", Ceiling::Full).await {
+                    match dial_side(
+                        w,
+                        r,
+                        crate::enroll::Call::of(code.as_str(), None),
+                        "Разработчик",
+                        Ceiling::Full,
+                        crate::wire::Side::WithAgents,
+                        None,
+                    )
+                    .await
+                    {
                         Ok(Outcome::Enrolled(_)) | Ok(Outcome::Already(_)) => Round::Held(hold(control.ear(), |_| {}).await),
                         Ok(Outcome::NotEnrolled(no)) => Round::NotEnrolled(no),
                         Err(why) => Round::Failed(why),

@@ -170,7 +170,6 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
     c.env("VRUNNER_IBCONNECTION", ib_switch(&cfg.current().base_path));
     c.env("VRUNNER_DBUSER", &cfg.current().db_user);
     c.env("VRUNNER_DBPWD", &cfg.current().db_password);
-    c.env("NO_PROXY", cfg.current().server.rsplit_once(':').map(|(h, _)| h).unwrap_or(&cfg.current().server));
     c.env("GIT_TERMINAL_PROMPT", "0");
     // Экран Конфигуратору даёт коннектор, а не вызывающий: через эту команду
     // идут `cf_decompile`/`cf_load`, а vanessa-runner поднимает ими
@@ -621,21 +620,9 @@ pub async fn pipe_jsonrpc<S>(
                         log(Event::Warn(format!("{who}: {e} — отвечаю отказом вызовам, пока не исправится")));
                         last_logged_error = Some(e.clone());
                     }
-                    let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
-                    if wait_and_reply_degraded(
-                        &mut sr,
-                        &mut buf,
-                        &mut f,
-                        &mut pending_frames,
-                        &handshake,
-                        rules.inject,
-                        local,
-                        who,
-                        &e,
-                        &out_tx,
-                    )
-                    .await
-                    .is_err()
+                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, who, &e, &out_tx)
+                        .await
+                        .is_err()
                     {
                         break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
                     }
@@ -658,21 +645,9 @@ pub async fn pipe_jsonrpc<S>(
                         log(Event::Warn(format!("{who}: не удалось запустить: {msg} — отвечаю отказом вызовам, пока не исправится")));
                         last_logged_error = Some(msg.clone());
                     }
-                    let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
-                    if wait_and_reply_degraded(
-                        &mut sr,
-                        &mut buf,
-                        &mut f,
-                        &mut pending_frames,
-                        &handshake,
-                        rules.inject,
-                        local,
-                        who,
-                        &msg,
-                        &out_tx,
-                    )
-                    .await
-                    .is_err()
+                    if wait_and_reply_degraded(&mut sr, &mut buf, &mut f, &mut pending_frames, &handshake, rules.inject, who, &msg, &out_tx)
+                        .await
+                        .is_err()
                     {
                         break 'connection (-1, true, "агент отключился, пока ребёнок не запускался".to_string());
                     }
@@ -699,8 +674,6 @@ pub async fn pipe_jsonrpc<S>(
         let from_child = {
             let (out, pending, log, in_flight, inject, swallow) =
                 (out_tx.clone(), pending.clone(), log.clone(), in_flight.clone(), rules.inject, swallow.clone());
-            // Режим — снимком того же `cfg`, что собрал команду этого ребёнка: описания наших инструментов идут за ним (`jsonrpc::our_tools`).
-            let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
             tokio::spawn(async move {
                 let mut f = Framer::new();
                 let mut buf = vec![0u8; 64 * 1024];
@@ -726,7 +699,7 @@ pub async fn pipe_jsonrpc<S>(
                                 dec_in_flight(&in_flight);
                             }
                         }
-                        if out.send(rewrite_reply(fr, inject, local, &pending)).await.is_err() {
+                        if out.send(rewrite_reply(fr, inject, &pending)).await.is_err() {
                             return;
                         }
                     }
@@ -741,7 +714,7 @@ pub async fn pipe_jsonrpc<S>(
                             dec_in_flight(&in_flight);
                         }
                     }
-                    let _ = out.send(rewrite_reply(fr, inject, local, &pending)).await;
+                    let _ = out.send(rewrite_reply(fr, inject, &pending)).await;
                 }
             })
         };
@@ -832,11 +805,9 @@ pub async fn pipe_jsonrpc<S>(
                                     // вызов запер бы канал навсегда.
                                     let fr = pending_frames.pop_front().unwrap();
                                     if let Frame::Line(l) = &fr {
-                                        let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
                                         if let Some(reply) = degraded_reply(
                                             l,
                                             rules.inject,
-                                            local,
                                             who,
                                             "параметры сменились, а предыдущий вызов не завершился вовремя",
                                         ) {
@@ -1000,7 +971,7 @@ pub async fn pipe_jsonrpc<S>(
     let unanswered: Vec<Value> = pending.lock().unwrap().drain().map(|(_, (id, _))| id).collect();
     if rules.inject {
         for id in unanswered {
-            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(!crate::cfg::mode_needs_env(&cfg.current().mode)))).await;
+            let _ = out_tx.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
         }
     }
     // Свои задачи дорабатывают: их ответы ещё могут дойти до агента.
@@ -1209,8 +1180,7 @@ async fn handle_request(
             // `unanswered` ниже) — список в редакторе остаётся живым, как
             // того требует заголовок `ops_host::run_mcp`.
             None => {
-                let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
-                let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools(local))).await;
+                let _ = out.send(jsonrpc::list_reply(&id, jsonrpc::our_tools())).await;
                 Ok(())
             }
         },
@@ -1390,7 +1360,7 @@ fn capture_handshake(line: &[u8], handshake: &HandshakeCell) {
 /// кого, в списке только они, у 777N — пусто), `tools/call` и всё прочее
 /// именованное с `id` — явным отказом с причиной; уведомление (нет `id`) —
 /// отвечать нечем, и это не повод для записи в журнал.
-fn degraded_reply(line: &[u8], inject: bool, local: bool, who: &str, why: &str) -> Option<Vec<u8>> {
+fn degraded_reply(line: &[u8], inject: bool, who: &str, why: &str) -> Option<Vec<u8>> {
     let v: Value = serde_json::from_slice(line).ok()?;
     let method = v.get("method")?.as_str()?.to_string();
     let id = v.get("id").cloned();
@@ -1406,7 +1376,7 @@ fn degraded_reply(line: &[u8], inject: bool, local: bool, who: &str, why: &str) 
         Some(out)
     } else if method.eq_ignore_ascii_case("tools/list") {
         let id = id?;
-        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools(local) } else { Vec::new() }))
+        Some(jsonrpc::list_reply(&id, if inject { jsonrpc::our_tools() } else { Vec::new() }))
     } else {
         let id = id?;
         Some(jsonrpc::text_reply(&id, &format!("мост 1c-connect: {who} не запускается ({why}) — исправьте и повторите"), true))
@@ -1497,7 +1467,6 @@ async fn wait_and_reply_degraded<R>(
     pending_frames: &mut std::collections::VecDeque<Frame>,
     handshake: &HandshakeCell,
     inject: bool,
-    local: bool,
     who: &str,
     reason: &str,
     out_tx: &mpsc::Sender<Vec<u8>>,
@@ -1510,7 +1479,7 @@ where
             let fr = pending_frames.pop_front().unwrap();
             if let Frame::Line(l) = &fr {
                 capture_handshake(l, handshake);
-                if let Some(reply) = degraded_reply(l, inject, local, who, reason) {
+                if let Some(reply) = degraded_reply(l, inject, who, reason) {
                     let _ = out_tx.send(reply).await;
                 }
             }
@@ -1564,14 +1533,14 @@ async fn replay_handshake(stdin: &mut tokio::process::ChildStdin, handshake: &Ha
 /// допущенных инструментов для фильтрации берётся не из текущих параметров
 /// (к моменту ответа они могли уже смениться), а из того, что действовало
 /// на момент самого запроса — он и лежит в `pending` рядом с `id`.
-fn rewrite_reply(fr: Frame, inject: bool, local: bool, pending: &Pending) -> Vec<u8> {
+fn rewrite_reply(fr: Frame, inject: bool, pending: &Pending) -> Vec<u8> {
     match fr {
         Frame::Raw(b) => b,
         Frame::Line(mut l) => {
             let entry = jsonrpc::is_response_with_id(&l).and_then(|id| pending.lock().unwrap().remove(&key(&id)));
             if inject {
                 if let Some((_, allowed)) = &entry {
-                    if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed, local) {
+                    if let Some((_, out)) = jsonrpc::rewrite_list_reply(&l, allowed) {
                         return out;
                     }
                 }
@@ -2152,14 +2121,12 @@ mod tests {
         cfg.current_mut().base_path = "C:\\Bases\\Бух".into();
         cfg.current_mut().db_password = "па\"роль".into();
         cfg.current_mut().project = "C:\\proj\\Бух".into();
-        cfg.current_mut().server = "10.0.0.5:3393".into();
         let c = vrunner_command(&cfg, std::path::Path::new("T")).into_std();
         let env: std::collections::HashMap<_, _> =
             c.get_envs().filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().to_string(), v.to_string_lossy().to_string()))).collect();
         assert_eq!(env["VRUNNER_IBCONNECTION"], "/FC:\\Bases\\Бух");
         assert_eq!(env["VRUNNER_DBUSER"], "Администратор");
         assert_eq!(env["VRUNNER_DBPWD"], "па\"роль");
-        assert_eq!(env["NO_PROXY"], "10.0.0.5");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
         let sep = std::path::MAIN_SEPARATOR;
         let bin = format!("T{sep}vrunner{sep}bin");

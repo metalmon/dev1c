@@ -286,11 +286,7 @@ fn with_real<R>(ctx: &Ctx, cancel: &AtomicBool, f: impl FnOnce(&Deps, &dyn Fn(St
         platform_running: &crate::bridge::configurator_count,
         push: &push,
         pull: &pull,
-        push_plan: if p.local {
-            "git add, commit, затем отправка в ваш origin, если он заведён (git push)"
-        } else {
-            "git add, commit, затем отправка ветки рабочего места в Gitea (git push)"
-        },
+        push_plan: "git add, commit, затем отправка в ваш origin, если он заведён (git push)",
         dump_index_exists: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
         dry_run: ctx.dry_run,
         phase: &phase,

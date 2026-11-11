@@ -358,6 +358,11 @@ pub fn transport_of(combo: crate::cfg::Combo, has_channel: bool) -> Transport {
 pub struct Wiring {
     pub serving: Serving,
     pub to_channel: Option<ToChannel>,
+    /// Порты, которые слушает сеанс. `None` — те, что у всех (`Cfg::ports()`, константы): так зовут окно и командная строка.
+    ///
+    /// Своё число передают только тесты, и ради них же это поле и есть: порты у программы константные, а тесту нужен живой сеанс,
+    /// не отбирающий у настоящего коннектора его порт (до 11.11 «живым» в тестах был ssh-сеанс, который ничего не слушал).
+    pub ports: Option<Ports>,
 }
 
 /// Обслуживающая половина ЭТОЙ машины — та, что поднимает мост к серверам инструментов, — выставленная наружу, пока сеанс жив.
@@ -454,7 +459,7 @@ pub fn start_with_enabled(
             let state = Mutex::new(State::Connecting);
             // Порты у всех одни (`ports()`): слушает их местный слушатель, и то же число знает `Serve`. Тройка, считавшаяся от
             // номера рабочего места (`tunnel_ports()`), уехала вместе со средой — пробрасывать её больше некому.
-            let active_ports = cfg.ports();
+            let active_ports = wiring.ports.unwrap_or_else(|| cfg.ports());
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
             // Объявляем себя: с этой минуты поток узла знает, чем обслуживать вызовы, пришедшие по каналу. Снимается объявление
             // внизу, когда сеанс кончился, — и тем же самым снимается допуск к вызовам.
@@ -713,6 +718,11 @@ mod tests {
     /// Набор, который `Serve::new` принимает без лишних вопросов: сервер
     /// файловой базы на выдуманном рабочем месте `dev1` — те же значения, что
     /// и у остальных тестов этого файла (`filled_for_test`).
+    /// Свободная тройка портов для сеанса в тесте.
+    fn test_ports() -> Ports {
+        Ports { mcp: crate::ports::test_port(), vrunner: crate::ports::test_port(), web: crate::ports::test_port() }
+    }
+
     fn filled() -> Cfg {
         crate::cfg::filled_for_test()
     }
@@ -921,12 +931,10 @@ mod tests {
 
     #[test]
     fn a_session_that_cannot_dial_ends_by_itself_and_stop_is_still_fine() {
-        // Nothing listens there: the first attempt is terminal (no session
-        // ever existed), so wait() returns the error and stop() after it
-        // does not hang.
-        let port = crate::ports::test_port();
+        // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому (окна нет) — это `Transport::Nowhere`,
+        // отказ словами. Прежде тем же самым был ssh в несуществующую среду.
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().server = format!("127.0.0.1:{port}");
+        cfg.current_mut().base_here = false;
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -951,22 +959,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("onec-session-finished-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // Живой: на том конце слушает немой сокет — рукопожатие не кончается
-        // ни успехом, ни отказом, пока слушатель жив.
-        let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
-        let mut live = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
+        // Живой: база здесь, и местный слушатель стоит на портах, пока его не остановят. Порты — свои, тестовые: общие
+        // константы занял бы настоящий коннектор на машине человека.
+        let wiring = Wiring { ports: Some(test_ports()), ..Default::default() };
+        let mut live = start_with_enabled(
+            crate::cfg::filled_for_test(),
+            Kit::at(&dir),
+            std::sync::Arc::new(|_| {}),
+            Arc::new(AtomicBool::new(true)),
+            wiring,
+            |_| {},
+        );
         assert!(!live.finished(), "сеанс только что заведён и никуда не ушёл");
-        // Не `stop`: рукопожатие ждёт до 15 с, а тесту ждать нечего — роняем
-        // значение (тот же сигнал, но без ожидания) и отпускаем слушателя.
         drop(live);
-        drop(quiet);
 
-        // Кончившийся сам: звонить некуда, первая попытка терминальная.
-        let port = crate::ports::test_port();
+        // Кончившийся сам: базы здесь нет, а канал держать некому — вести вызовы некуда.
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().server = format!("127.0.0.1:{port}");
+        cfg.current_mut().base_here = false;
         let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
         let ended = (0..200).any(|_| {
             if dead.finished() {

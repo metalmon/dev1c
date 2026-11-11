@@ -153,21 +153,12 @@ fn the_hour_belongs_to_a_full_set() {
 }
 
 #[test]
-fn link_lines_say_where_and_as_whom() {
-    let h = Connection { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
-    assert_eq!(link_line(&State::Connecting, &h, "tunnel").unwrap().text, "подключаюсь к s:1 как dev2");
-    assert_eq!(link_line(&State::Off, &h, "tunnel").unwrap().text, "отключено");
-    assert!(link_line(&State::Up { since: Instant::now() }, &h, "tunnel").is_none());
-}
-
-#[test]
-fn local_mode_connecting_line_hides_the_environment_fields() {
-    // Адрес среды, пароль и имя рабочего места скрыты в «Связи» в
-    // локальном режиме и ничего не значат — журнал не должен о них
-    // говорить (находка целостного ревью).
-    let h = Connection { server: "s:1".into(), workstation: "dev2".into(), ..Default::default() };
-    let text = link_line(&State::Connecting, &h, "local").unwrap().text;
-    assert!(!text.contains("s:1") && !text.contains("dev2"), "{text}");
+fn link_lines_say_what_happened_without_naming_an_environment() {
+    // Ни адреса, ни рабочего места: среда уехала (11.11), и строка журнала
+    // говорит только о том, что включается и что выключено.
+    assert_eq!(link_line(&State::Connecting).unwrap().text, "включаю MCP");
+    assert_eq!(link_line(&State::Off).unwrap().text, "отключено");
+    assert!(link_line(&State::Up { since: Instant::now() }).is_none());
 }
 
 #[test]

@@ -69,12 +69,6 @@ pub fn carried_dump(saved: &Connection, new_project: &str) -> String {
 /// Берёт КАРТОЧКУ, а не `Cfg` (10.11): прежде она спрашивала у обеих настроек их текущее соединение, и переезд был виден только у той карточки, с которой работает агент — правка соседней уносила её каталог выгрузки молча. `Cfg` ей была нужна, пока в строке назывался доставшийся порт публикации (находка 6 задачи 1: порт живёт вне карточки), а портов она больше не называет вовсе — см. абзац выше.
 pub fn moved_lines(old: &Connection, new: &Connection) -> Vec<String> {
     let mut v = Vec::new();
-    if old.workstation != new.workstation {
-        v.push(format!(
-            "рабочее место сменилось: {} → {}. За ним переехали ветка проекта и адрес, куда он отправляется",
-            old.workstation, new.workstation
-        ));
-    }
     if old.project != new.project && old.dump != new.dump {
         v.push(format!("за каталогом проекта переехал каталог выгрузки: {} (прежний остался со старым содержимым)", new.dump));
     }
@@ -482,9 +476,6 @@ fn store_for(kit: &Kit) -> Result<secrets::Store, String> {
 fn fields_to_keep(host: &Connection, undecryptable: &[cfg::Undecryptable]) -> Vec<&'static str> {
     let mine = |field: &str| undecryptable.iter().any(|u| u.connection == host.name && u.field == field);
     let mut keep = Vec::new();
-    if host.password.is_empty() && mine("password") {
-        keep.push("password");
-    }
     if host.db_password.is_empty() && mine("db_password") {
         keep.push("db_password");
     }
@@ -571,7 +562,6 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     // `add_connection`: выводить его из имени, которое эта же запись только что придумала от каталога базы, значило бы дать первой
     // карточке ключ, который кто-то другой может вывести себе повторно.
     host.id_in_file = if old_host.name.is_empty() { cfg::CardId::fresh() } else { old_host.id() };
-    host.gitea = old_host.gitea.clone();
     host.dump = carried_dump(&old_host, &host.project);
     host.platform = old_host.platform.clone();
     host.configuration = old_host.configuration.clone();
@@ -616,15 +606,6 @@ pub fn save_host(ui: &mut Ui, mut host: Connection) -> Result<(), String> {
     // про поля, которых в окне нет ни в одной топологии.
     let shown = panel::shown_fields(&host);
     let saved = old_host.clone();
-    if !shown.contains(&"server") {
-        host.server = saved.server;
-    }
-    if !shown.contains(&"workstation") {
-        host.workstation = saved.workstation;
-    }
-    if !shown.contains(&"password") {
-        host.password = saved.password;
-    }
     if !shown.contains(&"base_path") {
         host.base_path = saved.base_path;
     }

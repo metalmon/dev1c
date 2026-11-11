@@ -1095,10 +1095,6 @@ pub fn refresh_project(cx: &mut App) {
                     Layout::Ok => (true, String::new()),
                     Layout::Missing => (false, "в папке проекта ещё ничего нет".into()),
                     Layout::BaseDir(f) => (false, format!("это каталог базы ({f})")),
-                    Layout::NoGitea => (false, cfg::NO_GITEA.into()),
-                    Layout::ForeignOrigin(u) => {
-                        (false, format!("{} — {}", project::foreign_origin(&u), project::foreign_origin_fix(&p.remote)))
-                    }
                     Layout::Drifted(d) => (false, d),
                 };
                 // Те же факты и под тем же замком, что отдаёт агенту
@@ -2624,15 +2620,15 @@ impl Ui {
 /// важно лишь то, что `ui.session` не пусто.
 #[cfg(test)]
 fn doomed_session(ui: &Ui) -> crate::session::Session {
-    let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
-    cfg.current_mut().server = format!("127.0.0.1:{port}");
+    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому — `Transport::Nowhere`.
+    cfg.current_mut().base_here = false;
     session::start_with_enabled(
         cfg,
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        session::Wiring { serving: ui.serving.clone(), to_channel: None },
+        session::Wiring { serving: ui.serving.clone(), to_channel: None, ports: None },
         |_| {},
     )
 }
@@ -2644,16 +2640,16 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
 /// настоящие порты и остался бы жив, а тесту нужен мёртвый.
 #[cfg(test)]
 fn ended_session(ui: &Ui) -> crate::session::Session {
-    let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
+    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому.
     cfg.current_mut().mode = "tunnel".into();
-    cfg.current_mut().server = format!("127.0.0.1:{port}");
+    cfg.current_mut().base_here = false;
     let mut s = session::start_with_enabled(
         cfg,
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        session::Wiring { serving: ui.serving.clone(), to_channel: None },
+        session::Wiring { serving: ui.serving.clone(), to_channel: None, ports: None },
         |_| {},
     );
     for _ in 0..200 {
@@ -2665,22 +2661,31 @@ fn ended_session(ui: &Ui) -> crate::session::Session {
     panic!("сеанс, которому некуда звонить, обязан кончиться сам");
 }
 
-/// Живой сеанс: на том конце слушает немой сокет — рукопожатие не
-/// кончается ни успехом, ни отказом, пока слушатель жив. Слушатель
-/// возвращается наружу: уронить его значит отпустить и сеанс.
+/// Живой сеанс: база здесь, и местный слушатель стоит на портах, пока его не
+/// остановят. Порты — тестовые (`Wiring::ports`): общие константы занял бы
+/// настоящий коннектор на машине человека. Слушатель возвращается наружу
+/// ради прежней подписи вызывающего — уронить его можно в любой момент.
 #[cfg(test)]
 fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
+    // Слушатель заводится и возвращается только затем, чтобы занять ОДИН порт и отдать номера остальных: живой сеанс слушает
+    // свои, тестовые порты — общие константы занял бы настоящий коннектор на машине человека.
     let quiet = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut cfg = ui.cfg.clone();
-    cfg.current_mut().mode = "tunnel".into();
-    cfg.current_mut().server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
+    let cfg = ui.cfg.clone();
     (
         session::start_with_enabled(
             cfg,
             ui.kit.clone(),
             Arc::new(|_| {}),
             ui.enabled.clone(),
-            session::Wiring { serving: ui.serving.clone(), to_channel: None },
+            session::Wiring {
+                serving: ui.serving.clone(),
+                to_channel: None,
+                ports: Some(crate::cfg::Ports {
+                    mcp: crate::ports::test_port(),
+                    vrunner: crate::ports::test_port(),
+                    web: crate::ports::test_port(),
+                }),
+            },
             |_| {},
         ),
         quiet,

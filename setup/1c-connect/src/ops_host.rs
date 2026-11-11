@@ -327,40 +327,6 @@ pub enum Gitea {
     Ok(String),
 }
 
-/// Адрес Gitea среды, выведенный из адреса среды: тот же хост, порт на два
-/// ниже SSH (блок из четырёх подряд у dev1c-setup). Вывод верен для
-/// туннеля — там Gitea среды приезжает на машину проброшенным портом.
-/// Зовётся **только при настройке** (`write_derived_gitea`): при каждом
-/// чтении этот счёт давал мёртвый адрес в образе, где туннеля нет.
-pub fn derived_gitea(server: &str) -> Option<String> {
-    let (host, port) = server.rsplit_once(':')?;
-    let port: u32 = port.parse().ok()?;
-    (!host.is_empty() && port > 2).then(|| format!("http://{host}:{}", port - 2))
-}
-
-/// Адрес среды, который настройке **есть смысл** записать. Вывод верен
-/// только в туннельном режиме: там Gitea среды приезжает на машину
-/// проброшенным портом. В локальном режиме туннеля нет, пробрасывать некому,
-/// и выведенный адрес указывает в пустоту — записать его значило бы
-/// закрепить выдумку в файле, да ещё так, будто её задал человек (живой
-/// прогон в образе 2026-10-21: `install` записал мёртвый
-/// `http://127.0.0.1:3391`). Там поле остаётся пустым: в образе его пишет
-/// `seed` стенда, у человека — он сам, а проверка до тех пор честно говорит
-/// «адрес среды не задан».
-///
-/// Пустой `server` или оставленное умолчание образца — тоже нечего выводить:
-/// этот адрес никто не задавал.
-pub fn gitea_to_write(host: &crate::cfg::Connection) -> Option<String> {
-    if host.mode != "tunnel" {
-        return None;
-    }
-    let server = host.server.trim();
-    if server.is_empty() || server == crate::cfg::Connection::default().server {
-        return None;
-    }
-    derived_gitea(server)
-}
-
 /// Настройка дописывает в toml всё, что программа выводила сама: адрес среды,
 /// каталог выгрузки и порт своей публикации. После настройки файл параметров —
 /// полная картина того, чем программа пользуется (решение заказчика
@@ -407,16 +373,6 @@ pub fn write_derived_fields(kit: &Kit, cfg: &mut Cfg, dry_run: bool) -> Result<V
     }
     anyhow::ensure!(!cfg.connections.is_empty(), "{}", crate::cfg::Cfg::no_connections_refusal());
     let mut fields: Vec<(&str, String)> = Vec::new();
-    if cfg.gitea_url().is_none() {
-        // Выводить не из чего (локальный режим, пустой или умолчательный
-        // `server`, `server` без порта) — поле остаётся пустым, и проверка
-        // скажет про поле, а не подставит выдуманный адрес. См.
-        // `gitea_to_write`.
-        if let Some(addr) = gitea_to_write(cfg.current()) {
-            cfg.current_mut().gitea = addr.clone();
-            fields.push(("gitea", format!("{addr:?}")));
-        }
-    }
     if cfg.current().dump.is_empty() {
         let dir = cfg.dump_dir();
         cfg.current_mut().dump = dir.clone();
@@ -1515,21 +1471,6 @@ fn version_once(base_url: &str, user: &str, password: &str, timeout: std::time::
 /// локальном режиме показывали пустую дырку (находка аудита 30.10).
 pub const ENV_NEARBY: &str = "база рядом, адрес не нужен";
 
-/// Строка про среду для шага `host.env` — и единственное место, где решается,
-/// спрашивать ли адрес вообще. В локальном режиме среды нет: база лежит рядом,
-/// туннеля нет, поле никем не заполняется, и проверять там нечего. Та же
-/// развилка стоит в `Cfg::validate`, и обе выросли из одного дня: пока у поля
-/// было умолчание-образец, безусловная проверка его пропускала, а с пустыми
-/// умолчаниями (26.10, `adce1c6`) она стала обрывать на стенде любую установку.
-pub fn env_line(mode: &str, server: &str) -> Result<String> {
-    if !crate::cfg::mode_needs_env(mode) {
-        return Ok(format!("среда: {ENV_NEARBY}"));
-    }
-    let addr: std::result::Result<Vec<_>, _> = std::net::ToSocketAddrs::to_socket_addrs(server).map(|a| a.collect());
-    anyhow::ensure!(addr.is_ok(), "адрес среды {server} не разбирается — проверьте server в 1c-connect.toml");
-    Ok(format!("среда: {server}"))
-}
-
 struct Env;
 impl Op<Ctx> for Env {
     fn id(&self) -> &'static str {
@@ -1547,12 +1488,8 @@ impl Op<Ctx> for Env {
     /// План обещает ровно то, что сделает `apply`: он сам ветвится по режиму
     /// (`env_line`), и в локальном режиме адрес среды не проверяет — обещать
     /// проверку того, чего в этом режиме нет, значит врать в плане.
-    fn plan(&self, ctx: &Ctx) -> Vec<Action> {
-        vec![Action::new(if crate::cfg::mode_needs_env(&ctx.cfg.current().mode) {
-            "проверить платформу 1С, mcp-1c в комплекте и адрес среды"
-        } else {
-            "проверить платформу 1С и mcp-1c в комплекте"
-        })]
+    fn plan(&self, _ctx: &Ctx) -> Vec<Action> {
+        vec![Action::new("проверить платформу 1С и mcp-1c в комплекте")]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         match find_1cv8(&ctx.cfg) {
@@ -1564,7 +1501,6 @@ impl Op<Ctx> for Env {
         let o = docker::probe(ctx, &exe.to_string_lossy(), &["--version"])?;
         anyhow::ensure!(o.ok(), "mcp-1c не запускается: {}", o.tail(2).join(" "));
         ctx.ok(o.text.trim().to_string());
-        ctx.ok(env_line(&ctx.cfg.current().mode, &ctx.cfg.current().server)?);
         Ok(())
     }
 }
@@ -1601,24 +1537,9 @@ impl Op<Ctx> for ProjectOp {
         match crate::project::layout_state(&p) {
             Layout::BaseDir(f) => OpState::Blocked(format!("{} — каталог базы ({f}); укажите другой project", p.dir.display())),
             Layout::Missing => OpState::Missing,
-            Layout::NoGitea => OpState::Blocked(crate::cfg::no_gitea()),
-            // Чужой origin раскладка не правит вовсе — это не расхождение, а
-            // настройка человека: шаг заперт словами, как и при пустом адресе
-            // среды.
-            Layout::ForeignOrigin(u) => {
-                OpState::Blocked(format!("{} — {}", crate::project::foreign_origin(&u), crate::project::foreign_origin_fix(&p.remote)))
-            }
-            // Куда приводим — только то, что и правда приводим: в локальном
-            // режиме ветка и origin принадлежат человеку, раскладка их не
-            // трогает, и расхождением там бывают только служебные файлы.
-            Layout::Drifted(d) => OpState::Drifted {
-                from: d,
-                to: if p.local {
-                    "служебные файлы проекта".to_string()
-                } else {
-                    format!("ветка {}, origin {}", p.branch, p.remote)
-                },
-            },
+            // Куда приводим — только то, что и правда приводим: ветка и `origin` принадлежат человеку, раскладка их не трогает,
+            // и расхождением бывают только служебные файлы.
+            Layout::Drifted(d) => OpState::Drifted { from: d, to: "служебные файлы проекта".to_string() },
             Layout::Ok => OpState::Done(format!("{}, ветка {}", p.dir.display(), crate::project::branch_label(&p))),
         }
     }
@@ -1627,17 +1548,8 @@ impl Op<Ctx> for ProjectOp {
         let analyzer = analyzer_lines(&ctx.cfg);
         let names: Vec<&str> = analyzer.iter().map(|(k, _)| *k).collect();
         let bsl = if names.is_empty() { String::new() } else { format!(", {} ({})", crate::analyzer::FILE, names.join(", ")) };
-        // `origin` в плане — только там, где раскладка его и ставит: в
-        // локальном режиме строка обещала «origin » с пустым адресом.
-        let origin = if p.local { String::new() } else { format!(", origin {}", p.remote) };
-        vec![Action::new(format!(
-            "{}: git init -b {}{origin}, .gitattributes/.gitignore/autumn-properties.json{bsl}",
-            p.dir.display(),
-            // Имя из одного места с самой раскладкой: план обещает ровно то,
-            // что сделает `init` на пустом каталоге, и ни слова про ветку
-            // существующего репозитория — её мы в локальном режиме не трогаем.
-            crate::project::init_branch(&p)
-        ))]
+        // Про `origin` план не обещает ничего: его заводит человек сам, а раскладка — каталог, git и служебные файлы.
+        vec![Action::new(format!("{}: git init -b main, .gitattributes/.gitignore/autumn-properties.json{bsl}", p.dir.display()))]
     }
     fn apply(&self, ctx: &Ctx) -> Result<()> {
         if ctx.dry_run {
@@ -2530,11 +2442,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gitea_probe_on_a_closed_port_is_down() {
-        assert!(matches!(gitea_probe("http://127.0.0.1:1", std::time::Duration::from_secs(5)), Gitea::Down(_)));
-    }
-
     /// Настоящие HTTP-ответы без стороннего крейта: слушатель отдаёт `replies`
     /// по одному на соединение, в порядке списка, и останавливается сам.
     /// Нескольких ответов хватает, чтобы проверить и повтор пробы: исход
@@ -2770,17 +2677,6 @@ mod tests {
         assert!(matches!(reach, Reach::Absent), "{reach:?}");
     }
 
-    #[test]
-    fn derived_gitea_sits_two_ports_below_ssh() {
-        assert_eq!(derived_gitea("192.168.1.10:3393").as_deref(), Some("http://192.168.1.10:3391"));
-        assert_eq!(derived_gitea("10.0.0.5:4403").as_deref(), Some("http://10.0.0.5:4401"));
-        // Выводить не из чего — и выдумывать нечего.
-        assert_eq!(derived_gitea("192.168.1.10"), None);
-        assert_eq!(derived_gitea("192.168.1.10:порт"), None);
-        assert_eq!(derived_gitea(":3393"), None);
-        assert_eq!(derived_gitea("192.168.1.10:1"), None);
-    }
-
     /// Каталог состояния на свой тест (писать в чужой toml нельзя),
     /// убираемый и при панике — как `tempdir::Dir` в `project.rs`.
     struct TomlKit(Kit);
@@ -2827,92 +2723,6 @@ mod tests {
         "project = \"C:\\\\proj\\\\Buh\"\nbase_url = \"http://localhost/Buh/hs/mcp-1c\"\n"
     );
 
-    #[test]
-    fn install_writes_the_derived_address_once() {
-        let kit = TomlKit::new("derived");
-        let path = kit.put(MINE);
-        let mut cfg: Cfg = toml::from_str(MINE).unwrap();
-        assert_eq!(cfg.gitea_url(), None);
-
-        let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
-        assert!(wrote.iter().any(|w| w == "gitea = \"http://10.0.0.5:4401\""), "{wrote:?}");
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(written.contains("gitea = \"http://10.0.0.5:4401\""), "{written}");
-        // Строки человека целы все до одной: правится значение, а не файл.
-        for line in MINE.lines() {
-            assert!(written.contains(line), "строка человека пропала: {line}\n{written}");
-        }
-        // И ни одного ключа из образца, которого человек не писал.
-        assert!(!written.contains("tools = ") && !written.contains("db_user = "), "{written}");
-        let back: Cfg = toml::from_str(&written).unwrap();
-        assert_eq!(back.gitea_url(), Some("http://10.0.0.5:4401"));
-
-        // Второй прогон настройки уже ничего не выводит и не пишет.
-        assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
-    }
-
-    /// Сухой прогон не пишет, но и не врёт: `cfg` в памяти правится, и план
-    /// операций показывает то, что случится (находка ревью задачи 35).
-    #[test]
-    fn a_dry_run_derives_in_memory_and_writes_nothing() {
-        let kit = TomlKit::new("dry");
-        let path = kit.put(MINE);
-        let mut cfg: Cfg = toml::from_str(MINE).unwrap();
-
-        let wrote = write_derived_fields(&kit, &mut cfg, true).unwrap();
-        assert_eq!(wrote.len(), 3, "{wrote:?}");
-        assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"), "план считается по выведенному");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), MINE, "сухой прогон файл не трогает");
-    }
-
-    /// Выводить адрес перестали 21.10, а спрашивать его продолжали — и на
-    /// стенде, где режим локальный всегда, установка обрывалась на первом же
-    /// шаге: ни проекта, ни публикации, ни расширения в базе (живой стенд,
-    /// 27.10.2026; заплата `patches/0001-stand-local-server/`).
-    #[test]
-    fn a_local_stand_is_not_asked_for_an_environment_address() {
-        assert!(env_line("local", "").unwrap().contains("рядом"));
-        assert!(env_line("tunnel", "").is_err(), "в туннеле адрес обязателен");
-        assert_eq!(env_line("tunnel", "192.168.1.10:3393").unwrap(), "среда: 192.168.1.10:3393");
-    }
-
-    /// План обещает то, что `apply` и сделает: его развилка по режиму стояла
-    /// с 27.10, а план говорил «и адрес среды» в обоих режимах — обещание
-    /// проверить то, чего в локальном режиме нет вовсе (находка аудита
-    /// 30.10). Та же правка у шага «Каталог проекта»: `origin` и «нужная»
-    /// ветка в локальном режиме принадлежат человеку, и план их не обещает.
-    #[test]
-    fn the_plan_promises_nothing_about_an_environment_the_mode_has_not_got() {
-        // Ветку в локальном режиме план называет только одну — ту, что
-        // заведёт `git init -b` на пустом месте (`project::init_branch`); к
-        // существующему репозиторию человека мы не прикасаемся, и на диск за
-        // его веткой план не ходит. Путь всё равно берём свой, а не
-        // `C:\proj\Buh` из `filled_for_test`: на машине владельца там лежит
-        // настоящий репозиторий, и шагу незачем его трогать.
-        let nowhere = std::env::temp_dir().join(format!("dev1c-plan-{}", std::process::id()));
-        let plan = |op: &dyn Op<Ctx>, mode: &str| {
-            let mut cfg = crate::cfg::filled_for_test();
-            cfg.current_mut().mode = mode.into();
-            cfg.current_mut().project = nowhere.display().to_string();
-            if mode == "local" {
-                cfg.current_mut().workstation.clear();
-            } else {
-                cfg.current_mut().gitea = "http://localhost:3000".into();
-            }
-            op.plan(&publication_ctx(cfg, true)).iter().map(|a| a.0.clone()).collect::<Vec<_>>().join(" ")
-        };
-        assert!(plan(&Env, "tunnel").contains("адрес среды"));
-        let local = plan(&Env, "local");
-        assert!(!local.contains("среды"), "{local}");
-        assert!(local.contains("mcp-1c в комплекте"), "{local}");
-
-        assert!(plan(&ProjectOp, "tunnel").contains("origin http://localhost:3000/dev1c/"));
-        let local = plan(&ProjectOp, "local");
-        assert!(!local.contains("origin"), "{local}");
-        assert!(local.contains("git init -b main"), "пустое рабочее место не делает ветку пустой: {local}");
-    }
-
     /// Куда шаг приводит каталог — ровно то, что он и правда делает. В
     /// локальном режиме ветка и origin принадлежат человеку, раскладка их не
     /// трогает, и обещать «ветка main» там значило бы обещать переключить
@@ -2925,7 +2735,6 @@ mod tests {
         let state = |mode: &str| {
             let mut cfg = crate::cfg::filled_for_test();
             cfg.current_mut().mode = mode.into();
-            cfg.current_mut().gitea = "http://localhost:3000".into();
             cfg.current_mut().project = t.path().display().to_string();
             ProjectOp.state(&publication_ctx(cfg, true))
         };
@@ -2936,59 +2745,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        match state("tunnel") {
-            OpState::Drifted { to, .. } => assert!(to.contains("ветка dev1") && to.contains("origin http://localhost:3000/dev1c/"), "{to}"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// Адрес среды выводится только там, где вывод верен. В локальном режиме
-    /// туннеля нет, и записанный адрес был бы выдумкой, закреплённой в файле
-    /// (живой прогон в образе 2026-10-21). Каталог выгрузки и порт публикации
-    /// пишутся в обоих режимах: они от полей этой же машины.
-    #[test]
-    fn a_local_workstation_gets_no_made_up_environment_address() {
-        let kit = TomlKit::new("local");
-        // Тот же образец, но локальный: именно подменой, а не второй строкой
-        // `mode` — два одноимённых ключа в одном toml разбору не нравятся.
-        let text = MINE.replace("mode = \"tunnel\"", "mode = \"local\"");
-        let path = kit.put(&text);
-        let mut cfg: Cfg = toml::from_str(&text).unwrap();
-
-        let wrote = write_derived_fields(&kit, &mut cfg, false).unwrap();
-        assert_eq!(cfg.gitea_url(), None, "в локальном режиме адрес не выдумывается");
-        assert!(wrote.iter().all(|w| !w.starts_with("gitea")), "{wrote:?}");
-        assert_eq!(wrote.len(), 2, "каталог выгрузки и порт публикации — пишутся: {wrote:?}");
-        let written = std::fs::read_to_string(&path).unwrap();
-        assert!(!written.contains("gitea"), "{written}");
-        // 8081, не 8082: с задачи 6 `derived_http_port` — константа, имя
-        // рабочего места (`dev2` в `MINE`) её больше не трогает.
-        assert!(written.contains("http_port = 8081") && written.contains("dump = "), "{written}");
-
-        // Тот же файл в туннельном режиме — адрес записан.
-        let kit = TomlKit::new("tunnel");
-        let path = kit.put(MINE);
-        let mut cfg: Cfg = toml::from_str(MINE).unwrap();
-        assert_eq!(cfg.current().mode, "tunnel", "умолчание режима");
-        write_derived_fields(&kit, &mut cfg, false).unwrap();
-        assert_eq!(cfg.gitea_url(), Some("http://10.0.0.5:4401"));
-        assert!(std::fs::read_to_string(&path).unwrap().contains("gitea = \"http://10.0.0.5:4401\""));
-    }
-
-    /// Нечего выводить — и в туннельном режиме: `server` пуст или держит
-    /// умолчание образца, которого никто не задавал.
-    #[test]
-    fn an_unset_server_derives_no_address_either() {
-        let tunnel = |server: &str| crate::cfg::Connection { server: server.into(), mode: "tunnel".into(), ..Default::default() };
-        assert_eq!(gitea_to_write(&tunnel("10.0.0.5:4403")).as_deref(), Some("http://10.0.0.5:4401"));
-        assert_eq!(gitea_to_write(&tunnel("")), None);
-        assert_eq!(gitea_to_write(&tunnel("  ")), None);
-        assert_eq!(gitea_to_write(&tunnel(&crate::cfg::Connection::default().server)), None, "умолчание образца никто не задавал");
-        assert_eq!(gitea_to_write(&tunnel("10.0.0.5")), None, "без порта выводить не из чего");
-        // Режим важнее всего остального.
-        let mut local = tunnel("10.0.0.5:4403");
-        local.mode = "local".into();
-        assert_eq!(gitea_to_write(&local), None);
     }
 
     /// Файла параметров нет — дописывать некуда: своего toml программа тут не
@@ -3096,20 +2852,6 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("http_port = 8081"), "{written}");
         assert!(!written.contains("8082"), "{written}");
-    }
-
-    #[test]
-    fn install_never_touches_a_written_address() {
-        let kit = TomlKit::new("written");
-        let text = format!("{MINE}gitea = \"http://localhost:3000\"\ndump = \"D:\\\\dump\"\nhttp_port = 9000\n");
-        let path = kit.put(&text);
-        let mut cfg: Cfg = toml::from_str(&text).unwrap();
-        assert!(write_derived_fields(&kit, &mut cfg, false).unwrap().is_empty());
-        assert_eq!(cfg.gitea_url(), Some("http://localhost:3000"));
-        assert_eq!(cfg.current().dump, "D:\\dump");
-        assert_eq!(cfg.current().http_port, Some(9000));
-        assert_eq!(cfg.dump_override(), Some("D:\\dump"), "свой каталог мост передаёт");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
     }
 
     #[test]
@@ -3873,51 +3615,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Круг исправления после ревью `717c873`/`e1ff800`: раньше `watch_mcp`
-    /// держала имя рабочего места параметром и перечитывала его на каждый
-    /// такт («Important 2 финального ревью») именно потому, что
-    /// `allow::read` смотрела в замок РАБОЧЕГО МЕСТА — переименование без
-    /// перезапуска окна («Сохранить», `gui/save.rs`) уводило проверку
-    /// спрашивать замок уже под новым именем, и признак гас при живом
-    /// коннекторе. Теперь `allow::read` смотрит в признак обслуживания
-    /// комплекта (`single_instance::is_serving`), которому имя рабочего
-    /// места не нужно вовсе: этот тест берёт признак ОДИН раз, до
-    /// переименования, и проверяет, что оно разрешение не тревожит —
-    /// отслеживать переезд имени больше нечем и не для чего.
-    #[test]
-    fn watch_mcp_does_not_care_that_the_workstation_got_renamed() {
-        let dir = mcp_test_dir("watch-mcp-rename");
-        let kit = Kit::at(&dir);
-        let user = format!("owner-{}", std::process::id());
-        // `watch_mcp` читает файл настоящим `Cfg::load` (боевая подложка —
-        // DPAPI на Windows), а этот тест — не про пароли: пароль обнулён,
-        // `seal`/`open` его пропускают как есть на любой подложке, и
-        // подложка для записи (здесь — файловая, без DPAPI, спека
-        // «Ловушки») не обязана совпадать с той, что читает `watch_mcp`.
-        let store = crate::secrets::Store::file(kit.state());
-        let write_workstation = |name: &str| {
-            let mut cfg = crate::cfg::filled_for_test();
-            cfg.current_mut().workstation = name.into();
-            cfg.current_mut().password = String::new();
-            std::fs::write(kit.state_path(crate::cfg::FILE), cfg.render(&store).unwrap()).unwrap();
-        };
-        write_workstation("dev1");
-        crate::allow::write(&kit, true).unwrap();
-        let _guard = take_serving_for_test(&kit, &user);
-        let live = crate::session::Live::new(Cfg::default());
-        let log: Sink = Arc::new(|_| {});
-        let enabled = watch_mcp(kit.clone(), user, live, log);
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(enabled.load(Ordering::Relaxed), "признак обслуживания держится — разрешение должно быть сразу");
-        write_workstation("dev2");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            enabled.load(Ordering::Relaxed),
-            "переименование рабочего места не должно гасить разрешение — признак обслуживания не о нём вовсе"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// Круг исправления 2 задачи 3 (проверка безопасности), находка 3: файл
     /// целиком может не пройти `Cfg::load` (опечатка в любом другом поле —
     /// здесь: пустой `base_path`), а ужесточение потолка записи обязано
@@ -3941,7 +3638,6 @@ mod tests {
         let store = crate::secrets::Store::file(kit.state());
         let write_cfg = |base_path: &str, write: &str| {
             let mut cfg = crate::cfg::filled_for_test();
-            cfg.current_mut().password = String::new();
             cfg.current_mut().base_path = base_path.into();
             // Потолок — КОРНЕВОЙ ключ файла с 10.11 (`Cfg::write`), и
             // терпимое чтение смотрит именно туда.

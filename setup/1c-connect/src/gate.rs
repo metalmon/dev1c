@@ -94,17 +94,6 @@ pub fn cold_gate(
     if let Some(f) = want.first() {
         return Some(f.said().into());
     }
-    if cfg::mode_needs_env(&h.mode) {
-        if h.server.trim().is_empty() {
-            return Some("не задан адрес среды".into());
-        }
-        if h.password.is_empty() {
-            return Some("не задан пароль рабочего места".into());
-        }
-        if h.workstation.trim().is_empty() {
-            return Some("не задано имя рабочего места".into());
-        }
-    }
     None
 }
 
@@ -301,15 +290,6 @@ mod tests {
         assert!(why.contains("не расшифрован"), "а своя — отбирает: {why}");
     }
 
-    /// В локальном режиме то же самое поле — не повод: его не читает никто (`panel::shown_fields` его там не показывает), тем же снисхождением, что у `Cfg::load_with` (`cfg::blocking_undecryptable`).
-    #[test]
-    fn an_unreadable_workstation_password_does_not_hold_the_switch_in_local_mode() {
-        let mut c = crate::cfg::filled_for_test();
-        c.current_mut().mode = "local".into();
-        c.undecryptable = vec![crate::cfg::Undecryptable::new("Buh", "password")];
-        assert_eq!(open(&c), None);
-    }
-
     #[test]
     fn a_file_base_without_its_directory_holds_the_switch() {
         let c = crate::cfg::filled_for_test();
@@ -424,27 +404,6 @@ mod tests {
             let why = cold_gate(&crate::cfg::filled_for_test(), true, true, &st, Ok(Path::new("1cv8.exe")), true, &licence::State::Valid)
                 .unwrap();
             assert!(why.contains("инструмент") && why.contains("комплект"), "{st:?}: {why}");
-        }
-    }
-
-    /// Адрес среды, пароль и имя рабочего места — условия только туннеля; в локальном режиме этих полей в окне нет, и замок их не спрашивает.
-    #[test]
-    fn the_tunnel_asks_for_the_environment_and_the_local_mode_does_not() {
-        type Case = (fn(&mut Cfg), &'static str);
-        let cases: [Case; 3] = [
-            (|c: &mut Cfg| c.current_mut().server = String::new(), "адрес среды"),
-            (|c: &mut Cfg| c.current_mut().password = String::new(), "пароль"),
-            (|c: &mut Cfg| c.current_mut().workstation = String::new(), "рабочего места"),
-        ];
-        for (field, mark) in cases {
-            let mut tunnel = crate::cfg::filled_for_test();
-            field(&mut tunnel);
-            let why = open(&tunnel).unwrap_or_else(|| panic!("туннель без «{mark}» обязан запереть переключатель"));
-            assert!(why.contains(mark), "{why}");
-            let mut local = crate::cfg::filled_for_test();
-            local.current_mut().mode = "local".into();
-            field(&mut local);
-            assert_eq!(open(&local), None, "в локальном режиме поля «{mark}» в окне нет");
         }
     }
 

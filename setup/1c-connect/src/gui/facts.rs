@@ -313,8 +313,6 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
     // в карточке хода. Громкий зовёт `verify::run`, которая печатает фазу и
     // сама же зовёт `gather` — отдельного набора шагов для кнопки не нужно.
     let ctx = if loud { ctx_for(ui) } else { quiet_ctx(ui) };
-    let mode = ui.cfg.current().mode.clone();
-    let link = ui.link.clone();
     let tx = ui.tx.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.
     let ports = ports_use(ui);
@@ -322,12 +320,8 @@ pub fn spawn_full_pass(ui: &Ui, gen: u64, loud: bool) {
         guarded(
             &tx,
             move || {
-                let state = link.is_up().then(|| link.label(&mode));
-                let facts = if loud {
-                    verify::run(&ctx, state.as_deref(), ports)
-                } else {
-                    verify::gather(&ctx, state.as_deref(), ports, Instant::now() + verify::SET_DEADLINE)
-                };
+                let facts =
+                    if loud { verify::run(&ctx, ports) } else { verify::gather(&ctx, ports, Instant::now() + verify::SET_DEADLINE) };
                 if loud {
                     let text = check::render("1c-connect", env!("CARGO_PKG_VERSION"), &verify::cfg_for_report(&ctx.cfg), &facts);
                     let _ = write_text(&ctx.kit.state_path("last-check.txt"), &text);
@@ -643,8 +637,6 @@ pub fn tick_facts(ui: &mut Ui, now: Instant, window_open: bool) {
 /// нуль сеансов.
 pub fn spawn_cheap(ui: &Ui, whole: bool) {
     let ctx = quiet_ctx(ui);
-    let mode = ui.cfg.current().mode.clone();
-    let link = ui.link.clone();
     let tx = ui.tx.clone();
     // Считаем на потоке окна: `Ui` в поток не уходит.
     let ports = ports_use(ui);
@@ -653,10 +645,7 @@ pub fn spawn_cheap(ui: &Ui, whole: bool) {
             &tx,
             move || {
                 let sessions = crate::bridge::configurator_count();
-                let facts = whole.then(|| {
-                    let state = link.is_up().then(|| link.label(&mode));
-                    verify::cheap(&ctx, state.as_deref(), ports, sessions)
-                });
+                let facts = whole.then(|| verify::cheap(&ctx, ports, sessions));
                 Ev::Cheap { sessions: Some(sessions), facts }
             },
             || Ev::Cheap { sessions: None, facts: None },

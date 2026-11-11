@@ -4,7 +4,7 @@
 //! Человек читает сверху вниз и останавливается на первом провале.
 
 use crate::editors;
-use crate::ops_host::{mcp_exe, tools_state, Ctx, Gitea, Reach};
+use crate::ops_host::{mcp_exe, tools_state, Ctx, Reach};
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -45,10 +45,7 @@ pub const PUBLICATION: &str = "публикация отвечает";
 pub const EXTENSION: &str = "расширение в базе";
 /// Имя — вопросом человека, а не именем файла платформы: «дескриптор публикации» (и `default.vrd` в подробности) — внутренность, которой на экране нет места (находка 27 осмотра 10.11). Спрашивает факт одно: опубликована ли ТА база, что выбрана в настройках.
 pub const DESCRIPTOR: &str = "публикация той же базы";
-const GITEA: &str = "Gitea";
 const MEDIA: &str = "комплект на носителе";
-const CONFIGURATOR: &str = "Конфигуратор";
-const TUNNEL: &str = "туннель";
 /// Имя про предмет (`gui::SUBJECT`), а не про рабочее место: факт стоит только в локальной ветви
 /// набора, где рабочих мест нет вовсе, и человек читал «порты рабочего
 /// места » про то, чего у него нет (находка аудита 30.10). Числа портов
@@ -65,7 +62,7 @@ const EDITOR_MCP: &str = "доступ к 1С у агента";
 /// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
 /// (`Конфигуратор`/`в базе открыт сеанс`), носитель, и последний —
 /// готовность канала к агенту (`туннель`/`порты рабочего места`).
-pub fn order(mode: &str) -> Vec<&'static str> {
+pub fn order() -> Vec<&'static str> {
     let mut v = Vec::new();
     // Срок — раньше всего остального: когда он вышел, ниже смотреть нечего.
     // Факт есть только в сборке с фичей `licence`: без неё срок никто не
@@ -95,24 +92,11 @@ pub fn order(mode: &str) -> Vec<&'static str> {
         v.push(SYSTEM_WEB);
     }
     v.extend([WEB, PUBLICATION, EXTENSION, DESCRIPTOR]);
-    if crate::cfg::mode_needs_env(mode) {
-        // Среда (Gitea) — только там, где она есть. В локальном режиме поле
-        // `gitea` пусто по замыслу и записать его некому
-        // (`ops_host::gitea_to_write`), а `verdict_of` берёт первый плохой
-        // факт: человек получал вечное «не всё готово», жёлтый значок в трее
-        // и совет нажать «Установить», которая этого поля не меняет
-        // (наблюдение владельца 30.10). Факта нет вовсе — и группа за ним не
-        // считается (`gather`).
-        v.push(GITEA);
-        v.push(CONFIGURATOR);
-        v.push(MEDIA);
-        v.push(TUNNEL);
-    } else {
-        v.push(OPEN_SESSION);
-        v.push(MEDIA);
-        v.push(MCP_PORTS);
-    }
-    // Последний страж набора в обоих режимах: канал к агенту готов (TUNNEL/MCP_PORTS), но инструментов 1С у него может и не быть — если записей MCP у редактора нет (решение владельца 29.10).
+    v.push(OPEN_SESSION);
+    v.push(MEDIA);
+    v.push(MCP_PORTS);
+    // Последний страж набора: порты для агента готовы (`MCP_PORTS`), но инструментов 1С у него может и не быть — если записей MCP у
+    // редактора нет (решение владельца 29.10).
     v.push(EDITOR_MCP);
     v
 }
@@ -209,31 +193,6 @@ pub fn platform_fact(choice: &Result<crate::platform::Choice, String>, others: &
     }
 }
 
-/// Адрес среды пуст — факт называет поле, а не говорит «Gitea не отвечает»
-/// про адрес, которого человек никогда не задавал (поправка заказчика
-/// 2026-10-21: программа не выдумывает адресов). Факт только про пустое
-/// поле: когда адрес есть, отчёт показывает его сам — `gitea_fact` называет
-/// адрес в любом исходе.
-pub fn gitea_address_fact() -> Check {
-    Check::fail(GITEA, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX)
-}
-
-/// Адрес называется в каждом исходе: отчёт показывает, с чем программа
-/// работает, — иначе провал «не отвечает» не говорит, куда она стучалась.
-pub fn gitea_fact(g: &Gitea, url: &str) -> Check {
-    match g {
-        Gitea::Down(e) => {
-            Check::fail(GITEA, format!("{url} не отвечает: {e}"), "среда не поднята или адрес не тот — dev1c-setup check на сервере")
-        }
-        Gitea::NoOrg => Check::fail(
-            GITEA,
-            format!("{url} отвечает, но организации dev1c в среде нет"),
-            "образ среды старый — dev1c-setup install с новым комплектом",
-        ),
-        Gitea::Ok(v) => Check::pass(GITEA, format!("Gitea {v} на {url}, организация dev1c есть")),
-    }
-}
-
 /// Linux: vanessa-runner поднимает Конфигуратор — оконную программу, и без
 /// экрана он не стартует («Unable to initialize GTK+ or connect to the
 /// windowing system», код 255 — замер 2026-10-20 в контейнере). Экран даёт
@@ -258,26 +217,6 @@ pub fn display_fact(display: Option<&str>, alive: bool, xvfb: Option<&std::path:
     match xvfb {
         Some(p) => Check::pass(DISPLAY, format!("{why}; экран даёт {} (виртуальный, никто в него не смотрит)", p.display())),
         None => Check::fail(DISPLAY, why, crate::ops_host::SCREEN_HINT),
-    }
-}
-
-/// Запущенный Конфигуратор — не поломка, а «сейчас занято человеком»: по
-/// спеке («Исключение одно и названо списком») такие факты — сведения и
-/// цвет точки не красят, иначе точка желтела бы у каждого, кто открыл 1С.
-/// Совет, что делать перед загрузкой, остаётся при факте: его читают.
-pub fn configurator_fact(n: usize) -> Check {
-    if n == 0 {
-        Check::pass(CONFIGURATOR, "не запущен")
-    } else {
-        Check {
-            ok: true,
-            info: true,
-            ..Check::fail(
-                CONFIGURATOR,
-                format!("запущено процессов 1cv8: {n}"),
-                "закройте Конфигуратор и клиентов 1С перед загрузкой: cf_load и import откажут, пока он открыт",
-            )
-        }
     }
 }
 
@@ -973,45 +912,19 @@ fn project_fact(ctx: &Ctx, tools: &std::path::Path) -> Check {
         // Совет называет ровно то, что раскладка и правит: в локальном режиме
         // ветка человека, origin человека, и `install` до них не дотрагивается
         // — там расхождением бывают только служебные файлы.
-        Layout::Drifted(d) => Check::fail(
-            PROJECT,
-            d,
-            if p.local {
-                "1c-connect install — создаст служебные файлы проекта"
-            } else {
-                "1c-connect install — поправит ветку, origin и файлы"
-            },
-        ),
-        Layout::NoGitea => Check::fail(PROJECT, crate::cfg::NO_GITEA, crate::cfg::NO_GITEA_FIX),
-        // Чужой origin — не то, что правит `install`: совет называет команды
-        // git, которыми человек решает это сам.
-        Layout::ForeignOrigin(u) => Check::fail(PROJECT, crate::project::foreign_origin(&u), crate::project::foreign_origin_fix(&p.remote)),
+        Layout::Drifted(d) => Check::fail(PROJECT, d, "1c-connect install — создаст служебные файлы проекта"),
     }
 }
 
-/// Файл параметров есть. Адрес среды не проверяется: в проде он может
-/// совпасть с образцом.
-///
-/// Первый факт набора, и до 30.10 он безусловно рассказывал про среду — в
-/// локальном режиме выходило «параметры: среда » с пустой дыркой на месте
-/// адреса, которого в этом режиме не бывает. Слова оттуда же, откуда их
-/// берёт план установки (`ops_host::ENV_NEARBY`): одна формулировка на обе
-/// поверхности, как у `cfg::NO_GITEA`.
-pub fn params_fact(file_exists: bool, mode: &str, server: &str) -> Check {
+/// Файл параметров есть — и это весь вопрос. Про среду разработки он
+/// рассказывал до 11.11 («параметры: среда <адрес>»), а до 30.10 — ещё и там,
+/// где среды не было, с пустой дыркой на месте адреса. Среды не стало вовсе,
+/// и рассказывать о ней нечего.
+pub fn params_fact(file_exists: bool) -> Check {
     if file_exists {
-        if !crate::cfg::mode_needs_env(mode) {
-            return Check::pass(PARAMS, crate::ops_host::ENV_NEARBY);
-        }
-        Check::pass(PARAMS, format!("среда {server}"))
+        Check::pass(PARAMS, "на месте")
     } else {
         Check::fail(PARAMS, "1c-connect.toml нет в комплекте", "1c-connect example > 1c-connect.toml, затем впишите свои значения")
-    }
-}
-
-pub fn tunnel_fact(state: Option<&str>) -> Check {
-    match state {
-        Some(s) => Check::pass(TUNNEL, s.to_string()),
-        None => Check::note(TUNNEL, "не поднят (поднимается командой connect)"),
     }
 }
 
@@ -1086,12 +999,12 @@ pub const SET_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60)
 /// Печатает фазу и запирает кнопки — обёртка над `gather` с общим сроком
 /// (`SET_DEADLINE`). Молчаливый расчёт (окно, фоном) зовёт `gather`
 /// напрямую — ему фаза не нужна и не положена (см. `gui::run_readiness`).
-pub fn run(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse) -> Vec<Check> {
+pub fn run(ctx: &Ctx, ports: PortUse) -> Vec<Check> {
     // Фаза — только здесь: по ней окно показывает карточку хода и запирает
     // кнопки. Сбор фактов её не объявляет, иначе молчаливый расчёт
     // готовности выглядел бы начавшейся операцией (спека).
     ctx.progress(Phase::Check);
-    gather(ctx, tunnel_state, ports, std::time::Instant::now() + SET_DEADLINE)
+    gather(ctx, ports, std::time::Instant::now() + SET_DEADLINE)
 }
 
 /// Дескриптор публикации (`default.vrd`) — сравнение с диском (`Paths::of` +
@@ -1128,7 +1041,7 @@ fn base_descriptor(cfg: &crate::cfg::Cfg, kit: &common::kit::Kit) -> Descriptor 
 // сам `gather` строит группы кодом, а это перечисление — их имена, по которым
 // тесты сверяют порядок и состав набора.
 #[cfg(test)]
-const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
+const EXPENSIVE: [&str; 2] = [PUBLICATION, WEB];
 
 /// Всё, что не ходит по сети и не ждёт ответа базы, — один проход, без срока.
 /// Дорогие факты (`EXPENSIVE`, а также расширение и дескриптор из группы
@@ -1152,13 +1065,12 @@ const EXPENSIVE: [&str; 3] = [PUBLICATION, GITEA, WEB];
 /// повторного ревью (Important 4) `gather` и `cheap` звали его оба по
 /// отдельности, рискуя получить два разных числа между вызовами и
 /// противоречащий набор.
-pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: usize) -> Vec<Check> {
-    let env = crate::cfg::mode_needs_env(&ctx.cfg.current().mode);
+pub fn cheap(ctx: &Ctx, ports: PortUse, sessions: usize) -> Vec<Check> {
     let mut v = Vec::new();
     let h = ctx.cfg.current();
     #[cfg(feature = "licence")]
     v.push(licence_fact(&crate::licence::state_now()));
-    v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists(), &h.mode, &h.server));
+    v.push(params_fact(ctx.kit.state_path(crate::cfg::FILE).exists()));
     // Платформу ищем один раз на два факта: сканирование каталогов не нужно
     // повторять, а строки для анализатора без неё не считаются вовсе.
     let (choice, others) = crate::ops_host::platform_report(&ctx.cfg);
@@ -1204,72 +1116,48 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
     // человека и за базу это число не принимает: ни вердикт не красит, ни
     // поводом не спрашивать базу не служит (правка 26.10) — оно сведение в
     // наборе и повод ПЕРЕСПРОСИТЬ базу на такте (`gui::on_cheap`).
-    if env {
-        v.push(configurator_fact(sessions));
-    } else {
-        v.push(open_session_fact(sessions));
-    }
+    v.push(open_session_fact(sessions));
     let root = ctx.kit.root.display().to_string();
     // Носитель называем так, как его понимает человек: на Windows это буква
     // диска («C:\»), на Linux буквы нет — там показываем путь комплекта
     // целиком, иначе в отчёт попадает огрызок вида «/op».
     let media = if cfg!(windows) { root.get(..3).unwrap_or(&root) } else { root.as_str() };
     v.push(media_fact(crate::ops_host::media_kind(&ctx.kit.root), media));
-    if env {
-        v.push(tunnel_fact(tunnel_state));
-    } else {
-        v.push({
-            let p = ctx.cfg.ports();
-            let me = std::process::id();
-            // В список идут только порты, занятые НЕ нами: порт свободный,
-            // занятый этим же процессом (окно проверяет само себя) или такой,
-            // про который держателя не выяснить, обвинять человека не даёт.
-            //
-            // Держателей спрашиваем ВСЕХ (`others_of_port`), а не первого:
-            // один порт слушают по IPv4 и по IPv6 разные процессы, и пока
-            // брали первого, чужой прятался за нами же. Живой случай 26.10:
-            // два рабочих места с именем `dev1` — коннектор в контейнере на
-            // `127.0.0.1` и проброс SSH с машины человека на `::1` — оба
-            // показали зелёное, а к какой базе попадёт агент, решал порядок
-            // в резолвере.
-            let busy_ports: Vec<(u16, String)> = [p.mcp, p.vrunner]
-                .into_iter()
-                .flat_map(|port| crate::holder::others_of_port(port, me).into_iter().map(move |who| (port, who)))
-                .collect();
-            mcp_ports_fact(p.mcp, p.vrunner, &busy_ports, ports)
-        });
-    }
+    v.push({
+        let p = ctx.cfg.ports();
+        let me = std::process::id();
+        // В список идут только порты, занятые НЕ нами: порт свободный,
+        // занятый этим же процессом (окно проверяет само себя) или такой,
+        // про который держателя не выяснить, обвинять человека не даёт.
+        //
+        // Держателей спрашиваем ВСЕХ (`others_of_port`), а не первого:
+        // один порт слушают по IPv4 и по IPv6 разные процессы, и пока
+        // брали первого, чужой прятался за нами же. Живой случай 26.10:
+        // два рабочих места с именем `dev1` — коннектор в контейнере на
+        // `127.0.0.1` и проброс SSH с машины человека на `::1` — оба
+        // показали зелёное, а к какой базе попадёт агент, решал порядок
+        // в резолвере.
+        let busy_ports: Vec<(u16, String)> = [p.mcp, p.vrunner]
+            .into_iter()
+            .flat_map(|port| crate::holder::others_of_port(port, me).into_iter().map(move |who| (port, who)))
+            .collect();
+        mcp_ports_fact(p.mcp, p.vrunner, &busy_ports, ports)
+    });
     // Последний страж: канал к агенту может быть готов (факт выше), а инструментов 1С у него не быть — если записей MCP у агента нет (решение владельца 29.10). Читаем диск здесь же, тем же `Setup::look`, что и подменю трея, и проходим по всему реестру `editors::AGENTS`, а не по двум именам руками: реестр для этого и завели, а факт, знающий двоих из четырёх, красил красным человека, настроившего только Claude Code (находка ревью 30.10).
     //
     // Половина у факта ОДНА — записи MCP (решение владельца 31.10, повод 2). Навыки — не условие работы инструментов: агент без них доходит до базы и вызывает инструменты ровно так же, они лишь делают его работу лучше. Поэтому чужая папка на месте скилла, отсутствующий отпечаток или недокопированный каталог навыков больше не красят набор и не гасят галочку в трее — об этом говорит строка журнала (`gui::skill_line` при щелчке, `gui::refresh_line` при тихой доставке на запуске), и больше нигде. Прежнее правило (задача 5, склейка обеих половин через `editors::both`) отменено, и самой склейки больше нет — боевых вызывающих у неё не осталось, и она удалена вместе со своим тестом (круг исправления 31.10, пункт 3): сорок чужих каталогов в доме не давали поставить галочку вовсе, и человек оставался без инструментов из-за навыков, которые ему для инструментов не нужны.
     //
     // Ветвь выбирает `editors::agents_live_here`, а не свой `mode == "local"` (пункт 4 ревью целого): предикат один и тот же у подменю трея и у этого факта. Прежде подменю брало его, а факт считал сам — и в серверном режиме, под который предикат и назван (журнал владельца 29.10: коннектор принимает туннель, агенты всегда локальные), подменю открылось бы с живыми галочками, а карточка в окне говорила бы «в контейнере записи MCP не проверяем».
-    v.push(if editors::agents_live_here(&ctx.cfg.current().mode) {
-        match std::env::current_exe().ok() {
-            Some(exe) => {
-                let states: Vec<(&str, Result<editors::Found, String>)> =
-                    editors::AGENTS.iter().map(|d| (d.label, d.setup.look(&exe))).collect();
-                local_editor_mcp_fact(&states)
-            }
-            // Свой путь неизвестен — ни один `Found` не посчитать; единственный
-            // случай, который до `editor_mcp_fact` доходит в бою.
-            None => editor_mcp_fact(),
+    // Записи MCP у агентов читаются ВСЕГДА: агенты живут там, где человек, и второй стороны у этого вопроса нет. Ветвь «в
+    // контейнере настройки агентов не проверяем» уехала вместе со средой (11.11).
+    v.push(match std::env::current_exe().ok() {
+        Some(exe) => {
+            let states: Vec<(&str, Result<editors::Found, String>)> =
+                editors::AGENTS.iter().map(|d| (d.label, d.setup.look(&exe))).collect();
+            local_editor_mcp_fact(&states)
         }
-    } else {
-        // Критическая находка финального ревью: правка настроек Zed в контейнере по SSH измерена
-        // неработающей и работать не может — `ForceCommand /bin/false` у рабочих мест
-        // (`config/sshd-setup.sh:76-85`) не пускает по SSH вовсе никаких команд, значит `editor_mcp`
-        // в туннельном режиме не заполнится никогда (`session::flip_with` читать не сможет), и старый
-        // `editor_mcp_fact(editor_mcp)` при живом туннеле был вечным `Check::fail` — жёлтая точка
-        // навсегда при исправной связи, плюс предупреждение на каждый пересчёт. Владелец решение по
-        // самой механике отложил, но пока его нет, факт в туннельном режиме — сведение, не провал: мы
-        // честно говорим, что не смотрим, а не красим вердикт механизмом, которым решено не
-        // пользоваться. Текст НЕ содержит «не проверено»: эта фраза запрещена в любом факте набора
-        // (`the_set_never_says_it_did_not_check`).
-        match tunnel_state {
-            None => Check::note(EDITOR_MCP, "нет сеанса — поднимется командой connect"),
-            Some(_) => Check::note(EDITOR_MCP, "в контейнере настройки агентов не проверяем"),
-        }
+        // Свой путь неизвестен — ни один `Found` не посчитать; единственный случай, который до `editor_mcp_fact` доходит в бою.
+        None => editor_mcp_fact(),
     });
     v
 }
@@ -1290,25 +1178,22 @@ pub fn cheap(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, sessions: us
 /// Группа среды отдаёт `Option`: в локальном режиме факта «Gitea» в наборе нет
 /// вовсе (`order`), и спрашивать адрес, которого в этом режиме не бывает,
 /// незачем — ни потока, ни пробы.
-fn parallel_expensive<B, G, W, C>(base: B, gitea: G, web: W, cheap: C) -> ((Check, Check, Check), Option<Check>, Check, Vec<Check>)
+fn parallel_expensive<B, W, C>(base: B, web: W, cheap: C) -> ((Check, Check, Check), Check, Vec<Check>)
 where
     B: FnOnce() -> (Check, Check, Check) + Send,
-    G: FnOnce() -> Option<Check> + Send,
     W: FnOnce() -> Check + Send,
     C: FnOnce() -> Vec<Check>,
 {
     std::thread::scope(|s| {
         let hb = s.spawn(base);
-        let hg = s.spawn(gitea);
         let hw = s.spawn(web);
         let cheap_facts = cheap();
         // `unwrap()` на панике спавнутого потока печатал бы только
         // `Any { .. }` — текст паники терялся (Minor 8). `resume_unwind`
         // продолжает ту же панику на вызывающем потоке, с тем же текстом.
         let base = hb.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
-        let gitea = hg.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
         let web = hw.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
-        (base, gitea, web, cheap_facts)
+        (base, web, cheap_facts)
     })
 }
 
@@ -1329,8 +1214,7 @@ where
 /// Порядок фактов в итоговом наборе — не порядок ответов, а фиксированные
 /// места по имени (`order`): два прогона с разными по времени ответами
 /// обязаны дать одинаково выглядящий отчёт.
-pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
-    let mode = ctx.cfg.current().mode.clone();
+pub fn gather(ctx: &Ctx, ports: PortUse, deadline: std::time::Instant) -> Vec<Check> {
     let h = ctx.cfg.current();
 
     // Сеансы 1С — сведение в наборе (`open_session_fact`/`configurator_fact`)
@@ -1346,11 +1230,10 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
     // НАМ — чужого сеанса это не тронет.
     let busy = busy_reason(&crate::project::doing(std::path::Path::new(&h.project)));
     let base_url = ctx.cfg.base_url();
-    let gitea_url = ctx.cfg.gitea_url().map(str::to_string);
     let web_port = ctx.cfg.http_port();
     let own = h.publication == "auto";
 
-    let ((publication, extension, descriptor), gitea_check, web_check, mut facts) = parallel_expensive(
+    let ((publication, extension, descriptor), web_check, mut facts) = parallel_expensive(
         || {
             if let Some((reason, hint)) = &busy {
                 let pair = (reason.as_str(), *hint);
@@ -1402,17 +1285,6 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             )
         },
         || {
-            if !crate::cfg::mode_needs_env(&mode) {
-                return None;
-            }
-            Some(match &gitea_url {
-                Some(url) => {
-                    gitea_fact(&crate::ops_host::gitea_probe(url, deadline.saturating_duration_since(std::time::Instant::now())), url)
-                }
-                None => gitea_address_fact(),
-            })
-        },
-        || {
             // Не весь остаток — свой кусок, не больше `WEB_CONNECT` (см. её
             // докстроку): отфильтрованный порт висит молча до конца срока, и
             // отдавать ему весь срок целиком незачем даже в своей группе.
@@ -1420,12 +1292,11 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
             let up = std::net::TcpStream::connect_timeout(&([127, 0, 0, 1], web_port).into(), left).is_ok();
             web_fact(web_port, up, own)
         },
-        || cheap(ctx, tunnel_state, ports, sessions),
+        || cheap(ctx, ports, sessions),
     );
 
     facts.extend([publication, extension, descriptor, web_check]);
-    facts.extend(gitea_check);
-    arrange(&mode, facts)
+    arrange(facts)
 }
 
 /// Раскладка набора по фиксированным местам (`order`) — отдельной функцией,
@@ -1439,8 +1310,8 @@ pub fn gather(ctx: &Ctx, tunnel_state: Option<&str>, ports: PortUse, deadline: s
 /// смолчал про второй) — если после раскладки по всем именам `order` в наборе
 /// остался лишний факт, это и есть дубликат, и он паникует с именем, как
 /// паникует и пропавший.
-fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
-    let arranged: Vec<Check> = order(mode)
+fn arrange(mut facts: Vec<Check>) -> Vec<Check> {
+    let arranged: Vec<Check> = order()
         .into_iter()
         .map(|name| {
             let pos = facts.iter().position(|c| c.what == name).unwrap_or_else(|| panic!("нет факта «{name}» в наборе"));
@@ -1477,15 +1348,8 @@ fn arrange(mode: &str, mut facts: Vec<Check>) -> Vec<Check> {
 /// `db_password` эта оговорка не касается ни там, ни тут: это пароль
 /// пользователя БАЗЫ, не рабочего места, и он нужен независимо от режима.
 fn redact(h: &mut crate::cfg::Connection) {
-    if !h.password.is_empty() {
-        h.password = "…".into();
-    }
     if !h.db_password.is_empty() {
         h.db_password = "…".into();
-    }
-    if !crate::cfg::mode_needs_env(&h.mode) {
-        h.server.clear();
-        h.password.clear();
     }
 }
 
@@ -1514,11 +1378,10 @@ mod tests {
     fn all_facts_sample() -> Vec<Check> {
         vec![
             licence_fact(&crate::licence::State::Expired),
-            params_fact(false, "tunnel", "192.168.1.10:3393"),
+            params_fact(false),
             platform_fact(&Err("нет платформы 1С".into()), &[]),
             analyzer_fact(None, &[], &[]),
             display_fact(None, false, None),
-            configurator_fact(1),
             open_session_fact(1),
             media_fact(Some("FAT32".into()), "E:\\"),
             base_fact("C:\\нет-такого-каталога-для-теста-one-truth", false),
@@ -1532,9 +1395,6 @@ mod tests {
             // 30.10 прочитал имя факта дважды; без неё страж ниже её не видит.
             extension_fact(Some(&Reach::Version("0.4.8".into())), None, "auto"),
             descriptor_fact(Descriptor::Differs),
-            gitea_address_fact(),
-            gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), "http://x"),
-            tunnel_fact(None),
             runner_fact(&RunnerState::Idle),
             mcp_ports_fact(7773, 7783, &[(7783, "nginx (pid 500)".to_string())], PortUse::WeListen),
             // Important 5 ревью задачи: факт выпадал из этого образца, и
@@ -1570,7 +1430,7 @@ mod tests {
         // Срок уже вышел («остаток» для дорогих фактов — 0), и ни один из
         // них не откатывается к «не проверено»: такого исхода больше нет.
         let ctx = test_ctx("tunnel");
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, PortUse::WeDont, std::time::Instant::now());
         assert!(!checks.is_empty());
         assert!(!format!("{checks:?}").contains("не проверено"), "{checks:?}");
         // И ни одна чистая фактовая функция модуля не говорит так сама по
@@ -1605,29 +1465,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_report_hides_tunnel_fields_in_local_mode() {
-        // Умолчание образца (`192.168.1.10:3393`) не должно попадать в отчёт
-        // локального рабочего места: этого адреса никто не задавал.
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().mode = "local".into();
-        let local = cfg_for_report(&cfg);
-        assert!(!local.contains("192.168.1.10"), "{local}");
-        cfg.current_mut().mode = "tunnel".into();
-        let tunnel = cfg_for_report(&cfg);
-        assert!(tunnel.contains("192.168.1.10"), "в туннеле адрес среды нужен: {tunnel}");
-    }
-
     /// Minor ревью задачи 7: маска «…» ставится только НЕпустому полю — иначе отчёт говорит «пароль есть» про поле, которого нет вовсе.
     #[test]
     fn an_empty_password_is_not_masked_as_if_it_were_set() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().password = String::new();
+        cfg.current_mut().db_password = String::new();
         cfg.current_mut().db_password = String::new();
         let report = cfg_for_report(&cfg);
         assert!(!report.contains("password = \"…\""), "{report}");
         assert!(!report.contains("db_password = \"…\""), "{report}");
-        cfg.current_mut().password = "секрет".into();
+        cfg.current_mut().db_password = "секрет".into();
         cfg.current_mut().db_password = "секрет базы".into();
         let report = cfg_for_report(&cfg);
         assert!(report.contains("password = \"…\"") && report.contains("db_password = \"…\""), "{report}");
@@ -1644,15 +1491,15 @@ mod tests {
         // Собственное значение, не совпадающее с `workstation = "dev1"` у
         // того же `Connection` (иначе проверка «не утекло» ловила бы законное
         // совпадение строк, а не маску).
-        cfg.current_mut().password = "секрет_host".into();
+        cfg.current_mut().db_password = "секрет_host".into();
         cfg.current_mut().db_password = "секрет_базы_1".into();
         let mut second = cfg.current().clone();
         second.name = "Ромашка".into();
-        second.password = "секрет_2".into();
+        second.db_password = "секрет_2".into();
         second.db_password = "секрет_базы_2".into();
         cfg.connections = vec![cfg.current().clone(), second];
         let report = cfg_for_report(&cfg);
-        assert!(!report.contains("секрет_host"), "пароль host.password утёк немаскированным: {report}");
+        assert!(!report.contains("секрет_host"), "пароль базы утёк немаскированным: {report}");
         assert!(!report.contains("секрет_базы_1"), "{report}");
         assert!(!report.contains("секрет_2"), "{report}");
         assert!(!report.contains("секрет_базы_2"), "{report}");
@@ -1663,8 +1510,6 @@ mod tests {
         cfg.current_mut().mode = mode.to_string();
         // Адрес среды задан полем и ведёт на закрытый локально порт: провал
         // мгновенный, как в ops_host::gitea_probe_on_a_closed_port_is_down.
-        cfg.current_mut().server = "127.0.0.1:3".into();
-        cfg.current_mut().gitea = "http://127.0.0.1:1".into();
         let sink: common::Sink = std::sync::Arc::new(|_: common::Event| {});
         Ctx {
             kit: common::kit::Kit::at(std::env::temp_dir().join(format!("verify-test-missing-kit-{}", std::process::id()))),
@@ -1675,96 +1520,42 @@ mod tests {
         }
     }
 
-    /// Совет факта «проект» называет то, что `install` и правда сделает. В
-    /// локальном режиме это только служебные файлы: ветка и origin там
-    /// принадлежат человеку, и обещать их правку нельзя (находка ревью 30.10).
     #[test]
-    fn the_project_fact_advises_only_what_install_really_does() {
-        let t = crate::project::tempdir::Dir::new();
-        std::fs::create_dir_all(t.path().join(".git")).unwrap();
-        let fact = |mode: &str| {
-            let mut ctx = test_ctx(mode);
-            ctx.cfg.current_mut().project = t.path().display().to_string();
-            project_fact(&ctx, std::path::Path::new("nowhere"))
-        };
-        let local = fact("local");
-        assert!(local.hint.contains("служебные файлы") && !local.hint.contains("origin"), "{}", local.hint);
-        assert!(fact("tunnel").hint.contains("origin"));
-    }
-
-    #[test]
-    fn web_server_fact_comes_before_tunnel_fact() {
-        // Order is the contract: a dead web port must not look like a tunnel fault.
-        let names = order("tunnel");
-        let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
-        assert!(at(WEB) < at(PUBLICATION));
-        assert!(at(PUBLICATION) < at(TUNNEL));
-    }
-
-    #[test]
-    fn order_ends_with_the_tunnel_or_the_ports_and_puts_the_screen_after_the_platform() {
+    fn order_ends_with_the_ports_and_puts_the_screen_after_the_platform() {
         // На Linux у набора два своих факта, которых нет ни на Windows, ни на
         // macOS: «экран для конфигуратора» сразу за платформой и «веб-сервер в
         // системе» перед портом веб-сервера. `d` сдвигает то, что стоит после
         // экрана, `w` — то, что стоит после обоих.
         let d = usize::from(cfg!(target_os = "linux"));
         let w = 2 * d;
-        // «Срок действия» — тоже свой факт, и он есть только в сборке с
-        // фичей `licence` (см. `order`). Он первый в наборе, поэтому сдвигает
-        // всё остальное целиком.
+        // «Срок действия» — тоже свой факт, и он есть только в сборке с фичей
+        // `licence` (см. `order`). Он первый в наборе, поэтому сдвигает всё
+        // остальное целиком.
         let l = usize::from(cfg!(feature = "licence"));
-        let tunnel = order("tunnel");
-        // +2 к прежней длине: задача 3 расщепила «публикация и расширение» на три факта (публикация, расширение, дескриптор). +1: задача 7 (решение владельца 29.10) добавила «записи MCP у редактора» последним стражем набора, после туннеля/портов рабочего места. +1 ещё: ревью той же задачи 7 (Important 2) добавило «пароль расшифрован» сразу за пользователем базы.
-        assert_eq!(tunnel.len(), 19 + w + l);
-        assert_eq!(tunnel[17 + w + l], "туннель");
-        assert_eq!(tunnel[18 + w + l], EDITOR_MCP);
+        let names = order();
+        assert_eq!(names.len(), 18 + w + l);
+        assert_eq!(names[16 + w + l], MCP_PORTS);
+        assert_eq!(names[17 + w + l], EDITOR_MCP);
         // Платформа и строка платформы для анализатора — рядом: вторая без
         // первой не считается вовсе.
-        assert_eq!(tunnel[1 + l], "платформа 1С");
-        assert_eq!(tunnel[2 + l], "платформа для анализатора");
-        assert_eq!(tunnel[5 + d + l], "vrunner-mcp отвечает");
-        assert_eq!(tunnel[9 + d + l], UNDECRYPTABLE);
-        assert_eq!(tunnel[14 + w + l], "Gitea");
+        assert_eq!(names[1 + l], "платформа 1С");
+        assert_eq!(names[2 + l], "платформа для анализатора");
+        assert_eq!(names[5 + d + l], "vrunner-mcp отвечает");
+        assert_eq!(names[9 + d + l], UNDECRYPTABLE);
         if d == 1 {
-            assert_eq!(tunnel[3 + l], "экран для конфигуратора");
-            assert_eq!(tunnel[11 + l], "веб-сервер в системе");
-            assert_eq!(tunnel[12 + l], "порт веб-сервера");
+            assert_eq!(names[3 + l], "экран для конфигуратора");
+            assert_eq!(names[11 + l], "веб-сервер в системе");
+            assert_eq!(names[12 + l], "порт веб-сервера");
         }
-        let local = order("local");
-        // На один короче туннельного: факта среды (Gitea) в локальном режиме
-        // в наборе нет вовсе — поле пусто по замыслу, записать его некому, а
-        // вердикт шёл за первым плохим фактом (правка 30.10).
-        assert_eq!(local.len(), 18 + w + l);
-        assert!(!local.contains(&GITEA), "{local:?}");
-        assert_eq!(local[16 + w + l], MCP_PORTS);
-        assert_eq!(local[17 + w + l], EDITOR_MCP);
-        // Неизвестный режим — то же, что туннельный: валидация где-то ещё.
-        assert_eq!(order("something-else"), tunnel);
-    }
-
-    #[test]
-    fn facts_follow_the_mode() {
-        let tunnel = order("tunnel");
-        assert!(tunnel.contains(&"туннель") && tunnel.contains(&"Конфигуратор"));
-        assert!(!tunnel.contains(&MCP_PORTS) && !tunnel.contains(&OPEN_SESSION));
-        assert!(tunnel.contains(&GITEA), "в туннельном режиме среда есть, и факт про неё стоит");
-        let local = order("local");
-        assert!(local.contains(&MCP_PORTS) && local.contains(&OPEN_SESSION));
-        assert!(!local.contains(&"туннель") && !local.contains(&"Конфигуратор"));
-        // Среда — то же правило, что у туннеля и Конфигуратора: нет её —
-        // нет и факта. Иначе `verdict_of` берёт его первым плохим, и
-        // локальный человек навсегда «не всё готово» с советом нажать
-        // «Установить», которая поля `gitea` не меняет (находка аудита 30.10).
-        assert!(!local.contains(&GITEA), "{local:?}");
     }
 
     #[test]
     fn every_fact_has_a_name_in_order() {
         for mode in ["tunnel", "local"] {
             let ctx = test_ctx(mode);
-            let checks = run(&ctx, Some("работает с 12:40"), PortUse::WeDont);
+            let checks = run(&ctx, PortUse::WeDont);
             let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
-            assert_eq!(names, order(mode), "mode {mode}");
+            assert_eq!(names, order(), "mode {mode}");
         }
     }
 
@@ -1784,32 +1575,28 @@ mod tests {
     #[test]
     fn a_short_deadline_drops_no_fact_and_places_cheap_facts_first_in_order() {
         let ctx = test_ctx("tunnel");
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, PortUse::WeDont, std::time::Instant::now());
         let names: Vec<&str> = checks.iter().map(|c| c.what.as_str()).collect();
-        assert_eq!(names, order("tunnel"), "короткий срок уронил факт(ы): {names:?}");
+        assert_eq!(names, order(), "короткий срок уронил факт(ы): {names:?}");
 
         let cheap_before_first_expensive = names.iter().take_while(|n| !EXPENSIVE.contains(n)).count();
         assert!(cheap_before_first_expensive > 0, "перед первым дорогим должны стоять дешёвые: {names:?}");
         let expensive: Vec<&str> = names.iter().copied().filter(|n| EXPENSIVE.contains(n)).collect();
-        assert_eq!(expensive, [WEB, PUBLICATION, GITEA], "{names:?}");
+        assert_eq!(expensive, [WEB, PUBLICATION], "{names:?}");
     }
 
-    /// Тестовый крюк задачи 4: те же три параллельные группы, что в
+    /// Тестовый крюк задачи 4: те же параллельные группы, что в
     /// `gather`, но с искусственной задержкой вместо настоящей пробы —
     /// механика параллельности и раскладки по местам проверяется тем же
     /// кодом (`parallel_expensive`), который и считает настоящие факты.
-    /// Возвращает только три «заглавных» факта групп (`EXPENSIVE`):
+    /// Возвращает только «заглавные» факты групп (`EXPENSIVE`):
     /// расширение и дескриптор — внутренности группы «база», здесь не нужны.
-    fn gather_expensive_for_test(delay: &[std::time::Duration; 3]) -> Vec<Check> {
-        let (base_delay, gitea_delay, web_delay) = (delay[0], delay[1], delay[2]);
-        let ((publication, _extension, _descriptor), gitea, web, _cheap) = parallel_expensive(
+    fn gather_expensive_for_test(delay: &[std::time::Duration; 2]) -> Vec<Check> {
+        let (base_delay, web_delay) = (delay[0], delay[1]);
+        let ((publication, _extension, _descriptor), web, _cheap) = parallel_expensive(
             || {
                 std::thread::sleep(base_delay);
                 (Check::pass(PUBLICATION, "test"), Check::pass(EXTENSION, "test"), Check::pass(DESCRIPTOR, "test"))
-            },
-            || {
-                std::thread::sleep(gitea_delay);
-                Some(Check::pass(GITEA, "test"))
             },
             || {
                 std::thread::sleep(web_delay);
@@ -1817,7 +1604,7 @@ mod tests {
             },
             Vec::new,
         );
-        vec![publication, gitea.expect("туннельный режим крюка отдаёт факт среды"), web]
+        vec![publication, web]
     }
 
     /// Держит `parallel_expensive` — механику, а не `gather` целиком: довести
@@ -1832,8 +1619,8 @@ mod tests {
         // поймало выдуманные «не отвечает» с советом «1c-connect install».
         let slow = std::time::Duration::from_millis(600);
         let t0 = std::time::Instant::now();
-        let facts = gather_expensive_for_test(&[slow, slow, slow]);
-        assert_eq!(facts.len(), 3);
+        let facts = gather_expensive_for_test(&[slow, slow]);
+        assert_eq!(facts.len(), 2);
         assert!(t0.elapsed() < slow * 2, "группы считались по очереди: {:?}", t0.elapsed());
     }
 
@@ -1847,12 +1634,12 @@ mod tests {
     #[test]
     fn arrange_puts_a_shuffled_set_back_into_the_fixed_order() {
         for mode in ["tunnel", "local"] {
-            let names = order(mode);
+            let names = order();
             // Перемешиваем: разворачиваем набор, а не просто берём его
             // же порядок — иначе совпадение могло бы быть случайным.
             let mut shuffled: Vec<Check> = names.iter().map(|n| Check::pass(n, "test")).collect();
             shuffled.reverse();
-            let arranged = arrange(mode, shuffled);
+            let arranged = arrange(shuffled);
             let got: Vec<&str> = arranged.iter().map(|c| c.what.as_str()).collect();
             assert_eq!(got, names, "mode {mode}");
         }
@@ -1864,10 +1651,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "лишний факт «публикация отвечает»")]
     fn arrange_panics_on_a_duplicated_fact_name() {
-        let mode = "tunnel";
-        let mut facts: Vec<Check> = order(mode).iter().map(|n| Check::pass(n, "test")).collect();
+        let mut facts: Vec<Check> = order().iter().map(|n| Check::pass(n, "test")).collect();
         facts.push(Check::pass(PUBLICATION, "дубликат"));
-        arrange(mode, facts);
+        arrange(facts);
     }
 
     /// Minor 9 (повторное ревью): имена новых фактов не были прибиты ни
@@ -1879,7 +1665,7 @@ mod tests {
         assert_eq!(PUBLICATION, "публикация отвечает");
         assert_eq!(EXTENSION, "расширение в базе");
         assert_eq!(DESCRIPTOR, "публикация той же базы");
-        let names = order("tunnel");
+        let names = order();
         let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
         assert!(at(PUBLICATION) < at(EXTENSION) && at(EXTENSION) < at(DESCRIPTOR), "{names:?}");
     }
@@ -1887,7 +1673,7 @@ mod tests {
     /// `cheap()` сама по себе — какие имена она отдаёт, без дорогих фактов.
     fn cheap_fact_names() -> Vec<String> {
         let ctx = test_ctx("tunnel");
-        cheap(&ctx, None, PortUse::WeDont, 0).into_iter().map(|c| c.what).collect()
+        cheap(&ctx, PortUse::WeDont, 0).into_iter().map(|c| c.what).collect()
     }
 
     /// Important 4 (повторное ревью): `cheap` берёт число сеансов у
@@ -1897,11 +1683,11 @@ mod tests {
     #[test]
     fn cheap_uses_the_session_count_it_is_given_not_its_own() {
         let ctx = test_ctx("local");
-        let busy = cheap(&ctx, None, PortUse::WeDont, 3);
+        let busy = cheap(&ctx, PortUse::WeDont, 3);
         let open = busy.iter().find(|c| c.what == OPEN_SESSION).expect("факт открытых сеансов");
         assert!(open.detail.contains("3 открыто сеанса"), "{open:?}");
 
-        let free = cheap(&ctx, None, PortUse::WeDont, 0);
+        let free = cheap(&ctx, PortUse::WeDont, 0);
         let open = free.iter().find(|c| c.what == OPEN_SESSION).expect("факт открытых сеансов");
         assert!(open.ok && !open.busy && open.detail.contains("нет"), "{open:?}");
     }
@@ -1917,7 +1703,7 @@ mod tests {
             assert!(!names.contains(&n.to_string()), "{n} не дешёвый");
         }
         // Дорогие идут после дешёвых и ровно один раз.
-        let all = order("tunnel");
+        let all = order();
         for n in EXPENSIVE.into_iter().chain([EXTENSION, DESCRIPTOR]) {
             assert_eq!(all.iter().filter(|x| **x == n).count(), 1, "{n}");
         }
@@ -1990,7 +1776,6 @@ mod tests {
     #[test]
     fn web_and_publication_facts_use_the_computed_address_in_auto_mode() {
         let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().server = "127.0.0.1:3".into();
         cfg.current_mut().publication = "auto".into();
         cfg.current_mut().http_port = Some(18080);
         cfg.current_mut().base_url = "http://localhost:9999/Buh/hs/mcp-1c".into();
@@ -2002,7 +1787,7 @@ mod tests {
             sink,
             prompt: Box::new(common::AlwaysDefault),
         };
-        let checks = run(&ctx, None, PortUse::WeDont);
+        let checks = run(&ctx, PortUse::WeDont);
 
         let web = checks.iter().find(|c| c.what == WEB).unwrap();
         assert!(web.detail.contains("18080") && !web.detail.contains("9999"), "{web:?}");
@@ -2028,13 +1813,13 @@ mod tests {
         assert!(!db_user_fact("   ").ok);
 
         // Факт стоит раньше публикации — и в порядке, и в самом наборе.
-        let names = order("local");
+        let names = order();
         let at = |n: &str| names.iter().position(|x| *x == n).unwrap();
         assert!(at(DB_USER) < at(PUBLICATION) && at(DB_USER) < at(WEB), "{names:?}");
 
         let mut ctx = test_ctx("local");
         ctx.cfg.current_mut().db_user = String::new();
-        let checks = run(&ctx, None, PortUse::WeDont);
+        let checks = run(&ctx, PortUse::WeDont);
         // Причина — пустой пользователь, а не «публикация не отвечает»:
         // смотрим с его места вниз, выше него в наборе свои провалы
         // (параметры, платформа) и к этому правилу они отношения не имеют.
@@ -2066,8 +1851,8 @@ mod tests {
         assert_eq!(open_session_fact(0).outcome(), Outcome::Good);
         // Туннельный режим — тот же исход: дорога, которой пришёл человек, тут
         // ничего не меняет.
-        assert_eq!(configurator_fact(1).outcome(), Outcome::Good);
-        assert_eq!(configurator_fact(0).outcome(), Outcome::Good);
+        assert_eq!(open_session_fact(1).outcome(), Outcome::Good);
+        assert_eq!(open_session_fact(0).outcome(), Outcome::Good);
     }
 
     /// Дорогая проба базы не делается вовсе, пока держится НАША долгая
@@ -2293,7 +2078,7 @@ mod tests {
 
         let mut ctx = test_ctx("local");
         ctx.cfg.current_mut().publication = "webserver".into();
-        let checks = gather(&ctx, None, PortUse::WeDont, std::time::Instant::now());
+        let checks = gather(&ctx, PortUse::WeDont, std::time::Instant::now());
         let d = checks.iter().find(|c| c.what == DESCRIPTOR).expect("факт дескриптора");
         assert!(d.ok && d.info, "{d:?}");
         assert!(!d.hint.contains("install"), "{d:?}");
@@ -2470,52 +2255,17 @@ mod tests {
         assert!(analyzer_fact(None, &[], &[]).detail.contains("неизвестна"));
     }
 
-    /// Пустое поле — провал про поле, а не «Gitea не отвечает» по
-    /// выдуманному адресу: человек не должен искать неисправность в среде,
-    /// которую он не настраивал.
-    #[test]
-    fn an_unset_environment_address_is_named_as_such() {
-        let c = gitea_address_fact();
-        assert!(!c.ok && !c.info, "{c:?}");
-        assert!(c.detail.contains("адрес среды не задан") && c.detail.contains("gitea"), "{c:?}");
-        assert!(!c.detail.contains("не отвечает"), "{c:?}");
-        assert!(c.hint.contains("1c-connect install"), "{c:?}");
-        // И факт берётся именно по пустому полю, а не по счёту от server.
-        // Режим туннельный: именно там пустое поле и есть беда — в локальном
-        // факта среды нет вовсе (`facts_follow_the_mode`).
-        let mut ctx = test_ctx("tunnel");
-        ctx.cfg.current_mut().gitea = String::new();
-        let v = run(&ctx, None, PortUse::WeDont);
-        let g = v.iter().find(|c| c.what == GITEA).expect("факт Gitea");
-        assert!(g.detail.contains("адрес среды не задан"), "{g:?}");
-    }
-
-    /// И каждый исход называет адрес: отчёт показывает, с чем программа
-    /// работает, а провал — куда она стучалась.
-    #[test]
-    fn gitea_fact_distinguishes_no_server_from_no_org_and_names_the_address() {
-        let url = "http://localhost:3000";
-        let down = gitea_fact(&crate::ops_host::Gitea::Down("timeout".into()), url);
-        assert!(!down.ok && down.hint.contains("dev1c-setup"), "{down:?}");
-        let noorg = gitea_fact(&crate::ops_host::Gitea::NoOrg, url);
-        assert!(!noorg.ok && noorg.detail.contains("организации dev1c"), "{}", noorg.detail);
-        let ok = gitea_fact(&crate::ops_host::Gitea::Ok("1.22".into()), url);
-        assert!(ok.ok && ok.detail.contains("1.22"));
-        for c in [&down, &noorg, &ok] {
-            assert!(c.detail.contains(url), "{c:?}");
-        }
-    }
-
     /// «Конфигуратор запущен» — не поломка, а «сейчас занято человеком»:
     /// по спеке такие факты переводятся в сведения и остаются сведениями,
     /// иначе точка желтела бы у каждого, кто открыл 1С. Совет, что делать
     /// перед загрузкой, при этом никуда не девается.
     #[test]
-    fn configurator_and_media_facts_say_what_to_do() {
-        let c = configurator_fact(2);
+    fn the_open_session_and_media_facts_say_what_to_do() {
+        let c = open_session_fact(2);
         assert!(c.ok && c.info, "{c:?}");
-        assert!(c.detail.contains('2') && c.hint.contains("загруз"), "{c:?}");
-        assert!(configurator_fact(0).ok && !configurator_fact(0).info);
+        assert!(c.detail.contains('2'), "{c:?}");
+        // Пустое число — тоже сведение: «открытых сеансов нет» вердикта не красит.
+        assert!(open_session_fact(0).ok && open_session_fact(0).info);
         let m = media_fact(Some("FAT32".into()), "E:\\");
         assert!(m.ok && m.info && m.detail.contains("FAT32"), "{m:?}");
         assert!(!media_fact(None, "C:\\").info);
@@ -2582,26 +2332,12 @@ mod tests {
         // Параметры — первый факт набора, который что-то говорит о машине.
         // В сборке с фичей `licence` перед ними стоит «срок действия» (см.
         // `order`), без неё они первые вовсе.
-        assert_eq!(order("tunnel")[usize::from(cfg!(feature = "licence"))], "параметры");
-        let c = params_fact(false, "tunnel", "192.168.1.10:3393");
+        assert_eq!(order()[usize::from(cfg!(feature = "licence"))], "параметры");
+        let c = params_fact(false);
         assert!(!c.ok && c.hint.contains("example"), "{c:?}");
         // Адрес образца больше не повод для красного: в проде он может совпасть.
-        assert!(params_fact(true, "tunnel", "192.168.1.10:3393").ok);
-        assert!(params_fact(true, "tunnel", "10.0.0.5:3393").ok);
-    }
-
-    /// Первый факт набора рассказывал про среду безусловно, и в локальном
-    /// режиме человек читал «параметры: среда » — пустую дырку на месте
-    /// адреса, которого в этом режиме не бывает (находка аудита 30.10).
-    /// Слова — те же, что у плана установки (`ops_host::ENV_NEARBY`).
-    #[test]
-    fn the_first_fact_does_not_name_an_environment_the_mode_has_not_got() {
-        let c = params_fact(true, "local", "");
-        assert!(c.ok, "{c:?}");
-        assert!(!c.detail.contains("среда"), "{c:?}");
-        assert_eq!(c.detail, crate::ops_host::ENV_NEARBY);
-        // Пустое поле в этом режиме законно, и факт на него не жалуется.
-        assert_eq!(params_fact(true, "local", "192.168.1.10:3393").detail, crate::ops_host::ENV_NEARBY);
+        assert!(params_fact(true).ok);
+        assert!(params_fact(true).ok);
     }
 
     /// Факт портов стоит только в локальной ветви набора — там, где рабочих
@@ -2655,13 +2391,13 @@ mod tests {
             Check::pass(PLATFORM, "есть"),
             Check::note(OPEN_SESSION, "занято человеком"),
             Check::fail(PROJECT, "не разложен", "1c-connect install"),
-            Check::fail(GITEA, "не отвечает", "dev1c-setup check"),
+            Check::fail(WEB, "не отвечает", "включите доступ к 1С"),
         ];
         match crate::gui::verdict_of(true, &checks) {
             crate::gui::Verdict::NotReady(c) => assert_eq!(c.what, PROJECT),
             other => panic!("{other:?}"),
         }
-        let all_notes = [Check::pass(PLATFORM, "есть"), configurator_fact(2), media_fact(Some("FAT32".into()), "E:\\")];
+        let all_notes = [Check::pass(PLATFORM, "есть"), open_session_fact(2), media_fact(Some("FAT32".into()), "E:\\")];
         assert!(matches!(crate::gui::verdict_of(true, &all_notes), crate::gui::Verdict::Ready));
     }
 
@@ -2731,14 +2467,6 @@ mod tests {
         assert!(c.detail.contains("wsap24t.so"), "{c:?}");
     }
 
-    #[test]
-    fn the_tunnel_fact_is_information_when_nobody_connected() {
-        let c = tunnel_fact(None);
-        assert!(c.info && c.ok, "{c:?}");
-        let c = tunnel_fact(Some("работает с 12:40"));
-        assert!(!c.info && c.ok);
-    }
-
     /// Настройки с непрочитанными паролями у ТЕКУЩЕГО соединения — фикстура
     /// фактов. Имя карточки берётся у самого соединения: находку, называющую
     /// карточку, которой в списке нет, сито считает требующей среды
@@ -2754,35 +2482,15 @@ mod tests {
 
     /// Ревью задачи 7, Important 2: тот же замок, что держит переключатель (`gate::cold_gate`), теперь и в наборе фактов — одно сито (`cfg::blocking_undecryptable`) на обе поверхности. `db_password` проваливает факт в любом режиме, `password` — только в туннельном.
     #[test]
-    fn undecryptable_fact_follows_the_same_sieve_as_the_switch() {
+    fn undecryptable_fact_counts_the_only_secret_there_is() {
         assert!(undecryptable_fact(&cfg_with_undecryptable("tunnel", &[])).ok, "расшифровалось — зелёный");
         let c = undecryptable_fact(&cfg_with_undecryptable("tunnel", &["db_password"]));
         assert!(!c.ok && c.detail.contains("db_password") && !c.hint.is_empty(), "{c:?}");
-        let c = undecryptable_fact(&cfg_with_undecryptable("tunnel", &["password"]));
-        assert!(!c.ok && c.detail.contains("password"), "{c:?}");
         // Задача 10: деталь факта называет карточку — отчёт прикладывают к
         // обращению, и без имени он не говорит, какую из них править.
         assert!(c.detail.contains("Buh"), "{c:?}");
-        // Локальный режим: пароль рабочего места никто не читает — зелёный, то же снисхождение, что у `cfg::blocking_undecryptable`.
-        assert!(undecryptable_fact(&cfg_with_undecryptable("local", &["password"])).ok, "в локальном режиме поле не в счёт");
-        assert!(!undecryptable_fact(&cfg_with_undecryptable("local", &["db_password"])).ok, "db_password в счёт в любом режиме");
-    }
-
-    /// Критическая находка финального ревью: контейнерная правка настроек Zed по SSH измерена
-    /// неработающей насовсем (`ForceCommand /bin/false`, `config/sshd-setup.sh:76-85`) — `editor_mcp`
-    /// в туннельном режиме не заполнится никогда, и факт, бравший провал из пустого `editor_mcp`, был
-    /// бы вечным `Check::fail` при исправной связи. Пока решение по механике не принято, факт в
-    /// туннельном режиме — сведение в обоих случаях: нет сеанса, или сеанс есть, а записи не смотрим.
-    #[test]
-    fn a_live_tunnel_does_not_fail_on_the_unreachable_container_editor_mcp() {
-        let ctx = test_ctx("tunnel");
-        let checks = cheap(&ctx, None, PortUse::WeDont, 0);
-        let c = checks.iter().find(|c| c.what == EDITOR_MCP).expect("факт обязан быть в наборе");
-        assert!(c.ok && c.info, "командная строка без сеанса не обязана заваливать проверку: {c:?}");
-        // Живой туннель — та же сведомость, не провал: читать в контейнере не пытаемся вовсе.
-        let checks = cheap(&ctx, Some("подключён 3 мин"), PortUse::WeDont, 0);
-        let c = checks.iter().find(|c| c.what == EDITOR_MCP).expect("факт обязан быть в наборе");
-        assert!(c.ok && c.info, "живой туннель в контейнере не обязан красить вердикт: {c:?}");
+        // Пароль пользователя базы нужен в любом сочетании: сита по режиму больше нет (11.11, пароля рабочего места не стало).
+        assert!(!undecryptable_fact(&cfg_with_undecryptable("local", &["db_password"])).ok, "{c:?}");
     }
 
     /// Пара «имя — состояние» в том виде, в каком факт её принимает от реестра.
@@ -3060,13 +2768,10 @@ mod tests {
 
     /// Место в наборе — сразу после последнего стража канала (решение владельца 29.10, «после TUNNEL» / «рядом с MCP_PORTS»).
     #[test]
-    fn editor_mcp_is_the_very_last_fact_in_both_modes() {
-        let tunnel = order("tunnel");
-        assert_eq!(tunnel.last(), Some(&EDITOR_MCP));
-        assert_eq!(tunnel[tunnel.len() - 2], TUNNEL);
-        let local = order("local");
-        assert_eq!(local.last(), Some(&EDITOR_MCP));
-        assert_eq!(local[local.len() - 2], MCP_PORTS);
+    fn editor_mcp_is_the_very_last_fact() {
+        let names = order();
+        assert_eq!(names.last(), Some(&EDITOR_MCP));
+        assert_eq!(names[names.len() - 2], MCP_PORTS);
     }
 
     /// Самое важное из трёх: ни «занят», ни «не поднимался» не приговор.

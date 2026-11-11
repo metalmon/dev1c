@@ -355,14 +355,14 @@ pub fn error_reply(id: &Value, code: i64, message: &str) -> Vec<u8> {
 /// Ответ ребёнка на `tools/list`: чужие инструменты вырезаются, на последней
 /// странице добавляются наши. `None` — это не такой ответ. `local` — режим
 /// работы: от него зависят описания наших инструментов (`our_tools`).
-pub fn rewrite_list_reply(line: &[u8], allowed: &[String], local: bool) -> Option<(Value, Vec<u8>)> {
+pub fn rewrite_list_reply(line: &[u8], allowed: &[String]) -> Option<(Value, Vec<u8>)> {
     let mut v = parse(line)?;
     let id = v.get("id")?.clone();
     let last_page = v.pointer("/result/nextCursor").is_none();
     let tools = v.pointer_mut("/result/tools")?.as_array_mut()?;
     tools.retain(|t| t.get("name").and_then(Value::as_str).is_some_and(|n| allowed.iter().any(|a| a == n)));
     if last_page {
-        tools.extend(our_tools(local));
+        tools.extend(our_tools());
     }
     let mut out = serde_json::to_vec(&v).ok()?;
     out.push(b'\n');
@@ -379,26 +379,19 @@ pub fn is_response_with_id(line: &[u8]) -> Option<Value> {
 }
 
 /// Описания читает модель на той стороне, и по ним она решает, звать
-/// инструмент или нет, — поэтому они зависят от режима. В локальном режиме
-/// (`local`) ни Gitea среды, ни организации `dev1c`, ни ветки рабочего места
-/// не существует: модель читала про них и шла искать то, чего на машине нет
-/// (находка аудита 30.10). Там обмен идёт через `origin`, который человек
-/// завёл сам, может не заводить вовсе — и работа всё равно доходит до базы:
-/// `cf_load` читает те самые файлы, которые агент и правит.
-pub fn our_tools(local: bool) -> Vec<Value> {
-    let (status_tail, pull, push) = if local {
-        (
-            "Проект, база и агент на одной машине: отправлять правки в базу не нужно, cf_load читает те самые файлы.",
-            "Забрать ветку из вашего origin (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load. origin у репозитория не задан — обмена нет, и инструмент об этом скажет.",
-            "Закоммитить src и отправить ветку в ваш origin. Перед этим — cf_decompile. Коммит делается всегда; origin не задан — коммит останется локальным, и это не ошибка: загрузить правки в базу можно и так.",
-        )
-    } else {
-        (
-            "А также имя репозитория в Gitea (dev1c/<имя>) и ветка рабочего места — их неоткуда больше узнать.",
-            "Забрать свою ветку из Gitea (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load. Забирает то, что отправлено в Gitea; правки, лежащие у вас незакоммиченными, сюда не попадут.",
-            "Закоммитить src и отправить свою ветку в Gitea. Перед этим — cf_decompile. Первый push создаёт репозиторий и ветку main. Пока не отправлено, человек правок не увидит и загрузить их в базу нельзя.",
-        )
-    };
+/// инструмент или нет. **Режима в них больше нет** (11.11, план удаления
+/// среды): ни Gitea, ни организации `dev1c`, ни ветки рабочего места не
+/// существует вовсе — модель читала про них и шла искать то, чего на машине
+/// нет (находка аудита 30.10, теперь невыразимая). Обмен идёт через
+/// `origin`, который человек завёл сам, может не заводить вовсе — и работа
+/// всё равно доходит до базы: `cf_load` читает те самые файлы, которые агент
+/// и правит.
+pub fn our_tools() -> Vec<Value> {
+    let (status_tail, pull, push) = (
+        "Проект и база на одной машине: отправлять правки в базу не нужно, cf_load читает те самые файлы.",
+        "Забрать ветку из вашего origin (git pull --rebase). Только на чистом дереве: сначала project_push. После pull — cf_load. origin у репозитория не задан — обмена нет, и инструмент об этом скажет.",
+        "Закоммитить src и отправить ветку в ваш origin. Перед этим — cf_decompile. Коммит делается всегда; origin не задан — коммит останется локальным, и это не ошибка: загрузить правки в базу можно и так.",
+    );
     vec![
         json!({
             "name": "project_status",
@@ -741,7 +734,7 @@ mod tests {
     #[test]
     fn list_reply_is_filtered_and_ours_are_appended_on_the_last_page() {
         let line = br#"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"cf_load"},{"name":"infobase_delete"},{"name":"task_status"}]}}"#;
-        let (id, out) = rewrite_list_reply(line, &allowed(), false).unwrap();
+        let (id, out) = rewrite_list_reply(line, &allowed()).unwrap();
         assert_eq!(id, json!(7));
         let v: Value = serde_json::from_slice(&out).unwrap();
         let names: Vec<&str> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -752,7 +745,7 @@ mod tests {
     #[test]
     fn a_page_with_next_cursor_is_filtered_but_not_extended() {
         let line = br#"{"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"x"},{"name":"cf_load"}],"nextCursor":"p2"}}"#;
-        let (_, out) = rewrite_list_reply(line, &allowed(), false).unwrap();
+        let (_, out) = rewrite_list_reply(line, &allowed()).unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 1);
         assert_eq!(v["result"]["nextCursor"], "p2");
@@ -760,15 +753,15 @@ mod tests {
 
     #[test]
     fn replies_without_tools_are_not_list_replies() {
-        assert!(rewrite_list_reply(br#"{"jsonrpc":"2.0","id":7,"result":{"ok":1}}"#, &allowed(), false).is_none());
-        assert!(rewrite_list_reply(b"not json", &allowed(), false).is_none());
+        assert!(rewrite_list_reply(br#"{"jsonrpc":"2.0","id":7,"result":{"ok":1}}"#, &allowed()).is_none());
+        assert!(rewrite_list_reply(b"not json", &allowed()).is_none());
         assert_eq!(is_response_with_id(br#"{"jsonrpc":"2.0","id":7,"result":{"ok":1}}"#), Some(json!(7)));
         assert_eq!(is_response_with_id(br#"{"jsonrpc":"2.0","id":7,"method":"x"}"#), None);
     }
 
     #[test]
     fn our_tools_describe_their_arguments() {
-        let t = our_tools(false);
+        let t = our_tools();
         assert_eq!(t.len(), 3);
         assert_eq!(t[2]["name"], "project_push");
         assert_eq!(t[2]["inputSchema"]["required"][0], "message");
@@ -776,20 +769,21 @@ mod tests {
     }
 
     /// Описания читает модель на той стороне и по ним решает, звать
-    /// инструмент или нет. В локальном режиме она читала про Gitea,
-    /// организацию `dev1c` и ветку рабочего места — и шла искать то, чего на
-    /// машине нет вовсе (находка аудита 30.10).
+    /// инструмент или нет. Про Gitea, организацию `dev1c` и ветку рабочего
+    /// места она читала и шла искать то, чего на машине нет вовсе (находка
+    /// аудита 30.10). Выбора между двумя наборами слов больше нет: среда
+    /// уехала из программы, и описывать её стало нечем (11.11).
     #[test]
-    fn the_tools_do_not_describe_an_environment_the_mode_has_not_got() {
-        let text = |local| our_tools(local).iter().map(|t| t["description"].as_str().unwrap().to_string()).collect::<Vec<_>>().join("\n");
-        let tunnel = text(false);
-        assert!(tunnel.contains("Gitea") && tunnel.contains("ветка рабочего места"), "{tunnel}");
-        let local = text(true);
-        assert!(!local.contains("Gitea") && !local.contains("dev1c"), "{local}");
-        assert!(!local.contains("рабоч"), "{local}");
-        // И вместо них — то, что в этом режиме правда: origin человека и то,
-        // что фиксации достаточно, чтобы правки дошли до базы.
-        assert!(local.contains("origin") && local.contains("cf_load"), "{local}");
+    fn the_tools_do_not_describe_an_environment_that_is_gone() {
+        let text = our_tools().iter().map(|t| t["description"].as_str().unwrap().to_string()).collect::<Vec<_>>().join(
+            "
+",
+        );
+        assert!(!text.contains("Gitea") && !text.contains("dev1c"), "{text}");
+        assert!(!text.contains("рабоч"), "{text}");
+        // И вместо них — то, что правда: origin человека и то, что фиксации
+        // достаточно, чтобы правки дошли до базы.
+        assert!(text.contains("origin") && text.contains("cf_load"), "{text}");
     }
 
     #[test]
@@ -798,7 +792,7 @@ mod tests {
         assert_eq!(v["id"], 5);
         assert_eq!(v["result"]["isError"], true);
         assert_eq!(v["result"]["content"][0]["text"], "занято");
-        let v: Value = serde_json::from_slice(&list_reply(&json!(1), our_tools(false))).unwrap();
+        let v: Value = serde_json::from_slice(&list_reply(&json!(1), our_tools())).unwrap();
         assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 3);
     }
 }

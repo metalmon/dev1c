@@ -482,20 +482,14 @@ pub fn list(cfg: &Cfg, link: &dyn Fn(&str) -> Option<State>, enroll: &dyn Fn(&st
 }
 
 /// Строка перехода сеанса — тексты как в сегодняшнем `gui.rs::set_link`.
-/// Начало и конец видны и в журнале: туннель сам пишет только про поднятую
-/// связь и обрывы, а отказ возвращает ошибкой. `Connecting` — по режиму:
-/// адрес среды, пароль и имя рабочего места в локальном режиме скрыты в
-/// «Связи» (`panel::shown_fields`) и ничего не значат — печатать их в
-/// журнал всё равно было бы находкой целостного ревью (строка говорила про
-/// туннель, которого там нет).
-pub fn link_line(l: &State, host: &Connection, mode: &str) -> Option<Line> {
+/// Начало и конец видны и в журнале: сеанс сам пишет только про поднятую
+/// связь и обрывы, а отказ возвращает ошибкой.
+pub fn link_line(l: &State) -> Option<Line> {
     match l {
         State::Connecting => {
-            let text = if mode == "local" {
-                "включаю MCP".to_string()
-            } else {
-                format!("подключаюсь к {} как {}", host.server, host.workstation)
-            };
+            // Слов про «подключаюсь к <адрес> как <рабочее место>» больше нет: среда уехала, а связь со второй стороной
+            // держит канал, и о ней говорят свои строки журнала (`gui::peer`).
+            let text = "включаю MCP".to_string();
             Some(Line { kind: Kind::Say, text })
         }
         State::Failed(why) => Some(Line { kind: Kind::Fail, text: why.clone() }),
@@ -702,7 +696,7 @@ pub fn restart_session(ui: &mut Ui, base_path: String) {
         let f: session::ToChannel = std::sync::Arc::new(move |kind, stream| peer.calls(&card, kind, stream));
         f
     });
-    let wiring = session::Wiring { serving, to_channel };
+    let wiring = session::Wiring { serving, to_channel, ports: None };
     let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, wiring, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
@@ -728,8 +722,7 @@ pub fn off_reason(ui: &Ui) -> Option<String> {
 
 /// Переход сеанса: в состояние, в журнал, в трей, перерисовать окно.
 pub fn set_link(cx: &mut App, l: State) {
-    let host = cx.global::<Ui>().cfg.current().clone();
-    let line = link_line(&l, &host, &host.mode);
+    let line = link_line(&l);
     let ui = cx.global_mut::<Ui>();
     ui.link = l.clone();
     if let Some(line) = line {
@@ -796,7 +789,7 @@ pub fn start_session(ui: &mut Ui) -> Result<(), String> {
         let f: session::ToChannel = std::sync::Arc::new(move |kind, stream| peer.calls(&card, kind, stream));
         f
     });
-    let wiring = session::Wiring { serving, to_channel };
+    let wiring = session::Wiring { serving, to_channel, ports: None };
     let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, wiring, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });

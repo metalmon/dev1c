@@ -21,14 +21,6 @@ pub enum Layout {
     /// В каталоге лежит база, не проект.
     BaseDir(String),
     Drifted(String),
-    /// Адреса среды нет в toml — `origin` собирать не из чего, и выдумывать
-    /// его программа не станет (спека, «программа не выдумывает адресов»).
-    NoGitea,
-    /// `origin` есть, и это не наш адрес: человек завёл его сам обычным git.
-    /// Такой мы не переписываем — ни раскладкой, ни обменом, — а называем
-    /// словами (правило 30.10: чужим мы не распоряжаемся). Внутри — адрес как
-    /// он есть, уже без учётных данных: эта строка идёт на поверхности.
-    ForeignOrigin(String),
     Ok,
 }
 
@@ -47,31 +39,6 @@ pub fn layout_state(p: &Project) -> Layout {
     if !p.dir.join(".git").exists() {
         return Layout::Missing;
     }
-    // Ветка и origin — только там, где они наши. В локальном режиме «нужной»
-    // ветки нет вовсе (`p.branch` пуст: ветка принадлежит человеку), а origin
-    // человека сравнивать не с чем: «origin X, нужен » было бы требованием
-    // привязаться к среде, которой нет.
-    if !p.local {
-        // После `.git`, а не до: у неразложенного каталога первопричина — что
-        // он не разложен, и подменять её адресом среды нельзя (находка ревью
-        // задачи 35). Совет в обоих случаях один — `install`.
-        if p.remote.is_empty() {
-            return Layout::NoGitea;
-        }
-        let branch = head_branch(p).unwrap_or_default();
-        if branch != p.branch {
-            return Layout::Drifted(format!("ветка {branch}, нужна {}", p.branch));
-        }
-        // Нет origin вовсе — расхождение, которое раскладка и лечит
-        // (`remote add`). Есть, но чужой — не расхождение, а чужая настройка:
-        // своё имя у неё и свои слова, потому что `install` её не правит.
-        match origin_url(p) {
-            Err(e) => return Layout::Drifted(e),
-            Ok(None) => return Layout::Drifted("нет origin".into()),
-            Ok(Some(u)) if u != p.remote => return Layout::ForeignOrigin(without_credentials(&u)),
-            Ok(Some(_)) => {}
-        }
-    }
     for f in [".gitattributes", ".gitignore", "autumn-properties.json"] {
         if !p.dir.join(f).exists() {
             return Layout::Drifted(format!("нет {f}"));
@@ -80,8 +47,8 @@ pub fn layout_state(p: &Project) -> Layout {
     Layout::Ok
 }
 
-/// Разложить проект: каталог, git с веткой рабочего места и origin на Gitea,
-/// три служебных файла (существующие не трогаются). Доказывает круг на
+/// Разложить проект: каталог, git на ветке `main` и три служебных файла
+/// (существующие не трогаются). Доказывает круг на
 /// месте: git и oscript отвечают из этого каталога.
 ///
 /// `analyzer` — строки платформы для `bsl-analyzer.toml`
@@ -93,30 +60,9 @@ pub fn init(p: &Project, tools: &Path, analyzer: &[(&'static str, String)], log:
     }
     std::fs::create_dir_all(p.dir.join("src")).map_err(|e| format!("не создать {}: {e}", p.dir.display()))?;
     if !p.dir.join(".git").exists() {
-        must(p, &["init", "-q", "-b", init_branch(p)])?;
-        log(format!("git init, ветка {}", init_branch(p)));
-    } else if !p.local {
-        // Ветку переключаем только там, где она наша: в туннельном режиме это
-        // логин рабочего места, конвенция среды. В локальном она принадлежит
-        // человеку, и «Установить» ему её не меняет — ни `checkout`, ни
-        // `checkout -b`. До 30.10 меняло: ветка читалась из `.git/HEAD`
-        // файлом, в ворктри и при отделённом HEAD выходило `main`, и человек,
-        // нажавший «Установить» из своей ветки, оказывался на другой либо
-        // получал отказ checkout поверх своих правок (находка ревью 30.10).
-        let branch = head_branch(p).unwrap_or_default();
-        if branch != p.branch {
-            // Switch to the workstation's branch; create it only if it does
-            // not exist — `-B` would reset a branch that already has work.
-            let exists = git(p, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", p.branch)])?.ok;
-            if exists {
-                must(p, &["checkout", "-q", &p.branch])?;
-            } else {
-                must(p, &["checkout", "-q", "-b", &p.branch])?;
-            }
-            log(format!("ветка {}", p.branch));
-        }
+        must(p, &["init", "-q", "-b", "main"])?;
+        log("git init, ветка main".to_string());
     }
-    ensure_origin(p)?;
     for (name, body) in [(".gitattributes", GITATTRIBUTES), (".gitignore", GITIGNORE), ("autumn-properties.json", PROPERTIES)] {
         let f = p.dir.join(name);
         if !f.exists() {
@@ -145,72 +91,17 @@ pub fn init(p: &Project, tools: &Path, analyzer: &[(&'static str, String)], log:
 pub struct Project {
     pub dir: PathBuf,
     pub git: PathBuf,
-    /// Ветка, которую мы НАВЯЗЫВАЕМ: логин рабочего места в туннельном режиме
-    /// — конвенция среды, и `init` к ней приводит репозиторий. В локальном
-    /// режиме пусто: ветка там принадлежит человеку, мы её не создаём, не
-    /// переключаем и не подменяем, а узнаём у git тогда, когда она нужна
-    /// (`work_branch`). Единственное место, где имя всё-таки нужно нам, —
-    /// `git init -b` на пустом каталоге (`init_branch`).
-    pub branch: String,
-    /// Адрес, к которому мы приводим `origin`: `<gitea>/dev1c/<имя>.git`. Это
-    /// конвенция среды — организация `dev1c` в её Gitea, — и пусто она бывает
-    /// по двум разным причинам, которые различает `local`: адрес среды не
-    /// задан (туннель) либо среды нет вовсе (локальный режим).
-    pub remote: String,
-    /// Логин рабочего места, которым подписываются коммиты и ходят в Gitea
-    /// среды. Пусто — личность и учётку не навязываем вовсе, берётся то, что
-    /// настроено у человека глобально в git (`git_flags`).
-    pub login: String,
-    /// Своего обмена со средой у этого проекта нет: ни адреса, который мы
-    /// вправе навязать `origin`, ни ветки рабочего места, ни учётки среды.
-    /// Обычный локальный репозиторий 1С-разработчика (решение владельца
-    /// 30.10: коннектор — самостоятельное приложение, локальный режим его
-    /// главный путь).
-    pub local: bool,
 }
 
 impl Project {
     /// `tools` — каталог инструментов на машине (`%LOCALAPPDATA%\dev1c`).
     pub fn from_cfg(cfg: &Cfg, tools: &Path) -> Project {
         let dir = PathBuf::from(&cfg.current().project);
-        // The last path segment by either separator: a Windows path read on
-        // Linux (CI) has no separators as far as PathBuf is concerned.
-        let name = cfg
-            .current()
-            .project
-            .trim_end_matches(['\\', '/'])
-            .rsplit(['\\', '/'])
-            .next()
-            .filter(|n| !n.is_empty())
-            .unwrap_or("project")
-            .to_string();
         let git = if cfg!(windows) { tools.join("git").join("cmd").join("git.exe") } else { tools.join("git").join("bin").join("git") };
-        let local = !crate::cfg::mode_needs_env(&cfg.current().mode);
-        // Адреса среды нет — `remote` пуст, а не собран из пустоты: читатели
-        // (`layout_state`, `ensure_origin`) говорят, чего не хватает. В
-        // локальном режиме его не собирают вовсе: организации `dev1c` в чужой
-        // Gitea не существует, а `origin` там принадлежит человеку.
-        let remote = if local { String::new() } else { cfg.gitea_url().map(|g| format!("{g}/dev1c/{name}.git")).unwrap_or_default() };
-        // Навязанной ветки в локальном режиме нет вовсе — ни из пустого
-        // рабочего места, ни прочитанной заранее: кто на какой ветке стоит,
-        // знает git, и спрашивать его надо в тот момент, когда ветка нужна.
-        let branch = if local { String::new() } else { cfg.current().workstation.clone() };
-        let login = if local { String::new() } else { cfg.current().workstation.clone() };
-        Project { dir, git, branch, remote, login, local }
-    }
-}
-
-/// Имя первой ветки нового репозитория: в туннельном режиме ветка рабочего
-/// места (конвенция среды), в локальном — `main`. Это единственное место, где
-/// имя ветки придумываем мы: на пустом каталоге её ещё нет ни у кого, а
-/// `git init` без `-b` взял бы `init.defaultBranch` человека — что тоже
-/// годится, но тогда план установки не смог бы назвать имя заранее. Одно
-/// знание на `init` и на строку плана (`ops_host::ProjectOp::plan`).
-pub fn init_branch(p: &Project) -> &str {
-    if p.branch.is_empty() {
-        "main"
-    } else {
-        p.branch.as_str()
+        // **Удалённой половины у обмена больше нет** (11.11): Gitea среды уехала вместе со средой, и ни адреса, который мы вправе
+        // навязать `origin`, ни ветки рабочего места, ни учётки среды у проекта не бывает. `origin` — собственность человека: он
+        // заводит его обычным git куда ему нужно, а ветку, на которой стоит, знает git — его и спрашиваем, когда ветка нужна.
+        Project { dir, git }
     }
 }
 
@@ -232,15 +123,10 @@ fn head_branch(p: &Project) -> Option<String> {
     (o.ok && !b.is_empty()).then_some(b)
 }
 
-/// Ветка, с которой идёт работа: в туннельном режиме — ветка рабочего места
-/// (отправка идёт в неё, такова конвенция среды), в локальном — та, на
-/// которой человек стоит. Отделённый HEAD в локальном режиме — отказ словами:
-/// фиксировать в него можно, но отправлять и принимать нечего, а имя
-/// выдумывать нельзя.
+/// Ветка, с которой идёт работа: та, на которой стоит человек. Отделённый
+/// HEAD — отказ словами: фиксировать в него можно, но отправлять и принимать
+/// нечего, а имя выдумывать нельзя.
 fn work_branch(p: &Project) -> Result<String, String> {
-    if !p.local {
-        return Ok(p.branch.clone());
-    }
     head_branch(p).ok_or_else(|| format!("{DETACHED_STATE} — {DETACHED_FIX}"))
 }
 
@@ -252,58 +138,29 @@ pub fn branch_label(p: &Project) -> String {
     work_branch(p).unwrap_or_else(|_| DETACHED_STATE.to_string())
 }
 
-/// Один набор флагов на все вызовы: личность, длинные пути, кириллица в
-/// именах, никакого менеджера паролей, пароль заголовком (в пилоте равен логину).
+/// Один набор флагов на все вызовы: длинные пути, кириллица в именах,
+/// никакого автоматического gc и два кэша на 90 тысяч файлов выгрузки.
 ///
-/// Пустой `login` — локальный режим: личность и учётку не навязываем.
-/// `user.name=`/`user.email=@dev1c.local` из пустого рабочего места дали бы
-/// мусор в подписи коммита, а `Authorization: Basic` из того же пустого
-/// логина — заведомо чужие учётные данные в чужой сервер (origin в этом
-/// режиме принадлежит человеку: GitHub, своя Gitea, корпоративный git).
-/// Менеджер паролей тоже не гасим — им человек в свой сервер и ходит.
-/// Техническая половина остаётся вся: она безвредна и нужна одинаково в
-/// обоих режимах.
-pub fn git_flags(login: &str) -> Vec<String> {
-    let identity = if login.is_empty() {
-        Vec::new()
-    } else {
-        let auth = base64(format!("{login}:{login}").as_bytes());
-        vec![
-            format!("user.name={login}"),
-            format!("user.email={login}@dev1c.local"),
-            "credential.helper=".into(),
-            format!("http.extraHeader=Authorization: Basic {auth}"),
-        ]
-    };
-    identity
-        .into_iter()
-        .chain([
-            "safe.directory=*".to_string(),
-            "core.longpaths=true".into(),
-            "core.quotepath=false".into(),
-            // A configuration dump is ~90k small files. On Windows `git commit`
-            // waits for its own auto-gc (it cannot detach), and repacking that
-            // many objects took an hour on a laptop. Never gc from the bridge;
-            // the two caches make status/add on 90k files bearable.
-            "gc.auto=0".into(),
-            "core.fscache=true".into(),
-            "core.preloadindex=true".into(),
-        ])
-        .flat_map(|f| ["-c".to_string(), f])
-        .collect()
-}
-
-fn base64(b: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::new();
-    for c in b.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        s.push(T[(n >> 18) as usize & 63] as char);
-        s.push(T[(n >> 12) as usize & 63] as char);
-        s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    s
+/// **Личность и учётку не навязываем вовсе** (с 11.11 — нечем): подпись
+/// коммита и доступ к `origin` берутся из того, что человек настроил у себя
+/// в git. Прежде здесь подставлялись логин рабочего места и `Authorization:
+/// Basic` для Gitea среды — её нет.
+pub fn git_flags() -> Vec<String> {
+    [
+        "safe.directory=*",
+        "core.longpaths=true",
+        "core.quotepath=false",
+        // A configuration dump is ~90k small files. On Windows `git commit`
+        // waits for its own auto-gc (it cannot detach), and repacking that
+        // many objects took an hour on a laptop. Never gc from the bridge;
+        // the two caches make status/add on 90k files bearable.
+        "gc.auto=0",
+        "core.fscache=true",
+        "core.preloadindex=true",
+    ]
+    .into_iter()
+    .flat_map(|f| ["-c".to_string(), f.to_string()])
+    .collect()
 }
 
 struct Out {
@@ -314,7 +171,7 @@ struct Out {
 /// Один набор флагов и окружения на все пути запуска — обычный и прерываемый.
 fn git_cmd(p: &Project, args: &[&str]) -> Command {
     let mut c = Command::new(&p.git);
-    c.args(git_flags(&p.login)).args(args).current_dir(&p.dir).env("GIT_TERMINAL_PROMPT", "0");
+    c.args(git_flags()).args(args).current_dir(&p.dir).env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -427,58 +284,19 @@ pub fn not_laid_out(dir: &std::path::Path) -> String {
 /// режиме — не «адрес среды не задан», а «адреса среды тут и не бывает»
 /// (решение владельца 30.10).
 fn ensure_origin(p: &Project) -> Result<(), String> {
-    // Один заслон на `init`, `pull` и `push`: пустой адрес не уезжает в
-    // `git remote set-url` и не превращается в «origin не отвечает».
-    if !p.local && p.remote.is_empty() {
-        return Err(crate::cfg::no_gitea());
-    }
     // Каталог без `.git` — не «ошибка git», а невыполненная установка; `init`
     // сюда приходит уже после `git init`, поэтому заслон общий.
     if !p.dir.join(".git").exists() {
         return Err(not_laid_out(&p.dir));
     }
-    if p.local {
-        return Ok(());
-    }
-    match origin_url(p)? {
-        Some(u) if u == p.remote => Ok(()),
-        // Адрес есть, и он не наш. Переписать его `set-url` значит стереть
-        // чужую настройку без следа: человек поработал в локальном режиме,
-        // завёл origin сам — свой GitHub, свою Gitea, корпоративный сервер, —
-        // переключился в туннельный, и первый же `install`/`push` молча увёл
-        // отправку в среду (находка ревью 30.10). Говорим словами и не делаем;
-        // работать дальше мы и не можем — `push origin` ушёл бы по ЧУЖОМУ
-        // адресу, то есть выгрузка человека уехала бы не туда.
-        Some(u) => Err(format!("{} — {}", foreign_origin(&u), foreign_origin_fix(&p.remote))),
-        None => must(p, &["remote", "add", "origin", p.remote.as_str()]).map(|_| ()),
-    }
+    Ok(())
 }
 
-/// Чужой `origin` — что увидели. Адрес без учётных данных: строка идёт в
-/// журнал окна, в факт и в ответ агенту.
-pub fn foreign_origin(origin: &str) -> String {
-    format!("origin указывает на {}, а не на репозиторий среды", without_credentials(origin))
-}
-
-/// …и что сделать человеку. Чужой адрес мы не меняем даже «для его же
-/// удобства»: решает он, а не мы.
-pub fn foreign_origin_fix(ours: &str) -> String {
-    format!("этот адрес мы не меняем: смените его сами (git remote set-url origin {ours}) или уберите origin (git remote remove origin), и программа заведёт его заново")
-}
-
-/// Чем звать удалённый репозиторий в командах git: нашим адресом там, где он
-/// наш, и именем `origin` в локальном режиме — адреса мы там не знаем и
-/// знать не должны.
-fn remote_arg(p: &Project) -> &str {
-    if p.remote.is_empty() {
-        "origin"
-    } else {
-        p.remote.as_str()
-    }
-}
-
+/// Есть ли такая ветка у `origin`. Адреса здесь не бывает: `origin` — тот,
+/// что завёл человек, и других удалённых имён мы не знаем (11.11, удаление
+/// среды).
 fn remote_has(p: &Project, branch: &str) -> Result<bool, String> {
-    let o = git(p, &["ls-remote", "--heads", remote_arg(p), branch])?;
+    let o = git(p, &["ls-remote", "--heads", "origin", branch])?;
     Ok(o.ok && o.text.contains(&format!("refs/heads/{branch}")))
 }
 
@@ -498,12 +316,9 @@ pub const NO_ORIGIN: &str = "у репозитория нет origin — доб�
 const NO_IDENTITY: &str =
     "git не знает, кем подписывать коммиты — задайте один раз: git config --global user.name \"Имя\" и git config --global user.email \"you@example.com\"";
 
-/// Личность для коммита есть. Спрашивается только в локальном режиме: в
-/// туннельном её задаёт сам коннектор именем рабочего места (`git_flags`).
+/// Личность для коммита есть: подписывает человек своей, другой у нас нет
+/// (с 11.11 `git_flags` не навязывает ни имени, ни учётки).
 fn identity_ready(p: &Project) -> Result<(), String> {
-    if !p.local {
-        return Ok(());
-    }
     let o = git(p, &["config", "--get", "user.email"])?;
     if o.ok && !o.text.trim().is_empty() {
         Ok(())
@@ -525,18 +340,6 @@ fn origin_url(p: &Project) -> Result<Option<String>, String> {
 /// окна и отдаём инструментом агенту — то есть модели на той стороне.
 use common::docker::without_credentials;
 
-/// `dev1c/<имя>` из `remote` (`.../dev1c/<имя>.git`) — агент это имя
-/// угадать не может: его собственный каталог зовётся просто `project`.
-fn repo_name(p: &Project) -> String {
-    let s = p.remote.strip_suffix(".git").unwrap_or(&p.remote);
-    let mut parts = s.rsplitn(3, '/');
-    let name = parts.next().unwrap_or(s);
-    let org = parts.next().unwrap_or("dev1c");
-    format!("{org}/{name}")
-}
-
-const CANNOT_REACH_THE_BASE: &str = "эти правки в базу загрузить нельзя, пока они не отправлены";
-
 /// Состояние проекта разобранным, а не текстом.
 ///
 /// Заведено 25.10.2026, потому что окно показывало ТЕКСТОВЫЙ ОТЧЁТ ДЛЯ
@@ -556,11 +359,6 @@ pub struct Facts {
     /// — адрес origin, какой человек завёл сам. Пусто — отправлять некуда
     /// (локальный репозиторий без origin).
     pub repo: String,
-    /// Ветка рабочего места из настроек: в неё пойдёт отправка. С `branch`
-    /// совпадает почти всегда, и расхождение — единственная причина, по
-    /// которой их стоит показывать обе. Пусто в локальном режиме: ветку там
-    /// выбирает человек, и «нужной» у нас нет.
-    pub want_branch: String,
     /// Последний коммит одной строкой; пусто — коммитов ещё нет.
     pub last: String,
     /// Неотправленных коммитов: число, либо `все` — ветки на сервере ещё нет.
@@ -570,12 +368,6 @@ pub struct Facts {
     pub changed: usize,
     /// `ConfigDumpInfo.xml` на месте: без него первая загрузка будет полной.
     pub index: bool,
-    /// Правки доходят до базы только через обмен — так в туннельном режиме:
-    /// агент на той стороне, база здесь, и пока ветка не отправлена, человеку
-    /// её нечем загрузить. В локальном режиме `false`: агент правит те самые
-    /// файлы, которые читает `cf_load`, и незакоммиченная работа загрузке не
-    /// помеха.
-    pub exchange: bool,
 }
 
 impl Facts {
@@ -590,12 +382,9 @@ pub fn facts(p: &Project) -> Result<Facts, String> {
     ensure_origin(p)?;
     let branch = head_branch(p).unwrap_or_else(|| DETACHED_STATE.to_string());
     let last = must(p, &["log", "-1", "--format=%h %s (%cr)"]).unwrap_or_default();
-    // Куда отправлять: в туннельном режиме это наш адрес и наша организация в
-    // Gitea среды, в локальном — то, что человек завёл сам; не завёл —
-    // отправлять некуда, и считать неотправленное незачем.
-    // Адрес показываем без учётных данных: эта строка уходит и в журнал, и
-    // агенту (`without_credentials`).
-    let repo = if p.local { origin_url(p)?.map(|u| without_credentials(&u)).unwrap_or_default() } else { repo_name(p) };
+    // Куда отправлять — то, что человек завёл сам; не завёл — отправлять некуда, и считать неотправленное незачем. Адрес
+    // показываем без учётных данных: эта строка уходит и в журнал, и агенту (`without_credentials`).
+    let repo = origin_url(p)?.map(|u| without_credentials(&u)).unwrap_or_default();
     // Считаем от той ветки, с которой идёт работа, а не от навязанной:
     // отправлять некуда (нет origin) или не от чего (HEAD отделён) — считать
     // нечего, и пустая строка это говорит (`Facts::ahead`).
@@ -606,16 +395,7 @@ pub fn facts(p: &Project) -> Result<Facts, String> {
         _ => String::new(),
     };
     let changed = must(p, &["status", "--porcelain"])?.lines().count();
-    Ok(Facts {
-        branch,
-        repo,
-        want_branch: if p.local { String::new() } else { p.branch.clone() },
-        last,
-        ahead,
-        changed,
-        index: p.dir.join("src").join("ConfigDumpInfo.xml").exists(),
-        exchange: !p.local,
-    })
+    Ok(Facts { branch, repo, last, ahead, changed, index: p.dir.join("src").join("ConfigDumpInfo.xml").exists() })
 }
 
 /// Тот же отчёт текстом — для агента (`project_status`) и командной строки.
@@ -635,19 +415,12 @@ pub fn status_text(f: &Facts) -> String {
     if !f.repo.is_empty() {
         lines.push(format!("репозиторий: {}", f.repo));
     }
-    if !f.want_branch.is_empty() {
-        lines.push(format!("ветка рабочего места: {}", f.want_branch));
-    }
     lines.push(format!("последний коммит: {last}"));
     if !f.ahead.is_empty() {
         lines.push(format!("неотправленных коммитов: {}", f.ahead));
     }
     lines.push(format!("изменено: {}", f.changed));
     lines.push(format!("ConfigDumpInfo.xml: {index}"));
-    // Про недосягаемую базу — только там, где она и правда за обменом.
-    if f.exchange && f.unsent() {
-        lines.push(CANNOT_REACH_THE_BASE.to_string());
-    }
     lines.join("\n")
 }
 
@@ -682,22 +455,17 @@ fn retry_once<T>(pause: std::time::Duration, cancel: &AtomicBool, attempt: impl 
 
 pub fn pull(p: &Project, cancel: &AtomicBool) -> Result<String, String> {
     ensure_origin(p)?;
-    // В локальном режиме обмен идёт через origin человека — нет его, нет и
-    // обмена, и сказать это надо его словами, а не про поле `gitea`.
-    if p.local && origin_url(p)?.is_none() {
+    // Обмен идёт через origin человека — нет его, нет и обмена, и сказать это надо его словами.
+    if origin_url(p)?.is_none() {
         return Err(NO_ORIGIN.into());
     }
-    // Перебазируем ту ветку, на которой человек стоит, а не `main`: до 30.10
-    // в локальном режиме `pull --rebase origin main` уводил его работу на
-    // чужую ветку (находка ревью 30.10).
+    // Перебазируем ту ветку, на которой человек стоит, а не `main`: `pull --rebase origin main` уводил его работу на чужую
+    // ветку (находка ревью 30.10).
     let branch = work_branch(p)?;
     // A fresh project has no branch on the server yet — that comes first:
     // its tree is "dirty" too, and the useful answer is "export first".
     if !remote_has(p, &branch)? {
-        return Err(format!(
-            "ветки {branch} {} ещё нет — сначала «Выгрузить из 1С» (cf_decompile, затем project_push)",
-            if p.local { "у origin" } else { "в Gitea" }
-        ));
+        return Err(format!("ветки {branch} у origin ещё нет — сначала «Выгрузить из 1С» (cf_decompile, затем project_push)"));
     }
     if !must(p, &["status", "--porcelain"])?.is_empty() {
         return Err("в каталоге проекта есть незакоммиченные изменения — сначала project_push".into());
@@ -780,7 +548,7 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
     // причина, по которой вторая половина не состоялась (решение владельца
     // 30.10: фиксация в локальном режиме работает всегда, без всякого
     // origin).
-    let origin = if p.local { origin_url(p)? } else { Some(p.remote.clone()) };
+    let origin = origin_url(p)?;
     // Что именно случилось — то и говорим: пустой первый коммит мы ДЕЛАЕМ, и
     // «нечего коммитить» про него было неправдой (находка ревью 30.10).
     let committed = if staged {
@@ -793,20 +561,10 @@ pub fn push(p: &Project, message: &str, cancel: &AtomicBool) -> Result<String, S
     let Some(origin) = origin else {
         return Ok(format!("{committed}: ветка {branch} — {NO_ORIGIN}"));
     };
-    // Репозиторий в Gitea среды создаёт первый push, и вместе с ним туда
-    // уезжает `main`: такова конвенция среды (`push-to-create` в организации
-    // `dev1c`). К чужому серверу человека она не относится — там репозиторий
-    // уже есть, а что делать с его `main`, решает он сам.
-    let first = !p.local && !remote_has(p, "main")?;
-    if first {
-        must_wait(p, &["push", "-q", "origin", "HEAD:refs/heads/main"], cancel)?;
-    }
+    // Репозиторий на сервере человека уже есть, а что делать с его `main`, решает он сам: «создать репозиторий первым push»
+    // было конвенцией среды (`push-to-create` в организации `dev1c`), и уехало вместе с ней (11.11).
     must_wait(p, &["push", "-q", "-u", "origin", &branch], cancel)?;
-    Ok(format!(
-        "{committed}, ветка {branch} отправлена в {}{}",
-        without_credentials(&origin),
-        if first { " (репозиторий создан, main тоже отправлен)" } else { "" }
-    ))
+    Ok(format!("{committed}, ветка {branch} отправлена в {}", without_credentials(&origin)))
 }
 
 /// Флаг отмены для CLI и моста: его никто не взводит — окно (Task 4) заведёт свой.
@@ -1132,7 +890,10 @@ mod tests {
     }
 
     /// Голый origin и проект с веткой dev2, как положит host.project (6B).
-    fn fixture() -> (tempdir::Dir, Project) {
+    ///
+    /// Адрес origin отдаётся третьим: `Project` его больше не держит (адрес принадлежит человеку), а тестам он нужен — завести второй
+    /// клон, подменить origin, проверить отказ.
+    fn fixture_with_origin() -> (tempdir::Dir, Project, std::path::PathBuf) {
         let tmp = tempdir::Dir::new();
         let origin = tmp.path().join("origin.git");
         git(tmp.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
@@ -1140,42 +901,27 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         git(&dir, &["init", "-q", "-b", "dev2"]);
         git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        // Личность — в самом репозитории: с 11.11 её берут у человека (`git_flags` ничего не навязывает), а на машине сборки
+        // глобальной настройки нет, и `identity_ready` отказал бы ещё до коммита.
+        git(&dir, &["config", "user.name", "t"]);
+        git(&dir, &["config", "user.email", "t@t"]);
         std::fs::write(dir.join(".gitattributes"), "* -text\n").unwrap();
         std::fs::write(dir.join(".gitignore"), "build/\n*.log\n").unwrap();
         std::fs::write(dir.join("autumn-properties.json"), "{}").unwrap();
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: "dev2".into(),
-            remote: origin.to_string_lossy().into(),
-            login: "dev2".into(),
-            local: false,
-        };
-        (tmp, p)
+        let p = Project { dir: dir.clone(), git: system_git() };
+        (tmp, p, origin)
     }
 
-    #[test]
-    fn flags_carry_identity_and_auth_header_without_a_password_in_the_url() {
-        let f = git_flags("dev2");
-        assert!(f.iter().any(|a| a == "user.name=dev2"));
-        assert!(f.iter().any(|a| a == "http.extraHeader=Authorization: Basic ZGV2MjpkZXYy"));
-        assert!(f.iter().any(|a| a == "credential.helper="));
-        assert!(f.iter().any(|a| a == "gc.auto=0"), "no auto-gc from the bridge: a 90k-file commit must not repack");
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().gitea = "http://192.168.1.10:3391".into();
-        let p = Project::from_cfg(&cfg, Path::new("/tools"));
-        assert_eq!(p.remote, "http://192.168.1.10:3391/dev1c/Buh.git");
-        cfg.current_mut().project = "/home/dev/proj/Бух/".into();
-        assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://192.168.1.10:3391/dev1c/Бух.git");
-        assert_eq!(p.branch, "dev1");
-        assert!(p.git.to_string_lossy().contains("git"));
+    fn fixture() -> (tempdir::Dir, Project) {
+        let (tmp, p, _) = fixture_with_origin();
+        (tmp, p)
     }
 
     #[test]
     fn git_cmd_carries_the_same_flags_as_git() {
         let (_t, p) = fixture();
         let c = git_cmd(&p, &["status"]);
-        let flags = git_flags(&p.login);
+        let flags = git_flags();
         let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args[..flags.len()], flags[..]);
         assert_eq!(c.get_current_dir(), Some(p.dir.as_path()));
@@ -1206,29 +952,13 @@ mod tests {
     }
 
     #[test]
-    fn first_push_creates_main_and_the_workstation_branch() {
-        let (_t, p) = fixture();
-        std::fs::write(p.dir.join("src").join("Module.bsl"), "Процедура А() КонецПроцедуры").unwrap();
-        std::fs::write(p.dir.join("secret.log"), "x").unwrap();
-        let text = push(&p, "первая выгрузка", &NEVER).unwrap();
-        assert!(text.contains("dev2"), "{text}");
-        let heads = git(&p.dir, &["ls-remote", "--heads", "origin"]);
-        assert!(heads.contains("refs/heads/main") && heads.contains("refs/heads/dev2"), "{heads}");
-        // .log is ignored, and only the four roots are added.
-        assert!(!git(&p.dir, &["ls-files"]).contains("secret.log"));
-        // Nothing new → push still succeeds and says so.
-        let again = push(&p, "пусто", &NEVER).unwrap();
-        assert!(again.contains("нечего"), "{again}");
-    }
-
-    #[test]
     fn pull_refuses_a_dirty_tree_and_reports_conflicts_by_file() {
-        let (t, p) = fixture();
+        let (t, p, origin) = fixture_with_origin();
         std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
         push(&p, "a", &NEVER).unwrap();
         // A second clone pushes a conflicting change to dev2.
         let other = t.path().join("other");
-        git(t.path(), &["clone", "-q", "-b", "dev2", &p.remote, other.to_str().unwrap()]);
+        git(t.path(), &["clone", "-q", "-b", "dev2", origin.to_str().unwrap(), other.to_str().unwrap()]);
         std::fs::write(other.join("src").join("M.bsl"), "2").unwrap();
         git(&other, &["commit", "-qam", "theirs"]);
         git(&other, &["push", "-q", "origin", "dev2"]);
@@ -1253,11 +983,9 @@ mod tests {
         // Push-to-create: before the first push there is no repository at all,
         // and `ls-remote` fails with "repository not found". That is "no
         // branch", not an error — otherwise the first push can never happen.
-        let (t, mut p) = fixture();
-        p.remote = t.path().join("absent.git").to_string_lossy().into();
-        // Адрес меняем и в самом репозитории: привести к нему чужой `origin`
-        // мы больше не вправе, и без этого отказ был бы про чужой адрес.
-        git(&p.dir, &["remote", "set-url", "origin", &p.remote]);
+        let (t, p) = fixture();
+        let absent = t.path().join("absent.git").to_string_lossy().to_string();
+        git(&p.dir, &["remote", "set-url", "origin", &absent]);
         assert_eq!(remote_has(&p, "main"), Ok(false));
         let e = pull(&p, &NEVER).unwrap_err();
         assert!(e.contains("Выгрузить из 1С"), "{e}");
@@ -1289,35 +1017,15 @@ mod tests {
         assert!(s.contains("ветка dev2") && s.contains("ConfigDumpInfo.xml: есть") && s.contains("изменено: 1"), "{s}");
     }
 
-    /// Агент не знает и не может угадать имя своего репозитория в Gitea
-    /// (его каталог зовётся просто `project`) — `status` обязан его назвать.
+    /// Агент не знает и не может угадать, куда отправляется его работа, —
+    /// `status` обязан назвать адрес `origin` как он есть.
     #[test]
     fn status_names_the_repository_and_the_branch() {
-        let (_t, mut p) = fixture();
-        p.remote = "http://127.0.0.1:3000/dev1c/UNF.git".into();
-        git(&p.dir, &["remote", "set-url", "origin", &p.remote]);
-        let s = status(&p).unwrap();
-        assert!(s.contains("репозиторий: dev1c/UNF"), "{s}");
-        assert!(s.contains("ветка рабочего места: dev2"), "{s}");
-    }
-
-    /// В туннельном режиме `cf_load` грузит каталог проекта на машине
-    /// человека, куда файлы попадают только через Gitea — незакоммиченная
-    /// или неотправленная правка недоступна никакому вызову, и агент
-    /// обязан это узнать из текста, а не по молчанию базы.
-    #[test]
-    fn status_warns_that_unsent_work_cannot_reach_the_base() {
         let (_t, p) = fixture();
-        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "a", &NEVER).unwrap();
-        assert!(!status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "clean tree must not warn");
-        std::fs::write(p.dir.join("src").join("M.bsl"), "2").unwrap();
-        assert!(status(&p).unwrap().contains(CANNOT_REACH_THE_BASE), "changed file must warn");
-        let (_t2, p2) = fixture();
-        std::fs::write(p2.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p2, "unpushed", &NEVER).unwrap();
-        git(&p2.dir, &["commit", "-q", "--allow-empty", "-m", "local only"]);
-        assert!(status(&p2).unwrap().contains(CANNOT_REACH_THE_BASE), "unpushed commit must warn");
+        git(&p.dir, &["remote", "set-url", "origin", "http://127.0.0.1:3000/dev1c/UNF.git"]);
+        let s = status(&p).unwrap();
+        assert!(s.contains("http://127.0.0.1:3000/dev1c/UNF.git"), "{s}");
+        assert!(s.contains("ветка dev2"), "{s}");
     }
 
     #[test]
@@ -1333,119 +1041,6 @@ mod tests {
         assert!(!err, "{text}");
     }
 
-    /// Смена режима не распоряжается чужим адресом. Сценарий ревью 30.10:
-    /// человек поработал в локальном режиме, завёл origin сам — свой GitHub,
-    /// своя Gitea, корпоративный сервер, — потом переключился в туннельный, и
-    /// первый же `install`/`push` делал `remote set-url origin <gitea>/dev1c/…`.
-    /// Адрес, который он завёл сам, исчезал без следа, а выгрузка уезжала не
-    /// туда, куда он смотрел. Теперь — слова и ни одного действия.
-    ///
-    /// Своего origin нет вовсе (каталог git-инициализирован руками) — это не
-    /// чужая настройка, и его мы по-прежнему заводим сами.
-    #[test]
-    fn a_foreign_origin_is_not_replaced_when_the_mode_changes() {
-        let (t, mut p) = fixture();
-        let theirs = t.path().join("мой-сервер.git").to_string_lossy().to_string();
-        git(t.path(), &["init", "-q", "--bare", "-b", "main", &theirs]);
-        git(&p.dir, &["remote", "set-url", "origin", &theirs]);
-        let ours = t.path().join("среда.git");
-        git(t.path(), &["init", "-q", "--bare", "-b", "main", ours.to_str().unwrap()]);
-        p.remote = ours.to_string_lossy().into();
-        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-
-        // Раскладка, состояние и отправка — все три говорят одно и то же и
-        // ничего не делают.
-        assert!(matches!(layout_state(&p), Layout::ForeignOrigin(u) if u == theirs));
-        for e in [
-            init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_err(),
-            push(&p, "a", &NEVER).unwrap_err(),
-            pull(&p, &NEVER).unwrap_err(),
-            status(&p).unwrap_err(),
-        ] {
-            assert!(e.contains("не меняем") && e.contains("мой-сервер") && e.contains("git remote set-url"), "{e}");
-        }
-        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), theirs, "чужой адрес переписан");
-        assert!(git(&ours, &["branch", "--list"]).is_empty(), "в среду уехало то, чего человек не просил");
-
-        // Убрал origin сам — дальше как раньше: заводим свой и работаем.
-        git(&p.dir, &["remote", "remove", "origin"]);
-        assert!(matches!(layout_state(&p), Layout::Drifted(d) if d.contains("нет origin")));
-        push(&p, "a", &NEVER).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), p.remote);
-        assert!(git(&ours, &["branch", "--list"]).contains("dev2"));
-    }
-
-    /// Адреса среды нет — `origin` не собирается из пустоты: раскладка это
-    /// называет, а `pull`/`push`/`init` отказывают текстом про поле.
-    #[test]
-    fn without_a_gitea_address_no_origin_is_made_up() {
-        let cfg = crate::cfg::filled_for_test();
-        assert_eq!(cfg.gitea_url(), None);
-        let (_t, mut p) = fixture();
-        p.remote = Project::from_cfg(&cfg, Path::new("/tools")).remote;
-        assert_eq!(p.remote, "");
-        assert!(matches!(layout_state(&p), Layout::NoGitea));
-        let e = init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_err();
-        assert!(e.contains("адрес среды не задан") && e.contains("gitea"), "{e}");
-        // Все четыре входа в git за одним заслоном — `status` в том числе:
-        // через него идут вкладка «Инструменты» и инструмент агента.
-        assert!(push(&p, "проба", &NEVER).unwrap_err().contains("адрес среды не задан"));
-        assert!(pull(&p, &NEVER).unwrap_err().contains("адрес среды не задан"));
-        assert!(status(&p).unwrap_err().contains("адрес среды не задан"));
-        // А неразложенный каталог называет свою причину, а не адрес среды.
-        let t = tempdir::Dir::new();
-        p.dir = t.path().join("нет такого");
-        std::fs::create_dir_all(&p.dir).unwrap();
-        assert!(matches!(layout_state(&p), Layout::Missing));
-    }
-
-    /// Главное правило локального режима: `origin` принадлежит человеку.
-    /// 1С-разработчик заводит его обычным git, куда ему нужно, и ни
-    /// раскладка, ни состояние, ни фиксация не вправе его переписать — а
-    /// переписывали: `ensure_origin` приводил `origin` к
-    /// `<gitea>/dev1c/<имя>.git`, собранному из пустого поля (вопрос
-    /// владельца 30.10). Заодно: ветка берётся из репозитория, а не из
-    /// пустого рабочего места, и личность коммита — человека, не `dev1`.
-    #[test]
-    fn in_local_mode_a_foreign_origin_survives_everything_we_do() {
-        let (t, mut p) = fixture();
-        // Свой сервер человека — голый репозиторий рядом, а не наш
-        // `origin.git` фикстуры: именно его адрес мы и не вправе трогать.
-        let theirs = t.path().join("мой-сервер.git").to_string_lossy().to_string();
-        git(t.path(), &["init", "-q", "--bare", "-b", "main", &theirs]);
-        git(&p.dir, &["remote", "set-url", "origin", &theirs]);
-        git(&p.dir, &["checkout", "-q", "-b", "feature/моя"]);
-        // Навязанной ветки в локальном режиме нет: её узнаёт git.
-        p = Project { branch: String::new(), remote: String::new(), login: String::new(), local: true, ..p };
-
-        // Раскладка не требует ни адреса среды, ни «нужной» ветки.
-        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
-        assert!(matches!(layout_state(&p), Layout::Ok));
-        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), theirs, "чужой origin переписан раскладкой");
-
-        // Состояние — без слов про Gitea и рабочее место, с адресом человека.
-        let f = facts(&p).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(f.repo, theirs);
-        assert!(f.want_branch.is_empty() && !f.exchange, "{f:?}");
-        let text = status_text(&f);
-        assert!(!text.contains("ветка рабочего места") && !text.contains("Gitea"), "{text}");
-        assert!(text.contains("ветка feature/моя"), "{text}");
-
-        // Фиксация: чужой origin цел, коммит подписан не нами. Личность —
-        // как у человека на своей машине (у него она глобальная, у теста —
-        // в самом репозитории): своей мы в этом режиме не навязываем.
-        git(&p.dir, &["config", "user.email", "me@example.com"]);
-        git(&p.dir, &["config", "user.name", "Я"]);
-        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        let out = push(&p, "моя правка", &NEVER).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(git(&p.dir, &["remote", "get-url", "origin"]), theirs, "чужой origin переписан отправкой: {out}");
-        assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "моя правка");
-        assert!(
-            !git(&p.dir, &["log", "-1", "--format=%ae"]).contains("dev1c.local"),
-            "личность рабочего места навязана локальному коммиту"
-        );
-    }
-
     /// Тот же режим, но origin человек не заводил. Фиксация работает — это
     /// обычный локальный репозиторий, и правки базе уже доступны; обмен
     /// отказывает, и словами про origin, а не про «адрес среды не задан» и
@@ -1456,14 +1051,7 @@ mod tests {
         let t = tempdir::Dir::new();
         let dir = t.path().join("Проект без origin");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: String::new(),
-            remote: String::new(),
-            login: String::new(),
-            local: true,
-        };
+        let p = Project { dir: dir.clone(), git: system_git() };
         init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
         assert!(matches!(layout_state(&p), Layout::Ok), "локальная раскладка не требует origin");
 
@@ -1508,14 +1096,7 @@ mod tests {
         let t = tempdir::Dir::new();
         let dir = t.path().join("Пустой проект");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: String::new(),
-            remote: String::new(),
-            login: String::new(),
-            local: true,
-        };
+        let p = Project { dir: dir.clone(), git: system_git() };
         git(&dir, &["init", "-q", "-b", "main"]);
         git(&dir, &["config", "user.email", "me@example.com"]);
         git(&dir, &["config", "user.name", "Я"]);
@@ -1545,33 +1126,6 @@ mod tests {
         assert_eq!(git(&his, &["diff", "--cached", "--name-only"]), "его-заметки.md");
     }
 
-    /// Навязанной ветки и личности в локальном режиме нет вовсе: иначе
-    /// «нужной» веткой становилась пустая строка (`git init -b `, «ветка
-    /// main, нужна »), а подписью коммита — `@dev1c.local`. Имя `main`
-    /// остаётся ровно для одного: завести ветку на пустом месте.
-    #[test]
-    fn a_local_project_imposes_neither_a_branch_nor_an_identity() {
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().mode = "local".into();
-        cfg.current_mut().workstation.clear();
-        cfg.current_mut().gitea = "http://localhost:3000".into();
-        let t = tempdir::Dir::new();
-        cfg.current_mut().project = t.path().join("Бух").display().to_string();
-        let p = Project::from_cfg(&cfg, Path::new("/tools"));
-        assert!(p.branch.is_empty(), "ветку человека мы не называем заранее: её знает git");
-        assert_eq!(init_branch(&p), "main");
-        assert!(p.remote.is_empty(), "адрес среды в локальном режиме не собирается даже из заполненного поля");
-        assert!(p.local && p.login.is_empty());
-        // В туннельном режиме ветка — конвенция среды, и она же имя первой.
-        cfg.current_mut().mode = "tunnel".into();
-        cfg.current_mut().workstation = "dev2".into();
-        assert_eq!(init_branch(&Project::from_cfg(&cfg, Path::new("/tools"))), "dev2");
-
-        let f = git_flags("");
-        assert!(!f.iter().any(|a| a.starts_with("user.name") || a.starts_with("http.extraHeader") || a == "credential.helper="), "{f:?}");
-        assert!(f.iter().any(|a| a == "safe.directory=*") && f.iter().any(|a| a == "gc.auto=0"), "{f:?}");
-    }
-
     /// Ветка человека — его, и «Установить» её не меняет. Два случая, на
     /// которых чтение `.git/HEAD` файлом давало `main` и уводило работу:
     /// ворктри (`.git` там файл) и отделённый HEAD. Сценарий ревью 30.10:
@@ -1594,14 +1148,7 @@ mod tests {
         let tree = t.path().join("Бух-ветка");
         git(&main_dir, &["worktree", "add", "-q", "-b", "моя", tree.to_str().unwrap()]);
         assert!(tree.join(".git").is_file(), "тест держится на том, что в ворктри .git — файл");
-        let p = Project {
-            dir: tree.clone(),
-            git: system_git(),
-            branch: String::new(),
-            remote: String::new(),
-            login: String::new(),
-            local: true,
-        };
+        let p = Project { dir: tree.clone(), git: system_git() };
 
         // Раскладка служебных файлов — да, ветка — нет.
         init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
@@ -1637,14 +1184,7 @@ mod tests {
         let t = tempdir::Dir::new();
         let dir = t.path().join("Его проект");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: String::new(),
-            remote: String::new(),
-            login: String::new(),
-            local: true,
-        };
+        let p = Project { dir: dir.clone(), git: system_git() };
         init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_or_else(|e| panic!("{e}"));
         git(&dir, &["config", "user.email", "me@example.com"]);
         git(&dir, &["config", "user.name", "Я"]);
@@ -1662,18 +1202,6 @@ mod tests {
         assert_eq!(git(&dir, &["diff", "--cached", "--name-only"]), "его-заметки.md");
     }
 
-    #[test]
-    fn the_remote_follows_the_explicit_gitea() {
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().gitea = "http://localhost:3000".into();
-        assert_eq!(Project::from_cfg(&cfg, Path::new("/tools")).remote, "http://localhost:3000/dev1c/Buh.git");
-        // Адрес поля разошёлся с тем, что в репозитории: это не «поправим», а
-        // «скажем» — см. `a_foreign_origin_is_not_replaced_when_the_mode_changes`.
-        let (_t, mut p) = fixture();
-        p.remote = "http://localhost:3000/dev1c/project.git".into();
-        assert!(matches!(layout_state(&p), Layout::ForeignOrigin(_)));
-    }
-
     /// Файл анализатора уезжает вместе с выгрузкой: он нужен второй стороне,
     /// и корень проекта у агента обязан быть пригодным сам, без его действий.
     /// Отправка на неразложенном проекте объясняет причину, а не пересказывает
@@ -1684,14 +1212,7 @@ mod tests {
         let t = tempdir::Dir::new();
         let dir = t.path().join("project");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: "dev1".into(),
-            remote: "http://localhost:3000/dev1c/project.git".into(),
-            login: "dev1".into(),
-            local: false,
-        };
+        let p = Project { dir: dir.clone(), git: system_git() };
         let e = push(&p, "выгрузка", &AtomicBool::new(false)).unwrap_err();
         assert!(e.contains("не разложен") && e.contains("install"), "{e}");
         assert!(!e.contains("GIT_DISCOVERY"), "сырой git наружу не идёт: {e}");
@@ -1734,19 +1255,11 @@ mod tests {
         let origin = t.path().join("o.git");
         git(t.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
         let dir = t.path().join("Проект Бух");
-        let p = Project {
-            dir: dir.clone(),
-            git: system_git(),
-            branch: "dev3".into(),
-            remote: origin.to_string_lossy().into(),
-            login: "dev3".into(),
-            local: false,
-        };
+        let p = Project { dir: dir.clone(), git: system_git() };
         assert!(matches!(layout_state(&p), Layout::Missing));
         let lines = std::cell::RefCell::new(Vec::new());
         init(&p, Path::new("nowhere"), &[], &|s| lines.borrow_mut().push(s)).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(git(&dir, &["symbolic-ref", "--short", "HEAD"]), "dev3");
-        assert_eq!(git(&dir, &["remote", "get-url", "origin"]), p.remote);
+        assert_eq!(git(&dir, &["symbolic-ref", "--short", "HEAD"]), "main", "первая ветка нового репозитория");
         assert_eq!(std::fs::read_to_string(dir.join(".gitattributes")).unwrap(), GITATTRIBUTES);
         assert!(std::fs::read_to_string(dir.join("autumn-properties.json")).unwrap().contains("\"increment\": true"));
         assert!(dir.join("src").is_dir());
@@ -1759,32 +1272,20 @@ mod tests {
     }
 
     #[test]
-    fn init_switches_to_an_existing_workstation_branch_without_resetting_it() {
-        // The person merged into main by hand and is still on it; dev2 has
-        // its own commit. install must switch back to dev2, not reset it.
-        let (_t, p) = fixture();
-        std::fs::write(p.dir.join("src").join("M.bsl"), "1").unwrap();
-        push(&p, "work on dev2", &NEVER).unwrap();
-        git(&p.dir, &["checkout", "-q", "-b", "main"]);
-        git(&p.dir, &["commit", "-q", "--allow-empty", "-m", "main moved on"]);
-        init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap();
-        assert_eq!(git(&p.dir, &["symbolic-ref", "--short", "HEAD"]), "dev2");
-        assert_eq!(git(&p.dir, &["log", "-1", "--format=%s"]), "work on dev2");
-    }
-
-    #[test]
     fn a_base_directory_is_refused_and_drift_is_named() {
         let t = tempdir::Dir::new();
         let dir = t.path().join("base");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("1Cv8.1CD"), "").unwrap();
-        let p =
-            Project { dir: dir.clone(), git: system_git(), branch: "dev1".into(), remote: "x".into(), login: "dev1".into(), local: false };
+        let p = Project { dir: dir.clone(), git: system_git() };
         assert!(matches!(layout_state(&p), Layout::BaseDir(_)));
         assert!(init(&p, Path::new("nowhere"), &[], &|_| {}).unwrap_err().contains("каталог базы"));
         let (_t2, p2) = fixture(); // branch dev2, origin set, three files present
+                                   // Ветку человека раскладка не трогает и расхождением не считает (11.11): расхождение — пропавший служебный файл.
         git(&p2.dir, &["checkout", "-q", "-b", "main"]);
-        assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains("ветка")));
+        assert!(matches!(layout_state(&p2), Layout::Ok), "ветка — дело человека");
+        std::fs::remove_file(p2.dir.join(".gitignore")).unwrap();
+        assert!(matches!(layout_state(&p2), Layout::Drifted(d) if d.contains(".gitignore")));
     }
 
     /// Фальшивый «бегунок»: первая попытка отказывает так, как отказывает

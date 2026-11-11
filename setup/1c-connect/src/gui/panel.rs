@@ -72,13 +72,10 @@ pub struct Fields {
     /// `host_of`/`fields_differ` про него не знают, и регулярная диффовка полей
     /// его не трогает.
     pub name: Entity<InputState>,
-    pub server: Entity<InputState>,
-    pub password: Entity<InputState>,
     pub base_path: Entity<InputState>,
     pub db_user: Entity<InputState>,
     pub db_password: Entity<InputState>,
     pub project: Entity<InputState>,
-    pub workstation: Entity<InputState>,
     /// Адрес чужой публикации. Показывается только в режиме «уже
     /// опубликована» (`shown_fields`), в обычном режиме адрес считается сам.
     pub base_url: Entity<InputState>,
@@ -1019,21 +1016,6 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
     if !f.repo.is_empty() {
         rows.push((Some(Dot::Up), "репозиторий".into(), f.repo.clone()));
     }
-    // Ветка в параметрах разошлась с тем, где человек стоит, — это и есть
-    // единственный повод показать обе: отправка пойдёт не туда, куда он
-    // смотрит. Пустая `want_branch` — локальный режим: ветку там выбирает
-    // человек, расходиться ей не с чем.
-    if !f.want_branch.is_empty() && f.branch != f.want_branch {
-        rows.push((
-            Some(Dot::Warn),
-            "Изменения уедут не туда, где вы работаете".into(),
-            // «Указана ветка …» — говор git, а не речь (правило текстового
-            // прохода: нельзя произнести вслух коллеге по телефону —
-            // написано неверно). Имя остаётся: это ЗНАЧЕНИЕ из соединения,
-            // человек его там же и видит, — а слово «ветка» уходит.
-            format!("в соединении задано «{}» — работа уедет туда", f.want_branch),
-        ));
-    }
     // 2. Есть ли что отправлять. Точка здесь — настоящее состояние.
     rows.push(unsent_row(f));
     // 3. Последняя отправка — только когда есть что показывать.
@@ -1067,16 +1049,12 @@ pub fn project_rows(v: Option<&ProjectView>) -> Vec<(Option<Dot>, String, String
 /// считает не записи git, а свою работу: что уже сложено и ждёт отправки. Заголовок строки при этом говорит, чего именно ждёт, — повторять
 /// это в подробности незачем.
 ///
-/// Заголовок — про отправку только там, где она есть. В локальном режиме
-/// («обмена нет»: агент правит те самые файлы, которые читает загрузка)
-/// «Всё отправлено» было бы ложью про механизм, которого нет, а работа всё
-/// равно доходит до базы — там речь только о том, зафиксирована ли она.
+/// Заголовок — про сохранение, а не про отправку: агент правит те самые
+/// файлы, которые читает загрузка, и работа доходит до базы без всякой
+/// отправки. «Всё отправлено» было бы ложью про механизм, которого нет
+/// (обмен со средой уехал 11.11).
 fn unsent_row(f: &crate::project::Facts) -> (Option<Dot>, String, String) {
-    let (good, bad) = if f.exchange {
-        ("Всё отправлено", "Не отправлено")
-    } else {
-        ("Все изменения сохранены", "Есть несохранённые изменения")
-    };
+    let (good, bad) = ("Все изменения сохранены", "Есть несохранённые изменения");
     if !f.unsent() {
         return (Some(Dot::Up), good.into(), String::new());
     }
@@ -2735,9 +2713,6 @@ pub fn publication_switch_label(c: &Connection) -> Option<&'static str> {
 
 fn field_value<'a>(h: &'a Connection, name: &str) -> &'a str {
     match name {
-        "server" => &h.server,
-        "password" => &h.password,
-        "workstation" => &h.workstation,
         "base_path" => &h.base_path,
         "db_user" => &h.db_user,
         "db_password" => &h.db_password,
@@ -2779,16 +2754,18 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connectio
         // знает, какая открыта. Настоящий ключ подставляет `save::save_host` из `ui.cfg` — тем же переносом, что `role`/`profile`/`mode`
         // и прочие поля, которых в окне нет.
         id_in_file: crate::cfg::CardId::default(),
+        // Ушедшие ключи файла (`server`, `gitea`, `password`, `workstation`) форма не несёт: программа их не читает, и на диск они
+        // больше не печатаются — см. их докстроку в `cfg::Connection`.
+        gone_server: None,
+        gone_gitea: None,
+        gone_password: None,
+        gone_workstation: None,
         base_here: true,
         // Поля для правки роли в окне тоже нет (её заводят будущие задачи
         // плана «Модель соединений»): пусто, и `save_host` переносит её из
         // текущих параметров той же строкой, что `profile`.
         role: String::new(),
         profile: String::new(),
-        server: v("server", &f.server),
-        gitea: String::new(),
-        password: v("password", &f.password),
-        workstation: v("workstation", &f.workstation),
         base_path: v("base_path", &f.base_path),
         // Поля в окне нет: версию платформы правят в toml, и `save_host`
         // переносит её из текущих параметров, как `tools` и `mode`.
@@ -2947,21 +2924,15 @@ impl Panel {
             Theme::sync_system_appearance(None, cx);
         }
 
-        // Подсказки остаются только там, где неочевиден ФОРМАТ — адрес среды
-        // с портом (решение владельца 26.10: «пустые поля вместо выдуманных
-        // значений»). «Администратор», «пароль», оба пути и «dev1» были
-        // похожи на уже заполненные значения, а не на подсказку формата —
-        // разбор живого прогона 9.11 нашёл их рядом с пустым переключателем
-        // первого экрана.
+        // Подсказки остаются только там, где неочевиден ФОРМАТ (решение владельца 26.10: «пустые поля вместо выдуманных
+        // значений»). «Администратор», «пароль» и оба пути были похожи на уже заполненные значения, а не на подсказку формата —
+        // разбор живого прогона 9.11 нашёл их рядом с пустым переключателем первого экрана.
         let fields = Fields {
             name: field("Ромашка", &host.name, false, window, cx),
-            server: field("192.168.1.10:3393", &host.server, false, window, cx),
-            password: field("", &host.password, true, window, cx),
             base_path: field("", &host.base_path, false, window, cx),
             db_user: field("", &host.db_user, false, window, cx),
             db_password: field("", &host.db_password, true, window, cx),
             project: field("", &host.project, false, window, cx),
-            workstation: field("", &host.workstation, false, window, cx),
             base_url: field("http://localhost/Buh", shown_base_url(&host), false, window, cx),
             code: field("", "", false, window, cx),
             issued: field("", "", false, window, cx),
@@ -3261,12 +3232,9 @@ impl Panel {
     /// Поля формы вместе с их именами — тот же список имён, что у
     /// `field_value`/`shown_fields`, чтобы обход полей не заводил третьего
     /// мнения о составе формы.
-    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 8] {
+    fn field_states(&self) -> [(&'static str, &Entity<InputState>); 5] {
         let f = &self.fields;
         [
-            ("server", &f.server),
-            ("password", &f.password),
-            ("workstation", &f.workstation),
             ("base_path", &f.base_path),
             ("db_user", &f.db_user),
             ("db_password", &f.db_password),
@@ -3285,22 +3253,7 @@ impl Panel {
     /// ось читалась здесь же у `cfg.current()`, карточка и запись жили на
     /// разных осях, и добраться до этого выбора тестом было нечем.
     fn host_from_fields(&self, mode: &str, publication: &str, cx: &mut Context<Self>) -> Connection {
-        let mut host = host_of(&self.fields, mode, publication, cx);
-        if mode == "local" {
-            // Адрес среды, пароль рабочего места и имя рабочего места скрыты
-            // в этом режиме — переносим их из текущих параметров, как
-            // `save_host` уже делает для `dump`/`tools`/`mode`/`base_url`.
-            // Рабочее место обязано остаться в toml не ради портов (с
-            // задачи 6 `cfg::Cfg::ports` их не считает — это константы) — а
-            // ради туннельной половины: поле принадлежит ей (`project.rs`,
-            // `gate.rs`), и переключение режима не должно стирать значение,
-            // которое человек впишет, вернувшись в туннель.
-            let current = cx.global::<Ui>().cfg.current().clone();
-            host.server = current.server;
-            host.password = current.password;
-            host.workstation = current.workstation;
-        }
-        host
+        host_of(&self.fields, mode, publication, cx)
     }
 
     /// Запись в toml и всё, что за ней следует: итог строкой журнала,
@@ -3636,23 +3589,6 @@ impl Panel {
         // незачем. Что именно правится, человек видит по пути в поле «База»
         // ниже, а «не указана» говорит сама подпись того же поля.
         //
-        // Поля туннеля — только у карточки, которая сама звонит в среду за
-        // базой, которой здесь нет (`cfg::needs_env`, читается через
-        // `shown_fields`): поле без действия роняет доверие к экрану
-        // параметров. Без них ряд не рисуется вовсе — ни дыры, ни подписи
-        // без поля.
-        if shown.contains(&"server") {
-            col = col.child(Self::row("Адрес среды и порт SSH", caption, accent, &f.server, window, cx));
-        }
-        if shown.contains(&"workstation") {
-            col = col.child(
-                h_flex()
-                    .gap_3()
-                    .items_end()
-                    .child(div().flex_1().child(Self::row("Рабочее место", caption, accent, &f.workstation, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль рабочего места", caption, accent, &f.password, window, cx))),
-            );
-        }
         if shown.contains(&"base_path") {
             // **Подпись называет ПРЕДМЕТ — «База», и только** (10.11, владелец про снимок этого поля: «Поле для ввода — База не указана.
             // Просто пиздец»). Короткая история, чтобы её не повторить: сперва «База не указана» стояла отдельной строкой между группами
@@ -5265,7 +5201,7 @@ mod tests {
         // Поля «Адрес публикации» в окне нет — `host_of` отдаёт его пустым.
         let shown = Connection { dump: String::new(), tools: Vec::new(), base_url: String::new(), ..saved.clone() };
         assert!(!fields_differ(&shown, &saved, "tunnel", "auto"));
-        let edited = Connection { server: "h:1".into(), ..shown.clone() };
+        let edited = Connection { db_user: "Админ".into(), ..shown.clone() };
         assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
         // Каталог проекта теперь в форме — его правка видна.
         let moved = Connection { project: "D:\\other\\Buh".into(), ..shown };
@@ -5289,39 +5225,11 @@ mod tests {
         // тем временем сменился.
         let typing = Connection { db_user: "Петров".into(), ..saved.clone() };
         assert!(!adopt_needed(&file, &typing, &saved, "local", "auto"));
-        // Поля, которых режим не показывает, подхват не будят: в локальном
-        // режиме адрес среды ни на что не влияет.
-        let hidden = Connection { server: "10.0.0.5:3393".into(), ..saved.clone() };
+        // Поля, которых состав не показывает, подхват не будят: при «публикует сама программа» адрес чужой публикации
+        // ни на что не влияет.
+        let hidden = Connection { base_url: "http://localhost/UNF".into(), ..saved.clone() };
         assert!(!adopt_needed(&hidden, &form, &saved, "local", "auto"));
-        assert!(adopt_needed(&hidden, &form, &saved, "tunnel", "auto"));
-    }
-
-    #[test]
-    fn local_mode_hides_the_environment_fields() {
-        let local = Connection { mode: "local".into(), ..Connection::default() };
-        assert_eq!(shown_fields(&local).to_vec(), vec!["base_path", "db_user", "db_password", "project"]);
-        let tunnel = Connection { mode: "tunnel".into(), ..Connection::default() };
-        assert_eq!(shown_fields(&tunnel).len(), 7);
-        // Что угодно, кроме "local", — тот же (полный) список, что у "tunnel".
-        let bogus = Connection { mode: "bogus".into(), ..Connection::default() };
-        assert_eq!(shown_fields(&bogus), shown_fields(&tunnel));
-    }
-
-    /// Находки 4 и 23 осмотра 10.11 (поля туннеля у карточки, которой он не нужен) НЕ вылечены, и тест закрепляет ПРИЧИНУ, а не состав:
-    /// транспорт выбирается одним режимом, и у любой нелокальной карточки поднимается туннель — значит поля ему нужны у любой такой
-    /// карточки. Сузишь показ по роли или по месту базы — туннель поедет с пустым адресом и пустым паролем.
-    ///
-    /// Тест стоит затем, чтобы правка показа не ушла вперёд модели молча: переменится правило выбора транспорта — он покраснеет и
-    /// напомнит, что показ можно сужать.
-    #[test]
-    fn the_tunnel_fields_follow_the_one_axis_that_picks_the_transport() {
-        for (role, base_here) in [("dial", true), ("accept", true), ("белиберда", true)] {
-            let c = Connection { mode: "tunnel".into(), role: role.into(), base_here, ..Connection::default() };
-            assert!(
-                shown_fields(&c).contains(&"server"),
-                "у нелокальной карточки туннель поднимается (session.rs: mode != local), значит поля показаны: {role}"
-            );
-        }
+        assert!(adopt_needed(&hidden, &form, &saved, "local", "webserver"));
     }
 
     /// Находка 24: сочетание «Принимаю подключения» × «База на другом
@@ -5416,7 +5324,7 @@ mod tests {
             base_here: true,
             publication: "auto".into(),
             profile: "business".into(),
-            server: "ещё не сохранено".into(),
+            db_user: "ещё не сохранено".into(),
             ..Default::default()
         };
         let fresh = Connection {
@@ -5425,7 +5333,7 @@ mod tests {
             base_here: false,
             publication: "webserver".into(),
             profile: "developer".into(),
-            server: "с диска".into(),
+            db_user: "с диска".into(),
             ..Default::default()
         };
 
@@ -5436,8 +5344,7 @@ mod tests {
         assert!(!original.base_here);
         assert_eq!(original.publication, "webserver", "публикация — такая же ось состава полей, как режим");
         assert_eq!(original.profile, "developer", "профиль — пятая ось: от него подпись кнопки и подпись поля папки");
-        assert!(!shown_fields(&original).contains(&"server"), "режим сменился на local — поля среды ушли из состава карточки");
-        assert_eq!(original.server, "ещё не сохранено", "текстовые поля — не ось этой функции, их не трогаем");
+        assert_eq!(original.db_user, "ещё не сохранено", "текстовые поля — не ось этой функции, их не трогаем");
     }
 
     /// Critical ревью всей ветки: ось, по которой СОБИРАЕТСЯ и ЗАПИСЫВАЕТСЯ
@@ -5601,15 +5508,14 @@ mod tests {
 
     #[test]
     fn changing_a_hidden_field_does_not_enable_save() {
-        let saved = Connection { mode: "local".into(), ..Connection::default() };
-        // Адрес среды, пароль рабочего места и само рабочее место правятся,
-        // но в локальном режиме ни на что не влияют — «Сохранить» молчит.
-        let edited =
-            Connection { server: "10.0.0.5:3393".into(), password: "другой".into(), workstation: "dev2".into(), ..saved.clone() };
+        let saved = Connection { mode: "local".into(), publication: "auto".into(), ..Connection::default() };
+        // «Адрес публикации» правится, но при `publication = "auto"` в окне его нет и ни на что он не влияет —
+        // «Сохранить» молчит. Прежде ту же мысль держали поля среды; их больше нет (11.11).
+        let edited = Connection { base_url: "http://localhost/UNF".into(), ..saved.clone() };
         assert!(!fields_differ(&edited, &saved, "local", "auto"));
-        // А то же самое в туннельном режиме — заметная правка.
-        assert!(fields_differ(&edited, &saved, "tunnel", "auto"));
-        // Видимое поле в локальном режиме по-прежнему включает «Сохранить».
+        // А при «база уже опубликована» то же самое — заметная правка.
+        assert!(fields_differ(&edited, &saved, "local", "webserver"));
+        // Видимое поле включает «Сохранить» в любом случае.
         let moved = Connection { project: "D:\\other\\Buh".into(), ..saved.clone() };
         assert!(fields_differ(&moved, &saved, "local", "auto"));
     }
@@ -5618,12 +5524,10 @@ mod tests {
         crate::project::Facts {
             branch: "dev1".into(),
             repo: "dev1c/Buh".into(),
-            want_branch: "dev1".into(),
             last: "a1b2c3 выгрузка (2 часа назад)".into(),
             ahead: ahead.into(),
             changed,
             index: true,
-            exchange: true,
         }
     }
 
@@ -5747,7 +5651,7 @@ mod tests {
         // нельзя, и `capitalized` его не трогает (в первом слове `/`).
         assert_eq!(rows[0], (Some(Dot::Up), "Репозиторий".into(), "dev1c/Buh".into()));
         assert!(!rows.iter().any(|r| r.1.contains("proj") || r.2.contains("ветка dev1")), "повтор каталога или ветки: {rows:?}");
-        assert_eq!(rows[1], (Some(Dot::Up), "Всё отправлено".into(), String::new()));
+        assert_eq!(rows[1], (Some(Dot::Up), "Все изменения сохранены".into(), String::new()));
         // Отпечаток снят с показа (правка слов 10.11): человеку он не говорит
         // ничего и вслух не читается — остаётся то, что он узнаёт.
         assert_eq!(rows[2], (Some(Dot::Off), "Последнее изменение".into(), "Выгрузка (2 часа назад)".into()));
@@ -5761,7 +5665,7 @@ mod tests {
     #[test]
     fn unsent_work_is_counted_in_words() {
         let rows = project_rows(Some(&view(Some(facts("3", 5)))));
-        assert_eq!(rows[1], (Some(Dot::Warn), "Не отправлено".into(), "3 изменения, не сохранено 5 файлов".into()));
+        assert_eq!(rows[1], (Some(Dot::Warn), "Есть несохранённые изменения".into(), "3 изменения, не сохранено 5 файлов".into()));
         let rows = project_rows(Some(&view(Some(facts("1", 0)))));
         assert_eq!(rows[1].2, "1 изменение");
         let rows = project_rows(Some(&view(Some(facts("0", 1)))));
@@ -5778,40 +5682,13 @@ mod tests {
     /// читает те самые файлы.
     #[test]
     fn a_local_project_without_an_origin_speaks_of_commits_not_of_sending() {
-        let mine = |changed| crate::project::Facts {
-            repo: String::new(),
-            want_branch: String::new(),
-            ahead: String::new(),
-            exchange: false,
-            changed,
-            ..facts("0", 0)
-        };
+        let mine = |changed| crate::project::Facts { repo: String::new(), ahead: String::new(), changed, ..facts("0", 0) };
         let rows = project_rows(Some(&view(Some(mine(0)))));
         assert!(!rows.iter().any(|r| r.1 == "Репозиторий"), "{rows:?}");
         assert!(!rows.iter().any(|r| r.1.contains("отправлен")), "{rows:?}");
         assert_eq!(rows[0], (Some(Dot::Up), "Все изменения сохранены".into(), String::new()));
         let rows = project_rows(Some(&view(Some(mine(2)))));
         assert_eq!(rows[0], (Some(Dot::Warn), "Есть несохранённые изменения".into(), "Не сохранено 2 файла".into()));
-    }
-
-    /// Две ветки показываются ровно тогда, когда они разные: в этом и был
-    /// абсурд прежней вкладки — «ветка dev1» и «ветка рабочего места dev1»
-    /// двумя одинаковыми карточками.
-    #[test]
-    fn the_two_branches_are_shown_only_when_they_differ() {
-        let drift = |r: &(Option<Dot>, String, String)| r.1.contains("уедут не туда");
-        let same = project_rows(Some(&view(Some(facts("0", 0)))));
-        assert!(!same.iter().any(drift), "{same:?}");
-
-        let drifted = crate::project::Facts { branch: "dev2".into(), ..facts("0", 0) };
-        let rows = project_rows(Some(&view(Some(drifted))));
-        let warn = rows.iter().find(|r| drift(r)).expect("расхождение обязано быть видно");
-        assert_eq!(warn.0, Some(Dot::Warn));
-        assert!(warn.2.contains("dev1"), "{warn:?}");
-        // Имя остаётся — его человек видит в соединении, — а говора git в
-        // строке нет: «указана ветка…» вслух коллеге не произносят (правило
-        // текстового прохода, правка 10.11).
-        assert!(!warn.2.contains("ветк"), "{warn:?}");
     }
 
     /// Индекс выгрузки — только когда его нет: это предупреждение о долгой

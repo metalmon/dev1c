@@ -230,17 +230,7 @@ fn run() -> Result<()> {
         Cmd::Mcp { .. } => unreachable!(),
         Cmd::Status => {
             println!("Комплект: {}", ctx.kit.root.display());
-            // Про рабочее место и среду — только в том режиме, где они есть:
-            // локально обе дырки были пустыми («Рабочее место  → среда »).
-            // Слова для локального — те же, что у плана установки и у первого
-            // факта набора (`ops_host::env_line`/`ENV_NEARBY`). Отказ разбора
-            // адреса печатается как строка, а не обрывает `status`: это
-            // диагностика, за которой человек сюда и пришёл.
-            if cfg::mode_needs_env(&ctx.cfg.current().mode) {
-                println!("Рабочее место {} → среда {}", ctx.cfg.current().workstation, ctx.cfg.current().server);
-            } else {
-                println!("{}", ops_host::env_line(&ctx.cfg.current().mode, &ctx.cfg.current().server).unwrap_or_else(|e| format!("{e:#}")));
-            }
+            println!("Соединение: {}", ctx.cfg.current().name);
             // `status` смотрит и рассказывает (`Cfg::load_unchecked` выше),
             // а не отказывает на чужом шифртексте — но молчать про это тоже
             // нельзя: это и есть диагностика, за которой человек сюда пришёл.
@@ -276,7 +266,7 @@ fn run() -> Result<()> {
             common::run::apply_all(&ctx, &ops, None, false)?;
             if !ctx.dry_run {
                 println!();
-                check(&ctx, None)?;
+                check(&ctx)?;
             }
         }
         Cmd::Uninstall => {
@@ -304,7 +294,7 @@ fn run() -> Result<()> {
             let t = flow::import(&ctx, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{t}");
         }
-        Cmd::Check => check(&ctx, None)?,
+        Cmd::Check => check(&ctx)?,
         Cmd::Verify => {
             let r = common::integrity::verify(&ctx.kit, |i, n, p| println!("  {i}/{n} {p}"))?;
             for e in r.entries.iter().filter(|e| e.state != common::integrity::FileState::Ok) {
@@ -356,13 +346,13 @@ fn use_connection(ctx: &Ctx, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn check(ctx: &Ctx, tunnel_state: Option<&str>) -> Result<()> {
+fn check(ctx: &Ctx) -> Result<()> {
     println!("Проверка:");
     // `check` смотрит и рассказывает (`Cfg::load_unchecked` в `run`), а не отказывает на чужом шифртексте. До ревью задачи 7 (Important 2) находка печаталась здесь отдельным `println!` МИМО набора фактов — отчёт (`last-check.txt`), который человек прикладывает к обращению, о ней молчал. Теперь это обычный факт набора (`verify::undecryptable_fact`, через `verify::run` ниже) — печатать её второй раз отдельной строкой не нужно. У `install`, который зовёт `check` тем же путём, список `undecryptable` всегда пуст: он сам на `Cfg::load` и отказал бы раньше.
     // Командная строка (`check`, и `install` сразу за установкой) портов
     // рабочего места не занимает: занятый порт для неё — сведение, а не
     // провал (спека, «порты важны там, где мы их занимаем»).
-    let checks = verify::run(ctx, tunnel_state, verify::PortUse::WeDont);
+    let checks = verify::run(ctx, verify::PortUse::WeDont);
     common::check::print(&checks);
     let (p, f) = common::check::summary(&checks);
     let path = ctx.kit.state_path("last-check.txt");
@@ -412,18 +402,8 @@ fn connect(ctx: &Ctx) -> Result<()> {
     // работающей связи.
     let _ = allow::write(&ctx.kit, true);
     let _off = OffOnExit(&ctx.kit);
-    // Числа, которые реально поднимутся: местный режим — константа,
-    // туннельный — то, что пойдёт среде как проброс (круг исправления
-    // финального ревью, Б3; `session::start_with_enabled` выбирает ту же
-    // пару тем же условием).
-    let ports = if ctx.cfg.current().mode == "local" { ctx.cfg.ports() } else { ctx.cfg.tunnel_ports() };
-    println!(
-        "Подключаюсь к {} как {}; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.",
-        ctx.cfg.current().server,
-        ctx.cfg.current().workstation,
-        ports.mcp,
-        ports.web
-    );
+    let ports = ctx.cfg.ports();
+    println!("Соединение «{}»; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.", ctx.cfg.current().name, ports.mcp, ports.web);
     let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {

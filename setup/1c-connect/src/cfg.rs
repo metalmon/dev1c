@@ -9,22 +9,6 @@ use serde::{Deserialize, Serialize};
 pub const EXAMPLE: &str = include_str!("../1c-connect.example.toml");
 pub const FILE: &str = "1c-connect.toml";
 
-/// Адреса среды в toml нет — и выдумывать его программа не станет. Одна
-/// формулировка на всех, кто про это говорит: факт «Gitea», факт «Каталог
-/// проекта», операция `host.project`, раскладка проекта и вкладка «Инструменты» —
-/// одна пустая строка в файле не должна называться разными словами (находка
-/// ревью задачи 35).
-pub const NO_GITEA: &str = "адрес среды не задан: поле gitea в 1c-connect.toml пусто";
-
-/// Как это исправить — тем же текстом у всех.
-pub const NO_GITEA_FIX: &str = "нажмите «Установить» в окне или выполните 1c-connect install; либо задайте gitea в 1c-connect.toml";
-
-/// Обе половины одной строкой: где отдельного места для подсказки нет
-/// (`OpState::Blocked`, отказ инструмента).
-pub fn no_gitea() -> String {
-    format!("{NO_GITEA} — {NO_GITEA_FIX}")
-}
-
 /// Инструменты vrunner, видимые агенту по умолчанию: выгрузка/загрузка,
 /// синтакс-контроль, тесты, фоновые задачи, кэш. Остальные 49 — по списку
 /// в toml.
@@ -346,19 +330,6 @@ pub fn folder_conflict(a: &str, b: &str) -> bool {
     let cb: Vec<&str> = nb.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
     let n = ca.len().min(cb.len());
     ca[..n] == cb[..n]
-}
-
-/// Номер рабочего места: `dev1`, `dev2` или `dev3`. С задачи 6 плана «тонкий
-/// срез ценности» и до круга исправления финального ревью у функции был
-/// РОВНО один потребитель — правило `validate()`, что в туннельном режиме
-/// имя обязано разбираться в номер (`!mode_needs_env(...) || self.number().is_some()`).
-/// Круг исправления (Б3) добавил второго: `Cfg::tunnel_ports()` считает от
-/// этого номера порты моста для среды — там же объяснение, почему местная
-/// `Cfg::ports()` (константы, те же числа, что раньше давало ПУСТОЕ имя)
-/// этот номер по-прежнему не читает. Обе функции уедут вместе с туннельным
-/// режимом и SSH — до этого момента номер жив для них обеих.
-pub fn number_of(workstation: &str) -> Option<u16> {
-    workstation.strip_prefix("dev")?.parse::<u16>().ok().filter(|n| (1..=3).contains(n))
 }
 
 /// Умолчание ПЕРВОЙ попытки подбора: `8081` — не окончательный порт httpd.
@@ -902,35 +873,21 @@ pub struct Connection {
     /// Своего `#[serde(default)]` у поля нет: умолчание берётся от всей структуры (`Default for Connection` ниже), и там оно пустое — тем же приёмом, что у всех прочих полей. На диск ключ ложится первым же сохранением: печать блока берёт его у `id()` (`connection_block`), то есть пишет уже выведенное, и со второго сохранения он просто читается обратно.
     #[serde(rename = "id")]
     pub id_in_file: CardId,
-    pub server: String,
-    /// Адрес Gitea среды целиком. Пусто — адрес не задан, и программа его не
-    /// выдумывает: вывод «порт SSH минус два» верен только в туннеле, а в
-    /// образе давал мёртвый адрес, о котором человек читал «Gitea не
-    /// отвечает». Поле записывают один раз при настройке, и только там, где
-    /// вывод верен: `1c-connect install` в туннельном режиме (из `server`,
-    /// см. `ops_host::gitea_to_write`) либо `seed` стенда (настоящий адрес
-    /// Gitea образа). В локальном режиме пусто так и остаётся, пока человек
-    /// не задаст адрес сам.
-    pub gitea: String,
-    pub password: String,
-    /// Логин человека в среде туннельного режима: `dev1`-`dev3`
-    /// (`number_of`) — собственность туннельной половины, не местной. С
-    /// задачи 6 плана «тонкий срез ценности» поле не влияет ни на МЕСТНЫЕ
-    /// порты моста (`Cfg::ports`, `derived_http_port` — константы с 2.11), ни
-    /// на замок одного коннектора (`single_instance::guard_key` — по
-    /// пользователю ОС, а не по рабочему месту): обе половины сняты нарочно.
-    /// Круг исправления финального ревью (Б3) вернул полю одного читателя:
-    /// `Cfg::tunnel_ports()` считает от него порты, которые коннектор просит
-    /// ПРОБРОСИТЬ среде — та сторона настроена по рабочим местам
-    /// (`dev1c-setup/verify.rs`), и константа увела бы их у `dev2`/`dev3`.
-    /// Совсем убрать поле нельзя (измерение владельца 2.11 показало почему):
-    /// его читают `project.rs` (имя ветки git и логин) и `gate.rs:96`
-    /// (проверка непустоты в туннельном режиме). Поле остаётся в структуре
-    /// — иначе `deny_unknown_fields` отверг бы существующие комплекты со
-    /// строкой `workstation = "dev1"`, включая эталонный, который
-    /// переписывать запрещено, — и уедет целиком вместе с SSH на
-    /// иroh-этапе, когда уйдёт и туннельный режим.
-    pub workstation: String,
+    /// **Ключи, которых программа больше не читает** — среда разработки уехала из неё 11.11 (план `2026-11-11-env-removal.md`):
+    /// адрес среды (`server`), её Gitea (`gitea`), пароль и логин рабочего места (`password`, `workstation`).
+    ///
+    /// **Разбору они известны нарочно.** `deny_unknown_fields` — правило верное (опечатка обязана быть отказом), но здесь оно отказало
+    /// бы файлу, который вчера работал: человек прочёл бы `unknown field \`server\`` и остался бы без программы, не поняв, что
+    /// случилось. Поэтому ключи принимаются и не читаются; какие из них нашлись, называет `gone_keys()`. С диска они уходят сами
+    /// первым же «Сохранить» — печать блока берёт поля у структуры, а в ней их нет (`connection_block`).
+    #[serde(default, rename = "server", skip_serializing)]
+    pub(crate) gone_server: Option<toml::Value>,
+    #[serde(default, rename = "gitea", skip_serializing)]
+    pub(crate) gone_gitea: Option<toml::Value>,
+    #[serde(default, rename = "password", skip_serializing)]
+    pub(crate) gone_password: Option<toml::Value>,
+    #[serde(default, rename = "workstation", skip_serializing)]
+    pub(crate) gone_workstation: Option<toml::Value>,
     pub base_path: String,
     /// Топология соединения: `true` — база на этой машине, `false` — на той
     /// стороне. Булево, а не строка с третьим состоянием: ровно два случая
@@ -1028,10 +985,6 @@ impl std::fmt::Debug for Connection {
             // Ключ не секрет, и в журнале поддержки по нему находят строку книги допуска: без него «зачислений ноль у карточки, где они
             // были» разбирать было бы нечем.
             .field("id", &self.id())
-            .field("server", &self.server)
-            .field("gitea", &self.gitea)
-            .field("password", &"<скрыт>")
-            .field("workstation", &self.workstation)
             .field("base_path", &self.base_path)
             .field("base_here", &self.base_here)
             .field("role", &self.role)
@@ -1075,10 +1028,10 @@ impl Default for Connection {
             // Пусто — значит «в файле ключа нет», и выводит его из имени `id()`: заводить ключ здесь было бы вторым ответом на тот же
             // вопрос, и этот второй зависел бы от того, каким путём карточка родилась — разбором файла или литералом в коде.
             id_in_file: CardId::default(),
-            server: String::new(),
-            gitea: String::new(),
-            password: String::new(),
-            workstation: String::new(),
+            gone_server: None,
+            gone_gitea: None,
+            gone_password: None,
+            gone_workstation: None,
             base_path: String::new(),
             // «База здесь» — умолчание, которое молчаливо совпадает и с
             // прежним `[host]` (там топологии не было вовсе, а база всегда
@@ -1206,11 +1159,13 @@ pub fn shown_fields(c: &Connection) -> &'static [&'static str] {
     if !combo.base_is_here() {
         return &["project"];
     }
-    match (combo == Combo::Alone, c.publication == "webserver") {
-        (true, false) => &["base_path", "db_user", "db_password", "project"],
-        (true, true) => &["base_path", "db_user", "db_password", "project", "base_url"],
-        (false, false) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project"],
-        (false, true) => &["server", "workstation", "password", "base_path", "db_user", "db_password", "project", "base_url"],
+    // Одна машина или пара по каналу — состав полей один и тот же: кто кому звонит, не меняет того, что надо знать о базе (спека
+    // сочетаний, «Что показывается в каждом сочетании»). Поля среды разработки — адрес, рабочее место, пароль рабочего места — ушли
+    // отсюда вместе со средой (11.11).
+    if c.publication == "webserver" {
+        &["base_path", "db_user", "db_password", "project", "base_url"]
+    } else {
+        &["base_path", "db_user", "db_password", "project"]
     }
 }
 
@@ -1229,9 +1184,6 @@ pub fn filled_for_test() -> Cfg {
     // имя в этом сравнении участвует (с задачи 4 `render` печатает и его).
     c.current_mut().name = "Buh".into();
     c.current = "Buh".into();
-    c.current_mut().server = "192.168.1.10:3393".into();
-    c.current_mut().password = "dev1".into();
-    c.current_mut().workstation = "dev1".into();
     c.current_mut().base_path = "C:\\Bases\\Buh".into();
     c.current_mut().db_user = "Администратор".into();
     c.current_mut().base_url = "http://localhost/Buh/hs/mcp-1c".into();
@@ -1381,7 +1333,6 @@ impl Cfg {
         let mut bad = Vec::new();
         for c in cfg.connections.iter_mut() {
             let name = c.name.clone();
-            c.password = open_or_mark(store, &name, "password", &c.password, &mut bad);
             c.db_password = open_or_mark(store, &name, "db_password", &c.db_password, &mut bad);
         }
         // `current`, называющий то, чего нет, здесь больше не разбирается:
@@ -1530,10 +1481,6 @@ impl Cfg {
     /// того, что сейчас в `ui.cfg` (`gui::save`), а тесты — свой набор полей.
     pub fn of_one(connection: Connection) -> Cfg {
         Cfg { current: connection.name.clone(), connections: vec![connection], ..Default::default() }
-    }
-
-    pub fn number(&self) -> Option<u16> {
-        number_of(&self.current().workstation)
     }
 
     /// Годность настроек: сперва список как список (имена и парные
@@ -1770,44 +1717,9 @@ impl Connection {
     /// человек видит и в окне.
     pub fn validate(&self) -> Result<()> {
         let at = format!("соединение «{}»", self.name);
-        // «Логин в среде» — понятие туннельного режима: три рабочих места
-        // (`dev1`-`dev3`) прибиты в контейнере среды, и там это настоящий
-        // логин человека. В локальном режиме никакой среды нет, спрашивать
-        // логин в ней не у кого, и требование оборачивалось красной строкой
-        // «workstation — dev1, dev2 или dev3 (ваш логин в среде)» у человека,
-        // который всё держит на одной машине (наблюдение владельца 30.10).
-        // Оговорка та же и по той же причине, что у `server` ниже. Пустое
-        // поле в локальном режиме работает: с задачи 6 плана «тонкий срез
-        // ценности» номер рабочего места не нужен ни портам (`Cfg::ports`),
-        // ни замку (`single_instance::guard_key`) — оба больше не читают
-        // это поле вовсе. Единственное, что здесь ещё спрашивает номер, —
-        // туннельный режим сам по себе: там это настоящий логин человека в
-        // среде, а не имя, из которого что-то считается.
-        anyhow::ensure!(
-            !mode_needs_env(&self.mode) || number_of(&self.workstation).is_some(),
-            "{at}: рабочее место — это ваш логин в среде: dev1, dev2 или dev3 [workstation]"
-        );
-        // Адрес среды спрашиваем только там, где по нему ходят. В локальном
-        // режиме базы лежат рядом, туннеля нет, и поле не заполняет никто —
-        // ни стенд, ни программа (`a_local_workstation_gets_no_made_up_environment_address`).
-        // Пока умолчанием служил образец «192.168.1.10:3393», проверка его и
-        // пропускала; 26.10 умолчания опустели (`adce1c6`) — и с этого дня на
-        // стенде этим отказом обрывалась ЛЮБАЯ установка, включая ту, что
-        // стенд делает сам при первом старте. Рабочее место оставалось без
-        // проекта, публикации и расширения в базе, то есть агент в редакторе
-        // оставался без инструментов 1С (живой стенд, 27.10.2026).
-        anyhow::ensure!(
-            !mode_needs_env(&self.mode) || self.server.contains(':'),
-            "{at}: адрес среды — адрес и порт через двоеточие, например 192.168.1.10:3393 [server]"
-        );
-        let g = self.gitea.trim();
-        anyhow::ensure!(
-            g.is_empty() || g.starts_with("http://") || g.starts_with("https://"),
-            "{at}: адрес Gitea среды — целиком, со схемой и портом, например http://localhost:3000; пусто значит «адрес не задан» [gitea, в туннельном режиме его пишет 1c-connect install]"
-        );
         anyhow::ensure!(
             matches!(self.mode.as_str(), "tunnel" | "local"),
-            "{at}: режим работы не распознан — выберите в карточке заново: всё на одной машине или агент в среде [mode; допустимые значения: local, tunnel]"
+            "{at}: не распознано, одна ли это машина — выберите в карточке заново: всё на одной машине или есть вторая сторона [mode; допустимые значения: local, tunnel]"
         );
         anyhow::ensure!(
             matches!(self.publication.as_str(), "auto" | "webserver"),
@@ -2119,15 +2031,6 @@ impl Cfg {
         self
     }
 
-    /// Адрес Gitea среды — только то, что написано в поле `gitea`; пусто —
-    /// `None`. Вывода здесь нет: адрес смотрит наружу этой машины, и
-    /// ошибиться в нём легко, поэтому его выводят один раз при настройке
-    /// (`ops_host::derived_gitea`) и записывают в toml.
-    pub fn gitea_url(&self) -> Option<&str> {
-        let explicit = self.current().gitea.trim().trim_end_matches('/');
-        (!explicit.is_empty()).then_some(explicit)
-    }
-
     /// Свой каталог выгрузки для `mcp-1c` — только когда человек выбрал его
     /// сам: поле непусто и отличается от выведенного `<project>/src`.
     /// Записанное настройкой умолчание ключ `--dump` не включает: иначе наша
@@ -2167,26 +2070,6 @@ impl Cfg {
     /// не согласовано.
     pub fn ports(&self) -> Ports {
         Ports { mcp: 7771, vrunner: 7781, web: 7791 }
-    }
-
-    /// Порты моста для ТУННЕЛЬНОГО режима: считаются от номера рабочего
-    /// места — `dev1` → `7771`/`7781`/`7791`, `dev2` → `7772`/`7782`/`7792`,
-    /// `dev3` → `7773`/`7783`/`7793`. Та же формула, что действовала до
-    /// задачи 6 (`git show 23a0487^:setup/1c-connect/src/cfg.rs:569-572`), и
-    /// возвращена сюда не случайно: эта же тройка идёт среде как список
-    /// ПРОБРАСЫВАЕМЫХ портов (`tunnel::run` → `Tunnel::connect`), а сторона
-    /// среды настроена ПО РАБОЧИМ МЕСТАМ (`dev1c-setup/verify.rs` слушает
-    /// именно `7770 + n`) — константа здесь увела бы порты у живых
-    /// установок `dev2`/`dev3` (круг исправления финального ревью, Б3).
-    ///
-    /// Местная работа (`ports()` выше) эту функцию не зовёт и не обязана:
-    /// цель задачи 6 — её независимость от пилотного поля — этим не
-    /// отменяется, уточняется только туннельная половина, которая поле и
-    /// так читает (`project.rs`, `gate.rs`). Функция уедет вместе с
-    /// туннельным режимом и SSH.
-    pub fn tunnel_ports(&self) -> Ports {
-        let n = self.number().unwrap_or(1);
-        Ports { mcp: 7770 + n, vrunner: 7780 + n, web: 7790 + n }
     }
 
     /// ПРЕДПОЧТЕНИЕ порта публикации — то, чего человек хочет сейчас (явный
@@ -2386,7 +2269,6 @@ pub(crate) fn connection_block(h: &Connection, store: &secrets::Store) -> std::r
     // обычный (безотказный) `Fn`, и протаскивать `Result` через его
     // замыкание было бы сложнее, чем сосчитать оба значения заранее и
     // отказать через `?` здесь.
-    let password = store.seal("password", &h.password)?;
     let db_password = store.seal("db_password", &h.db_password)?;
     let body = common::toml_render::render(block, |s, k| {
         if s != CONNECTION {
@@ -2394,10 +2276,6 @@ pub(crate) fn connection_block(h: &Connection, store: &secrets::Store) -> std::r
         }
         Some(match k {
             "name" => format!("{:?}", h.name),
-            "server" => format!("{:?}", h.server),
-            "gitea" => format!("{:?}", h.gitea),
-            "password" => format!("{:?}", password),
-            "workstation" => format!("{:?}", h.workstation),
             "base_path" => format!("{:?}", h.base_path),
             "base_here" => h.base_here.to_string(),
             "role" => format!("{:?}", h.role),
@@ -2633,22 +2511,11 @@ pub fn undecryptable_message(bad: &[Undecryptable]) -> String {
 /// знание.
 pub fn blocking_undecryptable(cfg: &Cfg) -> Vec<Undecryptable> {
     let current = cfg.current();
-    cfg.undecryptable
-        .iter()
-        .filter(|u| u.connection == current.name && (mode_needs_env(&current.mode) || u.field != "password"))
-        .cloned()
-        .collect()
+    cfg.undecryptable.iter().filter(|u| u.connection == current.name).cloned().collect()
 }
 
 /// Чем режимы отличаются: туннельному нужна среда разработки — контейнер с агентом на той стороне, тремя прибитыми рабочими местами (`dev1`-`dev3`) и своей Gitea, — и к ней идут адрес, логин, пароль, ветка проекта и сам туннель. Локальному не нужна: база, агенты, мост и проект на одной машине, спрашивать про среду не у кого, и всё, что про неё, в этом режиме либо пусто по замыслу, либо не существует вовсе.
 ///
-/// Одна функция вместо десяти сравнений строки по файлам: знание «что от чего зависит по режиму» расползалось своим `mode == "local"` по проверке, замку, набору фактов и валидации, и каждое место держало его копию с собственным объяснением. Локальный человек из-за этого читал про среду, которой у него нет — от красного «логин в среде» в `validate` до вечного красного факта «Gitea» (наблюдение владельца 30.10).
-///
-/// Сравнения, которые остались своими, — про другое, не про среду: какие поля показывает окно (`gui::panel::shown_fields`), где живут агенты (`editors::agents_live_here` — названо под серверный режим, где агенты локальны при живом туннеле), каким транспортом поднимается мост (`session`).
-pub fn mode_needs_env(mode: &str) -> bool {
-    mode != "local"
-}
-
 /// Единственный путь записи параметров (решение владельца, спека
 /// «Анти-цели»: «шифрование, которое тихо не состоялось»). Печатает,
 /// пишет, затем читает файл обратно и проверяет, что оба пароля
@@ -2861,8 +2728,7 @@ fn sealed_or_empty(text: &str, key: &str) -> std::result::Result<(), String> {
 /// такая же потеря, как пароль первого, и молча её пропускать незачем.
 fn passwords_match(written: &Cfg, reread: &Cfg) -> bool {
     written.connections.len() == reread.connections.len()
-        && std::iter::zip(&written.connections, &reread.connections)
-            .all(|(a, b)| a.password == b.password && a.db_password == b.db_password)
+        && std::iter::zip(&written.connections, &reread.connections).all(|(a, b)| a.db_password == b.db_password)
 }
 
 #[cfg(test)]
@@ -3243,9 +3109,7 @@ mod tests {
 
     fn _unused_filled() -> Cfg {
         let mut c = sample();
-        c.current_mut().server = "192.168.1.10:3393".into();
-        c.current_mut().password = "dev1".into();
-        c.current_mut().workstation = "dev1".into();
+        c.current_mut().db_password = "dev1".into();
         c.current_mut().base_path = "C:\\Bases\\Buh".into();
         c.current_mut().db_user = "Администратор".into();
         c.current_mut().base_url = "http://localhost/Buh/hs/mcp-1c".into();
@@ -3287,12 +3151,11 @@ mod tests {
     #[test]
     fn debug_output_never_carries_a_password() {
         let mut c = filled();
-        c.current_mut().password = "секрет-ssh".into();
         c.current_mut().db_password = "секрет-базы".into();
         let text = format!("{c:?}");
-        assert!(!text.contains("секрет-ssh") && !text.contains("секрет-базы"), "{text}");
-        assert_eq!(text.matches("<скрыт>").count(), 2);
-        assert!(text.contains(&c.current().workstation), "отладка не должна ослепнуть");
+        assert!(!text.contains("секрет-базы"), "{text}");
+        assert_eq!(text.matches("<скрыт>").count(), 1);
+        assert!(text.contains(&c.current().name), "отладка не должна ослепнуть");
     }
 
     /// Клиент-серверная база против файловой и сетевой. Решает то, что
@@ -3441,34 +3304,6 @@ mod tests {
         assert!(why.contains("на одной машине"), "{why}");
     }
 
-    /// Чем режимы отличаются — одно место, а не десяток сравнений строки:
-    /// каждое из них объясняло правило по-своему, и локальный человек читал
-    /// про среду, которой у него нет (аудит 30.10). Неизвестный режим —
-    /// туннельный, как и у набора фактов (`verify::order`): валидация ловит
-    /// его отдельно.
-    #[test]
-    fn one_place_knows_which_mode_needs_an_environment() {
-        assert!(mode_needs_env("tunnel"));
-        assert!(mode_needs_env("something-else"));
-        assert!(!mode_needs_env("local"));
-    }
-
-    /// Стенд всегда локальный, и поля `server` в его файле нет — так его
-    /// пишет сам стенд. Безусловная проверка этого поля обрывала там любую
-    /// установку, начиная с той, что стенд делает сам при первом старте
-    /// (живой стенд, 27.10.2026).
-    #[test]
-    fn a_local_workstation_needs_no_environment_address() {
-        let mut local = filled();
-        local.current_mut().mode = "local".into();
-        local.current_mut().server = String::new();
-        local.validate().unwrap();
-
-        let mut tunnel = filled();
-        tunnel.current_mut().server = String::new();
-        assert!(tunnel.validate().unwrap_err().to_string().contains("server"));
-    }
-
     /// Красный тест задачи 6, буквально из брифа: числа, которые раньше
     /// давало ПУСТОЕ имя рабочего места, остаются ровно теми же константами
     /// — не «красивыми» 7770/7780/7790/8080. Довод владельца 2.11: `mcp` и
@@ -3479,77 +3314,6 @@ mod tests {
         let p = Cfg::default().ports();
         assert_eq!((p.mcp, p.vrunner, p.web), (7771, 7781, 7791));
         assert_eq!(derived_http_port(), 8081);
-    }
-
-    /// С задачи 6 имя рабочего места МЕСТНЫЕ порты не трогает вовсе: та же
-    /// тройка независимо от того, что в поле (было и остаётся — находка
-    /// владельца 2.11, из которой убраны три «сестры» подбора, которых
-    /// никто не читал). Это про `ports()`, не про `tunnel_ports()` — у
-    /// туннельной сестры свой тест рядом (`tunnel_ports_follow_the_workstation_number`),
-    /// и там имя порты трогает нарочно (круг исправления финального
-    /// ревью, Б3).
-    #[test]
-    fn ports_no_longer_follow_the_workstation() {
-        let mut c = sample();
-        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791));
-        c.current_mut().workstation = "dev3".into();
-        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791), "рабочее место порт не меняет");
-        // Отказ на неизвестном номере — правило туннельного режима: в
-        // локальном логина в среде не существует, и поле не обязательно.
-        c.current_mut().mode = "tunnel".into();
-        c.current_mut().workstation = "dev4".into();
-        assert!(c.validate().unwrap_err().to_string().contains("workstation"));
-    }
-
-    /// Красный тест круга исправления финального ревью, Б3: порты для СРЕДЫ
-    /// в туннельном режиме обязаны считаться от номера рабочего места — та
-    /// же формула, что действовала до задачи 6
-    /// (`git show 23a0487^:…cfg.rs:569-572`). `ports()` рядом не трогаем ни
-    /// разу этим тестом: местная работа константу не теряет, уточняется
-    /// только `tunnel_ports()`.
-    #[test]
-    fn tunnel_ports_follow_the_workstation_number() {
-        let mut c = filled(); // mode = "tunnel", workstation = "dev1"
-        assert_eq!((c.tunnel_ports().mcp, c.tunnel_ports().vrunner, c.tunnel_ports().web), (7771, 7781, 7791));
-        c.current_mut().workstation = "dev2".into();
-        assert_eq!(
-            (c.tunnel_ports().mcp, c.tunnel_ports().vrunner, c.tunnel_ports().web),
-            (7772, 7782, 7792),
-            "dev2 теряет проброс, если тройка не считается от номера"
-        );
-        c.current_mut().workstation = "dev3".into();
-        assert_eq!((c.tunnel_ports().mcp, c.tunnel_ports().vrunner, c.tunnel_ports().web), (7773, 7783, 7793));
-        // Местные порты та же смена не двигает ни на единицу — разница
-        // видна по тому, какую функцию зовут, а не по значению имени.
-        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791));
-    }
-
-    /// Пустое или нераспознанное имя в туннельном режиме не паникует и не
-    /// отдаёт случайное число — тот же приём, что был у старой формулы
-    /// (`unwrap_or(1)`): первое рабочее место, не отказ (отказ для этого
-    /// случая — дело `validate()`, не этой функции).
-    #[test]
-    fn tunnel_ports_default_to_the_first_workstation() {
-        let mut c = filled();
-        c.current_mut().workstation = String::new();
-        assert_eq!((c.tunnel_ports().mcp, c.tunnel_ports().vrunner, c.tunnel_ports().web), (7771, 7781, 7791));
-    }
-
-    /// Наблюдение владельца 30.10: «какие логины в среде он просит в
-    /// локальном режиме?» — в локальном режиме среды нет, и требовать логин в
-    /// ней не у кого. Оговорка та же, что у адреса среды рядом.
-    #[test]
-    fn a_local_workstation_is_not_a_login_in_any_environment() {
-        let mut c = filled();
-        c.current_mut().mode = "local".into();
-        c.current_mut().workstation = String::new();
-        c.validate().expect("локальному режиму логин в среде не нужен");
-        // Порты при этом — первого рабочего места, а не ошибка.
-        assert_eq!((c.ports().mcp, c.ports().vrunner, c.ports().web), (7771, 7781, 7791));
-        // В туннельном режиме поле по-прежнему обязательно: там это
-        // настоящий логин человека в контейнере среды.
-        c.current_mut().mode = "tunnel".into();
-        assert!(c.validate().unwrap_err().to_string().contains("workstation"));
     }
 
     #[test]
@@ -3571,9 +3335,8 @@ mod tests {
 
     #[test]
     fn auto_computes_the_base_url() {
-        let mut c = filled();
+        let c = filled();
         assert_eq!(c.current().publication, "auto");
-        c.current_mut().workstation = "dev2".into();
         // `127.0.0.1`, не `localhost` — круг исправления 2: адрес прибит к
         // тому семейству, которое слушает httpd и проверяет страж
         // (`guard_own_listener`), см. докстроку `base_url()`. Порт — 8081
@@ -3913,15 +3676,15 @@ mod tests {
     /// какой из двух блоков его, решает человек.
     #[test]
     fn two_blocks_with_one_name_are_a_refusal_not_a_guess() {
-        let text = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"второй\"\n";
+        let text = "[[connection]]\nname = \"Buh\"\ndb_password = \"первый\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"второй\"\n";
         let e = block_in(text, "Buh").unwrap_err();
         assert!(e.contains("Buh") && e.contains("два блока"), "{e}");
-        assert!(set_named(text, "Buh", "password", "\"третий\"").is_err(), "писать наугад в один из двух нельзя");
-        assert_eq!(previous_literal(text, "Buh", "password"), None, "чей из двух это шифртекст — неизвестно");
+        assert!(set_named(text, "Buh", "db_password", "\"третий\"").is_err(), "писать наугад в один из двух нельзя");
+        assert_eq!(previous_literal(text, "Buh", "db_password"), None, "чей из двух это шифртекст — неизвестно");
         // Один блок тем же именем по-прежнему находится и правится.
-        let one = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n";
+        let one = "[[connection]]\nname = \"Buh\"\ndb_password = \"первый\"\n";
         assert_eq!(block_in(one, "Buh"), Ok(0));
-        assert_eq!(previous_literal(one, "Buh", "password").as_deref(), Some("\"первый\""));
+        assert_eq!(previous_literal(one, "Buh", "db_password").as_deref(), Some("\"первый\""));
     }
 
     /// Главный тест задачи: удаление карточки — это вырезание ТЕКСТА её
@@ -3933,9 +3696,9 @@ mod tests {
     /// ровно такими же, как были.
     #[test]
     fn remove_named_cuts_the_named_block_and_leaves_the_foreign_ciphertext_untouched() {
-        let text = "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"ШИФР-Buh\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = \"ШИФР-Ромашка\"\n";
+        let text = "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"ШИФР-Buh\"\n\n[[connection]]\nname = \"Ромашка\"\ndb_password = \"ШИФР-Ромашка\"\n";
         let out = remove_named(text, "Buh").unwrap();
-        assert_eq!(out, "current = \"Buh\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = \"ШИФР-Ромашка\"\n");
+        assert_eq!(out, "current = \"Buh\"\n\n[[connection]]\nname = \"Ромашка\"\ndb_password = \"ШИФР-Ромашка\"\n");
     }
 
     /// Имени нет ни в одном блоке — отказ тем же словами, что у `block_in` на
@@ -3953,7 +3716,7 @@ mod tests {
     /// Текст при отказе не меняется вовсе.
     #[test]
     fn remove_named_refuses_two_blocks_with_the_same_name() {
-        let text = "[[connection]]\nname = \"Buh\"\npassword = \"первый\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"второй\"\n";
+        let text = "[[connection]]\nname = \"Buh\"\ndb_password = \"первый\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"второй\"\n";
         let e = remove_named(text, "Buh").unwrap_err();
         assert!(e.contains("Buh") && e.contains("два блока"), "{e}");
     }
@@ -4267,21 +4030,19 @@ mod tests {
     #[test]
     fn a_refusal_shown_in_the_window_names_no_toml_key() {
         let mut c = filled_for_test();
-        c.current_mut().workstation = "кто-нибудь".into();
+        c.current_mut().publication = "чепуха".into();
         let for_file = format!("{:#}", c.validate().unwrap_err());
         let said = said_in_window(&for_file);
-        assert!(!said.contains("workstation"), "в окне имени ключа toml нет: {said}");
-        assert!(said.contains("рабочее место"), "а поле названо словами человека: {said}");
-        assert!(said.contains("dev1"), "и сказано, что вписать: {said}");
-        assert!(for_file.contains("[workstation]"), "читателю файла ключ остаётся — этой же фразой отвечает 1c-connect check: {for_file}");
+        assert!(!said.contains("publication"), "в окне имени ключа toml нет: {said}");
+        assert!(said.contains("публикует"), "а поле названо словами человека: {said}");
+        assert!(for_file.contains("[publication"), "читателю файла ключ остаётся — этой же фразой отвечает 1c-connect check: {for_file}");
 
         // Закрытый набор значений — тоже хвост для файла: в окне эту величину ВЫБИРАЮТ, а не пишут словом.
-        c.current_mut().workstation = "dev1".into();
         c.current_mut().mode = "мусор".into();
         let for_file = format!("{:#}", c.validate().unwrap_err());
         let said = said_in_window(&for_file);
         assert!(!said.contains("mode") && !said.contains("tunnel"), "ни ключа, ни его значений: {said}");
-        assert!(said.contains("режим работы"), "а величина названа так, как она подписана на экране: {said}");
+        assert!(said.contains("одна ли это машина"), "а величина названа так, как она подписана на экране: {said}");
         assert!(for_file.contains("local, tunnel"), "годные значения остаются читателю файла: {for_file}");
 
         // Фразы без хвоста функция не портит, и незакрытой скобки не боится.
@@ -4469,67 +4230,6 @@ mod tests {
         assert_eq!(derived_base_url("C:\\Базы\\Бух"), "http://localhost/Buh/hs/mcp-1c");
     }
 
-    /// Что написано в поле, то и адрес среды: счёта от порта SSH тут нет.
-    #[test]
-    fn a_written_gitea_is_returned_as_is() {
-        let mut c = filled();
-        c.current_mut().gitea = "http://localhost:3000".into();
-        assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
-        c.current_mut().server = "10.0.0.5:4403".into();
-        assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
-        // Хвостовой слэш не рождает двойного в адресе репозитория.
-        c.current_mut().gitea = "http://localhost:3000/".into();
-        assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
-        c.current_mut().gitea = "localhost:3000".into();
-        assert!(c.validate().unwrap_err().to_string().contains("gitea"));
-    }
-
-    /// Пусто — значит не задано. Программа не подставляет «порт SSH минус
-    /// два»: в образе этот счёт давал мёртвый адрес, которого человек
-    /// никогда не задавал. Toml без ключа читается, и `validate` молчит —
-    /// адрес дописывает настройка (`1c-connect install`).
-    #[test]
-    fn an_empty_gitea_is_none_not_a_guess() {
-        let without: Cfg = toml::from_str(&EXAMPLE.replace("gitea = \"\"", "")).unwrap();
-        assert!(without.current().gitea.is_empty());
-        assert_eq!(without.gitea_url(), None);
-        assert_eq!(filled().gitea_url(), None);
-        let mut c = filled();
-        c.current_mut().gitea = "   ".into();
-        assert_eq!(c.gitea_url(), None);
-        assert!(c.validate().is_ok());
-    }
-
-    /// Задача 4: правило поля ищется в ШАПКЕ образца, а не над строкой
-    /// ключа. Объяснения полей стоят в заголовке над блоками один раз
-    /// (решение плана 4): у каждого соединения поля одни и те же, и
-    /// объяснение над ключом первого блока сделало бы первый блок особенным.
-    #[test]
-    fn example_prints_gitea_with_its_rule() {
-        let lines: Vec<&str> = EXAMPLE.lines().collect();
-        let i = lines.iter().position(|l| l.starts_with("gitea = ")).unwrap_or_else(|| panic!("в образце нет поля gitea"));
-        assert_eq!(lines[i], "gitea = \"\"", "в образце поле пустое — иначе туннельное рабочее место заметило бы правку");
-        // Шапка — всё до первого блока; правило поля — её абзац, начатый
-        // именем поля и идущий до начала следующего (строки продолжения
-        // абзаца сдвинуты отступом).
-        let head: Vec<&str> = lines.iter().take_while(|l| l.trim() != CONNECTION).copied().collect();
-        let at = head
-            .iter()
-            .position(|l| l.starts_with("# gitea —"))
-            .unwrap_or_else(|| panic!("в шапке образца нет абзаца про gitea: {head:?}"));
-        let rule =
-            head[at..].iter().take_while(|l| l.starts_with("# gitea —") || l.starts_with("#    ")).copied().collect::<Vec<_>>().join("\n");
-        assert!(rule.contains("Пусто") && rule.contains("install"), "правило записи не напечатано: {rule}");
-        // Заполненное поле доходит до toml через render() и читается обратно.
-        let filled = EXAMPLE.replace("gitea = \"\"", "gitea = \"http://localhost:3000\"");
-        let c: Cfg = toml::from_str(&filled).unwrap();
-        let store = secrets::Store::file(&tmp("gitea"));
-        // Печать дописывает строку ключа карточки, которой в образце нет (см. `render_keeps_comments_and_round_trips`) — сверяется всё
-        // остальное.
-        assert_eq!(without_card_key(&c.render(&store).unwrap()), filled);
-        assert_eq!(c.gitea_url(), Some("http://localhost:3000"));
-    }
-
     /// Записанное настройкой умолчание ключ `--dump` у моста не включает:
     /// наша запись не должна молча менять агенту корень поиска по коду.
     #[test]
@@ -4632,14 +4332,6 @@ mod tests {
         assert!(c.current().tools.contains(&"cf_load".to_string()) && !c.current().tools.contains(&"xunit".to_string()));
     }
 
-    /// Пароль рабочего места больше НЕ подставляется умолчанием: в пилоте он
-    /// равен логину, но выдумывать его за человека нельзя — поле пустое, а в
-    /// окне на его месте подсказка (решение владельца 26.10).
-    #[test]
-    fn the_workstation_password_is_not_guessed_for_the_person() {
-        assert!(Connection::default().password.is_empty());
-    }
-
     /// Серверы MCP у pi и у Zed — одно и то же, иначе агенты разойдутся в
     /// умениях и никто не поймёт, почему один знает про выгрузку, а другой
     /// нет. Проверяется не только список имён: `command`, `args` и предел
@@ -4685,11 +4377,10 @@ mod tests {
         // а не выведенный заново.
         let back: Cfg = toml::from_str(&printed).unwrap();
         assert_eq!(back.current().id_in_file, c.current().id(), "сохранение обязано записать ключ в файл, а не вывести его опять");
-        c.current_mut().workstation = "dev2".into();
         let t = c.render(&store).unwrap();
         // Объяснение поля — в шапке над блоками (решение плана 4), и
         // печать его не теряет.
-        assert!(t.contains("workstation = \"dev2\"") && t.contains("# workstation — ваш логин в среде"));
+        assert!(t.contains("base_path = ") && t.contains("# base_path — путь к файловой базе"));
         // Прочитанное обратно отличается от напечатанного РОВНО ключом в файле: у `c` его не было (образец его не несёт), печать его
         // вывела и записала. Записываем то же в `c` — и дальше круг обязан быть полным, поле к полю.
         let settled = c.current().id();
@@ -4767,7 +4458,6 @@ mod tests {
     #[test]
     fn auto_mode_still_counts_its_own_address() {
         let mut c = filled();
-        c.current_mut().workstation = "dev1".into();
         c.current_mut().publication = "auto".into();
         c.current_mut().base_url = "http://localhost/Buh/hs/mcp-1c".into();
         // `127.0.0.1` — то же семейство, что слушает httpd (круг исправления 2).
@@ -4782,10 +4472,8 @@ mod tests {
     /// `write_checked`, которая с этого момента всегда шифрует.
     #[test]
     fn a_plaintext_file_still_loads() {
-        let kit =
-            kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"открытый\"\ndb_password = \"тоже открытый\"\n");
+        let kit = kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"тоже открытый\"\n");
         let c = Cfg::load_unchecked(&kit).unwrap();
-        assert_eq!(c.current().password, "открытый");
         assert_eq!(c.current().db_password, "тоже открытый");
         assert!(c.undecryptable.is_empty());
     }
@@ -4796,11 +4484,10 @@ mod tests {
     fn render_always_writes_ciphertext() {
         let s = secrets::Store::file(&tmp("render"));
         let mut c = filled();
-        c.current_mut().password = "секрет".into();
-        c.current_mut().db_password = "второй".into();
+        c.current_mut().db_password = "пароль-базы".into();
         let text = c.render(&s).unwrap();
-        assert!(!text.contains("секрет") && !text.contains("второй"), "{text}");
-        assert_eq!(text.matches(secrets::PREFIX).count(), 2);
+        assert!(!text.contains("пароль-базы"), "{text}");
+        assert_eq!(text.matches(secrets::PREFIX).count(), 1);
     }
 
     /// Образец (`1c-connect.example.toml`) несёт оба пароля пустыми, и
@@ -4810,7 +4497,7 @@ mod tests {
     /// Соединение здесь непустое по составу, хоть и с пустыми паролями
     /// (круг починки 1 задачи 4, находка 3): у `Cfg::default()` список
     /// соединений ПУСТ, а `render` с задачи 4 печатает блок на соединение —
-    /// то есть строки `password` в выводе не было вовсе, и утверждение
+    /// то есть строки `db_password` в выводе не было вовсе, и утверждение
     /// проверяло отсутствие того, чего никто не печатал. Пустой тест хуже
     /// отсутствующего: он выглядит покрытием.
     #[test]
@@ -4818,23 +4505,9 @@ mod tests {
         let s = secrets::Store::file(&tmp("renderempty"));
         let c = Cfg::of_one(Connection { name: "Buh".into(), ..Connection::default() });
         let text = c.render(&s).unwrap();
-        assert!(text.contains("password = \"\"") && text.contains("db_password = \"\""), "оба пустых пароля напечатаны: {text}");
+        assert!(text.contains("db_password = \"\""), "оба пустых пароля напечатаны: {text}");
         assert!(!text.contains(secrets::PREFIX), "{text}");
         assert_eq!(text, c.render(&s).unwrap(), "render обязан быть детерминированным");
-    }
-
-    /// Один пароль уже перешифрован, второй — ещё открытым текстом: оба
-    /// читаются за один проход, перешифровка — только при следующей записи.
-    #[test]
-    fn a_half_migrated_file_reads_both_halves() {
-        let s = secrets::Store::file(&tmp("half"));
-        let sealed = s.seal("password", "зашифрованный").unwrap();
-        let kit = kit_with(&format!(
-            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"{sealed}\"\ndb_password = \"открытый\"\n"
-        ));
-        let c = Cfg::load_unchecked_with(&kit, &s).unwrap();
-        assert_eq!(c.current().password, "зашифрованный");
-        assert_eq!(c.current().db_password, "открытый");
     }
 
     // Окно не отказывает на чужом шифртексте — поле пустое и готово к
@@ -4854,50 +4527,19 @@ mod tests {
         // отказ, который проверяет этот тест, бывает только в нём (умолчание
         // стало локальным 30.10).
         let kit = kit_with(&format!(
-            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nmode = \"tunnel\"\npassword = \"{}\"\n",
-            mine.seal("password", "секрет").unwrap()
+            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nmode = \"tunnel\"\ndb_password = \"{}\"\n",
+            mine.seal("db_password", "секрет").unwrap()
         ));
         let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
         assert!(e.contains("другой машине") || e.contains("другим пользователем"), "{e}");
         assert!(e.contains("введите"), "{e}");
     }
 
-    /// Important 1 ревью задачи 7: пароль рабочего места (`password`) в ЛОКАЛЬНОМ режиме не читает никто — туннеля нет, поле в окне не показано (`panel::shown_fields`). Отказывать на нём командной строке незачем — то же снисхождение, что `validate` уже даёт полю `server`.
-    #[test]
-    fn a_local_workstation_is_not_refused_over_an_unreadable_workstation_password() {
-        let (mine, theirs) = (secrets::Store::file(&tmp("local-ok1")), secrets::Store::file(&tmp("local-ok2")));
-        let mut filled_local = filled();
-        filled_local.current_mut().mode = "local".into();
-        filled_local.current_mut().password = "секрет".into();
-        let text = filled_local.render(&mine).unwrap();
-        let kit = kit_with(&text);
-        let loaded = Cfg::load_with(&kit, &theirs).expect("локальный режим не спрашивает пароль рабочего места");
-        assert_eq!(loaded.current().password, "", "поле всё равно отдаётся пустым — просто это не повод отказать");
-    }
-
-    /// Та же команда на том же режиме отказывает, когда непрочитан именно `db_password` — он нужен в любом режиме, снисхождения нет. Пароль рабочего места шифруем ТОЙ же подложкой, которой читаем (`theirs`), он обязан открыться сам — ломаем только `db_password`, чтобы причина отказа была однозначной.
-    #[test]
-    fn a_local_workstation_is_still_refused_over_an_unreadable_database_password() {
-        let (mine, theirs) = (secrets::Store::file(&tmp("local-bad1")), secrets::Store::file(&tmp("local-bad2")));
-        let mut filled_local = filled();
-        filled_local.current_mut().mode = "local".into();
-        filled_local.current_mut().db_password = "секрет базы".into();
-        let mut text = filled_local.render(&mine).unwrap();
-        let readable_password = theirs.seal("password", &filled_local.current().password).unwrap();
-        // Подставляется в блок ТЕКУЩЕГО соединения (задача 4), а не в
-        // прежнюю `[host]`: напечатанный файл несёт блоки, и дописанная
-        // рядом `[host]` сделала бы его отказом вместо подмены пароля.
-        text = set_current(&text, &filled_local, "password", &format!("{readable_password:?}")).unwrap();
-        let kit = kit_with(&text);
-        let e = Cfg::load_with(&kit, &theirs).unwrap_err().to_string();
-        assert!(e.contains("db_password"), "{e}");
-    }
-
     /// Разовая команда вроде `status` не имеет права переписывать параметры
     /// человека — чтение файла ничего на диске не меняет.
     #[test]
     fn reading_does_not_rewrite_the_file() {
-        let kit = kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"открытый\"\n");
+        let kit = kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"открытый\"\n");
         let before = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
         let _ = Cfg::load_unchecked(&kit).unwrap();
         assert_eq!(std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap(), before);
@@ -4968,7 +4610,7 @@ mod tests {
         let s = secrets::Store::file(&tmp("readback"));
         let kit = kit_with("");
         let mut c = filled();
-        c.current_mut().password = "секрет".into();
+        c.current_mut().db_password = "секрет".into();
         cfg::write_checked(&kit, &c, &s).unwrap();
         // Круговой `load_unchecked_with` один (ревью задачи 2, Minor 3: он
         // не ловит ничего сам по себе — убери вызов проверки из
@@ -4979,7 +4621,7 @@ mod tests {
         assert!(text.contains(secrets::PREFIX), "{text}");
         assert!(!text.contains("секрет"), "{text}");
         let back = Cfg::load_unchecked_with(&kit, &s).unwrap();
-        assert_eq!(back.current().password, "секрет");
+        assert_eq!(back.current().db_password, "секрет");
     }
 
     /// Сравнение, которым `write_checked` решает «сошлось или нет», —
@@ -4989,10 +4631,10 @@ mod tests {
     #[test]
     fn passwords_match_tells_a_real_mismatch_from_a_match() {
         let mut written = filled();
-        written.current_mut().password = "секрет".into();
+        written.current_mut().db_password = "секрет".into();
         let mut reread = written.clone();
         assert!(passwords_match(&written, &reread), "одинаковые пароли — совпадение");
-        reread.current_mut().password = String::new();
+        reread.current_mut().db_password = String::new();
         assert!(!passwords_match(&written, &reread), "пустое поле там, где был пароль, — несовпадение");
     }
 
@@ -5002,26 +4644,26 @@ mod tests {
     #[test]
     fn write_checked_refuses_a_kept_password_that_is_not_sealed() {
         let s = secrets::Store::file(&tmp("plain-patch"));
-        let kit = kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\npassword = \"дев1\"\n");
+        let kit = kit_with("current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\ndb_password = \"дев1\"\n");
         let mut c = filled();
         // Как после `load_unchecked` на непрочитанном поле: значение пустое, а
         // находка называет карточку и поле.
-        c.current_mut().password = String::new();
+        c.current_mut().db_password = String::new();
         let name = c.current().name.clone();
-        c.undecryptable = vec![Undecryptable::new(&name, "password")];
+        c.undecryptable = vec![Undecryptable::new(&name, "db_password")];
         let err = cfg::write_checked(&kit, &c, &s).unwrap_err();
         assert!(err.contains("не зашифрован") || err.contains(secrets::PREFIX), "{err}");
         // Файл всё равно написан (запись печатает раньше, чем отказывает проверка) — но без префикса, и дальше по нему никто не поедет молча.
         let text = std::fs::read_to_string(kit.state_path(cfg::FILE)).unwrap();
-        assert!(text.contains("password = \"дев1\""), "{text}");
+        assert!(text.contains("db_password = \"дев1\""), "{text}");
     }
 
     /// `sealed_or_empty` сама по себе: пусто и честный шифртекст проходят, открытый текст и битый toml — отказ.
     #[test]
     fn sealed_or_empty_accepts_blank_and_prefixed_and_rejects_plain_text() {
-        assert!(sealed_or_empty("[[connection]]\npassword = \"\"\n", "password").is_ok());
-        assert!(sealed_or_empty(&format!("[[connection]]\npassword = \"{}deadbeef\"\n", secrets::PREFIX), "password").is_ok());
-        assert!(sealed_or_empty("[[connection]]\npassword = \"открытый\"\n", "password").is_err());
+        assert!(sealed_or_empty("[[connection]]\ndb_password = \"\"\n", "db_password").is_ok());
+        assert!(sealed_or_empty(&format!("[[connection]]\ndb_password = \"{}deadbeef\"\n", secrets::PREFIX), "db_password").is_ok());
+        assert!(sealed_or_empty("[[connection]]\ndb_password = \"открытый\"\n", "db_password").is_err());
     }
 
     /// `write_checked` не обязан молчать, если запись самого файла не
@@ -5044,7 +4686,7 @@ mod tests {
         let file = kit.state_path(cfg::FILE);
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o400)).unwrap();
         let mut c = filled();
-        c.current_mut().password = "секрет".into();
+        c.current_mut().db_password = "секрет".into();
         let e = cfg::write_checked(&kit, &c, &s);
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         let e = e.unwrap_err();
@@ -5058,11 +4700,11 @@ mod tests {
     fn an_empty_password_does_not_refuse_load() {
         let s = secrets::Store::file(&tmp("empty-pwd-load"));
         let mut c = filled();
-        c.current_mut().password = String::new();
+        c.current_mut().db_password = String::new();
         let kit = kit_with(&c.render(&s).unwrap());
         let loaded = Cfg::load_with(&kit, &s).unwrap();
         assert!(loaded.undecryptable.is_empty());
-        assert_eq!(loaded.current().password, "");
+        assert_eq!(loaded.current().db_password, "");
     }
 
     /// Свежий комплект без единой настройки — пустой список, не отказ; а
@@ -5092,15 +4734,15 @@ mod tests {
     /// элемента списка.
     #[test]
     fn every_connection_blocks_password_is_opened_not_left_as_ciphertext() {
-        let s = secrets::Store::file(&tmp("two-connections-password"));
-        let sealed = s.seal("password", "секрет2").unwrap();
+        let s = secrets::Store::file(&tmp("two-connections-db_password"));
+        let sealed = s.seal("db_password", "секрет2").unwrap();
         let text = format!(
-            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nbase_path = \"C:\\\\Bases\\\\Buh\"\n\n[[connection]]\nname = \"Ромашка\"\nbase_path = \"C:\\\\Bases\\\\Ромашка\"\npassword = {sealed:?}\n"
+            "current = \"Buh\"\n\n[[connection]]\nname = \"Buh\"\nbase_path = \"C:\\\\Bases\\\\Buh\"\n\n[[connection]]\nname = \"Ромашка\"\nbase_path = \"C:\\\\Bases\\\\Ромашка\"\ndb_password = {sealed:?}\n"
         );
         let kit = kit_with(&text);
         let c = Cfg::load_unchecked_with(&kit, &s).unwrap();
         assert_eq!(c.connections.len(), 2);
-        assert_eq!(c.connections[1].password, "секрет2", "пароль второго соединения обязан открыться, а не остаться шифртекстом");
+        assert_eq!(c.connections[1].db_password, "секрет2", "пароль второго соединения обязан открыться, а не остаться шифртекстом");
     }
 
     /// Круг починки 1, находка 1: пароль соединения, который не открылся
@@ -5109,11 +4751,11 @@ mod tests {
     #[test]
     fn a_connections_undecryptable_password_is_named_in_the_list() {
         let (mine, theirs) = (secrets::Store::file(&tmp("conn-u1")), secrets::Store::file(&tmp("conn-u2")));
-        let sealed = mine.seal("password", "секрет").unwrap();
-        let text = format!("current = \"Ромашка\"\n\n[[connection]]\nname = \"Ромашка\"\npassword = {sealed:?}\n");
+        let sealed = mine.seal("db_password", "секрет").unwrap();
+        let text = format!("current = \"Ромашка\"\n\n[[connection]]\nname = \"Ромашка\"\ndb_password = {sealed:?}\n");
         let kit = kit_with(&text);
         let c = Cfg::load_unchecked_with(&kit, &theirs).expect("окно не отказывает на чужом шифртексте");
-        assert_eq!(c.connections[0].password, "", "поле обязано быть пустым, а не мусором");
-        assert!(c.undecryptable.contains(&Undecryptable::new("Ромашка", "password")), "{:?}", c.undecryptable);
+        assert_eq!(c.connections[0].db_password, "", "поле обязано быть пустым, а не мусором");
+        assert!(c.undecryptable.contains(&Undecryptable::new("Ромашка", "db_password")), "{:?}", c.undecryptable);
     }
 }

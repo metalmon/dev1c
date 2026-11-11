@@ -82,7 +82,31 @@ async fn accept_maybe(l: &Option<TcpListener>) -> std::io::Result<(TcpStream, st
 /// не трогает, поэтому каждое принятое соединение закрывается напрямую —
 /// `shutdown` общего сокета доходит до моста, что бы тот сейчас ни делал, и
 /// расходится по обеим его копиям дескриптора.
-pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut stop: watch::Receiver<bool>) -> anyhow::Result<()> {
+/// Куда вести принятое соединение: в СВОЙ мост или трубой в канал, к той стороне, где база.
+///
+/// Решается один раз, на весь сеанс, по сочетанию соединения (`cfg::Combo`) — не по каждому соединению и не по порту. «Уйти в канал,
+/// когда база здесь» и «поднять своего ребёнка, когда базы нет» этим становятся невыразимы, а не запрещены условием.
+///
+/// Канал зовётся ЗАМЫКАНИЕМ, а не ручкой потока узла: слушатель собирается и без окна (`cargo build` без фичи `gui`), а поток узла
+/// живёт за ней. Кто умеет увести соединение в канал, тот и даёт сюда замыкание.
+#[derive(Clone)]
+pub enum Toward {
+    /// База здесь: поднимаем своего ребёнка тем же мостом, что и всегда.
+    Child,
+    /// База на другом компьютере: соединение уходит трубой в канал.
+    Channel(ToChannel),
+}
+
+/// Увести соединение в канал к той стороне, где база. Отказ — словами в журнал сеанса.
+pub type ToChannel = std::sync::Arc<dyn Fn(crate::ops_host::McpServer, TcpStream) -> Result<(), String> + Send + Sync>;
+
+pub async fn run(
+    serve: Arc<Serve>,
+    ports: Ports,
+    toward: Toward,
+    on_event: impl Fn(Event),
+    mut stop: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let (mcp_listener, mcp6) = bind_loopback(ports.mcp).await?;
     let (vrunner_listener, vrunner6) = match bind_loopback(ports.vrunner).await {
         Ok(l) => l,
@@ -109,16 +133,16 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
     loop {
         tokio::select! {
             r = mcp_listener.accept() => {
-                handle_accept(r, &serve, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
             }
             r = vrunner_listener.accept() => {
-                handle_accept(r, &serve, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
             }
             r = accept_maybe(&mcp6) => {
-                handle_accept(r, &serve, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.mcp, &on_event, &mut open, &mut mcp_errors).await?;
             }
             r = accept_maybe(&vrunner6) => {
-                handle_accept(r, &serve, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
+                handle_accept(r, &serve, &toward, ports, ports.vrunner, &on_event, &mut open, &mut vrunner_errors).await?;
             }
             _ = stop.changed() => {
                 if *stop.borrow() {
@@ -137,9 +161,12 @@ pub async fn run(serve: Arc<Serve>, ports: Ports, on_event: impl Fn(Event), mut 
 /// уборка), на ошибке — предупреждение в журнал, пауза и, если ошибка не
 /// отпускает `MAX_ACCEPT_ERRORS` раз подряд, завершение сеанса вместо
 /// бесконечного холостого цикла.
+#[allow(clippy::too_many_arguments)]
 async fn handle_accept(
     r: std::io::Result<(TcpStream, std::net::SocketAddr)>,
     serve: &Arc<Serve>,
+    toward: &Toward,
+    ports: Ports,
     port: u16,
     on_event: &impl Fn(Event),
     open: &mut Vec<(JoinHandle<()>, std::net::TcpStream)>,
@@ -149,6 +176,15 @@ async fn handle_accept(
         Ok((stream, _)) => {
             *errors = 0;
             open.retain(|(h, _)| !h.is_finished());
+            // База на другом компьютере — соединение уходит трубой в канал, и своего ребёнка здесь не поднимают вовсе.
+            if let Toward::Channel(to_channel) = toward {
+                if let Some(crate::session::Served::Mcp(kind)) = crate::session::Served::of_port(port, ports) {
+                    if let Err(why) = to_channel(kind, stream) {
+                        on_event(Event::Warn(why));
+                    }
+                    return Ok(());
+                }
+            }
             match accept_for(serve, port, stream) {
                 Ok(Some(entry)) => open.push(entry),
                 // ponytail: порт всегда совпадает с тем, что знает `Serve` —
@@ -234,7 +270,7 @@ mod tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let (on_event, events) = recording_sink();
         let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
-        let task = tokio::spawn(async move { run(serve, run_ports, move |e| on_event(e), stop_rx).await });
+        let task = tokio::spawn(async move { run(serve, run_ports, Toward::Child, move |e| on_event(e), stop_rx).await });
 
         // Ждём, пока оба слушателя поднимутся, вместо фиксированной паузы.
         for _ in 0..50 {
@@ -313,7 +349,7 @@ mod tests {
         let (_stop_tx, stop_rx) = watch::channel(false);
 
         let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
-        let r = run(serve, run_ports, |_: Event| {}, stop_rx).await;
+        let r = run(serve, run_ports, Toward::Child, |_: Event| {}, stop_rx).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains(&vrunner_port.to_string()), "{err}");
 
@@ -358,7 +394,7 @@ mod tests {
         let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
         let (stop_tx, stop_rx) = watch::channel(false);
         let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
-        let task = tokio::spawn(async move { run(serve, run_ports, |_: Event| {}, stop_rx).await });
+        let task = tokio::spawn(async move { run(serve, run_ports, Toward::Child, |_: Event| {}, stop_rx).await });
 
         let mut client = loop {
             match TcpStream::connect(("127.0.0.1", mcp_port)).await {
@@ -396,7 +432,7 @@ mod tests {
         let serve = Arc::new(Serve::new(&cfg, &kit, Arc::new(|_: Event| {}), serve_ports, Arc::new(AtomicBool::new(true))));
         let (stop_tx, stop_rx) = watch::channel(false);
         let run_ports = Ports { mcp: mcp_port, vrunner: vrunner_port, web: 0 };
-        let task = tokio::spawn(async move { run(serve, run_ports, |_: Event| {}, stop_rx).await });
+        let task = tokio::spawn(async move { run(serve, run_ports, Toward::Child, |_: Event| {}, stop_rx).await });
 
         let mut client = loop {
             match TcpStream::connect(("127.0.0.1", vrunner_port)).await {

@@ -213,6 +213,12 @@ pub struct Ui {
     pub enabled: Arc<AtomicBool>,
     /// Последнее увиденное по SSH состояние записей `1c`/`vrunner` в настройках Zed в контейнере (решение владельца 29.10) — заводится один раз в `launch`, тем же правилом, что `enabled`, и читает его расчёт готовности (`verify::cheap`) своим тактом, независимо от того, идёт сеанс прямо сейчас или нет. В локальном режиме не используется — там факт читает `editors::look` прямо с диска.
     pub editor_mcp: session::EditorMcpSeen,
+    /// Обслуживающая половина этой машины, пока сеанс жив (`session::Serving`).
+    ///
+    /// Канал живёт в потоке узла и принимает знакомство, прощание и отзыв всегда; мост живёт в сеансе и ЕСТЬ обслуживание. Поток
+    /// вызовов приходит в канал, а обслуживает его сеанс — вот одна явная ручка между ними. Пусто — доступ к 1С выключен, и вызов
+    /// получает отказ словами.
+    pub serving: session::Serving,
     /// Холодный замок (`gate::cold_gate`): `None` — включать можно,
     /// `Some(причина)` — включать нечего. Считается не на каждую отрисовку, а
     /// по тем же событиям, что и вердикт готовности (`refresh_gate` в
@@ -2391,6 +2397,7 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(serve_on_start)),
             editor_mcp: Arc::new(Mutex::new(None)),
+            serving: session::Serving::default(),
             gate: gate.clone(),
             facts: Vec::new(),
             verdict: Verdict::Checking,
@@ -2507,11 +2514,11 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
         // сокет и выходит в сеть, и ждать этого на потоке окна нельзя.
         {
             reread_partners(cx.global_mut::<Ui>());
-            let (kit, tx) = {
+            let (kit, tx, serves) = {
                 let ui = cx.global::<Ui>();
-                (ui.kit.clone(), ui.tx.clone())
+                (ui.kit.clone(), ui.tx.clone(), ui.serving.clone())
             };
-            let peer = peer::start(&kit, tx);
+            let peer = peer::start(&kit, tx, serves);
             cx.global_mut::<Ui>().peer = Some(peer);
         }
         // Скиллы — тем, кто галочкой уже разрешил: доставить недостающее и
@@ -2562,6 +2569,7 @@ impl Ui {
             bind_failed: None,
             enabled: Arc::new(AtomicBool::new(true)),
             editor_mcp: Arc::new(Mutex::new(None)),
+            serving: session::Serving::default(),
             gate,
             facts: Vec::new(),
             verdict: Verdict::Checking,
@@ -2622,7 +2630,15 @@ fn doomed_session(ui: &Ui) -> crate::session::Session {
     let port = crate::ports::test_port();
     let mut cfg = ui.cfg.clone();
     cfg.current_mut().server = format!("127.0.0.1:{port}");
-    session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {})
+    session::start_with_enabled(
+        cfg,
+        ui.kit.clone(),
+        Arc::new(|_| {}),
+        ui.enabled.clone(),
+        ui.editor_mcp.clone(),
+        session::Wiring { serving: ui.serving.clone(), to_channel: None },
+        |_| {},
+    )
 }
 
 /// Сеанс, который УЖЕ кончился сам: туннель в никуда (первая попытка
@@ -2636,7 +2652,15 @@ fn ended_session(ui: &Ui) -> crate::session::Session {
     let mut cfg = ui.cfg.clone();
     cfg.current_mut().mode = "tunnel".into();
     cfg.current_mut().server = format!("127.0.0.1:{port}");
-    let mut s = session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {});
+    let mut s = session::start_with_enabled(
+        cfg,
+        ui.kit.clone(),
+        Arc::new(|_| {}),
+        ui.enabled.clone(),
+        ui.editor_mcp.clone(),
+        session::Wiring { serving: ui.serving.clone(), to_channel: None },
+        |_| {},
+    );
     for _ in 0..200 {
         if s.finished() {
             return s;
@@ -2655,7 +2679,18 @@ fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
     let mut cfg = ui.cfg.clone();
     cfg.current_mut().mode = "tunnel".into();
     cfg.current_mut().server = format!("127.0.0.1:{}", quiet.local_addr().unwrap().port());
-    (session::start_with_enabled(cfg, ui.kit.clone(), Arc::new(|_| {}), ui.enabled.clone(), ui.editor_mcp.clone(), |_| {}), quiet)
+    (
+        session::start_with_enabled(
+            cfg,
+            ui.kit.clone(),
+            Arc::new(|_| {}),
+            ui.enabled.clone(),
+            ui.editor_mcp.clone(),
+            session::Wiring { serving: ui.serving.clone(), to_channel: None },
+            |_| {},
+        ),
+        quiet,
+    )
 }
 
 #[cfg(test)]

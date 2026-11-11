@@ -83,6 +83,15 @@ enum Cmd {
     /// Позвонить зовущей карточкой. Пустой `code` — переподключение по
     /// запомненному партнёру (`Partners`), непустой — первая заявка.
     Dial { card: CardId, name: String, code: String },
+    /// Увести местное соединение агента В КАНАЛ — к той стороне, где база (шаг 4 плана пары B).
+    ///
+    /// Приходит от местного слушателя (`listen::run`): Zed подключился к нашему порту, а база не здесь. Поток узла открывает поток в
+    /// живом канале этой карточки, здоровается заголовком `McpOpen` и дальше просто переливает байты. Правил моста это не касается:
+    /// мост стоит на ТОЙ стороне, здесь только труба.
+    ///
+    /// Соединение едет сюда целиком, потому что канал живёт в этом потоке и больше нигде: второй держатель того же канала был бы
+    /// вторым проходом пробивания NAT и вторым разговором с релеем.
+    Calls { card: CardId, kind: crate::ops_host::McpServer, stream: tokio::net::TcpStream },
     /// Снять поток зачисленной стороны ПРЯМО СЕЙЧАС, сказав ей словами.
     ///
     /// Иначе отзыв действовал бы только на следующем круге той стороны, а
@@ -125,6 +134,16 @@ impl Peer {
     /// сделана и уже сказана словами (`panel::revoke_party`), а живого потока
     /// у этой стороны могло и не быть вовсе — тогда снимать нечего, и это не
     /// беда.
+    /// Увести местное соединение агента в канал — к той стороне, где база.
+    ///
+    /// Зовёт местный слушатель (`listen::run`), когда база не на этой машине. Отказ здесь один и тот же: потока узла нет — значит и
+    /// вести некуда.
+    pub fn calls(&self, card: &CardId, kind: crate::ops_host::McpServer, stream: tokio::net::TcpStream) -> Result<(), String> {
+        self.cmd
+            .send(Cmd::Calls { card: card.clone(), kind, stream })
+            .map_err(|_| "поток узла не работает — вызовы агента вести некуда".to_string())
+    }
+
     pub fn revoked(&self, card: &CardId, peer: EndpointId) {
         let _ = self.cmd.send(Cmd::Revoke { card: card.clone(), peer });
     }
@@ -154,7 +173,9 @@ impl Peer {
 ///
 /// Возвращается сразу: сам узел поднимается в потоке, и о том, поднялся ли он,
 /// говорит строка журнала. Иначе открытие окна ждало бы сеть.
-pub fn start(kit: &Kit, tx: UnboundedSender<Ev>) -> Peer {
+/// `serves` — обслуживающая половина этой машины (`session::Serving`): поток узла находит в ней мост, когда по каналу приходит поток
+/// вызовов. Пусто — доступ к 1С выключен, и вызов получает отказ словами.
+pub fn start(kit: &Kit, tx: UnboundedSender<Ev>, serves: crate::session::Serving) -> Peer {
     let (cmd, rx) = tokio::sync::mpsc::unbounded_channel();
     let reach = Arc::new(Mutex::new(None));
     let (kit_in, reach_in, tx_in) = (kit.clone(), reach.clone(), tx.clone());
@@ -166,14 +187,20 @@ pub fn start(kit: &Kit, tx: UnboundedSender<Ev>) -> Peer {
                 return;
             }
         };
-        rt.block_on(serve(kit_in, tx_in, reach_in, rx));
+        rt.block_on(serve(kit_in, tx_in, reach_in, serves, rx));
     });
     Peer { cmd, reach }
 }
 
 /// Вся жизнь потока узла: поднять, объявить себя, принимать входящие,
 /// звонить зовущими карточками.
-async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>>>, mut cmds: tokio::sync::mpsc::UnboundedReceiver<Cmd>) {
+async fn serve(
+    kit: Kit,
+    tx: UnboundedSender<Ev>,
+    reach: Arc<Mutex<Option<Reach>>>,
+    serves: crate::session::Serving,
+    mut cmds: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
+) {
     let node = match Node::start(kit.state()).await {
         Ok(node) => node,
         Err(e) => {
@@ -188,7 +215,7 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
     *reach.lock().unwrap_or_else(|e| e.into_inner()) = Some(seen);
     let channels = Channels::default();
     let live = Live::default();
-    tokio::spawn(accepting(node.clone(), channels.clone(), kit.clone(), tx.clone(), live.clone()));
+    tokio::spawn(accepting(node.clone(), channels.clone(), kit.clone(), tx.clone(), live.clone(), serves.clone()));
     let mut calls: HashMap<CardId, tokio::task::JoinHandle<()>> = HashMap::new();
     // Карточки, у которых партнёр уже записан, звонят САМИ, без щелчка:
     // человек разрешил подключение однажды, и перезапуск программы не повод
@@ -209,6 +236,10 @@ async fn serve(kit: Kit, tx: UnboundedSender<Ev>, reach: Arc<Mutex<Option<Reach>
     while let Some(cmd) = cmds.recv().await {
         match cmd {
             Cmd::Dial { card, name, code } => start_call(&node, &channels, &kit, &tx, &mut calls, Dialling { id: card, name }, code),
+            Cmd::Calls { card, kind, stream } => {
+                let (kit, tx, channels) = (kit.clone(), tx.clone(), channels.clone());
+                tokio::spawn(async move { pipe_calls(&kit, &tx, &channels, &card, kind, stream).await });
+            }
             Cmd::Revoke { card, peer } => {
                 // Признак базы для слов отзыва — это и есть ключ отзываемой карточки (решение владельца 10.11). Прежде он искался
                 // перебором по настройкам (чтение файла плюс поиск по имени), и на непрочитанных настройках или переименованной
@@ -311,6 +342,23 @@ impl Live {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, card, reins });
         id
+    }
+
+    /// **Пускать ли поток ВЫЗОВОВ** от этой стороны к этой карточке.
+    ///
+    /// Правило одно на обе пары и звучит так: поток вызовов обслуживается тогда и только тогда, когда у этой машины есть ЖИВОЙ
+    /// управляющий поток этой карточки к этому ключу. Отсюда два следствия даром, без единой новой строки: отзыв и прощание гасят
+    /// потоки вызовов немедленно (управляющий поток снимается с учёта — и допуск исчезает вместе с ним), а второй книги допуска для
+    /// вызовов не заводится вовсе.
+    ///
+    /// **Своей структуры под это нет нарочно** (план пары B звал её `Admit`). Учёт живых разговоров уже хранит ровно эту пару — ключ
+    /// стороны и карточку, — и заводить рядом второй список значило бы завести вторую меру на один вопрос: тот самый разряд дефектов,
+    /// который на этой ветке ловили шесть раз. Здесь — только имя правила, данное тому, что и так есть.
+    ///
+    /// Неопознанный разговор (`card: None`) допуска не даёт никому: карточку, о которой не договорились, назвать нечем.
+    fn admits(&self, peer: EndpointId, card: &CardId) -> bool {
+        let held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
+        held.get(&peer).is_some_and(|rows| rows.iter().any(|t| t.card.as_ref() == Some(card)))
     }
 
     /// Снять разговор с учёта — присмотр за ним кончился. Уже снятого
@@ -678,16 +726,136 @@ async fn one_round(
 /// `accept_all` не отдавала разговору ключ той стороны, без которого
 /// `enroll::accept_side` не решает допуск; теперь отдаёт, и одно правило
 /// живёт в одном месте.
-async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, live: Live) {
+async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, live: Live, serves: crate::session::Serving) {
     let noted = tx.clone();
     channel::accept_all(
         &node,
         &channels,
         move |why| say(&noted, Kind::Warn, why),
-        move |control, peer| answering(kit.clone(), tx.clone(), live.clone(), control, peer),
+        move |control, peer| answering(kit.clone(), tx.clone(), live.clone(), serves.clone(), control, peer),
     )
     .await;
 }
+/// Увести местное соединение агента в канал: открыть поток, поздороваться заголовком и перелить байты.
+///
+/// **Чего здесь нет нарочно.** Ни одного правила моста: ни белого списка инструментов, ни подмешивания своих, ни пересоздания ребёнка.
+/// Мост стоит на той стороне, у базы, и это и есть граница работы — «меняется труба, а не механизм» (спека протокола, раздел «MCP»).
+///
+/// Партнёр и ключ его базы берутся из того же места, откуда их берёт возврат (`enrolled::Partners`): второго списка партнёров нет.
+async fn pipe_calls(
+    kit: &Kit,
+    tx: &UnboundedSender<Ev>,
+    channels: &Channels,
+    card: &CardId,
+    kind: crate::ops_host::McpServer,
+    mut stream: tokio::net::TcpStream,
+) {
+    let partners = match Partners::open(kit.state()) {
+        Ok(p) => p,
+        Err(e) => {
+            say(tx, Kind::Fail, e);
+            return;
+        }
+    };
+    let (Some(partner), Some(base)) = (partners.of(card), partners.base_id_of(card)) else {
+        say(tx, Kind::Warn, "Вызов агента некуда вести: по этой карточке ещё не подключались.".to_string());
+        return;
+    };
+    let Some(channel) = channels.of(partner.key) else {
+        say(tx, Kind::Warn, "Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string());
+        return;
+    };
+    let mut control = match channel.call().await {
+        Ok(c) => c,
+        Err(e) => {
+            say(tx, Kind::Warn, e);
+            return;
+        }
+    };
+    let opened = {
+        let (send, recv) = control.halves();
+        match crate::wire::Frame::write(send, &crate::wire::Msg::McpOpen { base_id: base, kind }).await {
+            Err(e) => Err(e.to_string()),
+            // Ответ ждём тем же сроком, что и прочие кадры разговора: молчание той стороны — такой же ответ, как отказ.
+            Ok(()) => match enroll::first_frame(send, recv).await {
+                Ok(crate::wire::Msg::McpOk) => Ok(()),
+                Ok(crate::wire::Msg::Refuse(no)) => Err(no.text.to_string()),
+                Ok(other) => Err(format!("та сторона ответила не тем кадром: {other:?}")),
+                Err(e) => Err(e),
+            },
+        }
+    };
+    if let Err(why) = opened {
+        say(tx, Kind::Warn, why);
+        control.end(None).await;
+        return;
+    }
+    // Половины уезжают в трубу вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
+    let (send, recv, hold) = crate::channel::into_pipe(control);
+    let mut theirs = tokio::io::join(recv, send);
+    let _ = tokio::io::copy_bidirectional(&mut stream, &mut theirs).await;
+    drop(hold);
+}
+
+/// Обслужить поток ВЫЗОВОВ: та сторона открыла его к нашей карточке и назвала, какой из серверов инструментов ей нужен.
+///
+/// **Три вопроса, и все три — отказ словами, а не тишина.**
+///
+/// 1. Наша ли это карточка (`Cards::mine_named`). Проводный ключ в наше пространство имён не переводится; дорога к своей карточке
+///    одна и названа.
+/// 2. **Жив ли управляющий поток этой карточки к этому ключу** (`Live::admits`). Это и есть всё правило допуска: вторая книга
+///    разрешений для вызовов не заводится, а отзыв и прощание гасят вызовы сами собой — вместе с управляющим потоком уходит и допуск.
+/// 3. Включено ли обслуживание (`Serving::now`). Пусто — доступ к 1С выключен, и это ответ, а не беда.
+///
+/// Дальше по этому же потоку идёт сырой json-rpc, и правил моста мы не касаемся: меняется труба, а не механизм.
+#[allow(clippy::too_many_arguments)]
+async fn serve_calls(
+    tx: &UnboundedSender<Ev>,
+    live: &Live,
+    serving: &crate::session::Serving,
+    cards: &enroll::Cards,
+    mut control: crate::channel::Control,
+    peer: EndpointId,
+    base_id: &crate::wire::CardRef,
+    kind: crate::ops_host::McpServer,
+) {
+    let refuse = |control: crate::channel::Control, code: &'static str, text: &str| {
+        let no = crate::wire::Refuse::new(code, text);
+        async move { control.end(Some(no)).await }
+    };
+    let Some(card) = cards.mine_named(base_id).cloned() else {
+        refuse(control, crate::wire::code::NO_BASE, NO_SUCH_BASE).await;
+        return;
+    };
+    if !live.admits(peer, card.id()) {
+        refuse(control, crate::wire::code::NOT_ALLOWED, NOT_HELD).await;
+        return;
+    }
+    let Some(serve) = serving.now() else {
+        refuse(control, crate::wire::code::MCP_OFF, MCP_OFF_HERE).await;
+        return;
+    };
+    if crate::wire::Frame::write(control.says(), &crate::wire::Msg::McpOk).await.is_err() {
+        return;
+    }
+    say(tx, Kind::Say, format!("«{}»: агент той стороны открыл вызовы", card.name));
+    // Половины уезжают в мост вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
+    let (send, recv, hold) = crate::channel::into_pipe(control);
+    let task = serve.serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send));
+    let _ = task.await;
+    drop(hold);
+    say(tx, Kind::Say, format!("«{}»: вызовы закончились", card.name));
+}
+
+/// Карточки с таким ключом у нас нет. Слова те же, какими отвечает зачисление: разницы между «нет такой» и «есть, но не ваша» по ним
+/// не видно (та же защита, что у возврата).
+const NO_SUCH_BASE: &str = "Такой базы здесь нет.\nПопросите новый код на том компьютере, к которому подключаетесь.";
+
+/// Управляющего потока этой карточки нет — значит и вызовам тут делать нечего.
+const NOT_HELD: &str = "Подключение к этой базе не держится.\nПодключитесь заново: без живого подключения вызовы не обслуживаются.";
+
+/// Обслуживание на этой машине выключено.
+const MCP_OFF_HERE: &str = "Доступ к 1С на том компьютере выключен.\nПопросите включить его в окне программы.";
 
 /// Один разговор зачисления на принимающей стороне: заявка в окно, решение
 /// человека обратно, и дальше держим поток.
@@ -711,7 +879,14 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
 /// причины, и это единственное, что в `bye` ещё не доехало: прощание при
 /// закрытии окна (`channel::WINDOW_CLOSED`) уходит залпом с «Выхода»
 /// (`Cmd::ByeAll`).
-async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: crate::channel::Control, peer: EndpointId) {
+async fn answering(
+    kit: Kit,
+    tx: UnboundedSender<Ev>,
+    live: Live,
+    serves: crate::session::Serving,
+    mut control: crate::channel::Control,
+    peer: EndpointId,
+) {
     let mut book = match Book::open(kit.state()) {
         Ok(book) => book,
         Err(e) => {
@@ -734,9 +909,26 @@ async fn answering(kit: Kit, tx: UnboundedSender<Ev>, live: Live, mut control: c
             wait.await.unwrap_or(enroll::Decision::NoAnswer)
         }
     };
+    // **У потока два законных начала** (шаг 4 плана пары B): `Hello` — разговор о зачислении, `McpOpen` — поток вызовов к нашему
+    // серверу инструментов. Различает их тот, кто читает первый кадр, и это здесь.
+    let first = {
+        let (send, recv) = control.halves();
+        match enroll::first_frame(send, recv).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                say(&tx, Kind::Warn, e);
+                control.end(None).await;
+                return;
+            }
+        }
+    };
+    if let crate::wire::Msg::McpOpen { base_id, kind } = first {
+        serve_calls(&tx, &live, &serves, &cards, control, peer, &base_id, kind).await;
+        return;
+    }
     let out = {
         let (send, recv) = control.halves();
-        enroll::accept_side(send, recv, peer, &mut book, &cards, ask).await
+        enroll::accept_side_with(first, send, recv, peer, &mut book, &cards, ask).await
     };
     let out = match out {
         Ok(out) => out,

@@ -379,7 +379,7 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
 }
 
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
-    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Arc::new(Mutex::new(None)), on_state)
+    start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Arc::new(Mutex::new(None)), Wiring::default(), on_state)
 }
 
 /// Поднять сеанс в своём потоке. `log` получает все события (туннеля и
@@ -394,12 +394,55 @@ pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sy
 /// правилом: заводит и держит окно, сюда только передаётся, и расчёт
 /// готовности (`verify.rs`) читает её независимо от того, идёт сеанс прямо
 /// сейчас или нет (решение владельца 29.10).
+/// Чем увести местное соединение агента в канал — то же, что `listen::ToChannel`, названное здесь, чтобы звать сеанс одним именем.
+pub type ToChannel = crate::listen::ToChannel;
+
+/// Чем сеанс связан с потоком узла. Обе ручки про одно — вызовы агента по каналу, — и ездят поэтому вместе.
+///
+/// `serving` сеанс ЗАПОЛНЯЕТ собой (поток узла найдёт в ней мост, когда по каналу придёт поток вызовов); `to_channel` он ЧИТАЕТ
+/// (им местное соединение агента уводится в канал, когда база на другом компьютере). Пусто и то и другое — значит либо сеанса нет,
+/// либо потока узла нет, и оба случая отвечают словами, а не молчанием.
+#[derive(Clone, Default)]
+pub struct Wiring {
+    pub serving: Serving,
+    pub to_channel: Option<ToChannel>,
+}
+
+/// Обслуживающая половина ЭТОЙ машины — та, что поднимает мост к серверам инструментов, — выставленная наружу, пока сеанс жив.
+///
+/// **Зачем.** Канал живёт в потоке узла (`gui::peer`): он обязан принимать знакомство, прощание и отзыв независимо от того, включено
+/// ли обслуживание. Мост живёт в сеансе: он и ЕСТЬ обслуживание. Поток вызовов приходит в канал, а обслужить его должен сеанс — значит
+/// между ними нужна одна явная ручка, и вот она.
+///
+/// **Пустота здесь — это ответ, а не беда.** Сеанса нет — доступ к 1С выключен, и поток вызовов получает отказ словами. Второго места,
+/// где этот вопрос решался бы, не заводим: «включено ли» спрашивается тем, что ручка полна.
+#[derive(Clone, Default)]
+pub struct Serving(Arc<Mutex<Option<Arc<Serve>>>>);
+
+impl Serving {
+    /// Сеанс поднялся и готов обслуживать.
+    pub fn put(&self, serve: Arc<Serve>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(serve);
+    }
+
+    /// Сеанс кончился: обслуживать больше нечем.
+    pub fn clear(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Чем обслуживать прямо сейчас. `None` — доступ к 1С выключен.
+    pub fn now(&self) -> Option<Arc<Serve>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 pub fn start_with_enabled(
     cfg: Cfg,
     kit: Kit,
     log: Sink,
     enabled: Arc<AtomicBool>,
     editor_mcp: EditorMcpSeen,
+    wiring: Wiring,
     on_state: impl Fn(State) + Send + Sync + 'static,
 ) -> Session {
     let (stop_tx, stop_rx) = watch::channel(false);
@@ -428,6 +471,9 @@ pub fn start_with_enabled(
             // знать то же число, иначе `dispatch` не узнаёт свой же порт.
             let active_ports = if cfg.current().mode == "local" { cfg.ports() } else { cfg.tunnel_ports() };
             let serve = Arc::new(Serve::shared(shared_cfg, &cfg, &kit, log.clone(), active_ports, enabled));
+            // Объявляем себя: с этой минуты поток узла знает, чем обслуживать вызовы, пришедшие по каналу. Снимается объявление
+            // внизу, когда сеанс кончился, — и тем же самым снимается допуск к вызовам.
+            wiring.serving.put(serve.clone());
             let on_event = |e: Event| {
                 let mut s = state.lock().unwrap();
                 let next = s.clone().next(&e);
@@ -435,9 +481,21 @@ pub fn start_with_enabled(
                 *s = next;
                 on_state(s.clone());
             };
-            // Транспорт выбирает СОЧЕТАНИЕ: у карточки без второй стороны слушаем свои порты, у прочих поднимаем туннель.
-            let r = if crate::cfg::Combo::of(cfg.current()) == crate::cfg::Combo::Alone {
-                crate::listen::run(serve, active_ports, on_event, stop_rx).await
+            // **Транспорт выбирает СОЧЕТАНИЕ** (`cfg::Combo`), и исходов теперь три.
+            //
+            // «Всё на одной машине» — слушаем свои порты и поднимаем своего ребёнка, как было.
+            //
+            // База на ДРУГОМ компьютере (сторона агентов пары A) — тоже слушаем свои порты, но каждое принятое соединение уводим
+            // трубой в канал: мост стоит у базы, здесь его нет и быть не должно. Это и есть шаг 4 плана пары B. Уводить некуда, если
+            // потока узла нет вовсе (подкоманда `serve` без окна) — тогда остаётся прежний путь.
+            //
+            // База ЗДЕСЬ и сторона не одна — прежний туннель: вызовы по каналу к этой машине обслуживает не сеанс напрямую, а поток
+            // узла через `Serving`, и трогать здесь нечего.
+            let combo = crate::cfg::Combo::of(cfg.current());
+            let r = if combo == crate::cfg::Combo::Alone {
+                crate::listen::run(serve, active_ports, crate::listen::Toward::Child, on_event, stop_rx).await
+            } else if let (false, Some(to_channel)) = (combo.base_is_here(), wiring.to_channel.clone()) {
+                crate::listen::run(serve, active_ports, crate::listen::Toward::Channel(to_channel), on_event, stop_rx).await
             } else {
                 let dispatch = serve.clone();
                 let on_incoming = move |inc: tunnel::Incoming| {
@@ -447,6 +505,8 @@ pub fn start_with_enabled(
                 };
                 tunnel::run(&cfg, kit.state_path("known_hosts"), on_event, on_incoming, stop_rx, editor_mcp.clone()).await
             };
+            // Сеанс кончился — снимаем объявление: обслуживать вызовы по каналу больше нечем, и отказ скажет об этом словами.
+            wiring.serving.clear();
             on_state(State::ended(&r));
             r
         });

@@ -371,6 +371,20 @@ pub enum Outcome {
 /// «не та топология» в таблице спеки нет, и придумывать его раньше, чем
 /// появится вторая половина, значит придумывать наугад. Когда она появится,
 /// развилка встанет здесь, по этому полю.
+/// Первый кадр потока — ОТДЕЛЬНО от разговора о зачислении.
+///
+/// У потока в канале два законных начала: `Hello` управляющего разговора и `McpOpen` потока вызовов (шаг 4 плана пары B). Кто их
+/// различает, тот и читает первый кадр; `accept_side_with` получает его уже прочитанным.
+///
+/// Отказ уходит той стороне словами тем же `heard`, что и раньше: срок, обрыв и непонятый кадр отвечают одинаково.
+pub async fn first_frame<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(w: &mut W, r: &mut R) -> Result<Msg, String> {
+    heard(w, r, PATIENCE).await.map_err(|e| e.text.to_string())
+}
+
+/// Принять разговор о зачислении, прочитав первый кадр самостоятельно.
+///
+/// Остаётся ради тестов и ради тех мест, где у потока одно законное начало: разбор первого кадра живёт в `first_frame`, а всё, что
+/// дальше, — в `accept_side_with`.
 pub async fn accept_side<W, R, F, Fut>(
     w: &mut W,
     r: &mut R,
@@ -385,8 +399,28 @@ where
     F: FnOnce(Request) -> Fut,
     Fut: Future<Output = Decision>,
 {
-    // Шаг второй: та сторона открыла поток и представилась.
-    let (proto_min, proto_max, ceiling, why) = match heard(w, r, PATIENCE).await.map_err(|e| e.text)? {
+    let first = first_frame(w, r).await?;
+    accept_side_with(first, w, r, peer, book, cards, decide).await
+}
+
+/// То же, но первый кадр уже на руках.
+pub async fn accept_side_with<W, R, F, Fut>(
+    first: Msg,
+    w: &mut W,
+    r: &mut R,
+    peer: EndpointId,
+    book: &mut Book,
+    cards: &Cards,
+    decide: F,
+) -> Result<Outcome, String>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+    F: FnOnce(Request) -> Fut,
+    Fut: Future<Output = Decision>,
+{
+    // Шаг второй: та сторона открыла поток и представилась. Кадр уже прочитан тем, кто различает два законных начала потока.
+    let (proto_min, proto_max, ceiling, why) = match first {
         Msg::Hello { proto_min, proto_max, ceiling, why, .. } => (proto_min, proto_max, ceiling, why),
         other => return refuse_and_fail(w, Refuse::new(code::UNKNOWN_MESSAGE, out_of_turn("hello", &other))).await,
     };

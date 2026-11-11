@@ -213,7 +213,7 @@ async fn settle(mut send: SendStream, hold: Hold) {
 /// книги, отказ человека, обрыв, срок, паника задачи), и девятый забудут.
 /// Снятие на `Drop` работает и на отмене всей задачи — а задачу бросают
 /// именно так, когда человек выключает обслуживание или закрывает окно.
-struct Hold {
+pub struct Hold {
     conn: Connection,
     live: Arc<AtomicUsize>,
 }
@@ -326,6 +326,11 @@ impl Channels {
         held.retain(|_, ch| ch.is_open());
         held.insert(peer, channel.clone());
         channel
+    }
+
+    /// Живой канал к этому партнёру, если он есть. Нового звонка не делает: кому нечем звонить, тому и отвечают словами.
+    pub fn of(&self, peer: EndpointId) -> Option<Channel> {
+        self.live(peer)
     }
 
     fn live(&self, peer: EndpointId) -> Option<Channel> {
@@ -454,6 +459,18 @@ impl Reins {
 /// Задача письма заводится здесь же и живёт, пока живы вожжи. Поэтому
 /// `reins` зовётся из потока с рантаймом (`tokio::spawn`), а не с главного
 /// потока окна.
+/// Отдать ОБЕ половины потока наружу вместе с держателем канала: дальше по этому потоку идёт не наш разговор, а чужие байты
+/// (json-rpc моста, шаг 4 плана пары B).
+///
+/// Держатель уезжает вместе с половинами и живёт, пока жив поток: без него канал счёл бы себя опустевшим и закрылся бы под работающим
+/// мостом. `control` после этого падает пустым — его `Drop` видит вынутые половины и ничего не досылает.
+pub fn into_pipe(mut control: Control) -> (SendStream, RecvStream, Hold) {
+    let send = control.send.take().expect(TAKEN);
+    let recv = control.recv.take().expect(TAKEN);
+    let hold = control.hold.take().expect(TAKEN);
+    (send, recv, hold)
+}
+
 pub fn reins(mut control: Control) -> (Reins, RecvStream) {
     let recv = control.recv.take().expect(TAKEN);
     let send = control.send.take().expect(TAKEN);

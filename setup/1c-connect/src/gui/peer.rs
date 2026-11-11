@@ -968,13 +968,8 @@ async fn pipe_calls(
 
 /// Обслужить поток ВЫЗОВОВ: та сторона открыла его к нашей карточке и назвала, какой из серверов инструментов ей нужен.
 ///
-/// **Три вопроса, и все три — отказ словами, а не тишина.**
-///
-/// 1. Наша ли это карточка (`Cards::mine_named`). Проводный ключ в наше пространство имён не переводится; дорога к своей карточке
-///    одна и названа.
-/// 2. **Жив ли управляющий поток этой карточки к этому ключу** (`Live::admits`). Это и есть всё правило допуска: вторая книга
-///    разрешений для вызовов не заводится, а отзыв и прощание гасят вызовы сами собой — вместе с управляющим потоком уходит и допуск.
-/// 3. Включено ли обслуживание (`Serving::now`). Пусто — доступ к 1С выключен, и это ответ, а не беда.
+/// Допущен ли поток, решает `Admission::of` — один вопрос, один ответ, четыре отказа. Здесь остаётся только труба: сказать отказ
+/// словами, подтвердить `McpOk`, свести половины канала с мостом и дождаться конца.
 ///
 /// Дальше по этому же потоку идёт сырой json-rpc, и правил моста мы не касаемся: меняется труба, а не механизм.
 #[allow(clippy::too_many_arguments)]
@@ -988,60 +983,145 @@ async fn serve_calls(
     base_id: &crate::wire::CardRef,
     kind: crate::ops_host::McpServer,
 ) {
-    let refuse = |control: crate::channel::Control, code: &'static str, text: &str| {
-        let no = crate::wire::Refuse::new(code, text);
-        async move { control.end(Some(no)).await }
+    let admitted = match Admission::of(kit, live, serving, peer, base_id) {
+        Ok(admitted) => admitted,
+        Err(no) => {
+            control.end(Some(crate::wire::Refuse::new(no.code(), no.text()))).await;
+            return;
+        }
     };
-    // **Дорога к обслуживанию одна, и она узкая** (`Cards::serving_named`): карточка, чья база ЗДЕСЬ. Разрешение у карточки без
-    // базы значит «присылайте свою базу моим агентам» — права отдать СВОЮ базу оно не даёт, и путать их нельзя (находка проверки
-    // безопасности 11.11, вторая волна).
-    // **Карточки читаются ЗДЕСЬ И СЕЙЧАС, а не снимком начала разговора** (третья волна той же проверки). Управляющий поток живёт
-    // часами: человек успевает переключить у карточки «Где база», и снимок, снятый при его открытии, продолжал бы отдавать базу,
-    // которой у этой карточки больше нет. Поэтому сюда приезжает комплект, а не `Cards`: передать устаревший набор стало
-    // невыразимо — тем же приёмом, которым чинили `session::Open::is_for`.
-    let cards = Machine::read(kit).cards;
-    let Some(card) = cards.serving_named(base_id).cloned() else {
-        refuse(control, crate::wire::code::NO_BASE, NO_SUCH_BASE).await;
-        return;
-    };
-    // Допуск и потолок той машины — ОДИН ответ: обе величины пришли из одного кадра `hello` и кончаются вместе с потоком.
-    let Some(theirs) = live.admits(peer, card.id()) else {
-        refuse(control, crate::wire::code::NOT_ALLOWED, NOT_HELD).await;
-        return;
-    };
-    let Some(open) = serving.now() else {
-        refuse(control, crate::wire::code::MCP_OFF, MCP_OFF_HERE).await;
-        return;
-    };
-    // **Мост поднят по ТЕКУЩЕМУ соединению машины, и база в нём — его.** Значит вызов по другой карточке уехал бы в чужую базу:
-    // допуск спрашивали по одной, а обслужили бы другую. Отказываем словами (находка проверки безопасности 11.11).
-    //
-    // Это ограничение движка, а не замысла: инструменты работают с текущим соединением, и окно говорит это человеку тем же словом.
-    // Снимется оно тогда, когда мост научится подниматься ПО КАРТОЧКЕ, — это отдельная работа, и делать её заодно нельзя.
-    if !open.is_for(card.id()) {
-        refuse(control, crate::wire::code::NO_BASE, NOT_CURRENT).await;
-        return;
-    }
     if crate::wire::Frame::write(control.says(), &crate::wire::Msg::McpOk).await.is_err() {
         return;
     }
-    say(tx, Kind::Say, format!("«{}»: агент той стороны открыл вызовы", card.name));
+    say(tx, Kind::Say, format!("«{}»: агент той стороны открыл вызовы", admitted.card.name));
     // Половины уезжают в мост вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
     let (send, recv, hold) = crate::channel::into_pipe(control);
     // **Труба живёт не дольше сеанса И не дольше этого потока.** Мост поднят в потоке узла, а не в потоке сеанса, и уронить его
     // `drop(rt)` сеанса не может: без этого «выключил доступ к 1С» значило бы «выключил для новых», а уже идущие вызовы доживали бы
     // с живым ребёнком под ними. Снятие самого потока вызовов — то же самое с другой стороны: `Falls` роняет задачу своим `Drop`,
     // куда бы эта функция ни вышла, включая `abort` снаружи (находка проверки безопасности 11.11, вторая и четвёртая волны).
-    let mut task = Falls(
-        open.serve().serve(crate::session::Served::Mcp(kind), crate::session::Incoming::FromPeer(tokio::io::join(recv, send), theirs)),
-    );
+    let mut task = Falls(admitted.open.serve().serve(crate::session::Served::Mcp(kind), admitted.incoming(tokio::io::join(recv, send))));
     tokio::select! {
         _ = &mut task.0 => {}
-        () = open.until_stopped() => {}
+        () = admitted.open.until_stopped() => {}
     }
     drop(task);
     drop(hold);
-    say(tx, Kind::Say, format!("«{}»: вызовы закончились", card.name));
+    say(tx, Kind::Say, format!("«{}»: вызовы закончились", admitted.card.name));
+}
+
+/// Допуск потока вызовов: один вопрос, один ответ, четыре отказа.
+///
+/// Прежде четыре проверки стояли подряд в теле `serve_calls`, и у каждой был свой `return` с кодом провода и словами. Каждая по
+/// отдельности защищена докстрокой и своей находкой проверки безопасности, но ПОНЯТИЯ «допущен ли этот поток» не было нигде:
+/// чтобы его собрать, читающий обходил четыре файла, а отказы лежали отдельно от проверок. И доказать их было нечем — весь разбор
+/// требовал живого потока канала, то есть второй машины.
+///
+/// Здесь это один конструктор без сети: четыре отказа стали четырьмя ветвями одного `Err`, и каждая впервые проверяема.
+struct Admission {
+    card: crate::enroll::Card,
+    open: crate::session::Open,
+    /// Потолок записи ТОЙ машины — из того же кадра `hello`, что и допуск, и кончается вместе с ним.
+    ///
+    /// Приватный нарочно: наружу он отдаётся только `incoming`, то есть уже приклеенным к потоку. Отдельно взять его и потерять
+    /// по дороге (дыра 11.11, `f36f5cb`) этим становится невыразимо.
+    theirs: Ceiling,
+}
+
+/// Почему поток вызовов не допущен — с кодом провода и словами человеку рядом, а не в другом конце файла.
+enum Denied {
+    /// Карточки с таким ключом у нас нет — либо есть, но её база не здесь.
+    NoSuchBase,
+    /// Управляющего потока этой карточки к этому ключу нет.
+    NotHeld,
+    /// Доступ к 1С на этой машине выключен.
+    Off,
+    /// Карточка не текущая: мост поднят по другой, и её базу чужому вызову не отдают.
+    NotCurrent,
+}
+
+impl Denied {
+    fn code(&self) -> &'static str {
+        match self {
+            // «Нет такой» и «есть, но не текущая» отвечаются ОДНИМ кодом: по коду та сторона не должна различать, какая из двух
+            // причин сработала, — иначе код становится способом перебирать чужие карточки.
+            Denied::NoSuchBase | Denied::NotCurrent => crate::wire::code::NO_BASE,
+            Denied::NotHeld => crate::wire::code::NOT_ALLOWED,
+            Denied::Off => crate::wire::code::MCP_OFF,
+        }
+    }
+
+    fn text(&self) -> &'static str {
+        match self {
+            Denied::NoSuchBase => NO_SUCH_BASE,
+            Denied::NotHeld => NOT_HELD,
+            Denied::Off => MCP_OFF_HERE,
+            Denied::NotCurrent => NOT_CURRENT,
+        }
+    }
+}
+
+impl Admission {
+    /// Допущен ли поток вызовов к нашей базе — четыре вопроса, задаваемые в этом порядке.
+    ///
+    /// 1. **Дорога к обслуживанию одна, и она узкая** (`Cards::serving_named`): карточка, чья база ЗДЕСЬ. Разрешение у карточки
+    ///    без базы значит «присылайте свою базу моим агентам» — права отдать СВОЮ базу оно не даёт, и путать их нельзя (находка
+    ///    проверки безопасности 11.11, вторая волна).
+    /// 2. **Жив ли управляющий поток этой карточки к этому ключу** (`Live::admits`). Это и есть всё правило допуска: вторая книга
+    ///    разрешений для вызовов не заводится, а отзыв и прощание гасят вызовы сами собой — вместе с управляющим потоком уходит и
+    ///    допуск. Оттуда же приезжает потолок той машины: обе величины пришли из одного кадра `hello`.
+    /// 3. Включено ли обслуживание (`Serving::now`). Пусто — доступ к 1С выключен, и это ответ, а не беда.
+    /// 4. **Мост поднят по ТЕКУЩЕМУ соединению машины, и база в нём — его.** Значит вызов по другой карточке уехал бы в чужую
+    ///    базу: допуск спрашивали по одной, а обслужили бы другую (находка проверки безопасности 11.11). Это ограничение движка,
+    ///    а не замысла; снимется оно тогда, когда мост научится подниматься ПО КАРТОЧКЕ.
+    ///
+    /// **Карточки читаются ЗДЕСЬ И СЕЙЧАС, а не снимком начала разговора** (третья волна той же проверки). Управляющий поток
+    /// живёт часами: человек успевает переключить у карточки «Где база», и снимок, снятый при его открытии, продолжал бы отдавать
+    /// базу, которой у этой карточки больше нет. Поэтому сюда приезжает комплект, а не `Cards`: передать устаревший набор
+    /// невыразимо — тем же приёмом, которым чинили `session::Open::is_for`.
+    fn of(
+        kit: &Kit,
+        live: &Live,
+        serving: &crate::session::Serving,
+        peer: EndpointId,
+        base_id: &crate::wire::CardRef,
+    ) -> Result<Admission, Denied> {
+        Admission::from_cards(Machine::read(kit).cards, live, serving, peer, base_id)
+    }
+
+    /// То же, но карточки даёт вызывающий — ими проверяются тесты (тот же приём и тот же довод, что у `Machine::read_with`:
+    /// DPAPI из тестов не зовём). Боевой путь зовёт `of`, и подсунуть ему устаревший набор по-прежнему нечем.
+    #[cfg(test)]
+    fn from_cards_for_test(
+        cards: crate::enroll::Cards,
+        live: &Live,
+        serving: &crate::session::Serving,
+        peer: EndpointId,
+        base_id: &crate::wire::CardRef,
+    ) -> Result<Admission, Denied> {
+        Admission::from_cards(cards, live, serving, peer, base_id)
+    }
+
+    fn from_cards(
+        cards: crate::enroll::Cards,
+        live: &Live,
+        serving: &crate::session::Serving,
+        peer: EndpointId,
+        base_id: &crate::wire::CardRef,
+    ) -> Result<Admission, Denied> {
+        let card = cards.serving_named(base_id).cloned().ok_or(Denied::NoSuchBase)?;
+        let theirs = live.admits(peer, card.id()).ok_or(Denied::NotHeld)?;
+        let open = serving.now().ok_or(Denied::Off)?;
+        if !open.is_for(card.id()) {
+            return Err(Denied::NotCurrent);
+        }
+        Ok(Admission { card, open, theirs })
+    }
+
+    /// Поток канала вместе с потолком той машины — единственная дорога, которой потолок выходит из допуска.
+    fn incoming<S>(&self, stream: S) -> crate::session::Incoming<S> {
+        crate::session::Incoming::FromPeer(stream, self.theirs)
+    }
 }
 
 /// Карточки с таким ключом у нас нет. Слова те же, какими отвечает зачисление: разницы между «нет такой» и «есть, но не ваша» по ним
@@ -1466,8 +1546,84 @@ mod tests {
     // Именованный список, а не `super::*`: в области видимости этого модуля
     // живёт `gpui::*`, и его `test` перебил бы `#[test]` стандартной
     // библиотеки (тот же приём, что у тестов `panel.rs`).
-    use super::{cut_these, keep_holding, Ceiling, Falls, Live, Watch};
+    use super::{cut_these, keep_holding, Admission, Ceiling, Denied, Falls, Live, Machine, Watch};
     use crate::cfg::CardId;
+
+    /// Допуск потока вызовов целиком — четыре отказа и один успех, без сети и без второй машины.
+    ///
+    /// До 12.11 ни одна из этих четырёх ветвей не проверялась ничем: весь разбор стоял в теле `serve_calls`, за живым потоком
+    /// канала, и дотянуться до него можно было только живым прогоном на двух машинах с кликом человека. Каждая ветвь при этом —
+    /// находка проверки безопасности 11.11, то есть ровно то, что обязано иметь доказательство.
+    #[test]
+    fn the_four_refusals_of_an_admission_are_each_provable_without_a_wire() {
+        use crate::session::{Serve, Serving};
+        use common::kit::Kit;
+        use common::{Event, Sink};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        // Две карточки: у «Buh» база здесь, у «Zup» — на той стороне. Текущая — «Buh».
+        let mut cfg = crate::cfg::cfg_with(&["Buh", "Zup"]);
+        cfg.connections.iter_mut().find(|c| c.name == "Zup").unwrap().base_here = false;
+        let cards = Machine::of(&cfg).cards;
+        // Ключ карточки — НЕ её имя: его выводит сама карточка (`Connection::id`), и на провод он едет в своём виде.
+        let wire_of = |name: &str| cfg.connections.iter().find(|c| c.name == name).unwrap().id().on_wire();
+        let buh = cards.serving_named(&wire_of("Buh")).expect("у «Buh» база здесь").id().clone();
+
+        let dir = std::env::temp_dir().join(format!("onec-admission-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live_cfg = crate::session::Live::new(cfg.clone());
+        let log: Sink = Arc::new(|_: Event| {});
+        let ports = crate::cfg::Ports { mcp: 0, vrunner: 0, web: 0 };
+        let serve = Serve::shared(live_cfg.clone(), &cfg, &Kit::at(&dir), log, ports, Arc::new(AtomicBool::new(true)));
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let serving = Serving::default();
+        serving.put(Arc::new(serve), stop_rx);
+
+        let them = iroh::SecretKey::generate().public();
+        let live = Live::default();
+        live.remember(them, Some(buh.clone()), None, Ceiling::ReadOnly);
+
+        let ask = |cards: crate::enroll::Cards, serving: &Serving, r: &crate::wire::CardRef| {
+            Admission::from_cards_for_test(cards, &live, serving, them, r)
+        };
+
+        // 1. Карточки с таким ключом нет вовсе — и карточка, чья база НЕ здесь, отвечается тем же отказом: разрешение у неё
+        //    значит «присылайте свою базу моим агентам», а не «берите мою».
+        let nowhere = crate::cfg::CardId::from("такой-карточки-нет").on_wire();
+        assert!(matches!(ask(cards.clone(), &serving, &nowhere), Err(Denied::NoSuchBase)), "такой карточки нет");
+        assert!(matches!(ask(cards.clone(), &serving, &wire_of("Zup")), Err(Denied::NoSuchBase)), "база «Zup» на той стороне");
+
+        // 2. Управляющего потока этой карточки к этому ключу нет.
+        let stranger = iroh::SecretKey::generate().public();
+        let nobody = Live::default();
+        nobody.remember(stranger, Some(buh.clone()), None, Ceiling::Full);
+        assert!(
+            matches!(Admission::from_cards_for_test(cards.clone(), &nobody, &serving, them, &wire_of("Buh")), Err(Denied::NotHeld)),
+            "разрешение другой стороны этой стороне допуска не даёт"
+        );
+
+        // 3. Обслуживание выключено.
+        assert!(matches!(ask(cards.clone(), &Serving::default(), &wire_of("Buh")), Err(Denied::Off)), "доступ к 1С выключен");
+
+        // 4. Карточка не текущая: мост поднят по другой, и её базу чужому вызову не отдают.
+        let mut switched = cfg.clone();
+        switched.switch_current("Zup").unwrap();
+        live_cfg.set(switched);
+        assert!(matches!(ask(cards.clone(), &serving, &wire_of("Buh")), Err(Denied::NotCurrent)), "мост поднят по другой карточке");
+
+        // И успех: та же карточка, когда она снова текущая, — вместе с потолком ТОЙ машины.
+        live_cfg.set(cfg.clone());
+        let admitted = match ask(cards, &serving, &wire_of("Buh")) {
+            Ok(a) => a,
+            Err(no) => panic!("должен был допустить, а отказал: {}", no.text()),
+        };
+        assert_eq!(admitted.card.name, "Buh");
+        assert!(
+            matches!(admitted.incoming("поток"), crate::session::Incoming::FromPeer(_, Ceiling::ReadOnly)),
+            "потолок той машины выходит из допуска только приклеенным к потоку"
+        );
+    }
 
     /// Разговоры по карточкам: пустая строка — разговор, чья карточка не
     /// опознана.

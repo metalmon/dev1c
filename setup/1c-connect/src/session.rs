@@ -340,6 +340,18 @@ pub enum Transport {
     Nowhere,
 }
 
+/// Параметры, в которых потолок ТОЙ машины уже сложен со своим: `read_only`, когда та сторона у себя запретила запись.
+///
+/// Нужна ребёнку `mcp-1c`: его право записи — ключ `--access`, то есть оно попадает в команду при сборке, а не спрашивается на
+/// каждый вызов (так делает vrunner, `bridge::Rules::peer`). Запрет любой стороны сильнее разрешения другой, поэтому ужесточение
+/// здесь только в одну сторону: своё `read_only` чужим «можно» не отменяется.
+pub(crate) fn tightened(cfg: &Cfg, theirs: crate::wire::Ceiling) -> Cfg {
+    match theirs {
+        crate::wire::Ceiling::Full => cfg.clone(),
+        crate::wire::Ceiling::ReadOnly => cfg.clone().with_access("read_only"),
+    }
+}
+
 /// Решение о транспорте — ОДНИМ местом, по сочетанию и по тому, есть ли кому держать канал.
 pub fn transport_of(combo: crate::cfg::Combo, has_channel: bool) -> Transport {
     match (combo.base_is_here(), has_channel) {
@@ -575,10 +587,16 @@ impl Serve {
         self.cfg.get().1.current().id()
     }
 
-    pub fn serve<S>(&self, what: Served, stream: S) -> tokio::task::JoinHandle<()>
+    pub fn serve<S>(&self, what: Served, stream: S, theirs: crate::wire::Ceiling) -> tokio::task::JoinHandle<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        // Потолок ТОЙ машины — свойство этого соединения, а не машины: он услышан в её `hello` и дальше живёт здесь. Местный агент
+        // второй стороны не имеет вовсе, и `Ceiling::Full` у него значит «запрещать некому» (`bridge::Rules::peer`).
+        //
+        // Ребёнку mcp-1c он доезжает ключом `--access`, то есть попадает в команду при сборке; vrunner-mcp спрашивает его на каждый
+        // вызов через `Rules`. Разные дороги у одного правила — потому что разные у самих серверов инструментов.
+        let tighten = move |cfg: &Cfg| tightened(cfg, theirs);
         if what == Served::Mcp(McpServer::Vrunner) {
             let (_, cfg0) = self.cfg.get();
             let tools_dir = self.tools_dir.clone();
@@ -587,13 +605,14 @@ impl Serve {
                 let tools_dir = tools_dir.clone();
                 Arc::new(move |cfg: &Cfg| Ok(bridge::vrunner_command(cfg, &tools_dir)))
             };
-            let rules = bridge::Rules::for_vrunner(
+            let mut rules = bridge::Rules::for_vrunner(
                 self.cfg.clone(),
                 tools_dir,
                 rebuild,
                 Arc::new(bridge::configurator_count),
                 self.enabled.clone(),
             );
+            rules.peer = theirs;
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
             tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
@@ -609,10 +628,11 @@ impl Serve {
             // отказывает, не собрав команду (и не положив пароль в
             // окружение), когда владелец локального порта публикации —
             // не наш httpd.
-            let cmd0 = bridge::mcp_command_guarded(&cfg0, &kit);
+            let cmd0 = bridge::mcp_command_guarded(&tighten(&cfg0), &kit);
             let mut rules = bridge::Rules::for_mcp(self.enabled.clone());
             rules.live = self.cfg.clone();
-            rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command_guarded(cfg, &kit)));
+            rules.peer = theirs;
+            rules.rebuild = Some(Arc::new(move |cfg: &Cfg| bridge::mcp_command_guarded(&tighten(cfg), &kit)));
             let log_journal = self.log.clone();
             let log_exit = self.log.clone();
             tokio::spawn(bridge::pipe_jsonrpc(stream, cmd0, rules, log_journal, move |code, by_us, err| {
@@ -666,6 +686,20 @@ mod tests {
     use super::*;
     use crate::ops_host::{port_of, McpServer};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Потолок ТОЙ машины доезжает до ребёнка `mcp-1c` — ключом `--access`, и ужесточает только в одну сторону.
+    ///
+    /// До 11.11 он до ребёнка не доезжал вовсе: складывался, показывался человеку и писался в книгу, а пишущие инструменты
+    /// регистрировались как ни в чём не бывало (дыра контракта «запрет любой стороны сильнее разрешения другой»).
+    #[test]
+    fn the_other_machines_ceiling_reaches_the_child_and_only_tightens() {
+        let mine = crate::cfg::filled_for_test().with_access("read_write");
+        assert_eq!(tightened(&mine, crate::wire::Ceiling::Full).access(), "read_write", "та сторона не запрещает — своё слово цело");
+        assert_eq!(tightened(&mine, crate::wire::Ceiling::ReadOnly).access(), "read_only", "запретила та сторона — запрет и у ребёнка");
+
+        let locked = crate::cfg::filled_for_test().with_access("read_only");
+        assert_eq!(tightened(&locked, crate::wire::Ceiling::Full).access(), "read_only", "чужое «можно» своего запрета не отменяет");
+    }
 
     /// Транспорт выбирает ОДНА ось — где база, и у всех пяти сочетаний ответ назван здесь целиком.
     ///
@@ -772,7 +806,7 @@ mod tests {
         // мост обязан ответить сам, иначе Zed сочтёт сервер упавшим.
         let (mine, theirs) = tokio::io::duplex(64 * 1024);
         let serve = Serve::new(&filled(), &kit_in(tempdir()), Arc::new(|_| {}), ports(), Arc::new(AtomicBool::new(true)));
-        let task = serve.serve(Served::Mcp(McpServer::OneC), theirs);
+        let task = serve.serve(Served::Mcp(McpServer::OneC), theirs, crate::wire::Ceiling::Full);
         let reply = ask(mine, br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
         assert!(reply.contains("\"result\""), "{reply}");
         task.abort();

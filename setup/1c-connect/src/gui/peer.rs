@@ -328,6 +328,11 @@ struct Talk {
     /// Вожжи — только у ПРИНИМАЮЩЕЙ стороны: ими отзыв рвёт поток, который держит та. У звонящей стороны поток свой, и рвёт
     /// она его сама, когда кончает круг, — здесь `None`, и `cut` такой разговор не трогает.
     reins: Option<Reins>,
+    /// Потолок записи ТОЙ машины, услышанный в `hello` ЭТОГО разговора.
+    ///
+    /// Живёт рядом с допуском нарочно: обе величины приходят из одного кадра и кончаются вместе с потоком. Книга хранит своё
+    /// (`Party::peer_write`) для показа в карточке, а потоку вызовов нужна живая — та, что эта сторона объявила сейчас.
+    peer: crate::wire::Ceiling,
 }
 
 /// Живые разговоры принимающей стороны — по СТОРОНЕ, а не по карточке.
@@ -359,9 +364,9 @@ struct Live {
 impl Live {
     /// Запомнить разговор. Возвращает его номер — им он и снимается
     /// (`forget`).
-    fn remember(&self, peer: EndpointId, card: Option<CardId>, reins: Option<Reins>) -> u64 {
+    fn remember(&self, peer: EndpointId, card: Option<CardId>, reins: Option<Reins>, theirs: Ceiling) -> u64 {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, card, reins });
+        self.talks.lock().unwrap_or_else(|e| e.into_inner()).entry(peer).or_default().push(Talk { id, card, reins, peer: theirs });
         id
     }
 
@@ -377,9 +382,9 @@ impl Live {
     /// который на этой ветке ловили шесть раз. Здесь — только имя правила, данное тому, что и так есть.
     ///
     /// Неопознанный разговор (`card: None`) допуска не даёт никому: карточку, о которой не договорились, назвать нечем.
-    fn admits(&self, peer: EndpointId, card: &CardId) -> bool {
+    fn admits(&self, peer: EndpointId, card: &CardId) -> Option<Ceiling> {
         let held = self.talks.lock().unwrap_or_else(|e| e.into_inner());
-        held.get(&peer).is_some_and(|rows| rows.iter().any(|t| t.card.as_ref() == Some(card)))
+        held.get(&peer)?.iter().find(|t| t.card.as_ref() == Some(card)).map(|t| t.peer)
     }
 
     /// Снять разговор с учёта — присмотр за ним кончился. Уже снятого
@@ -772,7 +777,9 @@ async fn one_round(
             let watch = Watch {
                 live,
                 peer: channel.peer(),
-                id: live.remember(channel.peer(), Some(card.id.clone()), None),
+                // Потолок той стороны она объявила в `hello_ok`, и здесь он уже сложен с нашими двумя мерами (`write` выше):
+                // в учёт кладём именно её слово, чтобы мост спросил три меры, а не две.
+                id: live.remember(channel.peer(), Some(card.id.clone()), None, if write { Ceiling::Full } else { Ceiling::ReadOnly }),
                 _answering: Falls(tokio::spawn(answer_calls(
                     channel.clone(),
                     tx.clone(),
@@ -997,10 +1004,11 @@ async fn serve_calls(
         refuse(control, crate::wire::code::NO_BASE, NO_SUCH_BASE).await;
         return;
     };
-    if !live.admits(peer, card.id()) {
+    // Допуск и потолок той машины — ОДИН ответ: обе величины пришли из одного кадра `hello` и кончаются вместе с потоком.
+    let Some(theirs) = live.admits(peer, card.id()) else {
         refuse(control, crate::wire::code::NOT_ALLOWED, NOT_HELD).await;
         return;
-    }
+    };
     let Some(open) = serving.now() else {
         refuse(control, crate::wire::code::MCP_OFF, MCP_OFF_HERE).await;
         return;
@@ -1024,7 +1032,7 @@ async fn serve_calls(
     // `drop(rt)` сеанса не может: без этого «выключил доступ к 1С» значило бы «выключил для новых», а уже идущие вызовы доживали бы
     // с живым ребёнком под ними. Снятие самого потока вызовов — то же самое с другой стороны: `Falls` роняет задачу своим `Drop`,
     // куда бы эта функция ни вышла, включая `abort` снаружи (находка проверки безопасности 11.11, вторая и четвёртая волны).
-    let mut task = Falls(open.serve().serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send)));
+    let mut task = Falls(open.serve().serve(crate::session::Served::Mcp(kind), tokio::io::join(recv, send), theirs));
     tokio::select! {
         _ = &mut task.0 => {}
         () = open.until_stopped() => {}
@@ -1162,7 +1170,8 @@ async fn answering(
     // когда-то разрешили.
     say(&tx, Kind::Ok, format!("«{shown}»: подключено, {}", access_word(write)));
     let (reins, mut recv) = channel::reins(control);
-    let id = live.remember(peer, served.as_ref().map(|c| c.id().clone()), Some(reins));
+    let id =
+        live.remember(peer, served.as_ref().map(|c| c.id().clone()), Some(reins), if write { Ceiling::Full } else { Ceiling::ReadOnly });
     // Щель между решением человека и записью вожжей: спрашиваем допуск ЕЩЁ
     // РАЗ, уже после записи. Отзыв, случившийся в эти микросекунды, либо
     // увидит наши вожжи и порвёт поток сам, либо не увидит — и тогда его
@@ -1455,7 +1464,7 @@ mod tests {
     // Именованный список, а не `super::*`: в области видимости этого модуля
     // живёт `gpui::*`, и его `test` перебил бы `#[test]` стандартной
     // библиотеки (тот же приём, что у тестов `panel.rs`).
-    use super::{cut_these, keep_holding, Falls, Live, Watch};
+    use super::{cut_these, keep_holding, Ceiling, Falls, Live, Watch};
     use crate::cfg::CardId;
 
     /// Разговоры по карточкам: пустая строка — разговор, чья карточка не
@@ -1550,18 +1559,18 @@ mod tests {
         let watch = Watch {
             live: &live,
             peer,
-            id: live.remember(peer, Some(card.clone()), None),
+            id: live.remember(peer, Some(card.clone()), None, Ceiling::Full),
             _answering: Falls(tokio::spawn(async move {
                 let _done = done;
                 // Задача, которая сама никогда не кончается: так же ведёт себя приём входящих, пока канал жив.
                 futures::future::pending::<()>().await
             })),
         };
-        assert!(live.admits(peer, &card), "присмотр стоит — вызовы обслуживаются");
+        assert!(live.admits(peer, &card).is_some(), "присмотр стоит — вызовы обслуживаются");
 
         drop(watch);
 
-        assert!(!live.admits(peer, &card), "сняли присмотр — сняли и допуск");
+        assert!(live.admits(peer, &card).is_none(), "сняли присмотр — сняли и допуск");
         assert!(ended.await.is_err(), "задача снята, а не отвязана: её конец уронен вместе с ней");
     }
 
@@ -1576,18 +1585,18 @@ mod tests {
         // Ключ из семени, а не случайный: тесту нужен только различимый ключ.
         let peer = iroh::SecretKey::from_bytes(&[3u8; 32]).public();
         let card: CardId = "b1".into();
-        let held = live.remember(peer, Some(card.clone()), None);
+        let held = live.remember(peer, Some(card.clone()), None, Ceiling::Full);
 
-        assert!(live.admits(peer, &card), "поток держится — вызовы по этой карточке обслуживаются");
+        assert!(live.admits(peer, &card).is_some(), "поток держится — вызовы по этой карточке обслуживаются");
         assert!(live.alive(peer, held), "и сам разговор на учёте");
         // Отзыв этой карточки резать нечего: вожжей у разговора нет, и в список на снятие он не попадает.
         assert!(live.cut(peer, &card).is_empty(), "рвать нечем — поток держит сама звонящая сторона");
-        assert!(!live.admits(peer, &card), "а с учёта он при этом снят: допуск кончился вместе с присмотром");
+        assert!(live.admits(peer, &card).is_none(), "а с учёта он при этом снят: допуск кончился вместе с присмотром");
 
         // Круг кончился — звонящая снимает запись сама, и второй раз снимать нечего.
-        let again = live.remember(peer, Some(card.clone()), None);
+        let again = live.remember(peer, Some(card.clone()), None, Ceiling::Full);
         assert!(live.forget(peer, again).is_none(), "вожжей не было — и возвращать нечего");
-        assert!(!live.admits(peer, &card), "после круга допуска нет");
+        assert!(live.admits(peer, &card).is_none(), "после круга допуска нет");
     }
 
     /// сам звал `cut_these` и сам же повторял у себя удаление с конца. То
@@ -1657,7 +1666,7 @@ mod tests {
         for (control, card) in got.into_iter().zip([Some("Ромашка"), None, Some("Василёк")]) {
             let (held, ear) = reins(control);
             ears.push(ear);
-            ids.push(live.remember(peer, card.map(CardId::from), Some(held)));
+            ids.push(live.remember(peer, card.map(CardId::from), Some(held), Ceiling::Full));
         }
         assert!(ids.iter().all(|id| live.alive(peer, *id)), "все три на учёте");
 

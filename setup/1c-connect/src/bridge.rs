@@ -325,6 +325,15 @@ pub struct Rules {
     /// список и исполнять их здесь же: `true` у vrunner-mcp (778N), `false`
     /// у mcp-1c (777N) — там нет ни белого списка инструментов, ни наших.
     pub inject: bool,
+    /// Потолок записи ТОЙ машины — третья мера права записи, и до 11.11 она до ребёнка не доезжала вовсе.
+    ///
+    /// **Запрет любой стороны сильнее разрешения другой** (решение владельца 1.11). Две свои меры мост читает у настроек на каждый
+    /// вызов (`Cfg::may_write_now` — потолок машины и слово карточки), а эту ему сказать может только тот, кто её слышал: сторона,
+    /// принявшая `hello`. Прежде она складывалась, показывалась человеку и писалась в книгу — но пишущие инструменты у ребёнка ею
+    /// не гасились, то есть машина, объявившая у себя «только чтение», получала их и могла писать.
+    ///
+    /// `Ceiling::Full` — «та сторона ничего не запрещает»: так выглядит и МЕСТНЫЙ агент, у которого второй стороны нет вовсе.
+    pub peer: crate::wire::Ceiling,
 }
 
 impl Rules {
@@ -337,7 +346,7 @@ impl Rules {
         configurator_running: Arc<dyn Fn() -> usize + Send + Sync>,
         enabled: Arc<AtomicBool>,
     ) -> Rules {
-        Rules { live, rebuild: Some(rebuild), tools_dir, configurator_running, enabled, inject: true }
+        Rules { live, rebuild: Some(rebuild), tools_dir, configurator_running, enabled, inject: true, peer: crate::wire::Ceiling::Full }
     }
 
     /// Мост 777N: `mcp-1c`. Голый проброс — ни белого списка инструментов,
@@ -353,6 +362,7 @@ impl Rules {
             configurator_running: Arc::new(|| 0),
             enabled,
             inject: false,
+            peer: crate::wire::Ceiling::Full,
         }
     }
 }
@@ -1152,7 +1162,9 @@ async fn handle_request(
     // — запрет. `cfg` — уже свежий снимок на этот самый вызов
     // (`rules.live.get()` выше, не захваченный при старте соединения),
     // поэтому переключение потолка само подхватывается без рестарта моста.
-    let read_only = !cfg.may_write_now();
+    // Три меры, и выражение одно на всю программу (`wire::folded_write`): свои две — живым снимком настроек, третья — потолок
+    // той машины, услышанный в `hello` и положенный сюда тем, кто его слышал (`Rules::peer`).
+    let read_only = !crate::wire::folded_write(cfg.may_write_now(), rules.peer);
     let allowed: &[String] = if off || read_only { &empty } else { &tools };
     let defaults = connection_args(&cfg);
     match jsonrpc::route_request_with(&line, allowed, &defaults) {
@@ -2210,6 +2222,28 @@ mod tests {
     /// текстом про потолок — не про выключенные MCP (`DISABLED_TEXT`) и не
     /// про «выключен в 1c-connect.toml» ([host] tools): причина другая, и
     /// разработчик чинит другое. `project_status` (git, не база) под тем же
+    /// **Потолок ТОЙ машины гасит пишущие инструменты так же, как свой** (дыра контракта, найдена 11.11).
+    ///
+    /// Запрет любой стороны сильнее разрешения другой (решение владельца 1.11). Своя машина здесь разрешает запись — и до этой
+    /// правки чужой запрет до ребёнка не доезжал вовсе: он складывался, показывался человеку в карточке и писался в книгу, а
+    /// пишущий инструмент исполнялся как ни в чём не бывало.
+    #[tokio::test]
+    async fn the_other_machines_ceiling_refuses_a_writing_tool_too() {
+        // Машина СВОЯ разрешает: потолок read_write, карточка не запрещает.
+        let mut rules = rules(&["cf_load"], 0);
+        rules.peer = crate::wire::Ceiling::ReadOnly;
+        let (replies, raw, _) = talk(
+            ("BRIDGE_SCRIPT", "1"),
+            rules,
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"cf_load","arguments":{}}}"#],
+        )
+        .await;
+        assert_eq!(replies.len(), 1, "{raw}");
+        assert_eq!(replies[0]["result"]["isError"], true, "{raw}");
+        assert_eq!(replies[0]["result"]["content"][0]["text"].as_str().unwrap(), VRUNNER_CEILING_TEXT, "{raw}");
+        assert!(!raw.contains("child ran"), "до ребёнка вызов доходить не должен: {raw}");
+    }
+
     /// потолком ИСПОЛНЯЕТСЯ — круг исправления, находка владельца 2.11:
     /// граница потолка — данные в базе, а не любая запись.
     #[tokio::test]

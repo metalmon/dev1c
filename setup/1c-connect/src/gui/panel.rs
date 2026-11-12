@@ -2277,203 +2277,116 @@ fn add_link(window: &mut Window, cx: &mut App, role: &str) {
 /// перевязки запись в файл уходила верно, а открытая карточка эту правку
 /// не видела вовсе, хотя `cx.refresh_windows()` ниже честно перерисовывала
 /// окно — тем же самым, прежним видом.
-fn set_card_profile(cx: &mut App, name: &str, profile: &'static str) {
-    if let Err(e) = gui::set_profile(cx.global_mut::<Ui>(), name, profile) {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+/// Вопрос карточки, на который человек ответил переключателем.
+///
+/// Вопросов пять, и три из них — оси состава полей (`cfg::shown_fields`), поэтому после записи снимок карточки обязан
+/// перевязываться (`sync_card_topology`), иначе щелчок был, а вид карточки прежний.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Question {
+    /// «Это соединение» — три ответа одного переключателя: «Всё на одной машине», «Принимаю подключения», «Подключаюсь сам».
+    Topology,
+    /// «Где база».
+    BaseHere,
+    /// Режим отдельной дверью (его зовёт и сам ответ про топологию).
+    Mode,
+    /// «Публикация базы».
+    Publication,
+    /// Набор инструментов агента.
+    Profile,
+}
+
+/// Каким путём ложится ответ. Шагов бывает два — и только у одного случая (см. `axis_plan`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Точечная запись названных ключей ОДНОЙ правкой файла: между ними человек не видит половинчатых настроек.
+    Keys(Vec<(&'static str, &'static str)>),
+    /// Публикация точечно — у неё своя дверь: она ещё и снимает выведенный нами адрес (`save::set_publication`).
+    Publication(&'static str),
+    /// Режим ТЕКУЩЕЙ карточки — через последовательность трея: отказ под идущей операцией, вопрос про гашение обслуживания,
+    /// запись, перецикл сеанса, значок.
+    ModeUnderSession(&'static str),
+    /// Публикация ТЕКУЩЕЙ карточки — тем же путём и по той же причине: это действие над живой базой.
+    PublicationUnderSession(&'static str),
+}
+
+/// Что сделает ответ на вопрос карточки — РЕШЕНИЕ, отделённое от исполнения.
+///
+/// Прежде оно жило в телах пяти функций с `&mut App`, и ни одна из них не была достижима ни одним тестом: `&mut App` шва не даёт,
+/// а вынесение «чистой половины» рядом с каждой лишь переносило непроверяемую поверхность. Три правила, записанные в этих телах
+/// прозой, доказательства не имели вовсе — а каждое из них уже один раз стоило дефекта:
+///
+/// 1. **Роль — всегда точечная запись**: сама роль не держит ни сеанса, ни транспорта.
+/// 2. **Режим и публикация ТЕКУЩЕЙ карточки — только через трей** (Important 3 ревью круга починки 1): иначе карточка меняет
+///    транспорт под идущим сеансом, не трогая ни его, ни замок, ни значок.
+/// 3. **Ответ «Всё на одной машине» у нетекущей карточки задаёт ОБЕ оси одной записью** (находка владельца 9.11: писался только
+///    `mode`, а `base_here` оставался прежним — локальный режим без переключателя «Где база» молча считался «базой на той
+///    стороне»). И уход из «одной машины» у нетекущей — тоже одной записью (задача 4 плана «Карточка публикации и удаление»).
+///
+/// У ТЕКУЩЕЙ карточки уход из «одной машины» — ДВА шага, а не одна запись, и слить их нельзя (исключение из того же ruling'а):
+/// роль пишется точечно, а режим обязан пройти трей.
+pub fn axis_plan(q: Question, answer: &'static str, is_current: bool, was_local: bool) -> Vec<Step> {
+    match q {
+        Question::Profile => vec![Step::Keys(vec![("profile", answer)])],
+        // `base_here` транспорта не несёт (в отличие от режима) — точечная запись годится и у текущей карточки.
+        Question::BaseHere => vec![Step::Keys(vec![("base_here", answer)])],
+        Question::Mode if is_current => vec![Step::ModeUnderSession(answer)],
+        Question::Mode => vec![Step::Keys(vec![("mode", answer)])],
+        Question::Publication if is_current => vec![Step::PublicationUnderSession(answer)],
+        Question::Publication => vec![Step::Publication(answer)],
+        Question::Topology if answer == "local" && is_current => vec![Step::ModeUnderSession("local")],
+        Question::Topology if answer == "local" => vec![Step::Keys(vec![("mode", "local"), ("base_here", "true")])],
+        Question::Topology if is_current && was_local => vec![Step::Keys(vec![("role", answer)]), Step::ModeUnderSession("tunnel")],
+        Question::Topology if is_current => vec![Step::Keys(vec![("role", answer)])],
+        Question::Topology if was_local => vec![Step::Keys(vec![("role", answer), ("mode", "tunnel")])],
+        Question::Topology => vec![Step::Keys(vec![("role", answer)])],
     }
-    sync_card_topology(cx, name);
+}
+
+/// Исполнить план. ОДНА дверь на все пять вопросов — прежде их было пять, и правило «после точечной записи перевязать снимок»
+/// каждая повторяла у себя (а `set_card_mode` на отказе трея ещё и забывала перерисовать окно — Minor 2 круга починки 1).
+///
+/// Отказ трея называет, что именно идёт (`tray::busy_refusal`), и перерисовывает окно сам: на этой ветви больше никто не
+/// перерисовывает, и человек щёлкнул бы впустую. На УДАЧНОМ пути трея перевязка и перерисовка — его собственные, и звать их
+/// второй раз нечего, поэтому шаг трея всегда последний.
+fn perform_axis(cx: &mut App, name: &str, plan: Vec<Step>) {
+    for step in plan {
+        let wrote = match &step {
+            Step::Keys(keys) => gui::set_keys(cx.global_mut::<Ui>(), name, keys),
+            Step::Publication(answer) => gui::set_publication(cx.global_mut::<Ui>(), name, answer),
+            Step::ModeUnderSession(mode) => {
+                if !gui::tray::request_current_mode_change(cx, mode) {
+                    let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену режима");
+                    gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+                    cx.refresh_windows();
+                }
+                return;
+            }
+            Step::PublicationUnderSession(answer) => {
+                if !gui::tray::request_current_publication_change(cx, answer) {
+                    let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену публикации");
+                    gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
+                    cx.refresh_windows();
+                }
+                return;
+            }
+        };
+        if let Err(e) = wrote {
+            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
+            cx.refresh_windows();
+            return;
+        }
+        sync_card_topology(cx, name);
+    }
     cx.refresh_windows();
 }
 
-/// Сменить ответ «Это соединение» у открытой карточки — три ответа одного
-/// переключателя (Шаг 4 задачи 16: «один переключатель на три ответа, а не
-/// два переключателя рядом»). Роль — ВСЕГДА простая точечная запись
-/// (`gui::set_role`): сама роль сегодня не держит ни сеанса, ни транспорта
-/// (поиск по `role()` в проводке и замке у круга починки 1 это подтвердил),
-/// и смены сеанса не просит ни в каком случае.
-///
-/// Режим — другая ось: третий ответ («Всё на одной машине») и уход из него
-/// у первых двух меняют ТРАНСПОРТ. Если это соединение сейчас ТЕКУЩЕЕ,
-/// смена режима обязана пройти тем же путём, что у трея (`set_card_mode`,
-/// Important 3 ревью круга починки 1: иначе карточка меняла бы транспорт
-/// под идущим сеансом, не трогая ни его, ни замок, ни значок) — у прочих
-/// карточек сеанса нет, и там остаётся простая точечная запись.
-///
-/// **Роль и режим — ОДНОЙ записью, когда это не текущая карточка** (задача 4
-/// плана «Карточка публикации и удаление»): до этой задачи уход из «одной
-/// машины» у нетекущей карточки писал их двумя записями подряд
-/// (`gui::set_role`, затем `set_card_mode` → `gui::set_mode`) — отложенная
-/// мелочь прошлой ветки, та же беда, которую задача правит и у будущего
-/// писателя публикации. `gui::set_keys` читает файл один раз и пишет оба
-/// ключа одним проходом — между ними человек больше не видит половинчатый
-/// файл.
-///
-/// **У ТЕКУЩЕЙ карточки это две разные последовательности, не одна правка,**
-/// и сливать их в одну запись нельзя (исключение из ruling'а задачи 4): роль
-/// — простая точечная запись, а режим обязан пройти тревной
-/// (`set_card_mode` → `tray::request_current_mode_change` — замок, вопрос о
-/// гашении обслуживания, запись, перецикл сеанса, значок). Запись роли здесь
-/// остаётся отдельной, своей, как и раньше.
-fn set_card_topology_kind(cx: &mut App, name: &str, answer: &'static str) {
-    if answer == "local" {
-        let is_current = cx.global::<Ui>().cfg.current().name == name;
-        if is_current {
-            // Текущая карточка: режим меняет транспорт под сеансом (или
-            // могущим быть живым) и обязан пройти тревную последовательность
-            // (`set_card_mode` → `tray::request_current_mode_change`), а не
-            // точечную запись — Important 3 ревью круга починки 1 задачи 16,
-            // та же развилка, что ниже у роли. `base_here` эта дверь не
-            // пишет (сливать их в одну запись здесь нельзя по тому же
-            // ruling'у задачи 4, что и у роли с режимом ниже) — от
-            // застрявшего значения экран защищён отдельно (`shown_fields`,
-            // `base_fields_note`).
-            set_card_mode(cx, name, "local");
-            return;
-        }
-        // Нетекущая карточка: сеанса нет, и ответ «Всё на одной машине» —
-        // это ответ на вопрос «Это соединение», задающий ОБЕ оси сразу,
-        // одной записью (находка владельца 9.11: до этой правки писался
-        // только `mode`, а `base_here` оставался прежним — локальный режим
-        // без переключателя «Где база» на экране продолжал молча считаться
-        // «базой на той стороне»).
-        if let Err(e) = gui::set_keys(cx.global_mut::<Ui>(), name, &[("mode", "local"), ("base_here", "true")]) {
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-            cx.refresh_windows();
-            return;
-        }
-        sync_card_topology(cx, name);
-        cx.refresh_windows();
-        return;
-    }
-    let is_current = cx.global::<Ui>().cfg.current().name == name;
-    let was_local = cx.global::<Ui>().cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false);
-    if is_current {
-        if let Err(e) = gui::set_role(cx.global_mut::<Ui>(), name, answer) {
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-            cx.refresh_windows();
-            return;
-        }
-        sync_card_topology(cx, name);
-        // «Код следует из первого ответа сам» (спека) — роль записана, и
-        // если карточка была «на одной машине», уходим из этого режима тем
-        // же путём, что и для прямого ответа «Всё на одной машине» (см.
-        // выше, тревная последовательность — отдельно, она не часть этой
-        // записи).
-        if was_local {
-            set_card_mode(cx, name, "tunnel");
-        } else {
-            cx.refresh_windows();
-        }
-        return;
-    }
-    // Нетекущая карточка: сеанса нет, обе правки — просто точечная запись,
-    // и роль с режимом (если уходим из «одной машины») — одной записью.
-    let result = if was_local {
-        gui::set_keys(cx.global_mut::<Ui>(), name, &[("role", answer), ("mode", "tunnel")])
-    } else {
-        gui::set_role(cx.global_mut::<Ui>(), name, answer)
+/// Ответ на вопрос карточки: решение считается (`axis_plan`), потом исполняется (`perform_axis`). Одна дверь на все пять.
+fn answer_card(cx: &mut App, name: &str, q: Question, answer: &'static str) {
+    let (is_current, was_local) = {
+        let ui = cx.global::<Ui>();
+        (ui.cfg.current().name == name, ui.cfg.by_name(name).map(|c| c.mode == "local").unwrap_or(false))
     };
-    if let Err(e) = result {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-        cx.refresh_windows();
-        return;
-    }
-    sync_card_topology(cx, name);
-    cx.refresh_windows();
-}
-
-/// Сменить режим именованной карточки на `mode`. Критическая развилка
-/// Important 3 ревью круга починки 1 задачи 16: у ТЕКУЩЕГО соединения смена
-/// режима — это смена транспорта под живым (или могущим быть живым)
-/// сеансом, и обязана пройти всю последовательность трея
-/// (`gui::tray::request_current_mode_change` — отказ под операцией, вопрос про
-/// гашение обслуживания, запись, перецикл сеанса, тревный значок). У
-/// прочих карточек сеанса нет и гасить нечего — там остаётся простая
-/// точечная запись (`gui::set_mode`), тем же приёмом, что у роли.
-fn set_card_mode(cx: &mut App, name: &str, mode: &'static str) {
-    let is_current = cx.global::<Ui>().cfg.current().name == name;
-    if is_current {
-        if !gui::tray::request_current_mode_change(cx, mode) {
-            // Круг починки 5 задачи 16: тот же счёт (`mode_change_blocked`)
-            // теперь включает и публикацию — слово в отказе обязано
-            // называть её, а не всегда «операцию» (`busy_now_word`, тот же,
-            // что и у «Сделать текущим»). Фраза — одна на все двери
-            // (`tray::busy_refusal`), и действие в ней теперь названо: до
-            // сведения здесь стояло «повторите.» без того, что повторять.
-            let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену режима");
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
-            // Minor 2 круга починки 1 задачи 5: на этой ветви окно не
-            // перерисовывает никто (`apply_mode` до неё не доходит), и сказанное
-            // появлялось бы только на следующем кадре — человек щёлкнул, и по
-            // видимости ничего не произошло. Тот же дефект был у публикации
-            // (`set_card_publication`), и починен он в обоих местах, а не в том,
-            // которое заметили.
-            cx.refresh_windows();
-        }
-        // На удачном пути `request_current_mode_change`/`apply_mode` сами
-        // перевязывают `self.original` (`sync_card_topology`) и перерисовывают
-        // окно — здесь второй раз звать нечего.
-        return;
-    }
-    if let Err(e) = gui::set_mode(cx.global_mut::<Ui>(), name, mode) {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-    }
-    sync_card_topology(cx, name);
-    cx.refresh_windows();
-}
-
-/// Сменить ответ «Где база» у открытой карточки. Удача молчит — тот же
-/// приём, что `set_card_profile`: состав полей карточки меняется на экране
-/// сам, строка в журнал к нему ничего не добавила бы. `base_here` не несёт
-/// транспорта (в отличие от `mode`) — простая точечная запись годится и у
-/// текущей карточки.
-fn set_card_base_here(cx: &mut App, name: &str, base_here: bool) {
-    if let Err(e) = gui::set_base_here(cx.global_mut::<Ui>(), name, base_here) {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-    }
-    sync_card_topology(cx, name);
-    cx.refresh_windows();
-}
-
-/// Сменить ответ «Публикация базы» у открытой карточки (задача 5 плана
-/// «Карточка публикации и удаление»). Развилка — та же, что у `set_card_mode`,
-/// и по той же причине: публикация у ТЕКУЩЕГО соединения — это действие над
-/// живой базой (уходя в «публикует платформа 1С», гасим свой httpd и убираем
-/// свой дескриптор), и она обязана пройти всю последовательность трея
-/// (`gui::tray::request_current_publication_change` — отказ под идущей
-/// операцией, вопрос про смену базы, запись, перецикл сеанса). У прочих
-/// карточек сеанса нет и гасить нечего — там остаётся точечная запись
-/// (`gui::set_publication`, она же снимает выведенный нами адрес).
-///
-/// Перевязка снимка карточки после точечной записи обязательна
-/// (`sync_card_topology`): публикация — такая же ось состава полей, как режим
-/// (`shown_fields`), и без неё щелчок был бы, а вид карточки не изменился бы.
-/// У текущей карточки её делает сам `tray::apply_publication`.
-fn set_card_publication(cx: &mut App, name: &str, publication: &'static str) {
-    let is_current = cx.global::<Ui>().cfg.current().name == name;
-    if is_current {
-        if !gui::tray::request_current_publication_change(cx, publication) {
-            // Отказ называет, что именно идёт (`busy_now_word`, тот же счёт и
-            // то же слово, что у режима и у «Сделать текущим»), и одной
-            // фразой на все двери (`tray::busy_refusal`).
-            let why = gui::tray::busy_refusal(cx.global::<Ui>(), "смену публикации");
-            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: why });
-            // Minor 2 круга починки 1: отказ — единственная ветвь, где НИКТО
-            // не перерисовывает окно за нас (на удачном пути это делает
-            // `apply_publication`), и без этой строки сказанное появлялось бы
-            // только на следующем кадре — то есть по видимости не появлялось
-            // бы вовсе: человек щёлкнул, и ничего не произошло.
-            cx.refresh_windows();
-        }
-        // На удачном пути перевязку снимка и перерисовку делает сам
-        // `apply_publication` — второй раз звать нечего.
-        return;
-    }
-    if let Err(e) = gui::set_publication(cx.global_mut::<Ui>(), name, publication) {
-        gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: e });
-    }
-    sync_card_topology(cx, name);
-    cx.refresh_windows();
+    perform_axis(cx, name, axis_plan(q, answer, is_current, was_local));
 }
 
 /// Перевязать `self.original` открытой карточки на ПЯТЬ осей — `role`,
@@ -3473,7 +3386,8 @@ impl Panel {
                 .into_iter()
                 .map(|profile| {
                     let name = name.clone();
-                    let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_profile(cx, &name, profile));
+                    let act: parts::Act =
+                        std::rc::Rc::new(move |_: &mut Window, cx: &mut App| answer_card(cx, &name, Question::Profile, profile));
                     (SharedString::from(profile_label(profile)), act)
                 })
                 .collect(),
@@ -3514,7 +3428,7 @@ impl Panel {
                             let [dial, accept] = link::onboarding_answers();
                             for (label, answer) in [link::LOCAL_ANSWER, accept, dial] {
                                 let name = name.clone();
-                                menu = menu.item(parts::menu_item(label, move |_, cx| set_card_topology_kind(cx, &name, answer)));
+                                menu = menu.item(parts::menu_item(label, move |_, cx| answer_card(cx, &name, Question::Topology, answer)));
                             }
                             parts::menu(Slot::Field, menu)
                         }),
@@ -3546,7 +3460,9 @@ impl Panel {
                     .copied()
                     .map(|here| {
                         let name = name.clone();
-                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_base_here(cx, &name, here));
+                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                            answer_card(cx, &name, Question::BaseHere, if here { "true" } else { "false" })
+                        });
                         (SharedString::from(base_here_label(here)), act)
                     })
                     .collect(),
@@ -3611,8 +3527,9 @@ impl Panel {
                     .into_iter()
                     .map(|(words, publication)| {
                         let name = name.clone();
-                        let act: parts::Act =
-                            std::rc::Rc::new(move |_: &mut Window, cx: &mut App| set_card_publication(cx, &name, publication));
+                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                            answer_card(cx, &name, Question::Publication, publication)
+                        });
                         (SharedString::from(words), act)
                     })
                     .collect(),
@@ -4699,9 +4616,76 @@ impl Render for Panel {
 
 #[cfg(test)]
 mod tests {
+
+    use super::{Question, Step};
+
+    /// Что делает ответ на вопрос карточки — все пять вопросов и обе развилки текущей карточки.
+    ///
+    /// До 12.11 эти правила жили прозой в телах пяти функций с `&mut App`, ни одна из которых не была достижима ни одним тестом.
+    /// Каждое из трёх правил уже стоило дефекта, и ни одно не имело доказательства:
+    ///
+    /// 1. роль — всегда точечная запись (она не держит ни сеанса, ни транспорта);
+    /// 2. режим и публикация ТЕКУЩЕЙ карточки — только через трей (Important 3 ревью круга починки 1: иначе транспорт меняется
+    ///    под идущим сеансом, не трогая ни его, ни замок, ни значок);
+    /// 3. «Всё на одной машине» у нетекущей карточки задаёт ОБЕ оси одной записью (находка владельца 9.11: писался только
+    ///    `mode`, а `base_here` оставался прежним — и локальный режим молча считался «базой на той стороне»).
+    #[test]
+    fn the_answer_to_a_card_question_is_one_plan() {
+        let keys = |pairs: &[(&'static str, &'static str)]| Step::Keys(pairs.to_vec());
+
+        // Правило 3: обе оси одной записью, и человек не видит половинчатых настроек между ними.
+        assert_eq!(
+            axis_plan(Question::Topology, "local", false, false),
+            vec![keys(&[("mode", "local"), ("base_here", "true")])],
+            "«Всё на одной машине» у нетекущей карточки задаёт ОБЕ оси"
+        );
+        assert_eq!(
+            axis_plan(Question::Topology, "accept", false, true),
+            vec![keys(&[("role", "accept"), ("mode", "tunnel")])],
+            "уход из «одной машины» у нетекущей — тоже одной записью"
+        );
+
+        // Правило 2: у ТЕКУЩЕЙ карточки режим идёт треем, а не точечной записью.
+        assert_eq!(axis_plan(Question::Topology, "local", true, false), vec![Step::ModeUnderSession("local")]);
+        assert_eq!(axis_plan(Question::Mode, "tunnel", true, false), vec![Step::ModeUnderSession("tunnel")]);
+        assert_eq!(axis_plan(Question::Publication, "webserver", true, false), vec![Step::PublicationUnderSession("webserver")]);
+
+        // И те же два вопроса у НЕтекущей — точечно: сеанса там нет, гасить нечего.
+        assert_eq!(axis_plan(Question::Mode, "tunnel", false, false), vec![keys(&[("mode", "tunnel")])]);
+        assert_eq!(
+            axis_plan(Question::Publication, "webserver", false, false),
+            vec![Step::Publication("webserver")],
+            "у публикации своя дверь: она ещё и снимает выведенный нами адрес"
+        );
+
+        // Правило 1 и исключение из ruling'а: у ТЕКУЩЕЙ уход из «одной машины» — ДВА шага, роль точечно, режим треем.
+        assert_eq!(
+            axis_plan(Question::Topology, "dial", true, true),
+            vec![keys(&[("role", "dial")]), Step::ModeUnderSession("tunnel")],
+            "слить их в одну запись нельзя: роль точечная, а режим обязан пройти трей"
+        );
+        assert_eq!(axis_plan(Question::Topology, "dial", true, false), vec![keys(&[("role", "dial")])], "роль — всегда точечно");
+        assert_eq!(axis_plan(Question::Topology, "dial", false, false), vec![keys(&[("role", "dial")])]);
+
+        // Оси без транспорта точечны всегда, в том числе у текущей карточки.
+        for current in [true, false] {
+            assert_eq!(axis_plan(Question::BaseHere, "false", current, false), vec![keys(&[("base_here", "false")])]);
+            assert_eq!(axis_plan(Question::Profile, "developer", current, false), vec![keys(&[("profile", "developer")])]);
+        }
+
+        // Шаг трея — всегда последний: на удачном пути он сам перевязывает снимок и перерисовывает окно.
+        for plan in [
+            axis_plan(Question::Topology, "dial", true, true),
+            axis_plan(Question::Mode, "tunnel", true, false),
+            axis_plan(Question::Publication, "auto", true, false),
+        ] {
+            let tray = |st: &Step| matches!(st, Step::ModeUnderSession(_) | Step::PublicationUnderSession(_));
+            assert!(plan.iter().position(tray).map(|i| i + 1 == plan.len()).unwrap_or(true), "{plan:?}");
+        }
+    }
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, base_fields_note, base_here_answers, blind_code_note, can_save, card,
-        delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
+        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_fields_note, base_here_answers, blind_code_note, can_save,
+        card, delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
         issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
         project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
         save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,

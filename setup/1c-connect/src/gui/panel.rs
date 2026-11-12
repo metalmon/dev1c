@@ -5235,6 +5235,67 @@ mod tests {
         assert!(adopt_needed(&hidden, &Draft::new(form.clone(), "local", "webserver"), &saved));
     }
 
+    /// **Закон 2 окна: на одном экране один предмет назван один раз.** Статус у заголовка не повторяется в подвале.
+    ///
+    /// Проверки у этого закона не было вовсе, и долг спеки сочетаний (строка 92) записан ровно про это: `shown_base_url`,
+    /// `need::missing`, `card` и `main_button` каждая по отдельности права и по отдельности проверена, а дефект живёт там, где
+    /// они встречаются НА ЭКРАНЕ. Здесь они впервые встречаются в тесте — по всем пяти сочетаниям и по всем состояниям связи.
+    ///
+    /// Это не весь закон: полная проверка размещения требует, чтобы экран был ЗНАЧЕНИЕМ (`Screen`), а он пока собирается прямо в
+    /// отрисовке. Но повтор заголовка в подвале — то нарушение, которое уже случалось, и оно теперь ловится.
+    #[test]
+    fn the_screen_names_each_thing_once() {
+        use crate::session::State;
+        let states = [
+            (State::Off, None),
+            (State::Connecting, None),
+            (State::Up { since: std::time::Instant::now() }, None),
+            (State::Off, Some("в комплекте нет mcp-1c".to_string())),
+        ];
+        let combos = [
+            ("local", "accept", true),
+            ("tunnel", "accept", true),
+            ("tunnel", "accept", false),
+            ("tunnel", "dial", true),
+            ("tunnel", "dial", false),
+        ];
+        for (mode, role, base_here) in combos {
+            for (link, gate) in &states {
+                let mut ui = Ui::for_test();
+                ui.cfg = crate::cfg::cfg_with(&["Ромашка"]);
+                {
+                    let c = ui.cfg.current_mut();
+                    c.mode = mode.into();
+                    c.role = role.into();
+                    c.base_here = base_here;
+                }
+                ui.link = link.clone();
+                ui.gate = gate.clone();
+
+                let head = card(None, &ui.link, mode, &ui.verdict, ui.gate.as_deref(), std::time::Instant::now()).title;
+                let foot = main_button(&ui, "Ромашка", Dirty::No);
+                let what = format!("{mode}/{role}/база здесь={base_here}, связь {link:?}");
+
+                // Заголовок — про состояние связи; подвал — про ДЕЙСТВИЕ. Одно слово на обоих местах значит, что человек читает
+                // один факт дважды и не понимает, какое из двух мест главное.
+                assert!(
+                    !foot.label.is_empty() || foot.act.is_none(),
+                    "{what}: у подвала либо есть действие с подписью, либо слот пуст (закон 1)"
+                );
+                if !foot.label.is_empty() {
+                    assert_ne!(foot.label, head.as_str(), "{what}: подпись подвала повторяет заголовок");
+                }
+                if let Some(why) = &foot.why {
+                    assert!(!why.contains(head.as_str()), "{what}: подсказка подвала повторяет заголовок: {why}");
+                }
+                // Закон 4: подпись называет ПРЕДМЕТ, а не отказ. «Нельзя», «не удалось» и «ошибка» — слова отказа.
+                for word in ["нельзя", "не удалось", "ошибка"] {
+                    assert!(!foot.label.to_lowercase().contains(word), "{what}: подпись подвала называет отказ: {}", foot.label);
+                }
+            }
+        }
+    }
+
     /// Черновик несёт ОСИ, под которыми его рисовали, — и состав полей сравнения берётся из них же.
     ///
     /// Прежде оси подавались дважды на каждом месте вызова: сперва в `host_of`, снимавший значения, потом в `fields_differ`,

@@ -2704,8 +2704,45 @@ pub fn host_of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Connectio
 /// само и может долго стоять без фокуса), заметна по разошедшейся кнопке, а
 /// не по молчаливой перезаписи. Второй системы учёта изменений, которая
 /// будет расходиться с первой, это не стоит.
-pub fn adopt_needed(file: &Connection, form: &Connection, saved: &Connection, mode: &str, publication: &str) -> bool {
-    fields_differ(file, saved, mode, publication) && !fields_differ(form, saved, mode, publication)
+/// Черновик открытой карточки: значения из полей окна ВМЕСТЕ с осями, под которыми их рисовали.
+///
+/// Оси (`mode`, `publication`) решают, какие поля на экране вообще есть (`shown_fields`), поэтому сравнивать черновик с
+/// сохранённым можно только зная их. Прежде их подавали ДВАЖДЫ на каждом месте вызова — сперва `host_of`, потом `fields_differ`,
+/// — и ничто не мешало подать разные пары: сравнение пошло бы по одному составу полей, а значения были бы сняты по другому.
+/// Молча и мимо глаз, потому что обе функции по отдельности правы.
+///
+/// Здесь они внутри, и разойтись им негде. Наружу `Connection` отдаётся готовым (`into_connection`) — запись не меняется ни на
+/// строку: перенос неправимых полей из сохранённого живёт одним местом, в `save::save_host`, и переезжать сюда ему незачем.
+pub struct Draft {
+    form: Connection,
+    mode: String,
+    publication: String,
+}
+
+impl Draft {
+    /// Из полей живого окна.
+    pub fn of(f: &Fields, mode: &str, publication: &str, cx: &App) -> Draft {
+        Draft::new(host_of(f, mode, publication, cx), mode, publication)
+    }
+
+    /// Из готовых значений — тем же приёмом и по тому же доводу, что `Machine::read_with`: тест строит черновик без живого окна.
+    pub fn new(form: Connection, mode: &str, publication: &str) -> Draft {
+        Draft { form, mode: mode.to_string(), publication: publication.to_string() }
+    }
+
+    /// Разошёлся ли черновик с сохранённым — по тем полям, что сейчас на экране.
+    pub fn differs_from(&self, saved: &Connection) -> bool {
+        fields_differ(&self.form, saved, &self.mode, &self.publication)
+    }
+
+    /// Готовое соединение для записи (`save::save_host` перенесёт в него неправимые поля из сохранённого).
+    pub fn into_connection(self) -> Connection {
+        self.form
+    }
+}
+
+pub fn adopt_needed(file: &Connection, draft: &Draft, saved: &Connection) -> bool {
+    fields_differ(file, saved, &draft.mode, &draft.publication) && !draft.differs_from(saved)
 }
 
 /// Поля окна отличаются от сохранённых? Сравниваются только те поля, что
@@ -3016,8 +3053,8 @@ impl Panel {
         // карточки значениями текущей на первом же показе окна.
         let host = self.selected_connection(&cx.global::<Ui>().cfg);
         let (mode, publication) = (host.mode.clone(), host.publication.clone());
-        let form = host_of(&self.fields, &mode, &publication, cx);
-        adopt_needed(host, &form, &self.original, &mode, &publication).then(|| host.clone())
+        let draft = Draft::of(&self.fields, &mode, &publication, cx);
+        adopt_needed(host, &draft, &self.original).then(|| host.clone())
     }
 
     /// Соединение, чья карточка сейчас раскрыта: выбранное по имени, а если
@@ -3067,8 +3104,7 @@ impl Panel {
     /// `shown_fields`/`host_of` и пишется своим путём.
     fn dirty_now(&self, cx: &App) -> Dirty {
         let (mode, publication) = (&self.original.mode, &self.original.publication);
-        let form = host_of(&self.fields, mode, publication, cx);
-        if fields_differ(&form, &self.original, mode, publication) {
+        if Draft::of(&self.fields, mode, publication, cx).differs_from(&self.original) {
             return Dirty::Fields;
         }
         if self.fields.name.read(cx).value().trim() != self.original.name {
@@ -3150,7 +3186,7 @@ impl Panel {
     /// ось читалась здесь же у `cfg.current()`, карточка и запись жили на
     /// разных осях, и добраться до этого выбора тестом было нечем.
     fn host_from_fields(&self, mode: &str, publication: &str, cx: &mut Context<Self>) -> Connection {
-        host_of(&self.fields, mode, publication, cx)
+        Draft::of(&self.fields, mode, publication, cx).into_connection()
     }
 
     /// Запись в toml и всё, что за ней следует: итог строкой журнала,
@@ -4617,7 +4653,7 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
 
-    use super::{Question, Step};
+    use super::{Draft, Question, Step};
 
     /// Что делает ответ на вопрос карточки — все пять вопросов и обе развилки текущей карточки.
     ///
@@ -5185,18 +5221,37 @@ mod tests {
         let form = saved.clone();
         // Файл правили руками — подхватываем.
         let file = Connection { db_user: "Иванов".into(), ..saved.clone() };
-        assert!(adopt_needed(&file, &form, &saved, "local", "auto"));
+        assert!(adopt_needed(&file, &Draft::new(form.clone(), "local", "auto"), &saved));
         // Файл не менялся — подхватывать нечего.
-        assert!(!adopt_needed(&saved, &form, &saved, "local", "auto"));
+        assert!(!adopt_needed(&saved, &Draft::new(form.clone(), "local", "auto"), &saved));
         // Человек набирает в полях — его правку не затираем, даже если файл
         // тем временем сменился.
         let typing = Connection { db_user: "Петров".into(), ..saved.clone() };
-        assert!(!adopt_needed(&file, &typing, &saved, "local", "auto"));
+        assert!(!adopt_needed(&file, &Draft::new(typing.clone(), "local", "auto"), &saved));
         // Поля, которых состав не показывает, подхват не будят: при «публикует сама программа» адрес чужой публикации
         // ни на что не влияет.
         let hidden = Connection { base_url: "http://localhost/UNF".into(), ..saved.clone() };
-        assert!(!adopt_needed(&hidden, &form, &saved, "local", "auto"));
-        assert!(adopt_needed(&hidden, &form, &saved, "local", "webserver"));
+        assert!(!adopt_needed(&hidden, &Draft::new(form.clone(), "local", "auto"), &saved));
+        assert!(adopt_needed(&hidden, &Draft::new(form.clone(), "local", "webserver"), &saved));
+    }
+
+    /// Черновик несёт ОСИ, под которыми его рисовали, — и состав полей сравнения берётся из них же.
+    ///
+    /// Прежде оси подавались дважды на каждом месте вызова: сперва в `host_of`, снимавший значения, потом в `fields_differ`,
+    /// сравнивавший их. Подать разные пары не мешало ничто — сравнение шло бы по одному составу полей, а значения были сняты по
+    /// другому, и обе функции при этом по отдельности правы. Теперь оси внутри черновика, и разойтись им негде.
+    #[test]
+    fn a_draft_carries_the_axes_it_was_drawn_under() {
+        let saved = Connection { mode: "local".into(), publication: "auto".into(), ..Connection::default() };
+        // Адрес чужой публикации набран, но при «публикует сама программа» его на экране нет вовсе.
+        let typed = Connection { base_url: "http://localhost/UNF".into(), ..saved.clone() };
+
+        assert!(!Draft::new(typed.clone(), "local", "auto").differs_from(&saved), "поля нет на экране — и правки нет");
+        assert!(Draft::new(typed.clone(), "local", "webserver").differs_from(&saved), "поле показано — правка есть");
+
+        // Тот же черновик, те же значения: ответ решают ровно оси, и они теперь часть предмета, а не довод рядом с ним.
+        let same = Draft::new(saved.clone(), "local", "webserver");
+        assert!(!same.differs_from(&saved), "значения те же — расхождения нет ни при каком составе полей");
     }
 
     /// Находка 24 осмотра 10.11 держалась на том, что сочетание «Принимаю

@@ -251,11 +251,9 @@ impl Cards {
         let suits = [Side::WithBase, Side::WithAgents]
             .into_iter()
             .find(|s| self.pile(*s).map(|p| p.iter().any(|c| c.id() == id)).unwrap_or(false))?;
-        // Годится той стороне, которой мы не отвечаем, — значит мы с собеседником на ОДНОЙ стороне.
-        if suits == theirs {
-            return None;
-        }
-        crate::cfg::Mismatch::of_sides(theirs, theirs)
+        // Карточка годится стороне `suits` — значит НАША сторона ей противоположна. Дальше судит общая мера: совпали стороны —
+        // несовпадение, разошлись — законная пара и отказывать не о чем.
+        crate::cfg::Mismatch::of_sides(suits.other(), theirs)
     }
 
     fn aside(&self, id: &CardId) -> Option<&'static str> {

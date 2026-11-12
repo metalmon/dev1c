@@ -2267,6 +2267,69 @@ fn add_link(window: &mut Window, cx: &mut App, role: &str) {
     cx.refresh_windows();
 }
 
+/// Группа карточки — то, что человек видит одним куском.
+///
+/// Порядок вариантов здесь и есть порядок на экране: `card_view` строит список в нём, а отрисовка его обходит. Выдумать слот,
+/// которого нет в списке, ей больше нечем — у `match` нет такой ветви.
+pub enum Group {
+    /// «Как это работает»: два переключателя — «Это соединение» и «Где база».
+    HowItWorks,
+    /// Слова вместо полей базы: база на той стороне, и поля придут оттуда.
+    BaseNote(&'static str),
+    BasePath,
+    /// «Пользователь базы» и «Пароль» — одним рядом.
+    DbCredentials,
+    /// Переключатель «Публикация базы» со своим словом.
+    Publication(&'static str),
+    BaseUrl,
+    /// Папка документов; её подпись зависит от набора инструментов.
+    Project,
+    /// Код подключения и список разрешённых — у принимающей карточки.
+    Accepting(Accepting),
+    /// Поле для чужого кода и отпечаток — у звонящей.
+    Dialling(Dialling),
+}
+
+/// Что показывает открытая карточка: группы по порядку.
+///
+/// **Состав — свойство СОЧЕТАНИЯ, а не отрисовки** (спека сочетаний, «состав полей сочетания — свойство соединения»). Поля берутся
+/// у той же единственной меры, что отвечает замку и записи (`cfg::shown_fields`); остальные группы — у своих проверенных мер
+/// (`base_fields_note`, `publication_switch_label`, `accepting_block`, `dialling_block`). Здесь они впервые СОБРАНЫ в один
+/// предмет: прежде каждая отвечала порознь, а что из этого вышло на экране, не знал никто — ровно долг спеки сочетаний (строка
+/// 92: «обе функции по отдельности правы, а дефект живёт там, где они встречаются на экране»).
+pub fn card_view(c: &Connection, shown: &[&'static str], block: Option<Accepting>, dialling: Option<Dialling>) -> Vec<Group> {
+    let mut groups = Vec::new();
+    // «Где база» — второй вопрос карточки, и при «всё на одной машине» его не задают вовсе: второй стороны нет.
+    if c.mode != "local" {
+        groups.push(Group::HowItWorks);
+    }
+    if let Some(note) = base_fields_note(c) {
+        groups.push(Group::BaseNote(note));
+    }
+    if shown.contains(&"base_path") {
+        groups.push(Group::BasePath);
+    }
+    if shown.contains(&"db_user") {
+        groups.push(Group::DbCredentials);
+    }
+    if let Some(label) = publication_switch_label(c) {
+        groups.push(Group::Publication(label));
+    }
+    if shown.contains(&"base_url") {
+        groups.push(Group::BaseUrl);
+    }
+    if shown.contains(&"project") {
+        groups.push(Group::Project);
+    }
+    if let Some(block) = block {
+        groups.push(Group::Accepting(block));
+    }
+    if let Some(block) = dialling {
+        groups.push(Group::Dialling(block));
+    }
+    groups
+}
+
 /// Вопрос карточки, на который человек ответил переключателем.
 ///
 /// Вопросов пять, и три из них — оси состава полей (`cfg::shown_fields`), поэтому после записи снимок карточки обязан
@@ -3406,22 +3469,6 @@ impl Panel {
         // дело — чем зовётся папка и что в ней лежит, — и стоять ему
         // рядом с ней; первым же человек решает, КАК это соединение
         // подключается.
-        let profile_field = parts::field_select(
-            "profile",
-            "Профиль",
-            profile_label(&toolset).into(),
-            caption,
-            fg,
-            ["business", "developer"]
-                .into_iter()
-                .map(|profile| {
-                    let name = name.clone();
-                    let act: parts::Act =
-                        std::rc::Rc::new(move |_: &mut Window, cx: &mut App| answer_card(cx, &name, Question::Profile, profile));
-                    (SharedString::from(profile_label(profile)), act)
-                })
-                .collect(),
-        );
         // **Поля «Имя» в карточке НЕТ** (находка 36 обхода 10.11): имя стоит заголовком строки, и второй раз его говорить незачем.
         // Правится оно карандашом у того же заголовка — решение владельца: «на базовом имени при наведении нужна иконка редактирования
         // справа». Поле ввода (`fields.name`) никуда не делось: по карандашу оно встаёт НА МЕСТО заголовка, и пишет его та же
@@ -3464,124 +3511,9 @@ impl Panel {
                         }),
                 )
         });
-        // «Где база» — второй вопрос карточки, виден только когда первый
-        // ответ не «Всё на одной машине» (спека: «второй вопрос при нём не
-        // показывается») — топология теряет смысл там, где той стороны нет
-        // вовсе. `gui::set_base_here` пишет один ключ именованной карточки;
-        // состав полей (`shown_fields` ниже) читает уже переписанное
-        // соединение на следующей отрисовке.
-        if c.mode != "local" {
-            let name = c.name.clone();
-            let answers = base_here_answers(&c);
-            // Ответов может остаться ОДИН: принимающей карточке «на другом компьютере» сегодня не предлагают — протокол такого
-            // подключения ещё не проводит (находка 33, пара B). `field_select` в этом случае рисует строку, а не список: список, в
-            // котором нечего выбрать, обещает выбор, которого нет (владелец 10.11).
-            //
-            // Слова берутся из того же `base_here_label`, что стоит и на самой кнопке: два списка одних и тех же ответов разошлись бы
-            // на первой правке слова.
-            col = col.child(parts::field_select(
-                "base-here",
-                "Где база",
-                base_here_label(c.base_here).into(),
-                caption,
-                fg,
-                answers
-                    .iter()
-                    .copied()
-                    .map(|here| {
-                        let name = name.clone();
-                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                            answer_card(cx, &name, Question::BaseHere, if here { "true" } else { "false" })
-                        });
-                        (SharedString::from(base_here_label(here)), act)
-                    })
-                    .collect(),
-            ));
-        }
-        // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
-        // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
-        // «Где база» — спрашивать ли поля базы вовсе. Переключателя нет там,
-        // где базы здесь нет (`publication_switch_label` — одно решение и про
-        // показ, и про слово). Текущая карточка идёт тревной
-        // последовательностью, прочие — точечной записью
-        // (`answer_card`).
-        // Базы здесь нет — вместо пустого места слова (спека, «Что
-        // показывает карточка соединения»), тем же приёмом, что
-        // `nothing_to_show` на «Инструментах».
-        if let Some(note) = base_fields_note(&c) {
-            col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
-        }
-        // Имени базы отдельным получерным заголовком посреди карточки больше
-        // НЕТ (находка 19 осмотра 10.11: имя базы говорилось трижды — второй
-        // строкой в списке, этим заголовком и путём в поле «База»). Карточка
-        // стоит РАСКРЫТОЙ ВНУТРИ своей строки списка, то есть прямо под
-        // именем соединения и именем базы, — и повторять их внутри себя ей
-        // незачем. Что именно правится, человек видит по пути в поле «База»
-        // ниже, а «не указана» говорит сама подпись того же поля.
-        //
-        if shown.contains(&"base_path") {
-            // **Подпись называет ПРЕДМЕТ — «База», и только** (10.11, владелец про снимок этого поля: «Поле для ввода — База не указана.
-            // Просто пиздец»). Короткая история, чтобы её не повторить: сперва «База не указана» стояла отдельной строкой между группами
-            // и читалась заголовком группы (находка 6 осмотра), прошлый круг «починил» это тем, что сделал её подписью поля — то есть
-            // фразу передвинули, а не выкинули. Подпись человек читает, чтобы понять, ЧТО сюда вводить; что поле пустое, он и так видит.
-            // Выдуманной подсказки внутрь поля не ставим — плейсхолдеры-выдумки владелец убрал решением 26.10.
-            //
-            // Отдельного предупреждения карточка не заводит и не теряет: пустое обязательное поле говорит это само, а что без базы не
-            // работает обслуживание — говорит замок своими словами (`gui::gate`), там, где живут состояния карточки.
-            let button = pick("pick-base", f.base_path.clone(), cx);
-            col = col.child(path_row("База".to_string(), mark("base_path"), &f.base_path, button, window, cx));
-        }
-        if shown.contains(&"db_user") {
-            col = col.child(
-                h_flex()
-                    .gap_3()
-                    .child(div().flex_1().child(Self::row("Пользователь базы", mark("db_user"), accent, &f.db_user, window, cx)))
-                    .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
-            );
-        }
-        // «Публикация базы» — ПОСЛЕ самой базы (находка 28 осмотра 10.11:
-        // «„Публикация базы“ спрашивается раньше, чем указана сама база»).
-        // Переключателя нет там, где базы здесь нет (`publication_switch_label`
-        // — одно решение и про показ, и про слово). Текущая карточка идёт
-        // тревной последовательностью, прочие — точечной записью
-        // (`answer_card`).
-        if let Some(label) = publication_switch_label(&c) {
-            let name = c.name.clone();
-            col = col.child(parts::field_select(
-                "publication",
-                "Публикация базы",
-                label.into(),
-                caption,
-                fg,
-                link::publication_answers()
-                    .into_iter()
-                    .map(|(words, publication)| {
-                        let name = name.clone();
-                        let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
-                            answer_card(cx, &name, Question::Publication, publication)
-                        });
-                        (SharedString::from(words), act)
-                    })
-                    .collect(),
-            ));
-        }
-        // Адрес чужой публикации — сразу под переключателем, который его и
-        // спрашивает, и только в режиме «уже опубликована»: в обычном режиме
-        // адрес считает сама программа.
-        if shown.contains(&"base_url") {
-            col = col.child(Self::row("Адрес публикации", mark("base_url"), accent, &f.base_url, window, cx));
-        }
-        if shown.contains(&"project") {
-            // Профиль — прямо над папкой, подпись которой он и решает
-            // (`folder_label`): порядок полей идёт за порядком решений
-            // человека (находка 28).
-            col = col.child(profile_field);
-            let button = pick("pick-project", f.project.clone(), cx);
-            col = col.child(path_row(folder_label(&toolset).to_string(), mark("project"), &f.project, button, window, cx));
-        }
-        // Код для той стороны и кто уже зачислен — последним блоком карточки:
-        // поля человек правит, а это он читает и передаёт. Что показывать,
-        // решает `accepting_block`, здесь только виджеты.
+        // Что показывает эта карточка — ЗНАЧЕНИЕМ (`card_view`), а отрисовка его обходит. До 12.11 состав и порядок групп
+        // существовали только здесь, в четырёхстах строках приказов: спросить «что видно в этом сочетании» было не у чего,
+        // и семь законов окна, которые все про РАЗМЕЩЕНИЕ, доказательства не имели.
         let card_name = c.name.clone();
         let block = {
             let ui = cx.global::<Ui>();
@@ -3593,123 +3525,265 @@ impl Panel {
             let parties = ui.book.as_ref().map(|b| b.of(&c.id()));
             accepting_block(&ui.cfg, &c, code.as_deref(), parties.as_deref())
         };
-        if let Some(block) = block {
-            col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
-            let had_code = block.code.is_some();
-            if had_code {
-                // **Код — ОДНОЙ строкой в поле, а не простынёй на экране** (решение владельца 10.11: «пиши его в одну строку, так, чтобы
-                // человек мог сам его скопировать из поля»). Прежде он рисовался текстом с переносом — четыреста тридцать два знака в
-                // шестнадцать строк, съедавшие карточку целиком, и выделить их мышью было нельзя: читать код незачем, его передают.
-                // Поле прокручивается внутри себя, поэтому длинная строка карточку не растягивает и вёрстку не ломает.
-                //
-                // Значок копирования — справа от поля, тем же приёмом и того же вида, что значок выбора папки у полей «База» и «Папка
-                // документов» (`pick` выше): готовый образец, не новая кнопка. Подписи у него нет — она была нужна, пока рядом лежала
-                // простыня, и место под неё отнимало ширину у самого кода.
-                col = col.child(Self::scroll_anchor(&self.link_scroll));
-                let copy = {
-                    let (label, _) = pick_face();
-                    KitButton::new("copy-code")
-                        .outline()
-                        .when_some(label, |b, l| b.label(l))
-                        .icon(Icon::default().data(COPY_SVG))
-                        .tooltip("Скопировать код")
-                        // Копируется то, что в ПОЛЕ, а не второй экземпляр кода рядом: поле и значок говорят об одной строке, и
-                        // разойтись им негде.
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let code = this.fields.issued.read(cx).value().to_string();
-                            cx.write_to_clipboard(ClipboardItem::new_string(code));
-                            gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: "Код скопирован".into() });
-                        }))
-                };
-                col = col.child(
-                    v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Код подключения")).child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().min_w_0().child(Self::input(&self.fields.issued, accent, window, cx)))
-                            .child(copy),
-                    ),
-                );
-            }
-            if let Some(why) = block.code_note {
-                col = col.child(div().text_size(px(13.)).text_color(caption).child(why));
-            }
-            // Орудие выдачи — только там, где код вправду выдают (`Accepting::can_issue`): у карточки с базой на другом компьютере
-            // кнопка рядом с объяснением «кода не будет» означала бы «а всё-таки попробуйте».
-            //
-            // И только там, где код УЖЕ ЕСТЬ: это перевыпуск. Пока кода нет, выдаёт его главная кнопка подвала («Выдать код»), и
-            // вторая кнопка рядом, названная «Выдать новый код», предлагала бы то же дело вторым органом и чужим словом — найдено
-            // своим же обходом окна 10.11.
-            if had_code {
-                let card = card_name.clone();
-                // Кнопка во всю ширину — одна из двух законных форм кнопки в карточке (закон окна, «Кнопки в карточке: ровно две
-                // формы»; вторая — значок справа от поля, им здесь сделано копирование). Короткая кнопка посреди строки была третьей
-                // формой, которой не бывает.
-                col = col.child(
-                    parts::button_wide("new-code", "Выдать новый код")
-                        .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
-                );
-            }
-            if !block.enrolled.is_empty() {
-                col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
-            }
-            for (n, p) in block.parties.into_iter().enumerate() {
-                let card = card_name.clone();
-                let key = p.key;
-                col = col.child(
-                    v_flex().gap_1().child(div().min_w_0().text_size(px(12.)).child(p.fingerprint)).child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.says_name))
-                                    // Что ей дано — словами и рядом с её
-                                    // отпечатком: без этой строки сторона с
-                                    // правом записи выглядела в точности как
-                                    // та, которой разрешено только читать
-                                    // (спека 6 ревью задач 6 и 7).
-                                    .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.access)),
-                            )
-                            // Отзыв — красной кнопкой: он отнимает уже
-                            // сделанное (сторона перестанет входить), то
-                            // же правило, что развело пункты меню по
-                            // разрядам.
-                            .child(KitButton::new(("revoke", n)).danger().small().label(REVOKE).on_click(cx.listener(
-                                move |_, _, _, cx| {
-                                    revoke_party(cx.global_mut::<Ui>(), &card, key);
-                                    cx.refresh_windows();
-                                },
-                            ))),
-                    ),
-                );
-            }
-        }
-        // Куда вставить код — у ЗОВУЩЕЙ карточки, зеркалом блока кода у
-        // принимающей. Что показывать, решает `dialling_block`, здесь только
-        // виджеты. «Подключиться» в подвале при этом не тронута: она
-        // поднимает прежний сеанс SSH, который живёт параллельно и отвечает
-        // за сегодняшнюю работу.
         let dialling = {
             let ui = cx.global::<Ui>();
             let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| crate::gui::short_key(&key.to_string()));
             dialling_block(&c, partner)
         };
-        if let Some(block) = dialling {
-            col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
-            col = col.child(div().text_size(px(13.)).text_color(caption).child("Код подключения"));
-            // Кнопки рядом с полем НЕТ: главное действие карточки живёт в правом слоте подвала (`main_button` → `LinkAct::Dial`).
-            // Поле во всю ширину — ему и ширина достаётся вся.
-            col = col.child(Self::input(&self.fields.code, accent, window, cx));
-            // Отпечаток той стороны — целиком и тем же видом, что у
-            // зачисленных в принимающей карточке: он тоже сверяется голосом.
-            if let Some(partner) = block.partner {
-                // Подпись называет ТОГО, чей это отпечаток, а не место базы: у карточки «подключаюсь сам» с базой ЗДЕСЬ база как раз не
-                // у той машины (сочетание 4 спеки сочетаний), и «компьютер с базой» указывал бы на саму себя.
-                col = col.child(div().text_size(px(12.)).text_color(caption).child("Отпечаток компьютера, к которому подключаетесь"));
-                col = col.child(div().min_w_0().text_size(px(12.)).child(partner));
+        for group in card_view(&c, shown, block, dialling) {
+            match group {
+                // «Где база» — второй вопрос карточки, виден только когда первый
+                // ответ не «Всё на одной машине» (спека: «второй вопрос при нём не
+                // показывается») — топология теряет смысл там, где той стороны нет
+                // вовсе. `gui::set_base_here` пишет один ключ именованной карточки;
+                // состав полей (`shown_fields` ниже) читает уже переписанное
+                // соединение на следующей отрисовке.
+                Group::HowItWorks => {
+                    let name = c.name.clone();
+                    let answers = base_here_answers(&c);
+                    // Ответов может остаться ОДИН: принимающей карточке «на другом компьютере» сегодня не предлагают — протокол такого
+                    // подключения ещё не проводит (находка 33, пара B). `field_select` в этом случае рисует строку, а не список: список, в
+                    // котором нечего выбрать, обещает выбор, которого нет (владелец 10.11).
+                    //
+                    // Слова берутся из того же `base_here_label`, что стоит и на самой кнопке: два списка одних и тех же ответов разошлись бы
+                    // на первой правке слова.
+                    col = col.child(parts::field_select(
+                        "base-here",
+                        "Где база",
+                        base_here_label(c.base_here).into(),
+                        caption,
+                        fg,
+                        answers
+                            .iter()
+                            .copied()
+                            .map(|here| {
+                                let name = name.clone();
+                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                                    answer_card(cx, &name, Question::BaseHere, if here { "true" } else { "false" })
+                                });
+                                (SharedString::from(base_here_label(here)), act)
+                            })
+                            .collect(),
+                    ));
+                }
+                // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
+                // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
+                // «Где база» — спрашивать ли поля базы вовсе. Переключателя нет там,
+                // где базы здесь нет (`publication_switch_label` — одно решение и про
+                // показ, и про слово). Текущая карточка идёт тревной
+                // последовательностью, прочие — точечной записью
+                // (`answer_card`).
+                // Базы здесь нет — вместо пустого места слова (спека, «Что
+                // показывает карточка соединения»), тем же приёмом, что
+                // `nothing_to_show` на «Инструментах».
+                Group::BaseNote(note) => {
+                    col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
+                }
+                // Имени базы отдельным получерным заголовком посреди карточки больше
+                // НЕТ (находка 19 осмотра 10.11: имя базы говорилось трижды — второй
+                // строкой в списке, этим заголовком и путём в поле «База»). Карточка
+                // стоит РАСКРЫТОЙ ВНУТРИ своей строки списка, то есть прямо под
+                // именем соединения и именем базы, — и повторять их внутри себя ей
+                // незачем. Что именно правится, человек видит по пути в поле «База»
+                // ниже, а «не указана» говорит сама подпись того же поля.
+                //
+                Group::BasePath => {
+                    // **Подпись называет ПРЕДМЕТ — «База», и только** (10.11, владелец про снимок этого поля: «Поле для ввода — База не указана.
+                    // Просто пиздец»). Короткая история, чтобы её не повторить: сперва «База не указана» стояла отдельной строкой между группами
+                    // и читалась заголовком группы (находка 6 осмотра), прошлый круг «починил» это тем, что сделал её подписью поля — то есть
+                    // фразу передвинули, а не выкинули. Подпись человек читает, чтобы понять, ЧТО сюда вводить; что поле пустое, он и так видит.
+                    // Выдуманной подсказки внутрь поля не ставим — плейсхолдеры-выдумки владелец убрал решением 26.10.
+                    //
+                    // Отдельного предупреждения карточка не заводит и не теряет: пустое обязательное поле говорит это само, а что без базы не
+                    // работает обслуживание — говорит замок своими словами (`gui::gate`), там, где живут состояния карточки.
+                    let button = pick("pick-base", f.base_path.clone(), cx);
+                    col = col.child(path_row("База".to_string(), mark("base_path"), &f.base_path, button, window, cx));
+                }
+                Group::DbCredentials => {
+                    col = col.child(
+                        h_flex()
+                            .gap_3()
+                            .child(div().flex_1().child(Self::row("Пользователь базы", mark("db_user"), accent, &f.db_user, window, cx)))
+                            .child(div().flex_1().child(Self::row("Пароль", caption, accent, &f.db_password, window, cx))),
+                    );
+                }
+                // «Публикация базы» — ПОСЛЕ самой базы (находка 28 осмотра 10.11:
+                // «„Публикация базы“ спрашивается раньше, чем указана сама база»).
+                // Переключателя нет там, где базы здесь нет (`publication_switch_label`
+                // — одно решение и про показ, и про слово). Текущая карточка идёт
+                // тревной последовательностью, прочие — точечной записью
+                // (`answer_card`).
+                Group::Publication(label) => {
+                    let name = c.name.clone();
+                    col = col.child(parts::field_select(
+                        "publication",
+                        "Публикация базы",
+                        label.into(),
+                        caption,
+                        fg,
+                        link::publication_answers()
+                            .into_iter()
+                            .map(|(words, publication)| {
+                                let name = name.clone();
+                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                                    answer_card(cx, &name, Question::Publication, publication)
+                                });
+                                (SharedString::from(words), act)
+                            })
+                            .collect(),
+                    ));
+                }
+                // Адрес чужой публикации — сразу под переключателем, который его и
+                // спрашивает, и только в режиме «уже опубликована»: в обычном режиме
+                // адрес считает сама программа.
+                Group::BaseUrl => {
+                    col = col.child(Self::row("Адрес публикации", mark("base_url"), accent, &f.base_url, window, cx));
+                }
+                Group::Project => {
+                    // Профиль — прямо над папкой, подпись которой он и решает
+                    // (`folder_label`): порядок полей идёт за порядком решений
+                    // человека (находка 28).
+                    // Строится ЗДЕСЬ, а не заранее: обход групп не доказывает компилятору, что эта ветвь одна, и значение,
+                    // собранное выше, считалось бы перемещаемым дважды. Содержание прежнее, слово в слово.
+                    let profile_field = parts::field_select(
+                        "profile",
+                        "Профиль",
+                        profile_label(&toolset).into(),
+                        caption,
+                        fg,
+                        ["business", "developer"]
+                            .into_iter()
+                            .map(|profile| {
+                                let name = name.clone();
+                                let act: parts::Act = std::rc::Rc::new(move |_: &mut Window, cx: &mut App| {
+                                    answer_card(cx, &name, Question::Profile, profile)
+                                });
+                                (SharedString::from(profile_label(profile)), act)
+                            })
+                            .collect(),
+                    );
+                    col = col.child(profile_field);
+                    let button = pick("pick-project", f.project.clone(), cx);
+                    col = col.child(path_row(folder_label(&toolset).to_string(), mark("project"), &f.project, button, window, cx));
+                }
+                // Код для той стороны и кто уже зачислен — последним блоком карточки:
+                // поля человек правит, а это он читает и передаёт. Что показывать,
+                // решает `accepting_block`, здесь только виджеты.
+                Group::Accepting(block) => {
+                    col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
+                    let had_code = block.code.is_some();
+                    if had_code {
+                        // **Код — ОДНОЙ строкой в поле, а не простынёй на экране** (решение владельца 10.11: «пиши его в одну строку, так, чтобы
+                        // человек мог сам его скопировать из поля»). Прежде он рисовался текстом с переносом — четыреста тридцать два знака в
+                        // шестнадцать строк, съедавшие карточку целиком, и выделить их мышью было нельзя: читать код незачем, его передают.
+                        // Поле прокручивается внутри себя, поэтому длинная строка карточку не растягивает и вёрстку не ломает.
+                        //
+                        // Значок копирования — справа от поля, тем же приёмом и того же вида, что значок выбора папки у полей «База» и «Папка
+                        // документов» (`pick` выше): готовый образец, не новая кнопка. Подписи у него нет — она была нужна, пока рядом лежала
+                        // простыня, и место под неё отнимало ширину у самого кода.
+                        col = col.child(Self::scroll_anchor(&self.link_scroll));
+                        let copy = {
+                            let (label, _) = pick_face();
+                            KitButton::new("copy-code")
+                                .outline()
+                                .when_some(label, |b, l| b.label(l))
+                                .icon(Icon::default().data(COPY_SVG))
+                                .tooltip("Скопировать код")
+                                // Копируется то, что в ПОЛЕ, а не второй экземпляр кода рядом: поле и значок говорят об одной строке, и
+                                // разойтись им негде.
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let code = this.fields.issued.read(cx).value().to_string();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                    gui::note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Ok, text: "Код скопирован".into() });
+                                }))
+                        };
+                        col = col.child(
+                            v_flex().gap_1().child(div().text_size(px(13.)).text_color(caption).child("Код подключения")).child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(div().flex_1().min_w_0().child(Self::input(&self.fields.issued, accent, window, cx)))
+                                    .child(copy),
+                            ),
+                        );
+                    }
+                    if let Some(why) = block.code_note {
+                        col = col.child(div().text_size(px(13.)).text_color(caption).child(why));
+                    }
+                    // Орудие выдачи — только там, где код вправду выдают (`Accepting::can_issue`): у карточки с базой на другом компьютере
+                    // кнопка рядом с объяснением «кода не будет» означала бы «а всё-таки попробуйте».
+                    //
+                    // И только там, где код УЖЕ ЕСТЬ: это перевыпуск. Пока кода нет, выдаёт его главная кнопка подвала («Выдать код»), и
+                    // вторая кнопка рядом, названная «Выдать новый код», предлагала бы то же дело вторым органом и чужим словом — найдено
+                    // своим же обходом окна 10.11.
+                    if had_code {
+                        let card = card_name.clone();
+                        // Кнопка во всю ширину — одна из двух законных форм кнопки в карточке (закон окна, «Кнопки в карточке: ровно две
+                        // формы»; вторая — значок справа от поля, им здесь сделано копирование). Короткая кнопка посреди строки была третьей
+                        // формой, которой не бывает.
+                        col = col.child(
+                            parts::button_wide("new-code", "Выдать новый код")
+                                .on_click(cx.listener(move |_, _, window, cx| run_link_act(window, cx, LinkAct::NewCode, &card))),
+                        );
+                    }
+                    if !block.enrolled.is_empty() {
+                        col = col.child(div().text_size(px(13.)).text_color(caption).child(block.enrolled));
+                    }
+                    for (n, p) in block.parties.into_iter().enumerate() {
+                        let card = card_name.clone();
+                        let key = p.key;
+                        col = col.child(
+                            v_flex().gap_1().child(div().min_w_0().text_size(px(12.)).child(p.fingerprint)).child(
+                                h_flex()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        v_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.says_name))
+                                            // Что ей дано — словами и рядом с её
+                                            // отпечатком: без этой строки сторона с
+                                            // правом записи выглядела в точности как
+                                            // та, которой разрешено только читать
+                                            // (спека 6 ревью задач 6 и 7).
+                                            .child(div().min_w_0().text_size(px(12.)).text_color(caption).child(p.access)),
+                                    )
+                                    // Отзыв — красной кнопкой: он отнимает уже
+                                    // сделанное (сторона перестанет входить), то
+                                    // же правило, что развело пункты меню по
+                                    // разрядам.
+                                    .child(KitButton::new(("revoke", n)).danger().small().label(REVOKE).on_click(cx.listener(
+                                        move |_, _, _, cx| {
+                                            revoke_party(cx.global_mut::<Ui>(), &card, key);
+                                            cx.refresh_windows();
+                                        },
+                                    ))),
+                            ),
+                        );
+                    }
+                }
+                // Куда вставить код — у ЗОВУЩЕЙ карточки, зеркалом блока кода у
+                // принимающей. Что показывать, решает `dialling_block`, здесь только
+                // виджеты. «Подключиться» в подвале при этом не тронута: она
+                // поднимает прежний сеанс SSH, который живёт параллельно и отвечает
+                // за сегодняшнюю работу.
+                Group::Dialling(block) => {
+                    col = col.child(div().h(px(1.)).bg(caption.opacity(0.25)));
+                    col = col.child(div().text_size(px(13.)).text_color(caption).child("Код подключения"));
+                    // Кнопки рядом с полем НЕТ: главное действие карточки живёт в правом слоте подвала (`main_button` → `LinkAct::Dial`).
+                    // Поле во всю ширину — ему и ширина достаётся вся.
+                    col = col.child(Self::input(&self.fields.code, accent, window, cx));
+                    // Отпечаток той стороны — целиком и тем же видом, что у
+                    // зачисленных в принимающей карточке: он тоже сверяется голосом.
+                    if let Some(partner) = block.partner {
+                        // Подпись называет ТОГО, чей это отпечаток, а не место базы: у карточки «подключаюсь сам» с базой ЗДЕСЬ база как раз не
+                        // у той машины (сочетание 4 спеки сочетаний), и «компьютер с базой» указывал бы на саму себя.
+                        col =
+                            col.child(div().text_size(px(12.)).text_color(caption).child("Отпечаток компьютера, к которому подключаетесь"));
+                        col = col.child(div().min_w_0().text_size(px(12.)).child(partner));
+                    }
+                }
             }
         }
         col
@@ -4647,7 +4721,57 @@ impl Render for Panel {
 #[cfg(test)]
 mod tests {
 
-    use super::{Draft, Question, Step};
+    use super::{card_view, Draft, Group, Question, Step};
+
+    /// Что показывает карточка — состав и ПОРЯДОК групп, по всем пяти сочетаниям.
+    ///
+    /// До 12.11 спросить об этом было не у чего: состав существовал только как четыреста строк приказов отрисовки, и семь
+    /// законов окна — все про размещение — доказательства не имели. Это первая проверка долга спеки сочетаний (строка 92):
+    /// `shown_fields`, `base_fields_note`, `publication_switch_label` каждая по отдельности права и проверена, а дефект живёт
+    /// там, где они встречаются НА ЭКРАНЕ.
+    #[test]
+    fn a_card_shows_the_groups_its_combination_calls_for() {
+        let name = |g: &Group| match g {
+            Group::HowItWorks => "как это работает",
+            Group::BaseNote(_) => "слова вместо полей базы",
+            Group::BasePath => "база",
+            Group::DbCredentials => "пользователь и пароль",
+            Group::Publication(_) => "публикация",
+            Group::BaseUrl => "адрес публикации",
+            Group::Project => "папка",
+            Group::Accepting(_) => "код и разрешённые",
+            Group::Dialling(_) => "поле чужого кода",
+        };
+        let view = |mode: &str, role: &str, base_here: bool| {
+            let c = Connection { mode: mode.into(), role: role.into(), base_here, publication: "auto".into(), ..Connection::default() };
+            let shown = shown_fields(&c);
+            card_view(&c, shown, None, None).iter().map(name).collect::<Vec<_>>()
+        };
+
+        // Сочетание 1: второй стороны нет — вопроса «как это работает» карточка не задаёт вовсе.
+        assert_eq!(view("local", "accept", true), vec!["база", "пользователь и пароль", "публикация", "папка"]);
+
+        // Сочетания 2 и 4: база здесь — поля базы показаны, и первым идёт вопрос о том, как это работает.
+        let with_base = vec!["как это работает", "база", "пользователь и пароль", "публикация", "папка"];
+        assert_eq!(view("tunnel", "accept", true), with_base, "сочетание 2");
+        assert_eq!(view("tunnel", "dial", true), with_base, "сочетание 4");
+
+        // Сочетания 3 и 5: базы здесь нет — вместо полей базы СЛОВА, и ни публикации, ни адреса не предлагают.
+        let no_base = vec!["как это работает", "слова вместо полей базы", "папка"];
+        assert_eq!(view("tunnel", "accept", false), no_base, "сочетание 3");
+        assert_eq!(view("tunnel", "dial", false), no_base, "сочетание 5");
+
+        // Закон 3: состав полей идёт ровно за `shown_fields` — второй меры у карточки нет.
+        for (mode, role, base_here) in [("local", "accept", true), ("tunnel", "accept", false), ("tunnel", "dial", true)] {
+            let c = Connection { mode: mode.into(), role: role.into(), base_here, publication: "auto".into(), ..Connection::default() };
+            let shown = shown_fields(&c);
+            let groups = card_view(&c, shown, None, None);
+            let has = |g: &str| groups.iter().any(|x| name(x) == g);
+            assert_eq!(has("база"), shown.contains(&"base_path"), "{mode}/{role}");
+            assert_eq!(has("папка"), shown.contains(&"project"), "{mode}/{role}");
+            assert_eq!(has("адрес публикации"), shown.contains(&"base_url"), "{mode}/{role}");
+        }
+    }
 
     /// Что делает ответ на вопрос карточки — все пять вопросов и обе развилки текущей карточки.
     ///

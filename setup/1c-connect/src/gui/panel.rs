@@ -1112,17 +1112,6 @@ pub fn undecryptable_line(bad: &[cfg::Undecryptable]) -> Option<Line> {
 /// не показывает (находка 2 ревью пути 10.11). Окно зовёт его прежним именем.
 pub use crate::cfg::shown_fields;
 
-/// Слова вместо пустоты у карточки, чья база на той стороне — тот же приём,
-/// что у `nothing_to_show`: поверхность без полей базы обязана сказать об
-/// этом словами, а не молчать пустыми строками (спека, «Что показывает
-/// карточка соединения»). `None` — база здесь, подсказка не нужна.
-pub fn base_fields_note(c: &Connection) -> Option<&'static str> {
-    // Та же защита, что у `shown_fields` выше, через тот же `base_is_here()`:
-    // в локальном режиме «той стороны» не существует вовсе, и застрявшее
-    // `base_here = false` не вправе подписывать экран её словами.
-    (!c.base_is_here()).then_some("Эти поля заполняют на компьютере с базой")
-}
-
 /// Одна зачисленная сторона в карточке.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PartyRow {
@@ -2274,8 +2263,6 @@ fn add_link(window: &mut Window, cx: &mut App, role: &str) {
 pub enum Group {
     /// «Как это работает»: два переключателя — «Это соединение» и «Где база».
     HowItWorks,
-    /// Слова вместо полей базы: база на той стороне, и поля придут оттуда.
-    BaseNote(&'static str),
     BasePath,
     /// «Пользователь базы» и «Пароль» — одним рядом.
     DbCredentials,
@@ -2302,9 +2289,6 @@ pub fn card_view(c: &Connection, shown: &[&'static str], block: Option<Accepting
     // «Где база» — второй вопрос карточки, и при «всё на одной машине» его не задают вовсе: второй стороны нет.
     if c.mode != "local" {
         groups.push(Group::HowItWorks);
-    }
-    if let Some(note) = base_fields_note(c) {
-        groups.push(Group::BaseNote(note));
     }
     if shown.contains(&"base_path") {
         groups.push(Group::BasePath);
@@ -3566,19 +3550,6 @@ impl Panel {
                             .collect(),
                     ));
                 }
-                // «Публикация базы» — третий вопрос карточки, под «Где база»: от него
-                // зависит, спрашивать ли адрес публикации (`shown_fields`), как от
-                // «Где база» — спрашивать ли поля базы вовсе. Переключателя нет там,
-                // где базы здесь нет (`publication_switch_label` — одно решение и про
-                // показ, и про слово). Текущая карточка идёт тревной
-                // последовательностью, прочие — точечной записью
-                // (`answer_card`).
-                // Базы здесь нет — вместо пустого места слова (спека, «Что
-                // показывает карточка соединения»), тем же приёмом, что
-                // `nothing_to_show` на «Инструментах».
-                Group::BaseNote(note) => {
-                    col = col.child(div().text_size(px(13.)).text_color(caption).child(note));
-                }
                 // Имени базы отдельным получерным заголовком посреди карточки больше
                 // НЕТ (находка 19 осмотра 10.11: имя базы говорилось трижды — второй
                 // строкой в списке, этим заголовком и путём в поле «База»). Карточка
@@ -4727,13 +4698,12 @@ mod tests {
     ///
     /// До 12.11 спросить об этом было не у чего: состав существовал только как четыреста строк приказов отрисовки, и семь
     /// законов окна — все про размещение — доказательства не имели. Это первая проверка долга спеки сочетаний (строка 92):
-    /// `shown_fields`, `base_fields_note`, `publication_switch_label` каждая по отдельности права и проверена, а дефект живёт
+    /// `shown_fields`, `publication_switch_label`, `accepting_block` каждая по отдельности права и проверена, а дефект живёт
     /// там, где они встречаются НА ЭКРАНЕ.
     #[test]
     fn a_card_shows_the_groups_its_combination_calls_for() {
         let name = |g: &Group| match g {
             Group::HowItWorks => "как это работает",
-            Group::BaseNote(_) => "слова вместо полей базы",
             Group::BasePath => "база",
             Group::DbCredentials => "пользователь и пароль",
             Group::Publication(_) => "публикация",
@@ -4757,7 +4727,7 @@ mod tests {
         assert_eq!(view("tunnel", "dial", true), with_base, "сочетание 4");
 
         // Сочетания 3 и 5: базы здесь нет — вместо полей базы СЛОВА, и ни публикации, ни адреса не предлагают.
-        let no_base = vec!["как это работает", "слова вместо полей базы", "папка"];
+        let no_base = vec!["как это работает", "папка"];
         assert_eq!(view("tunnel", "accept", false), no_base, "сочетание 3");
         assert_eq!(view("tunnel", "dial", false), no_base, "сочетание 5");
 
@@ -4838,8 +4808,8 @@ mod tests {
         }
     }
     use super::{
-        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_fields_note, base_here_answers, blind_code_note, can_save,
-        card, delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
+        accepting_block, adopt_needed, adopt_topology, axis_of, axis_plan, base_here_answers, blind_code_note, can_save, card,
+        delete_on_confirm, delete_question_text, dialling_block, enroll_facts, fact_rows, fields_differ, folder_label, found_text,
         issue_code, leave_question, link_menu, live_code, main_button, nothing_to_show, op_question, pick_face, profile_label,
         project_facts, project_menu, project_rows, publication_switch_label, reason, request_to_answer, resolve_selected, row_marks,
         save_hint, shown_base_url, shown_fields, skill_found_text, switch_locked, switch_tooltip, tab_facts, tools_actions, tools_subject,
@@ -5468,7 +5438,6 @@ mod tests {
         let clean = Connection { mode: "local".into(), base_here: true, ..Connection::default() };
         assert_eq!(shown_fields(&stuck), shown_fields(&clean), "состав полей — как у «база здесь», несмотря на застрявшее значение");
         assert!(shown_fields(&stuck).contains(&"base_path"), "поля базы показаны, а не одна «project»");
-        assert_eq!(base_fields_note(&stuck), None, "подписи про «ту сторону» нет — той стороны в локальном режиме не существует");
     }
 
     #[test]
@@ -5620,15 +5589,18 @@ mod tests {
         assert!(!shown_fields(&there).contains(&"base_url"), "публикация — поле конца с базой");
     }
 
+    /// Карточка без базы не подписывает экран словами про «ту сторону»: подпись стояла над «Профилем» и «Папкой документов» —
+    /// полями, которые заполняют ЗДЕСЬ, — и объясняла отсутствие того, чего рядом и нет (решение владельца 15.11, живой прогон).
+    /// Пустое говорит о себе само (закон окна 5), а поля, которых нет, не показываются вовсе (закон 3).
     #[test]
-    fn a_card_whose_base_is_elsewhere_says_so_instead_of_showing_emptiness() {
-        // Спека: карточка бухгалтера обязана сказать это одной строкой — тем же
-        // приёмом, каким «Инструменты» уже не молчат пустотой. `mode:
-        // "tunnel"` — явно, тем же доводом, что у соседних тестов этого
-        // блока: в локальном режиме «той стороны» не существует.
+    fn a_card_whose_base_is_elsewhere_shows_no_base_fields_and_says_nothing_extra() {
         let there = Connection { base_here: false, mode: "tunnel".into(), ..Default::default() };
-        assert_eq!(base_fields_note(&there).unwrap(), "Эти поля заполняют на компьютере с базой");
-        assert_eq!(base_fields_note(&Connection::default()), None);
+        let shown = shown_fields(&there);
+        for field in ["base_path", "db_user", "db_password", "base_url"] {
+            assert!(!shown.contains(&field), "{field}: поля базы у такой карточки нет");
+        }
+        let groups = card_view(&there, shown, None, None);
+        assert!(groups.iter().all(|g| !matches!(g, Group::BasePath | Group::DbCredentials | Group::BaseUrl)));
     }
 
     #[test]

@@ -12,6 +12,8 @@ use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
+#[cfg(not(feature = "gui"))]
+use one_c_connect::gate;
 #[cfg(feature = "gui")]
 use one_c_connect::gui::Start;
 use one_c_connect::ops_host::{self, Ctx, McpServer};
@@ -527,6 +529,17 @@ fn serve(ctx: &Ctx) -> Result<()> {
     let _serving = single_instance::hold_serving(&ctx.kit);
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
     project::set_lock_target(ctx.kit.state());
+    // Холодный замок готовности — тот же вердикт и в том же месте по порядку,
+    // что на пути с окном (`gui::launch`): после замков, до того как поднято
+    // хоть что-нибудь. Один вердикт на всех потребителей — ровно затем
+    // `gate` и не за фичей `gui` (см. его заголовок). Заперт — значит агенту
+    // всё равно ничего не достанется (нет платформы, базы, mcp-1c или вышел
+    // срок), и стартовать, заняв порты и замок, значило бы обещать работу,
+    // которой не будет, не сказав ни слова. Слова и код возврата — общие
+    // (`gate::refuse_to_serve`).
+    if let Some(why) = gate::gate_now(&ctx.kit, &ctx.cfg) {
+        return Err(gate::refuse_to_serve(&ctx.kit, &why));
+    }
     // На стенде связь держит именно `serve` (сам он и есть «окно» этого
     // рабочего места) — тот же признак разрешения, что пишет `connect`, см.
     // комментарий там.

@@ -2367,14 +2367,8 @@ pub fn launch(kit: Kit, start: Start) -> anyhow::Result<()> {
     // порты ниже, чтобы обещания не прозвучало вовсе; в консоль его печатает `main` («Остановлено: …»), в журнал — мы.
     let serve_on_start = match serving_at_start(start, gate.as_deref(), autoconnect_on) {
         Ok(on) => on,
-        Err(why) => {
-            let text = format!(
-                "{SUBJECT} включить нельзя: {why}. Обслуживать вызовы агента этой машине нечем, и держать замок без обслуживания \
-                 `serve` не будет — он уходит. Устраните причину и запустите его снова."
-            );
-            crate::journal::write(&kit, Kind::Fail, &text);
-            anyhow::bail!("{text}");
-        }
+        // Слова — не свои, а общие с путём без окна (`gate::refuse_to_serve`): одна причина, одна формулировка, один журнал.
+        Err(why) => return Err(crate::gate::refuse_to_serve(&kit, why)),
     };
     crate::bridge::set_off_reason(gate.clone());
     // Исход словами в консоль — ограничение «каждая команда печатает исход словами». `serve` поднимают из терминала, из

@@ -8,6 +8,8 @@ pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
 pub mod channel;
+/// Подробный журнал шагов рукопожатия — по переменной `DEV1C_DEBUG` (просьба владельца 15.11).
+pub mod debug;
 pub mod editors;
 pub mod enroll;
 pub mod enrolled;

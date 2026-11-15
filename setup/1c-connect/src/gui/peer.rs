@@ -657,15 +657,35 @@ async fn calling(
 ) {
     flow(&tx, &card.id, Some(link::Flow::Calling));
     let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card.id) }));
+    // **Неудача круга обязана назвать причину.** Живой прогон 15.11: человек вставил код, нажал «Подключиться», поле очистилось —
+    // и больше ничего, ни строки, ни на этой машине, ни на той. `keep_calling` повторяет `Round::Failed` вечно, и до этой правки
+    // повторял МОЛЧА: «не дозвонился», «канал не открылся», «разговор сорвался» выглядели для человека одинаково — как ничего.
+    //
+    // Говорится ОДИН раз на причину, а не на каждый повтор: повторы идут с нарастающей паузой годами, и журнал, в котором одна
+    // строка повторена тысячу раз, человек читать не станет — это то же молчание, только шумное. Сменилась причина — скажется
+    // новая; круг удался — память об уже сказанном чистится, и следующая беда снова будет названа.
+    let said: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stopped = channel::keep_calling(|| {
         let (node, channels, kit, tx, card, addr, hand) =
             (node.clone(), channels.clone(), kit.clone(), tx.clone(), card.clone(), addr.clone(), hand.clone());
         let (live, serves) = (live.clone(), serves.clone());
+        let said = said.clone();
         async move {
             // Замок берётся и отпускается до первого ожидания — через `await`
             // его не держим ни разу.
             let mine = hand.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let (round, agreed) = one_round(&node, &channels, &kit, &tx, &live, &serves, &card, addr, mine.call()).await;
+            {
+                let mut last = said.lock().unwrap_or_else(|e| e.into_inner());
+                match &round {
+                    Round::Failed(why) if last.as_deref() != Some(why.as_str()) => {
+                        say(&tx, Kind::Warn, format!("«{}»: подключиться не удалось — {why}", card.name));
+                        *last = Some(why.clone());
+                    }
+                    Round::Failed(_) => {}
+                    _ => *last = None,
+                }
+            }
             let enrolled = hand.lock().unwrap_or_else(|e| e.into_inner()).after(&round, agreed);
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
                 flow(&tx, &card.id, Some(link::Flow::Retrying));
@@ -701,10 +721,17 @@ async fn one_round(
     addr: EndpointAddr,
     call: enroll::Call<'_>,
 ) -> (Round, Option<crate::wire::CardRef>) {
+    let note = |tx: &UnboundedSender<Ev>, text: Option<String>| {
+        if let Some(t) = text {
+            say(tx, Kind::Say, t);
+        }
+    };
+    note(tx, crate::debug::step(|| format!("«{}»: звоню на {}", card.name, crate::gui::short_key(&addr.id.to_string()))));
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
     };
+    note(tx, crate::debug::step(|| format!("«{}»: канал открыт, открываю управляющий поток", card.name)));
     let mut control = match channel.call().await {
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
@@ -726,6 +753,7 @@ async fn one_round(
         (crate::wire::Side::WithBase, Some(c)) => Some(c.on_wire()),
         _ => None,
     };
+    note(tx, crate::debug::step(|| format!("«{}»: поток открыт, здороваюсь (сторона {side:?})", card.name)));
     let out = {
         let (send, recv) = control.halves();
         enroll::dial_side(send, recv, call, &says_name(), machine.ceiling, side, base).await
@@ -741,6 +769,7 @@ async fn one_round(
         Ok(enroll::Outcome::Already(base)) => (Some(base.id.clone()), base.write),
         _ => (None, false),
     };
+    note(tx, crate::debug::step(|| format!("«{}»: ответ зачисления: {out:?}", card.name)));
     match out {
         Err(e) => {
             control.end(None).await;

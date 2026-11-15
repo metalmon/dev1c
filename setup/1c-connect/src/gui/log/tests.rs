@@ -3,7 +3,7 @@ use super::*;
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::cfg_with;
-use crate::journal::{self, day_stamp, entries, group_label, LogEntry, Stamp, Stamped, LOG_CAP, LOG_FILE};
+use crate::journal::{self, day_stamp, Stamp, LOG_CAP, LOG_FILE};
 use common::{Event, Phase, Progress};
 use core::prelude::v1::test;
 use std::time::{Duration, Instant};

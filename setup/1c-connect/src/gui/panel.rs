@@ -18,8 +18,8 @@ use crate::gui::theme;
 use crate::gui::link;
 use crate::gui::parts::{self, Slot};
 use crate::gui::window::hide_window;
-use crate::gui::{self, head_parts, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
-use crate::journal::{self, LogEntry, Stamped};
+use crate::gui::{self, head_parts, Busy, Dot, Kind, Line, LogEntry, ProjectView, Running, Stamped, Ui, Verdict, Which};
+use crate::journal;
 use crate::session::State;
 use common::check::{Check, Outcome};
 // `Button` из `gpui_kit` зовём `KitButton`: имя `Button` ниже занято чистым
@@ -4335,11 +4335,11 @@ impl Render for Panel {
                     self.log_scroll.scroll_to_bottom();
                 }
                 // Решение, что показать — подпись дня или строка с числом
-                // повторов, — целиком у чистой функции (`journal::entries`), по
+                // повторов, — целиком у чистой функции (`gui::entries`), по
                 // образцу `link_body` у вкладки «Связь»: отрисовка по
                 // готовому итогу своего не решает (задача 9 плана «После
                 // живого прогона»).
-                let entries = journal::entries(&lines, journal::day_stamp());
+                let entries = gui::entries(&lines, journal::day_stamp());
                 Self::scrolled(
                     "log",
                     &self.log_scroll,

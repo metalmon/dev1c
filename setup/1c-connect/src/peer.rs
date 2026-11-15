@@ -35,16 +35,22 @@
 //! и снимать его «чтобы проверить» нельзя. Пока решения нет, этот путь
 //! проверяется двумя машинами либо двумя учётными записями Windows.
 
-use super::*;
+// Именной список, а не `use super::*`: звёздочка над `gui` тащила сюда и окно целиком, и `gpui_kit::*` вместе с ним — то есть прятала
+// привязку узла к экрану там, где её никто не искал. Всё, что узлу правда нужно, живёт в модулях, открытых без окна.
 use crate::cfg::CardId;
 use crate::channel::{self, Channels, Gone, Reins, Round, Stopped};
-use crate::enroll;
+use crate::enroll::{self, Pending};
 use crate::enrolled::{Book, Partner, Partners};
 use crate::node::Node;
-use crate::peer_out::Out;
+use crate::peer_out::{Flow, Out};
 use crate::wire::{code, Ceiling, Refuse};
+use common::kit::Kit;
+use futures::channel::mpsc::UnboundedSender;
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Сколько ждём выхода в сеть, прежде чем выдавать код.
 ///
@@ -197,7 +203,7 @@ pub fn start(kit: &Kit, tx: UnboundedSender<Out>, serves: crate::session::Servin
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(e) => {
-                say(&tx_in, Kind::Fail, format!("Не удалось выйти в сеть: {e}"));
+                say(&tx_in, common::Event::Fail(format!("Не удалось выйти в сеть: {e}")));
                 return;
             }
         };
@@ -218,7 +224,7 @@ async fn serve(
     let node = match Node::start(kit.state()).await {
         Ok(node) => node,
         Err(e) => {
-            say(&tx, Kind::Fail, e);
+            say(&tx, common::Event::Fail(e));
             return;
         }
     };
@@ -245,7 +251,7 @@ async fn serve(
                 start_call(&node, &channels, &kit, &tx, &live, &serves, &mut calls, Dialling { id: card, name }, String::new());
             }
         }
-        Err(e) => say(&tx, Kind::Fail, e),
+        Err(e) => say(&tx, common::Event::Fail(e)),
     }
     while let Some(cmd) = cmds.recv().await {
         match cmd {
@@ -528,7 +534,7 @@ fn start_call(
     let addr = match target(kit, &card.id, &code) {
         Ok(addr) => addr,
         Err(e) => {
-            say(tx, Kind::Fail, e);
+            say(tx, common::Event::Fail(e));
             return;
         }
     };
@@ -656,7 +662,7 @@ async fn calling(
     code: String,
     addr: EndpointAddr,
 ) {
-    flow(&tx, &card.id, Some(link::Flow::Calling));
+    flow(&tx, &card.id, Some(Flow::Calling));
     let hand = Arc::new(Mutex::new(InHand { code, card: known_card(&kit, &card.id) }));
     // **Неудача круга обязана назвать причину.** Живой прогон 15.11: человек вставил код, нажал «Подключиться», поле очистилось —
     // и больше ничего, ни строки, ни на этой машине, ни на той. `keep_calling` повторяет `Round::Failed` вечно, и до этой правки
@@ -680,7 +686,7 @@ async fn calling(
                 let mut last = said.lock().unwrap_or_else(|e| e.into_inner());
                 match &round {
                     Round::Failed(why) if last.as_deref() != Some(why.as_str()) => {
-                        say(&tx, Kind::Warn, format!("«{}»: подключиться не удалось — {why}", card.name));
+                        say(&tx, common::Event::Warn(format!("«{}»: подключиться не удалось — {why}", card.name)));
                         *last = Some(why.clone());
                     }
                     Round::Failed(_) => {}
@@ -689,17 +695,17 @@ async fn calling(
             }
             let enrolled = hand.lock().unwrap_or_else(|e| e.into_inner()).after(&round, agreed);
             if enrolled && !matches!(round, Round::NotEnrolled(_)) {
-                flow(&tx, &card.id, Some(link::Flow::Retrying));
+                flow(&tx, &card.id, Some(Flow::Retrying));
             }
             round
         }
     })
     .await;
-    flow(&tx, &card.id, Some(link::Flow::Broken));
+    flow(&tx, &card.id, Some(Flow::Broken));
     let name = &card.name;
     match stopped {
-        Stopped::Farewell(why) => say(&tx, Kind::Say, format!("«{name}»: {}", why.text)),
-        Stopped::NotEnrolled(no) => say(&tx, Kind::Warn, format!("«{name}»: {}", no.text)),
+        Stopped::Farewell(why) => say(&tx, common::Event::Say(format!("«{name}»: {}", why.text))),
+        Stopped::NotEnrolled(no) => say(&tx, common::Event::Warn(format!("«{name}»: {}", no.text))),
     }
 }
 
@@ -724,10 +730,10 @@ async fn one_round(
 ) -> (Round, Option<crate::wire::CardRef>) {
     let note = |tx: &UnboundedSender<Out>, text: Option<String>| {
         if let Some(t) = text {
-            say(tx, Kind::Say, t);
+            say(tx, common::Event::Say(t));
         }
     };
-    note(tx, crate::debug::step(|| format!("«{}»: звоню на {}", card.name, crate::gui::short_key(&addr.id.to_string()))));
+    note(tx, crate::debug::step(|| format!("«{}»: звоню на {}", card.name, crate::enroll::short_key(&addr.id.to_string()))));
     let channel = match channels.to(node, addr.clone()).await {
         Ok(c) => c,
         Err(e) => return (Round::Failed(e), None),
@@ -786,14 +792,14 @@ async fn one_round(
             // берётся у канала (`Channel::peer`), а не у кода: это то, что
             // доказал сам iroh, а не то, что было написано в строке.
             remember(kit, tx, &card.id, channel.peer(), &addr, agreed.as_ref());
-            flow(tx, &card.id, Some(link::Flow::Up));
+            flow(tx, &card.id, Some(Flow::Up));
             // Право записи называется словами КАЖДЫЙ круг, а не только на
             // первом зачислении: потолок той машины складывается заново на
             // каждом подключении, и «переключённый потолок доедет следующим
             // подключением» (спека) человек читает здесь. Это же и
             // единственный читатель поля `write` у возврата — без него оно
             // уезжало бы в никуда.
-            say(tx, Kind::Ok, format!("«{}»: подключено, {}", card.name, access_word(write)));
+            say(tx, common::Event::Ok(format!("«{}»: подключено, {}", card.name, access_word(write))));
             // Разбирать сказанное по живому потоку здесь нечего: всё, что
             // кончает соединение, `hold` разбирает сам (`bye`, `revoked`), а
             // сообщения «что-то изменилось на стороне базы» в этой версии нет
@@ -895,7 +901,7 @@ async fn answer_calls(
                 match enroll::first_frame(send, recv).await {
                     Ok(msg) => msg,
                     Err(e) => {
-                        say(&tx, Kind::Warn, e);
+                        say(&tx, common::Event::Warn(e));
                         control.end(None).await;
                         return;
                     }
@@ -930,7 +936,7 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
     channel::accept_all(
         &node,
         &channels,
-        move |why| say(&noted, Kind::Warn, why),
+        move |why| say(&noted, common::Event::Warn(why)),
         move |control, peer| answering(kit.clone(), tx.clone(), live.clone(), serves.clone(), control, peer),
     )
     .await;
@@ -952,22 +958,22 @@ async fn pipe_calls(
     let partners = match Partners::open(kit.state()) {
         Ok(p) => p,
         Err(e) => {
-            say(tx, Kind::Fail, e);
+            say(tx, common::Event::Fail(e));
             return;
         }
     };
     let (Some(partner), Some(base)) = (partners.of(card), partners.base_id_of(card)) else {
-        say(tx, Kind::Warn, "Вызов агента некуда вести: по этой карточке ещё не подключались.".to_string());
+        say(tx, common::Event::Warn("Вызов агента некуда вести: по этой карточке ещё не подключались.".to_string()));
         return;
     };
     let Some(channel) = channels.of(partner.key) else {
-        say(tx, Kind::Warn, "Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string());
+        say(tx, common::Event::Warn("Вызов агента некуда вести: связь с той стороной сейчас не держится.".to_string()));
         return;
     };
     let mut control = match channel.call().await {
         Ok(c) => c,
         Err(e) => {
-            say(tx, Kind::Warn, e);
+            say(tx, common::Event::Warn(e));
             return;
         }
     };
@@ -985,7 +991,7 @@ async fn pipe_calls(
         }
     };
     if let Err(why) = opened {
-        say(tx, Kind::Warn, why);
+        say(tx, common::Event::Warn(why));
         control.end(None).await;
         return;
     }
@@ -1023,7 +1029,7 @@ async fn serve_calls(
     if crate::wire::Frame::write(control.says(), &crate::wire::Msg::McpOk).await.is_err() {
         return;
     }
-    say(tx, Kind::Say, format!("«{}»: агент той стороны открыл вызовы", admitted.card.name));
+    say(tx, common::Event::Say(format!("«{}»: агент той стороны открыл вызовы", admitted.card.name)));
     // Половины уезжают в мост вместе с держателем канала: пока идут вызовы, канал закрыться не вправе.
     let (send, recv, hold) = crate::channel::into_pipe(control);
     // **Труба живёт не дольше сеанса И не дольше этого потока.** Мост поднят в потоке узла, а не в потоке сеанса, и уронить его
@@ -1037,7 +1043,7 @@ async fn serve_calls(
     }
     drop(task);
     drop(hold);
-    say(tx, Kind::Say, format!("«{}»: вызовы закончились", admitted.card.name));
+    say(tx, common::Event::Say(format!("«{}»: вызовы закончились", admitted.card.name)));
 }
 
 /// Допуск потока вызовов: один вопрос, один ответ, четыре отказа.
@@ -1201,7 +1207,7 @@ async fn answering(
     let mut book = match Book::open(kit.state()) {
         Ok(book) => book,
         Err(e) => {
-            say(&tx, Kind::Fail, e);
+            say(&tx, common::Event::Fail(e));
             return;
         }
     };
@@ -1229,7 +1235,7 @@ async fn answering(
         match enroll::first_frame(send, recv).await {
             Ok(msg) => msg,
             Err(e) => {
-                say(&tx, Kind::Warn, e);
+                say(&tx, common::Event::Warn(e));
                 control.end(None).await;
                 return;
             }
@@ -1246,7 +1252,7 @@ async fn answering(
     let out = match out {
         Ok(out) => out,
         Err(e) => {
-            say(&tx, Kind::Warn, e);
+            say(&tx, common::Event::Warn(e));
             control.end(None).await;
             return;
         }
@@ -1261,7 +1267,7 @@ async fn answering(
         enroll::Outcome::Enrolled(base) => (base.base_id.clone(), base.write),
         enroll::Outcome::Already(base) => (base.id.clone(), base.write),
         enroll::Outcome::NotEnrolled(no) => {
-            say(&tx, Kind::Say, no.text.clone());
+            say(&tx, common::Event::Say(no.text.clone().into()));
             control.end(None).await;
             return;
         }
@@ -1275,12 +1281,12 @@ async fn answering(
     // человеку карточку-призрак.
     let shown = served.as_ref().map_or_else(|| "карточка не опознана".to_string(), |c| c.name.clone());
     if let Some(c) = &served {
-        flow(&tx, c.id(), Some(link::Flow::Up));
+        flow(&tx, c.id(), Some(Flow::Up));
     }
     // Право записи — то, что ПОЛУЧИЛОСЬ после сложения потолков: человек видит
     // в журнале, чем эта сторона сейчас может пользоваться, а не чем ей
     // когда-то разрешили.
-    say(&tx, Kind::Ok, format!("«{shown}»: подключено, {}", access_word(write)));
+    say(&tx, common::Event::Ok(format!("«{shown}»: подключено, {}", access_word(write))));
     let (reins, mut recv) = channel::reins(control);
     let id =
         live.remember(peer, served.as_ref().map(|c| c.id().clone()), Some(reins), if write { Ceiling::Full } else { Ceiling::ReadOnly });
@@ -1298,9 +1304,9 @@ async fn answering(
             }
         }
         if let Some(c) = &served {
-            flow(&tx, c.id(), Some(link::Flow::Broken));
+            flow(&tx, c.id(), Some(Flow::Broken));
         }
-        say(&tx, Kind::Warn, format!("«{shown}»: разрешение сняли прямо во время разговора — связь закрыта"));
+        say(&tx, common::Event::Warn(format!("«{shown}»: разрешение сняли прямо во время разговора — связь закрыта")));
         return;
     }
     let gone = channel::hold(&mut recv, |_| {}).await;
@@ -1309,11 +1315,11 @@ async fn answering(
     // нечего, и это не беда.
     drop(live.forget(peer, id));
     if let Some(c) = &served {
-        flow(&tx, c.id(), Some(link::Flow::Broken));
+        flow(&tx, c.id(), Some(Flow::Broken));
     }
     match gone {
-        Gone::Farewell(why) => say(&tx, Kind::Say, format!("«{shown}»: {}", why.text)),
-        Gone::Broken(why) => say(&tx, Kind::Say, format!("«{shown}»: {}", why.text)),
+        Gone::Farewell(why) => say(&tx, common::Event::Say(format!("«{shown}»: {}", why.text))),
+        Gone::Broken(why) => say(&tx, common::Event::Say(format!("«{shown}»: {}", why.text))),
     }
 }
 
@@ -1542,7 +1548,7 @@ fn remember(
         }
     });
     if let Err(e) = wrote {
-        say(tx, Kind::Warn, format!("Подключение живёт, но запомнить его не удалось: {e}"));
+        say(tx, common::Event::Warn(format!("Подключение живёт, но запомнить его не удалось: {e}")));
     }
 }
 
@@ -1555,28 +1561,18 @@ fn look(node: &Node) -> Reach {
     Reach { relay, direct: crate::ticket::direct_with_loopback(&seen, &node.endpoint().bound_sockets()) }
 }
 
-/// Строка в журнал окна из потока узла — своими словами (`common::Event`),
-/// не готовой строкой (`gui::log::Line`): перевод в строку — дело окна
-/// (`gui::line_of`), узел его не повторяет вторым переводом.
+/// Строка в журнал окна из потока узла — своими словами (`common::Event`), не готовой строкой (`gui::log::Line`): перевод в строку —
+/// дело окна (`gui::line_of`), узел его не повторяет вторым переводом.
 ///
-/// `Kind` здесь — всё ещё слово окна (эта правка его не трогает), но наружу
-/// из узла уезжает уже не оно: `Head` узел никогда не просит (строки-заголовки
-/// — дело самого окна, не потока), и ветка существует только затем, чтобы
-/// `match` остался исчерпывающим.
-fn say(tx: &UnboundedSender<Out>, kind: Kind, text: impl Into<String>) {
-    let text = text.into();
-    let event = match kind {
-        Kind::Ok => common::Event::Ok(text),
-        Kind::Warn => common::Event::Warn(text),
-        Kind::Fail => common::Event::Fail(text),
-        Kind::Say | Kind::Head => common::Event::Say(text),
-    };
-    let _ = tx.unbounded_send(Out::Say(event));
+/// Второго словаря здесь больше нет. Прежде узел звал `say` словом окна (`gui::log::Kind`) и переводил его в `common::Event` сам — две
+/// меры на один вопрос, главный разряд дефектов этого дерева. Мера осталась одна, и зовущие называют событие прямо.
+fn say(tx: &UnboundedSender<Out>, e: common::Event) {
+    let _ = tx.unbounded_send(Out::Say(e));
 }
 
 /// Новое состояние управляющего потока карточки — в окно. Слово человеку из
-/// него делает `link::contract_of`/`contract_word`, здесь только факт.
-fn flow(tx: &UnboundedSender<Out>, card: &CardId, now: Option<link::Flow>) {
+/// него делает `gui::link::contract_of`/`contract_word`, здесь только факт.
+fn flow(tx: &UnboundedSender<Out>, card: &CardId, now: Option<Flow>) {
     let _ = tx.unbounded_send(Out::Flow(card.clone(), now));
 }
 

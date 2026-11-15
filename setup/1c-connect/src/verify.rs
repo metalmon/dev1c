@@ -5,6 +5,7 @@
 
 use crate::editors;
 use crate::ops_host::{mcp_exe, tools_state, Ctx, Reach};
+use crate::SUBJECT;
 use common::check::Check;
 use common::op::OpState;
 use common::{Phase, Runner};
@@ -46,7 +47,7 @@ pub const EXTENSION: &str = "расширение в базе";
 /// Имя — вопросом человека, а не именем файла платформы: «дескриптор публикации» (и `default.vrd` в подробности) — внутренность, которой на экране нет места (находка 27 осмотра 10.11). Спрашивает факт одно: опубликована ли ТА база, что выбрана в настройках.
 pub const DESCRIPTOR: &str = "публикация той же базы";
 const MEDIA: &str = "комплект на носителе";
-/// Имя про предмет (`gui::SUBJECT`), а не про рабочее место: факт стоит только в локальной ветви
+/// Имя про предмет (`crate::SUBJECT`), а не про рабочее место: факт стоит только в локальной ветви
 /// набора, где рабочих мест нет вовсе, и человек читал «порты рабочего
 /// места » про то, чего у него нет (находка аудита 30.10). Числа портов
 /// по-прежнему считаются от номера рабочего места (`cfg::ports`, при пустом
@@ -56,7 +57,7 @@ const MCP_PORTS: &str = "порты доступа к 1С";
 const DEADLINE: &str = "срок действия";
 const OPEN_SESSION: &str = "сеансы 1С на машине";
 /// Решение владельца 29.10: пустые записи `context_servers`/`mcpServers` у редактора — зелёный статус при том, что агенту нечем работать с 1С, и это ложь по правилу «зелёный значит работает». Факт горячий (`gate.rs`, «горячее против холодного») — красит точку жёлтым и называет причину, но переключатель не запирает: `cold_gate` его не видит вовсе.
-/// Имя — предметом (`gui::SUBJECT`), а не внутренним словом «записи MCP»: человеку оно не говорит ничего (находка 12 осмотра 10.11). Имя константы оставлено как есть — она внутри кода.
+/// Имя — предметом (`crate::SUBJECT`), а не внутренним словом «записи MCP»: человеку оно не говорит ничего (находка 12 осмотра 10.11). Имя константы оставлено как есть — она внутри кода.
 const EDITOR_MCP: &str = "доступ к 1С у агента";
 
 /// Порядок фактов для режима: общие, затем то, что мешает загрузке/приёму
@@ -318,7 +319,7 @@ pub fn mcp_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], ports: Por
         return Check::fail(
             MCP_PORTS,
             format!("{mcp} и {vrunner}: занять не вышло{who} — агент до нас не дойдёт"),
-            "закройте вторую копию программы (или выключите доступ к 1С на той машине) и включите снова",
+            format!("закройте вторую копию программы (или выключите {SUBJECT} на той машине) и включите снова"),
         );
     }
     if busy.is_empty() {
@@ -339,7 +340,7 @@ pub fn mcp_ports_fact(mcp: u16, vrunner: u16, busy: &[(u16, String)], ports: Por
             Check::fail(
                 MCP_PORTS,
                 format!("порт(ы) {} заняты: {}", busy.iter().map(|(p, _)| p.to_string()).collect::<Vec<_>>().join(", "), who.join(", ")),
-                format!("закройте {} и включите доступ к 1С снова", who.join(" и ")),
+                format!("закройте {} и включите {SUBJECT} снова", who.join(" и ")),
             )
         }
         // Держателя называем по имени: оно уже добыто, а человеку полезно
@@ -523,11 +524,11 @@ fn system_web_server_fact(cfg: &crate::cfg::Cfg) -> Check {
 /// `own` — публикуем сами (`publication = "auto"`), `windows` — система, где
 /// IIS бывает. Оба параметрами, а не `cfg!` внутри: так правило проверяется
 /// тестом целиком, а не только на той системе, где тест запущен.
-fn web_hint(own: bool, windows: bool) -> &'static str {
+fn web_hint(own: bool, windows: bool) -> String {
     match (own, windows) {
-        (true, _) => "публикацию поднимает сам коннектор — включите доступ к 1С; если он включён, причину смотрите в журнале",
-        (false, true) => "запустите Apache или IIS, на котором опубликована база",
-        (false, false) => "запустите apache2, на котором опубликована база",
+        (true, _) => unreached_hint(),
+        (false, true) => "запустите Apache или IIS, на котором опубликована база".to_string(),
+        (false, false) => "запустите apache2, на котором опубликована база".to_string(),
     }
 }
 
@@ -598,7 +599,9 @@ const PUBLICATION_ADDRESS_HINT: &str =
 /// рабочую публикацию ни за что. Тот же совет, что у факта порта
 /// (`web_hint`): поднимает публикацию сам коннектор. Про установку
 /// расширения говорим только когда база ОТВЕТИЛА, что его нет.
-const UNREACHED_HINT: &str = "публикацию поднимает сам коннектор — включите доступ к 1С; если он включён, причину смотрите в журнале";
+fn unreached_hint() -> String {
+    format!("публикацию поднимает сам коннектор — включите {SUBJECT}; если он включён, причину смотрите в журнале")
+}
 
 /// Отвечает ли публикация вообще (любым HTTP-ответом по `/version`) —
 /// отдельно от того, стоит ли в базе расширение (`extension_fact`): раньше
@@ -670,7 +673,7 @@ fn publication_responds_fact(base_url: &str, responds: bool, busy: Option<(&str,
     if base_url.trim().is_empty() {
         return Check::fail(PUBLICATION, "адрес публикации не задан".to_string(), PUBLICATION_ADDRESS_HINT);
     }
-    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), UNREACHED_HINT)
+    Check::fail(PUBLICATION, format!("{base_url}/version не отвечает"), unreached_hint())
 }
 
 /// Расширение в базе — версия, отсутствие или недостижимость (`ops_host::Reach`,
@@ -749,7 +752,7 @@ fn extension_fact(reach: Option<&Reach>, busy: Option<(&str, &str)>, publication
         // ответом, а не мы догадкой по списку процессов).
         Some(Reach::Refused(c)) if crate::onec_error::is_busy(c) => Check::busy(EXTENSION, c.what, c.fix),
         Some(Reach::Refused(c)) => Check::fail(EXTENSION, c.what, c.fix),
-        Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), UNREACHED_HINT),
+        Some(Reach::Unreachable(why)) => Check::fail(EXTENSION, why.clone(), unreached_hint()),
         // Пробы не было и не могло быть: адрес чужой публикации не задан,
         // стучать некуда. Говорим это, а не «расширения в базе нет» — база
         // тут ни при чём, и чинится это полем в окне (`gather` сюда и
@@ -1733,12 +1736,12 @@ mod tests {
         let c = mcp_ports_fact(7773, 7783, &busy, PortUse::WeListen);
         assert!(!c.ok && !c.info, "{c:?}");
         assert!(c.detail.contains("7783") && c.detail.contains("nginx (pid 500)"), "держателя надо назвать: {c:?}");
-        assert_eq!(c.hint, format!("закройте nginx (pid 500) и включите {} снова", crate::gui::SUBJECT), "{c:?}");
+        assert_eq!(c.hint, format!("закройте nginx (pid 500) и включите {} снова", SUBJECT), "{c:?}");
 
         // Один держатель на оба порта — в совете он один раз, а не дважды.
         let both = [(7773, "1c-connect (pid 812)".to_string()), (7783, "1c-connect (pid 812)".to_string())];
         let c = mcp_ports_fact(7773, 7783, &both, PortUse::WeListen);
-        assert_eq!(c.hint, format!("закройте 1c-connect (pid 812) и включите {} снова", crate::gui::SUBJECT), "{c:?}");
+        assert_eq!(c.hint, format!("закройте 1c-connect (pid 812) и включите {} снова", SUBJECT), "{c:?}");
     }
 
     /// Свободные порты зелены в обоих случаях — правило о занятых, а не о
@@ -2176,8 +2179,8 @@ mod tests {
         // советовать установку нечего: публикацию поднимает сам коннектор.
         let free = publication_responds_fact("http://x", false, None);
         assert!(!free.hint.contains("install"), "{free:?}");
-        // По смыслу, а не по букве: совет говорит про предмет, который надо включить (`gui::SUBJECT`).
-        assert!(free.hint.contains(crate::gui::SUBJECT), "{free:?}");
+        // По смыслу, а не по букве: совет говорит про предмет, который надо включить (`crate::SUBJECT`).
+        assert!(free.hint.contains(SUBJECT), "{free:?}");
     }
 
     /// Истёкший срок — провал: человек обязан увидеть красное и дату, до
@@ -2372,7 +2375,7 @@ mod tests {
         assert!(ok.ok && ok.detail.contains("1.2"), "{ok:?}");
         // До базы не достучались — совет про обслуживание, не про установку.
         let fail = publication_responds_fact("http://x", false, None);
-        assert!(!fail.ok && fail.hint.contains(crate::gui::SUBJECT) && !fail.hint.contains("install"), "{fail:?}");
+        assert!(!fail.ok && fail.hint.contains(SUBJECT) && !fail.hint.contains("install"), "{fail:?}");
         // А вот когда база ОТВЕТИЛА, что расширения нет, установка и есть ответ.
         let absent = extension_fact(Some(&Reach::Absent), None, "auto");
         assert!(!absent.ok && absent.hint.contains("install"), "{absent:?}");
@@ -2391,7 +2394,7 @@ mod tests {
             Check::pass(PLATFORM, "есть"),
             Check::note(OPEN_SESSION, "занято человеком"),
             Check::fail(PROJECT, "не разложен", "1c-connect install"),
-            Check::fail(WEB, "не отвечает", "включите доступ к 1С"),
+            Check::fail(WEB, "не отвечает", format!("включите {SUBJECT}")),
         ];
         match crate::gui::verdict_of(true, &checks) {
             crate::gui::Verdict::NotReady(c) => assert_eq!(c.what, PROJECT),

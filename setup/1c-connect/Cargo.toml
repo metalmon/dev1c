@@ -27,7 +27,7 @@ default = ["gui"]
 # кому продавать пока нечего. Коммерческая сборка — `--features licence`;
 # тогда появляется и первый факт набора «срок действия» (`verify::order`).
 licence = []
-gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:futures", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk", "dep:x11rb"]
+gui = ["common/gui", "dep:gpui-kit", "dep:tray-icon", "dep:image", "dep:embed-resource", "dep:raw-window-handle", "dep:gtk", "dep:x11rb"]
 
 [dependencies]
 common = { path = "../common" }
@@ -55,7 +55,7 @@ serde_json.workspace = true
 toml.workspace = true
 gpui-kit = { version = "=0.7.3", optional = true }
 tray-icon = { version = "=0.26.1", default-features = false, optional = true }
-futures = { version = "0.3", optional = true }
+futures = { version = "0.3" }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 # Транспорт канала между двумя машинами: QUIC, адресуемый открытым ключом, с
 # пробиванием NAT и релеем как запасным путём. Цена замерена перед

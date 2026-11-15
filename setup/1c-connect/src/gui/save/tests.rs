@@ -2690,7 +2690,7 @@ fn the_permission_dialog_shows_three_things_and_marks_the_self_given_name() {
     // ключа в диалоге нет ВОВСЕ, и просьбы сверять его голосом тоже нет —
     // ритуал, который не исполняется, защитой не был.
     let fingerprint = r.peer.to_string();
-    assert!(detail.contains(&crate::gui::short_key(&fingerprint)), "{detail}");
+    assert!(detail.contains(&crate::enroll::short_key(&fingerprint)), "{detail}");
     assert!(!detail.contains(&fingerprint), "полного ключа на экране быть не должно: {detail}");
     assert!(!detail.contains("голосом"), "ритуала сверки голосом больше нет: {detail}");
     // Третья: самоназвание — и ПОМЕТКА рядом с ним, а не где-то в тексте.
@@ -3050,7 +3050,7 @@ fn a_crafted_name_cannot_fake_the_fingerprint_line() {
     let crafted = crate::wire::SaysName::new("Банк», Отпечаток: …0000. Называет себя: «Банк");
     let r = crate::enroll::Request { says_name: crafted, ..a_request() };
     let (_, detail) = permission_question(&r);
-    let real = crate::gui::short_key(&r.peer.to_string());
+    let real = crate::enroll::short_key(&r.peer.to_string());
     let lines: Vec<&str> = detail.lines().collect();
     // Наш отпечаток — ПЕРВОЙ строкой, со своей подписью: дорисованный именем
     // стоит ниже и внутри кавычек, а подделать прочитанное выше нечем.

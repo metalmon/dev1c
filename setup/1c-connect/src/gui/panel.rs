@@ -1312,9 +1312,9 @@ pub fn accepting_block(
         .iter()
         .map(|p| PartyRow {
             // Четыре последних знака, не все шестьдесят четыре (решение владельца
-            // 10.11, довод — у `gui::short_key`): по строке в полэкрана человек всё
+            // 10.11, довод — у `enroll::short_key`): по строке в полэкрана человек всё
             // равно никого не различал, а различает он их по имени и хвосту.
-            fingerprint: crate::gui::short_key(&p.key.to_string()),
+            fingerprint: crate::enroll::short_key(&p.key.to_string()),
             key: p.key,
             says_name: if p.says_name.is_empty() { "Без имени".to_string() } else { format!("«{}»", p.says_name) },
             // Слова, а не галочка, и все ТРИ меры права записи: свои две из
@@ -1364,7 +1364,7 @@ pub fn dialling_block(c: &Connection, partner: Option<String>) -> Option<Diallin
 pub struct Dialling {
     /// Отпечаток ключа той стороны — тот же короткий вид, что у зачисленных в
     /// принимающей карточке (`PartyRow::fingerprint`) и по тому же доводу
-    /// (`gui::short_key`). `None` — зачисления ещё не было.
+    /// (`enroll::short_key`). `None` — зачисления ещё не было.
     pub partner: Option<String>,
     // Поля `button` здесь больше нет (владелец 10.11: «Обсуждали же, что кнопка действия в футере. Нет, надо её спрятать и воткнуть выше новую кнопку»). Прошлый круг прочитал правило подвала половинчато: слово состояния из подвала убрал, а ДЕЙСТВИЕ завёл новой кнопкой посреди карточки — условленное место для действия пустовало. Главное действие зовущей карточки живёт в правом слоте подвала (`main_button`), поле для кода остаётся здесь, кнопки рядом с ним нет. Отсюда и короткое слово: «Подключиться по коду» звалось так затем, чтобы не спорить с «Подключиться» подвала (находка 14) — теперь это одна и та же кнопка, спорить не с чем.
 }
@@ -1791,7 +1791,7 @@ fn issue_code(ui: &mut Ui, card: &str, fresh: bool) -> Result<String, String> {
     // Узел ещё не поднялся или не вышел в сеть — код выдаётся без адресов:
     // это хуже (нужен интернет у обеих сторон), но не отказ. Молча так больше
     // не бывает — оговорку говорит `blind_code_note` ниже.
-    let reach = ui.peer.as_ref().and_then(crate::gui::peer::Peer::reach).unwrap_or_default();
+    let reach = ui.peer.as_ref().and_then(crate::peer::Peer::reach).unwrap_or_default();
     let reach_empty = reach.relay.is_none() && reach.direct.is_empty();
     let ticket = crate::ticket::Ticket::issue(id, reach.relay, reach.direct)?;
     let code = ticket.to_code();
@@ -1889,10 +1889,11 @@ fn revoke_party(ui: &mut Ui, card: &str, key: iroh::EndpointId) {
             if let (Some(peer), Some(card_key)) = (&ui.peer, card_key.as_ref()) {
                 peer.revoked(card_key, key);
             }
-            // Отпечаток — КОРОТКИЙ, тем же приёмом, что в строке зачисленного (`gui::short_key`): отпечаток в 64 знака сплошной строкой
+            // Отпечаток — КОРОТКИЙ, тем же приёмом, что в строке зачисленного (`enroll::short_key`): отпечаток в 64 знака сплошной строкой
             // журнал не носит (закон окна, «Журнал»), и сверяют его голосом по коротким знакам.
             Line {
-                kind: Kind::Ok, text: format!("Разрешение отозвано: «{card}», отпечаток {}", crate::gui::short_key(&key.to_string()))
+                kind: Kind::Ok,
+                text: format!("Разрешение отозвано: «{card}», отпечаток {}", crate::enroll::short_key(&key.to_string())),
             }
         }
         Err(e) => Line { kind: Kind::Fail, text: e },
@@ -3511,7 +3512,7 @@ impl Panel {
         };
         let dialling = {
             let ui = cx.global::<Ui>();
-            let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| crate::gui::short_key(&key.to_string()));
+            let partner = ui.partners.iter().find(|(card, _)| card == &c.id()).map(|(_, key)| crate::enroll::short_key(&key.to_string()));
             dialling_block(&c, partner)
         };
         for group in card_view(&c, shown, block, dialling) {
@@ -6845,7 +6846,7 @@ mod tests {
         // Отзыв от этого не страдает: он адресуется КЛЮЧОМ (строка ниже), а
         // не разбором строки с экрана, и различает стороны человек по имени
         // рядом. Полного ключа на экране нет вовсе — это и утверждается.
-        assert_eq!(b.parties[0].fingerprint, crate::gui::short_key(&a_key(7).to_string()));
+        assert_eq!(b.parties[0].fingerprint, crate::enroll::short_key(&a_key(7).to_string()));
         assert!(!b.parties[0].fingerprint.contains(&a_key(7).to_string()), "полного ключа в карточке быть не должно");
         assert_eq!(b.parties[0].key, a_key(7), "отзыв адресуется ключом, а не разбором строки с экрана");
         assert!(b.parties[0].says_name.contains("Ромашка-бухгалтерия"));

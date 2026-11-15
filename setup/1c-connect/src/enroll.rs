@@ -382,18 +382,21 @@ pub enum Decision {
 ///
 /// Тип живёт здесь, а не в окне: заявка (`Request`) и решение (`Decision`)
 /// — уже здешние, и канал между ними — третья деталь того же разговора, а
-/// не словарь экрана. Окно получает готовый тип и только показывает его
-/// (`gui::Pending` — реэкспорт).
+/// не словарь экрана. Окно — один из клиентов бека (закон 1 спеки
+/// «Сопряжение переезжает в бек»), и это ровно то, из-за чего у типа нет
+/// гейта на фичу окна: командная строка умеет всё, что окно (закон 3 той же
+/// спеки), и канал ответа обязан существовать и без `gui`.
 ///
 /// `Debug` — не для показа человеку (его тут и не ждут), а затем, что
 /// `peer_out::Out` оборачивает заявку в свой вариант и обязан выводиться
 /// целиком: тест формирует `{out:?}` на ветке, до которой доходить не
 /// должен, и без `Debug` здесь это не собралось бы вовсе.
 ///
-/// Доступен только со сборкой окна: без фичи `gui` зависимости `futures` в
-/// дереве нет вовсе (сборка `--no-default-features`), а звонить этому типу
-/// и некому — заявки принимает только `gui::peer`.
-#[cfg(feature = "gui")]
+/// Канал — `tokio::sync::oneshot`, а не `futures::channel::oneshot`: вторая
+/// зависимость в этом дереве под фичей `gui` (`Cargo.toml`), а `tokio` с
+/// `sync` — безусловная, и та же идиома уже живёт в `channel.rs`/`session.rs`.
+/// Вести здесь второй канал на том же вопросе значило бы заводить вторую
+/// меру, а не только лишнюю зависимость.
 #[derive(Debug)]
 pub struct Pending {
     pub request: Request,
@@ -401,14 +404,13 @@ pub struct Pending {
     /// вышел срок `DECISION`) либо ответ уже уехал методом `answer`. Заявка
     /// при этом со списка окна снимается, а не висит немым напоминанием
     /// (`gui::save::prune_enrollment`).
-    answer: Option<futures::channel::oneshot::Sender<Decision>>,
+    answer: Option<tokio::sync::oneshot::Sender<Decision>>,
 }
 
-#[cfg(feature = "gui")]
 impl Pending {
     /// Заявка со своим каналом ответа. Конструктор, а не литерал структуры —
     /// поле `answer` приватно, и это единственная дверь извне.
-    pub fn new(request: Request, answer: futures::channel::oneshot::Sender<Decision>) -> Pending {
+    pub fn new(request: Request, answer: tokio::sync::oneshot::Sender<Decision>) -> Pending {
         Pending { request, answer: Some(answer) }
     }
 
@@ -417,7 +419,7 @@ impl Pending {
     /// уже ушёл.
     ///
     /// Чистая проверка, и ответ она берёт у самого канала
-    /// (`Sender::is_canceled` — приёмник уронен), а не у своего срока: срок
+    /// (`Sender::is_closed` — приёмник уронен), а не у своего срока: срок
     /// держит `accept_side`, и второй счётчик здесь разошёлся бы с ним на
     /// первой же правке.
     ///
@@ -428,7 +430,7 @@ impl Pending {
     /// открывает окно, видит первую строку, снимает трубку, сверяет
     /// отпечаток голосом — и получает «отправить не удалось».
     pub fn reachable(&self) -> bool {
-        self.answer.as_ref().is_some_and(|tx| !tx.is_canceled())
+        self.answer.as_ref().is_some_and(|tx| !tx.is_closed())
     }
 
     /// Ответить на заявку. Канал берётся `Option::take` — отсюда и «один
@@ -1258,7 +1260,6 @@ const ALREADY_TALKING: &str = "По этому коду прямо сейчас 
 /// метод второй раз. Слова те же по духу, что у прочих отказов этого модуля
 /// (что случилось, что делать), хоть читает их не человек, а тот, кто правит
 /// вызов.
-#[cfg(feature = "gui")]
 const ALREADY_ANSWERED: &str = "Эта заявка уже получила ответ.\nКанал решения одноразовый: второй раз послать по нему нельзя, дошёл ли \
                                 первый ответ до адресата или нет.\nПроверяйте `Pending::reachable`, прежде чем звать `answer` снова.";
 
@@ -1399,7 +1400,6 @@ mod tests {
 
     /// Заявка для теста `Pending`: поля важны лишь тем, что они есть, а не
     /// какие — проверяется поведение канала ответа, а не разбор заявки.
-    #[cfg(feature = "gui")]
     fn a_request() -> Request {
         Request {
             card_name: "Ромашка".into(),
@@ -1411,17 +1411,18 @@ mod tests {
     }
 
     /// На заявку отвечают ОДИН раз: второй ответ — отказ словами, а не тихая потеря.
-    #[cfg(feature = "gui")]
     #[tokio::test]
     async fn a_request_is_answered_once_and_the_second_answer_is_refused_in_words() {
-        let (tx, mut rx) = futures::channel::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
         let mut p = Pending::new(a_request(), tx);
         assert!(p.answer(Decision::Allow).is_ok());
         // Брифовский пример звал `Decision::Decline`, которого в этом перечислении нет
         // (варианты — `Allow`/`Deny`/`NoAnswer`): второй ответ здесь — `Deny`, смысл теста
         // от выбора варианта не зависит, второй вызов обязан быть отказом словами.
         assert_eq!(p.answer(Decision::Deny).unwrap_err(), ALREADY_ANSWERED);
-        assert!(matches!(rx.try_recv(), Ok(Some(Decision::Allow))), "уехал первый ответ, а не последний");
+        // `tokio::sync::oneshot::Receiver::try_recv` отдаёт значение прямо, без
+        // обёртки `Option` (в отличие от `futures::channel::oneshot`).
+        assert!(matches!(rx.try_recv(), Ok(Decision::Allow)), "уехал первый ответ, а не последний");
     }
 
     /// Счётчик вызовов диалога: «человека не беспокоят вовсе» проверяется

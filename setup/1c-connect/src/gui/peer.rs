@@ -1211,7 +1211,7 @@ async fn answering(
     let ask = |request: enroll::Request| {
         let tx = tx.clone();
         async move {
-            let (answer, wait) = futures::channel::oneshot::channel();
+            let (answer, wait) = tokio::sync::oneshot::channel();
             if tx.unbounded_send(Out::Enroll(Pending::new(request, answer))).is_err() {
                 // Окна больше нет — спрашивать некого, и это не отказ
                 // человека, а отсутствие человека.

@@ -2660,7 +2660,7 @@ fn a_request() -> crate::enroll::Request {
 /// приватно (задача 2 плана «Пара переезжает в бек»), и после переезда
 /// собрать такую заявку литералом структуры, как раньше, уже нельзя.
 fn gone_pending(request: crate::enroll::Request) -> crate::gui::Pending {
-    let (tx, _rx) = futures::channel::oneshot::channel();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
     crate::gui::Pending::new(request, tx)
 }
 
@@ -2784,10 +2784,10 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
 fn the_answer_travels_back_to_the_conversation() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let (tx, mut rx) = futures::channel::oneshot::channel();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
     ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
-    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow));
+    assert_eq!(rx.try_recv().unwrap(), Decision::Allow);
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
@@ -2839,8 +2839,8 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
 fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let (a_tx, mut a_rx) = futures::channel::oneshot::channel();
-    let (b_tx, mut b_rx) = futures::channel::oneshot::channel();
+    let (a_tx, mut a_rx) = tokio::sync::oneshot::channel();
+    let (b_tx, mut b_rx) = tokio::sync::oneshot::channel();
     let a = a_request();
     let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
     assert_ne!(a.peer, b.peer, "иначе тест проверяет не то");
@@ -2853,8 +2853,14 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
 
     answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow);
-    assert_eq!(a_rx.try_recv().unwrap(), Some(Decision::Allow), "разрешение обязано уйти той стороне, чей отпечаток сверяли");
-    assert_eq!(b_rx.try_recv().unwrap(), None, "сторона, которую человек не видел, разрешения не получает");
+    assert_eq!(a_rx.try_recv().unwrap(), Decision::Allow, "разрешение обязано уйти той стороне, чей отпечаток сверяли");
+    // Б ничего не получила: канал жив, но пуст — `try_recv` отвечает `Empty`,
+    // а не `Ok` с пустым значением (`tokio::sync::oneshot`, в отличие от
+    // `futures::channel::oneshot`, не оборачивает ответ в `Option`).
+    assert!(
+        matches!(b_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+        "сторона, которую человек не видел, разрешения не получает"
+    );
     // Б осталась ждать своей очереди — её человек увидит своим диалогом.
     assert_eq!(ui.waiting.len(), 1);
     assert_eq!(ui.waiting[0].request.peer, b.peer);
@@ -2867,13 +2873,14 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
 fn an_answer_to_a_gone_request_touches_no_one_else() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
-    let (b_tx, mut b_rx) = futures::channel::oneshot::channel();
+    let (b_tx, mut b_rx) = tokio::sync::oneshot::channel();
     let gone = a_request().peer;
     let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
     take_request(&mut ui, crate::gui::Pending::new(b.clone(), b_tx));
 
     answer_request(&mut ui, b.card(), &b.card_name, gone, Decision::Deny);
-    assert_eq!(b_rx.try_recv().unwrap(), None, "отказ чужой заявке не адресуется");
+    // Канал жив, но пуст — тем же приёмом, что выше: `Empty`, а не `Ok(None)`.
+    assert!(matches!(b_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)), "отказ чужой заявке не адресуется");
     assert_eq!(ui.waiting.len(), 1, "чужая заявка со списка не снимается");
     assert!(ui.declined.is_empty(), "исхода, которого человек не выбирал про ЭТУ сторону, карточка не носит");
     // Смысл, а не буква: человеку сказано, что ТОЙ просьбы уже нет и что
@@ -2907,10 +2914,10 @@ fn the_book_is_reread_after_the_person_allows() {
     conversation.enroll(&card, peer, "Заказчик", true, crate::wire::Side::WithAgents).unwrap();
     assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
 
-    let (tx, mut rx) = futures::channel::oneshot::channel();
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
     ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow);
-    assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow), "решение обязано уехать — иначе перечтения и не будет");
+    assert_eq!(rx.try_recv().unwrap(), Decision::Allow, "решение обязано уехать — иначе перечтения и не будет");
 
     let parties = ui.book.as_ref().unwrap().of(&card);
     assert_eq!(parties.len(), 1, "карточка сразу после «Разрешить» обязана показать зачисленную сторону");
@@ -2944,7 +2951,7 @@ fn allowing_drops_the_code_it_spent() {
     let card = a_request().card().clone();
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
     ui.codes.push((card.clone(), ticket));
-    let (tx, _rx) = futures::channel::oneshot::channel();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
     ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);

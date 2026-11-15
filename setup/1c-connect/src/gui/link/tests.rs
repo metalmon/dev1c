@@ -3,6 +3,7 @@ use super::*;
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::{cfg_with, Connection};
+use crate::peer_out::Flow;
 use crate::session::State;
 use common::check::Check;
 use core::prelude::v1::test;
@@ -162,16 +163,6 @@ fn link_lines_say_what_happened_without_naming_an_environment() {
 }
 
 #[test]
-fn autoconnect_reads_the_kit_state_with_no_record_meaning_off() {
-    let ui = Ui::for_test();
-    assert!(!autoconnect(&ui.kit));
-    ui.kit.state_set("autoconnect", "1").unwrap();
-    assert!(autoconnect(&ui.kit));
-    ui.kit.state_set("autoconnect", "0").unwrap();
-    assert!(!autoconnect(&ui.kit));
-}
-
-#[test]
 fn a_stale_session_generation_is_not_current() {
     let mut ui = Ui::for_test();
     ui.session_gen = 2;
@@ -261,18 +252,6 @@ fn flip_enabled_only_touches_the_flag_and_nothing_else() {
     // харнесса для него нет, держится ревью.
     assert_eq!(ui.session_gen, gen_before);
     let _ = ui.session.take().unwrap().stop();
-}
-
-#[test]
-fn local_mode_hides_up_behind_the_flag_but_shows_a_failure_regardless() {
-    let now = Instant::now();
-    assert_eq!(local_display("local", false, State::Up { since: now }), State::Off);
-    assert_eq!(local_display("local", false, State::Connecting), State::Off);
-    assert_eq!(local_display("local", true, State::Up { since: now }), State::Up { since: now });
-    let failed = State::Failed("порт занят".into());
-    assert_eq!(local_display("local", false, failed.clone()), failed);
-    // Туннельный режим — состояние сеанса идёт как есть, флаг тут ни при чём.
-    assert_eq!(local_display("tunnel", false, State::Up { since: now }), State::Up { since: now });
 }
 
 /// «Подключаться при запуске» замок не обходит: коннектор поднимается,
@@ -733,46 +712,6 @@ fn onboarding_ends_when_the_first_connection_exists() {
 
 // Задача 7 плана «Канал и зачисление»: состояния контракта в окне.
 
-/// Спека контракта перечисляет восемь состояний
-/// (`2026-11-01-connection-contract.md`), и у каждого обязано быть решение,
-/// какое слово человек увидит. «Своё слово» здесь значит «решённое», а не
-/// «ни с кем не общее»: спека экрана (`2026-11-01-interface-design.md`,
-/// «Строка на соединение») сама называет три свёртки, и этот тест их и
-/// прибивает — иначе любая из них однажды «починится» в сторону восьми
-/// разных слов, которых спека не просила.
-///
-/// Падал он так: до правки `contract_word` не существовало вовсе, а `row`
-/// отдавала «не подключено» на всё, кроме четырёх состояний транспорта —
-/// «ждёт разрешения» и «отклонено» на экране не было ни одного.
-#[test]
-fn every_contract_state_has_its_own_word() {
-    let expect = [
-        // «Нет» своей строки не имеет вовсе: соединения без строки в списке
-        // не бывает, и слову этому негде показаться.
-        (Contract::No, None),
-        // «Тикет выдан» и «ждёт разрешения» — одно ожидание для человека.
-        (Contract::CodeIssued, Some("ждёт разрешения")),
-        (Contract::Waiting, Some("ждёт разрешения")),
-        // «Разрешено» — миг между решением и «подключено», своего слова не
-        // получает: его слово то же, что у начавшегося подключения.
-        (Contract::Allowed, Some("подключается")),
-        (Contract::Up, Some("подключено")),
-        (Contract::Broken, Some("разорвано")),
-        (Contract::Retrying, Some("подключается снова")),
-        (Contract::Declined, Some("отклонено")),
-    ];
-    assert_eq!(expect.len(), CONTRACT_STATES.len(), "в таблице обязаны стоять все состояния контракта, а не часть");
-    for (state, word) in expect {
-        assert_eq!(contract_word(state), word, "{state:?}");
-    }
-    // Свёрток ровно три, и больше их быть не должно: четвёртая — это уже
-    // два состояния, которые человек не может различить, не спросив.
-    let mut words: Vec<&str> = CONTRACT_STATES.iter().filter_map(|k| contract_word(*k)).collect();
-    words.sort_unstable();
-    words.dedup();
-    assert_eq!(words.len(), 6, "восемь состояний, три свёртки — шесть слов: {words:?}");
-}
-
 /// Висящая заявка — та, что человек закрыл не решив (`Decision::NoAnswer`):
 /// она НЕ разрешена и НЕ отклонена, и слово о ней обязано вернуться на
 /// экран. Вместе со словом оживает и правило `list` «ждущий разрешения —
@@ -870,13 +809,14 @@ fn a_refusal_is_an_outcome_and_a_new_request_overrides_it() {
 
 /// Зачисленная, но сейчас не подключённая сторона — это «не подключено», а
 /// не «разрешено»: обещать движение там, где его нет, слово не вправе.
-/// Число зачисленных живёт в карточке, а не в строке списка.
+/// Число зачисленных живёт в карточке, а не в строке списка. Проверка, что
+/// зачисление само по себе не состояние контракта, — за `contract_of`, и
+/// живёт она рядом с ним (`contract::tests::being_enrolled_is_not_a_contract_state`).
 #[test]
 fn being_enrolled_is_not_a_word_on_the_row() {
     let c = Connection { mode: "tunnel".into(), ..Default::default() };
     let enrolled = Enroll { enrolled: 3, ..Default::default() };
     assert_eq!(super::row(&crate::cfg::Cfg::default(), &c, false, None, &enrolled).state, "не подключено");
-    assert_eq!(contract_of(None, &enrolled), None, "зачисление само по себе не состояние контракта");
 }
 
 /// Жизнь карточки — это её управляющий поток, а не транспорт рабочего места.

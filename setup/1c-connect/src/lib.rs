@@ -8,6 +8,8 @@ pub mod analyzer;
 pub mod bridge;
 pub mod cfg;
 pub mod channel;
+/// Словарь состояний связи (`status` назовёт их без окна) — задача 10 плана «Сопряжение переезжает в бек».
+pub mod contract;
 /// Подробный журнал шагов рукопожатия — по переменной `DEV1C_DEBUG` (просьба владельца 15.11).
 pub mod debug;
 pub mod editors;

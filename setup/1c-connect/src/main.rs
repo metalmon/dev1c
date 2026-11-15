@@ -12,6 +12,8 @@ use clap::{Parser, Subcommand};
 use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
+#[cfg(feature = "gui")]
+use one_c_connect::gui::Start;
 use one_c_connect::ops_host::{self, Ctx, McpServer};
 use one_c_connect::{allow, cfg, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
 use std::sync::atomic::AtomicBool;
@@ -109,16 +111,6 @@ fn hidden_for_args(args: &[String]) -> Option<bool> {
     }
 }
 
-/// Показывать ли окно при старте, когда программу подняли подкомандой — ЕДИНСТВЕННОЕ, чем она разнится с двойным щелчком.
-///
-/// `serve` — тот же бек, которому сказали не открывать окно при старте (спека, раздел 4), а не отдельная программа и не урезанная:
-/// значок, замок, признак обслуживания, узел, публикацию и сеанс ему поднимает та же `gui::launch`. Отличие выражено значением, а
-/// не вторым путём подъёма, — потому его и можно здесь спросить, а тестом сверить.
-#[cfg(feature = "gui")]
-fn launch_hidden(cmd: &Cmd) -> bool {
-    matches!(cmd, Cmd::Serve)
-}
-
 fn main() {
     #[cfg(feature = "gui")]
     let console = gui_launch().is_none();
@@ -181,7 +173,7 @@ fn run() -> Result<()> {
     if let Some(hidden) = gui_launch() {
         let kit = ops_host::wire_state(Kit::discover("ONEC_CONNECT_KIT")?);
         ops_host::ensure_state(&kit)?;
-        return one_c_connect::gui::launch(kit, hidden);
+        return one_c_connect::gui::launch(kit, Start::Window { hidden });
     }
     let cli = Cli::parse();
     // `wire_state` разводит чтение и запись: из комплекта читаем, своё пишем
@@ -307,13 +299,14 @@ fn run() -> Result<()> {
         Cmd::Connect => connect(&ctx)?,
         // `serve` — тот же бек, которому сказали не открывать окно при старте (спека, раздел 4): не отдельная программа и не
         // урезанная. Значок, замок, признак обслуживания, узел, публикация и сеанс у него те же самые, потому что путь подъёма
-        // один — `gui::launch`; разнятся запуски ровно одним, показывать ли окно, и это одно выражено значением `hidden`.
-        // Второго пути (своего `acquire`, своего сеанса) здесь больше нет: это была «две меры на один вопрос» на уровне процесса.
+        // один — `gui::launch`; чем именно он разнится с двойным щелчком, названо вариантом `Start::Serve` целиком (пять отличий,
+        // см. его докстроку), а не условием на месте. Второго пути (своего `acquire`, своего сеанса) здесь больше нет: это была
+        // «две меры на один вопрос» на уровне процесса.
         //
         // Сборка без окна идёт прежним путём `fn serve` ниже: значка там нет и быть не может, и спека разрешает это единственным
         // случаем — «машина без рабочего стола».
         #[cfg(feature = "gui")]
-        Cmd::Serve => return one_c_connect::gui::launch(ctx.kit.clone(), launch_hidden(&Cmd::Serve)),
+        Cmd::Serve => return one_c_connect::gui::launch(ctx.kit.clone(), Start::Serve),
         #[cfg(not(feature = "gui"))]
         Cmd::Serve => serve(&ctx)?,
         Cmd::Export { message } => {
@@ -403,7 +396,6 @@ impl Drop for OffOnExit<'_> {
     }
 }
 
-/// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 /// Узел этой машины и проводка от него к сеансу — для долгоживущей подкоманды (`connect`, `serve`).
 ///
 /// Связь со второй стороной держит узел (`peer::start`), а не окно, и поднимает его всякий, кто держит сеанс. До задачи 4 плана
@@ -440,18 +432,15 @@ fn peer_wiring(ctx: &Ctx) -> (peer::Peer, session::Wiring) {
     (node, session::Wiring { serving, to_channel, ports: None })
 }
 
+/// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
 fn connect(ctx: &Ctx) -> Result<()> {
-    let params = ctx.kit.state_path(cfg::FILE);
-    anyhow::ensure!(
-        params.exists(),
-        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
-        params.display(),
-        params.display()
-    );
+    cfg::require_file(&ctx.kit)?;
     // Один коннектор на СЕАНС пользователя (задача 6: было — на рабочее
     // место): вторая копия не борется за порты и мьютекс проекта с этой —
-    // см. `single_instance`.
-    let _guard = single_instance::acquire(&ctx.kit)?;
+    // см. `single_instance`. Просить первую копию показать окно НЕ просим:
+    // человек запросил обслуживание в терминале, и чужое всплывшее окно с
+    // нулевым кодом было бы ответом не на его вопрос (`acquire`).
+    let _guard = single_instance::acquire(&ctx.kit, false)?;
     // Признак «обслуживает этот комплект» — рядом, своим смыслом (не
     // взаимозаменяем с замком сеанса выше): его слушает сторож моста по
     // коннектору (`orphan::guard_owner`), и ключ у него не плывёт при
@@ -481,11 +470,25 @@ fn connect(ctx: &Ctx) -> Result<()> {
             r = s.wait() => r,
         }
     });
+    say_goodbye(&_node, &ctx.kit);
     let stopped = s.stop();
     r?;
     stopped?;
     println!("Отключено.");
     Ok(())
+}
+
+/// Прощание зачисленным сторонам — ПЕРВЫМ делом на выходе, до остановки сеанса, тем же порядком и тем же сроком, что у окна
+/// (`gui::quit`).
+///
+/// Канал, закрытый молча, читается той стороной как обрыв, а обрыв она повторяет кругами и показывает «подключается снова» — вечно,
+/// потому что звонить уже некуда. Слова превращают это в исход: круги прекращаются, и человек там читает «Та сторона закрыла
+/// программу». До этой задачи командная строка узла не поднимала вовсе, и прощаться ей было нечем; теперь поднимает — значит и
+/// прощаться обязана, иначе остановка стенда оставляла бы вторую сторону в кругах.
+fn say_goodbye(node: &peer::Peer, kit: &Kit) {
+    if !node.bye_all(one_c_connect::STOP_WAIT) {
+        journal::write(kit, journal::Kind::Warn, "предупредить подключённых о выходе не удалось — у них связь просто оборвётся");
+    }
 }
 
 /// Текст для журнала, если публикация не поднялась — `None`, если всё в
@@ -503,23 +506,23 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
 ///
 /// Путь сборки БЕЗ окна, и только её (задача 4 плана «Сопряжение переезжает
-/// в бек»): значка и окна там нет и быть не может, и спека разрешает это
-/// единственным случаем — «машина без рабочего стола». В сборке с окном
-/// `Cmd::Serve` идёт в `gui::launch(kit, true)`, то есть тем же путём, что
-/// двойной щелчок, — и начинает слушаться замка и галочки «подключаться при
-/// запуске», тогда как здесь обслуживание включается безусловно.
+/// в бек»): значка там нет и быть не может — его код в сборку не входит, —
+/// и спека разрешает это единственным случаем «машина без рабочего стола».
+/// В сборке с окном `Cmd::Serve` идёт в `gui::launch(kit, Start::Serve)`, то
+/// есть тем же путём, что двойной щелчок, со значком и без окна; второго
+/// подъёма связи там нет вовсе, эта функция в неё не компилируется.
+///
+/// Отличие от того пути одно и названо: здесь обслуживание включается
+/// безусловно, а `launch` спрашивает замок и галочку «подключаться при
+/// запуске» (`serve_on_start`).
 #[cfg(not(feature = "gui"))]
 fn serve(ctx: &Ctx) -> Result<()> {
-    let params = ctx.kit.state_path(cfg::FILE);
-    anyhow::ensure!(
-        params.exists(),
-        "нет файла параметров {} — создайте его из образца: 1c-connect example > {}",
-        params.display(),
-        params.display()
-    );
+    cfg::require_file(&ctx.kit)?;
     // Тот же единственный владелец сеанса, что у `connect` — см.
-    // `single_instance`.
-    let _guard = single_instance::acquire(&ctx.kit)?;
+    // `single_instance`; и так же не просим первую копию показать окно:
+    // `serve` поднимают планировщик и служба, которым нулевой код значил бы
+    // «обслуживание идёт», а оно шло бы не здесь.
+    let _guard = single_instance::acquire(&ctx.kit, false)?;
     // Тот же признак обслуживания, что у `connect` — см. комментарий там.
     let _serving = single_instance::hold_serving(&ctx.kit);
     // Та же проводка замка проекта, что у `connect` — см. комментарий там.
@@ -572,6 +575,7 @@ fn serve(ctx: &Ctx) -> Result<()> {
             r = s.wait() => r,
         }
     });
+    say_goodbye(&_node, &ctx.kit);
     let stopped = s.stop();
     r?;
     stopped?;
@@ -617,17 +621,14 @@ mod tests {
         assert!(Cli::try_parse_from(["1c-connect", "mcp"]).is_err(), "без имени сервера — отказ");
     }
 
-    /// `serve` — не урезанная программа: значок он поднимает такой же, как запуск с окном. Разнятся они одним — показывать ли окно
-    /// при старте.
-    ///
-    /// Сверять тут больше нечего именно потому, что путь подъёма один (`gui::launch`): значок, замок, признак обслуживания, узел,
-    /// публикация и сеанс приходят оттуда обоим, и второго места, где их можно было бы недодать `serve`, в программе нет.
+    /// Два скрытых способа запуска окна — двойной щелчок и автозапуск при входе в систему — разбираются до `Cli::parse()` и
+    /// отличаются только значением `hidden`. Подкоманды сюда не попадают: `serve` разбирает clap, и его `Start` собирается в `run`.
     #[cfg(feature = "gui")]
     #[test]
-    fn serving_without_a_window_still_raises_the_tray_icon() {
-        assert_eq!(hidden_for_args(&["1c-connect".into()]), Some(false), "двойной щелчок — тот же подъём, но с окном");
+    fn a_double_click_and_the_autostart_differ_only_in_whether_the_window_shows() {
+        assert_eq!(hidden_for_args(&["1c-connect".into()]), Some(false), "двойной щелчок — с окном");
         assert_eq!(hidden_for_args(&["1c-connect".into(), "--tray".into()]), Some(true), "автозапуск при входе — без окна");
-        assert!(launch_hidden(&Cmd::Serve), "`serve` — тот же бек, которому сказали не открывать окно при старте");
+        assert_eq!(hidden_for_args(&["1c-connect".into(), "serve".into()]), None, "подкоманду разбирает clap, а не этот разбор");
     }
 
     #[cfg(not(feature = "gui"))]

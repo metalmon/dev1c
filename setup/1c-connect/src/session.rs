@@ -977,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_cannot_dial_ends_by_itself_and_stop_is_still_fine() {
+    fn a_session_that_cannot_bind_its_port_ends_by_itself_and_stop_is_still_fine() {
         // Сеансу нечего поднимать: порт слушателя занят, и подняться он не может. Прежде тем же самым был ssh в несуществующую
         // среду, а до задачи 4 плана «Сопряжение переезжает в бек» — база на другом компьютере при отсутствующем канале
         // (`listen::NO_WINDOW`). Того отказа больше нет: ручка канала есть всегда, и сеанс над чужой базой поднимается.

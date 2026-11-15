@@ -206,9 +206,35 @@ fn a_stale_generation_answer_is_dropped() {
 #[test]
 fn a_failed_tray_icon_leads_to_the_exit_path_not_a_silent_hang() {
     let ok: Result<(), &str> = Ok(());
-    assert_eq!(exit_code_for(&ok), None, "трей построился — выходить незачем");
+    assert_eq!(exit_code_for(&ok, true), None, "трей построился — выходить незачем");
     let failed: Result<(), &str> = Err("GTK не инициализирован");
-    assert_eq!(exit_code_for(&failed), Some(1), "без значка окно не закрыть — код выхода ненулевой");
+    assert_eq!(exit_code_for(&failed, true), Some(1), "без значка окно не закрыть — код выхода ненулевой");
+}
+
+/// `serve` — не урезанная программа: значок он спрашивает такой же, как запуск с окном (`tray::build` в `launch` стоит ДО всякой
+/// развилки и зовётся обоими). Разнятся они тем, что значит ОТКАЗ значка, и ещё четырьмя следствиями способа запуска — вот они все.
+///
+/// Единственность пути подъёма этот тест не сторожит и сторожить не может: её держит компилятор. В сборке с окном `fn serve` в
+/// `main.rs` закрыт `#[cfg(not(feature = "gui"))]` и в неё не компилируется вовсе, а `gui::launch` — единственная функция, которая
+/// берёт замок, поднимает узел, публикацию и сеанс. Вернуть второй путь, не тронув этих двух фактов, нельзя.
+#[test]
+fn serving_without_a_window_still_raises_the_tray_icon() {
+    let failed: Result<(), &str> = Err("значок не создался: рабочего стола нет");
+    // Главное: отказ значка смертелен ровно там, где без него заводится ловушка — у окна. `serve` его переживает, иначе бек без
+    // рабочего стола отказывался бы работать вовсе, а спека разрешает его дословно.
+    assert_eq!(exit_code_for(&failed, Start::Serve.tray_is_vital()), None, "`serve` без значка работает: узел, дверь, команды");
+    for hidden in [false, true] {
+        let w = Start::Window { hidden };
+        assert_eq!(exit_code_for(&failed, w.tray_is_vital()), Some(1), "{w:?}: окно без значка — ловушка, из неё нет выхода");
+    }
+    // Остальные четыре отличия — те же, что в докстроке `Start`, и других в программе нет.
+    assert!(Start::Window { hidden: false }.shows_window(), "двойной щелчок окно показывает");
+    assert!(!Start::Window { hidden: true }.shows_window(), "автозапуск при входе — нет");
+    assert!(!Start::Serve.shows_window(), "`serve` окна при старте не показывает никогда");
+    assert!(Start::Serve.speaks_to_console(), "`serve` обязан напечатать исход словами");
+    assert!(!Start::Window { hidden: false }.speaks_to_console(), "у окна консоли нет");
+    assert!(!Start::Serve.asks_first_copy_to_show(), "вторая копия `serve` отказывает словами, а не показывает чужое окно");
+    assert!(Start::Window { hidden: false }.asks_first_copy_to_show(), "второй щелчок по ярлыку поднимает окно первой копии");
 }
 
 #[test]

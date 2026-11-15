@@ -323,6 +323,11 @@ pub fn line_of(e: &Event) -> Option<Line> {
 fn note_line_counting(ui: &mut Ui, mut line: Line, counts_as_unread: bool) {
     line.text = capitalized(&line.text);
     journal::write(&ui.kit, line.kind, &line.text);
+    // `serve` поднят из командной строки, и всё, что ложится в журнал, человек там обязан прочесть сразу — тем же начертанием, что
+    // в файле (`Kind::mark`, см. `gui::say_aloud`). Для окна `aloud` ложно: консоли у него нет.
+    if ui.aloud {
+        println!("{:<2}{}", line.kind.mark(), line.text);
+    }
     let stamp = journal::day_stamp();
     // Склеится ли строка с предыдущей — считаем ДО записи, тем же правилом,
     // каким ленту собирает `entries`: один вид, один текст и один день

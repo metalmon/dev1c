@@ -1219,7 +1219,7 @@ pub fn start(p: &Paths, _lifetime: Lifetime, _kit_root: &Path) -> Result<(), Str
     // порту пусто. Ровно это заказчик и поймал 25.10, переключив
     // обслуживание дважды подряд: в журнале «HTTP-сервис базы поднят», а
     // порт мёртвый.
-    wait_until(STOP_WAIT, || !port_listens(p.port));
+    wait_until(PORT_FREE_WAIT, || !port_listens(p.port));
     let out = std::process::Command::new("apache2")
         .args(["-f", &p.conf.to_string_lossy(), "-k", "start"])
         .output()
@@ -1247,8 +1247,11 @@ pub fn start(p: &Paths, _lifetime: Lifetime, _kit_root: &Path) -> Result<(), Str
 /// Сколько ждать, пока прежний сервер отпустит порт, и сколько — пока новый
 /// на нём отзовётся. Секунды, а не доли: apache уходит и приходит не мгновенно,
 /// а человек всё равно смотрит на «включаю MCP».
+///
+/// Имя говорит, чего ждём, а не «сколько ждать на выходе»: прежде это был второй `STOP_WAIT` в дереве (первый — `crate::STOP_WAIT`,
+/// срок опускания работы на выходе), и читатель комментария про httpd уходил по имени не туда. Вопросы разные — имена разные.
 #[cfg(not(windows))]
-const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const PORT_FREE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(not(windows))]
 const START_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 

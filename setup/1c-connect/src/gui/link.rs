@@ -467,6 +467,20 @@ pub fn serving(ui: &Ui) -> bool {
 /// сеансом нечем): старому потоку просят остановиться (в своём потоке, не
 /// блокируя этот), новый поднимают сразу с уже записанными параметрами —
 /// тем же флагом `enabled`, он живёт дольше сеанса. Переход в
+/// Чем увести местное соединение агента в канал, когда база на другом компьютере. Замыкание, а не ручка потока узла: слушатель
+/// собирается и без окна, и знать про поток узла ему незачем.
+///
+/// Ручка есть ВСЕГДА (задача 4 плана «Сопряжение переезжает в бек»): узла может ещё не быть — его поднимает `launch` своим чередом,
+/// — и тогда вызов получает те же слова отказа (`peer::NO_NODE`), что и при кончившемся потоке узла. «Ручки нет» в словаре сеанса
+/// не выражается вовсе, и отказ говорится на вызов, а не на весь сеанс вперёд.
+fn to_channel_of(ui: &Ui) -> session::ToChannel {
+    let (peer, card) = (ui.peer.clone(), ui.cfg.current().id().clone());
+    std::sync::Arc::new(move |kind, stream| match &peer {
+        Some(p) => p.calls(&card, kind, stream),
+        None => Err(crate::peer::NO_NODE.to_string()),
+    })
+}
+
 /// «подключаюсь»/«подключён» придёт позже обычным `Ev::Link`, здесь —
 /// только одна строка в журнал про сам факт перезапуска.
 pub fn restart_session(ui: &mut Ui, base_path: String) {
@@ -481,14 +495,7 @@ pub fn restart_session(ui: &mut Ui, base_path: String) {
     let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
     // Обслуживающая половина объявляется сеансом и читается потоком узла: вызовы по каналу обслуживает тот же мост, что и местные.
     let serving = ui.serving.clone();
-    // Чем увести местное соединение агента в канал, когда база на другом компьютере. Замыкание, а не ручка потока узла: слушатель
-    // собирается и без окна, и знать про поток узла ему незачем.
-    let to_channel = ui.peer.as_ref().map(|p| {
-        let (peer, card) = (p.clone(), ui.cfg.current().id().clone());
-        let f: session::ToChannel = std::sync::Arc::new(move |kind, stream| peer.calls(&card, kind, stream));
-        f
-    });
-    let wiring = session::Wiring { serving, to_channel, ports: None };
+    let wiring = session::Wiring { serving, to_channel: to_channel_of(ui), ports: None };
     let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, wiring, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
@@ -568,14 +575,7 @@ pub fn start_session(ui: &mut Ui) -> Result<(), String> {
     let (cfg, kit, tx, enabled) = (ui.cfg.clone(), ui.kit.clone(), ui.tx.clone(), ui.enabled.clone());
     // Обслуживающая половина объявляется сеансом и читается потоком узла: вызовы по каналу обслуживает тот же мост, что и местные.
     let serving = ui.serving.clone();
-    // Чем увести местное соединение агента в канал, когда база на другом компьютере. Замыкание, а не ручка потока узла: слушатель
-    // собирается и без окна, и знать про поток узла ему незачем.
-    let to_channel = ui.peer.as_ref().map(|p| {
-        let (peer, card) = (p.clone(), ui.cfg.current().id().clone());
-        let f: session::ToChannel = std::sync::Arc::new(move |kind, stream| peer.calls(&card, kind, stream));
-        f
-    });
-    let wiring = session::Wiring { serving, to_channel, ports: None };
+    let wiring = session::Wiring { serving, to_channel: to_channel_of(ui), ports: None };
     let session = session::start_with_enabled(cfg, kit, ctx.sink, enabled, wiring, move |l| {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });

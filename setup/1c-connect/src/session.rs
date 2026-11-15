@@ -311,6 +311,10 @@ pub(crate) fn child_exit_line(who: &str, code: i32, by_us: bool, tail: &str) -> 
     Some(Event::Warn(format!("{what}{because}{hint}")))
 }
 
+/// Сеанс без проводки к узлу — только для тестов. Работающая программа зовёт `start_with_enabled`: сеанс и поток узла поднимает
+/// один и тот же хозяин (окно, `connect`, `serve`), и проводка между ними у него на руках. До задачи 4 плана «Сопряжение переезжает
+/// в бек» этим коротким путём ходили `connect` и `serve` — и оставались без узла, то есть без канала.
+#[cfg(test)]
 pub fn start(cfg: Cfg, kit: Kit, log: Sink, on_state: impl Fn(State) + Send + Sync + 'static) -> Session {
     start_with_enabled(cfg, kit, log, Arc::new(AtomicBool::new(true)), Wiring::default(), on_state)
 }
@@ -368,17 +372,31 @@ pub(crate) fn tightened(cfg: &Cfg, theirs: crate::wire::Ceiling) -> Cfg {
 /// Чем сеанс связан с потоком узла. Обе ручки про одно — вызовы агента по каналу, — и ездят поэтому вместе.
 ///
 /// `serving` сеанс ЗАПОЛНЯЕТ собой (поток узла найдёт в ней мост, когда по каналу придёт поток вызовов); `to_channel` он ЧИТАЕТ
-/// (им местное соединение агента уводится в канал, когда база на другом компьютере). Пусто и то и другое — значит либо сеанса нет,
-/// либо потока узла нет, и оба случая отвечают словами, а не молчанием.
-#[derive(Clone, Default)]
+/// (им местное соединение агента уводится в канал, когда база на другом компьютере). Пустая `serving` — значит сеанса нет, и вызов
+/// по каналу получает отказ словами, а не молчание.
+///
+/// `to_channel` пустым не бывает с задачи 4 плана «Сопряжение переезжает в бек»: узел поднимает всякий, кто держит сеанс — и окно, и
+/// `connect`, и `serve`, — поэтому ручка приходит сюда всегда. Отказ «вести некуда» остался ровно там, где он правда («поток узла
+/// кончился» — `Peer::calls`), и говорится он на вызов, а не на весь сеанс вперёд.
+#[derive(Clone)]
 pub struct Wiring {
     pub serving: Serving,
-    pub to_channel: Option<ToChannel>,
+    pub to_channel: ToChannel,
     /// Порты, которые слушает сеанс. `None` — те, что у всех (`Cfg::ports()`, константы): так зовут окно и командная строка.
     ///
     /// Своё число передают только тесты, и ради них же это поле и есть: порты у программы константные, а тесту нужен живой сеанс,
     /// не отбирающий у настоящего коннектора его порт (до 11.11 «живым» в тестах был ssh-сеанс, который ничего не слушал).
     pub ports: Option<Ports>,
+}
+
+/// Проводка для теста: потока узла в тестах не поднимают, и ручка канала отвечает теми же словами, какими отвечает `Peer::calls`,
+/// когда поток узла кончился. Отказ, а не пустота: «ручки нет» в работающей программе невыразимо (см. докстроку `Wiring`), и
+/// фикстура не должна возвращать это в словарь с чёрного хода.
+#[cfg(test)]
+impl Default for Wiring {
+    fn default() -> Self {
+        Wiring { serving: Serving::default(), to_channel: Arc::new(|_, _| Err(crate::peer::NO_NODE.to_string())), ports: None }
+    }
 }
 
 /// Обслуживающая половина ЭТОЙ машины — та, что поднимает мост к серверам инструментов, — выставленная наружу, пока сеанс жив.
@@ -498,10 +516,8 @@ pub fn start_with_enabled(
             // Третьего хода нет с 11.11: им был ssh в среду разработки, и среда уехала из программы целиком (план
             // `2026-11-11-env-removal.md`). Поднять туннель этой развилкой стало невыразимо, а не запрещено условием.
             let combo = crate::cfg::Combo::of(cfg.current());
-            let r = match crate::listen::Toward::of(combo, wiring.to_channel.clone()) {
-                Ok(toward) => crate::listen::run(serve, active_ports, toward, on_event, stop_rx).await,
-                Err(why) => Err(anyhow::anyhow!(why)),
-            };
+            let toward = crate::listen::Toward::of(combo, wiring.to_channel.clone());
+            let r = crate::listen::run(serve, active_ports, toward, on_event, stop_rx).await;
             // Сеанс кончился — снимаем объявление: обслуживать вызовы по каналу больше нечем, и отказ скажет об этом словами.
             wiring.serving.clear();
             on_state(State::ended(&r));
@@ -962,15 +978,21 @@ mod tests {
 
     #[test]
     fn a_session_that_cannot_dial_ends_by_itself_and_stop_is_still_fine() {
-        // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому (окна нет) — отказ `listen::NO_WINDOW`
-        // словами. Прежде тем же самым был ssh в несуществующую среду.
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().base_here = false;
+        // Сеансу нечего поднимать: порт слушателя занят, и подняться он не может. Прежде тем же самым был ssh в несуществующую
+        // среду, а до задачи 4 плана «Сопряжение переезжает в бек» — база на другом компьютере при отсутствующем канале
+        // (`listen::NO_WINDOW`). Того отказа больше нет: ручка канала есть всегда, и сеанс над чужой базой поднимается.
+        let cfg = crate::cfg::filled_for_test();
         let dir = std::env::temp_dir().join(format!("onec-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ports = Ports { mcp: busy.local_addr().unwrap().port(), ..test_ports() };
+        let wiring = Wiring { ports: Some(ports), ..Default::default() };
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let seen2 = seen.clone();
-        let mut s = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), move |st| seen2.lock().unwrap().push(st));
+        let mut s =
+            start_with_enabled(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), Arc::new(AtomicBool::new(true)), wiring, move |st| {
+                seen2.lock().unwrap().push(st)
+            });
         let rt = tokio::runtime::Runtime::new().unwrap();
         let r = rt.block_on(s.wait());
         assert!(r.is_err(), "{r:?}");
@@ -1004,10 +1026,19 @@ mod tests {
         assert!(!live.finished(), "сеанс только что заведён и никуда не ушёл");
         drop(live);
 
-        // Кончившийся сам: базы здесь нет, а канал держать некому — вести вызовы некуда.
-        let mut cfg = crate::cfg::filled_for_test();
-        cfg.current_mut().base_here = false;
-        let mut dead = start(cfg, Kit::at(&dir), std::sync::Arc::new(|_| {}), |_| {});
+        // Кончившийся сам: порт слушателя занят, и поднять его нечем. Прежде этим же был «базы здесь нет, а канал держать некому»,
+        // и с задачи 4 плана «Сопряжение переезжает в бек» такого отказа нет: ручка канала есть всегда, и сеанс над чужой базой
+        // поднимается.
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let wiring = Wiring { ports: Some(Ports { mcp: busy.local_addr().unwrap().port(), ..test_ports() }), ..Default::default() };
+        let mut dead = start_with_enabled(
+            crate::cfg::filled_for_test(),
+            Kit::at(&dir),
+            std::sync::Arc::new(|_| {}),
+            Arc::new(AtomicBool::new(true)),
+            wiring,
+            |_| {},
+        );
         let ended = (0..200).any(|_| {
             if dead.finished() {
                 return true;

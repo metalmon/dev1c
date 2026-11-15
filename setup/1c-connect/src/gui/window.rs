@@ -4,7 +4,7 @@
 //! его только явное действие (крестик, Esc, трей).
 
 use super::panel::Panel;
-use super::{note_line, run_readiness, Kind, Line, Tab, Ui};
+use super::{run_readiness, Kind, Tab, Ui};
 use crate::cfg::Cfg;
 use crate::ops_host;
 use gpui_kit::prelude::*;
@@ -332,7 +332,12 @@ pub fn show_window(cx: &mut App) {
                 ui.unread = 0;
             }
         }
-        Err(e) => note_line(cx.global_mut::<Ui>(), Line { kind: Kind::Fail, text: format!("окно не открылось: {e:#}") }),
+        // Окно не открылось — значит показывать его здесь негде, и это не на раз: отказ даёт сама оконная система сеанса, у
+        // которого нет рабочего стола. Прежде отсюда уходила строка в журнал, а процесс оставался жить и держал единственный на
+        // комплект замок — после чего настоящее окно на машине не открывалось вовсе и молча (закон 5 спеки, день 15.11). Слова и
+        // код возврата считает бек (`journal::no_place_for_a_window`), здесь — только выход; строка журнала окна не заводится: её
+        // читать всё равно некому, окна нет, а на диск она уже легла.
+        Err(e) => std::process::exit(crate::journal::no_place_for_a_window(&cx.global::<Ui>().kit, &format!("{e:#}"))),
     }
 }
 

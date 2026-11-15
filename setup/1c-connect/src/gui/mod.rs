@@ -2584,36 +2584,42 @@ impl Ui {
 /// важно лишь то, что `ui.session` не пусто.
 #[cfg(test)]
 fn doomed_session(ui: &Ui) -> crate::session::Session {
-    let mut cfg = ui.cfg.clone();
-    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому — отказ `listen::NO_WINDOW`.
-    cfg.current_mut().base_here = false;
     session::start_with_enabled(
-        cfg,
+        ui.cfg.clone(),
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        session::Wiring { serving: ui.serving.clone(), to_channel: None, ports: None },
+        session::Wiring { serving: ui.serving.clone(), ports: Some(busy_ports()), ..Default::default() },
         |_| {},
     )
 }
 
-/// Сеанс, который УЖЕ кончился сам: туннель в никуда (первая попытка
-/// терминальная), и ждём, пока поток уйдёт. Ровно то, что остаётся в
+/// Тройка портов, первый из которых ЗАНЯТ: сеанс на ней не поднимется и кончится сам. Слушатель, который его занял, остаётся жить
+/// до конца прогона (`mem::forget`): держать его некому — сеанс отдаётся наружу один, а порт обязан быть занят, пока он пробует.
+///
+/// До задачи 4 плана «Сопряжение переезжает в бек» мёртвый сеанс в тестах заводили иначе — «база на другом компьютере, а канал
+/// держать некому» (отказ `listen::NO_WINDOW`). Того отказа больше нет: ручка канала есть всегда, сеанс над чужой базой
+/// поднимается — и, не подмени здесь порты, занял бы настоящие, те самые, на которых стоит живой коннектор машины человека.
+#[cfg(test)]
+fn busy_ports() -> crate::cfg::Ports {
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let ports =
+        crate::cfg::Ports { mcp: busy.local_addr().unwrap().port(), vrunner: crate::ports::test_port(), web: crate::ports::test_port() };
+    std::mem::forget(busy);
+    ports
+}
+
+/// Сеанс, который УЖЕ кончился сам: подняться ему нечем (порт слушателя
+/// занят, `busy_ports`), и ждём, пока поток уйдёт. Ровно то, что остаётся в
 /// `Ui` после отказа bind: `session` не пусто, а работать нечему.
-/// Режим — туннельный независимо от `ui.cfg`: локальный сеанс занял бы
-/// настоящие порты и остался бы жив, а тесту нужен мёртвый.
 #[cfg(test)]
 fn ended_session(ui: &Ui) -> crate::session::Session {
-    let mut cfg = ui.cfg.clone();
-    // Сеансу нечего поднимать: база на другом компьютере, а канал держать некому.
-    cfg.current_mut().mode = "tunnel".into();
-    cfg.current_mut().base_here = false;
     let mut s = session::start_with_enabled(
-        cfg,
+        ui.cfg.clone(),
         ui.kit.clone(),
         Arc::new(|_| {}),
         ui.enabled.clone(),
-        session::Wiring { serving: ui.serving.clone(), to_channel: None, ports: None },
+        session::Wiring { serving: ui.serving.clone(), ports: Some(busy_ports()), ..Default::default() },
         |_| {},
     );
     for _ in 0..200 {
@@ -2643,12 +2649,12 @@ fn live_session(ui: &Ui) -> (crate::session::Session, std::net::TcpListener) {
             ui.enabled.clone(),
             session::Wiring {
                 serving: ui.serving.clone(),
-                to_channel: None,
                 ports: Some(crate::cfg::Ports {
                     mcp: crate::ports::test_port(),
                     vrunner: crate::ports::test_port(),
                     web: crate::ports::test_port(),
                 }),
+                ..Default::default()
             },
             |_| {},
         ),

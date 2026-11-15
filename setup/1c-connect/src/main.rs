@@ -13,7 +13,8 @@ use common::kit::Kit;
 use common::op::CleanLevel;
 use common::{AlwaysDefault, Event, Prompt, Runner, StdinPrompt};
 use one_c_connect::ops_host::{self, Ctx, McpServer};
-use one_c_connect::{allow, cfg, flow, licence, project, session, single_instance, verify};
+use one_c_connect::{allow, cfg, flow, journal, licence, peer, peer_out, project, session, single_instance, verify};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -95,12 +96,27 @@ enum Cmd {
 /// каждом входе в Windows всплывало бы чёрное окно.
 #[cfg(feature = "gui")]
 fn gui_launch() -> Option<bool> {
-    let args: Vec<String> = std::env::args().collect();
-    match args.as_slice() {
+    hidden_for_args(&std::env::args().collect::<Vec<_>>())
+}
+
+/// Тот же разбор отдельно от `std::env::args`, чтобы ответ «с окном или без» проверялся тестом.
+#[cfg(feature = "gui")]
+fn hidden_for_args(args: &[String]) -> Option<bool> {
+    match args {
         [_] => Some(false),
         [_, a] if a == "--tray" => Some(true),
         _ => None,
     }
+}
+
+/// Показывать ли окно при старте, когда программу подняли подкомандой — ЕДИНСТВЕННОЕ, чем она разнится с двойным щелчком.
+///
+/// `serve` — тот же бек, которому сказали не открывать окно при старте (спека, раздел 4), а не отдельная программа и не урезанная:
+/// значок, замок, признак обслуживания, узел, публикацию и сеанс ему поднимает та же `gui::launch`. Отличие выражено значением, а
+/// не вторым путём подъёма, — потому его и можно здесь спросить, а тестом сверить.
+#[cfg(feature = "gui")]
+fn launch_hidden(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::Serve)
 }
 
 fn main() {
@@ -289,6 +305,16 @@ fn run() -> Result<()> {
             ext.revert_apply(&ctx, CleanLevel::Stack)?;
         }
         Cmd::Connect => connect(&ctx)?,
+        // `serve` — тот же бек, которому сказали не открывать окно при старте (спека, раздел 4): не отдельная программа и не
+        // урезанная. Значок, замок, признак обслуживания, узел, публикация и сеанс у него те же самые, потому что путь подъёма
+        // один — `gui::launch`; разнятся запуски ровно одним, показывать ли окно, и это одно выражено значением `hidden`.
+        // Второго пути (своего `acquire`, своего сеанса) здесь больше нет: это была «две меры на один вопрос» на уровне процесса.
+        //
+        // Сборка без окна идёт прежним путём `fn serve` ниже: значка там нет и быть не может, и спека разрешает это единственным
+        // случаем — «машина без рабочего стола».
+        #[cfg(feature = "gui")]
+        Cmd::Serve => return one_c_connect::gui::launch(ctx.kit.clone(), launch_hidden(&Cmd::Serve)),
+        #[cfg(not(feature = "gui"))]
         Cmd::Serve => serve(&ctx)?,
         Cmd::Export { message } => {
             let t = flow::export(&ctx, &message, &project::NEVER).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -378,6 +404,42 @@ impl Drop for OffOnExit<'_> {
 }
 
 /// Туннель плюс мост, пока не нажмут Ctrl+C или сеанс не упадёт сам.
+/// Узел этой машины и проводка от него к сеансу — для долгоживущей подкоманды (`connect`, `serve`).
+///
+/// Связь со второй стороной держит узел (`peer::start`), а не окно, и поднимает его всякий, кто держит сеанс. До задачи 4 плана
+/// «Сопряжение переезжает в бек» узел жил только в окне, и сторона без базы отказывала словами «связь с ним держит окно программы»
+/// — отказ был правдой ровно потому, что здесь узла никто не поднимал.
+///
+/// Ручку узла возвращаем наружу, и держать её обязан вызывающий до самого конца: когда база ЗДЕСЬ, проводка уходит в `Toward::Child`
+/// и замыкание с узлом внутри умирает — а узел нужен как раз в этом сочетании, чтобы принимать вызовы ТОЙ стороны.
+///
+/// События узла идут человеку в консоль (`ctx.sink`, тот же вид строк, что у остальных подкоманд) и на диск (`journal::say`, тот же
+/// файл и тот же вид, что у окна). Заявка на зачисление (`Out::Enroll`) и состояние потока карточки (`Out::Flow`) здесь молчат:
+/// заявке нужен ответ человека, а показать её и спросить этой подкомандe нечем — слово о них за командной строкой сопряжения.
+fn peer_wiring(ctx: &Ctx) -> (peer::Peer, session::Wiring) {
+    let serving = session::Serving::default();
+    let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<peer_out::Out>();
+    let node = peer::start(&ctx.kit, out_tx, serving.clone());
+    let (kit, sink) = (ctx.kit.clone(), ctx.sink.clone());
+    std::thread::spawn(move || {
+        futures::executor::block_on(async move {
+            use futures::StreamExt;
+            while let Some(out) = out_rx.next().await {
+                if let peer_out::Out::Say(e) = out {
+                    journal::say(&kit, &e);
+                    sink(e);
+                }
+            }
+        })
+    });
+    // Замыкание, а не ручка узла: слушатель собирается и без окна, и знать про поток узла ему незачем (см. `listen::Toward`).
+    let to_channel: session::ToChannel = {
+        let (node, card) = (node.clone(), ctx.cfg.current().id().clone());
+        Arc::new(move |kind, stream| node.calls(&card, kind, stream))
+    };
+    (node, session::Wiring { serving, to_channel, ports: None })
+}
+
 fn connect(ctx: &Ctx) -> Result<()> {
     let params = ctx.kit.state_path(cfg::FILE);
     anyhow::ensure!(
@@ -408,7 +470,10 @@ fn connect(ctx: &Ctx) -> Result<()> {
     let _off = OffOnExit(&ctx.kit);
     let ports = ctx.cfg.ports();
     println!("Соединение «{}»; порты {} (mcp-1c) и {} (веб-клиент). Ctrl+C — отключиться.", ctx.cfg.current().name, ports.mcp, ports.web);
-    let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
+    // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
+    let (_node, wiring) = peer_wiring(ctx);
+    let mut s =
+        session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {
         tokio::select! {
@@ -427,6 +492,7 @@ fn connect(ctx: &Ctx) -> Result<()> {
 /// порядке. Отдельная чистая функция (не внутри `serve`) — чтобы решение
 /// «что сказать при отказе» проверялось без настоящего httpd/apache и без
 /// реального сеанса.
+#[cfg(not(feature = "gui"))]
 fn publication_failure_text(result: &Result<()>) -> Option<String> {
     result.as_ref().err().map(|e| format!("публикация базы не поднята: {e:#}"))
 }
@@ -435,6 +501,14 @@ fn publication_failure_text(result: &Result<()>) -> Option<String> {
 /// запуска без рабочего стола (стенд, автозапуск). Останавливается по
 /// Ctrl+C, а на Linux — ещё и по SIGTERM, чтобы `docker stop` и остановка
 /// стенда закрывали мосты штатно и срабатывала уборка группы процессов.
+///
+/// Путь сборки БЕЗ окна, и только её (задача 4 плана «Сопряжение переезжает
+/// в бек»): значка и окна там нет и быть не может, и спека разрешает это
+/// единственным случаем — «машина без рабочего стола». В сборке с окном
+/// `Cmd::Serve` идёт в `gui::launch(kit, true)`, то есть тем же путём, что
+/// двойной щелчок, — и начинает слушаться замка и галочки «подключаться при
+/// запуске», тогда как здесь обслуживание включается безусловно.
+#[cfg(not(feature = "gui"))]
 fn serve(ctx: &Ctx) -> Result<()> {
     let params = ctx.kit.state_path(cfg::FILE);
     anyhow::ensure!(
@@ -472,7 +546,10 @@ fn serve(ctx: &Ctx) -> Result<()> {
     if let Some(text) = publication_failure_text(&ops_host::ensure_publication(ctx)) {
         ctx.fail(text);
     }
-    let mut s = session::start(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), |_| {});
+    // Узел держится до конца функции, а не до конца проводки — см. докстроку `peer_wiring`.
+    let (_node, wiring) = peer_wiring(ctx);
+    let mut s =
+        session::start_with_enabled(ctx.cfg.clone(), ctx.kit.clone(), ctx.sink.clone(), Arc::new(AtomicBool::new(true)), wiring, |_| {});
     let rt = tokio::runtime::Runtime::new()?;
     let r = rt.block_on(async {
         // Условный атрибут внутри `select!` макрос не принимает, поэтому
@@ -540,6 +617,20 @@ mod tests {
         assert!(Cli::try_parse_from(["1c-connect", "mcp"]).is_err(), "без имени сервера — отказ");
     }
 
+    /// `serve` — не урезанная программа: значок он поднимает такой же, как запуск с окном. Разнятся они одним — показывать ли окно
+    /// при старте.
+    ///
+    /// Сверять тут больше нечего именно потому, что путь подъёма один (`gui::launch`): значок, замок, признак обслуживания, узел,
+    /// публикация и сеанс приходят оттуда обоим, и второго места, где их можно было бы недодать `serve`, в программе нет.
+    #[cfg(feature = "gui")]
+    #[test]
+    fn serving_without_a_window_still_raises_the_tray_icon() {
+        assert_eq!(hidden_for_args(&["1c-connect".into()]), Some(false), "двойной щелчок — тот же подъём, но с окном");
+        assert_eq!(hidden_for_args(&["1c-connect".into(), "--tray".into()]), Some(true), "автозапуск при входе — без окна");
+        assert!(launch_hidden(&Cmd::Serve), "`serve` — тот же бек, которому сказали не открывать окно при старте");
+    }
+
+    #[cfg(not(feature = "gui"))]
     #[test]
     fn a_failed_publication_is_reported_but_serve_keeps_going() {
         // Решение из отчёта: занятый порт публикации не должен обрывать
@@ -552,6 +643,7 @@ mod tests {
         assert!(text.contains("8083"), "{text}");
     }
 
+    #[cfg(not(feature = "gui"))]
     #[test]
     fn a_successful_publication_has_nothing_to_report() {
         let ok: Result<()> = Ok(());

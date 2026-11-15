@@ -182,6 +182,7 @@ pub fn vrunner_command(cfg: &crate::cfg::Cfg, tools: &std::path::Path) -> tokio:
 
 use crate::jsonrpc::{self, Frame, Framer, Route};
 use crate::session::Live;
+use crate::SUBJECT;
 use common::{Event, Sink};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -931,7 +932,7 @@ pub async fn pipe_jsonrpc<S>(
                 in_flight.store(0, Ordering::Relaxed);
                 let _ = err_tail.await;
                 drop(job);
-                log(Event::Say(format!("{who}: доступ к 1С выключен — ребёнок освобождён, соединение остаётся")));
+                log(Event::Say(format!("{who}: {SUBJECT} выключен — ребёнок освобождён, соединение остаётся")));
                 // Без ребёнка, пока не включат снова: та же `handle_request`,
                 // которой отвечается и живой ребёнок, со `stdin: None` —
                 // второй механизм ответа без ребёнка заводить незачем,
@@ -963,10 +964,10 @@ pub async fn pipe_jsonrpc<S>(
                     }
                     tokio::select! {
                         n = sr.read(&mut buf) => match n {
-                            Ok(0) | Err(_) => break 'connection (-1, true, "агент отключился, пока доступ к 1С был выключен".to_string()),
+                            Ok(0) | Err(_) => break 'connection (-1, true, format!("агент отключился, пока {SUBJECT} был выключен")),
                             Ok(n) => pending_frames.extend(f.push(&buf[..n])),
                         },
-                        () = crate::orphan::launcher_gone() => break 'connection (-1, true, "агент отключился, пока доступ к 1С был выключен".to_string()),
+                        () = crate::orphan::launcher_gone() => break 'connection (-1, true, format!("агент отключился, пока {SUBJECT} был выключен")),
                         _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                     }
                 }
@@ -975,7 +976,7 @@ pub async fn pipe_jsonrpc<S>(
                 let (now_gen, now_cfg) = rules.live.get();
                 gen = now_gen;
                 cfg = now_cfg;
-                log(Event::Say(format!("{who}: доступ к 1С включён — поднимаю ребёнка в {}", cfg.current().base_path)));
+                log(Event::Say(format!("{who}: {SUBJECT} включён — поднимаю ребёнка в {}", cfg.current().base_path)));
                 continue;
             }
         }

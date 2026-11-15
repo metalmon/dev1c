@@ -5,6 +5,7 @@
 use crate::bridge;
 use crate::cfg::{Cfg, Ports};
 use crate::ops_host::McpServer;
+use crate::SUBJECT;
 use common::kit::Kit;
 use common::{Event, Sink};
 use std::sync::atomic::AtomicBool;
@@ -139,7 +140,7 @@ impl State {
             }
             State::Up { since } => {
                 let m = since.elapsed().as_secs() / 60;
-                let verb = if local { "доступ к 1С включён" } else { "подключён" };
+                let verb = if local { format!("{SUBJECT} включён") } else { "подключён".to_string() };
                 if m < 60 {
                     format!("{verb} {m} мин")
                 } else {

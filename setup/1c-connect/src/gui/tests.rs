@@ -720,3 +720,14 @@ fn quitting_waits_for_clicks_in_flight_but_not_forever() {
     live.store(0, Ordering::Relaxed);
     assert!(wait_quiet(&live, Duration::from_secs(5)), "ждать было нечего");
 }
+
+/// Узел говорит СВОИМ словарём, а окно его переводит — не наоборот.
+///
+/// Проверка стоит здесь, а не рядом с `peer_out::Out`: предмет у неё — ПЕРЕВОД (`line_of`), а перевод делает окно. У самого `Out` проверок нет вовсе, и это не упущение: он чистые данные, и без окна проверять в нём нечего.
+#[test]
+fn the_node_speaks_its_own_words_and_the_window_translates() {
+    use crate::peer_out::Out;
+    let out = Out::Say(common::Event::Fail("не дозвонился".into()));
+    let Out::Say(e) = &out else { panic!("{out:?}") };
+    assert_eq!(line_of(e).unwrap().text, "не дозвонился");
+}

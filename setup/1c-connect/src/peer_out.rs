@@ -59,18 +59,3 @@ pub enum Flow {
     /// (`channel::keep_calling`) — ждём следующего круга.
     Retrying,
 }
-
-// Проверка про ПЕРЕВОД, а потому живёт с окном: она зовёт `gui::line_of`, которого в сборке без окна нет вовсе. Гейт здесь ничего не
-// прячет — он называет сторону, которой проверка принадлежит.
-#[cfg(all(test, feature = "gui"))]
-mod tests {
-    use super::Out;
-
-    /// Узел говорит СВОИМ словарём: окно переводит его, а не наоборот.
-    #[test]
-    fn the_node_speaks_its_own_words_and_the_window_translates() {
-        let out = Out::Say(common::Event::Fail("не дозвонился".into()));
-        let Out::Say(e) = &out else { panic!("{out:?}") };
-        assert_eq!(crate::gui::line_of(e).unwrap().text, "не дозвонился");
-    }
-}

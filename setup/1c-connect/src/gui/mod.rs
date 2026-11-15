@@ -21,8 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-// Слово продукта, а не слово экрана: живёт в корне крейта (`crate::SUBJECT`), где его видят обе стороны. Здесь — ввоз, чтобы
-// `format!("{SUBJECT}")` ниже читался так же, как читался всегда.
+// Слово продукта, а не слово экрана: живёт в корне крейта (`crate::SUBJECT`), где его видят обе стороны. Здесь — ввоз, чтобы `format!("{SUBJECT}")` ниже читался так же, как читался всегда.
 use crate::SUBJECT;
 
 pub mod autostart;

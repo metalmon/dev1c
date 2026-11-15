@@ -2654,6 +2654,16 @@ fn a_request() -> crate::enroll::Request {
     }
 }
 
+/// Заявка, которой уже некому отвечать — тем же приёмом, которым разговор
+/// роняет её в живом коде (вышел срок, сорвалась связь): приёмник уронен
+/// раньше, чем кто-нибудь успел позвать `answer`. Поле канала у `Pending`
+/// приватно (задача 2 плана «Пара переезжает в бек»), и после переезда
+/// собрать такую заявку литералом структуры, как раньше, уже нельзя.
+fn gone_pending(request: crate::enroll::Request) -> crate::gui::Pending {
+    let (tx, _rx) = futures::channel::oneshot::channel();
+    crate::gui::Pending::new(request, tx)
+}
+
 /// Решение 7 `2026-11-01-protocol-design.md`, дословно: диалог показывает
 /// ТРИ вещи и ни одной больше — отпечаток ключа, базу и то, как сторона себя
 /// назвала, с прямой пометкой, что имя никто не проверял.
@@ -2742,7 +2752,7 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
     let card = a_request().card().clone();
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    ui.waiting.push(gone_pending(a_request()));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::NoAnswer);
     assert_eq!(ui.waiting.len(), 1, "закрытие без ответа заявку не снимает");
@@ -2761,7 +2771,7 @@ fn closing_the_dialog_without_an_answer_leaves_the_request_hanging() {
 
     // Разрешение по новой заявке стирает прошлый исход: карточка больше не
     // «отклонено».
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    ui.waiting.push(gone_pending(a_request()));
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.waiting.is_empty());
     assert!(ui.declined.is_empty(), "разрешённая карточка не носит прошлый отказ");
@@ -2775,13 +2785,13 @@ fn the_answer_travels_back_to_the_conversation() {
     use crate::enroll::Decision;
     let mut ui = Ui::for_test();
     let (tx, mut rx) = futures::channel::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
     assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow));
 
     // Ответить некуда — молчать нельзя: человек нажал «Разрешить» и иначе
     // ждал бы подключения, которого не будет.
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    ui.waiting.push(gone_pending(a_request()));
     answer_request(&mut ui, a_request().card(), "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.log.last().unwrap().line.text.contains("не удалось"), "{:?}", ui.log.last());
 }
@@ -2794,11 +2804,11 @@ fn the_answer_travels_back_to_the_conversation() {
 fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
     let mut ui = Ui::for_test();
     ui.declined.push(a_request().card().clone());
-    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    take_request(&mut ui, gone_pending(a_request()));
     assert_eq!(ui.waiting.len(), 1);
     assert!(ui.declined.is_empty(), "новая заявка перебивает прошлый исход");
 
-    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    take_request(&mut ui, gone_pending(a_request()));
     assert_eq!(ui.waiting.len(), 1, "тот же ключ — та же заявка, а не вторая запись о ней");
 
     // Заявка по другой карточке соседку не трогает: отзыв и разрешение
@@ -2810,7 +2820,7 @@ fn a_repeat_from_the_same_key_replaces_its_own_request_and_the_refusal() {
         base: crate::wire::BaseFields { base_id: "ДРУГОЙ-КЛЮЧ".into(), ..a_request().base },
         ..a_request()
     };
-    take_request(&mut ui, crate::gui::Pending { request: other, answer: None });
+    take_request(&mut ui, gone_pending(other));
     assert_eq!(ui.waiting.len(), 2);
 }
 
@@ -2836,10 +2846,10 @@ fn the_answer_goes_to_the_request_the_person_was_shown_and_to_no_other() {
     assert_ne!(a.peer, b.peer, "иначе тест проверяет не то");
 
     // Диалог открыт по А — ключ той стороны запомнен ДО показа.
-    take_request(&mut ui, crate::gui::Pending { request: a.clone(), answer: Some(a_tx) });
+    take_request(&mut ui, crate::gui::Pending::new(a.clone(), a_tx));
     let shown = a.peer;
     // Пока человек сверяет отпечаток по телефону, встаёт в очередь Б.
-    take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
+    take_request(&mut ui, crate::gui::Pending::new(b.clone(), b_tx));
     assert_eq!(ui.waiting.len(), 2, "чужая заявка показанную не вытесняет");
 
     answer_request(&mut ui, a.card(), &a.card_name, shown, Decision::Allow);
@@ -2860,7 +2870,7 @@ fn an_answer_to_a_gone_request_touches_no_one_else() {
     let (b_tx, mut b_rx) = futures::channel::oneshot::channel();
     let gone = a_request().peer;
     let b = crate::enroll::Request { peer: iroh::SecretKey::from_bytes(&[77u8; 32]).public(), ..a_request() };
-    take_request(&mut ui, crate::gui::Pending { request: b.clone(), answer: Some(b_tx) });
+    take_request(&mut ui, crate::gui::Pending::new(b.clone(), b_tx));
 
     answer_request(&mut ui, b.card(), &b.card_name, gone, Decision::Deny);
     assert_eq!(b_rx.try_recv().unwrap(), None, "отказ чужой заявке не адресуется");
@@ -2898,7 +2908,7 @@ fn the_book_is_reread_after_the_person_allows() {
     assert_eq!(ui.book.as_ref().unwrap().of(&card).len(), 0, "снимок окна о чужой записи сам не узнаёт — это и была находка");
 
     let (tx, mut rx) = futures::channel::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
     answer_request(&mut ui, &card, "Ромашка", peer, Decision::Allow);
     assert_eq!(rx.try_recv().unwrap(), Some(Decision::Allow), "решение обязано уехать — иначе перечтения и не будет");
 
@@ -2919,7 +2929,7 @@ fn the_book_is_reread_when_a_request_arrives() {
     crate::enrolled::Book::open(&state).unwrap().enroll(&"Клевер".into(), peer, "Сосед", false, crate::wire::Side::WithAgents).unwrap();
     assert_eq!(ui.book.as_ref().unwrap().of(&"Клевер".into()).len(), 0, "иначе тест проверяет не то");
 
-    take_request(&mut ui, crate::gui::Pending { request: a_request(), answer: None });
+    take_request(&mut ui, gone_pending(a_request()));
     assert_eq!(ui.book.as_ref().unwrap().of(&"Клевер".into()).len(), 1, "книга обязана быть перечитана на событии о заявке");
 }
 
@@ -2935,7 +2945,7 @@ fn allowing_drops_the_code_it_spent() {
     let ticket = crate::ticket::Ticket::issue(a_request().peer, None, Vec::new()).unwrap();
     ui.codes.push((card.clone(), ticket));
     let (tx, _rx) = futures::channel::oneshot::channel();
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: Some(tx) });
+    ui.waiting.push(crate::gui::Pending::new(a_request(), tx));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
     assert!(ui.codes.is_empty(), "погашенный зачислением код в карточке не остаётся");
@@ -2959,7 +2969,7 @@ fn an_allowance_that_never_arrived_keeps_the_code_it_did_not_spend() {
     ui.codes.push((card.clone(), ticket));
     // Разговор кончился: отвечать некуда — ровно то, о чём окно и говорит
     // словами «там уже не ждут ответа».
-    ui.waiting.push(crate::gui::Pending { request: a_request(), answer: None });
+    ui.waiting.push(gone_pending(a_request()));
 
     answer_request(&mut ui, &card, "Ромашка", a_request().peer, Decision::Allow);
 

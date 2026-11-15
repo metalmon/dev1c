@@ -1212,7 +1212,7 @@ async fn answering(
         let tx = tx.clone();
         async move {
             let (answer, wait) = futures::channel::oneshot::channel();
-            if tx.unbounded_send(Out::Enroll(Pending { request, answer: Some(answer) })).is_err() {
+            if tx.unbounded_send(Out::Enroll(Pending::new(request, answer))).is_err() {
                 // Окна больше нет — спрашивать некого, и это не отказ
                 // человека, а отсутствие человека.
                 return enroll::Decision::NoAnswer;

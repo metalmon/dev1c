@@ -7077,7 +7077,7 @@ mod tests {
         // отвечать, кнопку «Разрешить» не зажигает вовсе (Important 2
         // ревью) — и это проверяет сосед ниже.
         let (tx, _rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(tx) });
+        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
         assert!(enroll_facts(&ui, &card).waiting, "факт заявки обязан дойти до слова и до кнопки");
         for dirty in [Dirty::No, Dirty::Fields, Dirty::NameOnly] {
             let b = main_button(&ui, "", dirty);
@@ -7120,7 +7120,7 @@ mod tests {
         let mut ui = ui_for("accept", "tunnel", false);
         let card = ui.cfg.current().name.clone();
         let (tx, rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(tx) });
+        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), tx));
         assert!(enroll_facts(&ui, &card).waiting, "живая заявка ждёт — иначе тест проверяет не то");
         assert_eq!(main_button(&ui, "", Dirty::No).label, crate::gui::ALLOW);
 
@@ -7170,9 +7170,9 @@ mod tests {
         let (first_tx, first_rx) = futures::channel::oneshot::channel();
         let mut first = a_waiting_request(ui.cfg.current());
         first.peer = a_key(4);
-        ui.waiting.push(crate::gui::Pending { request: first, answer: Some(first_tx) });
+        ui.waiting.push(crate::gui::Pending::new(first, first_tx));
         let (second_tx, _second_rx) = futures::channel::oneshot::channel();
-        ui.waiting.push(crate::gui::Pending { request: a_waiting_request(ui.cfg.current()), answer: Some(second_tx) });
+        ui.waiting.push(crate::gui::Pending::new(a_waiting_request(ui.cfg.current()), second_tx));
         assert_eq!(request_to_answer(&ui, &card).map(|r| r.peer), Some(a_key(4)), "обе живы — спрашивают про первую");
 
         // Разговор первой кончился: приёмник её решения уронен.

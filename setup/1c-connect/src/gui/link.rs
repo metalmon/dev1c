@@ -453,7 +453,7 @@ pub fn link_line(l: &State) -> Option<Line> {
         State::Connecting => {
             // Слов про «подключаюсь к <адрес> как <рабочее место>» больше нет: среда уехала, а связь со второй стороной
             // держит канал, и о ней говорят свои строки журнала (`peer`).
-            let text = "включаю доступ к 1С".to_string();
+            let text = format!("включаю {SUBJECT}");
             Some(Line { kind: Kind::Say, text })
         }
         State::Failed(why) => Some(Line { kind: Kind::Fail, text: why.clone() }),
@@ -499,7 +499,7 @@ pub fn refresh_gate(ui: &mut Ui) {
         if let Some(why) = ui.gate.clone() {
             if ui.enabled.load(Ordering::Relaxed) {
                 douse_serving(ui);
-                note_line(ui, Line { kind: Kind::Warn, text: format!("доступ к 1С выключен: {why}") });
+                note_line(ui, Line { kind: Kind::Warn, text: format!("{SUBJECT} выключен: {why}") });
             }
         }
     }
@@ -569,9 +569,9 @@ pub fn autostart_enabled(gate: Option<&str>, autoconnect_on: bool) -> bool {
 /// а про запуск — только когда запуск и правда просили.
 pub fn gate_line(why: &str, autoconnect_on: bool) -> Line {
     let text = if autoconnect_on {
-        format!("доступ к 1С не включился при запуске: {why}")
+        format!("{SUBJECT} не включился при запуске: {why}")
     } else {
-        format!("Включить доступ к 1С пока нельзя: {why}")
+        format!("Включить {SUBJECT} пока нельзя: {why}")
     };
     Line { kind: Kind::Warn, text }
 }
@@ -665,7 +665,7 @@ pub fn restart_session(ui: &mut Ui, base_path: String) {
         let _ = tx.unbounded_send(Ev::Link(gen, l));
     });
     ui.session = Some(session);
-    note_line(ui, Line { kind: Kind::Say, text: format!("доступ к 1С перезапущен: база {base_path}") });
+    note_line(ui, Line { kind: Kind::Say, text: format!("{SUBJECT} перезапущен: база {base_path}") });
 }
 
 /// Почему обслуживание не идёт — одной строкой для отказа агенту. Порядок

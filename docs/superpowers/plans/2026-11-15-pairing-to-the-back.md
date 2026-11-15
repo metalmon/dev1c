@@ -530,10 +530,16 @@ git commit -am "Проверки машины переезжают в бек: п
 - Правка: `setup/1c-connect/src/lib.rs` (объявить модуль, БЕЗ гейта), `setup/1c-connect/src/gui/log.rs`, `setup/1c-connect/src/gui/log/tests.rs`
 
 **Интерфейсы:**
-- Отдаёт: `journal::Stamp`, `journal::Stamped`, `journal::day_stamp`, `journal::clock`, `journal::group_label`, `journal::LogEntry`, `journal::entries`, `journal::LOG_CAP`, `journal::LOG_FILE`, `journal::record_panics(kit: &Kit)`, и письмо в файл — `journal::write(kit: &Kit, e: &common::Event)`.
-- Остаётся в `gui/log.rs`: `Kind`, `Line`, `line_of`, `note_line`, `note_line_seen`, `head_line`, `head_parts`, `capitalized`, `took`, `running_clock`, `progress_text`, `stale_*`, `op_refusal`, `licence_line`, `note_licence_change*`.
+- Отдаёт: `journal::Kind` (с методом `mark()`), `journal::Stamp`, `journal::Stamped`, `journal::day_stamp`, `journal::clock`, `journal::group_label`, `journal::LogEntry`, `journal::entries`, `journal::LOG_CAP`, `journal::LOG_FILE`, `journal::record_panics(kit: &Kit)`, и письмо в файл двумя подписями: `journal::write(kit: &Kit, kind: Kind, text: &str)` — обе формы строки, заголовок раздела в том числе; `journal::say(kit: &Kit, e: &common::Event)` — удобство для бека, который держит в руках `Event`, а не `Kind`: переводит одно в другое и зовёт `write`.
+- Остаётся в `gui/log.rs`: `Line` (её поле `kind` становится `journal::Kind`, сам `Kind` реэкспортируется — полторы сотни мест, строящих `Line` литералом, правки не требуют), `line_of`, `note_line`, `note_line_seen`, `head_line`, `head_parts`, `capitalized`, `took`, `running_clock`, `progress_text`, `stale_*`, `op_refusal`, `licence_line`, `note_licence_change*`.
 
-**Решение, которое задача обязана принять, и оно уже принято здесь:** сегодня `write_log_file(kit: &Kit, line: &Line)` — функция бека, берущая слово окна. Она переезжает как `journal::write(kit: &Kit, e: &common::Event)`: у `Event` есть и разряд, и текст, то есть ровно то, из чего строка в файле и складывается. Окно продолжает строить свой `Line` через `line_of` из того же `Event` — одно значение, два потребителя, и перевод по-прежнему один.
+**Решение, принятое 16.11 по замеру, и оно отменяет прежнюю запись этого абзаца.** Здесь стояло: `write_log_file` переезжает как `journal::write(kit, e: &common::Event)`, «у `Event` есть и разряд, и текст». Замер показал, что это неверно дважды.
+
+Первое: `write_log_file` РАЗЛИЧАЕТ `Kind::Head` — заголовок раздела пишется пустой строкой и без значка (`gui/log.rs:438`), — а у `common::Event` варианта `Head` нет, задача 1 склеила его с `Say`. Запись через `Event` потеряла бы форму заголовка, и тест `note_line_appends_marks_and_head_lines_to_the_log_file` стал бы красным. Красный тест здесь вопрос, а не препятствие: он спрашивает верно.
+
+Второе и более важное: перевод разряда в значок делает ОДНА функция `Kind::mark()`, и зовут её двое — запись в файл (`gui/log.rs:438`) и отрисовка строки на экране (`panel.rs:4411`). Завести в беке вторую таблицу значков для файла значило бы развести одну меру на две, то есть сделать ровно то, против чего вся ветка.
+
+Отсюда: **`Kind` переезжает в бек вместе с журналом.** Это словарь журнала, а не экрана — его варианты называют форму строки в ФАЙЛЕ, а `mark()` отдаёт знак, который в этот файл и пишется. `Line` остаётся в окне, её поле `kind` указывает на `journal::Kind`, и `gui/log.rs` держит реэкспорт `pub use crate::journal::Kind;` — полторы сотни мест, строящих `Line` литералом, правки не требуют. Перевод `Event → Line` (`line_of`) остаётся в окне и единственным, как и было.
 
 - [ ] **Шаг 1: Написать падающий тест**
 
@@ -541,8 +547,8 @@ git commit -am "Проверки машины переезжают в бек: п
 /// Журнал один: строка, записанная беком без окна, ложится в тот же файл и тем же видом.
 #[test]
 fn the_journal_is_one_and_the_back_writes_to_it_without_a_window() {
-    // write(&kit, &Event::Fail("не дозвонился")) кладёт в LOG_FILE строку со значком "✗"
-    // и тем же текстом, что окно показало бы через line_of
+    // say(&kit, &Event::Fail("не дозвонился")) кладёт в LOG_FILE строку со значком "✗" и тем же текстом
+    // write(&kit, Kind::Head, "Проверка") кладёт заголовок раздела прежней формой: пустая строка, без значка
 }
 ```
 

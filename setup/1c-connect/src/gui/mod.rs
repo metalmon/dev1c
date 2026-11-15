@@ -6,6 +6,7 @@
 use crate::cfg::{self, Cfg, Connection};
 use crate::flow;
 use crate::ops_host::{self, Ctx};
+use crate::peer_out::Out;
 use crate::project::{self, Layout, Project};
 use crate::secrets;
 use crate::session::{self, Session, State};
@@ -132,6 +133,12 @@ pub fn badge(base: &image::RgbaImage, state: TrayState) -> image::RgbaImage {
 ///
 /// `answer` забирается первым же ответом и больше не существует: ответить
 /// на одну заявку дважды нельзя — `Decision` у неё один.
+///
+/// `Debug` — не для показа человеку (его тут и не ждут), а затем, что
+/// `peer_out::Out` оборачивает заявку в свой вариант и обязан выводиться
+/// целиком: тест формирует `{out:?}` на ветке, до которой доходить не
+/// должен, и без `Debug` здесь это не собралось бы вовсе.
+#[derive(Debug)]
 pub struct Pending {
     pub request: crate::enroll::Request,
     /// `None` — ответить уже некуда: разговор кончился (сорвалась связь,
@@ -2528,8 +2535,26 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
                 let ui = cx.global::<Ui>();
                 (ui.kit.clone(), ui.tx.clone(), ui.serving.clone())
             };
-            let peer = peer::start(&kit, tx, serves);
+            // Узел говорит своим словарём (`peer_out::Out`), а не словарём
+            // окна: здесь, и только здесь, одним `match`'ом он становится
+            // `Ev`. Второго такого перевода в проекте нет и не должно быть.
+            let (out_tx, mut out_rx) = futures::channel::mpsc::unbounded::<Out>();
+            let peer = peer::start(&kit, out_tx, serves);
             cx.global_mut::<Ui>().peer = Some(peer);
+            cx.spawn(async move |_| {
+                use futures::StreamExt;
+                while let Some(out) = out_rx.next().await {
+                    let ev = match out {
+                        Out::Enroll(p) => Some(Ev::Enroll(p)),
+                        Out::Say(e) => line_of(&e).map(Ev::Line),
+                        Out::Flow(card, now) => Some(Ev::Flow(card, now)),
+                    };
+                    if let Some(ev) = ev {
+                        let _ = tx.unbounded_send(ev);
+                    }
+                }
+            })
+            .detach();
         }
         // Скиллы — тем, кто галочкой уже разрешил: доставить недостающее и
         // обновить устаревшее, не дожидаясь второго щелчка (задача 6). Своим

@@ -19,9 +19,9 @@
 //! звонить.
 //!
 //! **Решения человека остаются у человека.** Этот поток не решает, пускать
-//! ли кого-то: он посылает заявку в окно (`Ev::Enroll`) и ждёт ответа по
-//! одноразовому каналу. Диалог, отпечаток и кнопки — дело окна (`save::
-//! ask_permission`), и второго мнения о допуске здесь нет.
+//! ли кого-то: он посылает заявку в окно (`peer_out::Out::Enroll`) и ждёт
+//! ответа по одноразовому каналу. Диалог, отпечаток и кнопки — дело окна
+//! (`save::ask_permission`), и второго мнения о допуске здесь нет.
 //!
 //! **Две копии на одной машине этот код умеет, а программа — пока нет.**
 //! Канал, зачисление и код с петлёй рассчитаны ровно на этот случай
@@ -41,6 +41,7 @@ use crate::channel::{self, Channels, Gone, Reins, Round, Stopped};
 use crate::enroll;
 use crate::enrolled::{Book, Partner, Partners};
 use crate::node::Node;
+use crate::peer_out::Out;
 use crate::wire::{code, Ceiling, Refuse};
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::HashMap;
@@ -188,7 +189,7 @@ impl Peer {
 /// говорит строка журнала. Иначе открытие окна ждало бы сеть.
 /// `serves` — обслуживающая половина этой машины (`session::Serving`): поток узла находит в ней мост, когда по каналу приходит поток
 /// вызовов. Пусто — доступ к 1С выключен, и вызов получает отказ словами.
-pub fn start(kit: &Kit, tx: UnboundedSender<Ev>, serves: crate::session::Serving) -> Peer {
+pub fn start(kit: &Kit, tx: UnboundedSender<Out>, serves: crate::session::Serving) -> Peer {
     let (cmd, rx) = tokio::sync::mpsc::unbounded_channel();
     let reach = Arc::new(Mutex::new(None));
     let (kit_in, reach_in, tx_in) = (kit.clone(), reach.clone(), tx.clone());
@@ -209,7 +210,7 @@ pub fn start(kit: &Kit, tx: UnboundedSender<Ev>, serves: crate::session::Serving
 /// звонить зовущими карточками.
 async fn serve(
     kit: Kit,
-    tx: UnboundedSender<Ev>,
+    tx: UnboundedSender<Out>,
     reach: Arc<Mutex<Option<Reach>>>,
     serves: crate::session::Serving,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
@@ -517,7 +518,7 @@ fn start_call(
     node: &Node,
     channels: &Channels,
     kit: &Kit,
-    tx: &UnboundedSender<Ev>,
+    tx: &UnboundedSender<Out>,
     live: &Live,
     serves: &crate::session::Serving,
     calls: &mut HashMap<CardId, tokio::task::JoinHandle<()>>,
@@ -648,7 +649,7 @@ async fn calling(
     node: Node,
     channels: Channels,
     kit: Kit,
-    tx: UnboundedSender<Ev>,
+    tx: UnboundedSender<Out>,
     live: Live,
     serves: crate::session::Serving,
     card: Dialling,
@@ -714,14 +715,14 @@ async fn one_round(
     node: &Node,
     channels: &Channels,
     kit: &Kit,
-    tx: &UnboundedSender<Ev>,
+    tx: &UnboundedSender<Out>,
     live: &Live,
     serves: &crate::session::Serving,
     card: &Dialling,
     addr: EndpointAddr,
     call: enroll::Call<'_>,
 ) -> (Round, Option<crate::wire::CardRef>) {
-    let note = |tx: &UnboundedSender<Ev>, text: Option<String>| {
+    let note = |tx: &UnboundedSender<Out>, text: Option<String>| {
         if let Some(t) = text {
             say(tx, Kind::Say, t);
         }
@@ -875,7 +876,7 @@ impl Drop for Watch<'_> {
 /// круг — задачу снимают, и незавершённый `answer` уходит с ней.
 async fn answer_calls(
     channel: channel::Channel,
-    tx: UnboundedSender<Ev>,
+    tx: UnboundedSender<Out>,
     live: Live,
     serves: crate::session::Serving,
     kit: Kit,
@@ -924,7 +925,7 @@ async fn answer_calls(
 /// `accept_all` не отдавала разговору ключ той стороны, без которого
 /// `enroll::accept_side` не решает допуск; теперь отдаёт, и одно правило
 /// живёт в одном месте.
-async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Ev>, live: Live, serves: crate::session::Serving) {
+async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender<Out>, live: Live, serves: crate::session::Serving) {
     let noted = tx.clone();
     channel::accept_all(
         &node,
@@ -942,7 +943,7 @@ async fn accepting(node: Node, channels: Channels, kit: Kit, tx: UnboundedSender
 /// Партнёр и ключ его базы берутся из того же места, откуда их берёт возврат (`enrolled::Partners`): второго списка партнёров нет.
 async fn pipe_calls(
     kit: &Kit,
-    tx: &UnboundedSender<Ev>,
+    tx: &UnboundedSender<Out>,
     channels: &Channels,
     card: &CardId,
     kind: crate::ops_host::McpServer,
@@ -1003,7 +1004,7 @@ async fn pipe_calls(
 /// Дальше по этому же потоку идёт сырой json-rpc, и правил моста мы не касаемся: меняется труба, а не механизм.
 #[allow(clippy::too_many_arguments)]
 async fn serve_calls(
-    tx: &UnboundedSender<Ev>,
+    tx: &UnboundedSender<Out>,
     live: &Live,
     serving: &crate::session::Serving,
     kit: &Kit,
@@ -1191,7 +1192,7 @@ const MCP_OFF_HERE: &str = "Доступ к 1С на том компьютере
 /// (`Cmd::ByeAll`).
 async fn answering(
     kit: Kit,
-    tx: UnboundedSender<Ev>,
+    tx: UnboundedSender<Out>,
     live: Live,
     serves: crate::session::Serving,
     mut control: crate::channel::Control,
@@ -1211,7 +1212,7 @@ async fn answering(
         let tx = tx.clone();
         async move {
             let (answer, wait) = futures::channel::oneshot::channel();
-            if tx.unbounded_send(Ev::Enroll(Pending { request, answer: Some(answer) })).is_err() {
+            if tx.unbounded_send(Out::Enroll(Pending { request, answer: Some(answer) })).is_err() {
                 // Окна больше нет — спрашивать некого, и это не отказ
                 // человека, а отсутствие человека.
                 return enroll::Decision::NoAnswer;
@@ -1519,7 +1520,7 @@ fn known_card(kit: &Kit, card: &CardId) -> Option<crate::wire::CardRef> {
 /// возвращение после перезапуска.
 fn remember(
     kit: &Kit,
-    tx: &UnboundedSender<Ev>,
+    tx: &UnboundedSender<Out>,
     card: &CardId,
     peer: EndpointId,
     addr: &EndpointAddr,
@@ -1554,16 +1555,29 @@ fn look(node: &Node) -> Reach {
     Reach { relay, direct: crate::ticket::direct_with_loopback(&seen, &node.endpoint().bound_sockets()) }
 }
 
-/// Строка в журнал окна из потока узла. Прямой дороги к `note_line` отсюда
-/// нет и быть не может — она просит `&mut Ui`, то есть главный поток.
-fn say(tx: &UnboundedSender<Ev>, kind: Kind, text: impl Into<String>) {
-    let _ = tx.unbounded_send(Ev::Line(Line { kind, text: text.into() }));
+/// Строка в журнал окна из потока узла — своими словами (`common::Event`),
+/// не готовой строкой (`gui::log::Line`): перевод в строку — дело окна
+/// (`gui::line_of`), узел его не повторяет вторым переводом.
+///
+/// `Kind` здесь — всё ещё слово окна (эта правка его не трогает), но наружу
+/// из узла уезжает уже не оно: `Head` узел никогда не просит (строки-заголовки
+/// — дело самого окна, не потока), и ветка существует только затем, чтобы
+/// `match` остался исчерпывающим.
+fn say(tx: &UnboundedSender<Out>, kind: Kind, text: impl Into<String>) {
+    let text = text.into();
+    let event = match kind {
+        Kind::Ok => common::Event::Ok(text),
+        Kind::Warn => common::Event::Warn(text),
+        Kind::Fail => common::Event::Fail(text),
+        Kind::Say | Kind::Head => common::Event::Say(text),
+    };
+    let _ = tx.unbounded_send(Out::Say(event));
 }
 
 /// Новое состояние управляющего потока карточки — в окно. Слово человеку из
 /// него делает `link::contract_of`/`contract_word`, здесь только факт.
-fn flow(tx: &UnboundedSender<Ev>, card: &CardId, now: Option<link::Flow>) {
-    let _ = tx.unbounded_send(Ev::Flow(card.clone(), now));
+fn flow(tx: &UnboundedSender<Out>, card: &CardId, now: Option<link::Flow>) {
+    let _ = tx.unbounded_send(Out::Flow(card.clone(), now));
 }
 
 /// Проверяются здесь два решения, и оба — про обход отзыва (находки

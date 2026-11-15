@@ -28,6 +28,8 @@ pub mod node;
 pub mod onec_error;
 pub mod ops_host;
 pub mod orphan;
+#[cfg(feature = "gui")]
+pub mod peer_out;
 pub mod platform;
 pub mod ports;
 pub mod project;

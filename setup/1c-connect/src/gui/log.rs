@@ -1,250 +1,21 @@
-//! Журнал: строки, их вид и запись на диск.
+//! Журнал: строки, их вид (окно) и перевод входящих событий в них.
 //!
-//! `note_line` — единственный путь строки в журнал окна, `note_file` — на
-//! диск. Здесь же форматирование того, что человек читает.
+//! `note_line` — единственный путь строки в журнал окна; запись на диск (значки, заголовок раздела, файл
+//! `1c-connect.log`) переехала в `journal` вместе со словарём разрядов (`Kind`) — закон 2 спеки: журнал один, и бек пишет в
+//! него без окна (задача 12 плана «Сопряжение переезжает в бек»).
 
 use super::*;
+use crate::journal;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    Ok,
-    Warn,
-    Fail,
-    Say,
-    /// Заголовок раздела журнала — название операции с часами в заголовке.
-    Head,
-}
-
-impl Kind {
-    /// Значок перед строкой журнала; у `Say` и `Head` строка идёт без значка.
-    pub fn mark(self) -> &'static str {
-        match self {
-            Kind::Ok => "✓",
-            Kind::Warn => "!",
-            Kind::Fail => "✗",
-            Kind::Say | Kind::Head => "",
-        }
-    }
-}
+/// Разряд строки реэкспортирован из `journal`, а не продублирован: перевод разряда в значок (`Kind::mark`) — одна функция,
+/// и зовут её и файл (`journal::write`), и экран (`panel`, рядом с цветом строки); второй меры на тот же вопрос в окне не
+/// заводим. Полторы сотни мест, строящих `Line { kind: Kind::X, .. }` литералом по всему `gui/`, этим реэкспортом не задеты.
+pub use crate::journal::Kind;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Line {
     pub kind: Kind,
     pub text: String,
-}
-
-/// Отметка дня и часа у строки журнала: не поле самой `Line` — её строят
-/// литералом `Line { kind, text }` в полутора сотнях мест по всему `gui/`
-/// (карточки, сохранение, трей, окно), и часы там ни при чём, — а обёртка
-/// (`Stamped`) в единственном месте, где строка входит в журнал окна
-/// (`note_line_counting`). Неделя считается с понедельника (0) — обычный
-/// порядок для лестницы `group_label` и для «в понедельник» … «в
-/// воскресенье».
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Stamp {
-    pub year: i32,
-    pub month: u32,
-    pub day: u32,
-    pub weekday: u32,
-    pub hour: u32,
-    pub minute: u32,
-}
-
-impl Stamp {
-    /// Время строки для показа — тем же `HH:MM`, каким его уже печатает
-    /// `clock()` в заголовке операции: двух разных начертаний часа на одном
-    /// экране быть не должно.
-    pub fn hhmm(self) -> String {
-        format!("{:02}:{:02}", self.hour, self.minute)
-    }
-}
-
-/// Строка журнала вместе с отметкой, когда она пришла. Это и есть элемент
-/// `Ui::log`; `Deref` до `Line` оставляет без изменений всё, что уже читает
-/// `l.kind`/`l.text` у строк журнала по всему коду и тестам.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Stamped {
-    pub line: Line,
-    pub stamp: Stamp,
-}
-
-impl std::ops::Deref for Stamped {
-    type Target = Line;
-    fn deref(&self) -> &Line {
-        &self.line
-    }
-}
-
-pub const LOG_CAP: usize = 2000;
-
-/// Файл журнала рядом с комплектом: та же дозапись, что командная строка
-/// ведёт в `setup.log` (`Kit::journal`), но для окна и своим текстом.
-pub const LOG_FILE: &str = "1c-connect.log";
-
-/// Местное время `HH:MM` для заголовка раздела. `gui` собирается под
-/// Windows (feature `gui` на Linux в CI отключена, см. `Cargo.toml`), но
-/// модуль всё равно огорожен по примеру `fatal` ниже, а не завязан на это.
-#[cfg(windows)]
-pub fn clock() -> String {
-    use windows_sys::Win32::Foundation::SYSTEMTIME;
-    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-    let mut t = SYSTEMTIME { wYear: 0, wMonth: 0, wDayOfWeek: 0, wDay: 0, wHour: 0, wMinute: 0, wSecond: 0, wMilliseconds: 0 };
-    unsafe { GetLocalTime(&mut t) };
-    format!("{:02}:{:02}", t.wHour, t.wMinute)
-}
-
-#[cfg(not(windows))]
-pub fn clock() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    format!("{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60)
-}
-
-/// Местная дата и час:минута для отметки строки журнала — тем же приёмом,
-/// что `clock()` выше (тот же `GetLocalTime`, тот же запасной путь вне
-/// Windows), с числом, месяцем, годом и днём недели вдобавок: без них
-/// лестницу подписи дня (`group_label`) не свести. Нового зависимого пакета
-/// для времени не заводим (решение владельца 9.11) — `chrono` и подобные
-/// здесь не нужны.
-#[cfg(windows)]
-pub fn day_stamp() -> Stamp {
-    use windows_sys::Win32::Foundation::SYSTEMTIME;
-    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
-    let mut t = SYSTEMTIME { wYear: 0, wMonth: 0, wDayOfWeek: 0, wDay: 0, wHour: 0, wMinute: 0, wSecond: 0, wMilliseconds: 0 };
-    unsafe { GetLocalTime(&mut t) };
-    // `wDayOfWeek`: 0 = воскресенье … 6 = суббота. У нас неделя с
-    // понедельника (0) — см. докстроку `Stamp`.
-    Stamp {
-        year: t.wYear as i32,
-        month: t.wMonth as u32,
-        day: t.wDay as u32,
-        weekday: (t.wDayOfWeek as u32 + 6) % 7,
-        hour: t.wHour as u32,
-        minute: t.wMinute as u32,
-    }
-}
-
-#[cfg(not(windows))]
-pub fn day_stamp() -> Stamp {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let days = (secs / 86400) as i64;
-    let (year, month, day) = civil_from_days(days);
-    Stamp {
-        year,
-        month,
-        day,
-        // Эпоха (1970-01-01) — четверг, то есть индекс 3 при неделе с
-        // понедельника (0); отсюда и смещение `+3` ниже.
-        weekday: (((days + 3) % 7 + 7) % 7) as u32,
-        hour: ((secs / 3600) % 24) as u32,
-        minute: ((secs / 60) % 60) as u32,
-    }
-}
-
-/// Число дней от 1970-01-01 (алгоритм Хауарда Хиннанта: `days_from_civil`).
-/// Новый зависимый пакет (`chrono`/`time`) под разницу двух дат не заводим —
-/// это десяток строк известной арифметики, без нового кода для часовых
-/// поясов и календарей, которые здесь и не нужны.
-fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y as i64 - 1 } else { y as i64 };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m as i64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// Обратное действие — нужно только запасному пути `day_stamp` вне Windows:
-/// там нет `GetLocalTime`, который отдаёт дату сам, только секунды с эпохи.
-#[cfg(not(windows))]
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { (y + 1) as i32 } else { y as i32 }, m, d)
-}
-
-/// Названия дней недели для лестницы (владелец 9.11): «в понедельник», «во
-/// вторник», «в среду», «в четверг», «в пятницу», «в субботу», «в
-/// воскресенье» — с большой, потому что подпись стоит сама по себе, не
-/// серединой фразы. Индекс — `Stamp::weekday` (понедельник = 0).
-const WEEKDAY_NAMES: [&str; 7] = ["В понедельник", "Во вторник", "В среду", "В четверг", "В пятницу", "В субботу", "В воскресенье"];
-
-/// Месяцы в родительном падеже («3 ноября») для даты старше этой недели.
-/// Индекс — месяц минус один (`Stamp::month` от 1 до 12).
-const MONTHS_GENITIVE: [&str; 12] =
-    ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
-
-/// Подпись дня по лестнице, которую ведущий предложил и владелец согласовал
-/// 9.11: «Сегодня» → «Вчера» → название дня недели для остальных дней ЭТОЙ
-/// недели («В среду») → дата для всего, что старше («3 ноября»). Чистая
-/// функция от двух дат, без обращения к живым часам: отрисовку GPUI тестом
-/// не взять, а эту лестницу можно и нужно проверить без живого окна.
-pub fn group_label(day: Stamp, today: Stamp) -> String {
-    let diff = days_from_civil(today.year, today.month, today.day) - days_from_civil(day.year, day.month, day.day);
-    match diff {
-        0 => "Сегодня".to_string(),
-        1 => "Вчера".to_string(),
-        // `today.weekday` — число дней от понедельника ЭТОЙ недели до
-        // сегодня; день попадает в эту неделю, пока он не дальше понедельника.
-        d if d >= 2 && d <= today.weekday as i64 => WEEKDAY_NAMES[day.weekday as usize].to_string(),
-        _ => format!("{} {}", day.day, MONTHS_GENITIVE[day.month.saturating_sub(1).min(11) as usize]),
-    }
-}
-
-/// Элемент готовой ленты журнала — то же разделение решения от отрисовки,
-/// что `panel::Body` у вкладки «Связь»: что показать решает чистая функция
-/// (`entries`), рисует уже готовый список, своего не решая.
-#[derive(Clone, PartialEq, Debug)]
-pub enum LogEntry {
-    /// Подпись дня (`group_label`) по центру, между строк.
-    Caption(String),
-    /// Строка журнала ВМЕСТЕ с её отметкой времени (`Stamped`, не `Line`) и
-    /// сколько раз подряд она повторилась (1 — без повтора, счётчик в хвосте
-    /// строки тогда не рисуется).
-    ///
-    /// Отметку запись несёт затем, что иначе собранное время никуда не
-    /// доходит: `Stamp::hour`/`minute` заполнялись с 9.11, а читателя у них
-    /// не было ни одного, и за день работы все строки стояли под одной
-    /// подписью «Сегодня», ничем не отличаясь друг от друга (находка ревью
-    /// всей ветки). `Stamped`, а не третье поле кортежа: обёртка уже есть,
-    /// `Deref` до `Line` оставляет без изменений всё, что читает `l.kind`
-    /// и `l.text` у записи.
-    Row(Stamped, usize),
-}
-
-/// Лента журнала целиком, готовая к отрисовке: повторы подряд (один вид,
-/// один текст) сложены в одну запись со счётчиком — разделённые чужой
-/// строкой НЕ складываются, — и перед первой строкой каждого дня (включая
-/// самый первый) вставлена его подпись. Чистая функция от списка и
-/// сегодняшней даты: это и единственное, что можно проверить тестом —
-/// отрисовку GPUI тестом не взять.
-///
-/// У склеенного повтора остаётся отметка ПЕРВОГО вхождения: запись стоит в
-/// ленте на месте первой строки, и время рядом с ней обязано отвечать на
-/// «когда это началось», а не называть час, в который запись стоять не
-/// может.
-pub fn entries(lines: &[Stamped], today: Stamp) -> Vec<LogEntry> {
-    let mut out: Vec<LogEntry> = Vec::new();
-    let mut last_day: Option<(i32, u32, u32)> = None;
-    for s in lines {
-        let day = (s.stamp.year, s.stamp.month, s.stamp.day);
-        if last_day != Some(day) {
-            out.push(LogEntry::Caption(group_label(s.stamp, today)));
-            last_day = Some(day);
-        }
-        match out.last_mut() {
-            Some(LogEntry::Row(prev, count)) if prev.kind == s.line.kind && prev.text == s.line.text => *count += 1,
-            _ => out.push(LogEntry::Row(s.clone(), 1)),
-        }
-    }
-    out
 }
 
 /// Отказ операции, меняющей машину, по истёкшему сроку: `Some` — начинать
@@ -343,7 +114,7 @@ pub fn capitalized(s: &str) -> String {
 
 /// Заголовок раздела журнала: название операции и час её начала.
 pub fn head_line(title: &str) -> Line {
-    Line { kind: Kind::Head, text: format!("{title} · {}", clock()) }
+    Line { kind: Kind::Head, text: format!("{title} · {}", journal::clock()) }
 }
 
 /// Заголовок раздела на экране, разобранный на две половины: название
@@ -421,46 +192,6 @@ pub fn stale_line(r: &mut Running, now: Instant) -> Option<Line> {
     }
 }
 
-/// Строка журнала на диск, тем же текстом, что рисует окно, но без цвета:
-/// значок и пробел перед строкой (у `Say` — два пробела вместо значка),
-/// у заголовка раздела — пустая строка перед ним. Ошибки записи (диск занят,
-/// прав нет) молча игнорируются — журнал на диске не обязателен для работы.
-pub fn write_log_file(kit: &Kit, line: &Line) {
-    use std::io::Write;
-    let path = kit.state_path(LOG_FILE);
-    // Каталог состояния создаёт `ops_host::ensure_state` на запуске; здесь
-    // на всякий случай ещё раз — журнал открывается напрямую, без
-    // `kit::write_text`, который родителя создаёт сам.
-    if let Some(d) = path.parent() {
-        let _ = std::fs::create_dir_all(d);
-    }
-    let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) else { return };
-    let text = if line.kind == Kind::Head { format!("\n{}\n", line.text) } else { format!("{:<2}{}\n", line.kind.mark(), line.text) };
-    let _ = f.write_all(text.as_bytes());
-}
-
-/// Паника — в журнал на диске, а не в никуда.
-///
-/// Релиз окна собран `windows_subsystem = "windows"` (`main.rs`): консоли нет, и всё, что паника печатает в `stderr`, пропадает. Для
-/// человека это выглядит как «окно замерло и вылетело», а для нас — как пустое место там, где должна быть причина: обвал 12.11 на
-/// home-gpu пришлось доставать из системного журнала Windows по коду `c0000409`, и имени виноватой строки там нет вовсе.
-///
-/// Прежний обработчик зовётся следом, а не заменяется: он печатает то же самое в `stderr`, и под консолью (отладка, `--console`) человек
-/// по-прежнему видит привычное сообщение.
-pub fn record_panics(kit: &Kit) {
-    let path = kit.state_path(LOG_FILE);
-    let was = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let trace = std::backtrace::Backtrace::force_capture();
-        let text = format!("\n!! обвал {} — {info}\n{trace}\n", clock());
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&path) {
-            let _ = f.write_all(text.as_bytes());
-        }
-        was(info);
-    }));
-}
-
 /// `Command`/`Output` — в журнал команд на диске (см. `ctx_for`), не в окно.
 pub fn line_of(e: &Event) -> Option<Line> {
     let (kind, text) = match e {
@@ -479,8 +210,8 @@ pub fn line_of(e: &Event) -> Option<Line> {
 /// растут ли непрочитанные.
 fn note_line_counting(ui: &mut Ui, mut line: Line, counts_as_unread: bool) {
     line.text = capitalized(&line.text);
-    write_log_file(&ui.kit, &line);
-    let stamp = day_stamp();
+    journal::write(&ui.kit, line.kind, &line.text);
+    let stamp = journal::day_stamp();
     // Склеится ли строка с предыдущей — считаем ДО записи, тем же правилом,
     // каким ленту собирает `entries`: один вид, один текст и один день
     // (подпись дня, что встаёт на смене суток, склейку разрывает). Склеенный
@@ -493,9 +224,9 @@ fn note_line_counting(ui: &mut Ui, mut line: Line, counts_as_unread: bool) {
             && p.line.text == line.text
             && (p.stamp.year, p.stamp.month, p.stamp.day) == (stamp.year, stamp.month, stamp.day)
     });
-    ui.log.push(Stamped { stamp, line });
-    if ui.log.len() > LOG_CAP {
-        let extra = ui.log.len() - LOG_CAP;
+    ui.log.push(journal::Stamped { stamp, line });
+    if ui.log.len() > journal::LOG_CAP {
+        let extra = ui.log.len() - journal::LOG_CAP;
         ui.log.drain(0..extra);
     }
     if counts_as_unread && !glued && (ui.tab != Tab::Log || ui.window.is_none()) {
@@ -533,14 +264,6 @@ pub fn note_line(ui: &mut Ui, line: Line) {
 /// не погасла, — и не заметить их нельзя.
 pub fn note_line_seen(ui: &mut Ui, line: Line) {
     note_line_counting(ui, line, false);
-}
-
-/// Строка только в файл журнала (`1c-connect.log`), мимо окна: диагностика
-/// для разбора по снимку, которую человеку читать незачем (геометрия, обмеры).
-/// В журнале окна — только то, что человеку надо прочесть; пометка `Kind::Say`
-/// сама по себе не повод показывать строку, выбирает канал тот, кто пишет.
-pub fn note_file(kit: &Kit, line: &Line) {
-    write_log_file(kit, line);
 }
 
 /// Строка про очередь к httpd, когда баз больше одной. Однополосный

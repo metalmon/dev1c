@@ -4,7 +4,7 @@
 //! его только явное действие (крестик, Esc, трей).
 
 use super::panel::Panel;
-use super::{note_file, note_line, run_readiness, Kind, Line, Tab, Ui};
+use super::{note_line, run_readiness, Kind, Line, Tab, Ui};
 use crate::cfg::Cfg;
 use crate::ops_host;
 use gpui_kit::prelude::*;
@@ -261,22 +261,20 @@ pub fn show_window(cx: &mut App) {
     // Диагностика наезда на панель задач (заказчик 2026-10-20): без этой
     // строки жалоба «флайаут торчит за панелью» решается только через
     // скриншот + вопрос, какая рабочая область была в тот момент. Пишется
-    // только в файл журнала (`note_file`): в окне она у человека занимала
-    // половину списка на каждом открытии (заказчик 2026-10-21).
-    note_file(
+    // только в файл журнала (`journal::write`): в окне она у человека
+    // занимала половину списка на каждом открытии (заказчик 2026-10-21).
+    crate::journal::write(
         &cx.global::<Ui>().kit,
-        &Line {
-            kind: Kind::Say,
-            text: format!(
-                "рабочая область и угол флайаута: {}x{}+{}+{} → {},{}",
-                wa.size.width.as_f32() as i32,
-                wa.size.height.as_f32() as i32,
-                wa.origin.x.as_f32() as i32,
-                wa.origin.y.as_f32() as i32,
-                origin.x.as_f32() as i32,
-                origin.y.as_f32() as i32,
-            ),
-        },
+        Kind::Say,
+        &format!(
+            "рабочая область и угол флайаута: {}x{}+{}+{} → {},{}",
+            wa.size.width.as_f32() as i32,
+            wa.size.height.as_f32() as i32,
+            wa.origin.x.as_f32() as i32,
+            wa.origin.y.as_f32() as i32,
+            origin.x.as_f32() as i32,
+            origin.y.as_f32() as i32,
+        ),
     );
     let opts = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(origin, s))),

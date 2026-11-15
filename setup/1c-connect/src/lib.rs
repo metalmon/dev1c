@@ -21,6 +21,8 @@ pub mod gate;
 pub mod gui;
 pub mod holder;
 pub mod job;
+/// Словарь журнала (`Kind`) и запись на диск — `write`/`say`, обе без фичи `gui`: закон 2 спеки («книга, учёт разговоров и журнал — одни»), задача 12 плана «Сопряжение переезжает в бек».
+pub mod journal;
 pub mod jsonrpc;
 pub mod licence;
 pub mod listen;

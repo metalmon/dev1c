@@ -4,6 +4,7 @@ use super::*;
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::{self, Connection};
 use crate::gui::{Busy, Running, Which};
+use crate::journal::Stamped;
 use crate::session::State;
 use common::op::OpState;
 use common::Phase;

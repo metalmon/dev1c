@@ -212,7 +212,7 @@ pub struct Ui {
     /// только чтобы не гонять `verdict_of` по кругу — источник правды всё
     /// равно один: `facts`.
     pub verdict: Verdict,
-    /// На какой час верен набор (`gui::clock`, «15:54»); `None` — набора нет
+    /// На какой час верен набор (`journal::clock`, «15:54»); `None` — набора нет
     /// (`facts` пуст). Пересчитывается по событиям и по такту, а не
     /// непрерывно (спека, «Чем за это платим»), значит бывает устаревшим —
     /// и человек должен видеть, на какой момент он верен. Пишется там же,
@@ -282,7 +282,7 @@ pub struct Ui {
     /// заново; поле нужно только чтобы заметить смену под открытым окном и
     /// сказать о ней один раз, а не каждый тик.
     pub licence: crate::licence::State,
-    pub log: Vec<Stamped>,
+    pub log: Vec<crate::journal::Stamped>,
     pub unread: usize,
     pub tab: Tab,
     /// Каталог проекта, перечитанный в своём потоке (`refresh_project`);
@@ -1734,12 +1734,7 @@ pub fn quit(cx: &mut App) {
     if let Some(peer) = cx.global::<Ui>().peer.clone() {
         if !peer.bye_all(STOP_WAIT) {
             let kit = cx.global::<Ui>().kit.clone();
-            note_file(
-                &kit,
-                &Line {
-                    kind: Kind::Warn, text: "предупредить подключённых о выходе не удалось — у них связь просто оборвётся".into()
-                },
-            );
+            crate::journal::write(&kit, Kind::Warn, "предупредить подключённых о выходе не удалось — у них связь просто оборвётся");
         }
     }
     if let Some(s) = cx.global_mut::<Ui>().session.take() {
@@ -1766,14 +1761,10 @@ pub fn quit(cx: &mut App) {
     let ui = cx.global::<Ui>();
     // Выход — владелец рабочего места уходит, и признак на диске обязан сказать «off» раньше, чем замок (`single_instance::Guard`) и правда освободится: иначе подкоманда `mcp`, успевшая прочитать файл в это же окно, увидела бы «on» при уже умирающем окне. Непрошедшая запись — не тишина (минорная находка ревью задачи 2): она оставляет на диске «on» при мёртвом владельце, то есть разрешение, которого никто не давал.
     if let Err(e) = crate::allow::write(&ui.kit, false) {
-        note_file(
+        crate::journal::write(
             &ui.kit,
-            &Line {
-                kind: Kind::Warn,
-                text: format!(
-                    "при выходе не удалось записать, что обслуживание выключено: {e:#} — агент может считать, что оно ещё работает"
-                ),
-            },
+            Kind::Warn,
+            &format!("при выходе не удалось записать, что обслуживание выключено: {e:#} — агент может считать, что оно ещё работает"),
         );
     }
     // Свой httpd — тоже наш, и выход обязан забрать его с собой: он живёт в каталоге комплекта и переживал коннектор, не давая удалить папку (находка владельца 26.10). Чужой веб-сервер (`publication = "webserver"`) не трогаем — за него отвечает человек.
@@ -1787,7 +1778,7 @@ pub fn quit(cx: &mut App) {
         }),
     };
     if let Some(line) = &line {
-        note_file(&ui.kit, line);
+        crate::journal::write(&ui.kit, line.kind, &line.text);
     }
     cx.quit();
 }
@@ -2260,12 +2251,12 @@ pub fn launch(kit: Kit, hidden: bool) -> anyhow::Result<()> {
     // увидит.
     project::set_lock_target(kit.state());
     // ponytail: усечение сбросом, ротация — когда кому-то понадобится история
-    let log_path = kit.state_path(LOG_FILE);
+    let log_path = kit.state_path(crate::journal::LOG_FILE);
     if std::fs::metadata(&log_path).map(|m| m.len() > 1024 * 1024).unwrap_or(false) {
         let _ = std::fs::remove_file(&log_path);
     }
     // Сразу после усечения, до первого окна: обвал должен доставаться из журнала, а не из системных записей Windows.
-    log::record_panics(&kit);
+    crate::journal::record_panics(&kit);
     let autostart_on = autostart::is_on();
     // «Подключаться при запуске»: в туннельном режиме — решает, поднимать ли
     // сеанс при старте, как раньше; в локальном — сеанс поднимается всегда

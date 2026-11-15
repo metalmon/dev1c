@@ -3,6 +3,7 @@ use super::*;
 // `#[gpui::test]`), и глоб перекрывает встроенный. Явный импорт возвращает
 // обычный `#[test]`: одиночный импорт сильнее глоба.
 use crate::cfg::cfg_with;
+use crate::journal::{self, day_stamp, entries, group_label, LogEntry, Stamp, Stamped, LOG_CAP, LOG_FILE};
 use common::{Event, Phase, Progress};
 use core::prelude::v1::test;
 use std::time::{Duration, Instant};
@@ -38,9 +39,9 @@ fn the_window_explains_an_expired_licence_and_stays_quiet_while_it_runs() {
 }
 
 #[test]
-fn note_file_writes_the_file_and_not_the_window() {
+fn journal_write_writes_the_file_and_not_the_window() {
     let mut ui = Ui::for_test();
-    note_file(&ui.kit, &Line { kind: Kind::Say, text: "рабочая область и угол флайаута: 2560x1397+0+0 → 2168,965".into() });
+    journal::write(&ui.kit, Kind::Say, "рабочая область и угол флайаута: 2560x1397+0+0 → 2168,965");
     let text = std::fs::read_to_string(ui.kit.state_path(LOG_FILE)).unwrap();
     assert!(text.contains("рабочая область и угол флайаута"), "{text:?}");
     // Главное: служебная строка не попала ни в список окна, ни в счётчик
@@ -260,7 +261,7 @@ fn a_progress_event_moves_phase_and_seen() {
 fn a_line_during_an_operation_reaches_the_journal_and_moves_seen() {
     // B1: `Ev::Line` while `progress.is_some()` used to move the line
     // into `r.note` only — `note_line` (the sole caller of
-    // `write_log_file`) was never reached, so the journal (window and
+    // `journal::write`) was never reached, so the journal (window and
     // `1c-connect.log`) stayed empty for the whole operation.
     let mut ui = Ui::for_test();
     let now = Instant::now() + Duration::from_secs(3600);

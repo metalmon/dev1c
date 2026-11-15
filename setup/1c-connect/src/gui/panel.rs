@@ -18,7 +18,8 @@ use crate::gui::theme;
 use crate::gui::link;
 use crate::gui::parts::{self, Slot};
 use crate::gui::window::hide_window;
-use crate::gui::{self, head_parts, Busy, Dot, Kind, Line, LogEntry, ProjectView, Running, Stamped, Ui, Verdict, Which};
+use crate::gui::{self, head_parts, Busy, Dot, Kind, Line, ProjectView, Running, Ui, Verdict, Which};
+use crate::journal::{self, LogEntry, Stamped};
 use crate::session::State;
 use common::check::{Check, Outcome};
 // `Button` из `gpui_kit` зовём `KitButton`: имя `Button` ниже занято чистым
@@ -4334,11 +4335,11 @@ impl Render for Panel {
                     self.log_scroll.scroll_to_bottom();
                 }
                 // Решение, что показать — подпись дня или строка с числом
-                // повторов, — целиком у чистой функции (`gui::entries`), по
+                // повторов, — целиком у чистой функции (`journal::entries`), по
                 // образцу `link_body` у вкладки «Связь»: отрисовка по
                 // готовому итогу своего не решает (задача 9 плана «После
                 // живого прогона»).
-                let entries = gui::entries(&lines, gui::day_stamp());
+                let entries = journal::entries(&lines, journal::day_stamp());
                 Self::scrolled(
                     "log",
                     &self.log_scroll,
@@ -4587,7 +4588,7 @@ impl Render for Panel {
                     // (`Ev::Checks` в `mod.rs`).
                     menu.item(
                         parts::menu_item("Открыть журнал", |_, cx| {
-                            let path = cx.global::<Ui>().kit.state_path(gui::LOG_FILE);
+                            let path = cx.global::<Ui>().kit.state_path(journal::LOG_FILE);
                             gui::open_path(cx, &path);
                         })
                         .disabled(busy_now),

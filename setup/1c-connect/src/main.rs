@@ -734,6 +734,21 @@ mod tests {
         assert!(matches!(cli.cmd, Some(Cmd::Use { name: Some(n) }) if n == "Ромашка"));
     }
 
+    /// `code` и `dial` разбираются и с именем карточки, и без: имя — необязательное, без него берётся текущее соединение. Код у `dial`,
+    /// наоборот, обязателен — звонить без него некуда, и отказ здесь честнее пустой строки, уехавшей в узел.
+    #[test]
+    fn code_and_dial_take_an_optional_card_name() {
+        let cli = Cli::try_parse_from(["1c-connect", "code"]).expect("code без имени разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Code { card: None })));
+        let cli = Cli::try_parse_from(["1c-connect", "code", "Ромашка"]).expect("code с именем разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Code { card: Some(n) }) if n == "Ромашка"));
+        let cli = Cli::try_parse_from(["1c-connect", "dial", "кодик"]).expect("dial с одним кодом разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Dial { code, card: None }) if code == "кодик"));
+        let cli = Cli::try_parse_from(["1c-connect", "dial", "кодик", "Ромашка"]).expect("dial с кодом и именем разбирается");
+        assert!(matches!(cli.cmd, Some(Cmd::Dial { code, card: Some(n) }) if code == "кодик" && n == "Ромашка"));
+        assert!(Cli::try_parse_from(["1c-connect", "dial"]).is_err(), "без кода звонить некуда — отказ, а не пустая строка в узел");
+    }
+
     /// Ровно два сервера — те самые имена, что увидит `settings.json` Zed и
     /// `~/.pi/agent/mcp.json` (спека «MCP в редакторе», «Не цели»). Третьему
     /// имени взяться неоткуда: `McpServer` — закрытый `ValueEnum`.

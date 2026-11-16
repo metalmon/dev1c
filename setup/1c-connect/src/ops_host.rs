@@ -1674,7 +1674,7 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 }
 
 /// Один тик опроса подкоманды `mcp`: разрешение (признак на диске плюс
-/// живость владельца — `allow::read`), срок действия лицензии и файл
+/// живость владельца — `allow::read_with`), срок действия лицензии и файл
 /// параметров — втроём за один заход, а не в трёх отдельных потоках на один
 /// и тот же такт. Чистая по входу (сама не спит и не заводит поток), поэтому
 /// проверяется тестом без ожидания 200 мс.
@@ -1687,8 +1687,14 @@ fn cmd_log_sink(kit: &Kit) -> Sink {
 /// Срок истёк — `enabled` гасится тем же тактом, что и признак разрешения:
 /// без этого процесс, поднятый редактором задолго до срока, продолжал бы
 /// отвечать `tools/call` и после него (ревью задачи 3, Important 4).
-fn mcp_tick(kit: &Kit) -> (bool, Result<Cfg, String>) {
-    let allowed = crate::allow::read(kit);
+/// Чем подкоманда `mcp` спрашивает, жив ли коннектор. Ставит его `run_mcp`
+/// и ставит ОДИН раз: вопрос «жив ли тот, кого я обслуживаю» задаётся в
+/// подкоманде в одном месте, а тест подставляет сюда свою дверь — имя двери
+/// настоящей копии он занять не вправе.
+type Alive = Arc<dyn Fn() -> bool + Send + Sync>;
+
+fn mcp_tick(kit: &Kit, alive: &Alive) -> (bool, Result<Cfg, String>) {
+    let allowed = crate::allow::read_with(kit, || alive());
     let licensed = !matches!(crate::licence::state_now(), crate::licence::State::Expired);
     (allowed && licensed, Cfg::load(kit).map_err(|e| e.to_string()))
 }
@@ -1701,20 +1707,18 @@ fn mcp_tick(kit: &Kit) -> (bool, Result<Cfg, String>) {
 /// Important 3) — раньше `run_mcp` заводил разовую `Live` и `Rebuild`-рестарт
 /// не срабатывал никогда.
 ///
-/// `workstation` параметром здесь больше нет (круг исправления после ревью
-/// `717c873`/`e1ff800`): `allow::read` проверяет живость коннектора
-/// признаком обслуживания комплекта (`single_instance::is_serving`), а не
-/// замком рабочего места, и имя рабочего места ему не нужно вовсе — значит
-/// и подхватывать его переезд при переименовании («Important 2 финального
-/// ревью», раньше решалось здесь мутацией `workstation` на каждый тик)
-/// больше нечем и не для чего.
+/// Ни имени рабочего места, ни имени пользователя параметром здесь нет:
+/// живость коннектора спрашивается у его управляющей двери по учётной
+/// записи (`allow::read_with` плюс `Alive`), а имя рабочего места меняется
+/// на ходу и ничьим ключом быть не вправе (круг исправления после ревью
+/// `717c873`/`e1ff800`; строка пользователя снята кругом 1 задачи 14).
 ///
 /// ponytail: такт 200 мс — потолок. Вызов, пришедший в эти 200 мс после
 /// выключения переключателя, истечения срока или «Сохранить» с новой базой,
-/// ещё пройдёт на старых условиях; опрос чаще значило бы читать диск
-/// (признак, toml) и держать признак обслуживания на каждый тик чаще, а
-/// 200 мс и так короче, чем человек успевает заметить разницу между своим
-/// действием и ответом моста.
+/// ещё пройдёт на старых условиях; опрос чаще значило бы на каждый тик
+/// читать диск (признак, toml) и стучаться в дверь, а 200 мс и так короче,
+/// чем человек успевает заметить разницу между своим действием и ответом
+/// моста. Стук замерен: 300 мкс на отладочной сборке Windows (200 подряд за 60 мс), то есть 0,15 % одного ядра при этом такте.
 /// Можно ли доверять «потолок записи — `read_write`», прочитанному
 /// терпимо (`toml_render::get`) из файла, который целиком НЕ прошёл
 /// `Cfg::load`. Отказ по умолчанию, не разрешение (круг исправления 4,
@@ -1744,7 +1748,7 @@ fn trusts_read_write(file_text: Option<&str>) -> bool {
     common::toml_render::get(text, "", "write").as_deref() == Some(crate::cfg::WriteCeiling::ReadWrite.as_str())
 }
 
-fn watch_mcp(kit: Kit, live: crate::session::Live, log: Sink) -> Arc<AtomicBool> {
+fn watch_mcp(kit: Kit, live: crate::session::Live, log: Sink, alive: Alive) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     let out = flag.clone();
     std::thread::spawn(move || {
@@ -1753,7 +1757,7 @@ fn watch_mcp(kit: Kit, live: crate::session::Live, log: Sink) -> Arc<AtomicBool>
         // ещё правит toml (тот же приём, что `bridge.rs::last_logged_error`).
         let mut last_parse_err: Option<String> = None;
         loop {
-            let (enabled, cfg) = mcp_tick(&kit);
+            let (enabled, cfg) = mcp_tick(&kit, &alive);
             out.store(enabled, Ordering::Relaxed);
             match cfg {
                 Ok(cfg) => {
@@ -1850,8 +1854,10 @@ pub fn run_mcp(server: McpServer, kit: Kit) -> Result<()> {
     // не закрывает). Признак обслуживания, который он слушает, — за
     // комплектом, не за рабочим местом (круг исправления после ревью,
     // см. заголовок `orphan.rs`): `live` ему больше не нужна.
-    crate::orphan::guard_owner(kit.clone(), log.clone());
-    let enabled = watch_mcp(kit.clone(), live.clone(), log.clone());
+    crate::orphan::guard_owner(log.clone());
+    // Живость коннектора — отсюда и больше ниоткуда: один вопрос, один
+    // способ его задать (управляющая дверь, `allow::connector_alive`).
+    let enabled = watch_mcp(kit.clone(), live.clone(), log.clone(), Arc::new(crate::allow::connector_alive));
     // Порт подкоманде больше не нужен: вид сервера она знает прямо и отдаёт его словом (`session::Served`). `Ports` остаются — их
     // берёт сам `Serve`.
     let ports = cfg.ports();
@@ -3578,17 +3584,23 @@ mod tests {
     fn mcp_tick_is_closed_by_default_on_an_empty_kit() {
         let dir = mcp_test_dir("mcp-tick-empty");
         let kit = Kit::at(&dir);
-        let (enabled, cfg) = mcp_tick(&kit);
+        let (enabled, cfg) = mcp_tick(&kit, &(Arc::new(|| false) as Alive));
         assert!(!enabled, "никто не обслуживает комплект — разрешения нет");
         assert!(cfg.is_ok(), "{cfg:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// То, чем на каждой платформе реально закреплён признак обслуживания —
-    /// тот же приём, что в `orphan.rs`/`allow.rs` (не общий, дублирован тем
-    /// же порядком, что и прочие мелкие тестовые помощники этого крейта).
-    fn take_serving_for_test(kit: &Kit) -> crate::single_instance::Guard {
-        crate::single_instance::acquire_serving(kit).unwrap().expect("признак свободен в начале теста")
+    /// Живой коннектор на время теста — им играет открытая управляющая
+    /// дверь, объявившая обслуживание: с задачи 14 ровно это и значит
+    /// «коннектор обслуживает» (тот же приём, что в `orphan.rs`/`allow.rs`,
+    /// не общий — дублирован тем же порядком, что и прочие мелкие тестовые
+    /// помощники этого крейта). Своя учётная запись на каждый прогон: имя
+    /// настоящей копии тест занять не вправе.
+    fn a_serving_connector(kit: &Kit, tag: &str) -> (Alive, crate::door::Door) {
+        let name = crate::door::door_name(&format!("ops-{tag}-{}", std::process::id()));
+        let door = crate::door::open_at(&name, kit).expect("дверь открылась");
+        door.show(crate::door::StatusView { serving: true, cards: None });
+        (Arc::new(move || crate::door::serving_at(&name)), door)
     }
 
     /// Тот же тик — `true`, когда признак на диске «on» и признак
@@ -3599,12 +3611,12 @@ mod tests {
         let dir = mcp_test_dir("mcp-tick-open");
         let kit = Kit::at(&dir);
         crate::allow::write(&kit, true).unwrap();
-        let guard = take_serving_for_test(&kit);
-        let (enabled, _) = mcp_tick(&kit);
-        assert!(enabled, "коннектор обслуживает комплект, признак «on» — разрешение должно быть");
-        drop(guard);
-        let (enabled, _) = mcp_tick(&kit);
-        assert!(!enabled, "коннектор ушёл — тот же файл больше не разрешение");
+        let (alive, door) = a_serving_connector(&kit, "tick-open");
+        let (enabled, _) = mcp_tick(&kit, &alive);
+        assert!(enabled, "коннектор обслуживает, признак «on» — разрешение должно быть");
+        door.show(crate::door::StatusView { serving: false, cards: None });
+        let (enabled, _) = mcp_tick(&kit, &alive);
+        assert!(!enabled, "коннектор перестал обслуживать — тот же файл больше не разрешение");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3638,10 +3650,10 @@ mod tests {
         };
         write_cfg("C:\\Bases\\Buh", "read_write");
         crate::allow::write(&kit, true).unwrap();
-        let _guard = take_serving_for_test(&kit);
+        let (alive, _door) = a_serving_connector(&kit, "watch-ceiling");
         let live = crate::session::Live::new(Cfg::default());
         let log: Sink = Arc::new(|_| {});
-        let enabled = watch_mcp(kit.clone(), live.clone(), log);
+        let enabled = watch_mcp(kit.clone(), live.clone(), log, alive);
         std::thread::sleep(std::time::Duration::from_millis(400));
         assert!(enabled.load(Ordering::Relaxed));
         assert_eq!(live.get().1.access(), "read_write", "файл годный — читается как есть");

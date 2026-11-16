@@ -397,8 +397,8 @@ fn run() -> Result<()> {
         Cmd::Code { card } => issue_code(card)?,
         Cmd::Dial { code, card } => dial(&ctx, code, card)?,
         Cmd::Requests => show_requests()?,
-        Cmd::Allow { fingerprint, card } => answer_request(&fingerprint, card, enroll::Decision::Allow)?,
-        Cmd::Decline { fingerprint, card } => answer_request(&fingerprint, card, enroll::Decision::Deny)?,
+        Cmd::Allow { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Allow)?,
+        Cmd::Decline { fingerprint, card } => answer_request(&fingerprint, card, door::Said::Deny)?,
     }
     Ok(())
 }
@@ -458,8 +458,8 @@ fn show_requests() -> Result<()> {
 ///
 /// Слова исхода — у окна (`enroll::answered` через `door::answer_for`), второго словаря здесь нет. Не отдали ответ — это «не
 /// сделано»: причина названа, код возврата не ноль.
-fn answer_request(fingerprint: &str, card: Option<String>, d: enroll::Decision) -> Result<()> {
-    let asked = door::Ask::Answer { fingerprint: fingerprint.to_string(), card, decision: d };
+fn answer_request(fingerprint: &str, card: Option<String>, said: door::Said) -> Result<()> {
+    let asked = door::Ask::Answer { fingerprint: fingerprint.to_string(), card, said };
     let answer = door::ask(asked).map_err(|e| anyhow::anyhow!("{e}"))?;
     let door::Answer::Done(said) = answer else { anyhow::bail!("{}", door::WRONG_ANSWER) };
     println!("{}", said.map_err(|e| anyhow::anyhow!("{e}"))?);

@@ -2119,26 +2119,11 @@ pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
             },
         );
     }
-    // Отвеченная заявка уходит со списка МОЛЧА, и это не упущение: слова ответа человек уже прочитал (`enroll::answered`), а сказать
-    // ей вслед «ответа слишком долго не было» было бы прямой неправдой. Остаётся она в списке до этой уборки нарочно — чтобы второй
-    // набранный `allow` по тому же отпечатку прочёл «уже ответили», а не «такой заявки нет» (см. `enroll::Requests`).
-    let gone: Vec<String> = {
-        let mut held = ui.waiting.lock();
-        let gone = held.iter().filter(|p| !p.reachable() && !p.answered()).map(|p| p.request.card_name.clone()).collect();
-        held.retain(|p| p.reachable());
-        gone
-    };
-    for card in gone {
-        note_line(
-            ui,
-            Line {
-                kind: Kind::Say,
-                text: format!(
-                    "Просьба подключиться к «{card}» отменилась: ответа слишком долго не было. Попросите позвонить снова и ответьте \
-                     сразу."
-                ),
-            },
-        );
+    // Сама уборка заявок — у держателя списка (`enroll::Requests::prune`): список общий с управляющей дверью, и чистить его обязан
+    // не только тот, у кого есть окно. Окну остаётся то, чего у бека нет, — своя строка журнала; слова у обоих одни
+    // (`enroll::REQUEST_GONE`).
+    for card in ui.waiting.prune(Instant::now()) {
+        note_line(ui, Line { kind: Kind::Say, text: crate::enroll::request_gone(&card) });
     }
 }
 

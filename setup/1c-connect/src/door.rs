@@ -84,8 +84,30 @@ pub enum Ask {
         /// Имя карточки, если человек его назвал: одна сторона законно стучится в несколько карточек, и отпечаток их не различает
         /// вовсе. `None` — карточка не названа, и тогда заявка обязана найтись по отпечатку одна.
         card: Option<String>,
-        decision: crate::enroll::Decision,
+        said: Said,
     },
+}
+
+/// Что человек ОТВЕТИЛ заявке — и только то, что он правда отвечает: пускаю или не пускаю.
+///
+/// **Третьего ответа зачисления здесь нет, и это запрет типом, а не уговор** (замечание ревью круга правок 2). У `enroll::Decision`
+/// случая три, и третий — `NoAnswer`, «закрыл диалог, не решив»: он нужен ОКНУ, у которого диалог закрывается крестиком, и значит он
+/// «решения не было». Проехав дверью, он выглядел бы ответом: `Pending::answer` забрал бы канал (второй раз ответить стало бы
+/// нечем), человеку сказали бы «просьба никуда не делась», а команда ушла бы с нулём — молчаливый успех при заявке, на которую
+/// никто не ответил. Команды, которая его шлёт, в продукте нет; этот тип делает так, что её и не напишут.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Said {
+    Allow,
+    Deny,
+}
+
+impl From<Said> for crate::enroll::Decision {
+    fn from(said: Said) -> crate::enroll::Decision {
+        match said {
+            Said::Allow => crate::enroll::Decision::Allow,
+            Said::Deny => crate::enroll::Decision::Deny,
+        }
+    }
 }
 
 impl Ask {
@@ -273,9 +295,28 @@ pub fn serves(kit: Kit, peer: crate::peer::Peer, codes: crate::codes::Codes, req
         Ask::Status => Answer::Status(StatusView::default()),
         Ask::Code { card } => Answer::Code(issue_for(&kit, &peer, &codes, card.as_deref())),
         Ask::Dial { code, card } => Answer::Dialled(dial_for(&kit, &peer, &code, card.as_deref())),
-        Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
-        Ask::Answer { fingerprint, card, decision } => Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), decision)),
+        // Уборка — ПЕРЕД обоими вопросами о заявках, и это не прихоть: мёртвая заявка, оставшаяся в списке, не только показывается
+        // живой, но и мешает ответить соседней — отпечаток у них может быть один (`enroll::Requests::answer`). Окно чистит список
+        // тиком, а у бека тика нет вовсе: здесь его тик — набранная команда.
+        Ask::Requests => {
+            sweep(&kit, &requests);
+            Answer::Requests(Ok(waiting_now(&requests)))
+        }
+        Ask::Answer { fingerprint, card, said } => {
+            sweep(&kit, &requests);
+            Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), said))
+        }
     })
+}
+
+/// Убрать из списка то, чему там уже не место, и СКАЗАТЬ о пропавших заявках словами — в журнал, потому что экрана у бека нет.
+///
+/// Молчать нельзя по той же причине, по которой не молчит окно: заявка, на которую человек собирался ответить, исчезает, и без
+/// строки он не узнает, почему. Слова общие с окном (`enroll::request_gone`), второго текста на тот же случай нет.
+fn sweep(kit: &Kit, requests: &crate::enroll::Requests) {
+    for card in requests.prune(std::time::Instant::now()) {
+        crate::journal::write(kit, crate::journal::Kind::Say, &crate::enroll::request_gone(&card));
+    }
 }
 
 /// Кто просит разрешения ПРЯМО СЕЙЧАС — только те заявки, на которые ещё можно ответить (`Pending::reachable`).
@@ -313,8 +354,9 @@ pub fn answer_for(
     codes: &crate::codes::Codes,
     fingerprint: &str,
     card: Option<&str>,
-    d: crate::enroll::Decision,
+    said: Said,
 ) -> Result<String, String> {
+    let d: crate::enroll::Decision = said.into();
     let done = requests.answer(fingerprint, card, d).map_err(str::to_string)?;
     if done.sent && d == crate::enroll::Decision::Allow {
         codes.forget(&done.card);
@@ -1138,9 +1180,7 @@ mod tests {
         let (requests, codes) = (requests.clone(), codes.clone());
         Arc::new(move |q| match q {
             Ask::Requests => Answer::Requests(Ok(waiting_now(&requests))),
-            Ask::Answer { fingerprint, card, decision } => {
-                Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), decision))
-            }
+            Ask::Answer { fingerprint, card, said } => Answer::Done(answer_for(&requests, &codes, &fingerprint, card.as_deref(), said)),
             other => panic!("этот исполнитель отвечает только про заявки: {other:?}"),
         })
     }
@@ -1164,12 +1204,12 @@ mod tests {
         door.answers(answers_requests(&requests, &codes));
         let fp = crate::enroll::short_key(&a_key(3).to_string());
 
-        let allowed = ask_at(&name, Ask::Answer { fingerprint: fp.clone(), card: None, decision: crate::enroll::Decision::Allow });
+        let allowed = ask_at(&name, Ask::Answer { fingerprint: fp.clone(), card: None, said: Said::Allow });
         let Ok(Answer::Done(Ok(said))) = allowed else { panic!("первый ответ обязан уехать: {allowed:?}") };
         assert!(said.contains("разрешено"), "человеку сказано, чем кончилось: {said}");
         assert_eq!(rx.try_recv().expect("решение уехало в разговор"), crate::enroll::Decision::Allow);
 
-        let again = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Deny });
+        let again = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, said: Said::Deny });
         let Ok(Answer::Done(Err(no))) = again else { panic!("второй ответ обязан быть отказом: {again:?}") };
         assert!(no.contains("не удалось") && no.contains("Ромашка"), "отказ — словами и про ту карточку: {no}");
     }
@@ -1194,22 +1234,22 @@ mod tests {
         requests.take(two);
         door.answers(answers_requests(&requests, &codes));
 
-        let miss = ask_at(&name, Ask::Answer { fingerprint: "…нетакой".into(), card: None, decision: crate::enroll::Decision::Allow });
+        let miss = ask_at(&name, Ask::Answer { fingerprint: "…нетакой".into(), card: None, said: Said::Allow });
         let Ok(Answer::Done(Err(no))) = miss else { panic!("отпечаток ничей — отказ: {miss:?}") };
         assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
 
         // Пустой отпечаток не называет НИКОГО, хотя хвостом подошёл бы всем: «ответить всем сразу» этой дверью не набирается.
-        let empty = ask_at(&name, Ask::Answer { fingerprint: "…".into(), card: None, decision: crate::enroll::Decision::Allow });
+        let empty = ask_at(&name, Ask::Answer { fingerprint: "…".into(), card: None, said: Said::Allow });
         let Ok(Answer::Done(Err(no))) = empty else { panic!("пустой отпечаток — отказ: {empty:?}") };
         assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
 
         // Один отпечаток — две заявки: выбрать за человека нельзя, он сверял голосом одну из них. И ПОЛНЫЙ ключ их не различает
         // тоже: сторона одна, разные у них карточки.
         let fp = crate::enroll::short_key(&a_key(3).to_string());
-        let both = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Allow });
+        let both = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, said: Said::Allow });
         let Ok(Answer::Done(Err(no))) = both else { panic!("два совпадения — отказ: {both:?}") };
         assert_eq!(no, crate::enroll::AMBIGUOUS_FINGERPRINT);
-        let whole = ask_at(&name, Ask::Answer { fingerprint: a_key(3).to_string(), card: None, decision: crate::enroll::Decision::Allow });
+        let whole = ask_at(&name, Ask::Answer { fingerprint: a_key(3).to_string(), card: None, said: Said::Allow });
         let Ok(Answer::Done(Err(no))) = whole else { panic!("полный ключ тут тоже не различает: {whole:?}") };
         assert_eq!(no, crate::enroll::AMBIGUOUS_FINGERPRINT, "отказ зовёт назвать карточку — и это второе слово ключа заявки");
     }
@@ -1234,7 +1274,7 @@ mod tests {
         door.answers(answers_requests(&requests, &codes));
 
         let fp = a_key(3).to_string();
-        let asked = Ask::Answer { fingerprint: fp.clone(), card: Some("Клевер".into()), decision: crate::enroll::Decision::Allow };
+        let asked = Ask::Answer { fingerprint: fp.clone(), card: Some("Клевер".into()), said: Said::Allow };
         let Ok(Answer::Done(Ok(said))) = ask_at(&name, asked) else {
             panic!("названная карточка различает заявки")
         };
@@ -1246,7 +1286,7 @@ mod tests {
         );
 
         // А имя карточки, которой у этой стороны нет, не называет никого — и это опечатка, а не двусмысленность.
-        let asked = Ask::Answer { fingerprint: fp, card: Some("Пижма".into()), decision: crate::enroll::Decision::Allow };
+        let asked = Ask::Answer { fingerprint: fp, card: Some("Пижма".into()), said: Said::Allow };
         let Ok(Answer::Done(Err(no))) = ask_at(&name, asked) else { panic!("чужая карточка — отказ") };
         assert_eq!(no, crate::enroll::NO_SUCH_REQUEST);
     }
@@ -1279,7 +1319,7 @@ mod tests {
         );
 
         let fp = list[0].fingerprint.clone();
-        let answered = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, decision: crate::enroll::Decision::Deny });
+        let answered = ask_at(&name, Ask::Answer { fingerprint: fp, card: None, said: Said::Deny });
         assert!(matches!(answered, Ok(Answer::Done(Ok(_)))), "{answered:?}");
         let Ok(Answer::Requests(Ok(after))) = ask_at(&name, Ask::Requests) else { panic!("список обязан доехать") };
         assert!(after.is_empty(), "отвеченная заявка живой не показывается: {after:?}");
@@ -1312,7 +1352,14 @@ mod tests {
             base_path: if base_here { dir.path().join("Бухгалтерия.1CD").display().to_string() } else { String::new() },
             ..Default::default()
         };
-        let cfg = crate::cfg::Cfg { current: "Ромашка".into(), connections: vec![card], ..Default::default() };
+        // Запись машина РАЗРЕШАЕТ, и обе стороны стенда одинаково: умолчание — «только чтение», и на нём право записи в исходе
+        // было бы ложным у любой ветки, то есть сторож права записи не ловил бы ничего (замечание ревью круга правок 2).
+        let cfg = crate::cfg::Cfg {
+            current: "Ромашка".into(),
+            connections: vec![card],
+            write: crate::cfg::WriteCeiling::ReadWrite,
+            ..Default::default()
+        };
         let store = crate::secrets::Store::file(&dir.path().join("secrets"));
         let text = cfg.render(&store).expect("настройки напечатались");
         std::fs::write(kit.state_path(crate::cfg::FILE), text).expect("настройки записались");
@@ -1359,7 +1406,7 @@ mod tests {
     ///
     /// Узлы настоящие и сводятся по петле (адреса петли кладёт в код `ticket::direct_with_loopback` — там и довод, почему без них
     /// две копии на одной машине не нашли бы друг друга). Чего здесь нет: второй машины, окна, человека у экрана.
-    fn the_circle(accepting: &Stand, calling: &Stand) -> crate::enroll::Outcome {
+    fn the_circle(accepting: &Stand, calling: &Stand, said: Said) -> crate::enroll::Outcome {
         wait_until_reachable(accepting);
         let asked = ask_at(&accepting.name, Ask::Code { card: None });
         let Ok(Answer::Code(Ok(issued))) = asked else {
@@ -1388,10 +1435,9 @@ mod tests {
         assert_eq!(seen.short.chars().count(), 5, "короткий отпечаток — тот самый вид, что сверяют голосом: {seen:?}");
         assert!(seen.fingerprint.len() > seen.short.len(), "а отвечают полным ключом: {seen:?}");
 
-        let answered =
-            ask_at(&accepting.name, Ask::Answer { fingerprint: seen.fingerprint, card: None, decision: crate::enroll::Decision::Allow });
-        let Ok(Answer::Done(Ok(said))) = answered else { panic!("ответ человека обязан уехать: {answered:?}") };
-        assert!(said.contains("разрешено"), "{said}");
+        let answered = ask_at(&accepting.name, Ask::Answer { fingerprint: seen.fingerprint, card: None, said });
+        let Ok(Answer::Done(Ok(words))) = answered else { panic!("ответ человека обязан уехать: {answered:?}") };
+        assert!(words.contains(if said == Said::Allow { "разрешено" } else { "отклонено" }), "{words}");
 
         let dialled = call.join().expect("поток звонка");
         let Ok(Answer::Dialled(Ok(outcome))) = dialled else {
@@ -1406,7 +1452,7 @@ mod tests {
     fn pair_a_completes_without_a_window_and_without_a_second_machine() {
         let base = a_stand("pair-a-base", "accept", true);
         let agents = a_stand("pair-a-agents", "dial", false);
-        let outcome = the_circle(&base, &agents);
+        let outcome = the_circle(&base, &agents, Said::Allow);
         // Исход пары A — `Enrolled`: база у ТОЙ стороны, и её поля приехали в `enroll_ok`. Разойдись ветки — красным станет этот
         // тест или соседний, но не оба сразу.
         assert!(matches!(outcome, crate::enroll::Outcome::Enrolled(_)), "круг замкнулся зачислением, а не отказом: {outcome:?}");
@@ -1427,14 +1473,54 @@ mod tests {
         // (`Combo::DialBaseHere`) — это и есть пара B.
         let agents = a_stand("pair-b-agents", "accept", false);
         let base = a_stand("pair-b-base", "dial", true);
-        let outcome = the_circle(&agents, &base);
+        let outcome = the_circle(&agents, &base, Said::Allow);
         // Исход пары B — `EnrolledHere`: база НАША, полей той стороны в ответе нет и быть не может. Прими здесь `Enrolled` — и
         // тест перестал бы отличать пару B от пары A, то есть сторожил бы не то, ради чего заведён.
         let crate::enroll::Outcome::EnrolledHere(ours) = &outcome else {
             panic!("круг замкнулся зачислением В НАШУ базу, а не отказом и не чужой базой: {outcome:?}")
         };
         assert_eq!(ours.base_name.as_str(), "Бухгалтерия.1CD", "поля базы — наши собственные, те самые, что мы объявили");
-        assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains("подключено"));
+        // **Право записи — то, ради чего у исхода два случая, а не `Option`** (замечание ревью круга правок 2: без этой строки
+        // сторож был дырявый — верни `Option`/`None`, и тест остался бы зелёным). Обе стороны стенда разрешают запись, и сложенное
+        // из трёх мер право обязано быть полным: это ровно то значение, которым `peer::one_round` ставит потолок разговору в учёте
+        // (`live.remember`), а по нему мост пускает вызовы агентов к нашей базе. Станет «только чтение» — тест покраснеет здесь.
+        assert!(ours.write, "запись разрешили обе машины — агенту той стороны положена запись, а не только чтение: {ours:?}");
+        assert!(dialled_words("Ромашка", &outcome).expect("зачисление — успех").contains(crate::peer::access_word(true)));
+
+        // **Второе подключение той же стороны** (`Call::Return`): человека не спрашивают вовсе — личность доказана самим iroh, —
+        // и право записи складывает уже ТА сторона из СВОИХ настроек, а не мы (`enroll::Outcome::Already`). На живом прогоне это
+        // первое, что случится после обрыва, и до этого круга ни теста, ни замера на него не было.
+        let again = ask_at(&base.name, Ask::Dial { code: String::new(), card: None });
+        let Ok(Answer::Dialled(Ok(back))) = again else {
+            panic!("возврат обязан кончиться исходом: {again:?}")
+        };
+        let crate::enroll::Outcome::Already(brief) = &back else {
+            panic!("второй раз человека не спрашивают: {back:?}")
+        };
+        assert!(brief.write, "та сторона складывает право записи сама, и обе машины её разрешили: {brief:?}");
+        assert!(dialled_words("Ромашка", &back).expect("возврат — успех").contains("подключено"));
+        // И человека при этом правда не спрашивали: нового вопроса в списке нет.
+        let Ok(Answer::Requests(Ok(list))) = ask_at(&agents.name, Ask::Requests) else {
+            panic!("список обязан доехать")
+        };
+        assert!(list.is_empty(), "возврат по уже данному допуску заявки не поднимает: {list:?}");
+    }
+
+    /// **`decline` живьём, тем же кругом.** Отказ человека — исход, а не беда, и доехать до зовущей стороны он обязан СЛОВАМИ:
+    /// иначе она повторяла бы звонок кругами по сгоревшему коду, а человек на том конце читал бы тишину.
+    ///
+    /// Меряется на паре B — той самой, которой пойдёт живой прогон.
+    #[test]
+    fn a_refusal_reaches_the_caller_in_words() {
+        let agents = a_stand("decline-agents", "accept", false);
+        let base = a_stand("decline-base", "dial", true);
+        let outcome = the_circle(&agents, &base, Said::Deny);
+        let crate::enroll::Outcome::NotEnrolled(no) = &outcome else {
+            panic!("человек отказал — зачисления быть не должно: {outcome:?}")
+        };
+        assert_eq!(no.code, crate::wire::code::DECLINED, "код исхода — именно отказ человека: {no:?}");
+        let said = dialled_words("Ромашка", &outcome).expect_err("отказ — это «не сделано», и код возврата не ноль");
+        assert!(said.contains("Ромашка") && said.len() > "«Ромашка»: ".len(), "причина названа словами той стороны: {said}");
     }
 
     /// Дверь открыта, а делать ещё нечем: узел поднимается не мгновенно. Отказ приезжает СЛОВАМИ и тем видом ответа, которого вопрос ждёт, — чужой вид клиент прочёл бы как `WRONG_ANSWER`, то есть сказал бы человеку про версии вместо настоящей причины.
@@ -1459,7 +1545,7 @@ mod tests {
             panic!("отказ обязан приехать видом списка заявок, а не пустым списком")
         };
         assert_eq!(why, crate::peer::NOT_READY);
-        let answer = Ask::Answer { fingerprint: "…1234".into(), card: None, decision: crate::enroll::Decision::Allow };
+        let answer = Ask::Answer { fingerprint: "…1234".into(), card: None, said: Said::Allow };
         let Ok(Answer::Done(Err(why))) = ask_at(&name, answer) else {
             panic!("отказ обязан приехать видом ответа на заявку")
         };

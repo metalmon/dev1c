@@ -820,18 +820,34 @@ async fn knock(name: &str) -> io::Result<Knock> {
 /// Своего SID не узнали — тоже отказ: сверять не с чем, а разговаривать с неизвестным дверь не обязана.
 #[cfg(windows)]
 fn server_is_ours(client: &Knock) -> Result<(), String> {
+    let pid = server_pid(client).map_err(|e| format!("{STRANGER_DOOR} (не удалось узнать, чей процесс держит дверь: {e})"))?;
+    match (crate::holder::owner_of_pid(pid), account().ok()) {
+        (Some(theirs), Some(mine)) if theirs == mine => Ok(()),
+        _ => Err(STRANGER_DOOR.to_string()),
+    }
+}
+
+/// Номер процесса, держащего дверь с той стороны стука, — одно место, где он добывается. Зовущих двое, и вопросы у них разные: чей это процесс (`server_is_ours`, владелец токена) и в каком он сеансе (`holder_pid` ниже, которым живёт слово про чужой сеанс). Второго `GetNamedPipeServerProcessId` рядом быть не должно: это ровно «две меры на один вопрос», и разошлись бы они молча.
+#[cfg(windows)]
+fn server_pid(client: &Knock) -> io::Result<u32> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
     let mut pid = 0u32;
     // SAFETY: дескриптор живого клиентского конца канала (его держит `client`), `pid` — наш стек.
     let asked = unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut pid) };
     if asked == 0 {
-        return Err(format!("{STRANGER_DOOR} (не удалось узнать, чей процесс держит дверь: {})", io::Error::last_os_error()));
+        return Err(io::Error::last_os_error());
     }
-    match (crate::holder::owner_of_pid(pid), account().ok()) {
-        (Some(theirs), Some(mine)) if theirs == mine => Ok(()),
-        _ => Err(STRANGER_DOOR.to_string()),
-    }
+    Ok(pid)
+}
+
+/// Номер процесса, который держит дверь под этим именем, — `None`, если достучаться не вышло или ОС не назвала процесс. Чей он и в каком сеансе — решают выше; здесь только добыча, тем же стуком и тем же `server_pid`, которым дверь сторожит себя от самозванца.
+///
+/// Единственный зовущий — `single_instance::holder_session`: держателя замка спрашивают, в каком он сеансе, чтобы сказать человеку словами, почему окна не видно (спека, раздел 4).
+#[cfg(windows)]
+pub(crate) fn holder_pid(name: &str) -> Option<u32> {
+    let rt = runtime().ok()?;
+    rt.block_on(async { server_pid(&knock(name).await.ok()?).ok() })
 }
 
 /// На Linux тот же вопрос задаётся тем же способом, что и на стороне приёма: `SO_PEERCRED` отвечает обеим сторонам соединения, и клиент спрашивает им, чей процесс держит сокет.

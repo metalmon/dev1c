@@ -2121,7 +2121,7 @@ pub fn prune_enrollment(ui: &mut Ui, now: SystemTime) {
     }
     // Сама уборка заявок — у держателя списка (`enroll::Requests::prune`): список общий с управляющей дверью, и чистить его обязан
     // не только тот, у кого есть окно. Окну остаётся то, чего у бека нет, — своя строка журнала; слова у обоих одни
-    // (`enroll::REQUEST_GONE`).
+    // (`enroll::request_gone`).
     for card in ui.waiting.prune(Instant::now()) {
         note_line(ui, Line { kind: Kind::Say, text: crate::enroll::request_gone(&card) });
     }
